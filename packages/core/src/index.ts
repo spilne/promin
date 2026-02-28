@@ -104,6 +104,7 @@ export { InMemoryState } from "./lib/adapters/memory/index.ts";
 // Durable execution
 export {
   workflow,
+  flow,
   WorkflowBuilder,
   type WorkflowDefinition,
   type WorkflowHooks,
@@ -114,6 +115,7 @@ export {
   type DagStepContext,
   type MapStepContext,
   type StepOptions,
+  type StepFailureStrategy,
   type WorkflowStorage,
   type WorkflowState,
   type StepState,

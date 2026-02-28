@@ -16,10 +16,12 @@
 
 import { Effect } from "effect";
 import { Pipeline, type TaggedError } from "../pipeline.ts";
+import type { RetryPolicy } from "../retry.ts";
 import type { Codec } from "../typeclasses/codec.ts";
 import { JsonCodec } from "../typeclasses/codec.ts";
 import type { Show } from "../typeclasses/show.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
+import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
 import type { DagNode } from "./workflow-dag.ts";
 import { topologicalSort, computeReadySet } from "./workflow-dag.ts";
 import {
@@ -71,6 +73,25 @@ export interface WorkflowDefinition<Input, Output> {
     workflowId: string;
     input: Input;
   }): Promise<{ data: Output; error: null } | { data: null; error: unknown }>;
+  /**
+   * Invoke as a child workflow — returns Pipeline for composition.
+   * Automatically sets parentWorkflowId for tracking.
+   *
+   * @example
+   * ```ts
+   * .step("enrich", ({ prev }) =>
+   *   enrichUser.invoke({
+   *     workflowId: `enrich-${prev.id}`,
+   *     input: { userId: prev.id },
+   *   })
+   * )
+   * ```
+   */
+  invoke(params: {
+    workflowId: string;
+    input: Input;
+    parentWorkflowId?: string;
+  }): Pipeline<Output, StepError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,10 +127,20 @@ export interface WorkflowHooks {
 // Step options
 // ---------------------------------------------------------------------------
 
+export type StepFailureStrategy<T> =
+  | "fail"
+  | "skip"
+  | { fallback: (error: unknown) => T }
+  | { handler: (error: unknown) => "retry" | "skip" | "fail" };
+
 export interface StepOptions<T> {
   readonly codec?: Codec<T>;
   readonly show?: Show<T>;
   readonly timeoutMs?: number;
+  /** Retry the entire step at the workflow layer. Same RetryPolicy as Pipeline.retry(). */
+  readonly retry?: RetryPolicy<TaggedError>;
+  /** What to do when the step fails (after retries exhausted). Default: "fail". */
+  readonly onFailure?: StepFailureStrategy<T>;
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +155,8 @@ interface StepDefinition {
   readonly kind: StepKind;
   readonly execute: (params: ExecuteParams) => Pipeline<unknown, TaggedError>;
   readonly codec: Codec<unknown>;
+  readonly retry?: RetryPolicy<TaggedError>;
+  readonly onFailure?: StepFailureStrategy<unknown>;
 }
 
 interface ExecuteParams {
@@ -156,6 +189,8 @@ export class WorkflowBuilder<
     private readonly _steps: StepDefinition[],
     private readonly _lastStepName: string | null,
     private readonly _hooks?: WorkflowHooks,
+    private readonly _type?: string,
+    private readonly _metadata?: Record<string, unknown>,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -337,13 +372,7 @@ export class WorkflowBuilder<
       },
     };
 
-    return new WorkflowBuilder(
-      this._name,
-      this._storage,
-      [...this._steps, stepDef],
-      name,
-      this._hooks,
-    ) as any;
+    return this._derive([...this._steps, stepDef], name) as any;
   }
 
   // ---------------------------------------------------------------------------
@@ -401,13 +430,58 @@ export class WorkflowBuilder<
       },
     };
 
-    return new WorkflowBuilder(
-      this._name,
-      this._storage,
-      [...this._steps, stepDef],
+    return this._derive([...this._steps, stepDef], name) as any;
+  }
+
+  // ---------------------------------------------------------------------------
+  // subworkflow — invoke a child workflow as a step
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Invoke a child workflow as a step. The child is independently durable.
+   * Automatically sets parentWorkflowId for tracking.
+   *
+   * @example
+   * ```ts
+   * .subworkflow("enrich", enrichUser, {
+   *   input: (prev) => ({ userId: prev.id }),
+   *   workflowId: (prev) => `enrich-${prev.id}`,
+   * })
+   * ```
+   */
+  subworkflow<Name extends string, ChildInput, ChildOutput>(
+    name: Name,
+    definition: WorkflowDefinition<ChildInput, ChildOutput>,
+    config: {
+      input: (prev: Current) => ChildInput;
+      workflowId: (prev: Current) => string;
+    },
+    options?: StepOptions<ChildOutput>,
+  ): WorkflowBuilder<Input, Steps & Record<Name, ChildOutput>, ChildOutput, Error | StepError> {
+    this._validateName(name);
+
+    const dependsOn = this._lastStepName ? [this._lastStepName] : [];
+    const codec = (options?.codec ?? JsonCodec) as Codec<unknown>;
+
+    const stepDef: StepDefinition = {
       name,
-      this._hooks,
-    ) as any;
+      dependsOn,
+      kind: "normal",
+      codec,
+      execute: (execParams) => {
+        const prevStepName = dependsOn[0];
+        const prev = (
+          prevStepName != null ? execParams.results[prevStepName] : execParams.input
+        ) as Current;
+        return definition.invoke({
+          workflowId: config.workflowId(prev),
+          input: config.input(prev),
+          parentWorkflowId: execParams.workflowId,
+        }) as Pipeline<unknown, TaggedError>;
+      },
+    };
+
+    return this._derive([...this._steps, stepDef], name) as any;
   }
 
   // ---------------------------------------------------------------------------
@@ -467,13 +541,7 @@ export class WorkflowBuilder<
       },
     };
 
-    return new WorkflowBuilder(
-      this._name,
-      this._storage,
-      [...this._steps, stepDef],
-      name,
-      this._hooks,
-    ) as any;
+    return this._derive([...this._steps, stepDef], name) as any;
   }
 
   // ---------------------------------------------------------------------------
@@ -558,13 +626,7 @@ export class WorkflowBuilder<
       },
     };
 
-    return new WorkflowBuilder(
-      this._name,
-      this._storage,
-      [...this._steps, stepDef],
-      name,
-      this._hooks,
-    ) as any;
+    return this._derive([...this._steps, stepDef], name) as any;
   }
 
   // ---------------------------------------------------------------------------
@@ -590,13 +652,7 @@ export class WorkflowBuilder<
     };
 
     const newSteps = [...this._steps.slice(0, -1), transformedStep];
-    return new WorkflowBuilder(
-      this._name,
-      this._storage,
-      newSteps,
-      this._lastStepName,
-      this._hooks,
-    ) as any;
+    return this._derive(newSteps, this._lastStepName) as any;
   }
 
   // ---------------------------------------------------------------------------
@@ -624,6 +680,8 @@ export class WorkflowBuilder<
           workflowId,
           workflowName: this._name,
           input,
+          workflowType: this._type,
+          metadata: this._metadata,
         });
         state = await this._storage.loadWorkflow(workflowId);
       }
@@ -668,24 +726,46 @@ export class WorkflowBuilder<
           running.add(name);
         }
 
-        // Execute all ready steps in parallel
+        // Execute all ready steps in parallel, with per-step retry and failure handling
         const readySteps = ready.map((name) => this._steps.find((s) => s.name === name)!);
 
         const pipeline = Pipeline.all(
           ...readySteps.map((stepDef) => {
             const startedAt = new Date();
             const startTime = startedAt.getTime();
-            return stepDef
-              .execute({ input, results, workflowId, storage: this._storage })
-              .map((result) => {
-                const encoded = stepDef.codec.encode(result);
-                return {
-                  name: stepDef.name,
-                  result: encoded,
-                  durationMs: Date.now() - startTime,
-                  startedAt,
-                };
-              });
+
+            // Raw step execution — wrapped in suspend so retry re-invokes the step fn
+            let raw: Pipeline<unknown, TaggedError> = Pipeline.from(
+              Effect.suspend(
+                () =>
+                  stepDef.execute({ input, results, workflowId, storage: this._storage }).effect,
+              ),
+            ) as Pipeline<unknown, TaggedError>;
+
+            // Step-level retry (before mapping to result shape)
+            if (stepDef.retry) {
+              raw = raw.retry(stepDef.retry);
+            }
+
+            // Step-level failure strategy
+            const strategy = stepDef.onFailure ?? "fail";
+            if (strategy === "skip") {
+              raw = raw.handleError(() => undefined);
+            } else if (strategy !== "fail" && "fallback" in strategy) {
+              const fallbackFn = strategy.fallback;
+              raw = raw.handleError((err) => fallbackFn(err));
+            }
+
+            // Map to step result
+            return raw.map((result) => {
+              const encoded = stepDef.codec.encode(result);
+              return {
+                name: stepDef.name,
+                result: encoded,
+                durationMs: Date.now() - startTime,
+                startedAt,
+              };
+            });
           }),
         );
 
@@ -810,15 +890,60 @@ export class WorkflowBuilder<
   }
 
   // ---------------------------------------------------------------------------
+  // Terminal: execute — run without requiring a workflowId (auto-generated)
+  // ---------------------------------------------------------------------------
+
+  /** Execute the workflow with an auto-generated workflowId. For non-durable flows. */
+  async execute(input: Input): Promise<Current> {
+    return this.run({ workflowId: crypto.randomUUID(), input });
+  }
+
+  /** Execute with auto-generated workflowId, returns { data, error }. */
+  async executeSafe(input: Input): Promise<
+    | { data: Current; error: null }
+    | {
+        data: null;
+        error:
+          | Error
+          | WorkflowError
+          | StepError
+          | WorkflowLockError
+          | WorkflowSuspendedError
+          | WorkflowTimeoutError;
+      }
+  > {
+    return this.runSafe({ workflowId: crypto.randomUUID(), input });
+  }
+
+  // ---------------------------------------------------------------------------
   // build — freeze into a reusable WorkflowDefinition
   // ---------------------------------------------------------------------------
 
   build(): WorkflowDefinition<Input, Current> {
+    const self = this;
     return {
       name: this._name,
       storage: this._storage,
-      run: (params) => this.run(params),
-      runSafe: (params) => this.runSafe(params) as any,
+      run: (params) => self.run(params),
+      runSafe: (params) => self.runSafe(params) as any,
+      invoke: (params) =>
+        Pipeline.fromPromise(async () => {
+          // If parentWorkflowId provided, store it in metadata
+          if (params.parentWorkflowId) {
+            const state = await self._storage.loadWorkflow(params.workflowId);
+            if (!state) {
+              await self._storage.createWorkflow({
+                workflowId: params.workflowId,
+                workflowName: self._name,
+                input: params.input,
+                workflowType: self._type,
+                parentWorkflowId: params.parentWorkflowId,
+                metadata: self._metadata,
+              });
+            }
+          }
+          return self.run(params);
+        }) as Pipeline<Current, StepError>,
     };
   }
 
@@ -841,6 +966,22 @@ export class WorkflowBuilder<
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------
+
+  /** Create a new builder inheriting all config from this one. */
+  private _derive(
+    steps: StepDefinition[],
+    lastStepName: string | null,
+  ): WorkflowBuilder<Input, any, any, any> {
+    return new WorkflowBuilder(
+      this._name,
+      this._storage,
+      steps,
+      lastStepName,
+      this._hooks,
+      this._type,
+      this._metadata,
+    );
+  }
 
   private _validateName(name: string): void {
     if (this._steps.some((s) => s.name === name)) {
@@ -868,6 +1009,8 @@ export class WorkflowBuilder<
       dependsOn: params.dependsOn,
       kind: params.kind,
       codec,
+      retry: params.options?.retry as RetryPolicy<TaggedError> | undefined,
+      onFailure: params.options?.onFailure as StepFailureStrategy<unknown> | undefined,
       execute: (execParams) => {
         if (params.isLinear) {
           const prevStepName = params.dependsOn[0];
@@ -893,13 +1036,7 @@ export class WorkflowBuilder<
       },
     };
 
-    return new WorkflowBuilder(
-      this._name,
-      this._storage,
-      [...this._steps, stepDef],
-      params.name,
-      this._hooks,
-    );
+    return this._derive([...this._steps, stepDef], params.name);
   }
 }
 
@@ -911,8 +1048,37 @@ export function workflow<Input>(params: {
   name: string;
   storage: WorkflowStorage;
   hooks?: WorkflowHooks;
+  type?: string;
+  metadata?: Record<string, unknown>;
 }): WorkflowBuilder<Input> {
-  return new WorkflowBuilder(params.name, params.storage, [], null, params.hooks);
+  return new WorkflowBuilder(
+    params.name,
+    params.storage,
+    [],
+    null,
+    params.hooks,
+    params.type,
+    params.metadata,
+  );
+}
+
+/**
+ * Create a non-durable flow — same composition as workflow but without persistence.
+ * Uses in-memory storage, no workflowId needed. For request handlers, scripts, and
+ * compositions that don't need crash recovery.
+ *
+ * To make it durable later, change `flow()` to `workflow({ storage })`.
+ *
+ * @example
+ * ```ts
+ * const result = await flow<{ userId: string }>("process-user")
+ *   .step("fetch", ({ input }) => api.get(`/users/${input.userId}`))
+ *   .stepAsync("enrich", async ({ prev }) => enrichUser(prev))
+ *   .execute({ userId: "123" });
+ * ```
+ */
+export function flow<Input>(name: string, hooks?: WorkflowHooks): WorkflowBuilder<Input> {
+  return new WorkflowBuilder(name, new InMemoryWorkflowStorage(), [], null, hooks);
 }
 
 // ---------------------------------------------------------------------------

@@ -15,17 +15,16 @@ export type StepStatus =
 
 export type StepType = "single" | "map" | "sleep" | "signal";
 
-/**
- * Full workflow state. Generic params default to `unknown` for storage layer
- * compatibility — the builder narrows them via its own type params.
- */
 export interface WorkflowState<Input = unknown, Result = unknown> {
   readonly workflowId: string;
   readonly workflowName: string;
+  readonly workflowType?: string;
+  readonly parentWorkflowId?: string;
   readonly status: WorkflowStatus;
   readonly input: Input;
   readonly result?: Result;
   readonly error?: string;
+  readonly metadata?: Record<string, unknown>;
   readonly steps: Record<string, StepState>;
   readonly createdAt: Date;
   readonly updatedAt: Date;
@@ -44,11 +43,8 @@ export interface StepState {
   readonly durationMs?: number;
   readonly attempt: number;
   readonly tasks?: StepTaskState[];
-  /** For sleep steps: when to wake up. */
   readonly wakeAt?: Date;
-  /** For signal steps: the signal name to wait for. */
   readonly signalName?: string;
-  /** For signal steps: timeout deadline. */
   readonly signalTimeoutAt?: Date;
 }
 
@@ -63,7 +59,6 @@ export interface StepTaskState {
   readonly attempt: number;
 }
 
-/** A signal delivered to a workflow. */
 export interface SignalState {
   readonly signalName: string;
   readonly payload: unknown;

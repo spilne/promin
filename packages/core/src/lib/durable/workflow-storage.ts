@@ -8,22 +8,27 @@ export interface WorkflowStorage {
   /** Load the full workflow state. Returns null if workflow doesn't exist. */
   loadWorkflow(workflowId: string): Promise<WorkflowState | null>;
 
-  /** List workflows, optionally filtered by status and/or name. */
+  /** List workflows, optionally filtered by status, name, or type. */
   listWorkflows(params?: {
     status?: WorkflowStatus;
     name?: string;
+    type?: string;
+    parentId?: string;
     limit?: number;
     offset?: number;
   }): Promise<WorkflowState[]>;
 
-  /** Cancel a running or suspended workflow. */
-  cancelWorkflow(workflowId: string): Promise<void>;
+  /** Cancel a running or suspended workflow. With cascade, also cancels children. */
+  cancelWorkflow(workflowId: string, options?: { cascade?: boolean }): Promise<void>;
 
   /** Create a new workflow record. */
   createWorkflow(params: {
     workflowId: string;
     workflowName: string;
     input: unknown;
+    workflowType?: string;
+    parentWorkflowId?: string;
+    metadata?: Record<string, unknown>;
   }): Promise<void>;
 
   /** Save a completed step result. */

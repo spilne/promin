@@ -65,3 +65,6 @@ docs
 
 # bv (beads viewer) local config and caches
 .bv/
+.beads
+
+.claude/projects

@@ -23,6 +23,8 @@ export class InMemoryWorkflowStorage implements WorkflowStorage {
   async listWorkflows(params?: {
     status?: WorkflowStatus;
     name?: string;
+    type?: string;
+    parentId?: string;
     limit?: number;
     offset?: number;
   }): Promise<WorkflowState[]> {
@@ -33,12 +35,18 @@ export class InMemoryWorkflowStorage implements WorkflowStorage {
     if (params?.name) {
       results = results.filter((w) => w.workflowName === params.name);
     }
+    if (params?.type) {
+      results = results.filter((w) => w.workflowType === params.type);
+    }
+    if (params?.parentId) {
+      results = results.filter((w) => w.parentWorkflowId === params.parentId);
+    }
     const offset = params?.offset ?? 0;
     const limit = params?.limit ?? results.length;
     return results.slice(offset, offset + limit);
   }
 
-  async cancelWorkflow(workflowId: string): Promise<void> {
+  async cancelWorkflow(workflowId: string, options?: { cascade?: boolean }): Promise<void> {
     const wf = this.workflows.get(workflowId);
     if (!wf) return;
     if (wf.status !== "running" && wf.status !== "suspended") return;
@@ -51,19 +59,33 @@ export class InMemoryWorkflowStorage implements WorkflowStorage {
       completedAt: now,
       updatedAt: now,
     });
+
+    if (options?.cascade) {
+      for (const [childId, child] of this.workflows) {
+        if (child.parentWorkflowId === workflowId) {
+          await this.cancelWorkflow(childId, { cascade: true });
+        }
+      }
+    }
   }
 
   async createWorkflow(params: {
     workflowId: string;
     workflowName: string;
     input: unknown;
+    workflowType?: string;
+    parentWorkflowId?: string;
+    metadata?: Record<string, unknown>;
   }): Promise<void> {
     const now = new Date();
     this.workflows.set(params.workflowId, {
       workflowId: params.workflowId,
       workflowName: params.workflowName,
+      workflowType: params.workflowType,
+      parentWorkflowId: params.parentWorkflowId,
       status: "running",
       input: params.input,
+      metadata: params.metadata,
       steps: {},
       createdAt: now,
       updatedAt: now,

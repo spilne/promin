@@ -1,0 +1,30 @@
+// Storage
+export { PostgresWorkflowStorage } from "./lib/postgres-workflow-storage.ts";
+export { type PostgresStorageConfig } from "./lib/config.ts";
+export { migrate, type MigrateOptions } from "./lib/migrate.ts";
+
+// Lookup utilities
+export { defineLookup, type Lookup, type LookupEntry } from "./lib/lookup.ts";
+export {
+  createLookupTable,
+  type LookupTable,
+  type LookupBinding,
+  seedLookupEnums,
+  validateLookupEnums,
+} from "./lib/lookup-table.ts";
+
+// Workflow-specific lookups (core enums → integer IDs)
+export { WorkflowStatusIds, StepStatusIds, StepTypeIds } from "./lib/workflow-lookups.ts";
+
+// Schema exports for custom migrations
+export {
+  workflows,
+  workflowSteps,
+  workflowStepTasks,
+  workflowSignals,
+  workflowLocks,
+  workflowStatusTable,
+  stepStatusTable,
+  stepTypeTable,
+  LOOKUP_BINDINGS,
+} from "./lib/schema.ts";

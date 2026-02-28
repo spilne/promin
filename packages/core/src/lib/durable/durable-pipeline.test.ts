@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { Data } from "effect";
 import { Pipeline } from "../pipeline.ts";
-import { workflow } from "./durable-pipeline.ts";
+import { workflow, flow } from "./durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
 import {
   WorkflowLockError,
@@ -1252,5 +1252,353 @@ describe("InMemoryWorkflowStorage", () => {
     await storage.createWorkflow({ workflowId: "clear", workflowName: "t", input: {} });
     storage.clear();
     expect(await storage.loadWorkflow("clear")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// flow() — non-durable convenience
+// ---------------------------------------------------------------------------
+
+describe("flow", () => {
+  it("executes a linear chain without storage/workflowId", async () => {
+    const result = await flow<{ name: string }>("greet")
+      .step("greet", ({ input }) => Pipeline.succeed(`Hello, ${input.name}`))
+      .step("upper", ({ prev }) => Pipeline.succeed(prev.toUpperCase()))
+      .execute({ name: "World" });
+
+    expect(result).toBe("HELLO, WORLD");
+  });
+
+  it("executes a DAG", async () => {
+    const result = await flow<{ text: string }>("analyze")
+      .step("parse", ({ input }) => Pipeline.succeed(input.text.split(" ")))
+      .step("count", { dependsOn: ["parse"] }, ({ deps }) => Pipeline.succeed(deps.parse.length))
+      .step("join", { dependsOn: ["parse"] }, ({ deps }) => Pipeline.succeed(deps.parse.join("-")))
+      .step("combine", { dependsOn: ["count", "join"] }, ({ deps }) =>
+        Pipeline.succeed(`${deps.join} (${deps.count})`),
+      )
+      .execute({ text: "hello beautiful world" });
+
+    expect(result).toBe("hello-beautiful-world (3)");
+  });
+
+  it("works with stepAsync", async () => {
+    const result = await flow<{ n: number }>("compute")
+      .stepAsync("double", async ({ input }) => input.n * 2)
+      .stepAsync("add-ten", async ({ prev }) => prev + 10)
+      .execute({ n: 5 });
+
+    expect(result).toBe(20);
+  });
+
+  it("works with mapOver", async () => {
+    const result = await flow<{ items: number[] }>("batch")
+      .step("source", ({ input }) => Pipeline.succeed(input.items))
+      .mapOver("double", { array: "source" }, (n) => Pipeline.succeed(n * 2))
+      .execute({ items: [1, 2, 3] });
+
+    expect(result).toEqual([2, 4, 6]);
+  });
+
+  it("works with branch", async () => {
+    const result = await flow<{ n: number }>("classify")
+      .step("get", ({ input }) => Pipeline.succeed(input.n))
+      .branch("decide", {
+        condition: (n) => n > 10,
+        ifTrue: ({ prev }) => Pipeline.succeed(`big: ${prev}`),
+        ifFalse: ({ prev }) => Pipeline.succeed(`small: ${prev}`),
+      })
+      .execute({ n: 42 });
+
+    expect(result).toBe("big: 42");
+  });
+
+  it("works with map", async () => {
+    const result = await flow<{ s: string }>("transform")
+      .step("get", ({ input }) => Pipeline.succeed(input.s))
+      .map((s) => s.length)
+      .execute({ s: "hello" });
+
+    expect(result).toBe(5);
+  });
+
+  it("executeSafe returns data on success", async () => {
+    const { data, error } = await flow<{ n: number }>("safe")
+      .step("compute", ({ input }) => Pipeline.succeed(input.n * 2))
+      .executeSafe({ n: 5 });
+
+    expect(data).toBe(10);
+    expect(error).toBeNull();
+  });
+
+  it("executeSafe returns error on failure", async () => {
+    const { data, error } = await flow<{}>("fail")
+      .step("boom", () => Pipeline.fail(new FetchError({ message: "oops" })))
+      .executeSafe({});
+
+    expect(data).toBeNull();
+    expect(error).not.toBeNull();
+  });
+
+  it("accepts hooks", async () => {
+    const steps: string[] = [];
+
+    await flow<{ n: number }>("hooked", {
+      onStepComplete: ({ stepName }) => {
+        steps.push(stepName);
+      },
+    })
+      .step("a", ({ input }) => Pipeline.succeed(input.n + 1))
+      .step("b", ({ prev }) => Pipeline.succeed(prev * 2))
+      .execute({ n: 5 });
+
+    expect(steps).toEqual(["a", "b"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Subworkflows — invoke(), .subworkflow(), parent-child tracking
+// ---------------------------------------------------------------------------
+
+describe("Subworkflows", () => {
+  describe("invoke", () => {
+    it("invokes a child workflow as a Pipeline", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      const child = workflow<{ n: number }>({ name: "child", storage })
+        .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
+        .build();
+
+      const result = await workflow<{ n: number }>({ name: "parent", storage })
+        .step("compute", ({ input }) => Pipeline.succeed(input.n + 1))
+        .step("delegate", ({ prev }) =>
+          child.invoke({ workflowId: `child-${prev}`, input: { n: prev } }),
+        )
+        .run({ workflowId: "parent-1", input: { n: 5 } });
+
+      expect(result).toBe(12); // (5 + 1) * 2
+    });
+
+    it("sets parentWorkflowId on child", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      const child = workflow<{ n: number }>({ name: "child", storage })
+        .step("compute", ({ input }) => Pipeline.succeed(input.n))
+        .build();
+
+      await workflow<{}>({ name: "parent", storage })
+        .step("delegate", () =>
+          child.invoke({ workflowId: "child-1", input: { n: 42 }, parentWorkflowId: "parent-1" }),
+        )
+        .run({ workflowId: "parent-1", input: {} });
+
+      const childState = await storage.loadWorkflow("child-1");
+      expect(childState?.parentWorkflowId).toBe("parent-1");
+    });
+  });
+
+  describe(".subworkflow()", () => {
+    it("invokes child with builder sugar", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      const enrichUser = workflow<{ userId: string }>({ name: "enrich", storage })
+        .step("fetch", ({ input }) => Pipeline.succeed({ userId: input.userId, score: 95 }))
+        .build();
+
+      const result = await workflow<{ userId: string }>({ name: "parent", storage })
+        .step("create", ({ input }) => Pipeline.succeed({ id: input.userId, name: "Alice" }))
+        .subworkflow("enrich", enrichUser, {
+          input: (prev) => ({ userId: prev.id }),
+          workflowId: (prev) => `enrich-${prev.id}`,
+        })
+        .run({ workflowId: "parent-2", input: { userId: "u_1" } });
+
+      expect(result).toEqual({ userId: "u_1", score: 95 });
+    });
+
+    it("chains after subworkflow", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      const child = workflow<{ n: number }>({ name: "child", storage })
+        .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
+        .build();
+
+      const result = await workflow<{ n: number }>({ name: "parent", storage })
+        .step("start", ({ input }) => Pipeline.succeed(input.n))
+        .subworkflow("child", child, {
+          input: (prev) => ({ n: prev }),
+          workflowId: (prev) => `child-${prev}`,
+        })
+        .step("finish", ({ prev }) => Pipeline.succeed(prev + 100))
+        .run({ workflowId: "parent-3", input: { n: 5 } });
+
+      expect(result).toBe(110); // 5 * 2 + 100
+    });
+  });
+
+  describe("parent-child tracking", () => {
+    it("lists children by parentId", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      const child = workflow<{ n: number }>({ name: "child", storage })
+        .step("compute", ({ input }) => Pipeline.succeed(input.n))
+        .build();
+
+      // Create parent + children manually
+      await storage.createWorkflow({
+        workflowId: "parent-x",
+        workflowName: "parent",
+        input: {},
+      });
+      await child
+        .invoke({ workflowId: "child-a", input: { n: 1 }, parentWorkflowId: "parent-x" })
+        .runPromise();
+      await child
+        .invoke({ workflowId: "child-b", input: { n: 2 }, parentWorkflowId: "parent-x" })
+        .runPromise();
+
+      const children = await storage.listWorkflows({ parentId: "parent-x" });
+      expect(children).toHaveLength(2);
+    });
+
+    it("cascade cancel cancels children", async () => {
+      const storage = new InMemoryWorkflowStorage();
+
+      await storage.createWorkflow({
+        workflowId: "parent-cancel",
+        workflowName: "parent",
+        input: {},
+      });
+      await storage.createWorkflow({
+        workflowId: "child-cancel-1",
+        workflowName: "child",
+        input: {},
+        parentWorkflowId: "parent-cancel",
+      });
+      await storage.createWorkflow({
+        workflowId: "child-cancel-2",
+        workflowName: "child",
+        input: {},
+        parentWorkflowId: "parent-cancel",
+      });
+
+      await storage.cancelWorkflow("parent-cancel", { cascade: true });
+
+      expect((await storage.loadWorkflow("parent-cancel"))!.status).toBe("failed");
+      expect((await storage.loadWorkflow("child-cancel-1"))!.status).toBe("failed");
+      expect((await storage.loadWorkflow("child-cancel-2"))!.status).toBe("failed");
+    });
+
+    it("non-cascade cancel leaves children alone", async () => {
+      const storage = new InMemoryWorkflowStorage();
+
+      await storage.createWorkflow({
+        workflowId: "parent-nocancel",
+        workflowName: "parent",
+        input: {},
+      });
+      await storage.createWorkflow({
+        workflowId: "child-nocancel",
+        workflowName: "child",
+        input: {},
+        parentWorkflowId: "parent-nocancel",
+      });
+
+      await storage.cancelWorkflow("parent-nocancel");
+
+      expect((await storage.loadWorkflow("parent-nocancel"))!.status).toBe("failed");
+      expect((await storage.loadWorkflow("child-nocancel"))!.status).toBe("running");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step failure strategies — retry, skip, fallback
+// ---------------------------------------------------------------------------
+
+describe("Step failure strategies", () => {
+  describe("step retry", () => {
+    it("retries a failing step", async () => {
+      let attempts = 0;
+      const result = await flow<{}>("retry-test")
+        .step(
+          "flaky",
+          () => {
+            attempts++;
+            if (attempts < 3) return Pipeline.fail(new FetchError({ message: "transient" }));
+            return Pipeline.succeed("ok");
+          },
+          { retry: { maxRetries: 5 } },
+        )
+        .execute({});
+
+      expect(result).toBe("ok");
+      expect(attempts).toBe(3);
+    });
+  });
+
+  describe("onFailure: skip", () => {
+    it("skips failed step and continues", async () => {
+      const result = await flow<{}>("skip-test")
+        .step("optional", () => Pipeline.fail(new FetchError({ message: "fail" })), {
+          onFailure: "skip",
+        })
+        .step("next", () => Pipeline.succeed("continued"))
+        .execute({});
+
+      expect(result).toBe("continued");
+    });
+  });
+
+  describe("onFailure: fallback", () => {
+    it("uses fallback value on failure", async () => {
+      const result = await flow<{}>("fallback-test")
+        .step("risky", () => Pipeline.fail(new FetchError({ message: "fail" })), {
+          onFailure: { fallback: () => "default-value" },
+        })
+        .step("use-it", ({ prev }) => Pipeline.succeed(`got: ${prev}`))
+        .execute({});
+
+      expect(result).toBe("got: default-value");
+    });
+
+    it("fallback receives the error", async () => {
+      const result = await flow<{}>("fallback-err")
+        .step("risky", () => Pipeline.fail(new FetchError({ message: "specific-error" })), {
+          onFailure: {
+            fallback: (err) => `recovered from ${(err as FetchError).message}`,
+          },
+        })
+        .execute({});
+
+      expect(result).toBe("recovered from specific-error");
+    });
+  });
+
+  describe("retry + fallback combined", () => {
+    it("retries then falls back", async () => {
+      let attempts = 0;
+      const result = await flow<{}>("retry-fallback")
+        .step(
+          "always-fail",
+          () => {
+            attempts++;
+            return Pipeline.fail(new FetchError({ message: "always" }));
+          },
+          {
+            retry: { maxRetries: 2 },
+            onFailure: { fallback: () => "gave-up" },
+          },
+        )
+        .execute({});
+
+      expect(result).toBe("gave-up");
+      expect(attempts).toBeGreaterThan(1);
+    });
+  });
+
+  describe("default: fail", () => {
+    it("fails the workflow by default", async () => {
+      const { error } = await flow<{}>("fail-default")
+        .step("boom", () => Pipeline.fail(new FetchError({ message: "fail" })))
+        .executeSafe({});
+
+      expect(error).not.toBeNull();
+    });
   });
 });

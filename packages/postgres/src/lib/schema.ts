@@ -1,0 +1,124 @@
+// ---------------------------------------------------------------------------
+// Drizzle schema for durable workflow storage
+// ---------------------------------------------------------------------------
+
+import {
+  pgTable,
+  text,
+  integer,
+  jsonb,
+  timestamp,
+  bigint,
+  index,
+  uniqueIndex,
+  primaryKey,
+} from "drizzle-orm/pg-core";
+import { createLookupTable, type LookupBinding } from "./lookup-table.ts";
+import { WorkflowStatusIds, StepStatusIds, StepTypeIds } from "./workflow-lookups.ts";
+
+// ---------------------------------------------------------------------------
+// Lookup tables
+// ---------------------------------------------------------------------------
+
+export const workflowStatusTable = createLookupTable("wf_workflow_status");
+export const stepStatusTable = createLookupTable("wf_step_status");
+export const stepTypeTable = createLookupTable("wf_step_type");
+
+// ---------------------------------------------------------------------------
+// Lookup bindings — for seeding and validation
+// ---------------------------------------------------------------------------
+
+export const LOOKUP_BINDINGS: LookupBinding[] = [
+  { lookup: WorkflowStatusIds, table: workflowStatusTable },
+  { lookup: StepStatusIds, table: stepStatusTable },
+  { lookup: StepTypeIds, table: stepTypeTable },
+];
+
+// ---------------------------------------------------------------------------
+// Core tables
+// ---------------------------------------------------------------------------
+
+export const workflows = pgTable(
+  "wf_workflows",
+  {
+    workflowId: text("workflow_id").primaryKey(),
+    workflowName: text("workflow_name").notNull(),
+    workflowType: text("workflow_type"),
+    statusId: integer("status_id").notNull().default(WorkflowStatusIds.id.running),
+    input: jsonb("input").notNull(),
+    metadata: jsonb("metadata"),
+    result: jsonb("result"),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("wf_workflows_name_status_idx").on(t.workflowName, t.statusId),
+    index("wf_workflows_status_idx").on(t.statusId),
+    index("wf_workflows_type_idx").on(t.workflowType),
+  ],
+);
+
+export const workflowSteps = pgTable(
+  "wf_workflow_steps",
+  {
+    workflowId: text("workflow_id")
+      .notNull()
+      .references(() => workflows.workflowId, { onDelete: "cascade" }),
+    stepName: text("step_name").notNull(),
+    statusId: integer("status_id").notNull().default(StepStatusIds.id.pending),
+    stepTypeId: integer("step_type_id").notNull().default(StepTypeIds.id.single),
+    dependsOn: jsonb("depends_on").$type<string[]>().notNull().default([]),
+    result: jsonb("result"),
+    error: text("error"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    durationMs: bigint("duration_ms", { mode: "number" }),
+    attempt: integer("attempt").notNull().default(0),
+    wakeAt: timestamp("wake_at", { withTimezone: true }),
+    signalName: text("signal_name"),
+    signalTimeoutAt: timestamp("signal_timeout_at", { withTimezone: true }),
+  },
+  (t) => [primaryKey({ columns: [t.workflowId, t.stepName] })],
+);
+
+export const workflowStepTasks = pgTable(
+  "wf_workflow_step_tasks",
+  {
+    workflowId: text("workflow_id").notNull(),
+    stepName: text("step_name").notNull(),
+    taskIndex: integer("task_index").notNull(),
+    statusId: integer("status_id").notNull().default(StepStatusIds.id.pending),
+    input: jsonb("input"),
+    result: jsonb("result"),
+    error: text("error"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    attempt: integer("attempt").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.workflowId, t.stepName, t.taskIndex] })],
+);
+
+export const workflowSignals = pgTable(
+  "wf_workflow_signals",
+  {
+    workflowId: text("workflow_id")
+      .notNull()
+      .references(() => workflows.workflowId, { onDelete: "cascade" }),
+    signalName: text("signal_name").notNull(),
+    payload: jsonb("payload").notNull(),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("wf_signals_workflow_idx").on(t.workflowId),
+    uniqueIndex("wf_signals_workflow_signal_idx").on(t.workflowId, t.signalName),
+  ],
+);
+
+export const workflowLocks = pgTable("wf_workflow_locks", {
+  workflowId: text("workflow_id").primaryKey(),
+  lockedAt: timestamp("locked_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  lockedBy: text("locked_by"),
+});

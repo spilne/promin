@@ -1,5 +1,6 @@
 export {
   workflow,
+  flow,
   WorkflowBuilder,
   type WorkflowDefinition,
   type WorkflowHooks,
@@ -10,6 +11,7 @@ export {
   type DagStepContext,
   type MapStepContext,
   type StepOptions,
+  type StepFailureStrategy,
 } from "./durable-pipeline.ts";
 export { type WorkflowStorage } from "./workflow-storage.ts";
 export {
