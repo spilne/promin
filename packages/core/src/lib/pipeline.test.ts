@@ -125,11 +125,11 @@ describe("Pipeline", () => {
       expect(result).toBe("fallback");
     });
 
-    it("orElsePipeline recovers with another pipeline", async () => {
+    it("handleErrorWith recovers with another pipeline", async () => {
       const result = await Pipeline.from(
         Effect.fail(new TestError({ message: "oops" })) as Effect.Effect<string, TestError>,
       )
-        .orElsePipeline(() => Pipeline.succeed("recovered"))
+        .handleErrorWith(() => Pipeline.succeed("recovered"))
         .runPromise();
       expect(result).toBe("recovered");
     });

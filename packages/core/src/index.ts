@@ -35,3 +35,103 @@ export { PipelineChannel } from "./lib/channel.ts";
 export { PipelineSignal } from "./lib/signal.ts";
 export { PipelinePubSub } from "./lib/pubsub.ts";
 export { PipelinePool } from "./lib/pool.ts";
+
+// Typeclasses — data
+export {
+  type Codec,
+  JsonCodec,
+  codecFromSchema,
+  codecTuple,
+  codecRecord,
+  codecArray,
+  type Eq,
+  JsonEq,
+  eqFromCodec,
+  type Show,
+  JsonShow,
+  type Monoid,
+  arrayMonoid,
+  sumMonoid,
+  stringMonoid,
+  type Ord,
+  numberOrd,
+  stringOrd,
+  ordBy,
+} from "./lib/typeclasses/index.ts";
+
+// Typeclasses — streaming
+export {
+  type Streamable,
+  isStreamable,
+  type Sinkable,
+  isSinkable,
+  type KeyedSinkable,
+  isKeyedSinkable,
+  type Partitionable,
+  isPartitionable,
+  type Replayable,
+  isReplayable,
+  type Offset,
+  type Acknowledgeable,
+  isAcknowledgeable,
+  type Envelope,
+  type Checkpointable,
+  isCheckpointable,
+} from "./lib/typeclasses/index.ts";
+
+// Typeclasses — DataFrame
+export {
+  type Frameable,
+  isFrameable,
+  type FrameSchema,
+  type PushdownFilterable,
+  isPushdownFilterable,
+  type Predicate,
+  type ColumnSelectable,
+  isColumnSelectable,
+  type SourceSortable,
+  isSourceSortable,
+} from "./lib/typeclasses/index.ts";
+
+// Typeclasses — state
+export { type StateBackend } from "./lib/typeclasses/index.ts";
+
+// In-memory adapters
+export { MemoryStream } from "./lib/adapters/memory/index.ts";
+export { IterableSource, fromIterable } from "./lib/adapters/memory/index.ts";
+export { InMemoryState } from "./lib/adapters/memory/index.ts";
+
+// Durable execution
+export {
+  workflow,
+  WorkflowBuilder,
+  type WorkflowDefinition,
+  type WorkflowHooks,
+  type WorkflowDAG,
+  dagToMermaid,
+  dagToDot,
+  type StepContext,
+  type DagStepContext,
+  type MapStepContext,
+  type StepOptions,
+  type WorkflowStorage,
+  type WorkflowState,
+  type StepState,
+  type StepTaskState,
+  type SignalState,
+  type WorkflowStatus,
+  type StepStatus,
+  type StepType,
+  InMemoryWorkflowStorage,
+  WorkflowError,
+  StepError,
+  StorageError,
+  WorkflowLockError,
+  WorkflowSuspendedError,
+  WorkflowTimeoutError,
+  topologicalSort,
+  computeReadySet,
+  type DagNode,
+  trigger,
+  WorkflowResult,
+} from "./lib/durable/index.ts";

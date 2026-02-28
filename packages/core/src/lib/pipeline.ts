@@ -488,29 +488,223 @@ export class Pipeline<T, E extends TaggedError> {
     );
   }
 
-  /** Recover from errors by providing a fallback value. */
+  /** Recover from errors by providing a constant fallback value. */
   orElse(fallback: T): Pipeline<T, never> {
     return new Pipeline(
       Effect.orElse(this.effect, () => Effect.succeed(fallback)) as Effect.Effect<T, never>,
     );
   }
 
+  // -------------------------------------------------------------------------
+  // Error recovery (cats-aligned naming)
+  //
+  //   handleError      (E => B)             — total, plain value
+  //   handleErrorWith  (E => Pipeline<B>)   — total, Pipeline
+  //   handleErrorAsync (E => Promise<B>)    — total, async (TS convenience)
+  //   recover          (pred, E => B)       — partial, plain value
+  //   recoverWith      (pred, E => Pipe<B>) — partial, Pipeline
+  //   recoverAsync     (pred, E => Prom<B>) — partial, async (TS convenience)
+  //   redeem           (E => B, A => B)     — both paths, plain value
+  //   redeemWith       (E => Pipe, A => P)  — both paths, Pipeline
+  // -------------------------------------------------------------------------
+
   /**
-   * Recover from errors by running a different pipeline.
+   * Handle any error by mapping it to a value.
+   * cats: `handleError`
+   *
+   * @example
+   * ```ts
+   * pipeline.handleError((err) => ({ fallback: true, reason: err._tag }))
+   * ```
+   */
+  handleError<U>(fn: (error: E) => U): Pipeline<T | U, never> {
+    return new Pipeline(
+      Effect.catchAll(this.effect, (error) => Effect.succeed(fn(error))) as Effect.Effect<
+        T | U,
+        never
+      >,
+    );
+  }
+
+  /**
+   * Handle any error by running a different pipeline.
+   * cats: `handleErrorWith`
    *
    * @example
    * ```ts
    * primaryApi.get("/data", Schema)
-   *   .orElsePipeline(() => backupApi.get("/data", Schema))
+   *   .handleErrorWith((err) => backupApi.get("/data", Schema))
    * ```
    */
-  orElsePipeline<U, E2 extends TaggedError>(
+  handleErrorWith<U, E2 extends TaggedError>(
     fn: (error: E) => Pipeline<U, E2>,
   ): Pipeline<T | U, E2> {
     return new Pipeline(
       Effect.catchAll(this.effect, (error) => fn(error).effect),
       this._defaults,
     );
+  }
+
+  /**
+   * Handle any error with an async function — TS convenience.
+   *
+   * @example
+   * ```ts
+   * pipeline.handleErrorAsync(async (err) => fetchFallback(err))
+   * ```
+   */
+  handleErrorAsync<U>(fn: (error: E) => Promise<U>): Pipeline<T | U, never> {
+    return new Pipeline(
+      Effect.catchAll(this.effect, (error) => Effect.promise(() => fn(error))) as Effect.Effect<
+        T | U,
+        never
+      >,
+    );
+  }
+
+  /**
+   * Recover from errors matching a predicate — non-matching errors pass through.
+   * cats: `recover` (PartialFunction)
+   *
+   * @example
+   * ```ts
+   * httpPipeline.recover(
+   *   (err) => err._tag === "HttpStatusError" && err.status === 404,
+   *   () => null,
+   * )
+   * ```
+   */
+  recover<U>(predicate: (error: E) => boolean, fn: (error: E) => U): Pipeline<T | U, E> {
+    return new Pipeline(
+      Effect.catchAll(this.effect, (error) =>
+        predicate(error) ? Effect.succeed(fn(error)) : Effect.fail(error),
+      ) as Effect.Effect<T | U, E>,
+      this._defaults,
+    );
+  }
+
+  /**
+   * Recover from errors matching a predicate by running a different pipeline.
+   * cats: `recoverWith` (PartialFunction)
+   *
+   * @example
+   * ```ts
+   * httpPipeline.recoverWith(
+   *   (err) => err._tag === "HttpStatusError" && err.status === 404,
+   *   (err) => cache.get(key),
+   * )
+   * ```
+   */
+  recoverWith<U, E2 extends TaggedError>(
+    predicate: (error: E) => boolean,
+    fn: (error: E) => Pipeline<U, E2>,
+  ): Pipeline<T | U, E | E2> {
+    return new Pipeline(
+      Effect.catchAll(
+        this.effect,
+        (error): Effect.Effect<U, E | E2> =>
+          predicate(error) ? fn(error).effect : (Effect.fail(error) as Effect.Effect<never, E>),
+      ),
+      this._defaults,
+    );
+  }
+
+  /**
+   * Recover from errors matching a predicate with an async function — TS convenience.
+   *
+   * @example
+   * ```ts
+   * httpPipeline.recoverAsync(
+   *   (err) => err._tag === "HttpStatusError" && err.status === 404,
+   *   async () => fetchFromCache(),
+   * )
+   * ```
+   */
+  recoverAsync<U>(
+    predicate: (error: E) => boolean,
+    fn: (error: E) => Promise<U>,
+  ): Pipeline<T | U, E> {
+    return new Pipeline(
+      Effect.catchAll(this.effect, (error) =>
+        predicate(error) ? Effect.promise(() => fn(error)) : Effect.fail(error),
+      ) as Effect.Effect<T | U, E>,
+      this._defaults,
+    );
+  }
+
+  /**
+   * Transform both the error and success channels into a single type.
+   * cats: `redeem` — an optimization over `.attempt().map(fold)`
+   *
+   * @example
+   * ```ts
+   * const message = await pipeline.redeem(
+   *   (err) => `failed: ${err._tag}`,
+   *   (data) => `ok: ${data}`,
+   * ).runPromise();
+   * ```
+   */
+  redeem<B>(onError: (error: E) => B, onSuccess: (value: T) => B): Pipeline<B, never> {
+    return new Pipeline(
+      Effect.matchEffect(this.effect, {
+        onFailure: (error) => Effect.succeed(onError(error)),
+        onSuccess: (value) => Effect.succeed(onSuccess(value)),
+      }),
+    );
+  }
+
+  /**
+   * Transform both channels by running a pipeline for each.
+   * cats: `redeemWith` — subsumes `handleErrorWith`
+   *
+   * @example
+   * ```ts
+   * pipeline.redeemWith(
+   *   (err) => fallbackPipeline,
+   *   (data) => enrichPipeline(data),
+   * )
+   * ```
+   */
+  redeemWith<B, E2 extends TaggedError>(
+    onError: (error: E) => Pipeline<B, E2>,
+    onSuccess: (value: T) => Pipeline<B, E2>,
+  ): Pipeline<B, E2> {
+    return new Pipeline(
+      Effect.matchEffect(this.effect, {
+        onFailure: (error) => onError(error).effect,
+        onSuccess: (value) => onSuccess(value).effect,
+      }),
+    );
+  }
+
+  /**
+   * Transform both channels with async functions — TS convenience for `redeem`.
+   *
+   * @example
+   * ```ts
+   * pipeline.redeemAsync(
+   *   async (err) => fetchFallback(err),
+   *   async (data) => enrichData(data),
+   * )
+   * ```
+   */
+  redeemAsync<B>(
+    onError: (error: E) => Promise<B>,
+    onSuccess: (value: T) => Promise<B>,
+  ): Pipeline<B, never> {
+    return new Pipeline(
+      Effect.matchEffect(this.effect, {
+        onFailure: (error) => Effect.promise(() => onError(error)),
+        onSuccess: (value) => Effect.promise(() => onSuccess(value)),
+      }),
+    );
+  }
+
+  /** @deprecated Use `handleErrorWith` instead. */
+  orElsePipeline<U, E2 extends TaggedError>(
+    fn: (error: E) => Pipeline<U, E2>,
+  ): Pipeline<T | U, E2> {
+    return this.handleErrorWith(fn);
   }
 
   /**

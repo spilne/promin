@@ -1,6 +1,16 @@
 import { Effect, Stream, Chunk, Duration, Schedule, Ref, Option } from "effect";
 import type { TaggedError, Pipeline } from "./pipeline.ts";
 import type { PipelineRef } from "./ref.ts";
+import type {
+  Streamable,
+  Acknowledgeable,
+  Envelope,
+  Offset,
+  Sinkable,
+  KeyedSinkable,
+} from "./typeclasses/streamable.ts";
+import type { StateBackend } from "./typeclasses/state-backend.ts";
+import { isPartitionable, isReplayable } from "./typeclasses/streamable.ts";
 
 // ---------------------------------------------------------------------------
 // StreamPipeline<T, E> — chainable wrapper around Stream<T, E>
@@ -130,6 +140,53 @@ export class StreamPipeline<T, E extends TaggedError> {
    */
   static iterate<T>(initial: T, fn: (prev: T) => T): StreamPipeline<T, never> {
     return new StreamPipeline(Stream.iterate(initial, fn));
+  }
+
+  // -------------------------------------------------------------------------
+  // Typeclass-based construction
+  // -------------------------------------------------------------------------
+
+  /**
+   * Create a StreamPipeline from any Streamable source.
+   * Detects Partitionable and Replayable capabilities automatically.
+   *
+   * @example
+   * ```ts
+   * StreamPipeline.fromSource(kafkaTopic)
+   * StreamPipeline.fromSource(kafkaTopic, { partitions: [0, 1] })
+   * StreamPipeline.fromSource(kafkaTopic, { offset: { type: "earliest" } })
+   * ```
+   */
+  static fromSource<T>(
+    source: Streamable<T>,
+    params?: { group?: string; partitions?: number[]; offset?: Offset },
+  ): StreamPipeline<T, never> {
+    if (params?.offset && isReplayable<T>(source)) {
+      return source.subscribeFrom({ offset: params.offset, group: params?.group });
+    }
+    if (params?.partitions && isPartitionable<T>(source)) {
+      return source.subscribe({ group: params?.group, partitions: params.partitions });
+    }
+    return source.subscribe({ group: params?.group });
+  }
+
+  /**
+   * Create a StreamPipeline with manual acknowledgement from an Acknowledgeable source.
+   *
+   * @example
+   * ```ts
+   * StreamPipeline.fromAck(sqsQueue)
+   *   .forEach(async (envelope) => {
+   *     await process(envelope.value);
+   *     await envelope.ack();
+   *   });
+   * ```
+   */
+  static fromAck<T>(
+    source: Acknowledgeable<T>,
+    params?: { group?: string },
+  ): StreamPipeline<Envelope<T>, never> {
+    return source.subscribeAck(params);
   }
 
   // -------------------------------------------------------------------------
@@ -634,6 +691,58 @@ export class StreamPipeline<T, E extends TaggedError> {
   /** Run an async cleanup function when the stream ends. */
   onFinalize(fn: () => Promise<void>): StreamPipeline<T, E> {
     return new StreamPipeline(Stream.ensuring(this.stream, Effect.promise(fn)));
+  }
+
+  // -------------------------------------------------------------------------
+  // Typeclass-based sink & stateful operators
+  // -------------------------------------------------------------------------
+
+  /**
+   * Publish each stream item to a Sinkable (or KeyedSinkable with key extractor).
+   *
+   * @example
+   * ```ts
+   * stream.to(redisSink)
+   * stream.to(kafkaTopic, { key: (item) => item.userId })
+   * ```
+   */
+  to(sink: Sinkable<T>, params?: { key?: (value: T) => string }): Promise<void> {
+    return this.forEach(async (value) => {
+      if (params?.key) {
+        await (sink as KeyedSinkable<T>).publish(value, { key: params.key(value) });
+      } else {
+        await sink.publish(value);
+      }
+    });
+  }
+
+  /**
+   * Stateful stream processing — Flink-style keyed state.
+   * Each item is routed to a key, and the process function can read/write state.
+   *
+   * @example
+   * ```ts
+   * stream.statefulMap({
+   *   stateBackend: new InMemoryState<string, number>(),
+   *   keyBy: (event) => event.userId,
+   *   process: async (event, state) => {
+   *     const count = (await state.get(event.userId)) ?? 0;
+   *     await state.put(event.userId, count + 1);
+   *     return { ...event, visitCount: count + 1 };
+   *   },
+   * })
+   * ```
+   */
+  statefulMap<K, V, U>(params: {
+    stateBackend: StateBackend<K, V>;
+    keyBy: (value: T) => K;
+    process: (value: T, state: StateBackend<K, V>) => Promise<U>;
+  }): StreamPipeline<U, E> {
+    return new StreamPipeline(
+      Stream.mapEffect(this.stream, (value) =>
+        Effect.promise(() => params.process(value, params.stateBackend)),
+      ),
+    );
   }
 
   /** Process each item. Returns a Promise that resolves when the stream ends. */
