@@ -722,4 +722,71 @@ describe("StreamPipeline", () => {
       expect(collected).toEqual([1, 2, 3]);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // New combinators: repeatEval, range, fixedDelay, repeat, repeatN, spaced
+  // ---------------------------------------------------------------------------
+
+  describe("repeatEval", () => {
+    it("repeatedly evaluates an async function", async () => {
+      let count = 0;
+      const result = await StreamPipeline.repeatEval(async () => count++)
+        .take(5)
+        .collect();
+      expect(result).toEqual([0, 1, 2, 3, 4]);
+    });
+  });
+
+  describe("range", () => {
+    it("emits integers in [start, end)", async () => {
+      const result = await StreamPipeline.range(3, 7).collect();
+      expect(result).toEqual([3, 4, 5, 6]);
+    });
+
+    it("emits empty for start == end", async () => {
+      const result = await StreamPipeline.range(5, 5).collect();
+      expect(result).toEqual([]);
+    });
+  });
+
+  describe("fixedDelay", () => {
+    it("emits ticks with delay between completions", async () => {
+      const start = Date.now();
+      const result = await StreamPipeline.fixedDelay(50).take(3).collect();
+      const elapsed = Date.now() - start;
+
+      expect(result).toEqual([0, 1, 2]);
+      expect(elapsed).toBeGreaterThanOrEqual(120); // 3 × ~50ms
+    });
+  });
+
+  describe("repeat", () => {
+    it("infinitely repeats a stream", async () => {
+      const result = await StreamPipeline.fromIterable([1, 2]).repeat().take(6).collect();
+      expect(result).toEqual([1, 2, 1, 2, 1, 2]);
+    });
+  });
+
+  describe("repeatN", () => {
+    it("repeats a stream N times", async () => {
+      const result = await StreamPipeline.fromIterable([1, 2]).repeatN(3).collect();
+      expect(result).toEqual([1, 2, 1, 2, 1, 2]);
+    });
+
+    it("repeatN(1) is same as original", async () => {
+      const result = await StreamPipeline.fromIterable([1, 2, 3]).repeatN(1).collect();
+      expect(result).toEqual([1, 2, 3]);
+    });
+  });
+
+  describe("spaced", () => {
+    it("adds delay between elements", async () => {
+      const start = Date.now();
+      const result = await StreamPipeline.fromIterable([1, 2, 3]).spaced(50).collect();
+      const elapsed = Date.now() - start;
+
+      expect(result).toEqual([1, 2, 3]);
+      expect(elapsed).toBeGreaterThanOrEqual(120); // 3 × ~50ms
+    });
+  });
 });

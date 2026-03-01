@@ -25,6 +25,9 @@ export {
 } from "./lib/durable-scheduler.ts";
 export { durableSchedules, durableScheduleTicks } from "./lib/scheduler-schema.ts";
 
+// SKIP LOCKED queue (no extension required)
+export { PgQueue, type PgQueueConfig } from "./lib/pg-queue.ts";
+
 // Schema exports for custom migrations
 export {
   workflows,

@@ -142,6 +142,55 @@ export class StreamPipeline<T, E extends TaggedError> {
     return new StreamPipeline(Stream.iterate(initial, fn));
   }
 
+  /**
+   * Repeatedly evaluate an async function and emit its result.
+   * Like fs2's `Stream.repeatEval`.
+   *
+   * @example
+   * ```ts
+   * // Poll an API forever
+   * StreamPipeline.repeatEval(() => fetchMetrics())
+   *   .forEach((m) => gauge.set(m.value));
+   * ```
+   */
+  static repeatEval<T>(fn: () => Promise<T>): StreamPipeline<T, never> {
+    return new StreamPipeline(Stream.repeatEffect(Effect.promise(fn)));
+  }
+
+  /**
+   * Emit a range of integers [start, end).
+   *
+   * @example
+   * ```ts
+   * StreamPipeline.range(0, 10).collect(); // [0, 1, 2, ..., 9]
+   * ```
+   */
+  static range(start: number, end: number): StreamPipeline<number, never> {
+    const items = Array.from({ length: end - start }, (_, i) => start + i);
+    return new StreamPipeline(Stream.fromIterable(items));
+  }
+
+  /**
+   * Emit a tick after a fixed delay between completions.
+   * Unlike `tick()` (fixed rate), `fixedDelay` waits `ms` *after* the previous
+   * element is consumed before emitting the next.
+   *
+   * @example
+   * ```ts
+   * // Process, wait 5s, process, wait 5s...
+   * StreamPipeline.fixedDelay(5_000)
+   *   .mapAsync(() => heavyWork())
+   *   .drain();
+   * ```
+   */
+  static fixedDelay(ms: number): StreamPipeline<number, never> {
+    return new StreamPipeline(
+      Stream.unfoldEffect(0, (n) =>
+        Effect.sleep(Duration.millis(ms)).pipe(Effect.map(() => Option.some([n, n + 1] as const))),
+      ),
+    );
+  }
+
   // -------------------------------------------------------------------------
   // Typeclass-based construction
   // -------------------------------------------------------------------------
@@ -488,6 +537,48 @@ export class StreamPipeline<T, E extends TaggedError> {
     return new StreamPipeline(Stream.schedule(this.stream, Schedule.spaced(Duration.millis(ms))));
   }
 
+  /**
+   * Add a fixed delay between each element.
+   * Unlike `metered()` which throttles to a max rate, `spaced()` inserts
+   * a delay *after* each element is consumed.
+   */
+  spaced(ms: number): StreamPipeline<T, E> {
+    return new StreamPipeline(
+      Stream.mapEffect(this.stream, (value) =>
+        Effect.sleep(Duration.millis(ms)).pipe(Effect.map(() => value)),
+      ),
+    );
+  }
+
+  /**
+   * Infinitely repeat this stream's output.
+   * fs2: `stream.repeat`
+   *
+   * @example
+   * ```ts
+   * StreamPipeline.fromIterable([1, 2, 3]).repeat().take(9).collect();
+   * // [1, 2, 3, 1, 2, 3, 1, 2, 3]
+   * ```
+   */
+  repeat(): StreamPipeline<T, E> {
+    return new StreamPipeline(Stream.forever(this.stream));
+  }
+
+  /**
+   * Repeat this stream's output exactly `n` times.
+   * fs2: `stream.repeatN`
+   *
+   * @example
+   * ```ts
+   * StreamPipeline.fromIterable([1, 2]).repeatN(3).collect();
+   * // [1, 2, 1, 2, 1, 2]
+   * ```
+   */
+  repeatN(n: number): StreamPipeline<T, E> {
+    const streams = Array.from({ length: n }, () => this.stream);
+    return new StreamPipeline(streams.reduce((acc, s) => Stream.concat(acc, s)));
+  }
+
   // -------------------------------------------------------------------------
   // Combination
   // -------------------------------------------------------------------------
@@ -587,15 +678,13 @@ export class StreamPipeline<T, E extends TaggedError> {
    * await Effect.runPromise(paused.update(() => false)); // resume
    * ```
    */
-  pauseWhen(ref: PipelineRef<boolean>): StreamPipeline<T, E> {
-    // Check the ref before emitting each item; if paused, wait until unpaused
+  pauseWhen(ref: PipelineRef<boolean>, pollMs: number = 50): StreamPipeline<T, E> {
+    // Check the ref before emitting each item; if paused, sleep and re-check
     return new StreamPipeline(
       Stream.mapEffect(this.stream, (value) =>
         Effect.gen(function* () {
-          let isPaused = yield* Ref.get(ref.ref);
-          while (isPaused) {
-            yield* Effect.sleep(Duration.millis(50));
-            isPaused = yield* Ref.get(ref.ref);
+          while (yield* Ref.get(ref.ref)) {
+            yield* Effect.sleep(Duration.millis(pollMs));
           }
           return value;
         }),
