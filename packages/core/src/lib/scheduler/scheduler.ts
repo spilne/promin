@@ -19,8 +19,8 @@ export interface Scheduler extends Streamable<ScheduleTick> {
   /** Register a new schedule. */
   register(config: ScheduleConfig): void;
 
-  /** Remove a schedule. */
-  unregister(scheduleId: string): void;
+  /** Remove a schedule. Optional reason for audit/logging. */
+  unregister(scheduleId: string, options?: { reason?: string }): void;
 
   /** Pause a schedule (stops firing, keeps config). */
   pause(scheduleId: string): void;

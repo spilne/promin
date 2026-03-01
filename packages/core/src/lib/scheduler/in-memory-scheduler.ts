@@ -13,10 +13,63 @@ import type { Codec } from "../typeclasses/codec.ts";
 import type { Scheduler } from "./scheduler.ts";
 import type { ScheduleConfig, ScheduleTick } from "./types.ts";
 
+/**
+ * Non-blocking, in-process scheduler for cron expressions and fixed intervals.
+ *
+ * Uses `Effect.sleep()` to yield the fiber until the next fire time — no polling,
+ * no `setInterval`, no busy-wait. The event loop stays completely free between ticks.
+ *
+ * Implements `Streamable<ScheduleTick>` so it works with `StreamPipeline.fromSource()`.
+ *
+ * For production multi-instance deployments, use `DurableScheduler` from `@ts-backend/postgres`
+ * which adds persistence, catch-up, overlap policies, and leader election.
+ *
+ * @example
+ * ```ts
+ * import { createScheduler, StreamPipeline } from "@ts-backend/core";
+ *
+ * const scheduler = createScheduler();
+ *
+ * // Cron — every weekday at 9am EST
+ * scheduler.register({
+ *   id: "morning-report",
+ *   cron: "0 9 * * MON-FRI",
+ *   timezone: "America/New_York",
+ *   metadata: { team: "analytics" },
+ * });
+ *
+ * // Fixed interval — every 30 seconds
+ * scheduler.register({ id: "health-check", intervalMs: 30_000 });
+ *
+ * // Stream a single schedule → workflow trigger
+ * scheduler.stream("morning-report")
+ *   .through(trigger({
+ *     workflow: reportWorkflow,
+ *     toInput: (tick) => ({ date: tick.scheduledAt.toISOString().split("T")[0] }),
+ *     toWorkflowId: (tick) => `report-${tick.scheduledAt.toISOString().split("T")[0]}`,
+ *   }))
+ *   .drain();
+ *
+ * // Stream all schedules merged
+ * StreamPipeline.fromSource(scheduler)
+ *   .forEach((tick) => console.log(`${tick.scheduleId} fired at ${tick.firedAt}`));
+ *
+ * // Pause / resume at runtime
+ * scheduler.pause("health-check");
+ * scheduler.resume("health-check");
+ *
+ * // Unregister ends the stream
+ * scheduler.unregister("health-check");
+ * ```
+ */
 export class InMemoryScheduler implements Scheduler {
   private schedules = new Map<string, ScheduleConfig & { paused: boolean }>();
   readonly codec: Codec<ScheduleTick> = JsonCodec as Codec<ScheduleTick>;
 
+  /**
+   * Register a schedule. Validates cron expression eagerly.
+   * @throws If neither `cron` nor `intervalMs` is provided, or if cron is invalid.
+   */
   register(config: ScheduleConfig): void {
     if (!config.cron && !config.intervalMs) {
       throw new Error(`Schedule "${config.id}" must have either cron or intervalMs`);
@@ -36,20 +89,24 @@ export class InMemoryScheduler implements Scheduler {
     this.schedules.set(config.id, { ...config, paused: config.enabled === false });
   }
 
-  unregister(scheduleId: string): void {
+  /** Remove a schedule. Its stream will end. */
+  unregister(scheduleId: string, _options?: { reason?: string }): void {
     this.schedules.delete(scheduleId);
   }
 
+  /** Pause a schedule — stops emitting ticks but keeps the config. */
   pause(scheduleId: string): void {
     const s = this.schedules.get(scheduleId);
     if (s) s.paused = true;
   }
 
+  /** Resume a paused schedule. */
   resume(scheduleId: string): void {
     const s = this.schedules.get(scheduleId);
     if (s) s.paused = false;
   }
 
+  /** List all registered schedules with their current enabled state. */
   list(): ScheduleConfig[] {
     return [...this.schedules.values()].map(({ paused, ...config }) => ({
       ...config,
@@ -57,6 +114,12 @@ export class InMemoryScheduler implements Scheduler {
     }));
   }
 
+  /**
+   * Stream ticks from a specific schedule, or all schedules merged.
+   * Non-blocking — each schedule sleeps until its next fire time.
+   *
+   * @param scheduleId - If provided, stream only this schedule. Otherwise merge all.
+   */
   stream(scheduleId?: string): StreamPipeline<ScheduleTick, never> {
     if (scheduleId) {
       return this.createScheduleStream(scheduleId);

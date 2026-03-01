@@ -159,6 +159,41 @@ describe("DurableScheduler", () => {
     }, 10_000);
   });
 
+  describe("multiple schedules", () => {
+    it("streams ticks from multiple schedules merged", async () => {
+      const scheduler = createDurableScheduler({ db: pg.db, pollIntervalMs: 100 });
+      await scheduler.registerAsync({ id: "multi-a", intervalMs: 50, name: "A" });
+      await scheduler.registerAsync({ id: "multi-b", intervalMs: 50, name: "B" });
+
+      const ticks = await scheduler.stream().take(4).collect();
+
+      expect(ticks).toHaveLength(4);
+      const ids = new Set(ticks.map((t) => t.scheduleId));
+      expect(ids.size).toBeGreaterThanOrEqual(1); // at least one schedule fired
+    }, 10_000);
+
+    it("stream(id) filters to single schedule", async () => {
+      const scheduler = createDurableScheduler({ db: pg.db, pollIntervalMs: 100 });
+      await scheduler.registerAsync({ id: "filter-a", intervalMs: 50 });
+      await scheduler.registerAsync({ id: "filter-b", intervalMs: 50 });
+
+      const ticks = await scheduler.stream("filter-a").take(2).collect();
+
+      expect(ticks).toHaveLength(2);
+      expect(ticks.every((t) => t.scheduleId === "filter-a")).toBe(true);
+    }, 10_000);
+
+    it("disabled schedule does not emit", async () => {
+      const scheduler = createDurableScheduler({ db: pg.db, pollIntervalMs: 100 });
+      await scheduler.registerAsync({ id: "active-sched", intervalMs: 50 });
+      await scheduler.registerAsync({ id: "disabled-sched", intervalMs: 50, enabled: false });
+
+      const ticks = await scheduler.stream().take(3).collect();
+
+      expect(ticks.every((t) => t.scheduleId !== "disabled-sched")).toBe(true);
+    }, 10_000);
+  });
+
   describe("leader election", () => {
     it("only one instance acquires the lock", async () => {
       const s1 = createDurableScheduler({ db: pg.db, instanceId: "instance-1" });

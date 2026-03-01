@@ -421,3 +421,32 @@ await StreamPipeline.fromAck(dlq).forEach(async (envelope) => {
   await envelope.ack();
 });
 ```
+
+### Planned: RRULE Support for Complex Recurrence
+
+Currently `ScheduleConfig` supports `cron` (5/6/7-field) and `intervalMs`. These can't express:
+
+- **Biweekly** — every 2 weeks on Tuesday
+- **Every N weeks/months** — every 3rd month on the 1st
+- **Every other weekday** — every other Monday
+
+Google Calendar, Outlook, and iCalendar use [RRULE (RFC 5545)](https://datatracker.ietf.org/doc/html/rfc5545#section-3.3.10) for these patterns. Plan is to add `rrule` field to `ScheduleConfig` using the [rrule](https://github.com/jkbrzt/rrule) library:
+
+```typescript
+scheduler.register({
+  id: "biweekly-standup",
+  rrule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU;BYHOUR=10", // iCalendar RRULE
+  timezone: "America/New_York",
+});
+
+scheduler.register({
+  id: "quarterly-review",
+  rrule: "FREQ=MONTHLY;INTERVAL=3;BYMONTHDAY=1;BYHOUR=9",
+});
+```
+
+Three trigger types in `ScheduleConfig`:
+
+- `cron` — standard cron (simple schedules)
+- `rrule` — iCalendar RRULE (complex calendar patterns)
+- `intervalMs` — fixed interval (heartbeats, polling)
