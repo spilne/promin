@@ -1,0 +1,25 @@
+name: 'Resolve Image Name'
+description: 'Maps an app name to its Docker image name. Falls back to the app name if no mapping exists.'
+
+inputs:
+  app:
+    description: 'App name (Nx project name)'
+    required: true
+
+outputs:
+  image_name:
+    description: 'Resolved Docker image name'
+    value: ${{ steps.resolve.outputs.image_name }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Resolve
+      id: resolve
+      shell: bash
+      run: |
+        declare -A IMAGE_MAP=(
+          ["api-mcp"]="api-mcp-ts"
+        )
+        IMAGE_NAME="${IMAGE_MAP[${{ inputs.app }}]:-${{ inputs.app }}}"
+        echo "image_name=$IMAGE_NAME" >> $GITHUB_OUTPUT

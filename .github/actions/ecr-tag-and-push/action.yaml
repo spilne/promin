@@ -1,0 +1,24 @@
+name: 'Tag & Push Docker Image to ECR'
+description: 'Tags and pushes the docker image to AWS ECR'
+
+inputs:
+  ecr_registry:
+    description: 'ECR registry'
+    required: true
+  image_name:
+    description: 'Image name'
+    required: true
+  image_tag:
+    description: 'Image tag'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: 'Tag and push image ${{ inputs.image_name }}:${{ inputs.image_tag }} to AWS ECR'
+      run: |
+        docker tag ${{ inputs.image_name }}:latest ${{ inputs.ecr_registry }}/${{ inputs.image_name }}:${{ inputs.image_tag }}
+        docker tag ${{ inputs.image_name }}:latest ${{ inputs.ecr_registry }}/${{ inputs.image_name }}:latest
+        docker push ${{ inputs.ecr_registry }}/${{ inputs.image_name }}:${{ inputs.image_tag }}
+        docker push ${{ inputs.ecr_registry }}/${{ inputs.image_name }}:latest
+      shell: bash

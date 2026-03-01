@@ -1,0 +1,89 @@
+{
+  "$schema": "./node_modules/nx/schemas/nx-schema.json",
+  "namedInputs": {
+    "default": [
+      "{projectRoot}/**/*",
+      "sharedGlobals"
+    ],
+    "production": [
+      "default"
+    ],
+    "sharedGlobals": [
+      "{workspaceRoot}/.github/workflows/ci.yml"
+    ]
+  },
+  "plugins": [
+    {
+      "plugin": "@nx/js/typescript",
+      "include": [
+        "packages/**/*"
+      ],
+      "options": {
+        "typecheck": {
+          "targetName": "typecheck"
+        }
+      }
+    }
+  ],
+  "targetDefaults": {
+    "test": {
+      "executor": "nx:run-commands",
+      "dependsOn": [
+        "typecheck"
+      ],
+      "options": {
+        "commands": [
+          "bun test --pass-with-no-tests"
+        ],
+        "cwd": "{projectRoot}"
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "commands": [
+          "oxlint -c .oxlintrc.json {projectRoot}"
+        ],
+        "cwd": "{workspaceRoot}"
+      },
+      "inputs": [
+        "default",
+        "{workspaceRoot}/.oxlintrc.json"
+      ]
+    },
+    "format": {
+      "executor": "nx:run-commands",
+      "options": {
+        "commands": [
+          "oxfmt -c .oxfmtrc.json {projectRoot}"
+        ],
+        "cwd": "{workspaceRoot}"
+      },
+      "inputs": [
+        "default",
+        "{workspaceRoot}/.oxfmtrc.json"
+      ]
+    },
+    "format-check": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "oxfmt -c .oxfmtrc.check.json --check {projectRoot}",
+        "cwd": "{workspaceRoot}"
+      },
+      "inputs": [
+        "default",
+        "{workspaceRoot}/.oxfmtrc.check.json"
+      ]
+    },
+    "ci": {
+      "executor": "nx:noop",
+      "dependsOn": [
+        "typecheck",
+        "lint",
+        "format-check",
+        "test",
+        "^ci"
+      ]
+    }
+  }
+}
