@@ -11,6 +11,11 @@
       "import": "./src/index.ts",
       "default": "./src/index.ts"
     },
+    "./pgmq": {
+      "types": "./src/pgmq/index.ts",
+      "import": "./src/pgmq/index.ts",
+      "default": "./src/pgmq/index.ts"
+    },
     "./package.json": "./package.json"
   },
   "dependencies": {
