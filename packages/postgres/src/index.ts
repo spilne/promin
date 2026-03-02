@@ -16,6 +16,15 @@ export {
 // Workflow-specific lookups (core enums → integer IDs)
 export { WorkflowStatusIds, StepStatusIds, StepTypeIds } from "./lib/workflow-lookups.ts";
 
+// Durable scheduler
+export {
+  DurableScheduler,
+  createDurableScheduler,
+  type DurableScheduleConfig,
+  type DurableSchedulerConfig,
+} from "./lib/durable-scheduler.ts";
+export { durableSchedules, durableScheduleTicks } from "./lib/scheduler-schema.ts";
+
 // Schema exports for custom migrations
 export {
   workflows,
