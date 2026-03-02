@@ -137,3 +137,12 @@ export {
   trigger,
   WorkflowResult,
 } from "./lib/durable/index.ts";
+
+// Scheduler
+export {
+  type ScheduleConfig,
+  type ScheduleTick,
+  type Scheduler,
+  InMemoryScheduler,
+  createScheduler,
+} from "./lib/scheduler/index.ts";
