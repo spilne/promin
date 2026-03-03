@@ -1,26 +1,9 @@
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { describe, it, expect, beforeAll } from "bun:test";
 import { Data } from "effect";
 import { Pipeline, workflow } from "@ts-backend/core";
 import { PostgresWorkflowStorage } from "./postgres-workflow-storage.ts";
 import { migrate } from "./migrate.ts";
-import { PostgresTestContainer } from "./test-utils.ts";
-
-// ---------------------------------------------------------------------------
-// Container setup
-// ---------------------------------------------------------------------------
-
-const pg = new PostgresTestContainer();
-let storage: PostgresWorkflowStorage;
-
-beforeAll(async () => {
-  await pg.start();
-  await migrate(pg.db);
-  storage = await PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false });
-}, 60_000);
-
-afterAll(async () => {
-  await pg.stop();
-});
+import { postgresDescribe } from "./test-utils.ts";
 
 // ---------------------------------------------------------------------------
 // Test error types
@@ -34,7 +17,7 @@ class TestError extends Data.TaggedError("TestError")<{
 // migrate()
 // ---------------------------------------------------------------------------
 
-describe("migrate", () => {
+postgresDescribe("migrate", { migrate }, (pg) => {
   it("creates all tables", async () => {
     const result = await pg.sql`
       SELECT table_name FROM information_schema.tables
@@ -73,7 +56,13 @@ describe("migrate", () => {
 // CRUD operations
 // ---------------------------------------------------------------------------
 
-describe("PostgresWorkflowStorage", () => {
+postgresDescribe("PostgresWorkflowStorage", { migrate }, (pg) => {
+  let storage: PostgresWorkflowStorage;
+
+  beforeAll(async () => {
+    storage = await PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false });
+  });
+
   describe("createWorkflow + loadWorkflow", () => {
     it("creates and loads a workflow", async () => {
       await storage.createWorkflow({
@@ -289,7 +278,13 @@ describe("PostgresWorkflowStorage", () => {
 // End-to-end: workflow execution with Postgres storage
 // ---------------------------------------------------------------------------
 
-describe("End-to-end workflow with Postgres", () => {
+postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
+  let storage: PostgresWorkflowStorage;
+
+  beforeAll(async () => {
+    storage = await PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false });
+  });
+
   it("runs a linear workflow", async () => {
     const result = await workflow<{ n: number }>({ name: "e2e-linear", storage })
       .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
@@ -358,7 +353,6 @@ describe("End-to-end workflow with Postgres", () => {
   });
 
   it("stores and queries workflow type and metadata", async () => {
-    // Create workflows with different types and metadata
     await workflow<{ userId: string }>({
       name: "onboard-user",
       storage,
@@ -388,7 +382,6 @@ describe("End-to-end workflow with Postgres", () => {
       .step("load", ({ prev }) => Pipeline.succeed({ loaded: prev.length }))
       .run({ workflowId: "e2e-meta-etl", input: { pipeline: "events" } });
 
-    // Query by type
     const onboardingWfs = await storage.listWorkflows({ type: "onboarding" });
     expect(onboardingWfs.length).toBeGreaterThanOrEqual(1);
     expect(onboardingWfs.every((w) => w.workflowType === "onboarding")).toBe(true);
@@ -398,7 +391,6 @@ describe("End-to-end workflow with Postgres", () => {
       priority: "high",
     });
 
-    // Query by different type
     const etlWfs = await storage.listWorkflows({ type: "etl" });
     expect(etlWfs.length).toBe(1);
     expect(etlWfs[0]!.metadata).toEqual({
@@ -407,7 +399,6 @@ describe("End-to-end workflow with Postgres", () => {
       destination: "postgres",
     });
 
-    // Load individual workflow preserves type + metadata
     const report = await storage.loadWorkflow("e2e-meta-report");
     expect(report!.workflowType).toBe("report");
     expect(report!.metadata).toEqual({ team: "data", schedule: "daily" });

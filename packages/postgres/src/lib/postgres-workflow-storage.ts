@@ -25,6 +25,7 @@ import { WorkflowStatusIds, StepStatusIds, StepTypeIds } from "./workflow-lookup
 import { seedLookupEnums, validateLookupEnums } from "./lookup-table.ts";
 import type { PostgresStorageConfig } from "./config.ts";
 import { resolveConfig } from "./config.ts";
+import { execRaw } from "./drizzle-db.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -171,12 +172,12 @@ export class PostgresWorkflowStorage implements WorkflowStorage {
     if (params?.name) conditions.push(eq(workflows.workflowName, params.name));
     if (params?.type) conditions.push(eq(workflows.workflowType, params.type));
 
-    let query = this.db.select().from(workflows);
+    const query = this.db.select().from(workflows).$dynamic();
     if (conditions.length > 0)
-      query = query.where(conditions.length === 1 ? conditions[0] : and(...conditions));
-    query = query.orderBy(desc(workflows.createdAt));
-    if (params?.limit) query = query.limit(params.limit);
-    if (params?.offset) query = query.offset(params.offset);
+      query.where(conditions.length === 1 ? conditions[0] : and(...conditions));
+    query.orderBy(desc(workflows.createdAt));
+    if (params?.limit) query.limit(params.limit);
+    if (params?.offset) query.offset(params.offset);
 
     const rows = await query;
     return rows.map((row: any) => this.rowToWorkflowState(row, []));
@@ -403,19 +404,19 @@ export class PostgresWorkflowStorage implements WorkflowStorage {
     stepUpdate: Record<string, unknown>,
   ): Promise<void> {
     const now = new Date();
-    const stepValues: Record<string, unknown> = {
+    const stepValues = {
       workflowId,
       stepName,
       attempt: 1,
       startedAt: now,
+      statusId: stepUpdate.status ? StepStatusIds.toId(stepUpdate.status as StepStatus) : undefined,
+      stepTypeId: stepUpdate.stepType
+        ? StepTypeIds.toId(stepUpdate.stepType as StepType)
+        : undefined,
+      wakeAt: (stepUpdate.wakeAt as Date) ?? undefined,
+      signalName: (stepUpdate.signalName as string) ?? undefined,
+      signalTimeoutAt: (stepUpdate.signalTimeoutAt as Date) ?? undefined,
     };
-    if (stepUpdate.status)
-      stepValues.statusId = StepStatusIds.toId(stepUpdate.status as StepStatus);
-    if (stepUpdate.stepType)
-      stepValues.stepTypeId = StepTypeIds.toId(stepUpdate.stepType as StepType);
-    if (stepUpdate.wakeAt) stepValues.wakeAt = stepUpdate.wakeAt;
-    if (stepUpdate.signalName) stepValues.signalName = stepUpdate.signalName;
-    if (stepUpdate.signalTimeoutAt) stepValues.signalTimeoutAt = stepUpdate.signalTimeoutAt;
 
     await this.db
       .insert(workflowSteps)
@@ -474,27 +475,31 @@ export class PostgresWorkflowStorage implements WorkflowStorage {
   }
 
   private async tryAdvisoryLock(workflowId: string): Promise<boolean> {
-    const [result] = await this.db.execute(
+    const [result] = await execRaw(
+      this.db,
       sql`SELECT pg_try_advisory_lock(${hashToInt32(workflowId)}) as acquired`,
     );
     return result?.acquired === true;
   }
 
   private async releaseAdvisoryLock(workflowId: string): Promise<void> {
-    await this.db.execute(sql`SELECT pg_advisory_unlock(${hashToInt32(workflowId)})`);
+    await execRaw(this.db, sql`SELECT pg_advisory_unlock(${hashToInt32(workflowId)})`);
   }
 
   private async tryRowLock(workflowId: string, lockDurationMs: number): Promise<boolean> {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + lockDurationMs);
-    const [result] = await this.db.execute(sql`
+    const [result] = await execRaw(
+      this.db,
+      sql`
       INSERT INTO wf_workflow_locks (workflow_id, locked_at, expires_at, locked_by)
       VALUES (${workflowId}, ${now}, ${expiresAt}, ${this.config.instanceId})
       ON CONFLICT (workflow_id) DO UPDATE
         SET locked_at = ${now}, expires_at = ${expiresAt}, locked_by = ${this.config.instanceId}
         WHERE wf_workflow_locks.expires_at < ${now}
       RETURNING workflow_id
-    `);
+    `,
+    );
     return !!result;
   }
 }

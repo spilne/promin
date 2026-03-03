@@ -1,26 +1,12 @@
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { PostgresTestContainer } from "./test-utils.ts";
+import { describe, it, expect } from "bun:test";
+import { postgresDescribe } from "./test-utils.ts";
 import { PgQueue } from "./pg-queue.ts";
-
-// ---------------------------------------------------------------------------
-// Container setup — plain Postgres (no pgmq extension)
-// ---------------------------------------------------------------------------
-
-const pg = new PostgresTestContainer();
-
-beforeAll(async () => {
-  await pg.start();
-}, 60_000);
-
-afterAll(async () => {
-  await pg.stop();
-});
 
 // ---------------------------------------------------------------------------
 // PgQueue — SKIP LOCKED queue
 // ---------------------------------------------------------------------------
 
-describe("PgQueue", () => {
+postgresDescribe("PgQueue", (pg) => {
   describe("publish + subscribe (auto-pop)", () => {
     it("publishes and consumes messages", async () => {
       const queue = await PgQueue.create<{ userId: string }>(pg.db, "basic");

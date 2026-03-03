@@ -4,6 +4,7 @@
 
 import { pgTable, integer, text } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+import type { DrizzleDb } from "./drizzle-db.ts";
 import type { LookupEntry } from "./lookup.ts";
 
 // ---------------------------------------------------------------------------
@@ -33,7 +34,10 @@ export interface LookupBinding {
 // seedLookupEnums — idempotent seeding
 // ---------------------------------------------------------------------------
 
-export async function seedLookupEnums(db: any, bindings: readonly LookupBinding[]): Promise<void> {
+export async function seedLookupEnums(
+  db: DrizzleDb,
+  bindings: readonly LookupBinding[],
+): Promise<void> {
   for (const { lookup, table } of bindings) {
     for (const entry of lookup.entries) {
       await db
@@ -52,7 +56,7 @@ export async function seedLookupEnums(db: any, bindings: readonly LookupBinding[
 // ---------------------------------------------------------------------------
 
 export async function validateLookupEnums(
-  db: any,
+  db: DrizzleDb,
   bindings: readonly LookupBinding[],
 ): Promise<void> {
   const mismatches: string[] = [];

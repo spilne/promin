@@ -1,3 +1,6 @@
+// Drizzle DB type (re-export for convenience)
+export type { DrizzleDb } from "../lib/drizzle-db.ts";
+
 // Types
 export {
   type PgmqMessage,

@@ -7,6 +7,7 @@ import { Stream, Effect, Schedule, Duration } from "effect";
 import { StreamPipeline } from "@ts-backend/core";
 import type { Streamable, Sinkable, Acknowledgeable, Envelope, Codec } from "@ts-backend/core";
 import { JsonCodec } from "@ts-backend/core";
+import type { DrizzleDb } from "../lib/drizzle-db.ts";
 import type { ReadMode, AckMode } from "./types.ts";
 import * as pgmq from "./pgmq.ts";
 
@@ -16,7 +17,7 @@ import * as pgmq from "./pgmq.ts";
 
 export interface PgmqQueueConfig<T> {
   /** Drizzle database instance. */
-  db: any;
+  db: DrizzleDb;
   /** Queue name. */
   queue: string;
   /** Codec for message serialization. Default: JsonCodec. */
@@ -37,7 +38,7 @@ export interface PgmqQueueConfig<T> {
 
 export class PgmqQueue<T> implements Streamable<T>, Sinkable<T>, Acknowledgeable<T> {
   readonly codec: Codec<T>;
-  private readonly db: any;
+  private readonly db: DrizzleDb;
   readonly queue: string;
   private readonly defaultVt: number;
   private readonly defaultQty: number;
@@ -63,7 +64,7 @@ export class PgmqQueue<T> implements Streamable<T>, Sinkable<T>, Acknowledgeable
    * ```
    */
   static async create<T>(
-    db: any,
+    db: DrizzleDb,
     queue: string,
     config?: Omit<PgmqQueueConfig<T>, "db" | "queue">,
   ): Promise<PgmqQueue<T>> {

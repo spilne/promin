@@ -1,28 +1,13 @@
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { PostgresTestContainer } from "./test-utils.ts";
+import { describe, it, expect } from "bun:test";
+import { postgresDescribe } from "./test-utils.ts";
 import { migrate } from "./migrate.ts";
 import { createDurableScheduler } from "./durable-scheduler.ts";
-
-// ---------------------------------------------------------------------------
-// Container setup
-// ---------------------------------------------------------------------------
-
-const pg = new PostgresTestContainer();
-
-beforeAll(async () => {
-  await pg.start();
-  await migrate(pg.db);
-}, 60_000);
-
-afterAll(async () => {
-  await pg.stop();
-});
 
 // ---------------------------------------------------------------------------
 // DurableScheduler
 // ---------------------------------------------------------------------------
 
-describe("DurableScheduler", () => {
+postgresDescribe("DurableScheduler", { migrate }, (pg) => {
   describe("register + list", () => {
     it("registers a cron schedule", async () => {
       const scheduler = createDurableScheduler({ db: pg.db });

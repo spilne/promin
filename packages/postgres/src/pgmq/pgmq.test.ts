@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { GenericContainer, Wait, type StartedTestContainer } from "testcontainers";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
+import type { DrizzleDb } from "../lib/drizzle-db.ts";
 import { PgmqQueue } from "./pgmq-queue.ts";
 import { ReadMode } from "./types.ts";
 import * as pgmq from "./pgmq.ts";
@@ -14,7 +15,7 @@ const PGMQ_IMAGE = "ghcr.io/pgmq/pg17-pgmq:latest";
 
 let container: StartedTestContainer;
 let sqlClient: ReturnType<typeof postgres>;
-let db: ReturnType<typeof drizzle>;
+let db: DrizzleDb;
 
 beforeAll(async () => {
   container = await new GenericContainer(PGMQ_IMAGE)

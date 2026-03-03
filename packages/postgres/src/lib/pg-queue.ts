@@ -15,6 +15,7 @@ import { Effect, Stream, Duration, Schedule } from "effect";
 import { sql } from "drizzle-orm";
 import { StreamPipeline, JsonCodec } from "@ts-backend/core";
 import type { Streamable, Sinkable, Acknowledgeable, Envelope, Codec } from "@ts-backend/core";
+import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -22,7 +23,7 @@ import type { Streamable, Sinkable, Acknowledgeable, Envelope, Codec } from "@ts
 
 export interface PgQueueConfig<T> {
   /** Drizzle database instance. */
-  db: any;
+  db: DrizzleDb;
   /** Queue name (used as table suffix: pgq_{name}). */
   queue: string;
   /** Codec for message serialization. Default: JsonCodec. */
@@ -73,7 +74,7 @@ export interface PgQueueConfig<T> {
 export class PgQueue<T> implements Streamable<T>, Sinkable<T>, Acknowledgeable<T> {
   readonly codec: Codec<T>;
   readonly queue: string;
-  private readonly db: any;
+  private readonly db: DrizzleDb;
   private readonly tableName: string;
   private readonly defaultVtSeconds: number;
   private readonly defaultBatchSize: number;
@@ -97,7 +98,7 @@ export class PgQueue<T> implements Streamable<T>, Sinkable<T>, Acknowledgeable<T
    * Create a PgQueue — creates the underlying table if it doesn't exist.
    */
   static async create<T>(
-    db: any,
+    db: DrizzleDb,
     queue: string,
     config?: Omit<PgQueueConfig<T>, "db" | "queue">,
   ): Promise<PgQueue<T>> {
@@ -217,7 +218,8 @@ export class PgQueue<T> implements Streamable<T>, Sinkable<T>, Acknowledgeable<T
   ): Promise<
     { id: number; payload: unknown; attemptCount: number; createdAt: Date; headers: unknown }[]
   > {
-    const rows = await this.db.execute(
+    const rows = await execRaw(
+      this.db,
       sql.raw(`
         UPDATE ${this.tableName}
         SET status = 'processing',
@@ -245,7 +247,8 @@ export class PgQueue<T> implements Streamable<T>, Sinkable<T>, Acknowledgeable<T
 
   /** Pop (read + delete) — for auto-ack consumers. */
   private async pop(limit: number): Promise<{ id: number; payload: unknown }[]> {
-    const rows = await this.db.execute(
+    const rows = await execRaw(
+      this.db,
       sql.raw(`
         DELETE FROM ${this.tableName}
         WHERE id IN (
@@ -294,7 +297,8 @@ export class PgQueue<T> implements Streamable<T>, Sinkable<T>, Acknowledgeable<T
     completed: number;
     total: number;
   }> {
-    const [row] = await this.db.execute(
+    const [row] = await execRaw(
+      this.db,
       sql.raw(`
         SELECT
           COUNT(*) FILTER (WHERE status = 'pending') as pending,
@@ -314,7 +318,7 @@ export class PgQueue<T> implements Streamable<T>, Sinkable<T>, Acknowledgeable<T
 
   /** Purge all messages from the queue. */
   async purge(): Promise<number> {
-    const rows = await this.db.execute(sql.raw(`DELETE FROM ${this.tableName} RETURNING id`));
+    const rows = await execRaw(this.db, sql.raw(`DELETE FROM ${this.tableName} RETURNING id`));
     return rows.length;
   }
 
@@ -325,7 +329,8 @@ export class PgQueue<T> implements Streamable<T>, Sinkable<T>, Acknowledgeable<T
 
   /** Requeue dead messages (exceeded max attempts but still in processing). */
   async requeueDead(): Promise<number> {
-    const rows = await this.db.execute(
+    const rows = await execRaw(
+      this.db,
       sql.raw(`
         UPDATE ${this.tableName}
         SET status = 'pending', visible_at = NOW(), locked_by = NULL

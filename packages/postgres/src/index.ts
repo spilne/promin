@@ -1,3 +1,6 @@
+// Drizzle DB type
+export type { DrizzleDb } from "./lib/drizzle-db.ts";
+
 // Storage
 export { PostgresWorkflowStorage } from "./lib/postgres-workflow-storage.ts";
 export { type PostgresStorageConfig } from "./lib/config.ts";

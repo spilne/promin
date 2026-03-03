@@ -2,9 +2,11 @@
 // PostgresWorkflowStorage configuration
 // ---------------------------------------------------------------------------
 
+import type { DrizzleDb } from "./drizzle-db.ts";
+
 export interface PostgresStorageConfig {
   /** Drizzle database instance. User provides their own connection. */
-  db: any; // DrizzleClient — typed loosely to avoid forcing specific pg driver
+  db: DrizzleDb;
 
   /** Table name prefix. Default: "wf_". Allows multiple workflow engines in one DB. */
   tablePrefix?: string;

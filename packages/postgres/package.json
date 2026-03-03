@@ -16,6 +16,11 @@
       "import": "./src/pgmq/index.ts",
       "default": "./src/pgmq/index.ts"
     },
+    "./testing": {
+      "types": "./src/testing.ts",
+      "import": "./src/testing.ts",
+      "default": "./src/testing.ts"
+    },
     "./package.json": "./package.json"
   },
   "dependencies": {

@@ -16,6 +16,7 @@ import { eq, sql } from "drizzle-orm";
 import { StreamPipeline, JsonCodec } from "@ts-backend/core";
 import type { Scheduler, ScheduleConfig, ScheduleTick, Codec } from "@ts-backend/core";
 import { durableSchedules, durableScheduleTicks } from "./scheduler-schema.ts";
+import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
 
 // ---------------------------------------------------------------------------
 // Extended config for durable schedules
@@ -36,7 +37,7 @@ export interface DurableScheduleConfig extends ScheduleConfig {
 
 export interface DurableSchedulerConfig {
   /** Drizzle database instance. */
-  db: any;
+  db: DrizzleDb;
   /** Instance ID for leader election. Default: random UUID. */
   instanceId?: string;
   /** Poll interval in ms for checking due schedules. Default: 1000. */
@@ -110,7 +111,7 @@ export interface DurableSchedulerConfig {
  */
 export class DurableScheduler implements Scheduler {
   readonly codec: Codec<ScheduleTick> = JsonCodec as Codec<ScheduleTick>;
-  private readonly db: any;
+  private readonly db: DrizzleDb;
   readonly instanceId: string;
   private readonly pollIntervalMs: number;
   private readonly leaderLockId: number;
@@ -209,9 +210,9 @@ export class DurableScheduler implements Scheduler {
   }
 
   async listAsync(params?: { enabled?: boolean }): Promise<DurableScheduleConfig[]> {
-    let query = this.db.select().from(durableSchedules);
+    const query = this.db.select().from(durableSchedules).$dynamic();
     if (params?.enabled !== undefined) {
-      query = query.where(eq(durableSchedules.enabled, params.enabled));
+      query.where(eq(durableSchedules.enabled, params.enabled));
     }
     const rows = await query;
     return rows.map(rowToConfig);
@@ -485,7 +486,8 @@ export class DurableScheduler implements Scheduler {
   // ---------------------------------------------------------------------------
 
   private async tryLeaderLock(): Promise<boolean> {
-    const [result] = await this.db.execute(
+    const [result] = await execRaw(
+      this.db,
       sql`SELECT pg_try_advisory_lock(${this.leaderLockId}) as acquired`,
     );
     return result?.acquired === true;

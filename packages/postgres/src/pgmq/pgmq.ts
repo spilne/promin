@@ -4,6 +4,8 @@
 // ---------------------------------------------------------------------------
 
 import { sql } from "drizzle-orm";
+import { execRaw as exec } from "../lib/drizzle-db.ts";
+import type { DrizzleDb } from "../lib/drizzle-db.ts";
 import type { PgmqMessage, PgmqRecord, ReadMode } from "./types.ts";
 
 // ---------------------------------------------------------------------------
@@ -29,33 +31,33 @@ function parseRecords<T>(rows: any[]): PgmqRecord<T>[] {
 // Queue management
 // ---------------------------------------------------------------------------
 
-export async function createQueue(db: any, queue: string): Promise<void> {
-  await db.execute(sql`SELECT pgmq.create(${queue})`);
+export async function createQueue(db: DrizzleDb, queue: string): Promise<void> {
+  await exec(db, sql`SELECT pgmq.create(${queue})`);
 }
 
-export async function createUnloggedQueue(db: any, queue: string): Promise<void> {
-  await db.execute(sql`SELECT pgmq.create_unlogged(${queue})`);
+export async function createUnloggedQueue(db: DrizzleDb, queue: string): Promise<void> {
+  await exec(db, sql`SELECT pgmq.create_unlogged(${queue})`);
 }
 
 export async function createPartitionedQueue(
-  db: any,
+  db: DrizzleDb,
   queue: string,
   params?: { partitionInterval?: string; retentionInterval?: string },
 ): Promise<void> {
   const pi = params?.partitionInterval ?? "10000";
   const ri = params?.retentionInterval ?? "100000";
-  await db.execute(sql`SELECT pgmq.create_partitioned(${queue}, ${pi}, ${ri})`);
+  await exec(db, sql`SELECT pgmq.create_partitioned(${queue}, ${pi}, ${ri})`);
 }
 
-export async function dropQueue(db: any, queue: string): Promise<boolean> {
-  const [row] = await db.execute(sql`SELECT pgmq.drop_queue(${queue}) as dropped`);
+export async function dropQueue(db: DrizzleDb, queue: string): Promise<boolean> {
+  const [row] = await exec(db, sql`SELECT pgmq.drop_queue(${queue}) as dropped`);
   return row?.dropped === true;
 }
 
 export async function listQueues(
-  db: any,
+  db: DrizzleDb,
 ): Promise<{ queueName: string; createdAt: Date; isPartitioned: boolean; isUnlogged: boolean }[]> {
-  const rows = await db.execute(sql`SELECT * FROM pgmq.list_queues()`);
+  const rows = await exec(db, sql`SELECT * FROM pgmq.list_queues()`);
   return rows.map((r: any) => ({
     queueName: r.queue_name,
     createdAt: r.created_at instanceof Date ? r.created_at : new Date(r.created_at),
@@ -68,25 +70,27 @@ export async function listQueues(
 // Send
 // ---------------------------------------------------------------------------
 
-export async function send<T>(db: any, queue: string, msg: PgmqMessage<T>): Promise<number> {
+export async function send<T>(db: DrizzleDb, queue: string, msg: PgmqMessage<T>): Promise<number> {
   const json = JSON.stringify(msg.data);
   const delay = msg.delay ?? 0;
   const headers = msg.headers ? JSON.stringify(msg.headers) : null;
 
   if (headers) {
-    const [row] = await db.execute(
+    const [row] = await exec(
+      db,
       sql`SELECT * FROM pgmq.send(${queue}::text, ${json}::jsonb, ${headers}::jsonb, ${delay}::integer)`,
     );
     return Number(row?.send ?? row?.msg_id);
   }
-  const [row] = await db.execute(
+  const [row] = await exec(
+    db,
     sql`SELECT * FROM pgmq.send(${queue}::text, ${json}::jsonb, ${delay}::integer)`,
   );
   return Number(row?.send ?? row?.msg_id);
 }
 
 export async function sendBatch<T>(
-  db: any,
+  db: DrizzleDb,
   queue: string,
   messages: PgmqMessage<T>[],
 ): Promise<number[]> {
@@ -102,40 +106,49 @@ export async function sendBatch<T>(
 // Read
 // ---------------------------------------------------------------------------
 
-export async function read<T>(db: any, queue: string, mode: ReadMode): Promise<PgmqRecord<T>[]> {
+export async function read<T>(
+  db: DrizzleDb,
+  queue: string,
+  mode: ReadMode,
+): Promise<PgmqRecord<T>[]> {
   let rows: any[];
 
   switch (mode._tag) {
     case "standard":
-      rows = await db.execute(sql`SELECT * FROM pgmq.read(${queue}, ${mode.vt}, ${mode.qty})`);
+      rows = await exec(db, sql`SELECT * FROM pgmq.read(${queue}, ${mode.vt}, ${mode.qty})`);
       break;
 
     case "poll":
-      rows = await db.execute(
+      rows = await exec(
+        db,
         sql`SELECT * FROM pgmq.read_with_poll(${queue}, ${mode.vt}, ${mode.qty}, ${mode.maxPollSeconds ?? 5}, ${mode.pollIntervalMs ?? 100})`,
       );
       break;
 
     case "grouped":
-      rows = await db.execute(
+      rows = await exec(
+        db,
         sql`SELECT * FROM pgmq.read_grouped(${queue}, ${mode.vt}, ${mode.qty})`,
       );
       break;
 
     case "grouped-poll":
-      rows = await db.execute(
+      rows = await exec(
+        db,
         sql`SELECT * FROM pgmq.read_grouped_with_poll(${queue}, ${mode.vt}, ${mode.qty}, ${mode.maxPollSeconds ?? 5}, ${mode.pollIntervalMs ?? 100})`,
       );
       break;
 
     case "grouped-round-robin":
-      rows = await db.execute(
+      rows = await exec(
+        db,
         sql`SELECT * FROM pgmq.read_grouped_rr(${queue}, ${mode.vt}, ${mode.qty})`,
       );
       break;
 
     case "grouped-round-robin-poll":
-      rows = await db.execute(
+      rows = await exec(
+        db,
         sql`SELECT * FROM pgmq.read_grouped_rr_with_poll(${queue}, ${mode.vt}, ${mode.qty}, ${mode.maxPollSeconds ?? 5}, ${mode.pollIntervalMs ?? 100})`,
       );
       break;
@@ -145,8 +158,12 @@ export async function read<T>(db: any, queue: string, mode: ReadMode): Promise<P
 }
 
 /** Pop (read + immediate delete) up to `qty` messages. */
-export async function pop<T>(db: any, queue: string, qty: number = 1): Promise<PgmqRecord<T>[]> {
-  const rows = await db.execute(sql`SELECT * FROM pgmq.pop(${queue}, ${qty})`);
+export async function pop<T>(
+  db: DrizzleDb,
+  queue: string,
+  qty: number = 1,
+): Promise<PgmqRecord<T>[]> {
+  const rows = await exec(db, sql`SELECT * FROM pgmq.pop(${queue}, ${qty})`);
   return parseRecords<T>(rows);
 }
 
@@ -154,29 +171,39 @@ export async function pop<T>(db: any, queue: string, qty: number = 1): Promise<P
 // Delete / Archive
 // ---------------------------------------------------------------------------
 
-export async function deleteMessage(db: any, queue: string, msgId: number): Promise<boolean> {
-  const [row] = await db.execute(
+export async function deleteMessage(db: DrizzleDb, queue: string, msgId: number): Promise<boolean> {
+  const [row] = await exec(
+    db,
     sql`SELECT pgmq.delete(${queue}::text, ${BigInt(msgId)}::bigint) as deleted`,
   );
   return row?.deleted === true;
 }
 
-export async function deleteBatch(db: any, queue: string, msgIds: number[]): Promise<number[]> {
+export async function deleteBatch(
+  db: DrizzleDb,
+  queue: string,
+  msgIds: number[],
+): Promise<number[]> {
   const arr = msgIds.map(BigInt);
-  const rows = await db.execute(sql`SELECT * FROM pgmq.delete(${queue}, ${arr}::bigint[])`);
+  const rows = await exec(db, sql`SELECT * FROM pgmq.delete(${queue}, ${arr}::bigint[])`);
   return rows.map((r: any) => Number(r.delete));
 }
 
-export async function archive(db: any, queue: string, msgId: number): Promise<boolean> {
-  const [row] = await db.execute(
+export async function archive(db: DrizzleDb, queue: string, msgId: number): Promise<boolean> {
+  const [row] = await exec(
+    db,
     sql`SELECT pgmq.archive(${queue}::text, ${BigInt(msgId)}::bigint) as archived`,
   );
   return row?.archived === true;
 }
 
-export async function archiveBatch(db: any, queue: string, msgIds: number[]): Promise<number[]> {
+export async function archiveBatch(
+  db: DrizzleDb,
+  queue: string,
+  msgIds: number[],
+): Promise<number[]> {
   const arr = msgIds.map(BigInt);
-  const rows = await db.execute(sql`SELECT * FROM pgmq.archive(${queue}, ${arr}::bigint[])`);
+  const rows = await exec(db, sql`SELECT * FROM pgmq.archive(${queue}, ${arr}::bigint[])`);
   return rows.map((r: any) => Number(r.archive));
 }
 
@@ -184,18 +211,19 @@ export async function archiveBatch(db: any, queue: string, msgIds: number[]): Pr
 // Utilities
 // ---------------------------------------------------------------------------
 
-export async function purgeQueue(db: any, queue: string): Promise<number> {
-  const [row] = await db.execute(sql`SELECT pgmq.purge_queue(${queue}) as count`);
+export async function purgeQueue(db: DrizzleDb, queue: string): Promise<number> {
+  const [row] = await exec(db, sql`SELECT pgmq.purge_queue(${queue}) as count`);
   return Number(row?.count ?? 0);
 }
 
 export async function setVt<T>(
-  db: any,
+  db: DrizzleDb,
   queue: string,
   msgId: number,
   vtSeconds: number,
 ): Promise<PgmqRecord<T> | null> {
-  const rows = await db.execute(
+  const rows = await exec(
+    db,
     sql`SELECT * FROM pgmq.set_vt(${queue}::text, ${BigInt(msgId)}::bigint, ${vtSeconds}::integer)`,
   );
   const parsed = parseRecords<T>(rows);
@@ -203,7 +231,7 @@ export async function setVt<T>(
 }
 
 export async function metrics(
-  db: any,
+  db: DrizzleDb,
   queue: string,
 ): Promise<{
   queueName: string;
@@ -212,7 +240,7 @@ export async function metrics(
   oldestMsgAgeSec: number | null;
   totalMessages: number;
 }> {
-  const [row] = await db.execute(sql`SELECT * FROM pgmq.metrics(${queue})`);
+  const [row] = await exec(db, sql`SELECT * FROM pgmq.metrics(${queue})`);
   return {
     queueName: row.queue_name,
     queueLength: Number(row.queue_length),
@@ -224,18 +252,18 @@ export async function metrics(
 
 /** Enable NOTIFY on message insert for LISTEN-based consumers. */
 export async function enableNotify(
-  db: any,
+  db: DrizzleDb,
   queue: string,
   throttleIntervalMs: number = 250,
 ): Promise<void> {
-  await db.execute(sql`SELECT pgmq.enable_notify_insert(${queue}, ${throttleIntervalMs})`);
+  await exec(db, sql`SELECT pgmq.enable_notify_insert(${queue}, ${throttleIntervalMs})`);
 }
 
-export async function disableNotify(db: any, queue: string): Promise<void> {
-  await db.execute(sql`SELECT pgmq.disable_notify_insert(${queue})`);
+export async function disableNotify(db: DrizzleDb, queue: string): Promise<void> {
+  await exec(db, sql`SELECT pgmq.disable_notify_insert(${queue})`);
 }
 
 /** Create FIFO index for grouped reads. */
-export async function createFifoIndex(db: any, queue: string): Promise<void> {
-  await db.execute(sql`SELECT pgmq.create_fifo_index(${queue})`);
+export async function createFifoIndex(db: DrizzleDb, queue: string): Promise<void> {
+  await exec(db, sql`SELECT pgmq.create_fifo_index(${queue})`);
 }
