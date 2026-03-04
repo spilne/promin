@@ -31,6 +31,9 @@ export { durableSchedules, durableScheduleTicks } from "./lib/scheduler-schema.t
 // SKIP LOCKED queue (no extension required)
 export { PgQueue, type PgQueueConfig } from "./lib/pg-queue.ts";
 
+// LISTEN/NOTIFY change stream (CDC)
+export { PgChangeStream, type PgChangeStreamConfig } from "./lib/pg-change-stream.ts";
+
 // Schema exports for custom migrations
 export {
   workflows,
