@@ -143,6 +143,21 @@ export {
   type StepAttemptStorage,
   isStepAttemptStorage,
   type FailedWorkflowRecord,
+  type WorkflowSchema,
+  type StepSchema,
+  type SingleStepSchema,
+  type MapStepSchema,
+  type JsonSchema,
+  type NodeUiMeta,
+  WorkflowSchemaZ,
+  validateWorkflowSchema,
+  validateWorkflowSchemaSafe,
+  type ActivityRegistry,
+  type ActivityFactory,
+  type ActivityContext,
+  MapActivityRegistry,
+  compileWorkflow,
+  WorkflowCompilationError,
 } from "./lib/durable/index.ts";
 
 // Scheduler
