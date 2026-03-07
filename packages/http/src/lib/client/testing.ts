@@ -1,5 +1,5 @@
 import { Effect, Stream } from "effect";
-import { Pipeline } from "@ts-backend/core";
+import { Pipeline } from "@promin/core";
 import type { HttpClientError, ResponseParser } from "./http-client-error.ts";
 import { HttpParseError, HttpStatusError } from "./http-client-error.ts";
 import type {

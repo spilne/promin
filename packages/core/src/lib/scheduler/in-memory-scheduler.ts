@@ -21,12 +21,12 @@ import type { ScheduleConfig, ScheduleTick } from "./types.ts";
  *
  * Implements `Streamable<ScheduleTick>` so it works with `StreamPipeline.fromSource()`.
  *
- * For production multi-instance deployments, use `DurableScheduler` from `@ts-backend/postgres`
+ * For production multi-instance deployments, use `DurableScheduler` from `@promin/postgres`
  * which adds persistence, catch-up, overlap policies, and leader election.
  *
  * @example
  * ```ts
- * import { createScheduler, StreamPipeline } from "@ts-backend/core";
+ * import { createScheduler, StreamPipeline } from "@promin/core";
  *
  * const scheduler = createScheduler();
  *

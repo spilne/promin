@@ -31,8 +31,8 @@ export {
   type SSEvent,
 } from "./http-stream.ts";
 
-// Re-export Pipeline from @ts-backend/core for convenience
-export { Pipeline } from "@ts-backend/core";
+// Re-export Pipeline from @promin/core for convenience
+export { Pipeline } from "@promin/core";
 
 // Chainable pipeline API
 export {

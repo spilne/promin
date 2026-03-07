@@ -13,8 +13,8 @@
 import { Effect, Stream, Duration, Schedule } from "effect";
 import { Cron } from "croner";
 import { eq, sql } from "drizzle-orm";
-import { StreamPipeline, JsonCodec } from "@ts-backend/core";
-import type { Scheduler, ScheduleConfig, ScheduleTick, Codec } from "@ts-backend/core";
+import { StreamPipeline, JsonCodec } from "@promin/core";
+import type { Scheduler, ScheduleConfig, ScheduleTick, Codec } from "@promin/core";
 import { durableSchedules, durableScheduleTicks } from "./scheduler-schema.ts";
 import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
 
@@ -66,7 +66,7 @@ export interface DurableSchedulerConfig {
  *
  * @example
  * ```ts
- * import { createDurableScheduler, migrate } from "@ts-backend/postgres";
+ * import { createDurableScheduler, migrate } from "@promin/postgres";
  *
  * await migrate(db);
  * const scheduler = createDurableScheduler({ db });

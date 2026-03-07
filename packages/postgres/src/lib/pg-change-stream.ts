@@ -13,8 +13,8 @@
 
 import { Effect, Stream, Duration, Schedule } from "effect";
 import { sql } from "drizzle-orm";
-import { StreamPipeline, JsonCodec } from "@ts-backend/core";
-import type { Streamable, Replayable, Offset, Codec } from "@ts-backend/core";
+import { StreamPipeline, JsonCodec } from "@promin/core";
+import type { Streamable, Replayable, Offset, Codec } from "@promin/core";
 import type { DrizzleDb } from "./drizzle-db.ts";
 import type postgres from "postgres";
 

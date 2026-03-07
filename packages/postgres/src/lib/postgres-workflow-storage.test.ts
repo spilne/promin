@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from "bun:test";
 import { Data } from "effect";
-import { Pipeline, workflow } from "@ts-backend/core";
+import { Pipeline, workflow } from "@promin/core";
 import { PostgresWorkflowStorage } from "./postgres-workflow-storage.ts";
 import { migrate } from "./migrate.ts";
 import { postgresDescribe } from "./test-utils.ts";

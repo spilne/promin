@@ -13,8 +13,8 @@
 
 import { Effect, Stream, Duration, Schedule } from "effect";
 import { sql } from "drizzle-orm";
-import { StreamPipeline, JsonCodec } from "@ts-backend/core";
-import type { Streamable, Sinkable, Acknowledgeable, Envelope, Codec } from "@ts-backend/core";
+import { StreamPipeline, JsonCodec } from "@promin/core";
+import type { Streamable, Sinkable, Acknowledgeable, Envelope, Codec } from "@promin/core";
 import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
 
 // ---------------------------------------------------------------------------
@@ -52,7 +52,7 @@ export interface PgQueueConfig<T> {
  *
  * @example
  * ```ts
- * import { PgQueue } from "@ts-backend/postgres";
+ * import { PgQueue } from "@promin/postgres";
  *
  * const queue = await PgQueue.create<{ userId: string }>(db, "jobs");
  *

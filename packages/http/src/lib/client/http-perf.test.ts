@@ -1,5 +1,5 @@
 /**
- * Performance tests for @ts-backend/http/client.
+ * Performance tests for @promin/http/client.
  *
  * These tests verify throughput, parallelism, overhead, and resource cleanup
  * under load. Not micro-benchmarks — they assert observable performance

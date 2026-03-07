@@ -10,8 +10,8 @@ See the official installation guide: [Bun Installation](https://bun.sh/docs/inst
 
 ## Libraries
 
-- **[@ts-backend/core](./packages/core/)** - Effect-based `Pipeline<T,E>` and `StreamPipeline<T,E>` primitives for composable, retry-aware data processing
-- **[@ts-backend/http](./packages/http/)** - Effect-based HTTP client with chainable pipelines, streaming (SSE/NDJSON), retry, polling, and parallel execution
+- **[@promin/core](./packages/core/)** - Effect-based `Pipeline<T,E>` and `StreamPipeline<T,E>` primitives for composable, retry-aware data processing
+- **[@promin/http](./packages/http/)** - Effect-based HTTP client with chainable pipelines, streaming (SSE/NDJSON), retry, polling, and parallel execution
 
 ## Development
 

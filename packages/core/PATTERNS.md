@@ -1,6 +1,6 @@
 # Real-World Pipeline Patterns
 
-Advanced composition patterns using `@ts-backend/core` for complex async workflows.
+Advanced composition patterns using `@promin/core` for complex async workflows.
 
 ---
 

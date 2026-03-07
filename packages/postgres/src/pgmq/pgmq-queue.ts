@@ -4,9 +4,9 @@
 // ---------------------------------------------------------------------------
 
 import { Stream, Effect, Schedule, Duration } from "effect";
-import { StreamPipeline } from "@ts-backend/core";
-import type { Streamable, Sinkable, Acknowledgeable, Envelope, Codec } from "@ts-backend/core";
-import { JsonCodec } from "@ts-backend/core";
+import { StreamPipeline } from "@promin/core";
+import type { Streamable, Sinkable, Acknowledgeable, Envelope, Codec } from "@promin/core";
+import { JsonCodec } from "@promin/core";
 import type { DrizzleDb } from "../lib/drizzle-db.ts";
 import type { ReadMode, AckMode } from "./types.ts";
 import * as pgmq from "./pgmq.ts";

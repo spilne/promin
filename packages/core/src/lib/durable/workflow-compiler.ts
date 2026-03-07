@@ -74,8 +74,8 @@ export class WorkflowCompilationError extends Error {
  *
  * @example
  * ```ts
- * import { compileWorkflow, MapActivityRegistry, Pipeline } from "@ts-backend/core";
- * import { PostgresWorkflowStorage, migrate } from "@ts-backend/postgres";
+ * import { compileWorkflow, MapActivityRegistry, Pipeline } from "@promin/core";
+ * import { PostgresWorkflowStorage, migrate } from "@promin/postgres";
  *
  * // 1. Set up storage + registry
  * const storage = new PostgresWorkflowStorage({ db });

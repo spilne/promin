@@ -9,7 +9,7 @@ DAG-based workflows with checkpoint/resume, type-safe steps, and structural conc
 No storage, no workflowId. Same composition API as `workflow()`.
 
 ```typescript
-import { flow, Pipeline } from "@ts-backend/core";
+import { flow, Pipeline } from "@promin/core";
 
 // Simple linear chain
 const result = await flow<{ userId: string }>("process-user")
@@ -39,8 +39,8 @@ To make it durable later, change `flow("name")` to `workflow({ name, storage })`
 ### `workflow()` — durable (survives crashes, resumes from checkpoints)
 
 ```typescript
-import { workflow, Pipeline } from "@ts-backend/core";
-import { migrate, PostgresWorkflowStorage } from "@ts-backend/postgres";
+import { workflow, Pipeline } from "@promin/core";
+import { migrate, PostgresWorkflowStorage } from "@promin/postgres";
 
 await migrate(db);
 const storage = await PostgresWorkflowStorage.create({ db });
@@ -247,7 +247,7 @@ const dot = dagToDot(dag); // digraph "name" { ... }
 Compile JSON workflows from a node-based UI into executable WorkflowDefinitions:
 
 ```typescript
-import { compileWorkflow, MapActivityRegistry, Pipeline } from "@ts-backend/core";
+import { compileWorkflow, MapActivityRegistry, Pipeline } from "@promin/core";
 
 const registry = new MapActivityRegistry({
   "http.get": (config) => () => httpClient.get({ url: config?.url as string }),
@@ -287,7 +287,7 @@ await definition.run({ workflowId: "wf-1", input: {} });
 Validate untrusted schema JSON from APIs:
 
 ```typescript
-import { validateWorkflowSchema } from "@ts-backend/core";
+import { validateWorkflowSchema } from "@promin/core";
 
 const schema = validateWorkflowSchema(req.body); // throws ZodError on invalid
 ```
@@ -334,7 +334,7 @@ await storage.cancelWorkflow("onboard-1", { cascade: true }); // cancels childre
 Failed workflows (after all retries + compensation) are published to a configurable DLQ. Works with any `Sinkable<FailedWorkflowRecord>` — PgQueue, PgmqQueue, or custom.
 
 ```typescript
-import { PgQueue } from "@ts-backend/postgres";
+import { PgQueue } from "@promin/postgres";
 
 const dlq = await PgQueue.create<FailedWorkflowRecord>(db, "workflow-dlq");
 

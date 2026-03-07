@@ -139,7 +139,7 @@ export interface ActivityRegistry {
  *
  * @example
  * ```ts
- * import { MapActivityRegistry, Pipeline } from "@ts-backend/core";
+ * import { MapActivityRegistry, Pipeline } from "@promin/core";
  *
  * const registry = new MapActivityRegistry({
  *   // Simple transform

@@ -1,5 +1,5 @@
 {
-  "name": "@ts-backend/postgres",
+  "name": "@promin/postgres",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -24,7 +24,7 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@ts-backend/core": "workspace:*",
+    "@promin/core": "workspace:*",
     "drizzle-orm": "^0.44.0",
     "postgres": "^3.4.5"
   },

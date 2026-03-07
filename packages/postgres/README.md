@@ -1,22 +1,22 @@
-# @ts-backend/postgres
+# @promin/postgres
 
 Postgres infrastructure for the pipeline platform. Workflow storage, message queues (pgmq + SKIP LOCKED), durable scheduler, and change data capture — all backed by Postgres.
 
 ## Install
 
 ```typescript
-import { migrate, PostgresWorkflowStorage } from "@ts-backend/postgres";
-import { PgmqQueue } from "@ts-backend/postgres/pgmq";
-import { postgresDescribe } from "@ts-backend/postgres/testing";
+import { migrate, PostgresWorkflowStorage } from "@promin/postgres";
+import { PgmqQueue } from "@promin/postgres/pgmq";
+import { postgresDescribe } from "@promin/postgres/testing";
 ```
 
 Three entrypoints:
 
-| Entrypoint                     | What                                                     |
-| ------------------------------ | -------------------------------------------------------- |
-| `@ts-backend/postgres`         | Workflow storage, scheduler, PgQueue, CDC, lookups       |
-| `@ts-backend/postgres/pgmq`    | pgmq extension queues (requires `CREATE EXTENSION pgmq`) |
-| `@ts-backend/postgres/testing` | Test container helpers                                   |
+| Entrypoint                 | What                                                     |
+| -------------------------- | -------------------------------------------------------- |
+| `@promin/postgres`         | Workflow storage, scheduler, PgQueue, CDC, lookups       |
+| `@promin/postgres/pgmq`    | pgmq extension queues (requires `CREATE EXTENSION pgmq`) |
+| `@promin/postgres/testing` | Test container helpers                                   |
 
 All accept a `DrizzleDb` instance — works with any Postgres driver (postgres-js, bun:sql, etc).
 
@@ -27,8 +27,8 @@ Production-grade `WorkflowStorage` backed by Postgres. Integer lookup tables for
 ```typescript
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
-import { migrate, PostgresWorkflowStorage } from "@ts-backend/postgres";
-import { workflow, Pipeline } from "@ts-backend/core";
+import { migrate, PostgresWorkflowStorage } from "@promin/postgres";
+import { workflow, Pipeline } from "@promin/core";
 
 const sql = postgres(process.env.DATABASE_URL!);
 const db = drizzle(sql);
@@ -72,7 +72,7 @@ await migrate(db, {
 Message queue using plain Postgres tables. No extensions required — works with any Postgres 9.5+. Implements `Streamable<T>`, `Sinkable<T>`, and `Acknowledgeable<T>`.
 
 ```typescript
-import { PgQueue } from "@ts-backend/postgres";
+import { PgQueue } from "@promin/postgres";
 
 const queue = await PgQueue.create<{ userId: string }>(db, "jobs");
 
@@ -105,7 +105,7 @@ High-level typed queue backed by the [pgmq](https://github.com/pgmq/pgmq) extens
 Requires `CREATE EXTENSION pgmq` on your database.
 
 ```typescript
-import { PgmqQueue, ReadMode } from "@ts-backend/postgres/pgmq";
+import { PgmqQueue, ReadMode } from "@promin/postgres/pgmq";
 
 const queue = await PgmqQueue.create<{ orderId: string }>(db, "orders");
 
@@ -136,7 +136,7 @@ await queue.enableNotify();
 For full control, use the raw SQL functions directly:
 
 ```typescript
-import * as pgmq from "@ts-backend/postgres/pgmq";
+import * as pgmq from "@promin/postgres/pgmq";
 
 await pgmq.createQueue(db, "my-queue");
 const msgId = await pgmq.send(db, "my-queue", { data: { hello: "world" } });
@@ -152,7 +152,7 @@ Postgres-backed, distributed-safe cron scheduler. Persistent schedules, catch-up
 Implements `Streamable<ScheduleTick>` — works with `trigger()` and all StreamPipeline combinators.
 
 ```typescript
-import { createDurableScheduler, migrate } from "@ts-backend/postgres";
+import { createDurableScheduler, migrate } from "@promin/postgres";
 
 await migrate(db);
 const scheduler = createDurableScheduler({ db });
@@ -198,7 +198,7 @@ scheduler.resume("daily-etl");
 Real-time change data capture using LISTEN/NOTIFY with a poll-based fallback for at-least-once delivery. Implements `Streamable<T>` and `Replayable<T>`.
 
 ```typescript
-import { PgChangeStream } from "@ts-backend/postgres";
+import { PgChangeStream } from "@promin/postgres";
 
 const stream = new PgChangeStream<{ userId: string }>({
   db,
@@ -232,5 +232,5 @@ await stream.removeTrigger();
 Requires Docker.
 
 ```bash
-bun nx run @ts-backend/postgres:test
+bun nx run @promin/postgres:test
 ```

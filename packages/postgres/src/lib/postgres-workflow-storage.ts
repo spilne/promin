@@ -14,7 +14,7 @@ import type {
   StepTaskState,
   SignalState,
   StepAttemptRecord,
-} from "@ts-backend/core";
+} from "@promin/core";
 import {
   workflows,
   workflowSteps,

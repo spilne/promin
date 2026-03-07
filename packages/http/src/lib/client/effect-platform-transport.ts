@@ -37,7 +37,7 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  *
  * @example
  * ```ts
- * import { EffectPlatformTransport } from "@ts-backend/http/client";
+ * import { EffectPlatformTransport } from "@promin/http/client";
  *
  * const api = new DefaultHttpClient({
  *   baseUrl: "https://api.example.com",

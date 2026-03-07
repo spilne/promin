@@ -50,8 +50,8 @@ function searchVideos(params: { query: string; order: string; videoDuration?: st
 Use nx to run typecheck (this is what CI does):
 
 ```bash
-bun nx run @ts-backend/core:typecheck
-bun nx run @ts-backend/http:typecheck
+bun nx run @promin/core:typecheck
+bun nx run @promin/http:typecheck
 ```
 
 ## Key Libraries

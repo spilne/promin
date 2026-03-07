@@ -17,6 +17,6 @@
     "skipLibCheck": true,
     "strict": true,
     "target": "es2023",
-    "customConditions": ["@ts-backend/source"]
+    "customConditions": ["@promin/source"]
   }
 }

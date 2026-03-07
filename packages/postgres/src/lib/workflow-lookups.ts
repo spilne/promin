@@ -2,7 +2,7 @@
 // Workflow lookup ID mappings — extends core string enums with integer IDs
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStatus, StepStatus, StepType, StepAttemptType } from "@ts-backend/core";
+import type { WorkflowStatus, StepStatus, StepType, StepAttemptType } from "@promin/core";
 import { defineLookup } from "./lookup.ts";
 
 export const WorkflowStatusIds = defineLookup<WorkflowStatus>({

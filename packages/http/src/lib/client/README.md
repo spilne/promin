@@ -1,4 +1,4 @@
-# @ts-backend/http/client
+# @promin/http/client
 
 Effect-based HTTP client with chainable pipelines, Zod validation, retries, polling, streaming, and parallel composition.
 
@@ -7,7 +7,7 @@ Everything is **lazy** — nothing executes until you call `.runPromise()`, `.ru
 ## Quick start
 
 ```ts
-import { DefaultHttpClient, HttpPipeline } from "@ts-backend/http/client";
+import { DefaultHttpClient, HttpPipeline } from "@promin/http/client";
 import { z } from "zod";
 
 const api = new DefaultHttpClient({
@@ -73,7 +73,7 @@ const data = await api.get("https://some-url.com/data", DataSchema).runPromise()
 ### Service pattern
 
 ```ts
-import type { HttpClient } from "@ts-backend/http/client";
+import type { HttpClient } from "@promin/http/client";
 
 // Depend on the interface — not the implementation
 export class DefaultMyService implements MyService {
@@ -89,8 +89,8 @@ export class DefaultMyService implements MyService {
 ### Basic mocking
 
 ```ts
-import { MockHttpClient } from "@ts-backend/http/client/testing";
-import { noopLoggerFactory } from "@ts-backend/test";
+import { MockHttpClient } from "@promin/http/client/testing";
+import { noopLoggerFactory } from "@promin/test";
 
 const http = new MockHttpClient()
   .on("GET", "/users/1", { id: 1, name: "Alice" })
@@ -615,7 +615,7 @@ const effectStream = api.getSSE("/events").toStream();
 ### `Pipeline.all()` — run in parallel, all must succeed
 
 ```ts
-import { Pipeline } from "@ts-backend/http/client";
+import { Pipeline } from "@promin/http/client";
 
 const [users, posts, stats] = await Pipeline.all(
   api.get("/users", UsersSchema),
@@ -892,7 +892,7 @@ await Effect.runPromise(result);
 Build pipelines back from effects:
 
 ```ts
-import { createHttpPipeline } from "@ts-backend/http/client";
+import { createHttpPipeline } from "@promin/http/client";
 
 const pipeline = createHttpPipeline(someEffect);
 const user = await pipeline.retry().runPromise();
@@ -1010,7 +1010,7 @@ Valibot uses a standalone `safeParse(schema, data)` function, so a one-line adap
 
 ```ts
 import * as v from "valibot";
-import type { ResponseParser } from "@ts-backend/http/client";
+import type { ResponseParser } from "@promin/http/client";
 
 function valibot<T>(schema: v.BaseSchema<unknown, T, any>): ResponseParser<T> {
   return { safeParse: (data) => v.safeParse(schema, data) };
@@ -1024,7 +1024,7 @@ const user = await api.get("/users/1", valibot(UserSchema)).runPromise();
 
 ```ts
 import { type } from "arktype";
-import type { ResponseParser } from "@ts-backend/http/client";
+import type { ResponseParser } from "@promin/http/client";
 
 function arktype<T>(schema: type.Any): ResponseParser<T> {
   return {
@@ -1044,7 +1044,7 @@ const user = await api.get("/users/1", arktype<User>(UserSchema)).runPromise();
 ### Plain function
 
 ```ts
-import type { ResponseParser } from "@ts-backend/http/client";
+import type { ResponseParser } from "@promin/http/client";
 
 function parser<T>(validate: (data: unknown) => T): ResponseParser<T> {
   return {
@@ -1383,7 +1383,7 @@ The built-in `@effect/platform` transport gives you OpenTelemetry tracing on eve
 outbound request automatically:
 
 ```ts
-import { DefaultHttpClient, EffectPlatformTransport } from "@ts-backend/http/client";
+import { DefaultHttpClient, EffectPlatformTransport } from "@promin/http/client";
 
 const api = new DefaultHttpClient({
   baseUrl: "https://api.example.com",
@@ -1409,7 +1409,7 @@ const api = new DefaultHttpClient({
 ### Writing your own transport
 
 ```ts
-import { DefaultHttpClient, type HttpTransport } from "@ts-backend/http/client";
+import { DefaultHttpClient, type HttpTransport } from "@promin/http/client";
 
 class MyTransport implements HttpTransport {
   execute(options) {
@@ -1439,11 +1439,11 @@ const api = new DefaultHttpClient({
 ### Other improvements
 
 - [x] ~~**Request interceptors**~~ — shipped as `middleware` on `HttpClientConfig` (`onRequest` / `onResponse` / `onError` hooks with `tag` support)
-- [x] ~~**Circuit breaker**~~ — available via `@ts-backend/core`: `.withCircuitBreaker(breaker)`
-- [x] ~~**Cache**~~ — available via `@ts-backend/core`: `.cached(cache)`
-- [x] ~~**Concurrency limiter**~~ — available via `@ts-backend/core`: `.withPermit(semaphore)`
-- [x] ~~**Batching**~~ — available via `@ts-backend/core` StreamPipeline: `.groupWithin(size, ms)`
+- [x] ~~**Circuit breaker**~~ — available via `@promin/core`: `.withCircuitBreaker(breaker)`
+- [x] ~~**Cache**~~ — available via `@promin/core`: `.cached(cache)`
+- [x] ~~**Concurrency limiter**~~ — available via `@promin/core`: `.withPermit(semaphore)`
+- [x] ~~**Batching**~~ — available via `@promin/core` StreamPipeline: `.groupWithin(size, ms)`
 - [x] ~~**Pluggable transport**~~ — `HttpTransport` interface + `FetchTransport` default. Pass `transport` in `HttpClientConfig` to swap backends.
 - [x] ~~**`@effect/platform` transport**~~ — `EffectPlatformTransport` wraps `@effect/platform`'s HttpClient. Gets OTel tracing for free. Pass custom `Layer` for test mocking.
 - [x] ~~**Multipart upload**~~ — `api.postMultipart(path, schema, { file, fields })` builds FormData internally.
-- [ ] **Metrics** — automatic request count, latency histogram, error rate per `DefaultHttpClient` instance (integrate with existing Prometheus registry from `@ts-backend/http`)
+- [ ] **Metrics** — automatic request count, latency histogram, error rate per `DefaultHttpClient` instance (integrate with existing Prometheus registry from `@promin/http`)

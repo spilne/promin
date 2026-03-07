@@ -5,7 +5,8 @@ import { JsonCodec } from "../typeclasses/codec.ts";
 import { workflow } from "./durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
 import type { FailedWorkflowRecord } from "./workflow-state.ts";
-import type { Sinkable, Codec } from "../typeclasses/streamable.ts";
+import type { Sinkable } from "../typeclasses/streamable.ts";
+import type { Codec } from "../typeclasses/codec.ts";
 
 // ---------------------------------------------------------------------------
 // Test error

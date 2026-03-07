@@ -1,11 +1,11 @@
-# @ts-backend/core
+# @promin/core
 
 Generic Pipeline for structural concurrency, built on [Effect](https://effect.website). A chainable, lazily-evaluated facade over Effect that provides 80% of the patterns teams need without requiring Effect expertise.
 
 ## Quick Start
 
 ```typescript
-import { Pipeline, StreamPipeline } from "@ts-backend/core";
+import { Pipeline, StreamPipeline } from "@promin/core";
 
 // Simple async action with retry
 const result = await Pipeline.fn(() => callService())

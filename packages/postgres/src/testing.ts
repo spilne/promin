@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Test utilities entrypoint — import from "@ts-backend/postgres/testing"
+// Test utilities entrypoint — import from "@promin/postgres/testing"
 // ---------------------------------------------------------------------------
 
 export {
