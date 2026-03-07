@@ -141,6 +141,82 @@ await eventStream
   .forEach((r) => log(r.result));
 ```
 
+### Step Failure Strategies
+
+```typescript
+.step("fetch", fn, {
+  retry: { maxRetries: 3, baseDelayMs: 1000 },  // exponential backoff
+
+  onFailure: "fail",                              // default — fail the workflow
+  // OR
+  onFailure: "skip",                              // skip, continue with undefined
+  // OR
+  onFailure: { fallback: (error) => defaults },   // use fallback value
+  // OR
+  onFailure: { handler: (error) => "retry" | "skip" | "fail" },  // dynamic decision
+})
+```
+
+### Workflow-level Retry
+
+Re-runs from the failed step — completed steps are checkpointed and skipped.
+
+```typescript
+workflow<Input>({
+  name: "resilient",
+  storage,
+  retry: { maxRetries: 3, baseDelayMs: 5000 },
+})
+  .step("step-1", fn) // runs once, checkpointed
+  .step("step-2", fn); // if this fails, workflow retries from here
+```
+
+### Saga Compensation
+
+When a step fails, automatically undo completed steps in reverse order.
+
+```typescript
+workflow<{ from: string; to: string; amount: number }>({
+  name: "transfer",
+  storage,
+  retry: { maxRetries: 2, baseDelayMs: 5000 },
+  compensate: {
+    trigger: "after-retries", // compensate after all workflow retries exhausted (default)
+    // trigger: "immediate",      // compensate on first failure, skip workflow retries
+    retry: { maxRetries: 2 }, // retry failing compensation functions
+    onComplete: ({ input, error, compensatedSteps, failedCompensations }) =>
+      Pipeline.fromPromise(() => audit.log("rollback", { compensatedSteps, error })),
+  },
+})
+  .step("debit", ({ input }) => bankClient.debit(input.from, input.amount), {
+    compensate: ({ result }) => bankClient.refund(result.txId),
+  })
+  .step("credit", ({ input }) => bankClient.credit(input.to, input.amount), {
+    compensate: ({ result }) => bankClient.reverseCredit(result.txId),
+  })
+  .step("notify", ({ prev }) => emailClient.send(prev.receipt))
+  .run({ workflowId: "transfer-1", input: { from: "A", to: "B", amount: 100 } });
+```
+
+**Full failure cascade:**
+
+```
+Step fails
+  → Step retries (exponential backoff)
+    → Exhausted → StepFailureStrategy ("fail" / "skip" / fallback)
+      → "fail" → Workflow fails
+        → Workflow retries (re-run from failed step)
+          → Exhausted → Compensation cascade (reverse order)
+            → compensate.onComplete callback
+              → Workflow marked failed
+```
+
+- `trigger: "immediate"` — skips workflow retries, compensates right away
+- `trigger: "after-retries"` (default) — retries the workflow first, compensates only as last resort
+- Compensation failures don't block other compensations
+- `compensate.retry` retries individual compensation functions
+- `onFailure: "skip"` or `{ fallback }` prevents compensation (workflow continues)
+
 ### Observability
 
 ```typescript
@@ -164,6 +240,56 @@ await storage.cancelWorkflow(workflowId);
 const dag = builder.toJSON();
 const mermaid = dagToMermaid(dag); // graph LR ...
 const dot = dagToDot(dag); // digraph "name" { ... }
+```
+
+### Visual Editor Schema
+
+Compile JSON workflows from a node-based UI into executable WorkflowDefinitions:
+
+```typescript
+import { compileWorkflow, MapActivityRegistry, Pipeline } from "@ts-backend/core";
+
+const registry = new MapActivityRegistry({
+  "http.get": (config) => () => httpClient.get({ url: config?.url as string }),
+  "transform.uppercase": () => (ctx) => Pipeline.succeed(String(ctx.prev).toUpperCase()),
+  "db.insert": (config) => (ctx) => Pipeline.fromPromise(() => db.insert(config?.table, ctx.prev)),
+});
+
+const definition = compileWorkflow({
+  schema: {
+    version: 1,
+    name: "fetch-and-store",
+    steps: [
+      {
+        type: "step",
+        name: "fetch",
+        dependsOn: [],
+        activityRef: "http.get",
+        config: { url: "https://api.example.com" },
+      },
+      { type: "step", name: "transform", dependsOn: ["fetch"], activityRef: "transform.uppercase" },
+      {
+        type: "step",
+        name: "store",
+        dependsOn: ["transform"],
+        activityRef: "db.insert",
+        config: { table: "results" },
+      },
+    ],
+  },
+  storage,
+  registry,
+});
+
+await definition.run({ workflowId: "wf-1", input: {} });
+```
+
+Validate untrusted schema JSON from APIs:
+
+```typescript
+import { validateWorkflowSchema } from "@ts-backend/core";
+
+const schema = validateWorkflowSchema(req.body); // throws ZodError on invalid
 ```
 
 ## Planned: Subworkflows
@@ -266,128 +392,11 @@ await storage.cancelWorkflow("onboard-123", { cascade: true });
 })
 ```
 
-## Planned: Step Failure Strategies & Error Recovery
+## Planned
 
-### The Problem
+### DLQ Integration
 
-Currently, any step failure immediately fails the entire workflow. There's no way to:
-
-- Retry a step at the workflow layer (re-execute from checkpoint)
-- Skip a failed step and continue
-- Run a fallback step
-- Make a decision about what to do on failure
-- Send to DLQ on terminal failure vs retry on transient failure
-
-### Current Workarounds
-
-You can handle errors **inside** the Pipeline using existing operators:
-
-```typescript
-// Retry + timeout + partial recovery inside the step
-.step("fetch-user", ({ input }) =>
-  api.get(`/users/${input.userId}`, UserSchema)
-    .retry(3)
-    .timeout(10_000)
-    .recover(
-      (err) => err._tag === "HttpStatusError" && err.status === 404,
-      () => null,  // 404 → null, other errors propagate
-    )
-)
-
-// DLQ via hooks (notification only — can't change outcome)
-workflow<Input>({
-  name: "process-order",
-  storage,
-  hooks: {
-    onStepFailure: async ({ workflowId, stepName, error }) => {
-      await monitoring.recordStepFailure({ workflowId, stepName, error });
-    },
-    onWorkflowFailure: async ({ workflowId, error }) => {
-      await dlq.send({ workflowId, error, failedAt: new Date() });
-      await slack.alert(`Workflow ${workflowId} failed: ${error}`);
-    },
-  },
-})
-```
-
-### Planned: StepOptions.onFailure — per-step failure strategy
-
-```typescript
-.step("fetch-user", ({ input }) =>
-  api.get(`/users/${input.userId}`, UserSchema),
-  {
-    // Retry the entire step (re-execute from storage)
-    retry: { maxAttempts: 3, backoffMs: 1000 },
-
-    // What to do when retries are exhausted
-    onFailure: "fail",  // default — fail the whole workflow
-    // OR
-    onFailure: "skip",  // skip this step, continue with undefined
-    // OR
-    onFailure: { fallback: (error) => ({ id: 0, name: "Unknown" }) },
-    // OR
-    onFailure: { handler: async (error, ctx) => {
-      if (isTransient(error)) return "retry";
-      await dlq.send({ step: ctx.stepName, error });
-      return "skip";
-    }},
-  },
-)
-```
-
-### Planned: Error Decision Hooks — control flow on failure
-
-```typescript
-workflow<Input>({
-  name: "resilient-pipeline",
-  storage,
-  hooks: {
-    // Decision hook: return what to do (not just notify)
-    onStepError: async ({ workflowId, stepName, error, attempt }) => {
-      if (isTransient(error) && attempt < 3) {
-        return { action: "retry", delayMs: attempt * 1000 };
-      }
-      if (isNonCritical(stepName)) {
-        await monitoring.warn(`Skipping ${stepName}`, { error });
-        return { action: "skip" };
-      }
-      await dlq.send({ workflowId, stepName, error });
-      await pagerduty.alert({ workflowId, error });
-      return { action: "fail" };
-    },
-  },
-});
-```
-
-### Planned: Compensation — rollback on failure
-
-Saga pattern: when a step fails, run compensating actions for completed steps in reverse:
-
-```typescript
-workflow<{ orderId: string }>({ name: "place-order", storage })
-  .step("reserve-inventory", ({ input }) =>
-    api.post("/inventory/reserve", { json: { orderId: input.orderId } }),
-    { compensate: (result) => api.post("/inventory/release", { json: { reservationId: result.id } }) },
-  )
-  .step("charge-payment", ({ prev }) =>
-    api.post("/payments/charge", { json: { amount: prev.total } }),
-    { compensate: (result) => api.post("/payments/refund", { json: { paymentId: result.id } }) },
-  )
-  .step("send-confirmation", ({ prev }) =>
-    mailer.send(prev.email, "Order confirmed!"),
-    // No compensation needed for emails
-  )
-  .run({ ... });
-
-// If "charge-payment" fails:
-// 1. "send-confirmation" never ran — nothing to compensate
-// 2. "reserve-inventory" succeeded — compensate() runs → inventory released
-// 3. Workflow marked as failed with compensation log
-```
-
-### Planned: DLQ Integration
-
-First-class dead letter queue support, not just hook side-effects:
+First-class dead letter queue support:
 
 ```typescript
 import { PgmqQueue } from "@ts-backend/postgres";
@@ -397,56 +406,22 @@ const dlq = await PgmqQueue.create(db, "workflow-dlq");
 workflow<Input>({
   name: "process-events",
   storage,
-  dlq, // failed workflows automatically sent here
+  dlq,
   dlqOptions: {
-    // What gets sent: full state, input, error, step history
     include: ["input", "error", "steps"],
-    // When: after all retries exhausted (not on first failure)
     when: "terminal-failure",
   },
 });
 ```
 
-Query and replay from DLQ:
+### RRULE Support
 
-```typescript
-// Read failed workflows from DLQ
-await StreamPipeline.fromAck(dlq).forEach(async (envelope) => {
-  const failed = envelope.value;
-  // Fix and retry
-  await processEvents.run({
-    workflowId: `${failed.workflowId}-retry`,
-    input: failed.input,
-  });
-  await envelope.ack();
-});
-```
-
-### Planned: RRULE Support for Complex Recurrence
-
-Currently `ScheduleConfig` supports `cron` (5/6/7-field) and `intervalMs`. These can't express:
-
-- **Biweekly** — every 2 weeks on Tuesday
-- **Every N weeks/months** — every 3rd month on the 1st
-- **Every other weekday** — every other Monday
-
-Google Calendar, Outlook, and iCalendar use [RRULE (RFC 5545)](https://datatracker.ietf.org/doc/html/rfc5545#section-3.3.10) for these patterns. Plan is to add `rrule` field to `ScheduleConfig` using the [rrule](https://github.com/jkbrzt/rrule) library:
+Complex calendar recurrence via iCalendar RRULE:
 
 ```typescript
 scheduler.register({
   id: "biweekly-standup",
-  rrule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU;BYHOUR=10", // iCalendar RRULE
+  rrule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU;BYHOUR=10",
   timezone: "America/New_York",
 });
-
-scheduler.register({
-  id: "quarterly-review",
-  rrule: "FREQ=MONTHLY;INTERVAL=3;BYMONTHDAY=1;BYHOUR=9",
-});
 ```
-
-Three trigger types in `ScheduleConfig`:
-
-- `cron` — standard cron (simple schedules)
-- `rrule` — iCalendar RRULE (complex calendar patterns)
-- `intervalMs` — fixed interval (heartbeats, polling)

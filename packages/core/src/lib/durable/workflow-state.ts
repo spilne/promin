@@ -2,7 +2,9 @@
 // Workflow & Step state types
 // ---------------------------------------------------------------------------
 
-export type WorkflowStatus = "running" | "completed" | "failed" | "suspended";
+export type WorkflowStatus = "running" | "completed" | "failed" | "suspended" | "compensating";
+
+export type CompensationStatus = "none" | "compensating" | "compensated" | "partial";
 
 export type StepStatus =
   | "pending"
@@ -11,7 +13,9 @@ export type StepStatus =
   | "failed"
   | "skipped"
   | "sleeping"
-  | "waiting_for_signal";
+  | "waiting_for_signal"
+  | "compensated"
+  | "compensation_failed";
 
 export type StepType = "single" | "map" | "sleep" | "signal";
 
@@ -26,6 +30,8 @@ export interface WorkflowState<Input = unknown, Result = unknown> {
   readonly error?: string;
   readonly metadata?: Record<string, unknown>;
   readonly steps: Record<string, StepState>;
+  readonly workflowAttempt?: number;
+  readonly compensationStatus?: CompensationStatus;
   readonly createdAt: Date;
   readonly updatedAt: Date;
   readonly completedAt?: Date;
@@ -46,6 +52,9 @@ export interface StepState {
   readonly wakeAt?: Date;
   readonly signalName?: string;
   readonly signalTimeoutAt?: Date;
+  readonly compensationStatus?: "pending" | "compensated" | "compensation_failed";
+  readonly compensationError?: string;
+  readonly compensatedAt?: Date;
 }
 
 export interface StepTaskState {

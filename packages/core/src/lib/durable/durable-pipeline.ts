@@ -141,6 +141,41 @@ export interface StepOptions<T> {
   readonly retry?: RetryPolicy<TaggedError>;
   /** What to do when the step fails (after retries exhausted). Default: "fail". */
   readonly onFailure?: StepFailureStrategy<T>;
+  /**
+   * Compensation function — undoes this step's side effects during saga rollback.
+   * Only runs when a *later* step fails and the workflow triggers compensation.
+   * Receives the step's successful result and the workflow input.
+   */
+  readonly compensate?: (params: {
+    result: T;
+    input: unknown;
+    workflowId: string;
+  }) => Pipeline<void, any> | Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Workflow-level compensation config
+// ---------------------------------------------------------------------------
+
+export interface CompensateConfig {
+  /**
+   * When to trigger compensation.
+   * - `"after-retries"` (default) — compensate after all workflow retries exhausted.
+   * - `"immediate"` — compensate on first workflow failure (skip workflow retries).
+   */
+  trigger?: "after-retries" | "immediate";
+  /** Retry policy for each compensation function. Default: no retry. */
+  retry?: { maxRetries?: number; baseDelayMs?: number };
+  /**
+   * Callback after all step compensations complete.
+   * Receives the original error, list of compensated steps, and any compensation failures.
+   */
+  onComplete?: (params: {
+    input: unknown;
+    error: unknown;
+    compensatedSteps: string[];
+    failedCompensations: { stepName: string; error: unknown }[];
+  }) => Pipeline<void, any> | Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +192,11 @@ interface StepDefinition {
   readonly codec: Codec<unknown>;
   readonly retry?: RetryPolicy<TaggedError>;
   readonly onFailure?: StepFailureStrategy<unknown>;
+  readonly compensate?: (params: {
+    result: unknown;
+    input: unknown;
+    workflowId: string;
+  }) => Pipeline<void, any> | Promise<void>;
 }
 
 interface ExecuteParams {
@@ -164,6 +204,8 @@ interface ExecuteParams {
   readonly results: Record<string, unknown>;
   readonly workflowId: string;
   readonly storage: WorkflowStorage;
+  /** Mutable ref — incremented by the retry wrapper before each re-invocation. */
+  readonly attemptRef: { current: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +233,8 @@ export class WorkflowBuilder<
     private readonly _hooks?: WorkflowHooks,
     private readonly _type?: string,
     private readonly _metadata?: Record<string, unknown>,
+    private readonly _retry?: RetryPolicy<TaggedError>,
+    private readonly _compensateConfig?: CompensateConfig,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -662,6 +706,10 @@ export class WorkflowBuilder<
   async run(params: { workflowId: string; input: Input }): Promise<Current> {
     const { workflowId, input } = params;
     const workflowStartTime = Date.now();
+    const compensateTrigger = this._compensateConfig?.trigger ?? "after-retries";
+    const maxWorkflowRetries =
+      compensateTrigger === "immediate" ? 0 : (this._retry?.maxRetries ?? 0);
+    const workflowRetryDelayMs = this._retry?.baseDelayMs ?? 1000;
 
     // 1. Acquire lock
     const locked = await this._storage.tryLock(workflowId, DEFAULT_LOCK_DURATION_MS);
@@ -693,175 +741,328 @@ export class WorkflowBuilder<
       }));
       topologicalSort({ nodes: dagNodes, workflowId });
 
-      // 4. Execute DAG
-      const results: Record<string, unknown> = {};
+      // 4. Execute DAG with workflow-level retry
+      let lastStepError: unknown = null;
+      // Shared across workflow retries so attempt counters keep incrementing
+      const stepAttempts = new Map<string, number>();
 
-      // Load previously completed step results
-      if (state) {
-        for (const [stepName, stepState] of Object.entries(state.steps)) {
-          if (stepState.status === "completed") {
-            results[stepName] = stepState.result;
-          }
-        }
-      }
-
-      const completed = new Set(Object.keys(results));
-      const running = new Set<string>();
-
-      while (completed.size < this._steps.length) {
-        const ready = computeReadySet({ nodes: dagNodes, completed, running });
-
-        if (ready.length === 0 && running.size === 0) {
-          throw new WorkflowError({
-            workflowId,
-            message: "Deadlock: no steps are ready and none are running",
-          });
+      for (let workflowAttempt = 0; workflowAttempt <= maxWorkflowRetries; workflowAttempt++) {
+        // On retry, wait before re-attempting
+        if (workflowAttempt > 0) {
+          const delay = workflowRetryDelayMs * Math.pow(2, workflowAttempt - 1);
+          await new Promise((r) => setTimeout(r, delay));
         }
 
-        if (ready.length === 0) {
-          break;
-        }
+        const dagResult = await this._executeDag({
+          workflowId,
+          input,
+          dagNodes,
+          state,
+          workflowStartTime,
+          stepAttempts,
+        });
 
-        for (const name of ready) {
-          running.add(name);
-        }
-
-        // Execute all ready steps in parallel, with per-step retry and failure handling
-        const readySteps = ready.map((name) => this._steps.find((s) => s.name === name)!);
-
-        const pipeline = Pipeline.all(
-          ...readySteps.map((stepDef) => {
-            const startedAt = new Date();
-            const startTime = startedAt.getTime();
-
-            // Raw step execution — wrapped in suspend so retry re-invokes the step fn
-            let raw: Pipeline<unknown, TaggedError> = Pipeline.from(
-              Effect.suspend(
-                () =>
-                  stepDef.execute({ input, results, workflowId, storage: this._storage }).effect,
-              ),
-            ) as Pipeline<unknown, TaggedError>;
-
-            // Step-level retry (before mapping to result shape)
-            if (stepDef.retry) {
-              raw = raw.retry(stepDef.retry);
-            }
-
-            // Step-level failure strategy
-            const strategy = stepDef.onFailure ?? "fail";
-            if (strategy === "skip") {
-              raw = raw.handleError(() => undefined);
-            } else if (strategy !== "fail" && "fallback" in strategy) {
-              const fallbackFn = strategy.fallback;
-              raw = raw.handleError((err) => fallbackFn(err));
-            }
-
-            // Map to step result
-            return raw.map((result) => {
-              const encoded = stepDef.codec.encode(result);
-              return {
-                name: stepDef.name,
-                result: encoded,
-                durationMs: Date.now() - startTime,
-                startedAt,
-              };
-            });
-          }),
-        );
-
-        const { data: stepResults, error: stepError } = await pipeline.runSafe();
-
-        if (stepError) {
-          const tag = (stepError as TaggedError)._tag;
-
-          // Suspension errors propagate without failing the workflow
-          if (tag === "WorkflowSuspendedError") {
-            throw stepError;
-          }
-
-          // Timeout errors fail the workflow
-          if (tag === "WorkflowTimeoutError") {
-            const te = stepError as WorkflowTimeoutError;
-            await this._storage.saveStepFailure({
-              workflowId,
-              stepName: te.stepName,
-              error: te.message,
-              durationMs: 0,
-              startedAt: new Date(),
-            });
-            await this._hooks?.onStepFailure?.({
-              workflowId,
-              stepName: te.stepName,
-              error: te.message,
-              durationMs: 0,
-            });
-            await this._storage.failWorkflow(workflowId, te.message);
-            await this._hooks?.onWorkflowFailure?.({
-              workflowId,
-              error: te.message,
-              durationMs: Date.now() - workflowStartTime,
-            });
-            throw stepError;
-          }
-
-          // All other errors
-          const stepName =
-            tag === "StepError" ? (stepError as StepError).stepName : (ready[0] ?? "unknown");
-          const errorMsg =
-            stepError instanceof globalThis.Error ? stepError.message : String(stepError);
-          await this._storage.saveStepFailure({
+        if (dagResult.success) {
+          // 5. Complete workflow
+          const finalResult = dagResult.result;
+          await this._storage.completeWorkflow(workflowId, finalResult);
+          await this._hooks?.onWorkflowComplete?.({
             workflowId,
-            stepName,
-            error: errorMsg,
-            durationMs: 0,
-            startedAt: new Date(),
-          });
-          await this._hooks?.onStepFailure?.({
-            workflowId,
-            stepName,
-            error: errorMsg,
-            durationMs: 0,
-          });
-          await this._storage.failWorkflow(workflowId, errorMsg);
-          await this._hooks?.onWorkflowFailure?.({
-            workflowId,
-            error: errorMsg,
+            result: finalResult,
             durationMs: Date.now() - workflowStartTime,
           });
-          throw stepError;
+          return finalResult as Current;
         }
 
-        // Checkpoint each completed step
-        for (const { name, result, durationMs, startedAt } of stepResults!) {
-          await this._storage.saveStepResult({
-            workflowId,
-            stepName: name,
-            result,
-            durationMs,
-            startedAt,
-          });
-          await this._hooks?.onStepComplete?.({ workflowId, stepName: name, result, durationMs });
-          results[name] = result;
-          completed.add(name);
-          running.delete(name);
+        // DAG failed — suspension errors always propagate immediately
+        if (dagResult.suspension) {
+          throw dagResult.error;
+        }
+
+        lastStepError = dagResult.error;
+
+        // Check if this error is retryable (workflow-level `when` predicate)
+        const shouldRetry =
+          workflowAttempt < maxWorkflowRetries &&
+          (!this._retry?.when || this._retry.when(dagResult.error as TaggedError));
+
+        if (shouldRetry) {
+          // Reload state to pick up checkpointed steps
+          state = await this._storage.loadWorkflow(workflowId);
+        } else {
+          // Not retryable or retries exhausted — break to compensation
+          break;
         }
       }
 
-      // 5. Complete workflow
-      const lastStepName = this._steps[this._steps.length - 1]!.name;
-      const finalResult = results[lastStepName];
-      await this._storage.completeWorkflow(workflowId, finalResult);
-      await this._hooks?.onWorkflowComplete?.({
+      // All workflow retries exhausted — run compensation cascade
+      const compensationReport = await this._compensate({ workflowId, input, dagNodes });
+
+      // Fire workflow-level onComplete callback
+      if (this._compensateConfig?.onComplete) {
+        try {
+          const result = this._compensateConfig.onComplete({
+            input,
+            error: lastStepError,
+            compensatedSteps: compensationReport.compensated,
+            failedCompensations: compensationReport.failed,
+          });
+          if (result instanceof Pipeline) {
+            await result.runPromise();
+          } else if (result && typeof (result as Promise<void>).then === "function") {
+            await result;
+          }
+        } catch {
+          // onComplete failure is swallowed — the original error is more important
+        }
+      }
+
+      // Fail the workflow
+      const errorMsg =
+        lastStepError instanceof globalThis.Error ? lastStepError.message : String(lastStepError);
+      await this._storage.failWorkflow(workflowId, errorMsg);
+      await this._hooks?.onWorkflowFailure?.({
         workflowId,
-        result: finalResult,
+        error: errorMsg,
         durationMs: Date.now() - workflowStartTime,
       });
 
-      return finalResult as Current;
+      throw lastStepError;
     } finally {
       // 6. Release lock
       await this._storage.releaseLock(workflowId);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // DAG execution (extracted from run for retry loop)
+  // ---------------------------------------------------------------------------
+
+  private async _executeDag(params: {
+    workflowId: string;
+    input: Input;
+    dagNodes: DagNode[];
+    state: import("./workflow-state.ts").WorkflowState | null;
+    workflowStartTime: number;
+    /** Tracks attempt numbers per step — shared across workflow retries so counters keep incrementing. */
+    stepAttempts: Map<string, number>;
+  }): Promise<
+    { success: true; result: unknown } | { success: false; error: unknown; suspension: boolean }
+  > {
+    const { workflowId, input, dagNodes, state } = params;
+    const results: Record<string, unknown> = {};
+
+    // Load previously completed step results
+    if (state) {
+      for (const [stepName, stepState] of Object.entries(state.steps)) {
+        if (stepState.status === "completed") {
+          results[stepName] = stepState.result;
+        }
+      }
+    }
+
+    const completed = new Set(Object.keys(results));
+    const running = new Set<string>();
+
+    while (completed.size < this._steps.length) {
+      const ready = computeReadySet({ nodes: dagNodes, completed, running });
+
+      if (ready.length === 0 && running.size === 0) {
+        return {
+          success: false,
+          error: new WorkflowError({
+            workflowId,
+            message: "Deadlock: no steps are ready and none are running",
+          }),
+          suspension: false,
+        };
+      }
+
+      if (ready.length === 0) {
+        break;
+      }
+
+      for (const name of ready) {
+        running.add(name);
+      }
+
+      // Execute all ready steps in parallel, with per-step retry and failure handling
+      const readySteps = ready.map((name) => this._steps.find((s) => s.name === name)!);
+
+      const pipeline = Pipeline.all(
+        ...readySteps.map((stepDef) => {
+          const startedAt = new Date();
+          const startTime = startedAt.getTime();
+
+          // Get or initialize attempt counter for this step (persists across workflow retries)
+          const currentAttemptForStep = params.stepAttempts.get(stepDef.name) ?? 0;
+          const attemptRef = { current: currentAttemptForStep + 1 };
+
+          // Raw step execution — wrapped in suspend so retry re-invokes the step fn.
+          // attemptRef tracks the attempt number; incremented each invocation so
+          // step retries and workflow retries both see monotonically increasing attempts.
+          let raw: Pipeline<unknown, TaggedError> = Pipeline.from(
+            Effect.suspend(() => {
+              const currentAttempt = attemptRef.current;
+              attemptRef.current = currentAttempt + 1;
+              // Write back to shared map so workflow retries pick up the right count
+              params.stepAttempts.set(stepDef.name, currentAttempt);
+              return stepDef.execute({
+                input,
+                results,
+                workflowId,
+                storage: this._storage,
+                attemptRef: { current: currentAttempt },
+              }).effect;
+            }),
+          ) as Pipeline<unknown, TaggedError>;
+
+          // Step-level retry (before mapping to result shape)
+          if (stepDef.retry) {
+            raw = raw.retry(stepDef.retry);
+          }
+
+          // Step-level failure strategy
+          const strategy = stepDef.onFailure ?? "fail";
+          if (strategy === "skip") {
+            raw = raw.handleError(() => undefined);
+          } else if (strategy !== "fail" && "fallback" in strategy) {
+            const fallbackFn = strategy.fallback;
+            raw = raw.handleError((err) => fallbackFn(err));
+          }
+
+          // Map to step result
+          return raw.map((result) => {
+            const encoded = stepDef.codec.encode(result);
+            return {
+              name: stepDef.name,
+              result: encoded,
+              durationMs: Date.now() - startTime,
+              startedAt,
+            };
+          });
+        }),
+      );
+
+      const { data: stepResults, error: stepError } = await pipeline.runSafe();
+
+      if (stepError) {
+        const tag = (stepError as TaggedError)._tag;
+
+        // Suspension errors propagate without failing the workflow
+        if (tag === "WorkflowSuspendedError") {
+          return { success: false, error: stepError, suspension: true };
+        }
+
+        // Record step failure
+        const stepName =
+          tag === "StepError"
+            ? (stepError as StepError).stepName
+            : tag === "WorkflowTimeoutError"
+              ? (stepError as WorkflowTimeoutError).stepName
+              : (ready[0] ?? "unknown");
+        const errorMsg =
+          stepError instanceof globalThis.Error ? stepError.message : String(stepError);
+        await this._storage.saveStepFailure({
+          workflowId,
+          stepName,
+          error: errorMsg,
+          durationMs: 0,
+          startedAt: new Date(),
+        });
+        await this._hooks?.onStepFailure?.({
+          workflowId,
+          stepName,
+          error: errorMsg,
+          durationMs: 0,
+        });
+
+        return { success: false, error: stepError, suspension: false };
+      }
+
+      // Checkpoint each completed step
+      for (const { name, result, durationMs, startedAt } of stepResults!) {
+        await this._storage.saveStepResult({
+          workflowId,
+          stepName: name,
+          result,
+          durationMs,
+          startedAt,
+        });
+        await this._hooks?.onStepComplete?.({ workflowId, stepName: name, result, durationMs });
+        results[name] = result;
+        completed.add(name);
+        running.delete(name);
+      }
+    }
+
+    const lastStepName = this._steps[this._steps.length - 1]!.name;
+    return { success: true, result: results[lastStepName] };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Compensation cascade — undo completed steps in reverse order
+  // ---------------------------------------------------------------------------
+
+  private async _compensate(params: {
+    workflowId: string;
+    input: Input;
+    dagNodes: DagNode[];
+  }): Promise<{
+    compensated: string[];
+    failed: { stepName: string; error: unknown }[];
+  }> {
+    const { workflowId, input } = params;
+    const compensated: string[] = [];
+    const failed: { stepName: string; error: unknown }[] = [];
+
+    // Load current state to find completed steps
+    const state = await this._storage.loadWorkflow(workflowId);
+    if (!state) return { compensated, failed };
+
+    // Find completed steps that have compensation functions, in reverse order
+    const stepsToCompensate: { stepDef: StepDefinition; result: unknown }[] = [];
+    // Reverse the step list order — last completed first
+    for (let i = this._steps.length - 1; i >= 0; i--) {
+      const stepDef = this._steps[i]!;
+      const stepState = state.steps[stepDef.name];
+      if (stepState?.status === "completed" && stepDef.compensate) {
+        stepsToCompensate.push({ stepDef, result: stepState.result });
+      }
+    }
+
+    // Run compensations sequentially in reverse order
+    const retryConfig = this._compensateConfig?.retry;
+    const maxCompRetries = retryConfig?.maxRetries ?? 0;
+    const compRetryDelayMs = retryConfig?.baseDelayMs ?? 500;
+
+    for (const { stepDef, result } of stepsToCompensate) {
+      for (let attempt = 0; attempt <= maxCompRetries; attempt++) {
+        try {
+          if (attempt > 0) {
+            await new Promise((r) => setTimeout(r, compRetryDelayMs * Math.pow(2, attempt - 1)));
+          }
+          const compensateResult = stepDef.compensate!({ result, input, workflowId });
+          if (compensateResult instanceof Pipeline) {
+            await compensateResult.runPromise();
+          } else if (
+            compensateResult &&
+            typeof (compensateResult as Promise<void>).then === "function"
+          ) {
+            await compensateResult;
+          }
+          compensated.push(stepDef.name);
+          break;
+        } catch (err) {
+          if (attempt === maxCompRetries) {
+            // All retries exhausted — record failure, continue with others
+            failed.push({ stepName: stepDef.name, error: err });
+          }
+        }
+      }
+    }
+
+    return { compensated, failed };
   }
 
   // ---------------------------------------------------------------------------
@@ -980,6 +1181,8 @@ export class WorkflowBuilder<
       this._hooks,
       this._type,
       this._metadata,
+      this._retry,
+      this._compensateConfig,
     );
   }
 
@@ -1011,6 +1214,7 @@ export class WorkflowBuilder<
       codec,
       retry: params.options?.retry as RetryPolicy<TaggedError> | undefined,
       onFailure: params.options?.onFailure as StepFailureStrategy<unknown> | undefined,
+      compensate: params.options?.compensate as StepDefinition["compensate"],
       execute: (execParams) => {
         if (params.isLinear) {
           const prevStepName = params.dependsOn[0];
@@ -1019,7 +1223,7 @@ export class WorkflowBuilder<
             input: execParams.input,
             prev,
             workflowId: execParams.workflowId,
-            attempt: 1,
+            attempt: execParams.attemptRef.current,
           });
         } else {
           const deps: Record<string, unknown> = {};
@@ -1030,7 +1234,7 @@ export class WorkflowBuilder<
             input: execParams.input,
             deps,
             workflowId: execParams.workflowId,
-            attempt: 1,
+            attempt: execParams.attemptRef.current,
           });
         }
       },
@@ -1050,6 +1254,10 @@ export function workflow<Input>(params: {
   hooks?: WorkflowHooks;
   type?: string;
   metadata?: Record<string, unknown>;
+  /** Workflow-level retry policy. Re-runs from the failed step (completed steps are checkpointed). */
+  retry?: RetryPolicy<TaggedError>;
+  /** Compensation configuration — controls when and how saga rollback runs. */
+  compensate?: CompensateConfig;
 }): WorkflowBuilder<Input> {
   return new WorkflowBuilder(
     params.name,
@@ -1059,6 +1267,8 @@ export function workflow<Input>(params: {
     params.hooks,
     params.type,
     params.metadata,
+    params.retry as RetryPolicy<TaggedError> | undefined,
+    params.compensate,
   );
 }
 

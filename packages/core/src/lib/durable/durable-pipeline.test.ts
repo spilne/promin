@@ -1592,6 +1592,53 @@ describe("Step failure strategies", () => {
     });
   });
 
+  describe("step retry with when predicate", () => {
+    it("retries only matching errors", async () => {
+      let attempts = 0;
+      const result = await flow<{}>("retry-when")
+        .step(
+          "flaky",
+          () => {
+            attempts++;
+            if (attempts < 3) return Pipeline.fail(new FetchError({ message: "transient" }));
+            return Pipeline.succeed("ok");
+          },
+          {
+            retry: {
+              maxRetries: 5,
+              when: (err) => err._tag === "FetchError",
+            },
+          },
+        )
+        .execute({});
+
+      expect(result).toBe("ok");
+      expect(attempts).toBe(3);
+    });
+
+    it("does not retry non-matching errors", async () => {
+      let attempts = 0;
+      const { error } = await flow<{}>("retry-when-no-match")
+        .step(
+          "fail",
+          (): Pipeline<string, FetchError | HttpStatusError> => {
+            attempts++;
+            return Pipeline.fail(new HttpStatusError({ status: 400, message: "not retryable" }));
+          },
+          {
+            retry: {
+              maxRetries: 5,
+              when: (err) => err._tag === "FetchError", // only retry FetchError
+            },
+          },
+        )
+        .executeSafe({});
+
+      expect(error).not.toBeNull();
+      expect(attempts).toBe(1); // no retry — HttpStatusError doesn't match
+    });
+  });
+
   describe("default: fail", () => {
     it("fails the workflow by default", async () => {
       const { error } = await flow<{}>("fail-default")
