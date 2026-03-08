@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Frameable } from "../typeclasses/frameable.ts";
+import type { StreamPipeline } from "../stream-pipeline.ts";
 import type { LogicalPlan } from "./logical-plan.ts";
 import type { DataFrameExecutor } from "./executor.ts";
 import { ArrayExecutor } from "./array-executor.ts";
@@ -30,6 +31,15 @@ export class DataFrame<T> {
   // =========================================================================
 
   static fromArray<T>(data: T[]): DataFrame<T> {
+    return new DataFrame<T>({ _tag: "Source", data });
+  }
+
+  static fromIterable<T>(data: Iterable<T>): DataFrame<T> {
+    return new DataFrame<T>({ _tag: "Source", data: Array.from(data) });
+  }
+
+  static async fromStream<T>(stream: StreamPipeline<T, any>): Promise<DataFrame<T>> {
+    const data = await stream.collect();
     return new DataFrame<T>({ _tag: "Source", data });
   }
 

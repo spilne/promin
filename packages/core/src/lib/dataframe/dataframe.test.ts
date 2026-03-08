@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { DataFrame } from "./dataframe.ts";
+import { StreamPipeline } from "../stream-pipeline.ts";
 
 // ---------------------------------------------------------------------------
 // Test data
@@ -51,6 +52,33 @@ describe("DataFrame sources", () => {
   it("collect returns all rows", async () => {
     const result = await DataFrame.fromArray([1, 2, 3]).collect();
     expect(result).toEqual([1, 2, 3]);
+  });
+
+  it("fromIterable creates from any iterable", async () => {
+    const set = new Set([1, 2, 3]);
+    const result = await DataFrame.fromIterable(set).collect();
+    expect(result).toEqual([1, 2, 3]);
+  });
+
+  it("fromIterable works with generators", async () => {
+    function* gen() {
+      yield { n: 1 };
+      yield { n: 2 };
+      yield { n: 3 };
+    }
+    const result = await DataFrame.fromIterable(gen()).collect();
+    expect(result).toEqual([{ n: 1 }, { n: 2 }, { n: 3 }]);
+  });
+
+  it("fromStream collects a StreamPipeline", async () => {
+    const stream = StreamPipeline.fromIterable([
+      { name: "Alice", age: 30 },
+      { name: "Bob", age: 25 },
+    ]);
+    const df = await DataFrame.fromStream(stream);
+    const result = await df.filter((r) => r.age > 27).collect();
+    expect(result).toHaveLength(1);
+    expect(result[0]!.name).toBe("Alice");
   });
 });
 
