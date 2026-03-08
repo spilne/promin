@@ -39,6 +39,9 @@ export { PgQueue, type PgQueueConfig } from "./lib/pg-queue.ts";
 // LISTEN/NOTIFY change stream (CDC)
 export { PgChangeStream, type PgChangeStreamConfig } from "./lib/pg-change-stream.ts";
 
+// Distributed step queue (SKIP LOCKED)
+export { PgStepQueue, type PgStepQueueConfig } from "./lib/pg-step-queue.ts";
+
 // Schema exports for custom migrations
 export {
   workflows,
@@ -49,6 +52,7 @@ export {
   workflowStatusTable,
   stepStatusTable,
   stepTypeTable,
+  stepQueue,
   stepAttempts,
   attemptTypeTable,
   LOOKUP_BINDINGS,

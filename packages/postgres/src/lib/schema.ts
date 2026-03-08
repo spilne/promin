@@ -9,6 +9,7 @@ import {
   jsonb,
   timestamp,
   bigint,
+  bigserial,
   index,
   uniqueIndex,
   primaryKey,
@@ -129,6 +130,31 @@ export const workflowLocks = pgTable("wf_workflow_locks", {
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   lockedBy: text("locked_by"),
 });
+
+export const stepQueue = pgTable(
+  "wf_step_queue",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    workflowId: text("workflow_id").notNull(),
+    stepName: text("step_name").notNull(),
+    queue: text("queue").notNull().default("default"),
+    input: jsonb("input"),
+    prevResults: jsonb("prev_results"),
+    attempt: integer("attempt").notNull().default(1),
+    status: text("status").notNull().default("pending"),
+    result: jsonb("result"),
+    error: text("error"),
+    durationMs: bigint("duration_ms", { mode: "number" }),
+    claimedBy: text("claimed_by"),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("wf_step_queue_dequeue_idx").on(t.status, t.queue, t.createdAt),
+    index("wf_step_queue_workflow_idx").on(t.workflowId),
+  ],
+);
 
 export const stepAttempts = pgTable(
   "wf_step_attempts",
