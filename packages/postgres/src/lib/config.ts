@@ -25,6 +25,9 @@ export interface PostgresStorageConfig {
 
   /** Log function for debugging. Default: no-op. */
   logger?: (message: string, meta?: Record<string, unknown>) => void;
+
+  /** Record step attempt history for audit trail. Default: false. */
+  recordAttempts?: boolean;
 }
 
 export const DEFAULT_CONFIG = {
@@ -33,6 +36,7 @@ export const DEFAULT_CONFIG = {
   defaultLockDurationMs: 30_000,
   autoSeedLookups: true,
   logger: () => {},
+  recordAttempts: false,
 } as const;
 
 export function resolveConfig(config: PostgresStorageConfig): Required<PostgresStorageConfig> {
@@ -44,5 +48,6 @@ export function resolveConfig(config: PostgresStorageConfig): Required<PostgresS
     defaultLockDurationMs: config.defaultLockDurationMs ?? DEFAULT_CONFIG.defaultLockDurationMs,
     autoSeedLookups: config.autoSeedLookups ?? DEFAULT_CONFIG.autoSeedLookups,
     logger: config.logger ?? DEFAULT_CONFIG.logger,
+    recordAttempts: config.recordAttempts ?? DEFAULT_CONFIG.recordAttempts,
   };
 }

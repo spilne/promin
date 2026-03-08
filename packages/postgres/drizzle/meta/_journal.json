@@ -15,6 +15,13 @@
       "when": 1743400001000,
       "tag": "0001_scheduler",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1743400002000,
+      "tag": "0002_step_attempts",
+      "breakpoints": true
     }
   ]
 }

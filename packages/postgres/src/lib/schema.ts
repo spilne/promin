@@ -14,7 +14,12 @@ import {
   primaryKey,
 } from "drizzle-orm/pg-core";
 import { createLookupTable, type LookupBinding } from "./lookup-table.ts";
-import { WorkflowStatusIds, StepStatusIds, StepTypeIds } from "./workflow-lookups.ts";
+import {
+  WorkflowStatusIds,
+  StepStatusIds,
+  StepTypeIds,
+  AttemptTypeIds,
+} from "./workflow-lookups.ts";
 
 // ---------------------------------------------------------------------------
 // Lookup tables
@@ -23,6 +28,7 @@ import { WorkflowStatusIds, StepStatusIds, StepTypeIds } from "./workflow-lookup
 export const workflowStatusTable = createLookupTable("wf_workflow_status");
 export const stepStatusTable = createLookupTable("wf_step_status");
 export const stepTypeTable = createLookupTable("wf_step_type");
+export const attemptTypeTable = createLookupTable("wf_attempt_type");
 
 // ---------------------------------------------------------------------------
 // Lookup bindings — for seeding and validation
@@ -32,6 +38,7 @@ export const LOOKUP_BINDINGS: LookupBinding[] = [
   { lookup: WorkflowStatusIds, table: workflowStatusTable },
   { lookup: StepStatusIds, table: stepStatusTable },
   { lookup: StepTypeIds, table: stepTypeTable },
+  { lookup: AttemptTypeIds, table: attemptTypeTable },
 ];
 
 // ---------------------------------------------------------------------------
@@ -122,3 +129,23 @@ export const workflowLocks = pgTable("wf_workflow_locks", {
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   lockedBy: text("locked_by"),
 });
+
+export const stepAttempts = pgTable(
+  "wf_step_attempts",
+  {
+    workflowId: text("workflow_id").notNull(),
+    stepName: text("step_name").notNull(),
+    attempt: integer("attempt").notNull(),
+    attemptTypeId: integer("attempt_type_id").notNull(),
+    statusId: integer("status_id").notNull(),
+    result: jsonb("result"),
+    error: text("error"),
+    durationMs: bigint("duration_ms", { mode: "number" }),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workflowId, t.stepName, t.attempt, t.attemptTypeId] }),
+    index("wf_step_attempts_workflow_idx").on(t.workflowId),
+  ],
+);

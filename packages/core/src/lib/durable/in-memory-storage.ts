@@ -2,19 +2,21 @@
 // InMemoryWorkflowStorage — for testing
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage } from "./workflow-storage.ts";
+import type { WorkflowStorage, StepAttemptStorage } from "./workflow-storage.ts";
 import type {
   WorkflowState,
   WorkflowStatus,
   StepState,
   StepTaskState,
   SignalState,
+  StepAttemptRecord,
 } from "./workflow-state.ts";
 
-export class InMemoryWorkflowStorage implements WorkflowStorage {
+export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStorage {
   private workflows = new Map<string, WorkflowState>();
   private locks = new Map<string, { expiresAt: number }>();
   private signals = new Map<string, SignalState[]>();
+  private attempts = new Map<string, StepAttemptRecord[]>();
 
   async loadWorkflow(workflowId: string): Promise<WorkflowState | null> {
     return this.workflows.get(workflowId) ?? null;
@@ -342,6 +344,25 @@ export class InMemoryWorkflowStorage implements WorkflowStorage {
     this.locks.set(workflowId, { expiresAt: Date.now() + lockDurationMs });
   }
 
+  // ---------------------------------------------------------------------------
+  // StepAttemptStorage — attempt history
+  // ---------------------------------------------------------------------------
+
+  async saveStepAttempt(record: StepAttemptRecord): Promise<void> {
+    const key = record.workflowId;
+    const existing = this.attempts.get(key) ?? [];
+    existing.push(record);
+    this.attempts.set(key, existing);
+  }
+
+  async loadStepAttempts(workflowId: string, stepName?: string): Promise<StepAttemptRecord[]> {
+    const all = this.attempts.get(workflowId) ?? [];
+    if (stepName) {
+      return all.filter((a) => a.stepName === stepName);
+    }
+    return all;
+  }
+
   /** Test helper: get the raw workflow state. */
   getWorkflow(workflowId: string): WorkflowState | undefined {
     return this.workflows.get(workflowId);
@@ -352,5 +373,6 @@ export class InMemoryWorkflowStorage implements WorkflowStorage {
     this.workflows.clear();
     this.locks.clear();
     this.signals.clear();
+    this.attempts.clear();
   }
 }

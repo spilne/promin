@@ -37,14 +37,17 @@ postgresDescribe("migrate", { migrate }, (pg) => {
 
   it("seeds lookup tables", async () => {
     const statuses = await pg.sql`SELECT * FROM wf_workflow_status ORDER BY id`;
-    expect(statuses.length).toBe(4);
+    expect(statuses.length).toBe(5); // running, completed, failed, suspended, compensating
     expect(statuses[0]!.name).toBe("running");
 
     const stepStatuses = await pg.sql`SELECT * FROM wf_step_status ORDER BY id`;
-    expect(stepStatuses.length).toBe(7);
+    expect(stepStatuses.length).toBe(9); // +compensated, compensation_failed
 
     const stepTypes = await pg.sql`SELECT * FROM wf_step_type ORDER BY id`;
     expect(stepTypes.length).toBe(4);
+
+    const attemptTypes = await pg.sql`SELECT * FROM wf_attempt_type ORDER BY id`;
+    expect(attemptTypes.length).toBe(2); // execution, compensation
   });
 
   it("is idempotent", async () => {

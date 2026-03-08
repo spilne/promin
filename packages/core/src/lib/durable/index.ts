@@ -14,7 +14,11 @@ export {
   type StepFailureStrategy,
   type CompensateConfig,
 } from "./durable-pipeline.ts";
-export { type WorkflowStorage } from "./workflow-storage.ts";
+export {
+  type WorkflowStorage,
+  type StepAttemptStorage,
+  isStepAttemptStorage,
+} from "./workflow-storage.ts";
 export {
   type WorkflowState,
   type StepState,
@@ -24,6 +28,8 @@ export {
   type StepStatus,
   type StepType,
   type CompensationStatus,
+  type StepAttemptRecord,
+  type StepAttemptType,
 } from "./workflow-state.ts";
 export { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
 export {

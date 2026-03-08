@@ -17,7 +17,12 @@ export {
 } from "./lib/lookup-table.ts";
 
 // Workflow-specific lookups (core enums → integer IDs)
-export { WorkflowStatusIds, StepStatusIds, StepTypeIds } from "./lib/workflow-lookups.ts";
+export {
+  WorkflowStatusIds,
+  StepStatusIds,
+  StepTypeIds,
+  AttemptTypeIds,
+} from "./lib/workflow-lookups.ts";
 
 // Durable scheduler
 export {
@@ -44,5 +49,7 @@ export {
   workflowStatusTable,
   stepStatusTable,
   stepTypeTable,
+  stepAttempts,
+  attemptTypeTable,
   LOOKUP_BINDINGS,
 } from "./lib/schema.ts";

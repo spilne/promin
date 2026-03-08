@@ -136,6 +136,12 @@ export {
   type DagNode,
   trigger,
   WorkflowResult,
+  type CompensateConfig,
+  type CompensationStatus,
+  type StepAttemptRecord,
+  type StepAttemptType,
+  type StepAttemptStorage,
+  isStepAttemptStorage,
 } from "./lib/durable/index.ts";
 
 // Scheduler

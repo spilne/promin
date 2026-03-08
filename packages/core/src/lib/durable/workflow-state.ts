@@ -73,3 +73,22 @@ export interface SignalState {
   readonly payload: unknown;
   readonly deliveredAt: Date;
 }
+
+// ---------------------------------------------------------------------------
+// Step attempt history
+// ---------------------------------------------------------------------------
+
+export type StepAttemptType = "execution" | "compensation";
+
+export interface StepAttemptRecord {
+  readonly workflowId: string;
+  readonly stepName: string;
+  readonly attempt: number;
+  readonly type: StepAttemptType;
+  readonly status: "completed" | "failed";
+  readonly result?: unknown;
+  readonly error?: string;
+  readonly durationMs: number;
+  readonly startedAt: Date;
+  readonly completedAt: Date;
+}

@@ -2,7 +2,7 @@
 // Workflow lookup ID mappings — extends core string enums with integer IDs
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStatus, StepStatus, StepType } from "@ts-backend/core";
+import type { WorkflowStatus, StepStatus, StepType, StepAttemptType } from "@ts-backend/core";
 import { defineLookup } from "./lookup.ts";
 
 export const WorkflowStatusIds = defineLookup<WorkflowStatus>({
@@ -10,6 +10,7 @@ export const WorkflowStatusIds = defineLookup<WorkflowStatus>({
   completed: 2,
   failed: 3,
   suspended: 4,
+  compensating: 5,
 });
 
 export const StepStatusIds = defineLookup<StepStatus>({
@@ -20,6 +21,8 @@ export const StepStatusIds = defineLookup<StepStatus>({
   skipped: 5,
   sleeping: 6,
   waiting_for_signal: 7,
+  compensated: 8,
+  compensation_failed: 9,
 });
 
 export const StepTypeIds = defineLookup<StepType>({
@@ -27,4 +30,9 @@ export const StepTypeIds = defineLookup<StepType>({
   map: 2,
   sleep: 3,
   signal: 4,
+});
+
+export const AttemptTypeIds = defineLookup<StepAttemptType>({
+  execution: 1,
+  compensation: 2,
 });

@@ -21,6 +21,7 @@ import type { Codec } from "../typeclasses/codec.ts";
 import { JsonCodec } from "../typeclasses/codec.ts";
 import type { Show } from "../typeclasses/show.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
+import { isStepAttemptStorage } from "./workflow-storage.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
 import type { DagNode } from "./workflow-dag.ts";
 import { topologicalSort, computeReadySet } from "./workflow-dag.ts";
@@ -963,13 +964,27 @@ export class WorkflowBuilder<
               : (ready[0] ?? "unknown");
         const errorMsg =
           stepError instanceof globalThis.Error ? stepError.message : String(stepError);
+        const failStartedAt = new Date();
         await this._storage.saveStepFailure({
           workflowId,
           stepName,
           error: errorMsg,
           durationMs: 0,
-          startedAt: new Date(),
+          startedAt: failStartedAt,
         });
+        if (isStepAttemptStorage(this._storage)) {
+          await this._storage.saveStepAttempt({
+            workflowId,
+            stepName,
+            attempt: params.stepAttempts.get(stepName) ?? 1,
+            type: "execution",
+            status: "failed",
+            error: errorMsg,
+            durationMs: 0,
+            startedAt: failStartedAt,
+            completedAt: new Date(),
+          });
+        }
         await this._hooks?.onStepFailure?.({
           workflowId,
           stepName,
@@ -989,6 +1004,19 @@ export class WorkflowBuilder<
           durationMs,
           startedAt,
         });
+        if (isStepAttemptStorage(this._storage)) {
+          await this._storage.saveStepAttempt({
+            workflowId,
+            stepName: name,
+            attempt: params.stepAttempts.get(name) ?? 1,
+            type: "execution",
+            status: "completed",
+            result,
+            durationMs,
+            startedAt,
+            completedAt: new Date(),
+          });
+        }
         await this._hooks?.onStepComplete?.({ workflowId, stepName: name, result, durationMs });
         results[name] = result;
         completed.add(name);
@@ -1036,8 +1064,11 @@ export class WorkflowBuilder<
     const maxCompRetries = retryConfig?.maxRetries ?? 0;
     const compRetryDelayMs = retryConfig?.baseDelayMs ?? 500;
 
+    const recordsAttempts = isStepAttemptStorage(this._storage);
+
     for (const { stepDef, result } of stepsToCompensate) {
       for (let attempt = 0; attempt <= maxCompRetries; attempt++) {
+        const compStartedAt = new Date();
         try {
           if (attempt > 0) {
             await new Promise((r) => setTimeout(r, compRetryDelayMs * Math.pow(2, attempt - 1)));
@@ -1052,10 +1083,34 @@ export class WorkflowBuilder<
             await compensateResult;
           }
           compensated.push(stepDef.name);
+          if (recordsAttempts) {
+            await (this._storage as any).saveStepAttempt({
+              workflowId,
+              stepName: stepDef.name,
+              attempt: attempt + 1,
+              type: "compensation",
+              status: "completed",
+              durationMs: Date.now() - compStartedAt.getTime(),
+              startedAt: compStartedAt,
+              completedAt: new Date(),
+            });
+          }
           break;
         } catch (err) {
+          if (recordsAttempts) {
+            await (this._storage as any).saveStepAttempt({
+              workflowId,
+              stepName: stepDef.name,
+              attempt: attempt + 1,
+              type: "compensation",
+              status: "failed",
+              error: err instanceof Error ? err.message : String(err),
+              durationMs: Date.now() - compStartedAt.getTime(),
+              startedAt: compStartedAt,
+              completedAt: new Date(),
+            });
+          }
           if (attempt === maxCompRetries) {
-            // All retries exhausted — record failure, continue with others
             failed.push({ stepName: stepDef.name, error: err });
           }
         }

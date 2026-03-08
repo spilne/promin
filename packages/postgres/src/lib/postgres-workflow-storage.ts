@@ -5,6 +5,7 @@
 import { eq, and, sql, desc } from "drizzle-orm";
 import type {
   WorkflowStorage,
+  StepAttemptStorage,
   WorkflowState,
   WorkflowStatus,
   StepStatus,
@@ -12,6 +13,7 @@ import type {
   StepState,
   StepTaskState,
   SignalState,
+  StepAttemptRecord,
 } from "@ts-backend/core";
 import {
   workflows,
@@ -19,9 +21,15 @@ import {
   workflowStepTasks,
   workflowSignals,
   workflowLocks,
+  stepAttempts,
   LOOKUP_BINDINGS,
 } from "./schema.ts";
-import { WorkflowStatusIds, StepStatusIds, StepTypeIds } from "./workflow-lookups.ts";
+import {
+  WorkflowStatusIds,
+  StepStatusIds,
+  StepTypeIds,
+  AttemptTypeIds,
+} from "./workflow-lookups.ts";
 import { seedLookupEnums, validateLookupEnums } from "./lookup-table.ts";
 import type { PostgresStorageConfig } from "./config.ts";
 import { resolveConfig } from "./config.ts";
@@ -45,7 +53,7 @@ function hashToInt32(str: string): number {
 // PostgresWorkflowStorage
 // ---------------------------------------------------------------------------
 
-export class PostgresWorkflowStorage implements WorkflowStorage {
+export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStorage {
   private readonly config: Required<PostgresStorageConfig>;
 
   private constructor(config: Required<PostgresStorageConfig>) {
@@ -501,5 +509,55 @@ export class PostgresWorkflowStorage implements WorkflowStorage {
     `,
     );
     return !!result;
+  }
+
+  // ---------------------------------------------------------------------------
+  // StepAttemptStorage — attempt history (opt-in via recordAttempts config)
+  // ---------------------------------------------------------------------------
+
+  async saveStepAttempt(record: StepAttemptRecord): Promise<void> {
+    if (!this.config.recordAttempts) return;
+
+    await this.db.insert(stepAttempts).values({
+      workflowId: record.workflowId,
+      stepName: record.stepName,
+      attempt: record.attempt,
+      attemptTypeId: AttemptTypeIds.toId(record.type),
+      statusId: StepStatusIds.toId(record.status === "completed" ? "completed" : "failed"),
+      result: record.result,
+      error: record.error,
+      durationMs: record.durationMs,
+      startedAt: record.startedAt,
+      completedAt: record.completedAt,
+    });
+  }
+
+  async loadStepAttempts(workflowId: string, stepName?: string): Promise<StepAttemptRecord[]> {
+    const query = this.db.select().from(stepAttempts).$dynamic();
+    if (stepName) {
+      query.where(
+        and(eq(stepAttempts.workflowId, workflowId), eq(stepAttempts.stepName, stepName)),
+      );
+    } else {
+      query.where(eq(stepAttempts.workflowId, workflowId));
+    }
+    query.orderBy(stepAttempts.stepName, stepAttempts.attempt);
+
+    const rows = await query;
+    return rows.map((r: any) => ({
+      workflowId: r.workflowId,
+      stepName: r.stepName,
+      attempt: r.attempt,
+      type: AttemptTypeIds.toName(r.attemptTypeId),
+      status:
+        StepStatusIds.toName(r.statusId) === "completed"
+          ? ("completed" as const)
+          : ("failed" as const),
+      result: r.result ?? undefined,
+      error: r.error ?? undefined,
+      durationMs: Number(r.durationMs ?? 0),
+      startedAt: r.startedAt,
+      completedAt: r.completedAt,
+    }));
   }
 }

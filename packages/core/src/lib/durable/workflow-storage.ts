@@ -2,7 +2,12 @@
 // WorkflowStorage — pluggable persistence interface
 // ---------------------------------------------------------------------------
 
-import type { WorkflowState, WorkflowStatus, SignalState } from "./workflow-state.ts";
+import type {
+  WorkflowState,
+  WorkflowStatus,
+  SignalState,
+  StepAttemptRecord,
+} from "./workflow-state.ts";
 
 export interface WorkflowStorage {
   /** Load the full workflow state. Returns null if workflow doesn't exist. */
@@ -92,4 +97,30 @@ export interface WorkflowStorage {
 
   /** Heartbeat to extend a lock (for long-running steps). */
   heartbeat(workflowId: string, lockDurationMs: number): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// StepAttemptStorage — optional interface for recording attempt history
+// ---------------------------------------------------------------------------
+
+/**
+ * Optional storage extension for recording step attempt history.
+ * Implementations that support this append a record for every execution
+ * and compensation attempt, enabling audit trails and retry analysis.
+ *
+ * The engine detects this at runtime via `isStepAttemptStorage()`.
+ */
+export interface StepAttemptStorage {
+  /** Append a step attempt record (execution or compensation). */
+  saveStepAttempt(record: StepAttemptRecord): Promise<void>;
+
+  /** Load attempt history for a workflow, optionally filtered by step name. */
+  loadStepAttempts(workflowId: string, stepName?: string): Promise<StepAttemptRecord[]>;
+}
+
+/** Runtime check for whether a storage implementation supports attempt history. */
+export function isStepAttemptStorage(
+  storage: WorkflowStorage,
+): storage is WorkflowStorage & StepAttemptStorage {
+  return "saveStepAttempt" in storage && typeof (storage as any).saveStepAttempt === "function";
 }
