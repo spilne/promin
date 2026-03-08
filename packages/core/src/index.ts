@@ -142,6 +142,7 @@ export {
   type StepAttemptType,
   type StepAttemptStorage,
   isStepAttemptStorage,
+  type FailedWorkflowRecord,
 } from "./lib/durable/index.ts";
 
 // Scheduler

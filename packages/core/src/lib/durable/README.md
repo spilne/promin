@@ -292,127 +292,80 @@ import { validateWorkflowSchema } from "@ts-backend/core";
 const schema = validateWorkflowSchema(req.body); // throws ZodError on invalid
 ```
 
-## Planned: Subworkflows
+### Subworkflows
 
-Ergonomic child workflow composition with parent-child tracking.
-
-### Layer 1: `invoke()` — the primitive
-
-`WorkflowDefinition.invoke()` returns a `Pipeline` directly — no `Pipeline.fromPromise()` wrapping needed:
+Child workflow composition with parent-child tracking.
 
 ```typescript
 const enrichUser = workflow<{ userId: string }>({ name: "enrich", storage })
-  .step("fetch-profile", ({ input }) => api.get(`/profiles/${input.userId}`))
-  .step("fetch-scores", ({ prev }) => api.get(`/scores/${prev.id}`))
+  .step("fetch", ({ input }) => api.get(`/profiles/${input.userId}`))
   .build();
 
-// Use inside any step — invoke() returns Pipeline<Output, E>
+// .subworkflow() — builder sugar
 workflow<{ userId: string }>({ name: "onboard", storage })
-  .step("create-account", ({ input }) => api.post("/accounts", { json: input }))
-  .step("enrich", ({ prev }) =>
-    enrichUser.invoke({
-      workflowId: `enrich-${prev.accountId}`,
-      input: { userId: prev.userId },
-    })
-  )
-  .run({ ... });
-```
-
-`invoke()` vs `run()`:
-
-- `run()` returns `Promise<Output>` — for imperative use
-- `invoke()` returns `Pipeline<Output, E>` — composable, retryable, can chain `.timeout()`, `.retry()`, etc.
-- `invoke()` automatically sets `parentWorkflowId` for tracking
-
-### Layer 2: `.subworkflow()` — builder sugar
-
-For the common "call a child workflow with data from the previous step" pattern:
-
-```typescript
-workflow<{ userId: string }>({ name: "onboard", storage })
-  .step("create-account", ({ input }) => api.post("/accounts", { json: input }))
+  .step("create", ({ input }) => api.post("/accounts", { json: input }))
   .subworkflow("enrich", enrichUser, {
-    input: (prev) => ({ userId: prev.userId }),
-    workflowId: (prev) => `enrich-${prev.accountId}`,
+    input: (prev) => ({ userId: prev.id }),
+    workflowId: (prev) => `enrich-${prev.id}`,
   })
-  .step("notify", ({ prev }) => Pipeline.succeed(`Enriched: ${prev.score}`))
-  .run({ ... });
+  .step("notify", ({ prev }) => Pipeline.succeed(`Score: ${prev.score}`))
+  .run({ workflowId: "onboard-1", input: { userId: "u_42" } });
+
+// .invoke() — primitive for use inside any step
+.step("enrich", ({ prev }) =>
+  enrichUser.invoke({
+    workflowId: `enrich-${prev.id}`,
+    input: { userId: prev.id },
+  })
+)
+
+// Fan-out — mapOver + invoke
+.mapOver("process-all", { array: "get-items", concurrency: 10 }, (itemId) =>
+  processItem.invoke({ workflowId: `item-${itemId}`, input: { itemId } })
+)
+
+// Parent-child tracking
+const children = await storage.listWorkflows({ parentId: "onboard-1" });
+await storage.cancelWorkflow("onboard-1", { cascade: true }); // cancels children too
 ```
 
-Equivalent to a `.step()` that calls `.invoke()` — but less boilerplate.
+### Dead Letter Queue
 
-### Layer 3: Fan-out — mapOver + invoke
-
-No new API needed. `invoke()` returns Pipeline, `mapOver` accepts Pipeline:
+Failed workflows (after all retries + compensation) are published to a configurable DLQ. Works with any `Sinkable<FailedWorkflowRecord>` — PgQueue, PgmqQueue, or custom.
 
 ```typescript
-const processItem = workflow<{ itemId: string }>({ name: "process-item", storage })
-  .step("fetch", ({ input }) => api.get(`/items/${input.itemId}`))
-  .step("transform", ({ prev }) => Pipeline.succeed(transform(prev)))
-  .build();
+import { PgQueue } from "@ts-backend/postgres";
 
-workflow<{ items: string[] }>({ name: "batch", storage })
-  .step("get-items", ({ input }) => Pipeline.succeed(input.items))
-  .mapOver("process-all", { array: "get-items", concurrency: 10 }, (itemId) =>
-    processItem.invoke({
-      workflowId: `item-${itemId}`,
-      input: { itemId },
-    })
-  )
-  .run({ ... });
-```
+const dlq = await PgQueue.create<FailedWorkflowRecord>(db, "workflow-dlq");
 
-Each child workflow is independently durable — if the parent crashes, completed children don't re-run.
-
-### Parent-Child Tracking
-
-```typescript
-// WorkflowState gains parentWorkflowId
-interface WorkflowState {
-  parentWorkflowId?: string;
-  // ... existing fields
-}
-
-// Query children of a workflow
-const children = await storage.listWorkflows({ parentId: "onboard-123" });
-
-// Cascade cancel — cancel parent + all children
-await storage.cancelWorkflow("onboard-123", { cascade: true });
-```
-
-### SubworkflowAsync — Promise convenience
-
-```typescript
-.subworkflowAsync("enrich", enrichUser, {
-  input: async (prev) => {
-    const extra = await fetchExtra(prev.id);
-    return { userId: prev.userId, extra };
-  },
-  workflowId: (prev) => `enrich-${prev.accountId}`,
+workflow<{ orderId: string }>({
+  name: "process-order",
+  storage,
+  retry: { maxRetries: 3 },
+  dlq,
 })
+  .step("charge", fn)
+  .step("fulfill", fn)
+  .run({ workflowId: "order-1", input: { orderId: "ord_42" } });
+
+// Failed workflow record includes:
+// - workflowId, workflowName, input, error, failedAt
+// - step states (which steps completed, which failed)
+// - compensatedSteps, failedCompensations
+// - metadata
+
+// Replay from DLQ
+await dlq.subscribeAck().forEach(async (envelope) => {
+  const failed = envelope.value;
+  await processOrder.run({
+    workflowId: `${failed.workflowId}-retry`,
+    input: failed.input as { orderId: string },
+  });
+  await envelope.ack();
+});
 ```
 
 ## Planned
-
-### DLQ Integration
-
-First-class dead letter queue support:
-
-```typescript
-import { PgmqQueue } from "@ts-backend/postgres";
-
-const dlq = await PgmqQueue.create(db, "workflow-dlq");
-
-workflow<Input>({
-  name: "process-events",
-  storage,
-  dlq,
-  dlqOptions: {
-    include: ["input", "error", "steps"],
-    when: "terminal-failure",
-  },
-});
-```
 
 ### RRULE Support
 

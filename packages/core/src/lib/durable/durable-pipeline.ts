@@ -20,6 +20,8 @@ import type { RetryPolicy } from "../retry.ts";
 import type { Codec } from "../typeclasses/codec.ts";
 import { JsonCodec } from "../typeclasses/codec.ts";
 import type { Show } from "../typeclasses/show.ts";
+import type { Sinkable } from "../typeclasses/streamable.ts";
+import type { FailedWorkflowRecord } from "./workflow-state.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
 import { isStepAttemptStorage } from "./workflow-storage.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
@@ -236,6 +238,7 @@ export class WorkflowBuilder<
     private readonly _metadata?: Record<string, unknown>,
     private readonly _retry?: RetryPolicy<TaggedError>,
     private readonly _compensateConfig?: CompensateConfig,
+    private readonly _dlq?: Sinkable<FailedWorkflowRecord>,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -828,6 +831,29 @@ export class WorkflowBuilder<
         durationMs: Date.now() - workflowStartTime,
       });
 
+      // Publish to DLQ
+      if (this._dlq) {
+        try {
+          const failedState = await this._storage.loadWorkflow(workflowId);
+          await this._dlq.publish({
+            workflowId,
+            workflowName: this._name,
+            input,
+            error: errorMsg,
+            failedAt: new Date(),
+            steps: failedState?.steps ?? {},
+            compensatedSteps: compensationReport.compensated,
+            failedCompensations: compensationReport.failed.map((f) => ({
+              stepName: f.stepName,
+              error: f.error instanceof Error ? f.error.message : String(f.error),
+            })),
+            metadata: this._metadata,
+          });
+        } catch {
+          // DLQ failure is swallowed — the original error is more important
+        }
+      }
+
       throw lastStepError;
     } finally {
       // 6. Release lock
@@ -1238,6 +1264,7 @@ export class WorkflowBuilder<
       this._metadata,
       this._retry,
       this._compensateConfig,
+      this._dlq,
     );
   }
 
@@ -1313,6 +1340,8 @@ export function workflow<Input>(params: {
   retry?: RetryPolicy<TaggedError>;
   /** Compensation configuration — controls when and how saga rollback runs. */
   compensate?: CompensateConfig;
+  /** Dead letter queue — failed workflows are published here after all retries + compensation. */
+  dlq?: Sinkable<FailedWorkflowRecord>;
 }): WorkflowBuilder<Input> {
   return new WorkflowBuilder(
     params.name,
@@ -1324,6 +1353,7 @@ export function workflow<Input>(params: {
     params.metadata,
     params.retry as RetryPolicy<TaggedError> | undefined,
     params.compensate,
+    params.dlq,
   );
 }
 

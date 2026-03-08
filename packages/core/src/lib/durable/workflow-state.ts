@@ -78,6 +78,26 @@ export interface SignalState {
 // Step attempt history
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Dead letter queue record
+// ---------------------------------------------------------------------------
+
+export interface FailedWorkflowRecord {
+  readonly workflowId: string;
+  readonly workflowName: string;
+  readonly input: unknown;
+  readonly error: string;
+  readonly failedAt: Date;
+  readonly steps: Record<string, StepState>;
+  readonly compensatedSteps: string[];
+  readonly failedCompensations: { stepName: string; error: string }[];
+  readonly metadata?: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Step attempt history
+// ---------------------------------------------------------------------------
+
 export type StepAttemptType = "execution" | "compensation";
 
 export interface StepAttemptRecord {

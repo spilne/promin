@@ -30,6 +30,7 @@ export {
   type CompensationStatus,
   type StepAttemptRecord,
   type StepAttemptType,
+  type FailedWorkflowRecord,
 } from "./workflow-state.ts";
 export { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
 export {
