@@ -184,3 +184,21 @@ export {
   type RollingFn,
   type CumulativeFn,
 } from "./lib/dataframe/index.ts";
+
+// Distributed workflow execution
+export {
+  type StepRegistry,
+  type StepHandler,
+  MapStepRegistry,
+  type StepQueue,
+  type StepTask,
+  InMemoryStepQueue,
+  type WorkflowCoordinator,
+  type CoordinatorConfig,
+  DefaultCoordinator,
+  createCoordinator,
+  type WorkflowWorker,
+  type WorkerConfig,
+  DefaultWorker,
+  createWorker,
+} from "./lib/distributed/index.ts";

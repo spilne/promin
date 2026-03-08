@@ -71,6 +71,7 @@ export interface MapStepContext<Input> {
 export interface WorkflowDefinition<Input, Output> {
   readonly name: string;
   readonly storage: WorkflowStorage;
+  readonly dag: WorkflowDAG;
   run(params: { workflowId: string; input: Input }): Promise<Output>;
   runSafe(params: {
     workflowId: string;
@@ -1206,6 +1207,7 @@ export class WorkflowBuilder<
     return {
       name: this._name,
       storage: this._storage,
+      dag: this.toJSON(),
       run: (params) => self.run(params),
       runSafe: (params) => self.runSafe(params) as any,
       invoke: (params) =>

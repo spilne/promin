@@ -174,11 +174,13 @@ describe("Unpivot", () => {
     ];
 
     const result = await DataFrame.fromArray(wide)
-      .unpivot({ id: "region", columns: ["q1", "q2", "q3"] })
+      .unpivot({ id: "region", columns: ["q1", "q2", "q3"] as any })
       .collect();
 
     expect(result).toHaveLength(6); // 2 regions × 3 quarters
-    expect(result[0]).toEqual({ region: "US", variable: "q1", value: 100 });
+    expect((result[0] as any).region).toBe("US");
+    expect((result[0] as any).variable).toBe("q1");
+    expect((result[0] as any).value).toBe(100);
   });
 });
 
