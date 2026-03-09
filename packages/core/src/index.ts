@@ -168,3 +168,14 @@ export {
   InMemoryScheduler,
   createScheduler,
 } from "./lib/scheduler/index.ts";
+
+// DataFrame
+export {
+  DataFrame,
+  GroupedDataFrame,
+  ArrayExecutor,
+  type DataFrameExecutor,
+  type ExecutionCost,
+  type LogicalPlan,
+  type AggFn,
+} from "./lib/dataframe/index.ts";
