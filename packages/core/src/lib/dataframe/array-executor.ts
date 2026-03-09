@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import type { DataFrameExecutor, ExecutionCost } from "./executor.ts";
-import type { LogicalPlan, AggFn } from "./logical-plan.ts";
+import type { LogicalPlan, AggFn, WindowFn, RollingFn, CumulativeFn } from "./logical-plan.ts";
 
 export class ArrayExecutor implements DataFrameExecutor {
   async execute<T>(plan: LogicalPlan): Promise<T[]> {
@@ -166,6 +166,37 @@ function executePlan(plan: LogicalPlan): unknown[] {
       const right = executePlan(plan.right);
       return executeJoin(left, right, plan.on, plan.type);
     }
+
+    case "Window":
+      return executeWindow(
+        executePlan(plan.input),
+        plan.name,
+        plan.fn,
+        plan.orderBy,
+        plan.partitionBy,
+        plan.args,
+      );
+
+    case "Pivot":
+      return executePivot(executePlan(plan.input), plan.index, plan.columns, plan.values, plan.agg);
+
+    case "Unpivot":
+      return executeUnpivot(executePlan(plan.input), plan.id, plan.columns);
+
+    case "Explode":
+      return executeExplode(executePlan(plan.input), plan.column);
+
+    case "Rolling":
+      return executeRolling(
+        executePlan(plan.input),
+        plan.column,
+        plan.window,
+        plan.fn,
+        plan.outputName,
+      );
+
+    case "Cumulative":
+      return executeCumulative(executePlan(plan.input), plan.column, plan.fn, plan.outputName);
   }
 }
 
@@ -288,4 +319,277 @@ function executeJoin(
       return left.filter((l) => !rightIndex.has((l as any)[on]));
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Window functions
+// ---------------------------------------------------------------------------
+
+function executeWindow(
+  rows: unknown[],
+  name: string,
+  fn: WindowFn,
+  orderBy: string,
+  partitionBy?: string,
+  args?: { offset?: number; n?: number; default?: unknown },
+): unknown[] {
+  // Partition rows
+  const partitions = partitionBy ? groupRowsBy(rows, partitionBy) : [rows];
+
+  const result: unknown[] = [];
+  for (const partition of partitions) {
+    // Sort within partition
+    const sorted = [...partition].sort((a: any, b: any) => {
+      if (a[orderBy] < b[orderBy]) return -1;
+      if (a[orderBy] > b[orderBy]) return 1;
+      return 0;
+    });
+
+    for (let i = 0; i < sorted.length; i++) {
+      const row = sorted[i] as any;
+      let value: unknown;
+
+      switch (fn) {
+        case "row_number":
+          value = i + 1;
+          break;
+        case "rank": {
+          let rank = 1;
+          for (let j = 0; j < i; j++) {
+            if ((sorted[j] as any)[orderBy] !== row[orderBy]) rank = j + 1;
+          }
+          if (i > 0 && (sorted[i - 1] as any)[orderBy] !== row[orderBy]) rank = i + 1;
+          value = rank;
+          break;
+        }
+        case "dense_rank": {
+          const uniqueVals = [...new Set(sorted.map((r: any) => r[orderBy]))];
+          value = uniqueVals.indexOf(row[orderBy]) + 1;
+          break;
+        }
+        case "lag": {
+          const offset = args?.offset ?? 1;
+          value = i - offset >= 0 ? (sorted[i - offset] as any)[orderBy] : (args?.default ?? null);
+          break;
+        }
+        case "lead": {
+          const offset = args?.offset ?? 1;
+          value =
+            i + offset < sorted.length
+              ? (sorted[i + offset] as any)[orderBy]
+              : (args?.default ?? null);
+          break;
+        }
+        case "running_total":
+        case "sum": {
+          let sum = 0;
+          for (let j = 0; j <= i; j++) sum += Number((sorted[j] as any)[orderBy] ?? 0);
+          value = sum;
+          break;
+        }
+        case "avg": {
+          let sum = 0;
+          for (let j = 0; j <= i; j++) sum += Number((sorted[j] as any)[orderBy] ?? 0);
+          value = sum / (i + 1);
+          break;
+        }
+        case "min": {
+          let min = Number((sorted[0] as any)[orderBy]);
+          for (let j = 1; j <= i; j++) min = Math.min(min, Number((sorted[j] as any)[orderBy]));
+          value = min;
+          break;
+        }
+        case "max": {
+          let max = Number((sorted[0] as any)[orderBy]);
+          for (let j = 1; j <= i; j++) max = Math.max(max, Number((sorted[j] as any)[orderBy]));
+          value = max;
+          break;
+        }
+        case "first":
+          value = (sorted[0] as any)[orderBy];
+          break;
+        case "last":
+          value = (sorted[i] as any)[orderBy];
+          break;
+        case "ntile": {
+          const n = args?.n ?? 4;
+          value = Math.floor((i * n) / sorted.length) + 1;
+          break;
+        }
+      }
+
+      result.push({ ...row, [name]: value });
+    }
+  }
+  return result;
+}
+
+function groupRowsBy(rows: unknown[], column: string): unknown[][] {
+  const groups = new Map<unknown, unknown[]>();
+  for (const row of rows) {
+    const key = (row as any)[column];
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(row);
+  }
+  return [...groups.values()];
+}
+
+// ---------------------------------------------------------------------------
+// Pivot / Unpivot
+// ---------------------------------------------------------------------------
+
+function executePivot(
+  rows: unknown[],
+  index: string,
+  columns: string,
+  values: string,
+  agg: AggFn,
+): unknown[] {
+  // Group by index
+  const groups = new Map<unknown, Map<unknown, unknown[]>>();
+  for (const row of rows) {
+    const idx = (row as any)[index];
+    const col = (row as any)[columns];
+    const val = (row as any)[values];
+    if (!groups.has(idx)) groups.set(idx, new Map());
+    const colMap = groups.get(idx)!;
+    if (!colMap.has(col)) colMap.set(col, []);
+    colMap.get(col)!.push(val);
+  }
+
+  const result: unknown[] = [];
+  for (const [idx, colMap] of groups) {
+    const row: Record<string, unknown> = { [index]: idx };
+    for (const [col, vals] of colMap) {
+      row[String(col)] = computeAgg(
+        vals.map((v) => ({ [values]: v })),
+        values,
+        agg,
+      );
+    }
+    result.push(row);
+  }
+  return result;
+}
+
+function executeUnpivot(rows: unknown[], id: string, columns: string[]): unknown[] {
+  const result: unknown[] = [];
+  for (const row of rows) {
+    for (const col of columns) {
+      result.push({
+        [id]: (row as any)[id],
+        variable: col,
+        value: (row as any)[col],
+      });
+    }
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Explode
+// ---------------------------------------------------------------------------
+
+function executeExplode(rows: unknown[], column: string): unknown[] {
+  const result: unknown[] = [];
+  for (const row of rows) {
+    const arr = (row as any)[column];
+    if (Array.isArray(arr)) {
+      for (const item of arr) {
+        result.push({ ...(row as any), [column]: item });
+      }
+    } else {
+      result.push(row);
+    }
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Rolling windows
+// ---------------------------------------------------------------------------
+
+function executeRolling(
+  rows: unknown[],
+  column: string,
+  window: number,
+  fn: RollingFn,
+  outputName: string,
+): unknown[] {
+  return rows.map((row, i) => {
+    const start = Math.max(0, i - window + 1);
+    const windowSlice = rows.slice(start, i + 1).map((r: any) => Number(r[column]));
+    let value: number;
+
+    switch (fn) {
+      case "mean":
+        value = windowSlice.reduce((a, b) => a + b, 0) / windowSlice.length;
+        break;
+      case "sum":
+        value = windowSlice.reduce((a, b) => a + b, 0);
+        break;
+      case "min":
+        value = Math.min(...windowSlice);
+        break;
+      case "max":
+        value = Math.max(...windowSlice);
+        break;
+      case "std": {
+        const mean = windowSlice.reduce((a, b) => a + b, 0) / windowSlice.length;
+        const variance = windowSlice.reduce((a, v) => a + (v - mean) ** 2, 0) / windowSlice.length;
+        value = Math.sqrt(variance);
+        break;
+      }
+    }
+
+    return { ...(row as any), [outputName]: value };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Cumulative operations
+// ---------------------------------------------------------------------------
+
+function executeCumulative(
+  rows: unknown[],
+  column: string,
+  fn: CumulativeFn,
+  outputName: string,
+): unknown[] {
+  let acc: number | null = null;
+
+  return rows.map((row, i) => {
+    const val = Number((row as any)[column]);
+    let result: number;
+
+    switch (fn) {
+      case "sum":
+        acc = (acc ?? 0) + val;
+        result = acc;
+        break;
+      case "prod":
+        acc = (acc ?? 1) * val;
+        result = acc;
+        break;
+      case "min":
+        acc = acc == null ? val : Math.min(acc, val);
+        result = acc;
+        break;
+      case "max":
+        acc = acc == null ? val : Math.max(acc, val);
+        result = acc;
+        break;
+      case "pctChange":
+        if (i === 0 || acc == null) {
+          result = 0;
+          acc = val;
+        } else {
+          result = acc === 0 ? 0 : (val - acc) / acc;
+          acc = val;
+        }
+        break;
+    }
+
+    return { ...(row as any), [outputName]: result };
+  });
 }

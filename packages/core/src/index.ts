@@ -174,8 +174,13 @@ export {
   DataFrame,
   GroupedDataFrame,
   ArrayExecutor,
+  StringAccessor,
+  DateAccessor,
   type DataFrameExecutor,
   type ExecutionCost,
   type LogicalPlan,
   type AggFn,
+  type WindowFn,
+  type RollingFn,
+  type CumulativeFn,
 } from "./lib/dataframe/index.ts";

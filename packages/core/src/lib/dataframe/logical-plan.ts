@@ -16,7 +16,13 @@ export type LogicalPlan =
   | DistinctPlan
   | GroupByPlan
   | JoinPlan
-  | SlicePlan;
+  | SlicePlan
+  | WindowPlan
+  | PivotPlan
+  | UnpivotPlan
+  | ExplodePlan
+  | RollingPlan
+  | CumulativePlan;
 
 export interface SourcePlan {
   readonly _tag: "Source";
@@ -108,4 +114,72 @@ export interface SlicePlan {
   readonly input: LogicalPlan;
   readonly start: number;
   readonly end?: number;
+}
+
+export type WindowFn =
+  | "row_number"
+  | "rank"
+  | "dense_rank"
+  | "lag"
+  | "lead"
+  | "sum"
+  | "avg"
+  | "min"
+  | "max"
+  | "running_total"
+  | "first"
+  | "last"
+  | "ntile";
+
+export interface WindowPlan {
+  readonly _tag: "Window";
+  readonly input: LogicalPlan;
+  readonly name: string;
+  readonly partitionBy?: string;
+  readonly orderBy: string;
+  readonly fn: WindowFn;
+  readonly args?: { offset?: number; n?: number; default?: unknown };
+}
+
+export interface PivotPlan {
+  readonly _tag: "Pivot";
+  readonly input: LogicalPlan;
+  readonly index: string;
+  readonly columns: string;
+  readonly values: string;
+  readonly agg: AggFn;
+}
+
+export interface UnpivotPlan {
+  readonly _tag: "Unpivot";
+  readonly input: LogicalPlan;
+  readonly id: string;
+  readonly columns: string[];
+}
+
+export interface ExplodePlan {
+  readonly _tag: "Explode";
+  readonly input: LogicalPlan;
+  readonly column: string;
+}
+
+export type RollingFn = "mean" | "sum" | "min" | "max" | "std";
+
+export interface RollingPlan {
+  readonly _tag: "Rolling";
+  readonly input: LogicalPlan;
+  readonly column: string;
+  readonly window: number;
+  readonly fn: RollingFn;
+  readonly outputName: string;
+}
+
+export type CumulativeFn = "sum" | "prod" | "min" | "max" | "pctChange";
+
+export interface CumulativePlan {
+  readonly _tag: "Cumulative";
+  readonly input: LogicalPlan;
+  readonly column: string;
+  readonly fn: CumulativeFn;
+  readonly outputName: string;
 }
