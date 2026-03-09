@@ -7,6 +7,7 @@
 
 import { Effect, Stream, Duration, Option } from "effect";
 import { Cron } from "croner";
+import { RRule } from "rrule";
 import { StreamPipeline } from "../stream-pipeline.ts";
 import { JsonCodec } from "../typeclasses/codec.ts";
 import type { Codec } from "../typeclasses/codec.ts";
@@ -71,11 +72,14 @@ export class InMemoryScheduler implements Scheduler {
    * @throws If neither `cron` nor `intervalMs` is provided, or if cron is invalid.
    */
   register(config: ScheduleConfig): void {
-    if (!config.cron && !config.intervalMs) {
-      throw new Error(`Schedule "${config.id}" must have either cron or intervalMs`);
+    const triggers = [config.cron, config.rrule, config.intervalMs].filter(Boolean).length;
+    if (triggers === 0) {
+      throw new Error(`Schedule "${config.id}" must have one of: cron, rrule, or intervalMs`);
     }
-    if (config.cron && config.intervalMs) {
-      throw new Error(`Schedule "${config.id}" cannot have both cron and intervalMs`);
+    if (triggers > 1) {
+      throw new Error(
+        `Schedule "${config.id}" must have exactly one of: cron, rrule, or intervalMs`,
+      );
     }
     if (config.cron) {
       try {
@@ -84,6 +88,13 @@ export class InMemoryScheduler implements Scheduler {
         throw new Error(
           `Invalid cron expression "${config.cron}" for schedule "${config.id}": ${e}`,
         );
+      }
+    }
+    if (config.rrule) {
+      try {
+        RRule.fromString(config.rrule);
+      } catch (e) {
+        throw new Error(`Invalid RRULE "${config.rrule}" for schedule "${config.id}": ${e}`);
       }
     }
     this.schedules.set(config.id, { ...config, paused: config.enabled === false });
@@ -202,7 +213,9 @@ function computeAndSleep(
   const now = new Date();
   const nextFireTime = config.cron
     ? getNextCronTime(config.cron, config.timezone ?? "UTC", now)
-    : new Date(now.getTime() + (config.intervalMs ?? 1000));
+    : config.rrule
+      ? getNextRruleTime(config.rrule, now)
+      : new Date(now.getTime() + (config.intervalMs ?? 1000));
 
   const sleepMs = Math.max(0, nextFireTime.getTime() - now.getTime());
 
@@ -228,6 +241,15 @@ function getNextCronTime(expression: string, timezone: string, after: Date): Dat
     throw new Error(
       `Cron expression "${expression}" has no next fire time after ${after.toISOString()}`,
     );
+  }
+  return next;
+}
+
+function getNextRruleTime(rruleStr: string, after: Date): Date {
+  const rule = RRule.fromString(rruleStr);
+  const next = rule.after(after, false);
+  if (!next) {
+    throw new Error(`RRULE "${rruleStr}" has no next occurrence after ${after.toISOString()}`);
   }
   return next;
 }

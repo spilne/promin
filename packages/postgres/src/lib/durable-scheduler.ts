@@ -12,6 +12,7 @@
 
 import { Effect, Stream, Duration, Schedule } from "effect";
 import { Cron } from "croner";
+import { RRule } from "rrule";
 import { eq, sql } from "drizzle-orm";
 import { StreamPipeline, JsonCodec } from "@promin/core";
 import type { Scheduler, ScheduleConfig, ScheduleTick, Codec } from "@promin/core";
@@ -137,11 +138,20 @@ export class DurableScheduler implements Scheduler {
    * @throws If neither `cron` nor `intervalMs` is provided, or if cron is invalid.
    */
   async registerAsync(config: DurableScheduleConfig | ScheduleConfig): Promise<void> {
-    if (!config.cron && !config.intervalMs) {
-      throw new Error(`Schedule "${config.id}" must have either cron or intervalMs`);
+    const triggers = [config.cron, config.rrule, config.intervalMs].filter(Boolean).length;
+    if (triggers === 0) {
+      throw new Error(`Schedule "${config.id}" must have one of: cron, rrule, or intervalMs`);
+    }
+    if (triggers > 1) {
+      throw new Error(
+        `Schedule "${config.id}" must have exactly one of: cron, rrule, or intervalMs`,
+      );
     }
     if (config.cron) {
       new Cron(config.cron, { timezone: config.timezone ?? "UTC" }); // validate
+    }
+    if (config.rrule) {
+      RRule.fromString(config.rrule); // validate
     }
 
     const durable = config as DurableScheduleConfig;
@@ -151,6 +161,7 @@ export class DurableScheduler implements Scheduler {
         id: config.id,
         name: config.name,
         cron: config.cron,
+        rrule: config.rrule,
         intervalMs: config.intervalMs,
         timezone: config.timezone ?? "UTC",
         overlapPolicy: durable.overlapPolicy ?? "allow",
@@ -166,6 +177,7 @@ export class DurableScheduler implements Scheduler {
         set: {
           name: config.name,
           cron: config.cron,
+          rrule: config.rrule,
           intervalMs: config.intervalMs,
           timezone: config.timezone ?? "UTC",
           overlapPolicy: durable.overlapPolicy ?? "allow",
@@ -224,18 +236,34 @@ export class DurableScheduler implements Scheduler {
       .select()
       .from(durableSchedules)
       .where(eq(durableSchedules.id, scheduleId));
-    if (!row?.cron) return [];
+    if (!row) return [];
 
-    const cron = new Cron(row.cron, { timezone: row.timezone ?? "UTC" });
-    const times: Date[] = [];
-    let cursor = new Date();
-    for (let i = 0; i < count; i++) {
-      const next = cron.nextRun(cursor);
-      if (!next) break;
-      times.push(next);
-      cursor = new Date(next.getTime() + 1);
+    if (row.cron) {
+      const cron = new Cron(row.cron, { timezone: row.timezone ?? "UTC" });
+      const times: Date[] = [];
+      let cursor = new Date();
+      for (let i = 0; i < count; i++) {
+        const next = cron.nextRun(cursor);
+        if (!next) break;
+        times.push(next);
+        cursor = new Date(next.getTime() + 1);
+      }
+      return times;
     }
-    return times;
+
+    if (row.rrule) {
+      const rule = RRule.fromString(row.rrule);
+      const now = new Date();
+      // Get count+1 occurrences after now, skip the first if it's exactly now
+      const occurrences = rule.between(
+        now,
+        new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000),
+        true,
+      );
+      return occurrences.slice(0, count);
+    }
+
+    return [];
   }
 
   /** Manually trigger a schedule now. */
@@ -267,34 +295,47 @@ export class DurableScheduler implements Scheduler {
       .select()
       .from(durableSchedules)
       .where(eq(durableSchedules.id, scheduleId));
-    if (!row?.cron) return [];
+    if (!row) return [];
 
-    const cron = new Cron(row.cron, { timezone: row.timezone ?? "UTC" });
-    const ticks: ScheduleTick[] = [];
-    let cursor = params.from;
     let tickNumber = await this.getNextTickNumber(scheduleId);
+    const ticks: ScheduleTick[] = [];
 
-    while (cursor < params.to) {
-      const next = cron.nextRun(cursor);
-      if (!next || next >= params.to) break;
+    const occurrences = row.cron
+      ? this.backfillCronOccurrences(row.cron, row.timezone ?? "UTC", params.from, params.to)
+      : row.rrule
+        ? RRule.fromString(row.rrule).between(params.from, params.to, false)
+        : [];
 
+    for (const scheduledAt of occurrences) {
       const now = new Date();
       const tick: ScheduleTick = {
         scheduleId,
         scheduleName: row.name ?? undefined,
-        scheduledAt: next,
+        scheduledAt,
         firedAt: now,
         tickNumber,
         metadata: row.metadata as Record<string, unknown> | undefined,
       };
 
-      await this.recordTick(scheduleId, next, now, true, tickNumber);
+      await this.recordTick(scheduleId, scheduledAt, now, true, tickNumber);
       ticks.push(tick);
-      cursor = new Date(next.getTime() + 1);
       tickNumber++;
     }
 
     return ticks;
+  }
+
+  private backfillCronOccurrences(cron: string, timezone: string, from: Date, to: Date): Date[] {
+    const c = new Cron(cron, { timezone });
+    const dates: Date[] = [];
+    let cursor = from;
+    while (cursor < to) {
+      const next = c.nextRun(cursor);
+      if (!next || next >= to) break;
+      dates.push(next);
+      cursor = new Date(next.getTime() + 1);
+    }
+    return dates;
   }
 
   // ---------------------------------------------------------------------------
@@ -362,6 +403,9 @@ export class DurableScheduler implements Scheduler {
     if (config.cron) {
       return this.computeCronDueTicks(config, now, lastFired, nextTickNumber);
     }
+    if (config.rrule) {
+      return this.computeRruleDueTicks(config, now, lastFired, nextTickNumber);
+    }
     if (config.intervalMs) {
       return this.computeIntervalDueTicks(config, now, lastFired, nextTickNumber);
     }
@@ -409,6 +453,43 @@ export class DurableScheduler implements Scheduler {
       cursor = new Date(next.getTime() + 1);
       tickNumber++;
       catchUpCount++;
+    }
+
+    return ticks;
+  }
+
+  private computeRruleDueTicks(
+    config: DurableScheduleConfig,
+    now: Date,
+    lastFired: Date | null,
+    startTickNumber: number,
+  ): ScheduleTick[] {
+    const rule = RRule.fromString(config.rrule!);
+    const ticks: ScheduleTick[] = [];
+    const maxCatchUp = config.maxCatchUp ?? 0;
+    const jitterMs = config.jitterMs ?? 0;
+
+    const after = lastFired ? new Date(lastFired.getTime() + 1) : new Date(now.getTime() - 1);
+    const occurrences = rule.between(after, now, true);
+
+    // Limit to maxCatchUp if lastFired exists
+    const limited =
+      lastFired && occurrences.length > maxCatchUp
+        ? occurrences.slice(occurrences.length - maxCatchUp)
+        : occurrences;
+
+    let tickNumber = startTickNumber;
+    for (const scheduledAt of limited) {
+      const jitter = jitterMs > 0 ? Math.random() * jitterMs : 0;
+      ticks.push({
+        scheduleId: config.id,
+        scheduleName: config.name,
+        scheduledAt,
+        firedAt: new Date(Date.now() + jitter),
+        tickNumber,
+        metadata: config.metadata,
+      });
+      tickNumber++;
     }
 
     return ticks;
@@ -503,6 +584,7 @@ function rowToConfig(row: any): DurableScheduleConfig {
     id: row.id,
     name: row.name ?? undefined,
     cron: row.cron ?? undefined,
+    rrule: row.rrule ?? undefined,
     intervalMs: row.intervalMs ? Number(row.intervalMs) : undefined,
     timezone: row.timezone,
     overlapPolicy: row.overlapPolicy,

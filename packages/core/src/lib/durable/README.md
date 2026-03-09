@@ -365,16 +365,26 @@ await dlq.subscribeAck().forEach(async (envelope) => {
 });
 ```
 
-## Planned
-
 ### RRULE Support
 
-Complex calendar recurrence via iCalendar RRULE:
+Complex calendar recurrence via iCalendar RRULE (RFC 5545). Three trigger types: `cron`, `rrule`, `intervalMs`.
 
 ```typescript
+// Biweekly on Tuesday at 10am
 scheduler.register({
   id: "biweekly-standup",
   rrule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU;BYHOUR=10",
-  timezone: "America/New_York",
+});
+
+// Quarterly on the 1st at 9am
+scheduler.register({
+  id: "quarterly-review",
+  rrule: "FREQ=MONTHLY;INTERVAL=3;BYMONTHDAY=1;BYHOUR=9",
+});
+
+// Every second Monday
+scheduler.register({
+  id: "sprint-planning",
+  rrule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=MO;BYHOUR=9;BYMINUTE=30",
 });
 ```

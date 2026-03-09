@@ -2,15 +2,17 @@
 // Scheduler types
 // ---------------------------------------------------------------------------
 
-/** A schedule definition — supports cron expressions or fixed intervals. */
+/** A schedule definition — supports cron expressions, RRULE, or fixed intervals. */
 export interface ScheduleConfig {
   readonly id: string;
   readonly name?: string;
-  /** Cron expression (5 or 6 field). Mutually exclusive with intervalMs. */
+  /** Cron expression (5 or 6 field). Mutually exclusive with rrule and intervalMs. */
   readonly cron?: string;
-  /** Fixed interval in ms. Mutually exclusive with cron. */
+  /** iCalendar RRULE string (RFC 5545). Mutually exclusive with cron and intervalMs. */
+  readonly rrule?: string;
+  /** Fixed interval in ms. Mutually exclusive with cron and rrule. */
   readonly intervalMs?: number;
-  /** IANA timezone for cron evaluation. Default: "UTC". */
+  /** IANA timezone for cron/rrule evaluation. Default: "UTC". */
   readonly timezone?: string;
   /** Whether this schedule is active. Default: true. */
   readonly enabled?: boolean;

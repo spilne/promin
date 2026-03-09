@@ -72,4 +72,31 @@ async function streamAllSchedules() {
   console.log("Merged ticks:", ticks.map((t) => `${t.scheduleId}#${t.tickNumber}`));
 }
 
-export { registerSchedules, streamSingleSchedule, streamAllSchedules };
+// RRULE — complex calendar recurrence (biweekly, quarterly, etc.)
+function rruleSchedules() {
+  const scheduler = createScheduler();
+
+  // Biweekly on Tuesday at 10am
+  scheduler.register({
+    id: "biweekly-standup",
+    rrule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU;BYHOUR=10",
+    metadata: { type: "standup" },
+  });
+
+  // Quarterly on the 1st at 9am
+  scheduler.register({
+    id: "quarterly-review",
+    rrule: "FREQ=MONTHLY;INTERVAL=3;BYMONTHDAY=1;BYHOUR=9",
+  });
+
+  // Every second Monday at 9:30
+  scheduler.register({
+    id: "sprint-planning",
+    rrule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=MO;BYHOUR=9;BYMINUTE=30",
+  });
+
+  console.log("RRULE schedules:", scheduler.list().map((s) => s.id));
+  return scheduler;
+}
+
+export { registerSchedules, streamSingleSchedule, streamAllSchedules, rruleSchedules };

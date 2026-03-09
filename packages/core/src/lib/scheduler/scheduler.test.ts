@@ -21,21 +21,45 @@ describe("InMemoryScheduler", () => {
       expect(scheduler.list()).toHaveLength(1);
     });
 
-    it("throws if neither cron nor intervalMs", () => {
+    it("throws if no trigger type specified", () => {
       const scheduler = createScheduler();
-      expect(() => scheduler.register({ id: "bad" })).toThrow("must have either");
+      expect(() => scheduler.register({ id: "bad" })).toThrow("must have one of");
     });
 
-    it("throws if both cron and intervalMs", () => {
+    it("throws if multiple trigger types specified", () => {
       const scheduler = createScheduler();
       expect(() => scheduler.register({ id: "bad", cron: "* * * * *", intervalMs: 1000 })).toThrow(
-        "cannot have both",
+        "must have exactly one",
       );
     });
 
     it("throws on invalid cron expression", () => {
       const scheduler = createScheduler();
       expect(() => scheduler.register({ id: "bad", cron: "not a cron" })).toThrow("Invalid cron");
+    });
+
+    it("registers with rrule", () => {
+      const scheduler = createScheduler();
+      scheduler.register({
+        id: "biweekly",
+        rrule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU;BYHOUR=10",
+      });
+      const list = scheduler.list();
+      expect(list[0]!.rrule).toBe("FREQ=WEEKLY;INTERVAL=2;BYDAY=TU;BYHOUR=10");
+    });
+
+    it("throws on invalid rrule", () => {
+      const scheduler = createScheduler();
+      expect(() => scheduler.register({ id: "bad", rrule: "not a rrule" })).toThrow(
+        "Invalid RRULE",
+      );
+    });
+
+    it("throws if rrule + cron both specified", () => {
+      const scheduler = createScheduler();
+      expect(() =>
+        scheduler.register({ id: "bad", cron: "* * * * *", rrule: "FREQ=DAILY" }),
+      ).toThrow("must have exactly one");
     });
 
     it("registers with timezone", () => {
@@ -238,6 +262,28 @@ describe("InMemoryScheduler", () => {
       expect(inputs[0]!.tickNumber).toBe(0);
       expect(inputs[0]!.date).toBeTruthy();
     });
+  });
+
+  // ---------------------------------------------------------------------------
+  // RRULE stream
+  // ---------------------------------------------------------------------------
+
+  describe("rrule stream", () => {
+    it("emits ticks from rrule schedule", async () => {
+      const scheduler = createScheduler();
+      // Every second (for test speed)
+      scheduler.register({
+        id: "rrule-fast",
+        rrule: "FREQ=SECONDLY;INTERVAL=1",
+      });
+
+      const ticks = await scheduler.stream("rrule-fast").take(2).collect();
+
+      expect(ticks).toHaveLength(2);
+      expect(ticks[0]!.scheduleId).toBe("rrule-fast");
+      expect(ticks[0]!.tickNumber).toBe(0);
+      expect(ticks[1]!.tickNumber).toBe(1);
+    }, 10_000);
   });
 
   // ---------------------------------------------------------------------------

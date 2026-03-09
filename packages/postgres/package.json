@@ -26,7 +26,8 @@
   "dependencies": {
     "@promin/core": "workspace:*",
     "drizzle-orm": "^0.44.0",
-    "postgres": "^3.4.5"
+    "postgres": "^3.4.5",
+    "rrule": "^2.8.1"
   },
   "devDependencies": {
     "@types/bun": "catalog:",

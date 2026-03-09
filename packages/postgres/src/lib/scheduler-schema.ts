@@ -19,6 +19,7 @@ export const durableSchedules = pgTable(
     id: text("id").primaryKey(),
     name: text("name"),
     cron: text("cron"),
+    rrule: text("rrule"),
     intervalMs: bigint("interval_ms", { mode: "number" }),
     timezone: text("timezone").notNull().default("UTC"),
     overlapPolicy: text("overlap_policy").notNull().default("allow"),
