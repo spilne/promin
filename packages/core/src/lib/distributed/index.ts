@@ -12,4 +12,18 @@ export {
   DefaultCoordinator,
   createCoordinator,
 } from "./coordinator.ts";
-export { type WorkflowWorker, type WorkerConfig, DefaultWorker, createWorker } from "./worker.ts";
+export {
+  type WorkflowWorker,
+  type WorkerConfig,
+  type WorkerHooks,
+  DefaultWorker,
+  createWorker,
+} from "./worker.ts";
+export {
+  type WorkerMiddleware,
+  type NextFn,
+  timeoutMiddleware,
+  retryMiddleware,
+  loggingMiddleware,
+  metricsMiddleware,
+} from "./middleware.ts";

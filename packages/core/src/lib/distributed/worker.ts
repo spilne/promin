@@ -10,36 +10,49 @@ import { Pipeline } from "../pipeline.ts";
 import type { WorkflowStorage } from "../durable/workflow-storage.ts";
 import type { StepRegistry, StepContext } from "./step-registry.ts";
 import type { StepQueue, StepTask } from "./step-queue.ts";
+import type { WorkerMiddleware } from "./middleware.ts";
+
+// ---------------------------------------------------------------------------
+// Hooks — simple lifecycle callbacks
+// ---------------------------------------------------------------------------
+
+export interface WorkerHooks {
+  beforeStep?: (task: StepTask) => void | Promise<void>;
+  afterStep?: (task: StepTask, result: unknown, durationMs: number) => void | Promise<void>;
+  onError?: (task: StepTask, error: unknown, durationMs: number) => void | Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
 
 export interface WorkerConfig {
-  /** Workflow storage for checkpointing step results. */
   storage: WorkflowStorage;
-  /** Step queue to poll for tasks. */
   stepQueue: StepQueue;
-  /** Registry of step implementations this worker can execute. */
   registry: StepRegistry;
-  /** Queue names this worker polls. Default: ["default"]. */
   queues?: string[];
-  /** Max concurrent step executions. Default: 1. */
   concurrency?: number;
-  /** How often to poll for tasks (ms). Default: 1000. */
   pollIntervalMs?: number;
-  /** Worker ID for logging/debugging. Default: random UUID. */
   workerId?: string;
-  /** Called when a step completes. */
-  onStepComplete?: (params: { workflowId: string; stepName: string; durationMs: number }) => void;
-  /** Called when a step fails. */
-  onStepFailure?: (params: { workflowId: string; stepName: string; error: string }) => void;
+  /** Simple lifecycle hooks — run at fixed points. */
+  hooks?: WorkerHooks;
+  /** Composable middleware — wraps step execution. Runs inside hooks. */
+  middleware?: WorkerMiddleware[];
 }
 
+// ---------------------------------------------------------------------------
+// WorkflowWorker interface
+// ---------------------------------------------------------------------------
+
 export interface WorkflowWorker {
-  /** Begin polling and executing steps. */
   start(): Promise<void>;
-  /** Signal graceful shutdown — finish current work, then stop. */
   stop(): Promise<void>;
-  /** Worker ID. */
   readonly workerId: string;
 }
+
+// ---------------------------------------------------------------------------
+// Implementation
+// ---------------------------------------------------------------------------
 
 export class DefaultWorker implements WorkflowWorker {
   readonly workerId: string;
@@ -49,8 +62,8 @@ export class DefaultWorker implements WorkflowWorker {
   private readonly queues: string[];
   private readonly concurrency: number;
   private readonly pollIntervalMs: number;
-  private readonly onStepComplete?: WorkerConfig["onStepComplete"];
-  private readonly onStepFailure?: WorkerConfig["onStepFailure"];
+  private readonly hooks: WorkerHooks;
+  private readonly middleware: WorkerMiddleware[];
   private running = false;
   private activeCount = 0;
 
@@ -62,8 +75,8 @@ export class DefaultWorker implements WorkflowWorker {
     this.queues = config.queues ?? ["default"];
     this.concurrency = config.concurrency ?? 1;
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
-    this.onStepComplete = config.onStepComplete;
-    this.onStepFailure = config.onStepFailure;
+    this.hooks = config.hooks ?? {};
+    this.middleware = config.middleware ?? [];
   }
 
   async start(): Promise<void> {
@@ -86,7 +99,6 @@ export class DefaultWorker implements WorkflowWorker {
 
   async stop(): Promise<void> {
     this.running = false;
-    // Wait for active tasks to finish
     while (this.activeCount > 0) {
       await new Promise((r) => setTimeout(r, 100));
     }
@@ -106,33 +118,30 @@ export class DefaultWorker implements WorkflowWorker {
         durationMs: 0,
         startedAt: new Date(startTime),
       });
-      this.onStepFailure?.({ workflowId: task.workflowId, stepName: task.stepName, error });
+      await this.hooks.onError?.(task, new Error(error), 0);
       return;
     }
 
+    const ctx: StepContext = {
+      input: task.input,
+      prev: this.computePrev(task),
+      deps: task.prevResults,
+      workflowId: task.workflowId,
+      stepName: task.stepName,
+      attempt: task.attempt,
+    };
+
     try {
-      const ctx: StepContext = {
-        input: task.input,
-        prev: this.computePrev(task),
-        deps: task.prevResults,
-        workflowId: task.workflowId,
-        stepName: task.stepName,
-        attempt: task.attempt,
-      };
+      // hooks.beforeStep
+      await this.hooks.beforeStep?.(task);
 
-      const result = handler(ctx);
-      let value: unknown;
-
-      if (result instanceof Pipeline) {
-        value = await result.runPromise();
-      } else if (result && typeof (result as Promise<unknown>).then === "function") {
-        value = await result;
-      } else {
-        value = result;
-      }
+      // Build execution chain: middleware → handler
+      const execute = this.buildChain(task, handler);
+      const value = await execute(ctx);
 
       const durationMs = Date.now() - startTime;
 
+      // Checkpoint
       await this.stepQueue.complete({ taskId: task.id, result: value, durationMs });
       await this.storage.saveStepResult({
         workflowId: task.workflowId,
@@ -141,7 +150,9 @@ export class DefaultWorker implements WorkflowWorker {
         durationMs,
         startedAt: new Date(startTime),
       });
-      this.onStepComplete?.({ workflowId: task.workflowId, stepName: task.stepName, durationMs });
+
+      // hooks.afterStep
+      await this.hooks.afterStep?.(task, value, durationMs);
     } catch (err) {
       const durationMs = Date.now() - startTime;
       const error = err instanceof Error ? err.message : String(err);
@@ -154,8 +165,29 @@ export class DefaultWorker implements WorkflowWorker {
         durationMs,
         startedAt: new Date(startTime),
       });
-      this.onStepFailure?.({ workflowId: task.workflowId, stepName: task.stepName, error });
+
+      // hooks.onError
+      await this.hooks.onError?.(task, err, durationMs);
     }
+  }
+
+  private buildChain(
+    task: StepTask,
+    handler: (ctx: StepContext) => Pipeline<unknown, any> | Promise<unknown>,
+  ): (ctx: StepContext) => Promise<unknown> {
+    // Base: resolve handler result (Pipeline or Promise)
+    const base = async (ctx: StepContext): Promise<unknown> => {
+      const result = handler(ctx);
+      if (result instanceof Pipeline) return result.runPromise();
+      if (result && typeof (result as Promise<unknown>).then === "function") return result;
+      return result;
+    };
+
+    // Wrap with middleware (right to left)
+    return this.middleware.reduceRight<(ctx: StepContext) => Promise<unknown>>(
+      (next, mw) => (ctx) => mw({ task, ctx, next }),
+      base,
+    );
   }
 
   private computePrev(task: StepTask): unknown {

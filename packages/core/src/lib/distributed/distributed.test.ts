@@ -164,7 +164,11 @@ describe("WorkflowWorker", () => {
       registry,
       queues: ["default"],
       pollIntervalMs: 50,
-      onStepComplete: ({ stepName }) => completed.push(stepName),
+      hooks: {
+        afterStep: (task, _result, _ms) => {
+          completed.push(task.stepName);
+        },
+      },
     });
 
     // Run worker briefly
@@ -205,7 +209,11 @@ describe("WorkflowWorker", () => {
       registry,
       queues: ["default"],
       pollIntervalMs: 50,
-      onStepFailure: ({ stepName }) => failures.push(stepName),
+      hooks: {
+        onError: (task, _err, _ms) => {
+          failures.push(task.stepName);
+        },
+      },
     });
 
     void worker.start();
@@ -238,7 +246,11 @@ describe("WorkflowWorker", () => {
       registry,
       queues: ["default"],
       pollIntervalMs: 50,
-      onStepFailure: ({ error }) => failures.push(error),
+      hooks: {
+        onError: (_task, err, _ms) => {
+          failures.push(err instanceof Error ? err.message : String(err));
+        },
+      },
     });
 
     void worker.start();
@@ -307,7 +319,11 @@ describe("WorkflowWorker", () => {
       registry,
       queues: ["default"],
       pollIntervalMs: 50,
-      onStepComplete: ({ stepName }) => completed.push(stepName),
+      hooks: {
+        afterStep: (task, _result, _ms) => {
+          completed.push(task.stepName);
+        },
+      },
     });
 
     void worker.start();
@@ -426,5 +442,192 @@ describe("Coordinator + Worker end-to-end", () => {
     const state = await storage.loadWorkflow("routed-1");
     expect(state?.steps["preprocess"]?.status).toBe("completed");
     // GPU step may or may not have completed in time depending on coordination timing
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Middleware
+// ---------------------------------------------------------------------------
+
+describe("Worker middleware", () => {
+  it("middleware wraps step execution", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const queue = new InMemoryStepQueue();
+    const registry = new MapStepRegistry();
+    const log: string[] = [];
+
+    registry.register("step-a", (ctx) => Pipeline.succeed("result"));
+
+    await storage.createWorkflow({ workflowId: "mw-1", workflowName: "test", input: {} });
+    await queue.enqueue({
+      workflowId: "mw-1",
+      stepName: "step-a",
+      queue: "default",
+      input: {},
+      prevResults: {},
+    });
+
+    const worker = createWorker({
+      storage,
+      stepQueue: queue,
+      registry,
+      queues: ["default"],
+      pollIntervalMs: 50,
+      middleware: [
+        async ({ task, ctx, next }) => {
+          log.push("before");
+          const result = await next(ctx);
+          log.push("after");
+          return result;
+        },
+      ],
+    });
+
+    void worker.start();
+    await new Promise((r) => setTimeout(r, 200));
+    await worker.stop();
+
+    expect(log).toEqual(["before", "after"]);
+  });
+
+  it("middleware chain executes in order", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const queue = new InMemoryStepQueue();
+    const registry = new MapStepRegistry();
+    const log: string[] = [];
+
+    registry.register("step-a", () => {
+      log.push("handler");
+      return Pipeline.succeed("ok");
+    });
+
+    await storage.createWorkflow({ workflowId: "mw-2", workflowName: "test", input: {} });
+    await queue.enqueue({
+      workflowId: "mw-2",
+      stepName: "step-a",
+      queue: "default",
+      input: {},
+      prevResults: {},
+    });
+
+    const worker = createWorker({
+      storage,
+      stepQueue: queue,
+      registry,
+      queues: ["default"],
+      pollIntervalMs: 50,
+      middleware: [
+        async ({ ctx, next }) => {
+          log.push("mw1-before");
+          const r = await next(ctx);
+          log.push("mw1-after");
+          return r;
+        },
+        async ({ ctx, next }) => {
+          log.push("mw2-before");
+          const r = await next(ctx);
+          log.push("mw2-after");
+          return r;
+        },
+      ],
+    });
+
+    void worker.start();
+    await new Promise((r) => setTimeout(r, 200));
+    await worker.stop();
+
+    expect(log).toEqual(["mw1-before", "mw2-before", "handler", "mw2-after", "mw1-after"]);
+  });
+
+  it("timeout middleware fails slow steps", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const queue = new InMemoryStepQueue();
+    const registry = new MapStepRegistry();
+    const failures: string[] = [];
+
+    registry.register("slow-step", async () => {
+      await new Promise((r) => setTimeout(r, 5000));
+      return "should-not-reach";
+    });
+
+    await storage.createWorkflow({ workflowId: "mw-3", workflowName: "test", input: {} });
+    await queue.enqueue({
+      workflowId: "mw-3",
+      stepName: "slow-step",
+      queue: "default",
+      input: {},
+      prevResults: {},
+    });
+
+    // Import timeout middleware
+    const { timeoutMiddleware } = await import("./middleware.ts");
+
+    const worker = createWorker({
+      storage,
+      stepQueue: queue,
+      registry,
+      queues: ["default"],
+      pollIntervalMs: 50,
+      middleware: [timeoutMiddleware(100)],
+      hooks: {
+        onError: (_task, err, _ms) => {
+          failures.push(err instanceof Error ? err.message : String(err));
+        },
+      },
+    });
+
+    void worker.start();
+    await new Promise((r) => setTimeout(r, 500));
+    await worker.stop();
+
+    expect(failures.some((f) => f.includes("timed out"))).toBe(true);
+  });
+
+  it("hooks run alongside middleware", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const queue = new InMemoryStepQueue();
+    const registry = new MapStepRegistry();
+    const log: string[] = [];
+
+    registry.register("step-a", () => Pipeline.succeed("ok"));
+
+    await storage.createWorkflow({ workflowId: "mw-4", workflowName: "test", input: {} });
+    await queue.enqueue({
+      workflowId: "mw-4",
+      stepName: "step-a",
+      queue: "default",
+      input: {},
+      prevResults: {},
+    });
+
+    const worker = createWorker({
+      storage,
+      stepQueue: queue,
+      registry,
+      queues: ["default"],
+      pollIntervalMs: 50,
+      hooks: {
+        beforeStep: () => {
+          log.push("hook:before");
+        },
+        afterStep: () => {
+          log.push("hook:after");
+        },
+      },
+      middleware: [
+        async ({ ctx, next }) => {
+          log.push("mw:before");
+          const r = await next(ctx);
+          log.push("mw:after");
+          return r;
+        },
+      ],
+    });
+
+    void worker.start();
+    await new Promise((r) => setTimeout(r, 200));
+    await worker.stop();
+
+    expect(log).toEqual(["hook:before", "mw:before", "mw:after", "hook:after"]);
   });
 });

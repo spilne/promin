@@ -201,4 +201,11 @@ export {
   type WorkerConfig,
   DefaultWorker,
   createWorker,
+  type WorkerHooks,
+  type WorkerMiddleware,
+  type NextFn,
+  timeoutMiddleware,
+  retryMiddleware,
+  loggingMiddleware,
+  metricsMiddleware,
 } from "./lib/distributed/index.ts";
