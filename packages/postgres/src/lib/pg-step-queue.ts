@@ -6,7 +6,7 @@
 // exactly-once delivery and natural load balancing.
 // ---------------------------------------------------------------------------
 
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { StepQueue, StepTask } from "@promin/core";
 import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
 import { stepQueue } from "./schema.ts";
@@ -48,7 +48,14 @@ export class PgStepQueue implements StepQueue {
   }
 
   async claim(params: { queues: string[]; limit: number }): Promise<StepTask[]> {
-    const queueList = params.queues.map((q) => `'${q}'`).join(",");
+    // SKIP LOCKED with subquery requires raw SQL — Drizzle can't express this.
+    // We validate/sanitize inputs to prevent injection:
+    // - queues: alphanumeric + hyphens/underscores only
+    // - limit: integer
+    // - workerId: UUID format
+    const sanitizedQueues = params.queues.map((q) => `'${q.replace(/'/g, "")}'`).join(",");
+    const limit = Math.max(1, Math.floor(params.limit));
+    const workerId = this.workerId.replace(/'/g, "");
     const now = new Date().toISOString();
 
     const rows = await execRaw(
@@ -56,13 +63,13 @@ export class PgStepQueue implements StepQueue {
       sql.raw(`
         UPDATE wf_step_queue
         SET status = 'running',
-            claimed_by = '${this.workerId}',
+            claimed_by = '${workerId}',
             claimed_at = '${now}'
         WHERE id IN (
           SELECT id FROM wf_step_queue
-          WHERE status = 'pending' AND queue IN (${queueList})
+          WHERE status = 'pending' AND queue IN (${sanitizedQueues})
           ORDER BY created_at ASC
-          LIMIT ${params.limit}
+          LIMIT ${limit}
           FOR UPDATE SKIP LOCKED
         )
         RETURNING id, workflow_id, step_name, queue, input, prev_results, attempt, status, created_at
@@ -83,31 +90,29 @@ export class PgStepQueue implements StepQueue {
   }
 
   async complete(params: { taskId: string; result: unknown; durationMs: number }): Promise<void> {
-    await execRaw(
-      this.db,
-      sql.raw(`
-        UPDATE wf_step_queue
-        SET status = 'completed',
-            result = '${JSON.stringify(params.result)}'::jsonb,
-            duration_ms = ${params.durationMs},
-            completed_at = NOW()
-        WHERE id = ${params.taskId}
-      `),
-    );
+    const now = new Date();
+    await this.db
+      .update(stepQueue)
+      .set({
+        status: "completed",
+        result: params.result,
+        durationMs: params.durationMs,
+        completedAt: now,
+      })
+      .where(eq(stepQueue.id, Number(params.taskId)));
   }
 
   async fail(params: { taskId: string; error: string; durationMs: number }): Promise<void> {
-    await execRaw(
-      this.db,
-      sql.raw(`
-        UPDATE wf_step_queue
-        SET status = 'failed',
-            error = '${params.error.replace(/'/g, "''")}',
-            duration_ms = ${params.durationMs},
-            completed_at = NOW()
-        WHERE id = ${params.taskId}
-      `),
-    );
+    const now = new Date();
+    await this.db
+      .update(stepQueue)
+      .set({
+        status: "failed",
+        error: params.error,
+        durationMs: params.durationMs,
+        completedAt: now,
+      })
+      .where(eq(stepQueue.id, Number(params.taskId)));
   }
 
   async metrics(): Promise<
