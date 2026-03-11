@@ -2,6 +2,9 @@ export {
   type StepRegistry,
   type StepHandler,
   type StepContext,
+  type StepRegistration,
+  type WorkerStepOptions,
+  type StepFailureStrategy,
   MapStepRegistry,
 } from "./step-registry.ts";
 export { type StepQueue, type StepTask } from "./step-queue.ts";

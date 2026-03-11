@@ -1,19 +1,20 @@
 // ---------------------------------------------------------------------------
 // WorkflowWorker — polls step queue, executes steps, checkpoints results
 //
-// Workers register step implementations via StepRegistry, then poll
-// their assigned queues for tasks. Each claimed task is executed and
-// the result is checkpointed to WorkflowStorage.
+// Supports both:
+// - Per-step options (retry, onFailure, compensate) via StepRegistry
+// - Global middleware + hooks on the worker itself
 // ---------------------------------------------------------------------------
 
-import { Pipeline } from "../pipeline.ts";
+import { Pipeline, type TaggedError } from "../pipeline.ts";
 import type { WorkflowStorage } from "../durable/workflow-storage.ts";
-import type { StepRegistry, StepContext } from "./step-registry.ts";
+import { isStepAttemptStorage } from "../durable/workflow-storage.ts";
+import type { StepRegistry, StepContext, StepRegistration } from "./step-registry.ts";
 import type { StepQueue, StepTask } from "./step-queue.ts";
 import type { WorkerMiddleware } from "./middleware.ts";
 
 // ---------------------------------------------------------------------------
-// Hooks — simple lifecycle callbacks
+// Hooks
 // ---------------------------------------------------------------------------
 
 export interface WorkerHooks {
@@ -34,14 +35,12 @@ export interface WorkerConfig {
   concurrency?: number;
   pollIntervalMs?: number;
   workerId?: string;
-  /** Simple lifecycle hooks — run at fixed points. */
   hooks?: WorkerHooks;
-  /** Composable middleware — wraps step execution. Runs inside hooks. */
   middleware?: WorkerMiddleware[];
 }
 
 // ---------------------------------------------------------------------------
-// WorkflowWorker interface
+// Interface
 // ---------------------------------------------------------------------------
 
 export interface WorkflowWorker {
@@ -106,19 +105,11 @@ export class DefaultWorker implements WorkflowWorker {
 
   private async executeTask(task: StepTask): Promise<void> {
     const startTime = Date.now();
-    const handler = this.registry.resolve(task.stepName);
+    const registration = this.registry.resolve(task.stepName);
 
-    if (!handler) {
+    if (!registration) {
       const error = `Step "${task.stepName}" not found in registry. Available: ${this.registry.list().join(", ")}`;
-      await this.stepQueue.fail({ taskId: task.id, error, durationMs: 0 });
-      await this.storage.saveStepFailure({
-        workflowId: task.workflowId,
-        stepName: task.stepName,
-        error,
-        durationMs: 0,
-        startedAt: new Date(startTime),
-      });
-      await this.hooks.onError?.(task, new Error(error), 0);
+      await this.failTask(task, error, startTime);
       return;
     }
 
@@ -132,16 +123,13 @@ export class DefaultWorker implements WorkflowWorker {
     };
 
     try {
-      // hooks.beforeStep
       await this.hooks.beforeStep?.(task);
 
-      // Build execution chain: middleware → handler
-      const execute = this.buildChain(task, handler);
-      const value = await execute(ctx);
+      const chain = this.buildChain(task, registration);
+      const value = await chain(ctx);
 
       const durationMs = Date.now() - startTime;
 
-      // Checkpoint
       await this.stepQueue.complete({ taskId: task.id, result: value, durationMs });
       await this.storage.saveStepResult({
         workflowId: task.workflowId,
@@ -151,43 +139,131 @@ export class DefaultWorker implements WorkflowWorker {
         startedAt: new Date(startTime),
       });
 
-      // hooks.afterStep
+      if (isStepAttemptStorage(this.storage)) {
+        await this.storage.saveStepAttempt({
+          workflowId: task.workflowId,
+          stepName: task.stepName,
+          attempt: task.attempt,
+          type: "execution",
+          status: "completed",
+          result: value,
+          durationMs,
+          startedAt: new Date(startTime),
+          completedAt: new Date(),
+        });
+      }
+
       await this.hooks.afterStep?.(task, value, durationMs);
     } catch (err) {
       const durationMs = Date.now() - startTime;
-      const error = err instanceof Error ? err.message : String(err);
 
-      await this.stepQueue.fail({ taskId: task.id, error, durationMs });
-      await this.storage.saveStepFailure({
-        workflowId: task.workflowId,
-        stepName: task.stepName,
-        error,
-        durationMs,
-        startedAt: new Date(startTime),
-      });
+      // Apply onFailure strategy
+      const strategy = registration.options?.onFailure ?? "fail";
+      if (strategy === "skip") {
+        await this.stepQueue.complete({ taskId: task.id, result: undefined, durationMs });
+        await this.storage.saveStepResult({
+          workflowId: task.workflowId,
+          stepName: task.stepName,
+          result: undefined,
+          durationMs,
+          startedAt: new Date(startTime),
+        });
+        await this.hooks.afterStep?.(task, undefined, durationMs);
+        return;
+      }
 
-      // hooks.onError
-      await this.hooks.onError?.(task, err, durationMs);
+      if (typeof strategy === "object" && "fallback" in strategy) {
+        const fallbackValue = strategy.fallback(err);
+        await this.stepQueue.complete({ taskId: task.id, result: fallbackValue, durationMs });
+        await this.storage.saveStepResult({
+          workflowId: task.workflowId,
+          stepName: task.stepName,
+          result: fallbackValue,
+          durationMs,
+          startedAt: new Date(startTime),
+        });
+        await this.hooks.afterStep?.(task, fallbackValue, durationMs);
+        return;
+      }
+
+      // Default: fail
+      await this.failTask(task, err instanceof Error ? err.message : String(err), startTime);
     }
   }
 
   private buildChain(
     task: StepTask,
-    handler: (ctx: StepContext) => Pipeline<unknown, any> | Promise<unknown>,
+    registration: StepRegistration,
   ): (ctx: StepContext) => Promise<unknown> {
-    // Base: resolve handler result (Pipeline or Promise)
-    const base = async (ctx: StepContext): Promise<unknown> => {
+    const { handler, options } = registration;
+
+    // Base: resolve handler result + apply step-level retry
+    let base = async (ctx: StepContext): Promise<unknown> => {
       const result = handler(ctx);
       if (result instanceof Pipeline) return result.runPromise();
       if (result && typeof (result as Promise<unknown>).then === "function") return result;
       return result;
     };
 
-    // Wrap with middleware (right to left)
+    // Wrap with step-level retry (from StepOptions)
+    if (options?.retry) {
+      const retryPolicy = options.retry;
+      const innerBase = base;
+      base = async (ctx: StepContext): Promise<unknown> => {
+        const maxRetries = retryPolicy.maxRetries ?? 3;
+        const baseDelayMs = retryPolicy.baseDelayMs ?? 250;
+        const when = retryPolicy.when;
+        let lastError: unknown;
+
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+          try {
+            if (attempt > 0) {
+              await new Promise((r) => setTimeout(r, baseDelayMs * Math.pow(2, attempt - 1)));
+            }
+            return await innerBase({ ...ctx, attempt: ctx.attempt + attempt });
+          } catch (err) {
+            lastError = err;
+            if (when && !when(err as TaggedError)) throw err;
+          }
+        }
+        throw lastError;
+      };
+    }
+
+    // Wrap with global middleware (right to left)
     return this.middleware.reduceRight<(ctx: StepContext) => Promise<unknown>>(
       (next, mw) => (ctx) => mw({ task, ctx, next }),
       base,
     );
+  }
+
+  private async failTask(task: StepTask, error: string, startTime: number): Promise<void> {
+    const durationMs = Date.now() - startTime;
+
+    await this.stepQueue.fail({ taskId: task.id, error, durationMs });
+    await this.storage.saveStepFailure({
+      workflowId: task.workflowId,
+      stepName: task.stepName,
+      error,
+      durationMs,
+      startedAt: new Date(startTime),
+    });
+
+    if (isStepAttemptStorage(this.storage)) {
+      await this.storage.saveStepAttempt({
+        workflowId: task.workflowId,
+        stepName: task.stepName,
+        attempt: task.attempt,
+        type: "execution",
+        status: "failed",
+        error,
+        durationMs,
+        startedAt: new Date(startTime),
+        completedAt: new Date(),
+      });
+    }
+
+    await this.hooks.onError?.(task, new Error(error), durationMs);
   }
 
   private computePrev(task: StepTask): unknown {

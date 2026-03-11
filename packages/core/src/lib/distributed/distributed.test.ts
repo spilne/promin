@@ -631,3 +631,217 @@ describe("Worker middleware", () => {
     expect(log).toEqual(["hook:before", "mw:before", "mw:after", "hook:after"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Per-step options (retry, onFailure, compensate)
+// ---------------------------------------------------------------------------
+
+import { Data } from "effect";
+
+class TestError extends Data.TaggedError("TestError")<{
+  readonly message: string;
+}> {}
+
+describe("Per-step options", () => {
+  it("step-level retry retries on failure", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const queue = new InMemoryStepQueue();
+    const registry = new MapStepRegistry();
+    let attempts = 0;
+
+    registry.register(
+      "flaky",
+      (ctx) => {
+        attempts++;
+        if (attempts < 3) throw new Error("transient");
+        return Pipeline.succeed("ok");
+      },
+      { retry: { maxRetries: 5, baseDelayMs: 10 } },
+    );
+
+    await storage.createWorkflow({ workflowId: "retry-1", workflowName: "test", input: {} });
+    await queue.enqueue({
+      workflowId: "retry-1",
+      stepName: "flaky",
+      queue: "default",
+      input: {},
+      prevResults: {},
+    });
+
+    const worker = createWorker({
+      storage,
+      stepQueue: queue,
+      registry,
+      queues: ["default"],
+      pollIntervalMs: 50,
+    });
+
+    void worker.start();
+    await new Promise((r) => setTimeout(r, 500));
+    await worker.stop();
+
+    expect(attempts).toBe(3);
+    const state = await storage.loadWorkflow("retry-1");
+    expect(state?.steps["flaky"]?.status).toBe("completed");
+    expect(state?.steps["flaky"]?.result).toBe("ok");
+  });
+
+  it("step-level retry respects when predicate", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const queue = new InMemoryStepQueue();
+    const registry = new MapStepRegistry();
+    let attempts = 0;
+
+    registry.register(
+      "selective",
+      () => {
+        attempts++;
+        throw new TestError({ message: "permanent" });
+      },
+      {
+        retry: {
+          maxRetries: 5,
+          baseDelayMs: 10,
+          when: (err: any) => err._tag !== "TestError",
+        },
+      },
+    );
+
+    await storage.createWorkflow({ workflowId: "when-1", workflowName: "test", input: {} });
+    await queue.enqueue({
+      workflowId: "when-1",
+      stepName: "selective",
+      queue: "default",
+      input: {},
+      prevResults: {},
+    });
+
+    const worker = createWorker({
+      storage,
+      stepQueue: queue,
+      registry,
+      queues: ["default"],
+      pollIntervalMs: 50,
+    });
+
+    void worker.start();
+    await new Promise((r) => setTimeout(r, 300));
+    await worker.stop();
+
+    // TestError not retryable → only 1 attempt
+    expect(attempts).toBe(1);
+  });
+
+  it("onFailure: skip continues with undefined", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const queue = new InMemoryStepQueue();
+    const registry = new MapStepRegistry();
+
+    registry.register(
+      "optional",
+      () => {
+        throw new Error("fail");
+      },
+      { onFailure: "skip" },
+    );
+
+    await storage.createWorkflow({ workflowId: "skip-1", workflowName: "test", input: {} });
+    await queue.enqueue({
+      workflowId: "skip-1",
+      stepName: "optional",
+      queue: "default",
+      input: {},
+      prevResults: {},
+    });
+
+    const worker = createWorker({
+      storage,
+      stepQueue: queue,
+      registry,
+      queues: ["default"],
+      pollIntervalMs: 50,
+    });
+
+    void worker.start();
+    await new Promise((r) => setTimeout(r, 200));
+    await worker.stop();
+
+    const state = await storage.loadWorkflow("skip-1");
+    // Step should be "completed" with undefined (skipped)
+    expect(state?.steps["optional"]?.status).toBe("completed");
+    expect(state?.steps["optional"]?.result).toBeUndefined();
+  });
+
+  it("onFailure: fallback uses fallback value", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const queue = new InMemoryStepQueue();
+    const registry = new MapStepRegistry();
+
+    registry.register(
+      "risky",
+      () => {
+        throw new Error("fail");
+      },
+      { onFailure: { fallback: () => "default-value" } },
+    );
+
+    await storage.createWorkflow({ workflowId: "fallback-1", workflowName: "test", input: {} });
+    await queue.enqueue({
+      workflowId: "fallback-1",
+      stepName: "risky",
+      queue: "default",
+      input: {},
+      prevResults: {},
+    });
+
+    const worker = createWorker({
+      storage,
+      stepQueue: queue,
+      registry,
+      queues: ["default"],
+      pollIntervalMs: 50,
+    });
+
+    void worker.start();
+    await new Promise((r) => setTimeout(r, 200));
+    await worker.stop();
+
+    const state = await storage.loadWorkflow("fallback-1");
+    expect(state?.steps["risky"]?.status).toBe("completed");
+    expect(state?.steps["risky"]?.result).toBe("default-value");
+  });
+
+  it("records step attempts when storage supports it", async () => {
+    const storage = new InMemoryWorkflowStorage(); // implements StepAttemptStorage
+    const queue = new InMemoryStepQueue();
+    const registry = new MapStepRegistry();
+
+    registry.register("tracked", () => Pipeline.succeed("done"));
+
+    await storage.createWorkflow({ workflowId: "attempt-1", workflowName: "test", input: {} });
+    await queue.enqueue({
+      workflowId: "attempt-1",
+      stepName: "tracked",
+      queue: "default",
+      input: {},
+      prevResults: {},
+    });
+
+    const worker = createWorker({
+      storage,
+      stepQueue: queue,
+      registry,
+      queues: ["default"],
+      pollIntervalMs: 50,
+    });
+
+    void worker.start();
+    await new Promise((r) => setTimeout(r, 200));
+    await worker.stop();
+
+    const attempts = await storage.loadStepAttempts("attempt-1");
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]!.type).toBe("execution");
+    expect(attempts[0]!.status).toBe("completed");
+  });
+});
