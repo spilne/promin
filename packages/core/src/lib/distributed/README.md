@@ -227,22 +227,171 @@ This gives:
 - **FIFO ordering** — `ORDER BY created_at`
 - **No infrastructure** — just Postgres, no Redis/RabbitMQ/SQS
 
+### Per-Step Options
+
+Steps registered on workers support the same resilience features as the in-process workflow engine:
+
+```typescript
+const registry = new MapStepRegistry();
+
+// Retry with backoff + predicate
+registry.register("fetch-data", (ctx) => httpClient.get(ctx.prev), {
+  retry: {
+    maxRetries: 3,
+    baseDelayMs: 500,
+    when: (err) => err._tag === "HttpTimeoutError", // only retry timeouts
+  },
+});
+
+// Skip on failure — continue workflow with undefined
+registry.register("optional-enrichment", (ctx) => enrichData(ctx.prev), {
+  onFailure: "skip",
+});
+
+// Fallback value on failure
+registry.register("load-config", (ctx) => loadFromRemote(), {
+  onFailure: { fallback: () => ({ defaults: true }) },
+});
+
+// Compensation — undo side effects during saga rollback
+registry.register("charge-payment", (ctx) => chargeCard(ctx.prev), {
+  compensate: ({ result }) => Pipeline.fromPromise(() => refundPayment(result.paymentId)),
+});
+```
+
+### Hooks
+
+Simple lifecycle callbacks at fixed execution points:
+
+```typescript
+const worker = createWorker({
+  storage,
+  stepQueue,
+  registry,
+  hooks: {
+    beforeStep: (task) => {
+      console.log(`Starting ${task.stepName} for workflow ${task.workflowId}`);
+    },
+    afterStep: (task, result, durationMs) => {
+      metrics.histogram("step.duration", durationMs, { step: task.stepName });
+    },
+    onError: (task, error, durationMs) => {
+      alerting.notify(`Step ${task.stepName} failed: ${error}`);
+    },
+  },
+});
+```
+
+### Middleware
+
+Composable wrappers around step execution (like Koa middleware). Each middleware can modify input, output, or short-circuit.
+
+```typescript
+import {
+  createWorker,
+  timeoutMiddleware,
+  retryMiddleware,
+  loggingMiddleware,
+  metricsMiddleware,
+} from "@promin/core";
+
+const worker = createWorker({
+  storage,
+  stepQueue,
+  registry,
+  middleware: [
+    timeoutMiddleware(30_000), // kill steps taking > 30s
+    retryMiddleware({ maxRetries: 2 }), // retry on any failure
+    loggingMiddleware(console.log), // structured step logs
+    metricsMiddleware((m) => prometheus.observe(m)), // duration + status
+  ],
+});
+```
+
+**Execution order:**
+
+```
+hooks.beforeStep
+  → timeoutMiddleware
+    → retryMiddleware
+      → loggingMiddleware
+        → step handler
+      ← loggingMiddleware
+    ← retryMiddleware (retries on failure)
+  ← timeoutMiddleware (kills if too slow)
+hooks.afterStep / hooks.onError
+```
+
+Custom middleware:
+
+```typescript
+const tracingMiddleware: WorkerMiddleware = async ({ task, ctx, next }) => {
+  const span = tracer.startSpan(`step:${task.stepName}`);
+  try {
+    const result = await next(ctx);
+    span.setStatus("ok");
+    return result;
+  } catch (err) {
+    span.setStatus("error");
+    throw err;
+  } finally {
+    span.end();
+  }
+};
+```
+
+### Hooks vs Middleware vs Per-Step Options
+
+|                   | Hooks                    | Middleware               | Per-Step Options               |
+| ----------------- | ------------------------ | ------------------------ | ------------------------------ |
+| Scope             | All steps on this worker | All steps on this worker | One specific step              |
+| Can modify result | No (observe only)        | Yes                      | Yes (fallback)                 |
+| Can retry         | No                       | Yes                      | Yes                            |
+| Can short-circuit | No                       | Yes                      | Yes (skip/fallback)            |
+| Composable        | No (fixed points)        | Yes (chain)              | No                             |
+| Use for           | Logging, metrics, alerts | Timeout, tracing, auth   | Retry policy, failure strategy |
+
+Use all three together:
+
+```typescript
+const registry = new MapStepRegistry();
+registry.register("charge", chargeFn, {
+  retry: { maxRetries: 3 }, // per-step: retry this specific step
+  onFailure: { fallback: () => ({ charged: false }) },
+  compensate: ({ result }) => refund(result.id),
+});
+
+const worker = createWorker({
+  storage,
+  stepQueue,
+  registry,
+  middleware: [
+    timeoutMiddleware(60_000), // global: all steps time out at 60s
+    loggingMiddleware(), // global: log all steps
+  ],
+  hooks: {
+    onError: (
+      task,
+      err, // global: alert on any failure
+    ) => slack.notify(`${task.stepName} failed`),
+  },
+});
+```
+
 ### StepRegistry vs ActivityRegistry
 
-|              | StepRegistry                    | ActivityRegistry                    |
-| ------------ | ------------------------------- | ----------------------------------- |
-| Purpose      | Worker step execution           | Visual editor compilation           |
-| Used by      | WorkflowWorker                  | compileWorkflow()                   |
-| Context      | StepContext (input, prev, deps) | ActivityContext (input, prev, deps) |
-| Returns      | Pipeline or Promise             | Pipeline                            |
-| Registration | By step name                    | By activity ref                     |
-
-Both map names to functions. StepRegistry is for workers; ActivityRegistry is for the visual editor compiler. A worker could use both if it runs compiled visual editor workflows.
+|               | StepRegistry                    | ActivityRegistry                    |
+| ------------- | ------------------------------- | ----------------------------------- |
+| Purpose       | Worker step execution           | Visual editor compilation           |
+| Used by       | WorkflowWorker                  | compileWorkflow()                   |
+| Context       | StepContext (input, prev, deps) | ActivityContext (input, prev, deps) |
+| Returns       | Pipeline or Promise             | Pipeline                            |
+| Registration  | By step name + options          | By activity ref + config            |
+| Retry/Failure | WorkerStepOptions               | N/A (handled by engine)             |
 
 ### Graceful Shutdown
 
 ```typescript
-// Signal handler
 process.on("SIGTERM", async () => {
   await worker.stop(); // finishes current tasks, then exits
   process.exit(0);
