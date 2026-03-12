@@ -183,6 +183,26 @@ export interface CompensateConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Dispatch config — send specific steps to remote workers
+// ---------------------------------------------------------------------------
+
+export interface DispatchConfig {
+  /** Step queue for dispatching tasks to remote workers. */
+  stepQueue: import("../distributed/step-queue.ts").StepQueue;
+  /**
+   * Map step names to queue names. Unmatched steps execute locally.
+   *
+   * @example
+   * ```ts
+   * routing: { "transcribe": "gpu", "train-model": "gpu" }
+   * ```
+   */
+  routing: Record<string, string>;
+  /** How often to poll for dispatched step completion (ms). Default: 500. */
+  pollIntervalMs?: number;
+}
+
+// ---------------------------------------------------------------------------
 // Internal step definition
 // ---------------------------------------------------------------------------
 
@@ -240,6 +260,7 @@ export class WorkflowBuilder<
     private readonly _retry?: RetryPolicy<TaggedError>,
     private readonly _compensateConfig?: CompensateConfig,
     private readonly _dlq?: Sinkable<FailedWorkflowRecord>,
+    private readonly _dispatch?: DispatchConfig,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -914,8 +935,69 @@ export class WorkflowBuilder<
         running.add(name);
       }
 
-      // Execute all ready steps in parallel, with per-step retry and failure handling
-      const readySteps = ready.map((name) => this._steps.find((s) => s.name === name)!);
+      // Split into local and dispatched steps
+      const dispatchRouting = this._dispatch?.routing ?? {};
+      const localReady: string[] = [];
+      const dispatchReady: { name: string; queue: string }[] = [];
+
+      for (const name of ready) {
+        const queue = dispatchRouting[name];
+        if (queue && this._dispatch) {
+          dispatchReady.push({ name, queue });
+        } else {
+          localReady.push(name);
+        }
+      }
+
+      // Dispatch remote steps — enqueue and poll until completed
+      for (const { name, queue } of dispatchReady) {
+        await this._dispatch!.stepQueue.enqueue({
+          workflowId,
+          stepName: name,
+          queue,
+          input,
+          prevResults: { ...results },
+        });
+        // Poll until the worker completes this step
+        const pollMs = this._dispatch!.pollIntervalMs ?? 500;
+        while (true) {
+          await new Promise((r) => setTimeout(r, pollMs));
+          const currentState = await this._storage.loadWorkflow(workflowId);
+          const stepState = currentState?.steps[name];
+          if (stepState?.status === "completed") {
+            results[name] = stepState.result;
+            completed.add(name);
+            running.delete(name);
+            await this._hooks?.onStepComplete?.({
+              workflowId,
+              stepName: name,
+              result: stepState.result,
+              durationMs: stepState.durationMs ?? 0,
+            });
+            break;
+          }
+          if (stepState?.status === "failed") {
+            const errorMsg = stepState.error ?? "Remote step failed";
+            await this._hooks?.onStepFailure?.({
+              workflowId,
+              stepName: name,
+              error: errorMsg,
+              durationMs: 0,
+            });
+            return {
+              success: false,
+              error: new StepError({ workflowId, stepName: name, message: errorMsg }),
+              suspension: false,
+            };
+          }
+        }
+      }
+
+      // If all ready steps were dispatched, skip local execution
+      if (localReady.length === 0) continue;
+
+      // Execute local ready steps in parallel, with per-step retry and failure handling
+      const readySteps = localReady.map((name) => this._steps.find((s) => s.name === name)!);
 
       const pipeline = Pipeline.all(
         ...readySteps.map((stepDef) => {
@@ -1267,6 +1349,7 @@ export class WorkflowBuilder<
       this._retry,
       this._compensateConfig,
       this._dlq,
+      this._dispatch,
     );
   }
 
@@ -1344,6 +1427,8 @@ export function workflow<Input>(params: {
   compensate?: CompensateConfig;
   /** Dead letter queue — failed workflows are published here after all retries + compensation. */
   dlq?: Sinkable<FailedWorkflowRecord>;
+  /** Dispatch specific steps to remote workers instead of executing locally. */
+  dispatch?: DispatchConfig;
 }): WorkflowBuilder<Input> {
   return new WorkflowBuilder(
     params.name,
@@ -1356,6 +1441,7 @@ export function workflow<Input>(params: {
     params.retry as RetryPolicy<TaggedError> | undefined,
     params.compensate,
     params.dlq,
+    params.dispatch,
   );
 }
 

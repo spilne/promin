@@ -137,6 +137,7 @@ export {
   trigger,
   WorkflowResult,
   type CompensateConfig,
+  type DispatchConfig,
   type CompensationStatus,
   type StepAttemptRecord,
   type StepAttemptType,

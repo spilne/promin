@@ -13,6 +13,7 @@ export {
   type StepOptions,
   type StepFailureStrategy,
   type CompensateConfig,
+  type DispatchConfig,
 } from "./durable-pipeline.ts";
 export {
   type WorkflowStorage,
