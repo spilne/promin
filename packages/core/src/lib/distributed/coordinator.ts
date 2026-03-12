@@ -11,6 +11,7 @@ import type { WorkflowState } from "../durable/workflow-state.ts";
 import type { WorkflowDefinition, WorkflowDAG } from "../durable/durable-pipeline.ts";
 import { computeReadySet } from "../durable/workflow-dag.ts";
 import type { StepQueue } from "./step-queue.ts";
+import type { WorkerRegistry } from "./worker-registry.ts";
 
 export interface CoordinatorConfig {
   /** Workflow storage for state persistence. */
@@ -34,6 +35,10 @@ export interface CoordinatorConfig {
   defaultQueue?: string;
   /** How often to check for completed steps and enqueue next batch (ms). Default: 1000. */
   pollIntervalMs?: number;
+  /** Worker registry for health monitoring. Optional — without it, no dead detection. */
+  workerRegistry?: WorkerRegistry;
+  /** How long before a worker is considered dead (ms). Default: 30000. */
+  workerTimeoutMs?: number;
 }
 
 export interface WorkflowCoordinator {
@@ -63,6 +68,8 @@ export class DefaultCoordinator implements WorkflowCoordinator {
   private readonly routing: Record<string, string>;
   private readonly defaultQueue: string;
   private readonly pollIntervalMs: number;
+  private readonly workerRegistry?: WorkerRegistry;
+  private readonly workerTimeoutMs: number;
   private running = false;
   private dags = new Map<string, WorkflowDAG>();
   private enqueued = new Map<string, Set<string>>(); // workflowId → set of enqueued step names
@@ -77,6 +84,8 @@ export class DefaultCoordinator implements WorkflowCoordinator {
     this.routing = config.routing ?? {};
     this.defaultQueue = config.defaultQueue ?? "default";
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
+    this.workerRegistry = config.workerRegistry;
+    this.workerTimeoutMs = config.workerTimeoutMs ?? 30_000;
   }
 
   async submit<Input>(params: {
@@ -137,6 +146,14 @@ export class DefaultCoordinator implements WorkflowCoordinator {
   // ---------------------------------------------------------------------------
 
   private async tick(): Promise<void> {
+    // Detect dead workers and re-enqueue their stuck tasks
+    if (this.workerRegistry) {
+      const dead = await this.workerRegistry.detectDead(this.workerTimeoutMs);
+      for (const worker of dead) {
+        await this.reEnqueueStuckTasks(worker.workerId);
+      }
+    }
+
     // Check all tracked workflows for completed steps
     for (const [workflowId] of this.dags) {
       const state = await this.storage.loadWorkflow(workflowId);
@@ -218,6 +235,14 @@ export class DefaultCoordinator implements WorkflowCoordinator {
       const finalResult = lastStep ? prevResults[lastStep.name] : undefined;
       await this.storage.completeWorkflow(workflowId, finalResult);
       this.enqueued.delete(workflowId);
+    }
+  }
+
+  private async reEnqueueStuckTasks(deadWorkerId: string): Promise<void> {
+    const requeued = await this.stepQueue.requeueStuck({ claimedBy: deadWorkerId });
+    if (requeued > 0) {
+      // The next tick will re-evaluate ready-sets and re-enqueue naturally
+      // since stuck tasks are now back to "pending"
     }
   }
 

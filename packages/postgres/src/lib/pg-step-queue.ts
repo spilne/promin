@@ -115,6 +115,19 @@ export class PgStepQueue implements StepQueue {
       .where(eq(stepQueue.id, Number(params.taskId)));
   }
 
+  async requeueStuck(params: { claimedBy: string }): Promise<number> {
+    const rows = await execRaw(
+      this.db,
+      sql`
+        UPDATE wf_step_queue
+        SET status = 'pending', claimed_by = NULL, claimed_at = NULL
+        WHERE status = 'running' AND claimed_by = ${params.claimedBy}
+        RETURNING id
+      `,
+    );
+    return rows.length;
+  }
+
   async metrics(): Promise<
     Record<string, { pending: number; running: number; completed: number; failed: number }>
   > {

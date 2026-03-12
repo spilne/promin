@@ -12,6 +12,7 @@ import { isStepAttemptStorage } from "../durable/workflow-storage.ts";
 import type { StepRegistry, StepContext, StepRegistration } from "./step-registry.ts";
 import type { StepQueue, StepTask } from "./step-queue.ts";
 import type { WorkerMiddleware } from "./middleware.ts";
+import type { WorkerRegistry } from "./worker-registry.ts";
 
 // ---------------------------------------------------------------------------
 // Hooks
@@ -37,6 +38,12 @@ export interface WorkerConfig {
   workerId?: string;
   hooks?: WorkerHooks;
   middleware?: WorkerMiddleware[];
+  /** Worker registry for health monitoring. Optional — without it, no heartbeat/registration. */
+  workerRegistry?: WorkerRegistry;
+  /** Heartbeat interval in ms. Default: 5000. */
+  heartbeatIntervalMs?: number;
+  /** Worker metadata (hostname, labels, etc). */
+  metadata?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -63,8 +70,12 @@ export class DefaultWorker implements WorkflowWorker {
   private readonly pollIntervalMs: number;
   private readonly hooks: WorkerHooks;
   private readonly middleware: WorkerMiddleware[];
+  private readonly workerRegistry?: WorkerRegistry;
+  private readonly heartbeatIntervalMs: number;
+  private readonly workerMetadata?: Record<string, unknown>;
   private running = false;
   private activeCount = 0;
+  private heartbeatTimer?: ReturnType<typeof setInterval>;
 
   constructor(config: WorkerConfig) {
     this.workerId = config.workerId ?? crypto.randomUUID();
@@ -76,10 +87,27 @@ export class DefaultWorker implements WorkflowWorker {
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
     this.hooks = config.hooks ?? {};
     this.middleware = config.middleware ?? [];
+    this.workerRegistry = config.workerRegistry;
+    this.heartbeatIntervalMs = config.heartbeatIntervalMs ?? 5000;
+    this.workerMetadata = config.metadata;
   }
 
   async start(): Promise<void> {
     this.running = true;
+
+    // Register with worker registry
+    if (this.workerRegistry) {
+      await this.workerRegistry.register({
+        workerId: this.workerId,
+        queues: this.queues,
+        concurrency: this.concurrency,
+        metadata: this.workerMetadata,
+      });
+      this.heartbeatTimer = setInterval(async () => {
+        await this.workerRegistry!.heartbeat(this.workerId);
+      }, this.heartbeatIntervalMs);
+    }
+
     while (this.running) {
       if (this.activeCount < this.concurrency) {
         const claimCount = this.concurrency - this.activeCount;
@@ -98,8 +126,22 @@ export class DefaultWorker implements WorkflowWorker {
 
   async stop(): Promise<void> {
     this.running = false;
+
+    // Mark as draining, then wait for active tasks
+    if (this.workerRegistry) {
+      await this.workerRegistry.drain(this.workerId);
+    }
+
     while (this.activeCount > 0) {
       await new Promise((r) => setTimeout(r, 100));
+    }
+
+    // Deregister and stop heartbeat
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+    }
+    if (this.workerRegistry) {
+      await this.workerRegistry.deregister(this.workerId);
     }
   }
 

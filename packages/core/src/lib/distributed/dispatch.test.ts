@@ -32,7 +32,7 @@ describe("Hybrid dispatch", () => {
     void gpuWorker.start();
 
     // Run workflow with dispatch — "transcribe" goes to GPU worker, rest runs locally
-    const result = await workflow<{ videoId: string }>({
+    await workflow<{ videoId: string }>({
       name: "hybrid",
       storage,
       dispatch: {

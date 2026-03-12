@@ -6,11 +6,16 @@ import type { StepQueue, StepTask } from "./step-queue.ts";
 
 type MutableTask = {
   -readonly [K in keyof StepTask]: StepTask[K];
-} & { result?: unknown; error?: string };
+} & { result?: unknown; error?: string; claimedBy?: string };
 
 export class InMemoryStepQueue implements StepQueue {
   private tasks = new Map<string, MutableTask>();
   private counter = 0;
+  private readonly workerId: string;
+
+  constructor(params?: { workerId?: string }) {
+    this.workerId = params?.workerId ?? "in-memory";
+  }
 
   async enqueue(params: {
     workflowId: string;
@@ -42,6 +47,7 @@ export class InMemoryStepQueue implements StepQueue {
       if (claimed.length >= params.limit) break;
       if (task.status === "pending" && queueSet.has(task.queue)) {
         task.status = "running";
+        task.claimedBy = this.workerId;
         claimed.push({ ...task });
       }
     }
@@ -63,6 +69,18 @@ export class InMemoryStepQueue implements StepQueue {
       task.status = "failed";
       task.error = params.error;
     }
+  }
+
+  async requeueStuck(params: { claimedBy: string }): Promise<number> {
+    let count = 0;
+    for (const task of this.tasks.values()) {
+      if (task.status === "running" && task.claimedBy === params.claimedBy) {
+        task.status = "pending";
+        task.claimedBy = undefined;
+        count++;
+      }
+    }
+    return count;
   }
 
   async metrics(): Promise<
