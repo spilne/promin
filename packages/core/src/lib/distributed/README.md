@@ -2,6 +2,90 @@
 
 Run workflow steps on different machines. A coordinator dispatches steps to workers via Postgres task queues. Workers poll their assigned queues, execute steps, and checkpoint results.
 
+## When to Use What
+
+There are two ways to execute workflows:
+
+### In-process engine (`workflow.run()`)
+
+All steps run in the same process. The engine handles the full DAG execution loop, including retry, compensation, DLQ, and workflow-level retry.
+
+```typescript
+// Everything runs here — one process
+const result = await processVideo.run({
+  workflowId: "v1",
+  input: { videoId: "abc" },
+});
+```
+
+**Use when:**
+
+- Steps don't need specialized hardware (GPU, high memory)
+- Single-machine throughput is sufficient
+- You want the simplest setup (no coordinator, no workers)
+- Dev/test environments
+
+**You get for free:** workflow-level retry, compensation cascade, DLQ, step attempt recording, `CompensateConfig` trigger modes.
+
+### Distributed workers (`coordinator + worker`)
+
+Steps are dispatched to remote workers via Postgres queues. Each worker runs on a different machine with different capabilities.
+
+```typescript
+// Coordinator process
+await coordinator.submit({ workflow: processVideo, workflowId: "v1", input: { videoId: "abc" } });
+
+// GPU worker (different machine)
+gpuWorker.start();
+```
+
+**Use when:**
+
+- Steps need different hardware (GPU transcription, high-memory ML, specific regions)
+- You need horizontal scaling (more workers = more throughput)
+- Steps are in different languages/runtimes (via container executor, future Phase 3.4)
+- You want independent deployment of step implementations
+
+**You get:** per-step retry + `when` predicate, `onFailure` (skip/fallback), compensation, step attempt recording, hooks, middleware (timeout, logging, metrics, tracing).
+
+### Feature comparison
+
+```
+                          In-process engine    Distributed worker
+                          ─────────────────    ──────────────────
+Step retry + when         ✓ StepOptions        ✓ WorkerStepOptions
+onFailure (skip/fallback) ✓ StepOptions        ✓ WorkerStepOptions
+Compensation              ✓ StepOptions        ✓ WorkerStepOptions
+Step attempt recording    ✓ StepAttemptStorage  ✓ StepAttemptStorage
+Workflow-level retry      ✓ workflow({ retry }) ✗ (coordinator manages)
+Compensation cascade      ✓ CompensateConfig   ✗ (coordinator manages)
+DLQ                       ✓ workflow({ dlq })   ✗ (coordinator manages)
+Lifecycle hooks           ✓ WorkflowHooks      ✓ WorkerHooks
+Middleware                ✗                     ✓ WorkerMiddleware
+Timeout                   ✓ StepOptions         ✓ timeoutMiddleware
+Multi-machine routing     ✗                     ✓ routing config
+Horizontal scaling        ✗                     ✓ add more workers
+```
+
+### Same workflow, both modes
+
+The same `WorkflowDefinition` works in both modes. No code changes — only deployment changes:
+
+```typescript
+// Define once
+const processVideo = workflow<{ videoId: string }>({ name: "process-video", storage })
+  .step("download", fn)
+  .step("transcribe", { dependsOn: ["download"] }, fn)
+  .step("summarize", { dependsOn: ["transcribe"] }, fn)
+  .build();
+
+// Dev: run in-process
+await processVideo.run({ workflowId: "v1", input: { videoId: "abc" } });
+
+// Prod: distribute across machines
+await coordinator.submit({ workflow: processVideo, workflowId: "v1", input: { videoId: "abc" } });
+```
+
 ## How It Works
 
 ```
