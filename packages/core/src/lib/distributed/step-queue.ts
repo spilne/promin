@@ -19,14 +19,14 @@ export interface StepTask {
 }
 
 export interface StepQueue {
-  /** Enqueue a step for execution on a named queue. Lower priority number = higher priority. */
+  /** Enqueue a step for execution on a named queue. Higher priority number = runs first. */
   enqueue(params: {
     workflowId: string;
     stepName: string;
     queue: string;
     input: unknown;
     prevResults: Record<string, unknown>;
-    /** Priority — lower number runs first. Default: 5. */
+    /** Priority — higher number runs first. Default: 5. Range: 0-10. */
     priority?: number;
   }): Promise<string>;
 

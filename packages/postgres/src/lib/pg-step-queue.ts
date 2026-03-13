@@ -70,7 +70,7 @@ export class PgStepQueue implements StepQueue {
         WHERE id IN (
           SELECT id FROM wf_step_queue
           WHERE status = 'pending' AND queue IN (${sanitizedQueues})
-          ORDER BY priority ASC, created_at ASC
+          ORDER BY priority DESC, created_at ASC
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED
         )
@@ -91,7 +91,7 @@ export class PgStepQueue implements StepQueue {
         status: "running" as const,
         createdAt: r.created_at instanceof Date ? r.created_at : new Date(r.created_at),
       }))
-      .sort((a, b) => a.priority - b.priority || a.createdAt.getTime() - b.createdAt.getTime());
+      .sort((a, b) => b.priority - a.priority || a.createdAt.getTime() - b.createdAt.getTime());
   }
 
   async complete(params: { taskId: string; result: unknown; durationMs: number }): Promise<void> {

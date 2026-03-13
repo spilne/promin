@@ -219,7 +219,7 @@ describe("PgStepQueue", () => {
     expect(tasks[0]!.stepName).toBe("first");
   });
 
-  it("claim respects priority — lower number first", async () => {
+  it("claim respects priority — higher number runs first", async () => {
     const queue = new PgStepQueue({ db: pg.db });
     await queue.ensureTable();
 
@@ -229,7 +229,7 @@ describe("PgStepQueue", () => {
       queue: "prio",
       input: {},
       prevResults: {},
-      priority: 10,
+      priority: 1,
     });
     await queue.enqueue({
       workflowId: "wf-p",
@@ -237,7 +237,7 @@ describe("PgStepQueue", () => {
       queue: "prio",
       input: {},
       prevResults: {},
-      priority: 1,
+      priority: 10,
     });
     await queue.enqueue({
       workflowId: "wf-p",
@@ -250,10 +250,8 @@ describe("PgStepQueue", () => {
 
     const tasks = await queue.claim({ queues: ["prio"], limit: 3 });
     expect(tasks).toHaveLength(3);
-    // All three should be claimed — verify priority values exist
-    const priorities = tasks.map((t) => t.priority).sort((a, b) => a - b);
-    expect(priorities).toEqual([1, 5, 10]);
-    // First claimed should be highest priority (lowest number)
+    // First claimed should be highest priority (highest number)
     expect(tasks[0]!.stepName).toBe("high");
+    expect(tasks[0]!.priority).toBe(10);
   });
 });

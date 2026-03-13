@@ -45,12 +45,12 @@ export class InMemoryStepQueue implements StepQueue {
     const claimed: StepTask[] = [];
     const queueSet = new Set(params.queues);
 
-    // Sort by priority ASC, then createdAt ASC
+    // Sort by priority DESC (higher = more urgent), then createdAt ASC (FIFO within same priority)
     const pending = [...this.tasks.values()]
       .filter((t) => t.status === "pending" && queueSet.has(t.queue))
       .sort(
         (a, b) =>
-          (a.priority ?? 5) - (b.priority ?? 5) || a.createdAt.getTime() - b.createdAt.getTime(),
+          (b.priority ?? 5) - (a.priority ?? 5) || a.createdAt.getTime() - b.createdAt.getTime(),
       );
 
     for (const task of pending) {

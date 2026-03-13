@@ -89,7 +89,7 @@ describe("InMemoryStepQueue", () => {
     expect(tasks).toHaveLength(2);
   });
 
-  it("claim respects priority — lower number first", async () => {
+  it("claim respects priority — higher number runs first", async () => {
     const queue = new InMemoryStepQueue();
 
     await queue.enqueue({
@@ -98,7 +98,7 @@ describe("InMemoryStepQueue", () => {
       queue: "default",
       input: {},
       prevResults: {},
-      priority: 10,
+      priority: 1,
     });
     await queue.enqueue({
       workflowId: "wf-p",
@@ -106,7 +106,7 @@ describe("InMemoryStepQueue", () => {
       queue: "default",
       input: {},
       prevResults: {},
-      priority: 1,
+      priority: 10,
     });
     await queue.enqueue({
       workflowId: "wf-p",
