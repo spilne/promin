@@ -23,6 +23,7 @@ export class InMemoryStepQueue implements StepQueue {
     queue: string;
     input: unknown;
     prevResults: Record<string, unknown>;
+    priority?: number;
   }): Promise<string> {
     const id = `task-${++this.counter}`;
     this.tasks.set(id, {
@@ -30,6 +31,7 @@ export class InMemoryStepQueue implements StepQueue {
       workflowId: params.workflowId,
       stepName: params.stepName,
       queue: params.queue,
+      priority: params.priority ?? 5,
       input: params.input,
       prevResults: params.prevResults,
       attempt: 1,
@@ -43,7 +45,15 @@ export class InMemoryStepQueue implements StepQueue {
     const claimed: StepTask[] = [];
     const queueSet = new Set(params.queues);
 
-    for (const [, task] of this.tasks) {
+    // Sort by priority ASC, then createdAt ASC
+    const pending = [...this.tasks.values()]
+      .filter((t) => t.status === "pending" && queueSet.has(t.queue))
+      .sort(
+        (a, b) =>
+          (a.priority ?? 5) - (b.priority ?? 5) || a.createdAt.getTime() - b.createdAt.getTime(),
+      );
+
+    for (const task of pending) {
       if (claimed.length >= params.limit) break;
       if (task.status === "pending" && queueSet.has(task.queue)) {
         task.status = "running";

@@ -36,6 +36,13 @@
       "when": 1743400004000,
       "tag": "0004_step_queue",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1743400005000,
+      "tag": "0005_priority_queue",
+      "breakpoints": true
     }
   ]
 }

@@ -89,6 +89,53 @@ describe("InMemoryStepQueue", () => {
     expect(tasks).toHaveLength(2);
   });
 
+  it("claim respects priority — lower number first", async () => {
+    const queue = new InMemoryStepQueue();
+
+    await queue.enqueue({
+      workflowId: "wf-p",
+      stepName: "low",
+      queue: "default",
+      input: {},
+      prevResults: {},
+      priority: 10,
+    });
+    await queue.enqueue({
+      workflowId: "wf-p",
+      stepName: "high",
+      queue: "default",
+      input: {},
+      prevResults: {},
+      priority: 1,
+    });
+    await queue.enqueue({
+      workflowId: "wf-p",
+      stepName: "medium",
+      queue: "default",
+      input: {},
+      prevResults: {},
+      priority: 5,
+    });
+
+    const tasks = await queue.claim({ queues: ["default"], limit: 3 });
+    expect(tasks.map((t) => t.stepName)).toEqual(["high", "medium", "low"]);
+  });
+
+  it("default priority is 5", async () => {
+    const queue = new InMemoryStepQueue();
+
+    await queue.enqueue({
+      workflowId: "wf-d",
+      stepName: "default-prio",
+      queue: "default",
+      input: {},
+      prevResults: {},
+    });
+
+    const tasks = await queue.claim({ queues: ["default"], limit: 1 });
+    expect(tasks[0]!.priority).toBe(5);
+  });
+
   it("claimed tasks are not re-claimed", async () => {
     const queue = new InMemoryStepQueue();
 

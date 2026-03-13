@@ -10,6 +10,7 @@ export interface StepTask {
   readonly workflowId: string;
   readonly stepName: string;
   readonly queue: string;
+  readonly priority: number;
   readonly input: unknown;
   readonly prevResults: Record<string, unknown>;
   readonly attempt: number;
@@ -18,13 +19,15 @@ export interface StepTask {
 }
 
 export interface StepQueue {
-  /** Enqueue a step for execution on a named queue. */
+  /** Enqueue a step for execution on a named queue. Lower priority number = higher priority. */
   enqueue(params: {
     workflowId: string;
     stepName: string;
     queue: string;
     input: unknown;
     prevResults: Record<string, unknown>;
+    /** Priority — lower number runs first. Default: 5. */
+    priority?: number;
   }): Promise<string>;
 
   /** Claim up to `limit` pending tasks from the given queues (SKIP LOCKED). */

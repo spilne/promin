@@ -32,6 +32,7 @@ export class PgStepQueue implements StepQueue {
     queue: string;
     input: unknown;
     prevResults: Record<string, unknown>;
+    priority?: number;
   }): Promise<string> {
     const [row] = await this.db
       .insert(stepQueue)
@@ -39,6 +40,7 @@ export class PgStepQueue implements StepQueue {
         workflowId: params.workflowId,
         stepName: params.stepName,
         queue: params.queue,
+        priority: params.priority ?? 5,
         input: params.input,
         prevResults: params.prevResults,
       })
@@ -68,25 +70,28 @@ export class PgStepQueue implements StepQueue {
         WHERE id IN (
           SELECT id FROM wf_step_queue
           WHERE status = 'pending' AND queue IN (${sanitizedQueues})
-          ORDER BY created_at ASC
+          ORDER BY priority ASC, created_at ASC
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED
         )
-        RETURNING id, workflow_id, step_name, queue, input, prev_results, attempt, status, created_at
+        RETURNING id, workflow_id, step_name, queue, priority, input, prev_results, attempt, status, created_at
       `),
     );
 
-    return rows.map((r: any) => ({
-      id: String(r.id),
-      workflowId: r.workflow_id,
-      stepName: r.step_name,
-      queue: r.queue,
-      input: r.input,
-      prevResults: (r.prev_results as Record<string, unknown>) ?? {},
-      attempt: r.attempt,
-      status: "running" as const,
-      createdAt: r.created_at instanceof Date ? r.created_at : new Date(r.created_at),
-    }));
+    return rows
+      .map((r: any) => ({
+        id: String(r.id),
+        workflowId: r.workflow_id,
+        stepName: r.step_name,
+        queue: r.queue,
+        priority: r.priority ?? 5,
+        input: r.input,
+        prevResults: (r.prev_results as Record<string, unknown>) ?? {},
+        attempt: r.attempt,
+        status: "running" as const,
+        createdAt: r.created_at instanceof Date ? r.created_at : new Date(r.created_at),
+      }))
+      .sort((a, b) => a.priority - b.priority || a.createdAt.getTime() - b.createdAt.getTime());
   }
 
   async complete(params: { taskId: string; result: unknown; durationMs: number }): Promise<void> {
@@ -154,7 +159,10 @@ export class PgStepQueue implements StepQueue {
     return result;
   }
 
-  /** Ensure the step queue table exists. */
+  /**
+   * Ensure the step queue table exists with all columns.
+   * For production, prefer using migrations instead.
+   */
   async ensureTable(): Promise<void> {
     await execRaw(
       this.db,
@@ -164,6 +172,7 @@ export class PgStepQueue implements StepQueue {
           workflow_id TEXT NOT NULL,
           step_name TEXT NOT NULL,
           queue TEXT NOT NULL DEFAULT 'default',
+          priority INTEGER NOT NULL DEFAULT 5,
           input JSONB,
           prev_results JSONB,
           attempt INTEGER NOT NULL DEFAULT 1,
@@ -178,10 +187,18 @@ export class PgStepQueue implements StepQueue {
         )
       `),
     );
+    // Add priority column if table was created without it
     await execRaw(
       this.db,
       sql.raw(
-        `CREATE INDEX IF NOT EXISTS wf_step_queue_dequeue_idx ON wf_step_queue (status, queue, created_at)`,
+        `ALTER TABLE wf_step_queue ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 5`,
+      ),
+    );
+    await execRaw(this.db, sql.raw(`DROP INDEX IF EXISTS wf_step_queue_dequeue_idx`));
+    await execRaw(
+      this.db,
+      sql.raw(
+        `CREATE INDEX IF NOT EXISTS wf_step_queue_dequeue_idx ON wf_step_queue (status, queue, priority, created_at)`,
       ),
     );
     await execRaw(

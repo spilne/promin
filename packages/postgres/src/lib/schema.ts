@@ -138,6 +138,7 @@ export const stepQueue = pgTable(
     workflowId: text("workflow_id").notNull(),
     stepName: text("step_name").notNull(),
     queue: text("queue").notNull().default("default"),
+    priority: integer("priority").notNull().default(5),
     input: jsonb("input"),
     prevResults: jsonb("prev_results"),
     attempt: integer("attempt").notNull().default(1),
@@ -151,7 +152,7 @@ export const stepQueue = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    index("wf_step_queue_dequeue_idx").on(t.status, t.queue, t.createdAt),
+    index("wf_step_queue_dequeue_idx").on(t.status, t.queue, t.priority, t.createdAt),
     index("wf_step_queue_workflow_idx").on(t.workflowId),
   ],
 );
