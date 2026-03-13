@@ -12,6 +12,8 @@ import type { WorkflowDefinition, WorkflowDAG } from "../durable/durable-pipelin
 import { computeReadySet } from "../durable/workflow-dag.ts";
 import type { StepQueue } from "./step-queue.ts";
 import type { WorkerRegistry } from "./worker-registry.ts";
+import type { LeaderElection } from "./leader-election.ts";
+import { SingleLeader } from "./leader-election.ts";
 
 export interface CoordinatorConfig {
   /** Workflow storage for state persistence. */
@@ -39,6 +41,8 @@ export interface CoordinatorConfig {
   workerRegistry?: WorkerRegistry;
   /** How long before a worker is considered dead (ms). Default: 30000. */
   workerTimeoutMs?: number;
+  /** Leader election — ensures only one coordinator runs. Default: SingleLeader (always wins). */
+  leaderElection?: LeaderElection;
 }
 
 export interface WorkflowCoordinator {
@@ -70,7 +74,9 @@ export class DefaultCoordinator implements WorkflowCoordinator {
   private readonly pollIntervalMs: number;
   private readonly workerRegistry?: WorkerRegistry;
   private readonly workerTimeoutMs: number;
+  private readonly leaderElection: LeaderElection;
   private running = false;
+  private isLeader = false;
   private dags = new Map<string, WorkflowDAG>();
   private enqueued = new Map<string, Set<string>>(); // workflowId → set of enqueued step names
   private waiters = new Map<
@@ -86,6 +92,7 @@ export class DefaultCoordinator implements WorkflowCoordinator {
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
     this.workerRegistry = config.workerRegistry;
     this.workerTimeoutMs = config.workerTimeoutMs ?? 30_000;
+    this.leaderElection = config.leaderElection ?? new SingleLeader();
   }
 
   async submit<Input>(params: {
@@ -134,12 +141,24 @@ export class DefaultCoordinator implements WorkflowCoordinator {
   async start(): Promise<void> {
     this.running = true;
 
-    // Recovery: reload running workflows from storage
-    await this.recoverActiveWorkflows();
-
     while (this.running) {
-      await this.tick();
+      // Leader election — only one coordinator runs at a time
+      this.isLeader = await this.leaderElection.tryAcquire();
+
+      if (this.isLeader) {
+        // First tick as leader — recover active workflows
+        if (this.dags.size === 0) {
+          await this.recoverActiveWorkflows();
+        }
+        await this.tick();
+      }
+
       await new Promise((r) => setTimeout(r, this.pollIntervalMs));
+    }
+
+    if (this.isLeader) {
+      await this.leaderElection.release();
+      this.isLeader = false;
     }
   }
 

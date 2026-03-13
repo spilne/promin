@@ -23,6 +23,7 @@ export {
   createWorker,
 } from "./worker.ts";
 export { type WorkerInfo, type WorkerRegistry, InMemoryWorkerRegistry } from "./worker-registry.ts";
+export { type LeaderElection, SingleLeader } from "./leader-election.ts";
 export {
   type WorkerMiddleware,
   type NextFn,

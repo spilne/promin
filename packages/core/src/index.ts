@@ -203,6 +203,8 @@ export {
   type WorkerInfo,
   type WorkerRegistry,
   InMemoryWorkerRegistry,
+  type LeaderElection,
+  SingleLeader,
   DefaultWorker,
   createWorker,
   type WorkerHooks,

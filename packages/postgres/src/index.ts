@@ -42,6 +42,9 @@ export { PgChangeStream, type PgChangeStreamConfig } from "./lib/pg-change-strea
 // Distributed step queue (SKIP LOCKED)
 export { PgStepQueue, type PgStepQueueConfig } from "./lib/pg-step-queue.ts";
 
+// Leader election (advisory lock)
+export { PgLeaderElection, type PgLeaderElectionConfig } from "./lib/pg-leader-election.ts";
+
 // Schema exports for custom migrations
 export {
   workflows,
