@@ -25,6 +25,12 @@ export {
 export { type WorkerInfo, type WorkerRegistry, InMemoryWorkerRegistry } from "./worker-registry.ts";
 export { type LeaderElection, SingleLeader } from "./leader-election.ts";
 export {
+  type SleepScanner,
+  type SleepScannerConfig,
+  DefaultSleepScanner,
+  createSleepScanner,
+} from "./sleep-scanner.ts";
+export {
   type WorkerMiddleware,
   type NextFn,
   timeoutMiddleware,
