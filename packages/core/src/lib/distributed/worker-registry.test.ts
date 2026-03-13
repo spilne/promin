@@ -1,5 +1,4 @@
 import { describe, it, expect } from "bun:test";
-import { Pipeline } from "../pipeline.ts";
 import { InMemoryWorkflowStorage } from "../durable/index.ts";
 import { InMemoryWorkerRegistry } from "./worker-registry.ts";
 import { InMemoryStepQueue } from "./in-memory-step-queue.ts";
@@ -206,8 +205,8 @@ describe("Worker + registry integration", () => {
 
     // Check draining status
     await new Promise((r) => setTimeout(r, 50));
-    const draining = await workerRegistry.list({ status: "draining" });
     // May or may not catch the draining state depending on timing
+    void workerRegistry.list({ status: "draining" });
 
     await stopPromise;
 

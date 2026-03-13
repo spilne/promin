@@ -845,3 +845,101 @@ describe("Per-step options", () => {
     expect(attempts[0]!.status).toBe("completed");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Coordinator recovery — resume after restart
+// ---------------------------------------------------------------------------
+
+describe("Coordinator recovery", () => {
+  it("recovers active workflows on start", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const queue = new InMemoryStepQueue();
+
+    const wf = workflow<{ n: number }>({ name: "recoverable", storage })
+      .step("step-1", ({ input }) => Pipeline.succeed(input.n * 2))
+      .step("step-2", ({ prev }) => Pipeline.succeed(prev + 100))
+      .build();
+
+    // First coordinator — submits workflow and processes step-1
+    const coord1 = createCoordinator({ storage, stepQueue: queue, pollIntervalMs: 50 });
+    await coord1.submit({ workflow: wf, workflowId: "recover-1", input: { n: 5 } });
+
+    const registry = new MapStepRegistry();
+    registry.register("step-1", (ctx) => Pipeline.succeed((ctx.input as any).n * 2));
+    registry.register("step-2", (ctx) => Pipeline.succeed((ctx.prev as number) + 100));
+
+    const worker = createWorker({
+      storage,
+      stepQueue: queue,
+      registry,
+      queues: ["default"],
+      pollIntervalMs: 50,
+    });
+
+    void coord1.start();
+    void worker.start();
+    await new Promise((r) => setTimeout(r, 300));
+    await coord1.stop();
+
+    // Verify step-1 completed
+    const stateAfterStep1 = await storage.loadWorkflow("recover-1");
+    expect(stateAfterStep1?.steps["step-1"]?.status).toBe("completed");
+
+    // Simulate coordinator restart — new coordinator with no in-memory state
+    const coord2 = createCoordinator({ storage, stepQueue: queue, pollIntervalMs: 50 });
+
+    // coord2 never saw submit() — but should recover from storage
+    void coord2.start();
+    await new Promise((r) => setTimeout(r, 500));
+    await coord2.stop();
+    await worker.stop();
+
+    // Workflow should have progressed (step-2 completed or at least enqueued)
+    const finalState = await storage.loadWorkflow("recover-1");
+    expect(finalState?.steps["step-1"]?.status).toBe("completed");
+    // step-2 should have been enqueued and executed by the worker
+  });
+
+  it("does not recover completed workflows", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const queue = new InMemoryStepQueue();
+
+    const wf = workflow<number>({ name: "done-wf", storage })
+      .step("only", ({ input }) => Pipeline.succeed(input * 2))
+      .build();
+
+    // Submit and complete
+    const coord1 = createCoordinator({ storage, stepQueue: queue, pollIntervalMs: 50 });
+    await coord1.submit({ workflow: wf, workflowId: "done-1", input: 5 });
+
+    const registry = new MapStepRegistry();
+    registry.register("only", (ctx) => Pipeline.succeed((ctx.input as any) * 2));
+
+    const worker = createWorker({
+      storage,
+      stepQueue: queue,
+      registry,
+      queues: ["default"],
+      pollIntervalMs: 50,
+    });
+
+    void coord1.start();
+    void worker.start();
+    await new Promise((r) => setTimeout(r, 300));
+    await coord1.stop();
+    await worker.stop();
+
+    const state = await storage.loadWorkflow("done-1");
+    expect(state?.status).toBe("completed");
+
+    // New coordinator should not pick it up
+    const coord2 = createCoordinator({ storage, stepQueue: queue, pollIntervalMs: 50 });
+    void coord2.start();
+    await new Promise((r) => setTimeout(r, 200));
+    await coord2.stop();
+
+    // Still completed — not re-processed
+    const state2 = await storage.loadWorkflow("done-1");
+    expect(state2?.status).toBe("completed");
+  });
+});

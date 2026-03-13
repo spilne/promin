@@ -94,16 +94,18 @@ export class DefaultCoordinator implements WorkflowCoordinator {
     input: Input;
   }): Promise<void> {
     const { workflow, workflowId, input } = params;
+    const dag = workflow.dag;
 
-    // Create workflow in storage
+    // Create workflow in storage — persist DAG in metadata for recovery
     await this.storage.createWorkflow({
       workflowId,
       workflowName: workflow.name,
       input,
+      metadata: { ...((workflow as any).metadata ?? {}), _dag: dag },
     });
 
     // Store the DAG for coordination
-    this.dags.set(workflowId, workflow.dag);
+    this.dags.set(workflowId, dag);
 
     // Enqueue initial ready steps
     await this.enqueueReady(workflowId, input);
@@ -131,6 +133,10 @@ export class DefaultCoordinator implements WorkflowCoordinator {
 
   async start(): Promise<void> {
     this.running = true;
+
+    // Recovery: reload running workflows from storage
+    await this.recoverActiveWorkflows();
+
     while (this.running) {
       await this.tick();
       await new Promise((r) => setTimeout(r, this.pollIntervalMs));
@@ -235,6 +241,25 @@ export class DefaultCoordinator implements WorkflowCoordinator {
       const finalResult = lastStep ? prevResults[lastStep.name] : undefined;
       await this.storage.completeWorkflow(workflowId, finalResult);
       this.enqueued.delete(workflowId);
+    }
+  }
+
+  private async recoverActiveWorkflows(): Promise<void> {
+    // Reload running/suspended workflows in pages to handle large counts
+    for (const status of ["running", "suspended"] as const) {
+      let offset = 0;
+      const pageSize = 100;
+      while (true) {
+        const page = await this.storage.listWorkflows({ status, limit: pageSize, offset });
+        for (const state of page) {
+          if (this.dags.has(state.workflowId)) continue;
+          const dag = state.metadata?._dag as WorkflowDAG | undefined;
+          if (!dag) continue;
+          this.dags.set(state.workflowId, dag);
+        }
+        if (page.length < pageSize) break;
+        offset += pageSize;
+      }
     }
   }
 
