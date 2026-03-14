@@ -13,6 +13,16 @@
         "typescript": "~5.9.2",
       },
     },
+    "packages/container": {
+      "name": "@promin/container",
+      "version": "0.0.1",
+      "dependencies": {
+        "@promin/core": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+      },
+    },
     "packages/core": {
       "name": "@promin/core",
       "version": "0.0.1",
@@ -382,6 +392,8 @@
     "@oxlint/binding-win32-x64-msvc": ["@oxlint/binding-win32-x64-msvc@1.46.0", "", { "os": "win32", "cpu": "x64" }, "sha512-DJbQsSJUr4KSi9uU0QqOgI7PX2C+fKGZX+YDprt3vM2sC0dWZsgVTLoN2vtkNyEWJSY2mnvRFUshWXT3bmo0Ug=="],
 
     "@pkgjs/parseargs": ["@pkgjs/parseargs@0.11.0", "", {}, "sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg=="],
+
+    "@promin/container": ["@promin/container@workspace:packages/container"],
 
     "@promin/core": ["@promin/core@workspace:packages/core"],
 
