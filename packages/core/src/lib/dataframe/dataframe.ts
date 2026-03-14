@@ -12,6 +12,7 @@ import type { DataFrameExecutor } from "./executor.ts";
 import { ArrayExecutor } from "./array-executor.ts";
 import { GroupedDataFrame } from "./grouped-dataframe.ts";
 import { StringAccessor, DateAccessor } from "./accessors.ts";
+import { ExpectationSuite } from "../data-quality/expectation-suite.ts";
 
 const DEFAULT_EXECUTOR = new ArrayExecutor();
 
@@ -494,6 +495,14 @@ export class DataFrame<T> {
 
   async toArray(): Promise<T[]> {
     return this.collect();
+  }
+
+  // =========================================================================
+  // DATA QUALITY
+  // =========================================================================
+
+  expect(): ExpectationSuite<T> {
+    return new ExpectationSuite(this);
   }
 
   // =========================================================================

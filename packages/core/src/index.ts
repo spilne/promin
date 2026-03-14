@@ -186,6 +186,14 @@ export {
   type CumulativeFn,
 } from "./lib/dataframe/index.ts";
 
+// Data quality
+export {
+  type Expectation,
+  type ExpectationResult,
+  type ValidationResult,
+  ExpectationSuite,
+} from "./lib/data-quality/index.ts";
+
 // Distributed workflow execution
 export {
   type StepRegistry,
