@@ -16,6 +16,9 @@
     },
     {
       "path": "./packages/postgres"
+    },
+    {
+      "path": "./packages/container"
     }
   ]
 }

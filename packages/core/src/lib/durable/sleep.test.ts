@@ -65,7 +65,7 @@ describe("Durable sleep", () => {
     await new Promise((r) => setTimeout(r, 10));
 
     // Resume: completes
-    const result = await buildWf().run({ workflowId: "s-2", input: 5 });
+    await buildWf().run({ workflowId: "s-2", input: 5 });
 
     // "double" should NOT re-execute — it was checkpointed
     // But prev through sleep may be undefined (sleep doesn't pass through value)

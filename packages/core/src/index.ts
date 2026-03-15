@@ -190,6 +190,8 @@ export {
 export {
   type StepRegistry,
   type StepHandler,
+  type StepRegistration,
+  type WorkerStepOptions,
   MapStepRegistry,
   type StepQueue,
   type StepTask,
