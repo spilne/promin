@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { Effect, Stream } from "effect";
+import { OffsetTracker } from "./offset-tracker.ts";
 import { Kafka, type Consumer, type Producer, type EachMessagePayload } from "kafkajs";
 import { StreamPipeline, JsonCodec } from "@promin/core";
 import type {
@@ -118,40 +119,83 @@ export class KafkaTopic<T>
   // Acknowledgeable — manual ack/nack
   // =========================================================================
 
-  subscribeAck(params?: { group?: string }): StreamPipeline<Envelope<T>, never> {
+  /**
+   * Subscribe with manual ack — parallel-safe offset tracking.
+   *
+   * When processing messages in parallel, offsets are only committed
+   * up to the highest *contiguous* completed offset (high-water mark).
+   * This prevents message loss on crash:
+   *
+   *   Processing: [1:done, 2:pending, 3:done, 4:done]
+   *   Committable: offset 2 (only offset 1 is contiguous)
+   *
+   *   Later: [1:done, 2:done, 3:done, 4:done]
+   *   Committable: offset 5 (all contiguous)
+   *
+   * Set `commitIntervalMs` to control how often accumulated acks are flushed.
+   * Inspired by fs2-kafka / kafka4s commit batching pattern.
+   */
+  subscribeAck(params?: {
+    group?: string;
+    /** How often to flush committed offsets (ms). Default: 1000. */
+    commitIntervalMs?: number;
+  }): StreamPipeline<Envelope<T>, never> {
     const codec = this.codec;
     const kafka = this.kafka;
     const topic = this.topic;
     const groupId = params?.group ?? this.groupId;
+    const commitIntervalMs = params?.commitIntervalMs ?? 1000;
 
     const stream = Stream.async<Envelope<T>, never>((emit) => {
-      const consumer = kafka.consumer({ groupId });
+      const consumer = kafka.consumer({ groupId, maxWaitTimeInMs: 100 });
+      const tracker = new OffsetTracker();
+      let commitTimer: ReturnType<typeof setInterval> | undefined;
+
+      const flushCommits = async () => {
+        const committable = tracker.committable();
+        if (committable.size === 0) return;
+
+        const offsets = [...committable.entries()].map(([partition, offset]) => ({
+          topic,
+          partition,
+          offset: offset.toString(),
+        }));
+
+        try {
+          await consumer.commitOffsets(offsets);
+        } catch {
+          // Commit failed — will retry on next interval
+        }
+      };
 
       const run = async () => {
         await consumer.connect();
         await consumer.subscribe({ topic, fromBeginning: false });
 
+        // Periodic commit flush — batches acks for efficiency
+        commitTimer = setInterval(flushCommits, commitIntervalMs);
+
         await consumer.run({
+          autoCommit: false,
           eachMessage: async (payload: EachMessagePayload) => {
             const value = codec.decode(JSON.parse(payload.message.value!.toString()));
+            const offset = Number(payload.message.offset);
+            const partition = payload.partition;
+
             const envelope: Envelope<T> = {
               value,
               ack: async () => {
-                await consumer.commitOffsets([
-                  {
-                    topic,
-                    partition: payload.partition,
-                    offset: (Number(payload.message.offset) + 1).toString(),
-                  },
-                ]);
+                // Mark as completed — tracker handles ordering
+                tracker.complete(partition, offset);
               },
               nack: async () => {
-                // Kafka doesn't have nack — message will be redelivered on next poll
-                // if offset isn't committed
+                // Don't mark as completed — offset won't advance past this message.
+                // On next commit, this offset stays uncommitted.
+                // The message will be redelivered after consumer rebalance or restart.
               },
               metadata: {
                 topic,
-                partition: payload.partition,
+                partition,
                 offset: payload.message.offset,
                 key: payload.message.key?.toString(),
                 timestamp: payload.message.timestamp,
@@ -165,6 +209,9 @@ export class KafkaTopic<T>
       run().catch(() => {});
 
       return Effect.promise(async () => {
+        if (commitTimer) clearInterval(commitTimer);
+        // Final flush before disconnect
+        await flushCommits();
         await consumer.disconnect();
       });
     });
