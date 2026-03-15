@@ -20,8 +20,8 @@ afterAll(async () => {
 // PgStepQueue — SKIP LOCKED distributed step dispatch
 // ---------------------------------------------------------------------------
 
-describe("PgStepQueue", () => {
-  it("enqueues and claims a task", async () => {
+describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", () => {
+  it("enqueue a step task and claim it for processing", async () => {
     const queue = new PgStepQueue({ db: pg.db });
     await queue.ensureTable();
 
@@ -43,7 +43,7 @@ describe("PgStepQueue", () => {
     expect(tasks[0]!.input).toEqual({ n: 5 });
   });
 
-  it("claimed tasks are not re-claimed (SKIP LOCKED)", async () => {
+  it("concurrent workers cannot claim the same task — SKIP LOCKED prevents double processing", async () => {
     const queue = new PgStepQueue({ db: pg.db });
     await queue.ensureTable();
 
@@ -63,7 +63,7 @@ describe("PgStepQueue", () => {
     expect(second).toHaveLength(0);
   });
 
-  it("claim respects queue filter", async () => {
+  it("CPU and GPU tasks routed to separate queues — workers see only their tasks", async () => {
     const queue = new PgStepQueue({ db: pg.db });
     await queue.ensureTable();
 
@@ -91,7 +91,7 @@ describe("PgStepQueue", () => {
     expect(gpuTasks[0]!.stepName).toBe("gpu-step");
   });
 
-  it("claim respects limit", async () => {
+  it("worker claims at most 2 of 5 pending tasks — respects batch limit", async () => {
     const queue = new PgStepQueue({ db: pg.db });
     await queue.ensureTable();
 
@@ -109,7 +109,7 @@ describe("PgStepQueue", () => {
     expect(tasks).toHaveLength(2);
   });
 
-  it("complete marks task as completed with result", async () => {
+  it("step finishes successfully — result persisted and metrics updated", async () => {
     const queue = new PgStepQueue({ db: pg.db });
     await queue.ensureTable();
 
@@ -128,7 +128,7 @@ describe("PgStepQueue", () => {
     expect(metrics["test-complete"]?.completed).toBe(1);
   });
 
-  it("fail marks task as failed with error", async () => {
+  it("step fails — error message persisted and failure metrics updated", async () => {
     const queue = new PgStepQueue({ db: pg.db });
     await queue.ensureTable();
 
@@ -147,7 +147,7 @@ describe("PgStepQueue", () => {
     expect(metrics["test-fail"]?.failed).toBe(1);
   });
 
-  it("metrics returns per-queue counts", async () => {
+  it("ops dashboard sees pending/running/completed counts per queue", async () => {
     const queue = new PgStepQueue({ db: pg.db });
     await queue.ensureTable();
 
@@ -179,7 +179,7 @@ describe("PgStepQueue", () => {
     expect(metrics["metrics-q2"]?.pending).toBe(1);
   });
 
-  it("preserves prevResults through claim", async () => {
+  it("dependent step receives results from prior steps — context flows through the queue", async () => {
     const queue = new PgStepQueue({ db: pg.db });
     await queue.ensureTable();
 
@@ -195,7 +195,7 @@ describe("PgStepQueue", () => {
     expect(tasks[0]!.prevResults).toEqual({ "step-a": "result-a", "step-b": 42 });
   });
 
-  it("claim orders by created_at (FIFO)", async () => {
+  it("first-enqueued task is claimed first — FIFO fairness guarantee", async () => {
     const queue = new PgStepQueue({ db: pg.db });
     await queue.ensureTable();
 
@@ -219,7 +219,7 @@ describe("PgStepQueue", () => {
     expect(tasks[0]!.stepName).toBe("first");
   });
 
-  it("claim respects priority — higher number runs first", async () => {
+  it("urgent tasks jump the queue — priority ordering overrides FIFO", async () => {
     const queue = new PgStepQueue({ db: pg.db });
     await queue.ensureTable();
 

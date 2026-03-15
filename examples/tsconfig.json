@@ -8,6 +8,8 @@
   "references": [
     { "path": "../packages/core/tsconfig.lib.json" },
     { "path": "../packages/postgres/tsconfig.lib.json" },
-    { "path": "../packages/container/tsconfig.lib.json" }
+    { "path": "../packages/container/tsconfig.lib.json" },
+    { "path": "../packages/kafka/tsconfig.lib.json" },
+    { "path": "../packages/redis/tsconfig.lib.json" }
   ]
 }

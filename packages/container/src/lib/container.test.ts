@@ -13,8 +13,8 @@ import { containerStep } from "./container-step.ts";
 // LocalProcessRuntime
 // ---------------------------------------------------------------------------
 
-describe("LocalProcessRuntime", () => {
-  it("runs a command and captures stdout", async () => {
+describe("Local process runtime — run containerized steps as local processes for dev/test", () => {
+  it("simple echo command — captures stdout output", async () => {
     const runtime = new LocalProcessRuntime();
 
     const result = await runtime.run({
@@ -31,7 +31,7 @@ describe("LocalProcessRuntime", () => {
     expect(result.stdout.trim()).toBe("hello world");
   });
 
-  it("captures stderr and non-zero exit code", async () => {
+  it("command fails — stderr and exit code captured for error reporting", async () => {
     const runtime = new LocalProcessRuntime();
 
     const result = await runtime.run({
@@ -48,7 +48,7 @@ describe("LocalProcessRuntime", () => {
     expect(result.stderr.trim()).toBe("error msg");
   });
 
-  it("passes input via env PIPELINE_INPUT_PATH", async () => {
+  it("workflow input passed to container via temp file — step reads its payload", async () => {
     const runtime = new LocalProcessRuntime();
 
     const result = await runtime.run({
@@ -65,7 +65,7 @@ describe("LocalProcessRuntime", () => {
     expect(JSON.parse(result.stdout.trim())).toEqual({ greeting: "hello" });
   });
 
-  it("reads output from PIPELINE_OUTPUT_PATH", async () => {
+  it("step writes JSON result to output file — runtime picks it up as step result", async () => {
     const runtime = new LocalProcessRuntime();
 
     const result = await runtime.run({
@@ -82,7 +82,7 @@ describe("LocalProcessRuntime", () => {
     expect(result.output).toEqual({ result: 42 });
   });
 
-  it("passes custom env variables", async () => {
+  it("custom environment variables injected — step reads API keys or config", async () => {
     const runtime = new LocalProcessRuntime();
 
     const result = await runtime.run({
@@ -99,7 +99,7 @@ describe("LocalProcessRuntime", () => {
     expect(result.stdout.trim()).toBe("custom-value");
   });
 
-  it("respects timeout", async () => {
+  it("runaway process killed after 100ms timeout — prevents resource exhaustion", async () => {
     const runtime = new LocalProcessRuntime();
 
     const result = await runtime.run({
@@ -118,7 +118,7 @@ describe("LocalProcessRuntime", () => {
     expect(result.durationMs).toBeLessThan(500);
   });
 
-  it("reports duration", async () => {
+  it("execution duration tracked — used for performance monitoring", async () => {
     const runtime = new LocalProcessRuntime();
 
     const result = await runtime.run({
@@ -134,7 +134,7 @@ describe("LocalProcessRuntime", () => {
     expect(result.durationMs).toBeGreaterThan(30);
   });
 
-  it("cleans up temp files", async () => {
+  it("temp files cleaned up after execution — no disk leak between runs", async () => {
     const runtime = new LocalProcessRuntime();
     const { existsSync } = require("node:fs");
 
@@ -159,8 +159,8 @@ describe("LocalProcessRuntime", () => {
 // containerStep — integration with worker
 // ---------------------------------------------------------------------------
 
-describe("containerStep", () => {
-  it("creates a step handler from container spec", async () => {
+describe("Container step integration — run containerized commands as workflow steps", () => {
+  it("container spec wrapped as a Pipeline step handler — returns parsed JSON output", async () => {
     const runtime = new LocalProcessRuntime();
     const [handler] = containerStep({
       spec: {
@@ -184,7 +184,7 @@ describe("containerStep", () => {
     expect(result).toEqual({ msg: "from-container" });
   });
 
-  it("integrates with worker via StepRegistry", async () => {
+  it("container step registered in worker — executes and checkpoints like any other step", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();

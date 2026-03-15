@@ -140,7 +140,7 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
     expect(resumed.sort()).toEqual(["sleep-a", "sleep-b", "sleep-c"]);
   });
 
-  it("handles resumption errors", async () => {
+  it("resume fails — error callback fires but scanner keeps running", async () => {
     const storage = new InMemoryWorkflowStorage();
 
     // Manually create a suspended workflow that will fail on resume
