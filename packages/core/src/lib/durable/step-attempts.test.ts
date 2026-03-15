@@ -16,8 +16,8 @@ class TestError extends Data.TaggedError("TestError")<{
 // Execution attempt recording
 // ---------------------------------------------------------------------------
 
-describe("Step attempt history — execution", () => {
-  it("records successful step execution", async () => {
+describe("Step audit log — track every execution attempt for observability", () => {
+  it("successful step logs timing, result, and attempt number", async () => {
     const storage = new InMemoryWorkflowStorage();
 
     await workflow<string>({ name: "record-success", storage })
@@ -35,7 +35,7 @@ describe("Step attempt history — execution", () => {
     expect(attempts[0]!.completedAt).toBeInstanceOf(Date);
   });
 
-  it("records failed step execution", async () => {
+  it("failed step records the error for post-mortem analysis", async () => {
     const storage = new InMemoryWorkflowStorage();
 
     await workflow<string>({ name: "record-fail", storage })
@@ -49,7 +49,7 @@ describe("Step attempt history — execution", () => {
     expect(attempts[0]!.error).toBeDefined();
   });
 
-  it("records all step retry attempts", async () => {
+  it("flaky step retries three times — final success is recorded", async () => {
     const storage = new InMemoryWorkflowStorage();
     let calls = 0;
 
@@ -74,7 +74,7 @@ describe("Step attempt history — execution", () => {
     expect(attempts.some((a) => a.status === "completed")).toBe(true);
   });
 
-  it("records attempts across workflow retries", async () => {
+  it("workflow-level retries produce separate attempt records per step", async () => {
     const storage = new InMemoryWorkflowStorage();
     let calls = 0;
 
@@ -104,7 +104,7 @@ describe("Step attempt history — execution", () => {
     expect(step2.filter((a) => a.status === "completed")).toHaveLength(1);
   });
 
-  it("filters by step name", async () => {
+  it("query attempts for a single step — isolate one step's history", async () => {
     const storage = new InMemoryWorkflowStorage();
 
     await workflow<string>({ name: "filter-step", storage })

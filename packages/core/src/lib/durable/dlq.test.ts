@@ -76,7 +76,7 @@ describe("Dead-letter queue — capture failed workflows for investigation", () 
     expect(record.steps["fail-step"]!.status).toBe("failed");
   });
 
-  it("includes compensation info in DLQ record", async () => {
+  it("DLQ record tracks which rollbacks succeeded and which failed", async () => {
     const storage = new InMemoryWorkflowStorage();
     const dlq = new InMemoryDlq();
 
@@ -103,7 +103,7 @@ describe("Dead-letter queue — capture failed workflows for investigation", () 
     expect(record.failedCompensations[0]!.error).toBe("comp-failed");
   });
 
-  it("includes metadata in DLQ record", async () => {
+  it("team and priority metadata attached — route DLQ alerts to the right on-call", async () => {
     const storage = new InMemoryWorkflowStorage();
     const dlq = new InMemoryDlq();
 
@@ -120,7 +120,7 @@ describe("Dead-letter queue — capture failed workflows for investigation", () 
     expect(record.metadata).toEqual({ team: "growth", priority: "high" });
   });
 
-  it("does not publish to DLQ on success", async () => {
+  it("successful workflow does not clutter the DLQ", async () => {
     const storage = new InMemoryWorkflowStorage();
     const dlq = new InMemoryDlq();
 
@@ -135,7 +135,7 @@ describe("Dead-letter queue — capture failed workflows for investigation", () 
     expect(dlq.messages).toHaveLength(0);
   });
 
-  it("publishes after workflow retries exhausted", async () => {
+  it("DLQ message sent only after all retry attempts are exhausted", async () => {
     const storage = new InMemoryWorkflowStorage();
     const dlq = new InMemoryDlq();
     let attempts = 0;
@@ -157,7 +157,7 @@ describe("Dead-letter queue — capture failed workflows for investigation", () 
     expect(attempts).toBe(3);
   });
 
-  it("DLQ failure does not mask the original error", async () => {
+  it("DLQ itself is down — original business error is still surfaced to the caller", async () => {
     const storage = new InMemoryWorkflowStorage();
     const failingDlq: Sinkable<FailedWorkflowRecord> = {
       codec: JsonCodec as Codec<FailedWorkflowRecord>,
@@ -178,7 +178,7 @@ describe("Dead-letter queue — capture failed workflows for investigation", () 
     expect((error as any).message).toBe("original");
   });
 
-  it("works without DLQ configured", async () => {
+  it("DLQ is optional — workflows run fine without one configured", async () => {
     const storage = new InMemoryWorkflowStorage();
 
     // No dlq option — should work fine
@@ -189,7 +189,7 @@ describe("Dead-letter queue — capture failed workflows for investigation", () 
     expect(error).not.toBeNull();
   });
 
-  it("build() preserves DLQ config", async () => {
+  it("pre-built workflow definition retains DLQ configuration", async () => {
     const storage = new InMemoryWorkflowStorage();
     const dlq = new InMemoryDlq();
 
@@ -211,8 +211,8 @@ describe("Dead-letter queue — capture failed workflows for investigation", () 
 // DLQ replay pattern
 // ---------------------------------------------------------------------------
 
-describe("DLQ replay pattern", () => {
-  it("failed workflows can be replayed from DLQ records", async () => {
+describe("DLQ replay — re-process failed workflows after fixing the root cause", () => {
+  it("transient issue resolved — replay the failed order from its DLQ record", async () => {
     const storage = new InMemoryWorkflowStorage();
     const dlq = new InMemoryDlq();
     let shouldFail = true;

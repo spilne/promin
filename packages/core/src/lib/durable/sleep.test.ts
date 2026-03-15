@@ -11,8 +11,8 @@ class TestError extends Data.TaggedError("TestError")<{
 // Basic sleep
 // ---------------------------------------------------------------------------
 
-describe("Durable sleep", () => {
-  it("suspends at sleep step", async () => {
+describe("Durable sleep — pause a workflow and resume it later", () => {
+  it("email campaign waits 60s before sending — workflow suspends at the delay", async () => {
     const storage = new InMemoryWorkflowStorage();
     const log: string[] = [];
 
@@ -40,7 +40,7 @@ describe("Durable sleep", () => {
     expect(state?.steps["before"]?.result).toBe("hello");
   });
 
-  it("resumes after sleep expires and preserves results", async () => {
+  it("delay expires and workflow picks up where it left off — prior results preserved", async () => {
     const storage = new InMemoryWorkflowStorage();
     const log: string[] = [];
 
@@ -75,7 +75,7 @@ describe("Durable sleep", () => {
     expect(state?.status).toBe("completed");
   });
 
-  it("multiple sleeps in sequence", async () => {
+  it("multi-stage drip campaign — pause between each email send", async () => {
     const storage = new InMemoryWorkflowStorage();
     const log: string[] = [];
 
@@ -116,7 +116,7 @@ describe("Durable sleep", () => {
     expect(log).toEqual(["step-1", "step-2", "step-3"]);
   });
 
-  it("sleep step does not re-suspend after wake time passes", async () => {
+  it("already-expired sleep completes immediately — no double suspension", async () => {
     const storage = new InMemoryWorkflowStorage();
 
     const buildWf = () =>
@@ -138,7 +138,7 @@ describe("Durable sleep", () => {
     expect(state?.status).toBe("completed");
   });
 
-  it("checkpointed steps are not re-executed after sleep resume", async () => {
+  it("expensive API call before sleep is not repeated on resume — checkpointed", async () => {
     const storage = new InMemoryWorkflowStorage();
     let step1Calls = 0;
 
@@ -165,8 +165,8 @@ describe("Durable sleep", () => {
 // Sleep + compensation
 // ---------------------------------------------------------------------------
 
-describe("Sleep + compensation", () => {
-  it("compensates steps before sleep when post-sleep step fails", async () => {
+describe("Sleep + compensation — rollback pre-sleep work if post-sleep step fails", () => {
+  it("resource provisioned before delay, usage fails after — resource is cleaned up", async () => {
     const storage = new InMemoryWorkflowStorage();
     const log: string[] = [];
 
@@ -209,8 +209,8 @@ describe("Sleep + compensation", () => {
 // Sleep + workflow retry
 // ---------------------------------------------------------------------------
 
-describe("Sleep + workflow retry", () => {
-  it("workflow retry does not re-sleep already-completed sleeps", async () => {
+describe("Sleep + workflow retry — resume from where the workflow left off", () => {
+  it("flaky step after sleep retries without re-sleeping — delay already elapsed", async () => {
     const storage = new InMemoryWorkflowStorage();
     const log: string[] = [];
     let step2Calls = 0;
@@ -253,8 +253,8 @@ describe("Sleep + workflow retry", () => {
 // Long sleep values
 // ---------------------------------------------------------------------------
 
-describe("Long sleep durations", () => {
-  it("stores correct wakeAt for multi-day sleeps", async () => {
+describe("Long sleep durations — schedule workflows days or months in the future", () => {
+  it("30-day trial expiry reminder — wake-at timestamp is accurate", async () => {
     const storage = new InMemoryWorkflowStorage();
     const before = Date.now();
 
@@ -274,7 +274,7 @@ describe("Long sleep durations", () => {
     expect(actualMs).toBeLessThan(expectedMs + 1000);
   });
 
-  it("stores correct wakeAt for year-long sleeps", async () => {
+  it("annual contract renewal in 1 year — wake-at timestamp is accurate", async () => {
     const storage = new InMemoryWorkflowStorage();
     const before = Date.now();
 
