@@ -19,6 +19,12 @@
     },
     {
       "path": "./packages/container"
+    },
+    {
+      "path": "./packages/kafka"
+    },
+    {
+      "path": "./packages/redis"
     }
   ]
 }

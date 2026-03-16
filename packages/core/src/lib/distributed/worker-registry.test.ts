@@ -9,8 +9,8 @@ import { createWorker } from "./worker.ts";
 // WorkerRegistry basics
 // ---------------------------------------------------------------------------
 
-describe("WorkerRegistry", () => {
-  it("registers and lists workers", async () => {
+describe("Worker registry — track which workers are online and what they handle", () => {
+  it("new worker registers with its queues and concurrency limit", async () => {
     const registry = new InMemoryWorkerRegistry();
 
     await registry.register({
@@ -28,7 +28,7 @@ describe("WorkerRegistry", () => {
     expect(workers[0]!.concurrency).toBe(5);
   });
 
-  it("heartbeat updates timestamp", async () => {
+  it("heartbeat proves the worker is still alive — timestamp advances", async () => {
     const registry = new InMemoryWorkerRegistry();
     await registry.register({ workerId: "w-1", queues: ["default"], concurrency: 1 });
 
@@ -40,7 +40,7 @@ describe("WorkerRegistry", () => {
     expect(after.getTime()).toBeGreaterThan(before.getTime());
   });
 
-  it("drain marks worker as draining", async () => {
+  it("graceful shutdown — mark worker as draining before stopping", async () => {
     const registry = new InMemoryWorkerRegistry();
     await registry.register({ workerId: "w-1", queues: ["default"], concurrency: 1 });
 
@@ -50,7 +50,7 @@ describe("WorkerRegistry", () => {
     expect(workers).toHaveLength(1);
   });
 
-  it("deregister removes worker", async () => {
+  it("worker shuts down cleanly — removed from the registry", async () => {
     const registry = new InMemoryWorkerRegistry();
     await registry.register({ workerId: "w-1", queues: ["default"], concurrency: 1 });
     await registry.deregister("w-1");
@@ -59,7 +59,7 @@ describe("WorkerRegistry", () => {
     expect(workers).toHaveLength(0);
   });
 
-  it("detectDead marks stale workers as dead", async () => {
+  it("worker stopped heartbeating — detected as dead after timeout", async () => {
     const registry = new InMemoryWorkerRegistry();
     await registry.register({ workerId: "w-1", queues: ["default"], concurrency: 1 });
 
@@ -76,7 +76,7 @@ describe("WorkerRegistry", () => {
     expect(deadList).toHaveLength(1);
   });
 
-  it("detectDead ignores healthy workers", async () => {
+  it("healthy worker with recent heartbeat is not flagged as dead", async () => {
     const registry = new InMemoryWorkerRegistry();
     await registry.register({ workerId: "w-1", queues: ["default"], concurrency: 1 });
 
@@ -84,7 +84,7 @@ describe("WorkerRegistry", () => {
     expect(dead).toHaveLength(0);
   });
 
-  it("list filters by status", async () => {
+  it("list only active or only draining workers — ops dashboard filtering", async () => {
     const registry = new InMemoryWorkerRegistry();
     await registry.register({ workerId: "w-1", queues: ["default"], concurrency: 1 });
     await registry.register({ workerId: "w-2", queues: ["gpu"], concurrency: 2 });
@@ -104,8 +104,8 @@ describe("WorkerRegistry", () => {
 // Worker + registry integration
 // ---------------------------------------------------------------------------
 
-describe("Worker + registry integration", () => {
-  it("worker registers on start, deregisters on stop", async () => {
+describe("Worker + registry integration — automatic lifecycle management", () => {
+  it("worker auto-registers on start and auto-deregisters on stop", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
     const stepRegistry = new MapStepRegistry();
@@ -140,7 +140,7 @@ describe("Worker + registry integration", () => {
     expect(afterStop).toHaveLength(0);
   });
 
-  it("worker heartbeats while running", async () => {
+  it("worker sends periodic heartbeats — registry knows it is healthy", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
     const stepRegistry = new MapStepRegistry();
@@ -167,7 +167,7 @@ describe("Worker + registry integration", () => {
     await worker.stop();
   });
 
-  it("worker marks as draining before stop", async () => {
+  it("worker drains in-flight tasks before fully stopping", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
     const stepRegistry = new MapStepRegistry();
@@ -220,8 +220,8 @@ describe("Worker + registry integration", () => {
 // Dead worker recovery — requeueStuck
 // ---------------------------------------------------------------------------
 
-describe("Dead worker recovery", () => {
-  it("requeueStuck resets tasks from dead worker to pending", async () => {
+describe("Dead worker recovery — requeue stuck tasks after a worker crash", () => {
+  it("tasks claimed by a crashed worker are returned to the queue for another worker", async () => {
     const queue = new InMemoryStepQueue({ workerId: "dead-worker" });
 
     await queue.enqueue({

@@ -18,8 +18,8 @@ const sales = [
 // Window functions
 // ---------------------------------------------------------------------------
 
-describe("Window functions", () => {
-  it("row_number within partition", async () => {
+describe("Window functions — rank, lag, lead, and running totals", () => {
+  it("number each sale within its region by revenue — row numbering", async () => {
     const result = await DataFrame.fromArray(sales)
       .withWindowColumn("rn", {
         partitionBy: "region",
@@ -33,7 +33,7 @@ describe("Window functions", () => {
     expect(rns).toEqual([1, 2, 3]);
   });
 
-  it("dense_rank", async () => {
+  it("leaderboard ranking — tied scores share the same rank", async () => {
     const data = [
       { name: "A", score: 100 },
       { name: "B", score: 90 },
@@ -51,7 +51,7 @@ describe("Window functions", () => {
     expect((result[3] as any).rank).toBe(3); // score 100
   });
 
-  it("lag — access previous row value", async () => {
+  it("compare current month to previous month — lag for month-over-month analysis", async () => {
     const data = [
       { month: 1, revenue: 100 },
       { month: 2, revenue: 120 },
@@ -70,7 +70,7 @@ describe("Window functions", () => {
     expect((result[1] as any).prev_revenue).toBe(1); // lag of month, not revenue — it lags orderBy column
   });
 
-  it("lead — access next row value", async () => {
+  it("peek at next month's value — lead for forward-looking forecasts", async () => {
     const data = [
       { month: 1, revenue: 100 },
       { month: 2, revenue: 120 },
@@ -89,7 +89,7 @@ describe("Window functions", () => {
     expect((result[2] as any).next_month).toBe(-1); // no next
   });
 
-  it("running_total", async () => {
+  it("cumulative daily revenue — running total for cash flow tracking", async () => {
     const data = [
       { day: 1, amount: 10 },
       { day: 2, amount: 20 },
@@ -105,7 +105,7 @@ describe("Window functions", () => {
     expect((result[2] as any).cumulative).toBe(60);
   });
 
-  it("ntile — distribute into buckets", async () => {
+  it("split customers into quartile buckets for segmentation analysis", async () => {
     const data = Array.from({ length: 8 }, (_, i) => ({ id: i + 1, value: i * 10 }));
 
     const result = await DataFrame.fromArray(data)
@@ -117,7 +117,7 @@ describe("Window functions", () => {
     expect(quartiles.filter((q: number) => q === 4)).toHaveLength(2);
   });
 
-  it("top-N per group pattern", async () => {
+  it("top product by revenue per region — window rank plus filter", async () => {
     // Top 1 product by revenue per region
     const result = await DataFrame.fromArray(sales)
       .withWindowColumn("rank", {
@@ -143,8 +143,8 @@ describe("Window functions", () => {
 // Pivot / Unpivot
 // ---------------------------------------------------------------------------
 
-describe("Pivot", () => {
-  it("pivots rows to columns", async () => {
+describe("Pivot — reshape long data into wide crosstab reports", () => {
+  it("revenue by region with products as columns — crosstab for spreadsheet export", async () => {
     const result = await DataFrame.fromArray(sales)
       .pivot({ index: "region", columns: "product", values: "revenue", agg: "sum" })
       .collect();
@@ -155,7 +155,7 @@ describe("Pivot", () => {
     expect(us.Gadget).toBe(2000);
   });
 
-  it("pivot with count aggregation", async () => {
+  it("count of orders per product per region — volume heatmap data", async () => {
     const result = await DataFrame.fromArray(sales)
       .pivot({ index: "region", columns: "product", values: "revenue", agg: "count" })
       .collect();
@@ -166,8 +166,8 @@ describe("Pivot", () => {
   });
 });
 
-describe("Unpivot", () => {
-  it("unpivots columns to rows", async () => {
+describe("Unpivot — convert wide quarterly columns into long format for charting", () => {
+  it("quarterly revenue columns become variable/value rows for time-series charts", async () => {
     const wide = [
       { region: "US", q1: 100, q2: 200, q3: 150 },
       { region: "EU", q1: 80, q2: 120, q3: 90 },
@@ -188,8 +188,8 @@ describe("Unpivot", () => {
 // Explode
 // ---------------------------------------------------------------------------
 
-describe("Explode", () => {
-  it("explodes array column into rows", async () => {
+describe("Explode — flatten nested arrays into individual rows", () => {
+  it("product tags array becomes one row per tag — enables tag-level analytics", async () => {
     const data = [
       { id: 1, tags: ["a", "b", "c"] },
       { id: 2, tags: ["d"] },
@@ -208,58 +208,58 @@ describe("Explode", () => {
 // String accessor
 // ---------------------------------------------------------------------------
 
-describe("String accessor (.str)", () => {
+describe("String operations — clean and search text fields in bulk", () => {
   const products = [
     { name: "  Widget Pro  ", code: "WP-001" },
     { name: "Gadget Plus", code: "GP-002" },
     { name: "Widget Basic", code: "WB-003" },
   ];
 
-  it("contains", async () => {
+  it("flag products containing 'Widget' for the Widget product line report", async () => {
     const result = await DataFrame.fromArray(products).str("name").contains("Widget").collect();
 
     expect((result[0] as any).name_contains).toBe(true);
     expect((result[1] as any).name_contains).toBe(false);
   });
 
-  it("toUpperCase", async () => {
+  it("normalize product names to uppercase for case-insensitive matching", async () => {
     const result = await DataFrame.fromArray(products).str("name").toUpperCase().collect();
 
     expect((result[1] as any).name).toBe("GADGET PLUS");
   });
 
-  it("toLowerCase", async () => {
+  it("lowercase product names for URL slug generation", async () => {
     const result = await DataFrame.fromArray(products).str("name").toLowerCase().collect();
 
     expect((result[1] as any).name).toBe("gadget plus");
   });
 
-  it("trim", async () => {
+  it("trim whitespace from product names — fix messy CSV imports", async () => {
     const result = await DataFrame.fromArray(products).str("name").trim().collect();
 
     expect((result[0] as any).name).toBe("Widget Pro");
   });
 
-  it("startsWith", async () => {
+  it("identify Widget product codes by prefix — startsWith filter", async () => {
     const result = await DataFrame.fromArray(products).str("code").startsWith("WP").collect();
 
     expect((result[0] as any).code_startsWith).toBe(true);
     expect((result[1] as any).code_startsWith).toBe(false);
   });
 
-  it("replace", async () => {
+  it("replace hyphens with underscores in product codes for system compatibility", async () => {
     const result = await DataFrame.fromArray(products).str("code").replace("-", "_").collect();
 
     expect((result[0] as any).code).toBe("WP_001");
   });
 
-  it("length", async () => {
+  it("measure product code length — validate fixed-width format", async () => {
     const result = await DataFrame.fromArray(products).str("code").length().collect();
 
     expect((result[0] as any).code_len).toBe(6);
   });
 
-  it("split", async () => {
+  it("split product code into prefix and number — parse structured identifiers", async () => {
     const result = await DataFrame.fromArray(products).str("code").split("-").collect();
 
     expect((result[0] as any).code).toEqual(["WP", "001"]);
@@ -270,20 +270,20 @@ describe("String accessor (.str)", () => {
 // Date accessor
 // ---------------------------------------------------------------------------
 
-describe("Date accessor (.dt)", () => {
+describe("Date operations — extract and truncate timestamps for time-based reports", () => {
   const events = [
     { event: "A", date: "2026-03-15T10:30:00Z" },
     { event: "B", date: "2026-07-04T14:00:00Z" },
     { event: "C", date: "2026-12-25T08:00:00Z" },
   ];
 
-  it("year", async () => {
+  it("extract year from event dates for annual reporting", async () => {
     const result = await DataFrame.fromArray(events).dt("date").year().collect();
 
     expect((result[0] as any).date_year).toBe(2026);
   });
 
-  it("month", async () => {
+  it("extract month for seasonal trend analysis", async () => {
     const result = await DataFrame.fromArray(events).dt("date").month().collect();
 
     expect((result[0] as any).date_month).toBe(3);
@@ -291,13 +291,13 @@ describe("Date accessor (.dt)", () => {
     expect((result[2] as any).date_month).toBe(12);
   });
 
-  it("day", async () => {
+  it("extract day of month for daily volume charts", async () => {
     const result = await DataFrame.fromArray(events).dt("date").day().collect();
 
     expect((result[0] as any).date_day).toBe(15);
   });
 
-  it("truncate to month", async () => {
+  it("truncate to first of month — group events into monthly buckets", async () => {
     const result = await DataFrame.fromArray(events).dt("date").truncate("month").collect();
 
     expect((result[0] as any).date).toBe("2026-03-01T00:00:00.000Z");
@@ -309,7 +309,7 @@ describe("Date accessor (.dt)", () => {
 // Rolling windows
 // ---------------------------------------------------------------------------
 
-describe("Rolling windows", () => {
+describe("Rolling windows — smooth noisy time-series data", () => {
   const timeseries = [
     { day: 1, value: 10 },
     { day: 2, value: 20 },
@@ -318,7 +318,7 @@ describe("Rolling windows", () => {
     { day: 5, value: 50 },
   ];
 
-  it("rolling mean", async () => {
+  it("3-day moving average — smooth daily revenue for trend line", async () => {
     const result = await DataFrame.fromArray(timeseries)
       .rolling("value", { window: 3, fn: "mean" })
       .collect();
@@ -330,7 +330,7 @@ describe("Rolling windows", () => {
     expect((result[4] as any).value_rolling_mean).toBe(40); // [30, 40, 50]
   });
 
-  it("rolling sum", async () => {
+  it("2-day rolling sum — short-window revenue accumulation", async () => {
     const result = await DataFrame.fromArray(timeseries)
       .rolling("value", { window: 2, fn: "sum" })
       .collect();
@@ -340,7 +340,7 @@ describe("Rolling windows", () => {
     expect((result[2] as any).value_rolling_sum).toBe(50); // [20, 30]
   });
 
-  it("rolling with custom output name", async () => {
+  it("custom column name for the moving average — 'ma3' for the chart legend", async () => {
     const result = await DataFrame.fromArray(timeseries)
       .rolling("value", { window: 3, fn: "mean", as: "ma3" })
       .collect();
@@ -353,16 +353,16 @@ describe("Rolling windows", () => {
 // Cumulative operations
 // ---------------------------------------------------------------------------
 
-describe("Cumulative operations", () => {
+describe("Cumulative operations — running totals, products, and extremes", () => {
   const data = [{ n: 10 }, { n: 20 }, { n: 30 }, { n: 40 }];
 
-  it("cumSum", async () => {
+  it("running total of payments — track progress toward monthly quota", async () => {
     const result = await DataFrame.fromArray(data).cumSum("n").collect();
 
     expect(result.map((r: any) => r.n_cumsum)).toEqual([10, 30, 60, 100]);
   });
 
-  it("cumProd", async () => {
+  it("cumulative product — compound growth factor calculation", async () => {
     const result = await DataFrame.fromArray([{ n: 2 }, { n: 3 }, { n: 4 }])
       .cumProd("n")
       .collect();
@@ -370,7 +370,7 @@ describe("Cumulative operations", () => {
     expect(result.map((r: any) => r.n_cumprod)).toEqual([2, 6, 24]);
   });
 
-  it("cumMax", async () => {
+  it("running high-water mark — track the peak value seen so far", async () => {
     const result = await DataFrame.fromArray([{ n: 3 }, { n: 1 }, { n: 4 }, { n: 2 }])
       .cumMax("n")
       .collect();
@@ -378,7 +378,7 @@ describe("Cumulative operations", () => {
     expect(result.map((r: any) => r.n_cummax)).toEqual([3, 3, 4, 4]);
   });
 
-  it("cumMin", async () => {
+  it("running low-water mark — track the minimum value seen so far", async () => {
     const result = await DataFrame.fromArray([{ n: 3 }, { n: 1 }, { n: 4 }, { n: 2 }])
       .cumMin("n")
       .collect();
@@ -386,7 +386,7 @@ describe("Cumulative operations", () => {
     expect(result.map((r: any) => r.n_cummin)).toEqual([3, 1, 1, 1]);
   });
 
-  it("pctChange", async () => {
+  it("day-over-day price change percentage — detect volatility", async () => {
     const result = await DataFrame.fromArray([{ price: 100 }, { price: 110 }, { price: 99 }])
       .pctChange("price")
       .collect();
@@ -396,7 +396,7 @@ describe("Cumulative operations", () => {
     expect((result[2] as any).price_pctchange).toBeCloseTo(-0.1); // 10% decrease
   });
 
-  it("cumSum with custom output name", async () => {
+  it("custom column name for running total — 'running' for dashboard display", async () => {
     const result = await DataFrame.fromArray(data).cumSum("n", { as: "running" }).collect();
 
     expect(result.map((r: any) => r.running)).toEqual([10, 30, 60, 100]);
@@ -407,8 +407,8 @@ describe("Cumulative operations", () => {
 // Complex chained example
 // ---------------------------------------------------------------------------
 
-describe("Complex chained queries", () => {
-  it("e-commerce analytics pipeline", async () => {
+describe("End-to-end analytics — realistic multi-step e-commerce reporting", () => {
+  it("pivot, running total, top spender, and rolling average in one pipeline", async () => {
     const orders = [
       {
         userId: 1,

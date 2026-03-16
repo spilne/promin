@@ -7,8 +7,8 @@ import { createSleepScanner } from "./sleep-scanner.ts";
 // SleepScanner — resumes expired sleeps
 // ---------------------------------------------------------------------------
 
-describe("SleepScanner", () => {
-  it("resumes a workflow after sleep expires", async () => {
+describe("Sleep scanner — background process that wakes up sleeping workflows", () => {
+  it("1ms sleep expires — scanner detects it and resumes the workflow", async () => {
     const storage = new InMemoryWorkflowStorage();
     const log: string[] = [];
 
@@ -52,7 +52,7 @@ describe("SleepScanner", () => {
     expect(state?.status).toBe("completed");
   });
 
-  it("ignores workflows whose sleep has not expired", async () => {
+  it("workflow sleeping for 31 years is not woken up prematurely", async () => {
     const storage = new InMemoryWorkflowStorage();
 
     const wf = workflow<string>({ name: "long-sleep", storage })
@@ -82,7 +82,7 @@ describe("SleepScanner", () => {
     expect(state?.status).toBe("suspended");
   });
 
-  it("skips workflows with unknown definition", async () => {
+  it("unrecognized workflow name — scanner skips it silently without crashing", async () => {
     const storage = new InMemoryWorkflowStorage();
 
     const wf = workflow<string>({ name: "unknown-wf", storage })
@@ -110,7 +110,7 @@ describe("SleepScanner", () => {
     expect(errors).toHaveLength(0);
   });
 
-  it("handles multiple suspended workflows", async () => {
+  it("three workflows sleeping — scanner wakes all of them in one scan cycle", async () => {
     const storage = new InMemoryWorkflowStorage();
 
     const wf = workflow<string>({ name: "multi", storage })

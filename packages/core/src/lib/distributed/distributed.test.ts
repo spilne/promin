@@ -10,8 +10,8 @@ import { createWorker } from "./worker.ts";
 // StepRegistry
 // ---------------------------------------------------------------------------
 
-describe("StepRegistry", () => {
-  it("registers and resolves steps", () => {
+describe("Step registry — register reusable step handlers by name", () => {
+  it("register a 'double' handler and look it up by name at runtime", () => {
     const registry = new MapStepRegistry();
     registry.register("double", (ctx) => Pipeline.succeed((ctx.prev as number) * 2));
 
@@ -27,8 +27,8 @@ describe("StepRegistry", () => {
 // InMemoryStepQueue
 // ---------------------------------------------------------------------------
 
-describe("InMemoryStepQueue", () => {
-  it("enqueue and claim", async () => {
+describe("Step queue — distribute tasks to available workers", () => {
+  it("enqueue a task and claim it for processing", async () => {
     const queue = new InMemoryStepQueue();
 
     await queue.enqueue({
@@ -45,7 +45,7 @@ describe("InMemoryStepQueue", () => {
     expect(tasks[0]!.status).toBe("running");
   });
 
-  it("claim respects queue filter", async () => {
+  it("GPU worker only sees GPU tasks, default worker only sees default tasks", async () => {
     const queue = new InMemoryStepQueue();
 
     await queue.enqueue({
@@ -72,7 +72,7 @@ describe("InMemoryStepQueue", () => {
     expect(gpuTasks[0]!.stepName).toBe("b");
   });
 
-  it("claim respects limit", async () => {
+  it("worker claims at most 2 tasks at a time — respects concurrency limit", async () => {
     const queue = new InMemoryStepQueue();
 
     for (let i = 0; i < 5; i++) {
@@ -89,7 +89,7 @@ describe("InMemoryStepQueue", () => {
     expect(tasks).toHaveLength(2);
   });
 
-  it("claim respects priority — higher number runs first", async () => {
+  it("urgent tasks processed before background tasks — priority ordering", async () => {
     const queue = new InMemoryStepQueue();
 
     await queue.enqueue({
@@ -121,7 +121,7 @@ describe("InMemoryStepQueue", () => {
     expect(tasks.map((t) => t.stepName)).toEqual(["high", "medium", "low"]);
   });
 
-  it("default priority is 5", async () => {
+  it("tasks without explicit priority default to medium (5)", async () => {
     const queue = new InMemoryStepQueue();
 
     await queue.enqueue({
@@ -136,7 +136,7 @@ describe("InMemoryStepQueue", () => {
     expect(tasks[0]!.priority).toBe(5);
   });
 
-  it("claimed tasks are not re-claimed", async () => {
+  it("in-progress task is invisible to other workers — no double processing", async () => {
     const queue = new InMemoryStepQueue();
 
     await queue.enqueue({
@@ -154,7 +154,7 @@ describe("InMemoryStepQueue", () => {
     expect(second).toHaveLength(0);
   });
 
-  it("complete and fail update status", async () => {
+  it("marking tasks complete or failed updates queue metrics", async () => {
     const queue = new InMemoryStepQueue();
 
     const id1 = await queue.enqueue({
@@ -186,8 +186,8 @@ describe("InMemoryStepQueue", () => {
 // Worker — step execution
 // ---------------------------------------------------------------------------
 
-describe("WorkflowWorker", () => {
-  it("claims and executes a step", async () => {
+describe("Worker — poll queue, execute steps, checkpoint results", () => {
+  it("worker picks up a 'double' task and saves the result", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
@@ -231,7 +231,7 @@ describe("WorkflowWorker", () => {
     expect(state?.steps["double"]?.result).toBe(10); // 5 * 2
   });
 
-  it("handles step failure", async () => {
+  it("step throws an error — worker records the failure and moves on", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
@@ -272,7 +272,7 @@ describe("WorkflowWorker", () => {
     expect(state?.steps["fail-step"]?.status).toBe("failed");
   });
 
-  it("reports error for unregistered steps", async () => {
+  it("unknown step name — worker reports 'not found' instead of crashing", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
@@ -307,7 +307,7 @@ describe("WorkflowWorker", () => {
     expect(failures.some((f) => f.includes("not found"))).toBe(true);
   });
 
-  it("executes async step handlers", async () => {
+  it("async step handler with I/O delay — worker awaits completion", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
@@ -342,7 +342,7 @@ describe("WorkflowWorker", () => {
     expect(state?.steps["async-step"]?.result).toBe(142); // 42 + 100
   });
 
-  it("only polls assigned queues", async () => {
+  it("default worker ignores GPU queue tasks — queue isolation", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
@@ -386,8 +386,8 @@ describe("WorkflowWorker", () => {
 // Coordinator + Worker — end-to-end
 // ---------------------------------------------------------------------------
 
-describe("Coordinator + Worker end-to-end", () => {
-  it("executes a multi-step workflow across coordinator and worker", async () => {
+describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow", () => {
+  it("coordinator enqueues steps, worker executes them, results are checkpointed", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
 
@@ -436,7 +436,7 @@ describe("Coordinator + Worker end-to-end", () => {
     expect(state?.steps["double"]?.result).toBe(10); // 5 * 2
   });
 
-  it("routes steps to different queues", async () => {
+  it("transcription step routed to GPU worker, preprocessing stays on CPU", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
 
@@ -496,8 +496,8 @@ describe("Coordinator + Worker end-to-end", () => {
 // Middleware
 // ---------------------------------------------------------------------------
 
-describe("Worker middleware", () => {
-  it("middleware wraps step execution", async () => {
+describe("Worker middleware — add logging, metrics, or timeouts around step execution", () => {
+  it("middleware runs before and after the step handler", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
@@ -537,7 +537,7 @@ describe("Worker middleware", () => {
     expect(log).toEqual(["before", "after"]);
   });
 
-  it("middleware chain executes in order", async () => {
+  it("two middleware layers nest correctly — onion model execution order", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
@@ -586,7 +586,7 @@ describe("Worker middleware", () => {
     expect(log).toEqual(["mw1-before", "mw2-before", "handler", "mw2-after", "mw1-after"]);
   });
 
-  it("timeout middleware fails slow steps", async () => {
+  it("slow step exceeds 100ms timeout — middleware aborts it with a clear error", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
@@ -630,7 +630,7 @@ describe("Worker middleware", () => {
     expect(failures.some((f) => f.includes("timed out"))).toBe(true);
   });
 
-  it("hooks run alongside middleware", async () => {
+  it("lifecycle hooks fire around middleware — hooks bracket the full pipeline", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
@@ -689,8 +689,8 @@ class TestError extends Data.TaggedError("TestError")<{
   readonly message: string;
 }> {}
 
-describe("Per-step options", () => {
-  it("step-level retry retries on failure", async () => {
+describe("Per-step options — retry, skip, and fallback at the step level", () => {
+  it("flaky API step retries up to 5 times before giving up", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
@@ -733,7 +733,7 @@ describe("Per-step options", () => {
     expect(state?.steps["flaky"]?.result).toBe("ok");
   });
 
-  it("step-level retry respects when predicate", async () => {
+  it("permanent error skips retry — only transient errors are retried", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
@@ -779,7 +779,7 @@ describe("Per-step options", () => {
     expect(attempts).toBe(1);
   });
 
-  it("onFailure: skip continues with undefined", async () => {
+  it("optional enrichment step fails — skip it and continue the workflow", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
@@ -819,7 +819,7 @@ describe("Per-step options", () => {
     expect(state?.steps["optional"]?.result).toBeUndefined();
   });
 
-  it("onFailure: fallback uses fallback value", async () => {
+  it("risky step fails — use a safe default value instead of crashing", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
@@ -858,7 +858,7 @@ describe("Per-step options", () => {
     expect(state?.steps["risky"]?.result).toBe("default-value");
   });
 
-  it("records step attempts when storage supports it", async () => {
+  it("step execution logged to attempt storage — audit trail for compliance", async () => {
     const storage = new InMemoryWorkflowStorage(); // implements StepAttemptStorage
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
@@ -897,8 +897,8 @@ describe("Per-step options", () => {
 // Coordinator recovery — resume after restart
 // ---------------------------------------------------------------------------
 
-describe("Coordinator recovery", () => {
-  it("recovers active workflows on start", async () => {
+describe("Coordinator recovery — resume workflows after process restart", () => {
+  it("new coordinator discovers in-flight workflows and continues them", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
 
@@ -947,7 +947,7 @@ describe("Coordinator recovery", () => {
     // step-2 should have been enqueued and executed by the worker
   });
 
-  it("does not recover completed workflows", async () => {
+  it("already-completed workflows are not re-processed after restart", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
 

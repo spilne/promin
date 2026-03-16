@@ -41,26 +41,26 @@ const users: User[] = [
 // Sources
 // ---------------------------------------------------------------------------
 
-describe("DataFrame sources", () => {
-  it("fromArray creates a DataFrame", async () => {
+describe("Loading data — ingest from arrays, iterables, and streams", () => {
+  it("import sales records from an array into a queryable DataFrame", async () => {
     const df = DataFrame.fromArray(sales);
     const result = await df.collect();
     expect(result).toHaveLength(6);
     expect(result[0]).toEqual(sales[0]);
   });
 
-  it("collect returns all rows", async () => {
+  it("collect materializes all rows for downstream consumption", async () => {
     const result = await DataFrame.fromArray([1, 2, 3]).collect();
     expect(result).toEqual([1, 2, 3]);
   });
 
-  it("fromIterable creates from any iterable", async () => {
+  it("deduplicated set of IDs loaded into a DataFrame", async () => {
     const set = new Set([1, 2, 3]);
     const result = await DataFrame.fromIterable(set).collect();
     expect(result).toEqual([1, 2, 3]);
   });
 
-  it("fromIterable works with generators", async () => {
+  it("lazily generated records streamed into a DataFrame", async () => {
     function* gen() {
       yield { n: 1 };
       yield { n: 2 };
@@ -70,7 +70,7 @@ describe("DataFrame sources", () => {
     expect(result).toEqual([{ n: 1 }, { n: 2 }, { n: 3 }]);
   });
 
-  it("fromStream collects a StreamPipeline", async () => {
+  it("real-time event stream materialized into a DataFrame for batch analysis", async () => {
     const stream = StreamPipeline.fromIterable([
       { name: "Alice", age: 30 },
       { name: "Bob", age: 25 },
@@ -86,8 +86,8 @@ describe("DataFrame sources", () => {
 // Column operations
 // ---------------------------------------------------------------------------
 
-describe("Column operations", () => {
-  it("select picks specific columns", async () => {
+describe("Column operations — reshape the data for specific reports", () => {
+  it("export only region and revenue for the finance team", async () => {
     const result = await DataFrame.fromArray(sales).select("region", "revenue").collect();
 
     expect(result).toHaveLength(6);
@@ -95,21 +95,21 @@ describe("Column operations", () => {
     expect(result[0]).toEqual({ region: "US", revenue: 1000 });
   });
 
-  it("drop removes columns", async () => {
+  it("strip internal quantity field before sharing with external partners", async () => {
     const result = await DataFrame.fromArray(sales).drop("quantity").collect();
 
     expect(result[0]).toEqual({ region: "US", product: "Widget", revenue: 1000 });
     expect("quantity" in result[0]!).toBe(false);
   });
 
-  it("rename renames columns", async () => {
+  it("rename revenue to sales to match the BI tool's expected schema", async () => {
     const result = await DataFrame.fromArray(sales).rename({ revenue: "sales" }).collect();
 
     expect(result[0]).toHaveProperty("sales", 1000);
     expect(result[0]).not.toHaveProperty("revenue");
   });
 
-  it("withColumn adds a computed column", async () => {
+  it("compute unit price from revenue and quantity — derived metric", async () => {
     const result = await DataFrame.fromArray(sales)
       .withColumn("unitPrice", (row) => row.revenue / row.quantity)
       .collect();
@@ -123,8 +123,8 @@ describe("Column operations", () => {
 // Row operations
 // ---------------------------------------------------------------------------
 
-describe("Row operations", () => {
-  it("filter keeps matching rows", async () => {
+describe("Row operations — filter, transform, sort, and deduplicate", () => {
+  it("sales team filters for US region — only US orders remain", async () => {
     const result = await DataFrame.fromArray(sales)
       .filter((r) => r.region === "US")
       .collect();
@@ -133,7 +133,7 @@ describe("Row operations", () => {
     expect(result.every((r) => r.region === "US")).toBe(true);
   });
 
-  it("map transforms rows", async () => {
+  it("calculate total value per line item — revenue times quantity", async () => {
     const result = await DataFrame.fromArray(sales)
       .map((r) => ({ region: r.region, total: r.revenue * r.quantity }))
       .collect();
@@ -141,37 +141,37 @@ describe("Row operations", () => {
     expect(result[0]).toEqual({ region: "US", total: 10000 });
   });
 
-  it("sort ascending", async () => {
+  it("rank products by revenue lowest to highest", async () => {
     const result = await DataFrame.fromArray(sales).sort("revenue").collect();
 
     const revenues = result.map((r) => r.revenue);
     expect(revenues).toEqual([500, 800, 1000, 1200, 1500, 2000]);
   });
 
-  it("sort descending", async () => {
+  it("rank products by revenue highest first — top sellers on top", async () => {
     const result = await DataFrame.fromArray(sales).sort("revenue", "desc").collect();
 
     const revenues = result.map((r) => r.revenue);
     expect(revenues).toEqual([2000, 1500, 1200, 1000, 800, 500]);
   });
 
-  it("limit takes first N rows", async () => {
+  it("preview just the first 2 rows for a quick sanity check", async () => {
     const result = await DataFrame.fromArray(sales).limit(2).collect();
     expect(result).toHaveLength(2);
   });
 
-  it("offset skips first N rows", async () => {
+  it("skip already-processed rows for incremental loading", async () => {
     const result = await DataFrame.fromArray(sales).offset(4).collect();
     expect(result).toHaveLength(2);
   });
 
-  it("slice extracts range", async () => {
+  it("extract a page of results for paginated display", async () => {
     const result = await DataFrame.fromArray(sales).slice(1, 3).collect();
     expect(result).toHaveLength(2);
     expect(result[0]).toEqual(sales[1]);
   });
 
-  it("distinct removes duplicate rows", async () => {
+  it("remove exact duplicate rows from a denormalized export", async () => {
     const data = [
       { a: 1, b: 2 },
       { a: 1, b: 2 },
@@ -181,7 +181,7 @@ describe("Row operations", () => {
     expect(result).toHaveLength(2);
   });
 
-  it("distinctBy keeps first by column", async () => {
+  it("one row per region — keep the earliest order from each", async () => {
     const result = await DataFrame.fromArray(sales).distinctBy("region").collect();
 
     const regions = result.map((r) => r.region);
@@ -189,7 +189,7 @@ describe("Row operations", () => {
     expect(result.find((r) => r.region === "US")?.revenue).toBe(1000); // first US row
   });
 
-  it("distinctBy keeps last by column", async () => {
+  it("one row per region — keep the most recent order from each", async () => {
     const result = await DataFrame.fromArray(sales)
       .distinctBy("region", { keep: "last" })
       .collect();
@@ -204,21 +204,21 @@ describe("Row operations", () => {
 // Null handling
 // ---------------------------------------------------------------------------
 
-describe("Null handling", () => {
-  it("dropNull removes rows with null in column", async () => {
+describe("Null handling — clean up missing data before analysis", () => {
+  it("exclude users without email — cannot send marketing campaigns to them", async () => {
     const result = await DataFrame.fromArray(users).dropNull("email").collect();
 
     expect(result).toHaveLength(3);
     expect(result.every((r) => r.email != null)).toBe(true);
   });
 
-  it("dropNull() removes rows with any null", async () => {
+  it("drop any row with missing data — strict completeness requirement", async () => {
     const result = await DataFrame.fromArray(users).dropNull().collect();
 
     expect(result).toHaveLength(3);
   });
 
-  it("fillNull replaces null with default", async () => {
+  it("replace missing emails with 'unknown' for the report — fill nulls", async () => {
     const result = await DataFrame.fromArray(users).fillNull("email", "unknown").collect();
 
     expect(result.find((r) => r.name === "Bob")?.email).toBe("unknown");
@@ -230,8 +230,8 @@ describe("Null handling", () => {
 // Aggregation
 // ---------------------------------------------------------------------------
 
-describe("Aggregation", () => {
-  it("groupBy + agg with sum", async () => {
+describe("Aggregation — summarize data for executive dashboards", () => {
+  it("revenue report by region — total up all orders per geography", async () => {
     const result = await DataFrame.fromArray(sales)
       .groupBy("region")
       .agg({ revenue: "sum" })
@@ -242,7 +242,7 @@ describe("Aggregation", () => {
     expect(us.revenue).toBe(4200); // 1000 + 2000 + 1200
   });
 
-  it("groupBy + agg with multiple aggregations", async () => {
+  it("regional summary with total revenue and average quantity per order", async () => {
     const result = await DataFrame.fromArray(sales)
       .groupBy("region")
       .agg({ revenue: "sum", quantity: "avg" })
@@ -254,7 +254,7 @@ describe("Aggregation", () => {
     expect(eu.quantity).toBeCloseTo(5.5); // (8 + 3) / 2
   });
 
-  it("groupBy + agg with count", async () => {
+  it("count orders per region — measure market activity", async () => {
     const result = await DataFrame.fromArray(sales)
       .groupBy("region")
       .agg({ revenue: "count" })
@@ -264,7 +264,7 @@ describe("Aggregation", () => {
     expect(us.revenue).toBe(3);
   });
 
-  it("groupBy + agg with min/max", async () => {
+  it("find the smallest order per region — detect low-value anomalies", async () => {
     const result = await DataFrame.fromArray(sales)
       .groupBy("region")
       .agg({ revenue: "min" })
@@ -274,7 +274,7 @@ describe("Aggregation", () => {
     expect(us.revenue).toBe(1000);
   });
 
-  it("groupBy multiple columns", async () => {
+  it("revenue by region and product — detailed product performance breakdown", async () => {
     const result = await DataFrame.fromArray(sales)
       .groupBy("region", "product")
       .agg({ revenue: "sum" })
@@ -284,7 +284,7 @@ describe("Aggregation", () => {
     expect(usWidget.revenue).toBe(2200); // 1000 + 1200
   });
 
-  it("groupBy + agg with collect", async () => {
+  it("collect all revenue values per region into an array for sparkline charts", async () => {
     const result = await DataFrame.fromArray(sales)
       .groupBy("region")
       .agg({ revenue: "collect" })
@@ -299,7 +299,7 @@ describe("Aggregation", () => {
 // Joins
 // ---------------------------------------------------------------------------
 
-describe("Joins", () => {
+describe("Joins — combine orders with customer profiles", () => {
   const orders = [
     { userId: 1, amount: 100 },
     { userId: 2, amount: 200 },
@@ -313,7 +313,7 @@ describe("Joins", () => {
     { userId: 3, tier: "bronze" },
   ];
 
-  it("inner join", async () => {
+  it("match orders to customer tiers — only orders with known customers", async () => {
     const result = await DataFrame.fromArray(orders)
       .join(DataFrame.fromArray(profiles), { on: "userId", type: "inner" })
       .collect();
@@ -322,7 +322,7 @@ describe("Joins", () => {
     expect(result.every((r: any) => r.tier != null)).toBe(true);
   });
 
-  it("left join preserves all left rows", async () => {
+  it("keep all orders even if customer profile is missing — left join", async () => {
     const result = await DataFrame.fromArray(orders)
       .join(DataFrame.fromArray(profiles), { on: "userId", type: "left" })
       .collect();
@@ -330,7 +330,7 @@ describe("Joins", () => {
     expect(result).toHaveLength(4); // all 4 orders, userId 99 has no tier
   });
 
-  it("right join preserves all right rows", async () => {
+  it("keep all customer profiles even those with no orders — right join", async () => {
     const result = await DataFrame.fromArray(orders)
       .join(DataFrame.fromArray(profiles), { on: "userId", type: "right" })
       .collect();
@@ -339,7 +339,7 @@ describe("Joins", () => {
     expect(result).toHaveLength(4);
   });
 
-  it("semi join keeps left rows with match", async () => {
+  it("orders from active customers only — semi join filters without adding columns", async () => {
     const result = await DataFrame.fromArray(orders)
       .join(DataFrame.fromArray(profiles), { on: "userId", type: "semi" })
       .collect();
@@ -348,7 +348,7 @@ describe("Joins", () => {
     expect(result.every((r: any) => r.tier === undefined)).toBe(true); // no right columns
   });
 
-  it("anti join keeps left rows without match", async () => {
+  it("find orphan orders with no matching customer — anti join", async () => {
     const result = await DataFrame.fromArray(orders)
       .join(DataFrame.fromArray(profiles), { on: "userId", type: "anti" })
       .collect();
@@ -362,33 +362,33 @@ describe("Joins", () => {
 // Statistics
 // ---------------------------------------------------------------------------
 
-describe("Statistics", () => {
-  it("count returns row count", async () => {
+describe("Statistics — quick numeric summaries for data exploration", () => {
+  it("total number of sales transactions", async () => {
     expect(await DataFrame.fromArray(sales).count()).toBe(6);
   });
 
-  it("sum computes column sum", async () => {
+  it("total revenue across all regions", async () => {
     expect(await DataFrame.fromArray(sales).sum("revenue")).toBe(7000);
   });
 
-  it("avg computes column average", async () => {
+  it("average order value — key metric for the growth team", async () => {
     const avg = await DataFrame.fromArray(sales).avg("revenue");
     expect(avg).toBeCloseTo(1166.67, 0);
   });
 
-  it("min returns minimum value", async () => {
+  it("smallest order value — detect micro-transactions", async () => {
     expect(await DataFrame.fromArray(sales).min("revenue")).toBe(500);
   });
 
-  it("max returns maximum value", async () => {
+  it("largest order value — spot high-value deals", async () => {
     expect(await DataFrame.fromArray(sales).max("revenue")).toBe(2000);
   });
 
-  it("countDistinct counts unique values", async () => {
+  it("how many distinct regions are we selling to", async () => {
     expect(await DataFrame.fromArray(sales).countDistinct("region")).toBe(3);
   });
 
-  it("describe returns column statistics", async () => {
+  it("full statistical profile of revenue — count, mean, min, max, nulls", async () => {
     const stats = await DataFrame.fromArray(sales).describe();
 
     const revenueStat = stats.find((s) => s.column === "revenue")!;
@@ -404,23 +404,23 @@ describe("Statistics", () => {
 // Terminals
 // ---------------------------------------------------------------------------
 
-describe("Terminals", () => {
-  it("first returns first row", async () => {
+describe("Terminal operations — extract final results from the DataFrame", () => {
+  it("peek at the first record to verify schema shape", async () => {
     const row = await DataFrame.fromArray(sales).first();
     expect(row).toEqual(sales[0]);
   });
 
-  it("first returns null for empty", async () => {
+  it("empty dataset returns null instead of crashing", async () => {
     const row = await DataFrame.fromArray([]).first();
     expect(row).toBeNull();
   });
 
-  it("head returns first N rows", async () => {
+  it("preview the top 2 rows for a dashboard widget", async () => {
     const rows = await DataFrame.fromArray(sales).head(2);
     expect(rows).toHaveLength(2);
   });
 
-  it("tail returns last N rows", async () => {
+  it("last 2 records — check the most recent entries", async () => {
     const rows = await DataFrame.fromArray(sales).tail(2);
     expect(rows).toHaveLength(2);
     expect(rows[1]).toEqual(sales[5]);
@@ -431,8 +431,8 @@ describe("Terminals", () => {
 // Chained operations
 // ---------------------------------------------------------------------------
 
-describe("Chained operations", () => {
-  it("filter → sort → limit", async () => {
+describe("Chained operations — compose multi-step data pipelines", () => {
+  it("top 2 US orders by revenue — filter, sort, then limit", async () => {
     const result = await DataFrame.fromArray(sales)
       .filter((r) => r.region === "US")
       .sort("revenue", "desc")
@@ -444,7 +444,7 @@ describe("Chained operations", () => {
     expect(result[1]!.revenue).toBe(1200);
   });
 
-  it("withColumn → filter → select", async () => {
+  it("compute unit price, keep only premium products, export product and price", async () => {
     const result = await DataFrame.fromArray(sales)
       .withColumn("unitPrice", (r) => r.revenue / r.quantity)
       .filter((r) => (r as any).unitPrice > 100)
@@ -455,7 +455,7 @@ describe("Chained operations", () => {
     expect(Object.keys(result[0]!)).toEqual(["product", "unitPrice"]);
   });
 
-  it("filter → groupBy → agg → sort", async () => {
+  it("exclude small orders, summarize by region, rank by total revenue", async () => {
     const result = await DataFrame.fromArray(sales)
       .filter((r) => r.revenue > 500)
       .groupBy("region")
@@ -467,7 +467,7 @@ describe("Chained operations", () => {
     expect((result[0] as any).revenue).toBe(4200);
   });
 
-  it("lazy execution — nothing runs until terminal", async () => {
+  it("lazy evaluation — no work until collect is called, saving resources", async () => {
     let filterCalled = false;
 
     const df = DataFrame.fromArray(sales).filter((r) => {

@@ -120,7 +120,7 @@ describe("Step audit log — track every execution attempt for observability", (
     expect(onlyA[0]!.stepName).toBe("a");
   });
 
-  it("records multiple steps in a DAG", async () => {
+  it("all four steps in a fan-out DAG are recorded — complete execution trace", async () => {
     const storage = new InMemoryWorkflowStorage();
 
     await workflow<string>({ name: "dag-attempts", storage })
@@ -144,8 +144,8 @@ describe("Step audit log — track every execution attempt for observability", (
 // Compensation attempt recording
 // ---------------------------------------------------------------------------
 
-describe("Step attempt history — compensation", () => {
-  it("records successful compensation", async () => {
+describe("Compensation audit log — track rollback attempts for compliance", () => {
+  it("successful rollback is recorded with timing and attempt number", async () => {
     const storage = new InMemoryWorkflowStorage();
 
     await workflow<string>({ name: "comp-record", storage })
@@ -162,7 +162,7 @@ describe("Step attempt history — compensation", () => {
     expect(compAttempts[0]!.attempt).toBe(1);
   });
 
-  it("records failed compensation", async () => {
+  it("failed rollback logs the error — ops can investigate manually", async () => {
     const storage = new InMemoryWorkflowStorage();
 
     await workflow<string>({ name: "comp-fail-record", storage })
@@ -181,7 +181,7 @@ describe("Step attempt history — compensation", () => {
     expect(compAttempts[0]!.error).toBe("comp-failed");
   });
 
-  it("records compensation retry attempts", async () => {
+  it("rollback retries produce sequential attempt records — full retry history", async () => {
     const storage = new InMemoryWorkflowStorage();
     let compCalls = 0;
 
@@ -212,7 +212,7 @@ describe("Step attempt history — compensation", () => {
     expect(compAttempts.map((a) => a.attempt)).toEqual([1, 2, 3]);
   });
 
-  it("records both execution and compensation attempts together", async () => {
+  it("execution and rollback attempts coexist — complete lifecycle audit trail", async () => {
     const storage = new InMemoryWorkflowStorage();
 
     await workflow<string>({ name: "both-types", storage })
@@ -241,8 +241,8 @@ describe("Step attempt history — compensation", () => {
 // Storage without attempt support
 // ---------------------------------------------------------------------------
 
-describe("Storage without StepAttemptStorage", () => {
-  it("works normally when storage doesn't implement StepAttemptStorage", async () => {
+describe("Graceful degradation — audit logging is optional", () => {
+  it("workflows run fine when the storage backend lacks attempt tracking", async () => {
     // Create a minimal storage that doesn't have saveStepAttempt
     const base = new InMemoryWorkflowStorage();
     const minimalStorage: any = {

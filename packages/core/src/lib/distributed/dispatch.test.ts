@@ -9,8 +9,8 @@ import { createWorker } from "./worker.ts";
 // Hybrid dispatch — engine runs locally, dispatches specific steps to workers
 // ---------------------------------------------------------------------------
 
-describe("Hybrid dispatch", () => {
-  it("dispatches specific steps to remote workers", async () => {
+describe("Hybrid dispatch — run simple steps locally, offload heavy steps to workers", () => {
+  it("video download runs locally, transcription offloaded to GPU worker", async () => {
     const storage = new InMemoryWorkflowStorage();
     const stepQueue = new InMemoryStepQueue();
     const log: string[] = [];
@@ -62,7 +62,7 @@ describe("Hybrid dispatch", () => {
     expect(log).toContain("format:local");
   });
 
-  it("non-dispatched steps run locally with full engine features", async () => {
+  it("local steps still get retries and checkpointing — full engine features", async () => {
     const storage = new InMemoryWorkflowStorage();
     const stepQueue = new InMemoryStepQueue();
     let attempts = 0;
@@ -93,7 +93,7 @@ describe("Hybrid dispatch", () => {
     expect(attempts).toBe(3);
   });
 
-  it("runs entire workflow locally when no dispatch configured", async () => {
+  it("no dispatch config — everything runs locally as a normal workflow", async () => {
     const storage = new InMemoryWorkflowStorage();
 
     const result = await workflow<number>({ name: "no-dispatch", storage })
@@ -104,7 +104,7 @@ describe("Hybrid dispatch", () => {
     expect(result).toBe(110);
   });
 
-  it("handles dispatched step failure", async () => {
+  it("remote worker step fails — error propagates back to the calling workflow", async () => {
     const storage = new InMemoryWorkflowStorage();
     const stepQueue = new InMemoryStepQueue();
 
