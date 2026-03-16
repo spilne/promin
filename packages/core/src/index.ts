@@ -194,6 +194,17 @@ export {
   ExpectationSuite,
 } from "./lib/data-quality/index.ts";
 
+// SQL Models (dbt-style)
+export {
+  type SqlModel,
+  type SqlProject,
+  type SqlProjectResult,
+  type Materialization,
+  type ExpectationDef as SqlExpectationDef,
+  compileSqlProject,
+  type SqlCompilerConfig,
+} from "./lib/sql-models/index.ts";
+
 // Distributed workflow execution
 export {
   type StepRegistry,
