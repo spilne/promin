@@ -1,9 +1,16 @@
 /**
  * Webhook + signals — external system triggers workflow continuation
  *
- * Loan application: user applies → automated checks → workflow sleeps
- * waiting for underwriter approval via webhook. External system calls
- * our webhook endpoint, which delivers a signal to wake up the workflow.
+ * Business flow:
+ * 1. Borrower submits a loan application with desired amount and income details
+ * 2. System pulls a credit report and calculates debt-to-income ratio
+ * 3. Automated eligibility rules determine if the application qualifies
+ * 4. Workflow pauses and waits for a human underwriter to make the final decision
+ * 5. Underwriter reviews the application in an external system and submits their verdict
+ * 6. External system sends a webhook that wakes up the waiting workflow
+ * 7. Loan is created and borrower is notified of approval, or borrower is notified of denial
+ *
+ * The workflow can wait up to 7 days for the underwriter before timing out.
  */
 
 import {

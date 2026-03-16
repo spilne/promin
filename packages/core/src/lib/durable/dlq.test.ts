@@ -33,8 +33,8 @@ class InMemoryDlq implements Sinkable<FailedWorkflowRecord> {
 // DLQ basics
 // ---------------------------------------------------------------------------
 
-describe("DLQ integration", () => {
-  it("publishes failed workflow to DLQ", async () => {
+describe("Dead-letter queue — capture failed workflows for investigation", () => {
+  it("order processing fails — full context is sent to the DLQ for debugging", async () => {
     const storage = new InMemoryWorkflowStorage();
     const dlq = new InMemoryDlq();
 
@@ -56,7 +56,7 @@ describe("DLQ integration", () => {
     expect(record.failedAt).toBeInstanceOf(Date);
   });
 
-  it("includes step states in DLQ record", async () => {
+  it("DLQ record shows which steps succeeded and which failed — aids triage", async () => {
     const storage = new InMemoryWorkflowStorage();
     const dlq = new InMemoryDlq();
 

@@ -1,14 +1,15 @@
 /**
  * Video processing pipeline — realistic media company scenario
  *
- * When a creator uploads a video:
- * 1. Download from S3 (CPU worker)
- * 2. In parallel: transcribe audio (GPU) + generate thumbnails (CPU) + encode H.265 (GPU)
- * 3. Store metadata + update search index (local)
- * 4. Notify creator (local)
+ * Business flow:
+ * 1. Creator uploads a video to the platform
+ * 2. Upload is validated for format and integrity
+ * 3. Three tasks run in parallel: thumbnails are generated, audio is transcribed, and video is re-encoded to H.265
+ * 4. Metadata from all three tasks is stored and the search index is updated
+ * 5. Creator receives a notification that their video is ready
+ * 6. If processing fails, completed work is cleaned up and the creator is informed
  *
- * Different steps need different hardware. The coordinator routes
- * them to the right worker pool.
+ * Thumbnails run on CPU workers; transcription and encoding run on GPU workers.
  */
 
 import {

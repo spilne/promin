@@ -35,8 +35,8 @@ function tracker() {
 // Step-level compensation
 // ---------------------------------------------------------------------------
 
-describe("Step-level compensation", () => {
-  it("compensates completed steps when a later step fails", async () => {
+describe("Saga rollback — undo completed work when a later step fails", () => {
+  it("payment was charged but shipping failed — automatically refund the payment", async () => {
     const t = tracker();
     const storage = createStorage();
 
@@ -87,7 +87,7 @@ describe("Step-level compensation", () => {
     ]);
   });
 
-  it("does not compensate the step that failed", async () => {
+  it("failed step has nothing to undo — only completed steps get rolled back", async () => {
     const t = tracker();
     const storage = createStorage();
 
@@ -125,7 +125,7 @@ describe("Step-level compensation", () => {
     expect(t.calls).toEqual(["ok:execute", "fail:execute", "ok:compensate"]);
   });
 
-  it("skips compensation for steps without compensate function", async () => {
+  it("read-only steps have no rollback — only steps with undo logic are compensated", async () => {
     const t = tracker();
     const storage = createStorage();
 
@@ -164,7 +164,7 @@ describe("Step-level compensation", () => {
     ]);
   });
 
-  it("compensation failure does not block other compensations", async () => {
+  it("one refund fails but the other still runs — best-effort rollback", async () => {
     const t = tracker();
     const storage = createStorage();
 
@@ -212,7 +212,7 @@ describe("Step-level compensation", () => {
     ]);
   });
 
-  it("compensate receives the step result and workflow input", async () => {
+  it("rollback handler knows what was created — can target the exact resource to delete", async () => {
     const storage = createStorage();
     let receivedParams: any = null;
 
@@ -233,7 +233,7 @@ describe("Step-level compensation", () => {
     expect(receivedParams.workflowId).toBe("comp-params-1");
   });
 
-  it("compensate works with async/Promise functions", async () => {
+  it("async rollback handler — call an external API to reverse a charge", async () => {
     const t = tracker();
     const storage = createStorage();
 
@@ -257,7 +257,7 @@ describe("Step-level compensation", () => {
     expect(t.calls).toContain("step-1:compensate-async");
   });
 
-  it("no compensation when workflow succeeds", async () => {
+  it("happy path completes — no rollback actions are triggered", async () => {
     const t = tracker();
     const storage = createStorage();
 
@@ -279,8 +279,8 @@ describe("Step-level compensation", () => {
 // StepFailureStrategy interaction
 // ---------------------------------------------------------------------------
 
-describe("Compensation + StepFailureStrategy", () => {
-  it("no compensation when onFailure is 'skip'", async () => {
+describe("Failure strategy interaction — skip or fallback avoids unnecessary rollback", () => {
+  it("optional enrichment step is skipped on failure — no rollback needed", async () => {
     const t = tracker();
     const storage = createStorage();
 
@@ -320,7 +320,7 @@ describe("Compensation + StepFailureStrategy", () => {
     expect(t.calls).not.toContain("step-1:compensate");
   });
 
-  it("no compensation when onFailure uses fallback", async () => {
+  it("fallback value substituted for failed step — workflow continues without rollback", async () => {
     const t = tracker();
     const storage = createStorage();
 
@@ -353,7 +353,7 @@ describe("Compensation + StepFailureStrategy", () => {
     expect(t.calls).not.toContain("step-1:compensate");
   });
 
-  it("compensation triggers when onFailure is 'fail' (default)", async () => {
+  it("default fail strategy triggers rollback — critical steps must be undone", async () => {
     const t = tracker();
     const storage = createStorage();
 
@@ -383,8 +383,8 @@ describe("Compensation + StepFailureStrategy", () => {
 // Workflow-level retry
 // ---------------------------------------------------------------------------
 
-describe("Workflow-level retry", () => {
-  it("retries the workflow from the failed step", async () => {
+describe("Workflow-level retry — recover from transient failures before giving up", () => {
+  it("transient DB timeout on second step — retry succeeds without re-running first step", async () => {
     const t = tracker();
     const storage = createStorage();
     let attempt = 0;
@@ -418,7 +418,7 @@ describe("Workflow-level retry", () => {
     ]);
   });
 
-  it("compensates only after all workflow retries exhausted", async () => {
+  it("permanent failure after all retries — rollback only happens once at the end", async () => {
     const t = tracker();
     const storage = createStorage();
     let attempt = 0;
@@ -459,7 +459,7 @@ describe("Workflow-level retry", () => {
     ]);
   });
 
-  it("workflow retry + step retry combined", async () => {
+  it("step retries within each workflow attempt — total attempts multiply", async () => {
     const t = tracker();
     const storage = createStorage();
     let totalAttempts = 0;
@@ -502,7 +502,7 @@ describe("Workflow-level retry", () => {
     expect(t.calls).toContain("step-1:compensate");
   });
 
-  it("no workflow retry when retry is not configured", async () => {
+  it("no retry configured — failure triggers immediate rollback", async () => {
     const t = tracker();
     const storage = createStorage();
 
@@ -536,8 +536,8 @@ describe("Workflow-level retry", () => {
 // Workflow-level onCompensate
 // ---------------------------------------------------------------------------
 
-describe("Workflow-level compensate.onComplete", () => {
-  it("receives compensation report", async () => {
+describe("Post-rollback hook — notify ops team after saga compensation", () => {
+  it("report lists which steps were rolled back and which rollbacks failed", async () => {
     const storage = createStorage();
     let report: any = null;
 
@@ -570,7 +570,7 @@ describe("Workflow-level compensate.onComplete", () => {
     expect(report.failedCompensations[0].stepName).toBe("step-2");
   });
 
-  it("onComplete failure does not mask the original error", async () => {
+  it("notification hook crashes — original business error is still surfaced", async () => {
     const storage = createStorage();
 
     const { error } = await workflow<string>({
@@ -593,7 +593,7 @@ describe("Workflow-level compensate.onComplete", () => {
     expect((error as any).message).toBe("original error");
   });
 
-  it("onComplete works with async/Promise", async () => {
+  it("async notification hook — post rollback summary to Slack", async () => {
     const storage = createStorage();
     const t = tracker();
 
@@ -618,8 +618,8 @@ describe("Workflow-level compensate.onComplete", () => {
 // DAG compensation order
 // ---------------------------------------------------------------------------
 
-describe("DAG compensation order", () => {
-  it("compensates in reverse step definition order", async () => {
+describe("DAG rollback order — undo dependent steps before their prerequisites", () => {
+  it("parallel branches rolled back before the shared root step", async () => {
     const t = tracker();
     const storage = createStorage();
 
@@ -681,8 +681,8 @@ describe("DAG compensation order", () => {
 // Full cascade: step retry → workflow retry → compensation
 // ---------------------------------------------------------------------------
 
-describe("Full cascade", () => {
-  it("step retry → step fail → workflow retry → compensation", async () => {
+describe("Full recovery cascade — step retry, workflow retry, then rollback", () => {
+  it("exhausts step retries, then workflow retries, then compensates — full escalation path", async () => {
     const t = tracker();
     const storage = createStorage();
     let step2Calls = 0;
@@ -745,7 +745,7 @@ describe("Full cascade", () => {
     ]);
   });
 
-  it("transient failure recovers on workflow retry, no compensation", async () => {
+  it("transient network glitch clears up on retry — no rollback needed", async () => {
     const storage = createStorage();
     let step2Calls = 0;
 
@@ -778,8 +778,8 @@ describe("Full cascade", () => {
 // Edge cases
 // ---------------------------------------------------------------------------
 
-describe("Edge cases", () => {
-  it("empty workflow — no compensation needed", async () => {
+describe("Edge cases — boundary conditions for compensation logic", () => {
+  it("single step fails with no prior work — nothing to roll back", async () => {
     const storage = createStorage();
     const t = tracker();
 
@@ -802,7 +802,7 @@ describe("Edge cases", () => {
     expect(t.calls).toContain("onCompensate");
   });
 
-  it("workflow with only first step failing — no completed steps to compensate", async () => {
+  it("very first step fails — its own compensate is not invoked since it never completed", async () => {
     const t = tracker();
     const storage = createStorage();
 
@@ -819,7 +819,7 @@ describe("Edge cases", () => {
     expect(t.calls).toEqual([]);
   });
 
-  it("build() preserves retry and compensate config", async () => {
+  it("pre-built workflow definition retains all retry and rollback settings", async () => {
     const storage = createStorage();
     const t = tracker();
     let step2Calls = 0;
@@ -862,8 +862,8 @@ describe("Edge cases", () => {
 // Workflow retry `when` predicate
 // ---------------------------------------------------------------------------
 
-describe("Workflow retry when predicate", () => {
-  it("skips retry for non-retryable errors", async () => {
+describe("Selective retry — only retry transient errors, fail fast on permanent ones", () => {
+  it("business validation error is permanent — skip retries and compensate immediately", async () => {
     const t = tracker();
     const storage = createStorage();
     let step2Calls = 0;
@@ -903,7 +903,7 @@ describe("Workflow retry when predicate", () => {
     expect(t.calls).toContain("step-1:compensate");
   });
 
-  it("retries for retryable errors, stops for non-retryable", async () => {
+  it("network errors retry, but auth errors stop immediately — mixed error types", async () => {
     const storage = createStorage();
     let step2Calls = 0;
 
@@ -942,8 +942,8 @@ describe("Workflow retry when predicate", () => {
 // Attempt counter in step context
 // ---------------------------------------------------------------------------
 
-describe("Attempt counter", () => {
-  it("step receives incrementing attempt on step-level retry", async () => {
+describe("Attempt tracking — steps know which try they are on for backoff decisions", () => {
+  it("step-level retry increments the attempt counter each time", async () => {
     const storage = createStorage();
     const attempts: number[] = [];
 
@@ -967,7 +967,7 @@ describe("Attempt counter", () => {
     expect(attempts).toEqual([1, 2, 3]);
   });
 
-  it("step receives incrementing attempt across workflow retries", async () => {
+  it("attempt counter keeps incrementing across workflow retries — no reset", async () => {
     const storage = createStorage();
     const attempts: number[] = [];
     let totalCalls = 0;
@@ -993,7 +993,7 @@ describe("Attempt counter", () => {
     expect(attempts).toEqual([1, 2, 3]);
   });
 
-  it("step receives incrementing attempt with step + workflow retry combined", async () => {
+  it("combined step and workflow retries — monotonically increasing attempt numbers", async () => {
     const storage = createStorage();
     const attempts: number[] = [];
 
@@ -1030,8 +1030,8 @@ describe("Attempt counter", () => {
 // Compensation trigger modes
 // ---------------------------------------------------------------------------
 
-describe("Compensation trigger: immediate", () => {
-  it("compensates immediately without workflow retry", async () => {
+describe("Immediate rollback — undo right away without retrying the workflow", () => {
+  it("financial transaction needs instant reversal — skip workflow retries", async () => {
     const t = tracker();
     const storage = createStorage();
     let step2Calls = 0;
@@ -1068,7 +1068,7 @@ describe("Compensation trigger: immediate", () => {
     expect(t.calls).toEqual(["step-1:execute", "step-2:call=1", "step-1:compensate"]);
   });
 
-  it("step-level retries still work with immediate trigger", async () => {
+  it("step-level retries still exhaust before immediate rollback kicks in", async () => {
     const t = tracker();
     const storage = createStorage();
     let step2Calls = 0;
@@ -1112,8 +1112,8 @@ describe("Compensation trigger: immediate", () => {
   });
 });
 
-describe("Compensation trigger: after-retries (default)", () => {
-  it("retries workflow before compensating", async () => {
+describe("After-retries rollback (default) — exhaust all retries before compensating", () => {
+  it("workflow retries twice before giving up and rolling back", async () => {
     const t = tracker();
     const storage = createStorage();
     let step2Calls = 0;
@@ -1155,8 +1155,8 @@ describe("Compensation trigger: after-retries (default)", () => {
 // Compensation retry
 // ---------------------------------------------------------------------------
 
-describe("Compensation retry", () => {
-  it("retries failing compensation functions", async () => {
+describe("Compensation retry — retry the rollback itself if the undo API is flaky", () => {
+  it("refund API fails twice then succeeds — rollback retries until it works", async () => {
     const t = tracker();
     const storage = createStorage();
     let compAttempts = 0;
@@ -1191,7 +1191,7 @@ describe("Compensation retry", () => {
     ]);
   });
 
-  it("records failure after compensation retries exhausted", async () => {
+  it("rollback retries exhausted — failure recorded for manual intervention", async () => {
     const storage = createStorage();
     let report: any = null;
 

@@ -1,9 +1,15 @@
 /**
  * Saga compensation — undo completed steps on failure
  *
- * When a step fails, the engine automatically runs compensation
- * functions for completed steps in reverse order. Compensation
- * only triggers after all retries (step + workflow) are exhausted.
+ * Business flow:
+ * 1. A money transfer debits the sender's account
+ * 2. Crediting the recipient fails (e.g., insufficient funds on the other side)
+ * 3. The engine automatically reverses the debit by running compensation in reverse order
+ * 4. Only steps that actually completed are compensated (the failed step is not)
+ * 5. Compensation itself can be retried if it fails transiently
+ * 6. An audit callback reports which steps were compensated and which compensations failed
+ *
+ * Compensation triggers after all retries are exhausted, or immediately if configured that way.
  */
 
 import { Data } from "effect";

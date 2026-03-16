@@ -1,9 +1,15 @@
 /**
  * Durable workflows — survive crashes, resume from checkpoints
  *
- * workflow() persists step results to storage. On crash + restart,
- * completed steps are skipped and execution continues from the
- * first incomplete step.
+ * Business flow:
+ * 1. A user onboarding workflow creates an account and sends a welcome email
+ * 2. Each completed step is checkpointed to persistent storage
+ * 3. If the process crashes mid-workflow, restarting picks up from the last checkpoint
+ * 4. Already-completed steps are skipped on resume (no duplicate emails, no double accounts)
+ * 5. Workflow definitions can be built once and run many times with different inputs
+ * 6. Running and failed workflows can be queried, inspected, and cancelled
+ *
+ * The key property: a workflow will complete exactly once, regardless of how many times it restarts.
  */
 
 import {

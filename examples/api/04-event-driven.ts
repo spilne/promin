@@ -1,9 +1,16 @@
 /**
  * Event-driven workflows — stream triggers from queues
  *
- * SaaS user onboarding: when a user signs up (event in queue),
- * trigger a multi-step onboarding workflow. Process events
- * concurrently with dedup to avoid double-processing.
+ * Business flow:
+ * 1. New user signup events arrive from a message queue
+ * 2. Each event triggers an onboarding workflow: billing account is created in Stripe
+ * 3. Resources are provisioned based on the customer's plan (free, pro, enterprise)
+ * 4. A default workspace is created for the new user
+ * 5. Referral credit is applied if the user signed up with a referral code (failure is non-blocking)
+ * 6. Welcome email with a getting-started guide is sent
+ * 7. Signup is tracked in analytics
+ *
+ * Multiple signups are processed concurrently, with deduplication to prevent double-onboarding.
  */
 
 import {

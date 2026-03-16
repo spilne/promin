@@ -1,9 +1,14 @@
 /**
  * Subworkflows — child workflow composition
  *
- * invoke() returns Pipeline for use inside any step.
- * .subworkflow() is builder sugar for the common pattern.
- * Parent-child tracking enables cascade cancel and querying.
+ * Business flow:
+ * 1. A parent onboarding workflow creates a user account
+ * 2. A child workflow is invoked to enrich the user profile (fetch scores, metadata)
+ * 3. Another child workflow sends a welcome notification
+ * 4. For batch operations, a list of items fans out to individual child workflows running in parallel
+ * 5. Parent-child relationships are tracked, so cancelling the parent cascades to all children
+ *
+ * Child workflows are reusable building blocks that can be composed into larger processes.
  */
 
 import { workflow, Pipeline, InMemoryWorkflowStorage } from "@promin/core";

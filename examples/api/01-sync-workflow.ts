@@ -1,9 +1,15 @@
 /**
  * Synchronous workflow from API — wait for result
  *
- * E-commerce checkout: validate cart → reserve inventory → charge payment → confirm order.
- * The API waits for the workflow to complete and returns the result.
- * If the request is retried with the same orderId, the workflow resumes (idempotent).
+ * Business flow:
+ * 1. Customer submits a checkout request with their cart and payment method
+ * 2. System validates the cart contents and calculates the total
+ * 3. Inventory is reserved for each item in the order
+ * 4. Payment is charged (with automatic retry on transient failures)
+ * 5. Order is confirmed and a confirmation record is created
+ * 6. If any step fails, previous steps are automatically rolled back (inventory released, payment refunded)
+ *
+ * Retrying with the same order ID resumes the existing workflow rather than starting a new one.
  */
 
 import { workflow, Pipeline, InMemoryWorkflowStorage } from "@promin/core";

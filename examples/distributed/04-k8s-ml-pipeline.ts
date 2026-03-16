@@ -1,16 +1,15 @@
 /**
  * Kubernetes ML Pipeline — realistic production scenario
  *
- * A data science team trains models on GPU nodes, evaluates them,
- * and deploys the best one. Each step runs in a different container
- * with appropriate resources.
+ * Business flow:
+ * 1. Data scientist kicks off a training experiment with a dataset and hyperparameters
+ * 2. Training data is downloaded, cleaned, and split into train/test sets on cheap CPU nodes
+ * 3. Model is trained on expensive GPU nodes with configurable batch size and learning rate
+ * 4. Trained model is evaluated against accuracy and F1 thresholds on CPU nodes
+ * 5. If the model meets quality gates, it is promoted to production; otherwise it is rejected
+ * 6. On failure at any step, partial artifacts are cleaned up and the team is alerted
  *
- * Infrastructure:
- * - Coordinator runs on a small API server
- * - Data prep runs on CPU nodes (cheap)
- * - Training runs on GPU nodes (expensive, auto-scaled)
- * - Evaluation runs on CPU nodes
- * - Deployment runs on the API server
+ * Each step runs in its own Kubernetes pod with hardware matched to the workload.
  */
 
 import {

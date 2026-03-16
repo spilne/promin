@@ -1,8 +1,14 @@
 /**
  * Dead letter queue — capture failed workflows for replay
  *
- * Failed workflows (after all retries + compensation) are published
- * to a configurable DLQ. Works with any Sinkable<FailedWorkflowRecord>.
+ * Business flow:
+ * 1. An order-processing workflow fails after exhausting all retries (e.g., payment gateway is down)
+ * 2. The failure record is automatically published to a dead letter queue with full context
+ * 3. The DLQ record includes the original input, completed steps, error details, and compensation results
+ * 4. An operator inspects the DLQ, fixes the root cause, and replays the failed workflow
+ * 5. The replayed workflow runs from scratch with the same input and succeeds
+ *
+ * Ensures no failed work is silently lost; every failure is captured and replayable.
  */
 
 import { Data } from "effect";

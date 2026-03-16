@@ -1,9 +1,15 @@
 /**
  * Container steps — run workflow steps in isolated containers
  *
- * Steps can be any language: Python for ML, Go for encoding,
- * Rust for data processing. The container reads input JSON,
- * processes it, writes output JSON.
+ * Business flow:
+ * 1. A video is submitted for processing
+ * 2. The video is validated locally (lightweight check, no special hardware needed)
+ * 3. Audio transcription and video encoding are dispatched to GPU worker machines
+ * 4. Each heavy step runs inside its own container (Whisper for transcription, FFmpeg for encoding)
+ * 5. A coordinator routes steps to the right worker pool based on hardware requirements
+ * 6. Results from all parallel steps are collected and saved together
+ *
+ * Steps can be written in any language; the container contract is input JSON in, output JSON out.
  */
 
 import {

@@ -58,15 +58,15 @@ const users = [
 // expectNotNull
 // ---------------------------------------------------------------------------
 
-describe("expectNotNull", () => {
-  it("passes when no nulls", async () => {
+describe("Not-null validation — catch missing required fields", () => {
+  it("approves a dataset where all required fields are present", async () => {
     const result = await DataFrame.fromArray(users).expect().expectNotNull("id").validate();
 
     expect(result.passed).toBe(true);
     expect(result.summary.passed).toBe(1);
   });
 
-  it("fails when nulls exist", async () => {
+  it("flags rows with missing customer IDs before they reach the dashboard", async () => {
     const result = await DataFrame.fromArray(orders).expect().expectNotNull("userId").validate();
 
     expect(result.passed).toBe(false);
@@ -78,13 +78,13 @@ describe("expectNotNull", () => {
 // expectUnique
 // ---------------------------------------------------------------------------
 
-describe("expectUnique", () => {
-  it("passes when all unique", async () => {
+describe("Uniqueness validation — detect duplicate records", () => {
+  it("confirms every order has a distinct ID", async () => {
     const result = await DataFrame.fromArray(orders).expect().expectUnique("id").validate();
     expect(result.passed).toBe(true);
   });
 
-  it("fails when duplicates exist", async () => {
+  it("catches the same customer appearing twice — possible data duplication", async () => {
     const result = await DataFrame.fromArray(orders).expect().expectUnique("userId").validate();
     expect(result.passed).toBe(false);
   });
@@ -94,8 +94,8 @@ describe("expectUnique", () => {
 // expectBetween
 // ---------------------------------------------------------------------------
 
-describe("expectBetween", () => {
-  it("passes when all in range", async () => {
+describe("Range validation — ensure numeric values stay within business limits", () => {
+  it("accepts order amounts within the allowed billing range", async () => {
     const result = await DataFrame.fromArray(orders)
       .expect()
       .expectBetween("amount", { min: -100, max: 1000 })
@@ -104,7 +104,7 @@ describe("expectBetween", () => {
     expect(result.passed).toBe(true);
   });
 
-  it("fails when out of range", async () => {
+  it("rejects a negative order amount — likely a refund logged incorrectly", async () => {
     const result = await DataFrame.fromArray(orders)
       .expect()
       .expectBetween("amount", { min: 0, max: 1000 })
@@ -119,8 +119,8 @@ describe("expectBetween", () => {
 // expectMatch
 // ---------------------------------------------------------------------------
 
-describe("expectMatch", () => {
-  it("passes when all match", async () => {
+describe("Pattern validation — enforce format rules on text fields", () => {
+  it("confirms all customer names start with an uppercase letter", async () => {
     const result = await DataFrame.fromArray(users)
       .expect()
       .expectMatch("name", { pattern: /^[A-Z]/ })
@@ -129,7 +129,7 @@ describe("expectMatch", () => {
     expect(result.passed).toBe(true);
   });
 
-  it("fails when some don't match", async () => {
+  it("flags malformed email addresses before sending campaign", async () => {
     const result = await DataFrame.fromArray(orders)
       .expect()
       .expectMatch("email", { pattern: /^[^@]+@[^@]+\.[^@]+$/ })
@@ -144,8 +144,8 @@ describe("expectMatch", () => {
 // expectIn
 // ---------------------------------------------------------------------------
 
-describe("expectIn", () => {
-  it("passes when all values allowed", async () => {
+describe("Allowed-values validation — restrict fields to known categories", () => {
+  it("all order statuses belong to the known set", async () => {
     const result = await DataFrame.fromArray(orders)
       .expect()
       .expectIn("status", { values: ["pending", "completed", "cancelled"] })
@@ -154,7 +154,7 @@ describe("expectIn", () => {
     expect(result.passed).toBe(true);
   });
 
-  it("fails when unexpected values", async () => {
+  it("detects an unexpected 'cancelled' status that the downstream system cannot handle", async () => {
     const result = await DataFrame.fromArray(orders)
       .expect()
       .expectIn("status", { values: ["pending", "completed"] })
@@ -168,8 +168,8 @@ describe("expectIn", () => {
 // expectRowCount
 // ---------------------------------------------------------------------------
 
-describe("expectRowCount", () => {
-  it("passes when count in range", async () => {
+describe("Row-count validation — verify data volume is within expectations", () => {
+  it("daily order feed has a reasonable number of rows", async () => {
     const result = await DataFrame.fromArray(orders)
       .expect()
       .expectRowCount({ min: 1, max: 100 })
@@ -178,7 +178,7 @@ describe("expectRowCount", () => {
     expect(result.passed).toBe(true);
   });
 
-  it("fails when too few", async () => {
+  it("alerts when the pipeline delivers suspiciously few orders", async () => {
     const result = await DataFrame.fromArray(orders)
       .expect()
       .expectRowCount({ min: 100 })
@@ -187,7 +187,7 @@ describe("expectRowCount", () => {
     expect(result.passed).toBe(false);
   });
 
-  it("fails when too many", async () => {
+  it("alerts when an unexpected data spike exceeds the row limit", async () => {
     const result = await DataFrame.fromArray(orders).expect().expectRowCount({ max: 2 }).validate();
 
     expect(result.passed).toBe(false);
@@ -198,8 +198,8 @@ describe("expectRowCount", () => {
 // expectFreshness
 // ---------------------------------------------------------------------------
 
-describe("expectFreshness", () => {
-  it("passes when data is fresh", async () => {
+describe("Freshness validation — ensure data is not stale", () => {
+  it("order timestamps are within 24 hours — data pipeline is current", async () => {
     const result = await DataFrame.fromArray(orders)
       .expect()
       .expectFreshness("createdAt", { maxAgeMs: 24 * 60 * 60 * 1000 }) // 24 hours
@@ -208,7 +208,7 @@ describe("expectFreshness", () => {
     expect(result.passed).toBe(true);
   });
 
-  it("fails when data is stale", async () => {
+  it("flags a 2-day-old dataset — pipeline may have stalled", async () => {
     const staleData = [{ ts: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString() }];
     const result = await DataFrame.fromArray(staleData)
       .expect()
@@ -223,8 +223,8 @@ describe("expectFreshness", () => {
 // expectReferentialIntegrity
 // ---------------------------------------------------------------------------
 
-describe("expectReferentialIntegrity", () => {
-  it("passes when all references valid", async () => {
+describe("Referential integrity — verify foreign keys point to real records", () => {
+  it("every order references an existing customer", async () => {
     const validOrders = orders.filter((o) => o.userId != null);
     const result = await DataFrame.fromArray(validOrders)
       .expect()
@@ -237,7 +237,7 @@ describe("expectReferentialIntegrity", () => {
     expect(result.passed).toBe(true);
   });
 
-  it("fails when orphan references exist", async () => {
+  it("catches an order referencing a deleted customer — orphan record", async () => {
     const ordersWithOrphan = [
       ...orders.filter((o) => o.userId != null),
       {
@@ -266,8 +266,8 @@ describe("expectReferentialIntegrity", () => {
 // Custom expectation
 // ---------------------------------------------------------------------------
 
-describe("custom expect", () => {
-  it("runs custom check", async () => {
+describe("Custom business rules — domain-specific quality checks", () => {
+  it("total revenue is positive — basic sanity check on the daily batch", async () => {
     const result = await DataFrame.fromArray(orders)
       .expect()
       .expect("revenue_positive", async (df) => {
@@ -279,7 +279,7 @@ describe("custom expect", () => {
     expect(result.passed).toBe(true);
   });
 
-  it("custom check can fail", async () => {
+  it("a deliberately impossible rule fails — verifying that failures are reported", async () => {
     const result = await DataFrame.fromArray(orders)
       .expect()
       .expect("impossible", async () => false)
@@ -293,8 +293,8 @@ describe("custom expect", () => {
 // Chained expectations
 // ---------------------------------------------------------------------------
 
-describe("chained expectations", () => {
-  it("runs multiple expectations", async () => {
+describe("Multi-rule quality suite — run all checks before publishing data", () => {
+  it("order feed passes all five quality gates at once", async () => {
     const result = await DataFrame.fromArray(orders)
       .expect()
       .expectNotNull("id")
@@ -309,7 +309,7 @@ describe("chained expectations", () => {
     expect(result.passed).toBe(true);
   });
 
-  it("reports all failures", async () => {
+  it("summarizes every broken rule so the team can triage all issues at once", async () => {
     const result = await DataFrame.fromArray(orders)
       .expect()
       .expectNotNull("userId") // fails — 1 null
@@ -325,7 +325,7 @@ describe("chained expectations", () => {
     expect(result.summary.passed).toBe(1);
   });
 
-  it("warnings don't fail the suite", async () => {
+  it("nullable email is a warning, not a blocker — suite still passes", async () => {
     const result = await DataFrame.fromArray(orders)
       .expect()
       .expectNotNull("id")
@@ -342,8 +342,8 @@ describe("chained expectations", () => {
 // ValidationResult metadata
 // ---------------------------------------------------------------------------
 
-describe("ValidationResult", () => {
-  it("includes timestamp and duration", async () => {
+describe("Validation metadata — audit trail for compliance", () => {
+  it("records when the check ran and how long it took", async () => {
     const result = await DataFrame.fromArray(orders).expect().expectRowCount({ min: 1 }).validate();
 
     expect(result.timestamp).toBeInstanceOf(Date);

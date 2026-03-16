@@ -1,9 +1,16 @@
 /**
  * Async workflow from API — submit and poll
  *
- * KYC (Know Your Customer) verification: submit documents, run checks
- * in background, user polls for result. Workflow involves external APIs
- * that take minutes, so we don't block the HTTP request.
+ * Business flow:
+ * 1. Customer submits identity documents and a selfie for verification
+ * 2. System validates the uploaded documents are readable and complete
+ * 3. An external identity verification provider checks the documents against the selfie
+ * 4. Workflow sleeps while waiting for the provider to finish (can take up to 30 minutes)
+ * 5. Sanctions and politically-exposed-person screenings run against the customer's name
+ * 6. System approves or rejects the customer based on combined results
+ * 7. Customer polls a status endpoint at any time to check progress
+ *
+ * A background scanner resumes sleeping workflows once the external check completes.
  */
 
 import {

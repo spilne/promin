@@ -1,9 +1,16 @@
 /**
  * SQL Model Runner — dbt-style analytics pipeline
  *
- * Define SQL transformations as a DAG. Models compile to a workflow
- * that materializes tables/views in dependency order. Independent
- * models run in parallel. Tests validate output after each model.
+ * Business flow:
+ * 1. Analytics team defines SQL models for an e-commerce data warehouse
+ * 2. Staging models clean raw orders and users (filter deleted records, drop nulls)
+ * 3. A fact table aggregates daily revenue by region and pricing plan
+ * 4. Dimension tables summarize region performance and plan-level metrics
+ * 5. Models are compiled into a dependency graph; independent models run in parallel
+ * 6. After each model materializes, data tests verify uniqueness, nulls, and row counts
+ * 7. The full pipeline runs daily on a schedule, idempotent by date
+ *
+ * Similar to dbt: declare SQL models with dependencies, and the system handles execution order and testing.
  */
 
 import {

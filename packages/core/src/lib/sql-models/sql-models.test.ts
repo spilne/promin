@@ -79,8 +79,8 @@ function createMockDb() {
 // Basic compilation
 // ---------------------------------------------------------------------------
 
-describe("compileSqlProject", () => {
-  it("compiles a simple linear project", async () => {
+describe("SQL model orchestration — build analytics tables from raw data", () => {
+  it("staging view feeds into a revenue fact table — linear dependency chain", async () => {
     const storage = new InMemoryWorkflowStorage();
     const db = createMockDb();
 
@@ -115,7 +115,7 @@ describe("compileSqlProject", () => {
     expect(db.executed.some((s) => s.includes("CREATE TABLE fct_revenue"))).toBe(true);
   });
 
-  it("compiles a diamond DAG", async () => {
+  it("orders and users merge into revenue, then top regions — diamond dependency graph", async () => {
     const storage = new InMemoryWorkflowStorage();
     const db = createMockDb();
 
@@ -149,7 +149,7 @@ describe("compileSqlProject", () => {
     expect(Object.keys(state?.steps ?? {}).length).toBe(4);
   });
 
-  it("runs data quality tests on models", async () => {
+  it("validates order table has no nulls or duplicates after build — quality gate", async () => {
     const storage = new InMemoryWorkflowStorage();
     const db = createMockDb();
 
@@ -182,7 +182,7 @@ describe("compileSqlProject", () => {
     expect(result.testsPassed).toBe(3);
   });
 
-  it("has correct workflow metadata", async () => {
+  it("workflow name reflects the analytics project — useful for monitoring", async () => {
     const storage = new InMemoryWorkflowStorage();
     const db = createMockDb();
 
@@ -195,7 +195,7 @@ describe("compileSqlProject", () => {
     expect(wf.name).toBe("sql-project:my-analytics");
   });
 
-  it("supports view materialization", async () => {
+  it("lightweight staging layer uses views to avoid duplicating raw data", async () => {
     const storage = new InMemoryWorkflowStorage();
     const db = createMockDb();
 
@@ -213,7 +213,7 @@ describe("compileSqlProject", () => {
     expect(db.views.has("my_view")).toBe(true);
   });
 
-  it("drops before recreating", async () => {
+  it("rebuilds table from scratch each run — drop then create for clean state", async () => {
     const storage = new InMemoryWorkflowStorage();
     const db = createMockDb();
 
@@ -232,7 +232,7 @@ describe("compileSqlProject", () => {
     expect(dropIdx).toBeLessThan(createIdx);
   });
 
-  it("supports idempotent re-runs", async () => {
+  it("re-running the same build is a no-op — safe to retry after partial failure", async () => {
     const storage = new InMemoryWorkflowStorage();
     const db = createMockDb();
 

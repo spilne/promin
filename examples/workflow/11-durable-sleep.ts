@@ -1,11 +1,16 @@
 /**
  * Durable sleep — workflows that sleep for days, weeks, or months
  *
- * workflow.sleep() suspends the workflow and stores a wakeAt timestamp
- * in Postgres. The process doesn't need to stay running — a SleepScanner
- * periodically checks for expired sleeps and resumes them.
+ * Business flow:
+ * 1. An insurance policy is sold and the renewal workflow begins
+ * 2. Workflow sleeps for 90 days (the process does not need to stay running)
+ * 3. At day 90, a first renewal reminder email is sent (30 days before expiry)
+ * 4. At day 111, an urgent reminder with SMS is sent (9 days before expiry)
+ * 5. At day 118, the case is escalated to a human agent (2 days before expiry)
+ * 6. At day 120, the system checks whether the customer renewed or let the policy lapse
+ * 7. Renewed policies are confirmed; lapsed policies are flagged for compliance
  *
- * This example: insurance policy renewal with reminders over 120 days.
+ * Sleep timestamps are stored in the database; a background scanner resumes workflows when they wake.
  */
 
 import {

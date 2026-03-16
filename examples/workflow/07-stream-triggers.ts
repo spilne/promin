@@ -1,9 +1,14 @@
 /**
  * Stream triggers — bridge StreamPipeline to workflow execution
  *
- * trigger() transforms a stream of events into a stream of WorkflowResults.
- * Each event triggers a workflow execution with configurable concurrency
- * and deduplication.
+ * Business flow:
+ * 1. A stream of incoming order events is received (from a queue, API, or file)
+ * 2. Each order event triggers an order-processing workflow (validate, then charge)
+ * 3. Multiple orders are processed concurrently up to a configurable limit
+ * 4. Duplicate order IDs are detected and skipped to prevent double-processing
+ * 5. Results are collected and categorized as completed, failed, or skipped
+ *
+ * Connects event streams to workflow execution with built-in concurrency control and dedup.
  */
 
 import {

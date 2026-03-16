@@ -1,8 +1,16 @@
 /**
  * Data quality — validate datasets before they reach production
  *
- * Run after ETL, before dashboards see the data. Catch nulls,
- * duplicates, stale data, broken foreign keys, and distribution drift.
+ * Business flow:
+ * 1. Daily ETL job finishes loading fresh order data into the warehouse
+ * 2. Quality checks run before any dashboard or report can see the new data
+ * 3. Orders are checked for missing IDs, duplicate records, and invalid amounts
+ * 4. Email addresses are validated against a format pattern
+ * 5. Referential integrity is verified (every order references an existing user)
+ * 6. Data freshness is confirmed (no records older than 24 hours)
+ * 7. Failures are reported; warnings (soft checks) are logged but do not block promotion
+ *
+ * Can run as a standalone validation or as a scheduled workflow step with alerting.
  */
 
 import { DataFrame, InMemoryWorkflowStorage, workflow, Pipeline } from "@promin/core";
