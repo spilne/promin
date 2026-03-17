@@ -13,6 +13,19 @@ import type { StateBackend } from "./typeclasses/state-backend.ts";
 import { isPartitionable, isReplayable } from "./typeclasses/streamable.ts";
 
 // ---------------------------------------------------------------------------
+// Either — simple tagged union for attempt()
+// ---------------------------------------------------------------------------
+
+export type Either<E, A> = { _tag: "Left"; error: E } | { _tag: "Right"; value: A };
+
+export const Either = {
+  left: <E, A = never>(error: E): Either<E, A> => ({ _tag: "Left", error }),
+  right: <A, E = never>(value: A): Either<E, A> => ({ _tag: "Right", value }),
+  isLeft: <E, A>(e: Either<E, A>): e is { _tag: "Left"; error: E } => e._tag === "Left",
+  isRight: <E, A>(e: Either<E, A>): e is { _tag: "Right"; value: A } => e._tag === "Right",
+};
+
+// ---------------------------------------------------------------------------
 // StreamPipeline<T, E> — chainable wrapper around Stream<T, E>
 // ---------------------------------------------------------------------------
 
@@ -496,6 +509,111 @@ export class StreamPipeline<T, E extends TaggedError> {
         );
       }) as Stream.Stream<U, E>,
     );
+  }
+
+  /**
+   * Lift errors into the value channel — each element becomes Either<Error, T>.
+   * The stream never fails; errors are data you can filter, route, or log.
+   *
+   * Like fs2's `.attempt` — converts Stream[F, A] to Stream[F, Either[Throwable, A]].
+   *
+   * @example
+   * ```ts
+   * await stream
+   *   .mapAsync(riskyOperation)
+   *   .attempt()
+   *   .tapAsync(async (either) => {
+   *     if (either._tag === "Left") await dlq.publish(either.error);
+   *   })
+   *   .filter(Either.isRight)
+   *   .map((either) => either.value)
+   *   .drain();
+   * ```
+   */
+  /**
+   * Apply an async function to each element, catching per-element failures.
+   * Returns Either<Error, U> — successful results are Right, failures are Left
+   * with the original value and the error.
+   *
+   * The stream never dies from element processing failures.
+   * Like fs2's `.evalMap(f).attempt` but preserves the original value in Left.
+   *
+   * @example
+   * ```ts
+   * // Process orders, route failures to DLQ
+   * await orders.subscribe()
+   *   .mapAsyncAttempt(async (order) => chargePayment(order))
+   *   .tapAsync(async (either) => {
+   *     if (Either.isLeft(either))
+   *       await dlq.publish({ error: either.error, order: either.value });
+   *   })
+   *   .filter(Either.isRight)
+   *   .map((r) => r.value)
+   *   .drain();
+   * ```
+   */
+  mapAsyncAttempt<U>(
+    fn: (value: T) => Promise<U>,
+  ): StreamPipeline<Either<{ error: unknown; value: T }, U>, E> {
+    return new StreamPipeline(
+      Stream.mapEffect(this.stream, (value) =>
+        Effect.catchAllDefect(
+          Effect.promise(async (): Promise<Either<{ error: unknown; value: T }, U>> => {
+            try {
+              return { _tag: "Right", value: await fn(value) };
+            } catch (error) {
+              return { _tag: "Left", error: { error, value } };
+            }
+          }),
+          (defect) =>
+            Effect.succeed<Either<{ error: unknown; value: T }, U>>({
+              _tag: "Left",
+              error: { error: defect, value },
+            }),
+        ),
+      ) as Stream.Stream<Either<{ error: unknown; value: T }, U>, E>,
+    );
+  }
+
+  /**
+   * Like mapAsyncAttempt but with bounded concurrency.
+   * Parallel processing where failures don't kill the stream.
+   */
+  parAsyncMapAttempt<U>(
+    concurrency: number,
+    fn: (value: T) => Promise<U>,
+  ): StreamPipeline<Either<{ error: unknown; value: T }, U>, E> {
+    return new StreamPipeline(
+      Stream.mapEffect(
+        this.stream,
+        (value) =>
+          Effect.catchAllDefect(
+            Effect.promise(async (): Promise<Either<{ error: unknown; value: T }, U>> => {
+              try {
+                return { _tag: "Right", value: await fn(value) };
+              } catch (error) {
+                return { _tag: "Left", error: { error, value } };
+              }
+            }),
+            (defect) =>
+              Effect.succeed<Either<{ error: unknown; value: T }, U>>({
+                _tag: "Left",
+                error: { error: defect, value },
+              }),
+          ),
+        { concurrency },
+      ) as Stream.Stream<Either<{ error: unknown; value: T }, U>, E>,
+    );
+  }
+
+  /** Filter to only Right values from an Either stream. Like fs2's `.rethrow` but discards Left. */
+  rights<A>(this: StreamPipeline<Either<unknown, A>, E>): StreamPipeline<A, E> {
+    return this.filter(Either.isRight).map((r) => (r as { _tag: "Right"; value: A }).value);
+  }
+
+  /** Filter to only Left values from an Either stream. Useful for DLQ routing. */
+  lefts<L>(this: StreamPipeline<Either<L, unknown>, E>): StreamPipeline<L, E> {
+    return this.filter(Either.isLeft).map((l) => (l as { _tag: "Left"; error: L }).error);
   }
 
   /** Buffer items into batches of up to `maxSize` items or `maxWaitMs` ms, whichever comes first. */
