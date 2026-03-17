@@ -16,6 +16,7 @@ import {
 import type { PipelineSemaphore } from "./semaphore.ts";
 import type { CircuitBreaker } from "./circuit-breaker.ts";
 import type { PipelineCache } from "./cache.ts";
+import { type CacheStore, withCacheStore } from "./cache-store.ts";
 
 // ---------------------------------------------------------------------------
 // TaggedError constraint — required for .catch() to work
@@ -401,6 +402,27 @@ export class Pipeline<T, E extends TaggedError> {
    */
   cached(cache: PipelineCache<T>): Pipeline<T, E> {
     return new Pipeline(cache.wrap(this.effect), this._defaults);
+  }
+
+  /**
+   * Cache by key — look up in a CacheStore before executing.
+   * On miss, execute the pipeline and store the result.
+   *
+   * @example
+   * ```ts
+   * const userCache = new MemoryCache<string, User>({ ttlMs: 60_000, maxSize: 1000 });
+   *
+   * // Cache key derived from input
+   * const getUser = (id: string) =>
+   *   api.get(`/users/${id}`, UserSchema).cachedBy(userCache, id);
+   *
+   * await getUser("42").runPromise(); // hits API
+   * await getUser("42").runPromise(); // returns cached
+   * await getUser("99").runPromise(); // hits API (different key)
+   * ```
+   */
+  cachedBy<K>(store: CacheStore<K, T>, key: K): Pipeline<T, E> {
+    return new Pipeline(withCacheStore(this.effect, store, key), this._defaults);
   }
 
   /**

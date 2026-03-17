@@ -28,6 +28,13 @@ export {
 export { PipelineSemaphore } from "./lib/semaphore.ts";
 export { CircuitBreaker, type CircuitBreakerConfig } from "./lib/circuit-breaker.ts";
 export { PipelineCache } from "./lib/cache.ts";
+export {
+  type CacheStore,
+  MemoryCache,
+  type MemoryCacheConfig,
+  LayeredCache,
+  layered,
+} from "./lib/cache-store.ts";
 export { PipelineQueue } from "./lib/queue.ts";
 export { PipelineRef } from "./lib/ref.ts";
 export { PipelineDeferred } from "./lib/deferred.ts";
