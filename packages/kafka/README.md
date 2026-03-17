@@ -1,11 +1,11 @@
 # @promin/kafka
 
-Kafka transport adapter. Implements all streaming typeclasses — use Kafka topics as sources, sinks, and shuffle targets with the same API as any other transport.
+Kafka transport adapter. Uses `@confluentinc/kafka-javascript` (official Confluent client, built on librdkafka). Implements all streaming typeclasses — use Kafka topics as sources, sinks, and shuffle targets with the same API as any other transport.
 
 ## Usage
 
 ```typescript
-import { Kafka } from "kafkajs";
+import { Kafka } from "@confluentinc/kafka-javascript/kafkajs";
 import { KafkaTopic } from "@promin/kafka";
 import { StreamPipeline, trigger } from "@promin/core";
 

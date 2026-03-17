@@ -7,7 +7,7 @@
 
 import { Effect, Stream } from "effect";
 import { OffsetTracker } from "./offset-tracker.ts";
-import { Kafka, type Consumer, type Producer, type EachMessagePayload } from "kafkajs";
+import type { KafkaClient, KafkaConsumer, KafkaProducer, EachMessagePayload } from "./kafka-types.ts";
 import { StreamPipeline, JsonCodec } from "@promin/core";
 import type {
   KeyedSinkable,
@@ -22,7 +22,7 @@ import type {
 
 export interface KafkaTopicConfig<T> {
   /** Kafka client instance (kafkajs). */
-  kafka: Kafka;
+  kafka: KafkaClient;
   /** Topic name. */
   topic: string;
   /** Consumer group ID. */
@@ -45,12 +45,12 @@ export class KafkaTopic<T>
 {
   readonly codec: Codec<T>;
   readonly partitions: number;
-  private readonly kafka: Kafka;
+  private readonly kafka: KafkaClient;
   private readonly topic: string;
   private readonly groupId: string;
   
-  private consumer?: Consumer;
-  private producer?: Producer;
+  private consumer?: KafkaConsumer;
+  private producer?: KafkaProducer;
 
   constructor(config: KafkaTopicConfig<T>) {
     this.kafka = config.kafka;

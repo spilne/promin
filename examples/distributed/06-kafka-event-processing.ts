@@ -14,17 +14,13 @@
  * ensuring ordering per-user while allowing parallel processing across users.
  */
 
-import { Kafka } from "kafkajs";
-import { KafkaTopic } from "@promin/kafka";
+import { KafkaTopic, type KafkaClient } from "@promin/kafka";
 
-// ---------------------------------------------------------------------------
-// Setup — connect to Kafka cluster
-// ---------------------------------------------------------------------------
-
-const kafka = new Kafka({
-  clientId: "fraud-detector",
-  brokers: (process.env.KAFKA_BROKERS ?? "localhost:9092").split(","),
-});
+// Use any kafkajs-compatible client:
+// import { Kafka } from "@confluentinc/kafka-javascript/kafkajs";
+// import { Kafka } from "kafkajs";
+// const kafka = new Kafka({ brokers: [...] });
+declare const kafka: KafkaClient;
 
 // ---------------------------------------------------------------------------
 // Topics — typed, with streaming typeclasses

@@ -14,8 +14,8 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@promin/core": "workspace:*",
-    "kafkajs": "^2.2.4"
+    "@confluentinc/kafka-javascript": "^1.9.0",
+    "@promin/core": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "catalog:"
