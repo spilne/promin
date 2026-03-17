@@ -12,7 +12,6 @@
  */
 
 import { KafkaTopic, type KafkaClient } from "@promin/kafka";
-import { Either } from "@promin/core";
 
 declare const kafka: KafkaClient;
 
@@ -223,24 +222,19 @@ async function deadLetterRetry() {
 
   await jobs
     .subscribeAck()
-    .mapAsyncAttempt(async (envelope) => {
-      await processJob(envelope.value);
-      await envelope.ack();
-      return envelope.value;
-    })
-    // Route failures to DLQ — stream keeps processing
-    .tapAsync(async (either) => {
-      if (Either.isLeft(either)) {
-        const { error, value: envelope } = either.error;
+    .parAsyncMap(10, async (envelope) => {
+      try {
+        await processJob(envelope.value);
+      } catch (err) {
+        // Send to DLQ instead of crashing
         await dlq.publish({
-          jobId: (envelope as any).value.jobId,
-          error: error instanceof Error ? error.message : String(error),
-          original: (envelope as any).value,
+          jobId: envelope.value.jobId,
+          error: err instanceof Error ? err.message : String(err),
+          original: envelope.value,
         });
-        await (envelope as any).ack();
       }
+      await envelope.ack();
     })
-    .rights()
     .drain();
 }
 
