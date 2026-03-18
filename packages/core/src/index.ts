@@ -193,6 +193,20 @@ export {
   type CumulativeFn,
 } from "./lib/dataframe/index.ts";
 
+// Data profiling
+export {
+  type ProfileReport,
+  type ColumnProfile,
+  type NumericProfile,
+  type StringProfile,
+  type BooleanProfile,
+  type DateProfile,
+  type CorrelationPair,
+  type ProfileWarning,
+  profileData,
+  type ProfileOptions,
+} from "./lib/data-profiler/index.ts";
+
 // Data quality
 export {
   type Expectation,

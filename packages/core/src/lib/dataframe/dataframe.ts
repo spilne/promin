@@ -13,6 +13,8 @@ import { ArrayExecutor } from "./array-executor.ts";
 import { GroupedDataFrame } from "./grouped-dataframe.ts";
 import { StringAccessor, DateAccessor } from "./accessors.ts";
 import { ExpectationSuite } from "../data-quality/expectation-suite.ts";
+import { profileData, type ProfileOptions } from "../data-profiler/profiler.ts";
+import type { ProfileReport } from "../data-profiler/profile-types.ts";
 
 const DEFAULT_EXECUTOR = new ArrayExecutor();
 
@@ -503,6 +505,15 @@ export class DataFrame<T> {
 
   expect(): ExpectationSuite<T> {
     return new ExpectationSuite(this);
+  }
+
+  // =========================================================================
+  // DATA PROFILING
+  // =========================================================================
+
+  async profile(options?: ProfileOptions): Promise<ProfileReport> {
+    const rows = await this.collect();
+    return profileData(rows as Record<string, unknown>[], options);
   }
 
   // =========================================================================
