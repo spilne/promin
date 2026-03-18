@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { Pipeline } from "./pipeline.ts";
-import { MemoryCache, LayeredCache, layered } from "./cache-store.ts";
+import { MemoryCache, layered } from "./cache-store.ts";
 
 // ---------------------------------------------------------------------------
 // MemoryCache — in-memory key-value with TTL and LRU

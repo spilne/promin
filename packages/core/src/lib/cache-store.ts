@@ -190,17 +190,28 @@ export function layered<K, V>(...layers: CacheStore<K, V>[]): LayeredCache<K, V>
 /**
  * Wrap an Effect with a keyed cache lookup.
  * Used internally by Pipeline.cachedBy().
+ *
+ * @param ttl — static TTL in ms, or a function that computes TTL from the result.
+ *              Useful for entities with their own expiry (OAuth tokens, session data).
  */
 export function withCacheStore<T, E, K>(
   effect: Effect.Effect<T, E>,
   store: CacheStore<K, T>,
   key: K,
+  ttl?: number | ((value: T) => number),
 ): Effect.Effect<T, E> {
   return Effect.suspend(() =>
     Effect.promise(() => store.get(key)).pipe(
       Effect.flatMap((cached) => {
         if (cached !== undefined) return Effect.succeed(cached);
-        return effect.pipe(Effect.tap((value) => Effect.promise(() => store.set(key, value))));
+        return effect.pipe(
+          Effect.tap((value) =>
+            Effect.promise(() => {
+              const ttlMs = typeof ttl === "function" ? ttl(value) : ttl;
+              return store.set(key, value, ttlMs);
+            }),
+          ),
+        );
       }),
     ),
   ) as Effect.Effect<T, E>;

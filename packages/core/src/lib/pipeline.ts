@@ -421,8 +421,12 @@ export class Pipeline<T, E extends TaggedError> {
    * await getUser("99").runPromise(); // hits API (different key)
    * ```
    */
-  cachedBy<K>(store: CacheStore<K, T>, key: K): Pipeline<T, E> {
-    return new Pipeline(withCacheStore(this.effect, store, key), this._defaults);
+  cachedBy<K>(
+    store: CacheStore<K, T>,
+    key: K,
+    options?: { ttl?: number | ((value: T) => number) },
+  ): Pipeline<T, E> {
+    return new Pipeline(withCacheStore(this.effect, store, key, options?.ttl), this._defaults);
   }
 
   /**
