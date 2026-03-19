@@ -207,6 +207,16 @@ export {
   type ProfileOptions,
 } from "./lib/data-profiler/index.ts";
 
+// Data diff
+export {
+  dataDiff,
+  schemaDiff,
+  type DataDiffResult,
+  type DiffOptions,
+  type Modification,
+  type SchemaDiffResult,
+} from "./lib/data-diff/index.ts";
+
 // Data quality
 export {
   type Expectation,

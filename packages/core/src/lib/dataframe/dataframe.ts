@@ -15,6 +15,8 @@ import { StringAccessor, DateAccessor } from "./accessors.ts";
 import { ExpectationSuite } from "../data-quality/expectation-suite.ts";
 import { profileData, type ProfileOptions } from "../data-profiler/profiler.ts";
 import type { ProfileReport } from "../data-profiler/profile-types.ts";
+import { dataDiff, schemaDiff } from "../data-diff/data-diff.ts";
+import type { DataDiffResult, DiffOptions, SchemaDiffResult } from "../data-diff/diff-types.ts";
 
 const DEFAULT_EXECUTOR = new ArrayExecutor();
 
@@ -50,6 +52,24 @@ export class DataFrame<T> {
   static async from<T>(source: Frameable<T>): Promise<DataFrame<T>> {
     const data = await source.load();
     return new DataFrame<T>({ _tag: "Source", data });
+  }
+
+  static async diff<T>(
+    before: DataFrame<T>,
+    after: DataFrame<T>,
+    options: DiffOptions,
+  ): Promise<DataDiffResult> {
+    const beforeRows = await before.collect();
+    const afterRows = await after.collect();
+    return dataDiff(
+      beforeRows as Record<string, unknown>[],
+      afterRows as Record<string, unknown>[],
+      options,
+    );
+  }
+
+  static schemaDiff(beforeColumns: string[], afterColumns: string[]): SchemaDiffResult {
+    return schemaDiff(beforeColumns, afterColumns);
   }
 
   static concat<T>(...frames: DataFrame<T>[]): DataFrame<T> {
