@@ -225,6 +225,22 @@ export {
   ExpectationSuite,
 } from "./lib/data-quality/index.ts";
 
+// Data contracts
+export {
+  type DataContract,
+  type ContractValidationResult,
+  type ValidatableContract,
+  defineContract,
+} from "./lib/data-contracts/index.ts";
+
+// Data testing
+export {
+  generators,
+  generateRows,
+  type Generator,
+  dataframeProperties,
+} from "./lib/data-testing/index.ts";
+
 // SQL Models (dbt-style)
 export {
   type SqlModel,
