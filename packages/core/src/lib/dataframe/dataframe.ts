@@ -520,6 +520,14 @@ export class DataFrame<T> {
   }
 
   // =========================================================================
+  // DATA DIFF (instance method)
+  // =========================================================================
+
+  async diff(other: DataFrame<T>, options: DiffOptions): Promise<DataDiffResult> {
+    return DataFrame.diff(this, other, options);
+  }
+
+  // =========================================================================
   // DATA QUALITY
   // =========================================================================
 
