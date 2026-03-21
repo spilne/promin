@@ -38,6 +38,17 @@ type RouteEntry =
       fallback?: unknown | HttpClientError;
     };
 
+/** A registered route with its method, path matcher, and response entry. */
+interface RegisteredRoute {
+  method: string;
+  matcher: string | RegExp;
+  entry: RouteEntry;
+}
+
+function pathMatches(matcher: string | RegExp, path: string): boolean {
+  return typeof matcher === "string" ? path === matcher : matcher.test(path);
+}
+
 // ---------------------------------------------------------------------------
 // MockHttpClient
 // ---------------------------------------------------------------------------
@@ -67,7 +78,7 @@ export class MockHttpClient extends AbstractHttpClient {
   readonly calls: RecordedCall[] = [];
 
   private defaultResponse: unknown = {};
-  private readonly routes = new Map<string, RouteEntry>();
+  private readonly routes: RegisteredRoute[] = [];
   private readonly sseRoutes = new Map<string, SSEvent[]>();
   private readonly ndjsonRoutes = new Map<string, unknown[]>();
   private readonly streamRoutes = new Map<string, string>();
@@ -82,27 +93,35 @@ export class MockHttpClient extends AbstractHttpClient {
     return this;
   }
 
-  /** Register a static response for a specific method + path. */
-  on(method: string, path: string, response: unknown | HttpClientError): this {
-    this.routes.set(`${method} ${path}`, { type: "static", value: response });
+  /** Register a static response for a method + path. Path can be a string (exact) or RegExp. */
+  on(method: string, path: string | RegExp, response: unknown | HttpClientError): this {
+    this.routes.push({ method, matcher: path, entry: { type: "static", value: response } });
     return this;
   }
 
-  /** Register a dynamic response handler — response depends on the request. */
-  onFn(method: string, path: string, handler: ResponseHandler): this {
-    this.routes.set(`${method} ${path}`, { type: "handler", fn: handler });
+  /** Register a dynamic response handler. Path can be a string (exact) or RegExp. */
+  onFn(method: string, path: string | RegExp, handler: ResponseHandler): this {
+    this.routes.push({ method, matcher: path, entry: { type: "handler", fn: handler } });
     return this;
   }
 
   /**
    * Register an ordered sequence of responses. Each call consumes the next.
-   * After exhausted, repeats the last response.
+   * After exhausted, repeats the last response. Path can be a string (exact) or RegExp.
    */
-  onSequence(method: string, path: string, responses: (unknown | HttpClientError)[]): this {
-    this.routes.set(`${method} ${path}`, {
-      type: "queue",
-      responses: [...responses],
-      fallback: responses[responses.length - 1],
+  onSequence(
+    method: string,
+    path: string | RegExp,
+    responses: (unknown | HttpClientError)[],
+  ): this {
+    this.routes.push({
+      method,
+      matcher: path,
+      entry: {
+        type: "queue",
+        responses: [...responses],
+        fallback: responses[responses.length - 1],
+      },
     });
     return this;
   }
@@ -138,26 +157,27 @@ export class MockHttpClient extends AbstractHttpClient {
   // Assertion helpers
   // -------------------------------------------------------------------------
 
-  /** Check if a specific method + path was called at least once. */
-  calledWith(method: string, path: string): boolean {
-    return this.calls.some((c) => c.method === method && c.path === path);
+  /** Check if a specific method + path was called at least once. Path can be a string (exact) or RegExp. */
+  calledWith(method: string, path: string | RegExp): boolean {
+    return this.calls.some((c) => c.method === method && pathMatches(path, c.path));
   }
 
-  /** Count how many times a specific method + path was called. */
-  calledTimes(method: string, path: string): number {
-    return this.calls.filter((c) => c.method === method && c.path === path).length;
+  /** Count how many times a specific method + path was called. Path can be a string (exact) or RegExp. */
+  calledTimes(method: string, path: string | RegExp): number {
+    return this.calls.filter((c) => c.method === method && pathMatches(path, c.path)).length;
   }
 
-  /** Check if a method + path was called with a matching JSON body (deep equality). */
-  calledWithJson(method: string, path: string, expectedJson: unknown): boolean {
+  /** Check if a method + path was called with a matching JSON body. Path can be a string (exact) or RegExp. */
+  calledWithJson(method: string, path: string | RegExp, expectedJson: unknown): boolean {
     return this.calls.some(
-      (c) => c.method === method && c.path === path && Bun.deepEquals(c.json, expectedJson),
+      (c) =>
+        c.method === method && pathMatches(path, c.path) && Bun.deepEquals(c.json, expectedJson),
     );
   }
 
-  /** Get all recorded calls for a specific method + path. */
-  callsFor(method: string, path: string): RecordedCall[] {
-    return this.calls.filter((c) => c.method === method && c.path === path);
+  /** Get all recorded calls for a specific method + path. Path can be a string (exact) or RegExp. */
+  callsFor(method: string, path: string | RegExp): RecordedCall[] {
+    return this.calls.filter((c) => c.method === method && pathMatches(path, c.path));
   }
 
   /** Get the last recorded call, or undefined if none. */
@@ -178,7 +198,7 @@ export class MockHttpClient extends AbstractHttpClient {
   /** Reset everything — calls, routes, default response. */
   reset(): this {
     this.calls.length = 0;
-    this.routes.clear();
+    this.routes.length = 0;
     this.sseRoutes.clear();
     this.ndjsonRoutes.clear();
     this.streamRoutes.clear();
@@ -209,7 +229,7 @@ export class MockHttpClient extends AbstractHttpClient {
         };
         this.calls.push(call);
 
-        const entry = this.routes.get(`${params.method} ${path}`);
+        const entry = this.findRoute(params.method, path);
         const raw = entry ? this.resolveEntry(entry, call) : this.defaultResponse;
         if (this.isHttpClientError(raw)) return Effect.fail(raw);
         return this.parseResponse<T>(raw, params.schema, path);
@@ -222,7 +242,7 @@ export class MockHttpClient extends AbstractHttpClient {
       Effect.suspend(() => {
         const p = typeof path === "string" ? path : path.toString();
         this.calls.push({ method: "GET", path: p });
-        const entry = this.routes.get(`GET ${p}`);
+        const entry = this.findRoute("GET", p);
         if (entry)
           return this.toResult<string>(this.resolveEntry(entry, { method: "GET", path: p })).effect;
         return Effect.succeed(this.defaultResponse as string);
@@ -289,6 +309,14 @@ export class MockHttpClient extends AbstractHttpClient {
   // -------------------------------------------------------------------------
   // Internal helpers
   // -------------------------------------------------------------------------
+
+  /** Find a route entry: first registered match wins. */
+  private findRoute(method: string, path: string): RouteEntry | undefined {
+    for (const route of this.routes) {
+      if (route.method === method && pathMatches(route.matcher, path)) return route.entry;
+    }
+    return undefined;
+  }
 
   private resolveEntry(entry: RouteEntry, call: RecordedCall): unknown | HttpClientError {
     switch (entry.type) {
