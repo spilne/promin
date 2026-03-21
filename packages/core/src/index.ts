@@ -239,6 +239,7 @@ export {
   generateRows,
   type Generator,
   dataframeProperties,
+  streamProperties,
 } from "./lib/data-testing/index.ts";
 
 // SQL Models (dbt-style)

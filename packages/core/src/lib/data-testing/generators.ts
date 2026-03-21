@@ -100,7 +100,7 @@ export const generators = {
 
 /** Generate N rows from a generator map. */
 export function generateRows<T extends Record<string, unknown>>(
-  gens: Record<string, Generator<unknown>>,
+  gens: Record<string, Generator<any>>,
   count: number,
   seed = 42,
 ): T[] {

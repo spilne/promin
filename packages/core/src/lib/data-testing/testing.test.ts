@@ -17,7 +17,7 @@ describe("Test data generators — create realistic fixtures", () => {
     const rows = generateRows({ status: generators.pick("a", "b", "c") }, 20, 42);
     const values = new Set(rows.map((r) => r.status));
     expect(values.size).toBeGreaterThan(1); // not all the same
-    for (const v of values) expect(["a", "b", "c"]).toContain(v);
+    for (const v of values) expect(["a", "b", "c"]).toContain(v as string);
   });
 
   it("int generates within range", () => {
