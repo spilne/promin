@@ -45,6 +45,9 @@ export { PgStepQueue, type PgStepQueueConfig } from "./lib/pg-step-queue.ts";
 // Leader election (advisory lock)
 export { PgLeaderElection, type PgLeaderElectionConfig } from "./lib/pg-leader-election.ts";
 
+// State backend (topology checkpoints)
+export { PgStateBackend, type PgStateBackendConfig } from "./lib/pg-state-backend.ts";
+
 // Schema exports for custom migrations
 export {
   workflows,
