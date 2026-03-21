@@ -50,7 +50,6 @@ const transactions = new KafkaTopic<Transaction>({
   kafka,
   topic: "payment.transactions",
   groupId: "fraud-detection",
-  partitions: 12,
 });
 
 // Sink: approved transactions

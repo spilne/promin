@@ -254,7 +254,6 @@ async function keyedProcessing() {
     kafka,
     topic: "user-actions",
     groupId: "state-manager",
-    partitions: 12,
   });
 
   // Each partition processes independently — same user always on same partition

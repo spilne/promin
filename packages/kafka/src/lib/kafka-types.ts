@@ -102,6 +102,8 @@ export interface KafkaAdmin {
     topic: string,
     timestamp: number,
   ): Promise<KafkaPartitionOffset[]>;
+  /** Fetch partition count for a topic. Optional — not all clients expose this. */
+  fetchTopicPartitionCount?(topic: string): Promise<number>;
 }
 
 // ---------------------------------------------------------------------------

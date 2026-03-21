@@ -40,7 +40,6 @@ async function clickAnalytics() {
     kafka,
     topic: "user.clicks",
     groupId: "click-analytics",
-    partitions: 12,
   });
 
   const engagement = new KafkaTopic<{
@@ -107,7 +106,6 @@ async function orderEnrichment() {
     kafka,
     topic: "shop.orders",
     groupId: "order-enricher",
-    partitions: 12,
   });
 
   const customers = new KafkaTopic<{
@@ -119,7 +117,6 @@ async function orderEnrichment() {
     kafka,
     topic: "crm.customers",
     groupId: "order-enricher",
-    partitions: 12,
   });
 
   const enrichedOrders = new KafkaTopic<{
@@ -179,7 +176,6 @@ async function fraudDetection() {
     kafka,
     topic: "payments.transactions",
     groupId: "fraud-detector",
-    partitions: 24,
   });
 
   const alerts = new KafkaTopic<{
@@ -248,7 +244,6 @@ async function iotProcessing() {
     kafka,
     topic: "iot.raw-readings",
     groupId: "iot-processor",
-    partitions: 16,
   });
 
   const processed = new KafkaTopic<{
@@ -323,7 +318,6 @@ async function sessionAnalytics() {
     kafka,
     topic: "web.pageviews",
     groupId: "session-builder",
-    partitions: 12,
   });
 
   const sessions = new KafkaTopic<{
@@ -382,7 +376,6 @@ async function multiStageEtl() {
     kafka,
     topic: "ingest.raw",
     groupId: "etl-pipeline",
-    partitions: 24,
   });
 
   const regionMetrics = new KafkaTopic<{

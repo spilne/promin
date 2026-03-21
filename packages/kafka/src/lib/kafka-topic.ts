@@ -37,8 +37,6 @@ export interface KafkaTopicConfig<T> {
   groupId: string;
   /** Codec for message serialization. Default: JsonCodec. */
   codec?: Codec<T>;
-  /** Number of partitions (for Partitionable). */
-  partitions?: number;
   /** Poll interval for subscribe. Default: 100ms. */
   pollIntervalMs?: number;
 }
@@ -52,20 +50,36 @@ export class KafkaTopic<T>
     Checkpointable<T>
 {
   readonly codec: Codec<T>;
-  readonly partitions: number;
   private readonly kafka: KafkaClient;
   private readonly topic: string;
   private readonly groupId: string;
 
   private consumer?: KafkaConsumer;
   private producer?: KafkaProducer;
+  private _partitions?: number;
 
   constructor(config: KafkaTopicConfig<T>) {
     this.kafka = config.kafka;
     this.topic = config.topic;
     this.groupId = config.groupId;
     this.codec = config.codec ?? (JsonCodec as Codec<T>);
-    this.partitions = config.partitions ?? 1;
+  }
+
+  /** Partition count — fetched from broker on first access. */
+  get partitions(): number {
+    return this._partitions ?? 1;
+  }
+
+  /** Fetch and cache the partition count from the broker. */
+  async fetchPartitions(): Promise<number> {
+    if (this._partitions) return this._partitions;
+    const admin = this.kafka.admin();
+    await admin.connect();
+    if (admin.fetchTopicPartitionCount) {
+      this._partitions = await admin.fetchTopicPartitionCount(this.topic);
+    }
+    await admin.disconnect();
+    return this._partitions ?? 1;
   }
 
   // =========================================================================
