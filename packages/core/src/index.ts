@@ -287,3 +287,23 @@ export {
   loggingMiddleware,
   metricsMiddleware,
 } from "./lib/distributed/index.ts";
+
+// Stream topology — distributed stream processing
+export {
+  StreamTopology,
+  KeyedTopology,
+  WindowedTopology,
+  BuiltTopology,
+  TopologyRunner,
+  WindowManager,
+  JoinBuffer,
+  type JoinedPair,
+  type TimeWindow,
+  type WindowType,
+  type AggregateSpec,
+  type ProcessSpec,
+  type JoinConfig,
+  type TopologyConfig,
+  type TopologyHandle,
+  type CompiledTopology,
+} from "./lib/stream-topology/index.ts";
