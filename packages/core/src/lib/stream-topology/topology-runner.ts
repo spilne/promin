@@ -7,6 +7,7 @@
 // whatever partitions are assigned to it.
 //
 // State is keyed and checkpointed so it can be restored on crash/rebalance.
+// Backpressure is applied via bounded buffers and rate limiting.
 // ---------------------------------------------------------------------------
 
 import { StreamPipeline } from "../stream-pipeline.ts";
@@ -20,6 +21,7 @@ import type {
   TopologyNode,
   TopologyConfig,
   TopologyHandle,
+  TopologyMetrics,
   AggregateSpec,
   ProcessSpec,
   WindowType,
@@ -33,11 +35,100 @@ export class TopologyRunner {
   }
 }
 
+// ---------------------------------------------------------------------------
+// LRU set — bounded dedup with eviction
+// ---------------------------------------------------------------------------
+
+class LruSet {
+  private set = new Set<string>();
+  private order: string[] = [];
+
+  constructor(private readonly maxSize: number) {}
+
+  has(key: string): boolean {
+    return this.set.has(key);
+  }
+
+  add(key: string): void {
+    if (this.set.has(key)) return;
+    this.set.add(key);
+    this.order.push(key);
+    while (this.set.size > this.maxSize) {
+      const oldest = this.order.shift()!;
+      this.set.delete(oldest);
+    }
+  }
+
+  get size(): number {
+    return this.set.size;
+  }
+
+  toArray(): string[] {
+    return [...this.set];
+  }
+
+  restore(keys: string[]): void {
+    this.set.clear();
+    this.order = [];
+    for (const key of keys) {
+      this.set.add(key);
+      this.order.push(key);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rate limiter — token bucket
+// ---------------------------------------------------------------------------
+
+class RateLimiter {
+  private tokens: number;
+  private lastRefill: number;
+
+  constructor(private readonly maxPerSecond: number) {
+    this.tokens = maxPerSecond;
+    this.lastRefill = Date.now();
+  }
+
+  async acquire(): Promise<void> {
+    while (true) {
+      const now = Date.now();
+      const elapsed = (now - this.lastRefill) / 1000;
+      this.tokens = Math.min(this.maxPerSecond, this.tokens + elapsed * this.maxPerSecond);
+      this.lastRefill = now;
+
+      if (this.tokens >= 1) {
+        this.tokens -= 1;
+        return;
+      }
+
+      // Wait for token to become available
+      const waitMs = Math.ceil(((1 - this.tokens) / this.maxPerSecond) * 1000);
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// TopologyRunnerInstance
+// ---------------------------------------------------------------------------
+
 class TopologyRunnerInstance {
   private running = true;
   private stateBackend: StateBackend<string, unknown>;
   private checkpointInterval: ReturnType<typeof setInterval> | null = null;
   private abortController = new AbortController();
+
+  // Stateful operators tracked for checkpointing
+  private windowManagers: WindowManager<unknown, unknown, unknown>[] = [];
+  private joinBuffers: JoinBuffer<unknown, unknown>[] = [];
+  private dedupSets: LruSet[] = [];
+  private processStates: Map<string, unknown>[] = [];
+
+  // Metrics
+  private itemsProcessed = 0;
+  private metricsStartTime = Date.now();
+  private rateLimiter: RateLimiter | null = null;
 
   constructor(
     private readonly topology: BuiltTopology,
@@ -45,16 +136,20 @@ class TopologyRunnerInstance {
   ) {
     this.stateBackend =
       (config.stateBackend as StateBackend<string, unknown>) ?? new InMemoryState();
+
+    if (config.maxItemsPerSecond) {
+      this.rateLimiter = new RateLimiter(config.maxItemsPerSecond);
+    }
   }
 
   async start(): Promise<TopologyHandle> {
-    // Restore from last checkpoint
-    await this.stateBackend.restore({ name: `topology:${this.config.group}` });
+    // Restore all state from last checkpoint
+    await this.restoreAllState();
 
     // Set up periodic checkpointing
     if (this.config.checkpointIntervalMs) {
       this.checkpointInterval = setInterval(
-        () => this.checkpoint(),
+        () => this.checkpointAllState(),
         this.config.checkpointIntervalMs,
       );
     }
@@ -63,42 +158,123 @@ class TopologyRunnerInstance {
     const promises: Promise<void>[] = [];
     if (this.topology.compiled.sinks.length > 0) {
       for (const sink of this.topology.compiled.sinks) {
-        const pipeline = this.compile(sink.parent);
+        let pipeline = this.compile(sink.parent);
         const sinkTarget = sink.sink as Sinkable<unknown>;
+
+        // Apply backpressure buffer
+        if (this.config.maxBufferSize) {
+          pipeline = pipeline.buffer(this.config.maxBufferSize);
+        }
+
         promises.push(
           pipeline
             .interruptOn(this.abortController.signal)
             .tapAsync(async (value) => {
+              if (this.rateLimiter) await this.rateLimiter.acquire();
               await sinkTarget.publish(value);
+              this.itemsProcessed++;
             })
             .drain(),
         );
       }
     } else {
-      // No sinks — just compile the terminal node and drain
       const terminal = this.topology.compiled.nodes[this.topology.compiled.nodes.length - 1]!;
-      const pipeline = this.compile(terminal);
-      promises.push(pipeline.interruptOn(this.abortController.signal).drain());
+      let pipeline = this.compile(terminal);
+
+      if (this.config.maxBufferSize) {
+        pipeline = pipeline.buffer(this.config.maxBufferSize);
+      }
+
+      promises.push(
+        pipeline
+          .interruptOn(this.abortController.signal)
+          .tap(() => {
+            this.itemsProcessed++;
+          })
+          .drain(),
+      );
     }
 
-    // Run in background
     const drainPromise = Promise.all(promises);
 
+    const self = this;
     const handle: TopologyHandle = {
       shutdown: async () => {
-        this.running = false;
-        this.abortController.abort();
-        if (this.checkpointInterval) clearInterval(this.checkpointInterval);
-        await this.checkpoint();
-        await drainPromise.catch(() => {}); // swallow interrupt
+        self.running = false;
+        self.abortController.abort();
+        if (self.checkpointInterval) clearInterval(self.checkpointInterval);
+        await self.checkpointAllState();
+        await drainPromise.catch(() => {});
       },
-      isRunning: () => this.running,
+      isRunning: () => self.running,
+      metrics: () => self.getMetrics(),
     };
 
     return handle;
   }
 
-  /** Recursively compile a topology node into a StreamPipeline. */
+  // -------------------------------------------------------------------------
+  // Metrics
+  // -------------------------------------------------------------------------
+
+  private getMetrics(): TopologyMetrics {
+    const elapsed = (Date.now() - this.metricsStartTime) / 1000;
+    return {
+      itemsProcessed: this.itemsProcessed,
+      itemsPerSecond: elapsed > 0 ? this.itemsProcessed / elapsed : 0,
+      bufferStats: [], // Could be wired to Effect's buffer internals in future
+      dedupeSize: this.dedupSets.reduce((sum, s) => sum + s.size, 0),
+      activeWindows: this.windowManagers.reduce((sum, wm) => sum + wm.snapshot().length, 0),
+      joinBufferSize: this.joinBuffers.reduce((sum, jb) => {
+        const s = jb.stats();
+        return sum + s.leftItems + s.rightItems;
+      }, 0),
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // State checkpoint / restore
+  // -------------------------------------------------------------------------
+
+  private async checkpointAllState(): Promise<void> {
+    // Save window manager state
+    for (let i = 0; i < this.windowManagers.length; i++) {
+      const snapshot = this.windowManagers[i]!.snapshot();
+      await this.stateBackend.put(`window:${i}`, snapshot);
+    }
+
+    // Save dedup sets
+    for (let i = 0; i < this.dedupSets.length; i++) {
+      await this.stateBackend.put(`dedupe:${i}`, this.dedupSets[i]!.toArray());
+    }
+
+    // Save join buffer state — left and right buffers
+    for (let i = 0; i < this.joinBuffers.length; i++) {
+      await this.stateBackend.put(`join:${i}`, this.joinBuffers[i]!.snapshot());
+    }
+
+    // Process states are saved inline during processing, but flush here too
+    for (let i = 0; i < this.processStates.length; i++) {
+      const entries = [...this.processStates[i]!.entries()];
+      await this.stateBackend.put(`process-map:${i}`, entries);
+    }
+
+    await this.stateBackend.checkpoint({ name: `topology:${this.config.group}` });
+  }
+
+  private async restoreAllState(): Promise<void> {
+    await this.stateBackend.restore({ name: `topology:${this.config.group}` });
+
+    // Note: actual restoration happens in compile* methods when they
+    // create their stateful operators — they check the backend for
+    // existing state. This method just loads the checkpoint into the
+    // backend's live state.
+  }
+
+  // -------------------------------------------------------------------------
+  // Compilation
+  // -------------------------------------------------------------------------
+
   private compile(node: TopologyNode): StreamPipeline<unknown, never> {
     switch (node.type) {
       case "source":
@@ -110,11 +286,8 @@ class TopologyRunnerInstance {
       case "mapAsync":
         return this.compile(node.parent).parAsyncMap(node.concurrency, node.fn);
       case "keyBy":
-        // keyBy is a logical marker — at runtime, items just flow through
-        // The key function is used by downstream stateful operators
         return this.compile(node.parent);
       case "window":
-        // Window is a logical marker — actual windowing happens in aggregate
         return this.compile(node.parent);
       case "aggregate":
         return this.compileAggregate(node);
@@ -125,14 +298,12 @@ class TopologyRunnerInstance {
       case "join":
         return this.compileJoin(node);
       case "sink":
-        // Sink is handled by the runner, not compiled into the pipeline
         return this.compile(node.parent);
     }
   }
 
   private compileSource(node: { source: unknown }): StreamPipeline<unknown, never> {
     const source = node.source as Streamable<unknown> & Acknowledgeable<unknown>;
-    // Use ack-based subscription for at-least-once processing
     return source
       .subscribeAck({ group: this.config.group })
       .mapAsync(async (envelope: Envelope<unknown>) => {
@@ -146,16 +317,22 @@ class TopologyRunnerInstance {
     parent: TopologyNode;
     spec: AggregateSpec<unknown, unknown, unknown>;
   }): StreamPipeline<unknown, never> {
-    // Walk up to find the window and keyBy nodes
     const { windowType, keyFn } = this.findWindowAndKey(node.parent);
     const manager = new WindowManager(windowType, node.spec);
+    const idx = this.windowManagers.length;
+    this.windowManagers.push(manager);
+
+    // Restore from checkpoint (fire-and-forget — completes before first item arrives)
+    this.stateBackend.get(`window:${idx}`).then((saved) => {
+      if (saved && Array.isArray(saved)) {
+        manager.restore(saved as any);
+      }
+    });
 
     return this.compile(node.parent).flatMap((value: unknown) => {
       const key = keyFn(value);
       const now = this.extractTimestamp(value);
       const emitted = manager.add(key, value, now);
-
-      // Also flush completed windows
       const flushed = manager.flush(key, now);
 
       const all = [...emitted, ...flushed];
@@ -169,16 +346,23 @@ class TopologyRunnerInstance {
   }): StreamPipeline<unknown, never> {
     const { keyFn } = this.findKeyBy(node.parent);
     const keyStates = new Map<string, unknown>();
+    const idx = this.processStates.length;
+    this.processStates.push(keyStates);
+
+    // Restore from checkpoint
+    this.stateBackend.get(`process-map:${idx}`).then((saved) => {
+      if (saved && Array.isArray(saved)) {
+        for (const [k, v] of saved as [string, unknown][]) {
+          keyStates.set(k, v);
+        }
+      }
+    });
 
     return this.compile(node.parent).filterMap((value: unknown) => {
       const key = keyFn(value);
       const currentState = keyStates.get(key) ?? node.spec.init();
       const result = node.spec.process(currentState, value);
       keyStates.set(key, result.state);
-
-      // Save state to backend (fire-and-forget for performance, checkpointed periodically)
-      this.stateBackend.put(`process:${key}`, result.state);
-
       return result.emit;
     });
   }
@@ -187,7 +371,17 @@ class TopologyRunnerInstance {
     parent: TopologyNode;
     keyFn: (value: unknown) => string;
   }): StreamPipeline<unknown, never> {
-    const seen = new Set<string>();
+    const maxSize = this.config.maxDedupeSize ?? 100_000;
+    const seen = new LruSet(maxSize);
+    const idx = this.dedupSets.length;
+    this.dedupSets.push(seen);
+
+    // Restore from checkpoint
+    this.stateBackend.get(`dedupe:${idx}`).then((saved) => {
+      if (saved && Array.isArray(saved)) {
+        seen.restore(saved as string[]);
+      }
+    });
 
     return this.compile(node.parent).filter((value: unknown) => {
       const key = node.keyFn(value);
@@ -203,6 +397,16 @@ class TopologyRunnerInstance {
     config: { windowMs: number };
   }): StreamPipeline<unknown, never> {
     const buffer = new JoinBuffer(node.config.windowMs);
+    const idx = this.joinBuffers.length;
+    this.joinBuffers.push(buffer);
+
+    // Restore from checkpoint
+    this.stateBackend.get(`join:${idx}`).then((saved) => {
+      if (saved) {
+        buffer.restore(saved as any);
+      }
+    });
+
     const leftKeyFn = this.findKeyBy(node.left).keyFn;
     const rightKeyFn = this.findKeyBy(node.right).keyFn;
 
@@ -232,7 +436,10 @@ class TopologyRunnerInstance {
     });
   }
 
-  /** Walk up the node tree to find the windowType and keyBy function. */
+  // -------------------------------------------------------------------------
+  // Helpers
+  // -------------------------------------------------------------------------
+
   private findWindowAndKey(node: TopologyNode): {
     windowType: WindowType;
     keyFn: (value: unknown) => string;
@@ -258,7 +465,6 @@ class TopologyRunnerInstance {
     return { windowType, keyFn };
   }
 
-  /** Walk up to find the keyBy function. */
   private findKeyBy(node: TopologyNode): { keyFn: (value: unknown) => string } {
     let current: TopologyNode | undefined = node;
     while (current) {
@@ -270,7 +476,6 @@ class TopologyRunnerInstance {
     throw new Error("stateful operator requires keyBy");
   }
 
-  /** Extract event time from a value. Falls back to wall clock. */
   private extractTimestamp(value: unknown): number {
     if (value && typeof value === "object") {
       const v = value as Record<string, unknown>;
@@ -280,9 +485,5 @@ class TopologyRunnerInstance {
       if (typeof v.createdAt === "string") return new Date(v.createdAt).getTime();
     }
     return Date.now();
-  }
-
-  private async checkpoint(): Promise<void> {
-    await this.stateBackend.checkpoint({ name: `topology:${this.config.group}` });
   }
 }

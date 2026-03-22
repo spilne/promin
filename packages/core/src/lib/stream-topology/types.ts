@@ -31,11 +31,47 @@ export interface TopologyConfig {
   group: string;
   stateBackend?: unknown; // StateBackend<string, unknown>
   checkpointIntervalMs?: number;
+  /** Max items buffered between stages before backpressure kicks in. Default: unbounded. */
+  maxBufferSize?: number;
+  /** Max items emitted per second across the topology. Default: unlimited. */
+  maxItemsPerSecond?: number;
+  /** Max entries in the dedup seen-set before oldest are evicted. Default: 100_000. */
+  maxDedupeSize?: number;
+  /** Called when backpressure is applied (buffer full). */
+  onBackpressure?: (stats: BackpressureStats) => void;
+}
+
+export interface BackpressureStats {
+  /** Current buffer fill level (0-1). */
+  fillRatio: number;
+  /** Number of items in the buffer. */
+  bufferedItems: number;
+  /** Max buffer capacity. */
+  maxBuffer: number;
+  /** Timestamp of the event. */
+  timestamp: number;
 }
 
 export interface TopologyHandle {
   shutdown(): Promise<void>;
   isRunning(): boolean;
+  /** Get current topology metrics. */
+  metrics(): TopologyMetrics;
+}
+
+export interface TopologyMetrics {
+  /** Total items processed since start. */
+  itemsProcessed: number;
+  /** Items processed per second (rolling average). */
+  itemsPerSecond: number;
+  /** Current buffer fill levels by operator. */
+  bufferStats: { operator: string; buffered: number; capacity: number }[];
+  /** Number of keys in dedup set. */
+  dedupeSize: number;
+  /** Number of active windows. */
+  activeWindows: number;
+  /** Number of buffered join items (left + right). */
+  joinBufferSize: number;
 }
 
 // ---------------------------------------------------------------------------

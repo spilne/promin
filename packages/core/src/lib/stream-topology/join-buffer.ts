@@ -91,4 +91,30 @@ export class JoinBuffer<L, R> {
     this.leftBuffer.clear();
     this.rightBuffer.clear();
   }
+
+  /** Snapshot current state for checkpointing. */
+  snapshot(): {
+    left: [string, { value: L; timestamp: number }[]][];
+    right: [string, { value: R; timestamp: number }[]][];
+  } {
+    return {
+      left: [...this.leftBuffer.entries()],
+      right: [...this.rightBuffer.entries()],
+    };
+  }
+
+  /** Restore state from a checkpoint. */
+  restore(data: {
+    left: [string, { value: L; timestamp: number }[]][];
+    right: [string, { value: R; timestamp: number }[]][];
+  }): void {
+    this.leftBuffer.clear();
+    this.rightBuffer.clear();
+    for (const [key, items] of data.left) {
+      this.leftBuffer.set(key, items);
+    }
+    for (const [key, items] of data.right) {
+      this.rightBuffer.set(key, items);
+    }
+  }
 }

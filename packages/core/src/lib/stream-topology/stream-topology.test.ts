@@ -507,4 +507,124 @@ describe("JoinBuffer — time-windowed stream-stream join", () => {
     expect(stats.leftItems).toBe(2);
     expect(stats.rightItems).toBe(1);
   });
+
+  it("snapshot and restore preserves buffered state", () => {
+    const buffer = new JoinBuffer<string, string>(10000);
+
+    buffer.addLeft("k1", "left-1", 1000);
+    buffer.addLeft("k1", "left-2", 2000);
+    buffer.addRight("k2", "right-1", 1500);
+
+    const snap = buffer.snapshot();
+
+    // Create a new buffer and restore
+    const restored = new JoinBuffer<string, string>(10000);
+    restored.restore(snap);
+
+    // The restored buffer should match against new items
+    const matches = restored.addRight("k1", "right-match", 2500);
+    expect(matches).toEqual([
+      { left: "left-1", right: "right-match" },
+      { left: "left-2", right: "right-match" },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WindowManager — snapshot / restore (checkpointing)
+// ---------------------------------------------------------------------------
+
+describe("WindowManager — checkpoint and restore", () => {
+  it("snapshot and restore preserves window state", () => {
+    const spec = {
+      init: () => ({ count: 0 }),
+      add: (state: { count: number }) => ({ count: state.count + 1 }),
+      emit: (key: string, _w: any, state: { count: number }) => ({ key, count: state.count }),
+    };
+
+    const manager = new WindowManager({ type: "tumbling", windowMs: 1000 }, spec);
+
+    manager.add("u1", {}, 100);
+    manager.add("u1", {}, 500);
+
+    const snap = manager.snapshot();
+
+    // Create a new manager and restore
+    const restored = new WindowManager({ type: "tumbling", windowMs: 1000 }, spec);
+    restored.restore(snap);
+
+    // Add one more item and flush — should see all 3
+    restored.add("u1", {}, 800);
+    const flushed = restored.flush("u1", 1100);
+    expect(flushed).toEqual([{ key: "u1", count: 3 }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TopologyRunner — metrics
+// ---------------------------------------------------------------------------
+
+describe("TopologyRunner — metrics and backpressure", () => {
+  it("reports metrics after processing", async () => {
+    const source = createTestSource([1, 2, 3, 4, 5]);
+    const sink = createTestSink<number>();
+
+    const topology = StreamTopology.source(source)
+      .map((n) => n * 2)
+      .to(sink);
+
+    const handle = await TopologyRunner.run(topology, { group: "test-metrics" });
+    await new Promise((r) => setTimeout(r, 200));
+
+    const metrics = handle.metrics();
+    expect(metrics.itemsProcessed).toBe(5);
+    expect(metrics.itemsPerSecond).toBeGreaterThan(0);
+
+    await handle.shutdown();
+  });
+
+  it("runs with maxBufferSize without errors", async () => {
+    const source = createTestSource([1, 2, 3, 4, 5]);
+    const sink = createTestSink<number>();
+
+    const topology = StreamTopology.source(source)
+      .map((n) => n * 10)
+      .to(sink);
+
+    const handle = await TopologyRunner.run(topology, {
+      group: "test-buffer",
+      maxBufferSize: 2,
+    });
+
+    await new Promise((r) => setTimeout(r, 300));
+    await handle.shutdown();
+
+    expect(sink.items).toEqual([10, 20, 30, 40, 50]);
+  });
+
+  it("dedup respects maxDedupeSize eviction", async () => {
+    // Create items where we exceed maxDedupeSize
+    const items = Array.from({ length: 20 }, (_, i) => ({ id: `item-${i}`, v: i }));
+    // Then repeat the first few — they should have been evicted from the LRU
+    const repeated = [...items, { id: "item-0", v: 100 }, { id: "item-1", v: 101 }];
+    const source = createTestSource(repeated);
+    const sink = createTestSink<{ id: string; v: number }>();
+
+    const topology = StreamTopology.source(source)
+      .keyBy((e) => e.id)
+      .dedupe((e) => e.id)
+      .to(sink);
+
+    const handle = await TopologyRunner.run(topology, {
+      group: "test-dedupe-evict",
+      maxDedupeSize: 5, // Only keep last 5 keys
+    });
+
+    await new Promise((r) => setTimeout(r, 300));
+    await handle.shutdown();
+
+    // First 20 items should all pass (unique)
+    // item-0 and item-1 should pass again because they were evicted from the LRU (size 5)
+    expect(sink.items.length).toBe(22);
+  });
 });

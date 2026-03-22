@@ -305,5 +305,7 @@ export {
   type JoinConfig,
   type TopologyConfig,
   type TopologyHandle,
+  type TopologyMetrics,
+  type BackpressureStats,
   type CompiledTopology,
 } from "./lib/stream-topology/index.ts";

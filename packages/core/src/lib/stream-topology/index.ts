@@ -19,5 +19,7 @@ export type {
   JoinConfig,
   TopologyConfig,
   TopologyHandle,
+  TopologyMetrics,
+  BackpressureStats,
   CompiledTopology,
 } from "./types.ts";
