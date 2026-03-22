@@ -23,7 +23,6 @@ import { KafkaContainer } from "@testcontainers/kafka";
 // ---------------------------------------------------------------------------
 
 const REDPANDA_IMAGE = "redpandadata/redpanda:v24.3.7";
-const KAFKA_IMAGE = "apache/kafka:3.9.0";
 const REDIS_IMAGE = "redis:7-alpine";
 const POSTGRES_IMAGE = "postgres:17-alpine";
 
