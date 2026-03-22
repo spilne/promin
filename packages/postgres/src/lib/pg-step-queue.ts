@@ -26,6 +26,20 @@ export class PgStepQueue implements StepQueue {
     this.workerId = config.workerId ?? crypto.randomUUID();
   }
 
+  /**
+   * Get the Drizzle schema for the step queue table.
+   * Use this to include in your migration pipeline.
+   *
+   * @example
+   * ```ts
+   * // In your drizzle schema file:
+   * export { stepQueue } from "@promin/postgres";
+   * // Or:
+   * export const stepQueue = PgStepQueue.schema;
+   * ```
+   */
+  static readonly schema = stepQueue;
+
   async enqueue(params: {
     workflowId: string;
     stepName: string;

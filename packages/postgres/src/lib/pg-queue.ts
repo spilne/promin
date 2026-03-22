@@ -16,6 +16,7 @@ import { sql } from "drizzle-orm";
 import { StreamPipeline, JsonCodec } from "@promin/core";
 import type { Streamable, Sinkable, Acknowledgeable, Envelope, Codec } from "@promin/core";
 import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
+import { createQueueTable } from "./pg-queue-schema.ts";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -110,6 +111,22 @@ export class PgQueue<T> implements Streamable<T>, Sinkable<T>, Acknowledgeable<T
   /** Wrap an existing queue table (assumes it exists). */
   static wrap<T>(config: PgQueueConfig<T>): PgQueue<T> {
     return new PgQueue(config);
+  }
+
+  /**
+   * Get the Drizzle schema for a queue table.
+   * Use this to include queue tables in your migration pipeline.
+   *
+   * @example
+   * ```ts
+   * // In your drizzle schema file:
+   * export const ordersQueue = PgQueue.schema("orders");
+   *
+   * // Then run: bun drizzle-kit generate
+   * ```
+   */
+  static schema(queueName: string) {
+    return createQueueTable(queueName);
   }
 
   // ---------------------------------------------------------------------------

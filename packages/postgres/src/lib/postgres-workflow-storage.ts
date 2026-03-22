@@ -54,6 +54,28 @@ function hashToInt32(str: string): number {
 // ---------------------------------------------------------------------------
 
 export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStorage {
+  /**
+   * Drizzle schemas for all workflow tables.
+   * Use these to include workflow tables in your migration pipeline.
+   *
+   * @example
+   * ```ts
+   * // In your drizzle schema file:
+   * export const {
+   *   workflows, workflowSteps, workflowStepTasks,
+   *   workflowSignals, workflowLocks, stepAttempts,
+   * } = PostgresWorkflowStorage.schema;
+   * ```
+   */
+  static readonly schema = {
+    workflows,
+    workflowSteps,
+    workflowStepTasks,
+    workflowSignals,
+    workflowLocks,
+    stepAttempts,
+  };
+
   private readonly config: Required<PostgresStorageConfig>;
 
   private constructor(config: Required<PostgresStorageConfig>) {

@@ -9,10 +9,11 @@ import { sql } from "drizzle-orm";
 import type { DrizzleDb } from "./drizzle-db.ts";
 import { execRaw } from "./drizzle-db.ts";
 import type { StateBackend } from "@promin/core";
+import { createTopologyStateTable, topologyState } from "./pg-state-schema.ts";
 
 export interface PgStateBackendConfig {
   db: DrizzleDb;
-  /** Table name prefix. Default: "topology_state". */
+  /** Table name. Default: "topology_state". */
   table?: string;
 }
 
@@ -23,6 +24,26 @@ export class PgStateBackend implements StateBackend<string, unknown> {
   constructor(config: PgStateBackendConfig) {
     this.db = config.db;
     this.table = config.table ?? "topology_state";
+  }
+
+  /**
+   * Get the Drizzle schema for the default topology state table.
+   * Use this to include in your migration pipeline.
+   *
+   * @example
+   * ```ts
+   * // In your drizzle schema file:
+   * export const topologyState = PgStateBackend.schema;
+   *
+   * // For a custom table name:
+   * export const myState = PgStateBackend.schemaFor("my_topology_state");
+   * ```
+   */
+  static readonly schema = topologyState;
+
+  /** Get the Drizzle schema for a custom-named topology state table. */
+  static schemaFor(tableName: string) {
+    return createTopologyStateTable(tableName);
   }
 
   /** Create the state table if it doesn't exist. */

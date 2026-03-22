@@ -111,6 +111,21 @@ export interface DurableSchedulerConfig {
  * ```
  */
 export class DurableScheduler implements Scheduler {
+  /**
+   * Drizzle schemas for the scheduler tables.
+   * Use these to include scheduler tables in your migration pipeline.
+   *
+   * @example
+   * ```ts
+   * // In your drizzle schema file:
+   * export const { schedules, ticks } = DurableScheduler.schema;
+   * ```
+   */
+  static readonly schema = {
+    schedules: durableSchedules,
+    ticks: durableScheduleTicks,
+  };
+
   readonly codec: Codec<ScheduleTick> = JsonCodec as Codec<ScheduleTick>;
   private readonly db: DrizzleDb;
   readonly instanceId: string;

@@ -63,3 +63,5 @@ export {
   attemptTypeTable,
   LOOKUP_BINDINGS,
 } from "./lib/schema.ts";
+export { createQueueTable, type QueueTable } from "./lib/pg-queue-schema.ts";
+export { createTopologyStateTable, topologyState } from "./lib/pg-state-schema.ts";
