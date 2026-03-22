@@ -222,6 +222,16 @@ withKafka("Kafka integration", (ctx) => {
 // @platformatic/kafka — runs against real Apache Kafka (slower, ~30s startup)
 // ---------------------------------------------------------------------------
 
-withApacheKafka("@platformatic/kafka adapter (Apache Kafka)", (ctx) => {
-  adapterTests("stream-based consume", () => ctx.broker, createPlatformaticClient);
-});
+// ---------------------------------------------------------------------------
+// @platformatic/kafka — needs real Apache Kafka (Redpanda has API gaps).
+// Uses KafkaContainer from @testcontainers/kafka with Confluent image.
+// Slow to start (~60s JVM): skipped by default, enable with KAFKA_FULL=1.
+// ---------------------------------------------------------------------------
+
+const runFullKafka = process.env.KAFKA_FULL === "1";
+
+if (runFullKafka) {
+  withApacheKafka("@platformatic/kafka adapter (Apache Kafka)", (ctx) => {
+    adapterTests("stream-based consume", () => ctx.broker, createPlatformaticClient);
+  });
+}

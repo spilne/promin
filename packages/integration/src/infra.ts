@@ -13,6 +13,7 @@
 
 import { describe, beforeAll, afterAll } from "bun:test";
 import { GenericContainer, Wait, type StartedTestContainer } from "testcontainers";
+import { KafkaContainer } from "@testcontainers/kafka";
 
 // ---------------------------------------------------------------------------
 // Container configs
@@ -24,7 +25,7 @@ const REDIS_IMAGE = "redis:7-alpine";
 const POSTGRES_IMAGE = "postgres:17-alpine";
 
 const TIMEOUT = 180_000; // container startup timeout
-const KAFKA_TIMEOUT = 180_000; // Kafka (JVM) needs more time
+const KAFKA_TIMEOUT = 300_000; // Kafka (JVM) needs more time to start
 
 // ---------------------------------------------------------------------------
 // Context — what tests receive
@@ -61,7 +62,7 @@ async function startKafka(): Promise<{ container: StartedTestContainer; ctx: Kaf
   // Use a fixed host port so the advertised listener matches what clients connect to.
   const hostPort = 29092 + Math.floor(Math.random() * 1000);
 
-  const container = await new GenericContainer(KAFKA_IMAGE)
+  const container = await new GenericContainer(REDPANDA_IMAGE)
     .withExposedPorts({ container: 29092, host: hostPort })
     .withCommand([
       "redpanda",
@@ -77,7 +78,7 @@ async function startKafka(): Promise<{ container: StartedTestContainer; ctx: Kaf
       "--advertise-kafka-addr",
       `PLAINTEXT://localhost:${hostPort}`,
     ])
-    .withWaitStrategy(Wait.forLogMessage(/Successfully started Redpanda/))
+    .withWaitStrategy(Wait.forLogMessage("Successfully started Redpanda"))
     .withStartupTimeout(TIMEOUT)
     .start();
 
@@ -85,26 +86,13 @@ async function startKafka(): Promise<{ container: StartedTestContainer; ctx: Kaf
 }
 
 async function startApacheKafka(): Promise<{ container: StartedTestContainer; ctx: KafkaCtx }> {
-  const hostPort = 19092 + Math.floor(Math.random() * 1000);
-
-  const container = await new GenericContainer(KAFKA_IMAGE)
-    .withExposedPorts({ container: 9092, host: hostPort })
-    .withEnvironment({
-      KAFKA_NODE_ID: "1",
-      KAFKA_PROCESS_ROLES: "broker,controller",
-      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093",
-      KAFKA_ADVERTISED_LISTENERS: `PLAINTEXT://localhost:${hostPort}`,
-      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@localhost:9093",
-      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER",
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT",
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1",
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0",
-    })
-    .withWaitStrategy(Wait.forLogMessage(/Kafka Server started/))
+  const container = await new KafkaContainer("confluentinc/cp-kafka:7.9.1")
+    .withKraft()
     .withStartupTimeout(KAFKA_TIMEOUT)
     .start();
 
-  return { container, ctx: { broker: `localhost:${hostPort}` } };
+  const broker = `${container.getHost()}:${container.getMappedPort(9093)}`;
+  return { container, ctx: { broker } };
 }
 
 async function startRedis(): Promise<{ container: StartedTestContainer; ctx: RedisCtx }> {
