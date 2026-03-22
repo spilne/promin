@@ -11,7 +11,10 @@
 //   withAll("e2e pipeline", (ctx) => { ... });
 // ---------------------------------------------------------------------------
 
-import { describe, beforeAll, afterAll } from "bun:test";
+import { describe, beforeAll, afterAll, setDefaultTimeout } from "bun:test";
+
+// Integration tests need longer timeouts for container startup
+setDefaultTimeout(300_000);
 import { GenericContainer, Wait, type StartedTestContainer } from "testcontainers";
 import { KafkaContainer } from "@testcontainers/kafka";
 

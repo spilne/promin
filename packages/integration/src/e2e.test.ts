@@ -1,4 +1,6 @@
-import { it, expect } from "bun:test";
+import { it, expect, setDefaultTimeout } from "bun:test";
+
+setDefaultTimeout(300_000);
 import { Redis as IoRedis } from "ioredis";
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
