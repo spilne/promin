@@ -2,12 +2,20 @@
 // KafkaTopic<T> — Kafka topic implementing streaming typeclasses
 //
 // Implements: Partitionable, Replayable, Acknowledgeable, KeyedSinkable, Checkpointable
-// Uses kafkajs for consumer/producer.
+//
+// Works with any KafkaClient implementation:
+//   - kafkajs / @confluentinc/kafka-javascript (callback-based consumer)
+//   - @platformatic/kafka (stream-based consumer)
 // ---------------------------------------------------------------------------
 
 import { Effect, Stream } from "effect";
 import { OffsetTracker } from "./offset-tracker.ts";
-import type { KafkaClient, KafkaConsumer, KafkaProducer, EachMessagePayload } from "./kafka-types.ts";
+import type {
+  KafkaClient,
+  KafkaConsumer,
+  KafkaProducer,
+  KafkaMessage,
+} from "./kafka-types.ts";
 import { StreamPipeline, JsonCodec } from "@promin/core";
 import type {
   KeyedSinkable,
@@ -21,7 +29,7 @@ import type {
 } from "@promin/core";
 
 export interface KafkaTopicConfig<T> {
-  /** Kafka client instance (kafkajs). */
+  /** Kafka client instance. */
   kafka: KafkaClient;
   /** Topic name. */
   topic: string;
@@ -48,7 +56,7 @@ export class KafkaTopic<T>
   private readonly kafka: KafkaClient;
   private readonly topic: string;
   private readonly groupId: string;
-  
+
   private consumer?: KafkaConsumer;
   private producer?: KafkaProducer;
 
@@ -82,9 +90,7 @@ export class KafkaTopic<T>
     });
   }
 
-  async publishBatch(
-    messages: { value: T; key?: string }[],
-  ): Promise<void> {
+  async publishBatch(messages: { value: T; key?: string }[]): Promise<void> {
     if (!this.producer) {
       this.producer = this.kafka.producer();
       await this.producer.connect();
@@ -124,20 +130,12 @@ export class KafkaTopic<T>
    *
    * When processing messages in parallel, offsets are only committed
    * up to the highest *contiguous* completed offset (high-water mark).
-   * This prevents message loss on crash:
+   * This prevents message loss on crash.
    *
-   *   Processing: [1:done, 2:pending, 3:done, 4:done]
-   *   Committable: offset 2 (only offset 1 is contiguous)
-   *
-   *   Later: [1:done, 2:done, 3:done, 4:done]
-   *   Committable: offset 5 (all contiguous)
-   *
-   * Set `commitIntervalMs` to control how often accumulated acks are flushed.
-   * Inspired by fs2-kafka / kafka4s commit batching pattern.
+   * Supports both stream-based (platformatic) and callback-based (kafkajs) consumers.
    */
   subscribeAck(params?: {
     group?: string;
-    /** How often to flush committed offsets (ms). Default: 1000. */
     commitIntervalMs?: number;
   }): StreamPipeline<Envelope<T>, never> {
     const codec = this.codec;
@@ -147,7 +145,7 @@ export class KafkaTopic<T>
     const commitIntervalMs = params?.commitIntervalMs ?? 1000;
 
     const stream = Stream.async<Envelope<T>, never>((emit) => {
-      const consumer = kafka.consumer({ groupId, maxWaitTimeInMs: 100 });
+      const consumer = kafka.consumer({ groupId });
       const tracker = new OffsetTracker();
       let commitTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -168,49 +166,58 @@ export class KafkaTopic<T>
         }
       };
 
+      const makeEnvelope = (msg: KafkaMessage): Envelope<T> => {
+        const raw = msg.message.value;
+        const str = raw instanceof Buffer ? raw.toString() : (raw as string);
+        const value = codec.decode(JSON.parse(str));
+        const offset = Number(msg.message.offset);
+        const partition = msg.partition;
+
+        return {
+          value,
+          ack: async () => {
+            tracker.complete(partition, offset);
+          },
+          nack: async () => {
+            // Don't mark — offset won't advance, redelivered on restart
+          },
+          metadata: {
+            topic: msg.topic,
+            partition,
+            offset: msg.message.offset,
+            key: msg.message.key?.toString(),
+            timestamp: msg.message.timestamp,
+          },
+        };
+      };
+
       const run = async () => {
         await consumer.connect();
         await consumer.subscribe({ topic, fromBeginning: false });
 
-        // Periodic commit flush — batches acks for efficiency
         commitTimer = setInterval(flushCommits, commitIntervalMs);
 
-        await consumer.run({
-          autoCommit: false,
-          eachMessage: async (payload: EachMessagePayload) => {
-            const value = codec.decode(JSON.parse(payload.message.value!.toString()));
-            const offset = Number(payload.message.offset);
-            const partition = payload.partition;
-
-            const envelope: Envelope<T> = {
-              value,
-              ack: async () => {
-                // Mark as completed — tracker handles ordering
-                tracker.complete(partition, offset);
-              },
-              nack: async () => {
-                // Don't mark as completed — offset won't advance past this message.
-                // On next commit, this offset stays uncommitted.
-                // The message will be redelivered after consumer rebalance or restart.
-              },
-              metadata: {
-                topic,
-                partition,
-                offset: payload.message.offset,
-                key: payload.message.key?.toString(),
-                timestamp: payload.message.timestamp,
-              },
-            };
-            emit.single(envelope);
-          },
-        });
+        // Prefer stream mode (platformatic), fall back to callback mode (kafkajs)
+        if (consumer.stream) {
+          for await (const msg of consumer.stream()) {
+            emit.single(makeEnvelope(msg));
+          }
+        } else if (consumer.run) {
+          await consumer.run({
+            autoCommit: false,
+            eachMessage: async (msg: KafkaMessage) => {
+              emit.single(makeEnvelope(msg));
+            },
+          });
+        } else {
+          throw new Error("Consumer must implement either stream() or run()");
+        }
       };
 
       run().catch(() => {});
 
       return Effect.promise(async () => {
         if (commitTimer) clearInterval(commitTimer);
-        // Final flush before disconnect
         await flushCommits();
         await consumer.disconnect();
       });
@@ -226,7 +233,6 @@ export class KafkaTopic<T>
   async commitOffset(params: { group: string; offset: string }): Promise<void> {
     const consumer = this.kafka.consumer({ groupId: params.group });
     await consumer.connect();
-    // Note: in production, use the existing consumer instance
     await consumer.commitOffsets([
       { topic: this.topic, partition: 0, offset: params.offset },
     ]);
@@ -256,6 +262,12 @@ export class KafkaTopic<T>
     const stream = Stream.async<T, never>((emit) => {
       const consumer = kafka.consumer({ groupId });
 
+      const decodeMessage = (msg: KafkaMessage): T => {
+        const raw = msg.message.value;
+        const str = raw instanceof Buffer ? raw.toString() : (raw as string);
+        return codec.decode(JSON.parse(str));
+      };
+
       const run = async () => {
         await consumer.connect();
         await consumer.subscribe({
@@ -263,22 +275,33 @@ export class KafkaTopic<T>
           fromBeginning: offset?.type === "earliest",
         });
 
+        // Seek to timestamp if requested (requires admin + seek support)
         if (offset?.type === "timestamp") {
           const admin = kafka.admin();
           await admin.connect();
           const result = await admin.fetchTopicOffsetsByTimestamp(topic, offset.value);
           await admin.disconnect();
-          for (const p of result) {
-            consumer.seek({ topic, partition: p.partition, offset: p.offset });
+          if (consumer.seek) {
+            for (const p of result) {
+              consumer.seek({ topic, partition: p.partition, offset: p.offset });
+            }
           }
         }
 
-        await consumer.run({
-          eachMessage: async (payload: EachMessagePayload) => {
-            const value = codec.decode(JSON.parse(payload.message.value!.toString()));
-            emit.single(value);
-          },
-        });
+        // Prefer stream mode, fall back to callback mode
+        if (consumer.stream) {
+          for await (const msg of consumer.stream()) {
+            emit.single(decodeMessage(msg));
+          }
+        } else if (consumer.run) {
+          await consumer.run({
+            eachMessage: async (msg: KafkaMessage) => {
+              emit.single(decodeMessage(msg));
+            },
+          });
+        } else {
+          throw new Error("Consumer must implement either stream() or run()");
+        }
       };
 
       run().catch(() => {});
