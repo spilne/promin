@@ -10,6 +10,7 @@ import type { DrizzleDb } from "./drizzle-db.ts";
 import { execRaw } from "./drizzle-db.ts";
 import type { StateBackend } from "@promin/core";
 import { createTopologyStateTable, topologyState } from "./pg-state-schema.ts";
+import { ensureTable as ensureTableFromSchema } from "./schema-utils.ts";
 
 export interface PgStateBackendConfig {
   db: DrizzleDb;
@@ -46,24 +47,11 @@ export class PgStateBackend implements StateBackend<string, unknown> {
     return createTopologyStateTable(tableName);
   }
 
-  /** Create the state table if it doesn't exist. */
+  /** Create the state table if it doesn't exist. Derived from the Drizzle schema. */
   async ensureTable(): Promise<void> {
-    await this.db.execute(
-      sql.raw(`
-      CREATE TABLE IF NOT EXISTS ${this.table} (
-        key TEXT PRIMARY KEY,
-        value JSONB NOT NULL,
-        checkpoint TEXT DEFAULT 'live',
-        updated_at TIMESTAMPTZ DEFAULT now()
-      )
-    `),
-    );
-    await this.db.execute(
-      sql.raw(`
-      CREATE INDEX IF NOT EXISTS idx_${this.table}_checkpoint
-      ON ${this.table} (checkpoint)
-    `),
-    );
+    const schema =
+      this.table === "topology_state" ? topologyState : createTopologyStateTable(this.table);
+    await ensureTableFromSchema(this.db, schema);
   }
 
   async get(key: string): Promise<unknown | undefined> {

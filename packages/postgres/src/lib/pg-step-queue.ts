@@ -10,6 +10,7 @@ import { eq, sql } from "drizzle-orm";
 import type { StepQueue, StepTask } from "@promin/core";
 import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
 import { stepQueue } from "./schema.ts";
+import { ensureTable as ensureTableFromSchema } from "./schema-utils.ts";
 
 export interface PgStepQueueConfig {
   db: DrizzleDb;
@@ -175,51 +176,10 @@ export class PgStepQueue implements StepQueue {
 
   /**
    * Ensure the step queue table exists with all columns.
+   * Derived from the Drizzle schema — single source of truth.
    * For production, prefer using migrations instead.
    */
   async ensureTable(): Promise<void> {
-    await execRaw(
-      this.db,
-      sql.raw(`
-        CREATE TABLE IF NOT EXISTS wf_step_queue (
-          id BIGSERIAL PRIMARY KEY,
-          workflow_id TEXT NOT NULL,
-          step_name TEXT NOT NULL,
-          queue TEXT NOT NULL DEFAULT 'default',
-          priority INTEGER NOT NULL DEFAULT 5,
-          input JSONB,
-          prev_results JSONB,
-          attempt INTEGER NOT NULL DEFAULT 1,
-          status TEXT NOT NULL DEFAULT 'pending',
-          result JSONB,
-          error TEXT,
-          duration_ms BIGINT,
-          claimed_by TEXT,
-          claimed_at TIMESTAMPTZ,
-          completed_at TIMESTAMPTZ,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-      `),
-    );
-    // Add priority column if table was created without it
-    await execRaw(
-      this.db,
-      sql.raw(
-        `ALTER TABLE wf_step_queue ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 5`,
-      ),
-    );
-    await execRaw(this.db, sql.raw(`DROP INDEX IF EXISTS wf_step_queue_dequeue_idx`));
-    await execRaw(
-      this.db,
-      sql.raw(
-        `CREATE INDEX IF NOT EXISTS wf_step_queue_dequeue_idx ON wf_step_queue (status, queue, priority, created_at)`,
-      ),
-    );
-    await execRaw(
-      this.db,
-      sql.raw(
-        `CREATE INDEX IF NOT EXISTS wf_step_queue_workflow_idx ON wf_step_queue (workflow_id)`,
-      ),
-    );
+    await ensureTableFromSchema(this.db, stepQueue);
   }
 }

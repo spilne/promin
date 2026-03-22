@@ -17,6 +17,7 @@ import { StreamPipeline, JsonCodec } from "@promin/core";
 import type { Streamable, Sinkable, Acknowledgeable, Envelope, Codec } from "@promin/core";
 import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
 import { createQueueTable } from "./pg-queue-schema.ts";
+import { ensureTable as ensureTableFromSchema } from "./schema-utils.ts";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -80,7 +81,6 @@ export class PgQueue<T> implements Streamable<T>, Sinkable<T>, Acknowledgeable<T
   private readonly defaultVtSeconds: number;
   private readonly defaultBatchSize: number;
   private readonly pollIntervalMs: number;
-  private readonly maxAttempts: number;
   private readonly ackMode: "delete" | "archive";
 
   private constructor(config: PgQueueConfig<T>) {
@@ -91,7 +91,6 @@ export class PgQueue<T> implements Streamable<T>, Sinkable<T>, Acknowledgeable<T
     this.defaultVtSeconds = config.defaultVtSeconds ?? 30;
     this.defaultBatchSize = config.defaultBatchSize ?? 10;
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
-    this.maxAttempts = config.maxAttempts ?? 3;
     this.ackMode = config.ackMode ?? "delete";
   }
 
@@ -134,27 +133,7 @@ export class PgQueue<T> implements Streamable<T>, Sinkable<T>, Acknowledgeable<T
   // ---------------------------------------------------------------------------
 
   private async ensureTable(): Promise<void> {
-    await this.db.execute(
-      sql.raw(`
-      CREATE TABLE IF NOT EXISTS ${this.tableName} (
-        id BIGSERIAL PRIMARY KEY,
-        payload JSONB NOT NULL,
-        headers JSONB,
-        status TEXT NOT NULL DEFAULT 'pending',
-        visible_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        attempt_count INTEGER NOT NULL DEFAULT 0,
-        max_attempts INTEGER NOT NULL DEFAULT ${this.maxAttempts},
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        completed_at TIMESTAMPTZ,
-        locked_by TEXT
-      )
-    `),
-    );
-    await this.db.execute(
-      sql.raw(
-        `CREATE INDEX IF NOT EXISTS ${this.tableName}_dequeue_idx ON ${this.tableName} (status, visible_at) WHERE status = 'pending'`,
-      ),
-    );
+    await ensureTableFromSchema(this.db, createQueueTable(this.queue));
   }
 
   // ---------------------------------------------------------------------------
