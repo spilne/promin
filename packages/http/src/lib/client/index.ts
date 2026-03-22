@@ -19,6 +19,7 @@ export {
   FetchTransport,
   type HttpTransport,
   type HttpRequestOptions,
+  type HttpProxyConfig,
 } from "./http-client.ts";
 
 // Streaming (Effect-level)

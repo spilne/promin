@@ -1,7 +1,12 @@
 import { Effect } from "effect";
 import { Pipeline, type PipelineDefaults } from "@promin/core";
 import type { HttpClientError, ResponseParser } from "./http-client-error.ts";
-import { httpRequest, httpRequestText, type HttpTransport } from "./http-client.ts";
+import {
+  httpRequest,
+  httpRequestText,
+  type HttpTransport,
+  type HttpProxyConfig,
+} from "./http-client.ts";
 import {
   httpStreamSSE,
   httpStreamNDJSON,
@@ -126,6 +131,27 @@ export interface HttpClientConfig {
    * for design rationale.
    */
   readonly transport?: HttpTransport;
+  /**
+   * Default proxy configuration for all requests.
+   * Per-request proxy can override this via request options.
+   *
+   * @example
+   * ```ts
+   * const client = new DefaultHttpClient({
+   *   baseUrl: "https://api.example.com",
+   *   proxy: { url: "http://proxy.internal:8080" },
+   * });
+   *
+   * // TLS-intercepting proxy with custom CA:
+   * const client = new DefaultHttpClient({
+   *   proxy: {
+   *     url: "http://proxy.corp:3128",
+   *     ca: fs.readFileSync("corp-ca.pem", "utf-8"),
+   *   },
+   * });
+   * ```
+   */
+  readonly proxy?: HttpProxyConfig;
 }
 
 /** Params accepted by {@link HttpClient.request}. */
@@ -377,6 +403,7 @@ export class DefaultHttpClient extends AbstractHttpClient {
         ? [...(this.config.middleware ?? []), ...overrides.middleware]
         : this.config.middleware,
       transport: overrides.transport ?? this.config.transport,
+      proxy: overrides.proxy ?? this.config.proxy,
     });
   }
 
@@ -446,6 +473,7 @@ export class DefaultHttpClient extends AbstractHttpClient {
         schema: params.schema,
         acceptStatus: params.acceptStatus,
         transport: this.config.transport,
+        proxy: this.config.proxy,
       }),
       { method: params.method, url, tag: params.tag },
     );
@@ -460,6 +488,7 @@ export class DefaultHttpClient extends AbstractHttpClient {
         headers: this.mergeHeaders(options?.headers),
         timeoutMs: options?.timeoutMs ?? this.config.timeoutMs,
         transport: this.config.transport,
+        proxy: this.config.proxy,
       }),
       { method: "GET", url, tag: options?.tag },
     );
@@ -477,6 +506,7 @@ export class DefaultHttpClient extends AbstractHttpClient {
         headers: this.mergeHeaders(options?.headers),
         timeoutMs: options?.timeoutMs ?? this.config.timeoutMs,
         transport: this.config.transport,
+        proxy: this.config.proxy,
       }),
     );
   }
@@ -491,6 +521,7 @@ export class DefaultHttpClient extends AbstractHttpClient {
         body: options?.body,
         timeoutMs: options?.timeoutMs ?? this.config.timeoutMs,
         transport: this.config.transport,
+        proxy: this.config.proxy,
       }),
     );
   }
@@ -503,6 +534,7 @@ export class DefaultHttpClient extends AbstractHttpClient {
         headers: this.mergeHeaders(options?.headers),
         timeoutMs: options?.timeoutMs ?? this.config.timeoutMs,
         transport: this.config.transport,
+        proxy: this.config.proxy,
       }),
     );
   }
@@ -517,6 +549,7 @@ export class DefaultHttpClient extends AbstractHttpClient {
         body: options?.body,
         timeoutMs: options?.timeoutMs ?? this.config.timeoutMs,
         transport: this.config.transport,
+        proxy: this.config.proxy,
       }),
     );
   }
@@ -534,6 +567,7 @@ export class DefaultHttpClient extends AbstractHttpClient {
         timeoutMs: options?.timeoutMs ?? this.config.timeoutMs,
         schema,
         transport: this.config.transport,
+        proxy: this.config.proxy,
       }),
     );
   }
@@ -553,6 +587,7 @@ export class DefaultHttpClient extends AbstractHttpClient {
         timeoutMs: options?.timeoutMs ?? this.config.timeoutMs,
         schema,
         transport: this.config.transport,
+        proxy: this.config.proxy,
       }),
     );
   }

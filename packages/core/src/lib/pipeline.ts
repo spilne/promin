@@ -1067,14 +1067,48 @@ export class Pipeline<T, E extends TaggedError> {
   /**
    * Execute and return `{ data, error }` — never throws.
    *
+   * By default, only typed errors (the `E` channel) are caught. Defects
+   * (untyped throws from `.map()`, `Pipeline.fn()` rejections, etc.) still
+   * throw as exceptions.
+   *
+   * Pass `{ catchAll: true }` to also catch defects — they are returned as
+   * plain `Error` objects in the `error` field.
+   *
    * @example
    * ```ts
    * const { data, error } = await pipeline.runSafe();
    * if (error) handleError(error);
    * else useData(data);
+   *
+   * // Catch everything including defects:
+   * const { data, error } = await pipeline.runSafe({ catchAll: true });
    * ```
    */
-  async runSafe(): Promise<{ data: T; error: null } | { data: null; error: E }> {
+  async runSafe(options: {
+    catchAll: true;
+  }): Promise<{ data: T; error: null } | { data: null; error: E | Error }>;
+  async runSafe(options?: {
+    catchAll?: false;
+  }): Promise<{ data: T; error: null } | { data: null; error: E }>;
+  async runSafe(options?: {
+    catchAll?: boolean;
+  }): Promise<{ data: T; error: null } | { data: null; error: E | Error }> {
+    if (options?.catchAll) {
+      const safed = this.effect.pipe(
+        Effect.catchAllDefect((defect) =>
+          Effect.fail(
+            (defect instanceof Error
+              ? defect
+              : new Error(String(defect), { cause: defect })) as any,
+          ),
+        ),
+      );
+      const either = await Effect.runPromise(Effect.either(safed));
+      return Either.isRight(either)
+        ? { data: either.right, error: null }
+        : { data: null, error: either.left };
+    }
+
     const either = await Effect.runPromise(Effect.either(this.effect));
     return Either.isRight(either)
       ? { data: either.right, error: null }

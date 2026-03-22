@@ -14,6 +14,18 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 // Types
 // ---------------------------------------------------------------------------
 
+/**
+ * Proxy configuration for routing requests through an HTTP proxy.
+ * Each HttpClient implementation translates this into its native format
+ * (e.g., Bun's `proxy`/`tls` fetch options, Axios's `httpsAgent`, etc.).
+ */
+export interface HttpProxyConfig {
+  /** Proxy endpoint URL (e.g., "http://user:pass@proxy.example.com:8080"). */
+  readonly url: string;
+  /** Custom CA certificate for TLS-intercepting proxies (PEM format). */
+  readonly ca?: string;
+}
+
 export interface HttpRequestOptions {
   /** Full URL (string or URL object). */
   readonly url: string | URL;
@@ -29,6 +41,8 @@ export interface HttpRequestOptions {
   readonly timeoutMs?: number;
   /** Extra abort signal to combine with the timeout signal. */
   readonly signal?: AbortSignal;
+  /** Proxy configuration for routing this request through a proxy. */
+  readonly proxy?: HttpProxyConfig;
 }
 
 export interface RetryPolicy {
@@ -106,6 +120,7 @@ export class FetchTransport implements HttpTransport {
       body,
       timeoutMs = DEFAULT_TIMEOUT_MS,
       signal,
+      proxy,
     } = options;
 
     const urlStr = typeof url === "string" ? url : url.toString();
@@ -130,14 +145,20 @@ export class FetchTransport implements HttpTransport {
         const signals: AbortSignal[] = [controller.signal, AbortSignal.timeout(timeoutMs)];
         if (signal) signals.push(signal);
 
+        // Build fetch options — Bun supports `proxy` and `tls` natively
+        const fetchOptions: RequestInit & { proxy?: string; tls?: { ca?: string } } = {
+          method,
+          headers: finalHeaders,
+          body: finalBody,
+          signal: AbortSignal.any(signals),
+        };
+        if (proxy) {
+          fetchOptions.proxy = proxy.url;
+          if (proxy.ca) fetchOptions.tls = { ca: proxy.ca };
+        }
+
         return Effect.tryPromise({
-          try: () =>
-            fetch(urlStr, {
-              method,
-              headers: finalHeaders,
-              body: finalBody,
-              signal: AbortSignal.any(signals),
-            }),
+          try: () => fetch(urlStr, fetchOptions),
           catch: (error) => {
             // If our controller aborted (fiber interrupted), don't surface as timeout
             if (controller.signal.aborted) {
