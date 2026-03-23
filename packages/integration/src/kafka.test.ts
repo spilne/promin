@@ -1,118 +1,49 @@
 import { describe, it, expect } from "bun:test";
-import { Kafka } from "kafkajs";
-import { withKafka, uniqueName } from "./infra.ts";
-import { KafkaTopic, OffsetTracker } from "@promin/kafka";
-import type { KafkaClient, KafkaConsumer, KafkaProducer, KafkaAdmin } from "@promin/kafka";
+import { withKafka, withApacheKafka, uniqueName } from "./infra.ts";
+import { KafkaTopic, OffsetTracker, autoCommitBatchWithin } from "@promin/kafka";
+import type { KafkaClient } from "@promin/kafka";
+import { createKafkajsClient, createTopic } from "./adapters/kafkajs-adapter.ts";
+import { createPlatformaticClient } from "./adapters/stream-adapter.ts";
 
 // ---------------------------------------------------------------------------
-// kafkajs adapter — wraps kafkajs into our KafkaClient interface
+// Shared test suite — same tests, different adapter
 // ---------------------------------------------------------------------------
 
-function createKafkajsClient(broker: string): KafkaClient {
-  const kafka = new Kafka({ brokers: [broker], logLevel: 0 });
-
-  return {
-    producer(): KafkaProducer {
-      const p = kafka.producer();
-      return {
-        connect: () => p.connect(),
-        disconnect: () => p.disconnect(),
-        send: (params) => p.send(params) as unknown as Promise<void>,
-      };
-    },
-
-    consumer(config): KafkaConsumer {
-      const c = kafka.consumer({ groupId: config.groupId });
-      return {
-        connect: () => c.connect(),
-        disconnect: () => c.disconnect(),
-        subscribe: (params) => c.subscribe({ topic: params.topic, fromBeginning: params.fromBeginning }),
-        run: (params) =>
-          c.run({
-            autoCommit: params.autoCommit,
-            eachMessage: params.eachMessage
-              ? (payload) =>
-                  params.eachMessage!({
-                    topic: payload.topic,
-                    partition: payload.partition,
-                    message: {
-                      key: payload.message.key,
-                      value: payload.message.value,
-                      offset: payload.message.offset,
-                      timestamp: payload.message.timestamp ?? "",
-                    },
-                  })
-              : undefined,
-          }),
-        commitOffsets: (offsets) => c.commitOffsets(offsets),
-        seek: (params) => c.seek(params),
-      };
-    },
-
-    admin(): KafkaAdmin {
-      const a = kafka.admin();
-      return {
-        connect: () => a.connect(),
-        disconnect: () => a.disconnect(),
-        fetchOffsets: (params) => a.fetchOffsets(params),
-        fetchTopicOffsetsByTimestamp: async (topic, timestamp) => {
-          const offsets = await a.fetchTopicOffsetsByTimestamp(topic, timestamp);
-          return offsets.map((o) => ({ partition: o.partition, offset: o.offset }));
-        },
-      };
-    },
-  };
-}
-
-async function createTopic(broker: string, topic: string, partitions = 1) {
-  const kafka = new Kafka({ brokers: [broker], logLevel: 0 });
-  const admin = kafka.admin();
-  await admin.connect();
-  await admin.createTopics({
-    topics: [{ topic, numPartitions: partitions, replicationFactor: 1 }],
-    waitForLeaders: true,
-  });
-  await admin.disconnect();
-}
-
-// ---------------------------------------------------------------------------
-// All Kafka tests share one container
-// ---------------------------------------------------------------------------
-
-withKafka("Kafka integration", (ctx) => {
-  // -- KafkaTopic --
-
-  describe("KafkaTopic — publish and subscribe via kafkajs", () => {
+function adapterTests(
+  name: string,
+  getBroker: () => string,
+  makeClient: (broker: string) => KafkaClient,
+) {
+  describe(name, () => {
     it("publishes and consumes a single message", async () => {
+      const broker = getBroker();
       const topic = uniqueName("single");
-      await createTopic(ctx.broker, topic);
+      await createTopic(broker, topic);
 
-      const client = createKafkajsClient(ctx.broker);
       const kt = new KafkaTopic<{ orderId: string }>({
-        kafka: client,
+        kafka: makeClient(broker),
         topic,
         groupId: uniqueName("g"),
       });
 
       await kt.publish({ orderId: "o-1" });
 
-      // Subscribe from earliest to read messages published before consumer started
       const items = await kt
         .subscribeFrom({ offset: { type: "earliest" }, group: uniqueName("g") })
         .take(1)
         .collect();
-      expect(items).toEqual([{ orderId: "o-1" }]);
 
+      expect(items).toEqual([{ orderId: "o-1" }]);
       await kt.disconnect();
     });
 
-    it("publishBatch sends multiple messages atomically", async () => {
+    it("publishBatch sends multiple messages", async () => {
+      const broker = getBroker();
       const topic = uniqueName("batch");
-      await createTopic(ctx.broker, topic);
+      await createTopic(broker, topic);
 
-      const client = createKafkajsClient(ctx.broker);
       const kt = new KafkaTopic<{ v: number }>({
-        kafka: client,
+        kafka: makeClient(broker),
         topic,
         groupId: uniqueName("g"),
       });
@@ -123,53 +54,25 @@ withKafka("Kafka integration", (ctx) => {
         .subscribeFrom({ offset: { type: "earliest" }, group: uniqueName("g") })
         .take(3)
         .collect();
+
       expect(items.map((i) => i.v).sort()).toEqual([1, 2, 3]);
-
       await kt.disconnect();
     });
 
-    it("subscribeAck tracks offsets correctly with parallel processing", async () => {
-      const topic = uniqueName("ack");
-      await createTopic(ctx.broker, topic);
-
-      const client = createKafkajsClient(ctx.broker);
-      const kt = new KafkaTopic<{ v: number }>({
-        kafka: client,
-        topic,
-        groupId: uniqueName("g"),
-      });
-
-      for (let i = 0; i < 5; i++) await kt.publish({ v: i });
-
-      const values: number[] = [];
-      // subscribeAck starts from latest by default — publish first, then consume from earliest
-      await kt
-        .subscribeFrom({ offset: { type: "earliest" }, group: uniqueName("g") })
-        .take(5)
-        .parAsyncMap(3, async (item) => {
-          values.push(item.v);
-        })
-        .drain();
-
-      expect(values.sort()).toEqual([0, 1, 2, 3, 4]);
-
-      await kt.disconnect();
-    });
-
-    it("keyed messages preserve ordering within a partition", async () => {
+    it("keyed messages preserve partition ordering", async () => {
+      const broker = getBroker();
       const topic = uniqueName("keyed");
-      await createTopic(ctx.broker, topic, 3);
+      await createTopic(broker, topic, 3);
 
-      const client = createKafkajsClient(ctx.broker);
-      const kt = new KafkaTopic<{ userId: string; seq: number }>({
-        kafka: client,
+      const kt = new KafkaTopic<{ seq: number }>({
+        kafka: makeClient(broker),
         topic,
         groupId: uniqueName("g"),
       });
 
-      await kt.publish({ userId: "u1", seq: 1 }, { key: "u1" });
-      await kt.publish({ userId: "u1", seq: 2 }, { key: "u1" });
-      await kt.publish({ userId: "u1", seq: 3 }, { key: "u1" });
+      await kt.publish({ seq: 1 }, { key: "u1" });
+      await kt.publish({ seq: 2 }, { key: "u1" });
+      await kt.publish({ seq: 3 }, { key: "u1" });
 
       const items = await kt
         .subscribeFrom({ offset: { type: "earliest" }, group: uniqueName("g") })
@@ -177,33 +80,103 @@ withKafka("Kafka integration", (ctx) => {
         .collect();
 
       expect(items.map((i) => i.seq)).toEqual([1, 2, 3]);
+      await kt.disconnect();
+    });
+  });
+}
 
+// ---------------------------------------------------------------------------
+// All tests under one Redpanda container
+// ---------------------------------------------------------------------------
+
+withKafka("Kafka integration", (ctx) => {
+  const getBroker = () => ctx.broker;
+
+  // -- Same tests, two different adapters --
+  adapterTests("kafkajs adapter (callback-based)", getBroker, createKafkajsClient);
+
+  // @platformatic/kafka adapter — requires Kafka API versions Redpanda doesn't fully support.
+  // The adapter code is correct (see adapters/stream-adapter.ts); enable when testing against
+  // a real Kafka broker: adapterTests("@platformatic/kafka", getBroker, createPlatformaticClient);
+  // adapterTests("@platformatic/kafka adapter (stream-based)", getBroker, createPlatformaticClient);
+
+  // -- OffsetTracker --
+  describe("OffsetTracker — contiguous commit tracking", () => {
+    it("only commits contiguous offsets", () => {
+      const tracker = new OffsetTracker();
+      tracker.complete(0, 2);
+      tracker.complete(0, 0);
+      expect(tracker.committable().get(0)).toBe(1);
+      tracker.complete(0, 1);
+      expect(tracker.committable().get(0)).toBe(3);
+    });
+  });
+
+  // -- commitBatchWithin --
+  describe("autoCommitBatchWithin — fs2-style batched commit pipe", () => {
+    it("acks are batched and flushed on stream end", async () => {
+      const topic = uniqueName("commit-batch");
+      await createTopic(ctx.broker, topic);
+
+      const kt = new KafkaTopic<{ v: number }>({
+        kafka: createKafkajsClient(ctx.broker),
+        topic,
+        groupId: uniqueName("g"),
+      });
+
+      for (let i = 0; i < 10; i++) await kt.publish({ v: i });
+
+      const values: number[] = [];
+
+      await kt
+        .subscribeAck({ group: uniqueName("g"), fromBeginning: true })
+        .take(10)
+        .mapAsync(async (env) => {
+          values.push(env.value.v);
+          return env;
+        })
+        .through(autoCommitBatchWithin(5, 1_000))
+        .drain();
+
+      expect(values.sort()).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+      await kt.disconnect();
+    });
+
+    it("parallel processing with batched commit", async () => {
+      const topic = uniqueName("commit-par");
+      await createTopic(ctx.broker, topic);
+
+      const kt = new KafkaTopic<{ v: number }>({
+        kafka: createKafkajsClient(ctx.broker),
+        topic,
+        groupId: uniqueName("g"),
+      });
+
+      for (let i = 0; i < 20; i++) await kt.publish({ v: i });
+
+      const values: number[] = [];
+
+      await kt
+        .subscribeAck({ group: uniqueName("g"), fromBeginning: true })
+        .take(20)
+        .parAsyncMap(5, async (env) => {
+          await new Promise((r) => setTimeout(r, Math.random() * 10));
+          values.push(env.value.v);
+          return env;
+        })
+        .through(autoCommitBatchWithin(10, 500))
+        .drain();
+
+      expect(values.sort((a, b) => a - b)).toEqual(
+        Array.from({ length: 20 }, (_, i) => i),
+      );
       await kt.disconnect();
     });
   });
 
-  // -- OffsetTracker --
-
-  describe("OffsetTracker — contiguous commit tracking", () => {
-    it("only commits contiguous offsets after parallel processing", async () => {
-      const tracker = new OffsetTracker();
-
-      tracker.complete(0, 2);
-      tracker.complete(0, 0);
-
-      const committable = tracker.committable();
-      expect(committable.get(0)).toBe(1);
-
-      tracker.complete(0, 1);
-      const committable2 = tracker.committable();
-      expect(committable2.get(0)).toBe(3);
-    });
-  });
-
   // -- Consumer groups --
-
   describe("Consumer groups — multiple consumers share partitions", () => {
-    it("two consumers in same group each get a subset of messages", async () => {
+    it("two consumers in same group share messages", async () => {
       const topic = uniqueName("cg");
       await createTopic(ctx.broker, topic, 2);
       const group = uniqueName("group");
@@ -243,4 +216,12 @@ withKafka("Kafka integration", (ctx) => {
       await kt2.disconnect();
     });
   });
+});
+
+// ---------------------------------------------------------------------------
+// @platformatic/kafka — runs against real Apache Kafka (slower, ~30s startup)
+// ---------------------------------------------------------------------------
+
+withApacheKafka("@platformatic/kafka adapter (Apache Kafka)", (ctx) => {
+  adapterTests("stream-based consume", () => ctx.broker, createPlatformaticClient);
 });

@@ -18,11 +18,13 @@ import { GenericContainer, Wait, type StartedTestContainer } from "testcontainer
 // Container configs
 // ---------------------------------------------------------------------------
 
-const KAFKA_IMAGE = "redpandadata/redpanda:v24.3.7";
+const REDPANDA_IMAGE = "redpandadata/redpanda:v24.3.7";
+const KAFKA_IMAGE = "apache/kafka:3.9.0";
 const REDIS_IMAGE = "redis:7-alpine";
 const POSTGRES_IMAGE = "postgres:17-alpine";
 
 const TIMEOUT = 180_000; // container startup timeout
+const KAFKA_TIMEOUT = 180_000; // Kafka (JVM) needs more time
 
 // ---------------------------------------------------------------------------
 // Context — what tests receive
@@ -82,6 +84,29 @@ async function startKafka(): Promise<{ container: StartedTestContainer; ctx: Kaf
   return { container, ctx: { broker: `localhost:${hostPort}` } };
 }
 
+async function startApacheKafka(): Promise<{ container: StartedTestContainer; ctx: KafkaCtx }> {
+  const hostPort = 19092 + Math.floor(Math.random() * 1000);
+
+  const container = await new GenericContainer(KAFKA_IMAGE)
+    .withExposedPorts({ container: 9092, host: hostPort })
+    .withEnvironment({
+      KAFKA_NODE_ID: "1",
+      KAFKA_PROCESS_ROLES: "broker,controller",
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093",
+      KAFKA_ADVERTISED_LISTENERS: `PLAINTEXT://localhost:${hostPort}`,
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@localhost:9093",
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER",
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT",
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1",
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0",
+    })
+    .withWaitStrategy(Wait.forLogMessage(/Kafka Server started/))
+    .withStartupTimeout(KAFKA_TIMEOUT)
+    .start();
+
+  return { container, ctx: { broker: `localhost:${hostPort}` } };
+}
+
 async function startRedis(): Promise<{ container: StartedTestContainer; ctx: RedisCtx }> {
   const container = await new GenericContainer(REDIS_IMAGE)
     .withExposedPorts(6379)
@@ -130,6 +155,25 @@ export function withKafka(name: string, fn: TestFn<KafkaCtx>) {
       container = result.container;
       Object.assign(ctx, result.ctx);
     }, TIMEOUT);
+
+    afterAll(async () => {
+      await container?.stop();
+    });
+
+    fn(ctx);
+  });
+}
+
+export function withApacheKafka(name: string, fn: TestFn<KafkaCtx>) {
+  describe(name, () => {
+    let container: StartedTestContainer;
+    const ctx: KafkaCtx = { broker: "" };
+
+    beforeAll(async () => {
+      const result = await startApacheKafka();
+      container = result.container;
+      Object.assign(ctx, result.ctx);
+    }, KAFKA_TIMEOUT);
 
     afterAll(async () => {
       await container?.stop();
