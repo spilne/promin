@@ -1,0 +1,268 @@
+import { it, expect } from "bun:test";
+import { Redis as IoRedis } from "ioredis";
+import { withRedis, uniqueName } from "./infra.ts";
+import { RedisStream, RedisPubSub, RedisStateBackend, RedisCacheStore } from "@promin/redis";
+
+// ---------------------------------------------------------------------------
+// RedisStream — durable consumer groups
+// ---------------------------------------------------------------------------
+
+withRedis("RedisStream — consumer group messaging", (ctx) => {
+  function redis() {
+    return new IoRedis(ctx.port, ctx.host);
+  }
+
+  it("publishes and consumes a message", async () => {
+    const r = redis();
+    const stream = new RedisStream<{ orderId: string }>({
+      redis: r,
+      stream: uniqueName("orders"),
+      group: "processors",
+    });
+
+    await stream.publish({ orderId: "o-1" });
+
+    const items = await stream.subscribe().take(1).collect();
+    expect(items).toEqual([{ orderId: "o-1" }]);
+
+    r.disconnect();
+  });
+
+  it("ack and nack work correctly", async () => {
+    const r = redis();
+    const name = uniqueName("ack-test");
+    const stream = new RedisStream<{ v: number }>({
+      redis: r,
+      stream: name,
+      group: "g1",
+    });
+
+    await stream.publish({ v: 1 });
+    await stream.publish({ v: 2 });
+
+    // Consume and ack both messages
+    const envelopes = await stream.subscribeAck().take(2).collect();
+    expect(envelopes).toHaveLength(2);
+    await envelopes[0]!.ack();
+    await envelopes[1]!.ack();
+
+    // Stream length should be 2 (messages still in stream, just acked)
+    const info = await stream.info();
+    expect(info.length).toBe(2);
+
+    r.disconnect();
+  });
+
+  it("multiple consumers in same group share messages", async () => {
+    const r1 = redis();
+    const r2 = redis();
+    const name = uniqueName("shared");
+
+    const s1 = new RedisStream<{ v: number }>({ redis: r1, stream: name, group: "shared" });
+    const s2 = new RedisStream<{ v: number }>({ redis: r2, stream: name, group: "shared" });
+
+    // Publish 10 messages
+    for (let i = 0; i < 10; i++) await s1.publish({ v: i });
+
+    const items1: number[] = [];
+    const items2: number[] = [];
+
+    // Two consumers race to consume
+    const p1 = s1.subscribe().take(5).forEach((m) => items1.push(m.v));
+    const p2 = s2.subscribe().take(5).forEach((m) => items2.push(m.v));
+
+    await Promise.all([p1, p2]);
+
+    // Together they should have consumed all 10
+    expect(items1.length + items2.length).toBe(10);
+
+    r1.disconnect();
+    r2.disconnect();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RedisPubSub — fire-and-forget broadcast
+// ---------------------------------------------------------------------------
+
+withRedis("RedisPubSub — broadcast messaging", (ctx) => {
+  function redis() {
+    return new IoRedis(ctx.port, ctx.host);
+  }
+
+  it("subscriber receives published messages", async () => {
+    const r = redis();
+    const channel = uniqueName("events");
+    const pubsub = new RedisPubSub<{ type: string }>({ redis: r, channel });
+
+    const received: string[] = [];
+    const sub = pubsub.subscribe().tap((e) => received.push(e.type));
+
+    // Start consuming in background
+    const drainPromise = sub.take(2).drain();
+
+    // Give subscriber time to connect
+    await new Promise((r) => setTimeout(r, 200));
+
+    await pubsub.publish({ type: "login" });
+    await pubsub.publish({ type: "logout" });
+
+    await drainPromise;
+    expect(received).toEqual(["login", "logout"]);
+
+    r.disconnect();
+  });
+
+  it("pattern subscribe receives from matching channels", async () => {
+    const r = redis();
+    const prefix = uniqueName("ns");
+    const pubsub = new RedisPubSub<{ v: number }>({ redis: r, pattern: `${prefix}.*` });
+
+    const received: number[] = [];
+    const drainPromise = pubsub
+      .subscribe()
+      .tap((e) => received.push(e.v))
+      .take(2)
+      .drain();
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Publish to different channels under the pattern
+    const pub = redis();
+    await pub.publish(`${prefix}.orders`, JSON.stringify({ v: 1 }));
+    await pub.publish(`${prefix}.users`, JSON.stringify({ v: 2 }));
+
+    await drainPromise;
+    expect(received).toEqual([1, 2]);
+
+    r.disconnect();
+    pub.disconnect();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RedisStateBackend — topology state checkpointing
+// ---------------------------------------------------------------------------
+
+withRedis("RedisStateBackend — checkpoint and restore", (ctx) => {
+  function redis() {
+    return new IoRedis(ctx.port, ctx.host);
+  }
+
+  it("put/get round-trips values", async () => {
+    const r = redis();
+    const state = new RedisStateBackend({ redis: r, prefix: uniqueName("state") + ":" });
+
+    await state.put("user:1", { name: "Alice", score: 42 });
+    const value = await state.get("user:1");
+
+    expect(value).toEqual({ name: "Alice", score: 42 });
+
+    r.disconnect();
+  });
+
+  it("checkpoint and restore preserves state across instances", async () => {
+    const r = redis();
+    const prefix = uniqueName("cp") + ":";
+
+    // Instance 1: write state and checkpoint
+    const s1 = new RedisStateBackend({ redis: r, prefix });
+    await s1.put("counter", 42);
+    await s1.put("name", "topology-1");
+    await s1.checkpoint({ name: "v1" });
+
+    // Clear live state (simulate crash)
+    await s1.clear();
+    expect(await s1.get("counter")).toBeUndefined();
+
+    // Instance 2: restore from checkpoint
+    const s2 = new RedisStateBackend({ redis: r, prefix });
+    await s2.restore({ name: "v1" });
+
+    expect(await s2.get("counter")).toBe(42);
+    expect(await s2.get("name")).toBe("topology-1");
+
+    r.disconnect();
+  });
+
+  it("keys and entries enumerate state", async () => {
+    const r = redis();
+    const state = new RedisStateBackend({ redis: r, prefix: uniqueName("enum") + ":" });
+
+    await state.put("a", 1);
+    await state.put("b", 2);
+    await state.put("c", 3);
+
+    const keys = await state.keys();
+    expect(keys.sort()).toEqual(["a", "b", "c"]);
+
+    const entries = await state.entries();
+    expect(entries.sort((a, b) => String(a[0]).localeCompare(String(b[0])))).toEqual([
+      ["a", 1],
+      ["b", 2],
+      ["c", 3],
+    ]);
+
+    r.disconnect();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RedisCacheStore — key-value cache with TTL
+// ---------------------------------------------------------------------------
+
+withRedis("RedisCacheStore — caching with TTL", (ctx) => {
+  function redis() {
+    return new IoRedis(ctx.port, ctx.host);
+  }
+
+  it("set and get within TTL", async () => {
+    const r = redis();
+    const cache = new RedisCacheStore<{ name: string }>({
+      redis: r,
+      ttlMs: 10_000,
+      prefix: uniqueName("cache") + ":",
+    });
+
+    await cache.set("user:1", { name: "Alice" });
+    const value = await cache.get("user:1");
+    expect(value).toEqual({ name: "Alice" });
+
+    r.disconnect();
+  });
+
+  it("expired keys return undefined", async () => {
+    const r = redis();
+    const cache = new RedisCacheStore<number>({
+      redis: r,
+      ttlMs: 50, // 50ms TTL
+      prefix: uniqueName("ttl") + ":",
+    });
+
+    await cache.set("key", 42);
+    expect(await cache.get("key")).toBe(42);
+
+    // Wait for expiry
+    await new Promise((r) => setTimeout(r, 100));
+    expect(await cache.get("key")).toBeUndefined();
+
+    r.disconnect();
+  });
+
+  it("delete removes a key", async () => {
+    const r = redis();
+    const cache = new RedisCacheStore<string>({
+      redis: r,
+      ttlMs: 10_000,
+      prefix: uniqueName("del") + ":",
+    });
+
+    await cache.set("x", "hello");
+    expect(await cache.has("x")).toBe(true);
+
+    await cache.delete("x");
+    expect(await cache.has("x")).toBe(false);
+
+    r.disconnect();
+  });
+});

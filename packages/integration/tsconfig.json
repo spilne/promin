@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "types": ["node", "@types/bun"],
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../core/tsconfig.lib.json" },
+    { "path": "../kafka/tsconfig.lib.json" },
+    { "path": "../redis/tsconfig.lib.json" },
+    { "path": "../postgres/tsconfig.lib.json" }
+  ]
+}

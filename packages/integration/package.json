@@ -1,0 +1,25 @@
+{
+  "name": "@promin/integration",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@promin/core": "workspace:*",
+    "@promin/kafka": "workspace:*",
+    "@promin/redis": "workspace:*",
+    "@promin/postgres": "workspace:*",
+    "ioredis": "^5.6.1",
+    "kafkajs": "^2.2.4",
+    "drizzle-orm": "^0.44.0",
+    "postgres": "^3.4.5"
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:",
+    "testcontainers": "^11.13.0"
+  },
+  "nx": {
+    "targets": {
+      "test": {}
+    }
+  }
+}
