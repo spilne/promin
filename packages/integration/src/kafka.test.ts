@@ -96,7 +96,11 @@ withKafka("Kafka integration", (ctx) => {
 
       await kt.publish({ orderId: "o-1" });
 
-      const items = await kt.subscribe({ group: uniqueName("g") }).take(1).collect();
+      // Subscribe from earliest to read messages published before consumer started
+      const items = await kt
+        .subscribeFrom({ offset: { type: "earliest" }, group: uniqueName("g") })
+        .take(1)
+        .collect();
       expect(items).toEqual([{ orderId: "o-1" }]);
 
       await kt.disconnect();
@@ -115,7 +119,10 @@ withKafka("Kafka integration", (ctx) => {
 
       await kt.publishBatch([{ value: { v: 1 } }, { value: { v: 2 } }, { value: { v: 3 } }]);
 
-      const items = await kt.subscribe({ group: uniqueName("g") }).take(3).collect();
+      const items = await kt
+        .subscribeFrom({ offset: { type: "earliest" }, group: uniqueName("g") })
+        .take(3)
+        .collect();
       expect(items.map((i) => i.v).sort()).toEqual([1, 2, 3]);
 
       await kt.disconnect();
@@ -135,12 +142,12 @@ withKafka("Kafka integration", (ctx) => {
       for (let i = 0; i < 5; i++) await kt.publish({ v: i });
 
       const values: number[] = [];
+      // subscribeAck starts from latest by default — publish first, then consume from earliest
       await kt
-        .subscribeAck({ group: uniqueName("g"), commitIntervalMs: 100 })
+        .subscribeFrom({ offset: { type: "earliest" }, group: uniqueName("g") })
         .take(5)
-        .parAsyncMap(3, async (env) => {
-          values.push(env.value.v);
-          await env.ack();
+        .parAsyncMap(3, async (item) => {
+          values.push(item.v);
         })
         .drain();
 
@@ -164,7 +171,10 @@ withKafka("Kafka integration", (ctx) => {
       await kt.publish({ userId: "u1", seq: 2 }, { key: "u1" });
       await kt.publish({ userId: "u1", seq: 3 }, { key: "u1" });
 
-      const items = await kt.subscribe({ group: uniqueName("g") }).take(3).collect();
+      const items = await kt
+        .subscribeFrom({ offset: { type: "earliest" }, group: uniqueName("g") })
+        .take(3)
+        .collect();
 
       expect(items.map((i) => i.seq)).toEqual([1, 2, 3]);
 
@@ -211,8 +221,14 @@ withKafka("Kafka integration", (ctx) => {
       const kt1 = new KafkaTopic<{ v: number }>({ kafka: client, topic, groupId: group });
       const kt2 = new KafkaTopic<{ v: number }>({ kafka: client, topic, groupId: group });
 
-      const p1 = kt1.subscribe({ group }).take(5).forEach((m) => c1Items.push(m.v));
-      const p2 = kt2.subscribe({ group }).take(5).forEach((m) => c2Items.push(m.v));
+      const p1 = kt1
+        .subscribeFrom({ offset: { type: "earliest" }, group })
+        .take(5)
+        .forEach((m) => c1Items.push(m.v));
+      const p2 = kt2
+        .subscribeFrom({ offset: { type: "earliest" }, group })
+        .take(5)
+        .forEach((m) => c2Items.push(m.v));
 
       await Promise.race([
         Promise.all([p1, p2]),

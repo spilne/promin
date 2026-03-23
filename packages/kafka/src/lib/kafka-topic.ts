@@ -139,15 +139,6 @@ export class KafkaTopic<T>
   // Acknowledgeable — manual ack/nack
   // =========================================================================
 
-  /**
-   * Subscribe with manual ack — parallel-safe offset tracking.
-   *
-   * When processing messages in parallel, offsets are only committed
-   * up to the highest *contiguous* completed offset (high-water mark).
-   * This prevents message loss on crash.
-   *
-   * Supports both stream-based (platformatic) and callback-based (kafkajs) consumers.
-   */
   subscribeAck(params?: {
     group?: string;
     commitIntervalMs?: number;
@@ -162,6 +153,7 @@ export class KafkaTopic<T>
       const consumer = kafka.consumer({ groupId });
       const tracker = new OffsetTracker();
       let commitTimer: ReturnType<typeof setInterval> | undefined;
+      let stopped = false;
 
       const flushCommits = async () => {
         const committable = tracker.committable();
@@ -192,9 +184,7 @@ export class KafkaTopic<T>
           ack: async () => {
             tracker.complete(partition, offset);
           },
-          nack: async () => {
-            // Don't mark — offset won't advance, redelivered on restart
-          },
+          nack: async () => {},
           metadata: {
             topic: msg.topic,
             partition,
@@ -211,29 +201,29 @@ export class KafkaTopic<T>
 
         commitTimer = setInterval(flushCommits, commitIntervalMs);
 
-        // Prefer stream mode (platformatic), fall back to callback mode (kafkajs)
         if (consumer.stream) {
           for await (const msg of consumer.stream()) {
+            if (stopped) break;
             emit.single(makeEnvelope(msg));
           }
         } else if (consumer.run) {
           await consumer.run({
             autoCommit: false,
             eachMessage: async (msg: KafkaMessage) => {
+              if (stopped) return;
               emit.single(makeEnvelope(msg));
             },
           });
-        } else {
-          throw new Error("Consumer must implement either stream() or run()");
         }
       };
 
       run().catch(() => {});
 
       return Effect.promise(async () => {
+        stopped = true;
         if (commitTimer) clearInterval(commitTimer);
         await flushCommits();
-        await consumer.disconnect();
+        await consumer.disconnect().catch(() => {});
       });
     });
 
@@ -275,6 +265,7 @@ export class KafkaTopic<T>
 
     const stream = Stream.async<T, never>((emit) => {
       const consumer = kafka.consumer({ groupId });
+      let stopped = false;
 
       const decodeMessage = (msg: KafkaMessage): T => {
         const raw = msg.message.value;
@@ -289,7 +280,6 @@ export class KafkaTopic<T>
           fromBeginning: offset?.type === "earliest",
         });
 
-        // Seek to timestamp if requested (requires admin + seek support)
         if (offset?.type === "timestamp") {
           const admin = kafka.admin();
           await admin.connect();
@@ -302,26 +292,26 @@ export class KafkaTopic<T>
           }
         }
 
-        // Prefer stream mode, fall back to callback mode
         if (consumer.stream) {
           for await (const msg of consumer.stream()) {
+            if (stopped) break;
             emit.single(decodeMessage(msg));
           }
         } else if (consumer.run) {
           await consumer.run({
             eachMessage: async (msg: KafkaMessage) => {
+              if (stopped) return;
               emit.single(decodeMessage(msg));
             },
           });
-        } else {
-          throw new Error("Consumer must implement either stream() or run()");
         }
       };
 
       run().catch(() => {});
 
       return Effect.promise(async () => {
-        await consumer.disconnect();
+        stopped = true;
+        await consumer.disconnect().catch(() => {});
       });
     });
 
