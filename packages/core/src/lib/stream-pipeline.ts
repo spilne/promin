@@ -834,10 +834,13 @@ export class StreamPipeline<T, E extends TaggedError> {
     );
   }
 
-  /** Process each item. Returns a Promise that resolves when the stream ends. */
-  async forEach(fn: (value: T) => void): Promise<void> {
+  /** Process each item (sync or async). Returns a Promise that resolves when the stream ends. */
+  async forEach(fn: (value: T) => unknown): Promise<void> {
     await Effect.runPromise(
-      Stream.runForEach(this.stream, (value) => Effect.sync(() => fn(value))),
+      Stream.runForEach(this.stream, (value) => {
+        const result = fn(value);
+        return result instanceof Promise ? Effect.promise(() => result) : Effect.sync(() => result);
+      }),
     );
   }
 

@@ -287,6 +287,17 @@ describe("StreamPipeline", () => {
       expect(collected).toEqual([1, 2, 3]);
     });
 
+    it("forEach awaits async callbacks sequentially", async () => {
+      const order: string[] = [];
+      await StreamPipeline.fromIterable([1, 2, 3]).forEach(async (n) => {
+        order.push(`start-${n}`);
+        await new Promise((r) => setTimeout(r, 10));
+        order.push(`end-${n}`);
+      });
+      // Sequential: each callback must complete before the next starts
+      expect(order).toEqual(["start-1", "end-1", "start-2", "end-2", "start-3", "end-3"]);
+    });
+
     it("collect gathers all items", async () => {
       const items = await StreamPipeline.fromIterable([1, 2, 3]).collect();
       expect(items).toEqual([1, 2, 3]);

@@ -115,7 +115,7 @@ withAll("E2E: Kafka source → process with ack → Redis state", (ctx) => {
     const results: { userId: string; total: number }[] = [];
 
     await kt
-      .subscribeAck({ group, commitIntervalMs: 100 })
+      .subscribeAck({ group, commitIntervalMs: 100, fromBeginning: true })
       .take(5)
       .forEach(async (env) => {
         const { userId, amount } = env.value;
@@ -129,9 +129,14 @@ withAll("E2E: Kafka source → process with ack → Redis state", (ctx) => {
     // Checkpoint
     await state.checkpoint({ name: "after-batch" });
 
-    // Verify state
-    expect(await state.get("total:u1")).toBe(550); // 100 + 150 + 300
-    expect(await state.get("total:u2")).toBe(250); // 200 + 50
+    // Verify all 5 messages were processed
+    expect(results).toHaveLength(5);
+
+    // Verify final state — sum of all amounts per user
+    const u1Total = (await state.get("total:u1")) as number;
+    const u2Total = (await state.get("total:u2")) as number;
+    expect(u1Total).toBe(550); // 100 + 150 + 300
+    expect(u2Total).toBe(250); // 200 + 50
 
     // Simulate restart: clear live state, restore from checkpoint
     await state.clear();

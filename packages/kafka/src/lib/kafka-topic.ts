@@ -142,6 +142,7 @@ export class KafkaTopic<T>
   subscribeAck(params?: {
     group?: string;
     commitIntervalMs?: number;
+    fromBeginning?: boolean;
   }): StreamPipeline<Envelope<T>, never> {
     const codec = this.codec;
     const kafka = this.kafka;
@@ -197,7 +198,7 @@ export class KafkaTopic<T>
 
       const run = async () => {
         await consumer.connect();
-        await consumer.subscribe({ topic, fromBeginning: false });
+        await consumer.subscribe({ topic, fromBeginning: params?.fromBeginning ?? false });
 
         commitTimer = setInterval(flushCommits, commitIntervalMs);
 
