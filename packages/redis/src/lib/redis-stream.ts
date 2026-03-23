@@ -6,7 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { Effect, Stream } from "effect";
-import type { Redis } from "ioredis";
+import type { RedisClient } from "./redis-client.ts";
 import { StreamPipeline, JsonCodec } from "@promin/core";
 import type {
   Streamable,
@@ -18,8 +18,8 @@ import type {
 } from "@promin/core";
 
 export interface RedisStreamConfig<T> {
-  /** ioredis client instance. */
-  redis: Redis;
+  /** Redis client instance (ioredis, node-redis, Bun.RedisClient, etc.). */
+  redis: RedisClient;
   /** Stream key name. */
   stream: string;
   /** Consumer group name. */
@@ -38,7 +38,7 @@ export class RedisStream<T>
   implements Streamable<T>, Sinkable<T>, KeyedSinkable<T>, Acknowledgeable<T>
 {
   readonly codec: Codec<T>;
-  private readonly redis: Redis;
+  private readonly redis: RedisClient;
   private readonly stream: string;
   private readonly group: string;
   private readonly consumer: string;

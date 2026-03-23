@@ -2,12 +2,12 @@
 // RedisCacheStore — CacheStore backed by Redis with TTL
 // ---------------------------------------------------------------------------
 
-import type { Redis } from "ioredis";
+import type { RedisClient } from "./redis-client.ts";
 import type { CacheStore } from "@promin/core";
 
 export interface RedisCacheStoreConfig {
-  /** ioredis client instance. */
-  redis: Redis;
+  /** Redis client instance. */
+  redis: RedisClient;
   /** Key prefix to avoid collisions. Default: "cache:". */
   prefix?: string;
   /** Default TTL in ms. */
@@ -15,7 +15,7 @@ export interface RedisCacheStoreConfig {
 }
 
 export class RedisCacheStore<V> implements CacheStore<string, V> {
-  private readonly redis: Redis;
+  private readonly redis: RedisClient;
   private readonly prefix: string;
   private readonly ttlMs: number;
 

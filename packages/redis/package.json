@@ -14,11 +14,17 @@
     "./package.json": "./package.json"
   },
   "dependencies": {
-    "@promin/core": "workspace:*",
-    "ioredis": "^5.6.1"
+    "@promin/core": "workspace:*"
+  },
+  "peerDependencies": {
+    "ioredis": ">=5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "ioredis": { "optional": true }
   },
   "devDependencies": {
-    "@types/bun": "catalog:"
+    "@types/bun": "catalog:",
+    "ioredis": "^5.6.1"
   },
   "nx": {
     "targets": {

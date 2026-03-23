@@ -6,18 +6,18 @@
 // Restore loads from the checkpoint hash back into the live hash.
 // ---------------------------------------------------------------------------
 
-import type { Redis } from "ioredis";
+import type { RedisClient } from "./redis-client.ts";
 import type { StateBackend } from "@promin/core";
 
 export interface RedisStateBackendConfig {
-  /** ioredis client instance. */
-  redis: Redis;
+  /** Redis client instance. */
+  redis: RedisClient;
   /** Key prefix for the state hash. Default: "state:". */
   prefix?: string;
 }
 
 export class RedisStateBackend implements StateBackend<string, unknown> {
-  private readonly redis: Redis;
+  private readonly redis: RedisClient;
   private readonly prefix: string;
 
   constructor(config: RedisStateBackendConfig) {

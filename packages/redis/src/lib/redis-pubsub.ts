@@ -9,13 +9,13 @@
 // ---------------------------------------------------------------------------
 
 import { Effect, Stream } from "effect";
-import type { Redis } from "ioredis";
+import type { RedisClient } from "./redis-client.ts";
 import { StreamPipeline, JsonCodec } from "@promin/core";
 import type { Streamable, Sinkable, Codec } from "@promin/core";
 
 export interface RedisPubSubConfig<T> {
-  /** ioredis client instance for publishing. */
-  redis: Redis;
+  /** Redis client instance. */
+  redis: RedisClient;
   /** Exact channel name. Mutually exclusive with `pattern`. */
   channel?: string;
   /** Pattern for PSUBSCRIBE (e.g., "user-*", "events.*"). Mutually exclusive with `channel`. */
@@ -26,7 +26,7 @@ export interface RedisPubSubConfig<T> {
 
 export class RedisPubSub<T> implements Streamable<T>, Sinkable<T> {
   readonly codec: Codec<T>;
-  private readonly redis: Redis;
+  private readonly redis: RedisClient;
   private readonly channel?: string;
   private readonly pattern?: string;
 
