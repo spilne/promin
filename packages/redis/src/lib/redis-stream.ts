@@ -193,7 +193,7 @@ export class RedisStream<T>
       ...ids,
     );
 
-    return claimed.map((entry: any) => {
+    return (claimed as any[]).map((entry: any) => {
       const [id, fields] = entry;
       const dataIdx = fields.indexOf("data");
       const raw = dataIdx !== -1 ? fields[dataIdx + 1] : "null";

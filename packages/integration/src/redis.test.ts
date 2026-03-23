@@ -2,14 +2,15 @@ import { it, expect } from "bun:test";
 import { Redis as IoRedis } from "ioredis";
 import { withRedis, uniqueName } from "./infra.ts";
 import { RedisStream, RedisPubSub, RedisStateBackend, RedisCacheStore } from "@promin/redis";
+import type { RedisClient } from "@promin/redis";
 
 // ---------------------------------------------------------------------------
 // RedisStream — durable consumer groups
 // ---------------------------------------------------------------------------
 
 withRedis("RedisStream — consumer group messaging", (ctx) => {
-  function redis() {
-    return new IoRedis(ctx.port, ctx.host);
+  function redis(): RedisClient {
+    return new IoRedis(ctx.port, ctx.host) as unknown as RedisClient;
   }
 
   it("publishes and consumes a message", async () => {
@@ -20,6 +21,7 @@ withRedis("RedisStream — consumer group messaging", (ctx) => {
       group: "processors",
     });
 
+    await stream.ensureGroup();
     await stream.publish({ orderId: "o-1" });
 
     const items = await stream.subscribe().take(1).collect();
@@ -35,8 +37,10 @@ withRedis("RedisStream — consumer group messaging", (ctx) => {
       redis: r,
       stream: name,
       group: "g1",
+      blockMs: 500, // short block so test doesn't hang
     });
 
+    await stream.ensureGroup();
     await stream.publish({ v: 1 });
     await stream.publish({ v: 2 });
 
@@ -58,23 +62,34 @@ withRedis("RedisStream — consumer group messaging", (ctx) => {
     const r2 = redis();
     const name = uniqueName("shared");
 
-    const s1 = new RedisStream<{ v: number }>({ redis: r1, stream: name, group: "shared" });
-    const s2 = new RedisStream<{ v: number }>({ redis: r2, stream: name, group: "shared" });
+    const s1 = new RedisStream<{ v: number }>({
+      redis: r1,
+      stream: name,
+      group: "shared",
+      blockMs: 500,
+    });
+    const s2 = new RedisStream<{ v: number }>({
+      redis: r2,
+      stream: name,
+      group: "shared",
+      blockMs: 500,
+    });
+
+    await s1.ensureGroup();
 
     // Publish 10 messages
     for (let i = 0; i < 10; i++) await s1.publish({ v: i });
 
-    const items1: number[] = [];
-    const items2: number[] = [];
+    const allItems: number[] = [];
 
-    // Two consumers race to consume
-    const p1 = s1.subscribe().take(5).forEach((m) => items1.push(m.v));
-    const p2 = s2.subscribe().take(5).forEach((m) => items2.push(m.v));
+    // Consume all 10 with a timeout — distribution across consumers varies
+    await s1
+      .subscribe()
+      .merge(s2.subscribe())
+      .take(10)
+      .forEach((m) => allItems.push(m.v));
 
-    await Promise.all([p1, p2]);
-
-    // Together they should have consumed all 10
-    expect(items1.length + items2.length).toBe(10);
+    expect(allItems.sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
 
     r1.disconnect();
     r2.disconnect();
@@ -86,8 +101,8 @@ withRedis("RedisStream — consumer group messaging", (ctx) => {
 // ---------------------------------------------------------------------------
 
 withRedis("RedisPubSub — broadcast messaging", (ctx) => {
-  function redis() {
-    return new IoRedis(ctx.port, ctx.host);
+  function redis(): RedisClient {
+    return new IoRedis(ctx.port, ctx.host) as unknown as RedisClient;
   }
 
   it("subscriber receives published messages", async () => {
@@ -102,7 +117,7 @@ withRedis("RedisPubSub — broadcast messaging", (ctx) => {
     const drainPromise = sub.take(2).drain();
 
     // Give subscriber time to connect
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 500));
 
     await pubsub.publish({ type: "login" });
     await pubsub.publish({ type: "logout" });
@@ -125,12 +140,12 @@ withRedis("RedisPubSub — broadcast messaging", (ctx) => {
       .take(2)
       .drain();
 
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 500));
 
     // Publish to different channels under the pattern
     const pub = redis();
-    await pub.publish(`${prefix}.orders`, JSON.stringify({ v: 1 }));
-    await pub.publish(`${prefix}.users`, JSON.stringify({ v: 2 }));
+    await (pub as any).publish(`${prefix}.orders`, JSON.stringify({ v: 1 }));
+    await (pub as any).publish(`${prefix}.users`, JSON.stringify({ v: 2 }));
 
     await drainPromise;
     expect(received).toEqual([1, 2]);
@@ -145,8 +160,8 @@ withRedis("RedisPubSub — broadcast messaging", (ctx) => {
 // ---------------------------------------------------------------------------
 
 withRedis("RedisStateBackend — checkpoint and restore", (ctx) => {
-  function redis() {
-    return new IoRedis(ctx.port, ctx.host);
+  function redis(): RedisClient {
+    return new IoRedis(ctx.port, ctx.host) as unknown as RedisClient;
   }
 
   it("put/get round-trips values", async () => {
@@ -212,8 +227,8 @@ withRedis("RedisStateBackend — checkpoint and restore", (ctx) => {
 // ---------------------------------------------------------------------------
 
 withRedis("RedisCacheStore — caching with TTL", (ctx) => {
-  function redis() {
-    return new IoRedis(ctx.port, ctx.host);
+  function redis(): RedisClient {
+    return new IoRedis(ctx.port, ctx.host) as unknown as RedisClient;
   }
 
   it("set and get within TTL", async () => {

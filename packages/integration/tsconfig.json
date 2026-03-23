@@ -7,9 +7,17 @@
   },
   "include": ["src/**/*.ts"],
   "references": [
-    { "path": "../core/tsconfig.lib.json" },
-    { "path": "../kafka/tsconfig.lib.json" },
-    { "path": "../redis/tsconfig.lib.json" },
-    { "path": "../postgres/tsconfig.lib.json" }
+    {
+      "path": "../postgres"
+    },
+    {
+      "path": "../redis"
+    },
+    {
+      "path": "../kafka"
+    },
+    {
+      "path": "../core"
+    }
   ]
 }

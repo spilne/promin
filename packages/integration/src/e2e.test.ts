@@ -6,7 +6,7 @@ import { Kafka } from "kafkajs";
 import { withAll, uniqueName } from "./infra.ts";
 import { KafkaTopic } from "@promin/kafka";
 import type { KafkaClient, KafkaConsumer, KafkaProducer, KafkaAdmin } from "@promin/kafka";
-import { RedisStateBackend, RedisCacheStore } from "@promin/redis";
+import { RedisStateBackend, RedisCacheStore, type RedisClient as RedisClientType } from "@promin/redis";
 import { PgStateBackend, PgStepQueue } from "@promin/postgres";
 import type { DrizzleDb } from "@promin/postgres";
 
@@ -88,7 +88,7 @@ withAll("E2E: Kafka source → process with ack → Redis state", (ctx) => {
     await createTopic(ctx.kafka.broker, topic);
 
     const client = kafkaClient(ctx.kafka.broker);
-    const redis = new IoRedis(ctx.redis.port, ctx.redis.host);
+    const redis = new IoRedis(ctx.redis.port, ctx.redis.host) as unknown as RedisClientType;
     const prefix = uniqueName("e2e") + ":";
 
     // Publish 5 orders
@@ -208,7 +208,7 @@ withAll("E2E: Postgres step queue — distributed task lifecycle", (ctx) => {
 
 withAll("E2E: Redis cache with Postgres state fallback", (ctx) => {
   it("cache hit avoids state backend lookup", async () => {
-    const redis = new IoRedis(ctx.redis.port, ctx.redis.host);
+    const redis = new IoRedis(ctx.redis.port, ctx.redis.host) as unknown as RedisClientType;
     const sql = postgres(ctx.postgres.url);
     const db = drizzle(sql) as DrizzleDb;
 

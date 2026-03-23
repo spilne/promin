@@ -71,7 +71,7 @@ export class PgStateBackend implements StateBackend<string, unknown> {
       sql.raw(`
       INSERT INTO ${this.table} (key, value, checkpoint)
       VALUES ('${this.esc(key)}', '${this.esc(jsonValue)}'::jsonb, 'live')
-      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+      ON CONFLICT (key, checkpoint) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
     `),
     );
   }

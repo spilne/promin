@@ -25,6 +25,9 @@
     },
     {
       "path": "./packages/redis"
+    },
+    {
+      "path": "./packages/integration"
     }
   ]
 }
