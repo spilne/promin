@@ -50,6 +50,13 @@ export {
   type MultipartOptions,
   type HttpMiddleware,
   type HttpRequestContext,
+  type HttpResponse,
+  type ResponseDecoder,
+  binaryDecoder,
+  textDecoder,
+  jsonDecoder,
+  arrayBufferDecoder,
+  blobDecoder,
 } from "./http-pipeline.ts";
 
 // @effect/platform transport

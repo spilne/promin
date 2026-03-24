@@ -1,7 +1,14 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { Either } from "effect";
 import { z } from "zod";
-import { DefaultHttpClient, HttpPipeline, PollTimeoutError } from "./index.ts";
+import {
+  DefaultHttpClient,
+  HttpPipeline,
+  PollTimeoutError,
+  textDecoder,
+  arrayBufferDecoder,
+  blobDecoder,
+} from "./index.ts";
 import { MockHttpClient } from "./testing.ts";
 
 // ---------------------------------------------------------------------------
@@ -582,6 +589,20 @@ beforeAll(() => {
       const url = new URL(req.url);
       if (url.pathname === "/users/1") return Response.json({ id: 1, name: "Alice" });
       if (url.pathname === "/500") return new Response("server error", { status: 500 });
+      if (url.pathname === "/binary") {
+        const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]); // PNG header
+        return new Response(bytes, {
+          headers: {
+            "Content-Type": "application/octet-stream",
+            "Content-Length": String(bytes.length),
+          },
+        });
+      }
+      if (url.pathname === "/large-text") {
+        return new Response("Hello ".repeat(1000), {
+          headers: { "Content-Type": "text/plain" },
+        });
+      }
       if (url.pathname === "/echo")
         return req
           .json()
@@ -723,5 +744,83 @@ describe("postMultipart", () => {
     const result = await api.postMultipart("/500", UserSchema, { file }).runSafe();
     expect(result.error).not.toBeNull();
     expect(result.error!._tag).toBe("HttpStatusError");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getResponse — typed binary/text/json downloads
+// ---------------------------------------------------------------------------
+
+describe("getResponse — download files with typed decoders", () => {
+  it("downloads binary as ReadableStream (default decoder)", async () => {
+    const api = realClient();
+    const response = await api.getResponse("/binary").runPromise();
+
+    expect(response.status).toBe(200);
+    expect(response.contentType).toBe("application/octet-stream");
+    expect(response.contentLength).toBe(8);
+    expect(response.body).toBeInstanceOf(ReadableStream);
+
+    // Read the stream
+    const reader = response.body.getReader();
+    const { value } = await reader.read();
+    expect(value![0]).toBe(0x89); // PNG header byte
+    reader.releaseLock();
+  });
+
+  it("downloads as ArrayBuffer for full file access", async () => {
+    const api = realClient();
+    const response = await api.getResponse("/binary", { decoder: arrayBufferDecoder }).runPromise();
+
+    expect(response.status).toBe(200);
+    expect(response.body).toBeInstanceOf(ArrayBuffer);
+    expect(response.body.byteLength).toBe(8);
+
+    const bytes = new Uint8Array(response.body);
+    expect(bytes[0]).toBe(0x89);
+  });
+
+  it("downloads as text with textDecoder", async () => {
+    const api = realClient();
+    const response = await api.getResponse("/large-text", { decoder: textDecoder }).runPromise();
+
+    expect(response.status).toBe(200);
+    expect(response.contentType).toBe("text/plain");
+    expect(response.body).toBe("Hello ".repeat(1000));
+  });
+
+  it("downloads as Blob for file uploads", async () => {
+    const api = realClient();
+    const response = await api.getResponse("/binary", { decoder: blobDecoder }).runPromise();
+
+    expect(response.status).toBe(200);
+    expect(response.body).toBeInstanceOf(Blob);
+    expect(response.body.size).toBe(8);
+  });
+
+  it("returns HttpStatusError on non-OK status", async () => {
+    const api = realClient();
+    const result = await api.getResponse("/500").runSafe();
+    expect(result.error).not.toBeNull();
+    expect(result.error!._tag).toBe("HttpStatusError");
+  });
+
+  it("can chain with map to transform response", async () => {
+    const api = realClient();
+    const size = await api
+      .getResponse("/binary", { decoder: arrayBufferDecoder })
+      .map((r) => r.body.byteLength)
+      .runPromise();
+
+    expect(size).toBe(8);
+  });
+
+  it("works with MockHttpClient", async () => {
+    const mock = new MockHttpClient().on("GET", "/file.bin", { data: "mock-binary" });
+
+    const response = await mock.getResponse("/file.bin").runPromise();
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ data: "mock-binary" });
+    expect(mock.calledWith("GET", "/file.bin")).toBe(true);
   });
 });

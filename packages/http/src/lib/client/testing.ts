@@ -8,7 +8,13 @@ import type {
   RequestOptions,
   RequestBodyOptions,
 } from "./http-pipeline.ts";
-import { AbstractHttpClient, HttpPipeline, createHttpPipeline } from "./http-pipeline.ts";
+import {
+  AbstractHttpClient,
+  HttpPipeline,
+  createHttpPipeline,
+  type HttpResponse,
+  type ResponseDecoder,
+} from "./http-pipeline.ts";
 import { HttpStreamPipeline, type SSEvent } from "./http-stream.ts";
 
 // ---------------------------------------------------------------------------
@@ -233,6 +239,29 @@ export class MockHttpClient extends AbstractHttpClient {
         const raw = entry ? this.resolveEntry(entry, call) : this.defaultResponse;
         if (this.isHttpClientError(raw)) return Effect.fail(raw);
         return this.parseResponse<T>(raw, params.schema, path);
+      }),
+    );
+  }
+
+  getResponse<T = ReadableStream<Uint8Array>>(
+    path: string | URL,
+    _options?: RequestOptions & { decoder?: ResponseDecoder<T> },
+  ): Pipeline<HttpResponse<T>, HttpClientError> {
+    return createHttpPipeline(
+      Effect.suspend(() => {
+        const p = typeof path === "string" ? path : path.toString();
+        this.calls.push({ method: "GET", path: p });
+        const entry = this.findRoute("GET", p);
+        const raw = entry
+          ? this.resolveEntry(entry, { method: "GET", path: p })
+          : this.defaultResponse;
+        if (this.isHttpClientError(raw)) return Effect.fail(raw);
+        return Effect.succeed({
+          status: 200,
+          contentType: "application/octet-stream",
+          contentLength: null,
+          body: raw as T,
+        });
       }),
     );
   }

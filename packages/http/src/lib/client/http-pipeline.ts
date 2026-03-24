@@ -1,6 +1,7 @@
 import { Effect } from "effect";
 import { Pipeline, type PipelineDefaults } from "@promin/core";
 import type { HttpClientError, ResponseParser } from "./http-client-error.ts";
+import { HttpNetworkError, HttpTimeoutError, HttpStatusError } from "./http-client-error.ts";
 import {
   httpRequest,
   httpRequestText,
@@ -14,6 +15,52 @@ import {
   HttpStreamPipeline,
   type SSEvent,
 } from "./http-stream.ts";
+
+// ---------------------------------------------------------------------------
+// HttpResponse — typed response with metadata
+// ---------------------------------------------------------------------------
+
+/**
+ * HTTP response with typed body.
+ *
+ * The body type `T` depends on the decoder: `ReadableStream<Uint8Array>` for
+ * binary, `string` for text, parsed objects for JSON, etc.
+ */
+export interface HttpResponse<T> {
+  readonly status: number;
+  readonly contentType: string | null;
+  readonly contentLength: number | null;
+  readonly body: T;
+}
+
+// ---------------------------------------------------------------------------
+// ResponseDecoder — pluggable body decoding
+// ---------------------------------------------------------------------------
+
+/**
+ * Decodes a raw fetch Response body into type `T`.
+ *
+ * Built-in decoders: `binaryDecoder`, `textDecoder`, `jsonDecoder`.
+ * Create custom decoders for protobuf, msgpack, etc.
+ */
+export type ResponseDecoder<T> = (response: Response) => Promise<T>;
+
+/** Returns the raw body stream — no buffering, no copying. */
+export const binaryDecoder: ResponseDecoder<ReadableStream<Uint8Array>> = async (response) =>
+  response.body!;
+
+/** Reads the full body as a UTF-8 string. */
+export const textDecoder: ResponseDecoder<string> = (response) => response.text();
+
+/** Reads the full body as parsed JSON (unknown). */
+export const jsonDecoder: ResponseDecoder<unknown> = (response) => response.json();
+
+/** Returns the full body as an ArrayBuffer — for binary files. */
+export const arrayBufferDecoder: ResponseDecoder<ArrayBuffer> = (response) =>
+  response.arrayBuffer();
+
+/** Returns the full body as a Blob. */
+export const blobDecoder: ResponseDecoder<Blob> = (response) => response.blob();
 
 // ---------------------------------------------------------------------------
 // HTTP pipeline defaults — retry only transient HTTP errors
@@ -199,6 +246,29 @@ export interface HttpClient {
   getJson(path: string | URL, options?: RequestOptions): Pipeline<unknown, HttpClientError>;
   postJson(path: string | URL, options?: RequestBodyOptions): Pipeline<unknown, HttpClientError>;
   getText(path: string | URL, options?: RequestOptions): Pipeline<string, HttpClientError>;
+  /**
+   * Fetch a response with a typed body via decoder. Defaults to binary stream.
+   *
+   * @example
+   * ```ts
+   * // Download a file as binary stream (default)
+   * const { body, contentLength } = await client.getResponse("/file.zip").runPromise();
+   *
+   * // Download as ArrayBuffer
+   * const { body } = await client
+   *   .getResponse("/file.zip", { decoder: arrayBufferDecoder })
+   *   .runPromise();
+   *
+   * // Download as text
+   * const { body } = await client
+   *   .getResponse("/page.html", { decoder: textDecoder })
+   *   .runPromise();
+   * ```
+   */
+  getResponse<T = ReadableStream<Uint8Array>>(
+    path: string | URL,
+    options?: RequestOptions & { decoder?: ResponseDecoder<T> },
+  ): Pipeline<HttpResponse<T>, HttpClientError>;
   getStream(path: string | URL, options?: RequestOptions): HttpStreamPipeline<string>;
   postStream(path: string | URL, options?: RequestBodyOptions): HttpStreamPipeline<string>;
   getSSE(path: string | URL, options?: RequestOptions): HttpStreamPipeline<SSEvent>;
@@ -367,6 +437,10 @@ export abstract class AbstractHttpClient implements HttpClient {
   }
 
   abstract getText(path: string | URL, options?: RequestOptions): Pipeline<string, HttpClientError>;
+  abstract getResponse<T = ReadableStream<Uint8Array>>(
+    path: string | URL,
+    options?: RequestOptions & { decoder?: ResponseDecoder<T> },
+  ): Pipeline<HttpResponse<T>, HttpClientError>;
   abstract getStream(path: string | URL, options?: RequestOptions): HttpStreamPipeline<string>;
   abstract postStream(path: string | URL, options?: RequestBodyOptions): HttpStreamPipeline<string>;
   abstract getSSE(path: string | URL, options?: RequestOptions): HttpStreamPipeline<SSEvent>;
@@ -492,6 +566,87 @@ export class DefaultHttpClient extends AbstractHttpClient {
       }),
       { method: "GET", url, tag: options?.tag },
     );
+  }
+
+  getResponse<T = ReadableStream<Uint8Array>>(
+    path: string | URL,
+    options?: RequestOptions & { decoder?: ResponseDecoder<T> },
+  ): Pipeline<HttpResponse<T>, HttpClientError> {
+    const url = this.resolveUrl(path);
+    const timeoutMs = options?.timeoutMs ?? this.config.timeoutMs ?? 30_000;
+    const decoder = (options?.decoder ?? binaryDecoder) as ResponseDecoder<T>;
+
+    const fetchOptions: RequestInit & { proxy?: string; tls?: { ca?: string } } = {
+      method: "GET",
+      headers: this.mergeHeaders(options?.headers),
+      signal: AbortSignal.timeout(timeoutMs),
+    };
+    if (this.config.proxy) {
+      fetchOptions.proxy = this.config.proxy.url;
+      if (this.config.proxy.ca) fetchOptions.tls = { ca: this.config.proxy.ca };
+    }
+
+    const effect: Effect.Effect<HttpResponse<T>, HttpClientError> = Effect.tryPromise({
+      try: () => fetch(url, fetchOptions),
+      catch: (error): HttpClientError => {
+        if (error instanceof DOMException && error.name === "TimeoutError") {
+          return new HttpTimeoutError({
+            url,
+            timeoutMs,
+            message: `Request to ${url} timed out after ${timeoutMs}ms`,
+          });
+        }
+        return new HttpNetworkError({
+          url,
+          cause: error,
+          message: `Fetch to ${url} failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      },
+    }).pipe(
+      Effect.flatMap((response) => {
+        if (response.status >= 200 && response.status < 300) {
+          return Effect.tryPromise({
+            try: async (): Promise<HttpResponse<T>> => ({
+              status: response.status,
+              body: await decoder(response),
+              contentType: response.headers.get("content-type"),
+              contentLength: response.headers.has("content-length")
+                ? Number(response.headers.get("content-length"))
+                : null,
+            }),
+            catch: (cause): HttpClientError =>
+              new HttpNetworkError({
+                url,
+                cause,
+                message: `Failed to decode response from ${url}: ${cause instanceof Error ? cause.message : String(cause)}`,
+              }),
+          });
+        }
+        return Effect.tryPromise({
+          try: () => response.text().catch(() => ""),
+          catch: (): HttpClientError =>
+            new HttpStatusError({
+              url,
+              status: response.status,
+              body: "",
+              message: `GET ${url} returned ${response.status}`,
+            }),
+        }).pipe(
+          Effect.flatMap((body) =>
+            Effect.fail<HttpClientError>(
+              new HttpStatusError({
+                url,
+                status: response.status,
+                body,
+                message: `GET ${url} returned ${response.status}`,
+              }),
+            ),
+          ),
+        );
+      }),
+    ) as Effect.Effect<HttpResponse<T>, HttpClientError>;
+
+    return this.pipeline(effect, { method: "GET", url, tag: options?.tag });
   }
 
   // -------------------------------------------------------------------------
