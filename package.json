@@ -4,6 +4,9 @@
   "license": "MIT",
   "scripts": {
     "lci": "bunx nx affected -t ci --base=origin/main",
+    "test": "bun test packages/core packages/http packages/kafka packages/postgres",
+    "test:integration": "bun test packages/integration",
+    "test:all": "bun test packages/",
     "fmt": "bunx nx run-many -t format",
     "ff": "bun run fmt",
     "format": "bun run fmt",

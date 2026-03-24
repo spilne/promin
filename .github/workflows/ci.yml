@@ -10,7 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  # Fast: typecheck + lint + unit tests (no Docker needed)
+  unit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,4 +25,29 @@ jobs:
 
       - run: bun install --no-cache
 
-      - run: bunx nx run-many -t ci
+      - name: Typecheck
+        run: bunx nx run-many -t typecheck
+
+      - name: Lint
+        run: bunx nx run-many -t lint
+
+      - name: Unit tests
+        run: bun run test
+
+  # Slower: integration tests with testcontainers (Kafka, Redis, Postgres)
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          filter: tree:0
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - run: bun install --no-cache
+
+      - name: Integration tests
+        run: bun run test:integration
