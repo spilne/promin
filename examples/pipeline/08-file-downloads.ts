@@ -52,6 +52,160 @@ async function streamToDisk() {
 }
 
 // ---------------------------------------------------------------------------
+// Pattern 1b: Stream CSV → parse rows → DataFrame
+//
+// Business flow: Download a large CSV from an analytics API, parse it
+// row-by-row as a stream (no full file in memory), then load into a
+// DataFrame for aggregation and analysis. The CSV is never fully
+// buffered — rows flow through the pipeline as they arrive.
+// ---------------------------------------------------------------------------
+
+async function csvToDataFrame() {
+  const { body: stream } = await client
+    .getResponse("/exports/daily-transactions.csv")
+    .runPromise();
+
+  // Parse CSV stream into typed rows using StreamPipeline
+  const { StreamPipeline, DataFrame } = await import("@promin/core");
+
+  // Convert binary ReadableStream → text lines → parsed CSV rows
+  const rows = await StreamPipeline.fromAsyncIterable(
+    parseCSVStream(stream),
+    (err) => ({ _tag: "CSVParseError" as const, cause: err }),
+  )
+    // Skip header (already handled by parser)
+    // Filter out invalid rows as they stream through
+    .filter((row) => row.amount > 0)
+    // Collect into array for DataFrame
+    .collect();
+
+  // Build DataFrame from parsed rows — now we can query, aggregate, join
+  const df = DataFrame.fromArray(rows);
+
+  // Aggregate: revenue per region
+  const byRegion = await df
+    .groupBy(["region"])
+    .agg({ totalRevenue: { column: "amount", fn: "sum" } })
+    .execute();
+
+  console.log("Revenue by region:", byRegion);
+
+  // Filter high-value transactions
+  const highValue = await df
+    .filter((row) => row.amount > 10_000)
+    .sort("amount", "desc")
+    .limit(10)
+    .execute();
+
+  console.log("Top 10 high-value transactions:", highValue);
+
+  // Profile the dataset — column stats, null rates, distributions
+  const profile = await df.profile();
+  console.log("Dataset profile:", profile);
+}
+
+// ---------------------------------------------------------------------------
+// Pattern 1c: Stream CSV → process in StreamPipeline → sink to DB
+//
+// Business flow: A daily ETL job downloads transactions, enriches each
+// row with geo-IP data, and inserts into a database — all streaming,
+// no full file materialization. Backpressure ensures we don't overwhelm
+// the database with inserts.
+// ---------------------------------------------------------------------------
+
+async function csvStreamToDb() {
+  const { body: stream } = await client
+    .getResponse("/exports/daily-transactions.csv")
+    .runPromise();
+
+  const { StreamPipeline } = await import("@promin/core");
+
+  let inserted = 0;
+
+  await StreamPipeline.fromAsyncIterable(
+    parseCSVStream(stream),
+    (err) => ({ _tag: "CSVParseError" as const, cause: err }),
+  )
+    // Enrich with geo-IP lookup (parallel, bounded concurrency)
+    .parAsyncMap(10, async (row) => ({
+      ...row,
+      country: await geoIpLookup(row.ip),
+    }))
+    // Batch inserts for efficiency (100 rows or 1 second)
+    .groupWithin(100, 1_000)
+    // Insert batch into database
+    .mapAsync(async (batch) => {
+      await insertBatch(batch);
+      inserted += batch.length;
+      if (inserted % 1000 === 0) console.log(`Inserted ${inserted} rows...`);
+      return batch.length;
+    })
+    .drain();
+
+  console.log(`ETL complete: ${inserted} rows inserted`);
+}
+
+/** Parse a ReadableStream<Uint8Array> as CSV rows (async generator). */
+async function* parseCSVStream(
+  stream: ReadableStream<Uint8Array>,
+): AsyncGenerator<{ date: string; region: string; amount: number; ip: string }> {
+  const decoder = new TextDecoder();
+  const reader = stream.getReader();
+  let buffer = "";
+  let headers: string[] = [];
+  let isFirst = true;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop()!; // keep incomplete last line
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const values = line.split(",").map((v) => v.trim());
+
+      if (isFirst) {
+        headers = values;
+        isFirst = false;
+        continue;
+      }
+
+      const row: Record<string, string> = {};
+      headers.forEach((h, i) => (row[h] = values[i] ?? ""));
+
+      yield {
+        date: row.date ?? "",
+        region: row.region ?? "",
+        amount: Number(row.amount ?? 0),
+        ip: row.ip ?? "",
+      };
+    }
+  }
+
+  // Flush remaining buffer
+  if (buffer.trim() && headers.length > 0) {
+    const values = buffer.split(",").map((v) => v.trim());
+    const row: Record<string, string> = {};
+    headers.forEach((h, i) => (row[h] = values[i] ?? ""));
+    yield {
+      date: row.date ?? "",
+      region: row.region ?? "",
+      amount: Number(row.amount ?? 0),
+      ip: row.ip ?? "",
+    };
+  }
+}
+
+async function geoIpLookup(_ip: string): Promise<string> {
+  return "US";
+}
+
+async function insertBatch(_rows: unknown[]): Promise<void> {}
+
+// ---------------------------------------------------------------------------
 // Pattern 2: Restream binary between services — proxy pattern
 //
 // Business flow: A user uploads a profile photo. Our API downloads it
@@ -250,6 +404,8 @@ async function resizeImage(
 
 export {
   streamToDisk,
+  csvToDataFrame,
+  csvStreamToDb,
   restreamBetweenServices,
   downloadTransformUpload,
   guardedDownload,
