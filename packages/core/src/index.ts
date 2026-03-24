@@ -309,3 +309,15 @@ export {
   type BackpressureStats,
   type CompiledTopology,
 } from "./lib/stream-topology/index.ts";
+
+// Stream pipes — reusable through() transformations
+export {
+  utf8Decode,
+  lines,
+  csv,
+  jsonl,
+  jsonlAs,
+  parseAs,
+  parseAsLenient,
+  type CsvOptions,
+} from "./lib/stream-pipes.ts";
