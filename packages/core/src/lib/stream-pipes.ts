@@ -497,6 +497,50 @@ export function lengthPrefixed<T, E extends TaggedError>(
 }
 
 // ---------------------------------------------------------------------------
+// Base64 encode / decode
+// ---------------------------------------------------------------------------
+
+/**
+ * Encode binary chunks to base64 strings.
+ *
+ * @example
+ * ```ts
+ * binaryStream.through(base64Encode()) // StreamPipeline<string>
+ * ```
+ */
+export function base64Encode<E extends TaggedError>(): (
+  stream: StreamPipeline<Uint8Array, E>,
+) => StreamPipeline<string, E> {
+  return (stream) => {
+    const toBase64 =
+      typeof Buffer !== "undefined"
+        ? (buf: Uint8Array) => Buffer.from(buf).toString("base64")
+        : (buf: Uint8Array) => btoa(String.fromCharCode(...buf));
+    return stream.map(toBase64);
+  };
+}
+
+/**
+ * Decode base64 strings to binary chunks.
+ *
+ * @example
+ * ```ts
+ * base64Stream.through(base64Decode()) // StreamPipeline<Uint8Array>
+ * ```
+ */
+export function base64Decode<E extends TaggedError>(): (
+  stream: StreamPipeline<string, E>,
+) => StreamPipeline<Uint8Array, E> {
+  return (stream) => {
+    const fromBase64 =
+      typeof Buffer !== "undefined"
+        ? (s: string) => new Uint8Array(Buffer.from(s, "base64"))
+        : (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+    return stream.map(fromBase64);
+  };
+}
+
+// ---------------------------------------------------------------------------
 // CSV line parser — handles quoted fields with commas and newlines
 // ---------------------------------------------------------------------------
 

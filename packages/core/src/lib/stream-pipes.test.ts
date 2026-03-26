@@ -15,6 +15,8 @@ import {
   parseAsLenient,
   binaryDecode,
   lengthPrefixed,
+  base64Encode,
+  base64Decode,
 } from "./stream-pipes.ts";
 import { z } from "zod";
 
@@ -437,6 +439,36 @@ describe("lengthPrefixed — length-prefixed binary messages", () => {
       .collect();
 
     expect(result).toEqual(["hello"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// base64 encode / decode
+// ---------------------------------------------------------------------------
+
+describe("base64Encode / base64Decode — round-trip", () => {
+  it("encodes binary to base64 strings", async () => {
+    const data = new TextEncoder().encode("Hello World");
+    const result = await StreamPipeline.fromIterable([data]).through(base64Encode()).collect();
+
+    expect(result[0]).toBe(Buffer.from("Hello World").toString("base64"));
+  });
+
+  it("decodes base64 strings to binary", async () => {
+    const b64 = Buffer.from("Hello World").toString("base64");
+    const result = await StreamPipeline.fromIterable([b64]).through(base64Decode()).collect();
+
+    expect(new TextDecoder().decode(result[0])).toBe("Hello World");
+  });
+
+  it("round-trips: encode → decode preserves data", async () => {
+    const original = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]); // PNG header
+    const result = await StreamPipeline.fromIterable([original])
+      .through(base64Encode())
+      .through(base64Decode())
+      .collect();
+
+    expect(result[0]).toEqual(original);
   });
 });
 

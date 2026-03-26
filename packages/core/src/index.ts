@@ -326,6 +326,8 @@ export {
   parseAsLenient,
   binaryDecode,
   lengthPrefixed,
+  base64Encode,
+  base64Decode,
   type CsvOptions,
   type FixedWidthColumn,
   type XmlEvent,

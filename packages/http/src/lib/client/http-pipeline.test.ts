@@ -10,6 +10,7 @@ import {
   blobDecoder,
 } from "./index.ts";
 import { MockHttpClient } from "./testing.ts";
+import { StreamPipeline, utf8Decode, lines, csv, jsonlAs, parseAs, DataFrame } from "@promin/core";
 
 // ---------------------------------------------------------------------------
 // Schemas
@@ -603,6 +604,33 @@ beforeAll(() => {
           headers: { "Content-Type": "text/plain" },
         });
       }
+      if (url.pathname === "/data.csv") {
+        const csv = [
+          "date,region,amount,status",
+          "2025-01-01,US,100.50,completed",
+          "2025-01-02,EU,200.00,pending",
+          "2025-01-03,US,50.00,completed",
+          "2025-01-04,AP,-10.00,refunded",
+          "2025-01-05,EU,300.00,completed",
+        ].join("\n");
+        return new Response(csv, {
+          headers: {
+            "Content-Type": "text/csv",
+            "Content-Length": String(new TextEncoder().encode(csv).length),
+          },
+        });
+      }
+      if (url.pathname === "/events.jsonl") {
+        const jsonl = [
+          '{"type":"click","userId":"u1","ts":1000}',
+          '{"type":"view","userId":"u2","ts":2000}',
+          '{"type":"click","userId":"u1","ts":3000}',
+          '{"type":"purchase","userId":"u3","ts":4000}',
+        ].join("\n");
+        return new Response(jsonl, {
+          headers: { "Content-Type": "application/x-ndjson" },
+        });
+      }
       if (url.pathname === "/echo")
         return req
           .json()
@@ -822,5 +850,75 @@ describe("getResponse — download files with typed decoders", () => {
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ data: "mock-binary" });
     expect(mock.calledWith("GET", "/file.bin")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// End-to-end: HTTP download → stream pipes → DataFrame
+// ---------------------------------------------------------------------------
+
+describe("HTTP → stream pipes → DataFrame — full flow", () => {
+  it("downloads CSV, parses with pipes, loads into DataFrame", async () => {
+    const api = realClient();
+
+    const TransactionSchema = z.object({
+      date: z.string(),
+      region: z.string(),
+      amount: z.coerce.number(),
+      status: z.string(),
+    });
+
+    // HTTP download → binary stream → utf8 → lines → csv → typed
+    const rows = await api
+      .getResponse("/data.csv", { decoder: textDecoder })
+      .map((r) => r.body)
+      .runPromise()
+      .then((text) =>
+        StreamPipeline.fromIterable([text])
+          .through(lines())
+          .through(csv())
+          .through(parseAs(TransactionSchema))
+          .filter((t) => t.status === "completed" && t.amount > 0)
+          .collect(),
+      );
+
+    expect(rows).toHaveLength(3);
+    expect(rows.map((r) => r.region)).toEqual(["US", "US", "EU"]);
+
+    // Load into DataFrame for analytics
+    const df = DataFrame.fromArray(rows);
+    const grouped = await df.groupBy("region").agg({ amount: "sum" }).collect();
+
+    expect(grouped).toHaveLength(2);
+    const us = grouped.find((r: any) => r.region === "US");
+    const eu = grouped.find((r: any) => r.region === "EU");
+    expect(us.amount).toBe(150.5); // 100.50 + 50.00
+    expect(eu.amount).toBe(300);
+  });
+
+  it("downloads JSONL, parses with pipes, filters and collects", async () => {
+    const api = realClient();
+
+    const EventSchema = z.object({
+      type: z.string(),
+      userId: z.string(),
+      ts: z.number(),
+    });
+
+    const clicks = await api
+      .getResponse("/events.jsonl", { decoder: textDecoder })
+      .map((r) => r.body)
+      .runPromise()
+      .then((text) =>
+        StreamPipeline.fromIterable([text])
+          .through(lines())
+          .through(jsonlAs(EventSchema))
+          .filter((e) => e.type === "click")
+          .collect(),
+      );
+
+    expect(clicks).toHaveLength(2);
+    expect(clicks.every((c) => c.type === "click")).toBe(true);
+    expect(clicks.map((c) => c.userId)).toEqual(["u1", "u1"]);
   });
 });
