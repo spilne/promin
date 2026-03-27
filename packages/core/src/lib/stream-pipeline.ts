@@ -1,5 +1,6 @@
 import { Effect, Stream, Chunk, Duration, Schedule, Ref, Option } from "effect";
 import type { TaggedError, Pipeline } from "./pipeline.ts";
+import { OptimizedStreamPipeline } from "./optimized-stream-pipeline.ts";
 import type { PipelineRef } from "./ref.ts";
 import type {
   Streamable,
@@ -914,5 +915,23 @@ export class StreamPipeline<T, E extends TaggedError> {
   /** Escape hatch: get the raw Effect Stream for advanced composition. */
   toStream(): Stream.Stream<T, E> {
     return this.stream;
+  }
+
+  /**
+   * Switch to optimized mode — fuses adjacent pure operators (map, filter, filterMap, tap)
+   * into a single pass per element, eliminating per-operator Effect overhead.
+   *
+   * @example
+   * ```ts
+   * await StreamPipeline.fromIterable(data)
+   *   .optimized()
+   *   .map(transform)
+   *   .filter(isValid)
+   *   .map(enrich)
+   *   .collect(); // runs fused: 1 Effect call per element, not 3
+   * ```
+   */
+  optimized(): OptimizedStreamPipeline<T, E> {
+    return new OptimizedStreamPipeline(this.stream);
   }
 }
