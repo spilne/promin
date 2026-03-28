@@ -34,6 +34,26 @@ jobs:
       - name: Unit tests
         run: bun run test
 
+      - name: Benchmarks
+        run: bun run packages/core/src/lib/stream-pipeline.bench.ts 2>&1 | tee bench-output.txt
+
+      - name: Benchmark report
+        if: always()
+        run: |
+          # Strip ANSI codes and write to job summary
+          echo '## Benchmark Report' >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          sed 's/\x1b\[[0-9;]*m//g' bench-output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload benchmark artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: bench-output.txt
+
   # Slower: integration tests with testcontainers (Kafka, Redis, Postgres)
   integration:
     runs-on: ubuntu-latest

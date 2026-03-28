@@ -431,7 +431,7 @@ export class RawStream<T> {
       throw new Error("Cannot collectSync on an async source. Use collect() instead.");
     }
 
-    const source = this._source as Iterable<any>;
+    const source = this._source;
 
     if (this._ops.length === 0) {
       return Array.isArray(source) ? (source as T[]) : Array.from(source as Iterable<T>);
@@ -439,15 +439,34 @@ export class RawStream<T> {
 
     const fused = compile(this._ops);
     const hasFilter = this._ops.some((op) => op.tag === "filter" || op.tag === "filterMap");
-    const result: T[] = [];
 
+    // Fast path: array source → indexed for-loop (no iterator protocol overhead)
+    if (Array.isArray(source)) {
+      const len = source.length;
+      if (hasFilter) {
+        const result: T[] = [];
+        for (let i = 0; i < len; i++) {
+          const v = fused(source[i]);
+          if (v !== SKIP) result.push(v);
+        }
+        return result;
+      }
+      const result = new Array<T>(len);
+      for (let i = 0; i < len; i++) {
+        result[i] = fused(source[i]);
+      }
+      return result;
+    }
+
+    // Generic iterable path
+    const result: T[] = [];
     if (hasFilter) {
-      for (const item of source) {
+      for (const item of source as Iterable<any>) {
         const v = fused(item);
         if (v !== SKIP) result.push(v);
       }
     } else {
-      for (const item of source) {
+      for (const item of source as Iterable<any>) {
         result.push(fused(item));
       }
     }
@@ -469,6 +488,17 @@ export class RawStream<T> {
   forEach(fn: (value: T) => void): void {
     if (this._async) {
       throw new Error("Cannot forEach sync on an async source. Use forEachAsync() instead.");
+    }
+    if (Array.isArray(this._source) && this._ops.length > 0) {
+      const source = this._source;
+      const fused = compile(this._ops);
+      const hasFilter = this._ops.some((op) => op.tag === "filter" || op.tag === "filterMap");
+      for (let i = 0; i < source.length; i++) {
+        const v = fused(source[i]);
+        if (hasFilter && v === SKIP) continue;
+        fn(v);
+      }
+      return;
     }
     for (const item of this._collectIterable()) {
       fn(item);
@@ -494,6 +524,17 @@ export class RawStream<T> {
       throw new Error("Cannot reduce sync on an async source. Use reduceAsync() instead.");
     }
     let acc = initial;
+    if (Array.isArray(this._source) && this._ops.length > 0) {
+      const source = this._source;
+      const fused = compile(this._ops);
+      const hasFilter = this._ops.some((op) => op.tag === "filter" || op.tag === "filterMap");
+      for (let i = 0; i < source.length; i++) {
+        const v = fused(source[i]);
+        if (hasFilter && v === SKIP) continue;
+        acc = fn(acc, v);
+      }
+      return acc;
+    }
     for (const item of this._collectIterable()) {
       acc = fn(acc, item);
     }
@@ -519,6 +560,14 @@ export class RawStream<T> {
   drain(): void {
     if (this._async) {
       throw new Error("Cannot drain sync on an async source. Use drainAsync() instead.");
+    }
+    if (Array.isArray(this._source) && this._ops.length > 0) {
+      const source = this._source;
+      const fused = compile(this._ops);
+      for (let i = 0; i < source.length; i++) {
+        fused(source[i]);
+      }
+      return;
     }
     for (const _ of this._collectIterable()) {
       // consume
