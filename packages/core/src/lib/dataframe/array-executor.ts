@@ -10,6 +10,10 @@ export class ArrayExecutor implements DataFrameExecutor {
     return executePlan(plan) as T[];
   }
 
+  executeSync<T>(plan: LogicalPlan): T[] {
+    return executePlan(plan) as T[];
+  }
+
   supports(_plan: LogicalPlan): boolean {
     return true; // Array executor supports all operations
   }

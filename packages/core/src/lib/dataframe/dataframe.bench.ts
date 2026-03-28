@@ -33,8 +33,12 @@ for (const size of [1_000, 10_000, 100_000]) {
       return data.filter((r) => r.age > 35);
     });
 
-    bench("DataFrame.filter", async () => {
+    bench("DataFrame.filter (async)", async () => {
       return df.filter((r) => r.age > 35).collect();
+    });
+
+    bench("DataFrame.filter (sync)", () => {
+      return df.filter((r) => r.age > 35).collectSync();
     });
   });
 }
@@ -97,8 +101,12 @@ for (const size of [1_000, 10_000, 100_000]) {
       return [...groups.entries()].map(([region, revenue_sum]) => ({ region, revenue_sum }));
     });
 
-    bench("DataFrame.groupBy.agg", async () => {
+    bench("DataFrame.groupBy.agg (async)", async () => {
       return df.groupBy("region").agg({ revenue: "sum" }).collect();
+    });
+
+    bench("DataFrame.groupBy.agg (sync)", () => {
+      return df.groupBy("region").agg({ revenue: "sum" }).collectSync();
     });
   });
 }
@@ -151,8 +159,12 @@ for (const size of [1_000, 10_000, 100_000]) {
       });
     });
 
-    bench("DataFrame.distinctBy", async () => {
+    bench("DataFrame.distinctBy (async)", async () => {
       return df.distinctBy("region").collect();
+    });
+
+    bench("DataFrame.distinctBy (sync)", () => {
+      return df.distinctBy("region").collectSync();
     });
   });
 }

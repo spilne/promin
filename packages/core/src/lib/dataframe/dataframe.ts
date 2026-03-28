@@ -586,6 +586,18 @@ export class DataFrame<T> {
     return this._executor.execute<T>(this._plan);
   }
 
+  /**
+   * Synchronous collect — avoids async/Promise overhead.
+   * Only works with sync backends (ArrayExecutor). Throws if the executor
+   * doesn't support sync execution.
+   */
+  collectSync(): T[] {
+    if (!this._executor.executeSync) {
+      throw new Error("collectSync() requires a sync executor (e.g. ArrayExecutor)");
+    }
+    return this._executor.executeSync<T>(this._plan);
+  }
+
   async first(): Promise<T | null> {
     const rows = await this.limit(1).collect();
     return rows[0] ?? null;
