@@ -513,6 +513,38 @@ export class StreamPipeline<T, E extends TaggedError> {
     return new StreamPipeline(Stream.grouped(this.stream, size).pipe(Stream.map(Chunk.toArray)));
   }
 
+  /**
+   * Transform entire chunks at once for maximum throughput on hot paths.
+   * The function receives an array of items (one chunk, typically ~4096 elements)
+   * and returns a transformed array. Effect runtime cost is paid once per chunk.
+   *
+   * @example
+   * ```ts
+   * stream.mapChunks((batch) =>
+   *   batch.map(transform).filter(isValid)
+   * )
+   * ```
+   */
+  mapChunks<U>(fn: (chunk: T[]) => U[]): StreamPipeline<U, E> {
+    return new StreamPipeline(
+      Stream.mapChunks(this.stream, (chunk) => Chunk.unsafeFromArray(fn(Chunk.toArray(chunk)))),
+    );
+  }
+
+  /**
+   * Re-chunk the stream into chunks of exactly `size` elements (last chunk may be smaller).
+   * Useful for controlling throughput granularity — larger chunks amortize per-chunk overhead,
+   * smaller chunks reduce latency.
+   *
+   * @example
+   * ```ts
+   * stream.rechunk(10_000).mapChunks((batch) => processBatch(batch))
+   * ```
+   */
+  rechunk(size: number): StreamPipeline<T, E> {
+    return new StreamPipeline(Stream.rechunk(this.stream, size));
+  }
+
   /** Sliding window over stream items. Emits arrays of `size` elements. */
   sliding(size: number): StreamPipeline<T[], E> {
     return new StreamPipeline(Stream.sliding(this.stream, size).pipe(Stream.map(Chunk.toArray)));

@@ -360,6 +360,20 @@ export class OptimizedStreamPipeline<T, E extends TaggedError> {
     );
   }
 
+  mapChunks<U>(fn: (chunk: T[]) => U[]): OptimizedStreamPipeline<U, E> {
+    const base = this._flush();
+    return new OptimizedStreamPipeline(
+      Stream.mapChunks(base._baseStream, (chunk) =>
+        Chunk.unsafeFromArray(fn(Chunk.toArray(chunk))),
+      ),
+    );
+  }
+
+  rechunk(size: number): OptimizedStreamPipeline<T, E> {
+    const base = this._flush();
+    return new OptimizedStreamPipeline(Stream.rechunk(base._baseStream, size));
+  }
+
   sliding(size: number): OptimizedStreamPipeline<T[], E> {
     const base = this._flush();
     return new OptimizedStreamPipeline(
