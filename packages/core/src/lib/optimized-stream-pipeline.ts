@@ -1,4 +1,4 @@
-import { Effect, Stream, Chunk, Duration, Schedule, Ref, Option } from "effect";
+import { Effect, Stream, Chunk, Duration, Schedule, Ref } from "effect";
 import type { TaggedError } from "./pipeline.ts";
 import type { PipelineRef } from "./ref.ts";
 import type { Sinkable, KeyedSinkable } from "./typeclasses/streamable.ts";
@@ -94,13 +94,21 @@ export class OptimizedStreamPipeline<T, E extends TaggedError> {
     const fused = compile(this._ops);
     const hasFilter = this._ops.some((op) => op.tag === "filter" || op.tag === "filterMap");
 
-    if (hasFilter) {
-      return Stream.filterMap(this._baseStream, (value) => {
-        const result = fused(value);
-        return result === SKIP ? Option.none() : Option.some(result);
-      }) as Stream.Stream<T, E>;
-    }
-    return Stream.map(this._baseStream, fused) as Stream.Stream<T, E>;
+    // Use mapChunks for maximum throughput — processes entire chunks in a tight
+    // loop, paying the Effect runtime cost once per chunk (~4096 elements) instead
+    // of once per element.
+    return Stream.mapChunks(this._baseStream, (chunk) => {
+      if (hasFilter) {
+        const src = Chunk.toArray(chunk);
+        const result: any[] = [];
+        for (let i = 0; i < src.length; i++) {
+          const v = fused(src[i]);
+          if (v !== SKIP) result.push(v);
+        }
+        return Chunk.unsafeFromArray(result);
+      }
+      return Chunk.map(chunk, fused);
+    }) as Stream.Stream<T, E>;
   }
 
   private _flush(): OptimizedStreamPipeline<T, E> {
