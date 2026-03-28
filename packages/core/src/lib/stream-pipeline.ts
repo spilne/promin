@@ -918,8 +918,11 @@ export class StreamPipeline<T, E extends TaggedError> {
   }
 
   /**
-   * Switch to optimized mode — fuses adjacent pure operators (map, filter, filterMap, tap)
-   * into a single pass per element, eliminating per-operator Effect overhead.
+   * **Experimental** — Switch to optimized mode. Fuses adjacent pure operators
+   * (map, filter, filterMap, tap) into a single pass per element, eliminating
+   * per-operator Effect overhead.
+   *
+   * @experimental This API may change in future releases.
    *
    * @example
    * ```ts

@@ -2,6 +2,7 @@
 export { Pipeline, type TaggedError, type PipelineDefaults } from "./lib/pipeline.ts";
 export { StreamPipeline } from "./lib/stream-pipeline.ts";
 export { OptimizedStreamPipeline } from "./lib/optimized-stream-pipeline.ts";
+export { RawStream } from "./lib/raw-stream.ts";
 
 // Errors
 export { TimeoutError, PollTimeoutError, CircuitOpenError } from "./lib/pipeline-error.ts";

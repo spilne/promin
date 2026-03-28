@@ -1,6 +1,6 @@
 import { group, bench, run } from "mitata";
 import { StreamPipeline } from "./stream-pipeline.ts";
-import { OptimizedStreamPipeline } from "./optimized-stream-pipeline.ts";
+import { RawStream } from "./raw-stream.ts";
 import { Effect, Stream, Chunk } from "effect";
 
 // ---------------------------------------------------------------------------
@@ -172,6 +172,35 @@ group("map chain (100K elements)", () => {
       .map(mapFn)
       .collect();
   });
+
+  bench("RawStream — 1 map", () => {
+    return RawStream.fromArray(data).map(mapFn).collectSync();
+  });
+
+  bench("RawStream — 5 chained maps", () => {
+    return RawStream.fromArray(data)
+      .map(mapFn)
+      .map(mapFn)
+      .map(mapFn)
+      .map(mapFn)
+      .map(mapFn)
+      .collectSync();
+  });
+
+  bench("RawStream — 10 chained maps", () => {
+    return RawStream.fromArray(data)
+      .map(mapFn)
+      .map(mapFn)
+      .map(mapFn)
+      .map(mapFn)
+      .map(mapFn)
+      .map(mapFn)
+      .map(mapFn)
+      .map(mapFn)
+      .map(mapFn)
+      .map(mapFn)
+      .collectSync();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -247,6 +276,16 @@ group("filter chain (100K elements)", () => {
       .filter(filterFn)
       .collect();
   });
+
+  bench("RawStream — 5 chained filters", () => {
+    return RawStream.fromArray(data)
+      .filter(filterFn)
+      .filter(filterFn)
+      .filter(filterFn)
+      .filter(filterFn)
+      .filter(filterFn)
+      .collectSync();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -319,6 +358,16 @@ group("map + filter mixed (100K elements)", () => {
       .map(mapFn)
       .collect();
   });
+
+  bench("RawStream — map.filter.map.filter.map", () => {
+    return RawStream.fromArray(data)
+      .map(mapFn)
+      .filter(filterFn)
+      .map(mapFn)
+      .filter(filterFn)
+      .map(mapFn)
+      .collectSync();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -373,6 +422,16 @@ for (const size of [10_000, 100_000, 1_000_000]) {
         .map(mapFn)
         .map(mapFn)
         .collect();
+    });
+
+    bench("RawStream x5", () => {
+      return RawStream.fromArray(data)
+        .map(mapFn)
+        .map(mapFn)
+        .map(mapFn)
+        .map(mapFn)
+        .map(mapFn)
+        .collectSync();
     });
   });
 }
