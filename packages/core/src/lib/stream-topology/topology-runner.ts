@@ -10,6 +10,7 @@
 // Backpressure is applied via bounded buffers and rate limiting.
 // ---------------------------------------------------------------------------
 
+import { Stream, Chunk } from "effect";
 import { StreamPipeline } from "../stream-pipeline.ts";
 import type { Streamable, Acknowledgeable, Envelope, Sinkable } from "../typeclasses/streamable.ts";
 import type { StateBackend } from "../typeclasses/state-backend.ts";
@@ -276,13 +277,20 @@ class TopologyRunnerInstance {
   // -------------------------------------------------------------------------
 
   private compile(node: TopologyNode): StreamPipeline<unknown, never> {
+    // Collect adjacent pure ops (map/filter) and fuse them into a single mapChunks call.
+    const { pureOps, baseNode } = this.collectPureOps(node);
+    if (pureOps.length > 0) {
+      const base = this.compile(baseNode);
+      return this.applyFused(base, pureOps);
+    }
+
     switch (node.type) {
       case "source":
         return this.compileSource(node);
       case "map":
-        return this.compile(node.parent).map(node.fn);
       case "filter":
-        return this.compile(node.parent).filter(node.fn as (value: unknown) => boolean);
+        // Should not reach here — collectPureOps handles these
+        return this.compile(node.parent).map(node.fn);
       case "mapAsync":
         return this.compile(node.parent).parAsyncMap(node.concurrency, node.fn);
       case "keyBy":
@@ -300,6 +308,80 @@ class TopologyRunnerInstance {
       case "sink":
         return this.compile(node.parent);
     }
+  }
+
+  /**
+   * Walk backwards from a node collecting adjacent map/filter ops.
+   * Returns the ops in execution order (innermost parent first) and the
+   * base node where the pure chain ends.
+   */
+  private collectPureOps(node: TopologyNode): {
+    pureOps: Array<
+      { type: "map"; fn: (v: unknown) => unknown } | { type: "filter"; fn: (v: unknown) => boolean }
+    >;
+    baseNode: TopologyNode;
+  } {
+    const ops: Array<
+      { type: "map"; fn: (v: unknown) => unknown } | { type: "filter"; fn: (v: unknown) => boolean }
+    > = [];
+    let current = node;
+
+    while (current.type === "map" || current.type === "filter") {
+      if (current.type === "map") {
+        ops.push({ type: "map", fn: current.fn });
+      } else {
+        ops.push({ type: "filter", fn: current.fn as (v: unknown) => boolean });
+      }
+      current = current.parent;
+    }
+
+    // Ops are collected outermost-first, reverse for execution order
+    ops.reverse();
+    return { pureOps: ops, baseNode: current };
+  }
+
+  /** Apply fused pure ops as a single mapChunks call. */
+  private applyFused(
+    pipeline: StreamPipeline<unknown, never>,
+    ops: Array<
+      { type: "map"; fn: (v: unknown) => unknown } | { type: "filter"; fn: (v: unknown) => boolean }
+    >,
+  ): StreamPipeline<unknown, never> {
+    if (ops.length === 1) {
+      const op = ops[0]!;
+      return op.type === "map" ? pipeline.map(op.fn) : pipeline.filter(op.fn);
+    }
+
+    const SKIP = Symbol();
+    const hasFilter = ops.some((op) => op.type === "filter");
+
+    const fused = (value: unknown): unknown => {
+      let v = value;
+      for (let i = 0; i < ops.length; i++) {
+        const op = ops[i]!;
+        if (op.type === "map") {
+          v = op.fn(v);
+        } else {
+          if (!op.fn(v)) return SKIP;
+        }
+      }
+      return v;
+    };
+
+    return new StreamPipeline(
+      Stream.mapChunks(pipeline.stream, (chunk) => {
+        if (hasFilter) {
+          const src = Chunk.toArray(chunk);
+          const result: unknown[] = [];
+          for (let i = 0; i < src.length; i++) {
+            const v = fused(src[i]);
+            if (v !== SKIP) result.push(v);
+          }
+          return Chunk.unsafeFromArray(result);
+        }
+        return Chunk.map(chunk, fused);
+      }),
+    );
   }
 
   private compileSource(node: { source: unknown }): StreamPipeline<unknown, never> {
