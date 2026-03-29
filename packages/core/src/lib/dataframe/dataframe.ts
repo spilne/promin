@@ -10,6 +10,11 @@ import type { StreamPipeline } from "../stream-pipeline.ts";
 import type { LogicalPlan, WindowFn, AggFn, RollingFn } from "./logical-plan.ts";
 import type { FileSourceDescriptor } from "./file-source.ts";
 import type { DataFrameExecutor } from "./executor.ts";
+import { Expr } from "./expr.ts";
+
+function isExpr(value: unknown): value is Expr {
+  return value instanceof Expr;
+}
 import { ArrayExecutor } from "./array-executor.ts";
 import { GroupedDataFrame } from "./grouped-dataframe.ts";
 import { StringAccessor, DateAccessor } from "./accessors.ts";
@@ -138,16 +143,24 @@ export class DataFrame<T> {
     );
   }
 
-  withColumn<K extends string, V>(name: K, fn: (row: T) => V): DataFrame<T & Record<K, V>> {
-    return new DataFrame({ _tag: "WithColumn", input: this._plan, name, fn }, this._executor);
+  withColumn<K extends string, V>(
+    name: K,
+    fn: ((row: T) => V) | Expr,
+  ): DataFrame<T & Record<K, V>> {
+    const resolvedFn = isExpr(fn) ? fn.fn : fn;
+    return new DataFrame(
+      { _tag: "WithColumn", input: this._plan, name, fn: resolvedFn },
+      this._executor,
+    );
   }
 
   // =========================================================================
   // ROW OPERATIONS
   // =========================================================================
 
-  filter(fn: (row: T) => boolean): DataFrame<T> {
-    return new DataFrame({ _tag: "Filter", input: this._plan, fn }, this._executor);
+  filter(fn: ((row: T) => boolean) | Expr): DataFrame<T> {
+    const resolvedFn = isExpr(fn) ? fn.fn : fn;
+    return new DataFrame({ _tag: "Filter", input: this._plan, fn: resolvedFn }, this._executor);
   }
 
   map<U>(fn: (row: T) => U): DataFrame<U> {
