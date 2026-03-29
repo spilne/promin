@@ -10,6 +10,11 @@ type HasStream<T, E> = { readonly stream: Stream.Stream<T, E> };
 // Note: StreamPipeline import is deferred to avoid circular module initialization.
 // StreamPipeline imports us, so we lazy-import it only when needed at runtime.
 
+// TODO: This class is temporary. Once validated in production, merge fusion logic
+// directly into StreamPipeline's terminals (collect/forEach/drain) so optimization
+// happens by default — no .optimized() opt-in needed. Then delete this file.
+// See: docs/v1/plan/11-performance.md Phase R.2
+
 // ---------------------------------------------------------------------------
 // Fusion internals
 // ---------------------------------------------------------------------------
