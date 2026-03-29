@@ -24,6 +24,33 @@ import type {
 // StreamTopology — entry point (unkeyed stream)
 // ---------------------------------------------------------------------------
 
+/**
+ * Stateful stream processing with windows, joins, and automatic checkpointing.
+ *
+ * Build a declarative processing DAG from a message source (Kafka, etc.),
+ * apply transformations, partition by key, window, aggregate, and sink results.
+ * State is checkpointed periodically and restored on crash/rebalance.
+ *
+ * Runs in a single process — Kafka consumer groups handle partition assignment
+ * across instances. Use {@link TopologyRunner.run} to execute.
+ *
+ * @example
+ * ```ts
+ * const topology = StreamTopology.source(kafkaClickEvents)
+ *   .filter(e => e.type !== "bot")
+ *   .keyBy(e => e.userId)
+ *   .tumbling(60_000)
+ *   .count()
+ *   .to(outputTopic);
+ *
+ * const handle = await TopologyRunner.run(topology, {
+ *   group: "click-counter",
+ *   checkpointIntervalMs: 10_000,
+ * });
+ * ```
+ *
+ * @typeParam T - The item type in the stream
+ */
 export class StreamTopology<T> {
   constructor(readonly node: TopologyNode<T>) {}
 
@@ -73,6 +100,15 @@ export class StreamTopology<T> {
 // KeyedTopology — stream partitioned by key
 // ---------------------------------------------------------------------------
 
+/**
+ * A stream partitioned by key, enabling stateful per-key processing,
+ * time windows (tumbling, sliding, session), joins, and deduplication.
+ *
+ * Created via {@link StreamTopology.keyBy}. Each key is processed independently.
+ *
+ * @typeParam K - The key type (must extend string)
+ * @typeParam T - The item type in the stream
+ */
 export class KeyedTopology<K extends string, T> {
   constructor(readonly node: TopologyNode<T>) {}
 
@@ -153,6 +189,16 @@ export class KeyedTopology<K extends string, T> {
 // WindowedTopology — keyed stream with windowing applied
 // ---------------------------------------------------------------------------
 
+/**
+ * A keyed stream with a time window applied. Use {@link aggregate}, {@link count},
+ * or {@link sum} to reduce items within each window per key.
+ *
+ * Created via {@link KeyedTopology.tumbling}, {@link KeyedTopology.sliding},
+ * or {@link KeyedTopology.session}.
+ *
+ * @typeParam K - The key type
+ * @typeParam T - The item type in the stream
+ */
 export class WindowedTopology<K extends string, T> {
   constructor(readonly node: TopologyNode<T>) {}
 
