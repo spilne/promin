@@ -10,8 +10,8 @@
 // Backpressure is applied via bounded buffers and rate limiting.
 // ---------------------------------------------------------------------------
 
-import { Stream, Chunk } from "effect";
 import { StreamPipeline } from "../stream-pipeline.ts";
+import { type FusibleOp, fuseOpsToStream } from "../fusion.ts";
 import type { Streamable, Acknowledgeable, Envelope, Sinkable } from "../typeclasses/streamable.ts";
 import type { StateBackend } from "../typeclasses/state-backend.ts";
 import { InMemoryState } from "../adapters/memory/in-memory-state.ts";
@@ -352,36 +352,14 @@ class TopologyRunnerInstance {
       return op.type === "map" ? pipeline.map(op.fn) : pipeline.filter(op.fn);
     }
 
-    const SKIP = Symbol();
-    const hasFilter = ops.some((op) => op.type === "filter");
-
-    const fused = (value: unknown): unknown => {
-      let v = value;
-      for (let i = 0; i < ops.length; i++) {
-        const op = ops[i]!;
-        if (op.type === "map") {
-          v = op.fn(v);
-        } else {
-          if (!op.fn(v)) return SKIP;
-        }
-      }
-      return v;
-    };
-
-    return new StreamPipeline(
-      Stream.mapChunks(pipeline.stream, (chunk) => {
-        if (hasFilter) {
-          const src = Chunk.toArray(chunk);
-          const result: unknown[] = [];
-          for (let i = 0; i < src.length; i++) {
-            const v = fused(src[i]);
-            if (v !== SKIP) result.push(v);
-          }
-          return Chunk.unsafeFromArray(result);
-        }
-        return Chunk.map(chunk, fused);
-      }),
+    // Convert to FusibleOp format and use shared fusion
+    const fusibleOps: FusibleOp[] = ops.map((op) =>
+      op.type === "map"
+        ? { tag: "map" as const, fn: op.fn }
+        : { tag: "filter" as const, fn: op.fn },
     );
+
+    return new StreamPipeline(fuseOpsToStream(pipeline.stream, fusibleOps));
   }
 
   private compileSource(node: { source: unknown }): StreamPipeline<unknown, never> {

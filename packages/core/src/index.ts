@@ -3,6 +3,7 @@ export { Pipeline, type TaggedError, type PipelineDefaults } from "./lib/pipelin
 export { StreamPipeline } from "./lib/stream-pipeline.ts";
 export { OptimizedStreamPipeline } from "./lib/optimized-stream-pipeline.ts";
 export { RawStream } from "./lib/raw-stream.ts";
+export { type FusibleOp, SKIP, compileFused, hasFilterOps, fuseOpsToStream } from "./lib/fusion.ts";
 
 // Errors
 export { TimeoutError, PollTimeoutError, CircuitOpenError } from "./lib/pipeline-error.ts";

@@ -1,65 +1,5 @@
 import { Stream, Effect, Chunk } from "effect";
-
-// ---------------------------------------------------------------------------
-// Fusion internals (shared with OptimizedStreamPipeline)
-// ---------------------------------------------------------------------------
-
-const SKIP: unique symbol = Symbol("SKIP");
-
-type Op =
-  | { readonly tag: "map"; readonly fn: (value: any) => any }
-  | { readonly tag: "filter"; readonly fn: (value: any) => boolean }
-  | { readonly tag: "filterMap"; readonly fn: (value: any) => any | undefined }
-  | { readonly tag: "tap"; readonly fn: (value: any) => void };
-
-function compile(ops: Op[]): (value: any) => any {
-  if (ops.length === 0) return (v: any) => v;
-
-  if (ops.length === 1) {
-    const op = ops[0];
-    switch (op.tag) {
-      case "map":
-        return op.fn;
-      case "filter":
-        return (v: any) => (op.fn(v) ? v : SKIP);
-      case "filterMap":
-        return (v: any) => {
-          const r = op.fn(v);
-          return r === undefined ? SKIP : r;
-        };
-      case "tap":
-        return (v: any) => {
-          op.fn(v);
-          return v;
-        };
-    }
-  }
-
-  return (value: any) => {
-    let v: any = value;
-    for (let i = 0; i < ops.length; i++) {
-      const op = ops[i];
-      switch (op.tag) {
-        case "map":
-          v = op.fn(v);
-          break;
-        case "filter":
-          if (!op.fn(v)) return SKIP;
-          break;
-        case "filterMap": {
-          const r = op.fn(v);
-          if (r === undefined) return SKIP;
-          v = r;
-          break;
-        }
-        case "tap":
-          op.fn(v);
-          break;
-      }
-    }
-    return v;
-  };
-}
+import { type FusibleOp, SKIP, compileFused, hasFilterOps } from "./fusion.ts";
 
 // ---------------------------------------------------------------------------
 // RawStream<T> — zero-overhead stream, no Effect runtime
@@ -83,10 +23,10 @@ function compile(ops: Op[]): (value: any) => any {
  */
 export class RawStream<T> {
   private readonly _source: Iterable<any> | AsyncIterable<any>;
-  private readonly _ops: Op[];
+  private readonly _ops: FusibleOp[];
   private readonly _async: boolean;
 
-  constructor(source: Iterable<any> | AsyncIterable<any>, ops?: Op[], isAsync?: boolean) {
+  constructor(source: Iterable<any> | AsyncIterable<any>, ops?: FusibleOp[], isAsync?: boolean) {
     this._source = source;
     this._ops = ops ?? [];
     this._async = isAsync ?? Symbol.asyncIterator in source;
@@ -372,8 +312,8 @@ export class RawStream<T> {
     if (this._ops.length === 0) return this._source as Iterable<T>;
 
     const source = this._source as Iterable<any>;
-    const fused = compile(this._ops);
-    const hasFilter = this._ops.some((op) => op.tag === "filter" || op.tag === "filterMap");
+    const fused = compileFused(this._ops);
+    const hasFilter = hasFilterOps(this._ops);
 
     if (hasFilter) {
       return {
@@ -399,8 +339,8 @@ export class RawStream<T> {
     if (this._ops.length === 0) return this._source as AsyncIterable<T>;
 
     const source = this._source as AsyncIterable<any>;
-    const fused = compile(this._ops);
-    const hasFilter = this._ops.some((op) => op.tag === "filter" || op.tag === "filterMap");
+    const fused = compileFused(this._ops);
+    const hasFilter = hasFilterOps(this._ops);
 
     if (hasFilter) {
       return {
@@ -437,8 +377,8 @@ export class RawStream<T> {
       return Array.isArray(source) ? (source as T[]) : Array.from(source as Iterable<T>);
     }
 
-    const fused = compile(this._ops);
-    const hasFilter = this._ops.some((op) => op.tag === "filter" || op.tag === "filterMap");
+    const fused = compileFused(this._ops);
+    const hasFilter = hasFilterOps(this._ops);
 
     // Fast path: array source → indexed for-loop (no iterator protocol overhead)
     if (Array.isArray(source)) {
@@ -491,8 +431,8 @@ export class RawStream<T> {
     }
     if (Array.isArray(this._source) && this._ops.length > 0) {
       const source = this._source;
-      const fused = compile(this._ops);
-      const hasFilter = this._ops.some((op) => op.tag === "filter" || op.tag === "filterMap");
+      const fused = compileFused(this._ops);
+      const hasFilter = hasFilterOps(this._ops);
       for (let i = 0; i < source.length; i++) {
         const v = fused(source[i]);
         if (hasFilter && v === SKIP) continue;
@@ -526,8 +466,8 @@ export class RawStream<T> {
     let acc = initial;
     if (Array.isArray(this._source) && this._ops.length > 0) {
       const source = this._source;
-      const fused = compile(this._ops);
-      const hasFilter = this._ops.some((op) => op.tag === "filter" || op.tag === "filterMap");
+      const fused = compileFused(this._ops);
+      const hasFilter = hasFilterOps(this._ops);
       for (let i = 0; i < source.length; i++) {
         const v = fused(source[i]);
         if (hasFilter && v === SKIP) continue;
@@ -563,7 +503,7 @@ export class RawStream<T> {
     }
     if (Array.isArray(this._source) && this._ops.length > 0) {
       const source = this._source;
-      const fused = compile(this._ops);
+      const fused = compileFused(this._ops);
       for (let i = 0; i < source.length; i++) {
         fused(source[i]);
       }

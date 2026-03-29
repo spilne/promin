@@ -2,17 +2,7 @@ import { group, bench, run } from "mitata";
 import { StreamPipeline } from "./stream-pipeline.ts";
 import { RawStream } from "./raw-stream.ts";
 import { Effect, Stream, Chunk } from "effect";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function makeArray(n: number): number[] {
-  return Array.from({ length: n }, (_, i) => i);
-}
-
-const mapFn = (x: number) => x * 2 + 1;
-const filterFn = (x: number) => x % 3 !== 0;
+import { makeArray, mapFn, filterFn } from "./bench-helpers.ts";
 
 // ---------------------------------------------------------------------------
 // 1. Map chain — raw loop vs async generator vs Effect Stream vs StreamPipeline

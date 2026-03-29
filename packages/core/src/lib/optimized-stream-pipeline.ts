@@ -3,6 +3,7 @@ import type { TaggedError } from "./pipeline.ts";
 import type { PipelineRef } from "./ref.ts";
 import type { Sinkable, KeyedSinkable } from "./typeclasses/streamable.ts";
 import type { StateBackend } from "./typeclasses/state-backend.ts";
+import { type FusibleOp, fuseOpsToStream } from "./fusion.ts";
 
 /** Structural type for anything with a `.stream` property (StreamPipeline, OptimizedStreamPipeline, etc.) */
 type HasStream<T, E> = { readonly stream: Stream.Stream<T, E> };
@@ -14,67 +15,6 @@ type HasStream<T, E> = { readonly stream: Stream.Stream<T, E> };
 // directly into StreamPipeline's terminals (collect/forEach/drain) so optimization
 // happens by default — no .optimized() opt-in needed. Then delete this file.
 // See: docs/v1/plan/11-performance.md Phase R.2
-
-// ---------------------------------------------------------------------------
-// Fusion internals
-// ---------------------------------------------------------------------------
-
-const SKIP: unique symbol = Symbol("SKIP");
-
-type FusibleOp =
-  | { readonly tag: "map"; readonly fn: (value: any) => any }
-  | { readonly tag: "filter"; readonly fn: (value: any) => boolean }
-  | { readonly tag: "filterMap"; readonly fn: (value: any) => any | undefined }
-  | { readonly tag: "tap"; readonly fn: (value: any) => void };
-
-function compile(ops: FusibleOp[]): (value: any) => any {
-  if (ops.length === 0) return (v: any) => v;
-
-  if (ops.length === 1) {
-    const op = ops[0];
-    switch (op.tag) {
-      case "map":
-        return op.fn;
-      case "filter":
-        return (v: any) => (op.fn(v) ? v : SKIP);
-      case "filterMap":
-        return (v: any) => {
-          const r = op.fn(v);
-          return r === undefined ? SKIP : r;
-        };
-      case "tap":
-        return (v: any) => {
-          op.fn(v);
-          return v;
-        };
-    }
-  }
-
-  return (value: any) => {
-    let v: any = value;
-    for (let i = 0; i < ops.length; i++) {
-      const op = ops[i];
-      switch (op.tag) {
-        case "map":
-          v = op.fn(v);
-          break;
-        case "filter":
-          if (!op.fn(v)) return SKIP;
-          break;
-        case "filterMap": {
-          const r = op.fn(v);
-          if (r === undefined) return SKIP;
-          v = r;
-          break;
-        }
-        case "tap":
-          op.fn(v);
-          break;
-      }
-    }
-    return v;
-  };
-}
 
 // ---------------------------------------------------------------------------
 // OptimizedStreamPipeline<T, E>
@@ -95,25 +35,7 @@ export class OptimizedStreamPipeline<T, E extends TaggedError> {
 
   private _materialize(): Stream.Stream<T, E> {
     if (this._ops.length === 0) return this._baseStream;
-
-    const fused = compile(this._ops);
-    const hasFilter = this._ops.some((op) => op.tag === "filter" || op.tag === "filterMap");
-
-    // Use mapChunks for maximum throughput — processes entire chunks in a tight
-    // loop, paying the Effect runtime cost once per chunk (~4096 elements) instead
-    // of once per element.
-    return Stream.mapChunks(this._baseStream, (chunk) => {
-      if (hasFilter) {
-        const src = Chunk.toArray(chunk);
-        const result: any[] = [];
-        for (let i = 0; i < src.length; i++) {
-          const v = fused(src[i]);
-          if (v !== SKIP) result.push(v);
-        }
-        return Chunk.unsafeFromArray(result);
-      }
-      return Chunk.map(chunk, fused);
-    }) as Stream.Stream<T, E>;
+    return fuseOpsToStream(this._baseStream, this._ops) as Stream.Stream<T, E>;
   }
 
   private _flush(): OptimizedStreamPipeline<T, E> {

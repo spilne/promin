@@ -1,6 +1,7 @@
 import { group, bench, run } from "mitata";
 import { Stream, Chunk } from "effect";
 import { StreamPipeline } from "../stream-pipeline.ts";
+import { makeArray, mapFn, filterFn } from "../bench-helpers.ts";
 
 /**
  * Benchmarks comparing what TopologyRunner compiles:
@@ -9,13 +10,6 @@ import { StreamPipeline } from "../stream-pipeline.ts";
  *
  * We test the compiled output directly — not the full runner lifecycle.
  */
-
-const mapFn = (x: number) => x * 2 + 1;
-const filterFn = (x: number) => x % 3 !== 0;
-
-function makeArray(n: number): number[] {
-  return Array.from({ length: n }, (_, i) => i);
-}
 
 // ---------------------------------------------------------------------------
 // 5 chained maps
