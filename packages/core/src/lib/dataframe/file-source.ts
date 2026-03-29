@@ -71,8 +71,9 @@ export function CsvFile<T = Record<string, unknown>>(
 }
 
 /**
- * Parquet file source. Requires DuckDB executor for reading.
- * ArrayExecutor will throw — Parquet parsing needs a native engine.
+ * Parquet file source. Works with any executor:
+ * - DuckDB: reads natively via `read_parquet()` (fastest)
+ * - Array: parses via hyparquet (pure JS, zero native deps)
  */
 export function ParquetFile<T = Record<string, unknown>>(
   path: string,
@@ -83,9 +84,21 @@ export function ParquetFile<T = Record<string, unknown>>(
     schema: unknownSchema,
     codec: defaultCodec,
     async load(): Promise<T[]> {
-      throw new Error(
-        `ParquetFile("${path}") requires DuckDBExecutor. Use .withExecutor(new DuckDBExecutor()) or use DataFrame.from() with a DuckDB-backed executor.`,
+      const { readFileSync } = await import("fs");
+      const { parquetRead } = await import("hyparquet");
+      const buffer = readFileSync(path);
+      const arrayBuffer = buffer.buffer.slice(
+        buffer.byteOffset,
+        buffer.byteOffset + buffer.byteLength,
       );
+
+      return new Promise<T[]>((resolve) => {
+        parquetRead({
+          file: arrayBuffer,
+          rowFormat: "object",
+          onComplete: (rows: Record<string, any>[]) => resolve(rows as T[]),
+        });
+      });
     },
   };
 }

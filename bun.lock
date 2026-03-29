@@ -7,6 +7,7 @@
       "dependencies": {
         "duckdb": "^1.4.4",
         "duckdb-async": "^1.4.2",
+        "hyparquet": "^1.25.5",
       },
       "devDependencies": {
         "@nx/js": "21.4.1",
@@ -35,6 +36,7 @@
       "dependencies": {
         "croner": "^10.0.1",
         "effect": "catalog:",
+        "hyparquet": "^1.25.5",
         "rrule": "^2.8.1",
       },
     },
@@ -934,6 +936,8 @@
     "https-proxy-agent": ["https-proxy-agent@7.0.6", "", { "dependencies": { "agent-base": "^7.1.2", "debug": "4" } }, "sha512-vK9P5/iUfdl95AI+JVyUuIcVtd4ofvtrOr3HNtM2yxC9bnMbEdp3x01OhQNnjb8IJYi38VlTE3mBXwcfvywuSw=="],
 
     "humanize-ms": ["humanize-ms@1.2.1", "", { "dependencies": { "ms": "^2.0.0" } }, "sha512-Fl70vYtsAFb/C06PTS9dZBo7ihau+Tu/DNCk/OyHhea07S+aeMWpFFkUaXRa8fI+ScZbEI8dfSxwY7gxZ9SAVQ=="],
+
+    "hyparquet": ["hyparquet@1.25.5", "", {}, "sha512-YHEmaVX9ctI4uGzCdXHCPu8tEu2TJmO0H9s59z2JSe3kkc/S0Ltm+zpbJRCCLQWNu1SaocFcGCPTT2vl52BnTg=="],
 
     "iconv-lite": ["iconv-lite@0.6.3", "", { "dependencies": { "safer-buffer": ">= 2.1.2 < 3.0.0" } }, "sha512-4fCk79wshMdzMp2rH06qWrJE4iolqLhCUH+OiuIgU++RB0+94NlDL81atO7GX55uUKueo0txHNtvEyI6D7WdMw=="],
 

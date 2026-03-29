@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "duckdb": "^1.4.4",
-    "duckdb-async": "^1.4.2"
+    "duckdb-async": "^1.4.2",
+    "hyparquet": "^1.25.5"
   }
 }

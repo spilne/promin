@@ -69,8 +69,10 @@ function executePlan(plan: LogicalPlan): unknown[] {
           });
         }
         if (format === "parquet") {
+          // Sync parquet reading via hyparquet — load is async but we need sync here.
+          // For sync executor, throw with guidance. Use DataFrame.from(ParquetFile(...)) instead.
           throw new Error(
-            `Parquet files require DuckDBExecutor. Use .withExecutor(new DuckDBExecutor())`,
+            `Parquet files cannot be loaded synchronously. Use 'await DataFrame.from(ParquetFile("${path}"))' or .withExecutor(new DuckDBExecutor())`,
           );
         }
       }
