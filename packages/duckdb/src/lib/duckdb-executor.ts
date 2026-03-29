@@ -337,30 +337,19 @@ class CompilationContext {
           return `SELECT * FROM "${preloaded}"`;
         }
 
-        // Check if file-backed via DataFrame.fromFile() or DataFrame.from(CsvFile(...))
-        const frameable = plan.frameable;
-        if (frameable) {
+        // Check if source has a DuckDB-native SQL hint (e.g. read_parquet, read_csv_auto)
+        if (plan.duckdbSql) {
           const tableName = `_file${this.counter++}`;
-          const db = this.db;
-          if (frameable.format === "csv") {
-            const opts: string[] = [];
-            if (frameable.options?.delimiter) opts.push(`delim='${frameable.options.delimiter}'`);
-            if (frameable.options?.header === false) opts.push("header=false");
-            const optsStr = opts.length > 0 ? `, ${opts.join(", ")}` : "";
-            await db.run(
-              `CREATE TABLE "${tableName}" AS SELECT * FROM read_csv_auto('${frameable.path}'${optsStr})`,
-            );
-          } else if (frameable.format === "parquet") {
-            await db.run(
-              `CREATE TABLE "${tableName}" AS SELECT * FROM read_parquet('${frameable.path}')`,
-            );
-          } else if (frameable.format === "json") {
-            await db.run(
-              `CREATE TABLE "${tableName}" AS SELECT * FROM read_json_auto('${frameable.path}')`,
-            );
-          }
+          await this.db.run(`CREATE TABLE "${tableName}" AS SELECT * FROM ${plan.duckdbSql}`);
           this.tempTables.push(tableName);
           return `SELECT * FROM "${tableName}"`;
+        }
+
+        // Check if source has an async loader (file-backed Frameable)
+        if (plan.load && plan.data.length === 0) {
+          const data = await plan.load();
+          const table = await this.registerSource(data);
+          return `SELECT * FROM "${table}"`;
         }
 
         // Otherwise, load JS array data with caching

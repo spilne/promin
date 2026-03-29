@@ -7,7 +7,9 @@ import type { LogicalPlan, AggFn, WindowFn, RollingFn, CumulativeFn } from "./lo
 
 export class ArrayExecutor implements DataFrameExecutor {
   async execute<T>(plan: LogicalPlan): Promise<T[]> {
-    return executePlan(plan) as T[];
+    // Resolve any async sources (file-backed Frameables) before sync execution
+    const resolved = await resolveAsyncSources(plan);
+    return executePlan(resolved) as T[];
   }
 
   executeSync<T>(plan: LogicalPlan): T[] {
@@ -41,43 +43,32 @@ function estimateRows(plan: LogicalPlan): number {
   }
 }
 
+/** Walk the plan tree and resolve any Source nodes that have a load() but no data. */
+async function resolveAsyncSources(plan: LogicalPlan): Promise<LogicalPlan> {
+  if (plan._tag === "Source" && plan.load && plan.data.length === 0) {
+    const data = await plan.load();
+    return { ...plan, data, load: undefined };
+  }
+  if ("input" in plan && (plan as any).input) {
+    return { ...plan, input: await resolveAsyncSources((plan as any).input) } as LogicalPlan;
+  }
+  if ("left" in plan && "right" in plan) {
+    return {
+      ...plan,
+      left: await resolveAsyncSources((plan as any).left),
+      right: await resolveAsyncSources((plan as any).right),
+    } as LogicalPlan;
+  }
+  if (plan._tag === "Concat") {
+    return { ...plan, inputs: await Promise.all(plan.inputs.map(resolveAsyncSources)) };
+  }
+  return plan;
+}
+
 function executePlan(plan: LogicalPlan): unknown[] {
   switch (plan._tag) {
-    case "Source": {
-      if (plan.frameable && plan.data.length === 0) {
-        // File-backed source — load synchronously for ArrayExecutor
-        const { format, path, options } = plan.frameable;
-        const fs = require("fs");
-        if (format === "json") {
-          return JSON.parse(fs.readFileSync(path, "utf-8"));
-        }
-        if (format === "csv") {
-          const content = fs.readFileSync(path, "utf-8") as string;
-          const lines = content.trim().split("\n");
-          if (lines.length < 2) return [];
-          const delim = (options?.delimiter as string) ?? ",";
-          const cols = lines[0]!.split(delim).map((c: string) => c.trim());
-          return lines.slice(1).map((line: string) => {
-            const values = line.split(delim);
-            const row: Record<string, unknown> = {};
-            for (let i = 0; i < cols.length; i++) {
-              const v = values[i]?.trim() ?? "";
-              const num = Number(v);
-              row[cols[i]!] = v === "" ? null : Number.isNaN(num) ? v : num;
-            }
-            return row;
-          });
-        }
-        if (format === "parquet") {
-          // Sync parquet reading via hyparquet — load is async but we need sync here.
-          // For sync executor, throw with guidance. Use DataFrame.from(ParquetFile(...)) instead.
-          throw new Error(
-            `Parquet files cannot be loaded synchronously. Use 'await DataFrame.from(ParquetFile("${path}"))' or .withExecutor(new DuckDBExecutor())`,
-          );
-        }
-      }
+    case "Source":
       return plan.data;
-    }
 
     case "Filter":
       return executePlan(plan.input).filter(plan.fn);

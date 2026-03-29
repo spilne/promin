@@ -30,12 +30,17 @@ export type LogicalPlan =
 export interface SourcePlan {
   readonly _tag: "Source";
   readonly data: unknown[];
-  /** Optional file-backed source — executors can use native readers instead of `data`. */
-  readonly frameable?: {
-    path: string;
-    format: "csv" | "parquet" | "json";
-    options?: Record<string, unknown>;
-  };
+  /**
+   * Optional async loader — when the DataFrame was created from a Frameable source.
+   * The executor calls this to get data if `data` is empty.
+   */
+  readonly load?: () => Promise<unknown[]>;
+  /**
+   * Optional DuckDB hint — SQL expression to load data natively.
+   * Example: `"read_csv_auto('/path/to/file.csv')"` or `"read_parquet('/path/to/file.parquet')"`
+   * DuckDB executor uses this instead of load(). Other executors ignore it and call load().
+   */
+  readonly duckdbSql?: string;
 }
 
 export interface FilterPlan {

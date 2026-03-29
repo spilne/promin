@@ -8,7 +8,7 @@
 import type { Frameable } from "../typeclasses/frameable.ts";
 import type { StreamPipeline } from "../stream-pipeline.ts";
 import type { LogicalPlan, WindowFn, AggFn, RollingFn } from "./logical-plan.ts";
-import { type FileSourceDescriptor, isFileSource } from "./file-source.ts";
+import type { FileSourceDescriptor } from "./file-source.ts";
 import type { DataFrameExecutor } from "./executor.ts";
 import { ArrayExecutor } from "./array-executor.ts";
 import { GroupedDataFrame } from "./grouped-dataframe.ts";
@@ -51,12 +51,14 @@ export class DataFrame<T> {
   }
 
   static async from<T>(source: Frameable<T>): Promise<DataFrame<T>> {
-    // If source is file-backed, store metadata for executor-native reading
-    if (isFileSource(source)) {
+    // Check if source has file metadata (duckdbSql hint) for native executor loading
+    const fileSrc = source as any;
+    if (typeof fileSrc.duckdbSql === "string") {
       return new DataFrame<T>({
         _tag: "Source",
-        data: [], // executor loads natively or calls source.load()
-        frameable: { path: source.path, format: source.format, options: source.options },
+        data: [],
+        load: (() => source.load()) as () => Promise<unknown[]>,
+        duckdbSql: fileSrc.duckdbSql,
       });
     }
     const data = await source.load();
@@ -91,7 +93,8 @@ export class DataFrame<T> {
     return new DataFrame<T>({
       _tag: "Source",
       data: [],
-      frameable: source,
+      load: source.load as () => Promise<unknown[]>,
+      duckdbSql: source.duckdbSql,
     });
   }
 

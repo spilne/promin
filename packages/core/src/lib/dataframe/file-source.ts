@@ -1,29 +1,27 @@
 // ---------------------------------------------------------------------------
 // File source adapters for DataFrame
 //
-// These implement Frameable<T> so they work with DataFrame.from().
-// They also carry file metadata so DuckDB can use native readers.
+// Each adapter provides:
+//   - load(): async function to parse file into JS objects (works with any executor)
+//   - duckdbSql: optional SQL hint for DuckDB to read natively (zero JS overhead)
 //
-// Two loading paths:
-//   - DuckDBExecutor sees frameable.path → uses read_csv_auto/read_parquet (fast)
-//   - ArrayExecutor calls frameable.load() → parses in JS (universal)
+// The executor decides which to use:
+//   - DuckDB: uses duckdbSql if present, otherwise calls load()
+//   - Array: always calls load()
 //
-// Usage:
-//   // Lazy — file read deferred, executor chooses strategy
-//   DataFrame.fromFile(CsvFile("sales.csv")).withExecutor(duckdb)
-//
-//   // Eager — loads via Frameable.load(), always JS parsing
-//   await DataFrame.from(CsvFile("sales.csv"))
+// Adding new formats: just create a function that returns { load, duckdbSql? }.
+// No executor changes needed.
 // ---------------------------------------------------------------------------
 
 import type { Frameable, FrameSchema } from "../typeclasses/frameable.ts";
 import type { Codec } from "../typeclasses/codec.ts";
 
-/** Metadata carried on SourcePlan for executor-native file reading. */
+/** Source descriptor that can provide data + optional DuckDB hint. */
 export interface FileSourceDescriptor {
-  readonly path: string;
-  readonly format: "csv" | "parquet" | "json";
-  readonly options?: Record<string, unknown>;
+  /** Async loader — parses file into JS objects. Works with any executor. */
+  readonly load: () => Promise<unknown[]>;
+  /** Optional: DuckDB SQL expression for native reading (e.g. "read_parquet('/path')"). */
+  readonly duckdbSql?: string;
 }
 
 const defaultCodec: Codec<any> = {
@@ -34,26 +32,30 @@ const defaultCodec: Codec<any> = {
 const unknownSchema: FrameSchema = { columns: [] };
 
 /**
- * CSV file source. Implements Frameable for eager loading via DataFrame.from().
- * Also works with DataFrame.fromFile() for lazy/executor-native loading.
+ * CSV file source.
+ * - Any executor: parses in JS
+ * - DuckDB: `read_csv_auto()` natively
  */
 export function CsvFile<T = Record<string, unknown>>(
   path: string,
   options?: { delimiter?: string; header?: boolean },
 ): Frameable<T> & FileSourceDescriptor {
+  const delim = options?.delimiter ?? ",";
+  const duckOpts: string[] = [];
+  if (options?.delimiter) duckOpts.push(`delim='${options.delimiter}'`);
+  if (options?.header === false) duckOpts.push("header=false");
+  const optsStr = duckOpts.length > 0 ? `, ${duckOpts.join(", ")}` : "";
+
   return {
-    path,
-    format: "csv",
-    options: options as Record<string, unknown>,
     schema: unknownSchema,
     codec: defaultCodec,
+    duckdbSql: `read_csv_auto('${path}'${optsStr})`,
     async load(): Promise<T[]> {
       const fs = await import("fs");
       const content = fs.readFileSync(path, "utf-8");
       const lines = content.trim().split("\n");
       if (lines.length < 2) return [];
       const header = options?.header === false ? null : lines[0]!;
-      const delim = options?.delimiter ?? ",";
       const cols = header ? header.split(delim).map((c) => c.trim()) : [];
       const startIdx = header ? 1 : 0;
       return lines.slice(startIdx).map((line) => {
@@ -71,18 +73,17 @@ export function CsvFile<T = Record<string, unknown>>(
 }
 
 /**
- * Parquet file source. Works with any executor:
- * - DuckDB: reads natively via `read_parquet()` (fastest)
- * - Array: parses via hyparquet (pure JS, zero native deps)
+ * Parquet file source.
+ * - Any executor: parses via hyparquet (pure JS, zero native deps)
+ * - DuckDB: `read_parquet()` natively
  */
 export function ParquetFile<T = Record<string, unknown>>(
   path: string,
 ): Frameable<T> & FileSourceDescriptor {
   return {
-    path,
-    format: "parquet",
     schema: unknownSchema,
     codec: defaultCodec,
+    duckdbSql: `read_parquet('${path}')`,
     async load(): Promise<T[]> {
       const { readFileSync } = await import("fs");
       const { parquetRead } = await import("hyparquet");
@@ -91,7 +92,6 @@ export function ParquetFile<T = Record<string, unknown>>(
         buffer.byteOffset,
         buffer.byteOffset + buffer.byteLength,
       );
-
       return new Promise<T[]>((resolve) => {
         parquetRead({
           file: arrayBuffer,
@@ -104,17 +104,17 @@ export function ParquetFile<T = Record<string, unknown>>(
 }
 
 /**
- * JSON file source. Implements Frameable for eager loading.
- * DuckDB reads natively via read_json_auto.
+ * JSON file source.
+ * - Any executor: `JSON.parse()`
+ * - DuckDB: `read_json_auto()` natively
  */
 export function JsonFile<T = Record<string, unknown>>(
   path: string,
 ): Frameable<T> & FileSourceDescriptor {
   return {
-    path,
-    format: "json",
     schema: unknownSchema,
     codec: defaultCodec,
+    duckdbSql: `read_json_auto('${path}')`,
     async load(): Promise<T[]> {
       const fs = await import("fs");
       const content = fs.readFileSync(path, "utf-8");
@@ -123,13 +123,23 @@ export function JsonFile<T = Record<string, unknown>>(
   };
 }
 
-/** Type guard for file-backed Frameable sources. */
+/**
+ * TSV file source (tab-separated values).
+ * - Any executor: parses in JS
+ * - DuckDB: `read_csv_auto()` with tab delimiter
+ */
+export function TsvFile<T = Record<string, unknown>>(
+  path: string,
+): Frameable<T> & FileSourceDescriptor {
+  return CsvFile<T>(path, { delimiter: "\t" });
+}
+
+/** Type guard for file-backed sources with a load function. */
 export function isFileSource(value: unknown): value is FileSourceDescriptor {
   return (
     value !== null &&
     typeof value === "object" &&
-    "path" in value &&
-    "format" in value &&
-    typeof (value as any).path === "string"
+    "load" in value &&
+    typeof (value as any).load === "function"
   );
 }

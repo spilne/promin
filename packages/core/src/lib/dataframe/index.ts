@@ -14,6 +14,7 @@ export {
   CsvFile,
   ParquetFile,
   JsonFile,
+  TsvFile,
   isFileSource,
   type FileSourceDescriptor,
 } from "./file-source.ts";
