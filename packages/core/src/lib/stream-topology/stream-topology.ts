@@ -1,9 +1,12 @@
 // ---------------------------------------------------------------------------
-// StreamTopology — declarative distributed stream processing DAG
+// StreamTopology — stateful stream processing with windows, joins, and checkpointing
 //
-// StreamPipeline is single-process pull-based.
-// StreamTopology is its distributed counterpart: a declarative processing
-// DAG that runs across partitions with co-located state and checkpointing.
+// StreamPipeline is for general-purpose data transformation (stateless, finite or infinite).
+// StreamTopology is for long-running event processing: keyed state, time windows,
+// stream joins, deduplication, and automatic checkpointing for crash recovery.
+//
+// Runs in a single process. Kafka consumer groups handle partition assignment
+// across instances — each instance processes its assigned partitions independently.
 //
 // Think: Kafka Streams Topology / Flink JobGraph, with our API style.
 // ---------------------------------------------------------------------------

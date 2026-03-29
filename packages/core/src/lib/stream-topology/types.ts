@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// StreamTopology types — declarative distributed stream processing
+// StreamTopology types — stateful stream processing with windows, joins, checkpointing
 // ---------------------------------------------------------------------------
 
 export interface TimeWindow {
