@@ -197,6 +197,26 @@ function executePlan(plan: LogicalPlan): unknown[] {
 
     case "Cumulative":
       return executeCumulative(executePlan(plan.input), plan.column, plan.fn, plan.outputName);
+
+    case "Concat":
+      return plan.inputs.flatMap((input) => executePlan(input));
+
+    case "Union": {
+      const left = executePlan(plan.left);
+      const right = executePlan(plan.right);
+      const combined = [...left, ...right];
+      // Deduplicate by JSON serialization
+      const seen = new Set<string>();
+      return combined.filter((row) => {
+        const key = JSON.stringify(row);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+
+    case "Reverse":
+      return executePlan(plan.input).reverse();
   }
 }
 

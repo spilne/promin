@@ -73,12 +73,12 @@ export class DataFrame<T> {
   }
 
   static concat<T>(...frames: DataFrame<T>[]): DataFrame<T> {
-    // Materialize all then merge — for the array executor this is fine
-    return new DataFrame<T>({
-      _tag: "Source",
-      data: [], // placeholder — resolved at collect time
-      _concat: frames,
-    } as any);
+    if (frames.length === 0) return DataFrame.fromArray<T>([]);
+    if (frames.length === 1) return frames[0]!;
+    return new DataFrame<T>(
+      { _tag: "Concat", inputs: frames.map((f) => f._plan) },
+      frames[0]!._executor,
+    );
   }
 
   // =========================================================================
@@ -152,8 +152,7 @@ export class DataFrame<T> {
   }
 
   reverse(): DataFrame<T> {
-    // Sort by nothing — just reverse the array at execution
-    return this.map((row) => row); // identity, reversed in collect
+    return new DataFrame<T>({ _tag: "Reverse", input: this._plan }, this._executor);
   }
 
   // =========================================================================
@@ -184,10 +183,19 @@ export class DataFrame<T> {
   }
 
   valueCounts(column: keyof T & string): DataFrame<{ value: unknown; count: number }> {
-    return this.groupBy(column)
-      .agg({} as any)
-      .withColumn("count", () => 0) as any;
-    // Simple implementation — real one uses GroupBy + count
+    return DataFrame._fromPlan(
+      {
+        _tag: "Rename",
+        mapping: { [column]: "value", [`${column}_count`]: "count" },
+        input: {
+          _tag: "GroupBy",
+          columns: [column],
+          aggs: { [column]: "count" as const },
+          input: this._plan,
+        },
+      },
+      this._executor,
+    );
   }
 
   // =========================================================================
@@ -218,11 +226,18 @@ export class DataFrame<T> {
   // =========================================================================
 
   union(other: DataFrame<T>): DataFrame<T> {
-    // Collect both, concat, distinct
-    return DataFrame._fromPlan(
-      { _tag: "Source", data: [] } as any, // resolved via concat at execution
+    return new DataFrame<T>(
+      { _tag: "Union", left: this._plan, right: other._plan },
       this._executor,
     );
+  }
+
+  intersection(other: DataFrame<T>, on: keyof T & string): DataFrame<T> {
+    return this.join(other, { on, type: "semi" }) as unknown as DataFrame<T>;
+  }
+
+  difference(other: DataFrame<T>, on: keyof T & string): DataFrame<T> {
+    return this.join(other, { on, type: "anti" }) as unknown as DataFrame<T>;
   }
 
   // =========================================================================
@@ -454,6 +469,76 @@ export class DataFrame<T> {
   async countDistinct(column: keyof T & string): Promise<number> {
     const rows = await this.collect();
     return new Set(rows.map((r) => (r as any)[column])).size;
+  }
+
+  async median(column: keyof T & string): Promise<number | null> {
+    const rows = await this.collect();
+    const nums = rows.map((r) => Number((r as any)[column])).filter((v) => !Number.isNaN(v));
+    if (nums.length === 0) return null;
+    nums.sort((a, b) => a - b);
+    const mid = Math.floor(nums.length / 2);
+    return nums.length % 2 !== 0 ? nums[mid]! : (nums[mid - 1]! + nums[mid]!) / 2;
+  }
+
+  async std(column: keyof T & string): Promise<number | null> {
+    const v = await this.variance(column);
+    return v === null ? null : Math.sqrt(v);
+  }
+
+  async variance(column: keyof T & string): Promise<number | null> {
+    const rows = await this.collect();
+    const nums = rows.map((r) => Number((r as any)[column])).filter((v) => !Number.isNaN(v));
+    if (nums.length < 2) return null;
+    const mean = nums.reduce((a, b) => a + b, 0) / nums.length;
+    return nums.reduce((acc, v) => acc + (v - mean) ** 2, 0) / (nums.length - 1);
+  }
+
+  async quantile(column: keyof T & string, q: number): Promise<number | null> {
+    if (q < 0 || q > 1) throw new Error("Quantile must be between 0 and 1");
+    const rows = await this.collect();
+    const nums = rows.map((r) => Number((r as any)[column])).filter((v) => !Number.isNaN(v));
+    if (nums.length === 0) return null;
+    nums.sort((a, b) => a - b);
+    const pos = q * (nums.length - 1);
+    const lo = Math.floor(pos);
+    const hi = Math.ceil(pos);
+    if (lo === hi) return nums[lo]!;
+    return nums[lo]! + (pos - lo) * (nums[hi]! - nums[lo]!);
+  }
+
+  async correlation(col1: keyof T & string, col2: keyof T & string): Promise<number | null> {
+    const rows = await this.collect();
+    const pairs = rows
+      .map((r) => [Number((r as any)[col1]), Number((r as any)[col2])] as const)
+      .filter(([a, b]) => !Number.isNaN(a) && !Number.isNaN(b));
+    if (pairs.length < 2) return null;
+    const n = pairs.length;
+    const mean1 = pairs.reduce((acc, [a]) => acc + a, 0) / n;
+    const mean2 = pairs.reduce((acc, [, b]) => acc + b, 0) / n;
+    let cov = 0;
+    let var1 = 0;
+    let var2 = 0;
+    for (const [a, b] of pairs) {
+      const d1 = a - mean1;
+      const d2 = b - mean2;
+      cov += d1 * d2;
+      var1 += d1 * d1;
+      var2 += d2 * d2;
+    }
+    const denom = Math.sqrt(var1 * var2);
+    return denom === 0 ? null : cov / denom;
+  }
+
+  async covariance(col1: keyof T & string, col2: keyof T & string): Promise<number | null> {
+    const rows = await this.collect();
+    const pairs = rows
+      .map((r) => [Number((r as any)[col1]), Number((r as any)[col2])] as const)
+      .filter(([a, b]) => !Number.isNaN(a) && !Number.isNaN(b));
+    if (pairs.length < 2) return null;
+    const n = pairs.length;
+    const mean1 = pairs.reduce((acc, [a]) => acc + a, 0) / n;
+    const mean2 = pairs.reduce((acc, [, b]) => acc + b, 0) / n;
+    return pairs.reduce((acc, [a, b]) => acc + (a - mean1) * (b - mean2), 0) / (n - 1);
   }
 
   async describe(): Promise<

@@ -29,7 +29,7 @@ function arraySource<T>(items: T[]): Streamable<T> & Acknowledgeable<T> {
           metadata: {},
         })),
       ),
-  } as Streamable<T> & Acknowledgeable<T>;
+  } as unknown as Streamable<T> & Acknowledgeable<T>;
 }
 
 /** Sink that resolves a promise when `expectedCount` items arrive or timeout. */
@@ -188,13 +188,13 @@ group("TopologyRunner e2e: keyed window aggregate (1K events)", () => {
 
   bench("source → keyBy → tumbling(1s) → sum → sink", async () => {
     const source = arraySource(data);
-    const sink = countingSink<unknown>(90, 2000);
+    const sink = countingSink(90, 2000);
 
     const topology = StreamTopology.source(source)
       .keyBy((e) => e.userId)
       .tumbling(1000)
       .sum((e) => e.amount)
-      .to(sink);
+      .to(sink as Sinkable<any>);
 
     const handle = await TopologyRunner.run(topology, { group: `bench-window-${Date.now()}` });
     await sink.done;

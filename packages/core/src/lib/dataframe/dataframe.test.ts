@@ -483,3 +483,175 @@ describe("Chained operations — compose multi-step data pipelines", () => {
     expect(filterCalled).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Concat, Union, Reverse, Set Operations
+// ---------------------------------------------------------------------------
+
+describe("concat, union, reverse, set operations", () => {
+  it("concat merges rows from multiple frames", async () => {
+    const a = DataFrame.fromArray([{ id: 1 }, { id: 2 }]);
+    const b = DataFrame.fromArray([{ id: 3 }, { id: 4 }]);
+    const result = await DataFrame.concat(a, b).collect();
+    expect(result).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }]);
+  });
+
+  it("concat with three frames", async () => {
+    const a = DataFrame.fromArray([{ x: 1 }]);
+    const b = DataFrame.fromArray([{ x: 2 }]);
+    const c = DataFrame.fromArray([{ x: 3 }]);
+    const result = await DataFrame.concat(a, b, c).collect();
+    expect(result).toEqual([{ x: 1 }, { x: 2 }, { x: 3 }]);
+  });
+
+  it("concat with empty frames", async () => {
+    const a = DataFrame.fromArray([{ id: 1 }]);
+    const b = DataFrame.fromArray<{ id: number }>([]);
+    const result = await DataFrame.concat(a, b).collect();
+    expect(result).toEqual([{ id: 1 }]);
+  });
+
+  it("union deduplicates rows", async () => {
+    const a = DataFrame.fromArray([{ id: 1 }, { id: 2 }, { id: 3 }]);
+    const b = DataFrame.fromArray([{ id: 2 }, { id: 3 }, { id: 4 }]);
+    const result = await a.union(b).collect();
+    expect(result).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }]);
+  });
+
+  it("reverse reverses row order", async () => {
+    const result = await DataFrame.fromArray([{ v: 1 }, { v: 2 }, { v: 3 }])
+      .reverse()
+      .collect();
+    expect(result).toEqual([{ v: 3 }, { v: 2 }, { v: 1 }]);
+  });
+
+  it("intersection keeps only rows in both frames", async () => {
+    const a = DataFrame.fromArray([
+      { id: 1, name: "a" },
+      { id: 2, name: "b" },
+      { id: 3, name: "c" },
+    ]);
+    const b = DataFrame.fromArray([
+      { id: 2, name: "x" },
+      { id: 4, name: "y" },
+    ]);
+    const result = await a.intersection(b, "id").collect();
+    expect(result).toEqual([{ id: 2, name: "b" }]);
+  });
+
+  it("difference keeps rows not in other frame", async () => {
+    const a = DataFrame.fromArray([
+      { id: 1, name: "a" },
+      { id: 2, name: "b" },
+      { id: 3, name: "c" },
+    ]);
+    const b = DataFrame.fromArray([
+      { id: 2, name: "x" },
+      { id: 4, name: "y" },
+    ]);
+    const result = await a.difference(b, "id").collect();
+    expect(result).toEqual([
+      { id: 1, name: "a" },
+      { id: 3, name: "c" },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Statistical Functions
+// ---------------------------------------------------------------------------
+
+describe("statistical functions", () => {
+  const data = [
+    { name: "a", score: 10 },
+    { name: "b", score: 20 },
+    { name: "c", score: 30 },
+    { name: "d", score: 40 },
+    { name: "e", score: 50 },
+  ];
+  const df = DataFrame.fromArray(data);
+
+  it("median with odd count", async () => {
+    expect(await df.median("score")).toBe(30);
+  });
+
+  it("median with even count", async () => {
+    const even = DataFrame.fromArray([{ v: 10 }, { v: 20 }, { v: 30 }, { v: 40 }]);
+    expect(await even.median("v")).toBe(25);
+  });
+
+  it("median returns null for empty", async () => {
+    expect(await DataFrame.fromArray<{ v: number }>([]).median("v")).toBeNull();
+  });
+
+  it("variance (sample)", async () => {
+    const v = await df.variance("score");
+    expect(v).toBeCloseTo(250); // sample variance of [10,20,30,40,50]
+  });
+
+  it("std (sample)", async () => {
+    const s = await df.std("score");
+    expect(s).toBeCloseTo(Math.sqrt(250));
+  });
+
+  it("variance returns null for < 2 rows", async () => {
+    expect(await DataFrame.fromArray([{ v: 5 }]).variance("v")).toBeNull();
+  });
+
+  it("quantile at 0.5 equals median", async () => {
+    expect(await df.quantile("score", 0.5)).toBe(30);
+  });
+
+  it("quantile at 0 and 1", async () => {
+    expect(await df.quantile("score", 0)).toBe(10);
+    expect(await df.quantile("score", 1)).toBe(50);
+  });
+
+  it("quantile at 0.25", async () => {
+    expect(await df.quantile("score", 0.25)).toBe(20);
+  });
+
+  it("correlation — perfect positive", async () => {
+    const linear = DataFrame.fromArray([
+      { x: 1, y: 2 },
+      { x: 2, y: 4 },
+      { x: 3, y: 6 },
+    ]);
+    expect(await linear.correlation("x", "y")).toBeCloseTo(1);
+  });
+
+  it("correlation — perfect negative", async () => {
+    const neg = DataFrame.fromArray([
+      { x: 1, y: 6 },
+      { x: 2, y: 4 },
+      { x: 3, y: 2 },
+    ]);
+    expect(await neg.correlation("x", "y")).toBeCloseTo(-1);
+  });
+
+  it("correlation — uncorrelated", async () => {
+    const uncorr = DataFrame.fromArray([
+      { x: 1, y: 5 },
+      { x: 2, y: 3 },
+      { x: 3, y: 7 },
+      { x: 4, y: 1 },
+      { x: 5, y: 9 },
+    ]);
+    const c = await uncorr.correlation("x", "y");
+    // Not perfectly uncorrelated but close — just check it's a number
+    expect(typeof c).toBe("number");
+  });
+
+  it("covariance", async () => {
+    const linear = DataFrame.fromArray([
+      { x: 1, y: 2 },
+      { x: 2, y: 4 },
+      { x: 3, y: 6 },
+    ]);
+    expect(await linear.covariance("x", "y")).toBeCloseTo(2);
+  });
+
+  it("covariance returns null for < 2 rows", async () => {
+    expect(await DataFrame.fromArray([{ x: 1, y: 2 }]).covariance("x", "y")).toBeNull();
+  });
+});

@@ -22,7 +22,10 @@ export type LogicalPlan =
   | UnpivotPlan
   | ExplodePlan
   | RollingPlan
-  | CumulativePlan;
+  | CumulativePlan
+  | ConcatPlan
+  | UnionPlan
+  | ReversePlan;
 
 export interface SourcePlan {
   readonly _tag: "Source";
@@ -182,4 +185,20 @@ export interface CumulativePlan {
   readonly column: string;
   readonly fn: CumulativeFn;
   readonly outputName: string;
+}
+
+export interface ConcatPlan {
+  readonly _tag: "Concat";
+  readonly inputs: LogicalPlan[];
+}
+
+export interface UnionPlan {
+  readonly _tag: "Union";
+  readonly left: LogicalPlan;
+  readonly right: LogicalPlan;
+}
+
+export interface ReversePlan {
+  readonly _tag: "Reverse";
+  readonly input: LogicalPlan;
 }
