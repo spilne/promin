@@ -3,7 +3,7 @@
 //
 // Each adapter provides:
 //   - load(): async function to parse file into JS objects (works with any executor)
-//   - duckdbSql: optional SQL hint for DuckDB to read natively (zero JS overhead)
+//   - hint: optional "format:path" string for executor-native loading
 //
 // The executor decides which to use:
 //   - DuckDB: uses duckdbSql if present, otherwise calls load()
@@ -16,12 +16,16 @@
 import type { Frameable, FrameSchema } from "../typeclasses/frameable.ts";
 import type { Codec } from "../typeclasses/codec.ts";
 
-/** Source descriptor that can provide data + optional DuckDB hint. */
+/** Source descriptor that can provide data + optional executor hint. */
 export interface FileSourceDescriptor {
   /** Async loader — parses file into JS objects. Works with any executor. */
   readonly load: () => Promise<unknown[]>;
-  /** Optional: DuckDB SQL expression for native reading (e.g. "read_parquet('/path')"). */
-  readonly duckdbSql?: string;
+  /**
+   * Source hint — `"format:path"` string for executor-native loading.
+   * Executors register handlers for formats they support.
+   * If no handler matches, the executor falls back to `load()`.
+   */
+  readonly hint?: string;
 }
 
 const defaultCodec: Codec<any> = {
@@ -41,15 +45,11 @@ export function CsvFile<T = Record<string, unknown>>(
   options?: { delimiter?: string; header?: boolean },
 ): Frameable<T> & FileSourceDescriptor {
   const delim = options?.delimiter ?? ",";
-  const duckOpts: string[] = [];
-  if (options?.delimiter) duckOpts.push(`delim='${options.delimiter}'`);
-  if (options?.header === false) duckOpts.push("header=false");
-  const optsStr = duckOpts.length > 0 ? `, ${duckOpts.join(", ")}` : "";
 
   return {
     schema: unknownSchema,
     codec: defaultCodec,
-    duckdbSql: `read_csv_auto('${path}'${optsStr})`,
+    hint: `csv:${path}`,
     async load(): Promise<T[]> {
       const fs = await import("fs");
       const content = fs.readFileSync(path, "utf-8");
@@ -83,7 +83,7 @@ export function ParquetFile<T = Record<string, unknown>>(
   return {
     schema: unknownSchema,
     codec: defaultCodec,
-    duckdbSql: `read_parquet('${path}')`,
+    hint: `parquet:${path}`,
     async load(): Promise<T[]> {
       const { readFileSync } = await import("fs");
       const { parquetRead } = await import("hyparquet");
@@ -114,7 +114,7 @@ export function JsonFile<T = Record<string, unknown>>(
   return {
     schema: unknownSchema,
     codec: defaultCodec,
-    duckdbSql: `read_json_auto('${path}')`,
+    hint: `json:${path}`,
     async load(): Promise<T[]> {
       const fs = await import("fs");
       const content = fs.readFileSync(path, "utf-8");

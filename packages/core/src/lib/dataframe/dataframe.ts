@@ -51,14 +51,14 @@ export class DataFrame<T> {
   }
 
   static async from<T>(source: Frameable<T>): Promise<DataFrame<T>> {
-    // Check if source has file metadata (duckdbSql hint) for native executor loading
     const fileSrc = source as any;
-    if (typeof fileSrc.duckdbSql === "string") {
+    if (typeof fileSrc.hint === "string") {
+      // File-backed source — defer loading, carry hint for executor-native reading
       return new DataFrame<T>({
         _tag: "Source",
         data: [],
         load: (() => source.load()) as () => Promise<unknown[]>,
-        duckdbSql: fileSrc.duckdbSql,
+        hint: fileSrc.hint,
       });
     }
     const data = await source.load();
@@ -67,26 +67,20 @@ export class DataFrame<T> {
 
   /**
    * Create a DataFrame from a file source. The file is not loaded until
-   * `.collect()` is called — the executor decides how to read it:
+   * `.collect()` is called — the executor decides how to read it.
    *
-   * - **DuckDBExecutor**: reads natively (read_csv_auto, read_parquet) — fast, zero JS overhead
-   * - **ArrayExecutor**: parses in JS (CSV/JSON) or throws (Parquet requires DuckDB)
+   * Executors that have a registered loader for the source's hint will use
+   * native reading. Others fall back to `source.load()` (JS parsing).
    *
    * @example
    * ```ts
    * import { CsvFile, ParquetFile } from "@promin/core";
-   * import { DuckDBExecutor } from "@promin/duckdb";
    *
-   * // DuckDB reads Parquet natively — fastest path
-   * DataFrame.fromFile(ParquetFile("logs.parquet"))
-   *   .withExecutor(new DuckDBExecutor())
-   *   .groupBy("service").agg({ count: "count" })
-   *   .collect();
+   * // Executor with registered CSV loader reads natively
+   * DataFrame.fromFile(CsvFile("sales.csv")).withExecutor(myExecutor)
    *
-   * // CSV works with any executor
-   * DataFrame.fromFile(CsvFile("sales.csv"))
-   *   .filter(r => r.revenue > 1000)
-   *   .collect(); // ArrayExecutor parses CSV in JS
+   * // Default ArrayExecutor parses in JS
+   * DataFrame.fromFile(CsvFile("sales.csv")).collect()
    * ```
    */
   static fromFile<T>(source: FileSourceDescriptor): DataFrame<T> {
@@ -94,7 +88,7 @@ export class DataFrame<T> {
       _tag: "Source",
       data: [],
       load: source.load as () => Promise<unknown[]>,
-      duckdbSql: source.duckdbSql,
+      hint: source.hint,
     });
   }
 

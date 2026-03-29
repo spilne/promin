@@ -36,11 +36,14 @@ export interface SourcePlan {
    */
   readonly load?: () => Promise<unknown[]>;
   /**
-   * Optional DuckDB hint — SQL expression to load data natively.
-   * Example: `"read_csv_auto('/path/to/file.csv')"` or `"read_parquet('/path/to/file.parquet')"`
-   * DuckDB executor uses this instead of load(). Other executors ignore it and call load().
+   * Optional source hint — format and location for executor-native loading.
+   * Example: `"csv:/path/to/file.csv"`, `"parquet:/path/to/file.parquet"`
+   *
+   * Executors can register handlers for known hints via `registerLoader()`.
+   * If no handler matches, the executor falls back to `load()`.
+   * Core never interprets this — it's opaque to the plan.
    */
-  readonly duckdbSql?: string;
+  readonly hint?: string;
 }
 
 export interface FilterPlan {

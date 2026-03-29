@@ -67,16 +67,39 @@ import type { DataFrameExecutor, ExecutionCost, LogicalPlan, AggFn, WindowFn } f
 export class DuckDBExecutor implements DataFrameExecutor {
   private db: Database | null = null;
   private tmpDir: string;
-
-  /**
-   * Cache: maps source array identity → DuckDB table name.
-   * Uses WeakRef so cached tables don't prevent GC of source arrays.
-   */
   private sourceCache = new Map<number, { ref: WeakRef<unknown[]>; tableName: string }>();
   private cacheCounter = 0;
 
+  /**
+   * Registry of hint → SQL expression builder.
+   * When a SourcePlan has a `hint` like `"csv:/path/to/file.csv"`,
+   * the executor splits on `:` to get the format and path, then
+   * looks up the format in this registry.
+   */
+  private loaders = new Map<string, (path: string) => string>();
+
   constructor() {
     this.tmpDir = mkdtempSync(join(tmpdir(), "duckdb-df-"));
+
+    // Built-in loaders for common formats
+    this.registerLoader("csv", (path) => `read_csv_auto('${path}')`);
+    this.registerLoader("parquet", (path) => `read_parquet('${path}')`);
+    this.registerLoader("json", (path) => `read_json_auto('${path}')`);
+  }
+
+  /**
+   * Register a native loader for a source hint format.
+   * The loader receives the path and returns a DuckDB SQL expression.
+   *
+   * @example
+   * ```ts
+   * executor.registerLoader("ndjson", (path) => `read_ndjson_auto('${path}')`);
+   * executor.registerLoader("excel", (path) => `st_read('${path}')`);
+   * ```
+   */
+  registerLoader(format: string, toSql: (path: string) => string): this {
+    this.loaders.set(format, toSql);
+    return this;
   }
 
   private async getDb(): Promise<Database> {
@@ -88,7 +111,13 @@ export class DuckDBExecutor implements DataFrameExecutor {
 
   async execute<T>(plan: LogicalPlan): Promise<T[]> {
     const db = await this.getDb();
-    const ctx = new CompilationContext(db, this.tmpDir, this.sourceCache, this.cacheCounter);
+    const ctx = new CompilationContext(
+      db,
+      this.tmpDir,
+      this.sourceCache,
+      this.cacheCounter,
+      this.loaders,
+    );
 
     try {
       const sql = await ctx.compile(plan);
@@ -239,6 +268,7 @@ class CompilationContext {
     private tmpDir: string,
     private sourceCache: SourceCache,
     cacheCounter: number,
+    private loaders: Map<string, (path: string) => string>,
   ) {
     this.cacheCounter = cacheCounter;
   }
@@ -337,12 +367,20 @@ class CompilationContext {
           return `SELECT * FROM "${preloaded}"`;
         }
 
-        // Check if source has a DuckDB-native SQL hint (e.g. read_parquet, read_csv_auto)
-        if (plan.duckdbSql) {
-          const tableName = `_file${this.counter++}`;
-          await this.db.run(`CREATE TABLE "${tableName}" AS SELECT * FROM ${plan.duckdbSql}`);
-          this.tempTables.push(tableName);
-          return `SELECT * FROM "${tableName}"`;
+        // Check if source has a hint — look up registered native loader
+        if (plan.hint) {
+          const colonIdx = plan.hint.indexOf(":");
+          if (colonIdx > 0) {
+            const format = plan.hint.slice(0, colonIdx);
+            const path = plan.hint.slice(colonIdx + 1);
+            const toSql = this.loaders.get(format);
+            if (toSql) {
+              const tableName = `_file${this.tempCounter++}`;
+              await this.db.run(`CREATE TABLE "${tableName}" AS SELECT * FROM ${toSql(path)}`);
+              this.tempTables.push(tableName);
+              return `SELECT * FROM "${tableName}"`;
+            }
+          }
         }
 
         // Check if source has an async loader (file-backed Frameable)
