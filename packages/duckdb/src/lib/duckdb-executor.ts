@@ -100,6 +100,103 @@ export class DuckDBExecutor implements DataFrameExecutor {
     }
   }
 
+  /**
+   * Load a CSV file directly into DuckDB — no JS serialization overhead.
+   * DuckDB reads and parses the file natively (much faster than JS CSV parsing).
+   *
+   * @example
+   * ```ts
+   * const executor = new DuckDBExecutor();
+   * const df = await executor.fromCsv<SalesRow>("data/sales.csv");
+   * await df.groupBy("region").agg({ revenue: "sum" }).collect();
+   * ```
+   */
+  async fromCsv<T>(
+    path: string,
+    params?: { delimiter?: string; header?: boolean },
+  ): Promise<import("@promin/core").DataFrame<T>> {
+    const db = await this.getDb();
+    const tableName = `_file${this.cacheCounter++}`;
+    const opts: string[] = [];
+    if (params?.delimiter) opts.push(`delim='${params.delimiter}'`);
+    if (params?.header === false) opts.push("header=false");
+    const optsStr = opts.length > 0 ? `, ${opts.join(", ")}` : "";
+    await db.run(`CREATE TABLE "${tableName}" AS SELECT * FROM read_csv_auto('${path}'${optsStr})`);
+
+    // Create a DataFrame with a sentinel source that the compiler recognizes
+    const { DataFrame } = await import("@promin/core");
+    return DataFrame._fromPlan<T>(
+      { _tag: "Source", data: [], _duckdbTable: tableName } as any,
+      this,
+    );
+  }
+
+  /**
+   * Load a Parquet file directly into DuckDB — zero-copy columnar read.
+   * This is the fastest path: no serialization, no JS parsing.
+   *
+   * @example
+   * ```ts
+   * const executor = new DuckDBExecutor();
+   * const df = await executor.fromParquet<LogRow>("logs/2024-01.parquet");
+   * await df.filter(r => r.level === "error").collect();
+   * ```
+   */
+  async fromParquet<T>(path: string): Promise<import("@promin/core").DataFrame<T>> {
+    const db = await this.getDb();
+    const tableName = `_file${this.cacheCounter++}`;
+    await db.run(`CREATE TABLE "${tableName}" AS SELECT * FROM read_parquet('${path}')`);
+
+    const { DataFrame } = await import("@promin/core");
+    return DataFrame._fromPlan<T>(
+      { _tag: "Source", data: [], _duckdbTable: tableName } as any,
+      this,
+    );
+  }
+
+  /**
+   * Load a JSON file directly into DuckDB.
+   *
+   * @example
+   * ```ts
+   * const df = await executor.fromJson<Event>("events.json");
+   * ```
+   */
+  async fromJson<T>(path: string): Promise<import("@promin/core").DataFrame<T>> {
+    const db = await this.getDb();
+    const tableName = `_file${this.cacheCounter++}`;
+    await db.run(`CREATE TABLE "${tableName}" AS SELECT * FROM read_json_auto('${path}')`);
+
+    const { DataFrame } = await import("@promin/core");
+    return DataFrame._fromPlan<T>(
+      { _tag: "Source", data: [], _duckdbTable: tableName } as any,
+      this,
+    );
+  }
+
+  /**
+   * Execute raw SQL against the DuckDB instance.
+   * Useful for complex queries, CTEs, or operations not expressible via DataFrame API.
+   *
+   * @example
+   * ```ts
+   * const executor = new DuckDBExecutor();
+   * await executor.fromCsv("sales.csv");
+   * const df = await executor.sql<Result>("SELECT region, SUM(revenue) FROM _file0 GROUP BY region");
+   * ```
+   */
+  async sql<T>(query: string): Promise<import("@promin/core").DataFrame<T>> {
+    const db = await this.getDb();
+    const tableName = `_sql${this.cacheCounter++}`;
+    await db.run(`CREATE TABLE "${tableName}" AS ${query}`);
+
+    const { DataFrame } = await import("@promin/core");
+    return DataFrame._fromPlan<T>(
+      { _tag: "Source", data: [], _duckdbTable: tableName } as any,
+      this,
+    );
+  }
+
   supports(_plan: LogicalPlan): boolean {
     return true;
   }
@@ -234,7 +331,12 @@ class CompilationContext {
   async compile(plan: LogicalPlan): Promise<string> {
     switch (plan._tag) {
       case "Source": {
-        // Source data is cached by array identity
+        // Check if this source was pre-loaded from a file (fromCsv/fromParquet/fromJson)
+        const preloaded = (plan as any)._duckdbTable as string | undefined;
+        if (preloaded) {
+          return `SELECT * FROM "${preloaded}"`;
+        }
+        // Otherwise, load JS array data with caching
         const table = await this.registerSource(plan.data);
         return `SELECT * FROM "${table}"`;
       }

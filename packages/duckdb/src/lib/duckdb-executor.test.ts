@@ -361,4 +361,70 @@ describe("DuckDBExecutor", () => {
       ]);
     });
   });
+
+  describe("pattern: file sources (CSV, JSON)", () => {
+    // Scenario: Load data directly from files — no JS serialization.
+    // This is DuckDB's strongest use case: native file readers skip
+    // the JSON roundtrip that makes JS array loading slow.
+    const fs = require("fs");
+
+    it("fromCsv loads and queries CSV file", async () => {
+      const csvPath = "/tmp/duckdb_test_sales.csv";
+      fs.writeFileSync(csvPath, "region,revenue\nnorth,100\nsouth,200\nnorth,300\nsouth,400\n");
+
+      const executor = new DuckDBExecutor();
+      const sales = await executor.fromCsv<{ region: string; revenue: number }>(csvPath);
+      const result = await sales.groupBy("region").agg({ revenue: "sum" }).sort("region").collect();
+
+      expect(result).toEqual([
+        { region: "north", revenue_sum: 400 },
+        { region: "south", revenue_sum: 600 },
+      ]);
+    });
+
+    it("fromJson loads and queries JSON file", async () => {
+      const jsonPath = "/tmp/duckdb_test_events.json";
+      fs.writeFileSync(
+        jsonPath,
+        JSON.stringify([
+          { type: "click", page: "/home" },
+          { type: "click", page: "/about" },
+          { type: "view", page: "/home" },
+          { type: "click", page: "/home" },
+        ]),
+      );
+
+      const executor = new DuckDBExecutor();
+      const events = await executor.fromJson<{ type: string; page: string }>(jsonPath);
+      const result = await events.groupBy("type").agg({ page: "count" }).sort("type").collect();
+
+      expect(result).toEqual([
+        { type: "click", page_count: 3 },
+        { type: "view", page_count: 1 },
+      ]);
+    });
+
+    it("sql() executes raw SQL", async () => {
+      const executor = new DuckDBExecutor();
+      const result = await executor.sql<{ n: number }>("SELECT unnest(generate_series(1, 5)) as n");
+      const rows = await result.collect();
+      expect(rows).toEqual([{ n: 1 }, { n: 2 }, { n: 3 }, { n: 4 }, { n: 5 }]);
+    });
+
+    it("file source + DataFrame chain", async () => {
+      const csvPath = "/tmp/duckdb_test_chain.csv";
+      fs.writeFileSync(
+        csvPath,
+        "id,name,score\n1,alice,90\n2,bob,85\n3,charlie,95\n4,diana,70\n5,eve,88\n",
+      );
+
+      const executor = new DuckDBExecutor();
+      const students = await executor.fromCsv<{ id: number; name: string; score: number }>(csvPath);
+      const topStudents = await students.sort("score", "desc").limit(3).collect();
+
+      expect(topStudents.length).toBe(3);
+      expect(topStudents[0]!.name).toBe("charlie");
+      expect(topStudents[1]!.name).toBe("alice");
+    });
+  });
 });
