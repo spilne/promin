@@ -28,6 +28,9 @@
     },
     {
       "path": "./packages/integration"
+    },
+    {
+      "path": "./packages/duckdb"
     }
   ]
 }
