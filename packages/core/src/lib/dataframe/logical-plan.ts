@@ -30,6 +30,12 @@ export type LogicalPlan =
 export interface SourcePlan {
   readonly _tag: "Source";
   readonly data: unknown[];
+  /** Optional file-backed source — executors can use native readers instead of `data`. */
+  readonly frameable?: {
+    path: string;
+    format: "csv" | "parquet" | "json";
+    options?: Record<string, unknown>;
+  };
 }
 
 export interface FilterPlan {

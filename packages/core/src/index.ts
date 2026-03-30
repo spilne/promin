@@ -194,6 +194,11 @@ export {
   type WindowFn,
   type RollingFn,
   type CumulativeFn,
+  CsvFile,
+  ParquetFile,
+  JsonFile,
+  isFileSource,
+  type FileSourceDescriptor,
 } from "./lib/dataframe/index.ts";
 
 // Data profiling

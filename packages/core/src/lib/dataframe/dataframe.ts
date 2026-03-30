@@ -8,6 +8,7 @@
 import type { Frameable } from "../typeclasses/frameable.ts";
 import type { StreamPipeline } from "../stream-pipeline.ts";
 import type { LogicalPlan, WindowFn, AggFn, RollingFn } from "./logical-plan.ts";
+import { type FileSourceDescriptor, isFileSource } from "./file-source.ts";
 import type { DataFrameExecutor } from "./executor.ts";
 import { ArrayExecutor } from "./array-executor.ts";
 import { GroupedDataFrame } from "./grouped-dataframe.ts";
@@ -50,8 +51,48 @@ export class DataFrame<T> {
   }
 
   static async from<T>(source: Frameable<T>): Promise<DataFrame<T>> {
+    // If source is file-backed, store metadata for executor-native reading
+    if (isFileSource(source)) {
+      return new DataFrame<T>({
+        _tag: "Source",
+        data: [], // executor loads natively or calls source.load()
+        frameable: { path: source.path, format: source.format, options: source.options },
+      });
+    }
     const data = await source.load();
     return new DataFrame<T>({ _tag: "Source", data });
+  }
+
+  /**
+   * Create a DataFrame from a file source. The file is not loaded until
+   * `.collect()` is called — the executor decides how to read it:
+   *
+   * - **DuckDBExecutor**: reads natively (read_csv_auto, read_parquet) — fast, zero JS overhead
+   * - **ArrayExecutor**: parses in JS (CSV/JSON) or throws (Parquet requires DuckDB)
+   *
+   * @example
+   * ```ts
+   * import { CsvFile, ParquetFile } from "@promin/core";
+   * import { DuckDBExecutor } from "@promin/duckdb";
+   *
+   * // DuckDB reads Parquet natively — fastest path
+   * DataFrame.fromFile(ParquetFile("logs.parquet"))
+   *   .withExecutor(new DuckDBExecutor())
+   *   .groupBy("service").agg({ count: "count" })
+   *   .collect();
+   *
+   * // CSV works with any executor
+   * DataFrame.fromFile(CsvFile("sales.csv"))
+   *   .filter(r => r.revenue > 1000)
+   *   .collect(); // ArrayExecutor parses CSV in JS
+   * ```
+   */
+  static fromFile<T>(source: FileSourceDescriptor): DataFrame<T> {
+    return new DataFrame<T>({
+      _tag: "Source",
+      data: [],
+      frameable: source,
+    });
   }
 
   static async diff<T>(

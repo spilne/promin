@@ -331,11 +331,38 @@ class CompilationContext {
   async compile(plan: LogicalPlan): Promise<string> {
     switch (plan._tag) {
       case "Source": {
-        // Check if this source was pre-loaded from a file (fromCsv/fromParquet/fromJson)
+        // Check if pre-loaded from executor.fromCsv/fromParquet/fromJson
         const preloaded = (plan as any)._duckdbTable as string | undefined;
         if (preloaded) {
           return `SELECT * FROM "${preloaded}"`;
         }
+
+        // Check if file-backed via DataFrame.fromFile() or DataFrame.from(CsvFile(...))
+        const frameable = plan.frameable;
+        if (frameable) {
+          const tableName = `_file${this.counter++}`;
+          const db = this.db;
+          if (frameable.format === "csv") {
+            const opts: string[] = [];
+            if (frameable.options?.delimiter) opts.push(`delim='${frameable.options.delimiter}'`);
+            if (frameable.options?.header === false) opts.push("header=false");
+            const optsStr = opts.length > 0 ? `, ${opts.join(", ")}` : "";
+            await db.run(
+              `CREATE TABLE "${tableName}" AS SELECT * FROM read_csv_auto('${frameable.path}'${optsStr})`,
+            );
+          } else if (frameable.format === "parquet") {
+            await db.run(
+              `CREATE TABLE "${tableName}" AS SELECT * FROM read_parquet('${frameable.path}')`,
+            );
+          } else if (frameable.format === "json") {
+            await db.run(
+              `CREATE TABLE "${tableName}" AS SELECT * FROM read_json_auto('${frameable.path}')`,
+            );
+          }
+          this.tempTables.push(tableName);
+          return `SELECT * FROM "${tableName}"`;
+        }
+
         // Otherwise, load JS array data with caching
         const table = await this.registerSource(plan.data);
         return `SELECT * FROM "${table}"`;

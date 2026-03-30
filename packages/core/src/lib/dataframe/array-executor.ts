@@ -43,8 +43,39 @@ function estimateRows(plan: LogicalPlan): number {
 
 function executePlan(plan: LogicalPlan): unknown[] {
   switch (plan._tag) {
-    case "Source":
+    case "Source": {
+      if (plan.frameable && plan.data.length === 0) {
+        // File-backed source — load synchronously for ArrayExecutor
+        const { format, path, options } = plan.frameable;
+        const fs = require("fs");
+        if (format === "json") {
+          return JSON.parse(fs.readFileSync(path, "utf-8"));
+        }
+        if (format === "csv") {
+          const content = fs.readFileSync(path, "utf-8") as string;
+          const lines = content.trim().split("\n");
+          if (lines.length < 2) return [];
+          const delim = (options?.delimiter as string) ?? ",";
+          const cols = lines[0]!.split(delim).map((c: string) => c.trim());
+          return lines.slice(1).map((line: string) => {
+            const values = line.split(delim);
+            const row: Record<string, unknown> = {};
+            for (let i = 0; i < cols.length; i++) {
+              const v = values[i]?.trim() ?? "";
+              const num = Number(v);
+              row[cols[i]!] = v === "" ? null : Number.isNaN(num) ? v : num;
+            }
+            return row;
+          });
+        }
+        if (format === "parquet") {
+          throw new Error(
+            `Parquet files require DuckDBExecutor. Use .withExecutor(new DuckDBExecutor())`,
+          );
+        }
+      }
       return plan.data;
+    }
 
     case "Filter":
       return executePlan(plan.input).filter(plan.fn);

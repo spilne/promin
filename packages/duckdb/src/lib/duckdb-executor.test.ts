@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { DataFrame } from "@promin/core";
+import { DataFrame, CsvFile, JsonFile, ParquetFile } from "@promin/core";
 import { DuckDBExecutor } from "./duckdb-executor.ts";
 
 const duckdb = new DuckDBExecutor();
@@ -425,6 +425,77 @@ describe("DuckDBExecutor", () => {
       expect(topStudents.length).toBe(3);
       expect(topStudents[0]!.name).toBe("charlie");
       expect(topStudents[1]!.name).toBe("alice");
+    });
+  });
+
+  describe("pattern: DataFrame.fromFile() + withExecutor()", () => {
+    // Recommended API — file source is data, executor is processing strategy
+    const fs = require("fs");
+
+    it("CsvFile + DuckDB executor", async () => {
+      const csvPath = "/tmp/duckdb_test_fromfile.csv";
+      fs.writeFileSync(csvPath, "city,pop\nkyiv,3000000\nlviv,720000\nodesa,1010000\n");
+
+      const result = await DataFrame.fromFile(CsvFile(csvPath))
+        .withExecutor(new DuckDBExecutor())
+        .sort("pop", "desc")
+        .limit(2)
+        .collect();
+
+      expect(result).toEqual([
+        { city: "kyiv", pop: 3000000 },
+        { city: "odesa", pop: 1010000 },
+      ]);
+    });
+
+    it("CsvFile + ArrayExecutor (default, no withExecutor)", async () => {
+      const csvPath = "/tmp/duckdb_test_fromfile_arr.csv";
+      fs.writeFileSync(csvPath, "name,score\nalice,90\nbob,85\n");
+
+      const result = await DataFrame.fromFile(CsvFile(csvPath)).sort("score", "desc").collect();
+
+      expect(result).toEqual([
+        { name: "alice", score: 90 },
+        { name: "bob", score: 85 },
+      ]);
+    });
+
+    it("JsonFile + DuckDB executor", async () => {
+      const jsonPath = "/tmp/duckdb_test_fromfile.json";
+      fs.writeFileSync(
+        jsonPath,
+        JSON.stringify([
+          { k: "a", v: 1 },
+          { k: "b", v: 2 },
+        ]),
+      );
+
+      const result = await DataFrame.fromFile(JsonFile(jsonPath))
+        .withExecutor(new DuckDBExecutor())
+        .collect();
+
+      expect(result).toEqual([
+        { k: "a", v: 1 },
+        { k: "b", v: 2 },
+      ]);
+    });
+
+    it("DataFrame.from(CsvFile(...)) with DuckDB — same pattern via Frameable", async () => {
+      const csvPath = "/tmp/duckdb_test_frameable.csv";
+      fs.writeFileSync(csvPath, "x,y\n1,10\n2,20\n3,30\n");
+
+      const result = await (
+        await DataFrame.from(CsvFile(csvPath))
+      )
+        .withExecutor(new DuckDBExecutor())
+        .sort("x")
+        .collect();
+
+      expect(result).toEqual([
+        { x: 1, y: 10 },
+        { x: 2, y: 20 },
+        { x: 3, y: 30 },
+      ]);
     });
   });
 });

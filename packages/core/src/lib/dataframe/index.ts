@@ -10,3 +10,10 @@ export {
   type RollingFn,
   type CumulativeFn,
 } from "./logical-plan.ts";
+export {
+  CsvFile,
+  ParquetFile,
+  JsonFile,
+  isFileSource,
+  type FileSourceDescriptor,
+} from "./file-source.ts";
