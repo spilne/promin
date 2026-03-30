@@ -209,4 +209,39 @@ describe("DuckDBExecutor", () => {
       ]);
     });
   });
+
+  describe("table caching (load once, query many)", () => {
+    it("second query on same source is faster (cached)", async () => {
+      const data = Array.from({ length: 10_000 }, (_, i) => ({
+        id: i,
+        region: ["north", "south", "east", "west"][i % 4]!,
+        revenue: i * 10,
+      }));
+      const base = df(data);
+
+      // First query — loads data
+      const start1 = performance.now();
+      await base.groupBy("region").agg({ revenue: "sum" }).collect();
+      const first = performance.now() - start1;
+
+      // Second query — should reuse cached table
+      const start2 = performance.now();
+      await base.sort("revenue", "desc").limit(5).collect();
+      const second = performance.now() - start2;
+
+      // Second should be noticeably faster (no data loading)
+      expect(second).toBeLessThan(first);
+    });
+
+    it("different sources get different tables", async () => {
+      const a = df([{ v: 1 }, { v: 2 }]);
+      const b = df([{ v: 10 }, { v: 20 }]);
+
+      const resultA = await a.sort("v").collect();
+      const resultB = await b.sort("v").collect();
+
+      expect(resultA).toEqual([{ v: 1 }, { v: 2 }]);
+      expect(resultB).toEqual([{ v: 10 }, { v: 20 }]);
+    });
+  });
 });

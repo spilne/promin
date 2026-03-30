@@ -181,4 +181,44 @@ for (const size of [1_000, 10_000]) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Load once, query many — DuckDB's sweet spot
+// ---------------------------------------------------------------------------
+
+{
+  const data = generateRows(100_000);
+  const executor = new DuckDBExecutor();
+  const dfDuck = DataFrame.fromArray(data).withExecutor(executor);
+  const dfArray = DataFrame.fromArray(data);
+
+  // Warm up DuckDB cache with first query
+  await dfDuck.groupBy("region").agg({ revenue: "sum" }).collect();
+
+  group("load once, query many (100K rows, DuckDB cached)", () => {
+    bench("DuckDB: groupBy+sum (cached)", async () => {
+      return dfDuck.groupBy("region").agg({ revenue: "sum" }).collect();
+    });
+
+    bench("Array: groupBy+sum", async () => {
+      return dfArray.groupBy("region").agg({ revenue: "sum" }).collect();
+    });
+
+    bench("DuckDB: sort+limit 10 (cached)", async () => {
+      return dfDuck.sort("revenue", "desc").limit(10).collect();
+    });
+
+    bench("Array: sort+limit 10", async () => {
+      return dfArray.sort("revenue", "desc").limit(10).collect();
+    });
+
+    bench("DuckDB: distinct (cached)", async () => {
+      return dfDuck.distinct().collect();
+    });
+
+    bench("Array: distinct", async () => {
+      return dfArray.distinct().collect();
+    });
+  });
+}
+
 await run();
