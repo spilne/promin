@@ -498,4 +498,114 @@ describe("DuckDBExecutor", () => {
       ]);
     });
   });
+
+  describe("predicate pushdown — Expr compiled to SQL", () => {
+    const { col, when } = require("@promin/core");
+
+    it("filter with col().gt() compiles to SQL WHERE", async () => {
+      const data = Array.from({ length: 100 }, (_, i) => ({ id: i, score: i * 10 }));
+      const result = await df(data).filter(col("score").gt(500)).collect();
+      expect(result.length).toBe(49);
+      expect(result.every((r: any) => r.score > 500)).toBe(true);
+    });
+
+    it("filter with col().eq() compiles to SQL WHERE", async () => {
+      const result = await df([
+        { name: "alice", region: "north" },
+        { name: "bob", region: "south" },
+        { name: "charlie", region: "north" },
+      ])
+        .filter(col("region").eq("north"))
+        .collect();
+      expect(result).toEqual([
+        { name: "alice", region: "north" },
+        { name: "charlie", region: "north" },
+      ]);
+    });
+
+    it("filter with and/or compiles to SQL", async () => {
+      const data = [
+        { name: "a", age: 20, score: 90 },
+        { name: "b", age: 30, score: 80 },
+        { name: "c", age: 25, score: 95 },
+        { name: "d", age: 35, score: 70 },
+      ];
+      const result = await df(data)
+        .filter(col("age").gt(24).and(col("score").gt(85)))
+        .collect();
+      expect(result).toEqual([{ name: "c", age: 25, score: 95 }]);
+    });
+
+    it("filter with isIn compiles to SQL IN", async () => {
+      const data = [
+        { id: 1, region: "north" },
+        { id: 2, region: "south" },
+        { id: 3, region: "east" },
+        { id: 4, region: "west" },
+      ];
+      const result = await df(data)
+        .filter(col("region").isIn(["north", "east"]))
+        .sort("id")
+        .collect();
+      expect(result).toEqual([
+        { id: 1, region: "north" },
+        { id: 3, region: "east" },
+      ]);
+    });
+
+    it("filter with between compiles to SQL BETWEEN", async () => {
+      const data = Array.from({ length: 10 }, (_, i) => ({ id: i, value: i * 10 }));
+      const result = await df(data).filter(col("value").between(30, 70)).collect();
+      expect(result.length).toBe(5); // 30, 40, 50, 60, 70
+    });
+
+    it("withColumn with Expr compiles to SQL", async () => {
+      const result = await df([
+        { name: "alice", score: 85 },
+        { name: "bob", score: 92 },
+      ])
+        .withColumn("doubled", col("score").mul(2))
+        .select("name", "doubled")
+        .collect();
+      expect(result).toEqual([
+        { name: "alice", doubled: 170 },
+        { name: "bob", doubled: 184 },
+      ]);
+    });
+
+    it("when/otherwise compiles to SQL CASE", async () => {
+      const result = await df([
+        { name: "a", score: 95 },
+        { name: "b", score: 75 },
+        { name: "c", score: 55 },
+      ])
+        .withColumn(
+          "grade",
+          when(col("score").gt(90), "A").when(col("score").gt(70), "B").otherwise("C"),
+        )
+        .select("name", "grade")
+        .collect();
+      expect(result).toEqual([
+        { name: "a", grade: "A" },
+        { name: "b", grade: "B" },
+        { name: "c", grade: "C" },
+      ]);
+    });
+
+    it("chained: Expr filter + groupBy (full SQL, no JS fallback)", async () => {
+      const data = Array.from({ length: 1000 }, (_, i) => ({
+        region: ["north", "south", "east", "west"][i % 4]!,
+        revenue: i * 10,
+        active: i % 3 !== 0,
+      }));
+      const result = await df(data)
+        .filter(col("revenue").gt(5000))
+        .groupBy("region")
+        .agg({ revenue: "sum" })
+        .sort("region")
+        .collect();
+      expect(result.length).toBe(4);
+      expect(result[0]!.region).toBe("east");
+    });
+  });
 });

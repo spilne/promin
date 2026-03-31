@@ -148,8 +148,9 @@ export class DataFrame<T> {
     fn: ((row: T) => V) | Expr,
   ): DataFrame<T & Record<K, V>> {
     const resolvedFn = isExpr(fn) ? fn.fn : fn;
+    const expr = isExpr(fn) ? fn.ast : undefined;
     return new DataFrame(
-      { _tag: "WithColumn", input: this._plan, name, fn: resolvedFn },
+      { _tag: "WithColumn", input: this._plan, name, fn: resolvedFn, expr },
       this._executor,
     );
   }
@@ -160,7 +161,11 @@ export class DataFrame<T> {
 
   filter(fn: ((row: T) => boolean) | Expr): DataFrame<T> {
     const resolvedFn = isExpr(fn) ? fn.fn : fn;
-    return new DataFrame({ _tag: "Filter", input: this._plan, fn: resolvedFn }, this._executor);
+    const expr = isExpr(fn) ? fn.ast : undefined;
+    return new DataFrame(
+      { _tag: "Filter", input: this._plan, fn: resolvedFn, expr },
+      this._executor,
+    );
   }
 
   map<U>(fn: (row: T) => U): DataFrame<U> {

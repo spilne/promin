@@ -50,6 +50,8 @@ export interface FilterPlan {
   readonly _tag: "Filter";
   readonly input: LogicalPlan;
   readonly fn: (row: any) => boolean;
+  /** Optional: AST for SQL-compilable filters. Set when filter uses Expr instead of raw function. */
+  readonly expr?: import("./expr.ts").ExprAst;
 }
 
 export interface MapPlan {
@@ -81,6 +83,8 @@ export interface WithColumnPlan {
   readonly input: LogicalPlan;
   readonly name: string;
   readonly fn: (row: any) => any;
+  /** Optional: AST for SQL-compilable expressions. */
+  readonly expr?: import("./expr.ts").ExprAst;
 }
 
 export interface SortPlan {

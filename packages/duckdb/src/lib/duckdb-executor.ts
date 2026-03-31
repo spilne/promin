@@ -43,6 +43,7 @@ import { writeFileSync, unlinkSync, mkdtempSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import type { DataFrameExecutor, ExecutionCost, LogicalPlan, AggFn, WindowFn } from "@promin/core";
+import { isCompilable, astToSql } from "@promin/core";
 
 /**
  * DuckDB-backed DataFrame executor. Compiles logical plans to SQL and
@@ -397,6 +398,10 @@ class CompilationContext {
 
       case "Filter": {
         const input = await this.compile(plan.input);
+        // If we have a compilable AST, generate SQL WHERE instead of JS fallback
+        if (plan.expr && isCompilable(plan.expr)) {
+          return `SELECT * FROM (${input}) WHERE ${astToSql(plan.expr)}`;
+        }
         return this.applyJsFilter(input, plan.fn);
       }
 
@@ -426,6 +431,9 @@ class CompilationContext {
 
       case "WithColumn": {
         const input = await this.compile(plan.input);
+        if (plan.expr && isCompilable(plan.expr)) {
+          return `SELECT *, ${astToSql(plan.expr)} AS "${plan.name}" FROM (${input})`;
+        }
         return this.applyJsWithColumn(input, plan.name, plan.fn);
       }
 

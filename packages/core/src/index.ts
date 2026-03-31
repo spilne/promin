@@ -197,8 +197,17 @@ export {
   CsvFile,
   ParquetFile,
   JsonFile,
+  TsvFile,
   isFileSource,
   type FileSourceDescriptor,
+  Expr,
+  WhenExpr,
+  col,
+  lit,
+  when,
+  isCompilable,
+  astToSql,
+  type ExprAst,
 } from "./lib/dataframe/index.ts";
 
 // Data profiling
