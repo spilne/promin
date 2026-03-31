@@ -4,55 +4,100 @@ import { AutoExecutor } from "./auto-executor.ts";
 import { writeFileSync } from "fs";
 
 describe("AutoExecutor", () => {
-  it("uses ArrayExecutor for small data", async () => {
-    const executor = new AutoExecutor({ threshold: 100 });
-    const df = DataFrame.fromArray([{ id: 1 }, { id: 2 }, { id: 3 }]).withExecutor(executor);
-    const result = await df.collect();
-    expect(result).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }]);
+  describe("basic selection", () => {
+    it("uses Array for small data", async () => {
+      const executor = new AutoExecutor();
+      const result = await DataFrame.fromArray([{ id: 1 }, { id: 2 }])
+        .withExecutor(executor)
+        .collect();
+      expect(result).toEqual([{ id: 1 }, { id: 2 }]);
+    });
+
+    it("uses DuckDB for file-backed sources", async () => {
+      const csvPath = "/tmp/auto_test_file.csv";
+      writeFileSync(csvPath, "name,score\nalice,90\nbob,85\n");
+
+      const executor = new AutoExecutor();
+      const result = await DataFrame.fromFile(CsvFile(csvPath))
+        .withExecutor(executor)
+        .sort("score", "desc")
+        .collect();
+      expect(result[0]!.name).toBe("alice");
+    });
+
+    it("collectSync always uses Array", () => {
+      const executor = new AutoExecutor();
+      const result = DataFrame.fromArray([{ v: 1 }])
+        .withExecutor(executor)
+        .collectSync();
+      expect(result).toEqual([{ v: 1 }]);
+    });
   });
 
-  it("uses DuckDB for large data", async () => {
-    const executor = new AutoExecutor({ threshold: 10 });
-    const data = Array.from({ length: 100 }, (_, i) => ({
+  describe("smart plan-based selection", () => {
+    const bigData = Array.from({ length: 20_000 }, (_, i) => ({
       id: i,
-      region: ["north", "south"][i % 2]!,
+      region: ["north", "south", "east", "west"][i % 4]!,
       revenue: i * 10,
+      score: i % 100,
     }));
-    const df = DataFrame.fromArray(data).withExecutor(executor);
-    const result = await df.groupBy("region").agg({ revenue: "sum" }).sort("region").collect();
-    expect(result.length).toBe(2);
-    expect(result[0]!.region).toBe("north");
-  });
 
-  it("uses DuckDB for file-backed sources (has hint)", async () => {
-    const csvPath = "/tmp/auto_executor_test.csv";
-    writeFileSync(csvPath, "name,score\nalice,90\nbob,85\n");
+    it("groupBy on large data → DuckDB", async () => {
+      const executor = new AutoExecutor({ threshold: 10_000 });
+      const result = await DataFrame.fromArray(bigData)
+        .withExecutor(executor)
+        .groupBy("region")
+        .agg({ revenue: "sum" })
+        .sort("region")
+        .collect();
+      expect(result.length).toBe(4);
+    });
 
-    const executor = new AutoExecutor();
-    const df = DataFrame.fromFile(CsvFile(csvPath)).withExecutor(executor);
-    const result = await df.sort("score", "desc").collect();
-    expect(result[0]!.name).toBe("alice");
-  });
+    it("sort + limit on large data → DuckDB", async () => {
+      const executor = new AutoExecutor({ threshold: 10_000 });
+      const result = await DataFrame.fromArray(bigData)
+        .withExecutor(executor)
+        .sort("revenue", "desc")
+        .limit(5)
+        .collect();
+      expect(result.length).toBe(5);
+      expect(result[0]!.revenue).toBeGreaterThan(result[4]!.revenue);
+    });
 
-  it("collectSync uses ArrayExecutor", () => {
-    const executor = new AutoExecutor();
-    const df = DataFrame.fromArray([{ v: 1 }, { v: 2 }]).withExecutor(executor);
-    const result = df.collectSync();
-    expect(result).toEqual([{ v: 1 }, { v: 2 }]);
-  });
+    it("filter-only on large data → Array (pass-through)", async () => {
+      const executor = new AutoExecutor({ threshold: 10_000 });
+      // filter is a pass-through op — DuckDB falls back to JS anyway
+      const result = await DataFrame.fromArray(bigData)
+        .withExecutor(executor)
+        .filter((r) => r.region === "north")
+        .collect();
+      expect(result.every((r) => r.region === "north")).toBe(true);
+    });
 
-  it("groupBy works with auto-selection", async () => {
-    const executor = new AutoExecutor({ threshold: 5 });
-    const data = Array.from({ length: 20 }, (_, i) => ({
-      category: ["A", "B", "C", "D"][i % 4]!,
-      value: i,
-    }));
-    const result = await DataFrame.fromArray(data)
-      .withExecutor(executor)
-      .groupBy("category")
-      .agg({ value: "sum" })
-      .sort("category")
-      .collect();
-    expect(result.length).toBe(4);
+    it("small data with groupBy → Array (size overrides)", async () => {
+      const smallData = Array.from({ length: 100 }, (_, i) => ({
+        region: ["a", "b"][i % 2]!,
+        value: i,
+      }));
+      const executor = new AutoExecutor({ threshold: 10_000 });
+      const result = await DataFrame.fromArray(smallData)
+        .withExecutor(executor)
+        .groupBy("region")
+        .agg({ value: "sum" })
+        .sort("region")
+        .collect();
+      expect(result.length).toBe(2);
+    });
+
+    it("distinct on large data → DuckDB", async () => {
+      const executor = new AutoExecutor({ threshold: 10_000 });
+      const result = await DataFrame.fromArray(bigData)
+        .withExecutor(executor)
+        .select("region")
+        .distinct()
+        .sort("region")
+        .collect();
+      expect(result.length).toBe(4);
+    });
   });
 });

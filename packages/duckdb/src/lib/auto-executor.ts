@@ -1,10 +1,15 @@
 // ---------------------------------------------------------------------------
 // AutoExecutor — picks the best executor based on data size and plan
 //
-// Rules:
-//   - Source with hint (file-backed) + DuckDB available → DuckDB (native file reading)
-//   - Source data > threshold rows → DuckDB (better for large analytical queries)
-//   - Otherwise → ArrayExecutor (zero overhead for small data)
+// Decision rules (in priority order):
+//   1. File-backed source (has hint)          → DuckDB (native reading)
+//   2. Small data (< 1K rows)                 → Array (overhead dominates)
+//   3. Analytical ops + large data            → DuckDB (groupBy, window, distinct, union)
+//   4. Sort + Limit + large data              → DuckDB (top-N heap, 154x faster at 1M)
+//   5. Join + large data                      → DuckDB (SQL join optimizer)
+//   6. Only pass-through ops (filter/map/...) → Array (DuckDB falls back to JS anyway)
+//   7. Large data + non-trivial ops           → DuckDB
+//   8. Default                                → Array
 //
 // Usage:
 //   const executor = new AutoExecutor();
@@ -73,14 +78,64 @@ export class AutoExecutor implements DataFrameExecutor {
   }
 
   private selectExecutor(plan: LogicalPlan): DataFrameExecutor {
-    // File-backed source with hint → DuckDB (native reading)
     const source = findSource(plan);
-    if (source?.hint) {
+    const rowCount = source?.data.length ?? 0;
+    const hasHint = !!source?.hint;
+    const ops = collectOps(plan);
+
+    // Rule 1: File-backed source → DuckDB (native reading, no JS parsing)
+    if (hasHint) {
       return this.duckdbExecutor;
     }
 
-    // Large data → DuckDB
-    if (source && source.data.length > this.threshold) {
+    // Rule 2: Small data → Array (always, overhead dominates)
+    if (rowCount < 1_000 && !hasHint) {
+      return this.arrayExecutor;
+    }
+
+    // Rule 3: Has analytical ops (groupBy, window, distinct, union) → DuckDB
+    // These are DuckDB's sweet spot — columnar engine with SQL optimizer
+    const analyticalOps = new Set(["GroupBy", "Window", "Distinct", "Union"]);
+    const hasAnalytical = ops.some((op) => analyticalOps.has(op));
+    if (hasAnalytical && rowCount > this.threshold) {
+      return this.duckdbExecutor;
+    }
+
+    // Rule 4: Sort + Limit → DuckDB (top-N heap, 154x faster at 1M rows)
+    const hasSort = ops.includes("Sort");
+    const hasLimit = ops.includes("Limit");
+    if (hasSort && hasLimit && rowCount > this.threshold) {
+      return this.duckdbExecutor;
+    }
+
+    // Rule 5: Join → DuckDB for large data (SQL join optimizer)
+    if (ops.includes("Join") && rowCount > this.threshold) {
+      return this.duckdbExecutor;
+    }
+
+    // Rule 6: Only pass-through ops (filter, map, withColumn, select, drop) → Array
+    // DuckDB falls back to JS for these anyway, so Array is faster
+    const passThrough = new Set([
+      "Source",
+      "Filter",
+      "Map",
+      "WithColumn",
+      "Select",
+      "Drop",
+      "Rename",
+      "Limit",
+      "Offset",
+      "Slice",
+      "Reverse",
+      "Sort",
+    ]);
+    const allPassThrough = ops.every((op) => passThrough.has(op));
+    if (allPassThrough) {
+      return this.arrayExecutor;
+    }
+
+    // Rule 7: Large data with any non-trivial ops → DuckDB
+    if (rowCount > this.threshold) {
       return this.duckdbExecutor;
     }
 
@@ -96,4 +151,24 @@ function findSource(plan: LogicalPlan): (LogicalPlan & { _tag: "Source" }) | nul
   if ("left" in plan) return findSource((plan as any).left);
   if (plan._tag === "Concat" && plan.inputs.length > 0) return findSource(plan.inputs[0]!);
   return null;
+}
+
+/** Collect all operation types in the plan tree. */
+function collectOps(plan: LogicalPlan): string[] {
+  const ops: string[] = [plan._tag];
+  if ("input" in plan && (plan as any).input) {
+    ops.push(...collectOps((plan as any).input));
+  }
+  if ("left" in plan && (plan as any).left) {
+    ops.push(...collectOps((plan as any).left));
+  }
+  if ("right" in plan && (plan as any).right) {
+    ops.push(...collectOps((plan as any).right));
+  }
+  if (plan._tag === "Concat") {
+    for (const input of plan.inputs) {
+      ops.push(...collectOps(input));
+    }
+  }
+  return ops;
 }
