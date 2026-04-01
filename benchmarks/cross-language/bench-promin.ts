@@ -3,9 +3,7 @@
  * Compare with bench-pandas-polars.py for the same operations.
  */
 
-import { DataFrame, CsvFile } from "../../src/lib/dataframe/index.ts";
-import { col } from "../../src/lib/dataframe/expr.ts";
-import { readFileSync } from "fs";
+import { DataFrame, CsvFile, col } from "@promin/core";
 
 const CSV_PATH = "/tmp/benchmark_1m.csv";
 const WARMUP = 1;

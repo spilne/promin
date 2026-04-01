@@ -10,6 +10,8 @@
     "fmt": "bunx nx run-many -t format",
     "ff": "bun run fmt",
     "format": "bun run fmt",
+    "bench": "bun run benchmarks/cross-language/run-all.ts",
+    "bench:promin": "bun run benchmarks/cross-language/bench-promin.ts",
     "clean": "rm -rf node_modules packages/*/node_modules .nx/cache",
     "prepare": "git config core.hooksPath .githooks || true"
   },
