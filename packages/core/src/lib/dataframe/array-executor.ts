@@ -161,29 +161,103 @@ function executePlan(plan: LogicalPlan): unknown[] {
 
     case "GroupBy": {
       const rows = executePlan(plan.input);
-      const groups = new Map<string, unknown[]>();
+      const aggEntries = Object.entries(plan.aggs);
+      const singleGroupCol = plan.columns.length === 1;
 
-      for (const row of rows) {
-        const key = plan.columns.map((c) => (row as any)[c]).join("\0");
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key)!.push(row);
+      // Incremental aggregation — single pass, no storing of row arrays.
+      // Each group accumulates: count, sum, min, max, first, last, collect per agg column.
+      const groups = new Map<
+        string,
+        {
+          keyValues: any;
+          accs: {
+            count: number;
+            sum: number;
+            min: any;
+            max: any;
+            first: any;
+            last: any;
+            collect: any[];
+          }[];
+        }
+      >();
+
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i] as any;
+        // Fast key for single-column groupBy (no array/join)
+        const key = singleGroupCol
+          ? String(row[plan.columns[0]!])
+          : plan.columns.map((c) => row[c]).join("\0");
+
+        let group = groups.get(key);
+        if (!group) {
+          const keyValues: any = {};
+          for (const c of plan.columns) keyValues[c] = row[c];
+          group = {
+            keyValues,
+            accs: aggEntries.map(() => ({
+              count: 0,
+              sum: 0,
+              min: undefined as any,
+              max: undefined as any,
+              first: undefined as any,
+              last: undefined as any,
+              collect: [],
+            })),
+          };
+          groups.set(key, group);
+        }
+
+        for (let j = 0; j < aggEntries.length; j++) {
+          const [col] = aggEntries[j]!;
+          const v = row[col];
+          const acc = group.accs[j]!;
+          acc.count++;
+          if (v != null) {
+            const num = Number(v);
+            if (!Number.isNaN(num)) acc.sum += num;
+            if (acc.min === undefined || v < acc.min) acc.min = v;
+            if (acc.max === undefined || v > acc.max) acc.max = v;
+          }
+          if (acc.first === undefined) acc.first = v;
+          acc.last = v;
+          acc.collect.push(v);
+        }
       }
 
       const result: unknown[] = [];
-      for (const [, groupRows] of groups) {
-        const first = groupRows[0] as any;
-        const agged: Record<string, unknown> = {};
-
-        // Include group key columns
-        for (const col of plan.columns) {
-          agged[col] = first[col];
+      for (const group of groups.values()) {
+        const agged: Record<string, unknown> = { ...group.keyValues };
+        for (let j = 0; j < aggEntries.length; j++) {
+          const [col, fn] = aggEntries[j]!;
+          const acc = group.accs[j]!;
+          switch (fn) {
+            case "count":
+              agged[col] = acc.count;
+              break;
+            case "sum":
+              agged[col] = acc.sum;
+              break;
+            case "avg":
+              agged[col] = acc.count > 0 ? acc.sum / acc.count : null;
+              break;
+            case "min":
+              agged[col] = acc.min;
+              break;
+            case "max":
+              agged[col] = acc.max;
+              break;
+            case "first":
+              agged[col] = acc.first;
+              break;
+            case "last":
+              agged[col] = acc.last;
+              break;
+            case "collect":
+              agged[col] = acc.collect;
+              break;
+          }
         }
-
-        // Compute aggregations
-        for (const [col, fn] of Object.entries(plan.aggs)) {
-          agged[col] = computeAgg(groupRows, col, fn);
-        }
-
         result.push(agged);
       }
       return result;
