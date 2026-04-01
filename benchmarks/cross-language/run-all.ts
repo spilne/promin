@@ -68,6 +68,30 @@ promin.push(await bench("Chained (filter+groupBy+sort)", () =>
 promin.push(await bench("Distinct", () => df.select("region" as any).distinct().collect()));
 
 // ---------------------------------------------------------------------------
+// Run Promin AutoExecutor benchmarks
+// ---------------------------------------------------------------------------
+
+let autoResults: Result[] = [];
+try {
+  const { AutoExecutor } = await import("@promin/duckdb");
+  const auto = new AutoExecutor({ threshold: 10_000 });
+  const adf = DataFrame.fromArray(data).withExecutor(auto);
+  const adfFile = DataFrame.fromFile(CsvFile(CSV_PATH)).withExecutor(auto);
+
+  autoResults.push(await bench("CSV Load (file)", () => DataFrame.fromFile(CsvFile(CSV_PATH)).withExecutor(new (require("@promin/duckdb").AutoExecutor)()).collect()));
+  autoResults.push(await bench("Filter (revenue > 5000)", () => adf.filter(col("revenue").gt(5000)).collect()));
+  autoResults.push(await bench("GroupBy + Sum", () => adf.groupBy("region" as any).agg({ revenue: "sum" } as any).collect()));
+  autoResults.push(await bench("Sort (full)", () => adf.sort("revenue" as any, "desc").collect()));
+  autoResults.push(await bench("Sort + Limit 10", () => adf.sort("revenue" as any, "desc").limit(10).collect()));
+  autoResults.push(await bench("Chained (filter+groupBy+sort)", () =>
+    adf.filter(col("status").eq("active")).groupBy("region" as any).agg({ revenue: "sum" } as any).sort("revenue" as any, "desc").collect(),
+  ));
+  autoResults.push(await bench("Distinct", () => adf.select("region" as any).distinct().collect()));
+} catch (e) {
+  console.error("AutoExecutor not available:", (e as Error).message?.slice(0, 100));
+}
+
+// ---------------------------------------------------------------------------
 // Run Python benchmarks (Pandas + Polars)
 // ---------------------------------------------------------------------------
 
@@ -160,19 +184,34 @@ lines.push(`**Dataset**: 1M rows, 9 columns, ${(59).toFixed(0)}MB CSV`);
 lines.push(`**Machine**: ${process.arch}, Bun ${process.versions?.bun ?? "?"}`);
 lines.push(`**Date**: ${new Date().toISOString().slice(0, 10)}`);
 lines.push("");
-lines.push("| Operation | Polars | Promin | Pandas | vs Pandas | vs Polars |");
-lines.push("|---|---|---|---|---|---|");
+const hasAuto = autoResults.length > 0;
+if (hasAuto) {
+  lines.push("| Operation | Polars | Promin (Array) | Promin (Auto) | Pandas | vs Pandas | vs Polars |");
+  lines.push("|---|---|---|---|---|---|---|");
+} else {
+  lines.push("| Operation | Polars | Promin | Pandas | vs Pandas | vs Polars |");
+  lines.push("|---|---|---|---|---|---|");
+}
 
 for (let i = 0; i < promin.length; i++) {
   const p = promin[i]!;
+  const a = autoResults[i];
   const pandas = py.pandas[i];
   const polars = py.polars[i];
   const pdMs = pandas?.avgMs ?? 0;
   const plMs = polars?.avgMs ?? 0;
+  // Use the best Promin result for comparison
+  const bestMs = a ? Math.min(p.avgMs, a.avgMs) : p.avgMs;
 
-  lines.push(
-    `| ${p.name} | ${plMs ? fmt(plMs) : "—"} | ${fmt(p.avgMs)} | ${pdMs ? fmt(pdMs) : "—"} | ${pdMs ? vsOther(p.avgMs, pdMs) : "—"} | ${plMs ? vsOther(p.avgMs, plMs) : "—"} |`,
-  );
+  if (hasAuto) {
+    lines.push(
+      `| ${p.name} | ${plMs ? fmt(plMs) : "—"} | ${fmt(p.avgMs)} | ${a ? fmt(a.avgMs) : "—"} | ${pdMs ? fmt(pdMs) : "—"} | ${pdMs ? vsOther(bestMs, pdMs) : "—"} | ${plMs ? vsOther(bestMs, plMs) : "—"} |`,
+    );
+  } else {
+    lines.push(
+      `| ${p.name} | ${plMs ? fmt(plMs) : "—"} | ${fmt(p.avgMs)} | ${pdMs ? fmt(pdMs) : "—"} | ${pdMs ? vsOther(p.avgMs, pdMs) : "—"} | ${plMs ? vsOther(p.avgMs, plMs) : "—"} |`,
+    );
+  }
 }
 
 lines.push("");
