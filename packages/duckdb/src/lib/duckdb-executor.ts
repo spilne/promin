@@ -470,7 +470,7 @@ class CompilationContext {
         const input = await this.compile(plan.input);
         const groupCols = plan.columns.map((c) => `"${c}"`).join(", ");
         const aggExprs = Object.entries(plan.aggs)
-          .map(([col, fn]) => `${aggFnToSql(fn)}("${col}") AS "${col}_${fn}"`)
+          .map(([col, fn]) => `${aggFnToSql(fn)}("${col}") AS "${col}"`)
           .join(", ");
         return `SELECT ${groupCols}, ${aggExprs} FROM (${input}) GROUP BY ${groupCols}`;
       }

@@ -239,15 +239,21 @@ export class DataFrame<T> {
   }
 
   valueCounts(column: keyof T & string): DataFrame<{ value: unknown; count: number }> {
+    // Add a _vc_count column, groupBy the target column, count _vc_count, then rename
     return DataFrame._fromPlan(
       {
         _tag: "Rename",
-        mapping: { [column]: "value", [`${column}_count`]: "count" },
+        mapping: { [column]: "value", _vc_count: "count" },
         input: {
           _tag: "GroupBy",
           columns: [column],
-          aggs: { [column]: "count" as const },
-          input: this._plan,
+          aggs: { _vc_count: "count" as const },
+          input: {
+            _tag: "WithColumn",
+            name: "_vc_count",
+            fn: () => 1,
+            input: this._plan,
+          },
         },
       },
       this._executor,

@@ -75,8 +75,8 @@ describe("DuckDBExecutor", () => {
         .sort("region")
         .collect();
       expect(result).toEqual([
-        { region: "north", revenue_sum: 400 },
-        { region: "south", revenue_sum: 600 },
+        { region: "north", revenue: 400 },
+        { region: "south", revenue: 600 },
       ]);
     });
 
@@ -87,8 +87,8 @@ describe("DuckDBExecutor", () => {
         .sort("region")
         .collect();
       expect(result).toEqual([
-        { region: "north", revenue_count: 2 },
-        { region: "south", revenue_count: 2 },
+        { region: "north", revenue: 2 },
+        { region: "south", revenue: 2 },
       ]);
     });
 
@@ -98,8 +98,8 @@ describe("DuckDBExecutor", () => {
         .agg({ revenue: "avg" })
         .sort("region")
         .collect();
-      expect(result[0]!.revenue_avg).toBeCloseTo(200);
-      expect(result[1]!.revenue_avg).toBeCloseTo(300);
+      expect(result[0]!.revenue).toBeCloseTo(200);
+      expect(result[1]!.revenue).toBeCloseTo(300);
     });
   });
 
@@ -204,8 +204,8 @@ describe("DuckDBExecutor", () => {
         .sort("region")
         .collect();
       expect(result).toEqual([
-        { region: "north", revenue_sum: 400 },
-        { region: "south", revenue_sum: 400 },
+        { region: "north", revenue: 400 },
+        { region: "south", revenue: 400 },
       ]);
     });
   });
@@ -268,18 +268,18 @@ describe("DuckDBExecutor", () => {
       const result = await base
         .groupBy("region")
         .agg({ revenue: "sum" })
-        .sort("revenue_sum", "desc")
+        .sort("revenue", "desc")
         .collect();
       expect(result.length).toBe(4);
       expect(result[0]).toHaveProperty("region");
-      expect(result[0]).toHaveProperty("revenue_sum");
+      expect(result[0]).toHaveProperty("revenue");
     });
 
     it("widget 2: top 5 products by quantity", async () => {
       const result = await base
         .groupBy("product")
         .agg({ quantity: "sum" })
-        .sort("quantity_sum", "desc")
+        .sort("quantity", "desc")
         .limit(5)
         .collect();
       expect(result.length).toBe(3);
@@ -326,9 +326,9 @@ describe("DuckDBExecutor", () => {
       ];
       const result = await df(data).groupBy("dept").agg({ salary: "avg" }).sort("dept").collect();
       expect(result[0]!.dept).toBe("eng");
-      expect(result[0]!.salary_avg).toBeCloseTo(110);
+      expect(result[0]!.salary).toBeCloseTo(110);
       expect(result[1]!.dept).toBe("sales");
-      expect(result[1]!.salary_avg).toBeCloseTo(92.5);
+      expect(result[1]!.salary).toBeCloseTo(92.5);
     });
   });
 
@@ -377,8 +377,8 @@ describe("DuckDBExecutor", () => {
       const result = await sales.groupBy("region").agg({ revenue: "sum" }).sort("region").collect();
 
       expect(result).toEqual([
-        { region: "north", revenue_sum: 400 },
-        { region: "south", revenue_sum: 600 },
+        { region: "north", revenue: 400 },
+        { region: "south", revenue: 600 },
       ]);
     });
 
@@ -399,8 +399,8 @@ describe("DuckDBExecutor", () => {
       const result = await events.groupBy("type").agg({ page: "count" }).sort("type").collect();
 
       expect(result).toEqual([
-        { type: "click", page_count: 3 },
-        { type: "view", page_count: 1 },
+        { type: "click", page: 3 },
+        { type: "view", page: 1 },
       ]);
     });
 
