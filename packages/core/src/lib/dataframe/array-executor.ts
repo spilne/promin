@@ -126,8 +126,15 @@ function executePlan(plan: LogicalPlan): unknown[] {
       });
     }
 
-    case "Limit":
+    case "Limit": {
+      // Optimization: Sort + Limit → top-N selection (O(N) instead of O(N log N))
+      const inner = plan.input;
+      if (inner._tag === "Sort") {
+        const rows = executePlan(inner.input);
+        return topN(rows, plan.n, inner.by, inner.order);
+      }
       return executePlan(plan.input).slice(0, plan.n);
+    }
 
     case "Offset":
       return executePlan(plan.input).slice(plan.n);
@@ -320,6 +327,59 @@ function executePlan(plan: LogicalPlan): unknown[] {
     case "Reverse":
       return executePlan(plan.input).reverse();
   }
+}
+
+/**
+ * Top-N selection — O(N) instead of O(N log N) full sort.
+ * Uses a bounded sorted array (insertion sort into top-N buffer).
+ * At 1M rows with N=10: scans once, maintains a 10-element sorted buffer.
+ */
+function topN(rows: unknown[], n: number, by: string, order: "asc" | "desc"): unknown[] {
+  if (rows.length <= n) {
+    const result = [...rows];
+    const mult = order === "desc" ? -1 : 1;
+    return result.sort((a: any, b: any) => {
+      if (a[by] < b[by]) return -1 * mult;
+      if (a[by] > b[by]) return 1 * mult;
+      return 0;
+    });
+  }
+
+  const isDesc = order === "desc";
+  const top: unknown[] = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i] as any;
+    const val = row[by];
+
+    if (top.length < n) {
+      // Buffer not full — insert in sorted position
+      let pos = top.length;
+      for (let j = top.length - 1; j >= 0; j--) {
+        const cmp = isDesc ? val > (top[j] as any)[by] : val < (top[j] as any)[by];
+        if (cmp) pos = j;
+        else break;
+      }
+      top.splice(pos, 0, row);
+    } else {
+      // Buffer full — check if this row beats the worst
+      const worst = (top[n - 1] as any)[by];
+      const beats = isDesc ? val > worst : val < worst;
+      if (beats) {
+        // Find insertion point
+        let pos = n - 1;
+        for (let j = n - 2; j >= 0; j--) {
+          const cmp = isDesc ? val > (top[j] as any)[by] : val < (top[j] as any)[by];
+          if (cmp) pos = j;
+          else break;
+        }
+        top.splice(pos, 0, row);
+        top.length = n; // drop the worst
+      }
+    }
+  }
+
+  return top;
 }
 
 function computeAgg(rows: unknown[], column: string, fn: AggFn): unknown {
