@@ -34,25 +34,32 @@ jobs:
       - name: Unit tests
         run: bun run test
 
-      - name: Benchmarks
-        run: bun run packages/core/src/lib/stream-pipeline.bench.ts 2>&1 | tee bench-output.txt
+      - name: Stream benchmarks
+        run: bun run packages/core/src/lib/stream-pipeline.bench.ts 2>&1 | tee .target/reports/stream-bench.txt
 
-      - name: Benchmark report
+      - name: Cross-language benchmarks
+        run: |
+          pip install uv 2>/dev/null || true
+          bun run bench 2>&1 || true
+
+      - name: Publish benchmark report
         if: always()
         run: |
-          # Strip ANSI codes and write to job summary
-          echo '## Benchmark Report' >> $GITHUB_STEP_SUMMARY
+          # Stream benchmarks → job summary
+          echo '## Stream Benchmark Report' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          sed 's/\x1b\[[0-9;]*m//g' .target/reports/stream-bench.txt >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
           echo '' >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          sed 's/\x1b\[[0-9;]*m//g' bench-output.txt >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          # Cross-language report → job summary (already markdown)
+          cat .target/reports/benchmark-latest.md >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
 
-      - name: Upload benchmark artifact
+      - name: Upload benchmark artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-results
-          path: bench-output.txt
+          name: benchmark-reports
+          path: .target/reports/
 
   # Slower: integration tests with testcontainers (Kafka, Redis, Postgres)
   integration:
