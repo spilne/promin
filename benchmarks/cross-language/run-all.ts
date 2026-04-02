@@ -219,7 +219,14 @@ lines.push("*Lower is better. Bold = Promin wins.*");
 
 const report = lines.join("\n");
 console.log(report);
-writeFileSync("/tmp/benchmark-report.md", report);
-console.error("\nReport saved to /tmp/benchmark-report.md");
+
+const { mkdirSync } = await import("fs");
+const reportDir = `${import.meta.dir}/../../.target/reports`;
+mkdirSync(reportDir, { recursive: true });
+const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, "-");
+const reportPath = `${reportDir}/benchmark-${timestamp}.md`;
+writeFileSync(reportPath, report);
+writeFileSync(`${reportDir}/benchmark-latest.md`, report);
+console.error(`\nReport saved to ${reportPath}`);
 
 process.exit(0);
