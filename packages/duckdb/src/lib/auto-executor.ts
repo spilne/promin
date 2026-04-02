@@ -5,11 +5,15 @@
 //   1. File-backed source (has hint)          → DuckDB (native reading)
 //   2. Small data (< 1K rows)                 → Array (overhead dominates)
 //   3. Analytical ops + large data            → DuckDB (groupBy, window, distinct, union)
-//   4. Sort + Limit + large data              → DuckDB (top-N heap, 154x faster at 1M)
+//   4. Sort + Limit + large data              → DuckDB (top-N heap)
 //   5. Join + large data                      → DuckDB (SQL join optimizer)
-//   6. Only pass-through ops (filter/map/...) → Array (DuckDB falls back to JS anyway)
+//   6. Only pass-through ops (filter/map/...) → Array (result transfer kills DuckDB)
 //   7. Large data + non-trivial ops           → DuckDB
 //   8. Default                                → Array
+//
+// Note: Filter with Expr AST benefits from DuckDB predicate pushdown, but only
+// when combined with analytical ops (groupBy, sort+limit). Standalone filter
+// returns too many rows — transfer overhead negates the SQL advantage.
 //
 // Usage:
 //   const executor = new AutoExecutor();
@@ -113,6 +117,11 @@ export class AutoExecutor implements DataFrameExecutor {
       return this.duckdbExecutor;
     }
 
+    // Note: Filter with Expr *could* use DuckDB predicate pushdown, but DuckDB is
+    // slower when the result set is large (500K+ rows transfer overhead). Filter stays
+    // on Array. The pushdown is valuable when filter is combined with groupBy/sort
+    // (already handled by rules 3-5 which route the whole plan to DuckDB).
+
     // Rule 6: Only pass-through ops (filter, map, withColumn, select, drop) → Array
     // DuckDB falls back to JS for these anyway, so Array is faster
     const passThrough = new Set([
@@ -142,6 +151,22 @@ export class AutoExecutor implements DataFrameExecutor {
     // Default → Array
     return this.arrayExecutor;
   }
+}
+
+/** Check if the plan has Filter or WithColumn nodes with compilable Expr ASTs. */
+function hasExprPushdown(plan: LogicalPlan): boolean {
+  if (plan._tag === "Filter" && plan.expr) {
+    const { isCompilable } = require("@promin/core") as typeof import("@promin/core");
+    if (isCompilable(plan.expr)) return true;
+  }
+  if (plan._tag === "WithColumn" && plan.expr) {
+    const { isCompilable } = require("@promin/core") as typeof import("@promin/core");
+    if (isCompilable(plan.expr)) return true;
+  }
+  if ("input" in plan && (plan as any).input) return hasExprPushdown((plan as any).input);
+  if ("left" in plan)
+    return hasExprPushdown((plan as any).left) || hasExprPushdown((plan as any).right);
+  return false;
 }
 
 /** Walk the plan to find the root Source node. */
