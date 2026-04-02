@@ -63,6 +63,7 @@ Thumbs.db
 
 docs
 .target
+.direnv
 
 # bv (beads viewer) local config and caches
 .bv/
