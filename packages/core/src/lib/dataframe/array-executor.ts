@@ -114,16 +114,41 @@ function executePlan(plan: LogicalPlan): unknown[] {
       }));
 
     case "Sort": {
-      const rows = [...executePlan(plan.input)];
+      const rows = executePlan(plan.input);
       const key = plan.by;
-      const mult = plan.order === "desc" ? -1 : 1;
-      return rows.sort((a: any, b: any) => {
-        const va = a[key];
-        const vb = b[key];
-        if (va < vb) return -1 * mult;
-        if (va > vb) return 1 * mult;
-        return 0;
-      });
+      const desc = plan.order === "desc";
+      const n = rows.length;
+      if (n === 0) return rows;
+
+      // Extract keys once — avoids repeated property access in comparator
+      const keys = new Array(n);
+      const indices = new Array(n);
+      for (let i = 0; i < n; i++) {
+        keys[i] = (rows[i] as any)[key];
+        indices[i] = i;
+      }
+
+      // Numeric keys: subtraction comparator (faster than branching)
+      const isNumeric = typeof keys[0] === "number";
+      if (isNumeric) {
+        if (desc) {
+          indices.sort((a: number, b: number) => keys[b] - keys[a]);
+        } else {
+          indices.sort((a: number, b: number) => keys[a] - keys[b]);
+        }
+      } else if (desc) {
+        indices.sort((a: number, b: number) =>
+          keys[a] > keys[b] ? -1 : keys[a] < keys[b] ? 1 : 0,
+        );
+      } else {
+        indices.sort((a: number, b: number) =>
+          keys[a] < keys[b] ? -1 : keys[a] > keys[b] ? 1 : 0,
+        );
+      }
+
+      const result = new Array(n);
+      for (let i = 0; i < n; i++) result[i] = rows[indices[i]];
+      return result;
     }
 
     case "Limit": {
