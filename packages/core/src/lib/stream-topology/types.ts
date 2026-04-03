@@ -39,6 +39,8 @@ export interface TopologyConfig {
   maxDedupeSize?: number;
   /** Called when backpressure is applied (buffer full). */
   onBackpressure?: (stats: BackpressureStats) => void;
+  /** Ack every N items instead of per-item. Default: 100. Set to 1 for per-item ack. */
+  ackBatchSize?: number;
 }
 
 export interface BackpressureStats {

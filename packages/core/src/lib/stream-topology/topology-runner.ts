@@ -126,6 +126,9 @@ class TopologyRunnerInstance {
   private dedupSets: LruSet[] = [];
   private processStates: Map<string, unknown>[] = [];
 
+  // Batch ack — flush pending on shutdown
+  private pendingAckEnvelope: Envelope<unknown> | null = null;
+
   // Metrics
   private itemsProcessed = 0;
   private metricsStartTime = Date.now();
@@ -204,6 +207,11 @@ class TopologyRunnerInstance {
         self.running = false;
         self.abortController.abort();
         if (self.checkpointInterval) clearInterval(self.checkpointInterval);
+        // Flush pending ack before checkpoint
+        if (self.pendingAckEnvelope) {
+          await self.pendingAckEnvelope.ack();
+          self.pendingAckEnvelope = null;
+        }
         await self.checkpointAllState();
         await drainPromise.catch(() => {});
       },
@@ -364,12 +372,30 @@ class TopologyRunnerInstance {
 
   private compileSource(node: { source: unknown }): StreamPipeline<unknown, never> {
     const source = node.source as Streamable<unknown> & Acknowledgeable<unknown>;
+    const batchSize = this.config.ackBatchSize ?? 100;
+    let count = 0;
+
+    // Use subscribe() (no ack) when ack is disabled, subscribeAck() otherwise.
+    // Batch ack: sync-unwrap values, ack only the last envelope per batch.
+    // For Kafka, acking offset N implicitly acks all offsets < N.
+    if (batchSize <= 0) {
+      // No ack — fastest path for sources that don't need acknowledgement
+      return source.subscribe();
+    }
+
     return source
       .subscribeAck({ group: this.config.group })
-      .mapAsync(async (envelope: Envelope<unknown>) => {
-        const value = envelope.value;
-        await envelope.ack();
-        return value;
+      .map((envelope: Envelope<unknown>) => {
+        this.pendingAckEnvelope = envelope;
+        count++;
+        return envelope.value;
+      })
+      .tap(() => {
+        if (count >= batchSize && this.pendingAckEnvelope) {
+          this.pendingAckEnvelope.ack();
+          this.pendingAckEnvelope = null;
+          count = 0;
+        }
       });
   }
 
