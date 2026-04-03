@@ -138,8 +138,7 @@ try {
       .select("region" as any)
       .distinct()
       .collect());
+  await duckdb.close();
 } catch (e) {
   console.log("\nDuckDB not available:", (e as Error).message);
 }
-
-process.exit(0);

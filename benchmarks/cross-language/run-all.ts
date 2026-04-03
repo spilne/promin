@@ -87,6 +87,8 @@ try {
     adf.filter(col("status").eq("active")).groupBy("region" as any).agg({ revenue: "sum" } as any).sort("revenue" as any, "desc").collect(),
   ));
   autoResults.push(await bench("Distinct", () => adf.select("region" as any).distinct().collect()));
+  // Close DuckDB to avoid NAPI segfault on exit
+  await auto.close();
 } catch (e) {
   console.error("AutoExecutor not available:", (e as Error).message?.slice(0, 100));
 }
@@ -229,4 +231,4 @@ writeFileSync(reportPath, report);
 writeFileSync(`${reportDir}/benchmark-latest.md`, report);
 console.error(`\nReport saved to ${reportPath}`);
 
-process.exit(0);
+// No process.exit() — DuckDB connections closed above, process exits naturally

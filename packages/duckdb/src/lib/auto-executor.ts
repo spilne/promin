@@ -72,6 +72,11 @@ export class AutoExecutor implements DataFrameExecutor {
     return this.arrayExecutor.executeSync!(plan);
   }
 
+  /** Close the underlying DuckDB connection. Call before process exit. */
+  async close(): Promise<void> {
+    await this.duckdbExecutor.close();
+  }
+
   supports(plan: LogicalPlan): boolean {
     return true;
   }

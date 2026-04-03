@@ -86,6 +86,21 @@ export class DuckDBExecutor implements DataFrameExecutor {
     this.registerLoader("csv", (path) => `read_csv_auto('${path}')`);
     this.registerLoader("parquet", (path) => `read_parquet('${path}')`);
     this.registerLoader("json", (path) => `read_json_auto('${path}')`);
+
+    // Auto-close on process exit to avoid NAPI segfault
+    if (typeof process !== "undefined") {
+      process.on("exit", () => {
+        if (this.db) {
+          try {
+            // Access underlying sync close — duckdb-async wraps the sync duckdb driver
+            (this.db as any).db?.close?.();
+          } catch {
+            /* ignore */
+          }
+          this.db = null;
+        }
+      });
+    }
   }
 
   /**
@@ -108,6 +123,19 @@ export class DuckDBExecutor implements DataFrameExecutor {
       this.db = await Database.create(":memory:");
     }
     return this.db;
+  }
+
+  /** Close the DuckDB connection. Call this before process exit to avoid NAPI crash. */
+  async close(): Promise<void> {
+    if (this.db) {
+      try {
+        await this.db.close();
+      } catch {
+        // Ignore close errors — DuckDB NAPI cleanup can segfault
+      }
+      this.db = null;
+      this.sourceCache.clear();
+    }
   }
 
   async execute<T>(plan: LogicalPlan): Promise<T[]> {
