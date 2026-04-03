@@ -1,9 +1,11 @@
 import { describe, it, expect } from "bun:test";
 import { StreamPipeline } from "./stream-pipeline.ts";
-import { OptimizedStreamPipeline } from "./optimized-stream-pipeline.ts";
 import { Stream } from "effect";
 
-describe("OptimizedStreamPipeline", () => {
+// These tests verify that StreamPipeline's built-in operator fusion works.
+// .optimized() is deprecated (returns this) — fusion is automatic.
+
+describe("StreamPipeline", () => {
   // -------------------------------------------------------------------------
   // Construction & bridge
   // -------------------------------------------------------------------------
@@ -15,17 +17,13 @@ describe("OptimizedStreamPipeline", () => {
     });
 
     it("creates directly from Effect Stream", async () => {
-      const result = await new OptimizedStreamPipeline(Stream.fromIterable([4, 5, 6])).collect();
+      const result = await new StreamPipeline(Stream.fromIterable([4, 5, 6])).collect();
       expect(result).toEqual([4, 5, 6]);
     });
 
-    it("bridges back to StreamPipeline via toStreamPipeline()", async () => {
-      const sp = StreamPipeline.fromIterable([1, 2, 3])
-        .optimized()
-        .map((x) => x * 2)
-        .toStreamPipeline();
-      const result = (await sp.stream) ? await StreamPipeline.from(sp.stream).collect() : [];
-      expect(result).toEqual([2, 4, 6]);
+    it("optimized() returns this (fusion is automatic)", async () => {
+      const sp = StreamPipeline.fromIterable([1, 2, 3]);
+      expect(sp.optimized()).toBe(sp);
     });
   });
 
@@ -289,7 +287,7 @@ describe("OptimizedStreamPipeline", () => {
 
   describe("through", () => {
     it("applies reusable transformer", async () => {
-      const doubler = (s: OptimizedStreamPipeline<number, never>) => s.map((x) => x * 2);
+      const doubler = (s: StreamPipeline<number, never>) => s.map((x) => x * 2);
       const result = await StreamPipeline.fromIterable([1, 2, 3])
         .optimized()
         .through(doubler)

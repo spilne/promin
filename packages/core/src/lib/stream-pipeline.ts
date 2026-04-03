@@ -1,7 +1,7 @@
 import { Effect, Stream, Chunk, Duration, Schedule, Ref, Option } from "effect";
 import type { TaggedError, Pipeline } from "./pipeline.ts";
-import { OptimizedStreamPipeline } from "./optimized-stream-pipeline.ts";
 import type { PipelineRef } from "./ref.ts";
+import { type FusibleOp, fuseOpsToStream } from "./fusion.ts";
 import type {
   Streamable,
   Acknowledgeable,
@@ -23,11 +23,46 @@ import { isPartitionable, isReplayable } from "./typeclasses/streamable.ts";
  * Nothing executes until you call a terminal (`.forEach()`, `.collect()`, `.reduce()`, `.drain()`).
  * Handles backpressure naturally — the producer only advances when the consumer is ready.
  *
+ * **Automatic operator fusion**: adjacent pure operators (`.map()`, `.filter()`, `.filterMap()`,
+ * `.tap()`) are automatically fused into a single `mapChunks` call at execution time.
+ * This processes ~4096 elements per Effect runtime step instead of 1 per operator — typically
+ * 2-3x faster for chained pure operations. No `.optimized()` call needed.
+ *
  * @typeParam T - The item type emitted by the stream
  * @typeParam E - The error type (must extend `{ _tag: string }`)
  */
 export class StreamPipeline<T, E extends TaggedError> {
-  constructor(readonly stream: Stream.Stream<T, E>) {}
+  /** @internal Base stream — use .stream getter which materializes pending ops. */
+  private readonly _baseStream: Stream.Stream<any, E>;
+  /** @internal Pending pure ops accumulated for fusion. */
+  private readonly _ops: FusibleOp[];
+
+  constructor(stream: Stream.Stream<T, E>, ops?: FusibleOp[]) {
+    this._baseStream = stream;
+    this._ops = ops ?? [];
+  }
+
+  /**
+   * The underlying Effect Stream. Materializes any pending fused operators.
+   *
+   * Accessing this property triggers fusion: adjacent pure ops (map/filter/filterMap/tap)
+   * are compiled into a single `mapChunks` call before returning the stream.
+   */
+  get stream(): Stream.Stream<T, E> {
+    return this._materialize();
+  }
+
+  /** @internal Materialize pending ops into the Effect Stream via mapChunks. */
+  private _materialize(): Stream.Stream<T, E> {
+    if (this._ops.length === 0) return this._baseStream;
+    return fuseOpsToStream(this._baseStream, this._ops) as Stream.Stream<T, E>;
+  }
+
+  /** @internal Flush pending ops — returns a new StreamPipeline with ops materialized. */
+  private _flush(): StreamPipeline<T, E> {
+    if (this._ops.length === 0) return this;
+    return new StreamPipeline<T, E>(this._materialize());
+  }
 
   // -------------------------------------------------------------------------
   // Construction
@@ -243,15 +278,15 @@ export class StreamPipeline<T, E extends TaggedError> {
   // Transform
   // -------------------------------------------------------------------------
 
-  /** Transform each item. */
+  /** Transform each item. Automatically fused with adjacent map/filter/tap. */
   map<U>(fn: (value: T) => U): StreamPipeline<U, E> {
-    return new StreamPipeline(Stream.map(this.stream, fn));
+    return new StreamPipeline<U, E>(this._baseStream, [...this._ops, { tag: "map", fn }]);
   }
 
   /** Async transform each item — takes a function returning a Promise. The resolved value replaces the item. */
   mapAsync<U>(fn: (value: T) => Promise<U>): StreamPipeline<U, E> {
     return new StreamPipeline(
-      Stream.mapEffect(this.stream, (value) => Effect.promise(() => fn(value))),
+      Stream.mapEffect(this._materialize(), (value) => Effect.promise(() => fn(value))),
     );
   }
 
@@ -259,7 +294,9 @@ export class StreamPipeline<T, E extends TaggedError> {
   mapEffect<U, E2 extends TaggedError>(
     fn: (value: T) => Effect.Effect<U, E2>,
   ): StreamPipeline<U, E | E2> {
-    return new StreamPipeline(Stream.mapEffect(this.stream, fn) as Stream.Stream<U, E | E2>);
+    return new StreamPipeline(
+      Stream.mapEffect(this._materialize(), fn) as Stream.Stream<U, E | E2>,
+    );
   }
 
   /**
@@ -271,7 +308,7 @@ export class StreamPipeline<T, E extends TaggedError> {
    * ```
    */
   zipWithIndex(): StreamPipeline<[T, number], E> {
-    return new StreamPipeline(Stream.zipWithIndex(this.stream));
+    return new StreamPipeline(Stream.zipWithIndex(this._materialize()));
   }
 
   /** Stateful map — carries an accumulator, emits both accumulator and transformed value. */
@@ -280,7 +317,7 @@ export class StreamPipeline<T, E extends TaggedError> {
     fn: (state: S, value: T) => readonly [S, U],
   ): StreamPipeline<U, E> {
     return new StreamPipeline(
-      Stream.mapAccum(this.stream, initial, (state, value) => {
+      Stream.mapAccum(this._materialize(), initial, (state, value) => {
         const [nextState, output] = fn(state, value);
         return [nextState, output];
       }),
@@ -299,9 +336,13 @@ export class StreamPipeline<T, E extends TaggedError> {
    * stream.filter((e) => e.type === "internal", "drop") // drop internal events
    * ```
    */
+  /** Filter items. Automatically fused with adjacent map/filter/tap. */
   filter(fn: (value: T) => boolean, action?: "keep" | "drop"): StreamPipeline<T, E> {
     const predicate = action === "drop" ? (value: T) => !fn(value) : fn;
-    return new StreamPipeline(Stream.filter(this.stream, predicate));
+    return new StreamPipeline<T, E>(this._baseStream, [
+      ...this._ops,
+      { tag: "filter", fn: predicate },
+    ]);
   }
 
   /**
@@ -317,7 +358,7 @@ export class StreamPipeline<T, E extends TaggedError> {
   filterAsync(fn: (value: T) => Promise<boolean>, action?: "keep" | "drop"): StreamPipeline<T, E> {
     const predicate = action === "drop" ? (value: T) => fn(value).then((r) => !r) : fn;
     return new StreamPipeline(
-      Stream.filterEffect(this.stream, (value) => Effect.promise(() => predicate(value))),
+      Stream.filterEffect(this._materialize(), (value) => Effect.promise(() => predicate(value))),
     );
   }
 
@@ -331,13 +372,9 @@ export class StreamPipeline<T, E extends TaggedError> {
    * stream.filterMap((x) => x.status === "ok" ? x.data : undefined)
    * ```
    */
+  /** Filter + map in one pass. Automatically fused with adjacent pure ops. */
   filterMap<U>(fn: (value: T) => U | undefined): StreamPipeline<U, E> {
-    return new StreamPipeline(
-      Stream.filterMap(this.stream, (value) => {
-        const result = fn(value);
-        return result === undefined ? (Option.none() as Option.Option<U>) : Option.some(result);
-      }),
-    );
+    return new StreamPipeline<U, E>(this._baseStream, [...this._ops, { tag: "filterMap", fn }]);
   }
 
   /**
@@ -349,20 +386,25 @@ export class StreamPipeline<T, E extends TaggedError> {
    *   .unNone()                                // StreamPipeline<User>
    * ```
    */
+  /** Drop null/undefined. Automatically fused. */
   unNone(): StreamPipeline<NonNullable<T>, E> {
-    return new StreamPipeline(
-      Stream.filter(this.stream, (value): value is NonNullable<T> => value != null),
-    );
+    return new StreamPipeline<NonNullable<T>, E>(this._baseStream, [
+      ...this._ops,
+      { tag: "filter", fn: (value: any) => value != null },
+    ]);
   }
 
-  /** Run a sync side-effect for each item without changing it. */
+  /** Run a sync side-effect for each item without changing it. Automatically fused. */
   tap(fn: (value: T) => void): StreamPipeline<T, E> {
-    return new StreamPipeline(Stream.tap(this.stream, (value) => Effect.sync(() => fn(value))));
+    return new StreamPipeline<T, E>(this._baseStream, [...this._ops, { tag: "tap", fn }]);
   }
 
   /** Run an async side-effect for each item without changing it. Awaits the Promise before continuing. */
   tapAsync(fn: (value: T) => Promise<void>): StreamPipeline<T, E> {
-    return new StreamPipeline(Stream.tap(this.stream, (value) => Effect.promise(() => fn(value))));
+    const base = this._flush();
+    return new StreamPipeline(
+      Stream.tap(base._baseStream, (value) => Effect.promise(() => fn(value))),
+    );
   }
 
   /**
@@ -376,7 +418,7 @@ export class StreamPipeline<T, E extends TaggedError> {
    */
   tapAsyncFork(fn: (value: T) => Promise<void>): StreamPipeline<T, E> {
     return new StreamPipeline(
-      Stream.tap(this.stream, (value) =>
+      Stream.tap(this._materialize(), (value) =>
         Effect.fork(Effect.promise(() => fn(value)).pipe(Effect.catchAll(() => Effect.void))),
       ),
     );
@@ -384,27 +426,27 @@ export class StreamPipeline<T, E extends TaggedError> {
 
   /** Take the first N items then stop. */
   take(n: number): StreamPipeline<T, E> {
-    return new StreamPipeline(Stream.take(this.stream, n));
+    return new StreamPipeline(Stream.take(this._materialize(), n));
   }
 
   /** Take items while predicate is true, then stop. */
   takeWhile(fn: (value: T) => boolean): StreamPipeline<T, E> {
-    return new StreamPipeline(Stream.takeWhile(this.stream, fn));
+    return new StreamPipeline(Stream.takeWhile(this._materialize(), fn));
   }
 
   /** Skip the first N items. */
   drop(n: number): StreamPipeline<T, E> {
-    return new StreamPipeline(Stream.drop(this.stream, n));
+    return new StreamPipeline(Stream.drop(this._materialize(), n));
   }
 
   /** Skip items while the predicate is true, then emit everything after. */
   dropWhile(fn: (value: T) => boolean): StreamPipeline<T, E> {
-    return new StreamPipeline(Stream.dropWhile(this.stream, fn));
+    return new StreamPipeline(Stream.dropWhile(this._materialize(), fn));
   }
 
   /** Emit only when the value changes (by structural equality). */
   dedupe(): StreamPipeline<T, E> {
-    return new StreamPipeline(Stream.changes(this.stream));
+    return new StreamPipeline(Stream.changes(this._materialize()));
   }
 
   /**
@@ -418,7 +460,7 @@ export class StreamPipeline<T, E extends TaggedError> {
   distinctBy<K>(fn: (value: T) => K): StreamPipeline<T, E> {
     const seen = new Set<K>();
     return new StreamPipeline(
-      Stream.filter(this.stream, (value) => {
+      Stream.filter(this._materialize(), (value) => {
         const key = fn(value);
         if (seen.has(key)) return false;
         seen.add(key);
@@ -432,7 +474,7 @@ export class StreamPipeline<T, E extends TaggedError> {
     fn: (value: T) => StreamPipeline<U, E2>,
   ): StreamPipeline<U, E | E2> {
     return new StreamPipeline(
-      Stream.flatMap(this.stream, (value) => fn(value).stream) as Stream.Stream<U, E | E2>,
+      Stream.flatMap(this._materialize(), (value) => fn(value).stream) as Stream.Stream<U, E | E2>,
     );
   }
 
@@ -441,7 +483,7 @@ export class StreamPipeline<T, E extends TaggedError> {
     fn: (value: T) => StreamPipeline<U, E2>,
   ): StreamPipeline<U, E | E2> {
     return new StreamPipeline(
-      Stream.flatMap(this.stream, (value) => fn(value).stream, {
+      Stream.flatMap(this._materialize(), (value) => fn(value).stream, {
         switch: true,
       }) as Stream.Stream<U, E | E2>,
     );
@@ -449,7 +491,7 @@ export class StreamPipeline<T, E extends TaggedError> {
 
   /** Append another stream after this one completes. */
   concat(other: StreamPipeline<T, E>): StreamPipeline<T, E> {
-    return new StreamPipeline(Stream.concat(this.stream, other.stream));
+    return new StreamPipeline(Stream.concat(this._materialize(), other.stream));
   }
 
   // -------------------------------------------------------------------------
@@ -459,14 +501,16 @@ export class StreamPipeline<T, E extends TaggedError> {
   /** Async transform with bounded concurrency, preserving input order. */
   parAsyncMap<U>(concurrency: number, fn: (value: T) => Promise<U>): StreamPipeline<U, E> {
     return new StreamPipeline(
-      Stream.mapEffect(this.stream, (value) => Effect.promise(() => fn(value)), { concurrency }),
+      Stream.mapEffect(this._materialize(), (value) => Effect.promise(() => fn(value)), {
+        concurrency,
+      }),
     );
   }
 
   /** Like `parAsyncMap` but results arrive in completion order, not input order. */
   parAsyncMapUnordered<U>(concurrency: number, fn: (value: T) => Promise<U>): StreamPipeline<U, E> {
     return new StreamPipeline(
-      Stream.mapEffect(this.stream, (value) => Effect.promise(() => fn(value)), {
+      Stream.mapEffect(this._materialize(), (value) => Effect.promise(() => fn(value)), {
         concurrency,
         unordered: true,
       }),
@@ -484,7 +528,7 @@ export class StreamPipeline<T, E extends TaggedError> {
       Schedule.recurs(maxRetries),
     );
     return new StreamPipeline(
-      Stream.mapEffect(this.stream, (value) => {
+      Stream.mapEffect(this._materialize(), (value) => {
         // Effect.promise turns rejections into defects. Absorb defects into error channel
         // so Effect.retry can see them.
         const attempt = Effect.catchAllDefect(
@@ -502,7 +546,7 @@ export class StreamPipeline<T, E extends TaggedError> {
   /** Buffer items into batches of up to `maxSize` items or `maxWaitMs` ms, whichever comes first. */
   groupWithin(maxSize: number, maxWaitMs: number): StreamPipeline<T[], E> {
     return new StreamPipeline(
-      Stream.groupedWithin(this.stream, maxSize, Duration.millis(maxWaitMs)).pipe(
+      Stream.groupedWithin(this._materialize(), maxSize, Duration.millis(maxWaitMs)).pipe(
         Stream.map(Chunk.toArray),
       ),
     );
@@ -510,7 +554,9 @@ export class StreamPipeline<T, E extends TaggedError> {
 
   /** Buffer items into fixed-size batches. Last batch may be smaller. */
   grouped(size: number): StreamPipeline<T[], E> {
-    return new StreamPipeline(Stream.grouped(this.stream, size).pipe(Stream.map(Chunk.toArray)));
+    return new StreamPipeline(
+      Stream.grouped(this._materialize(), size).pipe(Stream.map(Chunk.toArray)),
+    );
   }
 
   /**
@@ -527,7 +573,9 @@ export class StreamPipeline<T, E extends TaggedError> {
    */
   mapChunks<U>(fn: (chunk: T[]) => U[]): StreamPipeline<U, E> {
     return new StreamPipeline(
-      Stream.mapChunks(this.stream, (chunk) => Chunk.unsafeFromArray(fn(Chunk.toArray(chunk)))),
+      Stream.mapChunks(this._materialize(), (chunk) =>
+        Chunk.unsafeFromArray(fn(Chunk.toArray(chunk))),
+      ),
     );
   }
 
@@ -542,32 +590,36 @@ export class StreamPipeline<T, E extends TaggedError> {
    * ```
    */
   rechunk(size: number): StreamPipeline<T, E> {
-    return new StreamPipeline(Stream.rechunk(this.stream, size));
+    return new StreamPipeline(Stream.rechunk(this._materialize(), size));
   }
 
   /** Sliding window over stream items. Emits arrays of `size` elements. */
   sliding(size: number): StreamPipeline<T[], E> {
-    return new StreamPipeline(Stream.sliding(this.stream, size).pipe(Stream.map(Chunk.toArray)));
+    return new StreamPipeline(
+      Stream.sliding(this._materialize(), size).pipe(Stream.map(Chunk.toArray)),
+    );
   }
 
   /** Decouple producer/consumer — buffer up to N items ahead. */
   buffer(capacity: number): StreamPipeline<T, E> {
-    return new StreamPipeline(Stream.buffer(this.stream, { capacity }));
+    return new StreamPipeline(Stream.buffer(this._materialize(), { capacity }));
   }
 
   /** Running accumulator — like `reduce` but emits every intermediate result. */
   scan<U>(initial: U, fn: (acc: U, value: T) => U): StreamPipeline<U, E> {
-    return new StreamPipeline(Stream.scan(this.stream, initial, fn));
+    return new StreamPipeline(Stream.scan(this._materialize(), initial, fn));
   }
 
   /** Emit only after a quiet period of `ms` milliseconds with no new items. */
   debounce(ms: number): StreamPipeline<T, E> {
-    return new StreamPipeline(Stream.debounce(this.stream, Duration.millis(ms)));
+    return new StreamPipeline(Stream.debounce(this._materialize(), Duration.millis(ms)));
   }
 
   /** Enforce max emission rate — emit at most 1 item per `ms` milliseconds. */
   metered(ms: number): StreamPipeline<T, E> {
-    return new StreamPipeline(Stream.schedule(this.stream, Schedule.spaced(Duration.millis(ms))));
+    return new StreamPipeline(
+      Stream.schedule(this._materialize(), Schedule.spaced(Duration.millis(ms))),
+    );
   }
 
   /**
@@ -577,7 +629,7 @@ export class StreamPipeline<T, E extends TaggedError> {
    */
   spaced(ms: number): StreamPipeline<T, E> {
     return new StreamPipeline(
-      Stream.mapEffect(this.stream, (value) =>
+      Stream.mapEffect(this._materialize(), (value) =>
         Effect.sleep(Duration.millis(ms)).pipe(Effect.map(() => value)),
       ),
     );
@@ -594,7 +646,7 @@ export class StreamPipeline<T, E extends TaggedError> {
    * ```
    */
   repeat(): StreamPipeline<T, E> {
-    return new StreamPipeline(Stream.forever(this.stream));
+    return new StreamPipeline(Stream.forever(this._materialize()));
   }
 
   /**
@@ -608,7 +660,7 @@ export class StreamPipeline<T, E extends TaggedError> {
    * ```
    */
   repeatN(n: number): StreamPipeline<T, E> {
-    const streams = Array.from({ length: n }, () => this.stream);
+    const streams = Array.from({ length: n }, () => this._materialize());
     return new StreamPipeline(streams.reduce((acc, s) => Stream.concat(acc, s)));
   }
 
@@ -618,7 +670,7 @@ export class StreamPipeline<T, E extends TaggedError> {
 
   /** Merge another stream — interleave items from both as they arrive. */
   merge(other: StreamPipeline<T, E>): StreamPipeline<T, E> {
-    return new StreamPipeline(Stream.merge(this.stream, other.stream));
+    return new StreamPipeline(Stream.merge(this._materialize(), other.stream));
   }
 
   /** Merge multiple streams — interleave items from all as they arrive. */
@@ -635,13 +687,13 @@ export class StreamPipeline<T, E extends TaggedError> {
     fn: (a: T, b: U) => V,
   ): StreamPipeline<V, E | E2> {
     return new StreamPipeline(
-      Stream.zipWith(this.stream, other.stream, fn) as Stream.Stream<V, E | E2>,
+      Stream.zipWith(this._materialize(), other.stream, fn) as Stream.Stream<V, E | E2>,
     );
   }
 
   /** Alternate items from two streams (round-robin). */
   interleave(other: StreamPipeline<T, E>): StreamPipeline<T, E> {
-    return new StreamPipeline(Stream.interleave(this.stream, other.stream));
+    return new StreamPipeline(Stream.interleave(this._materialize(), other.stream));
   }
 
   /** Reusable stream transformation. */
@@ -688,7 +740,7 @@ export class StreamPipeline<T, E extends TaggedError> {
   observe(fn: (stream: StreamPipeline<T, E>) => StreamPipeline<unknown, E>): StreamPipeline<T, E> {
     // Use tap + fork to run the observer in background without blocking
     return new StreamPipeline(
-      Stream.tap(this.stream, (value) =>
+      Stream.tap(this._materialize(), (value) =>
         Effect.fork(
           Stream.runDrain(fn(new StreamPipeline(Stream.make(value))).stream).pipe(
             Effect.catchAll(() => Effect.void),
@@ -714,7 +766,7 @@ export class StreamPipeline<T, E extends TaggedError> {
   pauseWhen(ref: PipelineRef<boolean>, pollMs: number = 50): StreamPipeline<T, E> {
     // Check the ref before emitting each item; if paused, sleep and re-check
     return new StreamPipeline(
-      Stream.mapEffect(this.stream, (value) =>
+      Stream.mapEffect(this._materialize(), (value) =>
         Effect.gen(function* () {
           while (yield* Ref.get(ref.ref)) {
             yield* Effect.sleep(Duration.millis(pollMs));
@@ -732,14 +784,14 @@ export class StreamPipeline<T, E extends TaggedError> {
   /** Recover from stream errors with a fallback value and stop. */
   orElse(fallback: T): StreamPipeline<T, never> {
     return new StreamPipeline(
-      Stream.orElse(this.stream, () => Stream.make(fallback)) as Stream.Stream<T, never>,
+      Stream.orElse(this._materialize(), () => Stream.make(fallback)) as Stream.Stream<T, never>,
     );
   }
 
   /** Run a side-effect on error. */
   tapError(fn: (error: E) => void): StreamPipeline<T, E> {
     return new StreamPipeline(
-      Stream.tapError(this.stream, (error) => Effect.sync(() => fn(error))),
+      Stream.tapError(this._materialize(), (error) => Effect.sync(() => fn(error))),
     );
   }
 
@@ -757,7 +809,7 @@ export class StreamPipeline<T, E extends TaggedError> {
       Schedule.exponential(Duration.millis(baseDelayMs), 2),
       Schedule.recurs(maxRetries),
     );
-    return new StreamPipeline(Stream.retry(this.stream, schedule));
+    return new StreamPipeline(Stream.retry(this._materialize(), schedule));
   }
 
   /**
@@ -770,7 +822,7 @@ export class StreamPipeline<T, E extends TaggedError> {
    */
   timeout(ms: number): StreamPipeline<T, E> {
     return new StreamPipeline(
-      Stream.timeoutFail(this.stream, () => "timeout" as never, Duration.millis(ms)),
+      Stream.timeoutFail(this._materialize(), () => "timeout" as never, Duration.millis(ms)),
     );
   }
 
@@ -782,7 +834,7 @@ export class StreamPipeline<T, E extends TaggedError> {
   interruptOn(signal: AbortSignal): StreamPipeline<T, E> {
     return new StreamPipeline(
       Stream.interruptWhen(
-        this.stream,
+        this._materialize(),
         Effect.async<void, never>((resume) => {
           if (signal.aborted) {
             resume(Effect.void);
@@ -798,7 +850,7 @@ export class StreamPipeline<T, E extends TaggedError> {
 
   /** Auto-stop stream after a duration. */
   interruptAfter(ms: number): StreamPipeline<T, E> {
-    return new StreamPipeline(Stream.interruptAfter(this.stream, Duration.millis(ms)));
+    return new StreamPipeline(Stream.interruptAfter(this._materialize(), Duration.millis(ms)));
   }
 
   // -------------------------------------------------------------------------
@@ -807,12 +859,12 @@ export class StreamPipeline<T, E extends TaggedError> {
 
   /** Run a sync cleanup function when the stream ends (success, error, or interruption). */
   finally(fn: () => void): StreamPipeline<T, E> {
-    return new StreamPipeline(Stream.ensuring(this.stream, Effect.sync(fn)));
+    return new StreamPipeline(Stream.ensuring(this._materialize(), Effect.sync(fn)));
   }
 
   /** Run an async cleanup function when the stream ends. */
   onFinalize(fn: () => Promise<void>): StreamPipeline<T, E> {
-    return new StreamPipeline(Stream.ensuring(this.stream, Effect.promise(fn)));
+    return new StreamPipeline(Stream.ensuring(this._materialize(), Effect.promise(fn)));
   }
 
   // -------------------------------------------------------------------------
@@ -861,7 +913,7 @@ export class StreamPipeline<T, E extends TaggedError> {
     process: (value: T, state: StateBackend<K, V>) => Promise<U>;
   }): StreamPipeline<U, E> {
     return new StreamPipeline(
-      Stream.mapEffect(this.stream, (value) =>
+      Stream.mapEffect(this._materialize(), (value) =>
         Effect.promise(() => params.process(value, params.stateBackend)),
       ),
     );
@@ -870,7 +922,7 @@ export class StreamPipeline<T, E extends TaggedError> {
   /** Process each item (sync or async). Returns a Promise that resolves when the stream ends. */
   async forEach(fn: (value: T) => unknown): Promise<void> {
     await Effect.runPromise(
-      Stream.runForEach(this.stream, (value) => {
+      Stream.runForEach(this._materialize(), (value) => {
         const result = fn(value);
         return result instanceof Promise ? Effect.promise(() => result) : Effect.sync(() => result);
       }),
@@ -889,7 +941,9 @@ export class StreamPipeline<T, E extends TaggedError> {
    * ```
    */
   async runFirst(): Promise<T | undefined> {
-    const chunk = await Effect.runPromise(Stream.runCollect(this.stream.pipe(Stream.take(1))));
+    const chunk = await Effect.runPromise(
+      Stream.runCollect(this._materialize().pipe(Stream.take(1))),
+    );
     const arr = Chunk.toArray(chunk);
     return arr.length > 0 ? arr[0] : undefined;
   }
@@ -906,7 +960,7 @@ export class StreamPipeline<T, E extends TaggedError> {
    */
   async collectFirst(predicate: (value: T) => boolean): Promise<T | undefined> {
     const result = await Effect.runPromise(
-      Stream.runCollect(this.stream.pipe(Stream.filter(predicate), Stream.take(1))),
+      Stream.runCollect(this._materialize().pipe(Stream.filter(predicate), Stream.take(1))),
     );
     const arr = Chunk.toArray(result);
     return arr.length > 0 ? arr[0] : undefined;
@@ -923,30 +977,30 @@ export class StreamPipeline<T, E extends TaggedError> {
    */
   async collectWhile(predicate: (value: T) => boolean): Promise<T[]> {
     const chunk = await Effect.runPromise(
-      Stream.runCollect(this.stream.pipe(Stream.takeWhile(predicate))),
+      Stream.runCollect(this._materialize().pipe(Stream.takeWhile(predicate))),
     );
     return Chunk.toArray(chunk);
   }
 
   /** Collect all items into an array. */
   async collect(): Promise<T[]> {
-    const chunk = await Effect.runPromise(Stream.runCollect(this.stream));
+    const chunk = await Effect.runPromise(Stream.runCollect(this._materialize()));
     return Chunk.toArray(chunk);
   }
 
   /** Fold over all items to produce a single value. */
   async reduce<U>(initial: U, fn: (acc: U, value: T) => U): Promise<U> {
-    return Effect.runPromise(Stream.runFold(this.stream, initial, fn));
+    return Effect.runPromise(Stream.runFold(this._materialize(), initial, fn));
   }
 
   /** Drain the stream (consume all items, discard values). */
   async drain(): Promise<void> {
-    await Effect.runPromise(Stream.runDrain(this.stream));
+    await Effect.runPromise(Stream.runDrain(this._materialize()));
   }
 
   /** Escape hatch: get the raw Effect Stream for advanced composition. */
   toStream(): Stream.Stream<T, E> {
-    return this.stream;
+    return this._materialize();
   }
 
   /**
@@ -966,7 +1020,12 @@ export class StreamPipeline<T, E extends TaggedError> {
    *   .collect(); // runs fused: 1 Effect call per element, not 3
    * ```
    */
-  optimized(): OptimizedStreamPipeline<T, E> {
-    return new OptimizedStreamPipeline(this.stream);
+  /**
+   * @deprecated Fusion is now automatic. StreamPipeline fuses adjacent pure operators
+   * (map, filter, filterMap, tap) by default — no need to call `.optimized()`.
+   * Returns `this` for backward compatibility.
+   */
+  optimized(): StreamPipeline<T, E> {
+    return this;
   }
 }
