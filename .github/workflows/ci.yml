@@ -35,12 +35,17 @@ jobs:
         run: bun run test
 
       - name: Stream benchmarks
-        run: bun run packages/core/src/lib/stream-pipeline.bench.ts 2>&1 | tee .target/reports/stream-bench.txt
+        run: |
+          mkdir -p .target/reports
+          bun run packages/core/src/lib/stream-pipeline.bench.ts 2>&1 | tee .target/reports/stream-bench.txt
 
       - name: Cross-language benchmarks
+        continue-on-error: true
         run: |
-          pip install uv 2>/dev/null || true
-          bun run bench 2>&1 || true
+          # Install uv for Python dependency management
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          bun run bench || true
 
       - name: Publish benchmark report
         if: always()
@@ -60,6 +65,7 @@ jobs:
         with:
           name: benchmark-reports
           path: .target/reports/
+          if-no-files-found: ignore
 
   # Slower: integration tests with testcontainers (Kafka, Redis, Postgres)
   integration:
