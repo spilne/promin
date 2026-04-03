@@ -383,19 +383,24 @@ class TopologyRunnerInstance {
       return source.subscribe();
     }
 
+    // Single mapChunks: unwrap + batch ack in one pass per chunk (~4096 items).
+    // Avoids per-item Effect overhead from chained .map().tap().
     return source
       .subscribeAck({ group: this.config.group })
-      .map((envelope: Envelope<unknown>) => {
-        this.pendingAckEnvelope = envelope;
-        count++;
-        return envelope.value;
-      })
-      .tap(() => {
-        if (count >= batchSize && this.pendingAckEnvelope) {
-          this.pendingAckEnvelope.ack();
-          this.pendingAckEnvelope = null;
-          count = 0;
+      .mapChunks((chunk: Envelope<unknown>[]) => {
+        const values: unknown[] = new Array(chunk.length);
+        for (let i = 0; i < chunk.length; i++) {
+          const env = chunk[i]!;
+          values[i] = env.value;
+          this.pendingAckEnvelope = env;
+          count++;
+          if (count >= batchSize) {
+            env.ack();
+            this.pendingAckEnvelope = null;
+            count = 0;
+          }
         }
+        return values;
       });
   }
 
