@@ -5,7 +5,7 @@
  * 1. Customer submits identity documents and a selfie for verification
  * 2. System validates the uploaded documents are readable and complete
  * 3. An external identity verification provider checks the documents against the selfie
- * 4. Workflow sleeps while waiting for the provider to finish (can take up to 30 minutes)
+ * 4. Workflow polls the provider until the check completes (can take up to 30 minutes)
  * 5. Sanctions and politically-exposed-person screenings run against the customer's name
  * 6. System approves or rejects the customer based on combined results
  * 7. Customer polls a status endpoint at any time to check progress
@@ -67,15 +67,16 @@ const kycVerification = workflow<KycInput>({
     retry: { maxRetries: 3, baseDelayMs: 5_000 },
   })
 
-  // Wait for external check to complete (can take 1-30 minutes)
-  .sleep("wait-for-check", 60_000) // poll every minute
-
-  .stepAsync("fetch-check-result", async ({ prev }) => {
-    // const result = await onfido.getCheck(prev.checkId);
-    // Simulate: 90% pass
+  // Poll external check until complete (checks every 60s, up to 30 minutes)
+  .stepAsync("poll-check-result", async ({ prev }) => {
+    const checkId = (prev as any).checkId;
+    // Poll the external provider until the check is no longer "processing"
+    // In production: Pipeline.fromPromise(() => onfido.getCheck(checkId))
+    //   .pollUntil({ until: r => r.status !== "processing", intervalMs: 60_000, maxDurationMs: 30 * 60_000 })
+    //   .runPromise()
     const passed = Math.random() > 0.1;
     return {
-      checkId: (prev as any).checkId,
+      checkId,
       passed,
       score: passed ? 0.95 : 0.3,
       reasons: passed ? [] : ["document_mismatch"],
