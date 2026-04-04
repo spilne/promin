@@ -1,23 +1,23 @@
 /**
- * Async workflow from API — submit and poll
+ * Async workflow from API — submit and wait for external signal
  *
  * Business flow:
  * 1. Customer submits identity documents and a selfie for verification
  * 2. System validates the uploaded documents are readable and complete
  * 3. An external identity verification provider checks the documents against the selfie
- * 4. Workflow polls the provider until the check completes (can take up to 30 minutes)
+ * 4. Workflow suspends and waits for a webhook signal from the provider (up to 30 minutes)
  * 5. Sanctions and politically-exposed-person screenings run against the customer's name
  * 6. System approves or rejects the customer based on combined results
  * 7. Customer polls a status endpoint at any time to check progress
  *
- * A background scanner resumes sleeping workflows once the external check completes.
+ * The workflow uses `waitForSignal` — it suspends (uses zero resources) until the
+ * external provider sends a webhook. No polling, no sleep loops.
  */
 
 import {
   workflow,
   Pipeline,
   InMemoryWorkflowStorage,
-  createSleepScanner,
   type WorkflowDefinition,
 } from "@promin/core";
 
@@ -37,6 +37,13 @@ interface KycInput {
   country: string;
 }
 
+interface CheckResult {
+  checkId: string;
+  passed: boolean;
+  score: number;
+  reasons: string[];
+}
+
 const kycVerification = workflow<KycInput>({
   name: "kyc-verification",
   storage,
@@ -51,39 +58,39 @@ const kycVerification = workflow<KycInput>({
     return { documentsValid: true, submittedAt: new Date().toISOString() };
   })
 
-  // Run identity verification via external provider (Jumio, Onfido, etc.)
-  .stepAsync("identity-check", async ({ input }) => {
-    // const result = await onfido.createCheck({
-    //   applicantId: input.userId,
-    //   document: input.documentUrl,
-    //   selfie: input.selfieUrl,
-    // });
-    return {
-      checkId: `check_${Date.now()}`,
-      provider: "onfido",
-      status: "processing",
-    };
-  }, {
-    retry: { maxRetries: 3, baseDelayMs: 5_000 },
+  // Kick off identity verification via external provider (Onfido, Jumio, etc.)
+  .stepAsync(
+    "submit-identity-check",
+    async ({ input }) => {
+      // const result = await onfido.createCheck({
+      //   applicantId: input.userId,
+      //   document: input.documentUrl,
+      //   selfie: input.selfieUrl,
+      // });
+      return {
+        checkId: `check_${Date.now()}`,
+        provider: "onfido",
+        status: "processing",
+      };
+    },
+    { retry: { maxRetries: 3, baseDelayMs: 5_000 } },
+  )
+
+  // Wait for the external provider to complete the check.
+  // The workflow suspends here — uses zero resources — until a webhook
+  // delivers the signal. Timeout after 30 minutes if no signal arrives.
+  //
+  // How it works:
+  //   1. Workflow reaches this step and suspends (status: "waiting_for_signal")
+  //   2. External provider finishes the check and sends a webhook to our API
+  //   3. Webhook handler calls storage.deliverSignal(workflowId, "identity-check-result", payload)
+  //   4. Next workflow resume picks up the signal and continues
+  .waitForSignal<CheckResult>("wait-for-check-result", {
+    signalName: "identity-check-result",
+    timeoutMs: 30 * 60_000, // 30 minutes
   })
 
-  // Poll external check until complete (checks every 60s, up to 30 minutes)
-  .stepAsync("poll-check-result", async ({ prev }) => {
-    const checkId = (prev as any).checkId;
-    // Poll the external provider until the check is no longer "processing"
-    // In production: Pipeline.fromPromise(() => onfido.getCheck(checkId))
-    //   .pollUntil({ until: r => r.status !== "processing", intervalMs: 60_000, maxDurationMs: 30 * 60_000 })
-    //   .runPromise()
-    const passed = Math.random() > 0.1;
-    return {
-      checkId,
-      passed,
-      score: passed ? 0.95 : 0.3,
-      reasons: passed ? [] : ["document_mismatch"],
-    };
-  })
-
-  // Sanctions screening
+  // Sanctions screening (runs after identity check completes)
   .stepAsync("sanctions-check", async ({ input }) => {
     // await sanctionsDb.screen(input.fullName, input.dateOfBirth, input.country);
     return { sanctionsClean: true, screenedAt: new Date().toISOString() };
@@ -133,20 +140,20 @@ async function handleSubmitKyc(request: {
     return { status: 202, body: { workflowId, status: "processing" } };
   }
 
-  // Start workflow — will suspend at the sleep step
+  // Start workflow — will suspend at waitForSignal step
   const { error } = await kycVerification.runSafe({
     workflowId,
     input: { userId: request.user.id, ...request.body },
   });
 
-  // Suspended at sleep is expected — external check takes time
+  // Suspended at waitForSignal is expected — external check takes time
   if (error && (error as any)._tag === "WorkflowSuspendedError") {
     return {
       status: 202,
       body: {
         workflowId,
         status: "processing",
-        message: "Verification in progress. Check back in a few minutes.",
+        message: "Verification in progress. You'll be notified when complete.",
       },
     };
   }
@@ -158,7 +165,35 @@ async function handleSubmitKyc(request: {
   return { status: 200, body: { workflowId, status: "completed" } };
 }
 
-// GET /kyc/status — poll for result
+// POST /webhooks/onfido — receives webhook from identity provider
+async function handleOnfidoWebhook(request: {
+  body: { resource_type: string; action: string; object: { id: string; status: string; result: string } };
+}) {
+  const check = request.body.object;
+  const passed = check.result === "clear";
+
+  // Find the workflow waiting for this check
+  // In production: look up workflowId by checkId from a mapping table
+  const workflowId = `kyc-lookup-by-check-${check.id}`;
+
+  // Deliver the signal — this wakes up the waiting workflow
+  await storage.deliverSignal(workflowId, "identity-check-result", JSON.stringify({
+    checkId: check.id,
+    passed,
+    score: passed ? 0.95 : 0.3,
+    reasons: passed ? [] : [check.result],
+  }));
+
+  // Resume the workflow (picks up the signal on next execution)
+  await kycVerification.runSafe({
+    workflowId,
+    input: {} as KycInput, // input already stored from initial run
+  });
+
+  return { status: 200, body: { received: true } };
+}
+
+// GET /kyc/status — check verification progress
 async function handleKycStatus(request: { user: { id: string } }) {
   const workflowId = `kyc-${request.user.id}`;
   const state = await storage.loadWorkflow(workflowId);
@@ -173,28 +208,17 @@ async function handleKycStatus(request: { user: { id: string } }) {
     case "failed":
       return { status: 200, body: { status: "failed", error: state.error } };
     case "suspended":
-      return { status: 200, body: { status: "processing", message: "Still verifying..." } };
+      return {
+        status: 200,
+        body: {
+          status: "processing",
+          message: "Waiting for identity verification provider...",
+          step: Object.entries(state.steps).find(([, s]) => s.status === "waiting_for_signal")?.[0],
+        },
+      };
     default:
       return { status: 200, body: { status: "processing" } };
   }
 }
 
-// ---------------------------------------------------------------------------
-// Background: sleep scanner resumes workflows after external checks
-// ---------------------------------------------------------------------------
-
-function startKycScanner() {
-  const definitions = new Map<string, WorkflowDefinition<unknown, unknown>>([
-    ["kyc-verification", kycVerification],
-  ]);
-
-  return createSleepScanner({
-    storage,
-    scanIntervalMs: 30_000, // check every 30 seconds
-    resolveWorkflow: (name) => definitions.get(name),
-    onResume: (id) => console.log(`KYC resumed: ${id}`),
-    onError: (id, err) => console.error(`KYC error: ${id}`, err),
-  });
-}
-
-export { kycVerification, handleSubmitKyc, handleKycStatus, startKycScanner };
+export { kycVerification, handleSubmitKyc, handleOnfidoWebhook, handleKycStatus };
