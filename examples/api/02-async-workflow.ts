@@ -259,21 +259,54 @@ async function handleKycStatusDetailed(request: { user: { id: string } }) {
   return { status: 200, body: status };
 }
 
-// Server-side: wait for workflow to finish (e.g. in a background job)
+// ---------------------------------------------------------------------------
+// WorkflowHandle — cleanest API for server-side orchestration
+// ---------------------------------------------------------------------------
+
+// The handle combines start + status + signal + result in one object.
+// Use this when you control both the workflow starter and the signal sender.
 //
-// Unlike the browser polling above, this blocks until the workflow completes.
-// Useful for orchestration where you need the result before continuing.
+//   const handle = await kycVerification.start(workflowId, input);
+//   // ... later, from webhook:
+//   await handle.signal("identity-check-result", checkPayload);
+//   // ... wait for completion:
+//   const result = await handle.result({ timeoutMs: 30 * 60_000 });
+//
+async function processKycWithHandle(userId: string, input: KycInput) {
+  const handle = await kycVerification.start(`kyc-${userId}`, input);
+
+  // At this point the workflow is running or suspended at waitForSignal.
+  const status = await handle.status();
+  console.log(`KYC started: ${status?.state}, step: ${status?.currentStep}`);
+
+  // In a real app, the signal comes from a webhook handler.
+  // Here we simulate it for demonstration:
+  await handle.signal("identity-check-result", JSON.stringify({
+    checkId: "check_123",
+    passed: true,
+    score: 0.95,
+    reasons: [],
+  }));
+
+  // Wait for the workflow to finish (resumes + completes after signal)
+  const result = await handle.result({ timeoutMs: 60_000 });
+  return result;
+}
+
+// Server-side: wait for workflow to finish without handle (alternative API)
+//
+// Uses runSafe + waitForResult directly. Same outcome as handle.result(),
+// but requires passing input again.
 //
 async function processKycAndWait(userId: string, input: KycInput) {
   const workflowId = `kyc-${userId}`;
 
   await kycVerification.runSafe({ workflowId, input });
 
-  // Block until complete — resumes suspended workflows on each poll
   const result = await kycVerification.waitForResult(workflowId, {
     input,
     intervalMs: 5_000,
-    timeoutMs: 30 * 60_000, // 30 minutes (identity check can be slow)
+    timeoutMs: 30 * 60_000,
   });
 
   return result;
@@ -285,5 +318,6 @@ export {
   handleOnfidoWebhook,
   handleKycStatus,
   handleKycStatusDetailed,
+  processKycWithHandle,
   processKycAndWait,
 };
