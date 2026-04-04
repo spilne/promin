@@ -1,14 +1,44 @@
 /**
  * Async workflow from API — submit and wait for external signal
  *
- * Business flow:
- * 1. Customer submits identity documents and a selfie for verification
- * 2. System validates the uploaded documents are readable and complete
- * 3. An external identity verification provider checks the documents against the selfie
- * 4. Workflow suspends and waits for a webhook signal from the provider (up to 30 minutes)
- * 5. Sanctions and politically-exposed-person screenings run against the customer's name
- * 6. System approves or rejects the customer based on combined results
- * 7. Customer polls a status endpoint at any time to check progress
+ * Workflow DAG:
+ *
+ *   ┌─────────────────────┐
+ *   │  validate-documents  │
+ *   └──────────┬──────────┘
+ *              ▼
+ *   ┌──────────────────────┐
+ *   │ submit-identity-check │──── kicks off external provider (Onfido)
+ *   └──────────┬───────────┘
+ *              ▼
+ *   ┌──────────────────────────┐
+ *   │ waitForSignal             │──── workflow SUSPENDS here (zero resources)
+ *   │ "identity-check-result"   │
+ *   └──────────┬───────────────┘
+ *              │         ▲
+ *              │         │  webhook: storage.deliverSignal(workflowId, ...)
+ *              │         │
+ *              │    ┌────┴──────────┐
+ *              │    │ Onfido webhook │  (external — POST /webhooks/onfido)
+ *              │    └───────────────┘
+ *              ▼
+ *   ┌─────────────────┐
+ *   │ sanctions-check  │
+ *   └────────┬────────┘
+ *            ▼
+ *   ┌─────────────────┐
+ *   │    pep-check     │
+ *   └────────┬────────┘
+ *            ▼
+ *   ┌─────────────────┐
+ *   │    decision      │──── branch: approve or reject
+ *   └─────────────────┘
+ *
+ * API endpoints:
+ *
+ *   POST /kyc/verify        → starts workflow, returns 202 (processing)
+ *   GET  /kyc/status        → returns current workflow state
+ *   POST /webhooks/onfido   → receives provider result, delivers signal
  *
  * The workflow uses `waitForSignal` — it suspends (uses zero resources) until the
  * external provider sends a webhook. No polling, no sleep loops.
