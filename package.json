@@ -12,6 +12,11 @@
     "format": "bun run fmt",
     "bench": "bun run benchmarks/cross-language/run-all.ts",
     "bench:promin": "bun run benchmarks/cross-language/bench-promin.ts",
+    "bench:stream": "bun run packages/core/src/lib/stream-pipeline.bench.ts",
+    "bench:pipeline": "bun run packages/core/src/lib/pipeline.bench.ts",
+    "bench:dataframe": "bun run packages/core/src/lib/dataframe/dataframe.bench.ts",
+    "bench:topology": "bun run packages/core/src/lib/stream-topology/topology-runner.bench.ts",
+    "bench:all": "bun run bench:stream && bun run bench:pipeline && bun run bench:dataframe && bun run bench:topology && bun run bench",
     "clean": "rm -rf node_modules packages/*/node_modules .nx/cache",
     "prepare": "git config core.hooksPath .githooks || true"
   },
