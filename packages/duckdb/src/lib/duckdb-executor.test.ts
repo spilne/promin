@@ -1,11 +1,11 @@
 import { describe, it, expect } from "bun:test";
-import { DataFrame, CsvFile, JsonFile, ParquetFile } from "@promin/core";
+import { DataFrame, CsvFile, JsonFile } from "@promin/core";
 import { DuckDBExecutor } from "./duckdb-executor.ts";
 
 const duckdb = new DuckDBExecutor();
 
-function df<T>(data: T[]) {
-  return DataFrame.fromArray(data).withExecutor(duckdb);
+function df(data: any[]) {
+  return DataFrame.fromArray(data).withExecutor(duckdb) as DataFrame<any>;
 }
 
 describe("DuckDBExecutor", () => {
@@ -436,7 +436,7 @@ describe("DuckDBExecutor", () => {
       const csvPath = "/tmp/duckdb_test_fromfile.csv";
       fs.writeFileSync(csvPath, "city,pop\nkyiv,3000000\nlviv,720000\nodesa,1010000\n");
 
-      const result = await DataFrame.fromFile(CsvFile(csvPath))
+      const result = await (DataFrame.fromFile(CsvFile(csvPath)) as DataFrame<any>)
         .withExecutor(new DuckDBExecutor())
         .sort("pop", "desc")
         .limit(2)
@@ -452,7 +452,9 @@ describe("DuckDBExecutor", () => {
       const csvPath = "/tmp/duckdb_test_fromfile_arr.csv";
       fs.writeFileSync(csvPath, "name,score\nalice,90\nbob,85\n");
 
-      const result = await DataFrame.fromFile(CsvFile(csvPath)).sort("score", "desc").collect();
+      const result = await (DataFrame.fromFile(CsvFile(csvPath)) as DataFrame<any>)
+        .sort("score", "desc")
+        .collect();
 
       expect(result).toEqual([
         { name: "alice", score: 90 },
@@ -484,9 +486,7 @@ describe("DuckDBExecutor", () => {
       const csvPath = "/tmp/duckdb_test_frameable.csv";
       fs.writeFileSync(csvPath, "x,y\n1,10\n2,20\n3,30\n");
 
-      const result = await (
-        await DataFrame.from(CsvFile(csvPath))
-      )
+      const result = await ((await DataFrame.from(CsvFile(csvPath))) as DataFrame<any>)
         .withExecutor(new DuckDBExecutor())
         .sort("x")
         .collect();

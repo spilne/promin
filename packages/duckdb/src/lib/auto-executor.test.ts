@@ -18,7 +18,7 @@ describe("AutoExecutor", () => {
       writeFileSync(csvPath, "name,score\nalice,90\nbob,85\n");
 
       const executor = new AutoExecutor();
-      const result = await DataFrame.fromFile(CsvFile(csvPath))
+      const result = await (DataFrame.fromFile(CsvFile(csvPath)) as DataFrame<any>)
         .withExecutor(executor)
         .sort("score", "desc")
         .collect();

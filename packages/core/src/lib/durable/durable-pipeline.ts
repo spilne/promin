@@ -138,6 +138,41 @@ export interface WorkflowDefinition<Input, Output> {
     workflowId: string,
     params?: { includeStepResults?: boolean },
   ): Promise<WorkflowStatusInfo<Output> | null>;
+
+  /**
+   * Start a workflow and return a handle for interacting with it.
+   *
+   * @example
+   * ```ts
+   * const handle = await myWorkflow.start("order-123", orderInput);
+   *
+   * // Check status
+   * const status = await handle.status();
+   *
+   * // Send a signal (e.g. from a webhook)
+   * await handle.signal("payment-received", { txId: "..." });
+   *
+   * // Wait for completion
+   * const result = await handle.result({ timeoutMs: 60_000 });
+   * ```
+   */
+  start(workflowId: string, input: Input): Promise<WorkflowHandle<Output>>;
+}
+
+/**
+ * Handle to a running workflow. Returned by `workflow.start()`.
+ */
+export interface WorkflowHandle<Output> {
+  readonly workflowId: string;
+
+  /** Get the current workflow status. */
+  status(params?: { includeStepResults?: boolean }): Promise<WorkflowStatusInfo<Output> | null>;
+
+  /** Send a signal to the workflow (e.g. from a webhook). */
+  signal(signalName: string, payload: unknown): Promise<void>;
+
+  /** Wait for the workflow to complete. Resumes suspended workflows on each poll. */
+  result(params?: { intervalMs?: number; timeoutMs?: number }): Promise<Output>;
 }
 
 export interface WorkflowStatusInfo<Output> {
@@ -1432,6 +1467,50 @@ export class WorkflowBuilder<
         }
 
         throw new Error(`Workflow ${workflowId} did not complete within ${timeoutMs}ms`);
+      },
+
+      start: async (workflowId, input) => {
+        await self.runSafe({ workflowId, input });
+
+        return {
+          workflowId,
+          status: (params) =>
+            self._storage.loadWorkflow(workflowId).then((state) => {
+              if (!state) return null;
+              const includeResults = params?.includeStepResults ?? false;
+              let currentStep: string | undefined;
+              let suspendedReason: "sleeping" | "waiting_for_signal" | undefined;
+              const steps: Record<string, { status: string; result?: unknown }> = {};
+              for (const [name, step] of Object.entries(state.steps)) {
+                if (step.status === "running" || step.status === "pending")
+                  currentStep = currentStep ?? name;
+                if (step.status === "sleeping") {
+                  currentStep = name;
+                  suspendedReason = "sleeping";
+                }
+                if (step.status === "waiting_for_signal") {
+                  currentStep = name;
+                  suspendedReason = "waiting_for_signal";
+                }
+                steps[name] = includeResults
+                  ? { status: step.status, result: step.result }
+                  : { status: step.status };
+              }
+              return {
+                state: state.status === "compensating" ? ("failed" as const) : state.status,
+                result: state.status === "completed" ? (state.result as Current) : undefined,
+                error: state.error,
+                currentStep,
+                suspendedReason,
+                steps,
+                createdAt: state.createdAt,
+                updatedAt: state.updatedAt,
+              };
+            }),
+          signal: (signalName, payload) =>
+            self._storage.deliverSignal(workflowId, signalName, payload),
+          result: (params) => self.build().waitForResult(workflowId, { input, ...params }),
+        };
       },
     };
   }

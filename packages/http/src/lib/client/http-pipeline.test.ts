@@ -10,7 +10,7 @@ import {
   blobDecoder,
 } from "./index.ts";
 import { MockHttpClient } from "./testing.ts";
-import { StreamPipeline, utf8Decode, lines, csv, jsonlAs, parseAs, DataFrame } from "@promin/core";
+import { StreamPipeline, lines, csv, jsonlAs, parseAs, DataFrame } from "@promin/core";
 
 // ---------------------------------------------------------------------------
 // Schemas

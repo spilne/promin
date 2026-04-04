@@ -175,6 +175,9 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
             throw new Error("not implemented");
           },
           getStatus: async () => null,
+          start: async () => {
+            throw new Error("not implemented");
+          },
         };
       },
       onError: (id, err) => errors.push({ id, err }),

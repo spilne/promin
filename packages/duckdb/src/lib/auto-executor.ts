@@ -158,22 +158,6 @@ export class AutoExecutor implements DataFrameExecutor {
   }
 }
 
-/** Check if the plan has Filter or WithColumn nodes with compilable Expr ASTs. */
-function hasExprPushdown(plan: LogicalPlan): boolean {
-  if (plan._tag === "Filter" && plan.expr) {
-    const { isCompilable } = require("@promin/core") as typeof import("@promin/core");
-    if (isCompilable(plan.expr)) return true;
-  }
-  if (plan._tag === "WithColumn" && plan.expr) {
-    const { isCompilable } = require("@promin/core") as typeof import("@promin/core");
-    if (isCompilable(plan.expr)) return true;
-  }
-  if ("input" in plan && (plan as any).input) return hasExprPushdown((plan as any).input);
-  if ("left" in plan)
-    return hasExprPushdown((plan as any).left) || hasExprPushdown((plan as any).right);
-  return false;
-}
-
 /** Walk the plan to find the root Source node. */
 function findSource(plan: LogicalPlan): (LogicalPlan & { _tag: "Source" }) | null {
   if (plan._tag === "Source") return plan;
