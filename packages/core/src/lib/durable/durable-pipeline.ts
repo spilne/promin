@@ -1470,46 +1470,15 @@ export class WorkflowBuilder<
       },
 
       start: async (workflowId, input) => {
-        await self.runSafe({ workflowId, input });
+        const definition = self.build();
+        await definition.runSafe({ workflowId, input });
 
         return {
           workflowId,
-          status: (params) =>
-            self._storage.loadWorkflow(workflowId).then((state) => {
-              if (!state) return null;
-              const includeResults = params?.includeStepResults ?? false;
-              let currentStep: string | undefined;
-              let suspendedReason: "sleeping" | "waiting_for_signal" | undefined;
-              const steps: Record<string, { status: string; result?: unknown }> = {};
-              for (const [name, step] of Object.entries(state.steps)) {
-                if (step.status === "running" || step.status === "pending")
-                  currentStep = currentStep ?? name;
-                if (step.status === "sleeping") {
-                  currentStep = name;
-                  suspendedReason = "sleeping";
-                }
-                if (step.status === "waiting_for_signal") {
-                  currentStep = name;
-                  suspendedReason = "waiting_for_signal";
-                }
-                steps[name] = includeResults
-                  ? { status: step.status, result: step.result }
-                  : { status: step.status };
-              }
-              return {
-                state: state.status === "compensating" ? ("failed" as const) : state.status,
-                result: state.status === "completed" ? (state.result as Current) : undefined,
-                error: state.error,
-                currentStep,
-                suspendedReason,
-                steps,
-                createdAt: state.createdAt,
-                updatedAt: state.updatedAt,
-              };
-            }),
+          status: (params) => definition.getStatus(workflowId, params),
           signal: (signalName, payload) =>
             self._storage.deliverSignal(workflowId, signalName, payload),
-          result: (params) => self.build().waitForResult(workflowId, { input, ...params }),
+          result: (params) => definition.waitForResult(workflowId, { input, ...params }),
         };
       },
     };
