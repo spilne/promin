@@ -3,6 +3,7 @@ export {
   flow,
   WorkflowBuilder,
   type WorkflowDefinition,
+  type WorkflowStatusInfo,
   type WorkflowHooks,
   type WorkflowDAG,
   dagToMermaid,

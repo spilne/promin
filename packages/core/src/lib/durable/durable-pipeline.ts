@@ -122,6 +122,33 @@ export interface WorkflowDefinition<Input, Output> {
       timeoutMs?: number;
     },
   ): Promise<Output>;
+
+  /**
+   * Get the current status of a workflow. Useful for status endpoints.
+   *
+   * @example
+   * ```ts
+   * // GET /kyc/status handler
+   * const status = await kycVerification.getStatus(workflowId);
+   * if (!status) return { status: 404 };
+   * return { status: 200, body: status };
+   * ```
+   */
+  getStatus(workflowId: string): Promise<WorkflowStatusInfo<Output> | null>;
+}
+
+export interface WorkflowStatusInfo<Output> {
+  readonly state: "running" | "completed" | "failed" | "suspended";
+  readonly result?: Output;
+  readonly error?: string;
+  /** Which step is currently active or blocked. */
+  readonly currentStep?: string;
+  /** Why the workflow is suspended (if applicable). */
+  readonly suspendedReason?: "sleeping" | "waiting_for_signal";
+  /** Summary of all step statuses. */
+  readonly steps: Record<string, { status: string; result?: unknown }>;
+  readonly createdAt: Date;
+  readonly updatedAt: Date;
 }
 
 // ---------------------------------------------------------------------------
@@ -1336,6 +1363,45 @@ export class WorkflowBuilder<
           }
           return self.run(params);
         }) as Pipeline<Current, StepError>,
+
+      getStatus: async (workflowId) => {
+        const state = await self._storage.loadWorkflow(workflowId);
+        if (!state) return null;
+
+        // Find the current/blocked step
+        let currentStep: string | undefined;
+        let suspendedReason: "sleeping" | "waiting_for_signal" | undefined;
+
+        for (const [name, step] of Object.entries(state.steps)) {
+          if (step.status === "running" || step.status === "pending") {
+            currentStep = currentStep ?? name;
+          }
+          if (step.status === "sleeping") {
+            currentStep = name;
+            suspendedReason = "sleeping";
+          }
+          if (step.status === "waiting_for_signal") {
+            currentStep = name;
+            suspendedReason = "waiting_for_signal";
+          }
+        }
+
+        const steps: Record<string, { status: string; result?: unknown }> = {};
+        for (const [name, step] of Object.entries(state.steps)) {
+          steps[name] = { status: step.status, result: step.result };
+        }
+
+        return {
+          state: state.status === "compensating" ? ("failed" as const) : state.status,
+          result: state.status === "completed" ? (state.result as Current) : undefined,
+          error: state.error,
+          currentStep,
+          suspendedReason,
+          steps,
+          createdAt: state.createdAt,
+          updatedAt: state.updatedAt,
+        };
+      },
 
       waitForResult: async (workflowId, params) => {
         const intervalMs = params.intervalMs ?? 5_000;
