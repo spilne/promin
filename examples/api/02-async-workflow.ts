@@ -155,19 +155,26 @@ const kycVerification = workflow<KycInput>({
 // ---------------------------------------------------------------------------
 
 // POST /kyc/verify — submit KYC, return immediately
+//
+// Flow:
+//   Browser → POST /kyc/verify → 202 { workflowId, status: "processing" }
+//   Browser → GET /kyc/status (polls) → { state: "suspended", currentStep: "wait-for-check-result" }
+//   Onfido → POST /webhooks/onfido → signal delivered, workflow resumes
+//   Browser → GET /kyc/status (polls) → { state: "completed", result: { approved: true } }
+//
 async function handleSubmitKyc(request: {
   user: { id: string };
   body: Omit<KycInput, "userId">;
 }) {
   const workflowId = `kyc-${request.user.id}`;
 
-  // Check if already submitted
-  const existing = await storage.loadWorkflow(workflowId);
-  if (existing?.status === "completed") {
-    return { status: 200, body: { status: "completed", result: existing.result } };
+  // Idempotent: check if already submitted
+  const existing = await kycVerification.getStatus(workflowId);
+  if (existing?.state === "completed") {
+    return { status: 200, body: existing };
   }
-  if (existing?.status === "running" || existing?.status === "suspended") {
-    return { status: 202, body: { workflowId, status: "processing" } };
+  if (existing) {
+    return { status: 202, body: existing };
   }
 
   // Start workflow — will suspend at waitForSignal step
@@ -176,45 +183,46 @@ async function handleSubmitKyc(request: {
     input: { userId: request.user.id, ...request.body },
   });
 
-  // Suspended at waitForSignal is expected — external check takes time
-  if (error && (error as any)._tag === "WorkflowSuspendedError") {
-    return {
-      status: 202,
-      body: {
-        workflowId,
-        status: "processing",
-        message: "Verification in progress. You'll be notified when complete.",
-      },
-    };
-  }
-
-  if (error) {
+  if (error && (error as any)._tag !== "WorkflowSuspendedError") {
     return { status: 500, body: { error: "Verification failed to start" } };
   }
 
-  return { status: 200, body: { workflowId, status: "completed" } };
+  // Return status (running or suspended — both expected)
+  const status = await kycVerification.getStatus(workflowId);
+  return { status: 202, body: status };
 }
 
 // POST /webhooks/onfido — receives webhook from identity provider
+//
+// Onfido sends this when the identity check completes. We deliver the
+// result as a signal to the waiting workflow, then resume it.
+//
 async function handleOnfidoWebhook(request: {
-  body: { resource_type: string; action: string; object: { id: string; status: string; result: string } };
+  body: {
+    resource_type: string;
+    action: string;
+    object: { id: string; status: string; result: string };
+  };
 }) {
   const check = request.body.object;
   const passed = check.result === "clear";
 
-  // Find the workflow waiting for this check
   // In production: look up workflowId by checkId from a mapping table
   const workflowId = `kyc-lookup-by-check-${check.id}`;
 
-  // Deliver the signal — this wakes up the waiting workflow
-  await storage.deliverSignal(workflowId, "identity-check-result", JSON.stringify({
-    checkId: check.id,
-    passed,
-    score: passed ? 0.95 : 0.3,
-    reasons: passed ? [] : [check.result],
-  }));
+  // Deliver the signal — wakes up the workflow on next resume
+  await storage.deliverSignal(
+    workflowId,
+    "identity-check-result",
+    JSON.stringify({
+      checkId: check.id,
+      passed,
+      score: passed ? 0.95 : 0.3,
+      reasons: passed ? [] : [check.result],
+    }),
+  );
 
-  // Resume the workflow (picks up the signal on next execution)
+  // Resume the workflow — picks up signal, runs remaining steps
   await kycVerification.runSafe({
     workflowId,
     input: {} as KycInput, // input already stored from initial run
@@ -223,32 +231,59 @@ async function handleOnfidoWebhook(request: {
   return { status: 200, body: { received: true } };
 }
 
-// GET /kyc/status — check verification progress
+// GET /kyc/status — poll for verification progress
+//
+// Frontend calls this on an interval (e.g. every 5 seconds).
+// Returns typed status with current step, no heavy step results by default.
+//
 async function handleKycStatus(request: { user: { id: string } }) {
   const workflowId = `kyc-${request.user.id}`;
-  const state = await storage.loadWorkflow(workflowId);
+  const status = await kycVerification.getStatus(workflowId);
 
-  if (!state) {
+  if (!status) {
     return { status: 404, body: { error: "No verification found" } };
   }
 
-  switch (state.status) {
-    case "completed":
-      return { status: 200, body: { status: "completed", result: state.result } };
-    case "failed":
-      return { status: 200, body: { status: "failed", error: state.error } };
-    case "suspended":
-      return {
-        status: 200,
-        body: {
-          status: "processing",
-          message: "Waiting for identity verification provider...",
-          step: Object.entries(state.steps).find(([, s]) => s.status === "waiting_for_signal")?.[0],
-        },
-      };
-    default:
-      return { status: 200, body: { status: "processing" } };
-  }
+  return { status: 200, body: status };
 }
 
-export { kycVerification, handleSubmitKyc, handleOnfidoWebhook, handleKycStatus };
+// GET /kyc/status?details=true — include step results (for debugging/admin)
+async function handleKycStatusDetailed(request: { user: { id: string } }) {
+  const workflowId = `kyc-${request.user.id}`;
+  const status = await kycVerification.getStatus(workflowId, { includeStepResults: true });
+
+  if (!status) {
+    return { status: 404, body: { error: "No verification found" } };
+  }
+
+  return { status: 200, body: status };
+}
+
+// Server-side: wait for workflow to finish (e.g. in a background job)
+//
+// Unlike the browser polling above, this blocks until the workflow completes.
+// Useful for orchestration where you need the result before continuing.
+//
+async function processKycAndWait(userId: string, input: KycInput) {
+  const workflowId = `kyc-${userId}`;
+
+  await kycVerification.runSafe({ workflowId, input });
+
+  // Block until complete — resumes suspended workflows on each poll
+  const result = await kycVerification.waitForResult(workflowId, {
+    input,
+    intervalMs: 5_000,
+    timeoutMs: 30 * 60_000, // 30 minutes (identity check can be slow)
+  });
+
+  return result;
+}
+
+export {
+  kycVerification,
+  handleSubmitKyc,
+  handleOnfidoWebhook,
+  handleKycStatus,
+  handleKycStatusDetailed,
+  processKycAndWait,
+};
