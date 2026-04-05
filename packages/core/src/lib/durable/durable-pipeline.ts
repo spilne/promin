@@ -134,7 +134,10 @@ export interface WorkflowDefinition<Input, Output> {
    * return { status: 200, body: status };
    * ```
    */
-  getStatus(workflowId: string): Promise<WorkflowStatusInfo<Output> | null>;
+  getStatus(
+    workflowId: string,
+    params?: { includeStepResults?: boolean },
+  ): Promise<WorkflowStatusInfo<Output> | null>;
 }
 
 export interface WorkflowStatusInfo<Output> {
@@ -1364,9 +1367,11 @@ export class WorkflowBuilder<
           return self.run(params);
         }) as Pipeline<Current, StepError>,
 
-      getStatus: async (workflowId) => {
+      getStatus: async (workflowId, params) => {
         const state = await self._storage.loadWorkflow(workflowId);
         if (!state) return null;
+
+        const includeResults = params?.includeStepResults ?? false;
 
         // Find the current/blocked step
         let currentStep: string | undefined;
@@ -1388,7 +1393,9 @@ export class WorkflowBuilder<
 
         const steps: Record<string, { status: string; result?: unknown }> = {};
         for (const [name, step] of Object.entries(state.steps)) {
-          steps[name] = { status: step.status, result: step.result };
+          steps[name] = includeResults
+            ? { status: step.status, result: step.result }
+            : { status: step.status };
         }
 
         return {
