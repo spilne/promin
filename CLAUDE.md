@@ -9,9 +9,15 @@ Project-level instructions for AI agents working on this codebase.
 ### Directory Layout
 
 ```
-libs/
-  pipeline/            # Effect-based Pipeline<T,E> and StreamPipeline<T,E> primitives
+packages/
+  core/                # Effect-based Pipeline<T,E> and StreamPipeline<T,E> primitives
   http/                # Effect-based HTTP client with pipelines, streaming, retry
+  kafka/               # Kafka topic abstraction with consumer groups and offset tracking
+  postgres/            # Postgres state backend, step queue, change streams
+  redis/               # Redis state backend and cache store
+  duckdb/              # DuckDB executor for analytical queries
+  container/           # DI container
+  integration/         # Integration tests (testcontainers: Kafka, Redis, Postgres)
 ```
 
 ## TypeScript Conventions
