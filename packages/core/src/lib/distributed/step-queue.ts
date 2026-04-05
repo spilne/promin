@@ -28,6 +28,8 @@ export interface StepQueue {
     prevResults: Record<string, unknown>;
     /** Priority — higher number runs first. Default: 5. Range: 0-10. */
     priority?: number;
+    /** Namespace for task isolation. Falls back to queue-level default. */
+    namespace?: string;
   }): Promise<string>;
 
   /** Claim up to `limit` pending tasks from the given queues (SKIP LOCKED). */

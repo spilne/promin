@@ -8,6 +8,9 @@ export interface PostgresStorageConfig {
   /** Drizzle database instance. User provides their own connection. */
   db: DrizzleDb;
 
+  /** Default namespace for workflow isolation. Null means unscoped. Default: null. */
+  namespace?: string | null;
+
   /** Table name prefix. Default: "wf_". Allows multiple workflow engines in one DB. */
   tablePrefix?: string;
 
@@ -31,6 +34,7 @@ export interface PostgresStorageConfig {
 }
 
 export const DEFAULT_CONFIG = {
+  namespace: null,
   tablePrefix: "wf_",
   useAdvisoryLocks: true,
   defaultLockDurationMs: 30_000,
@@ -42,6 +46,7 @@ export const DEFAULT_CONFIG = {
 export function resolveConfig(config: PostgresStorageConfig): Required<PostgresStorageConfig> {
   return {
     db: config.db,
+    namespace: config.namespace ?? DEFAULT_CONFIG.namespace,
     tablePrefix: config.tablePrefix ?? DEFAULT_CONFIG.tablePrefix,
     instanceId: config.instanceId ?? crypto.randomUUID(),
     useAdvisoryLocks: config.useAdvisoryLocks ?? DEFAULT_CONFIG.useAdvisoryLocks,

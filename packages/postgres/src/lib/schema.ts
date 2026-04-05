@@ -52,6 +52,7 @@ export const workflows = pgTable(
     workflowId: text("workflow_id").primaryKey(),
     workflowName: text("workflow_name").notNull(),
     workflowType: text("workflow_type"),
+    namespace: text("namespace"),
     statusId: integer("status_id").notNull().default(WorkflowStatusIds.id.running),
     input: jsonb("input").notNull(),
     metadata: jsonb("metadata"),
@@ -65,6 +66,7 @@ export const workflows = pgTable(
     index("wf_workflows_name_status_idx").on(t.workflowName, t.statusId),
     index("wf_workflows_status_idx").on(t.statusId),
     index("wf_workflows_type_idx").on(t.workflowType),
+    index("wf_workflows_namespace_idx").on(t.namespace),
   ],
 );
 
@@ -137,6 +139,7 @@ export const stepQueue = pgTable(
     id: bigserial("id", { mode: "number" }).primaryKey(),
     workflowId: text("workflow_id").notNull(),
     stepName: text("step_name").notNull(),
+    namespace: text("namespace"),
     queue: text("queue").notNull().default("default"),
     priority: integer("priority").notNull().default(5),
     input: jsonb("input"),
@@ -154,6 +157,7 @@ export const stepQueue = pgTable(
   (t) => [
     index("wf_step_queue_dequeue_idx").on(t.status, t.queue, t.priority, t.createdAt),
     index("wf_step_queue_workflow_idx").on(t.workflowId),
+    index("wf_step_queue_namespace_idx").on(t.namespace),
   ],
 );
 

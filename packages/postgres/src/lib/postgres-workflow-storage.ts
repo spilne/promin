@@ -102,6 +102,11 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
     return this.config.db;
   }
 
+  /** Resolve namespace: workflow-level → constructor default → null. */
+  private resolveNamespace(workflowNamespace?: string): string | null {
+    return workflowNamespace ?? this.config.namespace ?? null;
+  }
+
   // ---------------------------------------------------------------------------
   // Row → domain mapping
   // ---------------------------------------------------------------------------
@@ -115,6 +120,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       workflowId: row.workflowId,
       workflowName: row.workflowName,
       workflowType: row.workflowType ?? undefined,
+      namespace: row.namespace ?? undefined,
       status: WorkflowStatusIds.toName(row.statusId),
       input: row.input,
       result: row.result ?? undefined,
@@ -193,10 +199,14 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
     status?: WorkflowStatus;
     name?: string;
     type?: string;
+    namespace?: string;
     limit?: number;
     offset?: number;
   }): Promise<WorkflowState[]> {
     const conditions = [];
+    // Scope to constructor namespace if set and no explicit namespace filter
+    const ns = params?.namespace ?? this.config.namespace;
+    if (ns) conditions.push(eq(workflows.namespace, ns));
     if (params?.status)
       conditions.push(eq(workflows.statusId, WorkflowStatusIds.toId(params.status)));
     if (params?.name) conditions.push(eq(workflows.workflowName, params.name));
@@ -236,12 +246,15 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
     workflowName: string;
     input: unknown;
     workflowType?: string;
+    namespace?: string;
     metadata?: Record<string, unknown>;
   }): Promise<void> {
+    const ns = this.resolveNamespace(params.namespace);
     await this.db.insert(workflows).values({
       workflowId: params.workflowId,
       workflowName: params.workflowName,
       workflowType: params.workflowType,
+      namespace: ns,
       statusId: WorkflowStatusIds.id.running,
       input: params.input,
       metadata: params.metadata,

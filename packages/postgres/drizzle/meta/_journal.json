@@ -43,6 +43,13 @@
       "when": 1743400005000,
       "tag": "0005_priority_queue",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1743400006000,
+      "tag": "0006_namespace",
+      "breakpoints": true
     }
   ]
 }

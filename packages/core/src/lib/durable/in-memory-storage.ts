@@ -17,6 +17,16 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
   private locks = new Map<string, { expiresAt: number }>();
   private signals = new Map<string, SignalState[]>();
   private attempts = new Map<string, StepAttemptRecord[]>();
+  private readonly namespace: string | null;
+
+  constructor(config?: { namespace?: string | null }) {
+    this.namespace = config?.namespace ?? null;
+  }
+
+  /** Resolve namespace: workflow-level → constructor default → null. */
+  private resolveNamespace(workflowNamespace?: string): string | undefined {
+    return workflowNamespace ?? this.namespace ?? undefined;
+  }
 
   async loadWorkflow(workflowId: string): Promise<WorkflowState | null> {
     return this.workflows.get(workflowId) ?? null;
@@ -27,10 +37,16 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     name?: string;
     type?: string;
     parentId?: string;
+    namespace?: string;
     limit?: number;
     offset?: number;
   }): Promise<WorkflowState[]> {
     let results = [...this.workflows.values()];
+    // Scope to constructor namespace if set and no explicit namespace filter
+    const ns = params?.namespace ?? this.namespace;
+    if (ns) {
+      results = results.filter((w) => w.namespace === ns);
+    }
     if (params?.status) {
       results = results.filter((w) => w.status === params.status);
     }
@@ -77,6 +93,7 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     input: unknown;
     workflowType?: string;
     parentWorkflowId?: string;
+    namespace?: string;
     metadata?: Record<string, unknown>;
   }): Promise<void> {
     const now = new Date();
@@ -85,6 +102,7 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
       workflowName: params.workflowName,
       workflowType: params.workflowType,
       parentWorkflowId: params.parentWorkflowId,
+      namespace: this.resolveNamespace(params.namespace),
       status: "running",
       input: params.input,
       metadata: params.metadata,

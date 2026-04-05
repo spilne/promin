@@ -24,6 +24,7 @@ export interface WorkflowState<Input = unknown, Result = unknown> {
   readonly workflowName: string;
   readonly workflowType?: string;
   readonly parentWorkflowId?: string;
+  readonly namespace?: string;
   readonly status: WorkflowStatus;
   readonly input: Input;
   readonly result?: Result;

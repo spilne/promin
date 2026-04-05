@@ -13,12 +13,13 @@ export interface WorkflowStorage {
   /** Load the full workflow state. Returns null if workflow doesn't exist. */
   loadWorkflow(workflowId: string): Promise<WorkflowState | null>;
 
-  /** List workflows, optionally filtered by status, name, or type. */
+  /** List workflows, optionally filtered by status, name, type, or namespace. */
   listWorkflows(params?: {
     status?: WorkflowStatus;
     name?: string;
     type?: string;
     parentId?: string;
+    namespace?: string;
     limit?: number;
     offset?: number;
   }): Promise<WorkflowState[]>;
@@ -33,6 +34,7 @@ export interface WorkflowStorage {
     input: unknown;
     workflowType?: string;
     parentWorkflowId?: string;
+    namespace?: string;
     metadata?: Record<string, unknown>;
   }): Promise<void>;
 

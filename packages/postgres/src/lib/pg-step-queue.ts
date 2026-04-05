@@ -16,15 +16,19 @@ export interface PgStepQueueConfig {
   db: DrizzleDb;
   /** Worker ID for claiming tasks. Default: random UUID. */
   workerId?: string;
+  /** Default namespace for task isolation. Null means unscoped. Default: null. */
+  namespace?: string | null;
 }
 
 export class PgStepQueue implements StepQueue {
   private readonly db: DrizzleDb;
   private readonly workerId: string;
+  private readonly namespace: string | null;
 
   constructor(config: PgStepQueueConfig) {
     this.db = config.db;
     this.workerId = config.workerId ?? crypto.randomUUID();
+    this.namespace = config.namespace ?? null;
   }
 
   /**
@@ -48,12 +52,15 @@ export class PgStepQueue implements StepQueue {
     input: unknown;
     prevResults: Record<string, unknown>;
     priority?: number;
+    namespace?: string;
   }): Promise<string> {
+    const ns = params.namespace ?? this.namespace;
     const [row] = await this.db
       .insert(stepQueue)
       .values({
         workflowId: params.workflowId,
         stepName: params.stepName,
+        namespace: ns,
         queue: params.queue,
         priority: params.priority ?? 5,
         input: params.input,
@@ -74,6 +81,7 @@ export class PgStepQueue implements StepQueue {
     const limit = Math.max(1, Math.floor(params.limit));
     const workerId = this.workerId.replace(/'/g, "");
     const now = new Date().toISOString();
+    const nsFilter = this.namespace ? `AND namespace = '${this.namespace.replace(/'/g, "")}'` : "";
 
     const rows = await execRaw(
       this.db,
@@ -84,7 +92,7 @@ export class PgStepQueue implements StepQueue {
             claimed_at = '${now}'
         WHERE id IN (
           SELECT id FROM wf_step_queue
-          WHERE status = 'pending' AND queue IN (${sanitizedQueues})
+          WHERE status = 'pending' AND queue IN (${sanitizedQueues}) ${nsFilter}
           ORDER BY priority DESC, created_at ASC
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED
