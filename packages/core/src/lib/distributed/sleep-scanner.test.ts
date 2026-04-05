@@ -171,6 +171,9 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
           },
           runSafe: async () => ({ data: null, error: new Error("resume failed") }),
           invoke: () => Pipeline.fail(new Error("nope") as never),
+          waitForResult: async () => {
+            throw new Error("not implemented");
+          },
         };
       },
       onError: (id, err) => errors.push({ id, err }),

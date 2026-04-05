@@ -96,6 +96,32 @@ export interface WorkflowDefinition<Input, Output> {
     input: Input;
     parentWorkflowId?: string;
   }): Pipeline<Output, StepError>;
+
+  /**
+   * Wait for a workflow to complete, polling the storage at intervals.
+   * Resumes suspended workflows automatically on each poll.
+   *
+   * @example
+   * ```ts
+   * // Start workflow (may suspend at waitForSignal)
+   * await kycVerification.runSafe({ workflowId, input });
+   *
+   * // Wait for completion (resumes on each poll if signal arrived)
+   * const result = await kycVerification.waitForResult(workflowId, {
+   *   input,
+   *   intervalMs: 5_000,
+   *   timeoutMs: 60_000,
+   * });
+   * ```
+   */
+  waitForResult(
+    workflowId: string,
+    params: {
+      input: Input;
+      intervalMs?: number;
+      timeoutMs?: number;
+    },
+  ): Promise<Output>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1310,6 +1336,30 @@ export class WorkflowBuilder<
           }
           return self.run(params);
         }) as Pipeline<Current, StepError>,
+
+      waitForResult: async (workflowId, params) => {
+        const intervalMs = params.intervalMs ?? 5_000;
+        const timeoutMs = params.timeoutMs ?? 60_000;
+        const deadline = Date.now() + timeoutMs;
+
+        while (Date.now() < deadline) {
+          // Try to resume (picks up signals, completes sleep timers)
+          const { data, error } = await self.runSafe({ workflowId, input: params.input });
+
+          // Completed — return result
+          if (data !== null) return data;
+
+          // Failed (non-suspended) — throw
+          if (error && (error as any)._tag !== "WorkflowSuspendedError") {
+            throw error;
+          }
+
+          // Suspended — wait and retry
+          await new Promise((r) => setTimeout(r, intervalMs));
+        }
+
+        throw new Error(`Workflow ${workflowId} did not complete within ${timeoutMs}ms`);
+      },
     };
   }
 
