@@ -303,6 +303,8 @@ class TopologyRunnerInstance {
         return this.compile(node.parent).parAsyncMap(node.concurrency, node.fn);
       case "keyBy":
         return this.compile(node.parent);
+      case "shuffle":
+        return this.compile(node.parent);
       case "window":
         return this.compile(node.parent);
       case "aggregate":

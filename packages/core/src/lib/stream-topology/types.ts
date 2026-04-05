@@ -87,6 +87,7 @@ export type TopologyNode<_T = any> =
   | FilterNode<any>
   | MapAsyncNode<any>
   | KeyByNode<any>
+  | ShuffleNode<any>
   | WindowNode<any>
   | AggregateNode<any>
   | ProcessNode<any>
@@ -122,6 +123,13 @@ export interface KeyByNode<T> {
   type: "keyBy";
   parent: TopologyNode;
   keyFn: (value: T) => string;
+}
+
+export interface ShuffleNode<T> {
+  type: "shuffle";
+  parent: TopologyNode;
+  /** Optional explicit repartition topic name. Auto-generated if omitted. */
+  topicName?: string;
 }
 
 export interface WindowNode<T> {

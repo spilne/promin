@@ -112,6 +112,22 @@ export class StreamTopology<T> {
 export class KeyedTopology<K extends string, T> {
   constructor(readonly node: TopologyNode<T>) {}
 
+  /**
+   * Repartition data by key via an intermediate transport (e.g. Kafka topic).
+   * Ensures same-key records land on the same partition, enabling correct
+   * stateful processing across multiple instances.
+   *
+   * In single-process mode (TopologyRunner), shuffle is a no-op passthrough.
+   * In distributed mode (DistributedRunner), it creates a stage boundary.
+   */
+  shuffle(params?: { topicName?: string }): KeyedTopology<K, T> {
+    return new KeyedTopology({
+      type: "shuffle",
+      parent: this.node,
+      topicName: params?.topicName,
+    });
+  }
+
   /** Deduplicate by a key derived from each item. */
   dedupe(fn: (value: T) => string): KeyedTopology<K, T> {
     return new KeyedTopology({ type: "dedupe", parent: this.node, keyFn: fn as any });
