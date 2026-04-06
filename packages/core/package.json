@@ -19,6 +19,9 @@
     "hyparquet": "^1.25.5",
     "rrule": "^2.8.1"
   },
+  "devDependencies": {
+    "@types/bun": "catalog:"
+  },
   "nx": {
     "targets": {
       "typecheck": {},

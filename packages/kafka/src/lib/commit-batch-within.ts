@@ -87,11 +87,14 @@ export function commitBatchWithin<T>(
     };
 
     // Start periodic flush timer
-    flushTimer = setInterval(async () => {
-      if (Date.now() - lastFlush >= config.maxWaitMs) {
-        await flush();
-      }
-    }, Math.min(config.maxWaitMs, 1000));
+    flushTimer = setInterval(
+      async () => {
+        if (Date.now() - lastFlush >= config.maxWaitMs) {
+          await flush();
+        }
+      },
+      Math.min(config.maxWaitMs, 1000),
+    );
 
     return stream
       .mapAsync(async (env) => {
@@ -153,11 +156,14 @@ export function autoCommitBatchWithin<T>(
       lastFlush = Date.now();
     };
 
-    flushTimer = setInterval(async () => {
-      if (Date.now() - lastFlush >= maxWaitMs && pendingCount > 0) {
-        await flush();
-      }
-    }, Math.min(maxWaitMs, 1000));
+    flushTimer = setInterval(
+      async () => {
+        if (Date.now() - lastFlush >= maxWaitMs && pendingCount > 0) {
+          await flush();
+        }
+      },
+      Math.min(maxWaitMs, 1000),
+    );
 
     return stream
       .mapAsync(async (env) => {

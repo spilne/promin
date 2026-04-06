@@ -16,21 +16,26 @@
   "dependencies": {
     "@promin/core": "workspace:*"
   },
+  "devDependencies": {
+    "@types/bun": "catalog:",
+    "ioredis": "^5.6.1"
+  },
   "peerDependencies": {
     "ioredis": ">=5.0.0"
   },
   "peerDependenciesMeta": {
-    "ioredis": { "optional": true }
-  },
-  "devDependencies": {
-    "@types/bun": "catalog:",
-    "ioredis": "^5.6.1"
+    "ioredis": {
+      "optional": true
+    }
   },
   "nx": {
     "targets": {
       "typecheck": {},
       "test": {},
-      "lint": {}
+      "lint": {},
+      "format": {},
+      "format-check": {},
+      "ci": {}
     }
   }
 }

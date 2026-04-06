@@ -8,7 +8,11 @@ import { Kafka } from "kafkajs";
 import { withAll, uniqueName } from "./infra.ts";
 import { KafkaTopic } from "@promin/kafka";
 import type { KafkaClient, KafkaConsumer, KafkaProducer, KafkaAdmin } from "@promin/kafka";
-import { RedisStateBackend, RedisCacheStore, type RedisClient as RedisClientType } from "@promin/redis";
+import {
+  RedisStateBackend,
+  RedisCacheStore,
+  type RedisClient as RedisClientType,
+} from "@promin/redis";
 import { PgStateBackend, PgStepQueue } from "@promin/postgres";
 import type { DrizzleDb } from "@promin/postgres";
 
@@ -32,7 +36,8 @@ function kafkaClient(broker: string): KafkaClient {
       return {
         connect: () => c.connect(),
         disconnect: () => c.disconnect(),
-        subscribe: (params) => c.subscribe({ topic: params.topic, fromBeginning: params.fromBeginning }),
+        subscribe: (params) =>
+          c.subscribe({ topic: params.topic, fromBeginning: params.fromBeginning }),
         run: (params) =>
           c.run({
             autoCommit: params.autoCommit,
@@ -197,9 +202,7 @@ withAll("E2E: Postgres step queue — distributed task lifecycle", (ctx) => {
     await Promise.all([work(w1, "w1"), work(w2, "w2"), work(w3, "w3")]);
 
     // All 10 tasks completed, no duplicates
-    expect(completed.sort()).toEqual(
-      Array.from({ length: 10 }, (_, i) => `step-${i}`).sort(),
-    );
+    expect(completed.sort()).toEqual(Array.from({ length: 10 }, (_, i) => `step-${i}`).sort());
 
     // Work was distributed (at least 1 worker got tasks)
     const activeWorkers = Object.values(workerAssignments).filter((a) => a.length > 0);

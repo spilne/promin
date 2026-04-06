@@ -169,13 +169,7 @@ export class RedisStream<T>
     count: number;
   }): Promise<{ id: string; value: T }[]> {
     // Get pending messages
-    const pending = await this.redis.xpending(
-      this.stream,
-      this.group,
-      "-",
-      "+",
-      params.count,
-    );
+    const pending = await this.redis.xpending(this.stream, this.group, "-", "+", params.count);
 
     if (!Array.isArray(pending) || pending.length === 0) return [];
 
@@ -266,7 +260,7 @@ export class RedisStream<T>
     groups: number;
     lastId: string;
   }> {
-    const info = await this.redis.xinfo("STREAM", this.stream) as any[];
+    const info = (await this.redis.xinfo("STREAM", this.stream)) as any[];
     const lengthIdx = info.indexOf("length");
     const groupsIdx = info.indexOf("groups");
     const lastIdx = info.indexOf("last-generated-id");

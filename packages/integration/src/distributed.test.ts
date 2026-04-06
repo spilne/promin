@@ -64,9 +64,7 @@ withPostgres("Distributed DAG workflow — video processing pipeline", (ctx) => 
           thumb: ctx.deps.thumbnail.thumbUrl,
         }),
       )
-      .step("notify", (ctx) =>
-        Pipeline.succeed({ notified: true, summary: ctx.prev.summary }),
-      )
+      .step("notify", (ctx) => Pipeline.succeed({ notified: true, summary: ctx.prev.summary }))
       .build();
 
     // Set up coordinator
@@ -559,9 +557,7 @@ withAll("E2E: Kafka orders → distributed workflow → completion", (ctx) => {
       .step("validate", (c) =>
         Pipeline.succeed({ valid: c.input.amount > 0, orderId: c.input.orderId }),
       )
-      .step("charge", (c) =>
-        Pipeline.succeed({ charged: true, amount: c.input.amount }),
-      )
+      .step("charge", (c) => Pipeline.succeed({ charged: true, amount: c.input.amount }))
       .build();
 
     const coordinator = new DefaultCoordinator({

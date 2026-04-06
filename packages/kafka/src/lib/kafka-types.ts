@@ -30,10 +30,7 @@ export interface KafkaProducer {
   /** Disconnect from the broker. */
   disconnect(): Promise<void>;
   /** Send messages to a topic. */
-  send(params: {
-    topic: string;
-    messages: KafkaOutgoingMessage[];
-  }): Promise<void>;
+  send(params: { topic: string; messages: KafkaOutgoingMessage[] }): Promise<void>;
 }
 
 export interface KafkaOutgoingMessage {
@@ -94,14 +91,8 @@ export interface KafkaConsumer {
 export interface KafkaAdmin {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
-  fetchOffsets(params: {
-    groupId: string;
-    topics: string[];
-  }): Promise<KafkaTopicOffsets[]>;
-  fetchTopicOffsetsByTimestamp(
-    topic: string,
-    timestamp: number,
-  ): Promise<KafkaPartitionOffset[]>;
+  fetchOffsets(params: { groupId: string; topics: string[] }): Promise<KafkaTopicOffsets[]>;
+  fetchTopicOffsetsByTimestamp(topic: string, timestamp: number): Promise<KafkaPartitionOffset[]>;
   /** Fetch partition count for a topic. Optional — not all clients expose this. */
   fetchTopicPartitionCount?(topic: string): Promise<number>;
 }

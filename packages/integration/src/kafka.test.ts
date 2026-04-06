@@ -167,9 +167,7 @@ withKafka("Kafka integration", (ctx) => {
         .through(autoCommitBatchWithin(10, 500))
         .drain();
 
-      expect(values.sort((a, b) => a - b)).toEqual(
-        Array.from({ length: 20 }, (_, i) => i),
-      );
+      expect(values.sort((a, b) => a - b)).toEqual(Array.from({ length: 20 }, (_, i) => i));
       await kt.disconnect();
     });
   });
@@ -203,10 +201,7 @@ withKafka("Kafka integration", (ctx) => {
         .take(5)
         .forEach((m) => c2Items.push(m.v));
 
-      await Promise.race([
-        Promise.all([p1, p2]),
-        new Promise((r) => setTimeout(r, 15_000)),
-      ]);
+      await Promise.race([Promise.all([p1, p2]), new Promise((r) => setTimeout(r, 15_000))]);
 
       const all = [...c1Items, ...c2Items].sort((a, b) => a - b);
       expect(all.length).toBe(10);

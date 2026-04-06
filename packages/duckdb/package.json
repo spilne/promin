@@ -17,6 +17,9 @@
     "@promin/core": "workspace:*",
     "duckdb-async": "^1.4.2"
   },
+  "devDependencies": {
+    "@types/bun": "catalog:"
+  },
   "nx": {
     "targets": {
       "typecheck": {},

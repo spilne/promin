@@ -26,13 +26,12 @@ await StreamPipeline.fromSource(events)
   .forEach(handleSignup);
 
 // Manual ack — for at-least-once processing
-await events.subscribeAck()
-  .forEach(async (envelope) => {
-    await processEvent(envelope.value);
-    await envelope.ack();
-    // If you don't ack, the message stays in the PEL (pending entries list)
-    // and can be reclaimed by another consumer
-  });
+await events.subscribeAck().forEach(async (envelope) => {
+  await processEvent(envelope.value);
+  await envelope.ack();
+  // If you don't ack, the message stays in the PEL (pending entries list)
+  // and can be reclaimed by another consumer
+});
 
 // Publish
 await events.publish({ type: "signup", userId: "u_42" });
@@ -54,9 +53,9 @@ console.log(`Stream length: ${info.length}, groups: ${info.groups}`);
 
 ## Typeclasses Implemented
 
-| Typeclass | Methods |
-|---|---|
-| Streamable | `subscribe()` — auto-ack via XREADGROUP |
-| Sinkable | `publish(value)` — XADD |
-| KeyedSinkable | `publish(value, { key })` — XADD with key field |
+| Typeclass       | Methods                                                 |
+| --------------- | ------------------------------------------------------- |
+| Streamable      | `subscribe()` — auto-ack via XREADGROUP                 |
+| Sinkable        | `publish(value)` — XADD                                 |
+| KeyedSinkable   | `publish(value, { key })` — XADD with key field         |
 | Acknowledgeable | `subscribeAck()` → `envelope.ack()` — XREADGROUP + XACK |

@@ -26,7 +26,8 @@
       "test": {},
       "lint": {},
       "format": {},
-      "format-check": {}
+      "format-check": {},
+      "ci": {}
     }
   }
 }

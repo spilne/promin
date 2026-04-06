@@ -10,12 +10,7 @@
 
 import { Effect, Stream } from "effect";
 import { OffsetTracker } from "./offset-tracker.ts";
-import type {
-  KafkaClient,
-  KafkaConsumer,
-  KafkaProducer,
-  KafkaMessage,
-} from "./kafka-types.ts";
+import type { KafkaClient, KafkaConsumer, KafkaProducer, KafkaMessage } from "./kafka-types.ts";
 import { StreamPipeline, JsonCodec } from "@promin/core";
 import type {
   KeyedSinkable,
@@ -238,9 +233,7 @@ export class KafkaTopic<T>
   async commitOffset(params: { group: string; offset: string }): Promise<void> {
     const consumer = this.kafka.consumer({ groupId: params.group });
     await consumer.connect();
-    await consumer.commitOffsets([
-      { topic: this.topic, partition: 0, offset: params.offset },
-    ]);
+    await consumer.commitOffsets([{ topic: this.topic, partition: 0, offset: params.offset }]);
     await consumer.disconnect();
   }
 

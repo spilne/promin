@@ -47,10 +47,10 @@ const offset = await orderEvents.getCommittedOffset({ group: "my-group" });
 
 ## Typeclasses Implemented
 
-| Typeclass | Methods |
-|---|---|
-| Partitionable | `subscribe({ partitions })`, `.partitions` |
-| Replayable | `subscribeFrom({ offset })` |
+| Typeclass       | Methods                                                 |
+| --------------- | ------------------------------------------------------- |
+| Partitionable   | `subscribe({ partitions })`, `.partitions`              |
+| Replayable      | `subscribeFrom({ offset })`                             |
 | Acknowledgeable | `subscribeAck()` → `envelope.ack()` / `envelope.nack()` |
-| KeyedSinkable | `publish(value, { key })` |
-| Checkpointable | `commitOffset()`, `getCommittedOffset()` |
+| KeyedSinkable   | `publish(value, { key })`                               |
+| Checkpointable  | `commitOffset()`, `getCommittedOffset()`                |

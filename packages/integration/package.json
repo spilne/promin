@@ -6,11 +6,11 @@
   "dependencies": {
     "@promin/core": "workspace:*",
     "@promin/kafka": "workspace:*",
-    "@promin/redis": "workspace:*",
     "@promin/postgres": "workspace:*",
+    "@promin/redis": "workspace:*",
+    "drizzle-orm": "^0.44.0",
     "ioredis": "^5.6.1",
     "kafkajs": "^2.2.4",
-    "drizzle-orm": "^0.44.0",
     "postgres": "^3.4.5"
   },
   "devDependencies": {
@@ -21,7 +21,12 @@
   },
   "nx": {
     "targets": {
-      "test": {}
+      "typecheck": {},
+      "test": {},
+      "lint": {},
+      "format": {},
+      "format-check": {},
+      "ci": {}
     }
   }
 }

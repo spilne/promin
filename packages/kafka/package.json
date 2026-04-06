@@ -24,7 +24,10 @@
     "targets": {
       "typecheck": {},
       "test": {},
-      "lint": {}
+      "lint": {},
+      "format": {},
+      "format-check": {},
+      "ci": {}
     }
   }
 }
