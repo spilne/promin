@@ -222,7 +222,7 @@ export function withAll(name: string, fn: TestFn<Required<InfraCtx>>) {
       ctx.kafka = k.ctx;
       ctx.redis = r.ctx;
       ctx.postgres = p.ctx;
-    }, TIMEOUT);
+    }, KAFKA_TIMEOUT); // 3 containers in parallel — use the longer timeout
 
     afterAll(async () => {
       await Promise.all(containers.map((c) => c.stop()));
