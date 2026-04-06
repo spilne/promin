@@ -22,7 +22,13 @@ jobs:
         with:
           bun-version: latest
 
-      - run: bun install --no-cache
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - run: bun install
 
       - name: Typecheck
         run: bunx nx run-many -t typecheck
@@ -79,7 +85,13 @@ jobs:
         with:
           bun-version: latest
 
-      - run: bun install --no-cache
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - run: bun install
 
       - name: Pre-pull test container images
         run: |
