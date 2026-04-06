@@ -50,8 +50,6 @@ export const workflows = pgTable(
   "wf_workflows",
   {
     workflowId: text("workflow_id").primaryKey(),
-    /** Tenant/environment namespace. Default "default". Enables multi-tenant isolation and RLS. */
-    namespace: text("namespace").notNull().default("default"),
     workflowName: text("workflow_name").notNull(),
     workflowType: text("workflow_type"),
     statusId: integer("status_id").notNull().default(WorkflowStatusIds.id.running),
@@ -67,10 +65,6 @@ export const workflows = pgTable(
     index("wf_workflows_name_status_idx").on(t.workflowName, t.statusId),
     index("wf_workflows_status_idx").on(t.statusId),
     index("wf_workflows_type_idx").on(t.workflowType),
-    // Namespace indexes — for multi-tenant queries
-    index("wf_workflows_ns_idx").on(t.namespace),
-    index("wf_workflows_ns_name_status_idx").on(t.namespace, t.workflowName, t.statusId),
-    index("wf_workflows_ns_status_idx").on(t.namespace, t.statusId),
   ],
 );
 
@@ -141,8 +135,6 @@ export const stepQueue = pgTable(
   "wf_step_queue",
   {
     id: bigserial("id", { mode: "number" }).primaryKey(),
-    /** Namespace — matches workflow namespace for tenant isolation. */
-    namespace: text("namespace").notNull().default("default"),
     workflowId: text("workflow_id").notNull(),
     stepName: text("step_name").notNull(),
     queue: text("queue").notNull().default("default"),
@@ -162,14 +154,6 @@ export const stepQueue = pgTable(
   (t) => [
     index("wf_step_queue_dequeue_idx").on(t.status, t.queue, t.priority, t.createdAt),
     index("wf_step_queue_workflow_idx").on(t.workflowId),
-    // Namespace-scoped dequeue — workers only see their namespace
-    index("wf_step_queue_ns_dequeue_idx").on(
-      t.namespace,
-      t.status,
-      t.queue,
-      t.priority,
-      t.createdAt,
-    ),
   ],
 );
 
