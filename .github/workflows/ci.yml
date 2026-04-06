@@ -81,5 +81,14 @@ jobs:
 
       - run: bun install --no-cache
 
+      - name: Pre-pull test container images
+        run: |
+          docker pull redpandadata/redpanda:v24.3.7 &
+          docker pull redis:7-alpine &
+          docker pull postgres:17-alpine &
+          docker pull confluentinc/cp-kafka:7.9.1 &
+          docker pull ghcr.io/pgmq/pg17-pgmq:latest &
+          wait
+
       - name: Integration tests
         run: bun run test:integration
