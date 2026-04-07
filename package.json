@@ -17,11 +17,19 @@
     "bench:dataframe": "bun run packages/core/src/lib/dataframe/dataframe.bench.ts",
     "bench:topology": "bun run packages/core/src/lib/stream-topology/topology-runner.bench.ts",
     "bench:all": "bun run bench:stream && bun run bench:pipeline && bun run bench:dataframe && bun run bench:topology && bun run bench",
+    "docs": "bun run --filter @promin/docs build",
+    "docs:dev": "bun run --filter @promin/docs dev",
+    "docs:serve": "bunx serve .target/docs -p 4002",
+    "changeset": "changeset",
+    "version": "changeset version",
+    "release": "changeset publish",
     "clean": "rm -rf node_modules packages/*/node_modules .nx/cache",
     "prepare": "git config core.hooksPath .githooks || true"
   },
   "private": true,
   "devDependencies": {
+    "@changesets/changelog-github": "^0.6.0",
+    "@changesets/cli": "^2.30.0",
     "@nx/js": "21.4.1",
     "@types/bun": "^1.3.3",
     "mitata": "^1.0.34",
@@ -32,7 +40,9 @@
   },
   "workspaces": {
     "packages": [
-      "packages/*"
+      "packages/*",
+      "examples",
+      "documentation/generator"
     ],
     "catalog": {
       "@types/bun": "^1.3.3",

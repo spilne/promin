@@ -1,7 +1,6 @@
 {
   "name": "@promin/postgres",
   "version": "0.0.1",
-  "private": true,
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
@@ -22,6 +21,9 @@
       "default": "./src/testing.ts"
     },
     "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@promin/core": "workspace:*",

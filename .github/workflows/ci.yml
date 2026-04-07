@@ -49,6 +49,27 @@ jobs:
       - name: Unit tests
         run: bun run test
 
+  # Benchmarks: runs in parallel with unit + integration
+  benchmarks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          filter: tree:0
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - run: bun install
+
       - name: Stream benchmarks
         run: |
           mkdir -p .target/reports

@@ -1,0 +1,7 @@
+{
+  "title": "Distributed Workers",
+  "pages": [
+    "01-video-pipeline",
+    "02-multi-queue-workers"
+  ]
+}

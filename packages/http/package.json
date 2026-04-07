@@ -1,7 +1,6 @@
 {
   "name": "@promin/http",
   "version": "0.0.1",
-  "private": true,
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
@@ -22,6 +21,9 @@
       "default": "./src/lib/client/testing.ts"
     },
     "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@effect/platform": "catalog:",

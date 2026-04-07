@@ -1,0 +1,10 @@
+{
+  "title": "Workflows",
+  "pages": [
+    "01-order-processing",
+    "02-parallel-etl",
+    "03-bank-transfer-saga",
+    "04-approval-with-signal",
+    "05-batch-processing"
+  ]
+}

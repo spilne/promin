@@ -1,0 +1,13 @@
+{
+  "$schema": "https://unpkg.com/@changesets/config@3.1.3/schema.json",
+  "changelog": ["@changesets/changelog-github", { "repo": "spilne/promin" }],
+  "commit": false,
+  "fixed": [],
+  "linked": [
+    ["@promin/core", "@promin/http", "@promin/kafka", "@promin/postgres", "@promin/redis", "@promin/duckdb", "@promin/container"]
+  ],
+  "access": "public",
+  "baseBranch": "main",
+  "updateInternalDependencies": "patch",
+  "ignore": ["@promin/integration", "@promin/docs"]
+}

@@ -61,8 +61,8 @@ Thumbs.db
 .beads-credential-key
 
 
-docs
 .target
+.source
 .direnv
 
 # bv (beads viewer) local config and caches

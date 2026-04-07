@@ -1,0 +1,8 @@
+{
+  "title": "Patterns",
+  "pages": [
+    "01-resilience",
+    "02-stream-composition",
+    "03-data-pipelines"
+  ]
+}
