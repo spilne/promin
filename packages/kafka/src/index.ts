@@ -1,4 +1,8 @@
 export { KafkaTopic, type KafkaTopicConfig } from "./lib/index.ts";
+export {
+  KafkaShuffleTransport,
+  type KafkaShuffleTransportConfig,
+} from "./lib/kafka-shuffle-transport.ts";
 export { OffsetTracker } from "./lib/index.ts";
 export {
   commitBatchWithin,

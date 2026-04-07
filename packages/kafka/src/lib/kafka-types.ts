@@ -95,6 +95,10 @@ export interface KafkaAdmin {
   fetchTopicOffsetsByTimestamp(topic: string, timestamp: number): Promise<KafkaPartitionOffset[]>;
   /** Fetch partition count for a topic. Optional — not all clients expose this. */
   fetchTopicPartitionCount?(topic: string): Promise<number>;
+  /** Create topics. Optional — used by KafkaShuffleTransport for repartition topics. */
+  createTopics?(params: {
+    topics: { topic: string; numPartitions: number; replicationFactor: number }[];
+  }): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
