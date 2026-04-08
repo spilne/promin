@@ -53,6 +53,7 @@ export const workflows = pgTable(
     workflowName: text("workflow_name").notNull(),
     workflowType: text("workflow_type"),
     namespace: text("namespace"),
+    run: integer("run").notNull().default(1),
     statusId: integer("status_id").notNull().default(WorkflowStatusIds.id.running),
     input: jsonb("input").notNull(),
     metadata: jsonb("metadata"),
@@ -77,6 +78,7 @@ export const workflowSteps = pgTable(
       .notNull()
       .references(() => workflows.workflowId, { onDelete: "cascade" }),
     stepName: text("step_name").notNull(),
+    run: integer("run").notNull().default(1),
     statusId: integer("status_id").notNull().default(StepStatusIds.id.pending),
     stepTypeId: integer("step_type_id").notNull().default(StepTypeIds.id.single),
     dependsOn: jsonb("depends_on").$type<string[]>().notNull().default([]),
@@ -90,7 +92,7 @@ export const workflowSteps = pgTable(
     signalName: text("signal_name"),
     signalTimeoutAt: timestamp("signal_timeout_at", { withTimezone: true }),
   },
-  (t) => [primaryKey({ columns: [t.workflowId, t.stepName] })],
+  (t) => [primaryKey({ columns: [t.workflowId, t.stepName, t.run] })],
 );
 
 export const workflowStepTasks = pgTable(
@@ -98,6 +100,7 @@ export const workflowStepTasks = pgTable(
   {
     workflowId: text("workflow_id").notNull(),
     stepName: text("step_name").notNull(),
+    run: integer("run").notNull().default(1),
     taskIndex: integer("task_index").notNull(),
     statusId: integer("status_id").notNull().default(StepStatusIds.id.pending),
     input: jsonb("input"),
@@ -107,7 +110,7 @@ export const workflowStepTasks = pgTable(
     completedAt: timestamp("completed_at", { withTimezone: true }),
     attempt: integer("attempt").notNull().default(0),
   },
-  (t) => [primaryKey({ columns: [t.workflowId, t.stepName, t.taskIndex] })],
+  (t) => [primaryKey({ columns: [t.workflowId, t.stepName, t.run, t.taskIndex] })],
 );
 
 export const workflowSignals = pgTable(
@@ -166,6 +169,7 @@ export const stepAttempts = pgTable(
   {
     workflowId: text("workflow_id").notNull(),
     stepName: text("step_name").notNull(),
+    run: integer("run").notNull().default(1),
     attempt: integer("attempt").notNull(),
     attemptTypeId: integer("attempt_type_id").notNull(),
     statusId: integer("status_id").notNull(),
@@ -176,7 +180,7 @@ export const stepAttempts = pgTable(
     completedAt: timestamp("completed_at", { withTimezone: true }).notNull(),
   },
   (t) => [
-    primaryKey({ columns: [t.workflowId, t.stepName, t.attempt, t.attemptTypeId] }),
+    primaryKey({ columns: [t.workflowId, t.stepName, t.run, t.attempt, t.attemptTypeId] }),
     index("wf_step_attempts_workflow_idx").on(t.workflowId),
   ],
 );

@@ -1,0 +1,178 @@
+import { describe, it, expect } from "bun:test";
+import { workflow } from "./durable-pipeline.ts";
+import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
+
+const idempotency = { ttl: 60_000, onInFlight: "join" as const };
+
+describe("workflow singleflight", () => {
+  it("start() returns immediately without blocking", async () => {
+    const storage = new InMemoryWorkflowStorage();
+
+    const wf = workflow({ name: "nonblocking", storage })
+      .stepAsync("slow", async () => {
+        await new Promise((r) => setTimeout(r, 100));
+        return { done: true };
+      })
+      .build({ idempotency });
+
+    const handle = await wf.start("sf-1", {});
+    expect(handle.workflowId).toBe("sf-1");
+
+    const status = await handle.status();
+    expect(status).not.toBeNull();
+
+    const result = await handle.result({ timeoutMs: 5_000 });
+    expect(result).toEqual({ done: true });
+  });
+
+  it("multiple callers share one execution", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    let executionCount = 0;
+
+    const wf = workflow({ name: "singleflight", storage })
+      .stepAsync("compute", async () => {
+        executionCount++;
+        await new Promise((r) => setTimeout(r, 50));
+        return { value: 42 };
+      })
+      .build({ idempotency });
+
+    const handleA = await wf.start("sf-2", {});
+    const handleB = await wf.start("sf-2", {});
+
+    expect(handleA.workflowId).toBe("sf-2");
+    expect(handleB.workflowId).toBe("sf-2");
+
+    const [resultA, resultB] = await Promise.all([
+      handleA.result({ timeoutMs: 5_000 }),
+      handleB.result({ timeoutMs: 5_000 }),
+    ]);
+
+    expect(resultA).toEqual({ value: 42 });
+    expect(resultB).toEqual({ value: 42 });
+    expect(executionCount).toBe(1);
+  });
+
+  it("three concurrent callers, one execution", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    let executionCount = 0;
+
+    const wf = workflow({ name: "triple", storage })
+      .stepAsync("compute", async () => {
+        executionCount++;
+        await new Promise((r) => setTimeout(r, 50));
+        return { ok: true };
+      })
+      .build({ idempotency });
+
+    const [h1, h2, h3] = await Promise.all([
+      wf.start("sf-3", {}),
+      wf.start("sf-3", {}),
+      wf.start("sf-3", {}),
+    ]);
+
+    const [r1, r2, r3] = await Promise.all([
+      h1.result({ timeoutMs: 5_000 }),
+      h2.result({ timeoutMs: 5_000 }),
+      h3.result({ timeoutMs: 5_000 }),
+    ]);
+
+    expect(r1).toEqual({ ok: true });
+    expect(r2).toEqual({ ok: true });
+    expect(r3).toEqual({ ok: true });
+    expect(executionCount).toBe(1);
+  });
+
+  it("different workflowIds execute independently", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    let executionCount = 0;
+
+    const wf = workflow({ name: "independent", storage })
+      .stepAsync("compute", async () => {
+        executionCount++;
+        return { value: executionCount };
+      })
+      .build({ idempotency });
+
+    const handleA = await wf.start("sf-4a", {});
+    const handleB = await wf.start("sf-4b", {});
+
+    const [resultA, resultB] = await Promise.all([
+      handleA.result({ timeoutMs: 5_000 }),
+      handleB.result({ timeoutMs: 5_000 }),
+    ]);
+
+    expect(resultA).toEqual({ value: 1 });
+    expect(resultB).toEqual({ value: 2 });
+    expect(executionCount).toBe(2);
+  });
+
+  it("completed workflow returns cached result within TTL", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    let executionCount = 0;
+
+    const wf = workflow({ name: "cached", storage })
+      .stepAsync("compute", async () => {
+        executionCount++;
+        return { run: executionCount };
+      })
+      .build({ idempotency });
+
+    const h1 = await wf.start("sf-5", {});
+    await h1.result({ timeoutMs: 5_000 });
+    expect(executionCount).toBe(1);
+
+    // Within TTL — should return cached, not re-execute
+    const h2 = await wf.start("sf-5", {});
+    const status = await h2.status();
+    expect(status?.state).toBe("completed");
+    expect(status?.result).toEqual({ run: 1 });
+  });
+
+  it("suspended workflow is joined, not re-started", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    let executionCount = 0;
+
+    const wf = workflow({ name: "suspended-test", storage })
+      .stepAsync("first", async () => {
+        executionCount++;
+        return { step: 1 };
+      })
+      .waitForSignal("approval", { signalName: "approve", timeoutMs: 60_000 })
+      .build({ idempotency });
+
+    const h1 = await wf.start("sf-6", {});
+    await new Promise((r) => setTimeout(r, 100));
+
+    const h2 = await wf.start("sf-6", {});
+    expect(h1.workflowId).toBe("sf-6");
+    expect(h2.workflowId).toBe("sf-6");
+    expect(executionCount).toBe(1);
+
+    const status = await h2.status();
+    expect(status?.state).toBe("suspended");
+  });
+
+  it("without idempotency, start() throws on in-flight workflow", async () => {
+    const storage = new InMemoryWorkflowStorage();
+
+    const wf = workflow({ name: "no-idempotency", storage })
+      .stepAsync("slow", async () => {
+        await new Promise((r) => setTimeout(r, 100));
+        return { done: true };
+      })
+      .build(); // no idempotency config
+
+    const h1 = await wf.start("sf-7", {});
+
+    // Second start while running — should throw
+    try {
+      await wf.start("sf-7", {});
+      expect(true).toBe(false); // should not reach
+    } catch (e: any) {
+      expect(e._tag).toBe("WorkflowLockError");
+    }
+
+    await h1.result({ timeoutMs: 5_000 });
+  });
+});

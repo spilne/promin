@@ -50,6 +50,13 @@
       "when": 1743400006000,
       "tag": "0006_namespace",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1743400007000,
+      "tag": "0007_run_counter",
+      "breakpoints": true
     }
   ]
 }

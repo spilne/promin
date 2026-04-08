@@ -26,6 +26,7 @@ export interface WorkflowState<Input = unknown, Result = unknown> {
   readonly parentWorkflowId?: string;
   readonly namespace?: string;
   readonly status: WorkflowStatus;
+  readonly run: number;
   readonly input: Input;
   readonly result?: Result;
   readonly error?: string;
@@ -40,6 +41,7 @@ export interface WorkflowState<Input = unknown, Result = unknown> {
 
 export interface StepState {
   readonly stepName: string;
+  readonly run: number;
   readonly status: StepStatus;
   readonly dependsOn: string[];
   readonly stepType: StepType;

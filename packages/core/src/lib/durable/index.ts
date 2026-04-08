@@ -3,6 +3,7 @@ export {
   flow,
   WorkflowBuilder,
   type WorkflowDefinition,
+  type IdempotencyConfig,
   type WorkflowHandle,
   type WorkflowStatusInfo,
   type WorkflowHooks,

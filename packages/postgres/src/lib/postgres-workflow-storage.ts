@@ -121,6 +121,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       workflowName: row.workflowName,
       workflowType: row.workflowType ?? undefined,
       namespace: row.namespace ?? undefined,
+      run: row.run ?? 1,
       status: WorkflowStatusIds.toName(row.statusId),
       input: row.input,
       result: row.result ?? undefined,
@@ -136,6 +137,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
   private rowToStepState(row: any, tasks?: StepTaskState[]): StepState {
     return {
       stepName: row.stepName,
+      run: row.run ?? 1,
       status: StepStatusIds.toName(row.statusId),
       dependsOn: row.dependsOn ?? [],
       stepType: StepTypeIds.toName(row.stepTypeId),
@@ -176,14 +178,17 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       .where(eq(workflows.workflowId, workflowId));
     if (!wfRow) return null;
 
+    const currentRun = wfRow.run ?? 1;
     const stepRows = await this.db
       .select()
       .from(workflowSteps)
-      .where(eq(workflowSteps.workflowId, workflowId));
+      .where(and(eq(workflowSteps.workflowId, workflowId), eq(workflowSteps.run, currentRun)));
     const taskRows = await this.db
       .select()
       .from(workflowStepTasks)
-      .where(eq(workflowStepTasks.workflowId, workflowId));
+      .where(
+        and(eq(workflowStepTasks.workflowId, workflowId), eq(workflowStepTasks.run, currentRun)),
+      );
 
     const tasksByStep = new Map<string, StepTaskState[]>();
     for (const tr of taskRows) {
@@ -261,6 +266,14 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
     });
   }
 
+  private async getCurrentRun(workflowId: string): Promise<number> {
+    const [row] = await this.db
+      .select({ run: workflows.run })
+      .from(workflows)
+      .where(eq(workflows.workflowId, workflowId));
+    return row?.run ?? 1;
+  }
+
   async saveStepResult(params: {
     workflowId: string;
     stepName: string;
@@ -269,11 +282,13 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
     startedAt: Date;
   }): Promise<void> {
     const now = new Date();
+    const run = await this.getCurrentRun(params.workflowId);
     await this.db
       .insert(workflowSteps)
       .values({
         workflowId: params.workflowId,
         stepName: params.stepName,
+        run,
         statusId: StepStatusIds.id.completed,
         result: params.result,
         startedAt: params.startedAt,
@@ -282,7 +297,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
         attempt: 1,
       })
       .onConflictDoUpdate({
-        target: [workflowSteps.workflowId, workflowSteps.stepName],
+        target: [workflowSteps.workflowId, workflowSteps.stepName, workflowSteps.run],
         set: {
           statusId: StepStatusIds.id.completed,
           result: params.result,
@@ -305,11 +320,13 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
     startedAt: Date;
   }): Promise<void> {
     const now = new Date();
+    const run = await this.getCurrentRun(params.workflowId);
     await this.db
       .insert(workflowSteps)
       .values({
         workflowId: params.workflowId,
         stepName: params.stepName,
+        run,
         statusId: StepStatusIds.id.failed,
         error: params.error,
         startedAt: params.startedAt,
@@ -318,7 +335,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
         attempt: 1,
       })
       .onConflictDoUpdate({
-        target: [workflowSteps.workflowId, workflowSteps.stepName],
+        target: [workflowSteps.workflowId, workflowSteps.stepName, workflowSteps.run],
         set: {
           statusId: StepStatusIds.id.failed,
           error: params.error,
@@ -340,12 +357,14 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
     result: unknown;
   }): Promise<void> {
     const now = new Date();
+    const run = await this.getCurrentRun(params.workflowId);
     // Ensure parent step row exists
     await this.db
       .insert(workflowSteps)
       .values({
         workflowId: params.workflowId,
         stepName: params.stepName,
+        run,
         statusId: StepStatusIds.id.running,
         stepTypeId: StepTypeIds.id.map,
         attempt: 1,
@@ -357,6 +376,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       .values({
         workflowId: params.workflowId,
         stepName: params.stepName,
+        run,
         taskIndex: params.taskIndex,
         statusId: StepStatusIds.id.completed,
         result: params.result,
@@ -368,6 +388,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
         target: [
           workflowStepTasks.workflowId,
           workflowStepTasks.stepName,
+          workflowStepTasks.run,
           workflowStepTasks.taskIndex,
         ],
         set: {
@@ -386,12 +407,14 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
     error: string;
   }): Promise<void> {
     const now = new Date();
+    const run = await this.getCurrentRun(params.workflowId);
     // Ensure parent step row exists
     await this.db
       .insert(workflowSteps)
       .values({
         workflowId: params.workflowId,
         stepName: params.stepName,
+        run,
         statusId: StepStatusIds.id.running,
         stepTypeId: StepTypeIds.id.map,
         attempt: 1,
@@ -403,6 +426,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       .values({
         workflowId: params.workflowId,
         stepName: params.stepName,
+        run,
         taskIndex: params.taskIndex,
         statusId: StepStatusIds.id.failed,
         error: params.error,
@@ -414,6 +438,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
         target: [
           workflowStepTasks.workflowId,
           workflowStepTasks.stepName,
+          workflowStepTasks.run,
           workflowStepTasks.taskIndex,
         ],
         set: {
@@ -447,9 +472,11 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
     stepUpdate: Record<string, unknown>,
   ): Promise<void> {
     const now = new Date();
+    const run = await this.getCurrentRun(workflowId);
     const stepValues = {
       workflowId,
       stepName,
+      run,
       attempt: 1,
       startedAt: now,
       statusId: stepUpdate.status ? StepStatusIds.toId(stepUpdate.status as StepStatus) : undefined,
@@ -465,7 +492,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       .insert(workflowSteps)
       .values(stepValues)
       .onConflictDoUpdate({
-        target: [workflowSteps.workflowId, workflowSteps.stepName],
+        target: [workflowSteps.workflowId, workflowSteps.stepName, workflowSteps.run],
         set: stepValues,
       });
     await this.db
@@ -515,6 +542,23 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       .update(workflowLocks)
       .set({ expiresAt: new Date(Date.now() + lockDurationMs) })
       .where(eq(workflowLocks.workflowId, workflowId));
+  }
+
+  async startFreshRun(workflowId: string): Promise<number> {
+    const now = new Date();
+    const [row] = await this.db
+      .update(workflows)
+      .set({
+        run: sql`${workflows.run} + 1`,
+        statusId: WorkflowStatusIds.id.running,
+        result: null,
+        error: null,
+        completedAt: null,
+        updatedAt: now,
+      })
+      .where(eq(workflows.workflowId, workflowId))
+      .returning({ run: workflows.run });
+    return row?.run ?? 1;
   }
 
   private async tryAdvisoryLock(workflowId: string): Promise<boolean> {

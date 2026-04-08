@@ -64,6 +64,27 @@ export interface MapStepContext<Input> {
 }
 
 // ---------------------------------------------------------------------------
+// Idempotency config
+// ---------------------------------------------------------------------------
+
+export interface IdempotencyConfig {
+  /** Time-to-live before re-execution is allowed. */
+  readonly ttl: number | { readonly success: number; readonly failure?: number };
+  /**
+   * What to do when the TTL expires.
+   * - `"fresh-run"` — increment run counter, re-execute all steps (default)
+   * - `"replay"` — re-enter engine, replay completed steps from storage
+   */
+  readonly onExpiry?: "fresh-run" | "replay";
+  /**
+   * What to do when another execution is already in-flight.
+   * - `"join"` — return a handle to the existing run (singleflight, default)
+   * - `"reject"` — throw WorkflowLockError
+   */
+  readonly onInFlight?: "join" | "reject";
+}
+
+// ---------------------------------------------------------------------------
 // WorkflowDefinition — reusable workflow template
 // ---------------------------------------------------------------------------
 
@@ -72,10 +93,14 @@ export interface WorkflowDefinition<Input, Output> {
   readonly name: string;
   readonly storage: WorkflowStorage;
   readonly dag: WorkflowDAG;
-  run(params: { workflowId: string; input: Input }): Promise<Output>;
+  readonly idempotency?: IdempotencyConfig;
+  /** Execute workflow synchronously — blocks until completion. */
+  run(params: { workflowId: string; input: Input; force?: boolean }): Promise<Output>;
+  /** Execute workflow synchronously — returns `{ data, error }` instead of throwing. */
   runSafe(params: {
     workflowId: string;
     input: Input;
+    force?: boolean;
   }): Promise<{ data: Output; error: null } | { data: null; error: unknown }>;
   /**
    * Invoke as a child workflow — returns Pipeline for composition.
@@ -141,18 +166,13 @@ export interface WorkflowDefinition<Input, Output> {
 
   /**
    * Start a workflow and return a handle for interacting with it.
+   * With idempotency config: joins in-flight runs, respects TTL.
+   * Without idempotency: blocks until completion, throws if locked.
    *
    * @example
    * ```ts
    * const handle = await myWorkflow.start("order-123", orderInput);
-   *
-   * // Check status
    * const status = await handle.status();
-   *
-   * // Send a signal (e.g. from a webhook)
-   * await handle.signal("payment-received", { txId: "..." });
-   *
-   * // Wait for completion
    * const result = await handle.result({ timeoutMs: 60_000 });
    * ```
    */
@@ -352,7 +372,18 @@ export class WorkflowBuilder<
     private readonly _compensateConfig?: CompensateConfig,
     private readonly _dlq?: Sinkable<FailedWorkflowRecord>,
     private readonly _dispatch?: DispatchConfig,
+    private readonly _idempotency?: IdempotencyConfig,
   ) {}
+
+  /** Resolve TTL for a given workflow status. Returns undefined if no TTL applies. */
+  private _getIdempotencyTtl(status: string): number | undefined {
+    if (!this._idempotency) return undefined;
+    const ttl = this._idempotency.ttl;
+    if (typeof ttl === "number") return ttl;
+    if (status === "completed") return ttl.success;
+    if (status === "failed") return ttl.failure;
+    return undefined;
+  }
 
   // ---------------------------------------------------------------------------
   // Linear step — Pipeline-returning
@@ -820,13 +851,31 @@ export class WorkflowBuilder<
   // Terminal: run
   // ---------------------------------------------------------------------------
 
-  async run(params: { workflowId: string; input: Input }): Promise<Current> {
-    const { workflowId, input } = params;
+  async run(params: { workflowId: string; input: Input; force?: boolean }): Promise<Current> {
+    const { workflowId, input, force } = params;
     const workflowStartTime = Date.now();
     const compensateTrigger = this._compensateConfig?.trigger ?? "after-retries";
     const maxWorkflowRetries =
       compensateTrigger === "immediate" ? 0 : (this._retry?.maxRetries ?? 0);
     const workflowRetryDelayMs = this._retry?.baseDelayMs ?? 1000;
+    const idempotency = force ? undefined : this._idempotency;
+
+    // 0. Idempotency check — return cached result if within TTL
+    if (idempotency) {
+      const existing = await this._storage.loadWorkflow(workflowId);
+      if (existing?.completedAt) {
+        const elapsed = Date.now() - existing.completedAt.getTime();
+        const ttl = this._getIdempotencyTtl(existing.status);
+        if (ttl !== undefined && elapsed < ttl) {
+          if (existing.status === "completed") return existing.result as Current;
+          if (existing.status === "failed")
+            throw new WorkflowError({
+              workflowId,
+              message: existing.error ?? `Workflow "${workflowId}" failed (cached, TTL ${ttl}ms)`,
+            });
+        }
+      }
+    }
 
     // 1. Acquire lock
     const locked = await this._storage.tryLock(workflowId, DEFAULT_LOCK_DURATION_MS);
@@ -840,6 +889,31 @@ export class WorkflowBuilder<
     try {
       // 2. Load or create workflow state
       let state = await this._storage.loadWorkflow(workflowId);
+
+      // Double-check idempotency after lock — prevents race
+      if (idempotency && state?.completedAt) {
+        const elapsed = Date.now() - state.completedAt.getTime();
+        const ttl = this._getIdempotencyTtl(state.status);
+        if (ttl !== undefined && elapsed < ttl) {
+          await this._storage.releaseLock(workflowId);
+          if (state.status === "completed") return state.result as Current;
+          if (state.status === "failed")
+            throw new WorkflowError({
+              workflowId,
+              message: state.error ?? `Workflow "${workflowId}" failed (cached)`,
+            });
+        }
+        // TTL expired — check if we should start a fresh run
+        const onExpiry = idempotency.onExpiry ?? "fresh-run";
+        if (
+          onExpiry === "fresh-run" &&
+          (state.status === "completed" || state.status === "failed")
+        ) {
+          await this._storage.startFreshRun(workflowId);
+          state = await this._storage.loadWorkflow(workflowId);
+        }
+      }
+
       if (!state) {
         await this._storage.createWorkflow({
           workflowId,
@@ -1324,7 +1398,7 @@ export class WorkflowBuilder<
   // Terminal: runSafe
   // ---------------------------------------------------------------------------
 
-  async runSafe(params: { workflowId: string; input: Input }): Promise<
+  async runSafe(params: { workflowId: string; input: Input; force?: boolean }): Promise<
     | { data: Current; error: null }
     | {
         data: null;
@@ -1375,12 +1449,14 @@ export class WorkflowBuilder<
   // build — freeze into a reusable WorkflowDefinition
   // ---------------------------------------------------------------------------
 
-  build(): WorkflowDefinition<Input, Current> {
-    const self = this;
+  build(options?: { idempotency?: IdempotencyConfig }): WorkflowDefinition<Input, Current> {
+    const builder = options?.idempotency ? this._deriveWithIdempotency(options.idempotency) : this;
+    const self = builder;
     return {
-      name: this._name,
-      storage: this._storage,
-      dag: this.toJSON(),
+      name: self._name,
+      storage: self._storage,
+      dag: self.toJSON(),
+      idempotency: self._idempotency,
       run: (params) => self.run(params),
       runSafe: (params) => self.runSafe(params) as any,
       invoke: (params) =>
@@ -1470,15 +1546,47 @@ export class WorkflowBuilder<
       },
 
       start: async (workflowId, input) => {
-        const definition = self.build();
-        await definition.runSafe({ workflowId, input });
+        const definition = self.build(
+          self._idempotency ? { idempotency: self._idempotency } : undefined,
+        );
+        const existing = await self._storage.loadWorkflow(workflowId);
+        const isRunning = existing?.status === "running" || existing?.status === "suspended";
+        const onInFlight = self._idempotency?.onInFlight ?? "reject";
+
+        if (isRunning) {
+          if (onInFlight === "reject") {
+            throw new WorkflowLockError({
+              workflowId,
+              message: `Workflow "${workflowId}" is already running`,
+            });
+          }
+          // onInFlight === "join" — return handle to existing run
+        } else {
+          // Not running — fire-and-forget execution
+          definition.runSafe({ workflowId, input });
+          await new Promise((r) => setTimeout(r, 0));
+        }
 
         return {
           workflowId,
           status: (params) => definition.getStatus(workflowId, params),
           signal: (signalName, payload) =>
             self._storage.deliverSignal(workflowId, signalName, payload),
-          result: (params) => definition.waitForResult(workflowId, { input, ...params }),
+          result: async (params) => {
+            const intervalMs = params?.intervalMs ?? 1_000;
+            const timeoutMs = params?.timeoutMs ?? 60_000;
+            const deadline = Date.now() + timeoutMs;
+
+            while (Date.now() < deadline) {
+              const state = await self._storage.loadWorkflow(workflowId);
+              if (state?.status === "completed") return state.result as Current;
+              if (state?.status === "failed") {
+                throw new Error(state.error ?? `Workflow ${workflowId} failed`);
+              }
+              await new Promise((r) => setTimeout(r, intervalMs));
+            }
+            throw new Error(`Workflow ${workflowId} did not complete within ${timeoutMs}ms`);
+          },
         };
       },
     };
@@ -1521,6 +1629,26 @@ export class WorkflowBuilder<
       this._compensateConfig,
       this._dlq,
       this._dispatch,
+      this._idempotency,
+    );
+  }
+
+  private _deriveWithIdempotency(
+    idempotency: IdempotencyConfig,
+  ): WorkflowBuilder<Input, Steps, Current, Error> {
+    return new WorkflowBuilder(
+      this._name,
+      this._storage,
+      this._steps,
+      this._lastStepName,
+      this._hooks,
+      this._type,
+      this._metadata,
+      this._retry,
+      this._compensateConfig,
+      this._dlq,
+      this._dispatch,
+      idempotency,
     );
   }
 

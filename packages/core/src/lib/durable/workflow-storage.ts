@@ -99,6 +99,14 @@ export interface WorkflowStorage {
 
   /** Heartbeat to extend a lock (for long-running steps). */
   heartbeat(workflowId: string, lockDurationMs: number): Promise<void>;
+
+  /**
+   * Reset a completed workflow for a fresh re-execution.
+   * Increments the `run` counter, resets status to `running`, clears result/error.
+   * Old step results (from previous runs) remain in storage for history.
+   * Returns the new run number.
+   */
+  startFreshRun(workflowId: string): Promise<number>;
 }
 
 // ---------------------------------------------------------------------------
