@@ -128,6 +128,7 @@ export {
   type StepFailureStrategy,
   type WorkflowStorage,
   type WorkflowState,
+  type WorkflowRunSummary,
   type StepState,
   type StepTaskState,
   type SignalState,

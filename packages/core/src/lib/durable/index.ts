@@ -25,6 +25,7 @@ export {
 } from "./workflow-storage.ts";
 export {
   type WorkflowState,
+  type WorkflowRunSummary,
   type StepState,
   type StepTaskState,
   type SignalState,

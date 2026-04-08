@@ -10,13 +10,13 @@
       "path": "../packages/redis"
     },
     {
-      "path": "../packages/postgres"
-    },
-    {
       "path": "../packages/container"
     },
     {
       "path": "../packages/kafka"
+    },
+    {
+      "path": "../packages/postgres"
     },
     {
       "path": "../packages/core"

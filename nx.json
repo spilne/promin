@@ -27,6 +27,11 @@
     }
   ],
   "targetDefaults": {
+    "typecheck": {
+      "dependsOn": [
+        "^typecheck"
+      ]
+    },
     "test": {
       "executor": "nx:run-commands",
       "dependsOn": [
