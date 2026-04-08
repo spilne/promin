@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// InMemoryWorkflowStorage — for testing
+// InMemoryWorkflowStorage — for testing and single-process use
 // ---------------------------------------------------------------------------
 
 import type { WorkflowStorage, StepAttemptStorage } from "./workflow-storage.ts";
@@ -13,12 +13,30 @@ import type {
   StepAttemptRecord,
 } from "./workflow-state.ts";
 
+/** Mutable internal workflow state — avoids spread-copy on every mutation. */
+interface MutableWorkflow {
+  workflowId: string;
+  workflowName: string;
+  workflowType?: string;
+  parentWorkflowId?: string;
+  namespace?: string;
+  status: WorkflowStatus;
+  run: number;
+  input: unknown;
+  result?: unknown;
+  error?: string;
+  metadata?: Record<string, unknown>;
+  steps: Map<string, StepState>;
+  createdAt: Date;
+  updatedAt: Date;
+  completedAt?: Date;
+}
+
 export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStorage {
-  private workflows = new Map<string, WorkflowState>();
-  private locks = new Map<string, { expiresAt: number }>();
+  private workflows = new Map<string, MutableWorkflow>();
+  private locks = new Map<string, number>(); // workflowId → expiresAt
   private signals = new Map<string, SignalState[]>();
   private attempts = new Map<string, StepAttemptRecord[]>();
-  private stepHistory = new Map<string, StepState[]>();
   private runHistory = new Map<string, WorkflowRunSummary[]>();
   private readonly namespace: string | null;
 
@@ -26,13 +44,35 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     this.namespace = config?.namespace ?? null;
   }
 
-  /** Resolve namespace: workflow-level → constructor default → null. */
   private resolveNamespace(workflowNamespace?: string): string | undefined {
     return workflowNamespace ?? this.namespace ?? undefined;
   }
 
+  private toState(wf: MutableWorkflow): WorkflowState {
+    const steps: Record<string, StepState> = {};
+    for (const [k, v] of wf.steps) steps[k] = v;
+    return {
+      workflowId: wf.workflowId,
+      workflowName: wf.workflowName,
+      workflowType: wf.workflowType,
+      parentWorkflowId: wf.parentWorkflowId,
+      namespace: wf.namespace,
+      status: wf.status,
+      run: wf.run,
+      input: wf.input,
+      result: wf.result,
+      error: wf.error,
+      metadata: wf.metadata,
+      steps,
+      createdAt: wf.createdAt,
+      updatedAt: wf.updatedAt,
+      completedAt: wf.completedAt,
+    };
+  }
+
   async loadWorkflow(workflowId: string): Promise<WorkflowState | null> {
-    return this.workflows.get(workflowId) ?? null;
+    const wf = this.workflows.get(workflowId);
+    return wf ? this.toState(wf) : null;
   }
 
   async listWorkflows(params?: {
@@ -44,27 +84,26 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     limit?: number;
     offset?: number;
   }): Promise<WorkflowState[]> {
-    let results = [...this.workflows.values()];
-    // Scope to constructor namespace if set and no explicit namespace filter
     const ns = params?.namespace ?? this.namespace;
-    if (ns) {
-      results = results.filter((w) => w.namespace === ns);
-    }
-    if (params?.status) {
-      results = results.filter((w) => w.status === params.status);
-    }
-    if (params?.name) {
-      results = results.filter((w) => w.workflowName === params.name);
-    }
-    if (params?.type) {
-      results = results.filter((w) => w.workflowType === params.type);
-    }
-    if (params?.parentId) {
-      results = results.filter((w) => w.parentWorkflowId === params.parentId);
-    }
+    const results: WorkflowState[] = [];
+    let skipped = 0;
     const offset = params?.offset ?? 0;
-    const limit = params?.limit ?? results.length;
-    return results.slice(offset, offset + limit);
+    const limit = params?.limit ?? Infinity;
+
+    for (const wf of this.workflows.values()) {
+      if (ns && wf.namespace !== ns) continue;
+      if (params?.status && wf.status !== params.status) continue;
+      if (params?.name && wf.workflowName !== params.name) continue;
+      if (params?.type && wf.workflowType !== params.type) continue;
+      if (params?.parentId && wf.parentWorkflowId !== params.parentId) continue;
+      if (skipped < offset) {
+        skipped++;
+        continue;
+      }
+      if (results.length >= limit) break;
+      results.push(this.toState(wf));
+    }
+    return results;
   }
 
   async cancelWorkflow(workflowId: string, options?: { cascade?: boolean }): Promise<void> {
@@ -73,13 +112,10 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     if (wf.status !== "running" && wf.status !== "suspended") return;
 
     const now = new Date();
-    this.workflows.set(workflowId, {
-      ...wf,
-      status: "failed",
-      error: "Cancelled",
-      completedAt: now,
-      updatedAt: now,
-    });
+    wf.status = "failed";
+    wf.error = "Cancelled";
+    wf.completedAt = now;
+    wf.updatedAt = now;
 
     if (options?.cascade) {
       for (const [childId, child] of this.workflows) {
@@ -110,7 +146,7 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
       run: 1,
       input: params.input,
       metadata: params.metadata,
-      steps: {},
+      steps: new Map(),
       createdAt: now,
       updatedAt: now,
     });
@@ -126,9 +162,9 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     const wf = this.workflows.get(params.workflowId);
     if (!wf) return;
 
-    const existing = wf.steps[params.stepName];
+    const existing = wf.steps.get(params.stepName);
     const now = new Date();
-    const step: StepState = {
+    wf.steps.set(params.stepName, {
       stepName: params.stepName,
       run: wf.run,
       status: "completed",
@@ -140,13 +176,8 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
       durationMs: params.durationMs,
       attempt: (existing?.attempt ?? 0) + 1,
       tasks: existing?.tasks,
-    };
-
-    this.workflows.set(params.workflowId, {
-      ...wf,
-      steps: { ...wf.steps, [params.stepName]: step },
-      updatedAt: now,
     });
+    wf.updatedAt = now;
   }
 
   async saveStepFailure(params: {
@@ -159,9 +190,9 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     const wf = this.workflows.get(params.workflowId);
     if (!wf) return;
 
-    const existing = wf.steps[params.stepName];
+    const existing = wf.steps.get(params.stepName);
     const now = new Date();
-    const step: StepState = {
+    wf.steps.set(params.stepName, {
       stepName: params.stepName,
       run: wf.run,
       status: "failed",
@@ -173,13 +204,8 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
       durationMs: params.durationMs,
       attempt: (existing?.attempt ?? 0) + 1,
       tasks: existing?.tasks,
-    };
-
-    this.workflows.set(params.workflowId, {
-      ...wf,
-      steps: { ...wf.steps, [params.stepName]: step },
-      updatedAt: now,
     });
+    wf.updatedAt = now;
   }
 
   async saveTaskResult(params: {
@@ -191,44 +217,35 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     const wf = this.workflows.get(params.workflowId);
     if (!wf) return;
 
-    const existing = wf.steps[params.stepName];
-    const tasks = [...(existing?.tasks ?? [])];
+    const existing = wf.steps.get(params.stepName);
+    const tasks = existing?.tasks ? [...existing.tasks] : [];
     const now = new Date();
 
-    const existingTask = tasks.find((t) => t.taskIndex === params.taskIndex);
+    const idx = tasks.findIndex((t) => t.taskIndex === params.taskIndex);
+    const prev = idx >= 0 ? tasks[idx] : undefined;
     const task: StepTaskState = {
       taskIndex: params.taskIndex,
       status: "completed",
       result: params.result,
-      startedAt: existingTask?.startedAt ?? now,
+      startedAt: prev?.startedAt ?? now,
       completedAt: now,
-      attempt: (existingTask?.attempt ?? 0) + 1,
+      attempt: (prev?.attempt ?? 0) + 1,
     };
+    if (idx >= 0) tasks[idx] = task;
+    else tasks.push(task);
 
-    const idx = tasks.findIndex((t) => t.taskIndex === params.taskIndex);
-    if (idx >= 0) {
-      tasks[idx] = task;
-    } else {
-      tasks.push(task);
-    }
-
-    const step: StepState = {
+    wf.steps.set(params.stepName, {
       ...(existing ?? {
         stepName: params.stepName,
         run: wf.run,
-        status: "running",
+        status: "running" as const,
         dependsOn: [],
         stepType: "map" as const,
         attempt: 1,
       }),
       tasks,
-    };
-
-    this.workflows.set(params.workflowId, {
-      ...wf,
-      steps: { ...wf.steps, [params.stepName]: step },
-      updatedAt: now,
     });
+    wf.updatedAt = now;
   }
 
   async saveTaskFailure(params: {
@@ -240,72 +257,55 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     const wf = this.workflows.get(params.workflowId);
     if (!wf) return;
 
-    const existing = wf.steps[params.stepName];
-    const tasks = [...(existing?.tasks ?? [])];
+    const existing = wf.steps.get(params.stepName);
+    const tasks = existing?.tasks ? [...existing.tasks] : [];
     const now = new Date();
 
-    const existingTask = tasks.find((t) => t.taskIndex === params.taskIndex);
+    const idx = tasks.findIndex((t) => t.taskIndex === params.taskIndex);
+    const prev = idx >= 0 ? tasks[idx] : undefined;
     const task: StepTaskState = {
       taskIndex: params.taskIndex,
       status: "failed",
       error: params.error,
-      startedAt: existingTask?.startedAt ?? now,
+      startedAt: prev?.startedAt ?? now,
       completedAt: now,
-      attempt: (existingTask?.attempt ?? 0) + 1,
+      attempt: (prev?.attempt ?? 0) + 1,
     };
+    if (idx >= 0) tasks[idx] = task;
+    else tasks.push(task);
 
-    const idx = tasks.findIndex((t) => t.taskIndex === params.taskIndex);
-    if (idx >= 0) {
-      tasks[idx] = task;
-    } else {
-      tasks.push(task);
-    }
-
-    const step: StepState = {
+    wf.steps.set(params.stepName, {
       ...(existing ?? {
         stepName: params.stepName,
         run: wf.run,
-        status: "running",
+        status: "running" as const,
         dependsOn: [],
         stepType: "map" as const,
         attempt: 1,
       }),
       tasks,
-    };
-
-    this.workflows.set(params.workflowId, {
-      ...wf,
-      steps: { ...wf.steps, [params.stepName]: step },
-      updatedAt: now,
     });
+    wf.updatedAt = now;
   }
 
   async completeWorkflow(workflowId: string, result: unknown): Promise<void> {
     const wf = this.workflows.get(workflowId);
     if (!wf) return;
-
     const now = new Date();
-    this.workflows.set(workflowId, {
-      ...wf,
-      status: "completed",
-      result,
-      completedAt: now,
-      updatedAt: now,
-    });
+    wf.status = "completed";
+    wf.result = result;
+    wf.completedAt = now;
+    wf.updatedAt = now;
   }
 
   async failWorkflow(workflowId: string, error: string): Promise<void> {
     const wf = this.workflows.get(workflowId);
     if (!wf) return;
-
     const now = new Date();
-    this.workflows.set(workflowId, {
-      ...wf,
-      status: "failed",
-      error,
-      completedAt: now,
-      updatedAt: now,
-    });
+    wf.status = "failed";
+    wf.error = error;
+    wf.completedAt = now;
+    wf.updatedAt = now;
   }
 
   async suspendWorkflow(
@@ -316,10 +316,9 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     const wf = this.workflows.get(workflowId);
     if (!wf) return;
 
-    const existing = wf.steps[stepName];
+    const existing = wf.steps.get(stepName);
     const now = new Date();
-
-    const step: StepState = {
+    wf.steps.set(stepName, {
       stepName,
       run: wf.run,
       dependsOn: existing?.dependsOn ?? [],
@@ -327,23 +326,14 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
       attempt: existing?.attempt ?? 1,
       startedAt: existing?.startedAt ?? now,
       ...stepUpdate,
-    } as StepState;
-
-    this.workflows.set(workflowId, {
-      ...wf,
-      status: "suspended",
-      steps: { ...wf.steps, [stepName]: step },
-      updatedAt: now,
-    });
+    } as StepState);
+    wf.status = "suspended";
+    wf.updatedAt = now;
   }
 
   async deliverSignal(workflowId: string, signalName: string, payload: unknown): Promise<void> {
     const existing = this.signals.get(workflowId) ?? [];
-    existing.push({
-      signalName,
-      payload,
-      deliveredAt: new Date(),
-    });
+    existing.push({ signalName, payload, deliveredAt: new Date() });
     this.signals.set(workflowId, existing);
   }
 
@@ -352,14 +342,10 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
   }
 
   async tryLock(workflowId: string, lockDurationMs: number): Promise<boolean> {
-    const existing = this.locks.get(workflowId);
+    const expiresAt = this.locks.get(workflowId);
     const now = Date.now();
-
-    if (existing && existing.expiresAt > now) {
-      return false;
-    }
-
-    this.locks.set(workflowId, { expiresAt: now + lockDurationMs });
+    if (expiresAt !== undefined && expiresAt > now) return false;
+    this.locks.set(workflowId, now + lockDurationMs);
     return true;
   }
 
@@ -368,44 +354,37 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
   }
 
   async heartbeat(workflowId: string, lockDurationMs: number): Promise<void> {
-    this.locks.set(workflowId, { expiresAt: Date.now() + lockDurationMs });
+    this.locks.set(workflowId, Date.now() + lockDurationMs);
   }
 
   async startFreshRun(workflowId: string): Promise<number> {
     const wf = this.workflows.get(workflowId);
     if (!wf) throw new Error(`Workflow ${workflowId} not found`);
 
-    // Archive current run (metadata + steps)
+    // Archive current run
+    const steps: Record<string, StepState> = {};
+    for (const [k, v] of wf.steps) steps[k] = v;
+
     const runs = this.runHistory.get(workflowId) ?? [];
     runs.push({
       run: wf.run,
       status: wf.status,
       result: wf.result,
       error: wf.error,
-      steps: { ...wf.steps },
+      steps,
       createdAt: wf.createdAt,
       completedAt: wf.completedAt,
     });
     this.runHistory.set(workflowId, runs);
 
-    // Archive steps (for getStepHistory compatibility)
-    const history = this.stepHistory.get(workflowId) ?? [];
-    history.push(...Object.values(wf.steps));
-    this.stepHistory.set(workflowId, history);
-
-    const newRun = (wf.run ?? 1) + 1;
-    const now = new Date();
-    this.workflows.set(workflowId, {
-      ...wf,
-      run: newRun,
-      status: "running",
-      result: undefined,
-      error: undefined,
-      completedAt: undefined,
-      steps: {},
-      updatedAt: now,
-    });
-    return newRun;
+    wf.run++;
+    wf.status = "running";
+    wf.result = undefined;
+    wf.error = undefined;
+    wf.completedAt = undefined;
+    wf.steps = new Map();
+    wf.updatedAt = new Date();
+    return wf.run;
   }
 
   async loadRunHistory(
@@ -416,15 +395,16 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     if (!wf) return [];
 
     const archived = this.runHistory.get(workflowId) ?? [];
+    const currentSteps: Record<string, StepState> = {};
+    for (const [k, v] of wf.steps) currentSteps[k] = v;
 
-    // Current run + archived runs, sorted newest first
     const runs: WorkflowRunSummary[] = [
       {
         run: wf.run,
         status: wf.status,
         result: wf.result,
         error: wf.error,
-        steps: { ...wf.steps },
+        steps: currentSteps,
         createdAt: wf.createdAt,
         completedAt: wf.completedAt,
       },
@@ -439,31 +419,29 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
 
   /** Get step history across all runs for a workflow. */
   getStepHistory(workflowId: string): StepState[] {
-    return this.stepHistory.get(workflowId) ?? [];
+    const archived = this.runHistory.get(workflowId) ?? [];
+    return archived.flatMap((r) => Object.values(r.steps));
   }
 
   // ---------------------------------------------------------------------------
-  // StepAttemptStorage — attempt history
+  // StepAttemptStorage
   // ---------------------------------------------------------------------------
 
   async saveStepAttempt(record: StepAttemptRecord): Promise<void> {
-    const key = record.workflowId;
-    const existing = this.attempts.get(key) ?? [];
+    const existing = this.attempts.get(record.workflowId) ?? [];
     existing.push(record);
-    this.attempts.set(key, existing);
+    this.attempts.set(record.workflowId, existing);
   }
 
   async loadStepAttempts(workflowId: string, stepName?: string): Promise<StepAttemptRecord[]> {
     const all = this.attempts.get(workflowId) ?? [];
-    if (stepName) {
-      return all.filter((a) => a.stepName === stepName);
-    }
-    return all;
+    return stepName ? all.filter((a) => a.stepName === stepName) : all;
   }
 
   /** Test helper: get the raw workflow state. */
   getWorkflow(workflowId: string): WorkflowState | undefined {
-    return this.workflows.get(workflowId);
+    const wf = this.workflows.get(workflowId);
+    return wf ? this.toState(wf) : undefined;
   }
 
   /** Test helper: clear all data. */
@@ -472,7 +450,6 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     this.locks.clear();
     this.signals.clear();
     this.attempts.clear();
-    this.stepHistory.clear();
     this.runHistory.clear();
   }
 }
