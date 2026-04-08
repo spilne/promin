@@ -460,6 +460,48 @@ export function storageTestSuite(factory: () => WorkflowStorage | Promise<Workfl
         expect(page2[0]!.run).toBe(1);
       });
 
+      it("preserves status and result for archived runs", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "hist-meta-1", workflowName: "test", input: {} });
+        await s.completeWorkflow("hist-meta-1", "first-result");
+
+        await s.startFreshRun("hist-meta-1");
+        await s.failWorkflow("hist-meta-1", "boom");
+
+        await s.startFreshRun("hist-meta-1");
+
+        const history = await s.loadRunHistory("hist-meta-1");
+        expect(history).toHaveLength(3);
+
+        // Current run (3) — running, no result
+        expect(history[0]!.run).toBe(3);
+        expect(history[0]!.status).toBe("running");
+        expect(history[0]!.result).toBeUndefined();
+        expect(history[0]!.error).toBeUndefined();
+
+        // Archived run 2 — failed with error
+        expect(history[1]!.run).toBe(2);
+        expect(history[1]!.status).toBe("failed");
+        expect(history[1]!.error).toBe("boom");
+
+        // Archived run 1 — completed with result
+        expect(history[2]!.run).toBe(1);
+        expect(history[2]!.status).toBe("completed");
+        expect(history[2]!.result).toBe("first-result");
+      });
+
+      it("preserves completedAt for archived runs", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "hist-meta-2", workflowName: "test", input: {} });
+        await s.completeWorkflow("hist-meta-2", "done");
+
+        await s.startFreshRun("hist-meta-2");
+
+        const history = await s.loadRunHistory("hist-meta-2");
+        expect(history[1]!.run).toBe(1);
+        expect(history[1]!.completedAt).toBeInstanceOf(Date);
+      });
+
       it("includes current run even with no steps", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "hist-3", workflowName: "test", input: {} });
