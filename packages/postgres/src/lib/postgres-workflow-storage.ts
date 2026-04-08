@@ -2,7 +2,7 @@
 // PostgresWorkflowStorage — production-grade WorkflowStorage backed by Postgres
 // ---------------------------------------------------------------------------
 
-import { eq, and, sql, desc } from "drizzle-orm";
+import { eq, and, sql, desc, inArray } from "drizzle-orm";
 import type {
   WorkflowStorage,
   StepAttemptStorage,
@@ -572,30 +572,44 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       .where(eq(workflows.workflowId, workflowId));
     if (!wfRow) return [];
 
-    // Load ALL steps for this workflow (across all runs)
-    const allSteps = await this.db
+    const offset = params?.offset ?? 0;
+
+    // Get distinct run numbers (paginated), sorted desc
+    const runRows = await this.db
+      .selectDistinct({ run: workflowSteps.run })
+      .from(workflowSteps)
+      .where(eq(workflowSteps.workflowId, workflowId))
+      .orderBy(desc(workflowSteps.run));
+
+    const allRunNumbers = runRows.map((r) => r.run ?? 1);
+    // Ensure current run is included even if it has no steps yet
+    if (!allRunNumbers.includes(wfRow.run)) allRunNumbers.push(wfRow.run);
+    allRunNumbers.sort((a, b) => b - a);
+
+    const limit = params?.limit ?? allRunNumbers.length;
+    const paginatedRuns = allRunNumbers.slice(offset, offset + limit);
+    if (paginatedRuns.length === 0) return [];
+
+    // Load steps only for the paginated runs
+    const steps = await this.db
       .select()
       .from(workflowSteps)
-      .where(eq(workflowSteps.workflowId, workflowId));
+      .where(
+        and(eq(workflowSteps.workflowId, workflowId), inArray(workflowSteps.run, paginatedRuns)),
+      );
 
     // Group steps by run
     const stepsByRun = new Map<number, StepState[]>();
-    for (const row of allSteps) {
+    for (const row of steps) {
       const run = row.run ?? 1;
       if (!stepsByRun.has(run)) stepsByRun.set(run, []);
       stepsByRun.get(run)!.push(this.rowToStepState(row));
     }
 
-    // Get all distinct run numbers, sorted desc
-    const runNumbers = [...stepsByRun.keys()];
-    // Ensure current run is included even if it has no steps yet
-    if (!runNumbers.includes(wfRow.run)) runNumbers.push(wfRow.run);
-    runNumbers.sort((a, b) => b - a);
-
-    const runs: WorkflowRunSummary[] = runNumbers.map((run) => {
-      const steps: Record<string, StepState> = {};
+    return paginatedRuns.map((run) => {
+      const runSteps: Record<string, StepState> = {};
       for (const s of stepsByRun.get(run) ?? []) {
-        steps[s.stepName] = s;
+        runSteps[s.stepName] = s;
       }
 
       const isCurrent = run === wfRow.run;
@@ -604,15 +618,11 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
         status: isCurrent ? WorkflowStatusIds.toName(wfRow.statusId) : ("completed" as const),
         result: isCurrent ? (wfRow.result ?? undefined) : undefined,
         error: isCurrent ? (wfRow.error ?? undefined) : undefined,
-        steps,
+        steps: runSteps,
         createdAt: wfRow.createdAt,
         completedAt: isCurrent ? (wfRow.completedAt ?? undefined) : undefined,
       };
     });
-
-    const offset = params?.offset ?? 0;
-    const limit = params?.limit ?? runs.length;
-    return runs.slice(offset, offset + limit);
   }
 
   private async tryAdvisoryLock(workflowId: string): Promise<boolean> {
