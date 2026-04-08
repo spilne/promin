@@ -7,8 +7,6 @@ Redis Streams transport adapter. Consumer groups, manual ack, dead consumer recl
 ```typescript
 import Redis from "ioredis";
 import { RedisStream } from "@promin/redis";
-import { StreamPipeline } from "@promin/core";
-
 const redis = new Redis("redis://localhost:6379");
 
 const events = new RedisStream<UserEvent>({
@@ -21,7 +19,8 @@ const events = new RedisStream<UserEvent>({
 await events.ensureGroup();
 
 // Subscribe — auto-ack after processing
-await StreamPipeline.fromSource(events)
+await events
+  .subscribe()
   .filter((e) => e.type === "signup")
   .forEach(handleSignup);
 

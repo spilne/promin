@@ -63,6 +63,7 @@ Thumbs.db
 
 .target
 .source
+package-lock.json
 .direnv
 
 # bv (beads viewer) local config and caches

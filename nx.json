@@ -16,7 +16,8 @@
     {
       "plugin": "@nx/js/typescript",
       "include": [
-        "packages/**/*"
+        "packages/**/*",
+        "examples"
       ],
       "options": {
         "typecheck": {

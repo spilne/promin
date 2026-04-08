@@ -1,6 +1,18 @@
 # Promin
 
-TypeScript platform for pipelines, workflows, streaming, and data processing. Built on Effect, Bun, and Postgres.
+TypeScript toolkit for resilient async operations, durable workflows, stream processing, and analytics. Built on Effect, Bun, and Postgres.
+
+## Why Promin?
+
+Production services need retry, timeout, circuit breakers, backpressure, crash recovery, and observability. Most TypeScript tools solve one of these — Promin composes them all:
+
+- **Pipeline** — retry, timeout, circuit breaker, race, cache in one chainable API. No more nested try/catch with manual backoff.
+- **StreamPipeline** — parallel transforms, batching, deduplication with automatic operator fusion. Not just `for await...of`.
+- **Durable workflows** — DAG-based steps that survive crashes. Compensation (sagas), signals, sleep. Not just a job queue.
+- **StreamTopology** — keyed state, time windows, joins, distributed shuffle. Kafka Streams semantics in TypeScript.
+- **DataFrame** — lazy analytics with expression builder. Array executor for small data, DuckDB for large. Not just `Array.filter().map()`.
+
+All of these compose. A workflow step can use a Pipeline with retry. A StreamTopology can trigger workflows. A DataFrame query can run inside a durable step. One type system, one runtime.
 
 ## Packages
 
@@ -116,3 +128,10 @@ bun run bench:all    # all benchmark suites
 | Formatting | oxfmt |
 | Testing | bun:test |
 | Benchmarking | mitata |
+
+## Documentation
+
+- **[Book](./book/)** — full documentation (build with `bun run docs`)
+- **[Examples](./examples/)** — real-world scenarios, ordered simple → advanced
+- **[Comparison](./packages/core/COMPARISON.md)** — Pipeline vs Promise vs raw Effect
+- **[Glossary](./packages/core/GLOSSARY.md)** — Promin concepts mapped to Temporal, Airflow, Kafka Streams, Flink
