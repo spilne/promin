@@ -574,20 +574,24 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
 
     const offset = params?.offset ?? 0;
 
-    // Get distinct run numbers (paginated), sorted desc
-    const runRows = await this.db
-      .selectDistinct({ run: workflowSteps.run })
-      .from(workflowSteps)
-      .where(eq(workflowSteps.workflowId, workflowId))
-      .orderBy(desc(workflowSteps.run));
+    // Build the set of run numbers: UNION the current run (may have no steps yet)
+    // with distinct runs from steps, paginate in SQL
+    const runRows = await execRaw(
+      this.db,
+      sql`
+        SELECT DISTINCT run FROM (
+          SELECT ${wfRow.run} AS run
+          UNION
+          SELECT COALESCE(run, 1) AS run FROM wf_workflow_steps
+            WHERE workflow_id = ${workflowId}
+        ) AS runs
+        ORDER BY run DESC
+        LIMIT ${params?.limit ?? 2147483647}
+        OFFSET ${offset}
+      `,
+    );
 
-    const allRunNumbers = runRows.map((r) => r.run ?? 1);
-    // Ensure current run is included even if it has no steps yet
-    if (!allRunNumbers.includes(wfRow.run)) allRunNumbers.push(wfRow.run);
-    allRunNumbers.sort((a, b) => b - a);
-
-    const limit = params?.limit ?? allRunNumbers.length;
-    const paginatedRuns = allRunNumbers.slice(offset, offset + limit);
+    const paginatedRuns = runRows.map((r: { run: number }) => r.run);
     if (paginatedRuns.length === 0) return [];
 
     // Load steps only for the paginated runs
