@@ -10,6 +10,11 @@
       "import": "./src/index.ts",
       "default": "./src/index.ts"
     },
+    "./testing": {
+      "types": "./src/lib/durable/storage-test-suite.ts",
+      "import": "./src/lib/durable/storage-test-suite.ts",
+      "default": "./src/lib/durable/storage-test-suite.ts"
+    },
     "./package.json": "./package.json"
   },
   "publishConfig": {
