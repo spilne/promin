@@ -6,6 +6,7 @@ import type { WorkflowStorage, StepAttemptStorage } from "./workflow-storage.ts"
 import type {
   WorkflowState,
   WorkflowStatus,
+  WorkflowRunSummary,
   StepState,
   StepTaskState,
   SignalState,
@@ -18,6 +19,7 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
   private signals = new Map<string, SignalState[]>();
   private attempts = new Map<string, StepAttemptRecord[]>();
   private stepHistory = new Map<string, StepState[]>();
+  private runHistory = new Map<string, WorkflowRunSummary[]>();
   private readonly namespace: string | null;
 
   constructor(config?: { namespace?: string | null }) {
@@ -373,7 +375,20 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     const wf = this.workflows.get(workflowId);
     if (!wf) throw new Error(`Workflow ${workflowId} not found`);
 
-    // Archive current steps to history
+    // Archive current run (metadata + steps)
+    const runs = this.runHistory.get(workflowId) ?? [];
+    runs.push({
+      run: wf.run,
+      status: wf.status,
+      result: wf.result,
+      error: wf.error,
+      steps: { ...wf.steps },
+      createdAt: wf.createdAt,
+      completedAt: wf.completedAt,
+    });
+    this.runHistory.set(workflowId, runs);
+
+    // Archive steps (for getStepHistory compatibility)
     const history = this.stepHistory.get(workflowId) ?? [];
     history.push(...Object.values(wf.steps));
     this.stepHistory.set(workflowId, history);
@@ -391,6 +406,35 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
       updatedAt: now,
     });
     return newRun;
+  }
+
+  async loadRunHistory(
+    workflowId: string,
+    params?: { limit?: number; offset?: number },
+  ): Promise<WorkflowRunSummary[]> {
+    const wf = this.workflows.get(workflowId);
+    if (!wf) return [];
+
+    const archived = this.runHistory.get(workflowId) ?? [];
+
+    // Current run + archived runs, sorted newest first
+    const runs: WorkflowRunSummary[] = [
+      {
+        run: wf.run,
+        status: wf.status,
+        result: wf.result,
+        error: wf.error,
+        steps: { ...wf.steps },
+        createdAt: wf.createdAt,
+        completedAt: wf.completedAt,
+      },
+      ...archived,
+    ];
+    runs.sort((a, b) => b.run - a.run);
+
+    const offset = params?.offset ?? 0;
+    const limit = params?.limit ?? runs.length;
+    return runs.slice(offset, offset + limit);
   }
 
   /** Get step history across all runs for a workflow. */
@@ -429,5 +473,6 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     this.signals.clear();
     this.attempts.clear();
     this.stepHistory.clear();
+    this.runHistory.clear();
   }
 }

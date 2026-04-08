@@ -5,6 +5,7 @@
 import type {
   WorkflowState,
   WorkflowStatus,
+  WorkflowRunSummary,
   SignalState,
   StepAttemptRecord,
 } from "./workflow-state.ts";
@@ -107,6 +108,15 @@ export interface WorkflowStorage {
    * Returns the new run number.
    */
   startFreshRun(workflowId: string): Promise<number>;
+
+  /**
+   * Load run history for a workflow — all runs with their step results.
+   * Ordered by run number descending (newest first).
+   */
+  loadRunHistory(
+    workflowId: string,
+    params?: { limit?: number; offset?: number },
+  ): Promise<WorkflowRunSummary[]>;
 }
 
 // ---------------------------------------------------------------------------

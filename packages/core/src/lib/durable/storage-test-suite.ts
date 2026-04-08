@@ -330,6 +330,119 @@ export function storageTestSuite(factory: () => WorkflowStorage | Promise<Workfl
         expect(state!.run).toBe(2);
         expect(Object.keys(state!.steps)).toHaveLength(0);
       });
+
+      it("loadWorkflow always returns the latest run", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "fresh-3", workflowName: "test", input: {} });
+        await s.saveStepResult({
+          workflowId: "fresh-3",
+          stepName: "step-a",
+          result: "run-1-result",
+          durationMs: 10,
+          startedAt: new Date(),
+        });
+        await s.completeWorkflow("fresh-3", "result-1");
+
+        // Fresh run → run 2
+        await s.startFreshRun("fresh-3");
+        await s.saveStepResult({
+          workflowId: "fresh-3",
+          stepName: "step-a",
+          result: "run-2-result",
+          durationMs: 10,
+          startedAt: new Date(),
+        });
+        await s.completeWorkflow("fresh-3", "result-2");
+
+        // loadWorkflow returns latest run
+        const state = await s.loadWorkflow("fresh-3");
+        expect(state!.run).toBe(2);
+        expect(state!.result).toBe("result-2");
+        expect(state!.steps["step-a"]!.result).toBe("run-2-result");
+      });
+    });
+
+    // -------------------------------------------------------------------
+    // loadRunHistory
+    // -------------------------------------------------------------------
+
+    describe("loadRunHistory", () => {
+      it("returns all runs newest first", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "hist-1", workflowName: "test", input: {} });
+        await s.saveStepResult({
+          workflowId: "hist-1",
+          stepName: "compute",
+          result: "v1",
+          durationMs: 10,
+          startedAt: new Date(),
+        });
+        await s.completeWorkflow("hist-1", "result-1");
+
+        await s.startFreshRun("hist-1");
+        await s.saveStepResult({
+          workflowId: "hist-1",
+          stepName: "compute",
+          result: "v2",
+          durationMs: 10,
+          startedAt: new Date(),
+        });
+        await s.completeWorkflow("hist-1", "result-2");
+
+        await s.startFreshRun("hist-1");
+        await s.saveStepResult({
+          workflowId: "hist-1",
+          stepName: "compute",
+          result: "v3",
+          durationMs: 10,
+          startedAt: new Date(),
+        });
+        await s.completeWorkflow("hist-1", "result-3");
+
+        const history = await s.loadRunHistory("hist-1");
+        expect(history).toHaveLength(3);
+        expect(history[0]!.run).toBe(3); // newest first
+        expect(history[1]!.run).toBe(2);
+        expect(history[2]!.run).toBe(1);
+        expect(history[0]!.steps["compute"]!.result).toBe("v3");
+        expect(history[2]!.steps["compute"]!.result).toBe("v1");
+      });
+
+      it("returns empty array for non-existent workflow", async () => {
+        const s = await getStorage();
+        expect(await s.loadRunHistory("nonexistent")).toEqual([]);
+      });
+
+      it("supports pagination with limit and offset", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "hist-2", workflowName: "test", input: {} });
+        await s.completeWorkflow("hist-2", "r1");
+        await s.startFreshRun("hist-2");
+        await s.completeWorkflow("hist-2", "r2");
+        await s.startFreshRun("hist-2");
+        await s.completeWorkflow("hist-2", "r3");
+
+        // First page
+        const page1 = await s.loadRunHistory("hist-2", { limit: 2 });
+        expect(page1).toHaveLength(2);
+        expect(page1[0]!.run).toBe(3);
+        expect(page1[1]!.run).toBe(2);
+
+        // Second page
+        const page2 = await s.loadRunHistory("hist-2", { limit: 2, offset: 2 });
+        expect(page2).toHaveLength(1);
+        expect(page2[0]!.run).toBe(1);
+      });
+
+      it("includes current run even with no steps", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "hist-3", workflowName: "test", input: {} });
+
+        const history = await s.loadRunHistory("hist-3");
+        expect(history).toHaveLength(1);
+        expect(history[0]!.run).toBe(1);
+        expect(history[0]!.status).toBe("running");
+      });
     });
   });
 }

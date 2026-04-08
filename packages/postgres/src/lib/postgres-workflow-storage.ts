@@ -7,6 +7,7 @@ import type {
   WorkflowStorage,
   StepAttemptStorage,
   WorkflowState,
+  WorkflowRunSummary,
   WorkflowStatus,
   StepStatus,
   StepType,
@@ -559,6 +560,59 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       .where(eq(workflows.workflowId, workflowId))
       .returning({ run: workflows.run });
     return row?.run ?? 1;
+  }
+
+  async loadRunHistory(
+    workflowId: string,
+    params?: { limit?: number; offset?: number },
+  ): Promise<WorkflowRunSummary[]> {
+    const [wfRow] = await this.db
+      .select()
+      .from(workflows)
+      .where(eq(workflows.workflowId, workflowId));
+    if (!wfRow) return [];
+
+    // Load ALL steps for this workflow (across all runs)
+    const allSteps = await this.db
+      .select()
+      .from(workflowSteps)
+      .where(eq(workflowSteps.workflowId, workflowId));
+
+    // Group steps by run
+    const stepsByRun = new Map<number, StepState[]>();
+    for (const row of allSteps) {
+      const run = row.run ?? 1;
+      if (!stepsByRun.has(run)) stepsByRun.set(run, []);
+      stepsByRun.get(run)!.push(this.rowToStepState(row));
+    }
+
+    // Get all distinct run numbers, sorted desc
+    const runNumbers = [...stepsByRun.keys()];
+    // Ensure current run is included even if it has no steps yet
+    if (!runNumbers.includes(wfRow.run)) runNumbers.push(wfRow.run);
+    runNumbers.sort((a, b) => b - a);
+
+    const runs: WorkflowRunSummary[] = runNumbers.map((run) => {
+      const steps: Record<string, StepState> = {};
+      for (const s of stepsByRun.get(run) ?? []) {
+        steps[s.stepName] = s;
+      }
+
+      const isCurrent = run === wfRow.run;
+      return {
+        run,
+        status: isCurrent ? WorkflowStatusIds.toName(wfRow.statusId) : ("completed" as const),
+        result: isCurrent ? (wfRow.result ?? undefined) : undefined,
+        error: isCurrent ? (wfRow.error ?? undefined) : undefined,
+        steps,
+        createdAt: wfRow.createdAt,
+        completedAt: isCurrent ? (wfRow.completedAt ?? undefined) : undefined,
+      };
+    });
+
+    const offset = params?.offset ?? 0;
+    const limit = params?.limit ?? runs.length;
+    return runs.slice(offset, offset + limit);
   }
 
   private async tryAdvisoryLock(workflowId: string): Promise<boolean> {

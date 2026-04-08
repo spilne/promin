@@ -39,6 +39,17 @@ export interface WorkflowState<Input = unknown, Result = unknown> {
   readonly completedAt?: Date;
 }
 
+/** Summary of a single workflow run — used by loadRunHistory. */
+export interface WorkflowRunSummary {
+  readonly run: number;
+  readonly status: WorkflowStatus;
+  readonly result?: unknown;
+  readonly error?: string;
+  readonly steps: Record<string, StepState>;
+  readonly createdAt: Date;
+  readonly completedAt?: Date;
+}
+
 export interface StepState {
   readonly stepName: string;
   readonly run: number;
