@@ -71,6 +71,22 @@ export const workflows = pgTable(
   ],
 );
 
+export const workflowRuns = pgTable(
+  "wf_workflow_runs",
+  {
+    workflowId: text("workflow_id")
+      .notNull()
+      .references(() => workflows.workflowId, { onDelete: "cascade" }),
+    run: integer("run").notNull(),
+    statusId: integer("status_id").notNull(),
+    result: jsonb("result"),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => [primaryKey({ columns: [t.workflowId, t.run] })],
+);
+
 export const workflowSteps = pgTable(
   "wf_workflow_steps",
   {

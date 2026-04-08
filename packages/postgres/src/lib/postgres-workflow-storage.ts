@@ -18,6 +18,7 @@ import type {
 } from "@promin/core";
 import {
   workflows,
+  workflowRuns,
   workflowSteps,
   workflowStepTasks,
   workflowSignals,
@@ -70,6 +71,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
    */
   static readonly schema = {
     workflows,
+    workflowRuns,
     workflowSteps,
     workflowStepTasks,
     workflowSignals,
@@ -547,6 +549,28 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
 
   async startFreshRun(workflowId: string): Promise<number> {
     const now = new Date();
+
+    // Archive current run before resetting
+    const [current] = await this.db
+      .select()
+      .from(workflows)
+      .where(eq(workflows.workflowId, workflowId));
+
+    if (current) {
+      await this.db
+        .insert(workflowRuns)
+        .values({
+          workflowId,
+          run: current.run,
+          statusId: current.statusId,
+          result: current.result,
+          error: current.error,
+          createdAt: current.createdAt,
+          completedAt: current.completedAt,
+        })
+        .onConflictDoNothing();
+    }
+
     const [row] = await this.db
       .update(workflows)
       .set({
@@ -572,47 +596,78 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       .where(eq(workflows.workflowId, workflowId));
     if (!wfRow) return [];
 
+    // Current run + archived runs, newest first
+    const archivedRows = await this.db
+      .select()
+      .from(workflowRuns)
+      .where(eq(workflowRuns.workflowId, workflowId))
+      .orderBy(desc(workflowRuns.run))
+      .limit(params?.limit ?? 2147483647)
+      .offset(params?.offset ?? 0);
+
+    // If offset=0, current run is the first entry
     const offset = params?.offset ?? 0;
     const limit = params?.limit ?? wfRow.run;
-    const highRun = Math.max(1, wfRow.run - offset);
-    const lowRun = Math.max(1, highRun - limit + 1);
-    const count = highRun - lowRun + 1;
-    if (count <= 0) return [];
-    const paginatedRuns = Array.from({ length: count }, (_, i) => highRun - i);
+    const includeCurrentRun = offset === 0;
 
-    // Load steps only for the paginated runs
-    const steps = await this.db
-      .select()
-      .from(workflowSteps)
-      .where(
-        and(eq(workflowSteps.workflowId, workflowId), inArray(workflowSteps.run, paginatedRuns)),
-      );
+    type RunMeta = {
+      run: number;
+      statusId: number;
+      result: unknown;
+      error: string | null;
+      createdAt: Date;
+      completedAt: Date | null;
+    };
+    const runMetas: RunMeta[] = [];
 
-    // Group steps by run
-    const stepsByRun = new Map<number, StepState[]>();
-    for (const row of steps) {
-      const run = row.run ?? 1;
-      if (!stepsByRun.has(run)) stepsByRun.set(run, []);
-      stepsByRun.get(run)!.push(this.rowToStepState(row));
+    if (includeCurrentRun) {
+      runMetas.push({
+        run: wfRow.run,
+        statusId: wfRow.statusId,
+        result: wfRow.result,
+        error: wfRow.error,
+        createdAt: wfRow.createdAt,
+        completedAt: wfRow.completedAt,
+      });
     }
 
-    return paginatedRuns.map((run) => {
-      const runSteps: Record<string, StepState> = {};
-      for (const s of stepsByRun.get(run) ?? []) {
-        runSteps[s.stepName] = s;
-      }
+    for (const ar of archivedRows) {
+      runMetas.push({
+        run: ar.run,
+        statusId: ar.statusId,
+        result: ar.result,
+        error: ar.error,
+        createdAt: ar.createdAt,
+        completedAt: ar.completedAt,
+      });
+    }
 
-      const isCurrent = run === wfRow.run;
-      return {
-        run,
-        status: isCurrent ? WorkflowStatusIds.toName(wfRow.statusId) : ("completed" as const),
-        result: isCurrent ? (wfRow.result ?? undefined) : undefined,
-        error: isCurrent ? (wfRow.error ?? undefined) : undefined,
-        steps: runSteps,
-        createdAt: wfRow.createdAt,
-        completedAt: isCurrent ? (wfRow.completedAt ?? undefined) : undefined,
-      };
-    });
+    const page = includeCurrentRun ? runMetas.slice(0, limit) : runMetas;
+    if (page.length === 0) return [];
+
+    // Fetch steps for the runs in this page
+    const runNumbers = page.map((r) => r.run);
+    const stepRows = await this.db
+      .select()
+      .from(workflowSteps)
+      .where(and(eq(workflowSteps.workflowId, workflowId), inArray(workflowSteps.run, runNumbers)));
+
+    const stepsByRun = new Map<number, Record<string, StepState>>();
+    for (const row of stepRows) {
+      const run = row.run ?? 1;
+      if (!stepsByRun.has(run)) stepsByRun.set(run, {});
+      stepsByRun.get(run)![row.stepName] = this.rowToStepState(row);
+    }
+
+    return page.map((meta) => ({
+      run: meta.run,
+      status: WorkflowStatusIds.toName(meta.statusId),
+      result: meta.result ?? undefined,
+      error: meta.error ?? undefined,
+      steps: stepsByRun.get(meta.run) ?? {},
+      createdAt: meta.createdAt,
+      completedAt: meta.completedAt ?? undefined,
+    }));
   }
 
   private async tryAdvisoryLock(workflowId: string): Promise<boolean> {

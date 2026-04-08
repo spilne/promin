@@ -51,6 +51,7 @@ export { PgStateBackend, type PgStateBackendConfig } from "./lib/pg-state-backen
 // Schema exports for custom migrations
 export {
   workflows,
+  workflowRuns,
   workflowSteps,
   workflowStepTasks,
   workflowSignals,
