@@ -596,19 +596,21 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       .where(eq(workflows.workflowId, workflowId));
     if (!wfRow) return [];
 
-    // Current run + archived runs, newest first
+    // If offset=0, current run is the first entry
+    const offset = params?.offset ?? 0;
+    const limit = params?.limit ?? wfRow.run;
+    const includeCurrentRun = offset === 0;
+
+    // The current run lives in wf_workflows (not wf_workflow_runs), so when
+    // paginating past it we need to adjust the SQL offset by -1.
+    const archivedOffset = includeCurrentRun ? 0 : offset - 1;
     const archivedRows = await this.db
       .select()
       .from(workflowRuns)
       .where(eq(workflowRuns.workflowId, workflowId))
       .orderBy(desc(workflowRuns.run))
       .limit(params?.limit ?? 2147483647)
-      .offset(params?.offset ?? 0);
-
-    // If offset=0, current run is the first entry
-    const offset = params?.offset ?? 0;
-    const limit = params?.limit ?? wfRow.run;
-    const includeCurrentRun = offset === 0;
+      .offset(archivedOffset);
 
     type RunMeta = {
       run: number;
