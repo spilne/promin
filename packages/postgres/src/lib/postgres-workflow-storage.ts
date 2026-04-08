@@ -573,25 +573,13 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
     if (!wfRow) return [];
 
     const offset = params?.offset ?? 0;
+    const limit = params?.limit ?? wfRow.run;
+    const highRun = Math.max(1, wfRow.run - offset);
+    const lowRun = Math.max(1, highRun - limit + 1);
+    if (highRun < 1) return [];
 
-    // Build the set of run numbers: UNION the current run (may have no steps yet)
-    // with distinct runs from steps, paginate in SQL
-    const runRows = await execRaw(
-      this.db,
-      sql`
-        SELECT DISTINCT run FROM (
-          SELECT ${wfRow.run} AS run
-          UNION
-          SELECT COALESCE(run, 1) AS run FROM wf_workflow_steps
-            WHERE workflow_id = ${workflowId}
-        ) AS runs
-        ORDER BY run DESC
-        LIMIT ${params?.limit ?? 2147483647}
-        OFFSET ${offset}
-      `,
-    );
-
-    const paginatedRuns = runRows.map((r: { run: number }) => r.run);
+    const paginatedRuns: number[] = [];
+    for (let r = highRun; r >= lowRun; r--) paginatedRuns.push(r);
     if (paginatedRuns.length === 0) return [];
 
     // Load steps only for the paginated runs
