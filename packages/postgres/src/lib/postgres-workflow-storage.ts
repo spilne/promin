@@ -576,11 +576,9 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
     const limit = params?.limit ?? wfRow.run;
     const highRun = Math.max(1, wfRow.run - offset);
     const lowRun = Math.max(1, highRun - limit + 1);
-    if (highRun < 1) return [];
-
-    const paginatedRuns: number[] = [];
-    for (let r = highRun; r >= lowRun; r--) paginatedRuns.push(r);
-    if (paginatedRuns.length === 0) return [];
+    const count = highRun - lowRun + 1;
+    if (count <= 0) return [];
+    const paginatedRuns = Array.from({ length: count }, (_, i) => highRun - i);
 
     // Load steps only for the paginated runs
     const steps = await this.db
