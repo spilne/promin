@@ -41,8 +41,16 @@ export interface StepQueue {
   /** Mark a task as failed with an error. */
   fail(params: { taskId: string; error: string; durationMs: number }): Promise<void>;
 
-  /** Re-enqueue tasks stuck in "running" by a dead worker. Returns count re-enqueued. */
-  requeueStuck(params: { claimedBy: string }): Promise<number>;
+  /**
+   * Re-enqueue tasks stuck in "running" state. Returns count re-enqueued.
+   *
+   * Two modes:
+   * - `claimedBy` — requeue all tasks claimed by a specific (dead) worker
+   * - `staleTimeoutMs` — requeue any task in 'running' longer than this timeout,
+   *    regardless of which worker claimed it (catches orphaned tasks from
+   *    workers that crashed before heartbeating)
+   */
+  requeueStuck(params: { claimedBy?: string; staleTimeoutMs?: number }): Promise<number>;
 
   /** Get pending task count per queue. */
   metrics(): Promise<

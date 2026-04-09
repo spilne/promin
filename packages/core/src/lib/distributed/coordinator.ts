@@ -179,6 +179,10 @@ export class DefaultCoordinator implements WorkflowCoordinator {
       }
     }
 
+    // Catch-all: requeue any task stuck in 'running' longer than the timeout.
+    // This handles workers that crashed before registering or heartbeating.
+    await this.stepQueue.requeueStuck({ staleTimeoutMs: this.workerTimeoutMs });
+
     // Check all tracked workflows for completed steps
     for (const [workflowId] of this.dags) {
       const state = await this.storage.loadWorkflow(workflowId);

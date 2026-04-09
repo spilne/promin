@@ -6,7 +6,7 @@
 // exactly-once delivery and natural load balancing.
 // ---------------------------------------------------------------------------
 
-import { eq, sql } from "drizzle-orm";
+import { eq, and, lt, sql } from "drizzle-orm";
 import type { StepQueue, StepTask } from "@promin/core";
 import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
 import { stepQueue } from "./schema.ts";
@@ -143,16 +143,23 @@ export class PgStepQueue implements StepQueue {
       .where(eq(stepQueue.id, Number(params.taskId)));
   }
 
-  async requeueStuck(params: { claimedBy: string }): Promise<number> {
-    const rows = await execRaw(
-      this.db,
-      sql`
-        UPDATE wf_step_queue
-        SET status = 'pending', claimed_by = NULL, claimed_at = NULL
-        WHERE status = 'running' AND claimed_by = ${params.claimedBy}
-        RETURNING id
-      `,
-    );
+  async requeueStuck(params: { claimedBy?: string; staleTimeoutMs?: number }): Promise<number> {
+    const conditions = [eq(stepQueue.status, "running")];
+
+    if (params.claimedBy) {
+      conditions.push(eq(stepQueue.claimedBy, params.claimedBy));
+    } else if (params.staleTimeoutMs) {
+      conditions.push(lt(stepQueue.claimedAt, new Date(Date.now() - params.staleTimeoutMs)));
+    } else {
+      return 0;
+    }
+
+    const rows = await this.db
+      .update(stepQueue)
+      .set({ status: "pending", claimedBy: null, claimedAt: null })
+      .where(and(...conditions))
+      .returning({ id: stepQueue.id });
+
     return rows.length;
   }
 

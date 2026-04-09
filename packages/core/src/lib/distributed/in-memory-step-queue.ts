@@ -6,7 +6,7 @@ import type { StepQueue, StepTask } from "./step-queue.ts";
 
 type MutableTask = {
   -readonly [K in keyof StepTask]: StepTask[K];
-} & { result?: unknown; error?: string; claimedBy?: string };
+} & { result?: unknown; error?: string; claimedBy?: string; claimedAt?: Date };
 
 export class InMemoryStepQueue implements StepQueue {
   private tasks = new Map<string, MutableTask>();
@@ -58,6 +58,7 @@ export class InMemoryStepQueue implements StepQueue {
       if (task.status === "pending" && queueSet.has(task.queue)) {
         task.status = "running";
         task.claimedBy = this.workerId;
+        task.claimedAt = new Date();
         claimed.push({ ...task });
       }
     }
@@ -81,12 +82,20 @@ export class InMemoryStepQueue implements StepQueue {
     }
   }
 
-  async requeueStuck(params: { claimedBy: string }): Promise<number> {
+  async requeueStuck(params: { claimedBy?: string; staleTimeoutMs?: number }): Promise<number> {
     let count = 0;
+    const cutoff = params.staleTimeoutMs ? Date.now() - params.staleTimeoutMs : undefined;
+
     for (const task of this.tasks.values()) {
-      if (task.status === "running" && task.claimedBy === params.claimedBy) {
+      if (task.status !== "running") continue;
+
+      const matchesByWorker = params.claimedBy && task.claimedBy === params.claimedBy;
+      const matchesByTimeout = cutoff && task.claimedAt && task.claimedAt.getTime() < cutoff;
+
+      if (matchesByWorker || matchesByTimeout) {
         task.status = "pending";
         task.claimedBy = undefined;
+        task.claimedAt = undefined;
         count++;
       }
     }
