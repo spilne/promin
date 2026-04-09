@@ -15,7 +15,9 @@ export default function Layout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" suppressHydrationWarning>
       <body>
-        <RootProvider>{children}</RootProvider>
+        <RootProvider search={{ options: { api: "/api/search" } }}>
+          {children}
+        </RootProvider>
       </body>
     </html>
   );
