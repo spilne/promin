@@ -171,6 +171,59 @@ workflow<Input>({
   .step("step-2", fn); // if this fails, workflow retries from here
 ```
 
+### Idempotency & Singleflight
+
+Prevent duplicate executions and control what happens when a workflow is called again.
+
+```typescript
+const processOrder = workflow<{ orderId: string }>({
+  name: "process-order",
+  storage,
+})
+  .step("charge", ({ input }) => payments.charge(input.orderId))
+  .step("fulfill", ({ prev }) => warehouse.ship(prev.chargeId))
+  .build({
+    idempotency: {
+      ttl: 60_000, // cache result for 60s — re-calls return cached result
+      onInFlight: "join", // concurrent calls join the running execution (singleflight)
+      onExpiry: "fresh-run", // after TTL: re-execute with fresh run counter
+    },
+  });
+
+// First call — executes the workflow
+const result1 = await processOrder.run({ workflowId: "order-42", input: { orderId: "42" } });
+
+// Second call within TTL — returns cached result instantly (no re-execution)
+const result2 = await processOrder.run({ workflowId: "order-42", input: { orderId: "42" } });
+
+// Force re-execution regardless of TTL
+const result3 = await processOrder.run({
+  workflowId: "order-42",
+  input: { orderId: "42" },
+  force: true,
+});
+```
+
+**TTL options:**
+
+```typescript
+// Same TTL for success and failure
+idempotency: { ttl: 60_000 }
+
+// Different TTLs — cache success longer, retry failures sooner
+idempotency: { ttl: { success: 3_600_000, failure: 10_000 } }
+```
+
+**Behavior on concurrent calls (`onInFlight`):**
+
+- `"join"` (default) — caller waits for the in-flight execution to finish and gets the same result (singleflight pattern)
+- `"reject"` — throws `WorkflowLockError` immediately
+
+**Behavior after TTL expires (`onExpiry`):**
+
+- `"fresh-run"` (default) — increments the run counter and re-executes all steps from scratch. Previous run history is preserved.
+- `"replay"` — re-enters the engine and replays from checkpointed state (skips completed steps)
+
 ### Saga Compensation
 
 When a step fails, automatically undo completed steps in reverse order.
