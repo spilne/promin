@@ -22,11 +22,29 @@
       "options": {
         "typecheck": {
           "targetName": "typecheck"
+        },
+        "build": {
+          "targetName": "build"
         }
       }
     }
   ],
   "targetDefaults": {
+    "build": {
+      "executor": "nx:run-commands",
+      "dependsOn": [
+        "^build"
+      ],
+      "options": {
+        "commands": [
+          "tsc -b tsconfig.lib.json"
+        ],
+        "cwd": "{projectRoot}"
+      },
+      "outputs": [
+        "{projectRoot}/dist"
+      ]
+    },
     "typecheck": {
       "dependsOn": [
         "^typecheck"

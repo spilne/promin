@@ -3,6 +3,7 @@
   "version": "0.0.0",
   "license": "MIT",
   "scripts": {
+    "build": "bunx nx run-many -t build",
     "typecheck": "bunx nx run-many -t typecheck",
     "lint": "bunx nx run-many -t lint",
     "lci": "bunx nx affected -t ci --base=origin/main",

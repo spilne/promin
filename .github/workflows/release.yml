@@ -72,6 +72,9 @@ jobs:
 
       - run: bun install
 
+      - name: Build packages
+        run: bun run build
+
       - name: Create release PR or publish
         id: changesets
         uses: changesets/action@v1

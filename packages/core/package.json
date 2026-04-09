@@ -1,19 +1,26 @@
 {
   "name": "@promin/core",
   "version": "0.0.1",
+  "files": [
+    "dist",
+    "package.json"
+  ],
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "import": "./src/index.ts",
-      "default": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "@promin/source": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./testing": {
-      "types": "./src/lib/durable/storage-test-suite.ts",
-      "import": "./src/lib/durable/storage-test-suite.ts",
-      "default": "./src/lib/durable/storage-test-suite.ts"
+      "types": "./dist/lib/durable/storage-test-suite.d.ts",
+      "@promin/source": "./src/lib/durable/storage-test-suite.ts",
+      "import": "./dist/lib/durable/storage-test-suite.js",
+      "default": "./dist/lib/durable/storage-test-suite.js"
     },
     "./package.json": "./package.json"
   },
