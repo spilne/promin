@@ -536,7 +536,14 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       await this.releaseAdvisoryLock(workflowId);
       return;
     }
-    await this.db.delete(workflowLocks).where(eq(workflowLocks.workflowId, workflowId));
+    await this.db
+      .delete(workflowLocks)
+      .where(
+        and(
+          eq(workflowLocks.workflowId, workflowId),
+          eq(workflowLocks.lockedBy, this.config.instanceId),
+        ),
+      );
   }
 
   async heartbeat(workflowId: string, lockDurationMs: number): Promise<void> {
@@ -544,7 +551,12 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
     await this.db
       .update(workflowLocks)
       .set({ expiresAt: new Date(Date.now() + lockDurationMs) })
-      .where(eq(workflowLocks.workflowId, workflowId));
+      .where(
+        and(
+          eq(workflowLocks.workflowId, workflowId),
+          eq(workflowLocks.lockedBy, this.config.instanceId),
+        ),
+      );
   }
 
   async startFreshRun(workflowId: string): Promise<number> {

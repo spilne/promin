@@ -1,6 +1,16 @@
 // ---------------------------------------------------------------------------
 // InMemoryWorkflowStorage — for testing and single-process use
 // ---------------------------------------------------------------------------
+//
+// Single-process only. State lives in plain Maps on the JS heap, which is
+// not shared across Bun workers or Node worker_threads (each gets its own
+// isolate). For multi-worker deployments, use PostgresWorkflowStorage or
+// another networked backend via the WorkflowStorage interface.
+//
+// Lock atomicity: tryLock checks + sets synchronously (no await between
+// the read and write), so concurrent callers on the same event loop
+// cannot interleave.
+// ---------------------------------------------------------------------------
 
 import type { WorkflowStorage, StepAttemptStorage } from "./workflow-storage.ts";
 import type {
@@ -34,14 +44,16 @@ interface MutableWorkflow {
 
 export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStorage {
   private workflows = new Map<string, MutableWorkflow>();
-  private locks = new Map<string, number>(); // workflowId → expiresAt
+  private locks = new Map<string, { expiresAt: number; lockedBy: string }>(); // workflowId → lock info
+  private readonly instanceId: string;
   private signals = new Map<string, SignalState[]>();
   private attempts = new Map<string, StepAttemptRecord[]>();
   private runHistory = new Map<string, WorkflowRunSummary[]>();
   private readonly namespace: string | null;
 
-  constructor(config?: { namespace?: string | null }) {
+  constructor(config?: { namespace?: string | null; instanceId?: string }) {
     this.namespace = config?.namespace ?? null;
+    this.instanceId = config?.instanceId ?? crypto.randomUUID();
   }
 
   private resolveNamespace(workflowNamespace?: string): string | undefined {
@@ -342,19 +354,28 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
   }
 
   async tryLock(workflowId: string, lockDurationMs: number): Promise<boolean> {
-    const expiresAt = this.locks.get(workflowId);
+    const lock = this.locks.get(workflowId);
     const now = Date.now();
-    if (expiresAt !== undefined && expiresAt > now) return false;
-    this.locks.set(workflowId, now + lockDurationMs);
+    if (lock !== undefined && lock.expiresAt > now) return false;
+    this.locks.set(workflowId, { expiresAt: now + lockDurationMs, lockedBy: this.instanceId });
     return true;
   }
 
   async releaseLock(workflowId: string): Promise<void> {
+    const lock = this.locks.get(workflowId);
+    // Only release if we own the lock (or lock doesn't exist)
+    if (lock && lock.lockedBy !== this.instanceId) return;
     this.locks.delete(workflowId);
   }
 
   async heartbeat(workflowId: string, lockDurationMs: number): Promise<void> {
-    this.locks.set(workflowId, Date.now() + lockDurationMs);
+    const lock = this.locks.get(workflowId);
+    // Only extend if we own the lock
+    if (lock && lock.lockedBy !== this.instanceId) return;
+    this.locks.set(workflowId, {
+      expiresAt: Date.now() + lockDurationMs,
+      lockedBy: this.instanceId,
+    });
   }
 
   async startFreshRun(workflowId: string): Promise<number> {
