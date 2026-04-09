@@ -34,6 +34,7 @@ import {
   WorkflowSuspendedError,
   WorkflowTimeoutError,
 } from "./durable-pipeline-error.ts";
+import { withLock } from "./with-lock.ts";
 
 // ---------------------------------------------------------------------------
 // Step contexts
@@ -877,175 +878,168 @@ export class WorkflowBuilder<
       }
     }
 
-    // 1. Acquire lock
-    const locked = await this._storage.tryLock(workflowId, DEFAULT_LOCK_DURATION_MS);
-    if (!locked) {
-      throw new WorkflowLockError({
-        workflowId,
-        message: `Could not acquire lock on workflow "${workflowId}" — already running`,
-      });
-    }
+    // 1. Acquire lock with heartbeat — keeps lock alive during long steps
+    return withLock({
+      storage: this._storage,
+      workflowId,
+      options: { lockDurationMs: DEFAULT_LOCK_DURATION_MS },
+      fn: async () => {
+        // 2. Load or create workflow state
+        let state = await this._storage.loadWorkflow(workflowId);
 
-    try {
-      // 2. Load or create workflow state
-      let state = await this._storage.loadWorkflow(workflowId);
-
-      // Double-check idempotency after lock — prevents race
-      if (idempotency && state?.completedAt) {
-        const elapsed = Date.now() - state.completedAt.getTime();
-        const ttl = this._getIdempotencyTtl(state.status);
-        if (ttl !== undefined && elapsed < ttl) {
-          await this._storage.releaseLock(workflowId);
-          if (state.status === "completed") return state.result as Current;
-          if (state.status === "failed")
-            throw new WorkflowError({
-              workflowId,
-              message: state.error ?? `Workflow "${workflowId}" failed (cached)`,
-            });
-        }
-        // TTL expired — check if we should start a fresh run
-        const onExpiry = idempotency.onExpiry ?? "fresh-run";
-        if (
-          onExpiry === "fresh-run" &&
-          (state.status === "completed" || state.status === "failed")
-        ) {
-          await this._storage.startFreshRun(workflowId);
-          state = await this._storage.loadWorkflow(workflowId);
-        }
-      }
-
-      if (!state) {
-        await this._storage.createWorkflow({
-          workflowId,
-          workflowName: this._name,
-          input,
-          workflowType: this._type,
-          metadata: this._metadata,
-        });
-        state = await this._storage.loadWorkflow(workflowId);
-      }
-
-      // 3. Validate DAG
-      const dagNodes: DagNode[] = this._steps.map((s) => ({
-        name: s.name,
-        dependsOn: s.dependsOn,
-      }));
-      topologicalSort({ nodes: dagNodes, workflowId });
-
-      // 4. Execute DAG with workflow-level retry
-      let lastStepError: unknown = null;
-      // Shared across workflow retries so attempt counters keep incrementing
-      const stepAttempts = new Map<string, number>();
-
-      for (let workflowAttempt = 0; workflowAttempt <= maxWorkflowRetries; workflowAttempt++) {
-        // On retry, wait before re-attempting
-        if (workflowAttempt > 0) {
-          const delay = workflowRetryDelayMs * Math.pow(2, workflowAttempt - 1);
-          await new Promise((r) => setTimeout(r, delay));
-        }
-
-        const dagResult = await this._executeDag({
-          workflowId,
-          input,
-          dagNodes,
-          state,
-          workflowStartTime,
-          stepAttempts,
-        });
-
-        if (dagResult.success) {
-          // 5. Complete workflow
-          const finalResult = dagResult.result;
-          await this._storage.completeWorkflow(workflowId, finalResult);
-          await this._hooks?.onWorkflowComplete?.({
-            workflowId,
-            result: finalResult,
-            durationMs: Date.now() - workflowStartTime,
-          });
-          return finalResult as Current;
-        }
-
-        // DAG failed — suspension errors always propagate immediately
-        if (dagResult.suspension) {
-          throw dagResult.error;
-        }
-
-        lastStepError = dagResult.error;
-
-        // Check if this error is retryable (workflow-level `when` predicate)
-        const shouldRetry =
-          workflowAttempt < maxWorkflowRetries &&
-          (!this._retry?.when || this._retry.when(dagResult.error as TaggedError));
-
-        if (shouldRetry) {
-          // Reload state to pick up checkpointed steps
-          state = await this._storage.loadWorkflow(workflowId);
-        } else {
-          // Not retryable or retries exhausted — break to compensation
-          break;
-        }
-      }
-
-      // All workflow retries exhausted — run compensation cascade
-      const compensationReport = await this._compensate({ workflowId, input, dagNodes });
-
-      // Fire workflow-level onComplete callback
-      if (this._compensateConfig?.onComplete) {
-        try {
-          const result = this._compensateConfig.onComplete({
-            input,
-            error: lastStepError,
-            compensatedSteps: compensationReport.compensated,
-            failedCompensations: compensationReport.failed,
-          });
-          if (result instanceof Pipeline) {
-            await result.runPromise();
-          } else if (result && typeof (result as Promise<void>).then === "function") {
-            await result;
+        // Double-check idempotency after lock — prevents race
+        if (idempotency && state?.completedAt) {
+          const elapsed = Date.now() - state.completedAt.getTime();
+          const ttl = this._getIdempotencyTtl(state.status);
+          if (ttl !== undefined && elapsed < ttl) {
+            if (state.status === "completed") return state.result as Current;
+            if (state.status === "failed")
+              throw new WorkflowError({
+                workflowId,
+                message: state.error ?? `Workflow "${workflowId}" failed (cached)`,
+              });
           }
-        } catch {
-          // onComplete failure is swallowed — the original error is more important
+          // TTL expired — check if we should start a fresh run
+          const onExpiry = idempotency.onExpiry ?? "fresh-run";
+          if (
+            onExpiry === "fresh-run" &&
+            (state.status === "completed" || state.status === "failed")
+          ) {
+            await this._storage.startFreshRun(workflowId);
+            state = await this._storage.loadWorkflow(workflowId);
+          }
         }
-      }
 
-      // Fail the workflow
-      const errorMsg =
-        lastStepError instanceof globalThis.Error ? lastStepError.message : String(lastStepError);
-      await this._storage.failWorkflow(workflowId, errorMsg);
-      await this._hooks?.onWorkflowFailure?.({
-        workflowId,
-        error: errorMsg,
-        durationMs: Date.now() - workflowStartTime,
-      });
-
-      // Publish to DLQ
-      if (this._dlq) {
-        try {
-          const failedState = await this._storage.loadWorkflow(workflowId);
-          await this._dlq.publish({
+        if (!state) {
+          await this._storage.createWorkflow({
             workflowId,
             workflowName: this._name,
             input,
-            error: errorMsg,
-            failedAt: new Date(),
-            steps: failedState?.steps ?? {},
-            compensatedSteps: compensationReport.compensated,
-            failedCompensations: compensationReport.failed.map((f) => ({
-              stepName: f.stepName,
-              error: f.error instanceof Error ? f.error.message : String(f.error),
-            })),
+            workflowType: this._type,
             metadata: this._metadata,
           });
-        } catch {
-          // DLQ failure is swallowed — the original error is more important
+          state = await this._storage.loadWorkflow(workflowId);
         }
-      }
 
-      throw lastStepError;
-    } finally {
-      // 6. Release lock
-      await this._storage.releaseLock(workflowId);
-    }
+        // 3. Validate DAG
+        const dagNodes: DagNode[] = this._steps.map((s) => ({
+          name: s.name,
+          dependsOn: s.dependsOn,
+        }));
+        topologicalSort({ nodes: dagNodes, workflowId });
+
+        // 4. Execute DAG with workflow-level retry
+        let lastStepError: unknown = null;
+        // Shared across workflow retries so attempt counters keep incrementing
+        const stepAttempts = new Map<string, number>();
+
+        for (let workflowAttempt = 0; workflowAttempt <= maxWorkflowRetries; workflowAttempt++) {
+          // On retry, wait before re-attempting
+          if (workflowAttempt > 0) {
+            const delay = workflowRetryDelayMs * Math.pow(2, workflowAttempt - 1);
+            await new Promise((r) => setTimeout(r, delay));
+          }
+
+          const dagResult = await this._executeDag({
+            workflowId,
+            input,
+            dagNodes,
+            state,
+            workflowStartTime,
+            stepAttempts,
+          });
+
+          if (dagResult.success) {
+            // 5. Complete workflow
+            const finalResult = dagResult.result;
+            await this._storage.completeWorkflow(workflowId, finalResult);
+            await this._hooks?.onWorkflowComplete?.({
+              workflowId,
+              result: finalResult,
+              durationMs: Date.now() - workflowStartTime,
+            });
+            return finalResult as Current;
+          }
+
+          // DAG failed — suspension errors always propagate immediately
+          if (dagResult.suspension) {
+            throw dagResult.error;
+          }
+
+          lastStepError = dagResult.error;
+
+          // Check if this error is retryable (workflow-level `when` predicate)
+          const shouldRetry =
+            workflowAttempt < maxWorkflowRetries &&
+            (!this._retry?.when || this._retry.when(dagResult.error as TaggedError));
+
+          if (shouldRetry) {
+            // Reload state to pick up checkpointed steps
+            state = await this._storage.loadWorkflow(workflowId);
+          } else {
+            // Not retryable or retries exhausted — break to compensation
+            break;
+          }
+        }
+
+        // All workflow retries exhausted — run compensation cascade
+        const compensationReport = await this._compensate({ workflowId, input, dagNodes });
+
+        // Fire workflow-level onComplete callback
+        if (this._compensateConfig?.onComplete) {
+          try {
+            const result = this._compensateConfig.onComplete({
+              input,
+              error: lastStepError,
+              compensatedSteps: compensationReport.compensated,
+              failedCompensations: compensationReport.failed,
+            });
+            if (result instanceof Pipeline) {
+              await result.runPromise();
+            } else if (result && typeof (result as Promise<void>).then === "function") {
+              await result;
+            }
+          } catch {
+            // onComplete failure is swallowed — the original error is more important
+          }
+        }
+
+        // Fail the workflow
+        const errorMsg =
+          lastStepError instanceof globalThis.Error ? lastStepError.message : String(lastStepError);
+        await this._storage.failWorkflow(workflowId, errorMsg);
+        await this._hooks?.onWorkflowFailure?.({
+          workflowId,
+          error: errorMsg,
+          durationMs: Date.now() - workflowStartTime,
+        });
+
+        // Publish to DLQ
+        if (this._dlq) {
+          try {
+            const failedState = await this._storage.loadWorkflow(workflowId);
+            await this._dlq.publish({
+              workflowId,
+              workflowName: this._name,
+              input,
+              error: errorMsg,
+              failedAt: new Date(),
+              steps: failedState?.steps ?? {},
+              compensatedSteps: compensationReport.compensated,
+              failedCompensations: compensationReport.failed.map((f) => ({
+                stepName: f.stepName,
+                error: f.error instanceof Error ? f.error.message : String(f.error),
+              })),
+              metadata: this._metadata,
+            });
+          } catch {
+            // DLQ failure is swallowed — the original error is more important
+          }
+        }
+
+        throw lastStepError;
+      },
+    });
   }
 
   // ---------------------------------------------------------------------------
