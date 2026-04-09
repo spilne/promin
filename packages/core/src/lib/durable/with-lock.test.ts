@@ -119,4 +119,32 @@ describe("withLock", () => {
       expect(error).toBe(originalError);
     }
   });
+
+  it("release from wrong instance is rejected", async () => {
+    const instance1 = new InMemoryWorkflowStorage({ instanceId: "node-1" });
+    const instance2 = new InMemoryWorkflowStorage({ instanceId: "node-2" });
+    // Shared state: point instance2's locks at instance1's internal map
+    (instance2 as any).locks = (instance1 as any).locks;
+
+    await instance1.tryLock("wf-1", 60_000);
+    // instance2 tries to release — should be rejected (different owner)
+    await instance2.releaseLock("wf-1");
+    // Lock should still be held — instance1 can't re-acquire
+    expect(await instance1.tryLock("wf-1", 60_000)).toBe(false);
+  });
+
+  it("heartbeat from wrong instance is rejected", async () => {
+    const instance1 = new InMemoryWorkflowStorage({ instanceId: "node-1" });
+    const instance2 = new InMemoryWorkflowStorage({ instanceId: "node-2" });
+    (instance2 as any).locks = (instance1 as any).locks;
+
+    // instance1 acquires with short lock
+    await instance1.tryLock("wf-1", 100);
+    // instance2 tries to extend — should be rejected
+    await instance2.heartbeat("wf-1", 60_000);
+    // Wait for original lock to expire
+    await new Promise((r) => setTimeout(r, 150));
+    // Lock should have expired (heartbeat from wrong instance didn't extend it)
+    expect(await instance1.tryLock("wf-1", 60_000)).toBe(true);
+  });
 });
