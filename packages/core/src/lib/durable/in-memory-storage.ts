@@ -31,6 +31,7 @@ interface MutableWorkflow {
   parentWorkflowId?: string;
   namespace?: string;
   status: WorkflowStatus;
+  version?: string;
   run: number;
   input: unknown;
   result?: unknown;
@@ -70,6 +71,7 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
       parentWorkflowId: wf.parentWorkflowId,
       namespace: wf.namespace,
       status: wf.status,
+      version: wf.version,
       run: wf.run,
       input: wf.input,
       result: wf.result,
@@ -146,6 +148,7 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     parentWorkflowId?: string;
     namespace?: string;
     metadata?: Record<string, unknown>;
+    version?: string;
   }): Promise<void> {
     const now = new Date();
     this.workflows.set(params.workflowId, {
@@ -155,6 +158,7 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
       parentWorkflowId: params.parentWorkflowId,
       namespace: this.resolveNamespace(params.namespace),
       status: "running",
+      version: params.version,
       run: 1,
       input: params.input,
       metadata: params.metadata,
@@ -389,6 +393,7 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     const runs = this.runHistory.get(workflowId) ?? [];
     runs.push({
       run: wf.run,
+      version: wf.version,
       status: wf.status,
       result: wf.result,
       error: wf.error,
@@ -422,6 +427,7 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     const runs: WorkflowRunSummary[] = [
       {
         run: wf.run,
+        version: wf.version,
         status: wf.status,
         result: wf.result,
         error: wf.error,

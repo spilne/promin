@@ -40,3 +40,11 @@ export class WorkflowTimeoutError extends Data.TaggedError("WorkflowTimeoutError
   readonly stepName: string;
   readonly message: string;
 }> {}
+
+/** Workflow version mismatch — stored version differs from code version. */
+export class WorkflowVersionMismatchError extends Data.TaggedError("WorkflowVersionMismatchError")<{
+  readonly workflowId: string;
+  readonly expected: string;
+  readonly actual: string;
+  readonly message: string;
+}> {}

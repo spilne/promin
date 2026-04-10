@@ -53,6 +53,7 @@ export const workflows = pgTable(
     workflowName: text("workflow_name").notNull(),
     workflowType: text("workflow_type"),
     namespace: text("namespace"),
+    version: text("version"),
     run: integer("run").notNull().default(1),
     statusId: integer("status_id").notNull().default(WorkflowStatusIds.id.running),
     input: jsonb("input").notNull(),

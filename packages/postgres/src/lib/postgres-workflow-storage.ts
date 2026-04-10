@@ -124,6 +124,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       workflowName: row.workflowName,
       workflowType: row.workflowType ?? undefined,
       namespace: row.namespace ?? undefined,
+      version: row.version ?? undefined,
       run: row.run ?? 1,
       status: WorkflowStatusIds.toName(row.statusId),
       input: row.input,
@@ -256,6 +257,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
     workflowType?: string;
     namespace?: string;
     metadata?: Record<string, unknown>;
+    version?: string;
   }): Promise<void> {
     const ns = this.resolveNamespace(params.namespace);
     await this.db.insert(workflows).values({
@@ -263,6 +265,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       workflowName: params.workflowName,
       workflowType: params.workflowType,
       namespace: ns,
+      version: params.version,
       statusId: WorkflowStatusIds.id.running,
       input: params.input,
       metadata: params.metadata,
@@ -626,6 +629,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
 
     type RunMeta = {
       run: number;
+      version?: string;
       statusId: number;
       result: unknown;
       error: string | null;
@@ -637,6 +641,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
     if (includeCurrentRun) {
       runMetas.push({
         run: wfRow.run,
+        version: wfRow.version ?? undefined,
         statusId: wfRow.statusId,
         result: wfRow.result,
         error: wfRow.error,
@@ -675,6 +680,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
 
     return page.map((meta) => ({
       run: meta.run,
+      version: meta.version,
       status: WorkflowStatusIds.toName(meta.statusId),
       result: meta.result ?? undefined,
       error: meta.error ?? undefined,

@@ -37,6 +37,7 @@ export interface WorkflowStorage {
     parentWorkflowId?: string;
     namespace?: string;
     metadata?: Record<string, unknown>;
+    version?: string;
   }): Promise<void>;
 
   /** Save a completed step result. */

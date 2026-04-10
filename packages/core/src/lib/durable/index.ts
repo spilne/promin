@@ -45,6 +45,7 @@ export {
   WorkflowLockError,
   WorkflowSuspendedError,
   WorkflowTimeoutError,
+  WorkflowVersionMismatchError,
 } from "./durable-pipeline-error.ts";
 export { topologicalSort, computeReadySet, type DagNode } from "./workflow-dag.ts";
 export { trigger, WorkflowResult } from "./workflow-trigger.ts";

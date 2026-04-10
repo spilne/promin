@@ -26,6 +26,7 @@ export interface WorkflowState<Input = unknown, Result = unknown> {
   readonly parentWorkflowId?: string;
   readonly namespace?: string;
   readonly status: WorkflowStatus;
+  readonly version?: string;
   readonly run: number;
   readonly input: Input;
   readonly result?: Result;
@@ -42,6 +43,7 @@ export interface WorkflowState<Input = unknown, Result = unknown> {
 /** Summary of a single workflow run — used by loadRunHistory. */
 export interface WorkflowRunSummary {
   readonly run: number;
+  readonly version?: string;
   readonly status: WorkflowStatus;
   readonly result?: unknown;
   readonly error?: string;

@@ -33,6 +33,7 @@ import {
   WorkflowLockError,
   WorkflowSuspendedError,
   WorkflowTimeoutError,
+  WorkflowVersionMismatchError,
 } from "./durable-pipeline-error.ts";
 import { withLock } from "./with-lock.ts";
 
@@ -374,6 +375,7 @@ export class WorkflowBuilder<
     private readonly _dlq?: Sinkable<FailedWorkflowRecord>,
     private readonly _dispatch?: DispatchConfig,
     private readonly _idempotency?: IdempotencyConfig,
+    private readonly _version?: string,
   ) {}
 
   /** Resolve TTL for a given workflow status. Returns undefined if no TTL applies. */
@@ -384,6 +386,25 @@ export class WorkflowBuilder<
     if (status === "completed") return ttl.success;
     if (status === "failed") return ttl.failure;
     return undefined;
+  }
+
+  /** Set the workflow version. Used to detect code/state mismatch on resume. */
+  version(v: string): WorkflowBuilder<Input, Steps, Current, Error> {
+    return new WorkflowBuilder(
+      this._name,
+      this._storage,
+      this._steps,
+      this._lastStepName,
+      this._hooks,
+      this._type,
+      this._metadata,
+      this._retry,
+      this._compensateConfig,
+      this._dlq,
+      this._dispatch,
+      this._idempotency,
+      v,
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -917,8 +938,20 @@ export class WorkflowBuilder<
             input,
             workflowType: this._type,
             metadata: this._metadata,
+            version: this._version,
           });
           state = await this._storage.loadWorkflow(workflowId);
+        } else if (this._version) {
+          // Version mismatch check — only when builder explicitly sets a version
+          const storedVersion = state.version;
+          if (storedVersion !== this._version) {
+            throw new WorkflowVersionMismatchError({
+              workflowId,
+              expected: this._version,
+              actual: storedVersion ?? "(none)",
+              message: `Workflow "${workflowId}" was created with version "${storedVersion ?? "(none)"}" but current code is version "${this._version}"`,
+            });
+          }
         }
 
         // 3. Validate DAG
@@ -1624,6 +1657,7 @@ export class WorkflowBuilder<
       this._dlq,
       this._dispatch,
       this._idempotency,
+      this._version,
     );
   }
 
@@ -1643,6 +1677,7 @@ export class WorkflowBuilder<
       this._dlq,
       this._dispatch,
       idempotency,
+      this._version,
     );
   }
 
@@ -1722,6 +1757,8 @@ export function workflow<Input>(params: {
   dlq?: Sinkable<FailedWorkflowRecord>;
   /** Dispatch specific steps to remote workers instead of executing locally. */
   dispatch?: DispatchConfig;
+  /** Workflow version tag — used to detect code/state mismatch on resume. Defaults to "1". */
+  version?: string;
 }): WorkflowBuilder<Input> {
   return new WorkflowBuilder(
     params.name,
@@ -1735,6 +1772,8 @@ export function workflow<Input>(params: {
     params.compensate,
     params.dlq,
     params.dispatch,
+    undefined,
+    params.version,
   );
 }
 

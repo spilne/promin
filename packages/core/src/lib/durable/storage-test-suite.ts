@@ -56,6 +56,29 @@ export function storageTestSuite(factory: () => WorkflowStorage | Promise<Workfl
         const s = await getStorage();
         expect(await s.loadWorkflow("nonexistent")).toBeNull();
       });
+
+      it("stores and returns version when provided", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "ver-1",
+          workflowName: "test-wf",
+          input: {},
+          version: "2",
+        });
+        const state = await s.loadWorkflow("ver-1");
+        expect(state!.version).toBe("2");
+      });
+
+      it("version is undefined when not provided", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "ver-default",
+          workflowName: "test-wf",
+          input: {},
+        });
+        const state = await s.loadWorkflow("ver-default");
+        expect(state!.version).toBeUndefined();
+      });
     });
 
     // -------------------------------------------------------------------
