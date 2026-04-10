@@ -535,5 +535,128 @@ export function storageTestSuite(factory: () => WorkflowStorage | Promise<Workfl
         expect(history[0]!.status).toBe("running");
       });
     });
+
+    // -------------------------------------------------------------------
+    // purgeCompleted
+    // -------------------------------------------------------------------
+
+    describe("purgeCompleted", () => {
+      it("purges completed workflow older than maxAge", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "purge-c1", workflowName: "test", input: {} });
+        await s.completeWorkflow("purge-c1", "done");
+
+        // Completed just now — should NOT be purged with 1h threshold
+        const deleted = await s.purgeCompleted({ olderThanMs: 3_600_000, limit: 100 });
+        expect(deleted).toBe(0);
+        expect(await s.loadWorkflow("purge-c1")).not.toBeNull();
+      });
+
+      it("purges failed workflow older than maxAge", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "purge-f1", workflowName: "test", input: {} });
+        await s.failWorkflow("purge-f1", "boom");
+
+        const deleted = await s.purgeCompleted({ olderThanMs: 3_600_000, limit: 100 });
+        expect(deleted).toBe(0);
+        expect(await s.loadWorkflow("purge-f1")).not.toBeNull();
+      });
+
+      it("never purges running workflows", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "purge-r1", workflowName: "test", input: {} });
+
+        // olderThanMs=0 means "anything completed before now"
+        const deleted = await s.purgeCompleted({ olderThanMs: 0, limit: 100 });
+        expect(deleted).toBe(0);
+        expect(await s.loadWorkflow("purge-r1")).not.toBeNull();
+      });
+
+      it("never purges suspended workflows", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "purge-s1", workflowName: "test", input: {} });
+        await s.suspendWorkflow("purge-s1", "wait", {
+          status: "sleeping",
+          stepType: "sleep",
+          wakeAt: new Date(Date.now() + 60_000),
+        });
+
+        const deleted = await s.purgeCompleted({ olderThanMs: 0, limit: 100 });
+        expect(deleted).toBe(0);
+        expect(await s.loadWorkflow("purge-s1")).not.toBeNull();
+      });
+
+      it("respects batch limit", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "purge-b1", workflowName: "test", input: {} });
+        await s.completeWorkflow("purge-b1", "done");
+        await s.createWorkflow({ workflowId: "purge-b2", workflowName: "test", input: {} });
+        await s.completeWorkflow("purge-b2", "done");
+        await s.createWorkflow({ workflowId: "purge-b3", workflowName: "test", input: {} });
+        await s.completeWorkflow("purge-b3", "done");
+
+        // olderThanMs=0 with limit=2 — should delete at most 2
+        // Need a small delay so completedAt < now
+        await new Promise((r) => setTimeout(r, 10));
+        const deleted = await s.purgeCompleted({ olderThanMs: 0, limit: 2 });
+        expect(deleted).toBe(2);
+
+        // One should remain
+        const remaining = await s.listWorkflows({ status: "completed" });
+        expect(remaining).toHaveLength(1);
+      });
+
+      it("purges workflows within a from/to date range", async () => {
+        const s = await getStorage();
+
+        await s.createWorkflow({ workflowId: "purge-range-1", workflowName: "test", input: {} });
+        await s.completeWorkflow("purge-range-1", "done");
+
+        await new Promise((r) => setTimeout(r, 15));
+        const t1 = new Date();
+        await new Promise((r) => setTimeout(r, 15));
+
+        await s.createWorkflow({ workflowId: "purge-range-2", workflowName: "test", input: {} });
+        await s.completeWorkflow("purge-range-2", "done");
+
+        await new Promise((r) => setTimeout(r, 15));
+        const t2 = new Date();
+        await new Promise((r) => setTimeout(r, 15));
+
+        await s.createWorkflow({ workflowId: "purge-range-3", workflowName: "test", input: {} });
+        await s.completeWorkflow("purge-range-3", "done");
+
+        // Only purge workflows completed in [t1, t2) — should catch range-2 only
+        const deleted = await s.purgeCompleted({ from: t1, to: t2, limit: 100 });
+        expect(deleted).toBe(1);
+
+        expect(await s.loadWorkflow("purge-range-1")).not.toBeNull();
+        expect(await s.loadWorkflow("purge-range-2")).toBeNull();
+        expect(await s.loadWorkflow("purge-range-3")).not.toBeNull();
+      });
+
+      it("cascade-deletes steps, signals, and run history", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "purge-cascade", workflowName: "test", input: {} });
+        await s.saveStepResult({
+          workflowId: "purge-cascade",
+          stepName: "step-a",
+          result: "ok",
+          durationMs: 10,
+          startedAt: new Date(),
+        });
+        await s.deliverSignal("purge-cascade", "sig", { data: true });
+        await s.completeWorkflow("purge-cascade", "done");
+
+        await new Promise((r) => setTimeout(r, 10));
+        const deleted = await s.purgeCompleted({ olderThanMs: 0, limit: 100 });
+        expect(deleted).toBe(1);
+
+        // Workflow and all related data should be gone
+        expect(await s.loadWorkflow("purge-cascade")).toBeNull();
+        expect(await s.loadSignals("purge-cascade")).toEqual([]);
+        expect(await s.loadRunHistory("purge-cascade")).toEqual([]);
+      });
+    });
   });
 }

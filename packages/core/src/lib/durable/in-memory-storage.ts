@@ -444,6 +444,40 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     return runs.slice(offset, offset + limit);
   }
 
+  async purgeCompleted(
+    params: { olderThanMs: number; limit: number } | { from: Date; to: Date; limit: number },
+  ): Promise<number> {
+    let fromMs: number;
+    let toMs: number;
+
+    if ("olderThanMs" in params) {
+      fromMs = 0;
+      toMs = Date.now() - params.olderThanMs;
+    } else {
+      fromMs = params.from.getTime();
+      toMs = params.to.getTime();
+    }
+
+    let deleted = 0;
+
+    for (const [id, wf] of this.workflows) {
+      if (deleted >= params.limit) break;
+      if (wf.status !== "completed" && wf.status !== "failed") continue;
+      if (!wf.completedAt) continue;
+      const t = wf.completedAt.getTime();
+      if (t < fromMs || t >= toMs) continue;
+
+      this.workflows.delete(id);
+      this.locks.delete(id);
+      this.signals.delete(id);
+      this.attempts.delete(id);
+      this.runHistory.delete(id);
+      deleted++;
+    }
+
+    return deleted;
+  }
+
   /** Get step history across all runs for a workflow. */
   getStepHistory(workflowId: string): StepState[] {
     const archived = this.runHistory.get(workflowId) ?? [];

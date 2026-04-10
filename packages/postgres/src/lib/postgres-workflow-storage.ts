@@ -24,6 +24,7 @@ import {
   workflowSignals,
   workflowLocks,
   stepAttempts,
+  stepQueue,
   LOOKUP_BINDINGS,
 } from "./schema.ts";
 import {
@@ -688,6 +689,57 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       createdAt: meta.createdAt,
       completedAt: meta.completedAt ?? undefined,
     }));
+  }
+
+  async purgeCompleted(
+    params: { olderThanMs: number; limit: number } | { from: Date; to: Date; limit: number },
+  ): Promise<number> {
+    let from: Date;
+    let to: Date;
+
+    if ("olderThanMs" in params) {
+      from = new Date(0);
+      to = new Date(Date.now() - params.olderThanMs);
+    } else {
+      from = params.from;
+      to = params.to;
+    }
+
+    // Find expired workflow IDs in a single query
+    const expired = await this.db
+      .select({ workflowId: workflows.workflowId })
+      .from(workflows)
+      .where(
+        and(
+          sql`${workflows.statusId} IN (${WorkflowStatusIds.id.completed}, ${WorkflowStatusIds.id.failed})`,
+          sql`${workflows.completedAt} >= ${from}`,
+          sql`${workflows.completedAt} < ${to}`,
+        ),
+      )
+      .limit(params.limit);
+
+    if (expired.length === 0) return 0;
+
+    const ids = expired.map((r) => r.workflowId);
+
+    // Delete child tables first (FK order), then the workflow itself
+    await this.db.delete(workflowSignals).where(inArray(workflowSignals.workflowId, ids));
+    await this.db.delete(workflowStepTasks).where(inArray(workflowStepTasks.workflowId, ids));
+    await this.db.delete(workflowSteps).where(inArray(workflowSteps.workflowId, ids));
+    await this.db.delete(stepAttempts).where(inArray(stepAttempts.workflowId, ids));
+    await this.db.delete(workflowRuns).where(inArray(workflowRuns.workflowId, ids));
+    await this.db
+      .delete(stepQueue)
+      .where(
+        and(
+          inArray(stepQueue.workflowId, ids),
+          sql`${stepQueue.status} IN ('completed', 'failed')`,
+        ),
+      );
+    await this.db.delete(workflowLocks).where(inArray(workflowLocks.workflowId, ids));
+    await this.db.delete(workflows).where(inArray(workflows.workflowId, ids));
+
+    return ids.length;
   }
 
   private async tryAdvisoryLock(workflowId: string): Promise<boolean> {

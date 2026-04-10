@@ -118,6 +118,19 @@ export interface WorkflowStorage {
     workflowId: string,
     params?: { limit?: number; offset?: number },
   ): Promise<WorkflowRunSummary[]>;
+
+  /**
+   * Delete completed/failed workflows matching the given time window.
+   * Returns the number of workflows deleted.
+   * Never deletes running or suspended workflows.
+   *
+   * Overloads:
+   * - `olderThanMs` — relative: delete workflows completed more than N ms ago
+   * - `from` / `to` — absolute: delete workflows with completedAt in [from, to)
+   */
+  purgeCompleted(
+    params: { olderThanMs: number; limit: number } | { from: Date; to: Date; limit: number },
+  ): Promise<number>;
 }
 
 // ---------------------------------------------------------------------------
