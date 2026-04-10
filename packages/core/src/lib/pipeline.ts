@@ -514,6 +514,62 @@ export class Pipeline<T, E extends TaggedError> {
     );
   }
 
+  /**
+   * Observe all failures — typed errors AND defects — without changing them.
+   * Useful for logging where you want to see every failure regardless of type.
+   *
+   * @example
+   * ```ts
+   * pipeline.tapAnyError((err) => logger.error("pipeline failed", { error: err }))
+   * ```
+   */
+  tapAnyError(fn: (error: unknown) => void): Pipeline<T, E> {
+    return new Pipeline(
+      this.effect.pipe(
+        Effect.tapError((error) => Effect.sync(() => fn(error))),
+        Effect.catchAllDefect((defect) =>
+          Effect.andThen(
+            Effect.sync(() => fn(defect)),
+            Effect.die(defect),
+          ),
+        ),
+      ),
+      this._defaults,
+    );
+  }
+
+  /**
+   * Pull specific defect types into the typed error channel.
+   * Thrown errors matching any of the provided classes become typed errors;
+   * unmatched defects remain as defects.
+   *
+   * @example
+   * ```ts
+   * pipeline
+   *   .map(x => parseOrThrow(x))          // throws ParseError (defect)
+   *   .trapError(ParseError)              // Pipeline<T, E | ParseError>
+   *
+   * // Multiple types:
+   * pipeline
+   *   .map(x => riskyStuff(x))
+   *   .trapError(ParseError, ValidationError)
+   *   // Pipeline<T, E | ParseError | ValidationError>
+   * ```
+   */
+  trapError<Classes extends (new (...args: any[]) => TaggedError)[]>(
+    ...classes: Classes
+  ): Pipeline<T, E | InstanceType<Classes[number]>> {
+    return new Pipeline(
+      Effect.catchAllDefect(this.effect, (defect) => {
+        for (const cls of classes) {
+          if (defect instanceof cls) return Effect.fail(defect as any);
+        }
+        return Effect.die(defect);
+      }),
+      this._defaults,
+    );
+  }
+
   /** Recover from errors by providing a constant fallback value. */
   orElse(fallback: T): Pipeline<T, never> {
     return new Pipeline(

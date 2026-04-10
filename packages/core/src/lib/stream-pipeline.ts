@@ -1,4 +1,4 @@
-import { Effect, Stream, Chunk, Duration, Schedule, Ref, Option } from "effect";
+import { Effect, Stream, Chunk, Duration, Schedule, Ref, Option, Cause } from "effect";
 import type { TaggedError, Pipeline } from "./pipeline.ts";
 import type { PipelineRef } from "./ref.ts";
 import { type FusibleOp, fuseOpsToStream } from "./fusion.ts";
@@ -792,6 +792,55 @@ export class StreamPipeline<T, E extends TaggedError> {
   tapError(fn: (error: E) => void): StreamPipeline<T, E> {
     return new StreamPipeline(
       Stream.tapError(this._materialize(), (error) => Effect.sync(() => fn(error))),
+    );
+  }
+
+  /**
+   * Observe all failures — typed errors AND defects — without changing them.
+   * Useful for logging where you want to see every failure regardless of type.
+   */
+  tapAnyError(fn: (error: unknown) => void): StreamPipeline<T, E> {
+    return new StreamPipeline(
+      this._materialize().pipe(
+        Stream.tapError((error) => Effect.sync(() => fn(error))),
+        Stream.catchAllCause((cause) => {
+          const defects = Cause.defects(cause);
+          if (defects.length > 0) {
+            return Stream.fromEffect(
+              Effect.andThen(
+                Effect.sync(() => {
+                  for (const d of defects) fn(d);
+                }),
+                Effect.failCause(cause),
+              ),
+            ) as Stream.Stream<T, E>;
+          }
+          return Stream.failCause(cause) as Stream.Stream<T, E>;
+        }),
+      ),
+    );
+  }
+
+  /**
+   * Pull specific defect types into the typed error channel.
+   * Thrown errors matching any of the provided classes become typed errors;
+   * unmatched defects remain as defects.
+   */
+  trapError<Classes extends (new (...args: any[]) => TaggedError)[]>(
+    ...classes: Classes
+  ): StreamPipeline<T, E | InstanceType<Classes[number]>> {
+    return new StreamPipeline(
+      this._materialize().pipe(
+        Stream.catchAllCause((cause) => {
+          const defects = Cause.defects(cause);
+          for (const defect of defects) {
+            for (const cls of classes) {
+              if (defect instanceof cls) return Stream.fail(defect as any);
+            }
+          }
+          return Stream.failCause(cause) as Stream.Stream<T, E | InstanceType<Classes[number]>>;
+        }),
+      ),
     );
   }
 
