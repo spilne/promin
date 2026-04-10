@@ -2,7 +2,7 @@
 // PostgresWorkflowStorage — production-grade WorkflowStorage backed by Postgres
 // ---------------------------------------------------------------------------
 
-import { eq, and, sql, desc, inArray } from "drizzle-orm";
+import { eq, and, sql, desc, inArray, gte, lt } from "drizzle-orm";
 import type {
   WorkflowStorage,
   StepAttemptStorage,
@@ -712,8 +712,8 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       .where(
         and(
           sql`${workflows.statusId} IN (${WorkflowStatusIds.id.completed}, ${WorkflowStatusIds.id.failed})`,
-          sql`${workflows.completedAt} >= ${from}`,
-          sql`${workflows.completedAt} < ${to}`,
+          gte(workflows.completedAt, from),
+          lt(workflows.completedAt, to),
         ),
       )
       .limit(params.limit);

@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       docs-only:
@@ -72,20 +72,38 @@ jobs:
 
       - run: bun install
 
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set version in all packages
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          for pkg in packages/*/package.json; do
+            # Skip private packages
+            if jq -e '.private == true' "$pkg" > /dev/null 2>&1; then
+              echo "Skipping private: $pkg"
+              continue
+            fi
+            jq --arg v "$VERSION" '.version = $v' "$pkg" > tmp.json && mv tmp.json "$pkg"
+            echo "Set $(jq -r .name "$pkg") → $VERSION"
+          done
+
       - name: Build packages
         run: bun run build
 
-      - name: Create release PR or publish
-        id: changesets
-        uses: changesets/action@v1
-        with:
-          publish: bun run release
-          version: bun run version
-          title: "release: version packages"
-          commit: "release: version packages"
+      - name: Publish to npm
+        run: |
+          for pkg in packages/*/; do
+            if jq -e '.private == true' "$pkg/package.json" > /dev/null 2>&1; then
+              continue
+            fi
+            echo "Publishing $(jq -r .name "$pkg/package.json")..."
+            cd "$pkg"
+            npm publish --access public
+            cd "$GITHUB_WORKSPACE"
+          done
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   docs:

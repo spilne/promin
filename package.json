@@ -24,16 +24,11 @@
     "docs": "bun run --filter @promin/docs build",
     "docs:dev": "bun run --filter @promin/docs dev",
     "docs:serve": "bunx serve .target/docs -p 4002",
-    "changeset": "changeset",
-    "version": "changeset version",
-    "release": "changeset publish",
     "clean": "rm -rf node_modules packages/*/node_modules .nx/cache .nx/workspace-data .target packages/*/dist documentation/generator/.next documentation/generator/node_modules",
     "prepare": "git config core.hooksPath .githooks || true"
   },
   "private": true,
   "devDependencies": {
-    "@changesets/changelog-github": "^0.6.0",
-    "@changesets/cli": "^2.30.0",
     "@nx/js": "21.4.1",
     "@types/bun": "^1.3.3",
     "mitata": "^1.0.34",
