@@ -1592,6 +1592,8 @@ export class WorkflowBuilder<
           input = workflowIdOrInput as Input;
           workflowId = deriveId(input);
         } else {
+          // TODO: enforce at compile time via conditional return types on build()
+          // so start(input) is only callable when deriveId is configured
           throw new Error("workflowId is required when deriveId is not configured");
         }
 
