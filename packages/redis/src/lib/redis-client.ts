@@ -25,6 +25,10 @@ export interface RedisClient {
   // -- Scripting --
   eval(script: string, numkeys: number, ...args: (string | number)[]): Promise<unknown>;
 
+  // -- Atomic counters --
+  incr(key: string): Promise<number>;
+  decr(key: string): Promise<number>;
+
   // -- Expiry --
   pexpire(key: string, milliseconds: number): Promise<number>;
 

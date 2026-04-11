@@ -12,6 +12,8 @@ import {
   RedisRateLimiter,
   RedisChannel,
   RedisSemaphore,
+  RedisLatch,
+  RedisBarrier,
 } from "@promin/redis";
 import type { RedisClient } from "@promin/redis";
 import {
@@ -20,6 +22,8 @@ import {
   rateLimiterTestSuite,
   refTestSuite,
   channelTestSuite,
+  latchTestSuite,
+  barrierTestSuite,
 } from "@promin/core/testing";
 
 // ---------------------------------------------------------------------------
@@ -383,4 +387,32 @@ withRedis("RedisSemaphore — acquire and release", (ctx) => {
     await sem.release();
     r.disconnect();
   });
+});
+
+// ---------------------------------------------------------------------------
+// RedisLatch — portable conformance suite
+// ---------------------------------------------------------------------------
+
+withRedis("RedisLatch conformance", (ctx) => {
+  latchTestSuite(() =>
+    RedisLatch.make({
+      redis: new IoRedis(ctx.port, ctx.host) as unknown as RedisClient,
+      key: uniqueName("latch"),
+      count: 3,
+    }),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// RedisBarrier — portable conformance suite
+// ---------------------------------------------------------------------------
+
+withRedis("RedisBarrier conformance", (ctx) => {
+  barrierTestSuite(() =>
+    RedisBarrier.make({
+      redis: new IoRedis(ctx.port, ctx.host) as unknown as RedisClient,
+      key: uniqueName("barrier"),
+      parties: 3,
+    }),
+  );
 });

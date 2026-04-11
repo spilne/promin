@@ -9,3 +9,5 @@ export { RedisThrottle } from "./lib/index.ts";
 export { RedisRateLimiter } from "./lib/index.ts";
 export { RedisChannel } from "./lib/index.ts";
 export { RedisSemaphore } from "./lib/index.ts";
+export { RedisLatch } from "./lib/index.ts";
+export { RedisBarrier } from "./lib/index.ts";
