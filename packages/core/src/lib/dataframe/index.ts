@@ -26,3 +26,4 @@ export {
 export { type DataFrameSink, CsvSink, JsonlSink } from "./sink.ts";
 export { classifyPlan, type PlanStreamability } from "./plan-classifier.ts";
 export { executeChunked } from "./chunked-executor.ts";
+export { type GroupAccumulator, createAccumulator, accumulate, finalize } from "./streaming-agg.ts";

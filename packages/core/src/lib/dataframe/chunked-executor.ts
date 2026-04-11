@@ -2,9 +2,10 @@
 // Chunked executor — execute streamable plans chunk by chunk
 // ---------------------------------------------------------------------------
 
-import type { LogicalPlan, SourcePlan } from "./logical-plan.ts";
+import type { LogicalPlan, SourcePlan, GroupByPlan } from "./logical-plan.ts";
 import { classifyPlan } from "./plan-classifier.ts";
 import { ArrayExecutor } from "./array-executor.ts";
+import { createAccumulator, accumulate, finalize, type GroupAccumulator } from "./streaming-agg.ts";
 
 /**
  * Execute a plan in chunks, yielding arrays of rows.
@@ -28,6 +29,74 @@ export async function* executeChunked<T>(params: {
     const executor = new ArrayExecutor();
     const all = await executor.execute<T>(plan);
     yield all;
+    return;
+  }
+
+  if (streamability === "aggregating") {
+    // GroupBy with streamable input — per-chunk accumulation
+    const groupByPlan = plan as GroupByPlan;
+    const groupCols = groupByPlan.columns;
+    const aggs = groupByPlan.aggs;
+    const aggEntries = Object.entries(aggs);
+
+    // Extract source and streamable ops from the GroupBy's input
+    const { source, ops } = extractSourceAndOps(groupByPlan.input);
+    const data = source.load && source.data.length === 0 ? await source.load() : source.data;
+
+    const executor = new ArrayExecutor();
+    const singleGroupCol = groupCols.length === 1;
+
+    // Global accumulators across all chunks
+    const globalGroups = new Map<
+      string,
+      { keyValues: Record<string, unknown>; accs: GroupAccumulator[] }
+    >();
+
+    for (let i = 0; i < data.length; i += chunkSize) {
+      const chunk = data.slice(i, i + chunkSize);
+      if (chunk.length === 0) break;
+
+      // Apply streamable ops to chunk
+      const chunkPlan = rebuildPlan({ _tag: "Source", data: chunk }, ops);
+      const rows = executor.executeSync(chunkPlan);
+
+      // Group + accumulate
+      for (const row of rows) {
+        const r = row as Record<string, unknown>;
+        const key = singleGroupCol
+          ? String(r[groupCols[0]!])
+          : groupCols.map((c) => String(r[c])).join("\0");
+
+        let group = globalGroups.get(key);
+        if (!group) {
+          const keyValues: Record<string, unknown> = {};
+          for (const c of groupCols) keyValues[c] = r[c];
+          group = {
+            keyValues,
+            accs: aggEntries.map(([, fn]) => createAccumulator(fn)),
+          };
+          globalGroups.set(key, group);
+        }
+
+        for (let j = 0; j < aggEntries.length; j++) {
+          const [col, aggFn] = aggEntries[j]!;
+          accumulate(group.accs[j]!, aggFn, r[col]);
+        }
+      }
+    }
+
+    // Finalize all groups
+    const result: unknown[] = [];
+    for (const { keyValues, accs } of globalGroups.values()) {
+      const row: Record<string, unknown> = { ...keyValues };
+      for (let j = 0; j < aggEntries.length; j++) {
+        const [col, aggFn] = aggEntries[j]!;
+        row[col] = finalize(accs[j]!, aggFn);
+      }
+      result.push(row);
+    }
+
+    yield result as T[];
     return;
   }
 

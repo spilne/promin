@@ -4,7 +4,7 @@
 
 import type { LogicalPlan } from "./logical-plan.ts";
 
-export type PlanStreamability = "streamable" | "materializing";
+export type PlanStreamability = "streamable" | "aggregating" | "materializing";
 
 /**
  * Check if a plan can execute in streaming mode (per-chunk).
@@ -36,10 +36,13 @@ export function classifyPlan(plan: LogicalPlan): PlanStreamability {
     case "FillNull":
       return "materializing";
 
+    // GroupBy with streamable input can use per-chunk aggregation + merge
+    case "GroupBy":
+      return classifyPlan(plan.input) === "streamable" ? "aggregating" : "materializing";
+
     // These need all data — materializing
     case "Sort":
     case "Distinct":
-    case "GroupBy":
     case "Join":
     case "Window":
     case "Pivot":
