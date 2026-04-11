@@ -17,6 +17,17 @@ export interface RedisClient {
   exists(key: string): Promise<number>;
   keys(pattern: string): Promise<string[]>;
 
+  // -- List --
+  rpush(key: string, ...values: string[]): Promise<number>;
+  brpop(key: string, timeout: number): Promise<[string, string] | null>;
+  lpush(key: string, ...values: string[]): Promise<number>;
+
+  // -- Scripting --
+  eval(script: string, numkeys: number, ...args: (string | number)[]): Promise<unknown>;
+
+  // -- Expiry --
+  pexpire(key: string, milliseconds: number): Promise<number>;
+
   // -- Hash --
   hset(key: string, ...args: (string | Record<string, string>)[]): Promise<number>;
   hget(key: string, field: string): Promise<string | null>;
