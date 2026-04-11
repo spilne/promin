@@ -35,6 +35,37 @@ type TransitionHelper = <Target extends string>(
   context: unknown,
 ) => TransitionTo<any, any>;
 
+/** Context passed to middleware — describes the transition about to happen. */
+export interface TransitionContext {
+  readonly machineId: string;
+  readonly machineName: string;
+  readonly event: string;
+  readonly from: string;
+  to: string;
+  context: unknown;
+  readonly metadata?: unknown;
+}
+
+/** Middleware function — call next() to proceed, or throw to abort. */
+export type MachineMiddleware = (
+  ctx: TransitionContext,
+  next: () => Promise<void>,
+) => Promise<void> | void;
+
+/** Compose multiple middleware into one. */
+export function composeMachineMiddleware(...middlewares: MachineMiddleware[]): MachineMiddleware {
+  return (ctx, next) => {
+    let index = -1;
+    const dispatch = (i: number): Promise<void> => {
+      if (i <= index) return Promise.reject(new Error("next() called multiple times"));
+      index = i;
+      if (i >= middlewares.length) return Promise.resolve(next());
+      return Promise.resolve(middlewares[i]!(ctx, () => dispatch(i + 1)));
+    };
+    return dispatch(0);
+  };
+}
+
 /** Safety limits to prevent infinite loops and runaway machines. */
 export interface MachineLimits {
   /** Max total transitions over the machine's lifetime. Default: unlimited. */
@@ -50,6 +81,7 @@ export interface MachineLimits {
 export class StateMachineBuilder<S> {
   private states = new Map<string, StateConfig>();
   private transitions: TransitionConfig[] = [];
+  private middlewares: MachineMiddleware[] = [];
   private initialState?: string;
 
   constructor(
@@ -58,6 +90,12 @@ export class StateMachineBuilder<S> {
     private readonly version?: string,
     private readonly limits?: MachineLimits,
   ) {}
+
+  /** Add middleware that wraps every transition. Composable — called in order. */
+  use(middleware: MachineMiddleware): this {
+    this.middlewares.push(middleware);
+    return this;
+  }
 
   state(
     name: string & keyof S,
@@ -111,6 +149,7 @@ export class StateMachineBuilder<S> {
       this.initialState,
       this.version,
       this.limits,
+      this.middlewares.length > 0 ? composeMachineMiddleware(...this.middlewares) : undefined,
     );
   }
 }
@@ -130,6 +169,7 @@ export class StateMachineInstance<S> {
     private readonly initialState: string,
     private readonly version?: string,
     private readonly limits?: MachineLimits,
+    private readonly middleware?: MachineMiddleware,
   ) {}
 
   async start(params: {
@@ -196,7 +236,7 @@ export class StateMachineInstance<S> {
         if (!allowed) throw new Error(`Guard rejected event "${params.event}"`);
       }
 
-      // Execute action
+      // Execute action — compute target state and new context
       let targetState: string;
       let newContext: unknown;
 
@@ -235,26 +275,44 @@ export class StateMachineInstance<S> {
         throw new Error(`Target state "${targetState}" is not registered`);
       }
 
-      // Run onExit for current state
-      const currentStateConfig = this.states.get(machine.current);
-      if (currentStateConfig?.onExit) {
-        await currentStateConfig.onExit(machine.context);
-      }
-
-      // Persist transition
-      await this.storage.transition({
-        id: params.id,
+      // Build transition context for middleware
+      const txCtx: TransitionContext = {
+        machineId: params.id,
+        machineName: this.name,
+        event: params.event,
         from: machine.current,
         to: targetState,
-        event: params.event,
         context: newContext,
         metadata: params.metadata,
-      });
+      };
 
-      // Run onEnter for target state
-      const targetStateConfig = this.states.get(targetState);
-      if (targetStateConfig?.onEnter) {
-        await targetStateConfig.onEnter(newContext);
+      // Core transition: onExit → persist → onEnter
+      const executeTransition = async () => {
+        const currentStateConfig = this.states.get(txCtx.from);
+        if (currentStateConfig?.onExit) {
+          await currentStateConfig.onExit(machine.context);
+        }
+
+        await this.storage.transition({
+          id: params.id,
+          from: txCtx.from,
+          to: txCtx.to,
+          event: params.event,
+          context: txCtx.context,
+          metadata: txCtx.metadata,
+        });
+
+        const targetStateConfig = this.states.get(txCtx.to);
+        if (targetStateConfig?.onEnter) {
+          await targetStateConfig.onEnter(txCtx.context);
+        }
+      };
+
+      // Wrap with middleware if present
+      if (this.middleware) {
+        await this.middleware(txCtx, executeTransition);
+      } else {
+        await executeTransition();
       }
     } finally {
       await this.storage.releaseLock(params.id);

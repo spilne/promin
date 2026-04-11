@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeEach } from "bun:test";
-import { stateMachine, type StateMachineInstance } from "./state-machine.ts";
+import {
+  stateMachine,
+  composeMachineMiddleware,
+  type StateMachineInstance,
+  type MachineMiddleware,
+} from "./state-machine.ts";
 import { InMemoryStateMachineStorage } from "./state-machine-storage.ts";
 import { FakeClock } from "../clock.ts";
 
@@ -615,5 +620,170 @@ describe("StateMachine", () => {
 
     const state = await storage.load("meta-1");
     expect(state!.metadata).toEqual({ region: "us-east", createdBy: "test" });
+  });
+
+  // -------------------------------------------------------------------------
+  // Middleware
+  // -------------------------------------------------------------------------
+
+  it("middleware wraps transitions", async () => {
+    const log: string[] = [];
+    const machine = stateMachine<TrafficLight>({ name: "mw", storage })
+      .use(async (ctx, next) => {
+        log.push(`before:${ctx.from}->${ctx.to}`);
+        await next();
+        log.push(`after:${ctx.from}->${ctx.to}`);
+      })
+      .state("red")
+      .state("green")
+      .state("yellow")
+      .on("next", {
+        from: "red",
+        to: "green",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .on("next", {
+        from: "green",
+        to: "yellow",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .on("next", {
+        from: "yellow",
+        to: "red",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .initial("red")
+      .build();
+
+    await machine.start({ id: "mw-1", context: { count: 0 } });
+    await machine.send({ id: "mw-1", event: "next" });
+    expect(log).toEqual(["before:red->green", "after:red->green"]);
+  });
+
+  it("middleware can abort transition by throwing", async () => {
+    const machine = stateMachine<TrafficLight>({ name: "mw-abort", storage })
+      .use(async (_ctx, _next) => {
+        throw new Error("Blocked by middleware");
+      })
+      .state("red")
+      .state("green")
+      .state("yellow")
+      .on("next", {
+        from: "red",
+        to: "green",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .on("next", {
+        from: "green",
+        to: "yellow",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .on("next", {
+        from: "yellow",
+        to: "red",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .initial("red")
+      .build();
+
+    await machine.start({ id: "mw-2", context: { count: 0 } });
+    await expect(machine.send({ id: "mw-2", event: "next" })).rejects.toThrow(
+      "Blocked by middleware",
+    );
+    // State should not have changed
+    expect((await machine.getState("mw-2"))!.current).toBe("red");
+  });
+
+  it("multiple middleware compose in order", async () => {
+    const calls: string[] = [];
+    const machine = stateMachine<TrafficLight>({ name: "mw-compose", storage })
+      .use(async (_ctx, next) => {
+        calls.push("a:before");
+        await next();
+        calls.push("a:after");
+      })
+      .use(async (_ctx, next) => {
+        calls.push("b:before");
+        await next();
+        calls.push("b:after");
+      })
+      .state("red")
+      .state("green")
+      .state("yellow")
+      .on("next", {
+        from: "red",
+        to: "green",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .on("next", {
+        from: "green",
+        to: "yellow",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .on("next", {
+        from: "yellow",
+        to: "red",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .initial("red")
+      .build();
+
+    await machine.start({ id: "mw-3", context: { count: 0 } });
+    await machine.send({ id: "mw-3", event: "next" });
+    expect(calls).toEqual(["a:before", "b:before", "b:after", "a:after"]);
+  });
+
+  it("composeMachineMiddleware composes standalone middleware", async () => {
+    const calls: string[] = [];
+    const mw1: MachineMiddleware = async (_ctx, next) => {
+      calls.push("1");
+      await next();
+    };
+    const mw2: MachineMiddleware = async (_ctx, next) => {
+      calls.push("2");
+      await next();
+    };
+    const composed = composeMachineMiddleware(mw1, mw2);
+
+    const ctx = { machineId: "x", machineName: "x", event: "e", from: "a", to: "b", context: {} };
+    await composed(ctx, async () => {
+      calls.push("core");
+    });
+    expect(calls).toEqual(["1", "2", "core"]);
+  });
+
+  it("middleware can modify transition context", async () => {
+    const machine = stateMachine<TrafficLight>({ name: "mw-modify", storage })
+      .use(async (ctx, next) => {
+        // Inject extra metadata
+        ctx.metadata = { ...(ctx.metadata as any), injected: true };
+        await next();
+      })
+      .state("red")
+      .state("green")
+      .state("yellow")
+      .on("next", {
+        from: "red",
+        to: "green",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .on("next", {
+        from: "green",
+        to: "yellow",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .on("next", {
+        from: "yellow",
+        to: "red",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .initial("red")
+      .build();
+
+    await machine.start({ id: "mw-4", context: { count: 0 } });
+    await machine.send({ id: "mw-4", event: "next" });
+
+    const events = await machine.getHistory("mw-4");
+    expect((events[0]!.metadata as any).injected).toBe(true);
   });
 });
