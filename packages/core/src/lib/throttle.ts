@@ -3,9 +3,9 @@ import { Pipeline, type TaggedError } from "./pipeline.ts";
 
 /** Pluggable throttle interface — test against this, implement with any backend. */
 export interface Throttle {
-  acquireAsync(): Promise<void>;
-  tryAcquireAsync(): Promise<boolean>;
-  withPermitAsync<T>(fn: () => Promise<T>): Promise<T>;
+  acquireAsync(resource?: string): Promise<void>;
+  tryAcquireAsync(resource?: string): Promise<boolean>;
+  withPermitAsync<T>(fn: () => Promise<T>, resource?: string): Promise<T>;
 }
 
 /**
@@ -23,15 +23,25 @@ export class PipelineThrottle implements Throttle {
     private readonly permits: number,
     private readonly windowMs: number,
     private readonly timestamps: Ref.Ref<number[]>,
-    private readonly asyncTimestamps: number[],
+    private readonly asyncTimestampsMap: Map<string, number[]>,
   ) {}
+
+  private getAsyncTimestamps(resource?: string): number[] {
+    const key = resource ?? "";
+    let ts = this.asyncTimestampsMap.get(key);
+    if (!ts) {
+      ts = [];
+      this.asyncTimestampsMap.set(key, ts);
+    }
+    return ts;
+  }
 
   static make(params: { permits: number; windowMs: number }): PipelineThrottle {
     return new PipelineThrottle(
       params.permits,
       params.windowMs,
       Effect.runSync(Ref.make<number[]>([])),
-      [],
+      new Map(),
     );
   }
 
@@ -100,39 +110,41 @@ export class PipelineThrottle implements Throttle {
   }
 
   /** Acquire a permit, blocking until one is available (Promise). */
-  async acquireAsync(): Promise<void> {
+  async acquireAsync(resource?: string): Promise<void> {
+    const ts = this.getAsyncTimestamps(resource);
     const now = Date.now();
     const cutoff = now - this.windowMs;
-    while (this.asyncTimestamps.length > 0 && this.asyncTimestamps[0]! <= cutoff) {
-      this.asyncTimestamps.shift();
+    while (ts.length > 0 && ts[0]! <= cutoff) {
+      ts.shift();
     }
-    if (this.asyncTimestamps.length < this.permits) {
-      this.asyncTimestamps.push(now);
+    if (ts.length < this.permits) {
+      ts.push(now);
       return;
     }
-    const oldest = this.asyncTimestamps[0]!;
+    const oldest = ts[0]!;
     const waitMs = oldest + this.windowMs - now;
     await new Promise((r) => setTimeout(r, waitMs));
-    return this.acquireAsync();
+    return this.acquireAsync(resource);
   }
 
   /** Try to acquire a permit without blocking (Promise). */
-  async tryAcquireAsync(): Promise<boolean> {
+  async tryAcquireAsync(resource?: string): Promise<boolean> {
+    const ts = this.getAsyncTimestamps(resource);
     const now = Date.now();
     const cutoff = now - this.windowMs;
-    while (this.asyncTimestamps.length > 0 && this.asyncTimestamps[0]! <= cutoff) {
-      this.asyncTimestamps.shift();
+    while (ts.length > 0 && ts[0]! <= cutoff) {
+      ts.shift();
     }
-    if (this.asyncTimestamps.length < this.permits) {
-      this.asyncTimestamps.push(now);
+    if (ts.length < this.permits) {
+      ts.push(now);
       return true;
     }
     return false;
   }
 
   /** Wrap a function — acquire a permit then run (Promise). */
-  async withPermitAsync<T>(fn: () => Promise<T>): Promise<T> {
-    await this.acquireAsync();
+  async withPermitAsync<T>(fn: () => Promise<T>, resource?: string): Promise<T> {
+    await this.acquireAsync(resource);
     return fn();
   }
 

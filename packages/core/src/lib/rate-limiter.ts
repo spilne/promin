@@ -75,12 +75,24 @@ export interface RateLimiter {
 }
 
 export class PipelineRateLimiter implements RateLimiter {
+  private readonly asyncStateMap = new Map<string, MutableRateLimiterState>();
+
   private constructor(
     private readonly limit: number,
     private readonly windowMs: number,
+    private readonly strategy: Strategy,
     private readonly state: Ref.Ref<RateLimiterState>,
-    private readonly asyncState: MutableRateLimiterState,
   ) {}
+
+  private getAsyncState(resource?: string): MutableRateLimiterState {
+    const key = resource ?? "";
+    let s = this.asyncStateMap.get(key);
+    if (!s) {
+      s = createMutableState(this.strategy, this.limit);
+      this.asyncStateMap.set(key, s);
+    }
+    return s;
+  }
 
   static make(params: {
     limit: number;
@@ -92,8 +104,8 @@ export class PipelineRateLimiter implements RateLimiter {
     return new PipelineRateLimiter(
       params.limit,
       params.windowMs,
+      strategy,
       Effect.runSync(Ref.make(initialState)),
-      createMutableState(strategy, params.limit),
     );
   }
 
@@ -157,27 +169,27 @@ export class PipelineRateLimiter implements RateLimiter {
   // Promise API
   // ---------------------------------------------------------------------------
 
-  async acquireAsync(_resource?: string): Promise<void> {
+  async acquireAsync(resource?: string): Promise<void> {
     const now = Date.now();
-    const result = this.tryAcquireMutable(now);
+    const result = this.tryAcquireMutable(now, false, resource);
     if (result._tag === "rejected") {
       throw new RateLimitExceeded({ retryAfterMs: result.retryAfterMs });
     }
   }
 
-  async tryAcquireAsync(_resource?: string): Promise<boolean> {
+  async tryAcquireAsync(resource?: string): Promise<boolean> {
     const now = Date.now();
-    const result = this.tryAcquireMutable(now, true);
+    const result = this.tryAcquireMutable(now, true, resource);
     return result._tag === "ok";
   }
 
-  async withLimitAsync<T>(fn: () => Promise<T>, _resource?: string): Promise<T> {
-    await this.acquireAsync();
+  async withLimitAsync<T>(fn: () => Promise<T>, resource?: string): Promise<T> {
+    await this.acquireAsync(resource);
     return fn();
   }
 
-  async remainingAsync(_resource?: string): Promise<number> {
-    return this.computeRemainingMutable(Date.now());
+  async remainingAsync(resource?: string): Promise<number> {
+    return this.computeRemainingMutable(Date.now(), resource);
   }
 
   async resetAtAsync(): Promise<number> {
@@ -243,8 +255,9 @@ export class PipelineRateLimiter implements RateLimiter {
   private tryAcquireMutable(
     now: number,
     dryRun = false,
+    resource?: string,
   ): { _tag: "ok" } | { _tag: "rejected"; retryAfterMs: number } {
-    const s = this.asyncState;
+    const s = this.getAsyncState(resource);
 
     switch (s._tag) {
       case "sliding-window": {
@@ -330,11 +343,11 @@ export class PipelineRateLimiter implements RateLimiter {
     }
   }
 
-  private computeRemainingMutable(now: number): number {
-    return this.computeRemaining(this.asyncState, now);
+  private computeRemainingMutable(now: number, resource?: string): number {
+    return this.computeRemaining(this.getAsyncState(resource), now);
   }
 
-  private computeResetAtMutable(now: number): number {
-    return this.computeResetAt(this.asyncState, now);
+  private computeResetAtMutable(now: number, resource?: string): number {
+    return this.computeResetAt(this.getAsyncState(resource), now);
   }
 }

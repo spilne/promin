@@ -62,5 +62,23 @@ export function throttleTestSuite(factory: () => Throttle | Promise<Throttle>) {
       await new Promise((r) => setTimeout(r, 120));
       expect(await t.tryAcquireAsync()).toBe(true);
     });
+
+    it("different resources have independent permits", async () => {
+      const t = await getThrottle();
+      expect(await t.tryAcquireAsync("a")).toBe(true);
+      expect(await t.tryAcquireAsync("b")).toBe(true);
+      // Both exhausted independently
+      expect(await t.tryAcquireAsync("a")).toBe(false);
+      expect(await t.tryAcquireAsync("b")).toBe(false);
+    });
+
+    it("default resource is independent from named resource", async () => {
+      const t = await getThrottle();
+      expect(await t.tryAcquireAsync()).toBe(true);
+      expect(await t.tryAcquireAsync("named")).toBe(true);
+      // Both exhausted independently
+      expect(await t.tryAcquireAsync()).toBe(false);
+      expect(await t.tryAcquireAsync("named")).toBe(false);
+    });
   });
 }

@@ -84,5 +84,29 @@ export function rateLimiterTestSuite(
       const after = await r.remainingAsync();
       expect(after).toBe(1);
     });
+
+    it("different resources have independent limits", async () => {
+      const r = await getRl();
+      await r.acquireAsync("x");
+      await r.acquireAsync("x");
+      await r.acquireAsync("y");
+      await r.acquireAsync("y");
+      // Both exhausted independently
+      expect(await r.tryAcquireAsync("x")).toBe(false);
+      expect(await r.tryAcquireAsync("y")).toBe(false);
+    });
+
+    it("default resource is independent from named resource", async () => {
+      const r = await getRl();
+      await r.acquireAsync();
+      await r.acquireAsync();
+      await r.acquireAsync("named");
+      await r.acquireAsync("named");
+      expect(await r.tryAcquireAsync()).toBe(false);
+      expect(await r.tryAcquireAsync("named")).toBe(false);
+      // Remaining per resource
+      expect(await r.remainingAsync()).toBe(0);
+      expect(await r.remainingAsync("named")).toBe(0);
+    });
   });
 }
