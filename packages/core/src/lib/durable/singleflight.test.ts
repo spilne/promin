@@ -153,6 +153,53 @@ describe("workflow singleflight", () => {
     expect(status?.state).toBe("suspended");
   });
 
+  it("concurrent start() with same ID should execute only once", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    let executionCount = 0;
+
+    const wf = workflow({ name: "race-test", storage })
+      .stepAsync("compute", async () => {
+        executionCount++;
+        await new Promise((r) => setTimeout(r, 50));
+        return { value: 42 };
+      })
+      .build({ idempotency });
+
+    // Fire both start() concurrently — no await between them
+    const [handleA, handleB] = await Promise.all([wf.start("race-1", {}), wf.start("race-1", {})]);
+
+    const [resultA, resultB] = await Promise.all([
+      handleA.result({ timeoutMs: 5_000 }),
+      handleB.result({ timeoutMs: 5_000 }),
+    ]);
+
+    expect(resultA).toEqual({ value: 42 });
+    expect(resultB).toEqual({ value: 42 });
+    // BUG: without atomic createWorkflow, both callers may create the workflow
+    // and executionCount could be 2
+    expect(executionCount).toBe(1);
+  });
+
+  it("concurrent createWorkflow with same ID preserves first caller's data", async () => {
+    const storage = new InMemoryWorkflowStorage();
+
+    // Simulate race: two creates for same ID
+    await storage.createWorkflow({
+      workflowId: "race-create",
+      workflowName: "test",
+      input: { caller: "first" },
+    });
+    await storage.createWorkflow({
+      workflowId: "race-create",
+      workflowName: "test",
+      input: { caller: "second" },
+    });
+
+    const state = await storage.loadWorkflow("race-create");
+    // BUG: without conflict check, second create overwrites first
+    expect((state!.input as any).caller).toBe("first");
+  });
+
   it("without idempotency, start() throws on in-flight workflow", async () => {
     const storage = new InMemoryWorkflowStorage();
 

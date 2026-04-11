@@ -28,7 +28,7 @@ export interface WorkflowStorage {
   /** Cancel a running or suspended workflow. With cascade, also cancels children. */
   cancelWorkflow(workflowId: string, options?: { cascade?: boolean }): Promise<void>;
 
-  /** Create a new workflow record. */
+  /** Create a new workflow record. Returns `{ created: false, existing }` on conflict. */
   createWorkflow(params: {
     workflowId: string;
     workflowName: string;
@@ -38,7 +38,7 @@ export interface WorkflowStorage {
     namespace?: string;
     metadata?: Record<string, unknown>;
     version?: string;
-  }): Promise<void>;
+  }): Promise<{ created: true } | { created: false; existing: WorkflowState }>;
 
   /** Save a completed step result. */
   saveStepResult(params: {

@@ -222,7 +222,14 @@ export class RedisWorkflowStorage implements WorkflowStorage, StepAttemptStorage
     namespace?: string;
     metadata?: Record<string, unknown>;
     version?: string;
-  }): Promise<void> {
+  }): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
+    // Check if workflow already exists before creating
+    const existingRaw = await this.redis.hgetall(this.wfKey(params.workflowId));
+    if (existingRaw && existingRaw.id) {
+      const existing = await this.loadWorkflow(params.workflowId);
+      return { created: false, existing: existing! };
+    }
+
     const now = this.serializeDate(new Date());
     const ns = this.resolveNamespace(params.namespace);
 
@@ -244,6 +251,7 @@ export class RedisWorkflowStorage implements WorkflowStorage, StepAttemptStorage
     await this.redis.hset(this.wfKey(params.workflowId), fields);
     await this.redis.sadd(this.statusIndexKey("pending"), params.workflowId);
     await this.redis.sadd(this.nameIndexKey(params.workflowName), params.workflowId);
+    return { created: true };
   }
 
   async loadWorkflow(workflowId: string): Promise<WorkflowState | null> {

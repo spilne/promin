@@ -104,7 +104,7 @@ export class DefaultCoordinator implements WorkflowCoordinator {
     const dag = workflow.dag;
 
     // Create workflow in storage — persist DAG in metadata for recovery
-    await this.storage.createWorkflow({
+    const createResult = await this.storage.createWorkflow({
       workflowId,
       workflowName: workflow.name,
       input,
@@ -114,8 +114,8 @@ export class DefaultCoordinator implements WorkflowCoordinator {
     // Store the DAG for coordination
     this.dags.set(workflowId, dag);
 
-    // Enqueue initial ready steps
-    await this.enqueueReady(workflowId, input);
+    // Enqueue initial ready steps (even on conflict — the workflow may need re-evaluation)
+    await this.enqueueReady(workflowId, createResult.created ? input : createResult.existing.input);
   }
 
   async status(workflowId: string): Promise<WorkflowState | null> {

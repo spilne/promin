@@ -260,18 +260,28 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
     namespace?: string;
     metadata?: Record<string, unknown>;
     version?: string;
-  }): Promise<void> {
+  }): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
     const ns = this.resolveNamespace(params.namespace);
-    await this.db.insert(workflows).values({
-      workflowId: params.workflowId,
-      workflowName: params.workflowName,
-      workflowType: params.workflowType,
-      namespace: ns,
-      version: params.version,
-      statusId: WorkflowStatusIds.id.pending,
-      input: params.input,
-      metadata: params.metadata,
-    });
+    const [inserted] = await this.db
+      .insert(workflows)
+      .values({
+        workflowId: params.workflowId,
+        workflowName: params.workflowName,
+        workflowType: params.workflowType,
+        namespace: ns,
+        version: params.version,
+        statusId: WorkflowStatusIds.id.pending,
+        input: params.input,
+        metadata: params.metadata,
+      })
+      .onConflictDoNothing()
+      .returning({ workflowId: workflows.workflowId });
+
+    if (!inserted) {
+      const existing = await this.loadWorkflow(params.workflowId);
+      return { created: false, existing: existing! };
+    }
+    return { created: true };
   }
 
   /** Transition pending → running on first step activity. */

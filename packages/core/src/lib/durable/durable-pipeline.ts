@@ -935,7 +935,7 @@ export class WorkflowBuilder<
         }
 
         if (!state) {
-          await this._storage.createWorkflow({
+          const createResult = await this._storage.createWorkflow({
             workflowId,
             workflowName: this._name,
             input,
@@ -943,7 +943,12 @@ export class WorkflowBuilder<
             metadata: this._metadata,
             version: this._version,
           });
-          state = await this._storage.loadWorkflow(workflowId);
+          if (!createResult.created) {
+            // Race: another caller created the workflow between our load and create
+            state = createResult.existing;
+          } else {
+            state = await this._storage.loadWorkflow(workflowId);
+          }
         } else if (this._version) {
           // Version mismatch check — only when builder explicitly sets a version
           const storedVersion = state.version;
@@ -1500,6 +1505,7 @@ export class WorkflowBuilder<
           if (params.parentWorkflowId) {
             const state = await self._storage.loadWorkflow(params.workflowId);
             if (!state) {
+              // Best-effort create — if conflict, another caller already created it
               await self._storage.createWorkflow({
                 workflowId: params.workflowId,
                 workflowName: self._name,

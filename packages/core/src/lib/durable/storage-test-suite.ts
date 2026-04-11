@@ -32,13 +32,14 @@ export function storageTestSuite(factory: () => WorkflowStorage | Promise<Workfl
     describe("createWorkflow + loadWorkflow", () => {
       it("creates and loads a workflow", async () => {
         const s = await getStorage();
-        await s.createWorkflow({
+        const result = await s.createWorkflow({
           workflowId: "crud-1",
           workflowName: "test-wf",
           input: { userId: "u_42" },
           workflowType: "onboarding",
           metadata: { region: "us-east" },
         });
+        expect(result.created).toBe(true);
 
         const state = await s.loadWorkflow("crud-1");
         expect(state).not.toBeNull();
@@ -51,6 +52,27 @@ export function storageTestSuite(factory: () => WorkflowStorage | Promise<Workfl
         expect(state!.metadata).toEqual({ region: "us-east" });
         expect(state!.createdAt).toBeInstanceOf(Date);
         expect(state!.startedAt).toBeUndefined();
+      });
+
+      it("returns existing workflow on duplicate create", async () => {
+        const s = await getStorage();
+        const result1 = await s.createWorkflow({
+          workflowId: "dup-1",
+          workflowName: "test",
+          input: { a: 1 },
+        });
+        expect(result1.created).toBe(true);
+
+        const result2 = await s.createWorkflow({
+          workflowId: "dup-1",
+          workflowName: "test",
+          input: { a: 2 },
+        });
+        expect(result2.created).toBe(false);
+        if (!result2.created) {
+          expect(result2.existing.workflowId).toBe("dup-1");
+          expect(result2.existing.input).toEqual({ a: 1 }); // original input preserved
+        }
       });
 
       it("returns null for non-existent workflow", async () => {

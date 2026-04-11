@@ -151,7 +151,10 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     namespace?: string;
     metadata?: Record<string, unknown>;
     version?: string;
-  }): Promise<void> {
+  }): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
+    const existing = this.workflows.get(params.workflowId);
+    if (existing) return { created: false, existing: this.toState(existing) };
+
     const now = new Date();
     this.workflows.set(params.workflowId, {
       workflowId: params.workflowId,
@@ -168,6 +171,7 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
       createdAt: now,
       updatedAt: now,
     });
+    return { created: true };
   }
 
   /** Transition pending → running on first step activity. */
