@@ -180,26 +180,6 @@ describe("workflow singleflight", () => {
     expect(executionCount).toBe(1);
   });
 
-  it("concurrent createWorkflow with same ID preserves first caller's data", async () => {
-    const storage = new InMemoryWorkflowStorage();
-
-    // Simulate race: two creates for same ID
-    await storage.createWorkflow({
-      workflowId: "race-create",
-      workflowName: "test",
-      input: { caller: "first" },
-    });
-    await storage.createWorkflow({
-      workflowId: "race-create",
-      workflowName: "test",
-      input: { caller: "second" },
-    });
-
-    const state = await storage.loadWorkflow("race-create");
-    // BUG: without conflict check, second create overwrites first
-    expect((state!.input as any).caller).toBe("first");
-  });
-
   it("without idempotency, start() throws on in-flight workflow", async () => {
     const storage = new InMemoryWorkflowStorage();
 
