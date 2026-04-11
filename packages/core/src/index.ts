@@ -28,7 +28,7 @@ export {
 } from "./lib/combinators.ts";
 
 // Primitives
-export { PipelineSemaphore } from "./lib/semaphore.ts";
+export { PipelineSemaphore, type Semaphore } from "./lib/semaphore.ts";
 export { CircuitBreaker, type CircuitBreakerConfig } from "./lib/circuit-breaker.ts";
 export { PipelineCache } from "./lib/cache.ts";
 export {
@@ -38,13 +38,16 @@ export {
   LayeredCache,
   layered,
 } from "./lib/cache-store.ts";
-export { PipelineQueue } from "./lib/queue.ts";
-export { PipelineRef } from "./lib/ref.ts";
-export { PipelineDeferred } from "./lib/deferred.ts";
-export { PipelineChannel } from "./lib/channel.ts";
-export { PipelineSignal } from "./lib/signal.ts";
-export { PipelinePubSub } from "./lib/pubsub.ts";
-export { PipelinePool } from "./lib/pool.ts";
+export { PipelineQueue, type AsyncQueue } from "./lib/queue.ts";
+export { PipelineRef, type AtomicRef } from "./lib/ref.ts";
+export { PipelineDeferred, type DeferredValue } from "./lib/deferred.ts";
+export { PipelineChannel, type Channel } from "./lib/channel.ts";
+export { PipelineSignal, type Signal } from "./lib/signal.ts";
+export { PipelinePubSub, type PubSubBroadcast } from "./lib/pubsub.ts";
+export { PipelinePool, type ResourcePool } from "./lib/pool.ts";
+export { PipelineSingleflight, type Singleflight } from "./lib/singleflight.ts";
+export { PipelineThrottle, type Throttle } from "./lib/throttle.ts";
+export { PipelineRateLimiter, RateLimitExceeded, type RateLimiter } from "./lib/rate-limiter.ts";
 
 // Typeclasses — data
 export {

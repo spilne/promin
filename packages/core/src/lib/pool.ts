@@ -15,7 +15,13 @@ import { Effect } from "effect";
  * const result = await dbPool.useAsync((conn) => conn.query("SELECT 1"));
  * ```
  */
-export class PipelinePool<R> {
+/** Pluggable pool interface — implement with any backend. */
+export interface ResourcePool<R> {
+  useAsync<T>(fn: (resource: R) => Promise<T>): Promise<T>;
+  readonly size: number;
+}
+
+export class PipelinePool<R> implements ResourcePool<R> {
   private constructor(
     private readonly acquire: Effect.Effect<R>,
     private readonly release: (resource: R) => Effect.Effect<void>,

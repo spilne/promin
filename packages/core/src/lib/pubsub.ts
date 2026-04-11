@@ -12,7 +12,13 @@ import { StreamPipeline } from "./stream-pipeline.ts";
  * await events.subscribe().forEach(handle);
  * ```
  */
-export class PipelinePubSub<T> {
+/** Pluggable pub/sub interface — implement with any backend. */
+export interface PubSubBroadcast<T> {
+  publishAsync(value: T): Promise<boolean>;
+  shutdownAsync(): Promise<void>;
+}
+
+export class PipelinePubSub<T> implements PubSubBroadcast<T> {
   private constructor(readonly pubsub: PubSub.PubSub<T>) {}
 
   /** Create a bounded PubSub. Publisher blocks when all subscribers are full. */

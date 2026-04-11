@@ -11,7 +11,14 @@ import { Effect, Ref } from "effect";
  * const value = await counter.getAsync(); // 1
  * ```
  */
-export class PipelineRef<T> {
+/** Pluggable ref interface — implement with any backend. */
+export interface AtomicRef<T> {
+  getAsync(): Promise<T>;
+  setAsync(value: T): Promise<void>;
+  updateAsync(fn: (current: T) => T): Promise<void>;
+}
+
+export class PipelineRef<T> implements AtomicRef<T> {
   private constructor(readonly ref: Ref.Ref<T>) {}
 
   /** Create a ref with an initial value. */

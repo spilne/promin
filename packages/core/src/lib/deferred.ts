@@ -13,7 +13,15 @@ import { Effect, Deferred } from "effect";
  * await gate.succeedAsync(loadedConfig);
  * ```
  */
-export class PipelineDeferred<T> {
+/** Pluggable deferred interface — implement with any backend. */
+export interface DeferredValue<T> {
+  awaitAsync(): Promise<T>;
+  succeedAsync(value: T): Promise<boolean>;
+  failAsync(error: Error): Promise<boolean>;
+  isDoneAsync(): Promise<boolean>;
+}
+
+export class PipelineDeferred<T> implements DeferredValue<T> {
   private constructor(readonly deferred: Deferred.Deferred<T>) {}
 
   /** Create a new deferred value. */

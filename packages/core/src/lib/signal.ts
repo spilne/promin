@@ -12,7 +12,14 @@ import { StreamPipeline } from "./stream-pipeline.ts";
  * const current = await config.getAsync();
  * ```
  */
-export class PipelineSignal<T> {
+/** Pluggable signal interface — implement with any backend. */
+export interface Signal<T> {
+  getAsync(): Promise<T>;
+  setAsync(value: T): Promise<void>;
+  updateAsync(fn: (current: T) => T): Promise<void>;
+}
+
+export class PipelineSignal<T> implements Signal<T> {
   private constructor(readonly ref: SubscriptionRef.SubscriptionRef<T>) {}
 
   /** Create a signal with an initial value. */

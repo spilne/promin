@@ -11,7 +11,15 @@ import { StreamPipeline } from "./stream-pipeline.ts";
  * const next = await queue.takeAsync();
  * ```
  */
-export class PipelineQueue<T> {
+/** Pluggable queue interface — implement with any backend. */
+export interface AsyncQueue<T> {
+  offerAsync(item: T): Promise<void>;
+  takeAsync(): Promise<T>;
+  shutdownAsync(): Promise<void>;
+  sizeAsync(): Promise<number>;
+}
+
+export class PipelineQueue<T> implements AsyncQueue<T> {
   private constructor(readonly queue: Queue.Queue<T>) {}
 
   /** Create a bounded queue with the given capacity. Producer blocks when full. */

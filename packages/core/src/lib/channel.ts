@@ -14,7 +14,14 @@ import { StreamPipeline } from "./stream-pipeline.ts";
  * await ch.toStream().parAsyncMap(5, process).drain();
  * ```
  */
-export class PipelineChannel<T> {
+/** Pluggable channel interface — implement with any backend. */
+export interface Channel<T> {
+  sendAsync(item: T): Promise<void>;
+  closeAsync(): Promise<void>;
+  readonly isClosed: boolean;
+}
+
+export class PipelineChannel<T> implements Channel<T> {
   private closed = false;
 
   private constructor(private readonly queue: Queue.Queue<T>) {}

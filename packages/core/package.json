@@ -17,10 +17,10 @@
       "default": "./dist/index.js"
     },
     "./testing": {
-      "types": "./dist/lib/durable/storage-test-suite.d.ts",
-      "@promin/source": "./src/lib/durable/storage-test-suite.ts",
-      "import": "./dist/lib/durable/storage-test-suite.js",
-      "default": "./dist/lib/durable/storage-test-suite.js"
+      "types": "./dist/testing.d.ts",
+      "@promin/source": "./src/testing.ts",
+      "import": "./dist/testing.js",
+      "default": "./dist/testing.js"
     },
     "./package.json": "./package.json"
   },

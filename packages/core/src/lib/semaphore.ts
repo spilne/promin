@@ -12,7 +12,12 @@ import { Effect } from "effect";
  * pipeline.withPermit(apiLimit).runPromise();
  * ```
  */
-export class PipelineSemaphore {
+/** Pluggable semaphore interface — implement with any backend. */
+export interface Semaphore {
+  withPermit<T>(effect: Effect.Effect<T>): Effect.Effect<T>;
+}
+
+export class PipelineSemaphore implements Semaphore {
   private constructor(private readonly semaphore: Effect.Semaphore) {}
 
   /** Create a semaphore with N permits. */
