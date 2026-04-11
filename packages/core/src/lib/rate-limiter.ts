@@ -68,10 +68,10 @@ function createMutableState(strategy: Strategy, limit: number): MutableRateLimit
 
 /** Pluggable rate limiter interface — test against this, implement with any backend. */
 export interface RateLimiter {
-  acquireAsync(): Promise<void>;
-  tryAcquireAsync(): Promise<boolean>;
-  withLimitAsync<T>(fn: () => Promise<T>): Promise<T>;
-  remainingAsync(): Promise<number>;
+  acquireAsync(resource?: string): Promise<void>;
+  tryAcquireAsync(resource?: string): Promise<boolean>;
+  withLimitAsync<T>(fn: () => Promise<T>, resource?: string): Promise<T>;
+  remainingAsync(resource?: string): Promise<number>;
 }
 
 export class PipelineRateLimiter implements RateLimiter {
@@ -157,7 +157,7 @@ export class PipelineRateLimiter implements RateLimiter {
   // Promise API
   // ---------------------------------------------------------------------------
 
-  async acquireAsync(): Promise<void> {
+  async acquireAsync(_resource?: string): Promise<void> {
     const now = Date.now();
     const result = this.tryAcquireMutable(now);
     if (result._tag === "rejected") {
@@ -165,18 +165,18 @@ export class PipelineRateLimiter implements RateLimiter {
     }
   }
 
-  async tryAcquireAsync(): Promise<boolean> {
+  async tryAcquireAsync(_resource?: string): Promise<boolean> {
     const now = Date.now();
     const result = this.tryAcquireMutable(now, true);
     return result._tag === "ok";
   }
 
-  async withLimitAsync<T>(fn: () => Promise<T>): Promise<T> {
+  async withLimitAsync<T>(fn: () => Promise<T>, _resource?: string): Promise<T> {
     await this.acquireAsync();
     return fn();
   }
 
-  async remainingAsync(): Promise<number> {
+  async remainingAsync(_resource?: string): Promise<number> {
     return this.computeRemainingMutable(Date.now());
   }
 

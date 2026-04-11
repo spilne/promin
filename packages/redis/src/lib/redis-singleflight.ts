@@ -65,21 +65,26 @@ export class RedisSingleflight implements Singleflight {
       }
     }
 
-    // Joiner — wait for result
-    const timeoutSec = Math.ceil(this.timeoutMs / 1000);
-    const result = await this.redis.brpop(resultKey, timeoutSec);
-    if (!result) {
-      throw new Error(`Singleflight timeout waiting for key: ${key}`);
-    }
+    // Joiner — wait for result on a dedicated connection (BRPOP blocks)
+    const sub = this.redis.duplicate();
+    try {
+      const timeoutSec = Math.ceil(this.timeoutMs / 1000);
+      const result = await sub.brpop(resultKey, timeoutSec);
+      if (!result) {
+        throw new Error(`Singleflight timeout waiting for key: ${key}`);
+      }
 
-    const payload = JSON.parse(result[1]) as { error: boolean; value?: T; message?: string };
-    // Re-publish for other joiners
-    await this.redis.rpush(resultKey, result[1]);
-    await this.redis.pexpire(resultKey, 5000);
+      const payload = JSON.parse(result[1]) as { error: boolean; value?: T; message?: string };
+      // Re-publish for other joiners
+      await this.redis.rpush(resultKey, result[1]);
+      await this.redis.pexpire(resultKey, 5000);
 
-    if (payload.error) {
-      throw new Error(payload.message);
+      if (payload.error) {
+        throw new Error(payload.message);
+      }
+      return payload.value as T;
+    } finally {
+      sub.disconnect();
     }
-    return payload.value as T;
   }
 }

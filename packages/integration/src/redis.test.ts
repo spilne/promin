@@ -1,8 +1,26 @@
 import { it, expect } from "bun:test";
 import { Redis as IoRedis } from "ioredis";
 import { withRedis, uniqueName } from "./infra.ts";
-import { RedisStream, RedisPubSub, RedisStateBackend, RedisCacheStore } from "@promin/redis";
+import {
+  RedisStream,
+  RedisPubSub,
+  RedisStateBackend,
+  RedisCacheStore,
+  RedisSingleflight,
+  RedisRef,
+  RedisThrottle,
+  RedisRateLimiter,
+  RedisChannel,
+  RedisSemaphore,
+} from "@promin/redis";
 import type { RedisClient } from "@promin/redis";
+import {
+  singleflightTestSuite,
+  throttleTestSuite,
+  rateLimiterTestSuite,
+  refTestSuite,
+  channelTestSuite,
+} from "@promin/core/testing";
 
 // ---------------------------------------------------------------------------
 // RedisStream — durable consumer groups
@@ -278,6 +296,91 @@ withRedis("RedisCacheStore — caching with TTL", (ctx) => {
     await cache.delete("x");
     expect(await cache.has("x")).toBe(false);
 
+    r.disconnect();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Redis Primitives — portable conformance suites
+// ---------------------------------------------------------------------------
+
+withRedis("RedisSingleflight conformance", (ctx) => {
+  singleflightTestSuite(() => {
+    const r = new IoRedis(ctx.port, ctx.host) as unknown as RedisClient;
+    return RedisSingleflight.make({ redis: r, prefix: uniqueName("sf") });
+  });
+});
+
+withRedis("RedisRef conformance", (ctx) => {
+  refTestSuite(() =>
+    RedisRef.make({
+      redis: new IoRedis(ctx.port, ctx.host) as unknown as RedisClient,
+      key: uniqueName("ref"),
+      initial: 0,
+    }),
+  );
+});
+
+withRedis("RedisThrottle conformance", (ctx) => {
+  throttleTestSuite(() =>
+    RedisThrottle.make({
+      redis: new IoRedis(ctx.port, ctx.host) as unknown as RedisClient,
+      key: uniqueName("throttle"),
+      permits: 1,
+      windowMs: 100,
+    }),
+  );
+});
+
+withRedis("RedisRateLimiter conformance", (ctx) => {
+  rateLimiterTestSuite(() =>
+    RedisRateLimiter.make({
+      redis: new IoRedis(ctx.port, ctx.host) as unknown as RedisClient,
+      key: uniqueName("rl"),
+      limit: 2,
+      windowMs: 100,
+    }),
+  );
+});
+
+withRedis("RedisChannel conformance", (ctx) => {
+  channelTestSuite(() =>
+    RedisChannel.make({
+      redis: new IoRedis(ctx.port, ctx.host) as unknown as RedisClient,
+      key: uniqueName("chan"),
+      capacity: 10,
+    }),
+  );
+});
+
+withRedis("RedisSemaphore — acquire and release", (ctx) => {
+  function redis(): RedisClient {
+    return new IoRedis(ctx.port, ctx.host) as unknown as RedisClient;
+  }
+
+  it("withPermitAsync runs fn and releases", async () => {
+    const r = redis();
+    const sem = await RedisSemaphore.make({ redis: r, key: uniqueName("sem"), permits: 2 });
+    const result = await sem.withPermitAsync(async () => 42);
+    expect(result).toBe(42);
+    r.disconnect();
+  });
+
+  it("blocks when permits exhausted, resumes on release", async () => {
+    const r = redis();
+    const key = uniqueName("sem-block");
+    const sem = await RedisSemaphore.make({ redis: r, key, permits: 1, timeoutMs: 5000 });
+
+    await sem.acquire();
+
+    // Release after 50ms
+    setTimeout(() => sem.release(), 50);
+
+    const start = Date.now();
+    await sem.acquire();
+    expect(Date.now() - start).toBeGreaterThanOrEqual(30);
+
+    await sem.release();
     r.disconnect();
   });
 });

@@ -50,13 +50,17 @@ export class RedisRateLimiter implements RateLimiter {
     return new RedisRateLimiter(params.redis, params.key, params.limit, params.windowMs);
   }
 
-  async acquireAsync(): Promise<void> {
+  private resolveKey(resource?: string): string {
+    return resource ? `${this.key}:${resource}` : this.key;
+  }
+
+  async acquireAsync(resource?: string): Promise<void> {
     const now = Date.now();
     const member = `${now}:${Math.random().toString(36).slice(2, 10)}`;
     const result = await this.redis.eval(
       RATE_LIMIT_SCRIPT,
       1,
-      this.key,
+      this.resolveKey(resource),
       now,
       this.windowMs,
       this.limit,
@@ -68,26 +72,26 @@ export class RedisRateLimiter implements RateLimiter {
     }
   }
 
-  async tryAcquireAsync(): Promise<boolean> {
+  async tryAcquireAsync(resource?: string): Promise<boolean> {
     try {
-      await this.acquireAsync();
+      await this.acquireAsync(resource);
       return true;
     } catch {
       return false;
     }
   }
 
-  async withLimitAsync<T>(fn: () => Promise<T>): Promise<T> {
-    await this.acquireAsync();
+  async withLimitAsync<T>(fn: () => Promise<T>, resource?: string): Promise<T> {
+    await this.acquireAsync(resource);
     return fn();
   }
 
-  async remainingAsync(): Promise<number> {
+  async remainingAsync(resource?: string): Promise<number> {
     const now = Date.now();
     const result = await this.redis.eval(
       REMAINING_SCRIPT,
       1,
-      this.key,
+      this.resolveKey(resource),
       now,
       this.windowMs,
       this.limit,
