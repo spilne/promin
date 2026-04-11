@@ -175,6 +175,20 @@ export {
   MapActivityRegistry,
   compileWorkflow,
   WorkflowCompilationError,
+  stateMachine,
+  StateMachineBuilder,
+  StateMachineInstance,
+  type StateMachineStorage,
+  InMemoryStateMachineStorage,
+  type MachineSnapshot,
+  type MachineState,
+  type TransitionEvent,
+  type ContextOf,
+  type TransitionsOf,
+  type EventsOf,
+  type TerminalStates,
+  type TransitionTo,
+  transitionTo,
 } from "./lib/durable/index.ts";
 
 // Scheduler
