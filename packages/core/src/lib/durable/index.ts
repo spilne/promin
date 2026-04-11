@@ -83,6 +83,7 @@ export {
   type MachineMiddleware,
   type TransitionContext,
   composeMachineMiddleware,
+  retryMiddleware,
 } from "./state-machine.ts";
 export type { StateMachineStorage } from "./state-machine-storage.ts";
 export { InMemoryStateMachineStorage } from "./state-machine-storage.ts";

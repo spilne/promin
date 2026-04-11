@@ -10,6 +10,7 @@ import type {
 } from "./state-machine-types.ts";
 import { transitionTo } from "./state-machine-types.ts";
 import type { StateMachineStorage } from "./state-machine-storage.ts";
+import type { RetryPolicy } from "../retry.ts";
 
 // ---------------------------------------------------------------------------
 // Internal config types
@@ -28,6 +29,8 @@ interface TransitionConfig {
   to?: string; // undefined = conditional (action decides)
   guard?: (context: unknown) => boolean | Promise<boolean>;
   action?: (context: unknown, transition: TransitionHelper) => unknown | Promise<unknown>;
+  retry?: RetryPolicy<unknown>;
+  onError?: string; // target state on action failure (after retries exhausted)
 }
 
 type TransitionHelper = <Target extends string>(
@@ -55,15 +58,46 @@ export type MachineMiddleware = (
 /** Compose multiple middleware into one. */
 export function composeMachineMiddleware(...middlewares: MachineMiddleware[]): MachineMiddleware {
   return (ctx, next) => {
-    let index = -1;
     const dispatch = (i: number): Promise<void> => {
-      if (i <= index) return Promise.reject(new Error("next() called multiple times"));
-      index = i;
       if (i >= middlewares.length) return Promise.resolve(next());
       return Promise.resolve(middlewares[i]!(ctx, () => dispatch(i + 1)));
     };
     return dispatch(0);
   };
+}
+
+/** Reusable retry middleware — wraps every transition with retry logic. */
+export function retryMiddleware(policy: RetryPolicy<unknown>): MachineMiddleware {
+  return async (_ctx, next) => {
+    await executeWithRetryReturn(next, policy);
+  };
+}
+
+async function executeWithRetryReturn<T>(
+  fn: () => T | Promise<T>,
+  policy: RetryPolicy<unknown>,
+): Promise<T> {
+  const maxRetries = policy.maxRetries ?? 3;
+  const baseDelay = policy.baseDelayMs ?? 250;
+  const maxDelay = policy.maxDelayMs ?? Infinity;
+  const jitter = policy.jitter ?? false;
+  const timeBudget = policy.timeBudgetMs ?? Infinity;
+  const start = Date.now();
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt >= maxRetries) throw err;
+      if (policy.when && !policy.when(err)) throw err;
+      if (Date.now() - start >= timeBudget) throw err;
+
+      let delay = Math.min(baseDelay * 2 ** attempt, maxDelay);
+      if (jitter) delay *= 0.75 + Math.random() * 0.5;
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw new Error("unreachable");
 }
 
 /** Safety limits to prevent infinite loops and runaway machines. */
@@ -123,6 +157,8 @@ export class StateMachineBuilder<S> {
       to?: string & keyof S;
       guard?: (context: any) => boolean | Promise<boolean>;
       action?: (context: any, transition: any) => any | Promise<any>;
+      retry?: RetryPolicy<unknown>;
+      onError?: string & keyof S;
     },
   ): this {
     this.transitions.push({
@@ -131,6 +167,8 @@ export class StateMachineBuilder<S> {
       to: config.to,
       guard: config.guard,
       action: config.action,
+      retry: config.retry,
+      onError: config.onError,
     });
     return this;
   }
@@ -248,34 +286,50 @@ export class StateMachineInstance<S> {
       let targetState: string;
       let newContext: unknown;
 
-      if (transition.action) {
-        const helper = <Target extends string>(target: Target, ctx: unknown) =>
-          transitionTo<any, any>(target, ctx);
+      try {
+        if (transition.action) {
+          const helper = <Target extends string>(target: Target, ctx: unknown) =>
+            transitionTo<any, any>(target, ctx);
 
-        const result = await transition.action(machine.context, helper);
+          const executeAction = () => transition.action!(machine.context, helper);
+          const result = transition.retry
+            ? await executeWithRetryReturn(executeAction, transition.retry)
+            : await executeAction();
 
-        if (
-          result &&
-          typeof result === "object" &&
-          "_tag" in result &&
-          result._tag === "TransitionTo"
-        ) {
-          const tt = result as TransitionTo<any, any>;
-          targetState = tt.target as string;
-          newContext = tt.context;
+          if (
+            result &&
+            typeof result === "object" &&
+            "_tag" in result &&
+            result._tag === "TransitionTo"
+          ) {
+            const tt = result as TransitionTo<any, any>;
+            targetState = tt.target as string;
+            newContext = tt.context;
+          } else if (transition.to) {
+            targetState = transition.to;
+            newContext = result;
+          } else {
+            throw new Error(
+              `Transition for "${params.event}" has no target state and action didn't return TransitionTo`,
+            );
+          }
         } else if (transition.to) {
           targetState = transition.to;
-          newContext = result;
+          newContext = machine.context;
         } else {
-          throw new Error(
-            `Transition for "${params.event}" has no target state and action didn't return TransitionTo`,
-          );
+          throw new Error(`Transition for "${params.event}" has no action and no target state`);
         }
-      } else if (transition.to) {
-        targetState = transition.to;
-        newContext = machine.context;
-      } else {
-        throw new Error(`Transition for "${params.event}" has no action and no target state`);
+      } catch (err) {
+        if (transition.onError && this.states.has(transition.onError)) {
+          // Route to error state instead of throwing
+          targetState = transition.onError;
+          newContext = {
+            ...(machine.context as any),
+            error: err instanceof Error ? err.message : String(err),
+          };
+        } else {
+          throw err;
+        }
       }
 
       // Validate target state exists

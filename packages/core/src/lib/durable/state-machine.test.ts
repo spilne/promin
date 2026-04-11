@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "bun:test";
 import {
   stateMachine,
   composeMachineMiddleware,
+  retryMiddleware,
   type StateMachineInstance,
   type MachineMiddleware,
 } from "./state-machine.ts";
@@ -785,5 +786,133 @@ describe("StateMachine", () => {
 
     const events = await machine.getHistory("mw-4");
     expect((events[0]!.metadata as any).injected).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // Retry
+  // -------------------------------------------------------------------------
+
+  it("per-transition retry retries failed actions", async () => {
+    let attempts = 0;
+    type Simple = {
+      a: { context: { v: number }; transitions: { go: "b" } };
+      b: { context: { v: number }; transitions: {} };
+    };
+    const machine = stateMachine<Simple>({ name: "retry", storage })
+      .state("a")
+      .state("b", { terminal: true })
+      .on("go", {
+        from: "a",
+        to: "b",
+        action: async (ctx: { v: number }) => {
+          attempts++;
+          if (attempts < 3) throw new Error("fail");
+          return { v: ctx.v + 1 };
+        },
+        retry: { maxRetries: 5, baseDelayMs: 1 },
+      })
+      .initial("a")
+      .build();
+
+    await machine.start({ id: "retry-1", context: { v: 0 } });
+    await machine.send({ id: "retry-1", event: "go" });
+    expect(attempts).toBe(3);
+    expect((await machine.getState("retry-1"))!.current).toBe("b");
+  });
+
+  it("retryMiddleware retries the full transition including persistence", async () => {
+    let persistAttempts = 0;
+    const retryMw = retryMiddleware({ maxRetries: 3, baseDelayMs: 1 });
+    // Compose: a middleware that fails persistence on first attempt
+    const failOnceMw: MachineMiddleware = async (ctx, next) => {
+      persistAttempts++;
+      if (persistAttempts < 2) throw new Error("transient persistence failure");
+      await next();
+    };
+    type Simple = {
+      a: { context: { v: number }; transitions: { go: "b" } };
+      b: { context: { v: number }; transitions: {} };
+    };
+    const machine = stateMachine<Simple>({ name: "retry-mw", storage })
+      .use(retryMw)
+      .use(failOnceMw)
+      .state("a")
+      .state("b", { terminal: true })
+      .on("go", {
+        from: "a",
+        to: "b",
+        action: (ctx: { v: number }) => ({ v: ctx.v + 1 }),
+      })
+      .initial("a")
+      .build();
+
+    await machine.start({ id: "retry-mw-1", context: { v: 0 } });
+    await machine.send({ id: "retry-mw-1", event: "go" });
+    expect(persistAttempts).toBe(2);
+    expect((await machine.getState("retry-mw-1"))!.current).toBe("b");
+  });
+
+  // -------------------------------------------------------------------------
+  // onError transition
+  // -------------------------------------------------------------------------
+
+  it("onError routes to error state on action failure", async () => {
+    type WithError = {
+      pending: { context: { amount: number }; transitions: { charge: "charged" } };
+      charged: { context: { amount: number; txId: string }; transitions: {} };
+      payment_failed: { context: { amount: number; error: string }; transitions: {} };
+    };
+    const machine = stateMachine<WithError>({ name: "onerror", storage })
+      .state("pending")
+      .state("charged", { terminal: true })
+      .state("payment_failed", { terminal: true })
+      .on("charge", {
+        from: "pending",
+        to: "charged",
+        action: async () => {
+          throw new Error("card declined");
+        },
+        onError: "payment_failed",
+      })
+      .initial("pending")
+      .build();
+
+    await machine.start({ id: "err-1", context: { amount: 100 } });
+    await machine.send({ id: "err-1", event: "charge" });
+
+    const state = await machine.getState("err-1");
+    expect(state!.current).toBe("payment_failed");
+    expect((state!.context as any).error).toBe("card declined");
+  });
+
+  it("onError with retry — retries first, then routes to error state", async () => {
+    let attempts = 0;
+    type WithError = {
+      pending: { context: { v: number }; transitions: { go: "done" } };
+      done: { context: { v: number }; transitions: {} };
+      failed: { context: { v: number; error: string }; transitions: {} };
+    };
+    const machine = stateMachine<WithError>({ name: "onerror-retry", storage })
+      .state("pending")
+      .state("done", { terminal: true })
+      .state("failed", { terminal: true })
+      .on("go", {
+        from: "pending",
+        to: "done",
+        action: async () => {
+          attempts++;
+          throw new Error("always fails");
+        },
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+        onError: "failed",
+      })
+      .initial("pending")
+      .build();
+
+    await machine.start({ id: "err-2", context: { v: 0 } });
+    await machine.send({ id: "err-2", event: "go" });
+
+    expect(attempts).toBe(3); // 1 initial + 2 retries
+    expect((await machine.getState("err-2"))!.current).toBe("failed");
   });
 });
