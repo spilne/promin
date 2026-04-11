@@ -48,6 +48,8 @@ export { PipelinePool, type ResourcePool } from "./lib/pool.ts";
 export { PipelineSingleflight, type Singleflight } from "./lib/singleflight.ts";
 export { PipelineThrottle, type Throttle } from "./lib/throttle.ts";
 export { PipelineRateLimiter, RateLimitExceeded, type RateLimiter } from "./lib/rate-limiter.ts";
+export { PipelineLatch, type Latch } from "./lib/latch.ts";
+export { PipelineBarrier, type Barrier } from "./lib/barrier.ts";
 
 // Typeclasses — data
 export {
