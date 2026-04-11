@@ -44,6 +44,12 @@ import { join } from "path";
 import { tmpdir } from "os";
 import type { DataFrameExecutor, ExecutionCost, LogicalPlan, AggFn, WindowFn } from "@promin/core";
 import { isCompilable, astToSql } from "@promin/core";
+import {
+  rowsToArrow,
+  ensureArrowExtension,
+  releaseArrowSlot,
+  resetArrowState,
+} from "./arrow-bridge.ts";
 
 /**
  * DuckDB-backed DataFrame executor. Compiles logical plans to SQL and
@@ -65,11 +71,22 @@ import { isCompilable, astToSql } from "@promin/core";
  * await df.sort("revenue", "desc").limit(10).collect(); // ~1.4ms
  * ```
  */
+export interface DuckDBExecutorConfig {
+  /**
+   * Control Arrow IPC usage for data transfer.
+   * - `"auto"` — try to load arrow extension, fall back to JSON (default)
+   * - `true` — require Arrow, throw if extension unavailable
+   * - `false` — disable Arrow, always use JSON (for debugging or compatibility)
+   */
+  arrow?: "auto" | boolean;
+}
+
 export class DuckDBExecutor implements DataFrameExecutor {
   private db: Database | null = null;
   private tmpDir: string;
   private sourceCache = new Map<number, { ref: WeakRef<unknown[]>; tableName: string }>();
   private cacheCounter = 0;
+  private readonly arrowConfig: "auto" | boolean;
 
   /**
    * Registry of hint → SQL expression builder.
@@ -79,7 +96,8 @@ export class DuckDBExecutor implements DataFrameExecutor {
    */
   private loaders = new Map<string, (path: string) => string>();
 
-  constructor() {
+  constructor(config?: DuckDBExecutorConfig) {
+    this.arrowConfig = config?.arrow ?? "auto";
     this.tmpDir = mkdtempSync(join(tmpdir(), "duckdb-df-"));
 
     // Built-in loaders for common formats
@@ -118,9 +136,28 @@ export class DuckDBExecutor implements DataFrameExecutor {
     return this;
   }
 
+  private arrowAvailable = false;
+
   private async getDb(): Promise<Database> {
     if (!this.db) {
       this.db = await Database.create(":memory:");
+
+      if (this.arrowConfig === false) {
+        this.arrowAvailable = false;
+      } else if (this.arrowConfig === true) {
+        // Required — throw if unavailable
+        await ensureArrowExtension(this.db);
+        this.arrowAvailable = true;
+      } else {
+        // "auto" — try, fall back silently
+        try {
+          await ensureArrowExtension(this.db);
+          this.arrowAvailable = true;
+        } catch {
+          resetArrowState();
+          this.arrowAvailable = false;
+        }
+      }
     }
     return this.db;
   }
@@ -134,6 +171,10 @@ export class DuckDBExecutor implements DataFrameExecutor {
         // Ignore close errors — DuckDB NAPI cleanup can segfault
       }
       this.db = null;
+      if (this.arrowAvailable) {
+        this.arrowAvailable = false;
+        releaseArrowSlot();
+      }
       this.sourceCache.clear();
     }
   }
@@ -146,11 +187,15 @@ export class DuckDBExecutor implements DataFrameExecutor {
       this.sourceCache,
       this.cacheCounter,
       this.loaders,
+      this.arrowAvailable,
     );
 
     try {
       const sql = await ctx.compile(plan);
       this.cacheCounter = ctx.getCacheCounter();
+      // NOTE: We use db.all() for output instead of arrowIPCAll() because
+      // arrowIPCAll causes NAPI segfaults during cleanup in Bun runtime.
+      // Arrow IPC is used only for INPUT (register_buffer) where it's stable.
       const rows = await db.all(sql);
       return convertBigInts(rows) as T[];
     } finally {
@@ -280,6 +325,7 @@ export class DuckDBExecutor implements DataFrameExecutor {
   ): Promise<T[]> {
     const db = await this.getDb();
     const registeredTables: string[] = [];
+    const arrowBufferNames: string[] = [];
     const tempFiles: string[] = [];
 
     try {
@@ -292,10 +338,23 @@ export class DuckDBExecutor implements DataFrameExecutor {
           continue;
         }
 
+        if (this.arrowAvailable) {
+          try {
+            const buffers = rowsToArrow(rows as Record<string, unknown>[]);
+            const bufferName = `_arrowbuf_${name}_${this.cacheCounter++}`;
+            await db.register_buffer(bufferName, buffers, true);
+            arrowBufferNames.push(bufferName);
+            await db.run(`CREATE TEMP TABLE "${name}" AS SELECT * FROM "${bufferName}"`);
+            registeredTables.push(name);
+            continue;
+          } catch {
+            // Fall through to JSON path
+          }
+        }
+
         const filePath = join(this.tmpDir, `_sql_${name}_${this.cacheCounter++}.json`);
         writeFileSync(filePath, JSON.stringify(rows));
         tempFiles.push(filePath);
-
         await db.run(`CREATE TEMP TABLE "${name}" AS SELECT * FROM read_json_auto('${filePath}')`);
         registeredTables.push(name);
       }
@@ -304,10 +363,17 @@ export class DuckDBExecutor implements DataFrameExecutor {
       const result = await db.all(sql);
       return convertBigInts(result) as T[];
     } finally {
-      // Clean up temp tables and files
+      // Clean up temp tables, arrow buffers, and files
       for (const name of registeredTables) {
         try {
           await db.run(`DROP TABLE IF EXISTS "${name}"`);
+        } catch {
+          /* ignore */
+        }
+      }
+      for (const name of arrowBufferNames) {
+        try {
+          await db.unregister_buffer(name);
         } catch {
           /* ignore */
         }
@@ -355,6 +421,7 @@ type SourceCache = Map<number, { ref: WeakRef<unknown[]>; tableName: string }>;
 class CompilationContext {
   /** Temp tables created during this execution (cleaned up after). */
   private tempTables: string[] = [];
+  private arrowBufferNames: string[] = [];
   private files: string[] = [];
   private tempCounter = 0;
   private cacheCounter: number;
@@ -365,6 +432,7 @@ class CompilationContext {
     private sourceCache: SourceCache,
     cacheCounter: number,
     private loaders: Map<string, (path: string) => string>,
+    private arrowAvailable: boolean,
   ) {
     this.cacheCounter = cacheCounter;
   }
@@ -391,6 +459,13 @@ class CompilationContext {
     for (const table of this.tempTables) {
       try {
         await this.db.run(`DROP TABLE IF EXISTS "${table}"`);
+      } catch {
+        // ignore
+      }
+    }
+    for (const name of this.arrowBufferNames) {
+      try {
+        await this.db.unregister_buffer(name);
       } catch {
         // ignore
       }
@@ -428,11 +503,28 @@ class CompilationContext {
     }
 
     const name = `_src${this.cacheCounter++}`;
-    const filePath = join(this.tmpDir, `${name}.json`);
-    writeFileSync(filePath, JSON.stringify(data));
-    this.files.push(filePath);
+    let loaded = false;
 
-    await this.db.run(`CREATE TABLE "${name}" AS SELECT * FROM read_json_auto('${filePath}')`);
+    if (this.arrowAvailable) {
+      try {
+        const buffers = rowsToArrow(data as Record<string, unknown>[]);
+        const bufferName = `_arrowsrc_${name}`;
+        await this.db.register_buffer(bufferName, buffers, true);
+        await this.db.run(`CREATE TABLE "${name}" AS SELECT * FROM "${bufferName}"`);
+        await this.db.unregister_buffer(bufferName);
+        loaded = true;
+      } catch {
+        // Fall through to JSON path
+      }
+    }
+
+    if (!loaded) {
+      const filePath = join(this.tmpDir, `${name}.json`);
+      writeFileSync(filePath, JSON.stringify(data));
+      this.files.push(filePath);
+      await this.db.run(`CREATE TABLE "${name}" AS SELECT * FROM read_json_auto('${filePath}')`);
+    }
+
     this.sourceCache.set(this.cacheCounter, { ref: new WeakRef(data), tableName: name });
     return name;
   }
@@ -446,11 +538,30 @@ class CompilationContext {
     }
 
     const name = this.nextTempTable();
-    const filePath = join(this.tmpDir, `${name}.json`);
-    writeFileSync(filePath, JSON.stringify(data));
-    this.files.push(filePath);
+    let loaded = false;
 
-    await this.db.run(`CREATE TEMP TABLE "${name}" AS SELECT * FROM read_json_auto('${filePath}')`);
+    if (this.arrowAvailable) {
+      try {
+        const buffers = rowsToArrow(data as Record<string, unknown>[]);
+        const bufferName = `_arrowtmp_${name}`;
+        await this.db.register_buffer(bufferName, buffers, true);
+        await this.db.run(`CREATE TEMP TABLE "${name}" AS SELECT * FROM "${bufferName}"`);
+        await this.db.unregister_buffer(bufferName);
+        loaded = true;
+      } catch {
+        // Fall through to JSON path
+      }
+    }
+
+    if (!loaded) {
+      const filePath = join(this.tmpDir, `${name}.json`);
+      writeFileSync(filePath, JSON.stringify(data));
+      this.files.push(filePath);
+      await this.db.run(
+        `CREATE TEMP TABLE "${name}" AS SELECT * FROM read_json_auto('${filePath}')`,
+      );
+    }
+
     return name;
   }
 
