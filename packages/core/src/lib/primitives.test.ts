@@ -13,6 +13,33 @@ import {
   PipelinePubSub,
   PipelinePool,
 } from "../index.ts";
+import { refTestSuite } from "./ref-test-suite.ts";
+import { deferredTestSuite } from "./deferred-test-suite.ts";
+import { channelTestSuite } from "./channel-test-suite.ts";
+import { signalTestSuite } from "./signal-test-suite.ts";
+import { pubsubTestSuite } from "./pubsub-test-suite.ts";
+import { queueTestSuite } from "./queue-test-suite.ts";
+import { poolTestSuite } from "./pool-test-suite.ts";
+
+// ---------------------------------------------------------------------------
+// Portable conformance suites (Promise API)
+// ---------------------------------------------------------------------------
+
+refTestSuite(() => PipelineRef.make(0));
+deferredTestSuite(() => PipelineDeferred.make<number>());
+channelTestSuite(() => PipelineChannel.make<number>(10));
+signalTestSuite(() => PipelineSignal.make(0));
+pubsubTestSuite(() => PipelinePubSub.make<number>(10));
+queueTestSuite(() => PipelineQueue.make<number>(10));
+poolTestSuite(() =>
+  PipelinePool.make({
+    acquire: () => ({ id: 1 }),
+    release: () => {},
+    size: 2,
+  }),
+);
+
+// ---------------------------------------------------------------------------
 
 class TestError extends Data.TaggedError("TestError")<{
   readonly message: string;
