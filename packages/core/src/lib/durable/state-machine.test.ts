@@ -345,4 +345,81 @@ describe("StateMachine", () => {
       "Machine dup-1 already exists",
     );
   });
+
+  // -------------------------------------------------------------------------
+  // Limits
+  // -------------------------------------------------------------------------
+
+  it("maxTransitions prevents infinite loops", async () => {
+    const machine = stateMachine<TrafficLight>({
+      name: "limited",
+      storage,
+      limits: { maxTransitions: 3 },
+    })
+      .state("red")
+      .state("green")
+      .state("yellow")
+      .on("next", {
+        from: "red",
+        to: "green",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .on("next", {
+        from: "green",
+        to: "yellow",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .on("next", {
+        from: "yellow",
+        to: "red",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .initial("red")
+      .build();
+
+    await machine.start({ id: "lim-1", context: { count: 0 } });
+    await machine.send({ id: "lim-1", event: "next" }); // 1
+    await machine.send({ id: "lim-1", event: "next" }); // 2
+    await machine.send({ id: "lim-1", event: "next" }); // 3
+
+    await expect(machine.send({ id: "lim-1", event: "next" })).rejects.toThrow(
+      "exceeded max transitions limit",
+    );
+  });
+
+  it("maxTransitionsPerSecond rate limits sends", async () => {
+    const machine = stateMachine<TrafficLight>({
+      name: "rated",
+      storage,
+      limits: { maxTransitionsPerSecond: 2 },
+    })
+      .state("red")
+      .state("green")
+      .state("yellow")
+      .on("next", {
+        from: "red",
+        to: "green",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .on("next", {
+        from: "green",
+        to: "yellow",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .on("next", {
+        from: "yellow",
+        to: "red",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .initial("red")
+      .build();
+
+    await machine.start({ id: "rate-1", context: { count: 0 } });
+    await machine.send({ id: "rate-1", event: "next" }); // 1/sec
+    await machine.send({ id: "rate-1", event: "next" }); // 2/sec
+
+    await expect(machine.send({ id: "rate-1", event: "next" })).rejects.toThrow(
+      "exceeded rate limit",
+    );
+  });
 });

@@ -33,6 +33,14 @@ type TransitionHelper = <Target extends string>(
   context: unknown,
 ) => TransitionTo<any, any>;
 
+/** Safety limits to prevent infinite loops and runaway machines. */
+export interface MachineLimits {
+  /** Max total transitions over the machine's lifetime. Default: unlimited. */
+  maxTransitions?: number;
+  /** Max transitions per second. Default: unlimited. */
+  maxTransitionsPerSecond?: number;
+}
+
 // ---------------------------------------------------------------------------
 // Builder
 // ---------------------------------------------------------------------------
@@ -46,6 +54,7 @@ export class StateMachineBuilder<S> {
     private readonly name: string,
     private readonly storage: StateMachineStorage,
     private readonly version?: string,
+    private readonly limits?: MachineLimits,
   ) {}
 
   state(name: string & keyof S, options?: { terminal?: boolean }): this {
@@ -90,6 +99,7 @@ export class StateMachineBuilder<S> {
       this.transitions,
       this.initialState,
       this.version,
+      this.limits,
     );
   }
 }
@@ -99,6 +109,8 @@ export class StateMachineBuilder<S> {
 // ---------------------------------------------------------------------------
 
 export class StateMachineInstance<S> {
+  private recentSendTimestamps: number[] = [];
+
   constructor(
     private readonly name: string,
     private readonly storage: StateMachineStorage,
@@ -106,6 +118,7 @@ export class StateMachineInstance<S> {
     private readonly transitions: TransitionConfig[],
     private readonly initialState: string,
     private readonly version?: string,
+    private readonly limits?: MachineLimits,
   ) {}
 
   async start(params: { id: string; context: ContextOf<S, keyof S & string> }): Promise<void> {
@@ -128,6 +141,27 @@ export class StateMachineInstance<S> {
     try {
       const machine = await this.storage.load(params.id);
       if (!machine) throw new Error(`Machine ${params.id} not found`);
+
+      // Check limits
+      if (this.limits?.maxTransitions) {
+        const events = await this.storage.loadEvents(params.id);
+        if (events.length >= this.limits.maxTransitions) {
+          throw new Error(
+            `Machine ${params.id} exceeded max transitions limit (${this.limits.maxTransitions})`,
+          );
+        }
+      }
+
+      if (this.limits?.maxTransitionsPerSecond) {
+        const now = Date.now();
+        this.recentSendTimestamps = this.recentSendTimestamps.filter((t) => t > now - 1000);
+        if (this.recentSendTimestamps.length >= this.limits.maxTransitionsPerSecond) {
+          throw new Error(
+            `Machine ${params.id} exceeded rate limit (${this.limits.maxTransitionsPerSecond}/sec)`,
+          );
+        }
+        this.recentSendTimestamps.push(now);
+      }
 
       // Find matching transition
       const transition = this.transitions.find((t) => {
@@ -221,6 +255,7 @@ export function stateMachine<S>(params: {
   name: string;
   storage: StateMachineStorage;
   version?: string;
+  limits?: MachineLimits;
 }): StateMachineBuilder<S> {
-  return new StateMachineBuilder<S>(params.name, params.storage, params.version);
+  return new StateMachineBuilder<S>(params.name, params.storage, params.version, params.limits);
 }

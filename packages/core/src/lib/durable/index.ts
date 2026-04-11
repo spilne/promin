@@ -75,7 +75,12 @@ export {
 export { compileWorkflow, WorkflowCompilationError } from "./workflow-compiler.ts";
 
 // State machine
-export { stateMachine, StateMachineBuilder, StateMachineInstance } from "./state-machine.ts";
+export {
+  stateMachine,
+  StateMachineBuilder,
+  StateMachineInstance,
+  type MachineLimits,
+} from "./state-machine.ts";
 export type { StateMachineStorage } from "./state-machine-storage.ts";
 export { InMemoryStateMachineStorage } from "./state-machine-storage.ts";
 export type {
