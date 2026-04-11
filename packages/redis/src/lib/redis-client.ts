@@ -39,6 +39,24 @@ export interface RedisClient {
   hdel(key: string, ...fields: string[]): Promise<number>;
   hkeys(key: string): Promise<string[]>;
 
+  // -- Sorted Set --
+  zadd(key: string, ...args: (string | number)[]): Promise<number>;
+  zrem(key: string, ...members: string[]): Promise<number>;
+  zrangebyscore(
+    key: string,
+    min: string | number,
+    max: string | number,
+    ...args: (string | number)[]
+  ): Promise<string[]>;
+  zcard(key: string): Promise<number>;
+  zremrangebyscore(key: string, min: string | number, max: string | number): Promise<number>;
+
+  // -- Set --
+  sadd(key: string, ...members: string[]): Promise<number>;
+  srem(key: string, ...members: string[]): Promise<number>;
+  smembers(key: string): Promise<string[]>;
+  sinter(...keys: string[]): Promise<string[]>;
+
   // -- Stream --
   xadd(key: string, id: string, ...fields: string[]): Promise<string>;
   xreadgroup(...args: unknown[]): Promise<unknown>;

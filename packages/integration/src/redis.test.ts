@@ -14,9 +14,11 @@ import {
   RedisSemaphore,
   RedisLatch,
   RedisBarrier,
+  RedisWorkflowStorage,
 } from "@promin/redis";
 import type { RedisClient } from "@promin/redis";
 import {
+  storageTestSuite,
   singleflightTestSuite,
   throttleTestSuite,
   rateLimiterTestSuite,
@@ -414,5 +416,19 @@ withRedis("RedisBarrier conformance", (ctx) => {
       key: uniqueName("barrier"),
       parties: 3,
     }),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// RedisWorkflowStorage — portable conformance suite
+// ---------------------------------------------------------------------------
+
+withRedis("RedisWorkflowStorage conformance", (ctx) => {
+  storageTestSuite(
+    () =>
+      new RedisWorkflowStorage({
+        redis: new IoRedis(ctx.port, ctx.host) as unknown as RedisClient,
+        prefix: uniqueName("wf"),
+      }),
   );
 });
