@@ -7,9 +7,12 @@ export { type DataFrameExecutor, type ExecutionCost } from "./executor.ts";
 export {
   type LogicalPlan,
   type AggFn,
+  type CustomAgg,
   type WindowFn,
   type RollingFn,
   type CumulativeFn,
+  percentile,
+  reduce,
 } from "./logical-plan.ts";
 export { optimizePlan } from "./plan-optimizer.ts";
 export {
@@ -20,3 +23,4 @@ export {
   isFileSource,
   type FileSourceDescriptor,
 } from "./file-source.ts";
+export { type DataFrameSink, CsvSink, JsonlSink } from "./sink.ts";

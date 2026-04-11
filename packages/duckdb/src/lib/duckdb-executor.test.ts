@@ -499,6 +499,82 @@ describe("DuckDBExecutor", () => {
     });
   });
 
+  describe("DataFrame.sql — raw SQL against named DataFrames", () => {
+    it("executes raw SQL with JOIN across named DataFrames", async () => {
+      const users = DataFrame.fromArray([
+        { id: 1, name: "Alice", active: true },
+        { id: 2, name: "Bob", active: false },
+        { id: 3, name: "Carol", active: true },
+      ]);
+      const orders = DataFrame.fromArray([
+        { user_id: 1, amount: 100 },
+        { user_id: 1, amount: 200 },
+        { user_id: 3, amount: 50 },
+      ]);
+
+      const executor = new DuckDBExecutor();
+      const result = await DataFrame.sql(
+        `SELECT u.name, SUM(o.amount) as total
+         FROM users u
+         JOIN orders o ON u.id = o.user_id
+         WHERE u.active = true
+         GROUP BY u.name
+         ORDER BY total DESC`,
+        { users, orders },
+        executor,
+      );
+      const rows = await result.collect();
+      expect(rows).toHaveLength(2);
+      expect(rows[0]!.name).toBe("Alice");
+      expect(rows[0]!.total).toBe(300);
+      expect(rows[1]!.name).toBe("Carol");
+      expect(rows[1]!.total).toBe(50);
+    });
+
+    it("instance .sql() uses 'self' as table name", async () => {
+      const executor = new DuckDBExecutor();
+      const result = await DataFrame.fromArray([{ x: 1 }, { x: 2 }, { x: 3 }, { x: 4 }, { x: 5 }])
+        .withExecutor(executor)
+        .sql("SELECT SUM(x) as total FROM self");
+      const rows = await result.collect();
+      expect(rows[0]!.total).toBe(15);
+    });
+
+    it("handles single DataFrame with aggregation", async () => {
+      const executor = new DuckDBExecutor();
+      const sales = DataFrame.fromArray([
+        { region: "north", revenue: 100 },
+        { region: "south", revenue: 200 },
+        { region: "north", revenue: 300 },
+      ]);
+
+      const result = await DataFrame.sql(
+        `SELECT region, SUM(revenue) as total FROM sales GROUP BY region ORDER BY region`,
+        { sales },
+        executor,
+      );
+      const rows = await result.collect();
+      expect(rows).toEqual([
+        { region: "north", total: 400 },
+        { region: "south", total: 200 },
+      ]);
+    });
+
+    it("throws when executor lacks executeSql", async () => {
+      const df = DataFrame.fromArray([{ x: 1 }]);
+      await expect(DataFrame.sql("SELECT * FROM t", { t: df }, df["_executor"])).rejects.toThrow(
+        "SQL interface requires a DuckDB executor",
+      );
+    });
+
+    it("instance .sql() throws when executor lacks executeSql", async () => {
+      const df = DataFrame.fromArray([{ x: 1 }]);
+      await expect(df.sql("SELECT * FROM self")).rejects.toThrow(
+        "SQL interface requires a DuckDB executor",
+      );
+    });
+  });
+
   describe("predicate pushdown — Expr compiled to SQL", () => {
     const { col, when } = require("@promin/core");
 

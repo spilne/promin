@@ -10,6 +10,7 @@ import type { StreamPipeline } from "../stream-pipeline.ts";
 import type { LogicalPlan, WindowFn, AggFn, RollingFn } from "./logical-plan.ts";
 import type { FileSourceDescriptor } from "./file-source.ts";
 import type { DataFrameExecutor } from "./executor.ts";
+import type { DataFrameSink } from "./sink.ts";
 import { Expr } from "./expr.ts";
 
 function isExpr(value: unknown): value is Expr {
@@ -117,6 +118,37 @@ export class DataFrame<T> {
       load: source.load as () => Promise<unknown[]>,
       hint: source.hint,
     });
+  }
+
+  /**
+   * Execute raw SQL against named DataFrames. Requires a DuckDB executor.
+   *
+   * Each DataFrame is registered as a named table that can be referenced
+   * in the SQL query. The result is returned as a new DataFrame.
+   *
+   * @example
+   * ```ts
+   * const result = await DataFrame.sql(
+   *   `SELECT u.name, SUM(o.amount) as total
+   *    FROM users u
+   *    JOIN orders o ON u.id = o.user_id
+   *    WHERE u.active = true
+   *    GROUP BY u.name`,
+   *   { users: usersDF, orders: ordersDF },
+   *   executor,
+   * );
+   * ```
+   */
+  static async sql<T = Record<string, unknown>>(
+    query: string,
+    tables: Record<string, DataFrame<any>>,
+    executor: DataFrameExecutor,
+  ): Promise<DataFrame<T>> {
+    if (!("executeSql" in executor)) {
+      throw new Error("SQL interface requires a DuckDB executor");
+    }
+    const rows: T[] = await (executor as any).executeSql(query, tables);
+    return DataFrame.fromArray(rows);
   }
 
   static async diff<T>(
@@ -780,6 +812,35 @@ export class DataFrame<T> {
 
   async toArray(): Promise<T[]> {
     return this.collect();
+  }
+
+  /** Write all rows to a sink. Collects the plan then streams rows to the sink. */
+  async to(sink: DataFrameSink<T>): Promise<void> {
+    const rows = await this.collect();
+    for (const row of rows) await sink.write(row);
+    await sink.end();
+  }
+
+  // =========================================================================
+  // SQL INTERFACE
+  // =========================================================================
+
+  /**
+   * Run raw SQL against this DataFrame (referenced as "self" in the query).
+   * Requires a DuckDB executor.
+   *
+   * @example
+   * ```ts
+   * const df = DataFrame.fromArray(data).withExecutor(duckdbExecutor);
+   * const result = await df.sql<{ total: number }>("SELECT SUM(x) as total FROM self");
+   * ```
+   */
+  async sql<U = Record<string, unknown>>(query: string): Promise<DataFrame<U>> {
+    if (!("executeSql" in this._executor)) {
+      throw new Error("SQL interface requires a DuckDB executor");
+    }
+    const rows: U[] = await (this._executor as any).executeSql(query, { self: this });
+    return DataFrame.fromArray(rows);
   }
 
   // =========================================================================

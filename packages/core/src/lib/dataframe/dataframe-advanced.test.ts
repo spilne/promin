@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test";
 import { DataFrame } from "./dataframe.ts";
 import { optimizePlan } from "./plan-optimizer.ts";
 import { col } from "./expr.ts";
+import { percentile, reduce } from "./logical-plan.ts";
 
 // ---------------------------------------------------------------------------
 // Test data
@@ -745,5 +746,104 @@ describe("Column pruning — plan optimizer preserves correctness", () => {
       .select("a", "b")
       .collect();
     expect(result).toEqual([{ a: 5, b: 6 }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Custom aggregation functions
+// ---------------------------------------------------------------------------
+
+describe("Custom aggregation functions — median, stddev, mode, countDistinct, custom reducers", () => {
+  it("groupBy with median aggregation", async () => {
+    const df = DataFrame.fromArray([
+      { g: "a", v: 1 },
+      { g: "a", v: 3 },
+      { g: "a", v: 5 },
+      { g: "b", v: 10 },
+      { g: "b", v: 20 },
+    ]);
+    const result = await df.groupBy("g").agg({ v: "median" }).collect();
+    const a = result.find((r: any) => r.g === "a");
+    expect(a!.v).toBe(3);
+  });
+
+  it("groupBy with stddev aggregation", async () => {
+    const df = DataFrame.fromArray([
+      { g: "a", v: 2 },
+      { g: "a", v: 4 },
+      { g: "a", v: 4 },
+      { g: "a", v: 4 },
+      { g: "a", v: 5 },
+      { g: "a", v: 5 },
+      { g: "a", v: 7 },
+      { g: "a", v: 9 },
+    ]);
+    const result = await df.groupBy("g").agg({ v: "stddev" }).collect();
+    expect(result[0]!.v).toBeCloseTo(2, 0); // stddev ≈ 2
+  });
+
+  it("groupBy with countDistinct", async () => {
+    const df = DataFrame.fromArray([
+      { g: "a", v: 1 },
+      { g: "a", v: 2 },
+      { g: "a", v: 1 },
+      { g: "b", v: 3 },
+    ]);
+    const result = await df.groupBy("g").agg({ v: "countDistinct" }).collect();
+    const a = result.find((r: any) => r.g === "a");
+    expect(a!.v).toBe(2);
+  });
+
+  it("groupBy with mode aggregation", async () => {
+    const df = DataFrame.fromArray([
+      { g: "a", v: 1 },
+      { g: "a", v: 2 },
+      { g: "a", v: 2 },
+      { g: "a", v: 3 },
+    ]);
+    const result = await df.groupBy("g").agg({ v: "mode" }).collect();
+    expect(result[0]!.v).toBe(2);
+  });
+
+  it("groupBy with custom reducer", async () => {
+    const df = DataFrame.fromArray([
+      { g: "a", v: 10 },
+      { g: "a", v: 20 },
+      { g: "a", v: 30 },
+    ]);
+    const concatReducer = reduce("", (acc: string, val) => acc + String(val) + ",");
+    const result = await df.groupBy("g").agg({ v: concatReducer }).collect();
+    expect(result[0]!.v).toBe("10,20,30,");
+  });
+
+  it("groupBy with percentile", async () => {
+    const df = DataFrame.fromArray([
+      { g: "a", v: 1 },
+      { g: "a", v: 2 },
+      { g: "a", v: 3 },
+      { g: "a", v: 4 },
+      { g: "a", v: 5 },
+    ]);
+    const result = await df
+      .groupBy("g")
+      .agg({ v: percentile(0.9) })
+      .collect();
+    expect(result[0]!.v).toBe(5);
+  });
+
+  it("groupBy with variance aggregation", async () => {
+    const df = DataFrame.fromArray([
+      { g: "a", v: 2 },
+      { g: "a", v: 4 },
+      { g: "a", v: 4 },
+      { g: "a", v: 4 },
+      { g: "a", v: 5 },
+      { g: "a", v: 5 },
+      { g: "a", v: 7 },
+      { g: "a", v: 9 },
+    ]);
+    const result = await df.groupBy("g").agg({ v: "variance" }).collect();
+    // sample variance (n-1 denominator) is stddev^2
+    expect(result[0]!.v).toBeCloseTo(4.571, 2);
   });
 });

@@ -255,6 +255,73 @@ export class DuckDBExecutor implements DataFrameExecutor {
     );
   }
 
+  /**
+   * Execute raw SQL against named DataFrames.
+   * Each entry in `tables` is registered as a temp table that can be
+   * referenced by name in the SQL query. Tables are cleaned up after execution.
+   *
+   * @example
+   * ```ts
+   * const executor = new DuckDBExecutor();
+   * const users = DataFrame.fromArray([{ id: 1, name: "Alice" }]);
+   * const orders = DataFrame.fromArray([{ user_id: 1, amount: 100 }]);
+   *
+   * const rows = await executor.executeSql<{ name: string; total: number }>(
+   *   `SELECT u.name, SUM(o.amount) as total
+   *    FROM users u JOIN orders o ON u.id = o.user_id
+   *    GROUP BY u.name`,
+   *   { users, orders },
+   * );
+   * ```
+   */
+  async executeSql<T>(
+    sql: string,
+    tables: Record<string, import("@promin/core").DataFrame<any>>,
+  ): Promise<T[]> {
+    const db = await this.getDb();
+    const registeredTables: string[] = [];
+    const tempFiles: string[] = [];
+
+    try {
+      // Register each DataFrame as a named temp table
+      for (const [name, dataframe] of Object.entries(tables)) {
+        const rows = await dataframe.collect();
+        if (rows.length === 0) {
+          await db.run(`CREATE TEMP TABLE "${name}" AS SELECT 1 WHERE FALSE`);
+          registeredTables.push(name);
+          continue;
+        }
+
+        const filePath = join(this.tmpDir, `_sql_${name}_${this.cacheCounter++}.json`);
+        writeFileSync(filePath, JSON.stringify(rows));
+        tempFiles.push(filePath);
+
+        await db.run(`CREATE TEMP TABLE "${name}" AS SELECT * FROM read_json_auto('${filePath}')`);
+        registeredTables.push(name);
+      }
+
+      // Execute the user's SQL
+      const result = await db.all(sql);
+      return convertBigInts(result) as T[];
+    } finally {
+      // Clean up temp tables and files
+      for (const name of registeredTables) {
+        try {
+          await db.run(`DROP TABLE IF EXISTS "${name}"`);
+        } catch {
+          /* ignore */
+        }
+      }
+      for (const file of tempFiles) {
+        try {
+          unlinkSync(file);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+
   supports(_plan: LogicalPlan): boolean {
     return true;
   }
@@ -498,7 +565,7 @@ class CompilationContext {
         const input = await this.compile(plan.input);
         const groupCols = plan.columns.map((c) => `"${c}"`).join(", ");
         const aggExprs = Object.entries(plan.aggs)
-          .map(([col, fn]) => `${aggFnToSql(fn)}("${col}") AS "${col}"`)
+          .map(([col, fn]) => `${aggFnToExpr(fn, col)} AS "${col}"`)
           .join(", ");
         return `SELECT ${groupCols}, ${aggExprs} FROM (${input}) GROUP BY ${groupCols}`;
       }
@@ -591,24 +658,38 @@ class CompilationContext {
 // SQL helpers
 // ---------------------------------------------------------------------------
 
-function aggFnToSql(fn: AggFn): string {
+/** Build a full SQL aggregate expression like `SUM("col")` or `COUNT(DISTINCT "col")`. */
+function aggFnToExpr(fn: AggFn, col: string): string {
+  if (typeof fn === "object") {
+    throw new Error("Custom aggregation functions are not supported in DuckDB executor");
+  }
   switch (fn) {
     case "sum":
-      return "SUM";
+      return `SUM("${col}")`;
     case "count":
-      return "COUNT";
+      return `COUNT("${col}")`;
     case "avg":
-      return "AVG";
+      return `AVG("${col}")`;
     case "min":
-      return "MIN";
+      return `MIN("${col}")`;
     case "max":
-      return "MAX";
+      return `MAX("${col}")`;
     case "first":
-      return "FIRST";
+      return `FIRST("${col}")`;
     case "last":
-      return "LAST";
+      return `LAST("${col}")`;
     case "collect":
-      return "LIST";
+      return `LIST("${col}")`;
+    case "median":
+      return `MEDIAN("${col}")`;
+    case "stddev":
+      return `STDDEV_SAMP("${col}")`;
+    case "variance":
+      return `VAR_SAMP("${col}")`;
+    case "mode":
+      return `MODE("${col}")`;
+    case "countDistinct":
+      return `COUNT(DISTINCT "${col}")`;
   }
 }
 

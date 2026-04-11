@@ -218,6 +218,7 @@ function executePlan(plan: LogicalPlan): unknown[] {
 
       // Incremental aggregation — single pass, no storing of row arrays.
       // Each group accumulates: count, sum, min, max, first, last, collect per agg column.
+      // New aggs (median, stddev, variance, mode, countDistinct, custom) use collect or custom accumulators.
       const groups = new Map<
         string,
         {
@@ -230,6 +231,8 @@ function executePlan(plan: LogicalPlan): unknown[] {
             first: any;
             last: any;
             collect: any[];
+            distinct: Set<unknown>;
+            customAcc: unknown;
           }[];
         }
       >();
@@ -247,7 +250,7 @@ function executePlan(plan: LogicalPlan): unknown[] {
           for (const c of plan.columns) keyValues[c] = row[c];
           group = {
             keyValues,
-            accs: aggEntries.map(() => ({
+            accs: aggEntries.map(([, fn]) => ({
               count: 0,
               sum: 0,
               min: undefined as any,
@@ -255,13 +258,18 @@ function executePlan(plan: LogicalPlan): unknown[] {
               first: undefined as any,
               last: undefined as any,
               collect: [],
+              distinct: new Set<unknown>(),
+              customAcc:
+                typeof fn === "object" && fn._tag === "custom"
+                  ? structuredClone(fn.init)
+                  : undefined,
             })),
           };
           groups.set(key, group);
         }
 
         for (let j = 0; j < aggEntries.length; j++) {
-          const [col] = aggEntries[j]!;
+          const [col, fn] = aggEntries[j]!;
           const v = row[col];
           const acc = group.accs[j]!;
           acc.count++;
@@ -270,10 +278,14 @@ function executePlan(plan: LogicalPlan): unknown[] {
             if (!Number.isNaN(num)) acc.sum += num;
             if (acc.min === undefined || v < acc.min) acc.min = v;
             if (acc.max === undefined || v > acc.max) acc.max = v;
+            acc.distinct.add(v);
           }
           if (acc.first === undefined) acc.first = v;
           acc.last = v;
           acc.collect.push(v);
+          if (typeof fn === "object" && fn._tag === "custom") {
+            acc.customAcc = fn.accumulate(acc.customAcc, v);
+          }
         }
       }
 
@@ -283,6 +295,12 @@ function executePlan(plan: LogicalPlan): unknown[] {
         for (let j = 0; j < aggEntries.length; j++) {
           const [col, fn] = aggEntries[j]!;
           const acc = group.accs[j]!;
+
+          if (typeof fn === "object" && fn._tag === "custom") {
+            agged[col] = fn.finalize(acc.customAcc);
+            continue;
+          }
+
           switch (fn) {
             case "count":
               agged[col] = acc.count;
@@ -307,6 +325,68 @@ function executePlan(plan: LogicalPlan): unknown[] {
               break;
             case "collect":
               agged[col] = acc.collect;
+              break;
+            case "median": {
+              const nums = acc.collect
+                .filter((v: any) => v != null)
+                .map(Number)
+                .filter((v: number) => !Number.isNaN(v));
+              nums.sort((a: number, b: number) => a - b);
+              if (nums.length === 0) {
+                agged[col] = null;
+              } else {
+                const mid = Math.floor(nums.length / 2);
+                agged[col] = nums.length % 2 !== 0 ? nums[mid] : (nums[mid - 1]! + nums[mid]!) / 2;
+              }
+              break;
+            }
+            case "stddev": {
+              const nums = acc.collect
+                .filter((v: any) => v != null)
+                .map(Number)
+                .filter((v: number) => !Number.isNaN(v));
+              if (nums.length < 2) {
+                agged[col] = null;
+              } else {
+                const mean = nums.reduce((a: number, b: number) => a + b, 0) / nums.length;
+                const variance =
+                  nums.reduce((a: number, v: number) => a + (v - mean) ** 2, 0) / (nums.length - 1);
+                agged[col] = Math.sqrt(variance);
+              }
+              break;
+            }
+            case "variance": {
+              const nums = acc.collect
+                .filter((v: any) => v != null)
+                .map(Number)
+                .filter((v: number) => !Number.isNaN(v));
+              if (nums.length < 2) {
+                agged[col] = null;
+              } else {
+                const mean = nums.reduce((a: number, b: number) => a + b, 0) / nums.length;
+                agged[col] =
+                  nums.reduce((a: number, v: number) => a + (v - mean) ** 2, 0) / (nums.length - 1);
+              }
+              break;
+            }
+            case "mode": {
+              const freq = new Map<unknown, number>();
+              for (const v of acc.collect) {
+                if (v != null) freq.set(v, (freq.get(v) ?? 0) + 1);
+              }
+              let maxCount = 0;
+              let modeVal: unknown = null;
+              for (const [val, count] of freq) {
+                if (count > maxCount) {
+                  maxCount = count;
+                  modeVal = val;
+                }
+              }
+              agged[col] = modeVal;
+              break;
+            }
+            case "countDistinct":
+              agged[col] = acc.distinct.size;
               break;
           }
         }
@@ -466,6 +546,14 @@ function topN(rows: unknown[], n: number, by: string, order: "asc" | "desc"): un
 }
 
 function computeAgg(rows: unknown[], column: string, fn: AggFn): unknown {
+  if (typeof fn === "object" && fn._tag === "custom") {
+    let acc = structuredClone(fn.init);
+    for (const row of rows) {
+      acc = fn.accumulate(acc, (row as any)[column]);
+    }
+    return fn.finalize(acc);
+  }
+
   const values = rows.map((r: any) => r[column]).filter((v) => v != null);
 
   switch (fn) {
@@ -488,6 +576,43 @@ function computeAgg(rows: unknown[], column: string, fn: AggFn): unknown {
       return values[values.length - 1] ?? null;
     case "collect":
       return values;
+    case "median": {
+      const nums = values.map(Number).filter((v) => !Number.isNaN(v));
+      nums.sort((a, b) => a - b);
+      if (nums.length === 0) return null;
+      const mid = Math.floor(nums.length / 2);
+      return nums.length % 2 !== 0 ? nums[mid] : (nums[mid - 1]! + nums[mid]!) / 2;
+    }
+    case "stddev": {
+      const nums = values.map(Number).filter((v) => !Number.isNaN(v));
+      if (nums.length < 2) return null;
+      const mean = nums.reduce((a, b) => a + b, 0) / nums.length;
+      const variance = nums.reduce((a, v) => a + (v - mean) ** 2, 0) / (nums.length - 1);
+      return Math.sqrt(variance);
+    }
+    case "variance": {
+      const nums = values.map(Number).filter((v) => !Number.isNaN(v));
+      if (nums.length < 2) return null;
+      const mean = nums.reduce((a, b) => a + b, 0) / nums.length;
+      return nums.reduce((a, v) => a + (v - mean) ** 2, 0) / (nums.length - 1);
+    }
+    case "mode": {
+      const freq = new Map<unknown, number>();
+      for (const v of values) freq.set(v, (freq.get(v) ?? 0) + 1);
+      let maxCount = 0;
+      let modeVal: unknown = null;
+      for (const [val, count] of freq) {
+        if (count > maxCount) {
+          maxCount = count;
+          modeVal = val;
+        }
+      }
+      return modeVal;
+    }
+    case "countDistinct":
+      return new Set(values).size;
+    default:
+      return null;
   }
 }
 

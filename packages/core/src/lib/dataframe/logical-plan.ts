@@ -121,7 +121,57 @@ export interface GroupByPlan {
   readonly aggs: Record<string, AggFn>;
 }
 
-export type AggFn = "sum" | "count" | "avg" | "min" | "max" | "first" | "last" | "collect";
+export interface CustomAgg<Acc = unknown, Result = unknown> {
+  readonly _tag: "custom";
+  readonly init: Acc;
+  readonly accumulate: (acc: Acc, value: unknown) => Acc;
+  readonly finalize: (acc: Acc) => Result;
+}
+
+export type AggFn =
+  | "sum"
+  | "count"
+  | "avg"
+  | "min"
+  | "max"
+  | "first"
+  | "last"
+  | "collect"
+  | "median"
+  | "stddev"
+  | "variance"
+  | "mode"
+  | "countDistinct"
+  | CustomAgg;
+
+export function percentile(q: number): CustomAgg<number[], number> {
+  return {
+    _tag: "custom",
+    init: [],
+    accumulate: (acc, val) => {
+      acc.push(Number(val));
+      return acc;
+    },
+    finalize: (acc) => {
+      acc.sort((a, b) => a - b);
+      const idx = Math.ceil(q * acc.length) - 1;
+      return acc[Math.max(0, idx)]!;
+    },
+  };
+}
+
+export function reduce<Acc, Result>(
+  init: Acc,
+  accumulate: (acc: Acc, value: unknown) => Acc,
+  finalize?: (acc: Acc) => Result,
+): CustomAgg<Acc, Result> {
+  return {
+    _tag: "custom",
+    init,
+    accumulate,
+    finalize: finalize ?? ((acc) => acc as unknown as Result),
+  };
+}
 
 export interface JoinPlan {
   readonly _tag: "Join";
