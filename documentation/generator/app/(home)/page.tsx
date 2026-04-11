@@ -10,27 +10,26 @@ export default function HomePage() {
         alignItems: "center",
         justifyContent: "center",
         minHeight: "100vh",
-        gap: "1.5rem",
+        gap: "1rem",
         textAlign: "center",
-        padding: "2rem",
+        padding: "2rem 2rem 3rem",
       }}
     >
-      <PipelineAnimation />
-
-      <h1 style={{ fontSize: "3rem", fontWeight: 700, marginTop: "0.5rem" }}>
-        Promin
-      </h1>
+      <h1 style={{ fontSize: "3rem", fontWeight: 700 }}>Promin</h1>
       <p
         style={{
           fontSize: "1.25rem",
           opacity: 0.7,
           maxWidth: "40rem",
           lineHeight: 1.6,
+          marginBottom: "0.5rem",
         }}
       >
         TypeScript toolkit for resilient async operations, durable workflows,
         stream processing, and analytics.
       </p>
+
+      <PipelineAnimation />
 
       <div style={{ display: "flex", gap: "1rem", marginTop: "0.5rem" }}>
         <Link

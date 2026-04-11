@@ -6,13 +6,15 @@ import { useEffect, useRef } from "react";
 // DAG node layout
 // ---------------------------------------------------------------------------
 
+type IconDrawFn = (ctx: CanvasRenderingContext2D, x: number, y: number, s: number, color: string) => void;
+
 interface Node {
   id: string;
   label: string;
   x: number;
   y: number;
   color: string;
-  icon: string;
+  icon: IconDrawFn;
 }
 
 interface Edge {
@@ -20,16 +22,192 @@ interface Edge {
   to: string;
 }
 
+// ---------------------------------------------------------------------------
+// Vector icons — drawn on canvas, no emoji
+// ---------------------------------------------------------------------------
+
+const iconBolt: IconDrawFn = (ctx, x, y, s, color) => {
+  ctx.beginPath();
+  ctx.moveTo(x + 2 * s, y - 6 * s);
+  ctx.lineTo(x - 1 * s, y + 1 * s);
+  ctx.lineTo(x + 1 * s, y + 1 * s);
+  ctx.lineTo(x - 2 * s, y + 6 * s);
+  ctx.lineTo(x + 1 * s, y - 1 * s);
+  ctx.lineTo(x - 1 * s, y - 1 * s);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+};
+
+const iconEnvelope: IconDrawFn = (ctx, x, y, s, color) => {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.2 * s;
+  ctx.beginPath();
+  ctx.roundRect(x - 5 * s, y - 3.5 * s, 10 * s, 7 * s, 1 * s);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - 5 * s, y - 3.5 * s);
+  ctx.lineTo(x, y + 1 * s);
+  ctx.lineTo(x + 5 * s, y - 3.5 * s);
+  ctx.stroke();
+};
+
+const iconCylinder: IconDrawFn = (ctx, x, y, s, color) => {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.2 * s;
+  ctx.beginPath();
+  ctx.ellipse(x, y - 4 * s, 5 * s, 2 * s, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - 5 * s, y - 4 * s);
+  ctx.lineTo(x - 5 * s, y + 3 * s);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x + 5 * s, y - 4 * s);
+  ctx.lineTo(x + 5 * s, y + 3 * s);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(x, y + 3 * s, 5 * s, 2 * s, 0, 0, Math.PI);
+  ctx.stroke();
+};
+
+const iconArrowsRight: IconDrawFn = (ctx, x, y, s, color) => {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5 * s;
+  ctx.lineCap = "round";
+  for (const dy of [-3, 0, 3]) {
+    ctx.beginPath();
+    ctx.moveTo(x - 5 * s, (y + dy * s));
+    ctx.lineTo(x + 3 * s, (y + dy * s));
+    ctx.lineTo(x + 1 * s, (y + dy * s) - 2 * s);
+    ctx.moveTo(x + 3 * s, (y + dy * s));
+    ctx.lineTo(x + 1 * s, (y + dy * s) + 2 * s);
+    ctx.stroke();
+  }
+};
+
+const iconLoop: IconDrawFn = (ctx, x, y, s, color) => {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5 * s;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.arc(x, y, 5 * s, -0.5, Math.PI * 1.7);
+  ctx.stroke();
+  // Arrowhead
+  const ax = x + 5 * s * Math.cos(-0.5);
+  const ay = y + 5 * s * Math.sin(-0.5);
+  ctx.beginPath();
+  ctx.moveTo(ax + 2 * s, ay - 1 * s);
+  ctx.lineTo(ax, ay);
+  ctx.lineTo(ax + 2 * s, ay + 2 * s);
+  ctx.stroke();
+};
+
+const iconGrid: IconDrawFn = (ctx, x, y, s, color) => {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.2 * s;
+  const g = 3.5 * s;
+  for (let r = -1; r <= 1; r++) {
+    for (let c = -1; c <= 1; c++) {
+      ctx.strokeRect(x + c * g - g / 2, y + r * g - g / 2, g, g);
+    }
+  }
+};
+
+const iconDiamond: IconDrawFn = (ctx, x, y, s, color) => {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5 * s;
+  ctx.beginPath();
+  ctx.moveTo(x, y - 6 * s);
+  ctx.lineTo(x + 5 * s, y);
+  ctx.lineTo(x, y + 6 * s);
+  ctx.lineTo(x - 5 * s, y);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - 3 * s, y - 2 * s);
+  ctx.lineTo(x + 3 * s, y - 2 * s);
+  ctx.stroke();
+};
+
+const iconDisc: IconDrawFn = (ctx, x, y, s, color) => {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.2 * s;
+  ctx.beginPath();
+  ctx.arc(x, y, 5 * s, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(x, y, 2 * s, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - 5 * s, y);
+  ctx.lineTo(x - 2 * s, y);
+  ctx.moveTo(x + 2 * s, y);
+  ctx.lineTo(x + 5 * s, y);
+  ctx.stroke();
+};
+
+const iconWave: IconDrawFn = (ctx, x, y, s, color) => {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5 * s;
+  ctx.lineCap = "round";
+  for (const dy of [-3, 0, 3]) {
+    ctx.beginPath();
+    ctx.moveTo(x - 6 * s, y + dy * s);
+    ctx.bezierCurveTo(
+      x - 3 * s, y + (dy - 2) * s,
+      x, y + (dy + 2) * s,
+      x + 3 * s, y + dy * s,
+    );
+    ctx.lineTo(x + 6 * s, y + dy * s);
+    ctx.stroke();
+  }
+};
+
+const iconStateMachine: IconDrawFn = (ctx, x, y, s, color) => {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.3 * s;
+  // Three connected states (circles with arrows)
+  const r = 2.5 * s;
+  ctx.beginPath();
+  ctx.arc(x - 4 * s, y - 3 * s, r, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(x + 4 * s, y - 3 * s, r, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(x, y + 4 * s, r, 0, Math.PI * 2);
+  ctx.stroke();
+  // Arrows between
+  ctx.beginPath();
+  ctx.moveTo(x - 1.5 * s, y - 3 * s);
+  ctx.lineTo(x + 1.5 * s, y - 3 * s);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x + 2.5 * s, y - 0.5 * s);
+  ctx.lineTo(x + 1.5 * s, y + 1.5 * s);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - 1.5 * s, y + 1.5 * s);
+  ctx.lineTo(x - 2.5 * s, y - 0.5 * s);
+  ctx.stroke();
+};
+
 const NODES: Node[] = [
-  { id: "src1", label: "API", x: 60, y: 80, color: "#6366f1", icon: "⚡" },
-  { id: "src2", label: "Kafka", x: 60, y: 200, color: "#8b5cf6", icon: "📨" },
-  { id: "src3", label: "DB", x: 60, y: 320, color: "#a78bfa", icon: "🗄" },
-  { id: "pipe", label: "Pipeline", x: 280, y: 140, color: "#3b82f6", icon: "⛓" },
-  { id: "wf", label: "Workflow", x: 280, y: 280, color: "#0ea5e9", icon: "🔄" },
-  { id: "df", label: "DataFrame", x: 500, y: 200, color: "#06b6d4", icon: "📊" },
-  { id: "out1", label: "Redis", x: 720, y: 100, color: "#f43f5e", icon: "⚙" },
-  { id: "out2", label: "Postgres", x: 720, y: 240, color: "#10b981", icon: "💾" },
-  { id: "out3", label: "Stream", x: 720, y: 360, color: "#f59e0b", icon: "📡" },
+  // Sources (left column)
+  { id: "src1", label: "API", x: 70, y: 100, color: "#6366f1", icon: iconBolt },
+  { id: "src2", label: "Kafka", x: 70, y: 250, color: "#8b5cf6", icon: iconEnvelope },
+  { id: "src3", label: "DB", x: 70, y: 400, color: "#a78bfa", icon: iconCylinder },
+  // Processing (middle column)
+  { id: "pipe", label: "Pipeline", x: 280, y: 100, color: "#3b82f6", icon: iconArrowsRight },
+  { id: "wf", label: "Workflow", x: 280, y: 250, color: "#0ea5e9", icon: iconLoop },
+  { id: "sm", label: "State Machine", x: 280, y: 400, color: "#14b8a6", icon: iconStateMachine },
+  // Analytics (center-right)
+  { id: "df", label: "DataFrame", x: 500, y: 250, color: "#06b6d4", icon: iconGrid },
+  // Outputs (right column)
+  { id: "out1", label: "Redis", x: 720, y: 100, color: "#f43f5e", icon: iconDiamond },
+  { id: "out2", label: "Postgres", x: 720, y: 250, color: "#10b981", icon: iconDisc },
+  { id: "out3", label: "Stream", x: 720, y: 400, color: "#f59e0b", icon: iconWave },
 ];
 
 const EDGES: Edge[] = [
@@ -37,8 +215,10 @@ const EDGES: Edge[] = [
   { from: "src2", to: "pipe" },
   { from: "src2", to: "wf" },
   { from: "src3", to: "wf" },
+  { from: "src3", to: "sm" },
   { from: "pipe", to: "df" },
   { from: "wf", to: "df" },
+  { from: "sm", to: "out2" },
   { from: "pipe", to: "out1" },
   { from: "df", to: "out2" },
   { from: "df", to: "out3" },
@@ -125,7 +305,7 @@ export function PipelineAnimation() {
       const w = canvas!.getBoundingClientRect().width;
       const h = canvas!.getBoundingClientRect().height;
       const scaleX = w / 800;
-      const scaleY = h / 440;
+      const scaleY = h / 500;
       const dark = isDark();
 
       ctx.clearRect(0, 0, w, h);
@@ -218,18 +398,20 @@ export function PipelineAnimation() {
         ctx.lineWidth = 1;
         ctx.stroke();
 
-        // Icon
-        ctx.font = `${14 * Math.min(scaleX, scaleY)}px sans-serif`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(node.icon, nx, ny - 4 * scaleY);
+        // Icon (centered in circle)
+        const iconScale = Math.min(scaleX, scaleY) * 2;
+        ctx.save();
+        node.icon(ctx, nx, ny, iconScale, node.color);
+        ctx.restore();
 
-        // Label
+        // Label (below circle)
         ctx.font = `500 ${10 * Math.min(scaleX, scaleY)}px system-ui, sans-serif`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
         ctx.fillStyle = dark
           ? "rgba(200, 210, 230, 0.8)"
           : "rgba(40, 50, 80, 0.7)";
-        ctx.fillText(node.label, nx, ny + 14 * scaleY);
+        ctx.fillText(node.label, nx, ny + r + 6 * Math.min(scaleX, scaleY));
       }
 
       frameRef.current++;
@@ -250,7 +432,7 @@ export function PipelineAnimation() {
       style={{
         width: "100%",
         maxWidth: "800px",
-        height: "440px",
+        height: "500px",
         borderRadius: "1rem",
       }}
     />
