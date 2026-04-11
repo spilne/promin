@@ -2,7 +2,8 @@ import { group, bench, run } from "mitata";
 import { DataFrame } from "@promin/core";
 import { DuckDBExecutor } from "./duckdb-executor.ts";
 
-const duckdb = new DuckDBExecutor();
+const duckdb = new DuckDBExecutor(); // Arrow auto-enabled
+const duckdbNoArrow = new DuckDBExecutor({ arrow: false });
 
 function generateRows(n: number) {
   const regions = ["north", "south", "east", "west"];
@@ -222,34 +223,54 @@ for (const size of [1_000, 10_000]) {
 }
 
 // ---------------------------------------------------------------------------
-// Transfer overhead — isolate JSON serialization cost
-// This measures the bottleneck Arrow IPC would eliminate.
+// Arrow vs JSON transfer comparison
+// Uses pre-created executors to avoid MAX_ARROW_INSTANCES contention.
 // ---------------------------------------------------------------------------
 
 for (const size of [1_000, 10_000, 100_000]) {
   const label = size >= 100_000 ? `${size / 1_000}K` : `${(size / 1_000).toFixed(0)}K`;
   const data = generateRows(size);
 
-  group(`transfer overhead: load + trivial query (${label} rows)`, () => {
-    // Baseline: just the query on pre-cached data
-    const dfCached = DataFrame.fromArray(data).withExecutor(duckdb);
-    bench("DuckDB cached (no transfer)", async () => {
-      // Second call uses cache — measures pure DuckDB query time
-      return dfCached.select("id", "region", "revenue").collect();
+  group(`Arrow vs JSON transfer (${label} rows)`, () => {
+    // Arrow path (register_buffer)
+    const dfArrow = DataFrame.fromArray(data).withExecutor(duckdb);
+    bench("DuckDB Arrow (cached)", async () => {
+      return dfArrow.select("id", "region", "revenue").collect();
     });
 
-    // Full cost: fresh data each time (JSON serialize + INSERT + query + JSON parse)
-    bench("DuckDB cold (full JSON transfer)", async () => {
-      // Fresh executor so no cache — forces re-transfer
-      const freshDuck = new DuckDBExecutor();
-      const df = DataFrame.fromArray([...data]).withExecutor(freshDuck);
-      return df.select("id", "region", "revenue").collect();
+    // JSON path (read_json_auto)
+    const dfJson = DataFrame.fromArray(data).withExecutor(duckdbNoArrow);
+    bench("DuckDB JSON (cached)", async () => {
+      return dfJson.select("id", "region", "revenue").collect();
     });
 
-    // Array baseline: no transfer, just iteration
+    // Array baseline
     const dfArr = DataFrame.fromArray(data);
-    bench("ArrayExecutor (no transfer)", async () => {
+    bench("ArrayExecutor", async () => {
       return dfArr.select("id", "region", "revenue").collect();
+    });
+  });
+}
+
+// groupBy: Arrow vs JSON vs Array
+for (const size of [10_000, 100_000]) {
+  const label = size >= 100_000 ? `${size / 1_000}K` : `${(size / 1_000).toFixed(0)}K`;
+  const data = generateRows(size);
+
+  group(`Arrow vs JSON groupBy+agg (${label} rows)`, () => {
+    const dfArrow = DataFrame.fromArray(data).withExecutor(duckdb);
+    bench("DuckDB Arrow (cached)", async () => {
+      return dfArrow.groupBy("region").agg({ revenue: "sum", score: "avg" }).collect();
+    });
+
+    const dfJson = DataFrame.fromArray(data).withExecutor(duckdbNoArrow);
+    bench("DuckDB JSON (cached)", async () => {
+      return dfJson.groupBy("region").agg({ revenue: "sum", score: "avg" }).collect();
+    });
+
+    const dfArr = DataFrame.fromArray(data);
+    bench("ArrayExecutor", async () => {
+      return dfArr.groupBy("region").agg({ revenue: "sum", score: "avg" }).collect();
     });
   });
 }
