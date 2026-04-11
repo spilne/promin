@@ -728,7 +728,10 @@ export class StreamPipeline<T, E extends TaggedError> {
     return new StreamPipeline(Stream.catchAll(this._materialize(), (error: E) => fn(error).stream));
   }
 
-  /** Wrap each item in a success/failure result. Errors become values instead of failing the stream. */
+  /**
+   * Catch typed errors only — wrap items in Right, terminal typed error in Left.
+   * Defects (uncaught exceptions) still crash the stream. Use `attemptCause` to catch everything.
+   */
   attempt(): StreamPipeline<
     { readonly _tag: "Right"; readonly value: T } | { readonly _tag: "Left"; readonly error: E },
     never
@@ -741,6 +744,29 @@ export class StreamPipeline<T, E extends TaggedError> {
       Stream.catchAll(wrapped, (error: E) => Stream.succeed({ _tag: "Left" as const, error })),
     ) as StreamPipeline<
       { readonly _tag: "Right"; readonly value: T } | { readonly _tag: "Left"; readonly error: E },
+      never
+    >;
+  }
+
+  /**
+   * Catch all failures including defects — wrap items in Right, any failure in Left.
+   * The Left contains a `Cause<E>` which may be a typed error, a defect, or an interruption.
+   * Use `attempt` if you only care about typed errors.
+   */
+  attemptCause(): StreamPipeline<
+    | { readonly _tag: "Right"; readonly value: T }
+    | { readonly _tag: "Left"; readonly cause: Cause.Cause<E> },
+    never
+  > {
+    const wrapped = Stream.map(this._materialize(), (value: T) => ({
+      _tag: "Right" as const,
+      value,
+    }));
+    return new StreamPipeline(
+      Stream.catchAllCause(wrapped, (cause) => Stream.succeed({ _tag: "Left" as const, cause })),
+    ) as StreamPipeline<
+      | { readonly _tag: "Right"; readonly value: T }
+      | { readonly _tag: "Left"; readonly cause: Cause.Cause<E> },
       never
     >;
   }
