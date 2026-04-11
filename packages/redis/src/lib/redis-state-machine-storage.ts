@@ -2,14 +2,32 @@ import type { StateMachineStorage } from "@promin/core";
 import type { MachineState, TransitionEvent } from "@promin/core";
 import type { RedisClient } from "./redis-client.ts";
 
+export interface RedisStateMachineConfig {
+  prefix?: string;
+  /** TTL for machine keys after reaching a terminal state. Default: no expiry. */
+  terminalTtlMs?: number;
+  /** TTL for machine keys in non-terminal states — catches stuck/abandoned machines. Default: no expiry. */
+  activeTtlMs?: number;
+}
+
 export class RedisStateMachineStorage implements StateMachineStorage {
   private readonly prefix: string;
+  private readonly terminalTtlMs?: number;
+  private readonly activeTtlMs?: number;
+  private terminalStates = new Set<string>();
 
   constructor(
     private readonly redis: RedisClient,
-    config?: { prefix?: string },
+    config?: RedisStateMachineConfig,
   ) {
     this.prefix = config?.prefix ?? "sm";
+    this.terminalTtlMs = config?.terminalTtlMs;
+    this.activeTtlMs = config?.activeTtlMs;
+  }
+
+  /** Register terminal states so storage knows when to set TTL. */
+  registerTerminalStates(states: string[]): void {
+    for (const s of states) this.terminalStates.add(s);
   }
 
   private machineKey(id: string): string {
@@ -45,6 +63,12 @@ export class RedisStateMachineStorage implements StateMachineStorage {
     if (params.metadata) state.metadata = JSON.stringify(params.metadata);
 
     await this.redis.hset(this.machineKey(params.id), state);
+
+    // Set active TTL for stuck machine detection
+    if (this.activeTtlMs) {
+      await this.redis.pexpire(this.machineKey(params.id), this.activeTtlMs);
+      await this.redis.pexpire(this.eventsKey(params.id), this.activeTtlMs);
+    }
   }
 
   async load(id: string): Promise<MachineState | null> {
@@ -95,6 +119,16 @@ export class RedisStateMachineStorage implements StateMachineStorage {
       createdAt: new Date(now),
     };
     await this.redis.rpush(this.eventsKey(params.id), JSON.stringify(event));
+
+    // Set TTL based on target state
+    if (this.terminalStates.has(params.to) && this.terminalTtlMs) {
+      await this.redis.pexpire(this.machineKey(params.id), this.terminalTtlMs);
+      await this.redis.pexpire(this.eventsKey(params.id), this.terminalTtlMs);
+    } else if (this.activeTtlMs) {
+      // Refresh active TTL — machine is still alive
+      await this.redis.pexpire(this.machineKey(params.id), this.activeTtlMs);
+      await this.redis.pexpire(this.eventsKey(params.id), this.activeTtlMs);
+    }
   }
 
   async loadEvents(

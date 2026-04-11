@@ -181,6 +181,12 @@ export class StateMachineBuilder<S> {
   build(): StateMachineInstance<S> {
     if (!this.initialState) throw new Error("Initial state not set");
     if (this.states.size === 0) throw new Error("No states registered");
+
+    // Notify storage of terminal states (for TTL-based cleanup)
+    if ("registerTerminalStates" in this.storage) {
+      const terminals = [...this.states.values()].filter((s) => s.terminal).map((s) => s.name);
+      (this.storage as any).registerTerminalStates(terminals);
+    }
     return new StateMachineInstance<S>(
       this.name,
       this.storage,
