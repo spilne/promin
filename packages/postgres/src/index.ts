@@ -48,6 +48,9 @@ export { PgLeaderElection, type PgLeaderElectionConfig } from "./lib/pg-leader-e
 // State backend (topology checkpoints)
 export { PgStateBackend, type PgStateBackendConfig } from "./lib/pg-state-backend.ts";
 
+// State machine storage
+export { PgStateMachineStorage } from "./lib/pg-state-machine-storage.ts";
+
 // Schema exports for custom migrations
 export {
   workflows,
@@ -62,6 +65,8 @@ export {
   stepQueue,
   stepAttempts,
   attemptTypeTable,
+  machines,
+  machineEvents,
   LOOKUP_BINDINGS,
 } from "./lib/schema.ts";
 export { createQueueTable, type QueueTable } from "./lib/pg-queue-schema.ts";

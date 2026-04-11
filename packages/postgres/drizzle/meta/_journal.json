@@ -78,6 +78,13 @@
       "when": 1743400010000,
       "tag": "0010_pending_status",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1743400011000,
+      "tag": "0011_state_machines",
+      "breakpoints": true
     }
   ]
 }

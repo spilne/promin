@@ -203,3 +203,39 @@ export const stepAttempts = pgTable(
     index("wf_step_attempts_workflow_idx").on(t.workflowId),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// State machine tables
+// ---------------------------------------------------------------------------
+
+export const machines = pgTable(
+  "sm_machines",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    current: text("current_state").notNull(),
+    context: jsonb("context").notNull(),
+    version: text("version"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("sm_machines_name_idx").on(t.name), index("sm_machines_current_idx").on(t.current)],
+);
+
+export const machineEvents = pgTable(
+  "sm_machine_events",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    machineId: text("machine_id")
+      .notNull()
+      .references(() => machines.id, { onDelete: "cascade" }),
+    event: text("event").notNull(),
+    fromState: text("from_state").notNull(),
+    toState: text("to_state").notNull(),
+    context: jsonb("context").notNull(),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("sm_machine_events_machine_idx").on(t.machineId)],
+);

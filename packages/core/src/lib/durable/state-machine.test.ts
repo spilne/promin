@@ -450,6 +450,161 @@ describe("StateMachine", () => {
   // Metadata
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // onEnter / onExit hooks
+  // -------------------------------------------------------------------------
+
+  it("calls onEnter when entering a state", async () => {
+    const entered: string[] = [];
+    const machine = stateMachine<TrafficLight>({ name: "hooks", storage })
+      .state("red")
+      .state("green", {
+        onEnter: async () => {
+          entered.push("green");
+        },
+      })
+      .state("yellow")
+      .on("next", {
+        from: "red",
+        to: "green",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .on("next", {
+        from: "green",
+        to: "yellow",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .on("next", {
+        from: "yellow",
+        to: "red",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .initial("red")
+      .build();
+
+    await machine.start({ id: "hook-1", context: { count: 0 } });
+    await machine.send({ id: "hook-1", event: "next" }); // red → green
+    expect(entered).toEqual(["green"]);
+  });
+
+  it("calls onExit when leaving a state", async () => {
+    const exited: string[] = [];
+    const machine = stateMachine<TrafficLight>({ name: "hooks-exit", storage })
+      .state("red", {
+        onExit: async () => {
+          exited.push("red");
+        },
+      })
+      .state("green")
+      .state("yellow")
+      .on("next", {
+        from: "red",
+        to: "green",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .on("next", {
+        from: "green",
+        to: "yellow",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .on("next", {
+        from: "yellow",
+        to: "red",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .initial("red")
+      .build();
+
+    await machine.start({ id: "hook-2", context: { count: 0 } });
+    await machine.send({ id: "hook-2", event: "next" }); // red → green, onExit(red)
+    expect(exited).toEqual(["red"]);
+  });
+
+  it("calls onExit then onEnter in order", async () => {
+    const calls: string[] = [];
+    const machine = stateMachine<TrafficLight>({ name: "hooks-order", storage })
+      .state("red", {
+        onExit: async () => {
+          calls.push("exit:red");
+        },
+      })
+      .state("green", {
+        onEnter: async () => {
+          calls.push("enter:green");
+        },
+      })
+      .state("yellow")
+      .on("next", {
+        from: "red",
+        to: "green",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .on("next", {
+        from: "green",
+        to: "yellow",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .on("next", {
+        from: "yellow",
+        to: "red",
+        action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+      })
+      .initial("red")
+      .build();
+
+    await machine.start({ id: "hook-3", context: { count: 0 } });
+    await machine.send({ id: "hook-3", event: "next" });
+    expect(calls).toEqual(["exit:red", "enter:green"]);
+  });
+
+  // -------------------------------------------------------------------------
+  // Snapshot / Restore
+  // -------------------------------------------------------------------------
+
+  it("getSnapshot returns current state for serialization", async () => {
+    const machine = createTrafficLight(storage);
+    await machine.start({ id: "snap-1", context: { count: 0 } });
+    await machine.send({ id: "snap-1", event: "next" });
+
+    const snapshot = await machine.getSnapshot("snap-1");
+    expect(snapshot).not.toBeNull();
+    expect(snapshot!.current).toBe("green");
+    expect(snapshot!.context).toEqual({ count: 1 });
+    expect(snapshot!.name).toBe("traffic-light");
+  });
+
+  it("restore creates machine from snapshot", async () => {
+    const machine = createTrafficLight(storage);
+    await machine.start({ id: "snap-src", context: { count: 5 } });
+    await machine.send({ id: "snap-src", event: "next" }); // green
+
+    const snapshot = await machine.getSnapshot("snap-src");
+
+    await machine.restore({ id: "snap-dst", snapshot: snapshot! });
+    const state = await machine.getState("snap-dst");
+    expect(state!.current).toBe("green");
+    expect(state!.context).toEqual({ count: 6 });
+  });
+
+  it("restore to non-existent machine works, duplicate throws", async () => {
+    const machine = createTrafficLight(storage);
+    await machine.restore({
+      id: "snap-new",
+      snapshot: { current: "yellow", context: { count: 99 }, name: "traffic-light" },
+    });
+
+    const state = await machine.getState("snap-new");
+    expect(state!.current).toBe("yellow");
+
+    await expect(
+      machine.restore({ id: "snap-new", snapshot: { current: "red", context: { count: 0 } } }),
+    ).rejects.toThrow("already exists");
+  });
+
+  // -------------------------------------------------------------------------
+  // Metadata
+  // -------------------------------------------------------------------------
+
   it("stores metadata on machine instance", async () => {
     const machine = createTrafficLight(storage);
     await machine.start({

@@ -18,6 +18,8 @@ import type { StateMachineStorage } from "./state-machine-storage.ts";
 interface StateConfig {
   name: string;
   terminal: boolean;
+  onEnter?: (context: unknown) => void | Promise<void>;
+  onExit?: (context: unknown) => void | Promise<void>;
 }
 
 interface TransitionConfig {
@@ -57,10 +59,19 @@ export class StateMachineBuilder<S> {
     private readonly limits?: MachineLimits,
   ) {}
 
-  state(name: string & keyof S, options?: { terminal?: boolean }): this {
+  state(
+    name: string & keyof S,
+    options?: {
+      terminal?: boolean;
+      onEnter?: (context: any) => void | Promise<void>;
+      onExit?: (context: any) => void | Promise<void>;
+    },
+  ): this {
     this.states.set(name as string, {
       name: name as string,
       terminal: options?.terminal ?? false,
+      onEnter: options?.onEnter,
+      onExit: options?.onExit,
     });
     return this;
   }
@@ -224,6 +235,12 @@ export class StateMachineInstance<S> {
         throw new Error(`Target state "${targetState}" is not registered`);
       }
 
+      // Run onExit for current state
+      const currentStateConfig = this.states.get(machine.current);
+      if (currentStateConfig?.onExit) {
+        await currentStateConfig.onExit(machine.context);
+      }
+
       // Persist transition
       await this.storage.transition({
         id: params.id,
@@ -233,6 +250,12 @@ export class StateMachineInstance<S> {
         context: newContext,
         metadata: params.metadata,
       });
+
+      // Run onEnter for target state
+      const targetStateConfig = this.states.get(targetState);
+      if (targetStateConfig?.onEnter) {
+        await targetStateConfig.onEnter(newContext);
+      }
     } finally {
       await this.storage.releaseLock(params.id);
     }
@@ -242,6 +265,37 @@ export class StateMachineInstance<S> {
     const machine = await this.storage.load(id);
     if (!machine) return null;
     return { current: machine.current, context: machine.context } as MachineSnapshot<S>;
+  }
+
+  async getSnapshot(
+    id: string,
+  ): Promise<(MachineSnapshot<S> & { name: string; version?: string }) | null> {
+    const machine = await this.storage.load(id);
+    if (!machine) return null;
+    return {
+      current: machine.current,
+      context: machine.context,
+      name: machine.name,
+      version: machine.version,
+    } as MachineSnapshot<S> & { name: string; version?: string };
+  }
+
+  async restore(params: {
+    id: string;
+    snapshot: { current: string; context: unknown; name?: string; version?: string };
+    metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    const existing = await this.storage.load(params.id);
+    if (existing) throw new Error(`Machine ${params.id} already exists`);
+
+    await this.storage.create({
+      id: params.id,
+      name: params.snapshot.name ?? this.name,
+      initial: params.snapshot.current,
+      context: params.snapshot.context,
+      version: params.snapshot.version ?? this.version,
+      metadata: params.metadata,
+    });
   }
 
   async getHistory(
