@@ -121,7 +121,11 @@ export class StateMachineInstance<S> {
     private readonly limits?: MachineLimits,
   ) {}
 
-  async start(params: { id: string; context: ContextOf<S, keyof S & string> }): Promise<void> {
+  async start(params: {
+    id: string;
+    context: ContextOf<S, keyof S & string>;
+    metadata?: Record<string, unknown>;
+  }): Promise<void> {
     const existing = await this.storage.load(params.id);
     if (existing) throw new Error(`Machine ${params.id} already exists`);
 
@@ -131,6 +135,7 @@ export class StateMachineInstance<S> {
       initial: this.initialState,
       context: params.context,
       version: this.version,
+      metadata: params.metadata,
     });
   }
 

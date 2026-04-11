@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "bun:test";
 import { stateMachine, type StateMachineInstance } from "./state-machine.ts";
 import { InMemoryStateMachineStorage } from "./state-machine-storage.ts";
+import { FakeClock } from "../clock.ts";
 
 // ---------------------------------------------------------------------------
 // Test state definitions
@@ -421,5 +422,43 @@ describe("StateMachine", () => {
     await expect(machine.send({ id: "rate-1", event: "next" })).rejects.toThrow(
       "exceeded rate limit",
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // FakeClock
+  // -------------------------------------------------------------------------
+
+  it("uses FakeClock for deterministic timestamps", async () => {
+    const clock = FakeClock.create("2026-01-01T00:00:00Z");
+    const clockStorage = new InMemoryStateMachineStorage({ clock });
+    const machine = createTrafficLight(clockStorage);
+
+    await machine.start({ id: "clock-1", context: { count: 0 } });
+    const state1 = await clockStorage.load("clock-1");
+    expect(state1!.createdAt).toEqual(new Date("2026-01-01T00:00:00Z"));
+
+    clock.advance(5000);
+    await machine.send({ id: "clock-1", event: "next" });
+    const state2 = await clockStorage.load("clock-1");
+    expect(state2!.updatedAt).toEqual(new Date("2026-01-01T00:00:05Z"));
+
+    const events = await machine.getHistory("clock-1");
+    expect(events[0]!.createdAt).toEqual(new Date("2026-01-01T00:00:05Z"));
+  });
+
+  // -------------------------------------------------------------------------
+  // Metadata
+  // -------------------------------------------------------------------------
+
+  it("stores metadata on machine instance", async () => {
+    const machine = createTrafficLight(storage);
+    await machine.start({
+      id: "meta-1",
+      context: { count: 0 },
+      metadata: { region: "us-east", createdBy: "test" },
+    });
+
+    const state = await storage.load("meta-1");
+    expect(state!.metadata).toEqual({ region: "us-east", createdBy: "test" });
   });
 });

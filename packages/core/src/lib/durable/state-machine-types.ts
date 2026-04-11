@@ -61,6 +61,7 @@ export interface MachineState {
   readonly current: string;
   readonly context: unknown;
   readonly version?: string;
+  readonly metadata?: Record<string, unknown>;
   readonly createdAt: Date;
   readonly updatedAt: Date;
 }

@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import type { MachineState, TransitionEvent } from "./state-machine-types.ts";
+import { type Clock, SystemClock } from "../clock.ts";
 
 export interface StateMachineStorage {
   create(params: {
@@ -11,6 +12,7 @@ export interface StateMachineStorage {
     initial: string;
     context: unknown;
     version?: string;
+    metadata?: Record<string, unknown>;
   }): Promise<void>;
 
   load(id: string): Promise<MachineState | null>;
@@ -38,6 +40,11 @@ export class InMemoryStateMachineStorage implements StateMachineStorage {
   private machines = new Map<string, MachineState>();
   private events = new Map<string, TransitionEvent[]>();
   private locks = new Map<string, { expiresAt: number }>();
+  private readonly clock: Clock;
+
+  constructor(config?: { clock?: Clock }) {
+    this.clock = config?.clock ?? SystemClock;
+  }
 
   async create(params: {
     id: string;
@@ -45,14 +52,16 @@ export class InMemoryStateMachineStorage implements StateMachineStorage {
     initial: string;
     context: unknown;
     version?: string;
+    metadata?: Record<string, unknown>;
   }): Promise<void> {
-    const now = new Date();
+    const now = this.clock.now();
     this.machines.set(params.id, {
       id: params.id,
       name: params.name,
       current: params.initial,
       context: params.context,
       version: params.version,
+      metadata: params.metadata,
       createdAt: now,
       updatedAt: now,
     });
@@ -79,7 +88,7 @@ export class InMemoryStateMachineStorage implements StateMachineStorage {
       );
     }
 
-    const now = new Date();
+    const now = this.clock.now();
     this.machines.set(params.id, {
       ...machine,
       current: params.to,
@@ -112,7 +121,7 @@ export class InMemoryStateMachineStorage implements StateMachineStorage {
 
   async tryLock(id: string, durationMs: number): Promise<boolean> {
     const lock = this.locks.get(id);
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     if (lock && lock.expiresAt > now) return false;
     this.locks.set(id, { expiresAt: now + durationMs });
     return true;
