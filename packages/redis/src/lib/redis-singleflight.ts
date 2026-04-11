@@ -66,7 +66,7 @@ export class RedisSingleflight implements Singleflight {
     }
 
     // Joiner — wait for result on a dedicated connection (BRPOP blocks)
-    const sub = this.redis.duplicate();
+    const sub = await this.redis.duplicate();
     try {
       const timeoutSec = Math.ceil(this.timeoutMs / 1000);
       const result = await sub.brpop(resultKey, timeoutSec);
@@ -84,7 +84,7 @@ export class RedisSingleflight implements Singleflight {
       }
       return payload.value as T;
     } finally {
-      sub.disconnect();
+      sub.disconnect ? sub.disconnect() : sub.close?.();
     }
   }
 }

@@ -66,35 +66,43 @@ export class RedisPubSub<T> implements Streamable<T>, Sinkable<T> {
 
     // Redis requires a dedicated connection for subscriptions —
     // ioredis .duplicate() creates one sharing the same config.
+    const redis = this.redis;
     const stream = Stream.async<T, never>((emit) => {
-      const sub = this.redis.duplicate();
+      const setup = async () => {
+        const sub = await redis.duplicate();
 
-      if (pattern) {
-        sub.psubscribe(pattern).catch(() => {});
-        sub.on("pmessage", (_pattern: string, _ch: string, message: string) => {
-          try {
-            const value = codec.decode(JSON.parse(message));
-            emit.single(value);
-          } catch {
-            // Skip malformed messages
-          }
-        });
-      } else if (channel) {
-        sub.subscribe(channel).catch(() => {});
-        sub.on("message", (_ch: string, message: string) => {
-          try {
-            const value = codec.decode(JSON.parse(message));
-            emit.single(value);
-          } catch {
-            // Skip malformed messages
-          }
-        });
-      }
+        if (pattern) {
+          sub.psubscribe(pattern).catch(() => {});
+          sub.on("pmessage", (_pattern: string, _ch: string, message: string) => {
+            try {
+              const value = codec.decode(JSON.parse(message));
+              emit.single(value);
+            } catch {
+              // Skip malformed messages
+            }
+          });
+        } else if (channel) {
+          sub.subscribe(channel).catch(() => {});
+          sub.on("message", (_ch: string, message: string) => {
+            try {
+              const value = codec.decode(JSON.parse(message));
+              emit.single(value);
+            } catch {
+              // Skip malformed messages
+            }
+          });
+        }
+
+        return sub;
+      };
+
+      const subPromise = setup();
 
       return Effect.promise(async () => {
+        const sub = await subPromise;
         if (pattern) await sub.punsubscribe(pattern);
         else if (channel) await sub.unsubscribe(channel);
-        sub.disconnect();
+        sub.disconnect ? sub.disconnect() : sub.close?.();
       });
     });
 

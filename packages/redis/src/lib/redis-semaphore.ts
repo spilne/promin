@@ -36,7 +36,7 @@ export class RedisSemaphore {
 
   /** Acquire a permit. Blocks until one is available or timeout. Uses a dedicated connection. */
   async acquire(): Promise<void> {
-    const sub = this.redis.duplicate();
+    const sub = await this.redis.duplicate();
     try {
       const timeoutSec = Math.ceil(this.timeoutMs / 1000);
       const result = await sub.brpop(this.key, timeoutSec);
@@ -44,7 +44,7 @@ export class RedisSemaphore {
         throw new Error(`Semaphore acquire timeout after ${this.timeoutMs}ms`);
       }
     } finally {
-      sub.disconnect();
+      sub.disconnect ? sub.disconnect() : sub.close?.();
     }
   }
 

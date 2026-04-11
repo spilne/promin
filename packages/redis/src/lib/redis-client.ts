@@ -14,7 +14,7 @@ export interface RedisClient {
   get(key: string): Promise<string | null>;
   set(key: string, value: string, ...args: (string | number)[]): Promise<unknown>;
   del(...keys: string[]): Promise<number>;
-  exists(key: string): Promise<number>;
+  exists(key: string): Promise<number | boolean>;
   keys(pattern: string): Promise<string[]>;
 
   // -- List --
@@ -56,8 +56,10 @@ export interface RedisClient {
   pipeline(): RedisPipeline;
 
   // -- Connection --
-  duplicate(): RedisClient;
-  disconnect(): void;
+  duplicate(): RedisClient | Promise<RedisClient>;
+  /** Close the connection. Bun uses close(), ioredis uses disconnect(). */
+  disconnect?(): void;
+  close?(): void;
 }
 
 export interface RedisPipeline {
