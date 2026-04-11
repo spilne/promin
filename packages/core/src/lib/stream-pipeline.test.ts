@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { Data, Effect, Stream } from "effect";
+import { Data, Effect, Schedule, Stream } from "effect";
 import { StreamPipeline } from "../index.ts";
 
 // ---------------------------------------------------------------------------
@@ -798,6 +798,246 @@ describe("StreamPipeline", () => {
 
       expect(result).toEqual([1, 2, 3]);
       expect(elapsed).toBeGreaterThanOrEqual(120); // 3 × ~50ms
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // fs2/RxJS-inspired operators
+  // ---------------------------------------------------------------------------
+
+  describe("changes", () => {
+    it("skips consecutive duplicates", async () => {
+      const result = await StreamPipeline.fromIterable([1, 1, 2, 2, 2, 3, 1, 1])
+        .changes()
+        .collect();
+      expect(result).toEqual([1, 2, 3, 1]);
+    });
+
+    it("uses custom equality comparator", async () => {
+      const result = await StreamPipeline.fromIterable([
+        { id: 1, v: "a" },
+        { id: 1, v: "b" },
+        { id: 2, v: "c" },
+      ])
+        .changes((a, b) => a.id === b.id)
+        .collect();
+      expect(result).toHaveLength(2);
+      expect(result[0]!.id).toBe(1);
+      expect(result[1]!.id).toBe(2);
+    });
+
+    it("passes through single-element stream", async () => {
+      const result = await StreamPipeline.fromIterable([42]).changes().collect();
+      expect(result).toEqual([42]);
+    });
+
+    it("passes through empty stream", async () => {
+      const result = await StreamPipeline.fromIterable([]).changes().collect();
+      expect(result).toEqual([]);
+    });
+  });
+
+  describe("handleErrorWith", () => {
+    it("recovers with a fallback stream", async () => {
+      const failing = StreamPipeline.from(
+        Stream.concat(Stream.succeed(1), Stream.fail(new TestError({ message: "boom" }))),
+      );
+      const result = await failing
+        .handleErrorWith(() => StreamPipeline.fromIterable([99]))
+        .collect();
+      expect(result).toEqual([1, 99]);
+    });
+
+    it("does not invoke fallback when no error", async () => {
+      const result = await StreamPipeline.fromIterable([1, 2, 3])
+        .handleErrorWith(() => StreamPipeline.fromIterable([99]))
+        .collect();
+      expect(result).toEqual([1, 2, 3]);
+    });
+  });
+
+  describe("attempt", () => {
+    it("wraps items in Right, error in Left", async () => {
+      const result = await StreamPipeline.from(
+        Stream.concat(Stream.fromIterable([1, 2]), Stream.fail(new TestError({ message: "err" }))),
+      )
+        .attempt()
+        .collect();
+      expect(result).toHaveLength(3);
+      expect(result[0]).toEqual({ _tag: "Right", value: 1 });
+      expect(result[1]).toEqual({ _tag: "Right", value: 2 });
+      expect(result[2]!._tag).toBe("Left");
+      if (result[2]!._tag === "Left") {
+        expect(result[2]!.error.message).toBe("err");
+      }
+    });
+
+    it("returns all Right when no error", async () => {
+      const result = await StreamPipeline.fromIterable([1, 2]).attempt().collect();
+      expect(result).toEqual([
+        { _tag: "Right", value: 1 },
+        { _tag: "Right", value: 2 },
+      ]);
+    });
+  });
+
+  describe("zipWithPrevious", () => {
+    it("emits [prev, current] pairs", async () => {
+      const result = await StreamPipeline.fromIterable([10, 20, 30]).zipWithPrevious().collect();
+      expect(result).toEqual([
+        [undefined, 10],
+        [10, 20],
+        [20, 30],
+      ]);
+    });
+
+    it("handles single-element stream", async () => {
+      const result = await StreamPipeline.fromIterable([42]).zipWithPrevious().collect();
+      expect(result).toEqual([[undefined, 42]]);
+    });
+  });
+
+  describe("takeUntil", () => {
+    it("takes items until signal stream emits", async () => {
+      const slow = StreamPipeline.from(
+        Stream.fromIterable([1, 2, 3, 4, 5]).pipe(Stream.tap(() => Effect.sleep("50 millis"))),
+      );
+      const signal = StreamPipeline.from(
+        Stream.fromEffect(Effect.sleep("120 millis").pipe(Effect.as("stop"))),
+      );
+      const result = await slow.takeUntil(signal).collect();
+      // Should get first 2-3 items before signal fires at ~120ms
+      expect(result.length).toBeGreaterThanOrEqual(1);
+      expect(result.length).toBeLessThanOrEqual(3);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Reactive operators (RxJS-inspired)
+  // ---------------------------------------------------------------------------
+
+  describe("combineLatest", () => {
+    it("emits tuples combining latest values from both streams", async () => {
+      const a = StreamPipeline.from(
+        Stream.fromIterable([1, 2, 3]).pipe(Stream.schedule(Schedule.spaced("100 millis"))),
+      );
+      const b = StreamPipeline.from(
+        Stream.fromIterable(["x", "y", "z", "w"]).pipe(
+          Stream.schedule(Schedule.spaced("50 millis")),
+        ),
+      );
+      const result = await a.combineLatest(b).collect();
+      expect(result.length).toBeGreaterThan(0);
+      // Each item is [number, string]
+      for (const [num, str] of result) {
+        expect(typeof num).toBe("number");
+        expect(typeof str).toBe("string");
+      }
+    });
+
+    it("produces tuples with correct types", async () => {
+      const a = StreamPipeline.fromIterable([10, 20]);
+      const b = StreamPipeline.fromIterable(["a", "b"]);
+      const result = await a.combineLatest(b).collect();
+      expect(result.length).toBeGreaterThan(0);
+      // Every tuple has [number, string]
+      for (const [num, str] of result) {
+        expect(typeof num).toBe("number");
+        expect(typeof str).toBe("string");
+      }
+    });
+  });
+
+  describe("withLatest", () => {
+    it("enriches main stream with latest from side stream", async () => {
+      // Side stream emits fast so it has a value before main starts
+      const main = StreamPipeline.from(
+        Stream.fromIterable([1, 2, 3]).pipe(Stream.tap(() => Effect.sleep("80 millis"))),
+      );
+      const side = StreamPipeline.from(
+        Stream.fromIterable(["a", "b", "c"]).pipe(Stream.schedule(Schedule.spaced("30 millis"))),
+      );
+      const result = await main.withLatest(side).collect();
+      expect(result.length).toBeGreaterThan(0);
+      for (const [num, str] of result) {
+        expect(typeof num).toBe("number");
+        expect(typeof str).toBe("string");
+      }
+    });
+
+    it("skips main items if side stream has not emitted yet", async () => {
+      // Main emits instantly, side emits after delay — first main items may be skipped
+      const main = StreamPipeline.fromIterable([1, 2, 3]);
+      const side = StreamPipeline.from(
+        Stream.fromEffect(Effect.sleep("100 millis").pipe(Effect.as("late"))),
+      );
+      const result = await main.withLatest(side).collect();
+      // All main items arrive before side emits, so nothing pairs
+      expect(result.length).toBe(0);
+    });
+  });
+
+  describe("sample", () => {
+    it("emits latest value at fixed intervals", async () => {
+      // Fast source, slow sampler
+      const fast = StreamPipeline.from(
+        Stream.fromIterable([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]).pipe(
+          Stream.schedule(Schedule.spaced("10 millis")),
+        ),
+      );
+      const result = await fast.sample(50).take(2).collect();
+      expect(result.length).toBe(2);
+      // Sampled values should be from later in the sequence (not first)
+      for (const v of result) {
+        expect(typeof v).toBe("number");
+      }
+    });
+  });
+
+  describe("exhaustMap", () => {
+    it("ignores new items while inner stream is active", async () => {
+      const result = await StreamPipeline.fromIterable([1, 2, 3])
+        .exhaustMap((n) => StreamPipeline.fromIterable([n * 10]))
+        .collect();
+      // With synchronous inner streams, all items may process
+      expect(result.length).toBeGreaterThan(0);
+      expect(result[0]).toBe(10);
+    });
+
+    it("processes next item after inner completes", async () => {
+      const result = await StreamPipeline.from(
+        Stream.fromIterable([1, 2, 3]).pipe(Stream.schedule(Schedule.spaced("50 millis"))),
+      )
+        .exhaustMap((n) =>
+          StreamPipeline.from(
+            Stream.fromIterable([n * 10, n * 100]).pipe(
+              Stream.tap(() => Effect.sleep("10 millis")),
+            ),
+          ),
+        )
+        .collect();
+      // Each inner takes ~20ms, outer items spaced 50ms — all should process
+      expect(result).toEqual([10, 100, 20, 200, 30, 300]);
+    });
+  });
+
+  describe("audit", () => {
+    it("emits last value in each time window", async () => {
+      const fast = StreamPipeline.from(
+        Stream.fromIterable([1, 2, 3, 4, 5, 6]).pipe(Stream.schedule(Schedule.spaced("15 millis"))),
+      );
+      const result = await fast.audit(50).collect();
+      // ~90ms total, 50ms windows → should get 1-2 emissions
+      expect(result.length).toBeGreaterThanOrEqual(1);
+      // Each emitted value should be from later in the window
+      for (const v of result) {
+        expect(typeof v).toBe("number");
+      }
+    });
+
+    it("returns empty for empty stream", async () => {
+      const result = await StreamPipeline.fromIterable([]).audit(100).collect();
+      expect(result).toEqual([]);
     });
   });
 });

@@ -703,6 +703,67 @@ export class StreamPipeline<T, E extends TaggedError> {
     return pipe(this);
   }
 
+  // -------------------------------------------------------------------------
+  // fs2/RxJS-inspired operators
+  // -------------------------------------------------------------------------
+
+  /** Skip consecutive duplicate items. Like fs2's `changes` / RxJS `distinctUntilChanged`. */
+  changes(eq?: (a: T, b: T) => boolean): StreamPipeline<T, E> {
+    const equals = eq ?? ((a: T, b: T) => a === b);
+    return new StreamPipeline(
+      Stream.filterMap(
+        Stream.mapAccum(this._materialize(), Option.none<T>() as Option.Option<T>, (prev, curr) => {
+          if (Option.isSome(prev) && equals(prev.value, curr)) {
+            return [Option.some(curr), Option.none<T>()] as const;
+          }
+          return [Option.some(curr), Option.some(curr)] as const;
+        }),
+        (opt: Option.Option<T>) => opt,
+      ),
+    );
+  }
+
+  /** Replace error with a fallback stream. Like fs2's `handleErrorWith` / RxJS `catchError`. */
+  handleErrorWith(fn: (error: E) => StreamPipeline<T, E>): StreamPipeline<T, E> {
+    return new StreamPipeline(Stream.catchAll(this._materialize(), (error: E) => fn(error).stream));
+  }
+
+  /** Wrap each item in a success/failure result. Errors become values instead of failing the stream. */
+  attempt(): StreamPipeline<
+    { readonly _tag: "Right"; readonly value: T } | { readonly _tag: "Left"; readonly error: E },
+    never
+  > {
+    const wrapped = Stream.map(this._materialize(), (value: T) => ({
+      _tag: "Right" as const,
+      value,
+    }));
+    return new StreamPipeline(
+      Stream.catchAll(wrapped, (error: E) => Stream.succeed({ _tag: "Left" as const, error })),
+    ) as StreamPipeline<
+      { readonly _tag: "Right"; readonly value: T } | { readonly _tag: "Left"; readonly error: E },
+      never
+    >;
+  }
+
+  /** Emit [previous, current] pairs. First element gets [undefined, first]. Like fs2's `zipWithPrevious`. */
+  zipWithPrevious(): StreamPipeline<[T | undefined, T], E> {
+    return new StreamPipeline(
+      Stream.mapAccum(this._materialize(), undefined as T | undefined, (prev, curr) => {
+        return [curr, [prev, curr] as [T | undefined, T]] as const;
+      }),
+    );
+  }
+
+  /** Take items until another stream emits. Like RxJS `takeUntil` / fs2 `interruptWhen`. */
+  takeUntil<E2 extends TaggedError>(
+    signal: StreamPipeline<unknown, E2>,
+  ): StreamPipeline<T, E | E2> {
+    const interrupter = signal.stream.pipe(Stream.runHead, Effect.as(undefined));
+    return new StreamPipeline(
+      Stream.interruptWhen(this._materialize(), interrupter) as Stream.Stream<T, E | E2>,
+    );
+  }
+
   /**
    * Fan out every item to multiple parallel processing pipelines.
    * Each function receives a clone of the stream; results are merged.
@@ -772,6 +833,179 @@ export class StreamPipeline<T, E extends TaggedError> {
             yield* Effect.sleep(Duration.millis(pollMs));
           }
           return value;
+        }),
+      ),
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Reactive operators (RxJS-inspired)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Combine latest values from two streams. Emits whenever either stream emits,
+   * paired with the most recent value from the other stream.
+   * Like RxJS `combineLatest`.
+   *
+   * Note: tracking the latest value is done on a per-chunk basis (Effect semantics).
+   *
+   * @example
+   * ```ts
+   * const prices = StreamPipeline.from(priceStream);
+   * const rates  = StreamPipeline.from(rateStream);
+   * prices.combineLatest(rates).map(([price, rate]) => price * rate);
+   * ```
+   */
+  combineLatest<U, E2 extends TaggedError>(
+    other: StreamPipeline<U, E2>,
+  ): StreamPipeline<[T, U], E | E2> {
+    return new StreamPipeline(
+      Stream.zipLatest(this._materialize(), other.stream) as Stream.Stream<[T, U], E | E2>,
+    );
+  }
+
+  /**
+   * Enrich each item from the main stream with the latest value from a side stream.
+   * Only emits once the side stream has produced at least one value.
+   * Unlike `combineLatest`, emissions from the side stream alone do not produce output.
+   * Like RxJS `withLatestFrom`.
+   *
+   * @example
+   * ```ts
+   * const clicks = StreamPipeline.from(clickStream);
+   * const config = StreamPipeline.from(configStream);
+   * clicks.withLatest(config).map(([click, cfg]) => enrichClick(click, cfg));
+   * ```
+   */
+  withLatest<U, E2 extends TaggedError>(
+    other: StreamPipeline<U, E2>,
+  ): StreamPipeline<[T, U], E | E2> {
+    const mainStream = this._materialize();
+    const otherStream = other.stream;
+    return new StreamPipeline(
+      Stream.unwrap(
+        Effect.gen(function* () {
+          const latest = yield* Ref.make<Option.Option<U>>(Option.none());
+          // Fork side stream to continuously update the ref
+          const updater = Stream.runForEach(otherStream, (b) => Ref.set(latest, Option.some(b)));
+          // Main stream reads latest on each emission
+          const main = mainStream.pipe(
+            Stream.mapEffect((a) =>
+              Ref.get(latest).pipe(
+                Effect.map((b) =>
+                  Option.isSome(b) ? Option.some([a, b.value] as [T, U]) : Option.none(),
+                ),
+              ),
+            ),
+            Stream.filterMap((x) => x),
+          );
+          return Stream.merge(
+            main,
+            Stream.drain(Stream.fromEffect(updater)) as Stream.Stream<[T, U], E2>,
+          );
+        }),
+      ) as Stream.Stream<[T, U], E | E2>,
+    );
+  }
+
+  /**
+   * Emit the latest value at fixed intervals. Values arriving between ticks are
+   * silently replaced — only the most recent survives. If no value has arrived
+   * since the last tick, nothing is emitted.
+   * Like RxJS `sampleTime`.
+   *
+   * @example
+   * ```ts
+   * // Downsample a fast sensor stream to 1 Hz
+   * sensorStream.sample(1_000).forEach(logReading);
+   * ```
+   */
+  sample(intervalMs: number): StreamPipeline<T, E> {
+    const source = this._materialize();
+    return new StreamPipeline(
+      Stream.unwrap(
+        Effect.gen(function* () {
+          const latest = yield* Ref.make<Option.Option<T>>(Option.none());
+          // Fork source to continuously update the ref
+          const updater = Stream.runForEach(source, (item) => Ref.set(latest, Option.some(item)));
+          // Tick stream reads latest at each interval
+          const ticker = Stream.repeatEffectOption(
+            Effect.sleep(Duration.millis(intervalMs)).pipe(
+              Effect.flatMap(() =>
+                Ref.getAndSet(latest, Option.none()).pipe(
+                  Effect.flatMap((opt) =>
+                    Option.isSome(opt) ? Effect.succeed(opt.value) : Effect.fail(Option.none()),
+                  ),
+                ),
+              ),
+            ),
+          );
+          return Stream.merge(
+            ticker,
+            Stream.drain(Stream.fromEffect(updater)) as Stream.Stream<T, E>,
+          );
+        }),
+      ),
+    );
+  }
+
+  /**
+   * Flat-map each item into a sub-stream, but ignore new items while the previous
+   * inner stream is still active. Opposite of `switchMap` — first inner wins.
+   * Like RxJS `exhaustMap`.
+   *
+   * @example
+   * ```ts
+   * // Ignore rapid clicks while a save is in progress
+   * clickStream.exhaustMap((click) =>
+   *   StreamPipeline.fromPipeline(saveToServer(click.data))
+   * ).drain();
+   * ```
+   */
+  exhaustMap<U, E2 extends TaggedError>(
+    fn: (value: T) => StreamPipeline<U, E2>,
+  ): StreamPipeline<U, E | E2> {
+    const source = this._materialize();
+    return new StreamPipeline(
+      Stream.unwrap(
+        Effect.gen(function* () {
+          const busy = yield* Ref.make(false);
+          return source.pipe(
+            Stream.filterEffect(() => Ref.get(busy).pipe(Effect.map((b) => !b))),
+            Stream.flatMap((item) =>
+              Stream.unwrap(
+                Ref.set(busy, true).pipe(
+                  Effect.map(() => fn(item).stream.pipe(Stream.ensuring(Ref.set(busy, false)))),
+                ),
+              ),
+            ),
+          );
+        }),
+      ) as Stream.Stream<U, E | E2>,
+    );
+  }
+
+  /**
+   * When the source emits, start a timer. When the timer expires, emit the
+   * latest value from the source since the timer started. If the source emits
+   * again before the timer fires, the timer is NOT reset (unlike `debounce`).
+   * Like RxJS `auditTime`.
+   *
+   * Implemented via `groupedWithin(1 item cap disabled, ms window)` taking
+   * only the last element of each time window.
+   *
+   * @example
+   * ```ts
+   * // Rate-limit UI updates to at most one per 200ms
+   * uiEvents.audit(200).forEach(render);
+   * ```
+   */
+  audit(ms: number): StreamPipeline<T, E> {
+    return new StreamPipeline(
+      Stream.groupedWithin(this._materialize(), Number.MAX_SAFE_INTEGER, Duration.millis(ms)).pipe(
+        Stream.filterMap((chunk) => {
+          const arr = Chunk.toArray(chunk);
+          return arr.length > 0 ? Option.some(arr[arr.length - 1]!) : Option.none();
         }),
       ),
     );
