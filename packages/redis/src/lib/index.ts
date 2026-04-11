@@ -11,3 +11,4 @@ export { RedisChannel } from "./redis-channel.ts";
 export { RedisSemaphore } from "./redis-semaphore.ts";
 export { RedisLatch } from "./redis-latch.ts";
 export { RedisBarrier } from "./redis-barrier.ts";
+export { RedisStateMachineStorage } from "./redis-state-machine-storage.ts";
