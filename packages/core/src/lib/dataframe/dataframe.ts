@@ -6,8 +6,9 @@
 // ---------------------------------------------------------------------------
 
 import type { Frameable } from "../typeclasses/frameable.ts";
-import type { StreamPipeline } from "../stream-pipeline.ts";
+import { StreamPipeline } from "../stream-pipeline.ts";
 import type { LogicalPlan, WindowFn, AggFn, RollingFn } from "./logical-plan.ts";
+import { executeChunked } from "./chunked-executor.ts";
 import type { FileSourceDescriptor } from "./file-source.ts";
 import type { DataFrameExecutor } from "./executor.ts";
 import type { DataFrameSink } from "./sink.ts";
@@ -779,6 +780,33 @@ export class DataFrame<T> {
   // =========================================================================
   // TERMINALS
   // =========================================================================
+
+  /**
+   * Execute the plan in streaming mode — returns a StreamPipeline that yields rows.
+   *
+   * For streamable plans (filter, map, select, withColumn, etc.), processes the
+   * source data in fixed-size chunks with constant memory.
+   *
+   * For materializing plans (sort, groupBy, join, etc.), falls back to full
+   * execution and emits all rows at once.
+   *
+   * @param options.chunkSize - Number of source rows per chunk (default 10,000)
+   */
+  stream(options?: { chunkSize?: number }): StreamPipeline<T, never> {
+    const chunkSize = options?.chunkSize ?? 10_000;
+    const plan = this._plan;
+
+    return StreamPipeline.fromAsyncIterable<T, never>(
+      (async function* () {
+        for await (const chunk of executeChunked<T>({ plan, chunkSize })) {
+          yield* chunk;
+        }
+      })(),
+      (e) => {
+        throw e;
+      },
+    );
+  }
 
   async collect(): Promise<T[]> {
     return this._executor.execute<T>(this._plan);

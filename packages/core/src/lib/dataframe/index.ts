@@ -24,3 +24,5 @@ export {
   type FileSourceDescriptor,
 } from "./file-source.ts";
 export { type DataFrameSink, CsvSink, JsonlSink } from "./sink.ts";
+export { classifyPlan, type PlanStreamability } from "./plan-classifier.ts";
+export { executeChunked } from "./chunked-executor.ts";
