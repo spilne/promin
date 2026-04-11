@@ -179,6 +179,8 @@ export interface WorkflowDefinition<Input, Output> {
    * ```
    */
   start(workflowId: string, input: Input): Promise<WorkflowHandle<Output>>;
+  /** Start with ID derived from input (requires idempotency.deriveId config). */
+  start(input: Input): Promise<WorkflowHandle<Output>>;
 }
 
 /**
@@ -1477,9 +1479,14 @@ export class WorkflowBuilder<
   // build — freeze into a reusable WorkflowDefinition
   // ---------------------------------------------------------------------------
 
-  build(options?: { idempotency?: IdempotencyConfig }): WorkflowDefinition<Input, Current> {
+  build(options?: {
+    idempotency?: IdempotencyConfig;
+    /** Derive workflowId from input. Makes the ID deterministic — same input → same workflow. */
+    deriveId?: (input: Input) => string;
+  }): WorkflowDefinition<Input, Current> {
     const builder = options?.idempotency ? this._deriveWithIdempotency(options.idempotency) : this;
     const self = builder;
+    const deriveId = options?.deriveId;
     return {
       name: self._name,
       storage: self._storage,
@@ -1574,7 +1581,20 @@ export class WorkflowBuilder<
         throw new Error(`Workflow ${workflowId} did not complete within ${timeoutMs}ms`);
       },
 
-      start: async (workflowId, input) => {
+      start: async (workflowIdOrInput: string | Input, maybeInput?: Input) => {
+        // Resolve workflowId: explicit → deriveId(input) → error
+        let workflowId: string;
+        let input: Input;
+        if (maybeInput !== undefined) {
+          workflowId = workflowIdOrInput as string;
+          input = maybeInput;
+        } else if (deriveId) {
+          input = workflowIdOrInput as Input;
+          workflowId = deriveId(input);
+        } else {
+          throw new Error("workflowId is required when deriveId is not configured");
+        }
+
         const definition = self.build(
           self._idempotency ? { idempotency: self._idempotency } : undefined,
         );

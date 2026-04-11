@@ -175,4 +175,87 @@ describe("workflow singleflight", () => {
 
     await h1.result({ timeoutMs: 5_000 });
   });
+
+  // -------------------------------------------------------------------------
+  // deriveId
+  // -------------------------------------------------------------------------
+
+  it("deriveId generates workflowId from input", async () => {
+    const storage = new InMemoryWorkflowStorage();
+
+    const wf = workflow({ name: "derive", storage })
+      .stepAsync("compute", async () => ({ done: true }))
+      .build({
+        deriveId: (input: any) => `order:${input.userId}:${input.orderId}`,
+        idempotency,
+      });
+
+    const handle = await wf.start({ userId: "u1", orderId: "o5" });
+    expect(handle.workflowId).toBe("order:u1:o5");
+
+    const result = await handle.result({ timeoutMs: 5_000 });
+    expect(result).toEqual({ done: true });
+  });
+
+  it("deriveId deduplicates same logical request", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    let executions = 0;
+
+    const wf = workflow({ name: "derive-dedup", storage })
+      .stepAsync("compute", async () => {
+        executions++;
+        await new Promise((r) => setTimeout(r, 50));
+        return { value: 42 };
+      })
+      .build({
+        deriveId: (input: any) => `key:${input.id}`,
+        idempotency,
+      });
+
+    const h1 = await wf.start({ id: "abc" });
+    const h2 = await wf.start({ id: "abc" });
+
+    expect(h1.workflowId).toBe("key:abc");
+    expect(h2.workflowId).toBe("key:abc");
+
+    const [r1, r2] = await Promise.all([
+      h1.result({ timeoutMs: 5_000 }),
+      h2.result({ timeoutMs: 5_000 }),
+    ]);
+
+    expect(r1).toEqual({ value: 42 });
+    expect(r2).toEqual({ value: 42 });
+    expect(executions).toBe(1);
+  });
+
+  it("explicit ID overrides deriveId", async () => {
+    const storage = new InMemoryWorkflowStorage();
+
+    const wf = workflow({ name: "derive-override", storage })
+      .stepAsync("compute", async () => ({ ok: true }))
+      .build({
+        deriveId: (input: any) => `derived:${input.id}`,
+        idempotency,
+      });
+
+    const handle = await wf.start("explicit-id", { id: "abc" });
+    expect(handle.workflowId).toBe("explicit-id");
+
+    await handle.result({ timeoutMs: 5_000 });
+  });
+
+  it("start(input) without deriveId throws", async () => {
+    const storage = new InMemoryWorkflowStorage();
+
+    const wf = workflow({ name: "no-derive", storage })
+      .stepAsync("compute", async () => ({ ok: true }))
+      .build({ idempotency });
+
+    try {
+      await (wf as any).start({ id: "abc" });
+      expect(true).toBe(false);
+    } catch (e: any) {
+      expect(e.message).toContain("deriveId");
+    }
+  });
 });
