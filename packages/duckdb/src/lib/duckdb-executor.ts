@@ -546,7 +546,8 @@ class CompilationContext {
       case "Unpivot":
       case "Explode":
       case "Rolling":
-      case "Cumulative": {
+      case "Cumulative":
+      case "FillNull": {
         // Fallback to ArrayExecutor for operations that don't compile to SQL
         const { ArrayExecutor } = await import("@promin/core");
         const rows = await new ArrayExecutor().execute(plan);
