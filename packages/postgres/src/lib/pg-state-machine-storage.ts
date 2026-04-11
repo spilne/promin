@@ -20,6 +20,8 @@ export class PgStateMachineStorage implements StateMachineStorage {
   async create(params: {
     id: string;
     name: string;
+    type?: string;
+    namespace?: string;
     initial: string;
     context: unknown;
     version?: string;
@@ -28,6 +30,8 @@ export class PgStateMachineStorage implements StateMachineStorage {
     await this.db.insert(machines).values({
       id: params.id,
       name: params.name,
+      machineType: params.type,
+      namespace: params.namespace,
       current: params.initial,
       context: params.context,
       version: params.version,
@@ -41,6 +45,8 @@ export class PgStateMachineStorage implements StateMachineStorage {
     return {
       id: row.id,
       name: row.name,
+      type: row.machineType ?? undefined,
+      namespace: row.namespace ?? undefined,
       current: row.current,
       context: row.context,
       version: row.version ?? undefined,

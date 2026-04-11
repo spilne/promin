@@ -2,6 +2,8 @@
 CREATE TABLE IF NOT EXISTS sm_machines (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
+  machine_type TEXT,
+  namespace TEXT,
   current_state TEXT NOT NULL,
   context JSONB NOT NULL,
   version TEXT,
@@ -12,6 +14,8 @@ CREATE TABLE IF NOT EXISTS sm_machines (
 
 CREATE INDEX IF NOT EXISTS sm_machines_name_idx ON sm_machines(name);
 CREATE INDEX IF NOT EXISTS sm_machines_current_idx ON sm_machines(current_state);
+CREATE INDEX IF NOT EXISTS sm_machines_type_idx ON sm_machines(machine_type);
+CREATE INDEX IF NOT EXISTS sm_machines_namespace_idx ON sm_machines(namespace);
 
 CREATE TABLE IF NOT EXISTS sm_machine_events (
   id BIGSERIAL PRIMARY KEY,

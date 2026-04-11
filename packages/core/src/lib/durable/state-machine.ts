@@ -89,6 +89,8 @@ export class StateMachineBuilder<S> {
     private readonly storage: StateMachineStorage,
     private readonly version?: string,
     private readonly limits?: MachineLimits,
+    private readonly type?: string,
+    private readonly namespace?: string,
   ) {}
 
   /** Add middleware that wraps every transition. Composable — called in order. */
@@ -150,6 +152,8 @@ export class StateMachineBuilder<S> {
       this.version,
       this.limits,
       this.middlewares.length > 0 ? composeMachineMiddleware(...this.middlewares) : undefined,
+      this.type,
+      this.namespace,
     );
   }
 }
@@ -170,6 +174,8 @@ export class StateMachineInstance<S> {
     private readonly version?: string,
     private readonly limits?: MachineLimits,
     private readonly middleware?: MachineMiddleware,
+    private readonly type?: string,
+    private readonly namespace?: string,
   ) {}
 
   async start(params: {
@@ -183,6 +189,8 @@ export class StateMachineInstance<S> {
     await this.storage.create({
       id: params.id,
       name: this.name,
+      type: this.type,
+      namespace: this.namespace,
       initial: this.initialState,
       context: params.context,
       version: this.version,
@@ -373,6 +381,15 @@ export function stateMachine<S>(params: {
   storage: StateMachineStorage;
   version?: string;
   limits?: MachineLimits;
+  type?: string;
+  namespace?: string;
 }): StateMachineBuilder<S> {
-  return new StateMachineBuilder<S>(params.name, params.storage, params.version, params.limits);
+  return new StateMachineBuilder<S>(
+    params.name,
+    params.storage,
+    params.version,
+    params.limits,
+    params.type,
+    params.namespace,
+  );
 }

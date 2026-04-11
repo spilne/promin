@@ -58,6 +58,8 @@ export function transitionTo<S, State extends keyof S>(
 export interface MachineState {
   readonly id: string;
   readonly name: string;
+  readonly type?: string;
+  readonly namespace?: string;
   readonly current: string;
   readonly context: unknown;
   readonly version?: string;

@@ -213,6 +213,8 @@ export const machines = pgTable(
   {
     id: text("id").primaryKey(),
     name: text("name").notNull(),
+    machineType: text("machine_type"),
+    namespace: text("namespace"),
     current: text("current_state").notNull(),
     context: jsonb("context").notNull(),
     version: text("version"),
@@ -220,7 +222,12 @@ export const machines = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("sm_machines_name_idx").on(t.name), index("sm_machines_current_idx").on(t.current)],
+  (t) => [
+    index("sm_machines_name_idx").on(t.name),
+    index("sm_machines_current_idx").on(t.current),
+    index("sm_machines_type_idx").on(t.machineType),
+    index("sm_machines_namespace_idx").on(t.namespace),
+  ],
 );
 
 export const machineEvents = pgTable(

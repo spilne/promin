@@ -9,6 +9,8 @@ export interface StateMachineStorage {
   create(params: {
     id: string;
     name: string;
+    type?: string;
+    namespace?: string;
     initial: string;
     context: unknown;
     version?: string;
@@ -49,6 +51,8 @@ export class InMemoryStateMachineStorage implements StateMachineStorage {
   async create(params: {
     id: string;
     name: string;
+    type?: string;
+    namespace?: string;
     initial: string;
     context: unknown;
     version?: string;
@@ -58,6 +62,8 @@ export class InMemoryStateMachineStorage implements StateMachineStorage {
     this.machines.set(params.id, {
       id: params.id,
       name: params.name,
+      type: params.type,
+      namespace: params.namespace,
       current: params.initial,
       context: params.context,
       version: params.version,
