@@ -221,4 +221,65 @@ for (const size of [1_000, 10_000]) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Transfer overhead — isolate JSON serialization cost
+// This measures the bottleneck Arrow IPC would eliminate.
+// ---------------------------------------------------------------------------
+
+for (const size of [1_000, 10_000, 100_000]) {
+  const label = size >= 100_000 ? `${size / 1_000}K` : `${(size / 1_000).toFixed(0)}K`;
+  const data = generateRows(size);
+
+  group(`transfer overhead: load + trivial query (${label} rows)`, () => {
+    // Baseline: just the query on pre-cached data
+    const dfCached = DataFrame.fromArray(data).withExecutor(duckdb);
+    bench("DuckDB cached (no transfer)", async () => {
+      // Second call uses cache — measures pure DuckDB query time
+      return dfCached.select("id", "region", "revenue").collect();
+    });
+
+    // Full cost: fresh data each time (JSON serialize + INSERT + query + JSON parse)
+    bench("DuckDB cold (full JSON transfer)", async () => {
+      // Fresh executor so no cache — forces re-transfer
+      const freshDuck = new DuckDBExecutor();
+      const df = DataFrame.fromArray([...data]).withExecutor(freshDuck);
+      return df.select("id", "region", "revenue").collect();
+    });
+
+    // Array baseline: no transfer, just iteration
+    const dfArr = DataFrame.fromArray(data);
+    bench("ArrayExecutor (no transfer)", async () => {
+      return dfArr.select("id", "region", "revenue").collect();
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end groupBy: Array vs DuckDB cold vs DuckDB cached
+// Shows where transfer cost dominates vs where DuckDB query speed wins
+// ---------------------------------------------------------------------------
+
+for (const size of [10_000, 100_000]) {
+  const label = size >= 100_000 ? `${size / 1_000}K` : `${(size / 1_000).toFixed(0)}K`;
+  const data = generateRows(size);
+  const dfCached = DataFrame.fromArray(data).withExecutor(duckdb);
+  const dfArr = DataFrame.fromArray(data);
+
+  group(`groupBy+agg end-to-end (${label} rows)`, () => {
+    bench("Array", async () => {
+      return dfArr.groupBy("region").agg({ revenue: "sum", score: "avg" }).collect();
+    });
+
+    bench("DuckDB cached", async () => {
+      return dfCached.groupBy("region").agg({ revenue: "sum", score: "avg" }).collect();
+    });
+
+    bench("DuckDB cold (with JSON transfer)", async () => {
+      const freshDuck = new DuckDBExecutor();
+      const df = DataFrame.fromArray([...data]).withExecutor(freshDuck);
+      return df.groupBy("region").agg({ revenue: "sum", score: "avg" }).collect();
+    });
+  });
+}
+
 await run();
