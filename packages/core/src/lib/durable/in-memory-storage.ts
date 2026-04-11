@@ -39,6 +39,7 @@ interface MutableWorkflow {
   metadata?: Record<string, unknown>;
   steps: Map<string, StepState>;
   createdAt: Date;
+  startedAt?: Date;
   updatedAt: Date;
   completedAt?: Date;
 }
@@ -79,6 +80,7 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
       metadata: wf.metadata,
       steps,
       createdAt: wf.createdAt,
+      startedAt: wf.startedAt,
       updatedAt: wf.updatedAt,
       completedAt: wf.completedAt,
     };
@@ -123,7 +125,7 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
   async cancelWorkflow(workflowId: string, options?: { cascade?: boolean }): Promise<void> {
     const wf = this.workflows.get(workflowId);
     if (!wf) return;
-    if (wf.status !== "running" && wf.status !== "suspended") return;
+    if (wf.status !== "pending" && wf.status !== "running" && wf.status !== "suspended") return;
 
     const now = new Date();
     wf.status = "failed";
@@ -157,7 +159,7 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
       workflowType: params.workflowType,
       parentWorkflowId: params.parentWorkflowId,
       namespace: this.resolveNamespace(params.namespace),
-      status: "running",
+      status: "pending",
       version: params.version,
       run: 1,
       input: params.input,
@@ -166,6 +168,14 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
       createdAt: now,
       updatedAt: now,
     });
+  }
+
+  /** Transition pending → running on first step activity. */
+  private markRunning(wf: MutableWorkflow): void {
+    if (wf.status === "pending") {
+      wf.status = "running";
+      wf.startedAt = new Date();
+    }
   }
 
   async saveStepResult(params: {
@@ -177,6 +187,7 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
   }): Promise<void> {
     const wf = this.workflows.get(params.workflowId);
     if (!wf) return;
+    this.markRunning(wf);
 
     const existing = wf.steps.get(params.stepName);
     const now = new Date();
@@ -205,6 +216,7 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
   }): Promise<void> {
     const wf = this.workflows.get(params.workflowId);
     if (!wf) return;
+    this.markRunning(wf);
 
     const existing = wf.steps.get(params.stepName);
     const now = new Date();
@@ -399,14 +411,16 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
       error: wf.error,
       steps,
       createdAt: wf.createdAt,
+      startedAt: wf.startedAt,
       completedAt: wf.completedAt,
     });
     this.runHistory.set(workflowId, runs);
 
     wf.run++;
-    wf.status = "running";
+    wf.status = "pending";
     wf.result = undefined;
     wf.error = undefined;
+    wf.startedAt = undefined;
     wf.completedAt = undefined;
     wf.steps = new Map();
     wf.updatedAt = new Date();
@@ -433,6 +447,7 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
         error: wf.error,
         steps: currentSteps,
         createdAt: wf.createdAt,
+        startedAt: wf.startedAt,
         completedAt: wf.completedAt,
       },
       ...archived,

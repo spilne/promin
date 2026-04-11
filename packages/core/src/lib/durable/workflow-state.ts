@@ -2,7 +2,13 @@
 // Workflow & Step state types
 // ---------------------------------------------------------------------------
 
-export type WorkflowStatus = "running" | "completed" | "failed" | "suspended" | "compensating";
+export type WorkflowStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "suspended"
+  | "compensating";
 
 export type CompensationStatus = "none" | "compensating" | "compensated" | "partial";
 
@@ -36,6 +42,7 @@ export interface WorkflowState<Input = unknown, Result = unknown> {
   readonly workflowAttempt?: number;
   readonly compensationStatus?: CompensationStatus;
   readonly createdAt: Date;
+  readonly startedAt?: Date;
   readonly updatedAt: Date;
   readonly completedAt?: Date;
 }
@@ -49,6 +56,7 @@ export interface WorkflowRunSummary {
   readonly error?: string;
   readonly steps: Record<string, StepState>;
   readonly createdAt: Date;
+  readonly startedAt?: Date;
   readonly completedAt?: Date;
 }
 

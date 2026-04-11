@@ -45,11 +45,12 @@ export function storageTestSuite(factory: () => WorkflowStorage | Promise<Workfl
         expect(state!.workflowId).toBe("crud-1");
         expect(state!.workflowName).toBe("test-wf");
         expect(state!.workflowType).toBe("onboarding");
-        expect(state!.status).toBe("running");
+        expect(state!.status).toBe("pending");
         expect(state!.run).toBe(1);
         expect(state!.input).toEqual({ userId: "u_42" });
         expect(state!.metadata).toEqual({ region: "us-east" });
         expect(state!.createdAt).toBeInstanceOf(Date);
+        expect(state!.startedAt).toBeUndefined();
       });
 
       it("returns null for non-existent workflow", async () => {
@@ -84,6 +85,26 @@ export function storageTestSuite(factory: () => WorkflowStorage | Promise<Workfl
     // -------------------------------------------------------------------
     // saveStepResult
     // -------------------------------------------------------------------
+
+    describe("pending → running transition", () => {
+      it("transitions to running when first step is saved", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "pending-1", workflowName: "test", input: {} });
+        expect((await s.loadWorkflow("pending-1"))!.status).toBe("pending");
+
+        await s.saveStepResult({
+          workflowId: "pending-1",
+          stepName: "step-a",
+          result: "ok",
+          durationMs: 10,
+          startedAt: new Date(),
+        });
+
+        const state = await s.loadWorkflow("pending-1");
+        expect(state!.status).toBe("running");
+        expect(state!.startedAt).toBeInstanceOf(Date);
+      });
+    });
 
     describe("saveStepResult", () => {
       it("saves and loads step result", async () => {
@@ -333,8 +354,9 @@ export function storageTestSuite(factory: () => WorkflowStorage | Promise<Workfl
 
         const state = await s.loadWorkflow("fresh-1");
         expect(state!.run).toBe(2);
-        expect(state!.status).toBe("running");
+        expect(state!.status).toBe("pending");
         expect(state!.result).toBeUndefined();
+        expect(state!.startedAt).toBeUndefined();
       });
 
       it("old run steps are not loaded", async () => {
@@ -496,9 +518,9 @@ export function storageTestSuite(factory: () => WorkflowStorage | Promise<Workfl
         const history = await s.loadRunHistory("hist-meta-1");
         expect(history).toHaveLength(3);
 
-        // Current run (3) — running, no result
+        // Current run (3) — pending, no result
         expect(history[0]!.run).toBe(3);
-        expect(history[0]!.status).toBe("running");
+        expect(history[0]!.status).toBe("pending");
         expect(history[0]!.result).toBeUndefined();
         expect(history[0]!.error).toBeUndefined();
 
@@ -532,7 +554,7 @@ export function storageTestSuite(factory: () => WorkflowStorage | Promise<Workfl
         const history = await s.loadRunHistory("hist-3");
         expect(history).toHaveLength(1);
         expect(history[0]!.run).toBe(1);
-        expect(history[0]!.status).toBe("running");
+        expect(history[0]!.status).toBe("pending");
       });
     });
 

@@ -6,6 +6,7 @@ import type { WorkflowStatus, StepStatus, StepType, StepAttemptType } from "@pro
 import { defineLookup } from "./lookup.ts";
 
 export const WorkflowStatusIds = defineLookup<WorkflowStatus>({
+  pending: 0,
   running: 1,
   completed: 2,
   failed: 3,

@@ -107,7 +107,11 @@ export function trigger<T, Input, Output>(params: {
           if (onDuplicate === "skip") {
             const existing = await workflow.storage.loadWorkflow(workflowId);
             if (existing) {
-              if (existing.status === "completed" || existing.status === "running") {
+              if (
+                existing.status === "completed" ||
+                existing.status === "pending" ||
+                existing.status === "running"
+              ) {
                 return WorkflowResult.skipped({ workflowId, reason: "duplicate" });
               }
             }

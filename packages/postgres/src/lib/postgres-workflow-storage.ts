@@ -134,6 +134,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       metadata: row.metadata ?? undefined,
       steps: stepMap,
       createdAt: row.createdAt,
+      startedAt: row.startedAt ?? undefined,
       updatedAt: row.updatedAt,
       completedAt: row.completedAt ?? undefined,
     };
@@ -246,7 +247,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       .where(
         and(
           eq(workflows.workflowId, workflowId),
-          sql`${workflows.statusId} IN (${WorkflowStatusIds.id.running}, ${WorkflowStatusIds.id.suspended})`,
+          sql`${workflows.statusId} IN (${WorkflowStatusIds.id.pending}, ${WorkflowStatusIds.id.running}, ${WorkflowStatusIds.id.suspended})`,
         ),
       );
   }
@@ -267,10 +268,24 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       workflowType: params.workflowType,
       namespace: ns,
       version: params.version,
-      statusId: WorkflowStatusIds.id.running,
+      statusId: WorkflowStatusIds.id.pending,
       input: params.input,
       metadata: params.metadata,
     });
+  }
+
+  /** Transition pending → running on first step activity. */
+  private async markRunning(workflowId: string): Promise<void> {
+    const now = new Date();
+    await this.db
+      .update(workflows)
+      .set({ statusId: WorkflowStatusIds.id.running, startedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(workflows.workflowId, workflowId),
+          eq(workflows.statusId, WorkflowStatusIds.id.pending),
+        ),
+      );
   }
 
   private async getCurrentRun(workflowId: string): Promise<number> {
@@ -288,6 +303,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
     durationMs: number;
     startedAt: Date;
   }): Promise<void> {
+    await this.markRunning(params.workflowId);
     const now = new Date();
     const run = await this.getCurrentRun(params.workflowId);
     await this.db
@@ -326,6 +342,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
     durationMs: number;
     startedAt: Date;
   }): Promise<void> {
+    await this.markRunning(params.workflowId);
     const now = new Date();
     const run = await this.getCurrentRun(params.workflowId);
     await this.db
@@ -582,6 +599,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
           result: current.result,
           error: current.error,
           createdAt: current.createdAt,
+          startedAt: current.startedAt,
           completedAt: current.completedAt,
         })
         .onConflictDoNothing();
@@ -591,9 +609,10 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       .update(workflows)
       .set({
         run: sql`${workflows.run} + 1`,
-        statusId: WorkflowStatusIds.id.running,
+        statusId: WorkflowStatusIds.id.pending,
         result: null,
         error: null,
+        startedAt: null,
         completedAt: null,
         updatedAt: now,
       })
@@ -635,6 +654,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       result: unknown;
       error: string | null;
       createdAt: Date;
+      startedAt: Date | null;
       completedAt: Date | null;
     };
     const runMetas: RunMeta[] = [];
@@ -647,6 +667,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
         result: wfRow.result,
         error: wfRow.error,
         createdAt: wfRow.createdAt,
+        startedAt: wfRow.startedAt,
         completedAt: wfRow.completedAt,
       });
     }
@@ -658,6 +679,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
         result: ar.result,
         error: ar.error,
         createdAt: ar.createdAt,
+        startedAt: ar.startedAt,
         completedAt: ar.completedAt,
       });
     }
@@ -687,6 +709,7 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       error: meta.error ?? undefined,
       steps: stepsByRun.get(meta.run) ?? {},
       createdAt: meta.createdAt,
+      startedAt: meta.startedAt ?? undefined,
       completedAt: meta.completedAt ?? undefined,
     }));
   }

@@ -198,7 +198,7 @@ export interface WorkflowHandle<Output> {
 }
 
 export interface WorkflowStatusInfo<Output> {
-  readonly state: "running" | "completed" | "failed" | "suspended";
+  readonly state: "pending" | "running" | "completed" | "failed" | "suspended";
   readonly result?: Output;
   readonly error?: string;
   /** Which step is currently active or blocked. */
@@ -208,6 +208,7 @@ export interface WorkflowStatusInfo<Output> {
   /** Summary of all step statuses. */
   readonly steps: Record<string, { status: string; result?: unknown }>;
   readonly createdAt: Date;
+  readonly startedAt?: Date;
   readonly updatedAt: Date;
 }
 
@@ -1544,6 +1545,7 @@ export class WorkflowBuilder<
           suspendedReason,
           steps,
           createdAt: state.createdAt,
+          startedAt: state.startedAt,
           updatedAt: state.updatedAt,
         };
       },
@@ -1577,7 +1579,10 @@ export class WorkflowBuilder<
           self._idempotency ? { idempotency: self._idempotency } : undefined,
         );
         const existing = await self._storage.loadWorkflow(workflowId);
-        const isRunning = existing?.status === "running" || existing?.status === "suspended";
+        const isRunning =
+          existing?.status === "pending" ||
+          existing?.status === "running" ||
+          existing?.status === "suspended";
         const onInFlight = self._idempotency?.onInFlight ?? "reject";
 
         if (isRunning) {

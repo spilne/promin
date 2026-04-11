@@ -1108,7 +1108,7 @@ describe("InMemoryWorkflowStorage", () => {
     await storage.createWorkflow({ workflowId: "t1", workflowName: "test", input: { foo: "bar" } });
     const state = await storage.loadWorkflow("t1");
     expect(state?.workflowId).toBe("t1");
-    expect(state?.status).toBe("running");
+    expect(state?.status).toBe("pending");
     expect(state?.input).toEqual({ foo: "bar" });
   });
 
@@ -1502,7 +1502,7 @@ describe("Subworkflows", () => {
       await storage.cancelWorkflow("parent-nocancel");
 
       expect((await storage.loadWorkflow("parent-nocancel"))!.status).toBe("failed");
-      expect((await storage.loadWorkflow("child-nocancel"))!.status).toBe("running");
+      expect((await storage.loadWorkflow("child-nocancel"))!.status).toBe("pending");
     });
   });
 });

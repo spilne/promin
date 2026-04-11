@@ -269,7 +269,7 @@ export class DefaultCoordinator implements WorkflowCoordinator {
 
   private async recoverActiveWorkflows(): Promise<void> {
     // Reload running/suspended workflows in pages to handle large counts
-    for (const status of ["running", "suspended"] as const) {
+    for (const status of ["pending", "running", "suspended"] as const) {
       let offset = 0;
       const pageSize = 100;
       while (true) {

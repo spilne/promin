@@ -37,8 +37,8 @@ postgresDescribe("migrate", { migrate }, (pg) => {
 
   it("seeds lookup tables", async () => {
     const statuses = await pg.sql`SELECT * FROM wf_workflow_status ORDER BY id`;
-    expect(statuses.length).toBe(5); // running, completed, failed, suspended, compensating
-    expect(statuses[0]!.name).toBe("running");
+    expect(statuses.length).toBe(6); // pending, running, completed, failed, suspended, compensating
+    expect(statuses[0]!.name).toBe("pending");
 
     const stepStatuses = await pg.sql`SELECT * FROM wf_step_status ORDER BY id`;
     expect(stepStatuses.length).toBe(9); // +compensated, compensation_failed
@@ -81,7 +81,7 @@ postgresDescribe("PostgresWorkflowStorage", { migrate }, (pg) => {
       expect(state!.workflowId).toBe("crud-1");
       expect(state!.workflowName).toBe("test-wf");
       expect(state!.workflowType).toBe("onboarding");
-      expect(state!.status).toBe("running");
+      expect(state!.status).toBe("pending");
       expect(state!.input).toEqual({ userId: "u_42" });
       expect(state!.metadata).toEqual({ region: "us-east" });
       expect(state!.createdAt).toBeInstanceOf(Date);

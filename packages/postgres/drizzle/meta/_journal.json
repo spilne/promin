@@ -71,6 +71,13 @@
       "when": 1743400009000,
       "tag": "0009_workflow_version",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1743400010000,
+      "tag": "0010_pending_status",
+      "breakpoints": true
     }
   ]
 }
