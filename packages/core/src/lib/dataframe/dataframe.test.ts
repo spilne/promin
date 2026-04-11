@@ -117,6 +117,22 @@ describe("Column operations — reshape the data for specific reports", () => {
     expect(result[0]).toHaveProperty("unitPrice", 100);
     expect(result[1]).toHaveProperty("unitPrice", 400);
   });
+
+  it("withColumns adds multiple computed columns", async () => {
+    const df = DataFrame.fromArray([
+      { price: 100, quantity: 5 },
+      { price: 200, quantity: 3 },
+    ]);
+    const result = await df
+      .withColumns({
+        total: (r) => r.price * r.quantity,
+        discounted: (r) => r.price * 0.9,
+      })
+      .collect();
+    expect(result[0]!.total).toBe(500);
+    expect(result[0]!.discounted).toBe(90);
+    expect(result[1]!.total).toBe(600);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -223,6 +239,36 @@ describe("Null handling — clean up missing data before analysis", () => {
 
     expect(result.find((r) => r.name === "Bob")?.email).toBe("unknown");
     expect(result.find((r) => r.name === "Alice")?.email).toBe("alice@example.com");
+  });
+
+  it("fillNull with forward fill", async () => {
+    const df = DataFrame.fromArray([
+      { ts: 1, temp: 20 },
+      { ts: 2, temp: null },
+      { ts: 3, temp: null },
+      { ts: 4, temp: 25 },
+      { ts: 5, temp: null },
+    ]);
+    const result = await df.fillNull("temp", { method: "forward" }).collect();
+    expect(result.map((r) => r.temp)).toEqual([20, 20, 20, 25, 25]);
+  });
+
+  it("fillNull with backward fill", async () => {
+    const df = DataFrame.fromArray([
+      { ts: 1, temp: null },
+      { ts: 2, temp: null },
+      { ts: 3, temp: 25 },
+      { ts: 4, temp: null },
+      { ts: 5, temp: 30 },
+    ]);
+    const result = await df.fillNull("temp", { method: "backward" }).collect();
+    expect(result.map((r) => r.temp)).toEqual([25, 25, 25, 30, 30]);
+  });
+
+  it("fillNull with static value still works", async () => {
+    const df = DataFrame.fromArray([{ x: 1 }, { x: null }, { x: 3 }]);
+    const result = await df.fillNull("x", 0).collect();
+    expect(result.map((r) => r.x)).toEqual([1, 0, 3]);
   });
 });
 

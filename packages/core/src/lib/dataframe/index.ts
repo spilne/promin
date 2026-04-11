@@ -11,6 +11,7 @@ export {
   type RollingFn,
   type CumulativeFn,
 } from "./logical-plan.ts";
+export { optimizePlan } from "./plan-optimizer.ts";
 export {
   CsvFile,
   ParquetFile,

@@ -4,16 +4,19 @@
 
 import type { DataFrameExecutor, ExecutionCost } from "./executor.ts";
 import type { LogicalPlan, AggFn, WindowFn, RollingFn, CumulativeFn } from "./logical-plan.ts";
+import { optimizePlan } from "./plan-optimizer.ts";
 
 export class ArrayExecutor implements DataFrameExecutor {
   async execute<T>(plan: LogicalPlan): Promise<T[]> {
+    const optimized = optimizePlan(plan);
     // Resolve any async sources (file-backed Frameables) before sync execution
-    const resolved = await resolveAsyncSources(plan);
+    const resolved = await resolveAsyncSources(optimized);
     return executePlan(resolved) as T[];
   }
 
   executeSync<T>(plan: LogicalPlan): T[] {
-    return executePlan(plan) as T[];
+    const optimized = optimizePlan(plan);
+    return executePlan(optimized) as T[];
   }
 
   supports(_plan: LogicalPlan): boolean {
@@ -115,10 +118,26 @@ function executePlan(plan: LogicalPlan): unknown[] {
 
     case "Sort": {
       const rows = executePlan(plan.input);
-      const key = plan.by;
-      const desc = plan.order === "desc";
       const n = rows.length;
       if (n === 0) return rows;
+
+      // Multi-column sort
+      if (Array.isArray(plan.by)) {
+        const specs = plan.by as { column: string; order: "asc" | "desc" }[];
+        return [...rows].sort((a: any, b: any) => {
+          for (const spec of specs) {
+            const va = a[spec.column];
+            const vb = b[spec.column];
+            if (va < vb) return spec.order === "asc" ? -1 : 1;
+            if (va > vb) return spec.order === "asc" ? 1 : -1;
+          }
+          return 0;
+        });
+      }
+
+      // Single-column sort
+      const key = plan.by;
+      const desc = plan.order === "desc";
 
       // Extract keys once — avoids repeated property access in comparator
       const keys = new Array(n);
@@ -153,8 +172,9 @@ function executePlan(plan: LogicalPlan): unknown[] {
 
     case "Limit": {
       // Optimization: Sort + Limit → top-N selection (O(N) instead of O(N log N))
+      // Only applies to single-column sort (string `by`)
       const inner = plan.input;
-      if (inner._tag === "Sort") {
+      if (inner._tag === "Sort" && typeof inner.by === "string") {
         const rows = executePlan(inner.input);
         return topN(rows, plan.n, inner.by, inner.order);
       }
@@ -351,6 +371,44 @@ function executePlan(plan: LogicalPlan): unknown[] {
 
     case "Reverse":
       return executePlan(plan.input).reverse();
+
+    case "FillNull": {
+      const rows = executePlan(plan.input);
+      const col = plan.column;
+
+      if (plan.method === "value") {
+        return rows.map((row: any) => ({
+          ...row,
+          [col]: row[col] != null ? row[col] : plan.value,
+        }));
+      }
+
+      if (plan.method === "forward") {
+        let lastKnown: unknown = null;
+        return rows.map((row: any) => {
+          if (row[col] != null) {
+            lastKnown = row[col];
+            return row;
+          }
+          return { ...row, [col]: lastKnown };
+        });
+      }
+
+      if (plan.method === "backward") {
+        const result = rows.map((row: any) => ({ ...row }));
+        let nextKnown: unknown = null;
+        for (let i = result.length - 1; i >= 0; i--) {
+          if (result[i][col] != null) {
+            nextKnown = result[i][col];
+          } else {
+            result[i][col] = nextKnown;
+          }
+        }
+        return result;
+      }
+
+      return rows;
+    }
   }
 }
 
@@ -433,16 +491,21 @@ function computeAgg(rows: unknown[], column: string, fn: AggFn): unknown {
   }
 }
 
+function getJoinKey(row: any, on: string | string[]): string {
+  if (typeof on === "string") return String(row[on]);
+  return (on as string[]).map((k) => String(row[k])).join("\0");
+}
+
 function executeJoin(
   left: unknown[],
   right: unknown[],
-  on: string,
+  on: string | string[],
   type: "inner" | "left" | "right" | "full" | "semi" | "anti",
 ): unknown[] {
   // Build right index
-  const rightIndex = new Map<unknown, unknown[]>();
+  const rightIndex = new Map<string, unknown[]>();
   for (const row of right) {
-    const key = (row as any)[on];
+    const key = getJoinKey(row, on);
     if (!rightIndex.has(key)) rightIndex.set(key, []);
     rightIndex.get(key)!.push(row);
   }
@@ -451,7 +514,7 @@ function executeJoin(
     case "inner": {
       const result: unknown[] = [];
       for (const l of left) {
-        const matches = rightIndex.get((l as any)[on]);
+        const matches = rightIndex.get(getJoinKey(l, on));
         if (matches) {
           for (const r of matches) {
             result.push({ ...(l as any), ...(r as any) });
@@ -464,7 +527,7 @@ function executeJoin(
     case "left": {
       const result: unknown[] = [];
       for (const l of left) {
-        const matches = rightIndex.get((l as any)[on]);
+        const matches = rightIndex.get(getJoinKey(l, on));
         if (matches) {
           for (const r of matches) {
             result.push({ ...(l as any), ...(r as any) });
@@ -478,15 +541,15 @@ function executeJoin(
 
     case "right": {
       // Build left index and do right join
-      const leftIndex = new Map<unknown, unknown[]>();
+      const leftIndex = new Map<string, unknown[]>();
       for (const row of left) {
-        const key = (row as any)[on];
+        const key = getJoinKey(row, on);
         if (!leftIndex.has(key)) leftIndex.set(key, []);
         leftIndex.get(key)!.push(row);
       }
       const result: unknown[] = [];
       for (const r of right) {
-        const matches = leftIndex.get((r as any)[on]);
+        const matches = leftIndex.get(getJoinKey(r, on));
         if (matches) {
           for (const l of matches) {
             result.push({ ...(l as any), ...(r as any) });
@@ -502,7 +565,7 @@ function executeJoin(
       const result: unknown[] = [];
       const matchedRight = new Set<number>();
       for (const l of left) {
-        const matches = rightIndex.get((l as any)[on]);
+        const matches = rightIndex.get(getJoinKey(l, on));
         if (matches) {
           for (const r of matches) {
             matchedRight.add(right.indexOf(r));
@@ -519,11 +582,11 @@ function executeJoin(
     }
 
     case "semi": {
-      return left.filter((l) => rightIndex.has((l as any)[on]));
+      return left.filter((l) => rightIndex.has(getJoinKey(l, on)));
     }
 
     case "anti": {
-      return left.filter((l) => !rightIndex.has((l as any)[on]));
+      return left.filter((l) => !rightIndex.has(getJoinKey(l, on)));
     }
   }
 }

@@ -1,5 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { DataFrame } from "./dataframe.ts";
+import { optimizePlan } from "./plan-optimizer.ts";
+import { col } from "./expr.ts";
 
 // ---------------------------------------------------------------------------
 // Test data
@@ -528,5 +530,220 @@ describe("End-to-end analytics — realistic multi-step e-commerce reporting", (
 
     expect((rollingAvg[0] as any).ma3).toBe(1200); // just first
     expect(typeof (rollingAvg[3] as any).ma3).toBe("number");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Multi-column sort
+// ---------------------------------------------------------------------------
+
+describe("Multi-column sort — compound ordering across multiple fields", () => {
+  it("sorts by multiple columns", async () => {
+    const df = DataFrame.fromArray([
+      { region: "US", date: "2024-01", revenue: 100 },
+      { region: "EU", date: "2024-02", revenue: 200 },
+      { region: "US", date: "2024-02", revenue: 150 },
+      { region: "EU", date: "2024-01", revenue: 50 },
+    ]);
+    const sorted = await df
+      .sort([
+        { column: "region", order: "asc" },
+        { column: "date", order: "desc" },
+      ])
+      .collect();
+    expect(sorted[0]).toEqual({ region: "EU", date: "2024-02", revenue: 200 });
+    expect(sorted[1]).toEqual({ region: "EU", date: "2024-01", revenue: 50 });
+    expect(sorted[2]).toEqual({ region: "US", date: "2024-02", revenue: 150 });
+    expect(sorted[3]).toEqual({ region: "US", date: "2024-01", revenue: 100 });
+  });
+
+  it("multi-column sort with mixed asc/desc directions", async () => {
+    const df = DataFrame.fromArray([
+      { dept: "eng", level: 3, name: "Alice" },
+      { dept: "eng", level: 1, name: "Bob" },
+      { dept: "design", level: 2, name: "Charlie" },
+      { dept: "design", level: 2, name: "Diana" },
+    ]);
+    const sorted = await df
+      .sort([
+        { column: "dept", order: "asc" },
+        { column: "level", order: "desc" },
+      ])
+      .collect();
+    expect((sorted[0] as any).dept).toBe("design");
+    expect((sorted[0] as any).level).toBe(2);
+    expect((sorted[2] as any).dept).toBe("eng");
+    expect((sorted[2] as any).level).toBe(3);
+    expect((sorted[3] as any).level).toBe(1);
+  });
+
+  it("single-column sort still works after overload change", async () => {
+    const df = DataFrame.fromArray([{ v: 3 }, { v: 1 }, { v: 2 }]);
+    const sorted = await df.sort("v", "desc").collect();
+    expect(sorted.map((r) => r.v)).toEqual([3, 2, 1]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Composite join keys
+// ---------------------------------------------------------------------------
+
+describe("Composite join keys — joining on multiple columns", () => {
+  it("joins on composite keys", async () => {
+    const left = DataFrame.fromArray([
+      { userId: 1, date: "2024-01", score: 100 },
+      { userId: 1, date: "2024-02", score: 200 },
+      { userId: 2, date: "2024-01", score: 50 },
+    ]);
+    const right = DataFrame.fromArray([
+      { userId: 1, date: "2024-01", label: "A" },
+      { userId: 2, date: "2024-01", label: "B" },
+    ]);
+    const joined = await left.join(right, { on: ["userId", "date"] }).collect();
+    expect(joined).toHaveLength(2);
+    expect(joined[0]!.score).toBe(100);
+    expect(joined[0]!.label).toBe("A");
+    expect(joined[1]!.score).toBe(50);
+    expect(joined[1]!.label).toBe("B");
+  });
+
+  it("composite key left join preserves unmatched rows", async () => {
+    const left = DataFrame.fromArray([
+      { a: 1, b: "x", val: 10 },
+      { a: 1, b: "y", val: 20 },
+      { a: 2, b: "x", val: 30 },
+    ]);
+    const right = DataFrame.fromArray([{ a: 1, b: "x", extra: "found" }]);
+    const joined = await left.join(right, { on: ["a", "b"], type: "left" }).collect();
+    expect(joined).toHaveLength(3);
+    expect((joined[0] as any).extra).toBe("found");
+    expect((joined[1] as any).extra).toBeUndefined();
+    expect((joined[2] as any).extra).toBeUndefined();
+  });
+
+  it("single-column join still works after composite key change", async () => {
+    const left = DataFrame.fromArray([
+      { id: 1, v: "a" },
+      { id: 2, v: "b" },
+    ]);
+    const right = DataFrame.fromArray([{ id: 1, w: "x" }]);
+    const joined = await left.join(right, { on: "id", type: "inner" }).collect();
+    expect(joined).toHaveLength(1);
+    expect((joined[0] as any).v).toBe("a");
+    expect((joined[0] as any).w).toBe("x");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Time-series resampling
+// ---------------------------------------------------------------------------
+
+describe("Time-series resampling — aggregate data into time buckets", () => {
+  it("resamples time-series data", async () => {
+    const df = DataFrame.fromArray([
+      { ts: new Date("2024-01-01T00:00:00Z"), value: 10 },
+      { ts: new Date("2024-01-01T00:30:00Z"), value: 20 },
+      { ts: new Date("2024-01-01T01:00:00Z"), value: 30 },
+      { ts: new Date("2024-01-01T01:30:00Z"), value: 40 },
+      { ts: new Date("2024-01-01T02:00:00Z"), value: 50 },
+    ]);
+    const hourly = await df.resample("ts", "1h", { value: "avg" }).collect();
+    expect(hourly).toHaveLength(3);
+    expect(hourly[0]!.value).toBe(15); // avg(10, 20)
+    expect(hourly[1]!.value).toBe(35); // avg(30, 40)
+    expect(hourly[2]!.value).toBe(50); // avg(50)
+  });
+
+  it("resamples with numeric interval (ms)", async () => {
+    const df = DataFrame.fromArray([
+      { ts: 0, v: 1 },
+      { ts: 500, v: 2 },
+      { ts: 1000, v: 3 },
+      { ts: 1500, v: 4 },
+    ]);
+    const result = await df.resample("ts", 1000, { v: "sum" }).collect();
+    expect(result).toHaveLength(2);
+    expect(result[0]!.v).toBe(3); // sum(1, 2) at bucket 0
+    expect(result[1]!.v).toBe(7); // sum(3, 4) at bucket 1000
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Column pruning optimizer
+// ---------------------------------------------------------------------------
+
+describe("Column pruning — plan optimizer preserves correctness", () => {
+  it("column pruning preserves correctness", async () => {
+    const df = DataFrame.fromArray([
+      { a: 1, b: 2, c: 3, d: 4 },
+      { a: 5, b: 6, c: 7, d: 8 },
+      { a: 9, b: 10, c: 11, d: 12 },
+    ]);
+    // Select + filter — optimizer should handle this
+    const result = await df.filter(col("a").gt(1)).select("a", "b").collect();
+    expect(result).toEqual([
+      { a: 5, b: 6 },
+      { a: 9, b: 10 },
+    ]);
+  });
+
+  it("optimizer pushes select through filter when filter columns are subset of select", () => {
+    const source = { _tag: "Source" as const, data: [{ a: 1, b: 2, c: 3, d: 4 }] };
+    const filter = {
+      _tag: "Filter" as const,
+      input: source,
+      fn: (r: any) => r.a > 0,
+      expr: {
+        type: "binary" as const,
+        op: ">",
+        left: { type: "col" as const, name: "a" },
+        right: { type: "lit" as const, value: 0 },
+      },
+    };
+    const select = { _tag: "Select" as const, input: filter, columns: ["a", "b"] };
+
+    const optimized = optimizePlan(select);
+    // Filter's input should now be a Select (pushed down)
+    expect((optimized as any)._tag).toBe("Filter");
+    expect((optimized as any).input._tag).toBe("Select");
+    expect((optimized as any).input.columns).toEqual(["a", "b"]);
+  });
+
+  it("optimizer adds wider select when filter uses columns outside select", () => {
+    const source = { _tag: "Source" as const, data: [{ a: 1, b: 2, c: 3, d: 4 }] };
+    const filter = {
+      _tag: "Filter" as const,
+      input: source,
+      fn: (r: any) => r.c > 0,
+      expr: {
+        type: "binary" as const,
+        op: ">",
+        left: { type: "col" as const, name: "c" },
+        right: { type: "lit" as const, value: 0 },
+      },
+    };
+    const select = { _tag: "Select" as const, input: filter, columns: ["a", "b"] };
+
+    const optimized = optimizePlan(select);
+    // Should be Select(a,b) -> Filter -> Select(a,b,c) -> Source
+    expect((optimized as any)._tag).toBe("Select");
+    expect((optimized as any).columns).toEqual(["a", "b"]);
+    const innerFilter = (optimized as any).input;
+    expect(innerFilter._tag).toBe("Filter");
+    expect(innerFilter.input._tag).toBe("Select");
+    expect(new Set(innerFilter.input.columns)).toEqual(new Set(["a", "b", "c"]));
+  });
+
+  it("optimizer does not modify plan without expr on filter", async () => {
+    const df = DataFrame.fromArray([
+      { a: 1, b: 2, c: 3 },
+      { a: 5, b: 6, c: 7 },
+    ]);
+    // Opaque filter function — optimizer should leave it alone
+    const result = await df
+      .filter((row) => row.a > 1)
+      .select("a", "b")
+      .collect();
+    expect(result).toEqual([{ a: 5, b: 6 }]);
   });
 });

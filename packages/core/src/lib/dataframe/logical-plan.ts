@@ -25,7 +25,8 @@ export type LogicalPlan =
   | CumulativePlan
   | ConcatPlan
   | UnionPlan
-  | ReversePlan;
+  | ReversePlan
+  | FillNullPlan;
 
 export interface SourcePlan {
   readonly _tag: "Source";
@@ -90,8 +91,8 @@ export interface WithColumnPlan {
 export interface SortPlan {
   readonly _tag: "Sort";
   readonly input: LogicalPlan;
-  readonly by: string;
-  readonly order: "asc" | "desc";
+  readonly by: string | { column: string; order: "asc" | "desc" }[];
+  readonly order: "asc" | "desc"; // used when by is string (backward compat)
 }
 
 export interface LimitPlan {
@@ -126,7 +127,7 @@ export interface JoinPlan {
   readonly _tag: "Join";
   readonly left: LogicalPlan;
   readonly right: LogicalPlan;
-  readonly on: string;
+  readonly on: string | string[];
   readonly type: "inner" | "left" | "right" | "full" | "semi" | "anti";
 }
 
@@ -219,4 +220,12 @@ export interface UnionPlan {
 export interface ReversePlan {
   readonly _tag: "Reverse";
   readonly input: LogicalPlan;
+}
+
+export interface FillNullPlan {
+  readonly _tag: "FillNull";
+  readonly input: LogicalPlan;
+  readonly column: string;
+  readonly method: "value" | "forward" | "backward";
+  readonly value?: unknown;
 }

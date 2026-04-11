@@ -15,6 +15,28 @@ import { Expr } from "./expr.ts";
 function isExpr(value: unknown): value is Expr {
   return value instanceof Expr;
 }
+
+function parseInterval(s: string): number {
+  const match = s.match(/^(\d+)\s*(s|m|h|d|w|M)$/);
+  if (!match) throw new Error(`Invalid interval: ${s}`);
+  const n = parseInt(match[1]!, 10);
+  switch (match[2]) {
+    case "s":
+      return n * 1000;
+    case "m":
+      return n * 60_000;
+    case "h":
+      return n * 3_600_000;
+    case "d":
+      return n * 86_400_000;
+    case "w":
+      return n * 604_800_000;
+    case "M":
+      return n * 2_592_000_000; // ~30 days
+    default:
+      throw new Error(`Unknown unit: ${match[2]}`);
+  }
+}
 import { ArrayExecutor } from "./array-executor.ts";
 import { GroupedDataFrame } from "./grouped-dataframe.ts";
 import { StringAccessor, DateAccessor } from "./accessors.ts";
@@ -155,6 +177,16 @@ export class DataFrame<T> {
     );
   }
 
+  withColumns<M extends Record<string, ((row: T) => unknown) | Expr>>(
+    columns: M,
+  ): DataFrame<T & { [K in keyof M]: unknown }> {
+    let df: DataFrame<any> = this;
+    for (const [name, fnOrExpr] of Object.entries(columns)) {
+      df = df.withColumn(name, fnOrExpr as any);
+    }
+    return df;
+  }
+
   // =========================================================================
   // ROW OPERATIONS
   // =========================================================================
@@ -172,7 +204,15 @@ export class DataFrame<T> {
     return new DataFrame({ _tag: "Map", input: this._plan, fn }, this._executor);
   }
 
-  sort(by: keyof T & string, order: "asc" | "desc" = "asc"): DataFrame<T> {
+  sort(by: keyof T & string, order?: "asc" | "desc"): DataFrame<T>;
+  sort(by: { column: keyof T & string; order: "asc" | "desc" }[]): DataFrame<T>;
+  sort(
+    by: (keyof T & string) | { column: keyof T & string; order: "asc" | "desc" }[],
+    order: "asc" | "desc" = "asc",
+  ): DataFrame<T> {
+    if (Array.isArray(by)) {
+      return new DataFrame({ _tag: "Sort", input: this._plan, by, order: "asc" }, this._executor);
+    }
     return new DataFrame({ _tag: "Sort", input: this._plan, by, order }, this._executor);
   }
 
@@ -224,10 +264,35 @@ export class DataFrame<T> {
     );
   }
 
-  fillNull<K extends keyof T>(column: K, value: T[K]): DataFrame<T> {
-    return this.withColumn(column as string, (row) =>
-      row[column] != null ? row[column] : value,
-    ) as unknown as DataFrame<T>;
+  fillNull<K extends keyof T>(
+    column: K,
+    valueOrOptions: T[K] | { method: "forward" | "backward" },
+  ): DataFrame<T> {
+    if (
+      typeof valueOrOptions === "object" &&
+      valueOrOptions !== null &&
+      "method" in valueOrOptions
+    ) {
+      return new DataFrame(
+        {
+          _tag: "FillNull",
+          input: this._plan,
+          column: column as string,
+          method: valueOrOptions.method,
+        },
+        this._executor,
+      );
+    }
+    return new DataFrame(
+      {
+        _tag: "FillNull",
+        input: this._plan,
+        column: column as string,
+        method: "value",
+        value: valueOrOptions,
+      },
+      this._executor,
+    );
   }
 
   // =========================================================================
@@ -261,13 +326,52 @@ export class DataFrame<T> {
   }
 
   // =========================================================================
+  // TIME-SERIES RESAMPLING
+  // =========================================================================
+
+  /**
+   * Resample time-series data by truncating a time column to an interval,
+   * grouping by the resulting buckets, and aggregating.
+   *
+   * @param timeColumn - The column containing timestamps (Date or numeric epoch ms)
+   * @param interval - Interval string ("1h", "5m", "1d", "1w", "1M") or milliseconds
+   * @param aggs - Aggregation functions per column (e.g. `{ value: "avg" }`)
+   */
+  resample(
+    timeColumn: keyof T & string,
+    interval: string | number,
+    aggs: Record<string, AggFn>,
+  ): DataFrame<Record<string, unknown>> {
+    const intervalMs = typeof interval === "number" ? interval : parseInterval(interval);
+    const bucketCol = `_${timeColumn}_bucket`;
+
+    // Step 1: Add bucket column (truncate time to interval)
+    let df: DataFrame<any> = this.withColumn(bucketCol, (row: any) => {
+      const ts = row[timeColumn];
+      const epoch = ts instanceof Date ? ts.getTime() : Number(ts);
+      return new Date(Math.floor(epoch / intervalMs) * intervalMs);
+    });
+
+    // Step 2: GroupBy bucket + aggregate
+    df = df.groupBy(bucketCol).agg(aggs);
+
+    // Step 3: Rename bucket column back to original time column name
+    df = df.rename({ [bucketCol]: timeColumn } as any);
+
+    // Step 4: Sort by time
+    df = df.sort(timeColumn as any, "asc");
+
+    return df;
+  }
+
+  // =========================================================================
   // JOINS
   // =========================================================================
 
   join<U>(
     other: DataFrame<U>,
     params: {
-      on: (keyof T & keyof U) & string;
+      on: ((keyof T & keyof U) & string) | ((keyof T & keyof U) & string)[];
       type?: "inner" | "left" | "right" | "full" | "semi" | "anti";
     },
   ): DataFrame<T & U> {
