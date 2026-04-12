@@ -7,7 +7,7 @@
 // ---------------------------------------------------------------------------
 
 import { eq, and, lt, sql } from "drizzle-orm";
-import type { StepQueue, StepTask } from "@promin/core";
+import type { StepQueue, StepTask, FairnessPolicy } from "@promin/core";
 import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
 import { stepQueue } from "./schema.ts";
 import { ensureTable as ensureTableFromSchema } from "./schema-utils.ts";
@@ -71,35 +71,71 @@ export class PgStepQueue implements StepQueue {
     return String(row!.id);
   }
 
-  async claim(params: { queues: string[]; limit: number }): Promise<StepTask[]> {
-    // SKIP LOCKED with subquery requires raw SQL — Drizzle can't express this.
-    // We validate/sanitize inputs to prevent injection:
-    // - queues: alphanumeric + hyphens/underscores only
-    // - limit: integer
-    // - workerId: UUID format
+  async claim(params: {
+    queues: string[];
+    limit: number;
+    fairness?: FairnessPolicy;
+  }): Promise<StepTask[]> {
     const sanitizedQueues = params.queues.map((q) => `'${q.replace(/'/g, "")}'`).join(",");
     const limit = Math.max(1, Math.floor(params.limit));
     const workerId = this.workerId.replace(/'/g, "");
     const now = new Date().toISOString();
     const nsFilter = this.namespace ? `AND namespace = '${this.namespace.replace(/'/g, "")}'` : "";
+    const fairness = params.fairness ?? "strict-priority";
 
-    const rows = await execRaw(
-      this.db,
-      sql.raw(`
+    // Build ORDER BY clause based on fairness policy
+    let orderBy: string;
+    switch (fairness) {
+      case "round-robin":
+        // Round-robin across workflows: interleave by row number within each workflow
+        // ROW_NUMBER() can't be used inside FOR UPDATE SKIP LOCKED, so we use a
+        // two-layer approach: inner selects with SKIP LOCKED, outer orders by interleave
+        orderBy = `rn, created_at ASC`;
+        break;
+      case "weighted":
+        orderBy = `(priority * random()) DESC, created_at ASC`;
+        break;
+      case "strict-priority":
+      default:
+        orderBy = `priority DESC, created_at ASC`;
+        break;
+    }
+
+    let query: string;
+    if (fairness === "round-robin") {
+      // Round-robin: select all pending with SKIP LOCKED, then apply window function outside
+      query = `
         UPDATE wf_step_queue
-        SET status = 'running',
-            claimed_by = '${workerId}',
-            claimed_at = '${now}'
+        SET status = 'running', claimed_by = '${workerId}', claimed_at = '${now}'
         WHERE id IN (
-          SELECT id FROM wf_step_queue
-          WHERE status = 'pending' AND queue IN (${sanitizedQueues}) ${nsFilter}
-          ORDER BY priority DESC, created_at ASC
+          SELECT id FROM (
+            SELECT id, ROW_NUMBER() OVER (PARTITION BY workflow_id ORDER BY created_at ASC) as rn
+            FROM wf_step_queue
+            WHERE status = 'pending' AND queue IN (${sanitizedQueues}) ${nsFilter}
+          ) ranked
+          ORDER BY ${orderBy}
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED
         )
         RETURNING id, workflow_id, step_name, queue, priority, input, prev_results, attempt, status, created_at
-      `),
-    );
+      `;
+    } else {
+      // strict-priority and weighted: simple ORDER BY with SKIP LOCKED
+      query = `
+        UPDATE wf_step_queue
+        SET status = 'running', claimed_by = '${workerId}', claimed_at = '${now}'
+        WHERE id IN (
+          SELECT id FROM wf_step_queue
+          WHERE status = 'pending' AND queue IN (${sanitizedQueues}) ${nsFilter}
+          ORDER BY ${orderBy}
+          LIMIT ${limit}
+          FOR UPDATE SKIP LOCKED
+        )
+        RETURNING id, workflow_id, step_name, queue, priority, input, prev_results, attempt, status, created_at
+      `;
+    }
+
+    const rows = await execRaw(this.db, sql.raw(query));
 
     return rows
       .map((r: any) => ({

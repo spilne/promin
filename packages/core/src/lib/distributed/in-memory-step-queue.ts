@@ -2,7 +2,7 @@
 // InMemoryStepQueue — for testing distributed workflows without Postgres
 // ---------------------------------------------------------------------------
 
-import type { StepQueue, StepTask } from "./step-queue.ts";
+import type { StepQueue, StepTask, FairnessPolicy } from "./step-queue.ts";
 
 type MutableTask = {
   -readonly [K in keyof StepTask]: StepTask[K];
@@ -41,21 +41,71 @@ export class InMemoryStepQueue implements StepQueue {
     return id;
   }
 
-  async claim(params: { queues: string[]; limit: number }): Promise<StepTask[]> {
+  async claim(params: {
+    queues: string[];
+    limit: number;
+    fairness?: FairnessPolicy;
+  }): Promise<StepTask[]> {
     const claimed: StepTask[] = [];
     const queueSet = new Set(params.queues);
+    const fairness = params.fairness ?? "strict-priority";
 
-    // Sort by priority DESC (higher = more urgent), then createdAt ASC (FIFO within same priority)
-    const pending = [...this.tasks.values()]
-      .filter((t) => t.status === "pending" && queueSet.has(t.queue))
-      .sort(
-        (a, b) =>
-          (b.priority ?? 5) - (a.priority ?? 5) || a.createdAt.getTime() - b.createdAt.getTime(),
-      );
+    const pending = [...this.tasks.values()].filter(
+      (t) => t.status === "pending" && queueSet.has(t.queue),
+    );
 
-    for (const task of pending) {
+    let ordered: MutableTask[];
+
+    switch (fairness) {
+      case "strict-priority":
+        // Highest priority first, FIFO within same priority
+        ordered = pending.sort(
+          (a, b) =>
+            (b.priority ?? 5) - (a.priority ?? 5) || a.createdAt.getTime() - b.createdAt.getTime(),
+        );
+        break;
+
+      case "round-robin": {
+        // Interleave across workflowIds — one task per workflow, then cycle
+        const byWorkflow = new Map<string, MutableTask[]>();
+        for (const t of pending.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())) {
+          if (!byWorkflow.has(t.workflowId)) byWorkflow.set(t.workflowId, []);
+          byWorkflow.get(t.workflowId)!.push(t);
+        }
+        ordered = [];
+        const queues = [...byWorkflow.values()];
+        let round = 0;
+        while (ordered.length < pending.length) {
+          let added = false;
+          for (const wfTasks of queues) {
+            if (round < wfTasks.length) {
+              ordered.push(wfTasks[round]!);
+              added = true;
+            }
+          }
+          if (!added) break;
+          round++;
+        }
+        break;
+      }
+
+      case "weighted": {
+        // Weighted random — higher priority tasks have proportionally higher chance
+        // Shuffle pending, then sort with randomized priority weight
+        ordered = pending
+          .map((t) => ({ t, score: (t.priority ?? 5) * (0.5 + Math.random()) }))
+          .sort((a, b) => b.score - a.score)
+          .map((x) => x.t);
+        break;
+      }
+
+      default:
+        ordered = pending;
+    }
+
+    for (const task of ordered) {
       if (claimed.length >= params.limit) break;
-      if (task.status === "pending" && queueSet.has(task.queue)) {
+      if (task.status === "pending") {
         task.status = "running";
         task.claimedBy = this.workerId;
         task.claimedAt = new Date();

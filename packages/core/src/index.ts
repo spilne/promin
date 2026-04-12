@@ -302,6 +302,7 @@ export {
   MapStepRegistry,
   type StepQueue,
   type StepTask,
+  type FairnessPolicy,
   InMemoryStepQueue,
   type WorkflowCoordinator,
   type CoordinatorConfig,

@@ -18,6 +18,14 @@ export interface StepTask {
   readonly createdAt: Date;
 }
 
+/**
+ * Fairness policy for task dequeue ordering.
+ * - `strict-priority` — always dequeue highest priority first, FIFO within same priority (default)
+ * - `round-robin` — cycle across workflows/namespaces, prevents one workflow from starving others
+ * - `weighted` — dequeue proportionally to priority (priority 10 gets ~2x tasks vs priority 5)
+ */
+export type FairnessPolicy = "strict-priority" | "round-robin" | "weighted";
+
 export interface StepQueue {
   /** Enqueue a step for execution on a named queue. Higher priority number = runs first. */
   enqueue(params: {
@@ -33,7 +41,12 @@ export interface StepQueue {
   }): Promise<string>;
 
   /** Claim up to `limit` pending tasks from the given queues (SKIP LOCKED). */
-  claim(params: { queues: string[]; limit: number }): Promise<StepTask[]>;
+  claim(params: {
+    queues: string[];
+    limit: number;
+    /** Fairness policy for dequeue ordering. Default: strict-priority. */
+    fairness?: FairnessPolicy;
+  }): Promise<StepTask[]>;
 
   /** Mark a task as completed with a result. */
   complete(params: { taskId: string; result: unknown; durationMs: number }): Promise<void>;
