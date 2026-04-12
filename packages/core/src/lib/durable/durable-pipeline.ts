@@ -95,6 +95,7 @@ export interface IdempotencyConfig {
 /** A frozen workflow definition. Produced by `.build()` on WorkflowBuilder. */
 export interface WorkflowDefinition<Input, Output> {
   readonly name: string;
+  readonly version?: string;
   readonly storage: WorkflowStorage;
   readonly dag: WorkflowDAG;
   readonly idempotency?: IdempotencyConfig;
@@ -1560,6 +1561,7 @@ export class WorkflowBuilder<
     const deriveId = options?.deriveId;
     return {
       name: self._name,
+      version: self._version,
       storage: self._storage,
       dag: self.toJSON(),
       idempotency: self._idempotency,
