@@ -15,7 +15,7 @@ import type {
   StepTaskState,
   SignalState,
   StepAttemptRecord,
-} from "@promin/core";
+} from "@promin/workflow";
 import {
   workflows,
   workflowRuns,

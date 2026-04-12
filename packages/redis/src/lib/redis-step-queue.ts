@@ -8,7 +8,7 @@
 //   {prefix}:counter          → Incr for task ID generation
 // ---------------------------------------------------------------------------
 
-import type { StepQueue, StepTask, FairnessPolicy } from "@promin/core";
+import type { StepQueue, StepTask, FairnessPolicy } from "@promin/workflow";
 import type { RedisClient } from "./redis-client.ts";
 
 // -- Lua scripts -------------------------------------------------------------

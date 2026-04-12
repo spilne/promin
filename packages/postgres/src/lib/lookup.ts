@@ -12,7 +12,7 @@ export interface LookupEntry<TName extends string = string> {
  *
  * @example
  * ```ts
- * import type { WorkflowStatus } from "@promin/core";
+ * import type { WorkflowStatus } from "@promin/workflow";
  *
  * const WorkflowStatusIds = defineLookup<WorkflowStatus>({
  *   running: 1, completed: 2, failed: 3, suspended: 4,

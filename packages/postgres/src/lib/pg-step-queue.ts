@@ -7,7 +7,7 @@
 // ---------------------------------------------------------------------------
 
 import { eq, and, lt, sql } from "drizzle-orm";
-import type { StepQueue, StepTask, FairnessPolicy } from "@promin/core";
+import type { StepQueue, StepTask, FairnessPolicy } from "@promin/workflow";
 import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
 import { stepQueue } from "./schema.ts";
 import { ensureTable as ensureTableFromSchema } from "./schema-utils.ts";

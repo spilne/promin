@@ -22,7 +22,8 @@
     "access": "public"
   },
   "dependencies": {
-    "@promin/core": "workspace:*"
+    "@promin/core": "workspace:*",
+    "@promin/workflow": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "catalog:",

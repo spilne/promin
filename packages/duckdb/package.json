@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@promin/core": "workspace:*",
+    "@promin/data": "workspace:*",
     "apache-arrow": "^21.1.0",
     "duckdb-async": "^1.4.2"
   },

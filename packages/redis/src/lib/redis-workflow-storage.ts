@@ -7,7 +7,7 @@
 // - listWorkflows does not support parentId filter (no parent index).
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage, StepAttemptStorage } from "@promin/core";
+import type { WorkflowStorage, StepAttemptStorage } from "@promin/workflow";
 import type {
   WorkflowState,
   WorkflowStatus,
@@ -16,7 +16,7 @@ import type {
   StepTaskState,
   SignalState,
   StepAttemptRecord,
-} from "@promin/core";
+} from "@promin/workflow";
 import type { RedisClient } from "./redis-client.ts";
 
 export interface RedisWorkflowStorageConfig {

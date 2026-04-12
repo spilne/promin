@@ -23,7 +23,8 @@
   },
   "dependencies": {
     "@kubernetes/client-node": "^1.4.0",
-    "@promin/core": "workspace:*"
+    "@promin/core": "workspace:*",
+    "@promin/workflow": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "catalog:"

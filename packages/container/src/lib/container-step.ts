@@ -6,7 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { Pipeline } from "@promin/core";
-import type { StepHandler, WorkerStepOptions } from "@promin/core";
+import type { StepHandler, WorkerStepOptions } from "@promin/workflow";
 import type { ContainerRuntime, ContainerSpec } from "./container-runtime.ts";
 
 export interface ContainerStepConfig {

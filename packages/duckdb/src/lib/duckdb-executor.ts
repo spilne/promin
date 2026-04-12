@@ -42,8 +42,8 @@ import { Database } from "duckdb-async";
 import { writeFileSync, unlinkSync, mkdtempSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import type { DataFrameExecutor, ExecutionCost, LogicalPlan, AggFn, WindowFn } from "@promin/core";
-import { isCompilable, astToSql } from "@promin/core";
+import type { DataFrameExecutor, ExecutionCost, LogicalPlan, AggFn, WindowFn } from "@promin/data";
+import { isCompilable, astToSql } from "@promin/data";
 import {
   rowsToArrow,
   ensureArrowExtension,
@@ -217,7 +217,7 @@ export class DuckDBExecutor implements DataFrameExecutor {
   async fromCsv<T>(
     path: string,
     params?: { delimiter?: string; header?: boolean },
-  ): Promise<import("@promin/core").DataFrame<T>> {
+  ): Promise<import("@promin/data").DataFrame<T>> {
     const db = await this.getDb();
     const tableName = `_file${this.cacheCounter++}`;
     const opts: string[] = [];
@@ -227,7 +227,7 @@ export class DuckDBExecutor implements DataFrameExecutor {
     await db.run(`CREATE TABLE "${tableName}" AS SELECT * FROM read_csv_auto('${path}'${optsStr})`);
 
     // Create a DataFrame with a sentinel source that the compiler recognizes
-    const { DataFrame } = await import("@promin/core");
+    const { DataFrame } = await import("@promin/data");
     return DataFrame._fromPlan<T>(
       { _tag: "Source", data: [], _duckdbTable: tableName } as any,
       this,
@@ -245,12 +245,12 @@ export class DuckDBExecutor implements DataFrameExecutor {
    * await df.filter(r => r.level === "error").collect();
    * ```
    */
-  async fromParquet<T>(path: string): Promise<import("@promin/core").DataFrame<T>> {
+  async fromParquet<T>(path: string): Promise<import("@promin/data").DataFrame<T>> {
     const db = await this.getDb();
     const tableName = `_file${this.cacheCounter++}`;
     await db.run(`CREATE TABLE "${tableName}" AS SELECT * FROM read_parquet('${path}')`);
 
-    const { DataFrame } = await import("@promin/core");
+    const { DataFrame } = await import("@promin/data");
     return DataFrame._fromPlan<T>(
       { _tag: "Source", data: [], _duckdbTable: tableName } as any,
       this,
@@ -265,12 +265,12 @@ export class DuckDBExecutor implements DataFrameExecutor {
    * const df = await executor.fromJson<Event>("events.json");
    * ```
    */
-  async fromJson<T>(path: string): Promise<import("@promin/core").DataFrame<T>> {
+  async fromJson<T>(path: string): Promise<import("@promin/data").DataFrame<T>> {
     const db = await this.getDb();
     const tableName = `_file${this.cacheCounter++}`;
     await db.run(`CREATE TABLE "${tableName}" AS SELECT * FROM read_json_auto('${path}')`);
 
-    const { DataFrame } = await import("@promin/core");
+    const { DataFrame } = await import("@promin/data");
     return DataFrame._fromPlan<T>(
       { _tag: "Source", data: [], _duckdbTable: tableName } as any,
       this,
@@ -288,12 +288,12 @@ export class DuckDBExecutor implements DataFrameExecutor {
    * const df = await executor.sql<Result>("SELECT region, SUM(revenue) FROM _file0 GROUP BY region");
    * ```
    */
-  async sql<T>(query: string): Promise<import("@promin/core").DataFrame<T>> {
+  async sql<T>(query: string): Promise<import("@promin/data").DataFrame<T>> {
     const db = await this.getDb();
     const tableName = `_sql${this.cacheCounter++}`;
     await db.run(`CREATE TABLE "${tableName}" AS ${query}`);
 
-    const { DataFrame } = await import("@promin/core");
+    const { DataFrame } = await import("@promin/data");
     return DataFrame._fromPlan<T>(
       { _tag: "Source", data: [], _duckdbTable: tableName } as any,
       this,
@@ -321,7 +321,7 @@ export class DuckDBExecutor implements DataFrameExecutor {
    */
   async executeSql<T>(
     sql: string,
-    tables: Record<string, import("@promin/core").DataFrame<any>>,
+    tables: Record<string, import("@promin/data").DataFrame<any>>,
   ): Promise<T[]> {
     const db = await this.getDb();
     const registeredTables: string[] = [];
@@ -727,7 +727,7 @@ class CompilationContext {
       case "Cumulative":
       case "FillNull": {
         // Fallback to ArrayExecutor for operations that don't compile to SQL
-        const { ArrayExecutor } = await import("@promin/core");
+        const { ArrayExecutor } = await import("@promin/data");
         const rows = await new ArrayExecutor().execute(plan);
         const table = await this.registerTemp(rows);
         return `SELECT * FROM "${table}"`;

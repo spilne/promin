@@ -2,19 +2,17 @@ import { describe, it, expect, setDefaultTimeout } from "bun:test";
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { withPostgres, withAll, eventually, uniqueName } from "./infra.ts";
+import { Pipeline, InMemoryState } from "@promin/core";
+import { StreamTopology, TopologyRunner } from "@promin/topology";
 import {
   workflow,
-  Pipeline,
   InMemoryWorkflowStorage,
   DefaultCoordinator,
   DefaultWorker,
   MapStepRegistry,
   InMemoryStepQueue,
   InMemoryWorkerRegistry,
-  StreamTopology,
-  TopologyRunner,
-  InMemoryState,
-} from "@promin/core";
+} from "@promin/workflow";
 import { PgStepQueue } from "@promin/postgres";
 import type { DrizzleDb } from "@promin/postgres";
 import { KafkaTopic } from "@promin/kafka";

@@ -1,5 +1,5 @@
-import type { StateMachineStorage } from "@promin/core";
-import type { MachineState, TransitionEvent } from "@promin/core";
+import type { StateMachineStorage } from "@promin/workflow";
+import type { MachineState, TransitionEvent } from "@promin/workflow";
 import type { RedisClient } from "./redis-client.ts";
 
 export interface RedisStateMachineConfig {

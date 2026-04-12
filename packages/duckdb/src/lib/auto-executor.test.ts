@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { DataFrame, CsvFile } from "@promin/core";
+import { DataFrame, CsvFile } from "@promin/data";
 import { AutoExecutor } from "./auto-executor.ts";
 import { writeFileSync } from "fs";
 

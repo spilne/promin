@@ -1,0 +1,48 @@
+{
+  "name": "@promin/data",
+  "version": "0.0.1",
+  "files": [
+    "dist",
+    "package.json"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "@promin/source": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "@promin/source": "./src/testing.ts",
+      "import": "./dist/testing.js",
+      "default": "./dist/testing.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@promin/core": "workspace:*",
+    "effect": "catalog:",
+    "hyparquet": "^1.25.5"
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:"
+  },
+  "nx": {
+    "targets": {
+      "typecheck": {},
+      "test": {},
+      "lint": {},
+      "format": {},
+      "format-check": {},
+      "ci": {}
+    }
+  }
+}

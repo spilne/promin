@@ -36,6 +36,7 @@
   "dependencies": {
     "@effect/platform": "catalog:",
     "@promin/core": "workspace:*",
+    "@promin/data": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {

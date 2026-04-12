@@ -14,13 +14,14 @@ import {
   RedisSemaphore,
   RedisLatch,
   RedisBarrier,
+  RedisDeferred,
+  RedisSignal,
+  RedisQueue,
   RedisWorkflowStorage,
   RedisStepQueue,
 } from "@promin/redis";
 import type { RedisClient } from "@promin/redis";
 import {
-  storageTestSuite,
-  stepQueueTestSuite,
   singleflightTestSuite,
   throttleTestSuite,
   rateLimiterTestSuite,
@@ -28,7 +29,11 @@ import {
   channelTestSuite,
   latchTestSuite,
   barrierTestSuite,
+  deferredTestSuite,
+  signalTestSuite,
+  queueTestSuite,
 } from "@promin/core/testing";
+import { storageTestSuite, stepQueueTestSuite } from "@promin/workflow/testing";
 
 // ---------------------------------------------------------------------------
 // RedisStream — durable consumer groups
@@ -417,6 +422,47 @@ withRedis("RedisBarrier conformance", (ctx) => {
       redis: new IoRedis(ctx.port, ctx.host) as unknown as RedisClient,
       key: uniqueName("barrier"),
       parties: 3,
+    }),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// RedisDeferred — portable conformance suite
+// ---------------------------------------------------------------------------
+
+withRedis("RedisDeferred conformance", (ctx) => {
+  deferredTestSuite(() =>
+    RedisDeferred.make({
+      redis: new IoRedis(ctx.port, ctx.host) as unknown as RedisClient,
+      key: uniqueName("def"),
+    }),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// RedisSignal — portable conformance suite
+// ---------------------------------------------------------------------------
+
+withRedis("RedisSignal conformance", (ctx) => {
+  signalTestSuite(() =>
+    RedisSignal.make({
+      redis: new IoRedis(ctx.port, ctx.host) as unknown as RedisClient,
+      key: uniqueName("sig"),
+      initial: 0,
+    }),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// RedisQueue — portable conformance suite
+// ---------------------------------------------------------------------------
+
+withRedis("RedisQueue conformance", (ctx) => {
+  queueTestSuite(() =>
+    RedisQueue.make({
+      redis: new IoRedis(ctx.port, ctx.host) as unknown as RedisClient,
+      key: uniqueName("queue"),
+      capacity: 100,
     }),
   );
 });

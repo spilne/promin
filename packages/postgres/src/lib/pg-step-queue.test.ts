@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { PostgresTestContainer } from "./test-utils.ts";
 import { PgStepQueue } from "./pg-step-queue.ts";
-import { stepQueueTestSuite } from "@promin/core/testing";
+import { stepQueueTestSuite } from "@promin/workflow/testing";
 
 // ---------------------------------------------------------------------------
 // Container setup

@@ -23,7 +23,8 @@
   },
   "dependencies": {
     "@confluentinc/kafka-javascript": "^1.9.0",
-    "@promin/core": "workspace:*"
+    "@promin/core": "workspace:*",
+    "@promin/topology": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "catalog:"

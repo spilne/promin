@@ -21,8 +21,8 @@
 //   // Automatically picks Array for small data, DuckDB for large
 // ---------------------------------------------------------------------------
 
-import type { DataFrameExecutor, ExecutionCost, LogicalPlan } from "@promin/core";
-import { ArrayExecutor } from "@promin/core";
+import type { DataFrameExecutor, ExecutionCost, LogicalPlan } from "@promin/data";
+import { ArrayExecutor } from "@promin/data";
 import { DuckDBExecutor } from "./duckdb-executor.ts";
 
 /**

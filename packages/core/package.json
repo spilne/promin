@@ -28,10 +28,7 @@
     "access": "public"
   },
   "dependencies": {
-    "croner": "^10.0.1",
-    "effect": "catalog:",
-    "hyparquet": "^1.25.5",
-    "rrule": "^2.8.1"
+    "effect": "catalog:"
   },
   "devDependencies": {
     "@types/bun": "catalog:"

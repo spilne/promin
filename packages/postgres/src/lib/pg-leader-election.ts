@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { sql } from "drizzle-orm";
-import type { LeaderElection } from "@promin/core";
+import type { LeaderElection } from "@promin/workflow";
 import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
 
 export interface PgLeaderElectionConfig {

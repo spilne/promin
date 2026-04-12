@@ -15,7 +15,8 @@ import { Cron } from "croner";
 import { RRule } from "rrule";
 import { eq, sql } from "drizzle-orm";
 import { StreamPipeline, JsonCodec } from "@promin/core";
-import type { Scheduler, ScheduleConfig, ScheduleTick, Codec } from "@promin/core";
+import type { Codec } from "@promin/core";
+import type { Scheduler, ScheduleConfig, ScheduleTick } from "@promin/workflow";
 import { durableSchedules, durableScheduleTicks } from "./scheduler-schema.ts";
 import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
 

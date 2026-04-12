@@ -21,6 +21,7 @@ export interface RedisClient {
   rpush(key: string, ...values: string[]): Promise<number>;
   brpop(key: string, timeout: number): Promise<[string, string] | null>;
   lpush(key: string, ...values: string[]): Promise<number>;
+  llen(key: string): Promise<number>;
 
   // -- Scripting --
   eval(script: string, numkeys: number, ...args: (string | number)[]): Promise<unknown>;

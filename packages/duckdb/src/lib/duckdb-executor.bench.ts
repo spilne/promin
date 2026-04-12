@@ -1,5 +1,5 @@
 import { group, bench, run } from "mitata";
-import { DataFrame } from "@promin/core";
+import { DataFrame } from "@promin/data";
 import { DuckDBExecutor } from "./duckdb-executor.ts";
 
 const duckdb = new DuckDBExecutor(); // Arrow auto-enabled

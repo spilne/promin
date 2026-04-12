@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { DataFrame, CsvFile, JsonFile } from "@promin/core";
+import { DataFrame, CsvFile, JsonFile } from "@promin/data";
 import { DuckDBExecutor } from "./duckdb-executor.ts";
 import { rowsToArrow, arrowToRows } from "./arrow-bridge.ts";
 

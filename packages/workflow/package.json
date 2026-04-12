@@ -1,0 +1,49 @@
+{
+  "name": "@promin/workflow",
+  "version": "0.0.1",
+  "files": [
+    "dist",
+    "package.json"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "@promin/source": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "@promin/source": "./src/testing.ts",
+      "import": "./dist/testing.js",
+      "default": "./dist/testing.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@promin/core": "workspace:*",
+    "croner": "^10.0.1",
+    "effect": "catalog:",
+    "rrule": "^2.8.1"
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:"
+  },
+  "nx": {
+    "targets": {
+      "typecheck": {},
+      "test": {},
+      "lint": {},
+      "format": {},
+      "format-check": {},
+      "ci": {}
+    }
+  }
+}

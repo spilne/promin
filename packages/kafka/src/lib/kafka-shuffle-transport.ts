@@ -5,7 +5,7 @@
 // that data is published to (keyed by the keyBy function) and consumed from.
 // ---------------------------------------------------------------------------
 
-import type { ShuffleTransport } from "@promin/core";
+import type { ShuffleTransport } from "@promin/topology";
 import type { Codec, Streamable, Acknowledgeable, KeyedSinkable } from "@promin/core";
 import { KafkaTopic } from "./kafka-topic.ts";
 import type { KafkaClient } from "./kafka-types.ts";

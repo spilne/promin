@@ -1,5 +1,5 @@
 import { eq, and, sql } from "drizzle-orm";
-import type { StateMachineStorage, MachineState, TransitionEvent } from "@promin/core";
+import type { StateMachineStorage, MachineState, TransitionEvent } from "@promin/workflow";
 import { machines, machineEvents } from "./schema.ts";
 import type { DrizzleDb } from "./drizzle-db.ts";
 import { execRaw } from "./drizzle-db.ts";
