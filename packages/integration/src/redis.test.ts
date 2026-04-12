@@ -15,10 +15,12 @@ import {
   RedisLatch,
   RedisBarrier,
   RedisWorkflowStorage,
+  RedisStepQueue,
 } from "@promin/redis";
 import type { RedisClient } from "@promin/redis";
 import {
   storageTestSuite,
+  stepQueueTestSuite,
   singleflightTestSuite,
   throttleTestSuite,
   rateLimiterTestSuite,
@@ -429,6 +431,19 @@ withRedis("RedisWorkflowStorage conformance", (ctx) => {
       new RedisWorkflowStorage({
         redis: new IoRedis(ctx.port, ctx.host) as unknown as RedisClient,
         prefix: uniqueName("wf"),
+      }),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// RedisStepQueue — portable conformance suite
+// ---------------------------------------------------------------------------
+
+withRedis("RedisStepQueue conformance", (ctx) => {
+  stepQueueTestSuite(
+    () =>
+      new RedisStepQueue(new IoRedis(ctx.port, ctx.host) as unknown as RedisClient, {
+        prefix: uniqueName("sq"),
       }),
   );
 });

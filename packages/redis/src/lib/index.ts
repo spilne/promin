@@ -13,3 +13,4 @@ export { RedisLatch } from "./redis-latch.ts";
 export { RedisBarrier } from "./redis-barrier.ts";
 export { RedisStateMachineStorage } from "./redis-state-machine-storage.ts";
 export { RedisWorkflowStorage, type RedisWorkflowStorageConfig } from "./redis-workflow-storage.ts";
+export { RedisStepQueue } from "./redis-step-queue.ts";

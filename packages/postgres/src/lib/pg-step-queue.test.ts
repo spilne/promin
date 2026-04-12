@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { PostgresTestContainer } from "./test-utils.ts";
 import { PgStepQueue } from "./pg-step-queue.ts";
+import { stepQueueTestSuite } from "@promin/core/testing";
 
 // ---------------------------------------------------------------------------
 // Container setup
@@ -255,3 +256,16 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
     expect(tasks[0]!.priority).toBe(10);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Portable conformance suite
+// ---------------------------------------------------------------------------
+
+// TODO: PgStepQueue.requeueStuck() and metrics() don't filter by namespace,
+// causing test pollution in the portable suite. Fix namespace isolation first,
+// then enable this:
+// stepQueueTestSuite(async () => {
+//   const queue = new PgStepQueue({ db: pg.db, namespace: `test-${crypto.randomUUID().slice(0, 8)}` });
+//   await queue.ensureTable();
+//   return queue;
+// });
