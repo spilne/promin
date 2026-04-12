@@ -1,5 +1,5 @@
 {
-  "title": "Streaming",
+  "title": "Examples",
   "pages": [
     "01-kafka-consume-produce",
     "02-click-analytics",

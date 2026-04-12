@@ -1,11 +1,14 @@
 {
-  "title": "Workflows",
+  "title": "Examples",
   "pages": [
     "01-order-processing",
     "02-parallel-etl",
     "03-bank-transfer-saga",
     "04-approval-with-signal",
     "05-batch-processing",
-    "06-state-machine"
+    "06-state-machine",
+    "01-video-pipeline",
+    "02-multi-queue-workers",
+    "03-priority-fairness"
   ]
 }

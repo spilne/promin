@@ -2,8 +2,12 @@
   "title": "Promin",
   "pages": [
     "index",
-    "guide",
-    "examples",
+    "getting-started",
+    "core",
+    "workflow",
+    "data",
+    "topology",
+    "integrations",
     "reference"
   ]
 }

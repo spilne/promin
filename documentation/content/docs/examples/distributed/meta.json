@@ -1,8 +1,0 @@
-{
-  "title": "Distributed Workers",
-  "pages": [
-    "01-video-pipeline",
-    "02-multi-queue-workers",
-    "03-priority-fairness"
-  ]
-}
