@@ -162,4 +162,164 @@ describe("WorkflowVersionRegistry", () => {
     expect(counts.get("1")!.completed).toBe(2);
     expect(counts.get("2")!.completed).toBe(1);
   });
+
+  // -------------------------------------------------------------------------
+  // Edge cases
+  // -------------------------------------------------------------------------
+
+  it("multiple workflow types in same registry", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const registry = new WorkflowVersionRegistry();
+
+    const order = workflow({ name: "order", storage, version: "1" })
+      .stepAsync("s", async () => "order-result")
+      .build();
+    const payment = workflow({ name: "payment", storage, version: "1" })
+      .stepAsync("s", async () => "payment-result")
+      .build();
+
+    registry.register(order);
+    registry.register(payment);
+
+    const r1 = await registry.run({ workflowId: "o1", name: "order", input: {} });
+    const r2 = await registry.run({ workflowId: "p1", name: "payment", input: {} });
+
+    expect(r1).toBe("order-result");
+    expect(r2).toBe("payment-result");
+    expect(registry.names().sort()).toEqual(["order", "payment"]);
+  });
+
+  it("re-registering same version overwrites definition", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const registry = new WorkflowVersionRegistry();
+
+    const v1a = workflow({ name: "order", storage, version: "1" })
+      .stepAsync("s", async () => "first")
+      .build();
+    const v1b = workflow({ name: "order", storage, version: "1" })
+      .stepAsync("s", async () => "replaced")
+      .build();
+
+    registry.register(v1a);
+    registry.register(v1b);
+
+    expect(registry.versions("order")).toEqual(["1"]); // still one version
+    const result = await registry.run({ workflowId: "r1", name: "order", input: {} });
+    expect(result).toBe("replaced"); // uses the latest registration
+  });
+
+  it("resolve returns undefined for non-existent workflow name", () => {
+    const registry = new WorkflowVersionRegistry();
+    expect(registry.resolve("nonexistent")).toBeUndefined();
+    expect(registry.resolve("nonexistent", "1")).toBeUndefined();
+    expect(registry.latest("nonexistent")).toBeUndefined();
+    expect(registry.versions("nonexistent")).toEqual([]);
+  });
+
+  it("run throws for non-existent workflow name", async () => {
+    const registry = new WorkflowVersionRegistry();
+    await expect(registry.run({ workflowId: "x", name: "nonexistent", input: {} })).rejects.toThrow(
+      "No workflow",
+    );
+  });
+
+  it("latest is always the last registered version", () => {
+    const storage = new InMemoryWorkflowStorage();
+    const registry = new WorkflowVersionRegistry();
+
+    registry.register(
+      workflow({ name: "order", storage, version: "3" })
+        .stepAsync("s", async () => 1)
+        .build(),
+    );
+    registry.register(
+      workflow({ name: "order", storage, version: "1" })
+        .stepAsync("s", async () => 1)
+        .build(),
+    );
+    registry.register(
+      workflow({ name: "order", storage, version: "2" })
+        .stepAsync("s", async () => 1)
+        .build(),
+    );
+
+    // Last registered wins, regardless of version number
+    expect(registry.latest("order")).toBe("2");
+  });
+
+  it("different versions can have different step structures", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const registry = new WorkflowVersionRegistry();
+
+    // v1: 2 steps
+    const v1 = workflow({ name: "order", storage, version: "1" })
+      .stepAsync("validate", async () => "validated")
+      .stepAsync("charge", async () => "v1-charged")
+      .build();
+
+    // v2: 3 steps (different names, extra step)
+    const v2 = workflow({ name: "order", storage, version: "2" })
+      .stepAsync("verify", async () => "verified")
+      .stepAsync("charge", async () => "v2-charged")
+      .stepAsync("notify", async () => "v2-notified")
+      .build();
+
+    registry.register(v1);
+    registry.register(v2);
+
+    // Create a v1 workflow directly, then resume via registry
+    await v1.run({ workflowId: "v1-1", input: {} });
+    await storage.startFreshRun("v1-1");
+    const r1 = await registry.run({ workflowId: "v1-1", name: "order", input: {} });
+
+    // New workflow gets v2
+    const r2 = await registry.run({ workflowId: "v2-1", name: "order", input: {} });
+
+    expect(r1).toBe("v1-charged"); // resumed with v1 definition
+    expect(r2).toBe("v2-notified"); // new, used v2
+  });
+
+  it("concurrent workflows on different versions", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const registry = new WorkflowVersionRegistry();
+
+    let v1Count = 0;
+    let v2Count = 0;
+
+    const v1 = workflow({ name: "job", storage, version: "1" })
+      .stepAsync("run", async () => {
+        v1Count++;
+        return "v1";
+      })
+      .build();
+    const v2 = workflow({ name: "job", storage, version: "2" })
+      .stepAsync("run", async () => {
+        v2Count++;
+        return "v2";
+      })
+      .build();
+
+    registry.register(v1);
+    registry.register(v2);
+
+    // Create v1 workflows directly
+    await v1.run({ workflowId: "j1", input: {} });
+    await v1.run({ workflowId: "j2", input: {} });
+
+    // Fresh runs to simulate resume
+    await storage.startFreshRun("j1");
+    await storage.startFreshRun("j2");
+
+    // Run all concurrently — j1,j2 should use v1, j3,j4 use v2 (latest)
+    const results = await Promise.all([
+      registry.run({ workflowId: "j1", name: "job", input: {} }),
+      registry.run({ workflowId: "j2", name: "job", input: {} }),
+      registry.run({ workflowId: "j3", name: "job", input: {} }),
+      registry.run({ workflowId: "j4", name: "job", input: {} }),
+    ]);
+
+    expect(results).toEqual(["v1", "v1", "v2", "v2"]);
+    expect(v1Count).toBe(4); // 2 original + 2 resumed
+    expect(v2Count).toBe(2);
+  });
 });
