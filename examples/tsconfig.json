@@ -16,6 +16,9 @@
       "path": "../packages/kafka"
     },
     {
+      "path": "../packages/duckdb"
+    },
+    {
       "path": "../packages/postgres"
     },
     {

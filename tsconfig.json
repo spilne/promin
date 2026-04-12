@@ -34,6 +34,15 @@
     },
     {
       "path": "./examples"
+    },
+    {
+      "path": "./packages/topology"
+    },
+    {
+      "path": "./packages/workflow"
+    },
+    {
+      "path": "./packages/data"
     }
   ]
 }
