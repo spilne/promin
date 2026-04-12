@@ -41,6 +41,21 @@ export class WorkflowTimeoutError extends Data.TaggedError("WorkflowTimeoutError
   readonly message: string;
 }> {}
 
+/** A step exceeded its configured activity timeout. */
+export class StepTimeoutError extends Data.TaggedError("StepTimeoutError")<{
+  readonly workflowId: string;
+  readonly stepName: string;
+  readonly timeoutMs: number;
+  readonly message: string;
+}> {}
+
+/** The entire workflow exceeded its configured global deadline. */
+export class WorkflowDeadlineError extends Data.TaggedError("WorkflowDeadlineError")<{
+  readonly workflowId: string;
+  readonly timeoutMs: number;
+  readonly message: string;
+}> {}
+
 /** Workflow version mismatch — stored version differs from code version. */
 export class WorkflowVersionMismatchError extends Data.TaggedError("WorkflowVersionMismatchError")<{
   readonly workflowId: string;

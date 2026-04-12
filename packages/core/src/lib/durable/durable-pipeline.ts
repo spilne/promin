@@ -33,6 +33,8 @@ import {
   WorkflowLockError,
   WorkflowSuspendedError,
   WorkflowTimeoutError,
+  StepTimeoutError,
+  WorkflowDeadlineError,
   WorkflowVersionMismatchError,
 } from "./durable-pipeline-error.ts";
 import { withLock } from "./with-lock.ts";
@@ -330,6 +332,7 @@ interface StepDefinition {
   readonly kind: StepKind;
   readonly execute: (params: ExecuteParams) => Pipeline<unknown, TaggedError>;
   readonly codec: Codec<unknown>;
+  readonly timeoutMs?: number;
   readonly retry?: RetryPolicy<TaggedError>;
   readonly onFailure?: StepFailureStrategy<unknown>;
   readonly compensate?: (params: {
@@ -379,6 +382,7 @@ export class WorkflowBuilder<
     private readonly _dispatch?: DispatchConfig,
     private readonly _idempotency?: IdempotencyConfig,
     private readonly _version?: string,
+    private readonly _timeoutMs?: number,
   ) {}
 
   /** Resolve TTL for a given workflow status. Returns undefined if no TTL applies. */
@@ -407,6 +411,7 @@ export class WorkflowBuilder<
       this._dispatch,
       this._idempotency,
       v,
+      this._timeoutMs,
     );
   }
 
@@ -988,6 +993,7 @@ export class WorkflowBuilder<
             state,
             workflowStartTime,
             stepAttempts,
+            deadlineMs: this._timeoutMs != null ? workflowStartTime + this._timeoutMs : undefined,
           });
 
           if (dagResult.success) {
@@ -1095,6 +1101,8 @@ export class WorkflowBuilder<
     workflowStartTime: number;
     /** Tracks attempt numbers per step — shared across workflow retries so counters keep incrementing. */
     stepAttempts: Map<string, number>;
+    /** Workflow-level deadline (absolute timestamp). Steps completing after this fail the workflow. */
+    deadlineMs?: number;
   }): Promise<
     { success: true; result: unknown } | { success: false; error: unknown; suspension: boolean }
   > {
@@ -1114,6 +1122,19 @@ export class WorkflowBuilder<
     const running = new Set<string>();
 
     while (completed.size < this._steps.length) {
+      // Check workflow-level deadline before each batch
+      if (params.deadlineMs != null && Date.now() > params.deadlineMs) {
+        return {
+          success: false,
+          error: new WorkflowDeadlineError({
+            workflowId,
+            timeoutMs: this._timeoutMs!,
+            message: `Workflow "${workflowId}" exceeded global deadline of ${this._timeoutMs}ms`,
+          }),
+          suspension: false,
+        };
+      }
+
       const ready = computeReadySet({ nodes: dagNodes, completed, running });
 
       if (ready.length === 0 && running.size === 0) {
@@ -1227,6 +1248,28 @@ export class WorkflowBuilder<
             }),
           ) as Pipeline<unknown, TaggedError>;
 
+          // Per-step activity timeout — wraps the user's function with a deadline
+          if (stepDef.timeoutMs != null) {
+            const stepTimeoutMs = stepDef.timeoutMs;
+            const stepName = stepDef.name;
+            const timeoutEffect = Effect.sleep(stepTimeoutMs).pipe(
+              Effect.andThen(
+                Effect.fail(
+                  new StepTimeoutError({
+                    workflowId,
+                    stepName,
+                    timeoutMs: stepTimeoutMs,
+                    message: `Step "${stepName}" timed out after ${stepTimeoutMs}ms`,
+                  }),
+                ),
+              ),
+            );
+            raw = Pipeline.from(Effect.raceFirst(raw.effect, timeoutEffect)) as Pipeline<
+              unknown,
+              TaggedError
+            >;
+          }
+
           // Step-level retry (before mapping to result shape)
           if (stepDef.retry) {
             raw = raw.retry(stepDef.retry);
@@ -1270,7 +1313,9 @@ export class WorkflowBuilder<
             ? (stepError as StepError).stepName
             : tag === "WorkflowTimeoutError"
               ? (stepError as WorkflowTimeoutError).stepName
-              : (ready[0] ?? "unknown");
+              : tag === "StepTimeoutError"
+                ? (stepError as StepTimeoutError).stepName
+                : (ready[0] ?? "unknown");
         const errorMsg =
           stepError instanceof globalThis.Error ? stepError.message : String(stepError);
         const failStartedAt = new Date();
@@ -1330,6 +1375,23 @@ export class WorkflowBuilder<
         results[name] = result;
         completed.add(name);
         running.delete(name);
+      }
+
+      // Check workflow-level deadline after steps complete
+      if (
+        params.deadlineMs != null &&
+        Date.now() > params.deadlineMs &&
+        completed.size < this._steps.length
+      ) {
+        return {
+          success: false,
+          error: new WorkflowDeadlineError({
+            workflowId,
+            timeoutMs: this._timeoutMs!,
+            message: `Workflow "${workflowId}" exceeded global deadline of ${this._timeoutMs}ms`,
+          }),
+          suspension: false,
+        };
       }
     }
 
@@ -1443,7 +1505,9 @@ export class WorkflowBuilder<
           | StepError
           | WorkflowLockError
           | WorkflowSuspendedError
-          | WorkflowTimeoutError;
+          | WorkflowTimeoutError
+          | StepTimeoutError
+          | WorkflowDeadlineError;
       }
   > {
     try {
@@ -1474,7 +1538,9 @@ export class WorkflowBuilder<
           | StepError
           | WorkflowLockError
           | WorkflowSuspendedError
-          | WorkflowTimeoutError;
+          | WorkflowTimeoutError
+          | StepTimeoutError
+          | WorkflowDeadlineError;
       }
   > {
     return this.runSafe({ workflowId: crypto.randomUUID(), input });
@@ -1691,6 +1757,7 @@ export class WorkflowBuilder<
       this._dispatch,
       this._idempotency,
       this._version,
+      this._timeoutMs,
     );
   }
 
@@ -1711,6 +1778,7 @@ export class WorkflowBuilder<
       this._dispatch,
       idempotency,
       this._version,
+      this._timeoutMs,
     );
   }
 
@@ -1740,6 +1808,7 @@ export class WorkflowBuilder<
       dependsOn: params.dependsOn,
       kind: params.kind,
       codec,
+      timeoutMs: params.options?.timeoutMs,
       retry: params.options?.retry as RetryPolicy<TaggedError> | undefined,
       onFailure: params.options?.onFailure as StepFailureStrategy<unknown> | undefined,
       compensate: params.options?.compensate as StepDefinition["compensate"],
@@ -1792,6 +1861,8 @@ export function workflow<Input>(params: {
   dispatch?: DispatchConfig;
   /** Workflow version tag — used to detect code/state mismatch on resume. Defaults to "1". */
   version?: string;
+  /** Global deadline for the entire workflow execution (ms). Fails with WorkflowDeadlineError if exceeded. */
+  timeoutMs?: number;
 }): WorkflowBuilder<Input> {
   return new WorkflowBuilder(
     params.name,
@@ -1807,6 +1878,7 @@ export function workflow<Input>(params: {
     params.dispatch,
     undefined,
     params.version,
+    params.timeoutMs,
   );
 }
 

@@ -7,6 +7,8 @@ import {
   WorkflowLockError,
   WorkflowSuspendedError,
   WorkflowTimeoutError,
+  StepTimeoutError,
+  WorkflowDeadlineError,
 } from "./durable-pipeline-error.ts";
 import { topologicalSort, computeReadySet } from "./workflow-dag.ts";
 
@@ -1647,5 +1649,127 @@ describe("Step failure strategies", () => {
 
       expect(error).not.toBeNull();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-step activity timeout
+// ---------------------------------------------------------------------------
+
+describe("Per-step activity timeout", () => {
+  it("step times out after timeoutMs", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const wf = workflow<{}>({ name: "step-timeout", storage }).stepAsync(
+      "slow",
+      async () => {
+        await new Promise((r) => setTimeout(r, 500));
+        return "done";
+      },
+      { timeoutMs: 30 },
+    );
+
+    const { error } = await wf.runSafe({ workflowId: "t-step-timeout", input: {} });
+    expect(error).not.toBeNull();
+    expect((error as StepTimeoutError)._tag).toBe("StepTimeoutError");
+    expect((error as StepTimeoutError).stepName).toBe("slow");
+    expect((error as StepTimeoutError).timeoutMs).toBe(30);
+  });
+
+  it("step without timeout runs normally", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const wf = workflow<{}>({ name: "no-timeout", storage }).stepAsync("fast", async () => "done");
+
+    const result = await wf.run({ workflowId: "t-no-timeout", input: {} });
+    expect(result).toBe("done");
+  });
+
+  it("step completes within timeout succeeds", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const wf = workflow<{}>({ name: "within-timeout", storage }).stepAsync(
+      "quick",
+      async () => {
+        await new Promise((r) => setTimeout(r, 5));
+        return "ok";
+      },
+      { timeoutMs: 5000 },
+    );
+
+    const result = await wf.run({ workflowId: "t-within-timeout", input: {} });
+    expect(result).toBe("ok");
+  });
+
+  it("Pipeline-returning step times out", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const wf = workflow<{}>({ name: "pipeline-step-timeout", storage }).step(
+      "slow-pipeline",
+      () =>
+        Pipeline.fromPromise(async () => {
+          await new Promise((r) => setTimeout(r, 500));
+          return "done";
+        }),
+      { timeoutMs: 30 },
+    );
+
+    const { error } = await wf.runSafe({ workflowId: "t-pipeline-timeout", input: {} });
+    expect(error).not.toBeNull();
+    expect((error as StepTimeoutError)._tag).toBe("StepTimeoutError");
+    expect((error as StepTimeoutError).stepName).toBe("slow-pipeline");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Workflow global deadline
+// ---------------------------------------------------------------------------
+
+describe("Workflow global deadline", () => {
+  it("workflow times out after global deadline", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    // 3 steps each taking 30ms = ~90ms total, deadline at 50ms
+    // After step1 completes (~30ms < 50ms), step2 starts.
+    // After step2 completes (~60ms > 50ms), deadline check triggers before step3.
+    const wf = workflow<{}>({ name: "deadline-test", storage, timeoutMs: 50 })
+      .stepAsync("step1", async () => {
+        await new Promise((r) => setTimeout(r, 30));
+        return "a";
+      })
+      .stepAsync("step2", async () => {
+        await new Promise((r) => setTimeout(r, 30));
+        return "b";
+      })
+      .stepAsync("step3", async () => {
+        await new Promise((r) => setTimeout(r, 30));
+        return "c";
+      });
+
+    const { error } = await wf.runSafe({ workflowId: "t-deadline", input: {} });
+    expect(error).not.toBeNull();
+    expect((error as WorkflowDeadlineError)._tag).toBe("WorkflowDeadlineError");
+    expect((error as WorkflowDeadlineError).timeoutMs).toBe(50);
+  });
+
+  it("workflow within deadline completes normally", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const wf = workflow<{}>({ name: "within-deadline", storage, timeoutMs: 5000 })
+      .stepAsync("step1", async () => "a")
+      .stepAsync("step2", async () => "b");
+
+    const result = await wf.run({ workflowId: "t-within-deadline", input: {} });
+    expect(result).toBe("b");
+  });
+
+  it("workflow without timeoutMs has no deadline", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const wf = workflow<{}>({ name: "no-deadline", storage })
+      .stepAsync("step1", async () => {
+        await new Promise((r) => setTimeout(r, 10));
+        return "a";
+      })
+      .stepAsync("step2", async () => {
+        await new Promise((r) => setTimeout(r, 10));
+        return "b";
+      });
+
+    const result = await wf.run({ workflowId: "t-no-deadline", input: {} });
+    expect(result).toBe("b");
   });
 });

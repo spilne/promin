@@ -30,6 +30,9 @@ export {
 // Clock
 export { type Clock, SystemClock, FakeClock } from "./lib/clock.ts";
 
+// Duration
+export { Duration, type DurationInput, resolveMs } from "./lib/duration.ts";
+
 // Primitives
 export { PipelineSemaphore, type Semaphore } from "./lib/semaphore.ts";
 export { CircuitBreaker, type CircuitBreakerConfig } from "./lib/circuit-breaker.ts";
