@@ -71,6 +71,14 @@ export class RedisStepQueue implements StepQueue {
     return `${this.prefix}:running`;
   }
 
+  private completedKey(queue: string): string {
+    return `${this.prefix}:completed:${queue}`;
+  }
+
+  private failedKey(queue: string): string {
+    return `${this.prefix}:failed:${queue}`;
+  }
+
   // -- StepQueue interface ---------------------------------------------------
 
   async enqueue(params: {
@@ -148,6 +156,7 @@ export class RedisStepQueue implements StepQueue {
   }
 
   async complete(params: { taskId: string; result: unknown; durationMs: number }): Promise<void> {
+    const queue = await this.redis.hget(this.taskKey(params.taskId), "queue");
     await this.redis.hset(this.taskKey(params.taskId), {
       status: "completed",
       result: JSON.stringify(params.result),
@@ -155,9 +164,11 @@ export class RedisStepQueue implements StepQueue {
       completedAt: new Date().toISOString(),
     });
     await this.redis.srem(this.runningKey(), params.taskId);
+    if (queue) await this.redis.sadd(this.completedKey(queue), params.taskId);
   }
 
   async fail(params: { taskId: string; error: string; durationMs: number }): Promise<void> {
+    const queue = await this.redis.hget(this.taskKey(params.taskId), "queue");
     await this.redis.hset(this.taskKey(params.taskId), {
       status: "failed",
       error: params.error,
@@ -165,6 +176,7 @@ export class RedisStepQueue implements StepQueue {
       completedAt: new Date().toISOString(),
     });
     await this.redis.srem(this.runningKey(), params.taskId);
+    if (queue) await this.redis.sadd(this.failedKey(queue), params.taskId);
   }
 
   async requeueStuck(params: { claimedBy?: string; staleTimeoutMs?: number }): Promise<number> {
@@ -221,6 +233,23 @@ export class RedisStepQueue implements StepQueue {
         if (!result[queue]) result[queue] = { pending: 0, running: 0, completed: 0, failed: 0 };
         result[queue]!.running++;
       }
+    }
+
+    // Count completed/failed from per-queue tracking sets
+    const allQueueKeys = new Set<string>();
+    for (const key of keys) allQueueKeys.add(key.slice(`${this.prefix}:pending:`.length));
+    const completedKeys = await this.redis.keys(`${this.prefix}:completed:*`);
+    for (const key of completedKeys)
+      allQueueKeys.add(key.slice(`${this.prefix}:completed:`.length));
+    const failedKeys = await this.redis.keys(`${this.prefix}:failed:*`);
+    for (const key of failedKeys) allQueueKeys.add(key.slice(`${this.prefix}:failed:`.length));
+
+    for (const queue of allQueueKeys) {
+      if (!result[queue]) result[queue] = { pending: 0, running: 0, completed: 0, failed: 0 };
+      const cMembers = await this.redis.smembers(this.completedKey(queue));
+      result[queue]!.completed = cMembers.length;
+      const fMembers = await this.redis.smembers(this.failedKey(queue));
+      result[queue]!.failed = fMembers.length;
     }
 
     return result;

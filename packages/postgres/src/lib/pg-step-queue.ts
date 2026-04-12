@@ -182,6 +182,10 @@ export class PgStepQueue implements StepQueue {
   async requeueStuck(params: { claimedBy?: string; staleTimeoutMs?: number }): Promise<number> {
     const conditions = [eq(stepQueue.status, "running")];
 
+    if (this.namespace) {
+      conditions.push(eq(stepQueue.namespace, this.namespace));
+    }
+
     if (params.claimedBy) {
       conditions.push(eq(stepQueue.claimedBy, params.claimedBy));
     } else if (params.staleTimeoutMs) {
@@ -202,11 +206,12 @@ export class PgStepQueue implements StepQueue {
   async metrics(): Promise<
     Record<string, { pending: number; running: number; completed: number; failed: number }>
   > {
+    const nsFilter = this.namespace ? sql` WHERE namespace = ${this.namespace}` : sql``;
     const rows = await execRaw(
       this.db,
       sql`
         SELECT queue, status, COUNT(*) as count
-        FROM wf_step_queue
+        FROM wf_step_queue${nsFilter}
         GROUP BY queue, status
       `,
     );

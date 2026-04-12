@@ -261,11 +261,11 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
 // Portable conformance suite
 // ---------------------------------------------------------------------------
 
-// TODO: PgStepQueue.requeueStuck() and metrics() don't filter by namespace,
-// causing test pollution in the portable suite. Fix namespace isolation first,
-// then enable this:
-// stepQueueTestSuite(async () => {
-//   const queue = new PgStepQueue({ db: pg.db, namespace: `test-${crypto.randomUUID().slice(0, 8)}` });
-//   await queue.ensureTable();
-//   return queue;
-// });
+stepQueueTestSuite(async () => {
+  const queue = new PgStepQueue({
+    db: pg.db,
+    namespace: `test-${crypto.randomUUID().slice(0, 8)}`,
+  });
+  await queue.ensureTable();
+  return queue;
+});
