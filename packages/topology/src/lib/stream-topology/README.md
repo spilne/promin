@@ -91,6 +91,87 @@ const warnings = analyzeTopology(topology.compiled);
 // In distributed mode, events for the same key may arrive at different instances.
 ```
 
+## Window Types
+
+Windows group events by time for aggregation. Apply a window after `.keyBy()` to get a `WindowedTopology`, then use `.count()`, `.sum()`, or `.aggregate()`.
+
+### Tumbling window
+
+Fixed-size, non-overlapping. Each event belongs to exactly one window.
+
+```typescript
+// Count clicks per user every 60 seconds
+const topology = StreamTopology.source(clickEvents)
+  .keyBy((e) => e.userId)
+  .tumbling(60_000)
+  .count()
+  .to(outputTopic);
+```
+
+### Sliding window
+
+Fixed-size, overlapping. Windows advance by `slideMs`, so events can appear in multiple windows.
+
+```typescript
+// Average request latency over 5-minute windows, sliding every 1 minute
+const topology = StreamTopology.source(requestEvents)
+  .keyBy((e) => e.endpoint)
+  .sliding({ windowMs: 300_000, slideMs: 60_000 })
+  .aggregate({
+    init: () => ({ sum: 0, count: 0 }),
+    add: (state, req) => ({ sum: state.sum + req.latencyMs, count: state.count + 1 }),
+    emit: (key, window, state) => ({
+      endpoint: key,
+      window,
+      avgLatency: state.sum / state.count,
+    }),
+  })
+  .to(metricsOutput);
+```
+
+### Session window
+
+Dynamic windows that close after an inactivity gap. Events within the gap extend the session.
+
+```typescript
+// Group user activity into sessions with a 30-minute inactivity gap
+const topology = StreamTopology.source(userActivity)
+  .keyBy((e) => e.userId)
+  .session(1_800_000)
+  .aggregate({
+    init: () => ({ events: 0 }),
+    add: (state) => ({ events: state.events + 1 }),
+    emit: (key, window, state) => ({
+      userId: key,
+      sessionStart: window.start,
+      sessionEnd: window.end,
+      eventCount: state.events,
+    }),
+  })
+  .to(sessionsOutput);
+```
+
+### Window aggregation methods
+
+All window types support three aggregation methods:
+
+```typescript
+// .count() — count events per key per window
+.tumbling(60_000).count()
+// Emits: { key, window: { start, end }, count }
+
+// .sum(fn) — sum a numeric field per key per window
+.tumbling(60_000).sum((e) => e.amount)
+// Emits: { key, window: { start, end }, sum }
+
+// .aggregate(spec) — custom aggregation with init/add/emit
+.tumbling(60_000).aggregate({
+  init: () => initialState,
+  add: (state, value) => newState,
+  emit: (key, window, state) => outputRecord,
+})
+```
+
 ## Features
 
 - **Windows**: tumbling, sliding, session

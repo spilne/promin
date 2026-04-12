@@ -4,6 +4,7 @@
     "workflows",
     "distributed-workers",
     "sql-models",
+    "scheduler",
     "examples"
   ]
 }

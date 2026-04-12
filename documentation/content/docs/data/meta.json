@@ -2,6 +2,7 @@
   "title": "Data",
   "pages": [
     "dataframe",
+    "quality",
     "examples"
   ]
 }

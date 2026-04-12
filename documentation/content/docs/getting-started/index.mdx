@@ -1,0 +1,107 @@
+---
+title: Getting Started
+---
+
+Install the core package:
+
+```bash
+bun add @promin/core
+```
+
+Optional packages for specific use cases:
+
+```bash
+bun add @promin/http        # HTTP client with retry, streaming, circuit breaker
+bun add @promin/workflow     # Durable workflows with compensation (sagas)
+bun add @promin/data         # DataFrame, profiling, diff, quality checks
+bun add @promin/kafka        # Kafka topics, consumer groups, offset tracking
+bun add @promin/redis        # Redis state backend and cache store
+bun add @promin/postgres     # Postgres state backend, step queue, change streams
+bun add @promin/duckdb       # DuckDB executor for analytical queries
+bun add @promin/topology     # Stateful stream processing (Kafka Streams / Flink-style)
+```
+
+## Package overview
+
+| Package | What it provides |
+|---------|-----------------|
+| `@promin/core` | Pipeline, StreamPipeline, RawStream, semaphore, circuit breaker, cache |
+| `@promin/http` | Effect-based HTTP client with pipelines, streaming, retry |
+| `@promin/workflow` | Durable workflows, DAG steps, compensation, distributed workers |
+| `@promin/data` | DataFrame, data profiler, diff, quality, contracts, SQL models |
+| `@promin/kafka` | Kafka topic abstraction, consumer groups, offset tracking |
+| `@promin/redis` | Redis state backend and cache store |
+| `@promin/postgres` | Postgres state backend, step queue, change streams |
+| `@promin/duckdb` | DuckDB executor for analytical queries |
+| `@promin/topology` | Keyed state, time windows, joins, deduplication, checkpointing |
+
+## Your first Pipeline
+
+A `Pipeline` is a lazy, composable async action. Chain retry, timeout, and transforms — nothing runs until you call a terminal.
+
+```typescript
+import { Pipeline } from "@promin/core";
+
+const user = await Pipeline.fn(() => fetch("/api/user").then((r) => r.json()))
+  .map((data) => ({ ...data, name: data.name.toUpperCase() }))
+  .retry({ maxRetries: 3, jitter: true })
+  .timeout(5_000)
+  .runPromise();
+```
+
+Error handling without exceptions:
+
+```typescript
+const { data, error } = await Pipeline.fn(() => fetchUser(id))
+  .retry(3)
+  .timeout(5_000)
+  .runSafe();
+
+if (error) console.error(error._tag);
+else console.log(data);
+```
+
+## Your first StreamPipeline
+
+A `StreamPipeline` processes sequences of items with backpressure. Adjacent pure operators are automatically fused for performance.
+
+```typescript
+import { StreamPipeline } from "@promin/core";
+
+const emails = await StreamPipeline.fromIterable(users)
+  .filter((u) => u.active)
+  .map((u) => u.email)
+  .parAsyncMap(5, async (email) => {
+    const profile = await fetchProfile(email);
+    return { email, profile };
+  })
+  .collect();
+```
+
+## Your first Workflow
+
+Durable workflows survive crashes. Each step is persisted — on restart, completed steps are skipped automatically.
+
+```typescript
+import { workflow } from "@promin/workflow";
+
+const orderFlow = workflow({ name: "process-order", storage })
+  .stepAsync("validate", async ({ input }) => validate(input))
+  .stepAsync("charge", async ({ prev }) => charge(prev), {
+    compensate: async ({ result }) => refund(result),
+  })
+  .stepAsync("ship", async ({ prev }) => ship(prev))
+  .build();
+
+const result = await orderFlow.run({ workflowId: "order-1", input: order });
+```
+
+If "ship" fails, the workflow automatically runs the "charge" compensation (refund) — a saga pattern with zero boilerplate.
+
+## Next steps
+
+- [Pipeline](/docs/guide/pipeline) — full API for resilient async operations
+- [Workflows](/docs/guide/workflows) — durable execution, compensation, distributed workers
+- [DataFrame](/docs/guide/dataframe) — lazy analytics with expression builder
+- [StreamPipeline](/docs/guide/stream-pipeline) — stream processing with backpressure
+- [Comparison with other tools](/docs/getting-started/comparison)

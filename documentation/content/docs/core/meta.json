@@ -3,6 +3,8 @@
   "pages": [
     "pipeline",
     "stream-pipeline",
+    "primitives",
+    "stream-pipes",
     "examples"
   ]
 }

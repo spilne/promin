@@ -193,6 +193,112 @@ scheduler.pause("daily-etl");
 scheduler.resume("daily-etl");
 ```
 
+## Step Queue
+
+Postgres-backed distributed step queue for workflow workers. Uses `SELECT FOR UPDATE SKIP LOCKED` for exactly-once delivery and natural load balancing across workers.
+
+### Setup
+
+```typescript
+import { PgStepQueue } from "@promin/postgres";
+
+const queue = new PgStepQueue({
+  db,                    // DrizzleDb instance (required)
+  workerId: "worker-1",  // Identifies this worker (default: random UUID)
+  namespace: "prod",     // Isolate tasks by namespace (default: null = unscoped)
+});
+
+// Create the table (for dev/testing — prefer migrations for production)
+await queue.ensureTable();
+```
+
+For production migrations, include the Drizzle schema:
+
+```typescript
+import { PgStepQueue } from "@promin/postgres";
+export const stepQueue = PgStepQueue.schema;
+```
+
+### Enqueue tasks
+
+```typescript
+const taskId = await queue.enqueue({
+  workflowId: "order-123",
+  stepName: "charge",
+  queue: "payments",
+  input: { amount: 99.99 },
+  prevResults: { validate: { ok: true } },
+  priority: 8,           // Higher = claimed first (default: 5)
+});
+```
+
+### Claim and process tasks
+
+```typescript
+const tasks = await queue.claim({
+  queues: ["payments", "notifications"],
+  limit: 10,
+  fairness: "strict-priority",
+});
+
+for (const task of tasks) {
+  const start = Date.now();
+  try {
+    const result = await processStep(task);
+    await queue.complete({
+      taskId: task.id,
+      result,
+      durationMs: Date.now() - start,
+    });
+  } catch (err) {
+    await queue.fail({
+      taskId: task.id,
+      error: String(err),
+      durationMs: Date.now() - start,
+    });
+  }
+}
+```
+
+### Fairness policies
+
+Control how tasks are ordered when claiming:
+
+| Policy | Behavior |
+| --- | --- |
+| `"strict-priority"` | Highest priority first, then oldest (default) |
+| `"round-robin"` | Interleave across workflows — prevents one workflow from starving others |
+| `"weighted"` | Priority weighted by randomness — high priority tasks are more likely but not guaranteed |
+
+```typescript
+// Round-robin across workflows
+const tasks = await queue.claim({
+  queues: ["default"],
+  limit: 5,
+  fairness: "round-robin",
+});
+```
+
+### Requeue stuck tasks
+
+Recover tasks claimed by crashed workers:
+
+```typescript
+// Requeue tasks older than 5 minutes
+const requeued = await queue.requeueStuck({ staleTimeoutMs: 300_000 });
+
+// Requeue tasks from a specific dead worker
+const requeued = await queue.requeueStuck({ claimedBy: "worker-3" });
+```
+
+### Metrics
+
+```typescript
+const metrics = await queue.metrics();
+// { "payments": { pending: 12, running: 3, completed: 450, failed: 2 },
+//   "notifications": { pending: 0, running: 1, completed: 89, failed: 0 } }
+```
+
 ## PgChangeStream — LISTEN/NOTIFY CDC
 
 Real-time change data capture using LISTEN/NOTIFY with a poll-based fallback for at-least-once delivery. Implements `Streamable<T>` and `Replayable<T>`.

@@ -418,6 +418,67 @@ await dlq.subscribeAck().forEach(async (envelope) => {
 });
 ```
 
+### Version Registry
+
+Run multiple workflow versions simultaneously. New workflows use the latest version; existing workflows resume with the version they started on.
+
+```typescript
+import { workflow, WorkflowVersionRegistry } from "@promin/core";
+
+const registry = new WorkflowVersionRegistry();
+
+// Register versioned definitions (must have a version)
+const v1 = workflow({ name: "order", storage, version: "1" })
+  .step("validate", ({ input }) => validateV1(input))
+  .step("charge", ({ prev }) => chargeV1(prev))
+  .build();
+
+const v2 = workflow({ name: "order", storage, version: "2" })
+  .step("verify", ({ input }) => verifyV2(input))
+  .step("charge", ({ prev }) => chargeV2(prev))
+  .step("notify", ({ prev }) => notifyV2(prev))
+  .build();
+
+registry.register(v1);
+registry.register(v2);
+```
+
+**Running workflows through the registry:**
+
+```typescript
+// New workflow -> uses latest (v2)
+await registry.run({ workflowId: "order-new", name: "order", input: { orderId: "42" } });
+
+// Existing v1 workflow -> resumes with v1 definition
+await registry.run({ workflowId: "order-old", name: "order", input: { orderId: "7" } });
+```
+
+The registry checks storage for the workflow's version, then resolves the matching definition. If the stored version is no longer registered, it throws with a clear error listing available versions.
+
+**Monitoring drain progress:**
+
+Before deregistering an old version, check that all its workflows have finished:
+
+```typescript
+const counts = await registry.countByVersion({ name: "order", storage });
+// Map { "1" => { running: 3, completed: 150, failed: 1 },
+//        "2" => { running: 12, completed: 40, failed: 0 } }
+
+if (counts.get("1")!.running === 0) {
+  // Safe to remove v1 from the registry
+}
+```
+
+**Inspecting the registry:**
+
+```typescript
+registry.names();             // ["order", "payment"]
+registry.versions("order");   // ["1", "2"]
+registry.latest("order");     // "2"
+registry.resolve("order", "1"); // WorkflowDefinition for v1
+registry.resolve("order");      // WorkflowDefinition for latest
+```
+
 ### RRULE Support
 
 Complex calendar recurrence via iCalendar RRULE (RFC 5545). Three trigger types: `cron`, `rrule`, `intervalMs`.

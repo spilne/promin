@@ -84,6 +84,49 @@ const report = await df.profile();
 // Cross-column: correlations, warnings (high nulls, low cardinality, etc.)
 ```
 
+## Streaming
+
+Convert between DataFrame and StreamPipeline for memory-efficient processing of large datasets.
+
+### DataFrame.stream()
+
+Converts a DataFrame to a `StreamPipeline` that yields rows in fixed-size chunks. For streamable plans (filter, map, select, withColumn), rows are processed with constant memory. For materializing plans (sort, groupBy, join), falls back to full execution.
+
+```typescript
+// Stream rows in chunks of 1,000
+await df
+  .stream({ chunkSize: 1000 })
+  .map((row) => transform(row))
+  .filter((row) => row.score > 0.5)
+  .forEach((row) => console.log(row));
+```
+
+The default chunk size is 10,000 rows. Smaller chunks reduce peak memory; larger chunks improve throughput.
+
+```typescript
+// Process a large dataset without loading everything into memory
+await DataFrame.fromFile(CsvFile("events.csv"))
+  .filter(col("type").eq(lit("click")))
+  .select("userId", "timestamp")
+  .stream({ chunkSize: 5000 })
+  .map((row) => enrich(row))
+  .drain();
+```
+
+### DataFrame.fromStream()
+
+Creates a DataFrame by collecting all items from a StreamPipeline. This materializes the entire stream into memory.
+
+```typescript
+const df = await DataFrame.fromStream(
+  StreamPipeline.fromSource(kafkaTopic)
+    .map((msg) => msg.value)
+    .take(10_000)
+);
+
+const summary = await df.groupBy("region").agg({ total: { column: "amount", fn: "sum" } }).collect();
+```
+
 ## Operations
 
 - **Filter/Select**: filter, select, distinct, limit, sample, head, tail
