@@ -7,7 +7,7 @@ TypeScript toolkit for resilient async operations, durable workflows, stream pro
 
 ## Modules
 
-### [Pipeline](/docs/guide/pipeline) — Async actions with resilience
+### [Pipeline](/docs/core/pipeline) — Async actions with resilience
 
 Chainable, lazily-evaluated wrapper over Effect. Retry, timeout, circuit breaker, caching, polling — without Effect expertise.
 
@@ -19,7 +19,7 @@ const result = await Pipeline.fn(() => callService())
   .runPromise();
 ```
 
-### [StreamPipeline](/docs/guide/stream-pipeline) — Stream processing with backpressure
+### [StreamPipeline](/docs/core/stream-pipeline) — Stream processing with backpressure
 
 Parallel transforms, batching, deduplication, windowing. Automatic operator fusion.
 
@@ -31,7 +31,7 @@ await StreamPipeline.fromAsyncIterable(messages, onError)
   .forEach((batch) => db.bulkInsert(batch));
 ```
 
-### [StreamTopology](/docs/guide/stream-topology) — Stateful stream processing
+### [StreamTopology](/docs/topology/stream-topology) — Stateful stream processing
 
 Kafka Streams / Flink-style: keyed state, time windows, joins, deduplication, checkpointing, distributed shuffle.
 
@@ -44,7 +44,7 @@ const topology = StreamTopology.source(clicks)
   .to(output);
 ```
 
-### [Durable Workflows](/docs/guide/workflows) — Crash-recoverable execution
+### [Durable Workflows](/docs/workflow/workflows) — Crash-recoverable execution
 
 DAG-based workflows with compensation (sagas), map steps, sleep/signal, retry, and visual editor schema.
 
@@ -58,7 +58,7 @@ const orderFlow = workflow({ name: "process-order", storage })
   .build();
 ```
 
-### [Distributed Workers](/docs/guide/distributed-workers) — Multi-machine step execution
+### [Distributed Workers](/docs/workflow/distributed-workers) — Multi-machine step execution
 
 Coordinator + workers via Postgres queues. Route steps to specialized hardware (GPU, AI). Same workflow definition works in-process and distributed.
 
@@ -67,7 +67,7 @@ const coordinator = createCoordinator({ storage, stepQueue, routing: { transcrib
 await coordinator.submit({ workflow: processVideo, workflowId: "v1", input });
 ```
 
-### [DataFrame](/docs/guide/dataframe) — Lazy analytics
+### [DataFrame](/docs/data/dataframe) — Lazy analytics
 
 Composable DataFrame with expression builder, window functions, joins, and pluggable executors (Array or DuckDB).
 
@@ -82,13 +82,11 @@ const result = await DataFrame.fromRows(sales)
 
 ### Additional Modules
 
-| Module                                    | Description                                                               |
-| ----------------------------------------- | ------------------------------------------------------------------------- |
-| RawStream        | Zero-overhead stream for hot paths (~4x faster than StreamPipeline)       |
-| Stream Pipes     | Reusable `through()` transforms: CSV, JSONL, XML, base64, length-prefixed |
-| Data Profiler    | Column statistics, correlations, quality warnings                         |
-| Data Diff        | Row-level change detection between datasets                               |
-| Data Quality     | Declarative expectations and validation suites                            |
-| Data Contracts   | Schema + expectations + SLA definitions                                   |
-| [SQL Models](/docs/guide/sql-models)       | dbt-style SQL model DAG with materialization                              |
-| Scheduler        | Cron + rrule-based workflow scheduling                                    |
+| Module | Description |
+| --- | --- |
+| [Concurrency Primitives](/docs/core/primitives) | Semaphore, Ref, Channel, Queue, Deferred, Signal, Throttle, and more |
+| [Stream Pipes](/docs/core/stream-pipes) | Reusable `through()` transforms: CSV, JSONL, XML, base64, length-prefixed |
+| RawStream | Zero-overhead stream for hot paths (~4x faster than StreamPipeline) |
+| [Data Quality](/docs/data/quality) | Profiling, expectations, diff, contracts |
+| [SQL Models](/docs/workflow/sql-models) | dbt-style SQL model DAG with materialization |
+| [Scheduler](/docs/workflow/scheduler) | Cron + rrule-based workflow scheduling |

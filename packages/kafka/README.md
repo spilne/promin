@@ -1,6 +1,6 @@
 # @promin/kafka
 
-Kafka transport adapter. Uses `@confluentinc/kafka-javascript` (official Confluent client, built on librdkafka). Implements all streaming typeclasses — use Kafka topics as sources, sinks, and shuffle targets with the same API as any other transport.
+Kafka transport adapter with a driver-agnostic `KafkaClient` interface. Works with any Kafka client library — `@confluentinc/kafka-javascript`, `kafkajs`, `@platformatic/kafka`, or your own implementation. Implements all streaming typeclasses — use Kafka topics as sources, sinks, and shuffle targets with the same API as any other transport.
 
 ## Usage
 
@@ -61,7 +61,7 @@ const offset = await orderEvents.getCommittedOffset({ group: "my-group" });
 
 | Option           | Type        | Default     | Description                                                                 |
 | ---------------- | ----------- | ----------- | --------------------------------------------------------------------------- |
-| `kafka`          | `KafkaClient` | (required) | Kafka client instance from `@confluentinc/kafka-javascript` or compatible. |
+| `kafka`          | `KafkaClient` | (required) | Any Kafka client implementing `KafkaClient` interface (kafkajs, @confluentinc/kafka-javascript, @platformatic/kafka). |
 | `topic`          | `string`    | (required)  | Kafka topic name.                                                           |
 | `groupId`        | `string`    | (required)  | Consumer group ID for subscribing.                                          |
 | `codec`          | `Codec<T>`  | `JsonCodec` | Serialization codec. Override for Avro, Protobuf, etc.                     |
