@@ -3,6 +3,9 @@
   "pages": [
     "01-analytics-query",
     "02-data-quality",
-    "03-sql-models"
+    "03-sql-models",
+    "04-streaming-etl",
+    "05-advanced-analytics",
+    "06-sql-queries"
   ]
 }
