@@ -13,13 +13,22 @@
       "path": "../packages/container"
     },
     {
+      "path": "../packages/topology"
+    },
+    {
       "path": "../packages/kafka"
     },
     {
       "path": "../packages/duckdb"
     },
     {
+      "path": "../packages/data"
+    },
+    {
       "path": "../packages/postgres"
+    },
+    {
+      "path": "../packages/workflow"
     },
     {
       "path": "../packages/core"

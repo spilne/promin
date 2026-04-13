@@ -3,7 +3,7 @@
  * composite joins, time-series resampling, and forward fill.
  */
 
-import { DataFrame, col, percentile, reduce } from "@promin/core";
+import { DataFrame, percentile, reduce } from "@promin/data";
 
 // --- Sample data ---
 
@@ -61,7 +61,7 @@ console.log("Per-symbol stats:", stats);
 // p95 price per symbol using percentile
 const p95 = await DataFrame.fromArray(trades)
   .groupBy("symbol")
-  .agg({ price: percentile(0.95) })
+  .agg({ price: percentile(0.95) as any })
   .collect();
 console.log("P95 price:", p95);
 
@@ -75,6 +75,7 @@ const vwap = reduce(
   (acc: { totalValue: number; totalVolume: number }) =>
     acc.totalVolume > 0 ? acc.totalValue / acc.totalVolume : 0,
 );
+console.log("VWAP reducer:", vwap);
 
 // --- 4. Time-series resampling ---
 

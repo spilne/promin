@@ -4,7 +4,7 @@
  * and external events driving transitions.
  */
 
-import { stateMachine, InMemoryStateMachineStorage } from "@promin/core";
+import { stateMachine, InMemoryStateMachineStorage } from "@promin/workflow";
 
 // ---------------------------------------------------------------------------
 // 1. Define states — each state has its own typed context

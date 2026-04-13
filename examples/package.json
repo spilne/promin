@@ -6,6 +6,9 @@
   "dependencies": {
     "@promin/container": "workspace:*",
     "@promin/core": "workspace:*",
+    "@promin/data": "workspace:*",
+    "@promin/topology": "workspace:*",
+    "@promin/workflow": "workspace:*",
     "@promin/kafka": "workspace:*",
     "@promin/postgres": "workspace:*",
     "@promin/redis": "workspace:*",

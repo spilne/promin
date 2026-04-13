@@ -4,7 +4,7 @@
  * Shuffle ensures same-key events land on the same instance.
  */
 
-import { StreamTopology, DistributedRunner } from "@promin/core";
+import { StreamTopology, DistributedRunner } from "@promin/topology";
 import { KafkaTopic, KafkaShuffleTransport, type KafkaClient } from "@promin/kafka";
 
 declare const kafka: KafkaClient;

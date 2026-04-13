@@ -8,10 +8,10 @@ import {
   createCoordinator,
   createWorker,
   MapStepRegistry,
-  Pipeline,
   InMemoryWorkflowStorage,
   InMemoryStepQueue,
-} from "@promin/core";
+} from "@promin/workflow";
+import { Pipeline } from "@promin/core";
 
 const storage = new InMemoryWorkflowStorage();
 const stepQueue = new InMemoryStepQueue();

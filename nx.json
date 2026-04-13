@@ -99,6 +99,19 @@
         "{workspaceRoot}/.oxfmtrc.check.json"
       ]
     },
+    "publish": {
+      "executor": "nx:run-commands",
+      "dependsOn": [
+        "build",
+        "^publish"
+      ],
+      "options": {
+        "commands": [
+          "npm publish --access public --provenance"
+        ],
+        "cwd": "{projectRoot}"
+      }
+    },
     "ci": {
       "executor": "nx:noop",
       "dependsOn": [

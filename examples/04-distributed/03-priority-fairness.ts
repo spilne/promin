@@ -7,8 +7,7 @@
  * - weighted: probabilistic priority (higher = more likely, not guaranteed)
  */
 
-import { InMemoryWorkflowStorage, InMemoryStepQueue } from "@promin/core";
-import type { FairnessPolicy } from "@promin/core";
+import { InMemoryStepQueue } from "@promin/workflow";
 
 const queue = new InMemoryStepQueue();
 

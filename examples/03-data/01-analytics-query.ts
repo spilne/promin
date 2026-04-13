@@ -3,7 +3,7 @@
  * DataFrame builds a lazy plan; .collect() executes it.
  */
 
-import { DataFrame, col, lit } from "@promin/core";
+import { DataFrame, col, lit } from "@promin/data";
 
 interface Sale {
   region: string;

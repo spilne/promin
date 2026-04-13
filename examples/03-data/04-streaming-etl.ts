@@ -3,7 +3,7 @@
  * DataFrame.stream() returns a StreamPipeline, enabling chunked processing.
  */
 
-import { DataFrame, col, CsvSink, JsonlSink } from "@promin/core";
+import { DataFrame, col, CsvSink, JsonlSink } from "@promin/data";
 
 // Simulate a large dataset (in practice, use DataFrame.fromFile(CsvFile("huge.csv")))
 const orders = Array.from({ length: 100_000 }, (_, i) => ({

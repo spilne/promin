@@ -76,7 +76,7 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
 
-      - name: Set version in all packages
+      - name: Set version and resolve workspace deps
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
           for pkg in packages/*/package.json; do
@@ -85,24 +85,24 @@ jobs:
               echo "Skipping private: $pkg"
               continue
             fi
+            # Set version
             jq --arg v "$VERSION" '.version = $v' "$pkg" > tmp.json && mv tmp.json "$pkg"
+            # Replace workspace:* with ^VERSION for all @promin/* deps
+            jq --arg v "^$VERSION" '
+              if .dependencies then
+                .dependencies |= with_entries(
+                  if (.key | startswith("@promin/")) and .value == "workspace:*"
+                  then .value = $v
+                  else .
+                  end
+                )
+              else . end
+            ' "$pkg" > tmp.json && mv tmp.json "$pkg"
             echo "Set $(jq -r .name "$pkg") → $VERSION"
           done
 
-      - name: Build packages
-        run: bun run build
-
-      - name: Publish to npm
-        run: |
-          for pkg in packages/*/; do
-            if jq -e '.private == true' "$pkg/package.json" > /dev/null 2>&1; then
-              continue
-            fi
-            echo "Publishing $(jq -r .name "$pkg/package.json")..."
-            cd "$pkg"
-            npm publish --access public
-            cd "$GITHUB_WORKSPACE"
-          done
+      - name: Build and publish (Nx resolves dependency order)
+        run: bunx nx run-many -t publish --exclude=@promin/examples --exclude=@promin/integration --exclude=@promin/docs --parallel=1
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

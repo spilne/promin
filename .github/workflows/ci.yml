@@ -73,7 +73,7 @@ jobs:
       - name: Stream benchmarks
         run: |
           mkdir -p .target/reports
-          bun run packages/core/src/lib/stream-pipeline.bench.ts 2>&1 | tee .target/reports/stream-bench.txt
+          bun run bench:stream 2>&1 | tee .target/reports/stream-bench.txt
 
       - name: Cross-language benchmarks
         continue-on-error: true

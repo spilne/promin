@@ -3,7 +3,7 @@
  * Full SQL with JOINs, CTEs, window functions, aggregations.
  */
 
-import { DataFrame } from "@promin/core";
+import { DataFrame } from "@promin/data";
 import { DuckDBExecutor } from "@promin/duckdb";
 
 const executor = new DuckDBExecutor();

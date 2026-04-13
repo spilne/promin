@@ -4,7 +4,8 @@
  * If the workflow crashes, only unprocessed items are retried.
  */
 
-import { flow, Pipeline } from "@promin/core";
+import { flow } from "@promin/workflow";
+import { Pipeline } from "@promin/core";
 
 interface Image {
   id: string;

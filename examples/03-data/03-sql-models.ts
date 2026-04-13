@@ -3,7 +3,7 @@
  * The compiler turns this into a durable workflow: crash-safe, parallel where possible.
  */
 
-import { compileSqlProject, InMemoryWorkflowStorage } from "@promin/core";
+import { compileSqlProject, InMemoryWorkflowStorage } from "@promin/workflow";
 
 const storage = new InMemoryWorkflowStorage();
 

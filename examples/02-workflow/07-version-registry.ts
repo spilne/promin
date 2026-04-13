@@ -9,7 +9,7 @@
  * based on the version stored when the workflow was created.
  */
 
-import { workflow, WorkflowVersionRegistry, InMemoryWorkflowStorage } from "@promin/core";
+import { workflow, WorkflowVersionRegistry, InMemoryWorkflowStorage } from "@promin/workflow";
 
 const storage = new InMemoryWorkflowStorage();
 const registry = new WorkflowVersionRegistry();

@@ -4,7 +4,7 @@
  * If credit fails, the debit is automatically reversed.
  */
 
-import { workflow, InMemoryWorkflowStorage } from "@promin/core";
+import { workflow, InMemoryWorkflowStorage } from "@promin/workflow";
 
 const storage = new InMemoryWorkflowStorage();
 

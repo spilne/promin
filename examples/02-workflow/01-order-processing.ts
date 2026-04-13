@@ -3,7 +3,7 @@
  * If it crashes after charging, it resumes from shipping (not re-charges).
  */
 
-import { workflow } from "@promin/core";
+import { workflow } from "@promin/workflow";
 import { PostgresWorkflowStorage, migrate } from "@promin/postgres";
 
 declare const db: any;

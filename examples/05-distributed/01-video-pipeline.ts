@@ -4,7 +4,7 @@
  * Same workflow runs in-process (dev) or distributed (prod).
  */
 
-import { workflow, InMemoryWorkflowStorage } from "@promin/core";
+import { workflow, InMemoryWorkflowStorage } from "@promin/workflow";
 
 const storage = new InMemoryWorkflowStorage();
 

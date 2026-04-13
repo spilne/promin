@@ -3,7 +3,7 @@
  * The scheduler streams ticks — connect to workflows via trigger.
  */
 
-import { createScheduler } from "@promin/core";
+import { createScheduler } from "@promin/workflow";
 
 const scheduler = createScheduler();
 

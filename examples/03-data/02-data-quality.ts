@@ -3,7 +3,7 @@
  * Profile the dataset and check for anomalies.
  */
 
-import { profileData } from "@promin/core";
+import { profileData } from "@promin/data";
 
 const transactions = [
   { id: "t1", amount: 99.99, currency: "USD", timestamp: "2026-04-06T10:00:00Z" },

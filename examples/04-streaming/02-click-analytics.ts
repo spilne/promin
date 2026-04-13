@@ -3,7 +3,7 @@
  * StreamTopology handles windowing, keyed state, and checkpointing.
  */
 
-import { StreamTopology, TopologyRunner } from "@promin/core";
+import { StreamTopology, TopologyRunner } from "@promin/topology";
 import { KafkaTopic, type KafkaClient } from "@promin/kafka";
 
 declare const kafka: KafkaClient;

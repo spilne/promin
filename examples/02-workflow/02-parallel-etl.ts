@@ -4,7 +4,7 @@
  * Enrich and validate have no dependency on each other, so they run concurrently.
  */
 
-import { flow } from "@promin/core";
+import { flow } from "@promin/workflow";
 
 interface RawData {
   records: { id: string; value: number }[];
