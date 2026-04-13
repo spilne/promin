@@ -103,6 +103,10 @@ jobs:
 
       - name: Build and publish (Nx resolves dependency order)
         run: bunx nx run-many -t publish --exclude=@promin/examples --exclude=@promin/integration --exclude=@promin/docs --parallel=1
+        env:
+          # Uses NPM_TOKEN secret for initial publish, then OIDC trusted publishing (tokenless) once configured.
+          # Remove this line after setting up trusted publishers via: npm trust configure oidc
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   docs:
     if: ${{ !inputs.docs-only }}
