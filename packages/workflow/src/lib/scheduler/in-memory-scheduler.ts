@@ -211,11 +211,30 @@ function computeAndSleep(
   tickNumber: number,
 ): Effect.Effect<Option.Option<readonly [ScheduleTick, number]>> {
   const now = new Date();
+
+  // startAt: if schedule hasn't started yet, sleep until startAt then retry
+  if (config.startAt && now < config.startAt) {
+    const waitMs = config.startAt.getTime() - now.getTime();
+    return Effect.sleep(Duration.millis(waitMs)).pipe(
+      Effect.map(() => Option.some([SKIP_MARKER, tickNumber] as const)),
+    );
+  }
+
+  // endAt: if schedule has expired, stop emitting
+  if (config.endAt && now >= config.endAt) {
+    return Effect.succeed(Option.none());
+  }
+
   const nextFireTime = config.cron
     ? getNextCronTime(config.cron, config.timezone ?? "UTC", now)
     : config.rrule
       ? getNextRruleTime(config.rrule, now)
       : new Date(now.getTime() + (config.intervalMs ?? 1000));
+
+  // endAt: if next fire would be after endAt, stop
+  if (config.endAt && nextFireTime >= config.endAt) {
+    return Effect.succeed(Option.none());
+  }
 
   const sleepMs = Math.max(0, nextFireTime.getTime() - now.getTime());
 

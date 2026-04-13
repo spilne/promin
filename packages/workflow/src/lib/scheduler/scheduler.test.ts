@@ -287,6 +287,67 @@ describe("InMemoryScheduler", () => {
   });
 
   // ---------------------------------------------------------------------------
+  // startAt / endAt
+  // ---------------------------------------------------------------------------
+
+  describe("startAt / endAt", () => {
+    it("startAt delays first tick until the specified time", async () => {
+      const scheduler = createScheduler();
+      const startAt = new Date(Date.now() + 200);
+      scheduler.register({ id: "delayed", intervalMs: 50, startAt });
+
+      const before = Date.now();
+      const [tick] = await scheduler.stream("delayed").take(1).collect();
+      const elapsed = Date.now() - before;
+
+      expect(elapsed).toBeGreaterThanOrEqual(150);
+      expect(tick!.scheduleId).toBe("delayed");
+    });
+
+    it("endAt stops the stream after the specified time", async () => {
+      const scheduler = createScheduler();
+      const endAt = new Date(Date.now() + 200);
+      scheduler.register({ id: "expiring", intervalMs: 50, endAt });
+
+      const ticks = await scheduler.stream("expiring").collect();
+
+      expect(ticks.length).toBeGreaterThanOrEqual(1);
+      expect(ticks.length).toBeLessThan(10);
+    });
+
+    it("endAt in the past produces no ticks", async () => {
+      const scheduler = createScheduler();
+      scheduler.register({
+        id: "expired",
+        intervalMs: 50,
+        endAt: new Date(Date.now() - 1000),
+      });
+
+      const ticks = await scheduler.stream("expired").collect();
+      expect(ticks).toHaveLength(0);
+    });
+
+    it("startAt + endAt together define a window", async () => {
+      const scheduler = createScheduler();
+      const now = Date.now();
+      scheduler.register({
+        id: "windowed",
+        intervalMs: 50,
+        startAt: new Date(now + 100),
+        endAt: new Date(now + 400),
+      });
+
+      const before = Date.now();
+      const ticks = await scheduler.stream("windowed").collect();
+      const elapsed = Date.now() - before;
+
+      expect(elapsed).toBeGreaterThanOrEqual(100);
+      expect(ticks.length).toBeGreaterThanOrEqual(1);
+      expect(ticks.length).toBeLessThan(10);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Unregister ends stream
   // ---------------------------------------------------------------------------
 

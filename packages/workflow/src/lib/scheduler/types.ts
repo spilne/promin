@@ -16,6 +16,10 @@ export interface ScheduleConfig {
   readonly timezone?: string;
   /** Whether this schedule is active. Default: true. */
   readonly enabled?: boolean;
+  /** Don't fire before this time. Ticks with scheduledAt < startAt are skipped. */
+  readonly startAt?: Date;
+  /** Stop firing after this time. Schedule auto-disables when endAt is reached. */
+  readonly endAt?: Date;
   /** Arbitrary metadata passed through to ScheduleTick. */
   readonly metadata?: Record<string, unknown>;
 }
