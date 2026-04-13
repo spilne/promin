@@ -118,8 +118,11 @@ import { RedisSemaphore } from "@promin/redis";
 
 const sem = await RedisSemaphore.make({ redis, key: "db:pool", permits: 5, timeoutMs: 10_000 });
 await sem.acquire();
-try { await queryDatabase(); }
-finally { await sem.release(); }
+try {
+  await queryDatabase();
+} finally {
+  await sem.release();
+}
 
 // Or use the convenience wrapper:
 await sem.withPermitAsync(() => queryDatabase());
@@ -147,7 +150,12 @@ Distributed bounded FIFO queue with backpressure. Items are pushed left (LPUSH) 
 ```typescript
 import { RedisQueue } from "@promin/redis";
 
-const jobs = RedisQueue.make<{ id: string }>({ redis, key: "work:jobs", capacity: 100, timeoutMs: 30_000 });
+const jobs = RedisQueue.make<{ id: string }>({
+  redis,
+  key: "work:jobs",
+  capacity: 100,
+  timeoutMs: 30_000,
+});
 await jobs.offerAsync({ id: "j-1" });
 const next = await jobs.takeAsync(); // blocks until available
 const size = await jobs.sizeAsync();
@@ -308,8 +316,12 @@ import { RedisStepQueue } from "@promin/redis";
 const queue = new RedisStepQueue(redis, { prefix: "sq", workerId: "worker-1" });
 
 const taskId = await queue.enqueue({
-  workflowId: "wf-1", stepName: "sendEmail", queue: "email",
-  input: { to: "alice@example.com" }, prevResults: {}, priority: 8,
+  workflowId: "wf-1",
+  stepName: "sendEmail",
+  queue: "email",
+  input: { to: "alice@example.com" },
+  prevResults: {},
+  priority: 8,
 });
 
 const tasks = await queue.claim({ queues: ["email"], limit: 10 });
@@ -335,7 +347,13 @@ const storage = new RedisStateMachineStorage(redis, {
 storage.registerTerminalStates(["completed", "failed", "cancelled"]);
 
 await storage.create({ id: "order-1", name: "order", initial: "pending", context: {} });
-await storage.transition({ id: "order-1", from: "pending", to: "paid", event: "payment", context: { amount: 99 } });
+await storage.transition({
+  id: "order-1",
+  from: "pending",
+  to: "paid",
+  event: "payment",
+  context: { amount: 99 },
+});
 const state = await storage.load("order-1");
 const events = await storage.loadEvents("order-1");
 
@@ -371,7 +389,7 @@ redis.close();
 For workflow and stream resources, call their own disconnect/shutdown methods before closing the Redis connection:
 
 ```typescript
-await events.disconnect?.();   // RedisStream — if applicable
-await queue.shutdownAsync();   // RedisQueue
+await events.disconnect?.(); // RedisStream — if applicable
+await queue.shutdownAsync(); // RedisQueue
 redis.disconnect();
 ```

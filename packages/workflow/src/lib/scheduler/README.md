@@ -8,10 +8,10 @@ A scheduler manages named schedules and emits `ScheduleTick` events. Each tick c
 
 Two implementations:
 
-| Implementation | Package | Persistence | Multi-instance |
-| --- | --- | --- | --- |
-| `InMemoryScheduler` | `@promin/workflow` | None | No |
-| `DurableScheduler` | `@promin/postgres` | Postgres | Yes (leader election via `pg_advisory_lock`) |
+| Implementation      | Package            | Persistence | Multi-instance                               |
+| ------------------- | ------------------ | ----------- | -------------------------------------------- |
+| `InMemoryScheduler` | `@promin/workflow` | None        | No                                           |
+| `DurableScheduler`  | `@promin/postgres` | Postgres    | Yes (leader election via `pg_advisory_lock`) |
 
 ## ScheduleConfig
 
@@ -19,14 +19,14 @@ Each schedule requires exactly one trigger type:
 
 ```typescript
 interface ScheduleConfig {
-  id: string;                          // Unique identifier
-  name?: string;                       // Human-readable name
-  cron?: string;                       // Cron expression (5 or 6 field)
-  rrule?: string;                      // iCalendar RRULE (RFC 5545)
-  intervalMs?: number;                 // Fixed interval in milliseconds
-  timezone?: string;                   // IANA timezone (default: "UTC")
-  enabled?: boolean;                   // Active state (default: true)
-  metadata?: Record<string, unknown>;  // Passed through to ScheduleTick
+  id: string; // Unique identifier
+  name?: string; // Human-readable name
+  cron?: string; // Cron expression (5 or 6 field)
+  rrule?: string; // iCalendar RRULE (RFC 5545)
+  intervalMs?: number; // Fixed interval in milliseconds
+  timezone?: string; // IANA timezone (default: "UTC")
+  enabled?: boolean; // Active state (default: true)
+  metadata?: Record<string, unknown>; // Passed through to ScheduleTick
 }
 ```
 
@@ -36,11 +36,11 @@ Emitted when a schedule fires:
 
 ```typescript
 interface ScheduleTick {
-  scheduleId: string;       // Which schedule fired
-  scheduleName?: string;    // Human-readable name
-  scheduledAt: Date;        // Nominal fire time (cron-computed)
-  firedAt: Date;            // Actual fire time (may differ due to jitter/load)
-  tickNumber: number;       // Monotonic counter (0, 1, 2, ...)
+  scheduleId: string; // Which schedule fired
+  scheduleName?: string; // Human-readable name
+  scheduledAt: Date; // Nominal fire time (cron-computed)
+  firedAt: Date; // Actual fire time (may differ due to jitter/load)
+  tickNumber: number; // Monotonic counter (0, 1, 2, ...)
   metadata?: Record<string, unknown>;
 }
 ```
@@ -76,26 +76,30 @@ scheduler.register({
 
 ```typescript
 // Stream a single schedule into a workflow trigger
-scheduler.stream("morning-report")
-  .through(trigger({
-    workflow: reportWorkflow,
-    toInput: (tick) => ({ date: tick.scheduledAt.toISOString().split("T")[0] }),
-    toWorkflowId: (tick) => `report-${tick.scheduledAt.toISOString().split("T")[0]}`,
-  }))
+scheduler
+  .stream("morning-report")
+  .through(
+    trigger({
+      workflow: reportWorkflow,
+      toInput: (tick) => ({ date: tick.scheduledAt.toISOString().split("T")[0] }),
+      toWorkflowId: (tick) => `report-${tick.scheduledAt.toISOString().split("T")[0]}`,
+    }),
+  )
   .drain();
 
 // Stream all schedules merged
-StreamPipeline.fromSource(scheduler)
-  .forEach((tick) => console.log(`${tick.scheduleId} fired at ${tick.firedAt}`));
+StreamPipeline.fromSource(scheduler).forEach((tick) =>
+  console.log(`${tick.scheduleId} fired at ${tick.firedAt}`),
+);
 ```
 
 ### Runtime control
 
 ```typescript
-scheduler.pause("health-check");   // Stops emitting, keeps config
-scheduler.resume("health-check");  // Resumes emitting
+scheduler.pause("health-check"); // Stops emitting, keeps config
+scheduler.resume("health-check"); // Resumes emitting
 scheduler.unregister("health-check"); // Removes entirely, stream ends
-scheduler.list();                  // All registered ScheduleConfigs
+scheduler.list(); // All registered ScheduleConfigs
 ```
 
 ## Durable Scheduler (Postgres)
@@ -125,12 +129,15 @@ await scheduler.registerAsync({
 });
 
 // Trigger workflow from schedule
-scheduler.stream("daily-etl")
-  .through(trigger({
-    workflow: etlWorkflow,
-    toInput: (tick) => ({ date: tick.scheduledAt.toISOString().split("T")[0] }),
-    toWorkflowId: (tick) => `etl-${tick.scheduledAt.toISOString().split("T")[0]}`,
-  }))
+scheduler
+  .stream("daily-etl")
+  .through(
+    trigger({
+      workflow: etlWorkflow,
+      toInput: (tick) => ({ date: tick.scheduledAt.toISOString().split("T")[0] }),
+      toWorkflowId: (tick) => `etl-${tick.scheduledAt.toISOString().split("T")[0]}`,
+    }),
+  )
   .drain();
 
 // Management

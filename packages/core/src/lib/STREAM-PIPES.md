@@ -3,11 +3,7 @@
 Reusable `.through()` transformations for `StreamPipeline`. Each pipe is a function `StreamPipeline<A> -> StreamPipeline<B>` that you compose by chaining:
 
 ```ts
-stream
-  .through(utf8Decode())
-  .through(lines())
-  .through(csv())
-  .through(parseAs(MySchema))
+stream.through(utf8Decode()).through(lines()).through(csv()).through(parseAs(MySchema));
 ```
 
 All imports are from `@promin/core`.
@@ -114,8 +110,7 @@ Parse XML text into SAX-style events. Lightweight -- no DOM tree in memory.
 ```ts
 import { xml } from "@promin/core";
 
-const items = textStream.through(xml())
-  .filter(e => e.type === "open" && e.tag === "item");
+const items = textStream.through(xml()).filter((e) => e.type === "open" && e.tag === "item");
 // yields: { type: "open", tag: "item", attributes: { id: "1" } }
 ```
 
@@ -146,9 +141,7 @@ Parse JSONL with schema validation in one step. Combines `jsonl()` + `parseAs()`
 ```ts
 import { jsonlAs } from "@promin/core";
 
-const events = textStream
-  .through(lines())
-  .through(jsonlAs(EventSchema));
+const events = textStream.through(lines()).through(jsonlAs(EventSchema));
 ```
 
 ---
@@ -160,10 +153,7 @@ Validate and coerce rows using a schema (Zod, etc.). Invalid rows are silently d
 ```ts
 import { parseAs } from "@promin/core";
 
-const typed = textStream
-  .through(lines())
-  .through(csv())
-  .through(parseAs(TransactionSchema));
+const typed = textStream.through(lines()).through(csv()).through(parseAs(TransactionSchema));
 ```
 
 ---
@@ -179,7 +169,9 @@ const results = textStream
   .through(lines())
   .through(csv())
   .through(parseAsLenient(TransactionSchema))
-  .tap(({ error }) => { if (error) console.warn(error); })
+  .tap(({ error }) => {
+    if (error) console.warn(error);
+  })
   .filterMap(({ data }) => data);
 ```
 
@@ -195,10 +187,10 @@ Decode binary chunks using a custom decoder. Use for protobuf, msgpack, avro, or
 import { binaryDecode } from "@promin/core";
 
 // Protobuf
-stream.through(binaryDecode(buf => MyMessage.decode(buf)));
+stream.through(binaryDecode((buf) => MyMessage.decode(buf)));
 
 // MessagePack
-stream.through(binaryDecode(buf => decode(buf)));
+stream.through(binaryDecode((buf) => decode(buf)));
 ```
 
 ---
@@ -210,7 +202,7 @@ Decode length-prefixed binary messages (4-byte big-endian uint32 length prefix).
 ```ts
 import { lengthPrefixed } from "@promin/core";
 
-const messages = stream.through(lengthPrefixed(buf => MyProto.decode(buf)));
+const messages = stream.through(lengthPrefixed((buf) => MyProto.decode(buf)));
 ```
 
 ---

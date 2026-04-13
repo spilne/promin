@@ -12,9 +12,7 @@ Shared concurrency limiter. Wraps `Effect.Semaphore` to limit concurrent access 
 import { PipelineSemaphore } from "@promin/core";
 
 const apiLimit = PipelineSemaphore.make(10);
-const result = await Effect.runPromise(
-  apiLimit.withPermit(Effect.promise(() => fetch("/api")))
-);
+const result = await Effect.runPromise(apiLimit.withPermit(Effect.promise(() => fetch("/api"))));
 ```
 
 **Methods:** `make(permits)`, `withPermit(effect)`, `availablePermits`
@@ -181,7 +179,9 @@ Multi-strategy rate limiter: sliding window, fixed window, or token bucket. Fail
 import { PipelineRateLimiter } from "@promin/core";
 
 const limiter = PipelineRateLimiter.make({
-  limit: 100, windowMs: 60_000, strategy: "token-bucket",
+  limit: 100,
+  windowMs: 60_000,
+  strategy: "token-bucket",
 });
 await limiter.withLimitAsync(() => callApi());
 ```

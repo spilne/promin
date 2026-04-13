@@ -19,24 +19,24 @@ const result = await df
   .expectRowCount({ min: 1 })
   .validate();
 
-console.log(result.passed);   // true/false
-console.log(result.summary);  // { total, passed, failed, warnings }
-console.log(result.results);  // per-expectation details
+console.log(result.passed); // true/false
+console.log(result.summary); // { total, passed, failed, warnings }
+console.log(result.results); // per-expectation details
 ```
 
 **Built-in expectations:**
 
-| Method | Description |
-|--------|-------------|
-| `expectNotNull(column)` | No null/undefined values |
-| `expectUnique(column)` | All values distinct |
-| `expectBetween(column, { min, max })` | Numeric range check |
-| `expectMatch(column, { pattern })` | Regex pattern match |
-| `expectIn(column, { values })` | Value in allowed set |
-| `expectRowCount({ min?, max? })` | Row count bounds |
-| `expectFreshness(column, { maxAgeMs })` | Timestamp recency |
-| `expectReferentialIntegrity(column, { referenceTable, referenceColumn })` | Foreign key check |
-| `expect(name, checkFn)` | Custom expectation |
+| Method                                                                    | Description              |
+| ------------------------------------------------------------------------- | ------------------------ |
+| `expectNotNull(column)`                                                   | No null/undefined values |
+| `expectUnique(column)`                                                    | All values distinct      |
+| `expectBetween(column, { min, max })`                                     | Numeric range check      |
+| `expectMatch(column, { pattern })`                                        | Regex pattern match      |
+| `expectIn(column, { values })`                                            | Value in allowed set     |
+| `expectRowCount({ min?, max? })`                                          | Row count bounds         |
+| `expectFreshness(column, { maxAgeMs })`                                   | Timestamp recency        |
+| `expectReferentialIntegrity(column, { referenceTable, referenceColumn })` | Foreign key check        |
+| `expect(name, checkFn)`                                                   | Custom expectation       |
 
 All expectations accept an optional `severity: "error" | "warning"` parameter. Warnings don't cause `validate()` to fail.
 
@@ -53,10 +53,10 @@ const report = await profileData(rows);
 
 console.log(report.rowCount);
 console.log(report.duplicateRows);
-console.log(report.columns.age);    // NumericProfile: mean, median, std, percentiles
-console.log(report.columns.name);   // StringProfile: avgLength, topValues
-console.log(report.correlations);   // strong/moderate correlations between numeric columns
-console.log(report.warnings);       // high nulls, constant columns, high cardinality
+console.log(report.columns.age); // NumericProfile: mean, median, std, percentiles
+console.log(report.columns.name); // StringProfile: avgLength, topValues
+console.log(report.correlations); // strong/moderate correlations between numeric columns
+console.log(report.warnings); // high nulls, constant columns, high cardinality
 ```
 
 **Column types detected:** `numeric`, `string`, `boolean`, `date`
@@ -93,13 +93,10 @@ console.log(diff.modifications);
 Compare column sets between two dataset versions.
 
 ```ts
-const diff = schemaDiff(
-  ["id", "name", "email"],
-  ["id", "name", "email", "phone"],
-);
-console.log(diff.addedColumns);  // ["phone"]
+const diff = schemaDiff(["id", "name", "email"], ["id", "name", "email", "phone"]);
+console.log(diff.addedColumns); // ["phone"]
 console.log(diff.removedColumns); // []
-console.log(diff.compatible);     // true (no removals)
+console.log(diff.compatible); // true (no removals)
 ```
 
 ---
@@ -136,9 +133,9 @@ console.log(result.slaViolations);
 
 **SLA checks:**
 
-| Check | Description |
-|-------|-------------|
-| `freshness` | Most recent timestamp must be within `maxAgeMs` |
-| `completeness.minRowCount` | Minimum number of rows |
-| `completeness.maxNullPct` | Maximum null percentage per column |
-| `uniqueness.columns` | Columns that must have all unique values |
+| Check                      | Description                                     |
+| -------------------------- | ----------------------------------------------- |
+| `freshness`                | Most recent timestamp must be within `maxAgeMs` |
+| `completeness.minRowCount` | Minimum number of rows                          |
+| `completeness.maxNullPct`  | Maximum null percentage per column              |
+| `uniqueness.columns`       | Columns that must have all unique values        |

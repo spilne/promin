@@ -203,9 +203,9 @@ Postgres-backed distributed step queue for workflow workers. Uses `SELECT FOR UP
 import { PgStepQueue } from "@promin/postgres";
 
 const queue = new PgStepQueue({
-  db,                    // DrizzleDb instance (required)
-  workerId: "worker-1",  // Identifies this worker (default: random UUID)
-  namespace: "prod",     // Isolate tasks by namespace (default: null = unscoped)
+  db, // DrizzleDb instance (required)
+  workerId: "worker-1", // Identifies this worker (default: random UUID)
+  namespace: "prod", // Isolate tasks by namespace (default: null = unscoped)
 });
 
 // Create the table (for dev/testing — prefer migrations for production)
@@ -228,7 +228,7 @@ const taskId = await queue.enqueue({
   queue: "payments",
   input: { amount: 99.99 },
   prevResults: { validate: { ok: true } },
-  priority: 8,           // Higher = claimed first (default: 5)
+  priority: 8, // Higher = claimed first (default: 5)
 });
 ```
 
@@ -264,11 +264,11 @@ for (const task of tasks) {
 
 Control how tasks are ordered when claiming:
 
-| Policy | Behavior |
-| --- | --- |
-| `"strict-priority"` | Highest priority first, then oldest (default) |
-| `"round-robin"` | Interleave across workflows — prevents one workflow from starving others |
-| `"weighted"` | Priority weighted by randomness — high priority tasks are more likely but not guaranteed |
+| Policy              | Behavior                                                                                 |
+| ------------------- | ---------------------------------------------------------------------------------------- |
+| `"strict-priority"` | Highest priority first, then oldest (default)                                            |
+| `"round-robin"`     | Interleave across workflows — prevents one workflow from starving others                 |
+| `"weighted"`        | Priority weighted by randomness — high priority tasks are more likely but not guaranteed |
 
 ```typescript
 // Round-robin across workflows

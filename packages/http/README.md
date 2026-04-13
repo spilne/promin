@@ -23,11 +23,7 @@ const api = new DefaultHttpClient({
 const UserSchema = z.object({ id: z.number(), name: z.string() });
 
 // GET with Zod validation + retry + timeout
-const user = await api
-  .get("/users/1", UserSchema)
-  .retry(3)
-  .timeout(5_000)
-  .runPromise();
+const user = await api.get("/users/1", UserSchema).retry(3).timeout(5_000).runPromise();
 ```
 
 Every request returns a lazy pipeline — nothing executes until you call a terminal. Retry, timeout, validation, and streaming compose naturally through Pipeline combinators.

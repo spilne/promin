@@ -1,6 +1,25 @@
 {
   "name": "@promin/postgres",
   "version": "0.1.0",
+  "description": "Postgres backends for promin — workflow storage, step queue, change streams, and scheduling.",
+  "keywords": [
+    "change-stream",
+    "postgres",
+    "scheduler",
+    "step-queue",
+    "typescript",
+    "workflow-storage"
+  ],
+  "homepage": "https://github.com/spilne/promin/tree/main/packages/postgres",
+  "bugs": {
+    "url": "https://github.com/spilne/promin/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spilne/promin.git",
+    "directory": "packages/postgres"
+  },
   "files": [
     "dist",
     "package.json"
@@ -53,24 +72,5 @@
       "format-check": {},
       "ci": {}
     }
-  },
-  "description": "Postgres backends for promin \u2014 workflow storage, step queue, change streams, and scheduling.",
-  "license": "MIT",
-  "keywords": [
-    "typescript",
-    "postgres",
-    "workflow-storage",
-    "step-queue",
-    "change-stream",
-    "scheduler"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/spilne/promin.git",
-    "directory": "packages/postgres"
-  },
-  "homepage": "https://github.com/spilne/promin/tree/main/packages/postgres",
-  "bugs": {
-    "url": "https://github.com/spilne/promin/issues"
   }
 }

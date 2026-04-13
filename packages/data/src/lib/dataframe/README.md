@@ -121,10 +121,13 @@ Creates a DataFrame by collecting all items from a StreamPipeline. This material
 const df = await DataFrame.fromStream(
   StreamPipeline.fromSource(kafkaTopic)
     .map((msg) => msg.value)
-    .take(10_000)
+    .take(10_000),
 );
 
-const summary = await df.groupBy("region").agg({ total: { column: "amount", fn: "sum" } }).collect();
+const summary = await df
+  .groupBy("region")
+  .agg({ total: { column: "amount", fn: "sum" } })
+  .collect();
 ```
 
 ## Operations

@@ -59,13 +59,13 @@ const offset = await orderEvents.getCommittedOffset({ group: "my-group" });
 
 `KafkaTopicConfig<T>` accepts the following options:
 
-| Option           | Type        | Default     | Description                                                                 |
-| ---------------- | ----------- | ----------- | --------------------------------------------------------------------------- |
-| `kafka`          | `KafkaClient` | (required) | Any Kafka client implementing `KafkaClient` interface (kafkajs, @confluentinc/kafka-javascript, @platformatic/kafka). |
-| `topic`          | `string`    | (required)  | Kafka topic name.                                                           |
-| `groupId`        | `string`    | (required)  | Consumer group ID for subscribing.                                          |
-| `codec`          | `Codec<T>`  | `JsonCodec` | Serialization codec. Override for Avro, Protobuf, etc.                     |
-| `pollIntervalMs` | `number`    | `100`       | Poll interval for the consumer loop.                                        |
+| Option           | Type          | Default     | Description                                                                                                           |
+| ---------------- | ------------- | ----------- | --------------------------------------------------------------------------------------------------------------------- |
+| `kafka`          | `KafkaClient` | (required)  | Any Kafka client implementing `KafkaClient` interface (kafkajs, @confluentinc/kafka-javascript, @platformatic/kafka). |
+| `topic`          | `string`      | (required)  | Kafka topic name.                                                                                                     |
+| `groupId`        | `string`      | (required)  | Consumer group ID for subscribing.                                                                                    |
+| `codec`          | `Codec<T>`    | `JsonCodec` | Serialization codec. Override for Avro, Protobuf, etc.                                                                |
+| `pollIntervalMs` | `number`      | `100`       | Poll interval for the consumer loop.                                                                                  |
 
 ```typescript
 import { Kafka } from "@confluentinc/kafka-javascript/kafkajs";
@@ -120,6 +120,7 @@ await topic.publishBatch([
 ```
 
 Ordering guarantees:
+
 - Messages with the same key are always on the same partition and consumed in order.
 - Messages without a key are distributed round-robin across partitions.
 - Ordering is per-partition only. Cross-partition ordering is not guaranteed.
@@ -158,6 +159,7 @@ await shuffle.disconnect();
 ```
 
 Configuration:
+
 - `kafka` — Kafka client instance.
 - `partitions` — Number of partitions for repartition topics (default: 6). Higher values allow more parallelism.
 
@@ -172,6 +174,7 @@ await topic.disconnect();
 ```
 
 For `subscribeAck()`, the stream finalizer automatically:
+
 1. Stops consuming new messages.
 2. Flushes any pending offset commits.
 3. Disconnects the consumer.

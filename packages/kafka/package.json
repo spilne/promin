@@ -1,6 +1,24 @@
 {
   "name": "@promin/kafka",
   "version": "0.1.0",
+  "description": "Driver-agnostic Kafka transport for promin — consumer groups, keyed publishing, and shuffle.",
+  "keywords": [
+    "consumer-group",
+    "kafka",
+    "partitioning",
+    "streaming",
+    "typescript"
+  ],
+  "homepage": "https://github.com/spilne/promin/tree/main/packages/kafka",
+  "bugs": {
+    "url": "https://github.com/spilne/promin/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spilne/promin.git",
+    "directory": "packages/kafka"
+  },
   "files": [
     "dist",
     "package.json"
@@ -38,23 +56,5 @@
       "format-check": {},
       "ci": {}
     }
-  },
-  "description": "Driver-agnostic Kafka transport for promin \u2014 consumer groups, keyed publishing, and shuffle.",
-  "license": "MIT",
-  "keywords": [
-    "typescript",
-    "kafka",
-    "streaming",
-    "consumer-group",
-    "partitioning"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/spilne/promin.git",
-    "directory": "packages/kafka"
-  },
-  "homepage": "https://github.com/spilne/promin/tree/main/packages/kafka",
-  "bugs": {
-    "url": "https://github.com/spilne/promin/issues"
   }
 }

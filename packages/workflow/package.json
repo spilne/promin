@@ -1,6 +1,26 @@
 {
   "name": "@promin/workflow",
   "version": "0.1.0",
+  "description": "Durable workflow execution with DAG steps, compensation, distributed workers, and state machines.",
+  "keywords": [
+    "distributed",
+    "durable-execution",
+    "saga",
+    "scheduler",
+    "state-machine",
+    "typescript",
+    "workflow"
+  ],
+  "homepage": "https://github.com/spilne/promin/tree/main/packages/workflow",
+  "bugs": {
+    "url": "https://github.com/spilne/promin/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spilne/promin.git",
+    "directory": "packages/workflow"
+  },
   "files": [
     "dist",
     "package.json"
@@ -45,25 +65,5 @@
       "format-check": {},
       "ci": {}
     }
-  },
-  "description": "Durable workflow execution with DAG steps, compensation, distributed workers, and state machines.",
-  "license": "MIT",
-  "keywords": [
-    "typescript",
-    "workflow",
-    "durable-execution",
-    "saga",
-    "state-machine",
-    "distributed",
-    "scheduler"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/spilne/promin.git",
-    "directory": "packages/workflow"
-  },
-  "homepage": "https://github.com/spilne/promin/tree/main/packages/workflow",
-  "bugs": {
-    "url": "https://github.com/spilne/promin/issues"
   }
 }

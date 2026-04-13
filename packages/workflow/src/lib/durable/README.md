@@ -472,11 +472,11 @@ if (counts.get("1")!.running === 0) {
 **Inspecting the registry:**
 
 ```typescript
-registry.names();             // ["order", "payment"]
-registry.versions("order");   // ["1", "2"]
-registry.latest("order");     // "2"
+registry.names(); // ["order", "payment"]
+registry.versions("order"); // ["1", "2"]
+registry.latest("order"); // "2"
 registry.resolve("order", "1"); // WorkflowDefinition for v1
-registry.resolve("order");      // WorkflowDefinition for latest
+registry.resolve("order"); // WorkflowDefinition for latest
 ```
 
 ### RRULE Support
