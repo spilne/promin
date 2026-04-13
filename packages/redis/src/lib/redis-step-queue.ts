@@ -90,7 +90,8 @@ export class RedisStepQueue implements StepQueue {
     priority?: number;
     namespace?: string;
   }): Promise<string> {
-    const id = String(await this.redis.incr(`${this.prefix}:counter`));
+    const seq = await this.redis.incr(`${this.prefix}:counter`);
+    const id = String(seq);
     const now = Date.now();
     const priority = params.priority ?? 5;
 
@@ -110,8 +111,8 @@ export class RedisStepQueue implements StepQueue {
     });
 
     // Score: higher priority = higher score = popped first by ZREVRANGE.
-    // Within the same priority, earlier timestamp = higher offset = FIFO.
-    const score = priority * 1e12 + (1e12 - (now % 1e12));
+    // Within same priority, lower sequence = earlier enqueue = higher offset = FIFO.
+    const score = priority * 1e12 + (1e12 - seq);
     await this.redis.zadd(this.pendingKey(params.queue), score, id);
 
     return id;
@@ -198,7 +199,8 @@ export class RedisStepQueue implements StepQueue {
 
       // Move back from running set to pending sorted set
       const priority = parseInt(raw.priority ?? "5", 10);
-      const score = priority * 1e12 + (1e12 - (Date.now() % 1e12));
+      const requeueSeq = await this.redis.incr(`${this.prefix}:counter`);
+      const score = priority * 1e12 + (1e12 - requeueSeq);
       await this.redis.hset(this.taskKey(id), { status: "pending", claimedBy: "", claimedAt: "" });
       await this.redis.srem(this.runningKey(), id);
       await this.redis.zadd(this.pendingKey(raw.queue ?? "default"), score, id);
