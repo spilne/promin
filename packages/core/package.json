@@ -1,6 +1,6 @@
 {
   "name": "@promin/core",
-  "version": "0.0.1",
+  "version": "0.9.0",
   "files": [
     "dist",
     "package.json"
@@ -42,5 +42,27 @@
       "format-check": {},
       "ci": {}
     }
+  },
+  "description": "Resilient async pipelines, stream processing, and concurrency primitives for TypeScript. Built on Effect.",
+  "license": "MIT",
+  "keywords": [
+    "typescript",
+    "effect",
+    "pipeline",
+    "stream",
+    "async",
+    "retry",
+    "circuit-breaker",
+    "backpressure",
+    "concurrency"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spilne/promin.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/spilne/promin/tree/main/packages/core",
+  "bugs": {
+    "url": "https://github.com/spilne/promin/issues"
   }
 }

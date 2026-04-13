@@ -1,6 +1,6 @@
 {
   "name": "@promin/redis",
-  "version": "0.0.1",
+  "version": "0.9.0",
   "files": [
     "dist",
     "package.json"
@@ -46,5 +46,24 @@
       "format-check": {},
       "ci": {}
     }
+  },
+  "description": "Redis backends for promin \u2014 distributed primitives, workflow storage, caching, and pub/sub.",
+  "license": "MIT",
+  "keywords": [
+    "typescript",
+    "redis",
+    "distributed",
+    "semaphore",
+    "queue",
+    "workflow-storage"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spilne/promin.git",
+    "directory": "packages/redis"
+  },
+  "homepage": "https://github.com/spilne/promin/tree/main/packages/redis",
+  "bugs": {
+    "url": "https://github.com/spilne/promin/issues"
   }
 }

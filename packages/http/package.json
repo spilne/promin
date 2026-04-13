@@ -1,6 +1,6 @@
 {
   "name": "@promin/http",
-  "version": "0.0.1",
+  "version": "0.9.0",
   "files": [
     "dist",
     "package.json"
@@ -52,5 +52,24 @@
       "format-check": {},
       "ci": {}
     }
+  },
+  "description": "Resilient HTTP client built on promin Pipeline \u2014 retry, polling, SSE, NDJSON streaming.",
+  "license": "MIT",
+  "keywords": [
+    "typescript",
+    "http-client",
+    "retry",
+    "polling",
+    "sse",
+    "streaming"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spilne/promin.git",
+    "directory": "packages/http"
+  },
+  "homepage": "https://github.com/spilne/promin/tree/main/packages/http",
+  "bugs": {
+    "url": "https://github.com/spilne/promin/issues"
   }
 }

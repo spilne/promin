@@ -1,6 +1,6 @@
 {
   "name": "@promin/duckdb",
-  "version": "0.0.1",
+  "version": "0.9.0",
   "files": [
     "dist",
     "package.json"
@@ -39,5 +39,24 @@
       "format-check": {},
       "ci": {}
     }
+  },
+  "description": "DuckDB executor for promin DataFrame \u2014 SQL compilation, Arrow IPC, and auto-routing.",
+  "license": "MIT",
+  "keywords": [
+    "typescript",
+    "duckdb",
+    "dataframe",
+    "sql",
+    "arrow",
+    "analytics"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spilne/promin.git",
+    "directory": "packages/duckdb"
+  },
+  "homepage": "https://github.com/spilne/promin/tree/main/packages/duckdb",
+  "bugs": {
+    "url": "https://github.com/spilne/promin/issues"
   }
 }

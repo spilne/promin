@@ -1,6 +1,6 @@
 {
   "name": "@promin/topology",
-  "version": "0.0.1",
+  "version": "0.9.0",
   "files": [
     "dist",
     "package.json"
@@ -37,5 +37,24 @@
       "format-check": {},
       "ci": {}
     }
+  },
+  "description": "Stateful stream processing with keyed state, time windows, joins, and distributed shuffle.",
+  "license": "MIT",
+  "keywords": [
+    "typescript",
+    "stream-processing",
+    "topology",
+    "windowing",
+    "stateful",
+    "kafka-streams"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spilne/promin.git",
+    "directory": "packages/topology"
+  },
+  "homepage": "https://github.com/spilne/promin/tree/main/packages/topology",
+  "bugs": {
+    "url": "https://github.com/spilne/promin/issues"
   }
 }
