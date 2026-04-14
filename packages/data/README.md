@@ -17,7 +17,7 @@ bun add @promin/duckdb
 ## Quick Example
 
 ```typescript
-import { DataFrame, col, lit } from "@promin/core";
+import { DataFrame, col, lit } from "@promin/data";
 
 const result = await DataFrame.fromRows(sales)
   .filter(col("amount").gt(lit(100)))

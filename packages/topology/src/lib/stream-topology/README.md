@@ -11,7 +11,7 @@ Build a declarative processing DAG from a message source. Partition by key, appl
 ### Tumbling window count
 
 ```typescript
-import { StreamTopology, TopologyRunner } from "@promin/core";
+import { StreamTopology, TopologyRunner } from "@promin/topology";
 
 const topology = StreamTopology.source(clickEvents)
   .filter((e) => e.type !== "bot")
@@ -29,6 +29,8 @@ await TopologyRunner.run(topology, {
 ### Stateful per-key processing
 
 ```typescript
+import { StreamTopology } from "@promin/topology";
+
 const topology = StreamTopology.source(orders)
   .keyBy((e) => e.customerId)
   .process<{ total: number }, { customerId: string; runningTotal: number }>({
@@ -44,6 +46,8 @@ const topology = StreamTopology.source(orders)
 ### Stream-stream join
 
 ```typescript
+import { StreamTopology } from "@promin/topology";
+
 const orders = StreamTopology.source(orderEvents).keyBy((e) => e.orderId);
 const payments = StreamTopology.source(paymentEvents).keyBy((e) => e.orderId);
 
@@ -60,7 +64,7 @@ const topology = orders
 ### Distributed execution with shuffle
 
 ```typescript
-import { DistributedRunner } from "@promin/core";
+import { DistributedRunner } from "@promin/topology";
 import { KafkaShuffleTransport } from "@promin/kafka";
 
 const topology = StreamTopology.source(rawEvents)
@@ -84,7 +88,7 @@ await TopologyRunner.run(topology, { group: "counter" });
 ### Topology analyzer
 
 ```typescript
-import { analyzeTopology } from "@promin/core";
+import { analyzeTopology } from "@promin/topology";
 
 const warnings = analyzeTopology(topology.compiled);
 // Warns: "aggregate" follows keyBy without .shuffle().
@@ -100,6 +104,8 @@ Windows group events by time for aggregation. Apply a window after `.keyBy()` to
 Fixed-size, non-overlapping. Each event belongs to exactly one window.
 
 ```typescript
+import { StreamTopology } from "@promin/topology";
+
 // Count clicks per user every 60 seconds
 const topology = StreamTopology.source(clickEvents)
   .keyBy((e) => e.userId)
@@ -113,6 +119,8 @@ const topology = StreamTopology.source(clickEvents)
 Fixed-size, overlapping. Windows advance by `slideMs`, so events can appear in multiple windows.
 
 ```typescript
+import { StreamTopology } from "@promin/topology";
+
 // Average request latency over 5-minute windows, sliding every 1 minute
 const topology = StreamTopology.source(requestEvents)
   .keyBy((e) => e.endpoint)
@@ -134,6 +142,8 @@ const topology = StreamTopology.source(requestEvents)
 Dynamic windows that close after an inactivity gap. Events within the gap extend the session.
 
 ```typescript
+import { StreamTopology } from "@promin/topology";
+
 // Group user activity into sessions with a 30-minute inactivity gap
 const topology = StreamTopology.source(userActivity)
   .keyBy((e) => e.userId)

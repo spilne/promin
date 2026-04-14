@@ -9,7 +9,8 @@ DAG-based workflows with checkpoint/resume, type-safe steps, and structural conc
 No storage, no workflowId. Same composition API as `workflow()`.
 
 ```typescript
-import { flow, Pipeline } from "@promin/core";
+import { flow } from "@promin/workflow";
+import { Pipeline } from "@promin/core";
 
 // Simple linear chain
 const result = await flow<{ userId: string }>("process-user")
@@ -39,7 +40,8 @@ To make it durable later, change `flow("name")` to `workflow({ name, storage })`
 ### `workflow()` — durable (survives crashes, resumes from checkpoints)
 
 ```typescript
-import { workflow, Pipeline } from "@promin/core";
+import { workflow } from "@promin/workflow";
+import { Pipeline } from "@promin/core";
 import { migrate, PostgresWorkflowStorage } from "@promin/postgres";
 
 await migrate(db);
@@ -121,6 +123,8 @@ await storage.deliverSignal(workflowId, "manager-approved", { approved: true });
 ### build + trigger — Stream → Workflow
 
 ```typescript
+import { workflow, trigger, WorkflowResult } from "@promin/workflow";
+
 const analyzeArticle = workflow<{ url: string }>({ name: "analyze", storage })
   .step("scrape", ({ input }) => scraper.get(input.url))
   .step("summarize", ({ prev }) => ai.summarize(prev))
@@ -176,6 +180,8 @@ workflow<Input>({
 Prevent duplicate executions and control what happens when a workflow is called again.
 
 ```typescript
+import { workflow } from "@promin/workflow";
+
 const processOrder = workflow<{ orderId: string }>({
   name: "process-order",
   storage,
@@ -229,6 +235,9 @@ idempotency: { ttl: { success: 3_600_000, failure: 10_000 } }
 When a step fails, automatically undo completed steps in reverse order.
 
 ```typescript
+import { workflow } from "@promin/workflow";
+import { Pipeline } from "@promin/core";
+
 workflow<{ from: string; to: string; amount: number }>({
   name: "transfer",
   storage,
@@ -300,7 +309,8 @@ const dot = dagToDot(dag); // digraph "name" { ... }
 Compile JSON workflows from a node-based UI into executable WorkflowDefinitions:
 
 ```typescript
-import { compileWorkflow, MapActivityRegistry, Pipeline } from "@promin/core";
+import { compileWorkflow, MapActivityRegistry } from "@promin/workflow";
+import { Pipeline } from "@promin/core";
 
 const registry = new MapActivityRegistry({
   "http.get": (config) => () => httpClient.get({ url: config?.url as string }),
@@ -340,7 +350,7 @@ await definition.run({ workflowId: "wf-1", input: {} });
 Validate untrusted schema JSON from APIs:
 
 ```typescript
-import { validateWorkflowSchema } from "@promin/core";
+import { validateWorkflowSchema } from "@promin/workflow";
 
 const schema = validateWorkflowSchema(req.body); // throws ZodError on invalid
 ```
@@ -350,6 +360,9 @@ const schema = validateWorkflowSchema(req.body); // throws ZodError on invalid
 Child workflow composition with parent-child tracking.
 
 ```typescript
+import { workflow } from "@promin/workflow";
+import { Pipeline } from "@promin/core";
+
 const enrichUser = workflow<{ userId: string }>({ name: "enrich", storage })
   .step("fetch", ({ input }) => api.get(`/profiles/${input.userId}`))
   .build();
@@ -387,6 +400,7 @@ await storage.cancelWorkflow("onboard-1", { cascade: true }); // cancels childre
 Failed workflows (after all retries + compensation) are published to a configurable DLQ. Works with any `Sinkable<FailedWorkflowRecord>` — PgQueue, PgmqQueue, or custom.
 
 ```typescript
+import { workflow } from "@promin/workflow";
 import { PgQueue } from "@promin/postgres";
 
 const dlq = await PgQueue.create<FailedWorkflowRecord>(db, "workflow-dlq");
@@ -423,7 +437,7 @@ await dlq.subscribeAck().forEach(async (envelope) => {
 Run multiple workflow versions simultaneously. New workflows use the latest version; existing workflows resume with the version they started on.
 
 ```typescript
-import { workflow, WorkflowVersionRegistry } from "@promin/core";
+import { workflow, WorkflowVersionRegistry } from "@promin/workflow";
 
 const registry = new WorkflowVersionRegistry();
 

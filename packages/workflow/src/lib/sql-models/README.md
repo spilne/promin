@@ -11,7 +11,7 @@ Write SQL logic, declare dependencies. The compiler builds a DAG, runs models in
 ### Basic pipeline: staging → fact table
 
 ```typescript
-import { compileSqlProject } from "@promin/core";
+import { compileSqlProject } from "@promin/workflow";
 
 const project = {
   name: "analytics",

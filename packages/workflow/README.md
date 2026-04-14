@@ -11,7 +11,8 @@ bun add @promin/workflow
 ## Quick Example
 
 ```typescript
-import { workflow, Pipeline } from "@promin/core";
+import { workflow } from "@promin/workflow";
+import { Pipeline } from "@promin/core";
 import { migrate, PostgresWorkflowStorage } from "@promin/postgres";
 
 await migrate(db);

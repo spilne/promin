@@ -72,6 +72,8 @@ Horizontal scaling        ✗                     ✓ add more workers
 The same `WorkflowDefinition` works in both modes. No code changes — only deployment changes:
 
 ```typescript
+import { workflow, createCoordinator } from "@promin/workflow";
+
 // Define once
 const processVideo = workflow<{ videoId: string }>({ name: "process-video", storage })
   .step("download", fn)
@@ -145,6 +147,8 @@ await coordinator.submit({ workflow: processVideo, workflowId: "v1", input: { vi
 The coordinator routes steps to queues. Workers only poll their assigned queues.
 
 ```typescript
+import { createCoordinator } from "@promin/workflow";
+
 const coordinator = createCoordinator({
   storage,
   stepQueue,
@@ -160,6 +164,8 @@ const coordinator = createCoordinator({
 Routing is deployment config, not code. The same workflow definition works in-process (dev) and distributed (prod):
 
 ```typescript
+import { workflow } from "@promin/workflow";
+
 // Same workflow — runs locally in dev, distributed in prod
 const processVideo = workflow<{ videoId: string }>({ name: "process-video", storage })
   .step("download", ({ input }) => downloadVideo(input.videoId))
@@ -177,7 +183,8 @@ await coordinator.submit({ workflow: processVideo, workflowId: "v1", input: { vi
 ## Example: Multi-Queue Video Processing
 
 ```typescript
-import { createCoordinator, createWorker, MapStepRegistry, Pipeline } from "@promin/core";
+import { createCoordinator, createWorker, MapStepRegistry } from "@promin/workflow";
+import { Pipeline } from "@promin/core";
 import { PgStepQueue, PostgresWorkflowStorage, migrate } from "@promin/postgres";
 
 // --- Shared setup (all processes) ---
@@ -316,6 +323,9 @@ This gives:
 Steps registered on workers support the same resilience features as the in-process workflow engine:
 
 ```typescript
+import { MapStepRegistry } from "@promin/workflow";
+import { Pipeline } from "@promin/core";
+
 const registry = new MapStepRegistry();
 
 // Retry with backoff + predicate
@@ -348,6 +358,8 @@ registry.register("charge-payment", (ctx) => chargeCard(ctx.prev), {
 Simple lifecycle callbacks at fixed execution points:
 
 ```typescript
+import { createWorker } from "@promin/workflow";
+
 const worker = createWorker({
   storage,
   stepQueue,
@@ -377,7 +389,7 @@ import {
   retryMiddleware,
   loggingMiddleware,
   metricsMiddleware,
-} from "@promin/core";
+} from "@promin/workflow";
 
 const worker = createWorker({
   storage,
@@ -438,6 +450,13 @@ const tracingMiddleware: WorkerMiddleware = async ({ task, ctx, next }) => {
 Use all three together:
 
 ```typescript
+import {
+  MapStepRegistry,
+  createWorker,
+  timeoutMiddleware,
+  loggingMiddleware,
+} from "@promin/workflow";
+
 const registry = new MapStepRegistry();
 registry.register("charge", chargeFn, {
   retry: { maxRetries: 3 }, // per-step: retry this specific step

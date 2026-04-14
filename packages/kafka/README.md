@@ -7,7 +7,8 @@ Kafka transport adapter with a driver-agnostic `KafkaClient` interface. Works wi
 ```typescript
 import { Kafka } from "@confluentinc/kafka-javascript/kafkajs";
 import { KafkaTopic } from "@promin/kafka";
-import { StreamPipeline, trigger } from "@promin/core";
+import { StreamPipeline } from "@promin/core";
+import { trigger } from "@promin/workflow";
 
 const kafka = new Kafka({ brokers: ["localhost:9092"] });
 

@@ -75,6 +75,9 @@ scheduler.register({
 ### Streaming ticks
 
 ```typescript
+import { trigger } from "@promin/workflow";
+import { StreamPipeline } from "@promin/core";
+
 // Stream a single schedule into a workflow trigger
 scheduler
   .stream("morning-report")

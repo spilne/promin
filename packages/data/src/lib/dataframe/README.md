@@ -11,7 +11,7 @@ Operations are lazy — they build a logical plan. Terminal methods (`.collect()
 ### Filter, group, aggregate
 
 ```typescript
-import { DataFrame, col, lit } from "@promin/core";
+import { DataFrame, col, lit } from "@promin/data";
 
 const result = await DataFrame.fromRows(sales)
   .filter(col("amount").gt(lit(100)))
@@ -28,6 +28,8 @@ const result = await DataFrame.fromRows(sales)
 ### Expression builder with when/then
 
 ```typescript
+import { DataFrame, col, lit, when } from "@promin/data";
+
 const df = DataFrame.fromRows(users)
   .withColumn(
     "tier",
@@ -52,6 +54,8 @@ const result = await orders
 ### Window functions
 
 ```typescript
+import { DataFrame, col } from "@promin/data";
+
 const ranked = await DataFrame.fromRows(scores)
   .withColumn(
     "rank",
@@ -65,7 +69,7 @@ const ranked = await DataFrame.fromRows(scores)
 ### File sources
 
 ```typescript
-import { CsvFile, ParquetFile } from "@promin/core";
+import { CsvFile, ParquetFile } from "@promin/data";
 
 // In-memory (hyparquet for Parquet)
 const df = await DataFrame.from(ParquetFile("data.parquet"));
@@ -104,6 +108,8 @@ await df
 The default chunk size is 10,000 rows. Smaller chunks reduce peak memory; larger chunks improve throughput.
 
 ```typescript
+import { DataFrame, CsvFile, col, lit } from "@promin/data";
+
 // Process a large dataset without loading everything into memory
 await DataFrame.fromFile(CsvFile("events.csv"))
   .filter(col("type").eq(lit("click")))
@@ -118,6 +124,9 @@ await DataFrame.fromFile(CsvFile("events.csv"))
 Creates a DataFrame by collecting all items from a StreamPipeline. This materializes the entire stream into memory.
 
 ```typescript
+import { DataFrame } from "@promin/data";
+import { StreamPipeline } from "@promin/core";
+
 const df = await DataFrame.fromStream(
   StreamPipeline.fromSource(kafkaTopic)
     .map((msg) => msg.value)

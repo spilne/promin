@@ -11,7 +11,7 @@ bun add @promin/duckdb
 ## Quick Example
 
 ```typescript
-import { DataFrame, col, lit } from "@promin/core";
+import { DataFrame, col, lit } from "@promin/data";
 import { DuckDBExecutor } from "@promin/duckdb";
 
 const executor = new DuckDBExecutor();

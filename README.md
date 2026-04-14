@@ -18,7 +18,10 @@ All of these compose. A workflow step can use a Pipeline with retry. A StreamTop
 
 | Package | Description |
 |---|---|
-| **[@promin/core](./packages/core/)** | Pipeline, StreamPipeline, DataFrame, durable workflows, stream topology |
+| **[@promin/core](./packages/core/)** | Pipeline, StreamPipeline, concurrency primitives |
+| **[@promin/workflow](./packages/workflow/)** | Durable workflows, distributed workers, state machines, scheduler |
+| **[@promin/data](./packages/data/)** | DataFrame, data quality, profiling, diff, contracts |
+| **[@promin/topology](./packages/topology/)** | Stateful stream processing: windows, joins, shuffle |
 | **[@promin/http](./packages/http/)** | HTTP client with retry, streaming (SSE/NDJSON), circuit breaker |
 | **[@promin/duckdb](./packages/duckdb/)** | DuckDB executor for DataFrame — SQL compilation, file sources |
 | **[@promin/kafka](./packages/kafka/)** | Kafka transport adapter (Partitionable, Acknowledgeable) |
@@ -33,7 +36,9 @@ bun install
 ```
 
 ```typescript
-import { Pipeline, StreamPipeline, DataFrame, workflow, col } from "@promin/core";
+import { Pipeline, StreamPipeline } from "@promin/core";
+import { DataFrame, col } from "@promin/data";
+import { workflow } from "@promin/workflow";
 
 // Pipeline — composable async operations with retry, timeout, concurrency
 const result = await Pipeline.fromPromise(() => fetch("/api/data"))

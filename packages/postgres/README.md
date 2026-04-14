@@ -28,7 +28,8 @@ Production-grade `WorkflowStorage` backed by Postgres. Integer lookup tables for
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { migrate, PostgresWorkflowStorage } from "@promin/postgres";
-import { workflow, Pipeline } from "@promin/core";
+import { workflow } from "@promin/workflow";
+import { Pipeline } from "@promin/core";
 
 const sql = postgres(process.env.DATABASE_URL!);
 const db = drizzle(sql);

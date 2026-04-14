@@ -11,7 +11,7 @@ bun add @promin/topology
 ## Quick Example
 
 ```typescript
-import { StreamTopology, TopologyRunner } from "@promin/core";
+import { StreamTopology, TopologyRunner } from "@promin/topology";
 
 const topology = StreamTopology.source(clickEvents)
   .filter((e) => e.type !== "bot")
