@@ -1,13 +1,17 @@
 import { describe, it, expect, beforeEach } from "bun:test";
 import {
   stateMachine,
+  machine,
+  pureStateMachine,
   composeMachineMiddleware,
   retryMiddleware,
+  EventDataValidationError,
+  TIMEOUT_EVENT,
   type StateMachineInstance,
   type MachineMiddleware,
 } from "./state-machine.ts";
 import { InMemoryStateMachineStorage } from "./state-machine-storage.ts";
-import { FakeClock } from "@promin/core";
+import { FakeClock, type SchemaParser } from "@promin/core";
 
 // ---------------------------------------------------------------------------
 // Test state definitions
@@ -204,7 +208,7 @@ describe("StateMachine", () => {
       .state("rejected", { terminal: true })
       .on("review", {
         from: "pending",
-        action: (ctx: { score: number }, transition: any) => {
+        action: (ctx: { score: number }, _event: unknown, transition: any) => {
           if (ctx.score >= 70) {
             return transition("approved", { score: ctx.score });
           }
@@ -914,5 +918,607 @@ describe("StateMachine", () => {
 
     expect(attempts).toBe(3); // 1 initial + 2 retries
     expect((await machine.getState("err-2"))!.current).toBe("failed");
+  });
+
+  // -------------------------------------------------------------------------
+  // Typed event payloads
+  // -------------------------------------------------------------------------
+
+  describe("typed event payloads", () => {
+    type ClaimStates = {
+      pending: { context: { limit: number }; transitions: { approve: "approved"; deny: "denied" } };
+      approved: {
+        context: { limit: number; approvedBy: string; amount: number };
+        transitions: {};
+      };
+      denied: { context: { limit: number; reason: string }; transitions: {} };
+    };
+    type ClaimEvents = {
+      approve: { approvedBy: string; amount: number };
+      deny: { reason: string };
+    };
+
+    it("guard receives typed event data", async () => {
+      const machine = stateMachine<ClaimStates, ClaimEvents>({ name: "claim", storage })
+        .state("pending")
+        .state("approved", { terminal: true })
+        .state("denied", { terminal: true })
+        .on("approve", {
+          from: "pending",
+          to: "approved",
+          guard: (ctx, event) => event.amount <= ctx.limit,
+          action: (ctx, event) => ({
+            limit: ctx.limit,
+            approvedBy: event.approvedBy,
+            amount: event.amount,
+          }),
+        })
+        .on("deny", {
+          from: "pending",
+          to: "denied",
+          action: (ctx, event) => ({ limit: ctx.limit, reason: event.reason }),
+        })
+        .initial("pending")
+        .build();
+
+      await machine.start({ id: "c-1", context: { limit: 1000 } });
+      await machine.send({
+        id: "c-1",
+        event: "approve",
+        data: { approvedBy: "alice", amount: 500 },
+      });
+
+      const state = await machine.getState("c-1");
+      expect(state).toEqual({
+        current: "approved",
+        context: { limit: 1000, approvedBy: "alice", amount: 500 },
+      });
+    });
+
+    it("guard rejects when event data fails predicate", async () => {
+      const machine = stateMachine<ClaimStates, ClaimEvents>({ name: "claim-deny", storage })
+        .state("pending")
+        .state("approved", { terminal: true })
+        .state("denied", { terminal: true })
+        .on("approve", {
+          from: "pending",
+          to: "approved",
+          guard: (ctx, event) => event.amount <= ctx.limit,
+          action: (ctx, event) => ({
+            limit: ctx.limit,
+            approvedBy: event.approvedBy,
+            amount: event.amount,
+          }),
+        })
+        .initial("pending")
+        .build();
+
+      await machine.start({ id: "c-2", context: { limit: 100 } });
+      await expect(
+        machine.send({ id: "c-2", event: "approve", data: { approvedBy: "bob", amount: 500 } }),
+      ).rejects.toThrow('Guard rejected event "approve"');
+    });
+
+    it("event data persisted to history", async () => {
+      const machine = stateMachine<ClaimStates, ClaimEvents>({ name: "claim-hist", storage })
+        .state("pending")
+        .state("approved", { terminal: true })
+        .state("denied", { terminal: true })
+        .on("approve", {
+          from: "pending",
+          to: "approved",
+          action: (ctx, event) => ({
+            limit: ctx.limit,
+            approvedBy: event.approvedBy,
+            amount: event.amount,
+          }),
+        })
+        .initial("pending")
+        .build();
+
+      await machine.start({ id: "c-3", context: { limit: 1000 } });
+      await machine.send({
+        id: "c-3",
+        event: "approve",
+        data: { approvedBy: "alice", amount: 500 },
+      });
+
+      const history = await machine.getHistory("c-3");
+      expect(history).toHaveLength(1);
+      expect(history[0]!.eventData).toEqual({ approvedBy: "alice", amount: 500 });
+    });
+
+    it("onEnter / onExit receive event data", async () => {
+      const seenEnter: unknown[] = [];
+      const seenExit: unknown[] = [];
+
+      const machine = stateMachine<ClaimStates, ClaimEvents>({ name: "claim-hooks", storage })
+        .state("pending", {
+          onExit: (_ctx, event) => {
+            seenExit.push(event);
+          },
+        })
+        .state("approved", {
+          terminal: true,
+          onEnter: (_ctx, event) => {
+            seenEnter.push(event);
+          },
+        })
+        .state("denied", { terminal: true })
+        .on("approve", {
+          from: "pending",
+          to: "approved",
+          action: (ctx, event) => ({
+            limit: ctx.limit,
+            approvedBy: event.approvedBy,
+            amount: event.amount,
+          }),
+        })
+        .initial("pending")
+        .build();
+
+      await machine.start({ id: "c-4", context: { limit: 1000 } });
+      await machine.send({
+        id: "c-4",
+        event: "approve",
+        data: { approvedBy: "alice", amount: 500 },
+      });
+
+      expect(seenExit).toEqual([{ approvedBy: "alice", amount: 500 }]);
+      expect(seenEnter).toEqual([{ approvedBy: "alice", amount: 500 }]);
+    });
+
+    it("middleware sees event data via TransitionContext", async () => {
+      let seen: unknown;
+      const machine = stateMachine<ClaimStates, ClaimEvents>({ name: "claim-mw", storage })
+        .use((ctx, next) => {
+          seen = ctx.eventData;
+          return next();
+        })
+        .state("pending")
+        .state("approved", { terminal: true })
+        .state("denied", { terminal: true })
+        .on("approve", {
+          from: "pending",
+          to: "approved",
+          action: (ctx, event) => ({
+            limit: ctx.limit,
+            approvedBy: event.approvedBy,
+            amount: event.amount,
+          }),
+        })
+        .initial("pending")
+        .build();
+
+      await machine.start({ id: "c-5", context: { limit: 1000 } });
+      await machine.send({
+        id: "c-5",
+        event: "approve",
+        data: { approvedBy: "alice", amount: 500 },
+      });
+
+      expect(seen).toEqual({ approvedBy: "alice", amount: 500 });
+    });
+
+    it(".strict() validates event data and throws EventDataValidationError on failure", async () => {
+      const approveSchema: SchemaParser<{ approvedBy: string; amount: number }> = {
+        safeParse: (data) => {
+          if (
+            data &&
+            typeof data === "object" &&
+            "approvedBy" in data &&
+            typeof (data as any).approvedBy === "string" &&
+            "amount" in data &&
+            typeof (data as any).amount === "number"
+          ) {
+            return { success: true, data: data as { approvedBy: string; amount: number } };
+          }
+          return { success: false, error: "invalid approve payload" };
+        },
+      };
+
+      const machine = stateMachine<ClaimStates, ClaimEvents>({ name: "claim-strict", storage })
+        .state("pending")
+        .state("approved", { terminal: true })
+        .state("denied", { terminal: true })
+        .on("approve", {
+          from: "pending",
+          to: "approved",
+          action: (ctx, event) => ({
+            limit: ctx.limit,
+            approvedBy: event.approvedBy,
+            amount: event.amount,
+          }),
+        })
+        .strict({ approve: approveSchema })
+        .initial("pending")
+        .build();
+
+      await machine.start({ id: "c-6", context: { limit: 1000 } });
+
+      // Valid payload — succeeds
+      await machine.send({
+        id: "c-6",
+        event: "approve",
+        data: { approvedBy: "alice", amount: 500 },
+      });
+      expect((await machine.getState("c-6"))!.current).toBe("approved");
+
+      // Invalid payload — rejected before transition
+      await machine.start({ id: "c-7", context: { limit: 1000 } });
+      await expect(
+        machine.send({
+          id: "c-7",
+          event: "approve",
+          data: { approvedBy: 42 as any, amount: "bad" as any },
+        }),
+      ).rejects.toBeInstanceOf(EventDataValidationError);
+      expect((await machine.getState("c-7"))!.current).toBe("pending");
+    });
+
+    it(".strict() can be re-called to override per-event schemas (stricter)", async () => {
+      const baseSchema: SchemaParser<{ reason: string }> = {
+        safeParse: (data) => {
+          if (data && typeof data === "object" && "reason" in data) {
+            return { success: true, data: data as { reason: string } };
+          }
+          return { success: false, error: "missing reason" };
+        },
+      };
+      const stricter: SchemaParser<{ reason: string }> = {
+        safeParse: (data) => {
+          if (
+            data &&
+            typeof data === "object" &&
+            typeof (data as any).reason === "string" &&
+            (data as any).reason.length >= 5
+          ) {
+            return { success: true, data: data as { reason: string } };
+          }
+          return { success: false, error: "reason must be >= 5 chars" };
+        },
+      };
+
+      const machine = stateMachine<ClaimStates, ClaimEvents>({ name: "claim-override", storage })
+        .state("pending")
+        .state("approved", { terminal: true })
+        .state("denied", { terminal: true })
+        .on("deny", {
+          from: "pending",
+          to: "denied",
+          action: (ctx, event) => ({ limit: ctx.limit, reason: event.reason }),
+        })
+        .strict({ deny: baseSchema })
+        .strict({ deny: stricter })
+        .initial("pending")
+        .build();
+
+      await machine.start({ id: "c-8", context: { limit: 1000 } });
+      // Short reason — fails the stricter override
+      await expect(
+        machine.send({ id: "c-8", event: "deny", data: { reason: "no" } }),
+      ).rejects.toBeInstanceOf(EventDataValidationError);
+
+      // Longer reason — passes
+      await machine.send({ id: "c-8", event: "deny", data: { reason: "fraud" } });
+      expect((await machine.getState("c-8"))!.current).toBe("denied");
+    });
+
+    it("untyped Events=void machines still accept arbitrary events", async () => {
+      // No Events generic — same as before
+      const machine = stateMachine<ClaimStates>({ name: "claim-untyped", storage })
+        .state("pending")
+        .state("approved", { terminal: true })
+        .state("denied", { terminal: true })
+        .on("approve", {
+          from: "pending",
+          to: "approved",
+          action: (ctx: { limit: number }) => ({
+            limit: ctx.limit,
+            approvedBy: "n/a",
+            amount: 0,
+          }),
+        })
+        .initial("pending")
+        .build();
+
+      await machine.start({ id: "c-9", context: { limit: 1000 } });
+      await machine.send({ id: "c-9", event: "approve" });
+      expect((await machine.getState("c-9"))!.current).toBe("approved");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // machine() — quick in-memory shortcut
+  // -------------------------------------------------------------------------
+
+  describe("machine() shortcut", () => {
+    it("auto-creates storage, auto-starts, and returns a single-instance handle", async () => {
+      const handle = await machine<TrafficLight>({
+        initial: "red",
+        context: { count: 0 },
+      })
+        .state("red")
+        .state("green")
+        .state("yellow")
+        .on("next", {
+          from: "red",
+          to: "green",
+          action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+        })
+        .on("next", {
+          from: "green",
+          to: "yellow",
+          action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+        })
+        .on("next", {
+          from: "yellow",
+          to: "red",
+          action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+        })
+        .run();
+
+      expect(handle.id).toMatch(/^m-/);
+
+      await handle.send({ event: "next" });
+      const state = await handle.getState();
+      expect(state).toEqual({ current: "green", context: { count: 1 } });
+    });
+
+    it("accepts custom id and context override at run()", async () => {
+      const handle = await machine<TrafficLight>({
+        initial: "red",
+        context: { count: 0 },
+      })
+        .state("red")
+        .state("green")
+        .state("yellow")
+        .on("next", {
+          from: "red",
+          to: "green",
+          action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+        })
+        .run({ id: "custom-id", context: { count: 99 } });
+
+      expect(handle.id).toBe("custom-id");
+      const state = await handle.getState();
+      expect(state).toEqual({ current: "red", context: { count: 99 } });
+    });
+
+    it("getHistory works through the handle", async () => {
+      const handle = await machine<TrafficLight>({
+        initial: "red",
+        context: { count: 0 },
+      })
+        .state("red")
+        .state("green")
+        .state("yellow")
+        .on("next", {
+          from: "red",
+          to: "green",
+          action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+        })
+        .on("next", {
+          from: "green",
+          to: "yellow",
+          action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+        })
+        .run();
+
+      await handle.send({ event: "next" });
+      await handle.send({ event: "next" });
+
+      const history = await handle.getHistory();
+      expect(history).toHaveLength(2);
+      expect(history[0]!.from).toBe("red");
+      expect(history[1]!.from).toBe("green");
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // pureStateMachine() — sync-only, deterministic
+  // -------------------------------------------------------------------------
+
+  describe("pureStateMachine() sync-only", () => {
+    it("runs sync guards/actions identically to stateMachine()", async () => {
+      const m = pureStateMachine<TrafficLight>({ name: "pure", storage })
+        .state("red")
+        .state("green")
+        .state("yellow")
+        .on("next", {
+          from: "red",
+          to: "green",
+          guard: (ctx: { count: number }) => ctx.count < 10,
+          action: (ctx: { count: number }) => ({ count: ctx.count + 1 }),
+        })
+        .initial("red")
+        .build();
+
+      await m.start({ id: "p-1", context: { count: 0 } });
+      await m.send({ id: "p-1", event: "next" });
+      expect(await m.getState("p-1")).toEqual({ current: "green", context: { count: 1 } });
+    });
+
+    it("type narrows action return — async action would be a compile error", async () => {
+      // This test demonstrates the runtime works; the type-level constraint is
+      // covered by the typecheck step. (Async action below would not compile in
+      // pure mode because Promise<T> doesn't extend the narrowed sync return.)
+      const m = pureStateMachine<TrafficLight>({ name: "pure-sync", storage })
+        .state("red")
+        .state("green")
+        .state("yellow")
+        .on("next", {
+          from: "red",
+          to: "green",
+          action: (ctx: { count: number }) => ({ count: ctx.count + 5 }),
+        })
+        .initial("red")
+        .build();
+
+      await m.start({ id: "p-2", context: { count: 0 } });
+      await m.send({ id: "p-2", event: "next" });
+      expect(await m.getState("p-2")).toEqual({ current: "green", context: { count: 5 } });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Timed auto-transitions (.state(..., { timeout }))
+  // -------------------------------------------------------------------------
+
+  describe("state timeouts", () => {
+    type ApprovalStates = {
+      pending: { context: { item: string }; transitions: { approve: "approved" } };
+      approved: { context: { item: string }; transitions: {} };
+      timedOut: { context: { item: string }; transitions: {} };
+    };
+
+    function buildApprovalMachine(opts?: {
+      clock?: FakeClock;
+      autoScheduleTimeouts?: boolean;
+    }): StateMachineInstance<ApprovalStates> {
+      return stateMachine<ApprovalStates>({
+        name: "approval",
+        storage,
+        clock: opts?.clock,
+        autoScheduleTimeouts: opts?.autoScheduleTimeouts,
+      })
+        .state("pending", { timeout: { ms: 100, target: "timedOut" } })
+        .state("approved", { terminal: true })
+        .state("timedOut", { terminal: true })
+        .on("approve", { from: "pending", to: "approved" })
+        .initial("pending")
+        .build();
+    }
+
+    it("checkTimeouts() fires due timeout deterministically with FakeClock", async () => {
+      const clock = FakeClock.create("2026-01-01T00:00:00Z");
+      const clockStorage = new InMemoryStateMachineStorage({ clock });
+      storage = clockStorage;
+
+      const m = buildApprovalMachine({ clock, autoScheduleTimeouts: false });
+      await m.start({ id: "t-1", context: { item: "x" } });
+
+      // Not due yet
+      clock.advance(50);
+      expect(await m.checkTimeouts("t-1")).toBe(false);
+      expect((await m.getState("t-1"))!.current).toBe("pending");
+
+      // Now due
+      clock.advance(60);
+      expect(await m.checkTimeouts("t-1")).toBe(true);
+      expect((await m.getState("t-1"))!.current).toBe("timedOut");
+
+      const history = await m.getHistory("t-1");
+      expect(history).toHaveLength(1);
+      expect(history[0]!.event).toBe(TIMEOUT_EVENT);
+      expect(history[0]!.from).toBe("pending");
+      expect(history[0]!.to).toBe("timedOut");
+    });
+
+    it("explicit transition cancels pending timeout", async () => {
+      const clock = FakeClock.create("2026-01-01T00:00:00Z");
+      const clockStorage = new InMemoryStateMachineStorage({ clock });
+      storage = clockStorage;
+
+      const m = buildApprovalMachine({ clock, autoScheduleTimeouts: false });
+      await m.start({ id: "t-2", context: { item: "x" } });
+
+      // Approve before timeout
+      clock.advance(50);
+      await m.send({ id: "t-2", event: "approve" });
+      expect((await m.getState("t-2"))!.current).toBe("approved");
+
+      // Even past the original timeout window, no auto-transition fires
+      clock.advance(200);
+      expect(await m.checkTimeouts("t-2")).toBe(false);
+      expect((await m.getState("t-2"))!.current).toBe("approved");
+    });
+
+    it("timeout guard can veto firing — stays in source state", async () => {
+      const clock = FakeClock.create("2026-01-01T00:00:00Z");
+      const clockStorage = new InMemoryStateMachineStorage({ clock });
+      storage = clockStorage;
+
+      let allowFire = false;
+      const m = stateMachine<ApprovalStates>({
+        name: "approval-guarded",
+        storage,
+        clock,
+        autoScheduleTimeouts: false,
+      })
+        .state("pending", {
+          timeout: { ms: 100, target: "timedOut", guard: () => allowFire },
+        })
+        .state("approved", { terminal: true })
+        .state("timedOut", { terminal: true })
+        .on("approve", { from: "pending", to: "approved" })
+        .initial("pending")
+        .build();
+
+      await m.start({ id: "t-3", context: { item: "x" } });
+      clock.advance(150);
+
+      // Guard returns false — no transition
+      expect(await m.checkTimeouts("t-3")).toBe(false);
+      expect((await m.getState("t-3"))!.current).toBe("pending");
+
+      // Flip guard, retry — fires
+      allowFire = true;
+      expect(await m.checkTimeouts("t-3")).toBe(true);
+      expect((await m.getState("t-3"))!.current).toBe("timedOut");
+    });
+
+    it("auto-scheduled timeout fires via setTimeout in real time", async () => {
+      // Use a very short timeout (10ms) and real timers for the in-process path.
+      const m = stateMachine<ApprovalStates>({ name: "approval-auto", storage })
+        .state("pending", { timeout: { ms: 10, target: "timedOut" } })
+        .state("approved", { terminal: true })
+        .state("timedOut", { terminal: true })
+        .on("approve", { from: "pending", to: "approved" })
+        .initial("pending")
+        .build();
+
+      await m.start({ id: "t-4", context: { item: "x" } });
+      expect((await m.getState("t-4"))!.current).toBe("pending");
+
+      await new Promise((r) => setTimeout(r, 40));
+
+      expect((await m.getState("t-4"))!.current).toBe("timedOut");
+      m.cancelAllTimeouts();
+    });
+
+    it("chained timeouts — entering a state with timeout reschedules", async () => {
+      const clock = FakeClock.create("2026-01-01T00:00:00Z");
+      const clockStorage = new InMemoryStateMachineStorage({ clock });
+      storage = clockStorage;
+
+      type Chain = {
+        a: { context: {}; transitions: {} };
+        b: { context: {}; transitions: {} };
+        c: { context: {}; transitions: {} };
+      };
+
+      const m = stateMachine<Chain>({
+        name: "chain",
+        storage,
+        clock,
+        autoScheduleTimeouts: false,
+      })
+        .state("a", { timeout: { ms: 100, target: "b" } })
+        .state("b", { timeout: { ms: 100, target: "c" } })
+        .state("c", { terminal: true })
+        .initial("a")
+        .build();
+
+      await m.start({ id: "t-5", context: {} });
+
+      clock.advance(150);
+      expect(await m.checkTimeouts("t-5")).toBe(true);
+      expect((await m.getState("t-5"))!.current).toBe("b");
+
+      clock.advance(150);
+      expect(await m.checkTimeouts("t-5")).toBe(true);
+      expect((await m.getState("t-5"))!.current).toBe("c");
+    });
   });
 });

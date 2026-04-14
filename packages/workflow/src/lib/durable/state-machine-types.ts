@@ -1,6 +1,7 @@
 // ---------------------------------------------------------------------------
 // State machine type utilities — core type-safety layer
 // ---------------------------------------------------------------------------
+import type { SchemaParser } from "@promin/core";
 //
 // Users declare a state definition type to define their machine:
 //
@@ -75,6 +76,47 @@ export interface TransitionEvent {
   readonly from: string;
   readonly to: string;
   readonly context: unknown;
+  readonly eventData?: unknown;
   readonly metadata?: unknown;
   readonly createdAt: Date;
 }
+
+// ---------------------------------------------------------------------------
+// Typed event payloads (Events generic)
+// ---------------------------------------------------------------------------
+//
+// Three usage tiers:
+//   1. No types, no validation: `stateMachine<S>(...)` — Events defaults to void.
+//   2. Typed events, compile-time only: `stateMachine<S, { approve: { amount: number } }>(...)`.
+//   3. Typed + runtime validation: same as 2, plus `.strict({ approve: zSchema })`.
+//
+// Event values can be plain TS types or SchemaParser instances. EventData<E,K>
+// extracts the parsed payload type either way.
+// ---------------------------------------------------------------------------
+
+/** Event-name → payload-type map. Values may be plain types or SchemaParser. */
+export type EventsMap = Record<string, unknown>;
+
+/** Extract payload type for one event. Unwraps SchemaParser<T> → T. */
+export type EventData<E, K extends keyof E> = E extends void
+  ? unknown
+  : E[K] extends SchemaParser<infer T>
+    ? T
+    : E[K];
+
+/** Valid event names — `keyof Events` when typed, else any string. */
+export type EventName<E> = [E] extends [void] ? string : keyof E & string;
+
+/** Discriminated `send()` parameter shape. Hides `data` for void-payload events. */
+export type SendParams<E> = [E] extends [void]
+  ? { id: string; event: string; data?: unknown; metadata?: unknown }
+  : {
+      [K in keyof E & string]: [EventData<E, K>] extends [void]
+        ? { id: string; event: K; metadata?: unknown }
+        : { id: string; event: K; data: EventData<E, K>; metadata?: unknown };
+    }[keyof E & string];
+
+/** Per-event SchemaParser map for `.strict()` overrides. */
+export type StrictSchemas<E> = {
+  [K in keyof E]?: SchemaParser<EventData<E, K>>;
+};

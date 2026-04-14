@@ -25,6 +25,7 @@ export interface StateMachineStorage {
     to: string;
     event: string;
     context: unknown;
+    eventData?: unknown;
     metadata?: unknown;
   }): Promise<void>;
 
@@ -84,6 +85,7 @@ export class InMemoryStateMachineStorage implements StateMachineStorage {
     to: string;
     event: string;
     context: unknown;
+    eventData?: unknown;
     metadata?: unknown;
   }): Promise<void> {
     const machine = this.machines.get(params.id);
@@ -109,6 +111,7 @@ export class InMemoryStateMachineStorage implements StateMachineStorage {
       from: params.from,
       to: params.to,
       context: params.context,
+      eventData: params.eventData,
       metadata: params.metadata,
       createdAt: now,
     });

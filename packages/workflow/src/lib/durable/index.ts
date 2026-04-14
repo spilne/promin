@@ -80,8 +80,15 @@ export { compileWorkflow, WorkflowCompilationError } from "./workflow-compiler.t
 // State machine
 export {
   stateMachine,
+  machine,
+  pureStateMachine,
   StateMachineBuilder,
   StateMachineInstance,
+  QuickMachineBuilder,
+  MachineHandle,
+  EventDataValidationError,
+  TIMEOUT_EVENT,
+  type PureStateMachineBuilder,
   type MachineLimits,
   type MachineMiddleware,
   type TransitionContext,
@@ -99,5 +106,10 @@ export type {
   EventsOf,
   TerminalStates,
   TransitionTo,
+  EventsMap,
+  EventData,
+  EventName,
+  SendParams,
+  StrictSchemas,
 } from "./state-machine-types.ts";
 export { transitionTo } from "./state-machine-types.ts";

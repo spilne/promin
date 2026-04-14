@@ -4,13 +4,17 @@
 
 import type {
   ContextOf,
+  EventData,
+  EventName,
   MachineSnapshot,
+  SendParams,
+  StrictSchemas,
   TransitionEvent,
   TransitionTo,
 } from "./state-machine-types.ts";
 import { transitionTo } from "./state-machine-types.ts";
-import type { StateMachineStorage } from "./state-machine-storage.ts";
-import type { RetryPolicy } from "@promin/core";
+import { type StateMachineStorage, InMemoryStateMachineStorage } from "./state-machine-storage.ts";
+import { type Clock, SystemClock, type RetryPolicy, type SchemaParser } from "@promin/core";
 
 // ---------------------------------------------------------------------------
 // Internal config types
@@ -19,16 +23,30 @@ import type { RetryPolicy } from "@promin/core";
 interface StateConfig {
   name: string;
   terminal: boolean;
-  onEnter?: (context: unknown) => void | Promise<void>;
-  onExit?: (context: unknown) => void | Promise<void>;
+  onEnter?: (context: unknown, eventData?: unknown) => void | Promise<void>;
+  onExit?: (context: unknown, eventData?: unknown) => void | Promise<void>;
+  timeout?: TimeoutConfig;
 }
+
+interface TimeoutConfig {
+  ms: number;
+  target: string;
+  guard?: (context: unknown) => boolean | Promise<boolean>;
+}
+
+/** Special event name written to history when a state's timeout fires. */
+export const TIMEOUT_EVENT = "__timeout__";
 
 interface TransitionConfig {
   event: string;
   from: string | string[];
   to?: string; // undefined = conditional (action decides)
-  guard?: (context: unknown) => boolean | Promise<boolean>;
-  action?: (context: unknown, transition: TransitionHelper) => unknown | Promise<unknown>;
+  guard?: (context: unknown, eventData: unknown) => boolean | Promise<boolean>;
+  action?: (
+    context: unknown,
+    eventData: unknown,
+    transition: TransitionHelper,
+  ) => unknown | Promise<unknown>;
   retry?: RetryPolicy<unknown>;
   onError?: string; // target state on action failure (after retries exhausted)
 }
@@ -46,6 +64,7 @@ export interface TransitionContext {
   readonly from: string;
   to: string;
   context: unknown;
+  readonly eventData?: unknown;
   readonly metadata?: unknown;
 }
 
@@ -108,15 +127,27 @@ export interface MachineLimits {
   maxTransitionsPerSecond?: number;
 }
 
+/** Thrown when `.strict()` validation rejects the `data` payload of a `.send()`. */
+export class EventDataValidationError extends Error {
+  readonly _tag = "EventDataValidationError";
+  constructor(
+    readonly event: string,
+    override readonly cause: unknown,
+  ) {
+    super(`Event "${event}" payload failed schema validation`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Builder
 // ---------------------------------------------------------------------------
 
-export class StateMachineBuilder<S> {
+export class StateMachineBuilder<S, Events = void> {
   private states = new Map<string, StateConfig>();
   private transitions: TransitionConfig[] = [];
   private middlewares: MachineMiddleware[] = [];
   private initialState?: string;
+  private strictSchemas?: Record<string, SchemaParser<unknown>>;
 
   constructor(
     private readonly name: string,
@@ -125,6 +156,8 @@ export class StateMachineBuilder<S> {
     private readonly limits?: MachineLimits,
     private readonly type?: string,
     private readonly namespace?: string,
+    private readonly clock?: Clock,
+    private readonly autoScheduleTimeouts?: boolean,
   ) {}
 
   /** Add middleware that wraps every transition. Composable — called in order. */
@@ -137,8 +170,18 @@ export class StateMachineBuilder<S> {
     name: string & keyof S,
     options?: {
       terminal?: boolean;
-      onEnter?: (context: any) => void | Promise<void>;
-      onExit?: (context: any) => void | Promise<void>;
+      onEnter?: (context: any, eventData?: any) => void | Promise<void>;
+      onExit?: (context: any, eventData?: any) => void | Promise<void>;
+      /**
+       * Auto-transition to `target` after `ms` if no event arrives. Optional
+       * `guard` lets the timeout decide whether to actually fire. Cancelled on
+       * any explicit transition out of this state.
+       */
+      timeout?: {
+        ms: number;
+        target: string & keyof S;
+        guard?: (context: any) => boolean | Promise<boolean>;
+      };
     },
   ): this {
     this.states.set(name as string, {
@@ -146,27 +189,37 @@ export class StateMachineBuilder<S> {
       terminal: options?.terminal ?? false,
       onEnter: options?.onEnter,
       onExit: options?.onExit,
+      timeout: options?.timeout
+        ? { ms: options.timeout.ms, target: options.timeout.target, guard: options.timeout.guard }
+        : undefined,
     });
     return this;
   }
 
-  on(
-    event: string,
+  on<K extends EventName<Events>>(
+    event: K,
     config: {
       from: (string & keyof S) | (string & keyof S)[];
       to?: string & keyof S;
-      guard?: (context: any) => boolean | Promise<boolean>;
-      action?: (context: any, transition: any) => any | Promise<any>;
+      guard?: (
+        context: any,
+        event: [Events] extends [void] ? any : EventData<Events, K & keyof Events>,
+      ) => boolean | Promise<boolean>;
+      action?: (
+        context: any,
+        event: [Events] extends [void] ? any : EventData<Events, K & keyof Events>,
+        transition: TransitionHelper,
+      ) => any | Promise<any>;
       retry?: RetryPolicy<unknown>;
       onError?: string & keyof S;
     },
   ): this {
     this.transitions.push({
-      event,
+      event: event as string,
       from: config.from,
       to: config.to,
-      guard: config.guard,
-      action: config.action,
+      guard: config.guard as TransitionConfig["guard"],
+      action: config.action as TransitionConfig["action"],
       retry: config.retry,
       onError: config.onError,
     });
@@ -178,7 +231,25 @@ export class StateMachineBuilder<S> {
     return this;
   }
 
-  build(): StateMachineInstance<S> {
+  /**
+   * Enable runtime validation of `send()` data using SchemaParsers.
+   *
+   * Pass a per-event schema map. Each schema validates the `data` field of its
+   * matching event before the transition runs. Validation failures throw
+   * `EventDataValidationError` (the transition does not execute).
+   *
+   * Re-calling `.strict()` merges with the existing schema map, so per-event
+   * stricter overrides can be layered on top of a base map.
+   */
+  strict(schemas: StrictSchemas<Events>): this {
+    this.strictSchemas = {
+      ...(this.strictSchemas ?? {}),
+      ...(schemas as Record<string, SchemaParser<unknown>>),
+    };
+    return this;
+  }
+
+  build(): StateMachineInstance<S, Events> {
     if (!this.initialState) throw new Error("Initial state not set");
     if (this.states.size === 0) throw new Error("No states registered");
 
@@ -187,7 +258,7 @@ export class StateMachineBuilder<S> {
       const terminals = [...this.states.values()].filter((s) => s.terminal).map((s) => s.name);
       (this.storage as any).registerTerminalStates(terminals);
     }
-    return new StateMachineInstance<S>(
+    return new StateMachineInstance<S, Events>(
       this.name,
       this.storage,
       this.states,
@@ -198,6 +269,9 @@ export class StateMachineBuilder<S> {
       this.middlewares.length > 0 ? composeMachineMiddleware(...this.middlewares) : undefined,
       this.type,
       this.namespace,
+      this.strictSchemas,
+      this.clock ?? SystemClock,
+      this.autoScheduleTimeouts ?? true,
     );
   }
 }
@@ -206,8 +280,9 @@ export class StateMachineBuilder<S> {
 // Runtime
 // ---------------------------------------------------------------------------
 
-export class StateMachineInstance<S> {
+export class StateMachineInstance<S, Events = void> {
   private recentSendTimestamps: number[] = [];
+  private timers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(
     private readonly name: string,
@@ -220,6 +295,9 @@ export class StateMachineInstance<S> {
     private readonly middleware?: MachineMiddleware,
     private readonly type?: string,
     private readonly namespace?: string,
+    private readonly strictSchemas?: Record<string, SchemaParser<unknown>>,
+    private readonly clock: Clock = SystemClock,
+    private readonly autoScheduleTimeouts: boolean = true,
   ) {}
 
   async start(params: {
@@ -240,22 +318,45 @@ export class StateMachineInstance<S> {
       version: this.version,
       metadata: params.metadata,
     });
+
+    this.scheduleTimeoutIfAny(params.id, this.initialState);
   }
 
-  async send(params: { id: string; event: string; metadata?: unknown }): Promise<void> {
-    const locked = await this.storage.tryLock(params.id, 30_000);
-    if (!locked) throw new Error(`Machine ${params.id} is locked`);
+  async send(params: SendParams<Events>): Promise<void> {
+    // Type-erase the union — runtime treats data uniformly.
+    const { id, event, metadata } = params as {
+      id: string;
+      event: string;
+      metadata?: unknown;
+    };
+    let data = (params as { data?: unknown }).data;
+
+    // Validate data via .strict() schema if registered for this event.
+    if (this.strictSchemas && event in this.strictSchemas) {
+      const parser = this.strictSchemas[event]!;
+      const result = parser.safeParse(data);
+      if (!result.success) {
+        throw new EventDataValidationError(event, result.error);
+      }
+      data = result.data;
+    }
+
+    const locked = await this.storage.tryLock(id, 30_000);
+    if (!locked) throw new Error(`Machine ${id} is locked`);
+
+    // Cancel any pending timeout — this transition supersedes it.
+    this.cancelTimeout(id);
 
     try {
-      const machine = await this.storage.load(params.id);
-      if (!machine) throw new Error(`Machine ${params.id} not found`);
+      const machine = await this.storage.load(id);
+      if (!machine) throw new Error(`Machine ${id} not found`);
 
       // Check limits
       if (this.limits?.maxTransitions) {
-        const events = await this.storage.loadEvents(params.id);
+        const events = await this.storage.loadEvents(id);
         if (events.length >= this.limits.maxTransitions) {
           throw new Error(
-            `Machine ${params.id} exceeded max transitions limit (${this.limits.maxTransitions})`,
+            `Machine ${id} exceeded max transitions limit (${this.limits.maxTransitions})`,
           );
         }
       }
@@ -265,7 +366,7 @@ export class StateMachineInstance<S> {
         this.recentSendTimestamps = this.recentSendTimestamps.filter((t) => t > now - 1000);
         if (this.recentSendTimestamps.length >= this.limits.maxTransitionsPerSecond) {
           throw new Error(
-            `Machine ${params.id} exceeded rate limit (${this.limits.maxTransitionsPerSecond}/sec)`,
+            `Machine ${id} exceeded rate limit (${this.limits.maxTransitionsPerSecond}/sec)`,
           );
         }
         this.recentSendTimestamps.push(now);
@@ -274,18 +375,16 @@ export class StateMachineInstance<S> {
       // Find matching transition
       const transition = this.transitions.find((t) => {
         const froms = Array.isArray(t.from) ? t.from : [t.from];
-        return t.event === params.event && froms.includes(machine.current);
+        return t.event === event && froms.includes(machine.current);
       });
       if (!transition) {
-        throw new Error(
-          `No transition for event "${params.event}" from state "${machine.current}"`,
-        );
+        throw new Error(`No transition for event "${event}" from state "${machine.current}"`);
       }
 
       // Check guard
       if (transition.guard) {
-        const allowed = await transition.guard(machine.context);
-        if (!allowed) throw new Error(`Guard rejected event "${params.event}"`);
+        const allowed = await transition.guard(machine.context, data);
+        if (!allowed) throw new Error(`Guard rejected event "${event}"`);
       }
 
       // Execute action — compute target state and new context
@@ -297,7 +396,7 @@ export class StateMachineInstance<S> {
           const helper = <Target extends string>(target: Target, ctx: unknown) =>
             transitionTo<any, any>(target, ctx);
 
-          const executeAction = () => transition.action!(machine.context, helper);
+          const executeAction = () => transition.action!(machine.context, data, helper);
           const result = transition.retry
             ? await executeWithRetryReturn(executeAction, transition.retry)
             : await executeAction();
@@ -316,14 +415,14 @@ export class StateMachineInstance<S> {
             newContext = result;
           } else {
             throw new Error(
-              `Transition for "${params.event}" has no target state and action didn't return TransitionTo`,
+              `Transition for "${event}" has no target state and action didn't return TransitionTo`,
             );
           }
         } else if (transition.to) {
           targetState = transition.to;
           newContext = machine.context;
         } else {
-          throw new Error(`Transition for "${params.event}" has no action and no target state`);
+          throw new Error(`Transition for "${event}" has no action and no target state`);
         }
       } catch (err) {
         if (transition.onError && this.states.has(transition.onError)) {
@@ -345,34 +444,36 @@ export class StateMachineInstance<S> {
 
       // Build transition context for middleware
       const txCtx: TransitionContext = {
-        machineId: params.id,
+        machineId: id,
         machineName: this.name,
-        event: params.event,
+        event,
         from: machine.current,
         to: targetState,
         context: newContext,
-        metadata: params.metadata,
+        eventData: data,
+        metadata,
       };
 
       // Core transition: onExit → persist → onEnter
       const executeTransition = async () => {
         const currentStateConfig = this.states.get(txCtx.from);
         if (currentStateConfig?.onExit) {
-          await currentStateConfig.onExit(machine.context);
+          await currentStateConfig.onExit(machine.context, data);
         }
 
         await this.storage.transition({
-          id: params.id,
+          id,
           from: txCtx.from,
           to: txCtx.to,
-          event: params.event,
+          event,
           context: txCtx.context,
+          eventData: txCtx.eventData,
           metadata: txCtx.metadata,
         });
 
         const targetStateConfig = this.states.get(txCtx.to);
         if (targetStateConfig?.onEnter) {
-          await targetStateConfig.onEnter(txCtx.context);
+          await targetStateConfig.onEnter(txCtx.context, data);
         }
       };
 
@@ -382,8 +483,123 @@ export class StateMachineInstance<S> {
       } else {
         await executeTransition();
       }
+
+      // Schedule a fresh timeout for the new state if it has one.
+      this.scheduleTimeoutIfAny(id, txCtx.to);
     } finally {
-      await this.storage.releaseLock(params.id);
+      await this.storage.releaseLock(id);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Timed auto-transitions
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Manually check whether the machine `id` has a due timeout and fire it if so.
+   * Returns `true` if a transition fired. Useful for FakeClock-driven tests and
+   * future distributed scanners that need to drive timeouts externally.
+   */
+  async checkTimeouts(id: string): Promise<boolean> {
+    const machine = await this.storage.load(id);
+    if (!machine) return false;
+    const cfg = this.states.get(machine.current)?.timeout;
+    if (!cfg) return false;
+    const dueAt = machine.updatedAt.getTime() + cfg.ms;
+    if (this.clock.currentTimeMs() < dueAt) return false;
+    return await this.fireTimeout(id, machine.current);
+  }
+
+  /** Cancel all pending in-process timers — call before discarding the instance. */
+  cancelAllTimeouts(): void {
+    for (const handle of this.timers.values()) clearTimeout(handle);
+    this.timers.clear();
+  }
+
+  private scheduleTimeoutIfAny(id: string, stateName: string): void {
+    if (!this.autoScheduleTimeouts) return;
+    const cfg = this.states.get(stateName)?.timeout;
+    if (!cfg) return;
+    this.cancelTimeout(id);
+    const handle = setTimeout(() => {
+      this.timers.delete(id);
+      // Errors are swallowed — timeout firing must not crash the host process.
+      // Callers that need failure visibility should use checkTimeouts() directly.
+      this.fireTimeout(id, stateName).catch(() => {});
+    }, cfg.ms);
+    // Don't keep the event loop alive for pending state-machine timeouts.
+    if (typeof (handle as { unref?: () => void }).unref === "function") {
+      (handle as { unref: () => void }).unref();
+    }
+    this.timers.set(id, handle);
+  }
+
+  private cancelTimeout(id: string): void {
+    const handle = this.timers.get(id);
+    if (handle) {
+      clearTimeout(handle);
+      this.timers.delete(id);
+    }
+  }
+
+  /** Acquire lock, verify state hasn't changed, run guard, transition, reschedule. */
+  private async fireTimeout(id: string, fromState: string): Promise<boolean> {
+    const cfg = this.states.get(fromState)?.timeout;
+    if (!cfg) return false;
+
+    const locked = await this.storage.tryLock(id, 30_000);
+    if (!locked) return false;
+    try {
+      const machine = await this.storage.load(id);
+      if (!machine) return false;
+      // State may have moved while we waited — bail rather than misfiring.
+      if (machine.current !== fromState) return false;
+
+      if (cfg.guard) {
+        const allowed = await cfg.guard(machine.context);
+        if (!allowed) return false;
+      }
+
+      if (!this.states.has(cfg.target)) {
+        throw new Error(`Timeout target state "${cfg.target}" is not registered`);
+      }
+
+      const txCtx: TransitionContext = {
+        machineId: id,
+        machineName: this.name,
+        event: TIMEOUT_EVENT,
+        from: fromState,
+        to: cfg.target,
+        context: machine.context,
+        metadata: undefined,
+      };
+
+      const executeTransition = async () => {
+        const fromConfig = this.states.get(fromState);
+        if (fromConfig?.onExit) await fromConfig.onExit(machine.context, undefined);
+
+        await this.storage.transition({
+          id,
+          from: fromState,
+          to: cfg.target,
+          event: TIMEOUT_EVENT,
+          context: machine.context,
+        });
+
+        const toConfig = this.states.get(cfg.target);
+        if (toConfig?.onEnter) await toConfig.onEnter(machine.context, undefined);
+      };
+
+      if (this.middleware) {
+        await this.middleware(txCtx, executeTransition);
+      } else {
+        await executeTransition();
+      }
+
+      this.scheduleTimeoutIfAny(id, cfg.target);
+      return true;
+    } finally {
+      await this.storage.releaseLock(id);
     }
   }
 
@@ -436,20 +652,188 @@ export class StateMachineInstance<S> {
 // Factory
 // ---------------------------------------------------------------------------
 
-export function stateMachine<S>(params: {
+export function stateMachine<S, Events = void>(params: {
   name: string;
   storage: StateMachineStorage;
   version?: string;
   limits?: MachineLimits;
   type?: string;
   namespace?: string;
-}): StateMachineBuilder<S> {
-  return new StateMachineBuilder<S>(
+  /** Time source for due-timeout calculations. Default: SystemClock. */
+  clock?: Clock;
+  /**
+   * Whether to schedule in-process setTimeout for state timeouts. Default: true.
+   * Set false for distributed mode where an external scanner drives `checkTimeouts()`.
+   */
+  autoScheduleTimeouts?: boolean;
+}): StateMachineBuilder<S, Events> {
+  return new StateMachineBuilder<S, Events>(
     params.name,
     params.storage,
     params.version,
     params.limits,
     params.type,
     params.namespace,
+    params.clock,
+    params.autoScheduleTimeouts,
   );
+}
+
+// ---------------------------------------------------------------------------
+// machine() — quick in-memory shortcut (mirrors flow() for workflows)
+// ---------------------------------------------------------------------------
+
+/** Live single-instance handle returned by `machine().run()`. */
+export class MachineHandle<S, Events = void> {
+  constructor(
+    readonly id: string,
+    private readonly instance: StateMachineInstance<S, Events>,
+  ) {}
+
+  /** Send an event. `id` is fixed to this handle's instance and omitted from params. */
+  send(params: Omit<SendParams<Events>, "id">): Promise<void> {
+    return this.instance.send({ ...(params as object), id: this.id } as SendParams<Events>);
+  }
+
+  getState(): Promise<MachineSnapshot<S> | null> {
+    return this.instance.getState(this.id);
+  }
+
+  getSnapshot(): Promise<(MachineSnapshot<S> & { name: string; version?: string }) | null> {
+    return this.instance.getSnapshot(this.id);
+  }
+
+  getHistory(params?: { limit?: number; offset?: number }): Promise<TransitionEvent[]> {
+    return this.instance.getHistory(this.id, params);
+  }
+}
+
+/**
+ * Builder returned by `machine()`. Same as StateMachineBuilder but with `.run()`
+ * for one-shot prototyping — auto-builds, auto-starts, auto-generates id.
+ */
+export class QuickMachineBuilder<S, Events = void> extends StateMachineBuilder<S, Events> {
+  private readonly defaultContext: ContextOf<S, keyof S & string>;
+
+  constructor(params: {
+    name: string;
+    storage: StateMachineStorage;
+    initial: string & keyof S;
+    context: ContextOf<S, keyof S & string>;
+    version?: string;
+    limits?: MachineLimits;
+  }) {
+    super(params.name, params.storage, params.version, params.limits);
+    this.defaultContext = params.context;
+    this.initial(params.initial);
+  }
+
+  /** Build, start, and return a single-instance handle. Auto-generates id if omitted. */
+  async run(params?: {
+    id?: string;
+    context?: ContextOf<S, keyof S & string>;
+  }): Promise<MachineHandle<S, Events>> {
+    const inst = this.build();
+    const id = params?.id ?? `m-${crypto.randomUUID()}`;
+    const ctx = params?.context ?? this.defaultContext;
+    await inst.start({ id, context: ctx });
+    return new MachineHandle<S, Events>(id, inst);
+  }
+}
+
+/**
+ * Quick in-memory state machine — zero setup for prototyping and tests.
+ *
+ * ```typescript
+ * const m = await machine<Light>({ initial: "red", context: { count: 0 } })
+ *   .state("red").state("green").state("yellow")
+ *   .on("next", { from: "red", to: "green", action: (c) => ({ count: c.count + 1 }) })
+ *   .on("next", { from: "green", to: "yellow", action: (c) => ({ count: c.count + 1 }) })
+ *   .on("next", { from: "yellow", to: "red", action: (c) => ({ count: c.count + 1 }) })
+ *   .run();
+ *
+ * await m.send({ event: "next" });
+ * ```
+ */
+export function machine<S, Events = void>(params: {
+  initial: string & keyof S;
+  context?: ContextOf<S, keyof S & string>;
+  name?: string;
+  version?: string;
+  limits?: MachineLimits;
+}): QuickMachineBuilder<S, Events> {
+  return new QuickMachineBuilder<S, Events>({
+    name: params.name ?? "machine",
+    storage: new InMemoryStateMachineStorage(),
+    initial: params.initial,
+    context: params.context ?? ({} as ContextOf<S, keyof S & string>),
+    version: params.version,
+    limits: params.limits,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// pureStateMachine() — sync-only, deterministic decision engine
+// ---------------------------------------------------------------------------
+//
+// Same runtime as stateMachine(), narrower compile-time signatures: guards and
+// actions cannot return Promises. Use when the machine is a pure decision layer
+// over an event log (deterministic replay, no I/O).
+// ---------------------------------------------------------------------------
+
+/**
+ * Type alias narrowing `StateMachineBuilder` to sync-only guards/actions.
+ *
+ * Shares the same runtime — only compile-time signatures differ. Async
+ * guards/actions become a compile error since `Promise<T>` does not match
+ * the narrowed `T` return type.
+ */
+export interface PureStateMachineBuilder<S, Events = void> {
+  use(middleware: MachineMiddleware): this;
+  state(
+    name: string & keyof S,
+    options?: {
+      terminal?: boolean;
+      onEnter?: (context: any, eventData?: any) => void;
+      onExit?: (context: any, eventData?: any) => void;
+    },
+  ): this;
+  on<K extends EventName<Events>>(
+    event: K,
+    config: {
+      from: (string & keyof S) | (string & keyof S)[];
+      to?: string & keyof S;
+      guard?: (
+        context: any,
+        event: [Events] extends [void] ? any : EventData<Events, K & keyof Events>,
+      ) => boolean;
+      action?: (
+        context: any,
+        event: [Events] extends [void] ? any : EventData<Events, K & keyof Events>,
+        transition: TransitionHelper,
+      ) => any;
+      retry?: RetryPolicy<unknown>;
+      onError?: string & keyof S;
+    },
+  ): this;
+  initial(state: string & keyof S): this;
+  strict(schemas: StrictSchemas<Events>): this;
+  build(): StateMachineInstance<S, Events>;
+}
+
+/**
+ * Sync-only state machine — same runtime as `stateMachine()` but guards/actions
+ * cannot return Promises. Enables deterministic replay and pure decision logic.
+ */
+export function pureStateMachine<S, Events = void>(params: {
+  name: string;
+  storage: StateMachineStorage;
+  version?: string;
+  limits?: MachineLimits;
+  type?: string;
+  namespace?: string;
+  clock?: Clock;
+  autoScheduleTimeouts?: boolean;
+}): PureStateMachineBuilder<S, Events> {
+  return stateMachine<S, Events>(params) as unknown as PureStateMachineBuilder<S, Events>;
 }
