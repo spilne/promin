@@ -1,4 +1,5 @@
 import { Data } from "effect";
+import type { SchemaParser } from "@promin/core";
 
 /** Network-level failure (DNS, connection refused, socket hang up). */
 export class HttpNetworkError extends Data.TaggedError("HttpNetworkError")<{
@@ -69,9 +70,7 @@ export class PollTimeoutError extends Data.TaggedError("PollTimeoutError")<{
  * };
  * ```
  */
-export interface ResponseParser<T> {
-  safeParse(data: unknown): { success: true; data: T } | { success: false; error: unknown };
-}
+export type ResponseParser<T> = SchemaParser<T>;
 
 /** Union of all HTTP client errors — use `_tag` to discriminate. */
 export type HttpClientError =
