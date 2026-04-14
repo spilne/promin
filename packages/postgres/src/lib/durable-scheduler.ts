@@ -164,10 +164,20 @@ export class DurableScheduler implements Scheduler {
       );
     }
     if (config.cron) {
-      new Cron(config.cron, { timezone: config.timezone ?? "UTC" }); // validate
+      try {
+        new Cron(config.cron, { timezone: config.timezone ?? "UTC" });
+      } catch (e) {
+        throw new Error(
+          `Invalid cron expression "${config.cron}" for schedule "${config.id}": ${e}`,
+        );
+      }
     }
     if (config.rrule) {
-      RRule.fromString(config.rrule); // validate
+      try {
+        RRule.fromString(config.rrule);
+      } catch (e) {
+        throw new Error(`Invalid RRULE "${config.rrule}" for schedule "${config.id}": ${e}`);
+      }
     }
 
     const durable = config as DurableScheduleConfig;
@@ -208,25 +218,37 @@ export class DurableScheduler implements Scheduler {
       });
   }
 
-  /** Remove a schedule from Postgres. Optional reason for audit trail. */
+  /** Remove a schedule from Postgres (fire-and-forget). Use `unregisterAsync` to await. */
   unregister(scheduleId: string, options?: { reason?: string }): void {
-    if (options?.reason) {
-      // Could log or store the reason — for now just log if logger provided
-    }
-    void this.db.delete(durableSchedules).where(eq(durableSchedules.id, scheduleId));
+    void this.unregisterAsync(scheduleId, options);
   }
 
-  /** Pause a schedule — persisted, survives restart. */
+  /** Awaitable version of `unregister`. */
+  async unregisterAsync(scheduleId: string, _options?: { reason?: string }): Promise<void> {
+    await this.db.delete(durableSchedules).where(eq(durableSchedules.id, scheduleId));
+  }
+
+  /** Pause a schedule (fire-and-forget). Use `pauseAsync` to await. */
   pause(scheduleId: string): void {
-    void this.db
+    void this.pauseAsync(scheduleId);
+  }
+
+  /** Awaitable version of `pause`. */
+  async pauseAsync(scheduleId: string): Promise<void> {
+    await this.db
       .update(durableSchedules)
       .set({ enabled: false, updatedAt: new Date() })
       .where(eq(durableSchedules.id, scheduleId));
   }
 
-  /** Resume a paused schedule — persisted. */
+  /** Resume a paused schedule (fire-and-forget). Use `resumeAsync` to await. */
   resume(scheduleId: string): void {
-    void this.db
+    void this.resumeAsync(scheduleId);
+  }
+
+  /** Awaitable version of `resume`. */
+  async resumeAsync(scheduleId: string): Promise<void> {
+    await this.db
       .update(durableSchedules)
       .set({ enabled: true, updatedAt: new Date() })
       .where(eq(durableSchedules.id, scheduleId));
@@ -439,8 +461,26 @@ export class DurableScheduler implements Scheduler {
     const maxCatchUp = config.maxCatchUp ?? 0;
     const jitterMs = config.jitterMs ?? 0;
 
+    // First-fire bootstrap: with no lastFired, the catch-up loop below would
+    // never produce a tick (cron.nextRun(now-1) returns the next FUTURE
+    // occurrence, which fails the `next > now` guard). Emit one tick at `now`
+    // so polling impls behave like sleep-until-next impls on stream startup.
+    if (!lastFired) {
+      const jitter = jitterMs > 0 ? Math.random() * jitterMs : 0;
+      return [
+        {
+          scheduleId: config.id,
+          scheduleName: config.name,
+          scheduledAt: now,
+          firedAt: new Date(Date.now() + jitter),
+          tickNumber: startTickNumber,
+          metadata: config.metadata,
+        },
+      ];
+    }
+
     // Compute missed fires since lastFired (catch-up)
-    let cursor = lastFired ? new Date(lastFired.getTime() + 1) : new Date(now.getTime() - 1);
+    let cursor = new Date(lastFired.getTime() + 1);
     let tickNumber = startTickNumber;
     let catchUpCount = 0;
 
@@ -485,7 +525,23 @@ export class DurableScheduler implements Scheduler {
     const maxCatchUp = config.maxCatchUp ?? 0;
     const jitterMs = config.jitterMs ?? 0;
 
-    const after = lastFired ? new Date(lastFired.getTime() + 1) : new Date(now.getTime() - 1);
+    // Same first-fire bootstrap as cron — without it `between(now-1, now)`
+    // is a 1ms window that almost never contains an occurrence.
+    if (!lastFired) {
+      const jitter = jitterMs > 0 ? Math.random() * jitterMs : 0;
+      return [
+        {
+          scheduleId: config.id,
+          scheduleName: config.name,
+          scheduledAt: now,
+          firedAt: new Date(Date.now() + jitter),
+          tickNumber: startTickNumber,
+          metadata: config.metadata,
+        },
+      ];
+    }
+
+    const after = new Date(lastFired.getTime() + 1);
     const occurrences = rule.between(after, now, true);
 
     // Limit to maxCatchUp if lastFired exists

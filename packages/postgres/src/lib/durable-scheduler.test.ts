@@ -1,7 +1,9 @@
 import { describe, it, expect } from "bun:test";
+import { sql } from "drizzle-orm";
+import { schedulerTestSuite } from "@promin/workflow/testing";
 import { postgresDescribe } from "./test-utils.ts";
 import { migrate } from "./migrate.ts";
-import { createDurableScheduler } from "./durable-scheduler.ts";
+import { createDurableScheduler, DurableScheduler } from "./durable-scheduler.ts";
 
 // ---------------------------------------------------------------------------
 // DurableScheduler
@@ -177,6 +179,26 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
 
       expect(ticks.every((t) => t.scheduleId !== "disabled-sched")).toBe(true);
     }, 10_000);
+  });
+
+  // -------------------------------------------------------------------------
+  // Portable Scheduler conformance suite — run against DurableScheduler.
+  // Each test gets a fresh schedules/ticks table via TRUNCATE in the factory.
+  // pollIntervalMs is small so streaming tests don't time out.
+  // -------------------------------------------------------------------------
+  schedulerTestSuite("DurableScheduler", async () => {
+    await pg.db.execute(
+      sql`TRUNCATE ${DurableScheduler.schema.schedules}, ${DurableScheduler.schema.ticks} CASCADE`,
+    );
+    const scheduler = createDurableScheduler({ db: pg.db, pollIntervalMs: 25 });
+    return {
+      scheduler,
+      register: (config) => scheduler.registerAsync(config),
+      unregister: (id, options) => scheduler.unregisterAsync(id, options),
+      pause: (id) => scheduler.pauseAsync(id),
+      resume: (id) => scheduler.resumeAsync(id),
+      list: async () => scheduler.listAsync(),
+    };
   });
 
   describe("leader election", () => {
