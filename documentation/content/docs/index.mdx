@@ -1,11 +1,25 @@
 ---
-title: "@promin/core"
+title: Promin
 description: TypeScript toolkit for resilient async operations, durable workflows, stream processing, and analytics. Built on Effect.
 ---
 
 TypeScript toolkit for resilient async operations, durable workflows, stream processing, and analytics. Built on [Effect](https://effect.website).
 
-## Modules
+## Packages
+
+| Package | What it does |
+| --- | --- |
+| [`@promin/core`](/docs/core/pipeline) | Pipeline, StreamPipeline, concurrency primitives |
+| [`@promin/workflow`](/docs/workflow/workflows) | Durable workflows, state machines, distributed workers, scheduler |
+| [`@promin/data`](/docs/data/dataframe) | DataFrame, data quality, profiling, diff |
+| [`@promin/topology`](/docs/topology/stream-topology) | Stateful stream processing — windows, joins, shuffle |
+| [`@promin/redis`](/docs/integrations/redis) | Redis backends — primitives, storage, caching |
+| [`@promin/postgres`](/docs/integrations/postgres) | Postgres backends — storage, queues, CDC, scheduler |
+| [`@promin/kafka`](/docs/integrations/kafka) | Kafka transport — consumer groups, partitioning |
+| [`@promin/http`](/docs/integrations/http-client) | Resilient HTTP client — retry, SSE, NDJSON |
+| [`@promin/duckdb`](/docs/data/dataframe) | DuckDB executor for DataFrame — SQL, Arrow IPC |
+
+## Highlights
 
 ### [Pipeline](/docs/core/pipeline) — Async actions with resilience
 
