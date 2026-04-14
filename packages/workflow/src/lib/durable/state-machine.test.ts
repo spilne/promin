@@ -1415,6 +1415,34 @@ describe("StateMachine", () => {
       expect(history[0]!.to).toBe("timedOut");
     });
 
+    it("custom event label appears in history instead of TIMEOUT_EVENT default", async () => {
+      const clock = FakeClock.create("2026-01-01T00:00:00Z");
+      const clockStorage = new InMemoryStateMachineStorage({ clock });
+      storage = clockStorage;
+
+      const m = stateMachine<ApprovalStates>({
+        name: "approval-labelled",
+        storage,
+        clock,
+        autoScheduleTimeouts: false,
+      })
+        .state("pending", { timeout: { ms: 100, target: "timedOut", event: "expire" } })
+        .state("approved", { terminal: true })
+        .state("timedOut", { terminal: true })
+        .on("approve", { from: "pending", to: "approved" })
+        .initial("pending")
+        .build();
+
+      await m.start({ id: "t-label", context: { item: "x" } });
+      clock.advance(150);
+      expect(await m.checkTimeouts("t-label")).toBe(true);
+
+      const history = await m.getHistory("t-label");
+      expect(history).toHaveLength(1);
+      expect(history[0]!.event).toBe("expire");
+      expect(history[0]!.event).not.toBe(TIMEOUT_EVENT);
+    });
+
     it("explicit transition cancels pending timeout", async () => {
       const clock = FakeClock.create("2026-01-01T00:00:00Z");
       const clockStorage = new InMemoryStateMachineStorage({ clock });

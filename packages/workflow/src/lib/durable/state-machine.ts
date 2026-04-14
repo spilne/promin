@@ -31,10 +31,11 @@ interface StateConfig {
 interface TimeoutConfig {
   ms: number;
   target: string;
+  event?: string;
   guard?: (context: unknown) => boolean | Promise<boolean>;
 }
 
-/** Special event name written to history when a state's timeout fires. */
+/** Default event name written to history when a state's timeout fires. */
 export const TIMEOUT_EVENT = "__timeout__";
 
 interface TransitionConfig {
@@ -173,13 +174,20 @@ export class StateMachineBuilder<S, Events = void> {
       onEnter?: (context: any, eventData?: any) => void | Promise<void>;
       onExit?: (context: any, eventData?: any) => void | Promise<void>;
       /**
-       * Auto-transition to `target` after `ms` if no event arrives. Optional
-       * `guard` lets the timeout decide whether to actually fire. Cancelled on
-       * any explicit transition out of this state.
+       * Auto-transition to `target` after `ms` if no event arrives.
+       *
+       * - `target` is typed `keyof S` — invalid state names are a compile error.
+       * - `event` is an optional audit-log label written to the transition
+       *   history (default: `TIMEOUT_EVENT` = `"__timeout__"`). Use this to
+       *   give the firing a human-meaningful name like `"expire"` or `"escalate"`.
+       * - `guard` lets the timeout decide whether to actually fire.
+       *
+       * Cancelled by any explicit transition out of this state.
        */
       timeout?: {
         ms: number;
         target: string & keyof S;
+        event?: string;
         guard?: (context: any) => boolean | Promise<boolean>;
       };
     },
@@ -190,7 +198,12 @@ export class StateMachineBuilder<S, Events = void> {
       onEnter: options?.onEnter,
       onExit: options?.onExit,
       timeout: options?.timeout
-        ? { ms: options.timeout.ms, target: options.timeout.target, guard: options.timeout.guard }
+        ? {
+            ms: options.timeout.ms,
+            target: options.timeout.target,
+            event: options.timeout.event,
+            guard: options.timeout.guard,
+          }
         : undefined,
     });
     return this;
@@ -564,10 +577,11 @@ export class StateMachineInstance<S, Events = void> {
         throw new Error(`Timeout target state "${cfg.target}" is not registered`);
       }
 
+      const eventName = cfg.event ?? TIMEOUT_EVENT;
       const txCtx: TransitionContext = {
         machineId: id,
         machineName: this.name,
-        event: TIMEOUT_EVENT,
+        event: eventName,
         from: fromState,
         to: cfg.target,
         context: machine.context,
@@ -582,7 +596,7 @@ export class StateMachineInstance<S, Events = void> {
           id,
           from: fromState,
           to: cfg.target,
-          event: TIMEOUT_EVENT,
+          event: eventName,
           context: machine.context,
         });
 
