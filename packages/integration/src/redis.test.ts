@@ -19,6 +19,7 @@ import {
   RedisQueue,
   RedisWorkflowStorage,
   RedisStepQueue,
+  RedisDurableScheduler,
 } from "@promin/redis";
 import type { RedisClient } from "@promin/redis";
 import {
@@ -33,7 +34,7 @@ import {
   signalTestSuite,
   queueTestSuite,
 } from "@promin/core/testing";
-import { storageTestSuite, stepQueueTestSuite } from "@promin/workflow/testing";
+import { storageTestSuite, stepQueueTestSuite, schedulerTestSuite } from "@promin/workflow/testing";
 
 // ---------------------------------------------------------------------------
 // RedisStream — durable consumer groups
@@ -492,4 +493,27 @@ withRedis("RedisStepQueue conformance", (ctx) => {
         prefix: uniqueName("sq"),
       }),
   );
+});
+
+// ---------------------------------------------------------------------------
+// RedisDurableScheduler — portable Scheduler conformance suite
+// ---------------------------------------------------------------------------
+
+withRedis("RedisDurableScheduler conformance", (ctx) => {
+  schedulerTestSuite("RedisDurableScheduler", () => {
+    const redis = new IoRedis(ctx.port, ctx.host) as unknown as RedisClient;
+    const scheduler = new RedisDurableScheduler({
+      redis,
+      prefix: uniqueName("sched"),
+      pollIntervalMs: 25,
+    });
+    return {
+      scheduler,
+      register: (config) => scheduler.registerAsync(config),
+      unregister: (id, options) => scheduler.unregisterAsync(id, options),
+      pause: (id) => scheduler.pauseAsync(id),
+      resume: (id) => scheduler.resumeAsync(id),
+      list: async () => scheduler.listAsync(),
+    };
+  });
 });

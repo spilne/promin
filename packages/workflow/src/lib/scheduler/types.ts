@@ -6,6 +6,12 @@
 export interface ScheduleConfig {
   readonly id: string;
   readonly name?: string;
+  /**
+   * Logical grouping for multi-tenant deployments. `findDue`, `listSchedules`,
+   * and leader election all scope by namespace so tenants don't interfere with
+   * each other. Default: schedule belongs to the global (undefined) namespace.
+   */
+  readonly namespace?: string;
   /** Cron expression (5 or 6 field). Mutually exclusive with rrule and intervalMs. */
   readonly cron?: string;
   /** iCalendar RRULE string (RFC 5545). Mutually exclusive with cron and intervalMs. */
@@ -22,6 +28,20 @@ export interface ScheduleConfig {
   readonly endAt?: Date;
   /** Arbitrary metadata passed through to ScheduleTick. */
   readonly metadata?: Record<string, unknown>;
+}
+
+/**
+ * Extended config for durable schedulers (poll-based, with persistent state).
+ * Strict superset of `ScheduleConfig` — switching backends doesn't require
+ * changing the schedule definition.
+ */
+export interface DurableScheduleConfig extends ScheduleConfig {
+  /** What to do if the previous run hasn't finished. Default: "allow". */
+  readonly overlapPolicy?: "skip" | "queue" | "cancel_previous" | "allow";
+  /** Max catch-up runs when scheduler was down. Default: 0 (no catch-up). */
+  readonly maxCatchUp?: number;
+  /** Random jitter in ms added to fire time. Default: 0. */
+  readonly jitterMs?: number;
 }
 
 /** Emitted when a schedule fires. */

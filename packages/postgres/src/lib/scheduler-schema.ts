@@ -17,6 +17,7 @@ export const durableSchedules = pgTable(
   "wf_schedules",
   {
     id: text("id").primaryKey(),
+    namespace: text("namespace"),
     name: text("name"),
     cron: text("cron"),
     rrule: text("rrule"),
@@ -30,10 +31,15 @@ export const durableSchedules = pgTable(
     endAt: timestamp("end_at", { withTimezone: true }),
     metadata: jsonb("metadata"),
     lastFiredAt: timestamp("last_fired_at", { withTimezone: true }),
+    nextRun: timestamp("next_run", { withTimezone: true }),
+    tickCount: bigint("tick_count", { mode: "number" }).notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("wf_schedules_enabled_idx").on(t.enabled)],
+  (t) => [
+    index("wf_schedules_enabled_idx").on(t.enabled),
+    index("wf_schedules_due_idx").on(t.namespace, t.nextRun),
+  ],
 );
 
 export const durableScheduleTicks = pgTable(

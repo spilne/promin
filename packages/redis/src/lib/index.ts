@@ -17,3 +17,11 @@ export { RedisQueue } from "./redis-queue.ts";
 export { RedisStateMachineStorage } from "./redis-state-machine-storage.ts";
 export { RedisWorkflowStorage, type RedisWorkflowStorageConfig } from "./redis-workflow-storage.ts";
 export { RedisStepQueue } from "./redis-step-queue.ts";
+export {
+  RedisDurableScheduler,
+  createRedisDurableScheduler,
+  RedisSchedulerStorage,
+  type RedisDurableSchedulerConfig,
+  type RedisSchedulerStorageConfig,
+  type DurableScheduleConfig,
+} from "./redis-durable-scheduler.ts";

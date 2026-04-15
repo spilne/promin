@@ -102,10 +102,19 @@ export {
 // Scheduler
 export {
   type ScheduleConfig,
+  type DurableScheduleConfig,
   type ScheduleTick,
   type Scheduler,
+  type SchedulerStorage,
   InMemoryScheduler,
   createScheduler,
+  DurableScheduler,
+  type DurableSchedulerConfig,
+  createDurableScheduler,
+  InMemorySchedulerStorage,
+  computeDueTicks,
+  computeNextRun,
+  validateScheduleConfig,
 } from "./lib/scheduler/index.ts";
 
 // Distributed workflow execution
