@@ -79,6 +79,20 @@ export class RedisSchedulerStorage implements SchedulerStorage {
     return rawToConfig(raw);
   }
 
+  async loadSchedules(ids: string[]): Promise<Map<string, DurableScheduleConfig>> {
+    const out = new Map<string, DurableScheduleConfig>();
+    if (ids.length === 0) return out;
+    // No MGET equivalent for hashes — fan out HGETALL calls. The redis client
+    // pipelines these under the hood when called concurrently on the same
+    // connection, so this is one round-trip in practice.
+    const raws = await Promise.all(ids.map((id) => this.redis.hgetall(this.scheduleKey(id))));
+    for (let i = 0; i < ids.length; i++) {
+      const raw = raws[i];
+      if (raw && raw.id) out.set(ids[i]!, rawToConfig(raw));
+    }
+    return out;
+  }
+
   async loadScheduleState(
     id: string,
   ): Promise<{ lastFired: Date | null; tickCount: number } | null> {
@@ -90,9 +104,27 @@ export class RedisSchedulerStorage implements SchedulerStorage {
     };
   }
 
-  async recordFire(id: string, firedAt: Date): Promise<void> {
+  async loadScheduleStates(
+    ids: string[],
+  ): Promise<Map<string, { lastFired: Date | null; tickCount: number }>> {
+    const out = new Map<string, { lastFired: Date | null; tickCount: number }>();
+    if (ids.length === 0) return out;
+    const raws = await Promise.all(ids.map((id) => this.redis.hgetall(this.scheduleKey(id))));
+    for (let i = 0; i < ids.length; i++) {
+      const raw = raws[i];
+      if (raw && raw.id) {
+        out.set(ids[i]!, {
+          lastFired: raw.lastFiredAt ? new Date(Number(raw.lastFiredAt)) : null,
+          tickCount: raw.tickCount ? Number(raw.tickCount) : 0,
+        });
+      }
+    }
+    return out;
+  }
+
+  async recordFire(id: string, firedAt: Date, count: number = 1): Promise<void> {
     const current = await this.redis.hget(this.scheduleKey(id), "tickCount");
-    const next = (current ? Number(current) : 0) + 1;
+    const next = (current ? Number(current) : 0) + count;
     await this.redis.hset(this.scheduleKey(id), {
       lastFiredAt: String(firedAt.getTime()),
       tickCount: String(next),
@@ -109,6 +141,53 @@ export class RedisSchedulerStorage implements SchedulerStorage {
     } else {
       await this.redis.zadd(dueKey, nextRun.getTime(), id);
     }
+  }
+
+  async commitPoll(
+    updates: Array<{
+      id: string;
+      firedAt?: Date;
+      tickIncrement?: number;
+      nextRun: Date | null;
+    }>,
+  ): Promise<void> {
+    if (updates.length === 0) return;
+
+    // Need each id's namespace to pick the right due-ZSET. Fetch them in one
+    // pipelined fan-out (same trick as loadSchedules).
+    const namespaces = await Promise.all(
+      updates.map((u) => this.redis.hget(this.scheduleKey(u.id), "namespace")),
+    );
+    // Need current tickCounts for the increments — Redis lacks an HSET-with-add
+    // primitive, so fetch + recompute. One pipeline round-trip total.
+    const tickCounts = await Promise.all(
+      updates.map((u) =>
+        u.tickIncrement
+          ? this.redis.hget(this.scheduleKey(u.id), "tickCount")
+          : Promise.resolve(null),
+      ),
+    );
+
+    // Build pipeline: HSET fire-state for any update that fired, then
+    // ZADD/ZREM for the next-run change. Single MULTI commits everything.
+    await Promise.all(
+      updates.map(async (u, i) => {
+        if (u.firedAt !== undefined && u.tickIncrement && u.tickIncrement > 0) {
+          const next = (tickCounts[i] ? Number(tickCounts[i]) : 0) + u.tickIncrement;
+          await this.redis.hset(this.scheduleKey(u.id), {
+            lastFiredAt: String(u.firedAt.getTime()),
+            tickCount: String(next),
+          });
+        }
+        const ns = namespaces[i] ?? undefined;
+        const dueKey = this.dueKey(ns);
+        if (u.nextRun === null) {
+          await this.redis.zrem(dueKey, u.id);
+        } else {
+          await this.redis.zadd(dueKey, u.nextRun.getTime(), u.id);
+        }
+      }),
+    );
   }
 
   // -------------------------------------------------------------------------

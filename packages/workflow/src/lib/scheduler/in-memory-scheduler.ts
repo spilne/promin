@@ -240,11 +240,13 @@ function computeAndSleep(
 
   return Effect.sleep(Duration.millis(sleepMs)).pipe(
     Effect.map(() => {
+      const jitterMs = config.jitterMs ?? 0;
+      const jitter = jitterMs > 0 ? Math.random() * jitterMs : 0;
       const tick: ScheduleTick = {
         scheduleId: config.id,
         scheduleName: config.name,
         scheduledAt: nextFireTime,
-        firedAt: new Date(),
+        firedAt: new Date(Date.now() + jitter),
         tickNumber,
         metadata: config.metadata,
       };

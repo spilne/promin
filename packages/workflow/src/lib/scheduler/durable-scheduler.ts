@@ -34,6 +34,14 @@ export interface DurableSchedulerConfig {
    * large schedule counts; the storage `findDue` enforces this via LIMIT.
    */
   batchSize?: number;
+  /**
+   * Hash-based partitioning for horizontal scaling. When set, this instance
+   * only fires schedules whose `hashCode(id) mod count == index`. Run N
+   * scheduler processes with `{ index: 0, count: N } ... { index: N-1, count: N }`
+   * to spread load. Storage findDue still returns all due IDs; partitioning
+   * happens in the scheduler shell so any storage backend works without changes.
+   */
+  partition?: { index: number; count: number };
 }
 
 /**
@@ -53,6 +61,7 @@ export class DurableScheduler implements Scheduler {
   private readonly leaderLockTtlMs: number;
   private readonly namespace?: string;
   private readonly batchSize: number;
+  private readonly partition?: { index: number; count: number };
 
   constructor(config: DurableSchedulerConfig) {
     this.storage = config.storage;
@@ -61,6 +70,18 @@ export class DurableScheduler implements Scheduler {
     this.leaderLockTtlMs = config.leaderLockTtlMs ?? this.pollIntervalMs * 3;
     this.namespace = config.namespace;
     this.batchSize = config.batchSize ?? 100;
+    if (config.partition) {
+      if (
+        config.partition.count < 1 ||
+        config.partition.index < 0 ||
+        config.partition.index >= config.partition.count
+      ) {
+        throw new Error(
+          `Invalid partition: index=${config.partition.index}, count=${config.partition.count}`,
+        );
+      }
+      this.partition = config.partition;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -235,27 +256,59 @@ export class DurableScheduler implements Scheduler {
           limit: self.batchSize,
           namespace: self.namespace,
         });
-        const targetIds = scheduleId ? dueIds.filter((id) => id === scheduleId) : dueIds;
 
+        // Apply partitioning + scheduleId filter in the shell so storage
+        // backends don't need partition awareness.
+        const targetIds = dueIds.filter((id) => {
+          if (scheduleId && id !== scheduleId) return false;
+          if (self.partition && hashCode(id) % self.partition.count !== self.partition.index) {
+            return false;
+          }
+          return true;
+        });
+
+        if (targetIds.length === 0) return [] as ScheduleTick[];
+
+        // Bulk load — TWO storage round-trips for ALL due schedules instead
+        // of 2N. Storage backends collapse this into one IN/pipeline call.
+        const [configs, states] = await Promise.all([
+          self.storage.loadSchedules(targetIds),
+          self.storage.loadScheduleStates(targetIds),
+        ]);
+
+        // Compute ticks + commit-batch entries in pure code (no I/O).
         const ticks: ScheduleTick[] = [];
+        const updates: Array<{
+          id: string;
+          firedAt?: Date;
+          tickIncrement?: number;
+          nextRun: Date | null;
+        }> = [];
+
         for (const id of targetIds) {
-          const config = await self.storage.loadSchedule(id);
+          const config = configs.get(id);
           if (!config) {
-            await self.storage.setNextRun(id, null);
+            // Schedule was deleted between findDue and now — drop from due-tracking.
+            updates.push({ id, nextRun: null });
             continue;
           }
           if (config.enabled === false) continue;
 
-          const state = await self.storage.loadScheduleState(id);
-          const due = computeDueTicks(config, state?.lastFired ?? null, state?.tickCount ?? 0);
-          for (const tick of due) {
-            await self.storage.recordFire(id, tick.firedAt);
-            ticks.push(tick);
-          }
+          const state = states.get(id) ?? { lastFired: null, tickCount: 0 };
+          const due = computeDueTicks(config, state.lastFired, state.tickCount);
+          ticks.push(...due);
 
-          // Re-schedule (or remove from due-tracking if exhausted).
-          const next = computeNextRun(config);
-          await self.storage.setNextRun(id, next);
+          updates.push({
+            id,
+            firedAt: due.length > 0 ? due[due.length - 1]!.firedAt : undefined,
+            tickIncrement: due.length > 0 ? due.length : undefined,
+            nextRun: computeNextRun(config),
+          });
+        }
+
+        // ONE round-trip writes back state for every fired/rescheduled id.
+        if (updates.length > 0) {
+          await self.storage.commitPoll(updates);
         }
         return ticks;
       }),
@@ -435,6 +488,16 @@ export function computeNextRun(config: DurableScheduleConfig): Date | null {
   if (config.endAt && candidate >= config.endAt) return null;
   if (config.startAt && candidate < config.startAt) return config.startAt;
   return candidate;
+}
+
+/** Stable 32-bit string hash — used for partitioning across scheduler workers. */
+function hashCode(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = (h << 5) - h + s.charCodeAt(i);
+    h |= 0;
+  }
+  return Math.abs(h);
 }
 
 function backfillCron(cron: string, timezone: string, from: Date, to: Date): Date[] {

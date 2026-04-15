@@ -49,6 +49,15 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     return this.schedules.get(id) ?? null;
   }
 
+  async loadSchedules(ids: string[]): Promise<Map<string, DurableScheduleConfig>> {
+    const out = new Map<string, DurableScheduleConfig>();
+    for (const id of ids) {
+      const cfg = this.schedules.get(id);
+      if (cfg) out.set(id, cfg);
+    }
+    return out;
+  }
+
   async loadScheduleState(
     id: string,
   ): Promise<{ lastFired: Date | null; tickCount: number } | null> {
@@ -56,14 +65,46 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     return this.state.get(id) ?? { lastFired: null, tickCount: 0 };
   }
 
-  async recordFire(id: string, firedAt: Date): Promise<void> {
+  async loadScheduleStates(
+    ids: string[],
+  ): Promise<Map<string, { lastFired: Date | null; tickCount: number }>> {
+    const out = new Map<string, { lastFired: Date | null; tickCount: number }>();
+    for (const id of ids) {
+      if (!this.schedules.has(id)) continue;
+      out.set(id, this.state.get(id) ?? { lastFired: null, tickCount: 0 });
+    }
+    return out;
+  }
+
+  async recordFire(id: string, firedAt: Date, count: number = 1): Promise<void> {
     const prev = this.state.get(id) ?? { lastFired: null, tickCount: 0 };
-    this.state.set(id, { lastFired: firedAt, tickCount: prev.tickCount + 1 });
+    this.state.set(id, { lastFired: firedAt, tickCount: prev.tickCount + count });
   }
 
   async setNextRun(id: string, nextRun: Date | null): Promise<void> {
     if (nextRun === null) this.nextRun.delete(id);
     else this.nextRun.set(id, nextRun.getTime());
+  }
+
+  async commitPoll(
+    updates: Array<{
+      id: string;
+      firedAt?: Date;
+      tickIncrement?: number;
+      nextRun: Date | null;
+    }>,
+  ): Promise<void> {
+    for (const u of updates) {
+      if (u.firedAt !== undefined && u.tickIncrement && u.tickIncrement > 0) {
+        const prev = this.state.get(u.id) ?? { lastFired: null, tickCount: 0 };
+        this.state.set(u.id, {
+          lastFired: u.firedAt,
+          tickCount: prev.tickCount + u.tickIncrement,
+        });
+      }
+      if (u.nextRun === null) this.nextRun.delete(u.id);
+      else this.nextRun.set(u.id, u.nextRun.getTime());
+    }
   }
 
   // -------------------------------------------------------------------------

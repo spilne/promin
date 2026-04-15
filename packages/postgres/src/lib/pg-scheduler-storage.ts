@@ -7,7 +7,7 @@
 // election.
 // ---------------------------------------------------------------------------
 
-import { and, asc, eq, isNotNull, lte, sql, type SQL } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, lte, sql, type SQL } from "drizzle-orm";
 import type { DurableScheduleConfig, SchedulerStorage } from "@promin/workflow";
 import { durableSchedules, durableScheduleTicks } from "./scheduler-schema.ts";
 import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
@@ -66,6 +66,17 @@ export class PgSchedulerStorage implements SchedulerStorage {
     return row ? rowToConfig(row) : null;
   }
 
+  async loadSchedules(ids: string[]): Promise<Map<string, DurableScheduleConfig>> {
+    if (ids.length === 0) return new Map();
+    const rows = await this.db
+      .select()
+      .from(durableSchedules)
+      .where(inArray(durableSchedules.id, ids));
+    const out = new Map<string, DurableScheduleConfig>();
+    for (const row of rows) out.set(row.id, rowToConfig(row));
+    return out;
+  }
+
   async loadScheduleState(
     id: string,
   ): Promise<{ lastFired: Date | null; tickCount: number } | null> {
@@ -80,12 +91,34 @@ export class PgSchedulerStorage implements SchedulerStorage {
     return { lastFired: row.lastFired ?? null, tickCount: Number(row.tickCount) };
   }
 
-  async recordFire(id: string, firedAt: Date): Promise<void> {
+  async loadScheduleStates(
+    ids: string[],
+  ): Promise<Map<string, { lastFired: Date | null; tickCount: number }>> {
+    if (ids.length === 0) return new Map();
+    const rows = await this.db
+      .select({
+        id: durableSchedules.id,
+        lastFired: durableSchedules.lastFiredAt,
+        tickCount: durableSchedules.tickCount,
+      })
+      .from(durableSchedules)
+      .where(inArray(durableSchedules.id, ids));
+    const out = new Map<string, { lastFired: Date | null; tickCount: number }>();
+    for (const row of rows) {
+      out.set(row.id, {
+        lastFired: row.lastFired ?? null,
+        tickCount: Number(row.tickCount),
+      });
+    }
+    return out;
+  }
+
+  async recordFire(id: string, firedAt: Date, count: number = 1): Promise<void> {
     await this.db
       .update(durableSchedules)
       .set({
         lastFiredAt: firedAt,
-        tickCount: sql`${durableSchedules.tickCount} + 1`,
+        tickCount: sql`${durableSchedules.tickCount} + ${count}`,
         updatedAt: new Date(),
       })
       .where(eq(durableSchedules.id, id));
@@ -96,6 +129,43 @@ export class PgSchedulerStorage implements SchedulerStorage {
       .update(durableSchedules)
       .set({ nextRun, updatedAt: new Date() })
       .where(eq(durableSchedules.id, id));
+  }
+
+  async commitPoll(
+    updates: Array<{
+      id: string;
+      firedAt?: Date;
+      tickIncrement?: number;
+      nextRun: Date | null;
+    }>,
+  ): Promise<void> {
+    if (updates.length === 0) return;
+
+    // One UPDATE … FROM (VALUES …) statement covers every id in the batch.
+    // Drizzle's .update().from() expects a typed Table, not a (VALUES …)
+    // literal — so the VALUES list and join predicate use `sql`, while the
+    // column SETs reference the typed `durableSchedules` table for safety.
+    // Dates are serialized to ISO strings explicitly — the postgres-js bind
+    // path inside `sql.raw`/`sql.join` doesn't auto-coerce Date in this path,
+    // so we rely on the `::timestamptz` cast to parse the string server-side.
+    const valuesSql = sql.join(
+      updates.map(
+        (u) =>
+          sql`(${u.id}::text, ${u.firedAt?.toISOString() ?? null}::timestamptz, ${u.tickIncrement ?? 0}::bigint, ${u.nextRun?.toISOString() ?? null}::timestamptz)`,
+      ),
+      sql`, `,
+    );
+
+    await this.db
+      .update(durableSchedules)
+      .set({
+        lastFiredAt: sql`COALESCE(v.fired_at, ${durableSchedules.lastFiredAt})`,
+        tickCount: sql`${durableSchedules.tickCount} + v.tick_inc`,
+        nextRun: sql`v.next_run::timestamptz`,
+        updatedAt: new Date(),
+      })
+      .from(sql`(VALUES ${valuesSql}) AS v(id, fired_at, tick_inc, next_run)` as any)
+      .where(sql`${durableSchedules.id} = v.id`);
   }
 
   // -------------------------------------------------------------------------

@@ -26,6 +26,13 @@ export interface ScheduleConfig {
   readonly startAt?: Date;
   /** Stop firing after this time. Schedule auto-disables when endAt is reached. */
   readonly endAt?: Date;
+  /**
+   * Random jitter in ms added to each fire time. Spreads load when many
+   * schedules fire on the same boundary (e.g. midnight crons). Each tick
+   * fires at a uniformly-random offset in `[0, jitterMs)` past its nominal
+   * time. Default: 0 (no jitter). Same approach as Temporal/Quartz.
+   */
+  readonly jitterMs?: number;
   /** Arbitrary metadata passed through to ScheduleTick. */
   readonly metadata?: Record<string, unknown>;
 }
@@ -40,8 +47,6 @@ export interface DurableScheduleConfig extends ScheduleConfig {
   readonly overlapPolicy?: "skip" | "queue" | "cancel_previous" | "allow";
   /** Max catch-up runs when scheduler was down. Default: 0 (no catch-up). */
   readonly maxCatchUp?: number;
-  /** Random jitter in ms added to fire time. Default: 0. */
-  readonly jitterMs?: number;
 }
 
 /** Emitted when a schedule fires. */
