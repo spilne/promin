@@ -349,4 +349,123 @@ describe("DAG visualization", () => {
       expect(dot).toContain("}");
     });
   });
+
+  describe("match step visualization", () => {
+    type Order = { type: string; total: number };
+
+    it("toJSON exposes case labels for selector-mode match", () => {
+      const storage = new InMemoryWorkflowStorage();
+      const dag = workflow<Order>({ name: "shipping", storage })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .match("route", {
+          on: (o) => o.type,
+          cases: {
+            express: () => Pipeline.succeed("E"),
+            standard: () => Pipeline.succeed("S"),
+            freight: () => Pipeline.succeed("F"),
+          },
+          default: () => Pipeline.succeed("D"),
+        })
+        .toJSON();
+
+      const route = dag.steps.find((s) => s.name === "route")!;
+      expect(route.kind).toBe("match");
+      expect(route.cases).toEqual(["express", "standard", "freight"]);
+      expect(route.hasDefault).toBe(true);
+    });
+
+    it("toJSON exposes labels for predicate-mode match (uses provided labels)", () => {
+      const storage = new InMemoryWorkflowStorage();
+      const dag = workflow<Order>({ name: "shipping-pred", storage })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .match("route", {
+          cases: [
+            { label: "vip", when: (o) => o.total > 10_000, then: () => Pipeline.succeed("V") },
+            {
+              label: "express",
+              when: (o) => o.type === "express",
+              then: () => Pipeline.succeed("E"),
+            },
+          ],
+        })
+        .toJSON();
+
+      const route = dag.steps.find((s) => s.name === "route")!;
+      expect(route.cases).toEqual(["vip", "express"]);
+      expect(route.hasDefault).toBeFalsy();
+    });
+
+    it("toJSON falls back to case[N] for unlabeled predicate cases", () => {
+      const storage = new InMemoryWorkflowStorage();
+      const dag = workflow<Order>({ name: "shipping-unlabeled", storage })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .match("route", {
+          cases: [
+            { when: (o) => o.total > 10_000, then: () => Pipeline.succeed("V") },
+            { when: (o) => o.type === "express", then: () => Pipeline.succeed("E") },
+          ],
+        })
+        .toJSON();
+
+      const route = dag.steps.find((s) => s.name === "route")!;
+      expect(route.cases).toEqual(["case[0]", "case[1]"]);
+    });
+
+    it("dagToMermaid renders match as decision node with labeled outgoing edges", () => {
+      const storage = new InMemoryWorkflowStorage();
+      const dag = workflow<Order>({ name: "viz-mermaid", storage })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .match("route", {
+          on: (o) => o.type,
+          cases: {
+            express: () => Pipeline.succeed("E"),
+            standard: () => Pipeline.succeed("S"),
+          },
+          default: () => Pipeline.succeed("D"),
+        })
+        .toJSON();
+
+      const mermaid = dagToMermaid(dag);
+      // Decision node uses diamond shape `{...}`.
+      expect(mermaid).toContain('route{"route"}');
+      // Each case becomes a labeled edge to a phantom case node.
+      expect(mermaid).toContain('route -->|"express"| route_express');
+      expect(mermaid).toContain('route -->|"standard"| route_standard');
+      expect(mermaid).toContain('route -->|"default"| route_default');
+      // Phantom case nodes use rounded shape `(...)`.
+      expect(mermaid).toContain('route_express(["express"])');
+    });
+
+    it("dagToDot renders match as diamond with labeled edges", () => {
+      const storage = new InMemoryWorkflowStorage();
+      const dag = workflow<Order>({ name: "viz-dot", storage })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .match("route", {
+          on: (o) => o.type,
+          cases: {
+            express: () => Pipeline.succeed("E"),
+            standard: () => Pipeline.succeed("S"),
+          },
+        })
+        .toJSON();
+
+      const dot = dagToDot(dag);
+      expect(dot).toContain('"route" [shape=diamond];');
+      expect(dot).toContain('"route" -> "route.express" [label="express"];');
+      expect(dot).toContain('"route" -> "route.standard" [label="standard"];');
+      expect(dot).not.toContain('label="default"');
+    });
+
+    it("non-match steps render as plain rectangles, not diamonds", () => {
+      const storage = new InMemoryWorkflowStorage();
+      const dag = workflow<{}>({ name: "no-match", storage })
+        .step("a", () => Pipeline.succeed(1))
+        .step("b", () => Pipeline.succeed(2))
+        .toJSON();
+
+      const mermaid = dagToMermaid(dag);
+      expect(mermaid).toContain('a["a"]');
+      expect(mermaid).not.toContain("a{");
+    });
+  });
 });

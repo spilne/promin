@@ -356,11 +356,41 @@ export type MatchParams<Input, Current, Output, E extends TaggedError> =
     }
   | {
       readonly cases: ReadonlyArray<{
+        /**
+         * Optional human-readable label for this case. Surfaced in DAG
+         * visualization (Mermaid/DOT edge labels). Without a label, the case
+         * shows up as `case[N]` in diagrams — useful for debugging but easy
+         * to lose track of after refactors. Strongly recommended.
+         */
+        readonly label?: string;
         readonly when: (value: Current) => boolean;
         readonly then: MatchCaseFn<Input, Current, Output, E>;
       }>;
       readonly default?: MatchCaseFn<Input, Current, Output, E>;
     };
+
+/**
+ * Build viz metadata (case labels) from MatchParams for the DAG. The input
+ * type is loose because this only reads the shape (`cases` keys/labels) — the
+ * actual generic parameters of MatchParams are irrelevant to visualization.
+ */
+function matchVizMeta(params: {
+  on?: unknown;
+  cases: Record<string, unknown> | ReadonlyArray<{ label?: string }>;
+  default?: unknown;
+}): { cases: readonly string[]; hasDefault: boolean } {
+  if (typeof params.on === "function") {
+    return {
+      cases: Object.keys(params.cases as Record<string, unknown>),
+      hasDefault: params.default !== undefined,
+    };
+  }
+  const arrayCases = params.cases as ReadonlyArray<{ label?: string }>;
+  return {
+    cases: arrayCases.map((c, i) => c.label ?? `case[${i}]`),
+    hasDefault: params.default !== undefined,
+  };
+}
 
 /** Resolve which case fires for `prev`. Throws `MatchError` if none + no default. */
 function pickMatchBranch<Input, Current, Output, E extends TaggedError>(
@@ -418,6 +448,18 @@ interface StepDefinition {
     input: unknown;
     workflowId: string;
   }) => Pipeline<void, any> | Promise<void>;
+  /**
+   * Static metadata for visualization/documentation. Currently set by `.match()`
+   * to expose its case labels so the DAG can render decision branches; future
+   * step kinds (e.g. branch with named arms) can populate it too. Runtime
+   * execution does not read this — it's purely a visualization hint.
+   */
+  readonly viz?: {
+    /** For `.match()` steps: the case labels (selector keys or predicate labels). */
+    readonly cases?: readonly string[];
+    /** For `.match()` steps: true if a `default` case exists. */
+    readonly hasDefault?: boolean;
+  };
 }
 
 interface ExecuteParams {
@@ -800,6 +842,7 @@ export class WorkflowBuilder<
         const branch = pickMatchBranch(params, prev as Current, name);
         return branch(ctx as any) as Pipeline<unknown, TaggedError>;
       },
+      viz: matchVizMeta(params),
     };
 
     return this._derive([...this._steps, stepDef], name) as any;
@@ -1881,6 +1924,8 @@ export class WorkflowBuilder<
         name: s.name,
         dependsOn: s.dependsOn,
         kind: s.kind,
+        ...(s.viz?.cases ? { cases: s.viz.cases } : {}),
+        ...(s.viz?.hasDefault ? { hasDefault: true } : {}),
       })),
     };
   }
@@ -2062,17 +2107,42 @@ export interface WorkflowDAG {
     readonly name: string;
     readonly dependsOn: readonly string[];
     readonly kind: string;
+    /**
+     * For decision nodes (currently `match`): the named case alternatives.
+     * Visualizers render these as labeled outgoing edges so the static
+     * diagram shows every possible path the workflow can take, not just
+     * the one that fired in some run.
+     */
+    readonly cases?: readonly string[];
+    /** True if a `default` fallback exists for the cases. */
+    readonly hasDefault?: boolean;
   }[];
 }
+
+const sanitize = (s: string): string => s.replace(/[^a-zA-Z0-9]/g, "_");
 
 /** Convert a WorkflowDAG to Mermaid graph syntax. */
 export function dagToMermaid(dag: WorkflowDAG): string {
   const lines: string[] = ["graph LR"];
   for (const step of dag.steps) {
-    const id = step.name.replace(/[^a-zA-Z0-9]/g, "_");
-    lines.push(`    ${id}["${step.name}"]`);
+    const id = sanitize(step.name);
+    // Decision nodes get the diamond shape `{...}`; others stay rectangular.
+    const isDecision = step.kind === "match" && step.cases && step.cases.length > 0;
+    lines.push(isDecision ? `    ${id}{"${step.name}"}` : `    ${id}["${step.name}"]`);
+
     for (const dep of step.dependsOn) {
-      lines.push(`    ${dep.replace(/[^a-zA-Z0-9]/g, "_")} --> ${id}`);
+      lines.push(`    ${sanitize(dep)} --> ${id}`);
+    }
+
+    // For match nodes, render each case as a labeled phantom node so the
+    // alternatives are visible even though only one fires per run.
+    if (isDecision) {
+      const allCases = [...step.cases!, ...(step.hasDefault ? ["default"] : [])];
+      for (const label of allCases) {
+        const caseId = `${id}_${sanitize(label)}`;
+        lines.push(`    ${caseId}(["${label}"])`);
+        lines.push(`    ${id} -->|"${label}"| ${caseId}`);
+      }
     }
   }
   return lines.join("\n");
@@ -2082,9 +2152,22 @@ export function dagToMermaid(dag: WorkflowDAG): string {
 export function dagToDot(dag: WorkflowDAG): string {
   const lines: string[] = [`digraph "${dag.name}" {`];
   for (const step of dag.steps) {
-    lines.push(`    "${step.name}";`);
+    const isDecision = step.kind === "match" && step.cases && step.cases.length > 0;
+    if (isDecision) {
+      lines.push(`    "${step.name}" [shape=diamond];`);
+    } else {
+      lines.push(`    "${step.name}";`);
+    }
     for (const dep of step.dependsOn) {
       lines.push(`    "${dep}" -> "${step.name}";`);
+    }
+    if (isDecision) {
+      const allCases = [...step.cases!, ...(step.hasDefault ? ["default"] : [])];
+      for (const label of allCases) {
+        const caseNode = `${step.name}.${label}`;
+        lines.push(`    "${caseNode}" [shape=ellipse];`);
+        lines.push(`    "${step.name}" -> "${caseNode}" [label="${label}"];`);
+      }
     }
   }
   lines.push("}");
