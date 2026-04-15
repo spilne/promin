@@ -14,7 +14,7 @@
 // used by Effect, Zod, and RxJS for heterogeneous collections.
 // ---------------------------------------------------------------------------
 
-import { Effect } from "effect";
+import { Effect, Data } from "effect";
 import { Pipeline, type TaggedError } from "@promin/core";
 import type { RetryPolicy } from "@promin/core";
 import type { Codec } from "@promin/core";
@@ -322,10 +322,87 @@ export interface DispatchConfig {
 }
 
 // ---------------------------------------------------------------------------
+// match() — params and error type
+// ---------------------------------------------------------------------------
+
+/**
+ * Thrown by `.match()` when no case applies and no `default` was provided.
+ * Carries the step name, mode, and (for selector mode) the resolved key so
+ * debugging prod failures doesn't require re-running the workflow.
+ */
+export class MatchError extends Data.TaggedError("MatchError")<{
+  readonly stepName: string;
+  readonly mode: "selector" | "predicate";
+  readonly selectorKey?: string;
+  readonly message: string;
+}> {}
+
+type MatchCaseFn<Input, Current, Output, E extends TaggedError> = (
+  ctx: StepContext<Input, Current>,
+) => Pipeline<Output, E>;
+
+/**
+ * Two-mode params for `.match()`:
+ * - **Selector**: `on` returns a key; `cases` is a record keyed by that string.
+ * - **Predicate**: `cases` is an array of `{when, then}`; first match wins.
+ *
+ * `default` is optional in both modes; missing match throws `MatchError`.
+ */
+export type MatchParams<Input, Current, Output, E extends TaggedError> =
+  | {
+      readonly on: (value: Current) => string;
+      readonly cases: Record<string, MatchCaseFn<Input, Current, Output, E>>;
+      readonly default?: MatchCaseFn<Input, Current, Output, E>;
+    }
+  | {
+      readonly cases: ReadonlyArray<{
+        readonly when: (value: Current) => boolean;
+        readonly then: MatchCaseFn<Input, Current, Output, E>;
+      }>;
+      readonly default?: MatchCaseFn<Input, Current, Output, E>;
+    };
+
+/** Resolve which case fires for `prev`. Throws `MatchError` if none + no default. */
+function pickMatchBranch<Input, Current, Output, E extends TaggedError>(
+  params: MatchParams<Input, Current, Output, E>,
+  prev: Current,
+  stepName: string,
+): MatchCaseFn<Input, Current, Output, E> {
+  // Selector mode (`on` is a function, `cases` is a record).
+  if ("on" in params && typeof params.on === "function") {
+    const key = params.on(prev);
+    const hit = (params.cases as Record<string, MatchCaseFn<Input, Current, Output, E>>)[key];
+    if (hit) return hit;
+    if (params.default) return params.default;
+    throw new MatchError({
+      stepName,
+      mode: "selector",
+      selectorKey: key,
+      message: `match step "${stepName}" — no case for selector key "${key}" and no default`,
+    });
+  }
+
+  // Predicate mode (`cases` is an array).
+  const cases = params.cases as ReadonlyArray<{
+    when: (v: Current) => boolean;
+    then: MatchCaseFn<Input, Current, Output, E>;
+  }>;
+  for (const c of cases) {
+    if (c.when(prev)) return c.then;
+  }
+  if (params.default) return params.default;
+  throw new MatchError({
+    stepName,
+    mode: "predicate",
+    message: `match step "${stepName}" — no predicate matched and no default`,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Internal step definition
 // ---------------------------------------------------------------------------
 
-type StepKind = "normal" | "map" | "branch" | "sleep" | "signal";
+type StepKind = "normal" | "map" | "branch" | "match" | "sleep" | "signal";
 
 interface StepDefinition {
   readonly name: string;
@@ -649,6 +726,78 @@ export class WorkflowBuilder<
           attempt: 1,
         };
         const branch = params.condition(prev as Current) ? params.ifTrue : params.ifFalse;
+        return branch(ctx as any) as Pipeline<unknown, TaggedError>;
+      },
+    };
+
+    return this._derive([...this._steps, stepDef], name) as any;
+  }
+
+  // ---------------------------------------------------------------------------
+  // match — multi-way branching (selector or first-matching-predicate)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Multi-way conditional routing. Two modes — pick whichever matches your data:
+   *
+   * **Selector mode** — like `switch (key)`. `on` returns a string key that
+   * selects from `cases`. `default` is optional; missing key throws `MatchError`.
+   *
+   * ```typescript
+   * .match("route", {
+   *   on: (order) => order.type,
+   *   cases: {
+   *     express: ({ prev }) => Pipeline.fromPromise(() => expressShip(prev)),
+   *     standard: ({ prev }) => Pipeline.fromPromise(() => standardShip(prev)),
+   *     freight: ({ prev }) => Pipeline.fromPromise(() => freightShip(prev)),
+   *   },
+   *   default: ({ prev }) => Pipeline.fromPromise(() => standardShip(prev)),
+   * })
+   * ```
+   *
+   * **Predicate mode** — like `if/else if`. `cases` is an array; first
+   * matching `when` wins. Order matters.
+   *
+   * ```typescript
+   * .match("route", {
+   *   cases: [
+   *     { when: (o) => o.total > 10_000, then: ({ prev }) => Pipeline.fromPromise(() => vipProcess(prev)) },
+   *     { when: (o) => o.type === "express", then: ({ prev }) => Pipeline.fromPromise(() => expressShip(prev)) },
+   *   ],
+   *   default: ({ prev }) => Pipeline.fromPromise(() => standardShip(prev)),
+   * })
+   * ```
+   *
+   * Output type is inferred as the union of all case Pipeline outputs (or the
+   * common type when they all match). Match contributes one node to the DAG;
+   * deterministic from `prev` so replay re-runs the same case.
+   */
+  match<Name extends string, Output, E2 extends TaggedError = never>(
+    name: Name,
+    params: MatchParams<Input, Current, Output, E2>,
+    options?: StepOptions<Output>,
+  ): WorkflowBuilder<Input, Steps & Record<Name, Output>, Output, Error | E2 | MatchError> {
+    this._validateName(name);
+
+    const dependsOn = this._lastStepName ? [this._lastStepName] : [];
+    const codec = (options?.codec ?? JsonCodec) as Codec<unknown>;
+
+    const stepDef: StepDefinition = {
+      name,
+      dependsOn,
+      kind: "match",
+      codec,
+      execute: (execParams) => {
+        const prevStepName = dependsOn[0];
+        const prev = prevStepName != null ? execParams.results[prevStepName] : execParams.input;
+        const ctx: StepContext<unknown, unknown> = {
+          input: execParams.input,
+          prev,
+          workflowId: execParams.workflowId,
+          attempt: 1,
+        };
+
+        const branch = pickMatchBranch(params, prev as Current, name);
         return branch(ctx as any) as Pipeline<unknown, TaggedError>;
       },
     };

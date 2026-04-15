@@ -36,6 +36,8 @@ export {
   StepTimeoutError,
   WorkflowDeadlineError,
   WorkflowVersionMismatchError,
+  MatchError,
+  type MatchParams,
   topologicalSort,
   computeReadySet,
   type DagNode,

@@ -495,6 +495,151 @@ describe("WorkflowBuilder", () => {
   });
 
   // ---------------------------------------------------------------------------
+  // match — multi-way branching
+  // ---------------------------------------------------------------------------
+
+  describe("match (selector mode)", () => {
+    type Order = { type: "express" | "standard" | "freight"; total: number };
+
+    it("routes to the case matching the selector key", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      const result = await workflow<Order>({ name: "match-sel", storage })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .match("route", {
+          on: (o) => o.type,
+          cases: {
+            express: ({ prev }) => Pipeline.succeed(`EXP:${prev.total}`),
+            standard: ({ prev }) => Pipeline.succeed(`STD:${prev.total}`),
+            freight: ({ prev }) => Pipeline.succeed(`FRT:${prev.total}`),
+          },
+        })
+        .run({ workflowId: "wf-sel-1", input: { type: "freight", total: 500 } });
+      expect(result).toBe("FRT:500");
+    });
+
+    it("falls back to default when key has no case", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      const result = await workflow<Order>({ name: "match-default", storage })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .match("route", {
+          on: (o) => o.type,
+          cases: {
+            express: ({ prev }) => Pipeline.succeed(`EXP:${prev.total}`),
+          },
+          default: ({ prev }) => Pipeline.succeed(`DEFAULT:${prev.total}`),
+        })
+        .run({ workflowId: "wf-sel-2", input: { type: "standard", total: 50 } });
+      expect(result).toBe("DEFAULT:50");
+    });
+
+    it("throws MatchError when no case matches and no default", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      await expect(
+        workflow<Order>({ name: "match-no-case", storage })
+          .step("load", ({ input }) => Pipeline.succeed(input))
+          .match("route", {
+            on: (o) => o.type,
+            cases: {
+              express: ({ prev }) => Pipeline.succeed(`EXP:${prev.total}`),
+            },
+          })
+          .run({ workflowId: "wf-sel-3", input: { type: "freight", total: 50 } }),
+      ).rejects.toThrow(/no case for selector key "freight"/);
+    });
+
+    it("checkpoints the result like any other step", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      await workflow<Order>({ name: "match-cp", storage })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .match("route", {
+          on: (o) => o.type,
+          cases: {
+            express: () => Pipeline.succeed("FAST"),
+            standard: () => Pipeline.succeed("OK"),
+            freight: () => Pipeline.succeed("SLOW"),
+          },
+        })
+        .run({ workflowId: "wf-cp-1", input: { type: "express", total: 1 } });
+
+      const state = storage.getWorkflow("wf-cp-1");
+      expect(state?.steps["route"]?.status).toBe("completed");
+      expect(state?.steps["route"]?.result).toBe("FAST");
+    });
+
+    it("can chain with downstream steps", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      const result = await workflow<Order>({ name: "match-chain", storage })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .match("route", {
+          on: (o) => o.type,
+          cases: {
+            express: ({ prev }) => Pipeline.succeed(`exp-${prev.total}`),
+            standard: ({ prev }) => Pipeline.succeed(`std-${prev.total}`),
+            freight: ({ prev }) => Pipeline.succeed(`frt-${prev.total}`),
+          },
+        })
+        .step("upper", ({ prev }) => Pipeline.succeed(prev.toUpperCase()))
+        .run({ workflowId: "wf-chain-1", input: { type: "express", total: 99 } });
+      expect(result).toBe("EXP-99");
+    });
+  });
+
+  describe("match (predicate mode)", () => {
+    type Order = { type: string; total: number };
+
+    it("first matching predicate wins, even when later ones would also match", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      const result = await workflow<Order>({ name: "match-pred-order", storage })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .match("route", {
+          cases: [
+            // VIP rule fires first — total > 10K wins even though express would too.
+            {
+              when: (o) => o.total > 10_000,
+              then: ({ prev }) => Pipeline.succeed(`VIP:${prev.total}`),
+            },
+            {
+              when: (o) => o.type === "express",
+              then: ({ prev }) => Pipeline.succeed(`EXP:${prev.total}`),
+            },
+          ],
+          default: ({ prev }) => Pipeline.succeed(`STD:${prev.total}`),
+        })
+        .run({ workflowId: "wf-pred-1", input: { type: "express", total: 25_000 } });
+      expect(result).toBe("VIP:25000");
+    });
+
+    it("falls back to default when no predicate matches", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      const result = await workflow<Order>({ name: "match-pred-default", storage })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .match("route", {
+          cases: [
+            {
+              when: (o) => o.type === "express",
+              then: ({ prev }) => Pipeline.succeed(`EXP:${prev.total}`),
+            },
+          ],
+          default: ({ prev }) => Pipeline.succeed(`STD:${prev.total}`),
+        })
+        .run({ workflowId: "wf-pred-2", input: { type: "standard", total: 50 } });
+      expect(result).toBe("STD:50");
+    });
+
+    it("throws MatchError when nothing matches and no default", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      await expect(
+        workflow<Order>({ name: "match-pred-no-match", storage })
+          .step("load", ({ input }) => Pipeline.succeed(input))
+          .match("route", {
+            cases: [{ when: (o) => o.type === "express", then: () => Pipeline.succeed("E") }],
+          })
+          .run({ workflowId: "wf-pred-3", input: { type: "ground", total: 1 } }),
+      ).rejects.toThrow(/no predicate matched/);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // sleep — durable timer
   // ---------------------------------------------------------------------------
 
