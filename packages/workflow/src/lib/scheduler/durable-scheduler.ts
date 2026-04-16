@@ -106,6 +106,37 @@ export class DurableScheduler implements Scheduler {
     await this.storage.setNextRun(config.id, new Date());
   }
 
+  /**
+   * Update an existing schedule, merging changes with its current config.
+   * Unlike `registerAsync` (which requires a full config and upserts), this
+   * takes a partial and preserves unspecified fields — ergonomic for runtime
+   * management UIs that only touch one field at a time ("change the cron",
+   * "bump the timezone", etc.).
+   *
+   * Recomputes `nextRun` from the merged config and writes it back so the
+   * change is picked up on the next poll without a round-trip lag.
+   *
+   * Throws if the schedule doesn't exist. Re-validates cron/rrule/intervalMs
+   * exclusivity on the merged result.
+   */
+  async updateAsync(
+    scheduleId: string,
+    patch: Partial<Omit<DurableScheduleConfig, "id">>,
+  ): Promise<void> {
+    const current = await this.storage.loadSchedule(scheduleId);
+    if (!current) {
+      throw new Error(`Cannot update schedule "${scheduleId}" — does not exist`);
+    }
+    const merged: DurableScheduleConfig = { ...current, ...patch, id: scheduleId };
+    validateScheduleConfig(merged);
+    await this.storage.upsertSchedule(merged);
+
+    // Any change to trigger/timezone/startAt/endAt can alter when the next fire
+    // should be. Recompute and push into due-tracking so the next poll sees it.
+    const next = computeNextRun(merged);
+    await this.storage.setNextRun(scheduleId, next);
+  }
+
   unregister(scheduleId: string, options?: { reason?: string }): void {
     void this.unregisterAsync(scheduleId, options);
   }

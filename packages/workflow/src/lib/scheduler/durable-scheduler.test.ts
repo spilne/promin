@@ -127,6 +127,79 @@ describe("DurableScheduler scalability features", () => {
     );
   });
 
+  // -------------------------------------------------------------------------
+  // Dynamic schedule management (promin-wqg): partial updateAsync
+  // -------------------------------------------------------------------------
+
+  describe("updateAsync — partial update", () => {
+    it("merges patch with existing config and preserves untouched fields", async () => {
+      const storage = new InMemorySchedulerStorage();
+      const scheduler = new DurableScheduler({ storage, pollIntervalMs: 25 });
+
+      await scheduler.registerAsync({
+        id: "daily-report",
+        name: "Daily Report",
+        cron: "0 9 * * *",
+        timezone: "America/New_York",
+        metadata: { team: "analytics" },
+      });
+
+      await scheduler.updateAsync("daily-report", { cron: "0 10 * * *" });
+
+      const list = await scheduler.listAsync();
+      const updated = list.find((s) => s.id === "daily-report")!;
+      expect(updated.cron).toBe("0 10 * * *");
+      // Fields not in the patch remain.
+      expect(updated.name).toBe("Daily Report");
+      expect(updated.timezone).toBe("America/New_York");
+      expect(updated.metadata).toEqual({ team: "analytics" });
+    });
+
+    it("recomputes nextRun after a trigger change", async () => {
+      const storage = new InMemorySchedulerStorage();
+      const scheduler = new DurableScheduler({ storage, pollIntervalMs: 25 });
+
+      await scheduler.registerAsync({ id: "iv-1", intervalMs: 60_000 });
+
+      // Updating interval should push the next run further out.
+      await scheduler.updateAsync("iv-1", { intervalMs: 300_000 });
+
+      // Due-tracking should now reflect the new interval; findDue within the
+      // next few ms should not return it because nextRun moved forward.
+      const due = await storage.findDue({ now: new Date(), limit: 10 });
+      expect(due).not.toContain("iv-1");
+    });
+
+    it("throws on update of non-existent schedule", async () => {
+      const storage = new InMemorySchedulerStorage();
+      const scheduler = new DurableScheduler({ storage, pollIntervalMs: 25 });
+      await expect(scheduler.updateAsync("missing", { cron: "* * * * *" })).rejects.toThrow(
+        /does not exist/,
+      );
+    });
+
+    it("rejects invalid merged config (e.g. cron + intervalMs both set)", async () => {
+      const storage = new InMemorySchedulerStorage();
+      const scheduler = new DurableScheduler({ storage, pollIntervalMs: 25 });
+
+      await scheduler.registerAsync({ id: "conflict", cron: "0 9 * * *" });
+      // Patch adds intervalMs — merged config has both cron AND intervalMs, invalid.
+      await expect(scheduler.updateAsync("conflict", { intervalMs: 60_000 })).rejects.toThrow(
+        /must have exactly one/,
+      );
+    });
+
+    it("can pause via updateAsync enabled: false", async () => {
+      const storage = new InMemorySchedulerStorage();
+      const scheduler = new DurableScheduler({ storage, pollIntervalMs: 25 });
+      await scheduler.registerAsync({ id: "pr-u", intervalMs: 60_000 });
+
+      await scheduler.updateAsync("pr-u", { enabled: false });
+      const updated = (await scheduler.listAsync()).find((s) => s.id === "pr-u")!;
+      expect(updated.enabled).toBe(false);
+    });
+  });
+
   it("namespace isolation — schedules in ns A don't fire in scheduler scoped to ns B", async () => {
     const storage = new InMemorySchedulerStorage();
 
