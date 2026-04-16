@@ -20,7 +20,13 @@
 // ---------------------------------------------------------------------------
 
 import type { RetryPolicy } from "@promin/core";
-import type { JournalEntry, ActivityJournalStorage } from "./activity-journal.ts";
+import {
+  isJournaledSuspendStorage,
+  type JournalEntry,
+  type ActivityJournalStorage,
+  type JournaledSuspendStorage,
+} from "./activity-journal.ts";
+import { WorkflowSuspendedError } from "./durable-pipeline-error.ts";
 
 // ---------------------------------------------------------------------------
 // Ctx types
@@ -64,6 +70,28 @@ export interface JournaledContext<Input, Prev> {
     fn: () => T | Promise<T>,
     options?: ActivityOptions,
   ): Generator<ActivityYield, T, T>;
+
+  /**
+   * Durable sleep inside a journaled step. First run writes a pending journal
+   * entry with `wakeAt = now + duration` and throws `WorkflowSuspendedError`,
+   * releasing the worker. Replay after the scanner (or test driver) completes
+   * the entry resolves to the actual wake time.
+   *
+   * Requires the configured storage to implement `JournaledSuspendStorage`;
+   * throws a clear error at first use if not.
+   */
+  sleep(duration: number | Date): Generator<ActivityYield, Date, Date>;
+
+  /**
+   * Durable signal wait inside a journaled step. First run writes a pending
+   * journal entry naming the signal and throws `WorkflowSuspendedError`.
+   * External `completeSignal(...)` delivers a value, completes the entry,
+   * and enqueues resume. Replay returns the delivered value.
+   *
+   * The generic `T` types the delivered payload; runtime validation (Zod
+   * codec) arrives in Phase 3.
+   */
+  signal<T>(name: string): Generator<ActivityYield, T, T>;
 }
 
 /** The body function passed to `.journaled()`. */
@@ -150,6 +178,26 @@ function makeCtx<Input, Prev>(params: {
             name,
           );
         }
+        // Phase 2 introduces non-activity journal entries (sleep/signal).
+        // Seeing one of those here means the user swapped an activity for a
+        // sleep/signal at the same index between runs — a determinism bug.
+        const recordedType = recorded.stepType ?? "activity";
+        if (recordedType !== "activity") {
+          throw new JournalNonDeterminismError(
+            stepName,
+            activityIndex,
+            `${recordedType}:${recorded.activityName}`,
+            `activity:${name}`,
+          );
+        }
+        // Pending activity rows shouldn't happen (Phase 1 writes only on
+        // completion). If we see one, something earlier went wrong.
+        if (!recorded.exit) {
+          throw new Error(
+            `journal entry ${activityIndex} for step "${stepName}" is pending; ` +
+              `expected a completed activity`,
+          );
+        }
         if (recorded.exit.tag === "Failure") {
           throw new Error(recorded.exit.error);
         }
@@ -188,7 +236,200 @@ function makeCtx<Input, Prev>(params: {
     return yield { _tag: "Activity", name, promise };
   }
 
-  return { input, prev, workflowId, activity };
+  // -------------------------------------------------------------------------
+  // ctx.sleep / ctx.signal (Phase 2) — require JournaledSuspendStorage
+  // -------------------------------------------------------------------------
+
+  function requireSuspendStorage(op: "sleep" | "signal"): JournaledSuspendStorage {
+    if (!isJournaledSuspendStorage(storage)) {
+      throw new Error(
+        `ctx.${op}() requires a WorkflowStorage that implements JournaledSuspendStorage. ` +
+          `Use InMemoryWorkflowStorage or PostgresWorkflowStorage, or extend your custom ` +
+          `storage with appendPendingEntry/completePendingEntry/findDueSleeps/findPendingSignal.`,
+      );
+    }
+    return storage;
+  }
+
+  function* sleep(duration: number | Date): Generator<ActivityYield, Date, Date> {
+    const suspendStorage = requireSuspendStorage("sleep");
+    const activityIndex = indexRef.next++;
+    const name = "sleep";
+
+    const promise = (async (): Promise<Date> => {
+      const recorded = journalByIndex.get(activityIndex);
+      const recordedType = recorded?.stepType ?? "activity";
+      if (recorded && recordedType !== "sleep") {
+        throw new JournalNonDeterminismError(
+          stepName,
+          activityIndex,
+          `${recordedType}:${recorded.activityName}`,
+          "sleep",
+        );
+      }
+
+      // Replay after wake — entry is completed with the actual wake time.
+      if (recorded && recorded.phase === "completed" && recorded.exit) {
+        if (recorded.exit.tag === "Failure") {
+          throw new Error(recorded.exit.error);
+        }
+        // Value was stored as an ISO string; hydrate to Date.
+        const raw = recorded.exit.value;
+        return typeof raw === "string" ? new Date(raw) : (raw as Date);
+      }
+
+      // First run (or still pending) — compute wakeAt, persist, suspend.
+      const wakeAt = duration instanceof Date ? duration : new Date(Date.now() + duration);
+      if (!recorded) {
+        await suspendStorage.appendPendingEntry({
+          workflowId,
+          stepName,
+          activityIndex,
+          activityName: name,
+          stepType: "sleep",
+          wakeAt,
+        });
+      }
+      throw new WorkflowSuspendedError({
+        workflowId,
+        stepName,
+        reason: "sleep",
+        message: `sleeping until ${wakeAt.toISOString()}`,
+      });
+    })();
+
+    return yield { _tag: "Activity", name, promise };
+  }
+
+  function* signalImpl<T>(signalName: string): Generator<ActivityYield, T, T> {
+    const suspendStorage = requireSuspendStorage("signal");
+    const activityIndex = indexRef.next++;
+
+    const promise = (async (): Promise<T> => {
+      const recorded = journalByIndex.get(activityIndex);
+      const recordedType = recorded?.stepType ?? "activity";
+      if (recorded && recordedType !== "signal") {
+        throw new JournalNonDeterminismError(
+          stepName,
+          activityIndex,
+          `${recordedType}:${recorded.activityName}`,
+          `signal:${signalName}`,
+        );
+      }
+      if (recorded && recorded.activityName !== signalName) {
+        throw new JournalNonDeterminismError(
+          stepName,
+          activityIndex,
+          recorded.activityName,
+          signalName,
+        );
+      }
+
+      // Replay after delivery — entry completed with the signal payload.
+      if (recorded && recorded.phase === "completed" && recorded.exit) {
+        if (recorded.exit.tag === "Failure") {
+          throw new Error(recorded.exit.error);
+        }
+        return recorded.exit.value as T;
+      }
+
+      // First run (or still pending) — register interest, suspend.
+      if (!recorded) {
+        await suspendStorage.appendPendingEntry({
+          workflowId,
+          stepName,
+          activityIndex,
+          activityName: signalName,
+          stepType: "signal",
+        });
+      }
+      throw new WorkflowSuspendedError({
+        workflowId,
+        stepName,
+        reason: "signal",
+        message: `waiting for signal "${signalName}"`,
+      });
+    })();
+
+    return yield { _tag: "Activity", name: signalName, promise };
+  }
+
+  return { input, prev, workflowId, activity, sleep, signal: signalImpl };
+}
+
+// ---------------------------------------------------------------------------
+// completeSignal — external API used to deliver a value to a suspended step
+// ---------------------------------------------------------------------------
+
+/**
+ * Deliver a signal value to a workflow awaiting it via `ctx.signal(name)`.
+ * Finds the matching pending journal entry and completes it with the given
+ * value. Subsequent replay of the journaled step unblocks at the signal and
+ * continues.
+ *
+ * The caller is responsible for re-enqueuing the workflow for execution after
+ * delivery (via PgStepQueue, in-memory scheduler, or direct re-run). Phase 2b
+ * wires an automatic resume path through the step queue; Phase 2a expects
+ * callers to drive resume themselves.
+ *
+ * Returns `true` if a pending entry was found and completed; `false` if no
+ * matching pending signal exists (already delivered, or never registered).
+ */
+export async function completeSignal(params: {
+  storage: JournaledSuspendStorage;
+  workflowId: string;
+  stepName: string;
+  signalName: string;
+  value: unknown;
+}): Promise<boolean> {
+  const hit = await params.storage.findPendingSignal({
+    workflowId: params.workflowId,
+    stepName: params.stepName,
+    signalName: params.signalName,
+  });
+  if (!hit) return false;
+
+  await params.storage.completePendingEntry({
+    workflowId: params.workflowId,
+    stepName: params.stepName,
+    activityIndex: hit.activityIndex,
+    exit: { tag: "Success", value: params.value },
+  });
+  return true;
+}
+
+/**
+ * Scanner hook — complete all due sleeps up to `limit`. Returns the
+ * completed entries so a caller (or test) can re-enqueue the workflows.
+ *
+ * Usage:
+ * ```ts
+ * const due = await completeDueSleeps({ storage, now, limit: 100 });
+ * for (const { workflowId } of due) {
+ *   await workflow.run({ workflowId }); // re-drive to consume completion
+ * }
+ * ```
+ */
+export async function completeDueSleeps(params: {
+  storage: JournaledSuspendStorage;
+  now: Date;
+  limit: number;
+}): Promise<Array<{ workflowId: string; stepName: string; activityIndex: number; wakeAt: Date }>> {
+  const due = await params.storage.findDueSleeps({
+    now: params.now,
+    limit: params.limit,
+  });
+  for (const entry of due) {
+    await params.storage.completePendingEntry({
+      workflowId: entry.workflowId,
+      stepName: entry.stepName,
+      activityIndex: entry.activityIndex,
+      // Store as ISO string for consistent JSON roundtrip; the generator
+      // hydrates back to Date on replay.
+      exit: { tag: "Success", value: entry.wakeAt.toISOString() },
+    });
+  }
+  return due;
 }
 
 // ---------------------------------------------------------------------------

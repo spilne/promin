@@ -62,14 +62,20 @@ export {
   type WebhookHmacConfig,
 } from "./webhook-trigger.ts";
 
-// Journaled steps (promin-0kt / Phase 1)
+// Journaled steps (promin-0kt Phase 1 + Phase 2)
 export {
   type JournalEntry,
+  type JournalStepType,
+  type JournalPhase,
   type ActivityJournalStorage,
+  type JournaledSuspendStorage,
   isActivityJournalStorage,
+  isJournaledSuspendStorage,
 } from "./activity-journal.ts";
 export {
   runJournaledStep,
+  completeSignal,
+  completeDueSleeps,
   JournalNonDeterminismError,
   JournalStorageMissingError,
   type JournaledContext,

@@ -13,7 +13,11 @@
 // ---------------------------------------------------------------------------
 
 import type { WorkflowStorage, StepAttemptStorage } from "./workflow-storage.ts";
-import type { ActivityJournalStorage, JournalEntry } from "./activity-journal.ts";
+import type {
+  ActivityJournalStorage,
+  JournaledSuspendStorage,
+  JournalEntry,
+} from "./activity-journal.ts";
 import type {
   WorkflowState,
   WorkflowStatus,
@@ -46,7 +50,7 @@ interface MutableWorkflow {
 }
 
 export class InMemoryWorkflowStorage
-  implements WorkflowStorage, StepAttemptStorage, ActivityJournalStorage
+  implements WorkflowStorage, StepAttemptStorage, ActivityJournalStorage, JournaledSuspendStorage
 {
   private workflows = new Map<string, MutableWorkflow>();
   private locks = new Map<string, { expiresAt: number; lockedBy: string }>(); // workflowId → lock info
@@ -542,19 +546,117 @@ export class InMemoryWorkflowStorage
     stepName: string;
     activityIndex: number;
     activityName: string;
-    exit: JournalEntry["exit"];
+    exit: NonNullable<JournalEntry["exit"]>;
   }): Promise<void> {
     const key = this.journalKey(params.workflowId, params.stepName);
     const entries = this.journal.get(key) ?? [];
-    // Idempotent: skip if the same index is already recorded.
+    // Idempotent: skip if the same index is already recorded and completed.
+    const existing = entries.findIndex((e) => e.activityIndex === params.activityIndex);
+    if (existing !== -1 && entries[existing]!.phase !== "pending") return;
+    const entry: JournalEntry = {
+      activityIndex: params.activityIndex,
+      activityName: params.activityName,
+      stepType: "activity",
+      phase: "completed",
+      exit: params.exit,
+      createdAt: new Date(),
+    };
+    if (existing !== -1) entries[existing] = entry;
+    else entries.push(entry);
+    this.journal.set(key, entries);
+  }
+
+  async appendPendingEntry(params: {
+    workflowId: string;
+    stepName: string;
+    activityIndex: number;
+    activityName: string;
+    stepType: "sleep" | "signal";
+    wakeAt?: Date;
+  }): Promise<void> {
+    const key = this.journalKey(params.workflowId, params.stepName);
+    const entries = this.journal.get(key) ?? [];
+    // Idempotent: if entry at this index already exists, leave it alone.
     if (entries.some((e) => e.activityIndex === params.activityIndex)) return;
     entries.push({
       activityIndex: params.activityIndex,
       activityName: params.activityName,
-      exit: params.exit,
+      stepType: params.stepType,
+      phase: "pending",
+      wakeAt: params.wakeAt,
       createdAt: new Date(),
     });
     this.journal.set(key, entries);
+  }
+
+  async completePendingEntry(params: {
+    workflowId: string;
+    stepName: string;
+    activityIndex: number;
+    exit: NonNullable<JournalEntry["exit"]>;
+  }): Promise<void> {
+    const key = this.journalKey(params.workflowId, params.stepName);
+    const entries = this.journal.get(key);
+    if (!entries) return;
+    const idx = entries.findIndex((e) => e.activityIndex === params.activityIndex);
+    if (idx === -1) return;
+    const existing = entries[idx]!;
+    // Idempotent on repeated delivery — ignore if already completed.
+    if (existing.phase === "completed") return;
+    entries[idx] = {
+      ...existing,
+      phase: "completed",
+      exit: params.exit,
+    };
+    this.journal.set(key, entries);
+  }
+
+  async findDueSleeps(params: {
+    now: Date;
+    limit: number;
+  }): Promise<
+    Array<{ workflowId: string; stepName: string; activityIndex: number; wakeAt: Date }>
+  > {
+    const due: Array<{
+      workflowId: string;
+      stepName: string;
+      activityIndex: number;
+      wakeAt: Date;
+    }> = [];
+    for (const [key, entries] of this.journal) {
+      const [workflowId, stepName] = key.split("::") as [string, string];
+      for (const e of entries) {
+        if (
+          e.stepType === "sleep" &&
+          e.phase === "pending" &&
+          e.wakeAt &&
+          e.wakeAt.getTime() <= params.now.getTime()
+        ) {
+          due.push({
+            workflowId,
+            stepName,
+            activityIndex: e.activityIndex,
+            wakeAt: e.wakeAt,
+          });
+          if (due.length >= params.limit) return due;
+        }
+      }
+    }
+    return due;
+  }
+
+  async findPendingSignal(params: {
+    workflowId: string;
+    stepName: string;
+    signalName: string;
+  }): Promise<JournalEntry | null> {
+    const entries = this.journal.get(this.journalKey(params.workflowId, params.stepName));
+    if (!entries) return null;
+    const hit = entries.find(
+      (e) =>
+        e.stepType === "signal" && e.phase === "pending" && e.activityName === params.signalName,
+    );
+    return hit ?? null;
   }
 
   /** Test helper: delete a specific journal entry (simulates crash-before-append). */
