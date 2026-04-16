@@ -54,6 +54,13 @@ export {
 } from "./durable-pipeline-error.ts";
 export { topologicalSort, computeReadySet, type DagNode } from "./workflow-dag.ts";
 export { trigger, WorkflowResult } from "./workflow-trigger.ts";
+export {
+  webhookTrigger,
+  type WebhookTriggerConfig,
+  type WebhookRequest,
+  type WebhookHandler,
+  type WebhookHmacConfig,
+} from "./webhook-trigger.ts";
 
 // Visual editor schema (Phase 2.7)
 export {
