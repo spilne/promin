@@ -204,6 +204,23 @@ export const stepAttempts = pgTable(
   ],
 );
 
+// Activity journal for .journaled() steps — one row per ctx.activity call.
+export const activityJournal = pgTable(
+  "wf_activity_journal",
+  {
+    workflowId: text("workflow_id").notNull(),
+    stepName: text("step_name").notNull(),
+    activityIndex: integer("activity_index").notNull(),
+    activityName: text("activity_name").notNull(),
+    exit: jsonb("exit").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workflowId, t.stepName, t.activityIndex] }),
+    index("wf_activity_journal_step_idx").on(t.workflowId, t.stepName),
+  ],
+);
+
 // ---------------------------------------------------------------------------
 // State machine tables
 // ---------------------------------------------------------------------------

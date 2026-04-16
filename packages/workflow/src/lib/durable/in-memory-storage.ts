@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import type { WorkflowStorage, StepAttemptStorage } from "./workflow-storage.ts";
+import type { ActivityJournalStorage, JournalEntry } from "./activity-journal.ts";
 import type {
   WorkflowState,
   WorkflowStatus,
@@ -44,13 +45,17 @@ interface MutableWorkflow {
   completedAt?: Date;
 }
 
-export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStorage {
+export class InMemoryWorkflowStorage
+  implements WorkflowStorage, StepAttemptStorage, ActivityJournalStorage
+{
   private workflows = new Map<string, MutableWorkflow>();
   private locks = new Map<string, { expiresAt: number; lockedBy: string }>(); // workflowId → lock info
   private readonly instanceId: string;
   private signals = new Map<string, SignalState[]>();
   private attempts = new Map<string, StepAttemptRecord[]>();
   private runHistory = new Map<string, WorkflowRunSummary[]>();
+  /** Activity journal keyed by `${workflowId}::${stepName}` → ordered entries. */
+  private journal = new Map<string, JournalEntry[]>();
   private readonly namespace: string | null;
 
   constructor(config?: { namespace?: string | null; instanceId?: string }) {
@@ -518,6 +523,51 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     return stepName ? all.filter((a) => a.stepName === stepName) : all;
   }
 
+  // ---------------------------------------------------------------------------
+  // ActivityJournalStorage — .journaled() step support
+  // ---------------------------------------------------------------------------
+
+  private journalKey(workflowId: string, stepName: string): string {
+    return `${workflowId}::${stepName}`;
+  }
+
+  async loadJournal(workflowId: string, stepName: string): Promise<JournalEntry[]> {
+    const entries = this.journal.get(this.journalKey(workflowId, stepName)) ?? [];
+    // Defensive copy + stable sort by activityIndex ascending.
+    return [...entries].sort((a, b) => a.activityIndex - b.activityIndex);
+  }
+
+  async appendEntry(params: {
+    workflowId: string;
+    stepName: string;
+    activityIndex: number;
+    activityName: string;
+    exit: JournalEntry["exit"];
+  }): Promise<void> {
+    const key = this.journalKey(params.workflowId, params.stepName);
+    const entries = this.journal.get(key) ?? [];
+    // Idempotent: skip if the same index is already recorded.
+    if (entries.some((e) => e.activityIndex === params.activityIndex)) return;
+    entries.push({
+      activityIndex: params.activityIndex,
+      activityName: params.activityName,
+      exit: params.exit,
+      createdAt: new Date(),
+    });
+    this.journal.set(key, entries);
+  }
+
+  /** Test helper: delete a specific journal entry (simulates crash-before-append). */
+  deleteJournalEntry(workflowId: string, stepName: string, activityIndex: number): void {
+    const key = this.journalKey(workflowId, stepName);
+    const entries = this.journal.get(key);
+    if (!entries) return;
+    this.journal.set(
+      key,
+      entries.filter((e) => e.activityIndex !== activityIndex),
+    );
+  }
+
   /** Test helper: get the raw workflow state. */
   getWorkflow(workflowId: string): WorkflowState | undefined {
     const wf = this.workflows.get(workflowId);
@@ -531,5 +581,6 @@ export class InMemoryWorkflowStorage implements WorkflowStorage, StepAttemptStor
     this.signals.clear();
     this.attempts.clear();
     this.runHistory.clear();
+    this.journal.clear();
   }
 }

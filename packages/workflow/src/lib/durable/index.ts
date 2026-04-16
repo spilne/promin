@@ -62,6 +62,22 @@ export {
   type WebhookHmacConfig,
 } from "./webhook-trigger.ts";
 
+// Journaled steps (promin-0kt / Phase 1)
+export {
+  type JournalEntry,
+  type ActivityJournalStorage,
+  isActivityJournalStorage,
+} from "./activity-journal.ts";
+export {
+  runJournaledStep,
+  JournalNonDeterminismError,
+  JournalStorageMissingError,
+  type JournaledContext,
+  type JournaledStepBody,
+  type ActivityYield,
+  type ActivityOptions,
+} from "./journaled-step.ts";
+
 // Visual editor schema (Phase 2.7)
 export {
   type WorkflowSchema,

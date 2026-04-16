@@ -410,3 +410,109 @@ postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
     expect(report!.result).toBe("Report for 2026-03-31");
   });
 });
+
+// ---------------------------------------------------------------------------
+// .journaled() step end-to-end via PostgresWorkflowStorage
+// ---------------------------------------------------------------------------
+
+postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
+  it("runs activities once on first execute, journals each, replays without re-running", async () => {
+    const storage = await PostgresWorkflowStorage.create({ db: pg.db });
+    let createCalls = 0;
+    let notifyCalls = 0;
+
+    const wf = workflow<{ user: string }>({ name: "signup-pg", storage })
+      .step("load", ({ input }) => Pipeline.succeed(input))
+      .journaled("setup", function* (ctx, prev) {
+        const created = yield* ctx.activity("create", async () => {
+          createCalls++;
+          return { id: `u-${prev.user}`, name: prev.user };
+        });
+        const notified = yield* ctx.activity("notify", async () => {
+          notifyCalls++;
+          return `welcome-${created.id}`;
+        });
+        return { user: created, greeting: notified };
+      });
+
+    const result = await wf.run({
+      workflowId: "pg-journal-1",
+      input: { user: "alice" },
+    });
+
+    expect(createCalls).toBe(1);
+    expect(notifyCalls).toBe(1);
+    expect(result).toEqual({
+      user: { id: "u-alice", name: "alice" },
+      greeting: "welcome-u-alice",
+    });
+
+    // Journal persisted in Postgres with the right shape.
+    const journal = await storage.loadJournal("pg-journal-1", "setup");
+    expect(journal).toHaveLength(2);
+    expect(journal[0]!.activityName).toBe("create");
+    expect(journal[0]!.exit).toEqual({
+      tag: "Success",
+      value: { id: "u-alice", name: "alice" },
+    });
+    expect(journal[1]!.activityName).toBe("notify");
+    expect(journal[1]!.exit).toEqual({ tag: "Success", value: "welcome-u-alice" });
+  });
+
+  it("appendEntry is idempotent — double-insert same index is a no-op", async () => {
+    const storage = await PostgresWorkflowStorage.create({ db: pg.db });
+
+    // Need a workflow row to satisfy the FK.
+    await storage.createWorkflow({
+      workflowId: "pg-journal-idem",
+      workflowName: "idem",
+      input: {},
+    });
+
+    const exit = { tag: "Success" as const, value: 42 };
+    await storage.appendEntry({
+      workflowId: "pg-journal-idem",
+      stepName: "s",
+      activityIndex: 0,
+      activityName: "a",
+      exit,
+    });
+    // Second call with same PK — should silently no-op.
+    await storage.appendEntry({
+      workflowId: "pg-journal-idem",
+      stepName: "s",
+      activityIndex: 0,
+      activityName: "a",
+      exit,
+    });
+
+    const journal = await storage.loadJournal("pg-journal-idem", "s");
+    expect(journal).toHaveLength(1);
+    expect(journal[0]!.exit).toEqual(exit);
+  });
+
+  it("FK cascade — deleting the workflow removes its journal entries", async () => {
+    const storage = await PostgresWorkflowStorage.create({ db: pg.db });
+
+    const wf = workflow<{ x: number }>({ name: "cascade-test", storage }).journaled(
+      "body",
+      function* (ctx, _prev) {
+        yield* ctx.activity("a", async () => 1);
+        yield* ctx.activity("b", async () => 2);
+        return "done";
+      },
+    );
+
+    await wf.run({ workflowId: "pg-journal-cascade", input: { x: 1 } });
+
+    const before = await storage.loadJournal("pg-journal-cascade", "body");
+    expect(before).toHaveLength(2);
+
+    // Cascade via the workflow's FK. purgeCompleted is the public path for
+    // deleting a completed workflow row and everything attached to it.
+    await storage.purgeCompleted({ olderThanMs: -1, limit: 100 });
+
+    const after = await storage.loadJournal("pg-journal-cascade", "body");
+    expect(after).toHaveLength(0);
+  });
+});

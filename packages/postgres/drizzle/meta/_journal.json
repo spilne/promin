@@ -92,6 +92,13 @@
       "when": 1743400012000,
       "tag": "0012_scheduler_namespace",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1743400013000,
+      "tag": "0013_activity_journal",
+      "breakpoints": true
     }
   ]
 }

@@ -15,6 +15,12 @@
 // ---------------------------------------------------------------------------
 
 import { Effect, Data } from "effect";
+import { isActivityJournalStorage, type ActivityJournalStorage } from "./activity-journal.ts";
+import {
+  runJournaledStep,
+  JournalStorageMissingError,
+  type JournaledStepBody,
+} from "./journaled-step.ts";
 import { Pipeline, type TaggedError } from "@promin/core";
 import type { RetryPolicy } from "@promin/core";
 import type { Codec } from "@promin/core";
@@ -432,7 +438,7 @@ function pickMatchBranch<Input, Current, Output, E extends TaggedError>(
 // Internal step definition
 // ---------------------------------------------------------------------------
 
-type StepKind = "normal" | "map" | "branch" | "match" | "sleep" | "signal";
+type StepKind = "normal" | "map" | "branch" | "match" | "sleep" | "signal" | "journaled";
 
 interface StepDefinition {
   readonly name: string;
@@ -769,6 +775,79 @@ export class WorkflowBuilder<
         };
         const branch = params.condition(prev as Current) ? params.ifTrue : params.ifFalse;
         return branch(ctx as any) as Pipeline<unknown, TaggedError>;
+      },
+    };
+
+    return this._derive([...this._steps, stepDef], name) as any;
+  }
+
+  // ---------------------------------------------------------------------------
+  // journaled — generator body with per-activity replay (promin-0kt / Phase 1)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Add a journaled step — a step whose body is a generator, with each
+   * `yield* ctx.activity(name, fn)` journaled as a checkpoint. On retry or
+   * replay within the step, already-journaled activities return their
+   * recorded value without re-executing; only un-journaled activities run.
+   *
+   * Requires the configured `WorkflowStorage` to also implement
+   * `ActivityJournalStorage` (InMemoryWorkflowStorage and
+   * PostgresWorkflowStorage do). `.build()` throws otherwise.
+   *
+   * ```typescript
+   * workflow({ name: "signup", storage })
+   *   .step("load", ({ input }) => Pipeline.succeed(input))
+   *   .journaled("create-and-notify", function*(ctx, prev) {
+   *     const user = yield* ctx.activity("create", () => createUser(prev))
+   *     const email = yield* ctx.activity("send-email", () => sendEmail(user))
+   *     return { user, email }
+   *   })
+   * ```
+   *
+   * Why a generator (not async): the body signature rejects bare `await` at
+   * compile time, so every side effect flows through `ctx.activity()` — the
+   * only thing that writes to the journal. Without this constraint, a bare
+   * `await fetch(...)` in the body silently re-fires on replay with a
+   * different result than the journaled one. That's the footgun we prevent.
+   */
+  journaled<Name extends string, Output>(
+    name: Name,
+    body: JournaledStepBody<Input, Current, Output>,
+    options?: StepOptions<Output>,
+  ): WorkflowBuilder<
+    Input,
+    Steps & Record<Name, Output>,
+    Output,
+    Error | JournalStorageMissingError
+  > {
+    this._validateName(name);
+    if (!isActivityJournalStorage(this._storage)) {
+      throw new JournalStorageMissingError(name);
+    }
+
+    const dependsOn = this._lastStepName ? [this._lastStepName] : [];
+    const codec = (options?.codec ?? JsonCodec) as Codec<unknown>;
+    const journalStorage = this._storage as WorkflowStorage & ActivityJournalStorage;
+
+    const stepDef: StepDefinition = {
+      name,
+      dependsOn,
+      kind: "journaled",
+      codec,
+      execute: (execParams) => {
+        const prevStepName = dependsOn[0];
+        const prev = prevStepName != null ? execParams.results[prevStepName] : execParams.input;
+        return Pipeline.fromPromise(() =>
+          runJournaledStep<Input, Current, Output>({
+            input: execParams.input as Input,
+            prev: prev as Current,
+            workflowId: execParams.workflowId,
+            stepName: name,
+            storage: journalStorage,
+            body,
+          }),
+        ) as Pipeline<unknown, TaggedError>;
       },
     };
 

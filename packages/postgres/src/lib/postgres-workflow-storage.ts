@@ -15,6 +15,8 @@ import type {
   StepTaskState,
   SignalState,
   StepAttemptRecord,
+  ActivityJournalStorage,
+  JournalEntry,
 } from "@promin/workflow";
 import {
   workflows,
@@ -25,6 +27,7 @@ import {
   workflowLocks,
   stepAttempts,
   stepQueue,
+  activityJournal,
   LOOKUP_BINDINGS,
 } from "./schema.ts";
 import {
@@ -56,7 +59,9 @@ function hashToInt32(str: string): number {
 // PostgresWorkflowStorage
 // ---------------------------------------------------------------------------
 
-export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStorage {
+export class PostgresWorkflowStorage
+  implements WorkflowStorage, StepAttemptStorage, ActivityJournalStorage
+{
   /**
    * Drizzle schemas for all workflow tables.
    * Use these to include workflow tables in your migration pipeline.
@@ -852,5 +857,54 @@ export class PostgresWorkflowStorage implements WorkflowStorage, StepAttemptStor
       startedAt: r.startedAt,
       completedAt: r.completedAt,
     }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // ActivityJournalStorage — .journaled() step support (promin-0kt Phase 1)
+  // ---------------------------------------------------------------------------
+
+  async loadJournal(workflowId: string, stepName: string): Promise<JournalEntry[]> {
+    const rows = await this.db
+      .select()
+      .from(activityJournal)
+      .where(
+        and(eq(activityJournal.workflowId, workflowId), eq(activityJournal.stepName, stepName)),
+      )
+      .orderBy(activityJournal.activityIndex);
+    return rows.map((r) => ({
+      activityIndex: r.activityIndex,
+      activityName: r.activityName,
+      exit: r.exit as JournalEntry["exit"],
+      createdAt: r.createdAt,
+    }));
+  }
+
+  async appendEntry(params: {
+    workflowId: string;
+    stepName: string;
+    activityIndex: number;
+    activityName: string;
+    exit: JournalEntry["exit"];
+  }): Promise<void> {
+    // Idempotent append — PK conflict on (workflow_id, step_name, activity_index)
+    // is silently dropped. Storage-level dedup: the engine may re-call append
+    // during a retry that crashes after a successful INSERT but before the
+    // caller observes completion.
+    await this.db
+      .insert(activityJournal)
+      .values({
+        workflowId: params.workflowId,
+        stepName: params.stepName,
+        activityIndex: params.activityIndex,
+        activityName: params.activityName,
+        exit: params.exit,
+      })
+      .onConflictDoNothing({
+        target: [
+          activityJournal.workflowId,
+          activityJournal.stepName,
+          activityJournal.activityIndex,
+        ],
+      });
   }
 }
