@@ -204,7 +204,9 @@ export const stepAttempts = pgTable(
   ],
 );
 
-// Activity journal for .journaled() steps — one row per ctx.activity call.
+// Activity journal for .journaled() steps — one row per ctx.activity /
+// ctx.sleep / ctx.signal invocation. Phase 2 added stepType/phase/wakeAt
+// for durable sleep & signal suspension.
 export const activityJournal = pgTable(
   "wf_activity_journal",
   {
@@ -212,7 +214,10 @@ export const activityJournal = pgTable(
     stepName: text("step_name").notNull(),
     activityIndex: integer("activity_index").notNull(),
     activityName: text("activity_name").notNull(),
-    exit: jsonb("exit").notNull(),
+    stepType: text("step_type").notNull().default("activity"),
+    phase: text("phase").notNull().default("completed"),
+    wakeAt: timestamp("wake_at", { withTimezone: true }),
+    exit: jsonb("exit"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

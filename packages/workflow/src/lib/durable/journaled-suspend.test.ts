@@ -286,6 +286,58 @@ describe("ctx.signal — durable mid-step signal wait", () => {
   });
 });
 
+describe("DefaultSleepScanner integration with journaled sleeps", () => {
+  it("scanner finds suspended journaled-sleep workflow and re-runs; ctx.sleep auto-completes", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    let postSleepCalls = 0;
+
+    const buildWorkflow = () =>
+      workflow<{ id: string }>({ name: "scanner-test", storage }).journaled(
+        "wait-then-do",
+        function* (ctx) {
+          // Very short sleep so the scanner integration is fast in tests.
+          yield* ctx.sleep(50);
+          yield* ctx.activity("post-sleep", async () => {
+            postSleepCalls++;
+            return "done";
+          });
+          return { ok: true };
+        },
+      );
+
+    const wf = buildWorkflow();
+
+    // Kick off — suspends at sleep. ctx.sleep also calls suspendWorkflow,
+    // so the workflow's step.wakeAt is set for the scanner.
+    await expect(wf.run({ workflowId: "scan-1", input: { id: "a" } })).rejects.toThrow(
+      /sleeping until/,
+    );
+    expect(postSleepCalls).toBe(0);
+
+    // Verify the workflow is marked suspended with the expected wakeAt.
+    const suspendedState = storage.getWorkflow("scan-1");
+    expect(suspendedState?.status).toBe("suspended");
+    const sleepStep = suspendedState?.steps["wait-then-do"];
+    expect(sleepStep?.status).toBe("sleeping");
+    expect(sleepStep?.wakeAt).toBeInstanceOf(Date);
+
+    // Wait past the sleep duration.
+    await new Promise((r) => setTimeout(r, 80));
+
+    // Re-run the workflow (simulating what DefaultSleepScanner does).
+    // ctx.sleep auto-completes the pending journal entry since now >= wakeAt,
+    // the step proceeds past sleep, and post-sleep activity fires.
+    const result = await buildWorkflow().run({ workflowId: "scan-1", input: { id: "a" } });
+    expect(result).toEqual({ ok: true });
+    expect(postSleepCalls).toBe(1);
+
+    // Journal entry should now be completed.
+    const journal = await storage.loadJournal("scan-1", "wait-then-do");
+    expect(journal[0]!.stepType).toBe("sleep");
+    expect(journal[0]!.phase).toBe("completed");
+  });
+});
+
 describe("end-to-end workflow with suspend/resume", () => {
   it("activity → sleep → activity → signal → activity — the full approval flow", async () => {
     const storage = new InMemoryWorkflowStorage();

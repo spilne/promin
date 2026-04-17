@@ -491,6 +491,167 @@ postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
     expect(journal[0]!.exit).toEqual(exit);
   });
 
+  it("ctx.sleep durable suspend/resume end-to-end with Postgres", async () => {
+    const storage = await PostgresWorkflowStorage.create({ db: pg.db });
+    let postSleepCalls = 0;
+
+    const buildWorkflow = () =>
+      workflow<{ id: string }>({ name: "pg-sleep", storage }).journaled(
+        "wait-then-do",
+        function* (ctx) {
+          yield* ctx.sleep(50);
+          yield* ctx.activity("post-sleep", async () => {
+            postSleepCalls++;
+            return "done";
+          });
+          return { ok: true };
+        },
+      );
+
+    // Kick off — suspends at sleep.
+    await expect(
+      buildWorkflow().run({ workflowId: "pg-sleep-1", input: { id: "a" } }),
+    ).rejects.toThrow(/sleeping until/);
+    expect(postSleepCalls).toBe(0);
+
+    // Journal has a pending sleep entry.
+    const pending = await storage.loadJournal("pg-sleep-1", "wait-then-do");
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.stepType).toBe("sleep");
+    expect(pending[0]!.phase).toBe("pending");
+    expect(pending[0]!.wakeAt).toBeInstanceOf(Date);
+
+    // Simulate the scanner firing after wake: re-run the workflow. ctx.sleep
+    // replay sees the pending entry and now >= wakeAt, auto-completes, and
+    // the step continues.
+    await new Promise((r) => setTimeout(r, 80));
+    const result = await buildWorkflow().run({
+      workflowId: "pg-sleep-1",
+      input: { id: "a" },
+    });
+    expect(result).toEqual({ ok: true });
+    expect(postSleepCalls).toBe(1);
+
+    const completed = await storage.loadJournal("pg-sleep-1", "wait-then-do");
+    expect(completed[0]!.phase).toBe("completed");
+    expect(completed[0]!.exit).toMatchObject({ tag: "Success" });
+  });
+
+  it("findDueSleeps returns only pending sleeps past their wakeAt", async () => {
+    const storage = await PostgresWorkflowStorage.create({ db: pg.db });
+
+    // Seed three workflows — one overdue sleep, one future sleep, one completed.
+    for (const id of ["due-a", "due-b", "future"]) {
+      await storage.createWorkflow({
+        workflowId: id,
+        workflowName: "due-test",
+        input: {},
+      });
+    }
+
+    const past = new Date(Date.now() - 10_000);
+    const future = new Date(Date.now() + 60_000);
+
+    await storage.appendPendingEntry({
+      workflowId: "due-a",
+      stepName: "s",
+      activityIndex: 0,
+      activityName: "sleep",
+      stepType: "sleep",
+      wakeAt: past,
+    });
+    await storage.appendPendingEntry({
+      workflowId: "due-b",
+      stepName: "s",
+      activityIndex: 0,
+      activityName: "sleep",
+      stepType: "sleep",
+      wakeAt: past,
+    });
+    await storage.appendPendingEntry({
+      workflowId: "future",
+      stepName: "s",
+      activityIndex: 0,
+      activityName: "sleep",
+      stepType: "sleep",
+      wakeAt: future,
+    });
+
+    const due = await storage.findDueSleeps({ now: new Date(), limit: 10 });
+    const dueIds = new Set(due.map((d) => d.workflowId));
+    expect(dueIds.has("due-a")).toBe(true);
+    expect(dueIds.has("due-b")).toBe(true);
+    expect(dueIds.has("future")).toBe(false);
+  });
+
+  it("completePendingEntry is idempotent on repeated delivery", async () => {
+    const storage = await PostgresWorkflowStorage.create({ db: pg.db });
+    await storage.createWorkflow({
+      workflowId: "idem-sig",
+      workflowName: "idem",
+      input: {},
+    });
+    await storage.appendPendingEntry({
+      workflowId: "idem-sig",
+      stepName: "gate",
+      activityIndex: 0,
+      activityName: "approval",
+      stepType: "signal",
+    });
+
+    // First delivery.
+    await storage.completePendingEntry({
+      workflowId: "idem-sig",
+      stepName: "gate",
+      activityIndex: 0,
+      exit: { tag: "Success", value: { approved: true } },
+    });
+
+    // Second delivery — should no-op; first value preserved.
+    await storage.completePendingEntry({
+      workflowId: "idem-sig",
+      stepName: "gate",
+      activityIndex: 0,
+      exit: { tag: "Success", value: { approved: false } },
+    });
+
+    const [entry] = await storage.loadJournal("idem-sig", "gate");
+    expect(entry!.phase).toBe("completed");
+    expect(entry!.exit).toEqual({ tag: "Success", value: { approved: true } });
+  });
+
+  it("findPendingSignal returns the entry or null", async () => {
+    const storage = await PostgresWorkflowStorage.create({ db: pg.db });
+    await storage.createWorkflow({
+      workflowId: "sig-find",
+      workflowName: "sf",
+      input: {},
+    });
+    await storage.appendPendingEntry({
+      workflowId: "sig-find",
+      stepName: "gate",
+      activityIndex: 0,
+      activityName: "approval",
+      stepType: "signal",
+    });
+
+    const hit = await storage.findPendingSignal({
+      workflowId: "sig-find",
+      stepName: "gate",
+      signalName: "approval",
+    });
+    expect(hit).not.toBeNull();
+    expect(hit!.stepType).toBe("signal");
+    expect(hit!.activityName).toBe("approval");
+
+    const miss = await storage.findPendingSignal({
+      workflowId: "sig-find",
+      stepName: "gate",
+      signalName: "different-name",
+    });
+    expect(miss).toBeNull();
+  });
+
   it("FK cascade — deleting the workflow removes its journal entries", async () => {
     const storage = await PostgresWorkflowStorage.create({ db: pg.db });
 

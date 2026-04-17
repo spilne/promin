@@ -845,6 +845,7 @@ export class WorkflowBuilder<
             workflowId: execParams.workflowId,
             stepName: name,
             storage: journalStorage,
+            workflowStorage: execParams.storage,
             body,
           }),
         ) as Pipeline<unknown, TaggedError>;

@@ -99,6 +99,13 @@
       "when": 1743400013000,
       "tag": "0013_activity_journal",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1743400014000,
+      "tag": "0014_journal_suspend",
+      "breakpoints": true
     }
   ]
 }

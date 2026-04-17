@@ -27,6 +27,7 @@ import {
   type JournaledSuspendStorage,
 } from "./activity-journal.ts";
 import { WorkflowSuspendedError } from "./durable-pipeline-error.ts";
+import type { WorkflowStorage } from "./workflow-storage.ts";
 
 // ---------------------------------------------------------------------------
 // Ctx types
@@ -152,8 +153,14 @@ function makeCtx<Input, Prev>(params: {
   stepName: string;
   journal: JournalEntry[];
   storage: ActivityJournalStorage;
+  /**
+   * Full WorkflowStorage — only used by ctx.sleep/ctx.signal to call
+   * suspendWorkflow() so the existing DefaultSleepScanner picks up
+   * journal-suspended workflows.
+   */
+  workflowStorage?: WorkflowStorage;
 }): JournaledContext<Input, Prev> {
-  const { input, prev, workflowId, stepName, journal, storage } = params;
+  const { input, prev, workflowId, stepName, journal, storage, workflowStorage } = params;
   const indexRef = { next: 0 };
   const journalByIndex = new Map(journal.map((e) => [e.activityIndex, e]));
 
@@ -268,18 +275,19 @@ function makeCtx<Input, Prev>(params: {
         );
       }
 
-      // Replay after wake — entry is completed with the actual wake time.
+      // Replay after completion — entry holds the actual wake time.
       if (recorded && recorded.phase === "completed" && recorded.exit) {
-        if (recorded.exit.tag === "Failure") {
-          throw new Error(recorded.exit.error);
-        }
-        // Value was stored as an ISO string; hydrate to Date.
+        if (recorded.exit.tag === "Failure") throw new Error(recorded.exit.error);
         const raw = recorded.exit.value;
         return typeof raw === "string" ? new Date(raw) : (raw as Date);
       }
 
-      // First run (or still pending) — compute wakeAt, persist, suspend.
-      const wakeAt = duration instanceof Date ? duration : new Date(Date.now() + duration);
+      // First run or pending replay — determine wake time.
+      // Use the recorded wakeAt when replaying a pending entry so time isn't
+      // re-computed (which would drift on every replay).
+      const wakeAt =
+        recorded?.wakeAt ?? (duration instanceof Date ? duration : new Date(Date.now() + duration));
+
       if (!recorded) {
         await suspendStorage.appendPendingEntry({
           workflowId,
@@ -287,6 +295,29 @@ function makeCtx<Input, Prev>(params: {
           activityIndex,
           activityName: name,
           stepType: "sleep",
+          wakeAt,
+        });
+      }
+
+      // Self-healing replay: if the scanner re-ran us and our wake time has
+      // passed, complete the entry here (no external completion needed) and
+      // return. The DefaultSleepScanner's existing "run workflow on wake"
+      // loop works unchanged — ctx.sleep does its own time check.
+      if (Date.now() >= wakeAt.getTime()) {
+        await suspendStorage.completePendingEntry({
+          workflowId,
+          stepName,
+          activityIndex,
+          exit: { tag: "Success", value: wakeAt.toISOString() },
+        });
+        return wakeAt;
+      }
+
+      // Still sleeping — mark the WORKFLOW as suspended at step level so the
+      // existing DefaultSleepScanner (which scans step.wakeAt) picks it up.
+      if (workflowStorage) {
+        await workflowStorage.suspendWorkflow(workflowId, stepName, {
+          status: "sleeping",
           wakeAt,
         });
       }
@@ -333,7 +364,10 @@ function makeCtx<Input, Prev>(params: {
         return recorded.exit.value as T;
       }
 
-      // First run (or still pending) — register interest, suspend.
+      // First run (or still pending) — register interest, mark the workflow
+      // suspended, then suspend. The DefaultSleepScanner ignores workflows
+      // without a wakeAt, so signals require external delivery via
+      // `completeSignal` to resume (no automatic wake from the scanner).
       if (!recorded) {
         await suspendStorage.appendPendingEntry({
           workflowId,
@@ -341,6 +375,12 @@ function makeCtx<Input, Prev>(params: {
           activityIndex,
           activityName: signalName,
           stepType: "signal",
+        });
+      }
+      if (workflowStorage) {
+        await workflowStorage.suspendWorkflow(workflowId, stepName, {
+          status: "waiting_signal",
+          signalName,
         });
       }
       throw new WorkflowSuspendedError({
@@ -451,12 +491,26 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
   workflowId: string;
   stepName: string;
   storage: ActivityJournalStorage;
+  /**
+   * Full WorkflowStorage — when provided, ctx.sleep/ctx.signal call
+   * suspendWorkflow() so the existing DefaultSleepScanner resumes them.
+   * Omit only when driving runJournaledStep directly from tests.
+   */
+  workflowStorage?: WorkflowStorage;
   body: JournaledStepBody<Input, Prev, Output>;
 }): Promise<Output> {
-  const { input, prev, workflowId, stepName, storage, body } = params;
+  const { input, prev, workflowId, stepName, storage, workflowStorage, body } = params;
 
   const journal = await storage.loadJournal(workflowId, stepName);
-  const ctx = makeCtx({ input, prev, workflowId, stepName, journal, storage });
+  const ctx = makeCtx({
+    input,
+    prev,
+    workflowId,
+    stepName,
+    journal,
+    storage,
+    workflowStorage,
+  });
   const gen = body(ctx, prev);
 
   let step: IteratorResult<ActivityYield, Output>;

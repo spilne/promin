@@ -16,6 +16,7 @@ import type {
   SignalState,
   StepAttemptRecord,
   ActivityJournalStorage,
+  JournaledSuspendStorage,
   JournalEntry,
 } from "@promin/workflow";
 import {
@@ -60,7 +61,7 @@ function hashToInt32(str: string): number {
 // ---------------------------------------------------------------------------
 
 export class PostgresWorkflowStorage
-  implements WorkflowStorage, StepAttemptStorage, ActivityJournalStorage
+  implements WorkflowStorage, StepAttemptStorage, ActivityJournalStorage, JournaledSuspendStorage
 {
   /**
    * Drizzle schemas for all workflow tables.
@@ -871,12 +872,7 @@ export class PostgresWorkflowStorage
         and(eq(activityJournal.workflowId, workflowId), eq(activityJournal.stepName, stepName)),
       )
       .orderBy(activityJournal.activityIndex);
-    return rows.map((r) => ({
-      activityIndex: r.activityIndex,
-      activityName: r.activityName,
-      exit: r.exit as JournalEntry["exit"],
-      createdAt: r.createdAt,
-    }));
+    return rows.map(rowToJournalEntry);
   }
 
   async appendEntry(params: {
@@ -884,7 +880,7 @@ export class PostgresWorkflowStorage
     stepName: string;
     activityIndex: number;
     activityName: string;
-    exit: JournalEntry["exit"];
+    exit: NonNullable<JournalEntry["exit"]>;
   }): Promise<void> {
     // Idempotent append — PK conflict on (workflow_id, step_name, activity_index)
     // is silently dropped. Storage-level dedup: the engine may re-call append
@@ -897,6 +893,8 @@ export class PostgresWorkflowStorage
         stepName: params.stepName,
         activityIndex: params.activityIndex,
         activityName: params.activityName,
+        stepType: "activity",
+        phase: "completed",
         exit: params.exit,
       })
       .onConflictDoNothing({
@@ -907,4 +905,131 @@ export class PostgresWorkflowStorage
         ],
       });
   }
+
+  // ---------------------------------------------------------------------------
+  // JournaledSuspendStorage — Phase 2 (ctx.sleep / ctx.signal)
+  // ---------------------------------------------------------------------------
+
+  async appendPendingEntry(params: {
+    workflowId: string;
+    stepName: string;
+    activityIndex: number;
+    activityName: string;
+    stepType: "sleep" | "signal";
+    wakeAt?: Date;
+  }): Promise<void> {
+    await this.db
+      .insert(activityJournal)
+      .values({
+        workflowId: params.workflowId,
+        stepName: params.stepName,
+        activityIndex: params.activityIndex,
+        activityName: params.activityName,
+        stepType: params.stepType,
+        phase: "pending",
+        wakeAt: params.wakeAt,
+        exit: null,
+      })
+      .onConflictDoNothing({
+        target: [
+          activityJournal.workflowId,
+          activityJournal.stepName,
+          activityJournal.activityIndex,
+        ],
+      });
+  }
+
+  async completePendingEntry(params: {
+    workflowId: string;
+    stepName: string;
+    activityIndex: number;
+    exit: NonNullable<JournalEntry["exit"]>;
+  }): Promise<void> {
+    // Idempotent on repeated delivery: the WHERE clause restricts to still-
+    // pending rows, so a second call on an already-completed row no-ops.
+    await this.db
+      .update(activityJournal)
+      .set({ phase: "completed", exit: params.exit })
+      .where(
+        and(
+          eq(activityJournal.workflowId, params.workflowId),
+          eq(activityJournal.stepName, params.stepName),
+          eq(activityJournal.activityIndex, params.activityIndex),
+          eq(activityJournal.phase, "pending"),
+        ),
+      );
+  }
+
+  async findDueSleeps(params: {
+    now: Date;
+    limit: number;
+  }): Promise<
+    Array<{ workflowId: string; stepName: string; activityIndex: number; wakeAt: Date }>
+  > {
+    const rows = await this.db
+      .select({
+        workflowId: activityJournal.workflowId,
+        stepName: activityJournal.stepName,
+        activityIndex: activityJournal.activityIndex,
+        wakeAt: activityJournal.wakeAt,
+      })
+      .from(activityJournal)
+      .where(
+        and(
+          eq(activityJournal.stepType, "sleep"),
+          eq(activityJournal.phase, "pending"),
+          sql`${activityJournal.wakeAt} <= ${params.now.toISOString()}::timestamptz`,
+        ),
+      )
+      .orderBy(activityJournal.wakeAt)
+      .limit(params.limit);
+    return rows.map((r) => ({
+      workflowId: r.workflowId,
+      stepName: r.stepName,
+      activityIndex: r.activityIndex,
+      // WHERE guarantees non-null wakeAt here.
+      wakeAt: r.wakeAt!,
+    }));
+  }
+
+  async findPendingSignal(params: {
+    workflowId: string;
+    stepName: string;
+    signalName: string;
+  }): Promise<JournalEntry | null> {
+    const [row] = await this.db
+      .select()
+      .from(activityJournal)
+      .where(
+        and(
+          eq(activityJournal.workflowId, params.workflowId),
+          eq(activityJournal.stepName, params.stepName),
+          eq(activityJournal.activityName, params.signalName),
+          eq(activityJournal.stepType, "signal"),
+          eq(activityJournal.phase, "pending"),
+        ),
+      )
+      .limit(1);
+    return row ? rowToJournalEntry(row) : null;
+  }
+}
+
+function rowToJournalEntry(row: {
+  activityIndex: number;
+  activityName: string;
+  stepType: string;
+  phase: string;
+  wakeAt: Date | null;
+  exit: unknown;
+  createdAt: Date;
+}): JournalEntry {
+  return {
+    activityIndex: row.activityIndex,
+    activityName: row.activityName,
+    stepType: row.stepType as JournalEntry["stepType"],
+    phase: row.phase as JournalEntry["phase"],
+    wakeAt: row.wakeAt ?? undefined,
+    exit: (row.exit ?? undefined) as JournalEntry["exit"],
+    createdAt: row.createdAt,
+  };
 }
