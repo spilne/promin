@@ -24,7 +24,7 @@ schedulerTestSuite("DurableScheduler+InMemoryStorage", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Scalability features (promin-bqs): batch firing, jitter, partitioning,
+// Scalability features — batch firing, jitter, partitioning,
 // namespace isolation. Storage-backend agnostic — exercised here against
 // InMemorySchedulerStorage; the same behaviors hold for Postgres/Redis since
 // the logic lives in the shell.
@@ -128,7 +128,7 @@ describe("DurableScheduler scalability features", () => {
   });
 
   // -------------------------------------------------------------------------
-  // Dynamic schedule management (promin-wqg): partial updateAsync
+  // Dynamic schedule management — partial updateAsync
   // -------------------------------------------------------------------------
 
   describe("updateAsync — partial update", () => {

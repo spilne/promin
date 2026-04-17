@@ -26,16 +26,16 @@ export type JournalPhase = "pending" | "completed";
  * delivery). `completed` entries have an exit and are the source of truth on
  * replay.
  *
- * Success values are codec-encoded (Phase 1: plain JSON; Phase 3: per-activity
- * Zod codecs). Errors serialize to string in Phase 1; Phase 3 upgrades
- * to tagged error unions for type-safe rethrow on replay.
+ * Success values are codec-encoded (currently plain JSON; per-activity
+ * Zod codecs are a planned follow-up). Errors serialize to string today;
+ * tagged error unions for type-safe rethrow are a future refinement.
  */
 export interface JournalEntry {
   readonly activityIndex: number;
   readonly activityName: string;
-  /** Default `"activity"` preserves Phase 1 behavior for older impls. */
+  /** Default `"activity"` preserves backward compat for entries without stepType. */
   readonly stepType?: JournalStepType;
-  /** Default `"completed"` preserves Phase 1 behavior (all entries were completed). */
+  /** Default `"completed"` preserves backward compat for entries without phase. */
   readonly phase?: JournalPhase;
   /** Exit is set once the entry reaches `completed` phase. `undefined` while `pending`. */
   readonly exit?:
@@ -63,8 +63,9 @@ export interface ActivityJournalStorage {
   /**
    * Append one journal entry. Idempotent on (workflowId, stepName, activityIndex):
    * re-inserting the same index is a no-op (the engine only appends after the
-   * side effect completes, so at-most-once is the target; see Phase 3 for
-   * two-phase record when at-least-once is unsafe).
+   * side effect completes, so at-most-once is the target; a future two-phase
+   * record mode will support at-least-once semantics for non-idempotent
+   * activities).
    */
   appendEntry(params: {
     readonly workflowId: string;
@@ -76,7 +77,7 @@ export interface ActivityJournalStorage {
 }
 
 // ---------------------------------------------------------------------------
-// JournaledSuspendStorage — Phase 2 extension for ctx.sleep / ctx.signal
+// JournaledSuspendStorage — extension for ctx.sleep / ctx.signal
 //
 // Strict superset of ActivityJournalStorage. Storages opt in by implementing
 // these four methods; the engine type-guards at first use of ctx.sleep /

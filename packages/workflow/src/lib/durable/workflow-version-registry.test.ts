@@ -324,7 +324,7 @@ describe("WorkflowVersionRegistry", () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Fluent API + drain detection (Phase 4 ergonomics)
+  // Fluent scoped builder + drain detection
   // ---------------------------------------------------------------------------
 
   describe("WorkflowVersionRegistry.for() scoped builder", () => {

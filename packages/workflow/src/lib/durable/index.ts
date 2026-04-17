@@ -66,7 +66,7 @@ export {
   type WebhookHmacConfig,
 } from "./webhook-trigger.ts";
 
-// Journaled steps (promin-0kt Phase 1 + Phase 2)
+// Journaled steps — generator-body DAG steps with per-activity replay
 export {
   type JournalEntry,
   type JournalStepType,
@@ -88,7 +88,7 @@ export {
   type ActivityOptions,
 } from "./journaled-step.ts";
 
-// Visual editor schema (Phase 2.7)
+// Visual editor schema — serializable DAG representation for authoring UIs
 export {
   type WorkflowSchema,
   type StepSchema,

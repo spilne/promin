@@ -806,7 +806,7 @@ export class WorkflowBuilder<
   }
 
   // ---------------------------------------------------------------------------
-  // journaled — generator body with per-activity replay (promin-0kt / Phase 1)
+  // journaled — generator body with per-activity replay
   // ---------------------------------------------------------------------------
 
   /**

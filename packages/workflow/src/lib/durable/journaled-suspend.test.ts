@@ -1,9 +1,7 @@
 // ---------------------------------------------------------------------------
-// Phase 2 — ctx.sleep + ctx.signal inside journaled steps.
-//
-// These tests exercise suspend/resume at the journal level using the
-// in-memory storage. Phase 2b adds the Postgres scanner + completeSignal
-// top-level API for distributed deployments.
+// ctx.sleep + ctx.signal inside journaled steps — suspend/resume tests.
+// Exercises the journal-level suspend mechanism end-to-end against the
+// in-memory storage. Postgres integration is covered in the postgres package.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, beforeEach } from "bun:test";

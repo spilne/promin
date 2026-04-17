@@ -205,8 +205,8 @@ export const stepAttempts = pgTable(
 );
 
 // Activity journal for .journaled() steps — one row per ctx.activity /
-// ctx.sleep / ctx.signal invocation. Phase 2 added stepType/phase/wakeAt
-// for durable sleep & signal suspension.
+// ctx.sleep / ctx.signal invocation. stepType/phase/wakeAt support
+// durable sleep and signal suspension alongside completed activity entries.
 export const activityJournal = pgTable(
   "wf_activity_journal",
   {

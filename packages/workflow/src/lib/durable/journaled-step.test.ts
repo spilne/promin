@@ -10,7 +10,7 @@ import {
 import type { JournaledContext } from "./journaled-step.ts";
 
 // ---------------------------------------------------------------------------
-// Tests cover the Phase 1 acceptance gate:
+// Tests cover the core .journaled() contract:
 //  - Activity runs once on first execution, result journaled.
 //  - Replay of the same (workflowId, stepName) returns the journaled value
 //    without re-executing the activity fn.

@@ -861,7 +861,7 @@ export class PostgresWorkflowStorage
   }
 
   // ---------------------------------------------------------------------------
-  // ActivityJournalStorage — .journaled() step support (promin-0kt Phase 1)
+  // ActivityJournalStorage — .journaled() step support
   // ---------------------------------------------------------------------------
 
   async loadJournal(workflowId: string, stepName: string): Promise<JournalEntry[]> {
@@ -907,7 +907,7 @@ export class PostgresWorkflowStorage
   }
 
   // ---------------------------------------------------------------------------
-  // JournaledSuspendStorage — Phase 2 (ctx.sleep / ctx.signal)
+  // JournaledSuspendStorage — ctx.sleep / ctx.signal
   // ---------------------------------------------------------------------------
 
   async appendPendingEntry(params: {

@@ -43,7 +43,7 @@ export interface ActivityYield {
   readonly promise: Promise<unknown>;
 }
 
-/** Per-activity configuration — retry for now; Phase 3 adds codec, idempotent, etc. */
+/** Per-activity configuration — retry today; codec/idempotent options planned. */
 export interface ActivityOptions {
   readonly retry?: RetryPolicy<unknown>;
 }
@@ -122,8 +122,8 @@ export interface JournaledContext<Input, Prev> {
    * External `completeSignal(...)` delivers a value, completes the entry,
    * and enqueues resume. Replay returns the delivered value.
    *
-   * The generic `T` types the delivered payload; runtime validation (Zod
-   * codec) arrives in Phase 3.
+   * The generic `T` types the delivered payload; runtime validation via a
+   * per-signal Zod codec is a planned refinement.
    */
   signal<T>(name: string): Generator<ActivityYield, T, T>;
 }
@@ -141,8 +141,8 @@ export type JournaledStepBody<Input, Prev, Output> = (
 /**
  * Thrown when the engine detects that the step body's structure has diverged
  * from the journaled execution (e.g. an activity was renamed between the
- * journaled run and the replay). Phase 1 catches name mismatches only; Phase 3
- * adds step-type and payload-hash checks.
+ * journaled run and the replay). Today catches activity-name and step-type
+ * mismatches; payload-hash checks are a planned refinement.
  */
 export class JournalNonDeterminismError extends Error {
   readonly _tag = "JournalNonDeterminismError";
@@ -237,9 +237,9 @@ function makeCtx<Input, Prev>(params: {
             name,
           );
         }
-        // Phase 2 introduces non-activity journal entries (sleep/signal).
-        // Seeing one of those here means the user swapped an activity for a
-        // sleep/signal at the same index between runs — a determinism bug.
+        // Seeing a sleep/signal journal entry at an activity yield index
+        // means the user swapped an activity for a sleep/signal at the same
+        // position between runs — a determinism bug.
         const recordedType = recorded.stepType ?? "activity";
         if (recordedType !== "activity") {
           throw new JournalNonDeterminismError(
@@ -249,8 +249,9 @@ function makeCtx<Input, Prev>(params: {
             `activity:${name}`,
           );
         }
-        // Pending activity rows shouldn't happen (Phase 1 writes only on
-        // completion). If we see one, something earlier went wrong.
+        // Pending activity rows shouldn't happen — the engine only appends
+        // activity entries after their side effect completes. If we see one,
+        // something earlier went wrong.
         if (!recorded.exit) {
           throw new Error(
             `journal entry ${activityIndex} for step "${stepName}" is pending; ` +
@@ -296,7 +297,7 @@ function makeCtx<Input, Prev>(params: {
   }
 
   // -------------------------------------------------------------------------
-  // ctx.sleep / ctx.signal (Phase 2) — require JournaledSuspendStorage
+  // ctx.sleep / ctx.signal — require JournaledSuspendStorage
   // -------------------------------------------------------------------------
 
   function requireSuspendStorage(op: "sleep" | "signal"): JournaledSuspendStorage {
@@ -485,9 +486,9 @@ function makeCtx<Input, Prev>(params: {
  * continues.
  *
  * The caller is responsible for re-enqueuing the workflow for execution after
- * delivery (via PgStepQueue, in-memory scheduler, or direct re-run). Phase 2b
- * wires an automatic resume path through the step queue; Phase 2a expects
- * callers to drive resume themselves.
+ * delivery (via PgStepQueue, in-memory scheduler, or direct re-run). Today
+ * callers drive resume themselves; an automatic resume path through the
+ * step queue is planned as a refinement.
  *
  * Returns `true` if a pending entry was found and completed; `false` if no
  * matching pending signal exists (already delivered, or never registered).
