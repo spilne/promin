@@ -299,6 +299,110 @@ describe("journaled step", () => {
     });
   });
 
+  describe("ctx.patched + ctx.workflowVersion", () => {
+    it("ctx.patched returns true for names in the workflow's patches array", async () => {
+      const wf = workflow<{ n: number }>({
+        name: "p-test",
+        storage,
+        version: "2",
+        patches: ["new-pricing", "batch"],
+      }).journaled("body", function* (ctx, prev) {
+        const a = ctx.patched("new-pricing");
+        const b = ctx.patched("batch");
+        const c = ctx.patched("unknown"); // not declared — silently false
+        return { a, b, c, n: prev.n };
+      });
+
+      const result = await wf.run({ workflowId: "p-1", input: { n: 42 } });
+      expect(result).toEqual({ a: true, b: true, c: false, n: 42 });
+    });
+
+    it("ctx.patched returns false when no patches declared", async () => {
+      const wf = workflow<{ n: number }>({ name: "p-none", storage, version: "1" }).journaled(
+        "body",
+        function* (ctx) {
+          return { patched: ctx.patched("new-pricing") };
+        },
+      );
+
+      const result = await wf.run({ workflowId: "p-2", input: { n: 1 } });
+      expect(result).toEqual({ patched: false });
+    });
+
+    it("ctx.workflowVersion exposes the stored version", async () => {
+      const wf = workflow<{ n: number }>({
+        name: "v-expose",
+        storage,
+        version: "3",
+      }).journaled("body", function* (ctx) {
+        return { version: ctx.workflowVersion };
+      });
+
+      const result = await wf.run({ workflowId: "v-1", input: { n: 1 } });
+      expect(result).toEqual({ version: "3" });
+    });
+
+    it("ctx.workflowVersion is undefined when workflow has no version set", async () => {
+      const wf = workflow<{ n: number }>({ name: "v-none", storage }).journaled(
+        "body",
+        function* (ctx) {
+          return { version: ctx.workflowVersion };
+        },
+      );
+
+      const result = await wf.run({ workflowId: "v-2", input: { n: 1 } });
+      expect(result).toEqual({ version: undefined });
+    });
+
+    it("drain + patched together — v1 takes old path, v2 takes new path", async () => {
+      // Same body, different `patches` declaration.
+      const body = function* (
+        ctx: JournaledContext<{ amount: number }, { amount: number }>,
+        prev: { amount: number },
+      ) {
+        if (ctx.patched("new-pricing")) {
+          return { total: prev.amount * 2 };
+        } else {
+          return { total: prev.amount };
+        }
+      };
+
+      const v1 = workflow<{ amount: number }>({
+        name: "priced",
+        storage,
+        version: "1",
+        patches: [], // patch off
+      })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .journaled("calc", body)
+        .build();
+
+      await v1.run({ workflowId: "price-v1", input: { amount: 100 } });
+      expect((await storage.getWorkflow("price-v1"))?.result).toEqual({ total: 100 });
+
+      const v2 = workflow<{ amount: number }>({
+        name: "priced",
+        storage,
+        version: "2",
+        onVersionMismatch: "drain",
+        previousVersions: [v1],
+        patches: ["new-pricing"], // patch on
+      })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .journaled("calc", body);
+
+      // Resume v1 workflow — drain delegates to v1 which has patches=[] →
+      // patched returns false → takes v1 path. Already completed so reads cached.
+      const existing = await v2.run({ workflowId: "price-v1", input: { amount: 100 } });
+      expect(existing).toEqual({ total: 100 });
+
+      // Fresh workflow — uses v2 def directly, patches=["new-pricing"] →
+      // patched returns true → takes v2 path.
+      const fresh = await v2.run({ workflowId: "price-v2", input: { amount: 100 } });
+      expect(fresh).toEqual({ total: 200 });
+    });
+  });
+
   describe("composition", () => {
     it("chains with .step() before and after", async () => {
       const result = await workflow<{ n: number }>({ name: "mixed", storage })

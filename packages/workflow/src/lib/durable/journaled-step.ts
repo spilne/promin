@@ -59,6 +59,39 @@ export interface JournaledContext<Input, Prev> {
   readonly workflowId: string;
 
   /**
+   * The version the workflow row was created under, as stored in the DB.
+   * Exposed for user-space custom version-comparison logic (e.g. semver,
+   * date-based ordering) when `ctx.patched()`'s set-membership model
+   * isn't enough. The framework itself uses this ONLY for display — all
+   * drain/patch logic uses equality/membership.
+   *
+   * `undefined` when the workflow was created without a `version` field.
+   */
+  readonly workflowVersion?: string;
+
+  /**
+   * Returns `true` if `name` is in the currently-running workflow
+   * definition's `patches` array. Inline version branches:
+   *
+   * ```typescript
+   * if (ctx.patched("use-new-pricing")) {
+   *   // v2+ code path
+   * } else {
+   *   // v1 code path (for workflows resuming under v1's definition)
+   * }
+   * ```
+   *
+   * Pure set membership — no version comparison. The drain policy ensures
+   * each stored version's own definition (with its own patch list) is the
+   * one running, so `ctx.patched` naturally reflects what the stored
+   * version knew about.
+   *
+   * Throws if `name` wasn't declared in the workflow's `patches` config —
+   * catches typos at runtime instead of silently returning false.
+   */
+  patched(name: string): boolean;
+
+  /**
    * Record an activity as a journal checkpoint. First run executes `fn`,
    * persists the result, resolves to it. Replay resolves to the persisted
    * value without calling `fn`.
@@ -159,8 +192,23 @@ function makeCtx<Input, Prev>(params: {
    * journal-suspended workflows.
    */
   workflowStorage?: WorkflowStorage;
+  /** Stored workflow version — exposed on ctx for user-space logic. */
+  workflowVersion?: string;
+  /** Active patches in the currently-running definition — drives ctx.patched. */
+  patches?: readonly string[];
 }): JournaledContext<Input, Prev> {
-  const { input, prev, workflowId, stepName, journal, storage, workflowStorage } = params;
+  const {
+    input,
+    prev,
+    workflowId,
+    stepName,
+    journal,
+    storage,
+    workflowStorage,
+    workflowVersion,
+    patches,
+  } = params;
+  const patchSet = new Set(patches ?? []);
   const indexRef = { next: 0 };
   const journalByIndex = new Map(journal.map((e) => [e.activityIndex, e]));
 
@@ -394,7 +442,32 @@ function makeCtx<Input, Prev>(params: {
     return yield { _tag: "Activity", name: signalName, promise };
   }
 
-  return { input, prev, workflowId, activity, sleep, signal: signalImpl };
+  function patched(name: string): boolean {
+    // Pure set membership. Returns false (not throws) for names not in the
+    // currently-running definition's patches array — this is load-bearing
+    // for the "same code file, different versions" pattern:
+    //
+    //   if (ctx.patched("new-pricing")) {
+    //     // v2 code path (patches = ["new-pricing"])
+    //   } else {
+    //     // v1 code path (patches = [])
+    //   }
+    //
+    // A throw-on-unknown design would break v1's false branch. Typo catching
+    // is a linter concern, not a runtime one.
+    return patchSet.has(name);
+  }
+
+  return {
+    input,
+    prev,
+    workflowId,
+    workflowVersion,
+    activity,
+    sleep,
+    signal: signalImpl,
+    patched,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -497,9 +570,23 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
    * Omit only when driving runJournaledStep directly from tests.
    */
   workflowStorage?: WorkflowStorage;
+  /** Stored workflow version — surfaced on ctx.workflowVersion. */
+  workflowVersion?: string;
+  /** Active patches in the currently-running definition — drives ctx.patched. */
+  patches?: readonly string[];
   body: JournaledStepBody<Input, Prev, Output>;
 }): Promise<Output> {
-  const { input, prev, workflowId, stepName, storage, workflowStorage, body } = params;
+  const {
+    input,
+    prev,
+    workflowId,
+    stepName,
+    storage,
+    workflowStorage,
+    workflowVersion,
+    patches,
+    body,
+  } = params;
 
   const journal = await storage.loadJournal(workflowId, stepName);
   const ctx = makeCtx({
@@ -510,6 +597,8 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     journal,
     storage,
     workflowStorage,
+    workflowVersion,
+    patches,
   });
   const gen = body(ctx, prev);
 

@@ -862,6 +862,8 @@ export class WorkflowBuilder<
       execute: (execParams) => {
         const prevStepName = dependsOn[0];
         const prev = prevStepName != null ? execParams.results[prevStepName] : execParams.input;
+        const builderVersion = this._version;
+        const builderPatches = this._patches;
         return Pipeline.fromPromise(() =>
           runJournaledStep<Input, Current, Output>({
             input: execParams.input as Input,
@@ -870,6 +872,8 @@ export class WorkflowBuilder<
             stepName: name,
             storage: journalStorage,
             workflowStorage: execParams.storage,
+            workflowVersion: builderVersion,
+            patches: builderPatches,
             body,
           }),
         ) as Pipeline<unknown, TaggedError>;
