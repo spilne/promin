@@ -154,7 +154,11 @@ export class JournalNonDeterminismError extends Error {
   ) {
     super(
       `journaled step "${stepName}" diverged at activity ${activityIndex}: ` +
-        `expected "${expected}", got "${actual}"`,
+        `expected "${expected}", got "${actual}". ` +
+        `This usually means workflow code changed between runs. ` +
+        `Either bump the workflow \`version\` (strict policy throws cleanly) ` +
+        `or use \`onVersionMismatch: "drain"\` + \`previousVersions\` to let ` +
+        `in-flight workflows finish on their original code.`,
     );
   }
 }

@@ -1286,7 +1286,12 @@ export class WorkflowBuilder<
               workflowId,
               expected: this._version,
               actual: storedVersion ?? "(none)",
-              message: `Workflow "${workflowId}" was created with version "${storedVersion ?? "(none)"}" but current code is version "${this._version}"`,
+              message:
+                `Workflow "${workflowId}" was created with version "${storedVersion ?? "(none)"}" ` +
+                `but current code is version "${this._version}". ` +
+                `To resume this workflow, either use \`onVersionMismatch: "drain"\` + ` +
+                `\`previousVersions: [v${storedVersion ?? "N"}]\` on the workflow config, or ` +
+                `register both versions in a WorkflowVersionRegistry.`,
             });
           }
         }
