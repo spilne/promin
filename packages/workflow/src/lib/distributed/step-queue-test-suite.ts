@@ -383,5 +383,109 @@ export function stepQueueTestSuite(factory: () => StepQueue | Promise<StepQueue>
         expect(m["q1"]!.running).toBe(0);
       });
     });
+
+    // -------------------------------------------------------------------
+    // Versioned dispatch
+    // -------------------------------------------------------------------
+
+    describe("versioned dispatch", () => {
+      it("persists version on enqueue and returns it on claim", async () => {
+        const q = await getQueue();
+        await q.enqueue({
+          workflowId: "wf-v",
+          stepName: "s",
+          queue: "vq",
+          input: {},
+          prevResults: {},
+          version: "2",
+        });
+
+        const [task] = await q.claim({ queues: ["vq"], limit: 1 });
+        expect(task).toBeDefined();
+        expect(task!.version).toBe("2");
+      });
+
+      it("claim filter skips tasks the worker can't handle", async () => {
+        const q = await getQueue();
+        // Three tasks: v1, v2, v3. Worker supports v1 + v2 only.
+        await q.enqueue({
+          workflowId: "f-1",
+          stepName: "s",
+          queue: "fq",
+          input: {},
+          prevResults: {},
+          version: "1",
+        });
+        await q.enqueue({
+          workflowId: "f-2",
+          stepName: "s",
+          queue: "fq",
+          input: {},
+          prevResults: {},
+          version: "2",
+        });
+        await q.enqueue({
+          workflowId: "f-3",
+          stepName: "s",
+          queue: "fq",
+          input: {},
+          prevResults: {},
+          version: "3",
+        });
+
+        const claimed = await q.claim({
+          queues: ["fq"],
+          limit: 10,
+          filter: (t) => t.version === "1" || t.version === "2",
+        });
+
+        expect(claimed).toHaveLength(2);
+        expect(claimed.map((t) => t.version).sort()).toEqual(["1", "2"]);
+      });
+
+      it("rejected tasks stay claimable by another worker on the next claim", async () => {
+        const q = await getQueue();
+        await q.enqueue({
+          workflowId: "r-1",
+          stepName: "s",
+          queue: "rq",
+          input: {},
+          prevResults: {},
+          version: "5",
+        });
+
+        // First claim: worker rejects v5 (doesn't support it).
+        const firstPass = await q.claim({
+          queues: ["rq"],
+          limit: 10,
+          filter: (t) => t.version === "1",
+        });
+        expect(firstPass).toHaveLength(0);
+
+        // Second claim: worker that DOES support v5 gets it.
+        const secondPass = await q.claim({
+          queues: ["rq"],
+          limit: 10,
+          filter: (t) => t.version === "5",
+        });
+        expect(secondPass).toHaveLength(1);
+        expect(secondPass[0]!.version).toBe("5");
+      });
+
+      it("unversioned tasks have undefined version (backward compat)", async () => {
+        const q = await getQueue();
+        await q.enqueue({
+          workflowId: "u-1",
+          stepName: "s",
+          queue: "uq",
+          input: {},
+          prevResults: {},
+        });
+
+        const [task] = await q.claim({ queues: ["uq"], limit: 1 });
+        expect(task).toBeDefined();
+        expect(task!.version).toBeUndefined();
+      });
+    });
   });
 }

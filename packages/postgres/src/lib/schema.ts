@@ -175,6 +175,7 @@ export const stepQueue = pgTable(
     claimedAt: timestamp("claimed_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    version: text("version"),
   },
   (t) => [
     index("wf_step_queue_dequeue_idx").on(t.status, t.queue, t.priority, t.createdAt),

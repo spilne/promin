@@ -24,6 +24,8 @@ export class InMemoryStepQueue implements StepQueue {
     input: unknown;
     prevResults: Record<string, unknown>;
     priority?: number;
+    namespace?: string;
+    version?: string;
   }): Promise<string> {
     const id = `task-${++this.counter}`;
     this.tasks.set(id, {
@@ -37,6 +39,7 @@ export class InMemoryStepQueue implements StepQueue {
       attempt: 1,
       status: "pending",
       createdAt: new Date(),
+      version: params.version,
     });
     return id;
   }
@@ -45,6 +48,7 @@ export class InMemoryStepQueue implements StepQueue {
     queues: string[];
     limit: number;
     fairness?: FairnessPolicy;
+    filter?: (task: StepTask) => boolean;
   }): Promise<StepTask[]> {
     const claimed: StepTask[] = [];
     const queueSet = new Set(params.queues);
@@ -105,12 +109,13 @@ export class InMemoryStepQueue implements StepQueue {
 
     for (const task of ordered) {
       if (claimed.length >= params.limit) break;
-      if (task.status === "pending") {
-        task.status = "running";
-        task.claimedBy = this.workerId;
-        task.claimedAt = new Date();
-        claimed.push({ ...task });
-      }
+      if (task.status !== "pending") continue;
+      // Apply filter predicate — rejected tasks stay pending for other workers.
+      if (params.filter && !params.filter({ ...task } as StepTask)) continue;
+      task.status = "running";
+      task.claimedBy = this.workerId;
+      task.claimedAt = new Date();
+      claimed.push({ ...task });
     }
 
     return claimed;

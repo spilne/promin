@@ -53,6 +53,7 @@ export class PgStepQueue implements StepQueue {
     prevResults: Record<string, unknown>;
     priority?: number;
     namespace?: string;
+    version?: string;
   }): Promise<string> {
     const ns = params.namespace ?? this.namespace;
     const [row] = await this.db
@@ -65,6 +66,7 @@ export class PgStepQueue implements StepQueue {
         priority: params.priority ?? 5,
         input: params.input,
         prevResults: params.prevResults,
+        version: params.version,
       })
       .returning({ id: stepQueue.id });
 
@@ -75,6 +77,7 @@ export class PgStepQueue implements StepQueue {
     queues: string[];
     limit: number;
     fairness?: FairnessPolicy;
+    filter?: (task: StepTask) => boolean;
   }): Promise<StepTask[]> {
     const sanitizedQueues = params.queues.map((q) => `'${q.replace(/'/g, "")}'`).join(",");
     const limit = Math.max(1, Math.floor(params.limit));
@@ -117,7 +120,7 @@ export class PgStepQueue implements StepQueue {
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED
         )
-        RETURNING id, workflow_id, step_name, queue, priority, input, prev_results, attempt, status, created_at
+        RETURNING id, workflow_id, step_name, queue, priority, input, prev_results, attempt, status, created_at, version
       `;
     } else {
       // strict-priority and weighted: simple ORDER BY with SKIP LOCKED
@@ -131,13 +134,13 @@ export class PgStepQueue implements StepQueue {
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED
         )
-        RETURNING id, workflow_id, step_name, queue, priority, input, prev_results, attempt, status, created_at
+        RETURNING id, workflow_id, step_name, queue, priority, input, prev_results, attempt, status, created_at, version
       `;
     }
 
     const rows = await execRaw(this.db, sql.raw(query));
 
-    return rows
+    const claimed: StepTask[] = rows
       .map((r: any) => ({
         id: String(r.id),
         workflowId: r.workflow_id,
@@ -149,8 +152,37 @@ export class PgStepQueue implements StepQueue {
         attempt: r.attempt,
         status: "running" as const,
         createdAt: r.created_at instanceof Date ? r.created_at : new Date(r.created_at),
+        version: r.version ?? undefined,
       }))
       .sort((a, b) => b.priority - a.priority || a.createdAt.getTime() - b.createdAt.getTime());
+
+    // Apply filter AFTER the claim — reject rows by releasing the lock (mark
+    // back to 'pending'). This is less efficient than filtering pre-UPDATE,
+    // but simpler and fine because worker filter rejections should be rare
+    // (a misconfigured worker that rejects most tasks is the real problem).
+    if (params.filter) {
+      const accepted: StepTask[] = [];
+      const released: string[] = [];
+      for (const t of claimed) {
+        if (params.filter(t)) accepted.push(t);
+        else released.push(t.id);
+      }
+      if (released.length > 0) {
+        await execRaw(
+          this.db,
+          sql.raw(
+            `UPDATE wf_step_queue SET status = 'pending', claimed_by = NULL, claimed_at = NULL ` +
+              `WHERE id IN (${released
+                .map((id) => parseInt(id, 10))
+                .filter(Number.isFinite)
+                .join(",")})`,
+          ),
+        );
+      }
+      return accepted;
+    }
+
+    return claimed;
   }
 
   async complete(params: { taskId: string; result: unknown; durationMs: number }): Promise<void> {

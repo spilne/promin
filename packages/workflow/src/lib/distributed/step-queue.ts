@@ -16,6 +16,12 @@ export interface StepTask {
   readonly attempt: number;
   readonly status: "pending" | "running" | "completed" | "failed";
   readonly createdAt: Date;
+  /**
+   * Workflow version that enqueued this task, if any. Enables rolling deploys
+   * where v1 and v2 workflows share a queue but workers filter by the versions
+   * they support. Undefined for unversioned workflows (backward compatible).
+   */
+  readonly version?: string;
 }
 
 /**
@@ -38,6 +44,11 @@ export interface StepQueue {
     priority?: number;
     /** Namespace for task isolation. Falls back to queue-level default. */
     namespace?: string;
+    /**
+     * Workflow version this step belongs to. Stored on the task so workers
+     * can filter by supported versions during rolling deploys.
+     */
+    version?: string;
   }): Promise<string>;
 
   /** Claim up to `limit` pending tasks from the given queues (SKIP LOCKED). */
@@ -46,6 +57,14 @@ export interface StepQueue {
     limit: number;
     /** Fairness policy for dequeue ordering. Default: strict-priority. */
     fairness?: FairnessPolicy;
+    /**
+     * Optional predicate — tasks where `filter(task)` returns false are left
+     * in the queue for other workers. Used by workers that only support a
+     * subset of step names or workflow versions. Evaluated AFTER SKIP LOCKED
+     * selects the task: implementations should release the lock on rejected
+     * tasks so other workers can claim them. Default: accept all.
+     */
+    filter?: (task: StepTask) => boolean;
   }): Promise<StepTask[]>;
 
   /** Mark a task as completed with a result. */

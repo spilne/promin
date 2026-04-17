@@ -89,14 +89,17 @@ export class RedisStepQueue implements StepQueue {
     prevResults: Record<string, unknown>;
     priority?: number;
     namespace?: string;
+    version?: string;
   }): Promise<string> {
     const seq = await this.redis.incr(`${this.prefix}:counter`);
     const id = String(seq);
     const now = Date.now();
     const priority = params.priority ?? 5;
 
-    // Store task as hash
-    await this.redis.hset(this.taskKey(id), {
+    // Store task as hash. Redis hashes don't support undefined — omit the
+    // version field entirely when unset rather than storing an empty string,
+    // so `parseHashArray` can distinguish "no version" from "empty string".
+    const fields: Record<string, string> = {
       id,
       workflowId: params.workflowId,
       stepName: params.stepName,
@@ -108,7 +111,9 @@ export class RedisStepQueue implements StepQueue {
       status: "pending",
       namespace: params.namespace ?? "",
       createdAt: new Date(now).toISOString(),
-    });
+    };
+    if (params.version !== undefined) fields.version = params.version;
+    await this.redis.hset(this.taskKey(id), fields);
 
     // Score: higher priority = higher score = popped first by ZREVRANGE.
     // Within same priority, lower sequence = earlier enqueue = higher offset = FIFO.
@@ -122,6 +127,7 @@ export class RedisStepQueue implements StepQueue {
     queues: string[];
     limit: number;
     fairness?: FairnessPolicy;
+    filter?: (task: StepTask) => boolean;
   }): Promise<StepTask[]> {
     const claimed: StepTask[] = [];
     const now = new Date().toISOString();
@@ -151,9 +157,38 @@ export class RedisStepQueue implements StepQueue {
       }
     }
 
-    return claimed.sort(
+    const sorted = claimed.sort(
       (a, b) => b.priority - a.priority || a.createdAt.getTime() - b.createdAt.getTime(),
     );
+
+    // Apply filter AFTER the Lua claim. Rejected tasks are released back to
+    // pending (the Lua script already moved them to running + updated the
+    // task hash — unwind those mutations here).
+    if (params.filter) {
+      const accepted: StepTask[] = [];
+      for (const t of sorted) {
+        if (params.filter(t)) {
+          accepted.push(t);
+          continue;
+        }
+        // Release: remove from running set + restore pending status + put
+        // back on the pending zset with original priority score.
+        await this.redis.srem(this.runningKey(), t.id);
+        await this.redis.hset(this.taskKey(t.id), {
+          status: "pending",
+          claimedBy: "",
+          claimedAt: "",
+        });
+        // Score mirrors enqueue(): priority*1e12 + offset. We don't have the
+        // original seq; use the id (monotonic via INCR) as a stand-in.
+        const seq = Number(t.id);
+        const score = t.priority * 1e12 + (1e12 - seq);
+        await this.redis.zadd(this.pendingKey(t.queue), score, t.id);
+      }
+      return accepted;
+    }
+
+    return sorted;
   }
 
   async complete(params: { taskId: string; result: unknown; durationMs: number }): Promise<void> {
@@ -276,6 +311,7 @@ export class RedisStepQueue implements StepQueue {
       attempt: parseInt(map.attempt ?? "1", 10),
       status: "running" as const,
       createdAt: new Date(map.createdAt ?? Date.now()),
+      version: map.version,
     };
   }
 }
