@@ -27,6 +27,8 @@ export {
   type StepType,
   InMemoryWorkflowStorage,
   WorkflowVersionRegistry,
+  ScopedWorkflowVersionRegistry,
+  type WorkflowVersionRegistryConfig,
   WorkflowError,
   StepError,
   StorageError,

@@ -322,4 +322,128 @@ describe("WorkflowVersionRegistry", () => {
     expect(v1Count).toBe(4); // 2 original + 2 resumed
     expect(v2Count).toBe(2);
   });
+
+  // ---------------------------------------------------------------------------
+  // Fluent API + drain detection (Phase 4 ergonomics)
+  // ---------------------------------------------------------------------------
+
+  describe("WorkflowVersionRegistry.for() scoped builder", () => {
+    it("returns a builder scoped to one workflow name", () => {
+      const storage = new InMemoryWorkflowStorage();
+      const v1 = workflow({ name: "order", storage, version: "1" })
+        .stepAsync("x", async () => "v1")
+        .build();
+      const v2 = workflow({ name: "order", storage, version: "2" })
+        .stepAsync("x", async () => "v2")
+        .build();
+
+      const scoped = WorkflowVersionRegistry.for("order").register(v1).register(v2);
+
+      expect(scoped.versions()).toEqual(["1", "2"]);
+      expect(scoped.latest()).toBe("2");
+      expect(scoped.resolve("1")).toBe(v1);
+    });
+
+    it("rejects definitions with a mismatched name", () => {
+      const storage = new InMemoryWorkflowStorage();
+      const wrongName = workflow({ name: "billing", storage, version: "1" })
+        .stepAsync("x", async () => "v1")
+        .build();
+
+      const scoped = WorkflowVersionRegistry.for("order");
+      expect(() => scoped.register(wrongName)).toThrow(/mismatched|name/i);
+    });
+
+    it("deregister removes a version", () => {
+      const storage = new InMemoryWorkflowStorage();
+      const v1 = workflow({ name: "order", storage, version: "1" })
+        .stepAsync("x", async () => "v1")
+        .build();
+      const v2 = workflow({ name: "order", storage, version: "2" })
+        .stepAsync("x", async () => "v2")
+        .build();
+
+      const scoped = WorkflowVersionRegistry.for("order").register(v1).register(v2);
+      scoped.deregister("1");
+
+      expect(scoped.versions()).toEqual(["2"]);
+      expect(scoped.resolve("1")).toBeUndefined();
+    });
+  });
+
+  describe("onDrained + autoDeregister", () => {
+    it("fires onDrained when a version's in-flight count hits zero", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      const drained: Array<[string, string]> = [];
+      const registry = new WorkflowVersionRegistry({
+        onDrained: (name, version) => {
+          drained.push([name, version]);
+        },
+      });
+
+      const v1 = workflow({ name: "order", storage, version: "1" })
+        .stepAsync("x", async () => "v1")
+        .build();
+      const v2 = workflow({ name: "order", storage, version: "2" })
+        .stepAsync("x", async () => "v2")
+        .build();
+
+      registry.register(v1);
+      registry.register(v2);
+
+      // Create a v1 workflow and complete it (contributes to v1's completed counter).
+      await v1.run({ workflowId: "o1", input: {} });
+
+      // Trigger the drain detection.
+      await registry.countByVersion({ name: "order", storage });
+
+      // v1 has 0 running, should fire onDrained.
+      expect(drained.some(([n, v]) => n === "order" && v === "1")).toBe(true);
+    });
+
+    it("autoDeregister removes drained versions (except the latest)", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      const registry = new WorkflowVersionRegistry({ autoDeregister: true });
+
+      const v1 = workflow({ name: "order", storage, version: "1" })
+        .stepAsync("x", async () => "v1")
+        .build();
+      const v2 = workflow({ name: "order", storage, version: "2" })
+        .stepAsync("x", async () => "v2")
+        .build();
+
+      registry.register(v1);
+      registry.register(v2);
+
+      await v1.run({ workflowId: "o1", input: {} });
+
+      // v1 drained (0 running), v2 has no workflows at all (also drained)
+      await registry.countByVersion({ name: "order", storage });
+
+      // v1 should be auto-deregistered; v2 (latest) stays even if drained.
+      expect(registry.versions("order")).toContain("2");
+      expect(registry.versions("order")).not.toContain("1");
+    });
+
+    it("doesn't double-fire onDrained for the same version", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      let count = 0;
+      const registry = new WorkflowVersionRegistry({
+        onDrained: () => {
+          count++;
+        },
+      });
+
+      const v1 = workflow({ name: "job", storage, version: "1" })
+        .stepAsync("x", async () => "v1")
+        .build();
+      registry.register(v1);
+
+      await registry.countByVersion({ name: "job", storage });
+      await registry.countByVersion({ name: "job", storage });
+      await registry.countByVersion({ name: "job", storage });
+
+      expect(count).toBe(1);
+    });
+  });
 });

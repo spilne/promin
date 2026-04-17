@@ -25,11 +25,55 @@ import type { WorkflowStorage } from "./workflow-storage.ts";
  * await registry.run({ workflowId: "order-old", input, name: "order" });
  * ```
  */
+/** Optional config for WorkflowVersionRegistry. */
+export interface WorkflowVersionRegistryConfig {
+  /**
+   * Automatically deregister versions whose in-flight count hits zero.
+   * Polled when `countByVersion()` is called; also triggered via
+   * `checkDrained()`. Default: false (manual deregistration).
+   */
+  autoDeregister?: boolean;
+  /**
+   * Callback fired when a version finishes draining (running + suspended
+   * count reaches zero). Fires regardless of `autoDeregister`; useful for
+   * logging/alerting even when you want to keep the version registered.
+   */
+  onDrained?: (name: string, version: string) => void | Promise<void>;
+}
+
 export class WorkflowVersionRegistry {
   // Map: workflowName -> Map<version, definition>
   private definitions = new Map<string, Map<string, WorkflowDefinition<unknown, unknown>>>();
   // Map: workflowName -> latest version string
   private latestVersions = new Map<string, string>();
+  // Versions we've already fired onDrained for — prevents double-firing.
+  private drainedNotified = new Set<string>();
+  private readonly autoDeregister: boolean;
+  private readonly onDrained?: (name: string, version: string) => void | Promise<void>;
+
+  constructor(config?: WorkflowVersionRegistryConfig) {
+    this.autoDeregister = config?.autoDeregister ?? false;
+    this.onDrained = config?.onDrained;
+  }
+
+  /**
+   * Fluent builder for a per-workflow registry. Reads more naturally than
+   * the raw constructor when you only care about one workflow name:
+   *
+   * ```typescript
+   * const orders = WorkflowVersionRegistry.for("orders")
+   *   .register(v1)
+   *   .register(v2)
+   *   .register(v3);
+   * ```
+   *
+   * Returns a thin wrapper that keeps method calls scoped to the given
+   * workflow name but delegates storage to the underlying registry.
+   */
+  static for(name: string, config?: WorkflowVersionRegistryConfig): ScopedWorkflowVersionRegistry {
+    const underlying = new WorkflowVersionRegistry(config);
+    return new ScopedWorkflowVersionRegistry(underlying, name);
+  }
 
   /**
    * Register a versioned workflow definition.
@@ -153,6 +197,106 @@ export class WorkflowVersionRegistry {
       else counts.running++; // pending, running, suspended, compensating
     }
 
+    // Drain detection: if a registered version has zero in-flight (no
+    // running counter) AND we haven't already notified, fire onDrained and
+    // optionally deregister.
+    for (const version of this.versions(params.name)) {
+      const counts = result.get(version) ?? { running: 0, completed: 0, failed: 0 };
+      if (counts.running === 0) {
+        const key = `${params.name}::${version}`;
+        if (!this.drainedNotified.has(key)) {
+          this.drainedNotified.add(key);
+          if (this.onDrained) await this.onDrained(params.name, version);
+          // Don't deregister the latest version — new workflows need it.
+          if (this.autoDeregister && this.latestVersions.get(params.name) !== version) {
+            this.deregister(params.name, version);
+          }
+        }
+      }
+    }
+
     return result;
+  }
+
+  /**
+   * Manually deregister a specific (name, version). Removes it from the
+   * registry so it can't be resolved. Doesn't touch stored workflows.
+   */
+  deregister(name: string, version: string): void {
+    this.definitions.get(name)?.delete(version);
+    // If we deregistered the latest, pick a new latest (last remaining).
+    if (this.latestVersions.get(name) === version) {
+      const remaining = this.definitions.get(name);
+      if (remaining && remaining.size > 0) {
+        const keys = [...remaining.keys()];
+        this.latestVersions.set(name, keys[keys.length - 1]!);
+      } else {
+        this.latestVersions.delete(name);
+      }
+    }
+  }
+}
+
+/**
+ * Thin wrapper over `WorkflowVersionRegistry` scoped to a single workflow
+ * name. Returned by `WorkflowVersionRegistry.for(name)` for a fluent API
+ * when you only manage one workflow's versions.
+ */
+export class ScopedWorkflowVersionRegistry {
+  constructor(
+    private readonly registry: WorkflowVersionRegistry,
+    private readonly name: string,
+  ) {}
+
+  /**
+   * Register a versioned definition. Returns `this` for chaining.
+   * The definition's `name` must match the scoped registry's name.
+   */
+  register(definition: WorkflowDefinition<unknown, unknown>): this {
+    if (definition.name !== this.name) {
+      throw new Error(
+        `ScopedWorkflowVersionRegistry("${this.name}"): definition has name "${definition.name}" — ` +
+          `use the unscoped registry for cross-name registrations.`,
+      );
+    }
+    this.registry.register(definition);
+    return this;
+  }
+
+  /** Resolve a definition by version (or latest if omitted). */
+  resolve(version?: string): WorkflowDefinition<unknown, unknown> | undefined {
+    return this.registry.resolve(this.name, version);
+  }
+
+  /** Latest registered version string, or undefined. */
+  latest(): string | undefined {
+    return this.registry.latest(this.name);
+  }
+
+  /** All registered versions for this workflow. */
+  versions(): string[] {
+    return this.registry.versions(this.name);
+  }
+
+  /** Run a workflow; see `WorkflowVersionRegistry.run`. */
+  run<Output>(params: { workflowId: string; input: unknown; force?: boolean }): Promise<Output> {
+    return this.registry.run<Output>({ ...params, name: this.name });
+  }
+
+  /** Count in-flight workflows per version; see base registry. */
+  countByVersion(params: {
+    storage: WorkflowStorage;
+  }): Promise<Map<string, { running: number; completed: number; failed: number }>> {
+    return this.registry.countByVersion({ ...params, name: this.name });
+  }
+
+  /** Deregister a specific version. */
+  deregister(version: string): void {
+    this.registry.deregister(this.name, version);
+  }
+
+  /** Access the underlying unscoped registry (escape hatch). */
+  get unscoped(): WorkflowVersionRegistry {
+    return this.registry;
   }
 }

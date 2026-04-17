@@ -40,7 +40,11 @@ export {
   type FailedWorkflowRecord,
 } from "./workflow-state.ts";
 export { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
-export { WorkflowVersionRegistry } from "./workflow-version-registry.ts";
+export {
+  WorkflowVersionRegistry,
+  ScopedWorkflowVersionRegistry,
+  type WorkflowVersionRegistryConfig,
+} from "./workflow-version-registry.ts";
 export {
   WorkflowError,
   StepError,
