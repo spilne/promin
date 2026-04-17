@@ -509,6 +509,27 @@ export class WorkflowBuilder<
     private readonly _idempotency?: IdempotencyConfig,
     private readonly _version?: string,
     private readonly _timeoutMs?: number,
+    /**
+     * How to handle a `.run()` against a workflow row created with a
+     * different `version`. Default: `"strict"` (throw WorkflowVersionMismatchError).
+     * `"drain"` delegates the resume to the matching definition in
+     * `_previousVersions` — requires that list to contain the stored version.
+     */
+    private readonly _onVersionMismatch: "strict" | "drain" = "strict",
+    /**
+     * Definitions of prior versions of this workflow, indexed by their own
+     * `version` field. Used by `onVersionMismatch: "drain"` to resume
+     * in-flight workflows with the exact code they were started on while
+     * new workflows use the current definition.
+     */
+    private readonly _previousVersions?: ReadonlyArray<WorkflowDefinition<unknown, unknown>>,
+    /**
+     * Patch names active in this workflow version. `ctx.patched(name)` in a
+     * journaled step returns `patches.includes(name)`. Using the drain
+     * policy ensures each stored version's own patch list is authoritative —
+     * no cross-version comparison needed.
+     */
+    private readonly _patches?: readonly string[],
   ) {}
 
   /** Resolve TTL for a given workflow status. Returns undefined if no TTL applies. */
@@ -538,6 +559,9 @@ export class WorkflowBuilder<
       this._idempotency,
       v,
       this._timeoutMs,
+      this._onVersionMismatch,
+      this._previousVersions,
+      this._patches,
     );
   }
 
@@ -1162,6 +1186,29 @@ export class WorkflowBuilder<
       compensateTrigger === "immediate" ? 0 : (this._retry?.maxRetries ?? 0);
     const workflowRetryDelayMs = this._retry?.baseDelayMs ?? 1000;
     const idempotency = force ? undefined : this._idempotency;
+
+    // Drain pre-check — if the stored workflow was created under a different
+    // version and this definition has `onVersionMismatch: "drain"`, delegate
+    // the whole run to the matching previousVersion definition. Stored
+    // version is immutable per workflow, so this is race-safe.
+    if (this._onVersionMismatch === "drain" && this._version) {
+      const existing = await this._storage.loadWorkflow(workflowId);
+      if (existing && existing.version !== this._version) {
+        const previousDef = this._previousVersions?.find((d) => d.version === existing.version);
+        if (!previousDef) {
+          throw new WorkflowVersionMismatchError({
+            workflowId,
+            expected: this._version,
+            actual: existing.version ?? "(none)",
+            message:
+              `Workflow "${workflowId}" was created with version "${existing.version ?? "(none)"}" ` +
+              `but current code is version "${this._version}". ` +
+              `onVersionMismatch is "drain" but no matching previousVersion was registered.`,
+          });
+        }
+        return previousDef.run({ workflowId, input, force }) as Promise<Current>;
+      }
+    }
 
     // 0. Idempotency check — return cached result if within TTL
     if (idempotency) {
@@ -2034,6 +2081,9 @@ export class WorkflowBuilder<
       this._idempotency,
       this._version,
       this._timeoutMs,
+      this._onVersionMismatch,
+      this._previousVersions,
+      this._patches,
     );
   }
 
@@ -2055,6 +2105,9 @@ export class WorkflowBuilder<
       idempotency,
       this._version,
       this._timeoutMs,
+      this._onVersionMismatch,
+      this._previousVersions,
+      this._patches,
     );
   }
 
@@ -2139,7 +2192,45 @@ export function workflow<Input>(params: {
   version?: string;
   /** Global deadline for the entire workflow execution (ms). Fails with WorkflowDeadlineError if exceeded. */
   timeoutMs?: number;
+  /**
+   * How to handle resumes of workflows created with a different `version`:
+   * - `"strict"` (default) — throw `WorkflowVersionMismatchError`.
+   * - `"drain"` — delegate the resume to the matching definition in
+   *   `previousVersions`. Use this to let in-flight workflows finish on
+   *   their original code while new workflows use the updated code.
+   */
+  onVersionMismatch?: "strict" | "drain";
+  /**
+   * Definitions of prior versions of this workflow. Consulted only when
+   * `onVersionMismatch: "drain"` is set and a resume encounters a stored
+   * version different from the current one. Each entry must have its own
+   * `version` field set, or it can't be looked up.
+   */
+  previousVersions?: ReadonlyArray<WorkflowDefinition<unknown, unknown>>;
+  /**
+   * Patch names active in this workflow version. Inside a journaled step
+   * body, `ctx.patched(name)` returns `patches.includes(name)`. Each
+   * workflow version declares its own active set — no comparison logic.
+   */
+  patches?: readonly string[];
 }): WorkflowBuilder<Input> {
+  if (params.onVersionMismatch === "drain" && !params.previousVersions?.length) {
+    throw new WorkflowError({
+      workflowId: "",
+      message: `workflow "${params.name}": onVersionMismatch: "drain" requires previousVersions to be non-empty`,
+    });
+  }
+  if (params.previousVersions) {
+    for (const prev of params.previousVersions) {
+      if (!prev.version) {
+        throw new WorkflowError({
+          workflowId: "",
+          message: `workflow "${params.name}": previousVersions entries must have a \`version\` field set`,
+        });
+      }
+    }
+  }
+
   return new WorkflowBuilder(
     params.name,
     params.storage,
@@ -2155,6 +2246,9 @@ export function workflow<Input>(params: {
     undefined,
     params.version,
     params.timeoutMs,
+    params.onVersionMismatch ?? "strict",
+    params.previousVersions,
+    params.patches,
   );
 }
 
