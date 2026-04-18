@@ -142,7 +142,12 @@ export class GraphFrame<V extends Vertex = Vertex, E extends Edge = Edge> {
   // ---------------------------------------------------------------------------
 
   async pageRank(
-    options: { maxIter?: number; dampingFactor?: number; tolerance?: number } = {},
+    options: {
+      maxIter?: number;
+      dampingFactor?: number;
+      tolerance?: number;
+      personalizedFrom?: VertexId | VertexId[];
+    } = {},
   ): Promise<DataFrame<V & { pagerank: number }>> {
     const { pageRank } = await import("./algorithms/pagerank.ts");
     return pageRank(this, options);
@@ -177,5 +182,120 @@ export class GraphFrame<V extends Vertex = Vertex, E extends Edge = Edge> {
   ): Promise<DataFrame<V & { community: number }>> {
     const { communityDetection } = await import("./algorithms/community-detection.ts");
     return communityDetection(this, options);
+  }
+
+  /**
+   * Jaccard neighbour similarity. Returns pairs of vertices with their
+   * similarity scores. Use `vertex` to restrict to pairs involving a single
+   * vertex (the common "top-K similar to X" query); use `top` to limit the
+   * result size.
+   */
+  async jaccardSimilarity(
+    options: { vertex?: VertexId; threshold?: number; top?: number } = {},
+  ): Promise<
+    DataFrame<{
+      a: VertexId;
+      b: VertexId;
+      similarity: number;
+      intersection: number;
+      union: number;
+    }>
+  > {
+    const { jaccardSimilarity } = await import("./algorithms/jaccard-similarity.ts");
+    return jaccardSimilarity(this, options);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Multi-graph composition
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Combine this graph with another. Vertices are deduplicated by id — this
+   * graph's attributes win on conflict. Edges from both sides are concatenated
+   * (duplicates are NOT removed; chain `.filterEdges` if you need that).
+   */
+  async union<V2 extends Vertex, E2 extends Edge>(
+    other: GraphFrame<V2, E2>,
+  ): Promise<GraphFrame<V | V2, E | E2>> {
+    const thisVertices = (await this.vertices.collect()) as V[];
+    const otherVertices = (await other.vertices.collect()) as V2[];
+    const seen = new Set<VertexId>();
+    const mergedVertices: (V | V2)[] = [];
+    for (const v of thisVertices) {
+      if (!seen.has(v.id)) {
+        seen.add(v.id);
+        mergedVertices.push(v);
+      }
+    }
+    for (const v of otherVertices) {
+      if (!seen.has(v.id)) {
+        seen.add(v.id);
+        mergedVertices.push(v);
+      }
+    }
+    const thisEdges = (await this.edges.collect()) as E[];
+    const otherEdges = (await other.edges.collect()) as E2[];
+    return new GraphFrame({
+      vertices: DataFrame.fromArray(mergedVertices) as DataFrame<V | V2>,
+      edges: DataFrame.fromArray([...thisEdges, ...otherEdges]) as DataFrame<E | E2>,
+    });
+  }
+
+  /**
+   * Vertices present in both graphs (matched by id); edges kept only when
+   * both endpoints survive the intersection. Edge attributes come from this
+   * graph.
+   */
+  async intersection<V2 extends Vertex, E2 extends Edge>(
+    other: GraphFrame<V2, E2>,
+  ): Promise<GraphFrame<V, E>> {
+    const otherIds = new Set((await other.vertices.collect()).map((v: V2) => v.id));
+    const thisVertices = (await this.vertices.collect()) as V[];
+    const kept = thisVertices.filter((v) => otherIds.has(v.id));
+    const keptIds = new Set(kept.map((v) => v.id));
+    const thisEdges = (await this.edges.collect()) as E[];
+    const edges = thisEdges.filter((e) => keptIds.has(e.src) && keptIds.has(e.dst));
+    return new GraphFrame({
+      vertices: DataFrame.fromArray(kept),
+      edges: DataFrame.fromArray(edges),
+    });
+  }
+
+  /**
+   * Vertices in this graph but not in `other`, and edges whose both endpoints
+   * survive. Useful for "accounts on YouTube not on Instagram" queries.
+   */
+  async difference<V2 extends Vertex, E2 extends Edge>(
+    other: GraphFrame<V2, E2>,
+  ): Promise<GraphFrame<V, E>> {
+    const otherIds = new Set((await other.vertices.collect()).map((v: V2) => v.id));
+    const thisVertices = (await this.vertices.collect()) as V[];
+    const kept = thisVertices.filter((v) => !otherIds.has(v.id));
+    const keptIds = new Set(kept.map((v) => v.id));
+    const thisEdges = (await this.edges.collect()) as E[];
+    const edges = thisEdges.filter((e) => keptIds.has(e.src) && keptIds.has(e.dst));
+    return new GraphFrame({
+      vertices: DataFrame.fromArray(kept),
+      edges: DataFrame.fromArray(edges),
+    });
+  }
+
+  /**
+   * Union two graphs and append a set of cross-graph linking edges. Use this
+   * when the same real-world entity appears as a vertex in both graphs and
+   * you want the traversal algorithms to treat them as connected — e.g.
+   * linking a creator's YouTube and Instagram accounts.
+   */
+  async bridge<V2 extends Vertex, E2 extends Edge, B extends Edge>(
+    other: GraphFrame<V2, E2>,
+    bridgeEdges: DataFrame<B>,
+  ): Promise<GraphFrame<V | V2, E | E2 | B>> {
+    const unioned = (await this.union(other)) as unknown as GraphFrame<V | V2, E | E2 | B>;
+    const unionedEdges = (await unioned.edges.collect()) as (E | E2 | B)[];
+    const bridges = (await bridgeEdges.collect()) as B[];
+    return new GraphFrame({
+      vertices: unioned.vertices,
+      edges: DataFrame.fromArray([...unionedEdges, ...bridges]) as DataFrame<E | E2 | B>,
+    });
   }
 }
