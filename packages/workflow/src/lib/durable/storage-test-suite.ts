@@ -194,6 +194,26 @@ export function storageTestSuite(
         expect(step!.result).toEqual({ data: "hello" });
         expect(step!.durationMs).toBe(150);
         expect(step!.completedAt).toBeInstanceOf(Date);
+        // metadata stays undefined when the caller didn't provide any —
+        // NOT an empty object, so queries like `metadata->>'matchCase'`
+        // distinguish "step with no audit data" from "step with unknown case".
+        expect(step!.metadata).toBeUndefined();
+      });
+
+      it("round-trips metadata on successful step", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "step-meta-ok", workflowName: "test", input: {} });
+        await s.saveStepResult({
+          workflowId: "step-meta-ok",
+          stepName: "route",
+          result: "done",
+          durationMs: 5,
+          startedAt: new Date(),
+          metadata: { matchCase: "express", matchMode: "selector" },
+        });
+
+        const step = (await s.loadWorkflow("step-meta-ok"))!.steps["route"]!;
+        expect(step.metadata).toEqual({ matchCase: "express", matchMode: "selector" });
       });
     });
 
@@ -216,6 +236,23 @@ export function storageTestSuite(
         const state = await s.loadWorkflow("step-fail");
         expect(state!.steps["bad"]!.status).toBe("failed");
         expect(state!.steps["bad"]!.error).toBe("something broke");
+      });
+
+      it("round-trips metadata on failed step — 'which case fired' survives a throw", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "step-meta-fail", workflowName: "test", input: {} });
+        await s.saveStepFailure({
+          workflowId: "step-meta-fail",
+          stepName: "route",
+          error: "branch threw",
+          durationMs: 3,
+          startedAt: new Date(),
+          metadata: { matchCase: "express", matchMode: "selector" },
+        });
+
+        const step = (await s.loadWorkflow("step-meta-fail"))!.steps["route"]!;
+        expect(step.status).toBe("failed");
+        expect(step.metadata).toEqual({ matchCase: "express", matchMode: "selector" });
       });
     });
 

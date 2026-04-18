@@ -47,6 +47,13 @@ export interface WorkflowStorage {
     result: unknown;
     durationMs: number;
     startedAt: Date;
+    /**
+     * Step-kind-specific audit data (e.g. `.match()` writes the chosen
+     * case). Stored verbatim on the step row. Omitted / `undefined` for
+     * steps that don't produce audit data, which must round-trip as
+     * `undefined` on load — not an empty object.
+     */
+    metadata?: Record<string, unknown>;
   }): Promise<void>;
 
   /** Mark a step as failed. */
@@ -56,6 +63,12 @@ export interface WorkflowStorage {
     error: string;
     durationMs: number;
     startedAt: Date;
+    /**
+     * Step-kind-specific audit data set before the step ran. Preserved on
+     * the failure row so ops can still see "which case fired" when a
+     * `.match()` branch threw.
+     */
+    metadata?: Record<string, unknown>;
   }): Promise<void>;
 
   /** Save a completed task result within a map step. */

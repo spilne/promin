@@ -197,6 +197,7 @@ export class InMemoryWorkflowStorage
     result: unknown;
     durationMs: number;
     startedAt: Date;
+    metadata?: Record<string, unknown>;
   }): Promise<void> {
     const wf = this.workflows.get(params.workflowId);
     if (!wf) return;
@@ -211,6 +212,7 @@ export class InMemoryWorkflowStorage
       dependsOn: existing?.dependsOn ?? [],
       stepType: existing?.stepType ?? "single",
       result: params.result,
+      metadata: params.metadata ?? existing?.metadata,
       startedAt: params.startedAt,
       completedAt: now,
       durationMs: params.durationMs,
@@ -226,6 +228,7 @@ export class InMemoryWorkflowStorage
     error: string;
     durationMs: number;
     startedAt: Date;
+    metadata?: Record<string, unknown>;
   }): Promise<void> {
     const wf = this.workflows.get(params.workflowId);
     if (!wf) return;
@@ -240,6 +243,7 @@ export class InMemoryWorkflowStorage
       dependsOn: existing?.dependsOn ?? [],
       stepType: existing?.stepType ?? "single",
       error: params.error,
+      metadata: params.metadata ?? existing?.metadata,
       startedAt: params.startedAt,
       completedAt: now,
       durationMs: params.durationMs,

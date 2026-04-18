@@ -429,18 +429,29 @@ function matchVizMeta(params: {
   };
 }
 
+/** Tagged result of a `.match()` selection — carries both the branch fn and the
+ *  audit label the runner persists on the step row. `label` is:
+ *    - selector mode: the selector key or `"default"` when the default ran.
+ *    - predicate mode: the matched case's `.label`, falling back to
+ *      `case[N]` (matching the DAG viz fallback), or `"default"`. */
+interface PickedMatchBranch<Input, Current, Output, E extends TaggedError> {
+  readonly fn: MatchCaseFn<Input, Current, Output, E>;
+  readonly mode: "selector" | "predicate";
+  readonly label: string;
+}
+
 /** Resolve which case fires for `prev`. Throws `MatchError` if none + no default. */
 function pickMatchBranch<Input, Current, Output, E extends TaggedError>(
   params: MatchParams<Input, Current, Output, E>,
   prev: Current,
   stepName: string,
-): MatchCaseFn<Input, Current, Output, E> {
+): PickedMatchBranch<Input, Current, Output, E> {
   // Selector mode (`on` is a function, `cases` is a record).
   if ("on" in params && typeof params.on === "function") {
     const key = params.on(prev);
     const hit = (params.cases as Record<string, MatchCaseFn<Input, Current, Output, E>>)[key];
-    if (hit) return hit;
-    if (params.default) return params.default;
+    if (hit) return { fn: hit, mode: "selector", label: key };
+    if (params.default) return { fn: params.default, mode: "selector", label: "default" };
     throw new MatchError({
       stepName,
       mode: "selector",
@@ -453,11 +464,15 @@ function pickMatchBranch<Input, Current, Output, E extends TaggedError>(
   const cases = params.cases as ReadonlyArray<{
     when: (v: Current) => boolean;
     then: MatchCaseFn<Input, Current, Output, E>;
+    label?: string;
   }>;
-  for (const c of cases) {
-    if (c.when(prev)) return c.then;
+  for (let i = 0; i < cases.length; i++) {
+    const c = cases[i]!;
+    if (c.when(prev)) {
+      return { fn: c.then, mode: "predicate", label: c.label ?? `case[${i}]` };
+    }
   }
-  if (params.default) return params.default;
+  if (params.default) return { fn: params.default, mode: "predicate", label: "default" };
   throw new MatchError({
     stepName,
     mode: "predicate",
@@ -508,6 +523,13 @@ interface ExecuteParams {
   readonly storage: WorkflowStorage;
   /** Mutable ref — incremented by the retry wrapper before each re-invocation. */
   readonly attemptRef: { current: number };
+  /**
+   * Mutable slot for step-kind-specific audit metadata. `.match()` writes the
+   * chosen case here; the runner forwards it to `saveStepResult` so the step
+   * row carries a `{ matchCase, matchMode, ... }` record queryable from SQL.
+   * Stays `undefined` for step kinds that don't produce audit data.
+   */
+  readonly metadataRef: { current?: Record<string, unknown> };
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,8 +1064,14 @@ export class WorkflowBuilder<
           attempt: 1,
         };
 
-        const branch = pickMatchBranch(params, prev as Current, name);
-        return branch(ctx as any) as Pipeline<unknown, TaggedError>;
+        const picked = pickMatchBranch(params, prev as Current, name);
+        // Record the chosen case BEFORE running it — even if the branch
+        // throws, the metadata is still there to debug "which case fired".
+        execParams.metadataRef.current = {
+          matchCase: picked.label,
+          matchMode: picked.mode,
+        };
+        return picked.fn(ctx as any) as Pipeline<unknown, TaggedError>;
       },
       viz: matchVizMeta(params),
     };
@@ -1649,6 +1677,11 @@ export class WorkflowBuilder<
       // Execute local ready steps in parallel, with per-step retry and failure handling
       const readySteps = localReady.map((name) => this._steps.find((s) => s.name === name)!);
 
+      // Per-parallel-batch audit metadata map. `.match()` writes its chosen
+      // case here via metadataRef; the failure path reads it back by step
+      // name to persist metadata even when a match branch throws.
+      const stepMetadata = new Map<string, Record<string, unknown>>();
+
       const pipeline = Pipeline.all(
         ...readySteps.map((stepDef) => {
           // Evaluate skipWhen before entering the step execution pipeline
@@ -1674,6 +1707,10 @@ export class WorkflowBuilder<
           // Get or initialize attempt counter for this step (persists across workflow retries)
           const currentAttemptForStep = params.stepAttempts.get(stepDef.name) ?? 0;
           const attemptRef = { current: currentAttemptForStep + 1 };
+          // Shared audit-metadata slot — `.match()` fills it at selector time;
+          // the map() below forwards it onto the stepResult shape. Fresh per
+          // step (not per attempt) so a retry overwrites rather than appends.
+          const metadataRef: { current?: Record<string, unknown> } = { current: undefined };
 
           // Raw step execution — wrapped in suspend so retry re-invokes the step fn.
           // attemptRef tracks the attempt number; incremented each invocation so
@@ -1684,13 +1721,22 @@ export class WorkflowBuilder<
               attemptRef.current = currentAttempt + 1;
               // Write back to shared map so workflow retries pick up the right count
               params.stepAttempts.set(stepDef.name, currentAttempt);
-              return stepDef.execute({
+              const executed = stepDef.execute({
                 input,
                 results,
                 workflowId,
                 storage: this._storage,
                 attemptRef: { current: currentAttempt },
-              }).effect;
+                metadataRef,
+              });
+              // Kinds that set metadata synchronously in their execute (e.g.
+              // `.match()` after selector resolution) surface it here BEFORE
+              // the branch pipeline runs. The failure path can then read
+              // the map by step name even when the branch throws.
+              if (metadataRef.current) {
+                stepMetadata.set(stepDef.name, metadataRef.current);
+              }
+              return executed.effect;
             }),
           ) as Pipeline<unknown, TaggedError>;
 
@@ -1736,6 +1782,7 @@ export class WorkflowBuilder<
             return {
               name: stepDef.name,
               result: encoded,
+              metadata: metadataRef.current,
               durationMs: Date.now() - startTime,
               startedAt,
             };
@@ -1771,6 +1818,7 @@ export class WorkflowBuilder<
           error: errorMsg,
           durationMs: 0,
           startedAt: failStartedAt,
+          metadata: stepMetadata.get(stepName),
         });
         if (isStepAttemptStorage(this._storage)) {
           await this._storage.saveStepAttempt({
@@ -1801,6 +1849,7 @@ export class WorkflowBuilder<
       // and replay paths are identical.
       for (const stepResult of stepResults!) {
         const { name, result, durationMs, startedAt } = stepResult;
+        const metadata = "metadata" in stepResult ? stepResult.metadata : undefined;
         const wasSkipped = "skipped" in stepResult && stepResult.skipped === true;
         const stepDef = this._steps.find((s) => s.name === name);
         const decoded = stepDef ? stepDef.codec.decode(result) : result;
@@ -1808,6 +1857,7 @@ export class WorkflowBuilder<
           workflowId,
           stepName: name,
           result,
+          metadata,
           durationMs,
           startedAt,
         });

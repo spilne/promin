@@ -79,6 +79,17 @@ export interface StepState {
   readonly compensationStatus?: "pending" | "compensated" | "compensation_failed";
   readonly compensationError?: string;
   readonly compensatedAt?: Date;
+  /**
+   * Step-kind-specific audit data written at execution time and
+   * queryable directly from storage. Today:
+   *   - `.match()` writes `{ matchCase, matchMode }` so prod debugging
+   *     ("why did this workflow route to express?") doesn't require
+   *     re-running the selector against `prev`.
+   * Future step kinds (subworkflow child id, branch direction, guard
+   * failure label, state-machine transition) will extend the shape.
+   * Stays `undefined` for steps that don't produce audit data.
+   */
+  readonly metadata?: Record<string, unknown>;
 }
 
 export interface StepTaskState {

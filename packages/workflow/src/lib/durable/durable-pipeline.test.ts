@@ -566,6 +566,76 @@ describe("WorkflowBuilder", () => {
       expect(state?.steps["route"]?.result).toBe("FAST");
     });
 
+    it("records the chosen case on StepState.metadata (selector mode)", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      await workflow<Order>({ name: "match-meta-sel", storage })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .match("route", {
+          on: (o) => o.type,
+          cases: {
+            express: () => Pipeline.succeed("FAST"),
+            standard: () => Pipeline.succeed("OK"),
+            freight: () => Pipeline.succeed("SLOW"),
+          },
+        })
+        .run({ workflowId: "wf-meta-sel", input: { type: "freight", total: 1 } });
+
+      const step = storage.getWorkflow("wf-meta-sel")!.steps["route"]!;
+      expect(step.metadata).toEqual({ matchCase: "freight", matchMode: "selector" });
+    });
+
+    it("metadata records 'default' when the default case fires (selector mode)", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      await workflow<Order>({ name: "match-meta-default-sel", storage })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .match("route", {
+          on: (o) => o.type,
+          cases: {
+            express: () => Pipeline.succeed("FAST"),
+          },
+          default: () => Pipeline.succeed("FALLBACK"),
+        })
+        .run({ workflowId: "wf-meta-default-sel", input: { type: "standard", total: 1 } });
+
+      const step = storage.getWorkflow("wf-meta-default-sel")!.steps["route"]!;
+      expect(step.metadata).toEqual({ matchCase: "default", matchMode: "selector" });
+    });
+
+    it("metadata survives a failing branch (stored on the failure row)", async () => {
+      // Use a tagged error so the failure flows through the engine's
+      // StepError handler (plain `throw` would produce a FiberFailure that
+      // escapes the workflow-level failure path — separate pre-existing
+      // limitation, not a metadata bug). The point is: even when the branch
+      // rejects, ops should still see `matchCase` on the failed step row.
+      class BranchError extends Data.TaggedError("BranchError")<{
+        readonly stepName: string;
+        readonly message: string;
+      }> {}
+
+      const storage = new InMemoryWorkflowStorage();
+      await expect(
+        workflow<Order>({ name: "match-meta-fail", storage })
+          .step("load", ({ input }) => Pipeline.succeed(input))
+          .match("route", {
+            on: (o) => o.type,
+            cases: {
+              express: () =>
+                Pipeline.from(
+                  new BranchError({ stepName: "route", message: "branch blew up" }) as never,
+                ) as never,
+              standard: () => Pipeline.succeed("OK"),
+              freight: () => Pipeline.succeed("SLOW"),
+            },
+          })
+          .run({ workflowId: "wf-meta-fail", input: { type: "express", total: 1 } }),
+      ).rejects.toThrow();
+
+      const step = storage.getWorkflow("wf-meta-fail")!.steps["route"]!;
+      expect(step.status).toBe("failed");
+      // The chosen case is still visible for debugging even though the branch threw.
+      expect(step.metadata).toEqual({ matchCase: "express", matchMode: "selector" });
+    });
+
     it("can chain with downstream steps", async () => {
       const storage = new InMemoryWorkflowStorage();
       const result = await workflow<Order>({ name: "match-chain", storage })
@@ -636,6 +706,46 @@ describe("WorkflowBuilder", () => {
           })
           .run({ workflowId: "wf-pred-3", input: { type: "ground", total: 1 } }),
       ).rejects.toThrow(/no predicate matched/);
+    });
+
+    it("records the matched case label on StepState.metadata (predicate mode)", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      await workflow<Order>({ name: "match-meta-pred", storage })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .match("route", {
+          cases: [
+            {
+              label: "vip",
+              when: (o) => o.total > 10_000,
+              then: () => Pipeline.succeed("VIP"),
+            },
+            {
+              when: (o) => o.type === "express",
+              then: () => Pipeline.succeed("EXP"),
+            },
+          ],
+          default: () => Pipeline.succeed("STD"),
+        })
+        .run({ workflowId: "wf-meta-pred", input: { type: "standard", total: 25_000 } });
+
+      const step = storage.getWorkflow("wf-meta-pred")!.steps["route"]!;
+      expect(step.metadata).toEqual({ matchCase: "vip", matchMode: "predicate" });
+    });
+
+    it("metadata uses 'case[N]' fallback when label is omitted (predicate mode)", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      await workflow<Order>({ name: "match-meta-pred-idx", storage })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .match("route", {
+          cases: [
+            { when: (o) => o.type === "express", then: () => Pipeline.succeed("E") },
+            { when: (o) => o.type === "standard", then: () => Pipeline.succeed("S") },
+          ],
+        })
+        .run({ workflowId: "wf-meta-pred-idx", input: { type: "standard", total: 1 } });
+
+      const step = storage.getWorkflow("wf-meta-pred-idx")!.steps["route"]!;
+      expect(step.metadata).toEqual({ matchCase: "case[1]", matchMode: "predicate" });
     });
   });
 

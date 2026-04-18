@@ -127,6 +127,13 @@
       "when": 1743400017000,
       "tag": "0017_payload_hash",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1743400018000,
+      "tag": "0018_step_metadata",
+      "breakpoints": true
     }
   ]
 }

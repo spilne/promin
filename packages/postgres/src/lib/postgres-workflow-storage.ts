@@ -163,6 +163,7 @@ export class PostgresWorkflowStorage
       wakeAt: row.wakeAt ?? undefined,
       signalName: row.signalName ?? undefined,
       signalTimeoutAt: row.signalTimeoutAt ?? undefined,
+      metadata: (row.metadata as Record<string, unknown> | null) ?? undefined,
     };
   }
 
@@ -318,6 +319,7 @@ export class PostgresWorkflowStorage
     result: unknown;
     durationMs: number;
     startedAt: Date;
+    metadata?: Record<string, unknown>;
   }): Promise<void> {
     await this.markRunning(params.workflowId);
     const now = new Date();
@@ -330,6 +332,7 @@ export class PostgresWorkflowStorage
         run,
         statusId: StepStatusIds.id.completed,
         result: params.result,
+        metadata: params.metadata,
         startedAt: params.startedAt,
         completedAt: now,
         durationMs: params.durationMs,
@@ -340,6 +343,10 @@ export class PostgresWorkflowStorage
         set: {
           statusId: StepStatusIds.id.completed,
           result: params.result,
+          // Only overwrite metadata on update when the caller provides one;
+          // `undefined` means "leave whatever was there" (e.g. metadata
+          // written before the step ran stays on the completed row).
+          ...(params.metadata !== undefined ? { metadata: params.metadata } : {}),
           completedAt: now,
           durationMs: params.durationMs,
           attempt: sql`${workflowSteps.attempt} + 1`,
@@ -357,6 +364,7 @@ export class PostgresWorkflowStorage
     error: string;
     durationMs: number;
     startedAt: Date;
+    metadata?: Record<string, unknown>;
   }): Promise<void> {
     await this.markRunning(params.workflowId);
     const now = new Date();
@@ -369,6 +377,7 @@ export class PostgresWorkflowStorage
         run,
         statusId: StepStatusIds.id.failed,
         error: params.error,
+        metadata: params.metadata,
         startedAt: params.startedAt,
         completedAt: now,
         durationMs: params.durationMs,
@@ -379,6 +388,7 @@ export class PostgresWorkflowStorage
         set: {
           statusId: StepStatusIds.id.failed,
           error: params.error,
+          ...(params.metadata !== undefined ? { metadata: params.metadata } : {}),
           completedAt: now,
           durationMs: params.durationMs,
           attempt: sql`${workflowSteps.attempt} + 1`,

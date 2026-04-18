@@ -514,6 +514,7 @@ export class RedisWorkflowStorage
     result: unknown;
     durationMs: number;
     startedAt: Date;
+    metadata?: Record<string, unknown>;
   }): Promise<void> {
     const raw = await this.redis.hgetall(this.wfKey(params.workflowId));
     if (!raw || !raw.id) return;
@@ -537,6 +538,9 @@ export class RedisWorkflowStorage
       dependsOn: existing.dependsOn ?? [],
       stepType: existing.stepType ?? "single",
       result: params.result,
+      // `params.metadata` wins when provided; otherwise preserve whatever
+      // was already on the step (e.g. metadata written at execute time).
+      metadata: params.metadata ?? existing.metadata,
       startedAt: params.startedAt,
       completedAt: now,
       durationMs: params.durationMs,
@@ -557,6 +561,7 @@ export class RedisWorkflowStorage
     error: string;
     durationMs: number;
     startedAt: Date;
+    metadata?: Record<string, unknown>;
   }): Promise<void> {
     const raw = await this.redis.hgetall(this.wfKey(params.workflowId));
     if (!raw || !raw.id) return;
@@ -579,6 +584,7 @@ export class RedisWorkflowStorage
       dependsOn: existing.dependsOn ?? [],
       stepType: existing.stepType ?? "single",
       error: params.error,
+      metadata: params.metadata ?? existing.metadata,
       startedAt: params.startedAt,
       completedAt: now,
       durationMs: params.durationMs,

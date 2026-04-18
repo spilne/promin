@@ -110,6 +110,10 @@ export const workflowSteps = pgTable(
     wakeAt: timestamp("wake_at", { withTimezone: true }),
     signalName: text("signal_name"),
     signalTimeoutAt: timestamp("signal_timeout_at", { withTimezone: true }),
+    // Step-kind-specific audit data (e.g. `.match()` writes the chosen
+    // case). Opaque JSON; queryable with `metadata->>'<key>'`. Null for
+    // steps that don't produce audit data.
+    metadata: jsonb("metadata"),
   },
   (t) => [primaryKey({ columns: [t.workflowId, t.stepName, t.run] })],
 );
