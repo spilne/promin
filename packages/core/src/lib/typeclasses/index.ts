@@ -8,6 +8,9 @@ export {
   codecArray,
 } from "./codec.ts";
 
+// Lossless codec — default for workflow step / activity results
+export { LosslessJsonCodec } from "./lossless-codec.ts";
+
 // Eq
 export { type Eq, JsonEq, eqFromCodec } from "./eq.ts";
 
