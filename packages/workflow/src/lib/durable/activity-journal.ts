@@ -32,6 +32,14 @@ export type JournalPhase = "pending" | "completed";
  */
 export interface JournalEntry {
   readonly activityIndex: number;
+  /**
+   * Branch path inside a `ctx.parallel` tree. Empty string `""` means "at
+   * top-level in the body" — that's the value every pre-parallel workflow
+   * journal already has, so old data works unchanged. Parallel branches get
+   * paths like `"0"`, `"1"`, `"2.3"` for nested parallels. The journal
+   * (workflow, step, activity_index, branch_path) quadruple is unique.
+   */
+  readonly branchPath: string;
   readonly activityName: string;
   /** Default `"activity"` preserves backward compat for entries without stepType. */
   readonly stepType?: JournalStepType;
@@ -61,16 +69,18 @@ export interface ActivityJournalStorage {
   loadJournal(workflowId: string, stepName: string): Promise<JournalEntry[]>;
 
   /**
-   * Append one journal entry. Idempotent on (workflowId, stepName, activityIndex):
-   * re-inserting the same index is a no-op (the engine only appends after the
-   * side effect completes, so at-most-once is the target; a future two-phase
-   * record mode will support at-least-once semantics for non-idempotent
-   * activities).
+   * Append one journal entry. Idempotent on
+   * `(workflowId, stepName, activityIndex, branchPath)`: re-inserting the
+   * same quadruple is a no-op (the engine only appends after the side
+   * effect completes, so at-most-once is the target). `branchPath` defaults
+   * to `""` for backwards compatibility with callers that don't use
+   * `ctx.parallel`.
    */
   appendEntry(params: {
     readonly workflowId: string;
     readonly stepName: string;
     readonly activityIndex: number;
+    readonly branchPath?: string;
     readonly activityName: string;
     readonly exit: NonNullable<JournalEntry["exit"]>;
   }): Promise<void>;
@@ -99,6 +109,7 @@ export interface JournaledSuspendStorage extends ActivityJournalStorage {
     readonly workflowId: string;
     readonly stepName: string;
     readonly activityIndex: number;
+    readonly branchPath?: string;
     readonly activityName: string;
     readonly stepType: "sleep" | "signal" | "activity" | "compensation";
     readonly wakeAt?: Date;
@@ -109,23 +120,31 @@ export interface JournaledSuspendStorage extends ActivityJournalStorage {
    * (for sleep entries, exit = `{ tag: "Success", value: actual wake time }`)
    * and by `completeSignal` (for signal entries, exit carries the delivered
    * value). No-op if already completed (idempotent on repeated delivery).
+   * `branchPath` defaults to `""` for non-parallel entries.
    */
   completePendingEntry(params: {
     readonly workflowId: string;
     readonly stepName: string;
     readonly activityIndex: number;
+    readonly branchPath?: string;
     readonly exit: NonNullable<JournalEntry["exit"]>;
   }): Promise<void>;
 
   /**
    * Scanner hook — return pending sleep entries whose `wakeAt <= now`, up to
    * `limit`. Backends use an index on `(wakeAt) WHERE step_type='sleep' AND phase='pending'`.
+   *
+   * Each hit includes `branchPath` so the caller can target the matching
+   * pending row when completing it. Sleep yields at top level always have
+   * `branchPath = ""`, but sleep inside a parallel branch (should a user
+   * ever mix them) carries its branch path here.
    */
   findDueSleeps(params: { now: Date; limit: number }): Promise<
     Array<{
       workflowId: string;
       stepName: string;
       activityIndex: number;
+      branchPath: string;
       wakeAt: Date;
     }>
   >;

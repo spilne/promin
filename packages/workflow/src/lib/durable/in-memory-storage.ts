@@ -537,24 +537,43 @@ export class InMemoryWorkflowStorage
 
   async loadJournal(workflowId: string, stepName: string): Promise<JournalEntry[]> {
     const entries = this.journal.get(this.journalKey(workflowId, stepName)) ?? [];
-    // Defensive copy + stable sort by activityIndex ascending.
-    return [...entries].sort((a, b) => a.activityIndex - b.activityIndex);
+    // Defensive copy + stable sort: by activityIndex primarily, then by
+    // branchPath so `ctx.parallel` branches have a deterministic replay
+    // order when a consumer iterates the journal directly.
+    return [...entries].sort((a, b) => {
+      if (a.activityIndex !== b.activityIndex) return a.activityIndex - b.activityIndex;
+      return a.branchPath.localeCompare(b.branchPath);
+    });
+  }
+
+  /** Locate an entry by its composite (activityIndex, branchPath) key. */
+  private findEntryIndex(
+    entries: JournalEntry[],
+    activityIndex: number,
+    branchPath: string,
+  ): number {
+    return entries.findIndex(
+      (e) => e.activityIndex === activityIndex && e.branchPath === branchPath,
+    );
   }
 
   async appendEntry(params: {
     workflowId: string;
     stepName: string;
     activityIndex: number;
+    branchPath?: string;
     activityName: string;
     exit: NonNullable<JournalEntry["exit"]>;
   }): Promise<void> {
+    const branchPath = params.branchPath ?? "";
     const key = this.journalKey(params.workflowId, params.stepName);
     const entries = this.journal.get(key) ?? [];
-    // Idempotent: skip if the same index is already recorded and completed.
-    const existing = entries.findIndex((e) => e.activityIndex === params.activityIndex);
+    // Idempotent: skip if the same (index, branchPath) is already recorded and completed.
+    const existing = this.findEntryIndex(entries, params.activityIndex, branchPath);
     if (existing !== -1 && entries[existing]!.phase !== "pending") return;
     const entry: JournalEntry = {
       activityIndex: params.activityIndex,
+      branchPath,
       activityName: params.activityName,
       stepType: "activity",
       phase: "completed",
@@ -570,16 +589,19 @@ export class InMemoryWorkflowStorage
     workflowId: string;
     stepName: string;
     activityIndex: number;
+    branchPath?: string;
     activityName: string;
     stepType: "sleep" | "signal" | "activity" | "compensation";
     wakeAt?: Date;
   }): Promise<void> {
+    const branchPath = params.branchPath ?? "";
     const key = this.journalKey(params.workflowId, params.stepName);
     const entries = this.journal.get(key) ?? [];
-    // Idempotent: if entry at this index already exists, leave it alone.
-    if (entries.some((e) => e.activityIndex === params.activityIndex)) return;
+    // Idempotent: if an entry at this (index, branchPath) already exists, leave it alone.
+    if (this.findEntryIndex(entries, params.activityIndex, branchPath) !== -1) return;
     entries.push({
       activityIndex: params.activityIndex,
+      branchPath,
       activityName: params.activityName,
       stepType: params.stepType,
       phase: "pending",
@@ -593,12 +615,14 @@ export class InMemoryWorkflowStorage
     workflowId: string;
     stepName: string;
     activityIndex: number;
+    branchPath?: string;
     exit: NonNullable<JournalEntry["exit"]>;
   }): Promise<void> {
+    const branchPath = params.branchPath ?? "";
     const key = this.journalKey(params.workflowId, params.stepName);
     const entries = this.journal.get(key);
     if (!entries) return;
-    const idx = entries.findIndex((e) => e.activityIndex === params.activityIndex);
+    const idx = this.findEntryIndex(entries, params.activityIndex, branchPath);
     if (idx === -1) return;
     const existing = entries[idx]!;
     // Idempotent on repeated delivery — ignore if already completed.
@@ -611,16 +635,20 @@ export class InMemoryWorkflowStorage
     this.journal.set(key, entries);
   }
 
-  async findDueSleeps(params: {
-    now: Date;
-    limit: number;
-  }): Promise<
-    Array<{ workflowId: string; stepName: string; activityIndex: number; wakeAt: Date }>
+  async findDueSleeps(params: { now: Date; limit: number }): Promise<
+    Array<{
+      workflowId: string;
+      stepName: string;
+      activityIndex: number;
+      branchPath: string;
+      wakeAt: Date;
+    }>
   > {
     const due: Array<{
       workflowId: string;
       stepName: string;
       activityIndex: number;
+      branchPath: string;
       wakeAt: Date;
     }> = [];
     for (const [key, entries] of this.journal) {
@@ -636,6 +664,7 @@ export class InMemoryWorkflowStorage
             workflowId,
             stepName,
             activityIndex: e.activityIndex,
+            branchPath: e.branchPath,
             wakeAt: e.wakeAt,
           });
           if (due.length >= params.limit) return due;

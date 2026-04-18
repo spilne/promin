@@ -214,6 +214,12 @@ export const activityJournal = pgTable(
     workflowId: text("workflow_id").notNull(),
     stepName: text("step_name").notNull(),
     activityIndex: integer("activity_index").notNull(),
+    // `branch_path` is the position of this entry inside a `ctx.parallel`
+    // tree. `""` means "at top-level in the body" — the default, matching
+    // every pre-parallel workflow. Parallel branches encode as `"0"`,
+    // `"1.0"`, `"2.3"` for nested structure. Included in the PK so
+    // concurrent branches at the same `activity_index` don't collide.
+    branchPath: text("branch_path").notNull().default(""),
     activityName: text("activity_name").notNull(),
     stepType: text("step_type").notNull().default("activity"),
     phase: text("phase").notNull().default("completed"),
@@ -222,7 +228,7 @@ export const activityJournal = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    primaryKey({ columns: [t.workflowId, t.stepName, t.activityIndex] }),
+    primaryKey({ columns: [t.workflowId, t.stepName, t.activityIndex, t.branchPath] }),
     index("wf_activity_journal_step_idx").on(t.workflowId, t.stepName),
   ],
 );

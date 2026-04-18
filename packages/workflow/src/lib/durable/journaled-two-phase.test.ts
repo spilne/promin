@@ -66,6 +66,7 @@ class SinglePhaseOnlyStorage implements ActivityJournalStorage {
     workflowId: string;
     stepName: string;
     activityIndex: number;
+    branchPath?: string;
     activityName: string;
     exit: NonNullable<JournalEntry["exit"]>;
   }): Promise<void> {
@@ -73,6 +74,7 @@ class SinglePhaseOnlyStorage implements ActivityJournalStorage {
     const list = this.entries.get(key) ?? [];
     list.push({
       activityIndex: entry.activityIndex,
+      branchPath: entry.branchPath ?? "",
       activityName: entry.activityName,
       stepType: "activity",
       phase: "completed",

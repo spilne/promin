@@ -276,7 +276,15 @@ function makeCtx<Input, Prev>(params: {
   // deterministic body. This avoids the PK collision that would arise if
   // activities and compensations each had their own 0-based counter.
   const indexRef = { next: 0 };
-  const journalByIndex = new Map<number, JournalEntry>(journal.map((e) => [e.activityIndex, e]));
+  // Journal lookups use the composite key `${activityIndex}:${branchPath}`.
+  // At top level (no ctx.parallel yet) branchPath is always `""`, so this
+  // degrades gracefully to a plain integer lookup. The string key is the
+  // same shape the parallel-aware ctx will use once promin-plif-b lands.
+  const journalKey = (activityIndex: number, branchPath: string): string =>
+    `${activityIndex}:${branchPath}`;
+  const journalByKey = new Map<string, JournalEntry>(
+    journal.map((e) => [journalKey(e.activityIndex, e.branchPath), e]),
+  );
 
   interface Compensation {
     readonly activityIndex: number; // reserved at registration time
@@ -321,7 +329,7 @@ function makeCtx<Input, Prev>(params: {
     // Build the async work for this activity. Replay-or-run is decided here
     // so the runner sees a single awaitable Promise regardless of path.
     const promise = (async (): Promise<T> => {
-      const recorded = journalByIndex.get(activityIndex);
+      const recorded = journalByKey.get(journalKey(activityIndex, ""));
       if (recorded) {
         // Replay path — validate determinism.
         if (recorded.activityName !== name) {
@@ -483,7 +491,7 @@ function makeCtx<Input, Prev>(params: {
     const name = "sleep";
 
     const promise = (async (): Promise<Date> => {
-      const recorded = journalByIndex.get(activityIndex);
+      const recorded = journalByKey.get(journalKey(activityIndex, ""));
       const recordedType = recorded?.stepType ?? "activity";
       if (recorded && recordedType !== "sleep") {
         throw new JournalNonDeterminismError(
@@ -556,7 +564,7 @@ function makeCtx<Input, Prev>(params: {
     const activityIndex = indexRef.next++;
 
     const promise = (async (): Promise<T> => {
-      const recorded = journalByIndex.get(activityIndex);
+      const recorded = journalByKey.get(journalKey(activityIndex, ""));
       const recordedType = recorded?.stepType ?? "activity";
       if (recorded && recordedType !== "signal") {
         throw new JournalNonDeterminismError(
@@ -651,7 +659,7 @@ function makeCtx<Input, Prev>(params: {
 
       // Replay: if a completed row already exists for this compensation
       // index, the previous worker finished it — skip.
-      const recorded = journalByIndex.get(compIdx);
+      const recorded = journalByKey.get(journalKey(compIdx, ""));
       if (recorded && (recorded.phase ?? "completed") === "completed") continue;
 
       if (twoPhase) {
@@ -787,7 +795,15 @@ export async function completeDueSleeps(params: {
   storage: JournaledSuspendStorage;
   now: Date;
   limit: number;
-}): Promise<Array<{ workflowId: string; stepName: string; activityIndex: number; wakeAt: Date }>> {
+}): Promise<
+  Array<{
+    workflowId: string;
+    stepName: string;
+    activityIndex: number;
+    branchPath: string;
+    wakeAt: Date;
+  }>
+> {
   const due = await params.storage.findDueSleeps({
     now: params.now,
     limit: params.limit,
@@ -797,6 +813,7 @@ export async function completeDueSleeps(params: {
       workflowId: entry.workflowId,
       stepName: entry.stepName,
       activityIndex: entry.activityIndex,
+      branchPath: entry.branchPath,
       // Store as ISO string for consistent JSON roundtrip; the generator
       // hydrates back to Date on replay.
       exit: { tag: "Success", value: entry.wakeAt.toISOString() },

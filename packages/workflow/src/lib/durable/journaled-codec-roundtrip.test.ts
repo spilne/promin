@@ -29,8 +29,18 @@ class JsonJournalStorage implements ActivityJournalStorage {
     return this.entries.get(this.key(workflowId, stepName)) ?? [];
   }
 
-  async appendEntry(entry: JournalEntry): Promise<void> {
-    const roundTripped: JournalEntry = JSON.parse(JSON.stringify(entry));
+  async appendEntry(entry: {
+    workflowId: string;
+    stepName: string;
+    activityIndex: number;
+    branchPath?: string;
+    activityName: string;
+    exit: NonNullable<JournalEntry["exit"]>;
+  }): Promise<void> {
+    const branchPath = entry.branchPath ?? "";
+    const normalized = { ...entry, branchPath };
+    const roundTripped: JournalEntry = JSON.parse(JSON.stringify(normalized));
+    roundTripped.branchPath = normalized.branchPath;
     const key = this.key(entry.workflowId, entry.stepName);
     const list = this.entries.get(key) ?? [];
     list.push(roundTripped);

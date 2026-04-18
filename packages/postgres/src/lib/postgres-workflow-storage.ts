@@ -871,7 +871,7 @@ export class PostgresWorkflowStorage
       .where(
         and(eq(activityJournal.workflowId, workflowId), eq(activityJournal.stepName, stepName)),
       )
-      .orderBy(activityJournal.activityIndex);
+      .orderBy(activityJournal.activityIndex, activityJournal.branchPath);
     return rows.map(rowToJournalEntry);
   }
 
@@ -879,19 +879,22 @@ export class PostgresWorkflowStorage
     workflowId: string;
     stepName: string;
     activityIndex: number;
+    branchPath?: string;
     activityName: string;
     exit: NonNullable<JournalEntry["exit"]>;
   }): Promise<void> {
-    // Idempotent append — PK conflict on (workflow_id, step_name, activity_index)
-    // is silently dropped. Storage-level dedup: the engine may re-call append
-    // during a retry that crashes after a successful INSERT but before the
-    // caller observes completion.
+    // Idempotent append — PK conflict on
+    // (workflow_id, step_name, activity_index, branch_path) is silently
+    // dropped. Storage-level dedup: the engine may re-call append during a
+    // retry that crashes after a successful INSERT but before the caller
+    // observes completion.
     await this.db
       .insert(activityJournal)
       .values({
         workflowId: params.workflowId,
         stepName: params.stepName,
         activityIndex: params.activityIndex,
+        branchPath: params.branchPath ?? "",
         activityName: params.activityName,
         stepType: "activity",
         phase: "completed",
@@ -902,6 +905,7 @@ export class PostgresWorkflowStorage
           activityJournal.workflowId,
           activityJournal.stepName,
           activityJournal.activityIndex,
+          activityJournal.branchPath,
         ],
       });
   }
@@ -914,6 +918,7 @@ export class PostgresWorkflowStorage
     workflowId: string;
     stepName: string;
     activityIndex: number;
+    branchPath?: string;
     activityName: string;
     stepType: "sleep" | "signal" | "activity" | "compensation";
     wakeAt?: Date;
@@ -924,6 +929,7 @@ export class PostgresWorkflowStorage
         workflowId: params.workflowId,
         stepName: params.stepName,
         activityIndex: params.activityIndex,
+        branchPath: params.branchPath ?? "",
         activityName: params.activityName,
         stepType: params.stepType,
         phase: "pending",
@@ -935,6 +941,7 @@ export class PostgresWorkflowStorage
           activityJournal.workflowId,
           activityJournal.stepName,
           activityJournal.activityIndex,
+          activityJournal.branchPath,
         ],
       });
   }
@@ -943,6 +950,7 @@ export class PostgresWorkflowStorage
     workflowId: string;
     stepName: string;
     activityIndex: number;
+    branchPath?: string;
     exit: NonNullable<JournalEntry["exit"]>;
   }): Promise<void> {
     // Idempotent on repeated delivery: the WHERE clause restricts to still-
@@ -955,22 +963,27 @@ export class PostgresWorkflowStorage
           eq(activityJournal.workflowId, params.workflowId),
           eq(activityJournal.stepName, params.stepName),
           eq(activityJournal.activityIndex, params.activityIndex),
+          eq(activityJournal.branchPath, params.branchPath ?? ""),
           eq(activityJournal.phase, "pending"),
         ),
       );
   }
 
-  async findDueSleeps(params: {
-    now: Date;
-    limit: number;
-  }): Promise<
-    Array<{ workflowId: string; stepName: string; activityIndex: number; wakeAt: Date }>
+  async findDueSleeps(params: { now: Date; limit: number }): Promise<
+    Array<{
+      workflowId: string;
+      stepName: string;
+      activityIndex: number;
+      branchPath: string;
+      wakeAt: Date;
+    }>
   > {
     const rows = await this.db
       .select({
         workflowId: activityJournal.workflowId,
         stepName: activityJournal.stepName,
         activityIndex: activityJournal.activityIndex,
+        branchPath: activityJournal.branchPath,
         wakeAt: activityJournal.wakeAt,
       })
       .from(activityJournal)
@@ -987,6 +1000,7 @@ export class PostgresWorkflowStorage
       workflowId: r.workflowId,
       stepName: r.stepName,
       activityIndex: r.activityIndex,
+      branchPath: r.branchPath,
       // WHERE guarantees non-null wakeAt here.
       wakeAt: r.wakeAt!,
     }));
@@ -1016,6 +1030,7 @@ export class PostgresWorkflowStorage
 
 function rowToJournalEntry(row: {
   activityIndex: number;
+  branchPath: string;
   activityName: string;
   stepType: string;
   phase: string;
@@ -1025,6 +1040,7 @@ function rowToJournalEntry(row: {
 }): JournalEntry {
   return {
     activityIndex: row.activityIndex,
+    branchPath: row.branchPath,
     activityName: row.activityName,
     stepType: row.stepType as JournalEntry["stepType"],
     phase: row.phase as JournalEntry["phase"],
