@@ -95,3 +95,12 @@ export {
   dataframeProperties,
   streamProperties,
 } from "./lib/data-testing/index.ts";
+
+// Graph frame
+export {
+  GraphFrame,
+  type Vertex,
+  type Edge,
+  type VertexId,
+  type GraphFrameInit,
+} from "./lib/graph-frame/graph-frame.ts";
