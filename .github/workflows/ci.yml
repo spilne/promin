@@ -75,6 +75,11 @@ jobs:
           mkdir -p .target/reports
           bun run bench:stream 2>&1 | tee .target/reports/stream-bench.txt
 
+      - name: Workflow benchmarks
+        run: |
+          mkdir -p .target/reports
+          bun run bench:workflow 2>&1 | tee .target/reports/workflow-bench.txt
+
       - name: Cross-language benchmarks
         continue-on-error: true
         run: |
@@ -90,6 +95,12 @@ jobs:
           echo '## Stream Benchmark Report' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           sed 's/\x1b\[[0-9;]*m//g' .target/reports/stream-bench.txt >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
+          # Workflow benchmarks → job summary
+          echo '## Workflow Benchmark Report' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          sed 's/\x1b\[[0-9;]*m//g' .target/reports/workflow-bench.txt >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo '' >> $GITHUB_STEP_SUMMARY
           # Cross-language report → job summary (already markdown)

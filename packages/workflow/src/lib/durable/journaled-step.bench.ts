@@ -45,19 +45,10 @@ const linearBody = (n: number) =>
     return last;
   };
 
-// N 3-arg activities WITHOUT hashing — measures the overload-dispatch cost
-// isolated from SHA-256.
-const linear3ArgNoHash = (n: number) =>
-  function* (ctx: any): any {
-    let last = 0;
-    for (let i = 0; i < n; i++) {
-      last = yield* ctx.activity(`a${i}`, { i }, async (x: { i: number }) => x.i);
-    }
-    return last;
-  };
-
-// N 3-arg activities WITH hashing — measures SHA-256 + canonicalJSON on top.
-const linear3ArgHash = (n: number) =>
+// N 3-arg activities. Same body for both "no hash" and "hash on" runs —
+// the difference is the runner-level `payloadHash` flag at the call site,
+// so the fn's shape stays constant and the SHA-256 cost is isolated.
+const linear3Arg = (n: number) =>
   function* (ctx: any): any {
     let last = 0;
     for (let i = 0; i < n; i++) {
@@ -238,7 +229,7 @@ group("fresh run — payloadHash cost (10 activities)", () => {
       workflowId: nextId(),
       stepName: "s",
       storage: new InMemoryWorkflowStorage(),
-      body: linear3ArgNoHash(10),
+      body: linear3Arg(10),
     });
   });
   bench("3-arg activity, payloadHash on", async () => {
@@ -249,7 +240,7 @@ group("fresh run — payloadHash cost (10 activities)", () => {
       stepName: "s",
       storage: new InMemoryWorkflowStorage(),
       payloadHash: true,
-      body: linear3ArgHash(10),
+      body: linear3Arg(10),
     });
   });
 });
