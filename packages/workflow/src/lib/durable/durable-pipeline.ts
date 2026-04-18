@@ -24,7 +24,7 @@ import {
 import { Pipeline, type TaggedError } from "@promin/core";
 import type { RetryPolicy } from "@promin/core";
 import type { Codec } from "@promin/core";
-import { JsonCodec } from "@promin/core";
+import { LosslessJsonCodec } from "@promin/core";
 import type { Show } from "@promin/core";
 import type { Sinkable } from "@promin/core";
 import type { FailedWorkflowRecord } from "./workflow-state.ts";
@@ -708,7 +708,7 @@ export class WorkflowBuilder<
   ): WorkflowBuilder<Input, Steps & Record<Name, Output[]>, Output[], Error | E2> {
     this._validateName(name);
 
-    const codec = (options?.codec ?? JsonCodec) as Codec<unknown>;
+    const codec = (options?.codec ?? LosslessJsonCodec) as Codec<unknown>;
     const concurrency = config.concurrency ?? Infinity;
 
     const stepDef: StepDefinition = {
@@ -789,7 +789,7 @@ export class WorkflowBuilder<
       name,
       dependsOn,
       kind: "guard",
-      codec: JsonCodec as Codec<unknown>,
+      codec: LosslessJsonCodec as Codec<unknown>,
       execute: (execParams) => {
         const prevStepName = dependsOn[0];
         const prev = prevStepName != null ? execParams.results[prevStepName] : execParams.input;
@@ -825,7 +825,7 @@ export class WorkflowBuilder<
     this._validateName(name);
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
-    const codec = (options?.codec ?? JsonCodec) as Codec<unknown>;
+    const codec = (options?.codec ?? LosslessJsonCodec) as Codec<unknown>;
 
     const stepDef: StepDefinition = {
       name,
@@ -895,7 +895,7 @@ export class WorkflowBuilder<
     }
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
-    const codec = (options?.codec ?? JsonCodec) as Codec<unknown>;
+    const codec = (options?.codec ?? LosslessJsonCodec) as Codec<unknown>;
     const journalStorage = this._storage as WorkflowStorage & ActivityJournalStorage;
 
     const stepDef: StepDefinition = {
@@ -974,7 +974,7 @@ export class WorkflowBuilder<
     this._validateName(name);
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
-    const codec = (options?.codec ?? JsonCodec) as Codec<unknown>;
+    const codec = (options?.codec ?? LosslessJsonCodec) as Codec<unknown>;
 
     const stepDef: StepDefinition = {
       name,
@@ -1028,7 +1028,7 @@ export class WorkflowBuilder<
     this._validateName(name);
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
-    const codec = (options?.codec ?? JsonCodec) as Codec<unknown>;
+    const codec = (options?.codec ?? LosslessJsonCodec) as Codec<unknown>;
 
     const stepDef: StepDefinition = {
       name,
@@ -1067,7 +1067,7 @@ export class WorkflowBuilder<
       name,
       dependsOn,
       kind: "sleep",
-      codec: JsonCodec,
+      codec: LosslessJsonCodec,
       execute: (params) => {
         const eff = Effect.gen(function* () {
           const state = yield* Effect.promise(() => params.storage.loadWorkflow(params.workflowId));
@@ -1131,7 +1131,7 @@ export class WorkflowBuilder<
     this._validateName(name);
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
-    const codec = (params.codec ?? JsonCodec) as Codec<unknown>;
+    const codec = (params.codec ?? LosslessJsonCodec) as Codec<unknown>;
     const signalName = params.signalName;
     const timeoutMs = params.timeoutMs;
 
@@ -1482,11 +1482,16 @@ export class WorkflowBuilder<
     const { workflowId, input, dagNodes, state } = params;
     const results: Record<string, unknown> = {};
 
-    // Load previously completed step results
+    // Load previously completed step results. The stored shape is always the
+    // codec's encoded form (written by saveStepResult above), so we decode
+    // through the step's codec here so downstream steps see the same shape
+    // they would on a fresh run.
     if (state) {
       for (const [stepName, stepState] of Object.entries(state.steps)) {
         if (stepState.status === "completed") {
-          results[stepName] = stepState.result;
+          const stepDef = this._steps.find((s) => s.name === stepName);
+          const codec = stepDef?.codec ?? LosslessJsonCodec;
+          results[stepName] = codec.decode(stepState.result);
         }
       }
     }
@@ -1739,10 +1744,15 @@ export class WorkflowBuilder<
         return { success: false, error: stepError, suspension: false };
       }
 
-      // Checkpoint each completed step
+      // Checkpoint each completed step. `result` here is the codec-encoded
+      // form; storage keeps that shape. Downstream steps and the
+      // onStepComplete hook see the round-tripped decoded form so fresh-run
+      // and replay paths are identical.
       for (const stepResult of stepResults!) {
         const { name, result, durationMs, startedAt } = stepResult;
         const wasSkipped = "skipped" in stepResult && stepResult.skipped === true;
+        const stepDef = this._steps.find((s) => s.name === name);
+        const decoded = stepDef ? stepDef.codec.decode(result) : result;
         await this._storage.saveStepResult({
           workflowId,
           stepName: name,
@@ -1764,9 +1774,14 @@ export class WorkflowBuilder<
           });
         }
         if (!wasSkipped) {
-          await this._hooks?.onStepComplete?.({ workflowId, stepName: name, result, durationMs });
+          await this._hooks?.onStepComplete?.({
+            workflowId,
+            stepName: name,
+            result: decoded,
+            durationMs,
+          });
         }
-        results[name] = result;
+        results[name] = decoded;
         completed.add(name);
         running.delete(name);
       }
@@ -2204,7 +2219,7 @@ export class WorkflowBuilder<
   }): WorkflowBuilder<Input, any, any, any> {
     this._validateName(params.name);
 
-    const codec = (params.options?.codec ?? JsonCodec) as Codec<unknown>;
+    const codec = (params.options?.codec ?? LosslessJsonCodec) as Codec<unknown>;
 
     const stepDef: StepDefinition = {
       name: params.name,

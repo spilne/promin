@@ -64,6 +64,7 @@ export { PipelineBarrier, type Barrier } from "./lib/barrier.ts";
 export {
   type Codec,
   JsonCodec,
+  LosslessJsonCodec,
   codecFromSchema,
   codecTuple,
   codecRecord,
