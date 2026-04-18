@@ -918,6 +918,7 @@ export class WorkflowBuilder<
             workflowStorage: execParams.storage,
             workflowVersion: builderVersion,
             patches: builderPatches,
+            codec,
             body,
           }),
         ) as Pipeline<unknown, TaggedError>;

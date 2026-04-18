@@ -19,7 +19,8 @@
 // through `ctx.activity`, which is what makes the journal/replay safe.
 // ---------------------------------------------------------------------------
 
-import type { RetryPolicy } from "@promin/core";
+import type { Codec, RetryPolicy } from "@promin/core";
+import { LosslessJsonCodec } from "@promin/core";
 import {
   isJournaledSuspendStorage,
   type JournalEntry,
@@ -43,9 +44,16 @@ export interface ActivityYield {
   readonly promise: Promise<unknown>;
 }
 
-/** Per-activity configuration — retry today; codec/idempotent options planned. */
+/** Per-activity configuration. */
 export interface ActivityOptions {
   readonly retry?: RetryPolicy<unknown>;
+  /**
+   * Override the codec used for this activity's result. Defaults to the
+   * step's codec (which defaults to LosslessJsonCodec at the pipeline level),
+   * so every activity round-trips through a lossless serializer unless the
+   * caller opts out explicitly.
+   */
+  readonly codec?: Codec<unknown>;
 }
 
 /**
@@ -201,6 +209,13 @@ function makeCtx<Input, Prev>(params: {
   workflowVersion?: string;
   /** Active patches in the currently-running definition — drives ctx.patched. */
   patches?: readonly string[];
+  /**
+   * Default codec inherited from the enclosing step; individual activities
+   * may override via `ActivityOptions.codec`. Falls back to
+   * LosslessJsonCodec so the fresh-run ↔ replay invariant holds even when
+   * the step didn't pass one.
+   */
+  defaultCodec?: Codec<unknown>;
 }): JournaledContext<Input, Prev> {
   const {
     input,
@@ -212,7 +227,9 @@ function makeCtx<Input, Prev>(params: {
     workflowStorage,
     workflowVersion,
     patches,
+    defaultCodec,
   } = params;
+  const stepCodec = defaultCodec ?? LosslessJsonCodec;
   const patchSet = new Set(patches ?? []);
   const indexRef = { next: 0 };
   const journalByIndex = new Map(journal.map((e) => [e.activityIndex, e]));
@@ -223,6 +240,7 @@ function makeCtx<Input, Prev>(params: {
     options?: ActivityOptions,
   ): Generator<ActivityYield, T, T> {
     const activityIndex = indexRef.next++;
+    const codec = options?.codec ?? stepCodec;
 
     // Build the async work for this activity. Replay-or-run is decided here
     // so the runner sees a single awaitable Promise regardless of path.
@@ -262,7 +280,7 @@ function makeCtx<Input, Prev>(params: {
         if (recorded.exit.tag === "Failure") {
           throw new Error(recorded.exit.error);
         }
-        return recorded.exit.value as T;
+        return codec.decode(recorded.exit.value) as T;
       }
 
       // Fresh-run path — execute with retry, persist (success or failure).
@@ -281,14 +299,20 @@ function makeCtx<Input, Prev>(params: {
         });
         throw err;
       }
+      // Encode for storage, then return the round-tripped value so fresh-run
+      // consumers see the same shape they'd see on replay. Without the decode
+      // step, a step body that yields `new Date()` would see a real Date on
+      // fresh run and a stringified one after restart — the asymmetry this
+      // work is built to eliminate.
+      const encoded = codec.encode(value);
       await storage.appendEntry({
         workflowId,
         stepName,
         activityIndex,
         activityName: name,
-        exit: { tag: "Success", value },
+        exit: { tag: "Success", value: encoded },
       });
-      return value;
+      return codec.decode(encoded) as T;
     })();
 
     // The runner will await the promise and resume via .next(resolvedValue);
@@ -582,6 +606,12 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
   workflowVersion?: string;
   /** Active patches in the currently-running definition — drives ctx.patched. */
   patches?: readonly string[];
+  /**
+   * Default codec for activities inside this step. Each activity can still
+   * override via its own options. Defaults to LosslessJsonCodec so fresh-run
+   * values round-trip to the same shape replay would produce.
+   */
+  codec?: Codec<unknown>;
   body: JournaledStepBody<Input, Prev, Output>;
 }): Promise<Output> {
   const {
@@ -593,6 +623,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     workflowStorage,
     workflowVersion,
     patches,
+    codec,
     body,
   } = params;
 
@@ -607,6 +638,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     workflowStorage,
     workflowVersion,
     patches,
+    defaultCodec: codec,
   });
   const gen = body(ctx, prev);
 
