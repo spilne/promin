@@ -741,6 +741,172 @@ export class DataFrame<T> {
     return pairs.reduce((acc, [a, b]) => acc + (a - mean1) * (b - mean2), 0) / (n - 1);
   }
 
+  /** Sample skewness (Fisher-Pearson). Returns null if fewer than 3 numeric values. */
+  async skew(column: keyof T & string): Promise<number | null> {
+    const rows = await this.collect();
+    const nums = rows.map((r) => Number((r as any)[column])).filter((v) => !Number.isNaN(v));
+    if (nums.length < 3) return null;
+    const n = nums.length;
+    const mean = nums.reduce((a, b) => a + b, 0) / n;
+    let m2 = 0;
+    let m3 = 0;
+    for (const v of nums) {
+      const d = v - mean;
+      m2 += d * d;
+      m3 += d * d * d;
+    }
+    const variance = m2 / (n - 1);
+    const stdev = Math.sqrt(variance);
+    if (stdev === 0) return 0;
+    const g1 = m3 / n / (stdev * stdev * stdev);
+    return (Math.sqrt(n * (n - 1)) / (n - 2)) * g1;
+  }
+
+  /** Sample excess kurtosis. Returns null if fewer than 4 numeric values. */
+  async kurtosis(column: keyof T & string): Promise<number | null> {
+    const rows = await this.collect();
+    const nums = rows.map((r) => Number((r as any)[column])).filter((v) => !Number.isNaN(v));
+    if (nums.length < 4) return null;
+    const n = nums.length;
+    const mean = nums.reduce((a, b) => a + b, 0) / n;
+    let m2 = 0;
+    let m4 = 0;
+    for (const v of nums) {
+      const d = v - mean;
+      const d2 = d * d;
+      m2 += d2;
+      m4 += d2 * d2;
+    }
+    if (m2 === 0) return 0;
+    const numerator = (n * (n + 1) * m4) / (m2 * m2);
+    return ((n - 1) / ((n - 2) * (n - 3))) * (numerator - 3 * (n - 1));
+  }
+
+  /** Shannon entropy of the column's discrete value distribution, in bits. */
+  async entropy(column: keyof T & string): Promise<number | null> {
+    const rows = await this.collect();
+    const values = rows.map((r) => (r as any)[column]).filter((v) => v != null);
+    if (values.length === 0) return null;
+    const counts = new Map<unknown, number>();
+    for (const v of values) counts.set(v, (counts.get(v) ?? 0) + 1);
+    const n = values.length;
+    let h = 0;
+    for (const c of counts.values()) {
+      const p = c / n;
+      h -= p * Math.log2(p);
+    }
+    return h;
+  }
+
+  /** Approximate distinct count via HyperLogLog (14-bit precision, ~0.8% error). */
+  async approxNUnique(column: keyof T & string): Promise<number> {
+    const rows = await this.collect();
+    const p = 14;
+    const m = 1 << p; // 16384 buckets
+    const registers = new Uint8Array(m);
+    const alpha = 0.7213 / (1 + 1.079 / m);
+
+    for (const r of rows) {
+      const v = (r as any)[column];
+      if (v == null) continue;
+      const h = hash64(String(v));
+      const index = Number(h & BigInt(m - 1));
+      const w = h >> BigInt(p);
+      // Leading zeros + 1 in the remaining 64-p bits
+      const lz = w === 0n ? 64 - p + 1 : leadingZeros64Minus(w, 64 - p) + 1;
+      if (lz > registers[index]!) registers[index] = lz;
+    }
+
+    let sum = 0;
+    let zeros = 0;
+    for (let i = 0; i < m; i++) {
+      sum += 1 / (1 << registers[i]!);
+      if (registers[i] === 0) zeros++;
+    }
+    let estimate = (alpha * m * m) / sum;
+    if (estimate <= 2.5 * m && zeros > 0) {
+      estimate = m * Math.log(m / zeros); // small-range correction
+    }
+    return Math.round(estimate);
+  }
+
+  /**
+   * Exponentially weighted moving average.
+   *
+   * `ewm[0] = x[0]; ewm[i] = alpha * x[i] + (1 - alpha) * ewm[i-1]`
+   *
+   * Replaces the column with the smoothed series. Null values keep the previous
+   * smoothed value (do not contribute to the update).
+   */
+  ewmMean(column: keyof T & string, params: { alpha: number }): DataFrame<T> {
+    const alpha = params.alpha;
+    if (alpha <= 0 || alpha > 1) throw new Error("ewmMean: alpha must be in (0, 1]");
+    const col = column as string;
+    return DataFrame._fromPlan<T>(
+      {
+        _tag: "Source",
+        data: [],
+        load: async () => {
+          const rows = await this.collect();
+          let prev: number | null = null;
+          return rows.map((r) => {
+            const raw = (r as any)[col];
+            const v = raw == null ? NaN : Number(raw);
+            if (Number.isNaN(v)) return { ...(r as any), [col]: prev };
+            prev = prev === null ? v : alpha * v + (1 - alpha) * prev;
+            return { ...(r as any), [col]: prev };
+          });
+        },
+      },
+      this._executor,
+    );
+  }
+
+  /** Fill null/NaN gaps in a numeric column via linear interpolation. */
+  interpolate(column: keyof T & string): DataFrame<T> {
+    const col = column as string;
+    return DataFrame._fromPlan<T>(
+      {
+        _tag: "Source",
+        data: [],
+        load: async () => {
+          const rows = await this.collect();
+          const result = rows.map((r) => ({ ...(r as any) }));
+          const isMissing = (v: unknown): boolean => v == null || Number.isNaN(Number(v));
+
+          let i = 0;
+          while (i < result.length) {
+            if (!isMissing(result[i]![col])) {
+              i++;
+              continue;
+            }
+            // Find the run of missing values
+            const start = i;
+            while (i < result.length && isMissing(result[i]![col])) i++;
+            const end = i; // exclusive
+            const before = start > 0 ? Number(result[start - 1]![col]) : null;
+            const after = end < result.length ? Number(result[end]![col]) : null;
+
+            if (before !== null && after !== null) {
+              const gap = end - start + 1;
+              const step = (after - before) / gap;
+              for (let k = 0; k < end - start; k++) {
+                result[start + k]![col] = before + step * (k + 1);
+              }
+            } else if (before !== null) {
+              for (let k = start; k < end; k++) result[k]![col] = before;
+            } else if (after !== null) {
+              for (let k = start; k < end; k++) result[k]![col] = after;
+            }
+            // both null — leave as-is
+          }
+          return result;
+        },
+      },
+      this._executor,
+    );
+  }
+
   async describe(): Promise<
     {
       column: string;
@@ -906,4 +1072,43 @@ export class DataFrame<T> {
   withExecutor(executor: DataFrameExecutor): DataFrame<T> {
     return new DataFrame(this._plan, executor);
   }
+}
+
+// ---------------------------------------------------------------------------
+// HyperLogLog helpers — used by DataFrame.approxNUnique
+// ---------------------------------------------------------------------------
+
+/**
+ * 64-bit hash of a string: FNV-1a mixing + Murmur3 finalizer for avalanche.
+ *
+ * FNV-1a alone has weak avalanche that biases HLL bucket assignment; applying
+ * the Murmur3 fmix64 finalizer fixes the distribution without a full Murmur
+ * rewrite.
+ */
+function hash64(s: string): bigint {
+  const FNV_OFFSET = 0xcbf29ce484222325n;
+  const FNV_PRIME = 0x100000001b3n;
+  const MASK = 0xffffffffffffffffn;
+  let h = FNV_OFFSET;
+  for (let i = 0; i < s.length; i++) {
+    h ^= BigInt(s.charCodeAt(i));
+    h = (h * FNV_PRIME) & MASK;
+  }
+  // Murmur3 fmix64
+  h ^= h >> 33n;
+  h = (h * 0xff51afd7ed558ccdn) & MASK;
+  h ^= h >> 33n;
+  h = (h * 0xc4ceb9fe1a85ec53n) & MASK;
+  h ^= h >> 33n;
+  return h;
+}
+
+/** Number of leading zeros in the low `bits` of `w` (a BigInt). */
+function leadingZeros64Minus(w: bigint, bits: number): number {
+  let lz = 0;
+  for (let i = bits - 1; i >= 0; i--) {
+    if ((w >> BigInt(i)) & 1n) break;
+    lz++;
+  }
+  return lz;
 }
