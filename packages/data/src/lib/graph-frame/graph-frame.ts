@@ -165,4 +165,17 @@ export class GraphFrame<V extends Vertex = Vertex, E extends Edge = Edge> {
     const { triangleCount } = await import("./algorithms/triangle-count.ts");
     return triangleCount(this);
   }
+
+  async communityDetection(
+    options: {
+      weightColumn?: keyof E & string;
+      resolution?: number;
+      tolerance?: number;
+      maxLocalPasses?: number;
+      maxLevels?: number;
+    } = {},
+  ): Promise<DataFrame<V & { community: number }>> {
+    const { communityDetection } = await import("./algorithms/community-detection.ts");
+    return communityDetection(this, options);
+  }
 }
