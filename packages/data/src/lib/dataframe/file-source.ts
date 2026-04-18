@@ -15,11 +15,19 @@
 
 import type { Frameable, FrameSchema } from "@promin/core";
 import type { Codec } from "@promin/core";
+import { streamingCsvRows } from "./csv-stream.ts";
 
 /** Source descriptor that can provide data + optional executor hint. */
 export interface FileSourceDescriptor {
   /** Async loader — parses file into JS objects. Works with any executor. */
   readonly load: () => Promise<unknown[]>;
+  /**
+   * Optional streaming reader — yields rows without materializing the whole
+   * file. The chunked executor prefers this over `load()` when available, so
+   * `.stream()` on a DataFrame can process the source disk-to-aggregate with
+   * bounded memory.
+   */
+  readonly stream?: () => AsyncIterable<unknown>;
   /**
    * Source hint — `"format:path"` string for executor-native loading.
    * Executors register handlers for formats they support.
@@ -68,6 +76,9 @@ export function CsvFile<T = Record<string, unknown>>(
         }
         return row as T;
       });
+    },
+    stream(): AsyncIterable<T> {
+      return streamingCsvRows<T>(path, options);
     },
   };
 }

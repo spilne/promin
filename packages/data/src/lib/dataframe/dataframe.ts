@@ -88,6 +88,10 @@ export class DataFrame<T> {
         _tag: "Source",
         data: [],
         load: (() => source.load()) as () => Promise<unknown[]>,
+        stream:
+          typeof fileSrc.stream === "function"
+            ? () => fileSrc.stream() as AsyncIterable<unknown>
+            : undefined,
         hint: fileSrc.hint,
       });
     }
@@ -118,6 +122,7 @@ export class DataFrame<T> {
       _tag: "Source",
       data: [],
       load: source.load as () => Promise<unknown[]>,
+      stream: source.stream as (() => AsyncIterable<unknown>) | undefined,
       hint: source.hint,
     });
   }

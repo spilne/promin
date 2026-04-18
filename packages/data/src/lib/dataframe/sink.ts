@@ -5,6 +5,8 @@
 // raw objects — no encoding layer needed.
 // ---------------------------------------------------------------------------
 
+import { StreamingCsvSink } from "./csv-stream.ts";
+
 /** Sink that receives rows from a DataFrame. */
 export interface DataFrameSink<T> {
   /** Called for each row. Sinks buffer internally as needed. */
@@ -13,7 +15,10 @@ export interface DataFrameSink<T> {
   end(): Promise<void>;
 }
 
-/** Write CSV to a file. Buffers rows in memory, flushes on `end()`. */
+/**
+ * Write CSV to a file. Backed by a streaming writer that flushes in 64 KB
+ * chunks so memory stays bounded regardless of row count.
+ */
 export function CsvSink<T>(
   path: string,
   options?: {
@@ -21,36 +26,7 @@ export function CsvSink<T>(
     header?: boolean;
   },
 ): DataFrameSink<T> {
-  const delimiter = options?.delimiter ?? ",";
-  const includeHeader = options?.header ?? true;
-  const lines: string[] = [];
-  let headerWritten = false;
-
-  return {
-    async write(row: T) {
-      const obj = row as Record<string, unknown>;
-      if (includeHeader && !headerWritten) {
-        lines.push(Object.keys(obj).join(delimiter));
-        headerWritten = true;
-      }
-      lines.push(
-        Object.values(obj)
-          .map((v) => {
-            if (v === null || v === undefined) return "";
-            const s = String(v);
-            return s.includes(delimiter) || s.includes('"') || s.includes("\n")
-              ? `"${s.replace(/"/g, '""')}"`
-              : s;
-          })
-          .join(delimiter),
-      );
-    },
-    async end() {
-      const content = lines.join("\n") + "\n";
-      const fs = await import("node:fs/promises");
-      await fs.writeFile(path, content);
-    },
-  };
+  return StreamingCsvSink<T>(path, options);
 }
 
 /** Write JSONL (newline-delimited JSON) to a file. One JSON object per line. */

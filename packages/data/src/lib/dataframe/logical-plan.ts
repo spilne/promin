@@ -37,6 +37,13 @@ export interface SourcePlan {
    */
   readonly load?: () => Promise<unknown[]>;
   /**
+   * Optional streaming reader — yields rows without materializing the whole
+   * source. The chunked executor prefers this over `load()` for bounded-memory
+   * consumption; whole-file terminals like `.collect()` still fall back to
+   * `load()` (or drain the stream if only `stream` is present).
+   */
+  readonly stream?: () => AsyncIterable<unknown>;
+  /**
    * Optional source hint — format and location for executor-native loading.
    * Example: `"csv:/path/to/file.csv"`, `"parquet:/path/to/file.parquet"`
    *

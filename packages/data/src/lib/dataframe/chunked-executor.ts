@@ -41,7 +41,6 @@ export async function* executeChunked<T>(params: {
 
     // Extract source and streamable ops from the GroupBy's input
     const { source, ops } = extractSourceAndOps(groupByPlan.input);
-    const data = source.load && source.data.length === 0 ? await source.load() : source.data;
 
     const executor = new ArrayExecutor();
     const singleGroupCol = groupCols.length === 1;
@@ -52,15 +51,10 @@ export async function* executeChunked<T>(params: {
       { keyValues: Record<string, unknown>; accs: GroupAccumulator[] }
     >();
 
-    for (let i = 0; i < data.length; i += chunkSize) {
-      const chunk = data.slice(i, i + chunkSize);
-      if (chunk.length === 0) break;
-
-      // Apply streamable ops to chunk
+    const consumeChunk = (chunk: unknown[]) => {
       const chunkPlan = rebuildPlan({ _tag: "Source", data: chunk }, ops);
       const rows = executor.executeSync(chunkPlan);
 
-      // Group + accumulate
       for (const row of rows) {
         const r = row as Record<string, unknown>;
         const key = singleGroupCol
@@ -88,6 +82,10 @@ export async function* executeChunked<T>(params: {
           }
         }
       }
+    };
+
+    for await (const chunk of sourceChunks(source, chunkSize)) {
+      consumeChunk(chunk);
     }
 
     // Finalize all groups
@@ -107,20 +105,41 @@ export async function* executeChunked<T>(params: {
 
   // Extract the source plan and the chain of streamable ops
   const { source, ops } = extractSourceAndOps(plan);
-
-  // Resolve source data — call load() if present, otherwise use inline data
-  const data = source.load && source.data.length === 0 ? await source.load() : source.data;
-
   const executor = new ArrayExecutor();
 
+  for await (const chunk of sourceChunks(source, chunkSize)) {
+    const chunkPlan = rebuildPlan({ _tag: "Source", data: chunk }, ops);
+    const result = executor.executeSync<T>(chunkPlan);
+    if (result.length > 0) yield result as T[];
+  }
+}
+
+/**
+ * Yield fixed-size chunks from a SourcePlan. Prefers `stream()` when it's
+ * available and the plan doesn't already carry materialised data — that
+ * lets disk-backed sources (streaming CSV, etc.) flow through the chunked
+ * executor without loading the whole file into memory. Falls back to `load()`,
+ * then to `source.data`.
+ */
+async function* sourceChunks(source: SourcePlan, chunkSize: number): AsyncGenerator<unknown[]> {
+  if (source.stream && source.data.length === 0) {
+    let buf: unknown[] = [];
+    for await (const row of source.stream()) {
+      buf.push(row);
+      if (buf.length >= chunkSize) {
+        yield buf;
+        buf = [];
+      }
+    }
+    if (buf.length > 0) yield buf;
+    return;
+  }
+
+  const data = source.load && source.data.length === 0 ? await source.load() : source.data;
   for (let i = 0; i < data.length; i += chunkSize) {
     const chunk = data.slice(i, i + chunkSize);
     if (chunk.length === 0) break;
-
-    // Rebuild the plan with the chunk as source, apply streamable ops
-    const chunkPlan = rebuildPlan({ _tag: "Source", data: chunk }, ops);
-    const result = executor.executeSync<T>(chunkPlan);
-    if (result.length > 0) yield result;
+    yield chunk;
   }
 }
 

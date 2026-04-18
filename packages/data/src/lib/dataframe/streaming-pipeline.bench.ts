@@ -1,10 +1,13 @@
 // ---------------------------------------------------------------------------
 // End-to-end streaming pipeline benchmark — 1M rows
 //
-// Three scenarios, run in order for direct comparison:
+// Four scenarios, run in order for direct comparison:
 //   (c) Direct-feed IncrementalAggregation — pure aggregator, no I/O
-//   (a) Current architecture: CsvSink (buffered) → CsvFile (buffered) → stream
-//   (b) True streaming: StreamingCsvSink + streamingCsvRows + IncrementalAggregation
+//   (a) CsvFile.load (buffered) → DataFrame.groupBy/agg .collect()
+//   (b) StreamingCsvSink + streamingCsvRows + IncrementalAggregation (raw primitives)
+//   (d) DataFrame.fromFile(CsvFile).stream().groupBy/agg — the integrated path
+//       that routes disk-to-aggregate through chunked-executor using the new
+//       SourcePlan.stream() hook
 //
 // Correctness is asserted against a reference JS aggregate; timing is printed.
 // Run with:
@@ -150,12 +153,14 @@ function rssMB(): number {
 let TMP = "";
 let CSV_PATH_BUFFERED = "";
 let CSV_PATH_STREAMING = "";
+let CSV_PATH_INTEGRATED = "";
 let REFERENCE: Map<string, Agg>;
 
 beforeAll(() => {
   TMP = mkdtempSync(join(tmpdir(), "promin-stream-bench-"));
   CSV_PATH_BUFFERED = join(TMP, "rows.buffered.csv");
   CSV_PATH_STREAMING = join(TMP, "rows.streaming.csv");
+  CSV_PATH_INTEGRATED = join(TMP, "rows.integrated.csv");
   console.log(`\nbench tmp dir: ${TMP}`);
   console.log(`rows: ${ROWS.toLocaleString()}, chunk: ${CHUNK}\n`);
   const { result, ms } = timeSync("reference agg (plain JS baseline)", referenceAgg);
@@ -310,5 +315,52 @@ describe("streaming pipeline (b) — StreamingCsvSink + streamingCsvRows + Incre
     );
 
     assertMatches(rows as Record<string, unknown>[], REFERENCE, "(b)");
+  }, 180_000);
+});
+
+// ---------------------------------------------------------------------------
+// (d) Integrated path — DataFrame.fromFile + .stream() routes the source's
+// stream() through the chunked executor end to end.
+// ---------------------------------------------------------------------------
+
+describe("streaming pipeline (d) — DataFrame.fromFile(CsvFile).stream() groupBy/agg", () => {
+  it("write 1M-row CSV via streaming CsvSink, aggregate via DataFrame API", async () => {
+    console.log("\n(d) integrated — DataFrame.fromFile + .stream() + groupBy");
+    const rssBefore = rssMB();
+
+    const { ms: writeMs } = await timeAsync("CsvSink.write x 1M + end (streaming)", async () => {
+      const sink = CsvSink<Row>(CSV_PATH_INTEGRATED);
+      for (const row of rowGenerator(ROWS)) await sink.write(row);
+      await sink.end();
+    });
+    const sz = await stat(CSV_PATH_INTEGRATED);
+    console.log(
+      `  file size                              ${(sz.size / 1_048_576).toFixed(1).padStart(9)} MB`,
+    );
+
+    const { result: rows, ms: aggMs } = await timeAsync(
+      "DataFrame.fromFile().stream().groupBy/agg",
+      async () => {
+        return DataFrame.fromFile<Row>(CsvFile<Row>(CSV_PATH_INTEGRATED))
+          .groupBy("region")
+          .agg({
+            count: exprAgg({ expr: col("value"), agg: "count" }),
+            sum: exprAgg({ expr: col("value"), agg: "sum" }),
+            min: exprAgg({ expr: col("value"), agg: "min" }),
+            max: exprAgg({ expr: col("value"), agg: "max" }),
+            avg: exprAgg({ expr: col("value"), agg: "avg" }),
+          })
+          .stream({ chunkSize: CHUNK })
+          .collect();
+      },
+    );
+
+    const rssDelta = rssMB() - rssBefore;
+    console.log(`  rss delta                              ${rssDelta.toFixed(1).padStart(9)} MB`);
+    console.log(
+      `  TOTAL                                  ${(writeMs + aggMs).toFixed(1).padStart(9)} ms`,
+    );
+
+    assertMatches(rows as Record<string, unknown>[], REFERENCE, "(d)");
   }, 180_000);
 });
