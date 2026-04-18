@@ -103,11 +103,14 @@ export class DefaultCoordinator implements WorkflowCoordinator {
     const { workflow, workflowId, input } = params;
     const dag = workflow.dag;
 
-    // Create workflow in storage — persist DAG in metadata for recovery
+    // Create workflow in storage — persist DAG in metadata for recovery.
+    // Also persist the workflow's version (if any) so it propagates through
+    // to step-queue tasks via enqueueReady → worker filter.
     const createResult = await this.storage.createWorkflow({
       workflowId,
       workflowName: workflow.name,
       input,
+      version: workflow.version,
       metadata: { ...((workflow as any).metadata ?? {}), _dag: dag },
     });
 
@@ -254,6 +257,9 @@ export class DefaultCoordinator implements WorkflowCoordinator {
         queue,
         input,
         prevResults,
+        // Carry the workflow's stored version through to the task so workers
+        // can filter by supported versions during rolling deploys.
+        version: state.version,
       });
       enqueuedSteps.add(stepName);
     }

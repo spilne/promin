@@ -44,6 +44,25 @@ export interface WorkerConfig {
   heartbeatIntervalMs?: number;
   /** Worker metadata (hostname, labels, etc). */
   metadata?: Record<string, unknown>;
+  /**
+   * Workflow versions this worker is willing to process. When set, tasks
+   * whose `version` is not in this list are skipped (left in the queue for
+   * a compatible worker). Unversioned tasks (`version === undefined`) are
+   * always accepted for backward compat with pre-versioning workflows.
+   *
+   * Typical use during a rolling deploy: a worker running both v1 and v2
+   * handlers sets `supportedVersions: ["1", "2"]`; after v1 drains, the
+   * next deploy drops this to `["2"]`.
+   */
+  supportedVersions?: readonly string[];
+  /**
+   * Custom claim-time filter predicate. Overrides the default filter
+   * (which accepts tasks the registry has a handler for). Use when the
+   * registry-based default isn't enough (e.g. routing by priority,
+   * task metadata, dynamic policy). Takes precedence over
+   * `supportedVersions` if both are supplied.
+   */
+  taskFilter?: (task: StepTask) => boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -73,6 +92,7 @@ export class DefaultWorker implements WorkflowWorker {
   private readonly workerRegistry?: WorkerRegistry;
   private readonly heartbeatIntervalMs: number;
   private readonly workerMetadata?: Record<string, unknown>;
+  private readonly claimFilter: (task: StepTask) => boolean;
   private running = false;
   private activeCount = 0;
   private heartbeatTimer?: ReturnType<typeof setInterval>;
@@ -90,6 +110,23 @@ export class DefaultWorker implements WorkflowWorker {
     this.workerRegistry = config.workerRegistry;
     this.heartbeatIntervalMs = config.heartbeatIntervalMs ?? 5000;
     this.workerMetadata = config.metadata;
+
+    // Build the claim-time filter. Explicit `taskFilter` wins; otherwise
+    // compose registry-has-handler + optional version allow-list.
+    if (config.taskFilter) {
+      this.claimFilter = config.taskFilter;
+    } else {
+      const supported = config.supportedVersions;
+      this.claimFilter = (task) => {
+        if (!this.registry.has(task.stepName)) return false;
+        if (supported) {
+          // Unversioned tasks always accepted (backward compat). Versioned
+          // tasks must be in the allow-list.
+          if (task.version !== undefined && !supported.includes(task.version)) return false;
+        }
+        return true;
+      };
+    }
   }
 
   async start(): Promise<void> {
@@ -111,7 +148,11 @@ export class DefaultWorker implements WorkflowWorker {
     while (this.running) {
       if (this.activeCount < this.concurrency) {
         const claimCount = this.concurrency - this.activeCount;
-        const tasks = await this.stepQueue.claim({ queues: this.queues, limit: claimCount });
+        const tasks = await this.stepQueue.claim({
+          queues: this.queues,
+          limit: claimCount,
+          filter: this.claimFilter,
+        });
 
         for (const task of tasks) {
           this.activeCount++;

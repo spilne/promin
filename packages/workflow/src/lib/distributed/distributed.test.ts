@@ -272,7 +272,7 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
     expect(state?.steps["fail-step"]?.status).toBe("failed");
   });
 
-  it("unknown step name — worker reports 'not found' instead of crashing", async () => {
+  it("unknown step name — worker skips the task and leaves it pending for a capable worker", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
@@ -304,7 +304,13 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
     await new Promise((r) => setTimeout(r, 200));
     await worker.stop();
 
-    expect(failures.some((f) => f.includes("not found"))).toBe(true);
+    // The worker's default claim filter rejects tasks whose step name isn't
+    // registered, so the task stays pending (a worker that DOES handle
+    // "unknown-step" can still pick it up). No errors are recorded because
+    // the task was never claimed.
+    expect(failures).toHaveLength(0);
+    const metrics = await queue.metrics();
+    expect(metrics["default"]!.pending).toBeGreaterThanOrEqual(1);
   });
 
   it("async step handler with I/O delay — worker awaits completion", async () => {
