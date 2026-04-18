@@ -139,6 +139,21 @@ export class EventDataValidationError extends Error {
   }
 }
 
+/** Thrown when a machine instance's stored version differs from the code's version. */
+export class StateMachineVersionMismatchError extends Error {
+  readonly _tag = "StateMachineVersionMismatchError";
+  constructor(
+    readonly machineId: string,
+    readonly storedVersion: string,
+    readonly codeVersion: string,
+    readonly currentState: string,
+  ) {
+    super(
+      `Machine "${machineId}" version mismatch: instance has "${storedVersion}" but code defines "${codeVersion}" (current state: "${currentState}")`,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Builder
 // ---------------------------------------------------------------------------
@@ -363,6 +378,15 @@ export class StateMachineInstance<S, Events = void> {
     try {
       const machine = await this.storage.load(id);
       if (!machine) throw new Error(`Machine ${id} not found`);
+
+      if (this.version != null && machine.version != null && machine.version !== this.version) {
+        throw new StateMachineVersionMismatchError(
+          id,
+          machine.version,
+          this.version,
+          machine.current,
+        );
+      }
 
       // Check limits
       if (this.limits?.maxTransitions) {

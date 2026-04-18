@@ -1918,3 +1918,132 @@ describe("Workflow global deadline", () => {
     expect(result).toBe("b");
   });
 });
+
+// ---------------------------------------------------------------------------
+// .guard() — precondition assertions
+// ---------------------------------------------------------------------------
+
+describe("guard", () => {
+  it("passes through when predicate returns true", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const result = await workflow<{ paid: boolean }>({ name: "guard-pass", storage })
+      .guard("ensure-paid", (input) => input.paid)
+      .stepAsync("ship", async () => "shipped")
+      .run({ workflowId: "g-1", input: { paid: true } });
+
+    expect(result).toBe("shipped");
+  });
+
+  it("fails with GuardError when predicate returns false", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const wf = workflow<{ paid: boolean }>({ name: "guard-fail", storage })
+      .guard("ensure-paid", (input) => input.paid, {
+        failureMessage: "Cannot ship unpaid order",
+      })
+      .stepAsync("ship", async () => "shipped");
+
+    await expect(wf.run({ workflowId: "g-2", input: { paid: false } })).rejects.toThrow(
+      "Cannot ship unpaid order",
+    );
+  });
+
+  it("uses default failure message when none provided", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const wf = workflow<{ ok: boolean }>({ name: "guard-default-msg", storage })
+      .guard("check", (input) => input.ok)
+      .stepAsync("next", async () => "done");
+
+    await expect(wf.run({ workflowId: "g-3", input: { ok: false } })).rejects.toThrow(
+      'Guard "check" failed',
+    );
+  });
+
+  it("passes prev value through to next step", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const result = await workflow<{ items: string[] }>({ name: "guard-passthrough", storage })
+      .guard("has-items", (input) => input.items.length > 0)
+      .step("count", ({ prev }) => Pipeline.succeed(prev.items.length))
+      .run({ workflowId: "g-4", input: { items: ["a", "b"] } });
+
+    expect(result).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// skipWhen — conditional step skip
+// ---------------------------------------------------------------------------
+
+describe("skipWhen", () => {
+  it("skips step when predicate returns true", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    let stepRan = false;
+    const result = await workflow<{ n: number }>({ name: "skip-true", storage })
+      .stepAsync(
+        "maybe",
+        async ({ input }) => {
+          stepRan = true;
+          return input.n * 2;
+        },
+        { skipWhen: (prev: unknown) => (prev as { n: number }).n === 0 },
+      )
+      .run({ workflowId: "s-1", input: { n: 0 } });
+
+    expect(stepRan).toBe(false);
+    expect(result).toEqual({ n: 0 });
+  });
+
+  it("runs step when predicate returns false", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    let stepRan = false;
+    const result = await workflow<{ n: number }>({ name: "skip-false", storage })
+      .stepAsync(
+        "maybe",
+        async ({ input }) => {
+          stepRan = true;
+          return input.n * 2;
+        },
+        { skipWhen: (prev: unknown) => (prev as { n: number }).n === 0 },
+      )
+      .run({ workflowId: "s-2", input: { n: 5 } });
+
+    expect(stepRan).toBe(true);
+    expect(result).toBe(10);
+  });
+
+  it("uses skipValue when provided", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const result = await workflow<{ n: number }>({ name: "skip-value", storage })
+      .stepAsync("double", async ({ input }) => input.n * 2, {
+        skipWhen: (prev: unknown) => (prev as { n: number }).n === 0,
+        skipValue: () => -1,
+      })
+      .run({ workflowId: "s-3", input: { n: 0 } });
+
+    expect(result).toBe(-1);
+  });
+
+  it("does not trigger onStepComplete hook when skipped", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const completedSteps: string[] = [];
+    const result = await workflow<{ skip: boolean }>({
+      name: "skip-hook",
+      storage,
+      hooks: {
+        onStepComplete: async ({ stepName }) => {
+          completedSteps.push(stepName);
+        },
+      },
+    })
+      .stepAsync("first", async () => "a")
+      .stepAsync("skippable", async () => "b", {
+        skipWhen: (prev: unknown) => (prev as string) === "a",
+      })
+      .stepAsync("last", async () => "c")
+      .run({ workflowId: "s-4", input: { skip: true } });
+
+    expect(result).toBe("c");
+    expect(completedSteps).toContain("first");
+    expect(completedSteps).not.toContain("skippable");
+    expect(completedSteps).toContain("last");
+  });
+});

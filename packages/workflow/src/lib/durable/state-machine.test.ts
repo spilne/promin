@@ -6,6 +6,7 @@ import {
   composeMachineMiddleware,
   retryMiddleware,
   EventDataValidationError,
+  StateMachineVersionMismatchError,
   TIMEOUT_EVENT,
   type StateMachineInstance,
   type MachineMiddleware,
@@ -1547,6 +1548,113 @@ describe("StateMachine", () => {
       clock.advance(150);
       expect(await m.checkTimeouts("t-5")).toBe(true);
       expect((await m.getState("t-5"))!.current).toBe("c");
+    });
+  });
+
+  describe("version check on send()", () => {
+    it("throws StateMachineVersionMismatchError when versions differ", async () => {
+      const v1 = stateMachine<TrafficLight>({ name: "traffic-light", storage, version: "1" })
+        .state("red")
+        .state("green")
+        .state("yellow")
+        .on("next", { from: "red", to: "green" })
+        .on("next", { from: "green", to: "yellow" })
+        .on("next", { from: "yellow", to: "red" })
+        .initial("red")
+        .build();
+
+      await v1.start({ id: "ver-1", context: { count: 0 } });
+
+      const v2 = stateMachine<TrafficLight>({ name: "traffic-light", storage, version: "2" })
+        .state("red")
+        .state("green")
+        .state("yellow")
+        .on("next", { from: "red", to: "green" })
+        .on("next", { from: "green", to: "yellow" })
+        .on("next", { from: "yellow", to: "red" })
+        .initial("red")
+        .build();
+
+      await expect(v2.send({ id: "ver-1", event: "next" })).rejects.toThrow(
+        /version mismatch.*"1".*"2"/,
+      );
+    });
+
+    it("allows send when versions match", async () => {
+      const m = stateMachine<TrafficLight>({ name: "traffic-light", storage, version: "1" })
+        .state("red")
+        .state("green")
+        .state("yellow")
+        .on("next", { from: "red", to: "green" })
+        .on("next", { from: "green", to: "yellow" })
+        .on("next", { from: "yellow", to: "red" })
+        .initial("red")
+        .build();
+
+      await m.start({ id: "ver-2", context: { count: 0 } });
+      await m.send({ id: "ver-2", event: "next" });
+      const state = await m.getState("ver-2");
+      expect(state!.current).toBe("green");
+    });
+
+    it("allows send when machine has no version (backward compat)", async () => {
+      const noVersion = stateMachine<TrafficLight>({ name: "traffic-light", storage })
+        .state("red")
+        .state("green")
+        .state("yellow")
+        .on("next", { from: "red", to: "green" })
+        .on("next", { from: "green", to: "yellow" })
+        .on("next", { from: "yellow", to: "red" })
+        .initial("red")
+        .build();
+
+      await noVersion.start({ id: "ver-3", context: { count: 0 } });
+
+      const withVersion = stateMachine<TrafficLight>({
+        name: "traffic-light",
+        storage,
+        version: "2",
+      })
+        .state("red")
+        .state("green")
+        .state("yellow")
+        .on("next", { from: "red", to: "green" })
+        .on("next", { from: "green", to: "yellow" })
+        .on("next", { from: "yellow", to: "red" })
+        .initial("red")
+        .build();
+
+      await withVersion.send({ id: "ver-3", event: "next" });
+      const state = await withVersion.getState("ver-3");
+      expect(state!.current).toBe("green");
+    });
+
+    it("allows send when code has no version (backward compat)", async () => {
+      const v1 = stateMachine<TrafficLight>({ name: "traffic-light", storage, version: "1" })
+        .state("red")
+        .state("green")
+        .state("yellow")
+        .on("next", { from: "red", to: "green" })
+        .on("next", { from: "green", to: "yellow" })
+        .on("next", { from: "yellow", to: "red" })
+        .initial("red")
+        .build();
+
+      await v1.start({ id: "ver-4", context: { count: 0 } });
+
+      const noVersion = stateMachine<TrafficLight>({ name: "traffic-light", storage })
+        .state("red")
+        .state("green")
+        .state("yellow")
+        .on("next", { from: "red", to: "green" })
+        .on("next", { from: "green", to: "yellow" })
+        .on("next", { from: "yellow", to: "red" })
+        .initial("red")
+        .build();
+
+      await noVersion.send({ id: "ver-4", event: "next" });
+      const state = await noVersion.getState("ver-4");
+      expect(state!.current).toBe("green");
     });
   });
 });

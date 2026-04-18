@@ -42,6 +42,7 @@ import {
   StepTimeoutError,
   WorkflowDeadlineError,
   WorkflowVersionMismatchError,
+  GuardError,
 } from "./durable-pipeline-error.ts";
 import { withLock } from "./with-lock.ts";
 
@@ -280,6 +281,10 @@ export interface StepOptions<T> {
     input: unknown;
     workflowId: string;
   }) => Pipeline<void, any> | Promise<void>;
+  /** Skip this step when the predicate returns true. Skipped steps are recorded as 'skipped' and do not trigger compensation. */
+  readonly skipWhen?: (prev: unknown) => boolean;
+  /** Value to pass to the next step when this step is skipped. Defaults to prev. */
+  readonly skipValue?: (prev: unknown) => T;
 }
 
 // ---------------------------------------------------------------------------
@@ -438,7 +443,7 @@ function pickMatchBranch<Input, Current, Output, E extends TaggedError>(
 // Internal step definition
 // ---------------------------------------------------------------------------
 
-type StepKind = "normal" | "map" | "branch" | "match" | "sleep" | "signal" | "journaled";
+type StepKind = "normal" | "map" | "branch" | "match" | "sleep" | "signal" | "journaled" | "guard";
 
 interface StepDefinition {
   readonly name: string;
@@ -454,6 +459,8 @@ interface StepDefinition {
     input: unknown;
     workflowId: string;
   }) => Pipeline<void, any> | Promise<void>;
+  readonly skipWhen?: (prev: unknown) => boolean;
+  readonly skipValue?: (prev: unknown) => unknown;
   /**
    * Static metadata for visualization/documentation. Currently set by `.match()`
    * to expose its case labels so the DAG can render decision branches; future
@@ -763,6 +770,43 @@ export class WorkflowBuilder<
     const wrappedFn = (element: any, ctx: MapStepContext<Input>) =>
       Pipeline.fromPromise(() => fn(element, ctx));
     return this.mapOver(name, config, wrappedFn as any, options) as any;
+  }
+
+  // ---------------------------------------------------------------------------
+  // guard — precondition assertion that fails fast (no retry)
+  // ---------------------------------------------------------------------------
+
+  guard<Name extends string>(
+    name: Name,
+    predicate: (prev: Current) => boolean,
+    options?: { failureMessage?: string },
+  ): WorkflowBuilder<Input, Steps & Record<Name, Current>, Current, Error | GuardError> {
+    this._validateName(name);
+
+    const dependsOn = this._lastStepName ? [this._lastStepName] : [];
+
+    const stepDef: StepDefinition = {
+      name,
+      dependsOn,
+      kind: "guard",
+      codec: JsonCodec as Codec<unknown>,
+      execute: (execParams) => {
+        const prevStepName = dependsOn[0];
+        const prev = prevStepName != null ? execParams.results[prevStepName] : execParams.input;
+        if (predicate(prev as Current)) {
+          return Pipeline.succeed(prev);
+        }
+        return Pipeline.fail(
+          new GuardError({
+            workflowId: execParams.workflowId,
+            stepName: name,
+            message: options?.failureMessage ?? `Guard "${name}" failed`,
+          }),
+        );
+      },
+    };
+
+    return this._derive([...this._steps, stepDef], name) as any;
   }
 
   // ---------------------------------------------------------------------------
@@ -1551,6 +1595,23 @@ export class WorkflowBuilder<
 
       const pipeline = Pipeline.all(
         ...readySteps.map((stepDef) => {
+          // Evaluate skipWhen before entering the step execution pipeline
+          if (stepDef.skipWhen) {
+            const prevStepName = stepDef.dependsOn[0];
+            const prev = prevStepName != null ? results[prevStepName] : input;
+            if (stepDef.skipWhen(prev)) {
+              const skipResult = stepDef.skipValue ? stepDef.skipValue(prev) : prev;
+              const encoded = stepDef.codec.encode(skipResult);
+              return Pipeline.succeed({
+                name: stepDef.name,
+                result: encoded,
+                durationMs: 0,
+                startedAt: new Date(),
+                skipped: true as const,
+              });
+            }
+          }
+
           const startedAt = new Date();
           const startTime = startedAt.getTime();
 
@@ -1679,7 +1740,9 @@ export class WorkflowBuilder<
       }
 
       // Checkpoint each completed step
-      for (const { name, result, durationMs, startedAt } of stepResults!) {
+      for (const stepResult of stepResults!) {
+        const { name, result, durationMs, startedAt } = stepResult;
+        const wasSkipped = "skipped" in stepResult && stepResult.skipped === true;
         await this._storage.saveStepResult({
           workflowId,
           stepName: name,
@@ -1700,7 +1763,9 @@ export class WorkflowBuilder<
             completedAt: new Date(),
           });
         }
-        await this._hooks?.onStepComplete?.({ workflowId, stepName: name, result, durationMs });
+        if (!wasSkipped) {
+          await this._hooks?.onStepComplete?.({ workflowId, stepName: name, result, durationMs });
+        }
         results[name] = result;
         completed.add(name);
         running.delete(name);
@@ -2150,6 +2215,8 @@ export class WorkflowBuilder<
       retry: params.options?.retry as RetryPolicy<TaggedError> | undefined,
       onFailure: params.options?.onFailure as StepFailureStrategy<unknown> | undefined,
       compensate: params.options?.compensate as StepDefinition["compensate"],
+      skipWhen: params.options?.skipWhen as StepDefinition["skipWhen"],
+      skipValue: params.options?.skipValue as StepDefinition["skipValue"],
       execute: (execParams) => {
         if (params.isLinear) {
           const prevStepName = params.dependsOn[0];

@@ -63,3 +63,10 @@ export class WorkflowVersionMismatchError extends Data.TaggedError("WorkflowVers
   readonly actual: string;
   readonly message: string;
 }> {}
+
+/** A guard precondition failed — the step should not execute. */
+export class GuardError extends Data.TaggedError("GuardError")<{
+  readonly workflowId: string;
+  readonly stepName: string;
+  readonly message: string;
+}> {}

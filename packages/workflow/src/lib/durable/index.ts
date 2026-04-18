@@ -55,6 +55,7 @@ export {
   StepTimeoutError,
   WorkflowDeadlineError,
   WorkflowVersionMismatchError,
+  GuardError,
 } from "./durable-pipeline-error.ts";
 export { topologicalSort, computeReadySet, type DagNode } from "./workflow-dag.ts";
 export { trigger, WorkflowResult } from "./workflow-trigger.ts";
@@ -122,6 +123,7 @@ export {
   QuickMachineBuilder,
   MachineHandle,
   EventDataValidationError,
+  StateMachineVersionMismatchError,
   TIMEOUT_EVENT,
   type PureStateMachineBuilder,
   type MachineLimits,
