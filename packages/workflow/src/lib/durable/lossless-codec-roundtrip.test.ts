@@ -180,3 +180,54 @@ describe("workflow — explicit JsonCodec opt-out still works", () => {
     expect(typeof r2).toBe("string");
   });
 });
+
+describe("workflow — pipeline-level default codec", () => {
+  it("workflow({ codec: JsonCodec }) applies identity to every step by default", async () => {
+    const storage = new JsonRoundTripStorage();
+    const wf = workflow({ name: "pipeline-default", storage, codec: JsonCodec })
+      .stepAsync("a", async () => new Date("2026-04-16T00:00:00Z"))
+      .stepAsync("b", async ({ prev }: { prev: unknown }) => prev)
+      .build();
+
+    await wf.run({ workflowId: "pdc-1", input: {} });
+    const replay = await wf.run({ workflowId: "pdc-1", input: {} });
+
+    // Every step inherited identity JsonCodec → Date lost on replay via JSON
+    // storage. Confirms the pipeline-level default propagates.
+    expect(typeof replay).toBe("string");
+  });
+
+  it("per-step codec still overrides the pipeline-level default", async () => {
+    const storage = new JsonRoundTripStorage();
+    const wf = workflow({ name: "pipeline-override", storage, codec: JsonCodec })
+      .stepAsync("lossy", async () => new Date("2026-04-16T00:00:00Z"))
+      .stepAsync(
+        "lossless",
+        async ({ prev: _ }: { prev: unknown }) => new Date("2026-05-01T00:00:00Z"),
+        { codec: (await import("@promin/core")).LosslessJsonCodec },
+      )
+      .build();
+
+    await wf.run({ workflowId: "po-1", input: {} });
+    const replay = await wf.run({ workflowId: "po-1", input: {} });
+
+    // Last step's output (Date from "lossless") must survive because that
+    // step overrode the identity default with LosslessJsonCodec.
+    expect(replay).toBeInstanceOf(Date);
+  });
+
+  it("no pipeline codec set ⇒ default is LosslessJsonCodec (backward compat)", async () => {
+    const storage = new JsonRoundTripStorage();
+    const wf = workflow({ name: "no-pipeline-codec", storage })
+      .stepAsync("produce", async () => new Date("2026-04-16T00:00:00Z"))
+      .build();
+
+    const replay = await wf.run({ workflowId: "npc-1", input: {} });
+    // With no pipeline codec, the step picks up LosslessJsonCodec and the
+    // Date survives — unchanged behaviour from before this feature landed.
+    await wf.run({ workflowId: "npc-1", input: {} });
+    const r2 = await wf.run({ workflowId: "npc-1", input: {} });
+    expect(replay).toBeInstanceOf(Date);
+    expect(r2).toBeInstanceOf(Date);
+  });
+});

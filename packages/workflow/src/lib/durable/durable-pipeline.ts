@@ -537,7 +537,20 @@ export class WorkflowBuilder<
      * no cross-version comparison needed.
      */
     private readonly _patches?: readonly string[],
+    /**
+     * Pipeline-level default codec. Used when a step or activity doesn't
+     * supply its own `options.codec`. Falls back to `LosslessJsonCodec` when
+     * unset, so every boundary is lossless by default — but callers who want
+     * a custom serializer (superjson, Zod schema, etc.) can set it once here
+     * rather than threading the option into every step.
+     */
+    private readonly _defaultCodec?: Codec<unknown>,
   ) {}
+
+  /** Resolve the codec a step or activity should use when no explicit override is set. */
+  private _codec(): Codec<unknown> {
+    return this._defaultCodec ?? LosslessJsonCodec;
+  }
 
   /** Resolve TTL for a given workflow status. Returns undefined if no TTL applies. */
   private _getIdempotencyTtl(status: string): number | undefined {
@@ -569,6 +582,7 @@ export class WorkflowBuilder<
       this._onVersionMismatch,
       this._previousVersions,
       this._patches,
+      this._defaultCodec,
     );
   }
 
@@ -708,7 +722,7 @@ export class WorkflowBuilder<
   ): WorkflowBuilder<Input, Steps & Record<Name, Output[]>, Output[], Error | E2> {
     this._validateName(name);
 
-    const codec = (options?.codec ?? LosslessJsonCodec) as Codec<unknown>;
+    const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
     const concurrency = config.concurrency ?? Infinity;
 
     const stepDef: StepDefinition = {
@@ -789,7 +803,7 @@ export class WorkflowBuilder<
       name,
       dependsOn,
       kind: "guard",
-      codec: LosslessJsonCodec as Codec<unknown>,
+      codec: this._codec() as Codec<unknown>,
       execute: (execParams) => {
         const prevStepName = dependsOn[0];
         const prev = prevStepName != null ? execParams.results[prevStepName] : execParams.input;
@@ -825,7 +839,7 @@ export class WorkflowBuilder<
     this._validateName(name);
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
-    const codec = (options?.codec ?? LosslessJsonCodec) as Codec<unknown>;
+    const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
 
     const stepDef: StepDefinition = {
       name,
@@ -895,7 +909,7 @@ export class WorkflowBuilder<
     }
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
-    const codec = (options?.codec ?? LosslessJsonCodec) as Codec<unknown>;
+    const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
     const journalStorage = this._storage as WorkflowStorage & ActivityJournalStorage;
 
     const stepDef: StepDefinition = {
@@ -975,7 +989,7 @@ export class WorkflowBuilder<
     this._validateName(name);
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
-    const codec = (options?.codec ?? LosslessJsonCodec) as Codec<unknown>;
+    const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
 
     const stepDef: StepDefinition = {
       name,
@@ -1029,7 +1043,7 @@ export class WorkflowBuilder<
     this._validateName(name);
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
-    const codec = (options?.codec ?? LosslessJsonCodec) as Codec<unknown>;
+    const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
 
     const stepDef: StepDefinition = {
       name,
@@ -1068,7 +1082,7 @@ export class WorkflowBuilder<
       name,
       dependsOn,
       kind: "sleep",
-      codec: LosslessJsonCodec,
+      codec: this._codec(),
       execute: (params) => {
         const eff = Effect.gen(function* () {
           const state = yield* Effect.promise(() => params.storage.loadWorkflow(params.workflowId));
@@ -1132,7 +1146,7 @@ export class WorkflowBuilder<
     this._validateName(name);
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
-    const codec = (params.codec ?? LosslessJsonCodec) as Codec<unknown>;
+    const codec = (params.codec ?? this._codec()) as Codec<unknown>;
     const signalName = params.signalName;
     const timeoutMs = params.timeoutMs;
 
@@ -2174,6 +2188,7 @@ export class WorkflowBuilder<
       this._onVersionMismatch,
       this._previousVersions,
       this._patches,
+      this._defaultCodec,
     );
   }
 
@@ -2198,6 +2213,7 @@ export class WorkflowBuilder<
       this._onVersionMismatch,
       this._previousVersions,
       this._patches,
+      this._defaultCodec,
     );
   }
 
@@ -2220,7 +2236,7 @@ export class WorkflowBuilder<
   }): WorkflowBuilder<Input, any, any, any> {
     this._validateName(params.name);
 
-    const codec = (params.options?.codec ?? LosslessJsonCodec) as Codec<unknown>;
+    const codec = (params.options?.codec ?? this._codec()) as Codec<unknown>;
 
     const stepDef: StepDefinition = {
       name: params.name,
@@ -2305,6 +2321,15 @@ export function workflow<Input>(params: {
    * workflow version declares its own active set — no comparison logic.
    */
   patches?: readonly string[];
+  /**
+   * Default codec for every step and activity in this workflow. Individual
+   * steps and activities can still override via their own `options.codec`.
+   * Omit to use `LosslessJsonCodec` (Date / BigInt / Map / Set / Error /
+   * RegExp / URL / undefined / NaN / ±Infinity / -0 round-trip). Set to
+   * `JsonCodec` to opt out everywhere and accept that non-JSON values will
+   * be lost across storage boundaries.
+   */
+  codec?: Codec<unknown>;
 }): WorkflowBuilder<Input> {
   if (params.onVersionMismatch === "drain" && !params.previousVersions?.length) {
     throw new WorkflowError({
@@ -2341,6 +2366,7 @@ export function workflow<Input>(params: {
     params.onVersionMismatch ?? "strict",
     params.previousVersions,
     params.patches,
+    params.codec,
   );
 }
 
