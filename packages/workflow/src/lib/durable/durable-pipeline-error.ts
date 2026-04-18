@@ -88,3 +88,28 @@ export class AmbiguousActivityOutcome extends Data.TaggedError("AmbiguousActivit
   readonly activityName: string;
   readonly message: string;
 }> {}
+
+/**
+ * Marker for errors that MUST NOT be retried by the activity retry loop.
+ * Intended for business-logic failures (validation errors, "not found",
+ * "already exists", policy violations) that won't succeed on retry. When a
+ * step body throws a TerminalError inside `ctx.activity(..., { retry: ... })`,
+ * the retry loop exits immediately and the activity is journaled as Failure.
+ *
+ * Throw from user code like `throw new TerminalError({ message: "..." })`.
+ */
+export class TerminalError extends Data.TaggedError("TerminalError")<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
+
+/**
+ * Marker for errors that SHOULD be retried by the activity retry loop —
+ * forces retry even when a user-supplied `retryable` predicate would reject.
+ * Useful for transient infra failures (timeouts, 5xx responses, connection
+ * drops) the retry loop should always take another shot at.
+ */
+export class RetryableError extends Data.TaggedError("RetryableError")<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}

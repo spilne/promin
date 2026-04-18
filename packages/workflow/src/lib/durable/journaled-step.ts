@@ -27,7 +27,12 @@ import {
   type ActivityJournalStorage,
   type JournaledSuspendStorage,
 } from "./activity-journal.ts";
-import { AmbiguousActivityOutcome, WorkflowSuspendedError } from "./durable-pipeline-error.ts";
+import {
+  AmbiguousActivityOutcome,
+  RetryableError,
+  TerminalError,
+  WorkflowSuspendedError,
+} from "./durable-pipeline-error.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
 
 // ---------------------------------------------------------------------------
@@ -68,6 +73,25 @@ export interface ActivityOptions {
    *   with a caller-supplied idempotency header, etc.).
    */
   readonly idempotent?: boolean;
+  /**
+   * Predicate controlling whether the retry loop should retry a given
+   * error. Only consulted when `retry` is set. Return `true` to retry,
+   * `false` to bail out immediately and journal the failure.
+   *
+   * Applies on top of the built-in rules:
+   *   - `TerminalError` — never retried (predicate is not consulted)
+   *   - `RetryableError` — always retried up to `retry.maxRetries`
+   *     (predicate is not consulted)
+   *
+   * The predicate is useful when errors don't come from the framework:
+   * ```ts
+   * ctx.activity('charge', fn, {
+   *   retry: { maxRetries: 5 },
+   *   retryable: (err) => err instanceof ServiceUnavailable,
+   * });
+   * ```
+   */
+  readonly retryable?: (err: unknown) => boolean;
 }
 
 /**
@@ -336,7 +360,9 @@ function makeCtx<Input, Prev>(params: {
       const runOnce = async (): Promise<T> => (await Promise.resolve(fn())) as T;
       let value: T;
       try {
-        value = options?.retry ? await runWithRetry(runOnce, options.retry) : await runOnce();
+        value = options?.retry
+          ? await runWithRetry(runOnce, options.retry, options?.retryable)
+          : await runOnce();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         const failureExit = { tag: "Failure", error: message } as const;
@@ -736,7 +762,11 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
 // Local retry runner — intentionally small; mirrors @promin/core pattern.
 // ---------------------------------------------------------------------------
 
-async function runWithRetry<T>(fn: () => Promise<T>, policy: RetryPolicy<unknown>): Promise<T> {
+async function runWithRetry<T>(
+  fn: () => Promise<T>,
+  policy: RetryPolicy<unknown>,
+  retryable?: (err: unknown) => boolean,
+): Promise<T> {
   const maxRetries = policy.maxRetries ?? 3;
   const baseDelay = policy.baseDelayMs ?? 100;
   const maxDelay = policy.maxDelayMs ?? Infinity;
@@ -746,8 +776,15 @@ async function runWithRetry<T>(fn: () => Promise<T>, policy: RetryPolicy<unknown
     try {
       return await fn();
     } catch (err) {
+      // Hard classification first — these take precedence over any
+      // user-supplied predicate or retry policy `when`.
+      if (err instanceof TerminalError) throw err;
+      const forcedRetry = err instanceof RetryableError;
+      if (!forcedRetry) {
+        if (retryable && !retryable(err)) throw err;
+        if (policy.when && !policy.when(err)) throw err;
+      }
       if (attempt >= maxRetries) throw err;
-      if (policy.when && !policy.when(err)) throw err;
       let delay = Math.min(baseDelay * 2 ** attempt, maxDelay);
       if (jitter) delay *= 0.75 + Math.random() * 0.5;
       await new Promise((r) => setTimeout(r, delay));
