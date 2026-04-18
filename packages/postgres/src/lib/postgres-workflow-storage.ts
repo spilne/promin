@@ -915,7 +915,7 @@ export class PostgresWorkflowStorage
     stepName: string;
     activityIndex: number;
     activityName: string;
-    stepType: "sleep" | "signal";
+    stepType: "sleep" | "signal" | "activity";
     wakeAt?: Date;
   }): Promise<void> {
     await this.db

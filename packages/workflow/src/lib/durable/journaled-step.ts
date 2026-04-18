@@ -27,7 +27,7 @@ import {
   type ActivityJournalStorage,
   type JournaledSuspendStorage,
 } from "./activity-journal.ts";
-import { WorkflowSuspendedError } from "./durable-pipeline-error.ts";
+import { AmbiguousActivityOutcome, WorkflowSuspendedError } from "./durable-pipeline-error.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
 
 // ---------------------------------------------------------------------------
@@ -54,6 +54,20 @@ export interface ActivityOptions {
    * caller opts out explicitly.
    */
   readonly codec?: Codec<unknown>;
+  /**
+   * Whether re-running this activity is safe. Controls behaviour when a
+   * worker crashes between the pending-row write and the completion write —
+   * the engine can't tell whether the side effect ran:
+   *
+   * - `false` (default) — throw `AmbiguousActivityOutcome`. Safe default
+   *   for payments, emails, webhooks, any external side effect you can't
+   *   deduplicate. The workflow halts; operator inspects the external
+   *   system and either resumes, compensates, or cancels.
+   * - `true` — re-run the activity body. Use only when the call is
+   *   naturally idempotent (pure computation, GET request, upsert by key
+   *   with a caller-supplied idempotency header, etc.).
+   */
+  readonly idempotent?: boolean;
 }
 
 /**
@@ -241,13 +255,19 @@ function makeCtx<Input, Prev>(params: {
   ): Generator<ActivityYield, T, T> {
     const activityIndex = indexRef.next++;
     const codec = options?.codec ?? stepCodec;
+    const idempotent = options?.idempotent === true;
+    // Two-phase record requires the pending-entry primitives. Storages that
+    // only implement the base ActivityJournalStorage fall back to the legacy
+    // single-phase path (side effect risks duplication under worker crash,
+    // same as before this change).
+    const twoPhase = isJournaledSuspendStorage(storage);
 
     // Build the async work for this activity. Replay-or-run is decided here
     // so the runner sees a single awaitable Promise regardless of path.
     const promise = (async (): Promise<T> => {
       const recorded = journalByIndex.get(activityIndex);
       if (recorded) {
-        // Replay path — validate determinism, rehydrate value or rethrow error.
+        // Replay path — validate determinism.
         if (recorded.activityName !== name) {
           throw new JournalNonDeterminismError(
             stepName,
@@ -268,50 +288,99 @@ function makeCtx<Input, Prev>(params: {
             `activity:${name}`,
           );
         }
-        // Pending activity rows shouldn't happen — the engine only appends
-        // activity entries after their side effect completes. If we see one,
-        // something earlier went wrong.
-        if (!recorded.exit) {
-          throw new Error(
-            `journal entry ${activityIndex} for step "${stepName}" is pending; ` +
-              `expected a completed activity`,
-          );
+        const phase = recorded.phase ?? "completed";
+        if (phase === "completed") {
+          if (!recorded.exit) {
+            throw new Error(
+              `journal entry ${activityIndex} for step "${stepName}" is completed but has no exit`,
+            );
+          }
+          if (recorded.exit.tag === "Failure") {
+            throw new Error(recorded.exit.error);
+          }
+          return codec.decode(recorded.exit.value) as T;
         }
-        if (recorded.exit.tag === "Failure") {
-          throw new Error(recorded.exit.error);
+        // Pending row on replay — the worker that started this activity
+        // crashed between the pending write and the completion write. The
+        // side effect may or may not have run.
+        if (!idempotent) {
+          throw new AmbiguousActivityOutcome({
+            workflowId,
+            stepName,
+            activityIndex,
+            activityName: name,
+            message:
+              `activity "${name}" (step "${stepName}", index ${activityIndex}) was ` +
+              `interrupted after starting but before completing, and is not marked ` +
+              `idempotent. Inspect the external system and either mark idempotent, ` +
+              `compensate, or fail the workflow.`,
+          });
         }
-        return codec.decode(recorded.exit.value) as T;
+        // Idempotent: fall through and re-run. appendPendingEntry is a no-op
+        // on the existing pending row, completePendingEntry below updates it
+        // with the new exit.
       }
 
-      // Fresh-run path — execute with retry, persist (success or failure).
+      // Fresh-run path — optionally write a pending row, execute, then
+      // complete (or fall back to single-phase append).
+      if (twoPhase) {
+        await storage.appendPendingEntry({
+          workflowId,
+          stepName,
+          activityIndex,
+          activityName: name,
+          stepType: "activity",
+        });
+      }
+
       const runOnce = async (): Promise<T> => (await Promise.resolve(fn())) as T;
       let value: T;
       try {
         value = options?.retry ? await runWithRetry(runOnce, options.retry) : await runOnce();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        await storage.appendEntry({
-          workflowId,
-          stepName,
-          activityIndex,
-          activityName: name,
-          exit: { tag: "Failure", error: message },
-        });
+        const failureExit = { tag: "Failure", error: message } as const;
+        if (twoPhase) {
+          await storage.completePendingEntry({
+            workflowId,
+            stepName,
+            activityIndex,
+            exit: failureExit,
+          });
+        } else {
+          await storage.appendEntry({
+            workflowId,
+            stepName,
+            activityIndex,
+            activityName: name,
+            exit: failureExit,
+          });
+        }
         throw err;
       }
       // Encode for storage, then return the round-tripped value so fresh-run
       // consumers see the same shape they'd see on replay. Without the decode
       // step, a step body that yields `new Date()` would see a real Date on
-      // fresh run and a stringified one after restart — the asymmetry this
-      // work is built to eliminate.
+      // fresh run and a stringified one after restart — the asymmetry
+      // promin-sd5k was built to eliminate.
       const encoded = codec.encode(value);
-      await storage.appendEntry({
-        workflowId,
-        stepName,
-        activityIndex,
-        activityName: name,
-        exit: { tag: "Success", value: encoded },
-      });
+      const successExit = { tag: "Success", value: encoded } as const;
+      if (twoPhase) {
+        await storage.completePendingEntry({
+          workflowId,
+          stepName,
+          activityIndex,
+          exit: successExit,
+        });
+      } else {
+        await storage.appendEntry({
+          workflowId,
+          stepName,
+          activityIndex,
+          activityName: name,
+          exit: successExit,
+        });
+      }
       return codec.decode(encoded) as T;
     })();
 

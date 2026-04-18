@@ -70,3 +70,21 @@ export class GuardError extends Data.TaggedError("GuardError")<{
   readonly stepName: string;
   readonly message: string;
 }> {}
+
+/**
+ * A journaled activity was replayed while its journal row is still in the
+ * `pending` phase — the worker that started it crashed between the pending
+ * write and the completion write, so we don't know whether the side effect
+ * ran. Thrown for non-idempotent activities (the default) so the workflow
+ * halts and the operator can inspect the external system before resuming.
+ *
+ * Opt in to automatic re-run by passing `idempotent: true` in
+ * `ActivityOptions`, which suppresses this error and re-runs the activity.
+ */
+export class AmbiguousActivityOutcome extends Data.TaggedError("AmbiguousActivityOutcome")<{
+  readonly workflowId: string;
+  readonly stepName: string;
+  readonly activityIndex: number;
+  readonly activityName: string;
+  readonly message: string;
+}> {}

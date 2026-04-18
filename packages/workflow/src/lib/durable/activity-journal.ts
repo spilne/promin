@@ -88,16 +88,18 @@ export interface ActivityJournalStorage {
 /** Optional extension for journaled steps that use `ctx.sleep` or `ctx.signal`. */
 export interface JournaledSuspendStorage extends ActivityJournalStorage {
   /**
-   * Append a `pending` entry — used by `ctx.sleep`/`ctx.signal` when the
-   * journaled step suspends. For sleep: carries `wakeAt`. For signal: the
-   * signal name lives in `activityName`. Idempotent on PK.
+   * Append a `pending` entry — used by `ctx.sleep` / `ctx.signal` when a
+   * journaled step suspends, and by `ctx.activity` for the two-phase record
+   * (pending row written before the side effect, completed after). For
+   * sleep: carries `wakeAt`. For signal / activity: the name lives in
+   * `activityName`. Idempotent on PK.
    */
   appendPendingEntry(params: {
     readonly workflowId: string;
     readonly stepName: string;
     readonly activityIndex: number;
     readonly activityName: string;
-    readonly stepType: "sleep" | "signal";
+    readonly stepType: "sleep" | "signal" | "activity";
     readonly wakeAt?: Date;
   }): Promise<void>;
 
