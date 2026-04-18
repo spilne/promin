@@ -74,25 +74,6 @@ export interface ActivityOptions {
    *   with a caller-supplied idempotency header, etc.).
    */
   readonly idempotent?: boolean;
-  /**
-   * Predicate controlling whether the retry loop should retry a given
-   * error. Only consulted when `retry` is set. Return `true` to retry,
-   * `false` to bail out immediately and journal the failure.
-   *
-   * Applies on top of the built-in rules:
-   *   - `TerminalError` — never retried (predicate is not consulted)
-   *   - `RetryableError` — always retried up to `retry.maxRetries`
-   *     (predicate is not consulted)
-   *
-   * The predicate is useful when errors don't come from the framework:
-   * ```ts
-   * ctx.activity('charge', fn, {
-   *   retry: { maxRetries: 5 },
-   *   retryable: (err) => err instanceof ServiceUnavailable,
-   * });
-   * ```
-   */
-  readonly retryable?: (err: unknown) => boolean;
 }
 
 /**
@@ -368,9 +349,7 @@ function makeCtx<Input, Prev>(params: {
         journaledBodyScope.exit(async () => (await Promise.resolve(fn())) as T);
       let value: T;
       try {
-        value = options?.retry
-          ? await runWithRetry(runOnce, options.retry, options?.retryable)
-          : await runOnce();
+        value = options?.retry ? await runWithRetry(runOnce, options.retry) : await runOnce();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         const failureExit = { tag: "Failure", error: message } as const;
@@ -778,11 +757,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
 // Local retry runner — intentionally small; mirrors @promin/core pattern.
 // ---------------------------------------------------------------------------
 
-async function runWithRetry<T>(
-  fn: () => Promise<T>,
-  policy: RetryPolicy<unknown>,
-  retryable?: (err: unknown) => boolean,
-): Promise<T> {
+async function runWithRetry<T>(fn: () => Promise<T>, policy: RetryPolicy<unknown>): Promise<T> {
   const maxRetries = policy.maxRetries ?? 3;
   const baseDelay = policy.baseDelayMs ?? 100;
   const maxDelay = policy.maxDelayMs ?? Infinity;
@@ -792,14 +767,12 @@ async function runWithRetry<T>(
     try {
       return await fn();
     } catch (err) {
-      // Hard classification first — these take precedence over any
-      // user-supplied predicate or retry policy `when`.
+      // Class-based classification first — these take precedence over the
+      // predicate so a TerminalError can't be re-retried by a lax `when`,
+      // and a RetryableError can't be skipped by a strict one.
       if (err instanceof TerminalError) throw err;
       const forcedRetry = err instanceof RetryableError;
-      if (!forcedRetry) {
-        if (retryable && !retryable(err)) throw err;
-        if (policy.when && !policy.when(err)) throw err;
-      }
+      if (!forcedRetry && policy.when && !policy.when(err)) throw err;
       if (attempt >= maxRetries) throw err;
       let delay = Math.min(baseDelay * 2 ** attempt, maxDelay);
       if (jitter) delay *= 0.75 + Math.random() * 0.5;

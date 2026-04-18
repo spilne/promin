@@ -2,13 +2,15 @@
 // Retry classification tests for journaled activities.
 //
 // Three levers control whether the retry loop re-attempts a failed activity:
-//   1. TerminalError — always stops the loop, ignores everything else.
-//   2. RetryableError — always forces retry, ignores predicates.
-//   3. `retryable` predicate on ActivityOptions — consulted for any other
-//      error; return false to bail out.
+//   1. TerminalError   — always stops the loop; `retry.when` isn't consulted.
+//   2. RetryableError  — always forces retry; `retry.when` isn't consulted.
+//   3. RetryPolicy.when (from @promin/core) — the predicate on the retry
+//      config itself. Consulted for any other error; return false to bail.
 //
-// The tests below nail each lever independently and in combination so a
-// future refactor can't silently flip the defaults.
+// Point (3) intentionally reuses the existing `when` from RetryPolicy rather
+// than adding a duplicate top-level option. The class-based short-circuits
+// take precedence so a lax `when` can't resurrect a TerminalError and a
+// strict one can't skip a RetryableError.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
@@ -98,7 +100,7 @@ describe("activity retry — TerminalError", () => {
     expect(a.box.count).toBe(1); // ran once, no retries
   });
 
-  it("TerminalError wins even when `retryable` would return true", async () => {
+  it("TerminalError wins even when `retry.when` would return true", async () => {
     const storage = new InMemoryWorkflowStorage();
     const a = attemptCounter();
 
@@ -117,8 +119,10 @@ describe("activity retry — TerminalError", () => {
               throw new TerminalError({ message: "nope" });
             },
             {
-              retry: fastRetry,
-              retryable: () => true, // predicate says "retry" — Terminal still wins
+              retry: {
+                ...fastRetry,
+                when: () => true, // predicate says "retry" — Terminal still wins
+              },
             },
           );
         },
@@ -134,7 +138,7 @@ describe("activity retry — TerminalError", () => {
 // ---------------------------------------------------------------------------
 
 describe("activity retry — RetryableError", () => {
-  it("forces retry even when `retryable` predicate would return false", async () => {
+  it("forces retry even when `retry.when` would return false", async () => {
     const storage = new InMemoryWorkflowStorage();
     const a = attemptCounter();
 
@@ -153,8 +157,10 @@ describe("activity retry — RetryableError", () => {
               throw new RetryableError({ message: "transient" });
             },
             {
-              retry: fastRetry,
-              retryable: () => false, // predicate says "don't retry" — Retryable wins
+              retry: {
+                ...fastRetry,
+                when: () => false, // predicate says "don't retry" — Retryable wins
+              },
             },
           );
         },
@@ -193,7 +199,7 @@ describe("activity retry — RetryableError", () => {
 });
 
 // ---------------------------------------------------------------------------
-// `retryable` predicate — consulted for any other error type
+// retry.when predicate — consulted for any other error type
 // ---------------------------------------------------------------------------
 
 class ValidationError extends Error {
@@ -210,7 +216,7 @@ class ServiceUnavailable extends Error {
   }
 }
 
-describe("activity retry — retryable predicate", () => {
+describe("activity retry — retry.when predicate", () => {
   it("predicate returns false → skip retries", async () => {
     const storage = new InMemoryWorkflowStorage();
     const a = attemptCounter();
@@ -230,8 +236,10 @@ describe("activity retry — retryable predicate", () => {
               throw new ValidationError("bad input");
             },
             {
-              retry: fastRetry,
-              retryable: (err) => err instanceof ServiceUnavailable,
+              retry: {
+                ...fastRetry,
+                when: (err) => err instanceof ServiceUnavailable,
+              },
             },
           );
         },
@@ -260,8 +268,10 @@ describe("activity retry — retryable predicate", () => {
               throw new ServiceUnavailable("503");
             },
             {
-              retry: fastRetry,
-              retryable: (err) => err instanceof ServiceUnavailable,
+              retry: {
+                ...fastRetry,
+                when: (err) => err instanceof ServiceUnavailable,
+              },
             },
           );
         },
@@ -271,7 +281,7 @@ describe("activity retry — retryable predicate", () => {
     expect(a.box.count).toBe(fastRetry.maxRetries + 1);
   });
 
-  it("predicate is not consulted when activity has no retry policy", async () => {
+  it("without a retry policy, any error propagates after one attempt", async () => {
     const storage = new InMemoryWorkflowStorage();
     const a = attemptCounter();
 
@@ -283,19 +293,15 @@ describe("activity retry — retryable predicate", () => {
         stepName: "s",
         storage,
         body: function* (ctx) {
-          return yield* ctx.activity(
-            "charge",
-            async () => {
-              a.bump();
-              throw new Error("boom");
-            },
-            { retryable: () => true }, // no retry policy — predicate ignored
-          );
+          return yield* ctx.activity("charge", async () => {
+            a.bump();
+            throw new Error("boom");
+          });
         },
       }),
     ).rejects.toThrow("boom");
 
-    expect(a.box.count).toBe(1); // runs once, no retry config
+    expect(a.box.count).toBe(1);
   });
 });
 
