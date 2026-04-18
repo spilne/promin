@@ -20,7 +20,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Codec, RetryPolicy } from "@promin/core";
-import { LosslessJsonCodec } from "@promin/core";
+import { LosslessJsonCodec, payloadHash as hashPayload } from "@promin/core";
 import {
   isJournaledSuspendStorage,
   type JournalEntry,
@@ -97,6 +97,22 @@ export interface ActivityOptions<T = unknown> {
    * ```
    */
   readonly compensate?: (result: T) => void | Promise<void>;
+  /**
+   * Opt in or out of payload hashing for this activity. Requires the 3-arg
+   * `ctx.activity(name, input, fn)` form — the 2-arg form can't hash
+   * because the input isn't reified. When set, the engine canonicalizes
+   * `input` to SHA-256 hex, stores it on the journal row, and on replay
+   * compares the stored hash against the recomputed one. A mismatch throws
+   * `JournalNonDeterminismError` to catch silent payload drift (same
+   * activity name, different input across runs).
+   *
+   * - `true` — hash this activity's input. Throws at call time if used with
+   *   the 2-arg form, since there's no separate input to hash.
+   * - `false` — explicit opt-out even when the pipeline enables hashing
+   *   globally via `workflow({ payloadHash: true })`.
+   * - missing — inherit the pipeline default (off by default).
+   */
+  readonly payloadHash?: boolean;
 }
 
 /**
@@ -147,12 +163,31 @@ export interface JournaledContext<Input, Prev> {
    * persists the result, resolves to it. Replay resolves to the persisted
    * value without calling `fn`.
    *
+   * Two forms:
+   *
+   * - 2-arg `ctx.activity(name, fn)` — inputs are captured inside the
+   *   closure. Simplest and what most activities need.
+   * - 3-arg `ctx.activity(name, input, fn)` — input is reified as a
+   *   separate arg so the engine can canonicalize + fingerprint it via
+   *   SHA-256. Required when `payloadHash` is enabled (per-activity
+   *   option or pipeline-level `workflow({ payloadHash: true })`). On
+   *   replay the engine recomputes the hash and throws
+   *   `JournalNonDeterminismError` on drift — catches "same activity
+   *   name, different input" bugs that the 2-arg form can't see through
+   *   the closure.
+   *
    * Must be consumed with `yield*` — the sub-generator delegates its single
    * yielded promise to the runner and returns the resolved value.
    */
   activity<T>(
     name: string,
     fn: () => T | Promise<T>,
+    options?: ActivityOptions<T>,
+  ): Generator<ActivityYield, T, T>;
+  activity<I, T>(
+    name: string,
+    input: I,
+    fn: (input: I) => T | Promise<T>,
     options?: ActivityOptions<T>,
   ): Generator<ActivityYield, T, T>;
 
@@ -283,6 +318,12 @@ function makeCtx<Input, Prev>(params: {
    * the step didn't pass one.
    */
   defaultCodec?: Codec<unknown>;
+  /**
+   * Pipeline-level default for `ActivityOptions.payloadHash`. When `true`,
+   * 3-arg `ctx.activity(name, input, fn)` calls hash by default; per-call
+   * `payloadHash: false` overrides. The 2-arg form is unaffected.
+   */
+  defaultPayloadHash?: boolean;
 }): { ctx: JournaledContext<Input, Prev>; unwind: (bodyError: unknown) => Promise<void> } {
   const {
     input,
@@ -295,6 +336,7 @@ function makeCtx<Input, Prev>(params: {
     workflowVersion,
     patches,
     defaultCodec,
+    defaultPayloadHash,
   } = params;
   const stepCodec = defaultCodec ?? LosslessJsonCodec;
   const patchSet = new Set(patches ?? []);
@@ -322,11 +364,40 @@ function makeCtx<Input, Prev>(params: {
   }
   const compensations: Compensation[] = [];
 
-  function* activity<T>(
+  function* activity<I, T>(
     name: string,
-    fn: () => T | Promise<T>,
-    options?: ActivityOptions<T>,
+    argA: I | (() => T | Promise<T>),
+    argB?: ActivityOptions<T> | ((input: I) => T | Promise<T>),
+    argC?: ActivityOptions<T>,
   ): Generator<ActivityYield, T, T> {
+    // Disambiguate the 2-arg vs 3-arg overload.
+    //   2-arg: ctx.activity(name, fn, options?)     — argA is fn
+    //   3-arg: ctx.activity(name, input, fn, opts?) — argB is fn
+    // We key off whether argB is a function: if so, argA is the reified
+    // input and argB is the unary activity fn. Otherwise argA must be the
+    // zero-arg fn.
+    let fn: () => T | Promise<T>;
+    let hasInput: boolean;
+    let boundInput: I | undefined;
+    let options: ActivityOptions<T> | undefined;
+    if (typeof argB === "function") {
+      hasInput = true;
+      boundInput = argA as I;
+      const unary = argB as (input: I) => T | Promise<T>;
+      fn = () => unary(argA as I);
+      options = argC;
+    } else {
+      if (typeof argA !== "function") {
+        throw new TypeError(
+          `ctx.activity("${name}"): expected 2-arg (name, fn) or 3-arg (name, input, fn) form; ` +
+            `got a non-function as the second argument with no activity function in the third.`,
+        );
+      }
+      hasInput = false;
+      boundInput = undefined;
+      fn = argA as () => T | Promise<T>;
+      options = argB as ActivityOptions<T> | undefined;
+    }
     // Position resolution: inside a ctx.parallel branch the scope supplies a
     // shared activityIndex + branch path; at top level we consume from the
     // step's flat counter with empty branch path.
@@ -336,6 +407,26 @@ function makeCtx<Input, Prev>(params: {
     const codec = options?.codec ?? stepCodec;
     const idempotent = options?.idempotent === true;
     const compensate = options?.compensate;
+    // Payload fingerprint — per-activity opt-in wins, else fall back to the
+    // pipeline default.
+    //   * Explicit `options.payloadHash: true` on the 2-arg form throws —
+    //     the caller asked for something they can't have, surface it.
+    //   * Pipeline-level default on a 2-arg call silently skips instead.
+    //     The pipeline flag means "hash where you can"; forcing every
+    //     existing 2-arg activity to migrate would make the flag
+    //     impractical to enable in a real codebase.
+    const explicitHashOpt = options?.payloadHash;
+    const wantsHash = explicitHashOpt ?? defaultPayloadHash ?? false;
+    if (wantsHash && !hasInput) {
+      if (explicitHashOpt === true) {
+        throw new Error(
+          `ctx.activity("${name}"): \`payloadHash\` requires the 3-arg form ctx.activity(name, input, fn). ` +
+            `The 2-arg form captures inputs inside a closure, so there's nothing separate to hash.`,
+        );
+      }
+      // Fell through from pipeline default — no hash, no error.
+    }
+    const payloadHashValue = wantsHash && hasInput ? hashPayload(boundInput) : undefined;
     if (compensate && scope) {
       // Compensation indices come from the top-level counter; reserving one
       // while concurrent branches are also bumping the counter is racy and
@@ -444,6 +535,7 @@ function makeCtx<Input, Prev>(params: {
           activityIndex,
           branchPath,
           activityName: name,
+          payloadHash: payloadHashValue,
           stepType: "activity",
         });
       }
@@ -477,6 +569,7 @@ function makeCtx<Input, Prev>(params: {
             activityIndex,
             branchPath,
             activityName: name,
+            payloadHash: payloadHashValue,
             exit: failureExit,
           });
         }
@@ -504,6 +597,7 @@ function makeCtx<Input, Prev>(params: {
           activityIndex,
           branchPath,
           activityName: name,
+          payloadHash: payloadHashValue,
           exit: successExit,
         });
       }
@@ -960,6 +1054,13 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
    * values round-trip to the same shape replay would produce.
    */
   codec?: Codec<unknown>;
+  /**
+   * Pipeline-level default for `ActivityOptions.payloadHash`. When `true`,
+   * every 3-arg `ctx.activity(name, input, fn)` in this step's body
+   * fingerprints its input by default; per-activity `payloadHash: false`
+   * still opts out. The 2-arg form is unaffected (no reified input to hash).
+   */
+  payloadHash?: boolean;
   body: JournaledStepBody<Input, Prev, Output>;
 }): Promise<Output> {
   const {
@@ -972,6 +1073,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     workflowVersion,
     patches,
     codec,
+    payloadHash,
     body,
   } = params;
 
@@ -987,6 +1089,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     workflowVersion,
     patches,
     defaultCodec: codec,
+    defaultPayloadHash: payloadHash,
   });
   const gen = body(ctx, prev);
 

@@ -571,6 +571,14 @@ export class WorkflowBuilder<
      * rather than threading the option into every step.
      */
     private readonly _defaultCodec?: Codec<unknown>,
+    /**
+     * Pipeline-level default for `ActivityOptions.payloadHash`. When `true`,
+     * every 3-arg `ctx.activity(name, input, fn)` in every journaled step
+     * hashes its input by default. Per-activity `payloadHash: false` still
+     * wins locally. Off by default — payload hashing is optional and costs
+     * one SHA-256 per activity invocation.
+     */
+    private readonly _defaultPayloadHash?: boolean,
   ) {}
 
   /** Resolve the codec a step or activity should use when no explicit override is set. */
@@ -609,6 +617,7 @@ export class WorkflowBuilder<
       this._previousVersions,
       this._patches,
       this._defaultCodec,
+      this._defaultPayloadHash,
     );
   }
 
@@ -959,6 +968,7 @@ export class WorkflowBuilder<
             workflowVersion: builderVersion,
             patches: builderPatches,
             codec,
+            payloadHash: this._defaultPayloadHash,
             body,
           }),
         ) as Pipeline<unknown, TaggedError>;
@@ -2215,6 +2225,7 @@ export class WorkflowBuilder<
       this._previousVersions,
       this._patches,
       this._defaultCodec,
+      this._defaultPayloadHash,
     );
   }
 
@@ -2240,6 +2251,7 @@ export class WorkflowBuilder<
       this._previousVersions,
       this._patches,
       this._defaultCodec,
+      this._defaultPayloadHash,
     );
   }
 
@@ -2406,6 +2418,22 @@ export function workflow<Input>(params: {
    * be lost across storage boundaries.
    */
   codec?: Codec<unknown>;
+  /**
+   * Enable activity-input fingerprinting across this whole workflow. When
+   * `true`, every 3-arg `ctx.activity(name, input, fn)` canonicalizes its
+   * input and stores a SHA-256 hex hash on the journal row; on replay, a
+   * mismatch throws `JournalNonDeterminismError` to catch silent payload
+   * drift (same activity name, different input between runs).
+   *
+   * Per-activity `ActivityOptions.payloadHash` still wins — pass `false`
+   * there to opt out of a specific activity even when the workflow default
+   * is on. The 2-arg `ctx.activity(name, fn)` form is unaffected because
+   * it has no reified input to hash.
+   *
+   * Off by default. Hashing adds one SHA-256 per activity invocation,
+   * which is cheap but not free.
+   */
+  payloadHash?: boolean;
 }): WorkflowBuilder<Input> {
   if (params.onVersionMismatch === "drain" && !params.previousVersions?.length) {
     throw new WorkflowError({
@@ -2443,6 +2471,7 @@ export function workflow<Input>(params: {
     params.previousVersions,
     params.patches,
     params.codec,
+    params.payloadHash,
   );
 }
 

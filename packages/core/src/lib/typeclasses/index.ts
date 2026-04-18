@@ -11,6 +11,10 @@ export {
 // Lossless codec — default for workflow step / activity results
 export { LosslessJsonCodec } from "./lossless-codec.ts";
 
+// Canonical JSON + payload hashing — used by the workflow journal to fingerprint
+// activity inputs for drift detection across replays.
+export { canonicalJSON, payloadHash } from "./canonicalize.ts";
+
 // Eq
 export { type Eq, JsonEq, eqFromCodec } from "./eq.ts";
 

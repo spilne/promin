@@ -65,6 +65,8 @@ export {
   type Codec,
   JsonCodec,
   LosslessJsonCodec,
+  canonicalJSON,
+  payloadHash,
   codecFromSchema,
   codecTuple,
   codecRecord,
