@@ -1,18 +1,20 @@
 // ---------------------------------------------------------------------------
-// RedisWorkflowStorage — Redis-backed WorkflowStorage + StepAttemptStorage
+// RedisWorkflowStorage — Redis-backed WorkflowStorage, StepAttemptStorage,
+// ActivityJournalStorage, and JournaledSuspendStorage.
 // ---------------------------------------------------------------------------
 //
 // Unsupported (by design — use PostgresWorkflowStorage if you need these):
 // - cancelWorkflow cascade: no parent index is maintained.
 // - listWorkflows parentId filter: no parent index is maintained.
-// - ActivityJournalStorage / JournaledSuspendStorage (i.e. `.journaled()`
-//   steps, `ctx.sleep`, `ctx.signal`): journal entries require an ordered,
-//   indexable store that Redis can't provide without materially more
-//   complexity. `.journaled()` will throw JournalStorageMissingError at
-//   build time against this storage.
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage, StepAttemptStorage } from "@promin/workflow";
+import type {
+  WorkflowStorage,
+  StepAttemptStorage,
+  ActivityJournalStorage,
+  JournaledSuspendStorage,
+  JournalEntry,
+} from "@promin/workflow";
 import type {
   WorkflowState,
   WorkflowStatus,
@@ -51,7 +53,62 @@ end
 return 0
 `;
 
-export class RedisWorkflowStorage implements WorkflowStorage, StepAttemptStorage {
+// Journal: append a COMPLETED activity entry. Idempotent on (wid, step, idx).
+// KEYS: [entryHash, idxZset, stepsSet]
+// ARGV: [idx, activityName, exitJson, createdAt, stepName]
+const APPEND_ENTRY_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
+redis.call('HSET', KEYS[1],
+  'activityName', ARGV[2],
+  'stepType', 'activity',
+  'phase', 'completed',
+  'exit', ARGV[3],
+  'createdAt', ARGV[4])
+redis.call('ZADD', KEYS[2], ARGV[1], ARGV[1])
+redis.call('SADD', KEYS[3], ARGV[5])
+return 1
+`;
+
+// Journal: append a PENDING entry (sleep or signal). Idempotent on (wid, step, idx).
+// KEYS: [entryHash, idxZset, stepsSet, sleepsZset (global), signalIdxHash]
+// ARGV: [idx, activityName, stepType, wakeAtMs|'', createdAt, stepName, sleepsMember|'', signalName|'']
+const APPEND_PENDING_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
+redis.call('HSET', KEYS[1],
+  'activityName', ARGV[2],
+  'stepType', ARGV[3],
+  'phase', 'pending',
+  'wakeAt', ARGV[4],
+  'createdAt', ARGV[5])
+redis.call('ZADD', KEYS[2], ARGV[1], ARGV[1])
+redis.call('SADD', KEYS[3], ARGV[6])
+if ARGV[3] == 'sleep' and ARGV[7] ~= '' then
+  redis.call('ZADD', KEYS[4], ARGV[4], ARGV[7])
+elseif ARGV[3] == 'signal' and ARGV[8] ~= '' then
+  redis.call('HSET', KEYS[5], ARGV[8], ARGV[1])
+end
+return 1
+`;
+
+// Journal: transition pending -> completed atomically. No-op if already completed.
+// KEYS: [entryHash, sleepsZset (global), signalIdxHash]
+// ARGV: [exitJson, sleepsMember|'', signalName|'']
+const COMPLETE_PENDING_LUA = `
+local phase = redis.call('HGET', KEYS[1], 'phase')
+if phase ~= 'pending' then return 0 end
+local stepType = redis.call('HGET', KEYS[1], 'stepType')
+redis.call('HSET', KEYS[1], 'phase', 'completed', 'exit', ARGV[1])
+if stepType == 'sleep' and ARGV[2] ~= '' then
+  redis.call('ZREM', KEYS[2], ARGV[2])
+elseif stepType == 'signal' and ARGV[3] ~= '' then
+  redis.call('HDEL', KEYS[3], ARGV[3])
+end
+return 1
+`;
+
+export class RedisWorkflowStorage
+  implements WorkflowStorage, StepAttemptStorage, ActivityJournalStorage, JournaledSuspendStorage
+{
   private readonly redis: RedisClient;
   private readonly prefix: string;
   private readonly namespace: string | null;
@@ -108,6 +165,57 @@ export class RedisWorkflowStorage implements WorkflowStorage, StepAttemptStorage
 
   private get completedIndexKey(): string {
     return `${this.prefix}:idx:completed`;
+  }
+
+  // -- Journal key helpers --------------------------------------------------
+
+  /** Per-workflow set of step names that have journal entries (for purge/ttl). */
+  private journalStepsKey(id: string): string {
+    return `${this.prefix}:${id}:journal:steps`;
+  }
+
+  /** Per-step sorted set of activity indices, for ordered loadJournal. */
+  private journalIdxKey(id: string, stepName: string): string {
+    return `${this.prefix}:${id}:journal:${stepName}:idx`;
+  }
+
+  /** Per-entry hash: activityName, stepType, phase, exit, wakeAt, createdAt. */
+  private journalEntryKey(id: string, stepName: string, activityIndex: number): string {
+    return `${this.prefix}:${id}:journal:${stepName}:entry:${activityIndex}`;
+  }
+
+  /** Per-step hash {signalName → activityIndex} for O(1) findPendingSignal. */
+  private journalSignalIdxKey(id: string, stepName: string): string {
+    return `${this.prefix}:${id}:journal:${stepName}:signal-idx`;
+  }
+
+  /** Global sorted set across workflows: score=wakeAt_ms, member="{wid}::{step}::{idx}". */
+  private get sleepsKey(): string {
+    return `${this.prefix}:sleeps`;
+  }
+
+  private sleepsMember(id: string, stepName: string, activityIndex: number): string {
+    return `${id}::${stepName}::${activityIndex}`;
+  }
+
+  private parseSleepsMember(
+    member: string,
+  ): { workflowId: string; stepName: string; activityIndex: number } | null {
+    // Parse from the right: last "::" separates idx; next-to-last separates step.
+    // This tolerates "::" inside workflowId (but not step name) since parsing
+    // splits on the last two occurrences. Given the existing codebase does
+    // not escape ":" in keys, matching that precedent is consistent.
+    const lastSep = member.lastIndexOf("::");
+    if (lastSep < 0) return null;
+    const idxStr = member.slice(lastSep + 2);
+    const rest = member.slice(0, lastSep);
+    const midSep = rest.lastIndexOf("::");
+    if (midSep < 0) return null;
+    const stepName = rest.slice(midSep + 2);
+    const workflowId = rest.slice(0, midSep);
+    const activityIndex = Number(idxStr);
+    if (!Number.isFinite(activityIndex)) return null;
+    return { workflowId, stepName, activityIndex };
   }
 
   // -- Index helpers --------------------------------------------------------
@@ -645,6 +753,27 @@ export class RedisWorkflowStorage implements WorkflowStorage, StepAttemptStorage
     for (const stepName of stepNames) {
       await this.redis.pexpire(this.tasksKey(workflowId, run, stepName), ttl);
     }
+
+    // TTL journal keys. The global sleeps zset is shared across workflows
+    // and is NOT expired; purgeCompleted + completePendingEntry clean up
+    // this workflow's members.
+    const journalSteps = await this.redis.smembers(this.journalStepsKey(workflowId));
+    if (journalSteps.length > 0) {
+      await this.redis.pexpire(this.journalStepsKey(workflowId), ttl);
+      for (const stepName of journalSteps) {
+        await this.redis.pexpire(this.journalIdxKey(workflowId, stepName), ttl);
+        await this.redis.pexpire(this.journalSignalIdxKey(workflowId, stepName), ttl);
+        const indices = await this.redis.zrangebyscore(
+          this.journalIdxKey(workflowId, stepName),
+          "-inf",
+          "+inf",
+        );
+        for (const idxStr of indices) {
+          const idx = Number(idxStr);
+          await this.redis.pexpire(this.journalEntryKey(workflowId, stepName, idx), ttl);
+        }
+      }
+    }
   }
 
   // -- Suspend / Signal -----------------------------------------------------
@@ -961,6 +1090,28 @@ export class RedisWorkflowStorage implements WorkflowStorage, StepAttemptStorage
         }
       }
 
+      // Cascade journal: step list, per-step idx zset + signal-idx hash +
+      // entry hashes, plus pending members left in the global sleeps zset.
+      const journalStepNames = await this.redis.smembers(this.journalStepsKey(id));
+      for (const stepName of journalStepNames) {
+        const indices = await this.redis.zrangebyscore(
+          this.journalIdxKey(id, stepName),
+          "-inf",
+          "+inf",
+        );
+        for (const idxStr of indices) {
+          const idx = Number(idxStr);
+          keysToDelete.push(this.journalEntryKey(id, stepName, idx));
+          // Defensive: ZREM is a no-op if not present.
+          await this.redis.zrem(this.sleepsKey, this.sleepsMember(id, stepName, idx));
+        }
+        keysToDelete.push(this.journalIdxKey(id, stepName));
+        keysToDelete.push(this.journalSignalIdxKey(id, stepName));
+      }
+      if (journalStepNames.length > 0) {
+        keysToDelete.push(this.journalStepsKey(id));
+      }
+
       // Delete all keys
       if (keysToDelete.length > 0) {
         await this.redis.del(...keysToDelete);
@@ -1009,5 +1160,196 @@ export class RedisWorkflowStorage implements WorkflowStorage, StepAttemptStorage
     });
 
     return stepName ? items.filter((a) => a.stepName === stepName) : items;
+  }
+
+  // -- ActivityJournalStorage -----------------------------------------------
+
+  async loadJournal(workflowId: string, stepName: string): Promise<JournalEntry[]> {
+    const indices = await this.redis.zrangebyscore(
+      this.journalIdxKey(workflowId, stepName),
+      "-inf",
+      "+inf",
+    );
+    if (indices.length === 0) return [];
+
+    const entries = await Promise.all(
+      indices.map(async (idxStr) => {
+        const idx = Number(idxStr);
+        const hash = await this.redis.hgetall(this.journalEntryKey(workflowId, stepName, idx));
+        if (!hash || Object.keys(hash).length === 0) return null;
+        return this.parseJournalEntry(idx, hash);
+      }),
+    );
+    return entries.filter((e): e is JournalEntry => e !== null);
+  }
+
+  async appendEntry(params: {
+    workflowId: string;
+    stepName: string;
+    activityIndex: number;
+    activityName: string;
+    exit: NonNullable<JournalEntry["exit"]>;
+  }): Promise<void> {
+    const entryKey = this.journalEntryKey(params.workflowId, params.stepName, params.activityIndex);
+    const idxKey = this.journalIdxKey(params.workflowId, params.stepName);
+    const stepsKey = this.journalStepsKey(params.workflowId);
+    const createdAt = this.serializeDate(new Date());
+    await this.redis.eval(
+      APPEND_ENTRY_LUA,
+      3,
+      entryKey,
+      idxKey,
+      stepsKey,
+      String(params.activityIndex),
+      params.activityName,
+      JSON.stringify(params.exit),
+      createdAt,
+      params.stepName,
+    );
+  }
+
+  // -- JournaledSuspendStorage ----------------------------------------------
+
+  async appendPendingEntry(params: {
+    workflowId: string;
+    stepName: string;
+    activityIndex: number;
+    activityName: string;
+    stepType: "sleep" | "signal";
+    wakeAt?: Date;
+  }): Promise<void> {
+    const entryKey = this.journalEntryKey(params.workflowId, params.stepName, params.activityIndex);
+    const idxKey = this.journalIdxKey(params.workflowId, params.stepName);
+    const stepsKey = this.journalStepsKey(params.workflowId);
+    const signalIdxKey = this.journalSignalIdxKey(params.workflowId, params.stepName);
+    const wakeAtMs =
+      params.stepType === "sleep" && params.wakeAt ? String(params.wakeAt.getTime()) : "";
+    // Only register in the global sleeps zset when we have a wakeAt — a sleep
+    // entry without one can't be scanned anyway.
+    const sleepsMember =
+      params.stepType === "sleep" && wakeAtMs
+        ? this.sleepsMember(params.workflowId, params.stepName, params.activityIndex)
+        : "";
+    const signalName = params.stepType === "signal" ? params.activityName : "";
+
+    await this.redis.eval(
+      APPEND_PENDING_LUA,
+      5,
+      entryKey,
+      idxKey,
+      stepsKey,
+      this.sleepsKey,
+      signalIdxKey,
+      String(params.activityIndex),
+      params.activityName,
+      params.stepType,
+      wakeAtMs,
+      this.serializeDate(new Date()),
+      params.stepName,
+      sleepsMember,
+      signalName,
+    );
+  }
+
+  async completePendingEntry(params: {
+    workflowId: string;
+    stepName: string;
+    activityIndex: number;
+    exit: NonNullable<JournalEntry["exit"]>;
+  }): Promise<void> {
+    const entryKey = this.journalEntryKey(params.workflowId, params.stepName, params.activityIndex);
+    const signalIdxKey = this.journalSignalIdxKey(params.workflowId, params.stepName);
+    // Load current entry to learn the signal name (if any) so the Lua script
+    // can remove it from the signal-idx hash. Safe under the workflow lock;
+    // completePendingEntry is always called by the lock holder (workflow
+    // resume, scanner, or signal deliverer) and the Lua phase check makes
+    // the write itself atomic.
+    const current = await this.redis.hgetall(entryKey);
+    const stepType = current?.stepType;
+    const sleepsMember =
+      stepType === "sleep"
+        ? this.sleepsMember(params.workflowId, params.stepName, params.activityIndex)
+        : "";
+    const signalName = stepType === "signal" ? (current?.activityName ?? "") : "";
+
+    await this.redis.eval(
+      COMPLETE_PENDING_LUA,
+      3,
+      entryKey,
+      this.sleepsKey,
+      signalIdxKey,
+      JSON.stringify(params.exit),
+      sleepsMember,
+      signalName,
+    );
+  }
+
+  async findDueSleeps(params: {
+    now: Date;
+    limit: number;
+  }): Promise<
+    Array<{ workflowId: string; stepName: string; activityIndex: number; wakeAt: Date }>
+  > {
+    const raw = await this.redis.zrangebyscore(
+      this.sleepsKey,
+      "-inf",
+      params.now.getTime(),
+      "WITHSCORES",
+      "LIMIT",
+      0,
+      params.limit,
+    );
+    const due: Array<{
+      workflowId: string;
+      stepName: string;
+      activityIndex: number;
+      wakeAt: Date;
+    }> = [];
+    for (let i = 0; i < raw.length; i += 2) {
+      const member = raw[i]!;
+      const score = Number(raw[i + 1]);
+      const parsed = this.parseSleepsMember(member);
+      if (!parsed) continue;
+      due.push({ ...parsed, wakeAt: new Date(score) });
+    }
+    return due;
+  }
+
+  async findPendingSignal(params: {
+    workflowId: string;
+    stepName: string;
+    signalName: string;
+  }): Promise<JournalEntry | null> {
+    const idxStr = await this.redis.hget(
+      this.journalSignalIdxKey(params.workflowId, params.stepName),
+      params.signalName,
+    );
+    if (idxStr == null) return null;
+    const idx = Number(idxStr);
+    const hash = await this.redis.hgetall(
+      this.journalEntryKey(params.workflowId, params.stepName, idx),
+    );
+    if (!hash || Object.keys(hash).length === 0) return null;
+    const entry = this.parseJournalEntry(idx, hash);
+    if (entry.phase !== "pending") return null;
+    return entry;
+  }
+
+  // -- Journal helpers ------------------------------------------------------
+
+  private parseJournalEntry(activityIndex: number, hash: Record<string, string>): JournalEntry {
+    const stepType = hash.stepType as JournalEntry["stepType"];
+    const phase = hash.phase as JournalEntry["phase"];
+    const exit = hash.exit ? (JSON.parse(hash.exit) as JournalEntry["exit"]) : undefined;
+    const wakeAt = hash.wakeAt ? new Date(Number(hash.wakeAt)) : undefined;
+    return {
+      activityIndex,
+      activityName: hash.activityName!,
+      stepType,
+      phase,
+      exit,
+      wakeAt,
+      createdAt: this.parseDate(hash.createdAt!),
+    };
   }
 }

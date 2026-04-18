@@ -173,10 +173,9 @@ export class JournalStorageMissingError extends Error {
   constructor(stepName: string) {
     super(
       `journaled step "${stepName}" requires a WorkflowStorage that implements ` +
-        `ActivityJournalStorage. Supported backends: InMemoryWorkflowStorage, ` +
-        `PostgresWorkflowStorage. RedisWorkflowStorage does NOT support journaled ` +
-        `steps — use Postgres if you need .journaled(), ctx.sleep, or ctx.signal. ` +
-        `Alternatively, extend your custom storage with loadJournal/appendEntry.`,
+        `ActivityJournalStorage. Supported built-in backends: InMemoryWorkflowStorage, ` +
+        `PostgresWorkflowStorage, RedisWorkflowStorage. Extend your custom storage ` +
+        `with loadJournal/appendEntry if you need a different backend.`,
     );
   }
 }
@@ -306,10 +305,10 @@ function makeCtx<Input, Prev>(params: {
     if (!isJournaledSuspendStorage(storage)) {
       throw new Error(
         `ctx.${op}() requires a WorkflowStorage that implements JournaledSuspendStorage. ` +
-          `Supported backends: InMemoryWorkflowStorage, PostgresWorkflowStorage. ` +
-          `RedisWorkflowStorage does NOT support durable suspend/resume — use Postgres ` +
-          `if you need ctx.sleep or ctx.signal. Alternatively, extend your custom storage ` +
-          `with appendPendingEntry/completePendingEntry/findDueSleeps/findPendingSignal.`,
+          `Supported built-in backends: InMemoryWorkflowStorage, PostgresWorkflowStorage, ` +
+          `RedisWorkflowStorage. Extend your custom storage with ` +
+          `appendPendingEntry/completePendingEntry/findDueSleeps/findPendingSignal ` +
+          `if you need a different backend.`,
       );
     }
     return storage;
