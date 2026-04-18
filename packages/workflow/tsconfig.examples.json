@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "rootDir": "examples",
+    "outDir": "dist-examples",
+    "tsBuildInfoFile": "dist-examples/tsconfig.examples.tsbuildinfo",
+    "types": ["@types/bun"]
+  },
+  "include": ["examples/**/*.ts"],
+  "references": [{ "path": "./tsconfig.lib.json" }]
+}

@@ -23,7 +23,9 @@
   },
   "files": [
     "dist",
-    "package.json"
+    "examples",
+    "package.json",
+    "versioning.md"
   ],
   "type": "module",
   "sideEffects": false,

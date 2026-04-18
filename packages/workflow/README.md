@@ -45,4 +45,5 @@ For non-durable use cases (scripts, request handlers), use `flow()` with the sam
 
 ## Documentation
 
-Full docs and examples: [packages/workflow](https://github.com/spilne/promin/tree/main/packages/workflow)
+- **[Versioning guide](./versioning.md)** — strict / drain / `ctx.patched()` / rolling worker deploys, with runnable examples in [`examples/versioning/`](./examples/versioning)
+- Full docs: [packages/workflow](https://github.com/spilne/promin/tree/main/packages/workflow)
