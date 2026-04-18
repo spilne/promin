@@ -33,3 +33,42 @@ export function isInJournaledBody(): boolean {
 export function currentJournaledStepName(): string | undefined {
   return journaledBodyScope.getStore()?.stepName;
 }
+
+// ---------------------------------------------------------------------------
+// activityScope — "am I inside a ctx.parallel branch?"
+//
+// Set by ctx.parallel() around each branch driver so activities yielded from
+// that branch get the parallel's activity_index + a deterministic branch
+// path. When the store is `undefined`, execution is at the top of the body
+// and activities draw from the top-level counter the runner owns directly.
+// ---------------------------------------------------------------------------
+
+export interface ActivityScope {
+  /**
+   * The activity_index every yield in this scope shares with every other
+   * yield in the same parallel. Frozen at the parallel's call-time position.
+   */
+  readonly parallelActivityIndex: number;
+  /**
+   * Path from the step's body root to the branch this scope represents.
+   * The FIRST yield in this scope is journaled with this exact prefix; each
+   * subsequent yield appends `.1`, `.2`, ... via `localCounter` so two
+   * sequential activities in the same branch stay uniquely identified.
+   */
+  readonly pathPrefix: string;
+  /** Mutable, scope-local yield counter. `{ next: 0 }` at branch entry. */
+  readonly localCounter: { next: number };
+}
+
+export const activityScope = new AsyncLocalStorage<ActivityScope>();
+
+/**
+ * Consume the next (branchPath) slot in the current scope. Mutates the
+ * scope's local counter. Returns "" when there's no scope (top-level body);
+ * callers handle the top-level activity_index themselves.
+ */
+export function nextPathInScope(scope: ActivityScope): string {
+  const n = scope.localCounter.next++;
+  if (n === 0) return scope.pathPrefix;
+  return scope.pathPrefix ? `${scope.pathPrefix}.${n}` : String(n);
+}

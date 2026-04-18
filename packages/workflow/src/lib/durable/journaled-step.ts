@@ -33,7 +33,12 @@ import {
   TerminalError,
   WorkflowSuspendedError,
 } from "./durable-pipeline-error.ts";
-import { journaledBodyScope } from "./journaled-body-scope.ts";
+import {
+  activityScope,
+  journaledBodyScope,
+  nextPathInScope,
+  type ActivityScope,
+} from "./journaled-body-scope.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
 
 // ---------------------------------------------------------------------------
@@ -172,6 +177,30 @@ export interface JournaledContext<Input, Prev> {
    * per-signal Zod codec is a planned refinement.
    */
   signal<T>(name: string): Generator<ActivityYield, T, T>;
+
+  /**
+   * Run `branches` concurrently and resolve to their results in input order.
+   * Each branch is a sub-generator — typically `ctx.activity(...)` — that
+   * yields its own ActivityYields. The engine drives each branch in its own
+   * scope so their journal entries stay uniquely identified by branch path
+   * without racing for the shared activity_index counter.
+   *
+   * Nesting is supported: a branch can itself be `ctx.parallel([...])`.
+   *
+   * ```ts
+   * const [user, perms] = yield* ctx.parallel([
+   *   ctx.activity("fetch-user", () => api.user(input.id)),
+   *   ctx.activity("fetch-perms", () => api.perms(input.id)),
+   * ]);
+   * ```
+   *
+   * Failure today uses Promise.all semantics: the first branch failure
+   * rejects the whole parallel; still-running branches complete in the
+   * background. Structured cancellation is planned as a follow-up.
+   */
+  parallel<T>(
+    branches: ReadonlyArray<Generator<ActivityYield, T, T>>,
+  ): Generator<ActivityYield, T[], unknown>;
 }
 
 /** The body function passed to `.journaled()`. */
@@ -298,7 +327,12 @@ function makeCtx<Input, Prev>(params: {
     fn: () => T | Promise<T>,
     options?: ActivityOptions<T>,
   ): Generator<ActivityYield, T, T> {
-    const activityIndex = indexRef.next++;
+    // Position resolution: inside a ctx.parallel branch the scope supplies a
+    // shared activityIndex + branch path; at top level we consume from the
+    // step's flat counter with empty branch path.
+    const scope = activityScope.getStore();
+    const activityIndex = scope ? scope.parallelActivityIndex : indexRef.next++;
+    const branchPath = scope ? nextPathInScope(scope) : "";
     const codec = options?.codec ?? stepCodec;
     const idempotent = options?.idempotent === true;
     const compensate = options?.compensate;
@@ -329,7 +363,7 @@ function makeCtx<Input, Prev>(params: {
     // Build the async work for this activity. Replay-or-run is decided here
     // so the runner sees a single awaitable Promise regardless of path.
     const promise = (async (): Promise<T> => {
-      const recorded = journalByKey.get(journalKey(activityIndex, ""));
+      const recorded = journalByKey.get(journalKey(activityIndex, branchPath));
       if (recorded) {
         // Replay path — validate determinism.
         if (recorded.activityName !== name) {
@@ -397,6 +431,7 @@ function makeCtx<Input, Prev>(params: {
           workflowId,
           stepName,
           activityIndex,
+          branchPath,
           activityName: name,
           stepType: "activity",
         });
@@ -421,6 +456,7 @@ function makeCtx<Input, Prev>(params: {
             workflowId,
             stepName,
             activityIndex,
+            branchPath,
             exit: failureExit,
           });
         } else {
@@ -428,6 +464,7 @@ function makeCtx<Input, Prev>(params: {
             workflowId,
             stepName,
             activityIndex,
+            branchPath,
             activityName: name,
             exit: failureExit,
           });
@@ -446,6 +483,7 @@ function makeCtx<Input, Prev>(params: {
           workflowId,
           stepName,
           activityIndex,
+          branchPath,
           exit: successExit,
         });
       } else {
@@ -453,6 +491,7 @@ function makeCtx<Input, Prev>(params: {
           workflowId,
           stepName,
           activityIndex,
+          branchPath,
           activityName: name,
           exit: successExit,
         });
@@ -621,6 +660,38 @@ function makeCtx<Input, Prev>(params: {
     return yield { _tag: "Activity", name: signalName, promise };
   }
 
+  // -------------------------------------------------------------------------
+  // ctx.parallel — concurrent sub-generators, one scope each
+  // -------------------------------------------------------------------------
+
+  function* parallel<T>(
+    branches: ReadonlyArray<Generator<ActivityYield, T, T>>,
+  ): Generator<ActivityYield, T[], unknown> {
+    // Compute parallel's own position the same way ctx.activity does: if
+    // we're already inside a parallel branch, bump that scope's counter;
+    // otherwise take a slot from the step-level counter.
+    const enclosing = activityScope.getStore();
+    const parallelActivityIndex = enclosing ? enclosing.parallelActivityIndex : indexRef.next++;
+    const parallelPath = enclosing ? nextPathInScope(enclosing) : "";
+
+    // Drive each branch sub-generator in its own ActivityScope so its
+    // yields consume slots from a branch-local counter with a branch-
+    // specific path prefix.
+    const promise = Promise.all(
+      branches.map((branchGen, i) => {
+        const branchPrefix = parallelPath ? `${parallelPath}.${i}` : String(i);
+        const branchScope: ActivityScope = {
+          parallelActivityIndex,
+          pathPrefix: branchPrefix,
+          localCounter: { next: 0 },
+        };
+        return activityScope.run(branchScope, () => driveSubGenerator(branchGen));
+      }),
+    );
+
+    return (yield { _tag: "Activity", name: "parallel", promise }) as unknown as T[];
+  }
+
   function patched(name: string): boolean {
     // Pure set membership. Returns false (not throws) for names not in the
     // currently-running definition's patches array — this is load-bearing
@@ -734,8 +805,29 @@ function makeCtx<Input, Prev>(params: {
     sleep,
     signal: signalImpl,
     patched,
+    parallel,
   };
   return { ctx, unwind };
+}
+
+/**
+ * Drive a branch sub-generator to completion, awaiting each yielded
+ * ActivityYield. Mirrors the outer runner but stays inside whatever
+ * `activityScope` the caller has set, so activities inside the branch see
+ * the branch-local scope.
+ */
+async function driveSubGenerator<T>(gen: Generator<ActivityYield, T, T>): Promise<T> {
+  let step = gen.next();
+  while (!step.done) {
+    const yielded = step.value;
+    try {
+      const resolved = await yielded.promise;
+      step = gen.next(resolved as never);
+    } catch (err) {
+      step = gen.throw(err);
+    }
+  }
+  return step.value;
 }
 
 // ---------------------------------------------------------------------------
