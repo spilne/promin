@@ -44,6 +44,12 @@
       "import": "./dist/testing.js",
       "default": "./dist/testing.js"
     },
+    "./dev": {
+      "types": "./dist/dev.d.ts",
+      "@promin/source": "./src/dev.ts",
+      "import": "./dist/dev.js",
+      "default": "./dist/dev.js"
+    },
     "./package.json": "./package.json"
   },
   "publishConfig": {

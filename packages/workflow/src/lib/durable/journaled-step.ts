@@ -33,6 +33,7 @@ import {
   TerminalError,
   WorkflowSuspendedError,
 } from "./durable-pipeline-error.ts";
+import { journaledBodyScope } from "./journaled-body-scope.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
 
 // ---------------------------------------------------------------------------
@@ -357,7 +358,14 @@ function makeCtx<Input, Prev>(params: {
         });
       }
 
-      const runOnce = async (): Promise<T> => (await Promise.resolve(fn())) as T;
+      // Exit the journaledBodyScope before running `fn()` — the scope is
+      // meant to flag non-deterministic globals called between `yield*`
+      // expressions, NOT the intentional side effects that happen inside an
+      // activity. Node's AsyncLocalStorage would otherwise propagate the
+      // body scope through every async continuation descending from the
+      // generator tick.
+      const runOnce = async (): Promise<T> =>
+        journaledBodyScope.exit(async () => (await Promise.resolve(fn())) as T);
       let value: T;
       try {
         value = options?.retry
@@ -737,9 +745,17 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
   });
   const gen = body(ctx, prev);
 
+  // Code between `yield*` expressions inside the generator runs when we call
+  // gen.next / gen.throw. Running each tick inside `journaledBodyScope` lets
+  // dev tooling (e.g. instrumentNonDeterminism) detect direct Date.now /
+  // Math.random calls from the body. Activity fn bodies run outside this
+  // scope — they're supposed to touch the outside world.
+  const bodyCtx = { stepName };
+  const tick = <R>(fn: () => R): R => journaledBodyScope.run(bodyCtx, fn);
+
   let step: IteratorResult<ActivityYield, Output>;
   try {
-    step = gen.next();
+    step = tick(() => gen.next());
   } catch (err) {
     // Body threw synchronously before yielding anything.
     throw err;
@@ -749,10 +765,10 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     const yielded = step.value;
     try {
       const resolved = await yielded.promise;
-      step = gen.next(resolved as never);
+      step = tick(() => gen.next(resolved as never));
     } catch (err) {
       // Let the body's try/catch handle it if it wants; otherwise re-throw.
-      step = gen.throw(err);
+      step = tick(() => gen.throw(err));
     }
   }
   return step.value;
