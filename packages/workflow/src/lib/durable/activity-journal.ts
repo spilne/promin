@@ -45,6 +45,15 @@ export interface JournalEntry {
   readonly stepType?: JournalStepType;
   /** Default `"completed"` preserves backward compat for entries without phase. */
   readonly phase?: JournalPhase;
+  /**
+   * Canonicalized-+-hashed fingerprint of the activity's input — only set when
+   * the caller opts in via `ActivityOptions.payloadHash` (or pipeline-level
+   * `payloadHash: true` with a 3-arg activity). On replay, if the stored and
+   * recomputed hashes differ, the engine throws `JournalNonDeterminismError`
+   * to catch silent payload drift (same activity name, different input).
+   * `undefined` when hashing was never requested.
+   */
+  readonly payloadHash?: string;
   /** Exit is set once the entry reaches `completed` phase. `undefined` while `pending`. */
   readonly exit?:
     | { readonly tag: "Success"; readonly value: unknown }
@@ -82,6 +91,7 @@ export interface ActivityJournalStorage {
     readonly activityIndex: number;
     readonly branchPath?: string;
     readonly activityName: string;
+    readonly payloadHash?: string;
     readonly exit: NonNullable<JournalEntry["exit"]>;
   }): Promise<void>;
 }
@@ -111,6 +121,7 @@ export interface JournaledSuspendStorage extends ActivityJournalStorage {
     readonly activityIndex: number;
     readonly branchPath?: string;
     readonly activityName: string;
+    readonly payloadHash?: string;
     readonly stepType: "sleep" | "signal" | "activity" | "compensation";
     readonly wakeAt?: Date;
   }): Promise<void>;

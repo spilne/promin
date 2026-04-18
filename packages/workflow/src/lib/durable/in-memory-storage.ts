@@ -563,6 +563,7 @@ export class InMemoryWorkflowStorage
     activityIndex: number;
     branchPath?: string;
     activityName: string;
+    payloadHash?: string;
     exit: NonNullable<JournalEntry["exit"]>;
   }): Promise<void> {
     const branchPath = params.branchPath ?? "";
@@ -571,12 +572,16 @@ export class InMemoryWorkflowStorage
     // Idempotent: skip if the same (index, branchPath) is already recorded and completed.
     const existing = this.findEntryIndex(entries, params.activityIndex, branchPath);
     if (existing !== -1 && entries[existing]!.phase !== "pending") return;
+    // Preserve payloadHash from the prior pending row if the completer didn't
+    // pass one — pending→completed transition shouldn't drop the fingerprint.
+    const priorHash = existing !== -1 ? entries[existing]!.payloadHash : undefined;
     const entry: JournalEntry = {
       activityIndex: params.activityIndex,
       branchPath,
       activityName: params.activityName,
       stepType: "activity",
       phase: "completed",
+      payloadHash: params.payloadHash ?? priorHash,
       exit: params.exit,
       createdAt: new Date(),
     };
@@ -591,6 +596,7 @@ export class InMemoryWorkflowStorage
     activityIndex: number;
     branchPath?: string;
     activityName: string;
+    payloadHash?: string;
     stepType: "sleep" | "signal" | "activity" | "compensation";
     wakeAt?: Date;
   }): Promise<void> {
@@ -605,6 +611,7 @@ export class InMemoryWorkflowStorage
       activityName: params.activityName,
       stepType: params.stepType,
       phase: "pending",
+      payloadHash: params.payloadHash,
       wakeAt: params.wakeAt,
       createdAt: new Date(),
     });

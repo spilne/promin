@@ -113,6 +113,20 @@
       "when": 1743400015000,
       "tag": "0015_step_queue_version",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1743400016000,
+      "tag": "0016_journal_branch_path",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1743400017000,
+      "tag": "0017_payload_hash",
+      "breakpoints": true
     }
   ]
 }

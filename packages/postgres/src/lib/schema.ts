@@ -223,6 +223,10 @@ export const activityJournal = pgTable(
     activityName: text("activity_name").notNull(),
     stepType: text("step_type").notNull().default("activity"),
     phase: text("phase").notNull().default("completed"),
+    // Canonicalized-+-hashed fingerprint of the activity input, opt-in via
+    // `ActivityOptions.payloadHash` or pipeline-level `payloadHash: true`.
+    // NULL when hashing was never requested.
+    payloadHash: text("payload_hash"),
     wakeAt: timestamp("wake_at", { withTimezone: true }),
     exit: jsonb("exit"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

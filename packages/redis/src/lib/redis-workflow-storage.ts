@@ -55,7 +55,7 @@ return 0
 
 // Journal: append a COMPLETED activity entry. Idempotent on (wid, step, idx).
 // KEYS: [entryHash, idxZset, stepsSet]
-// ARGV: [idx, activityName, exitJson, createdAt, stepName]
+// ARGV: [idx, activityName, exitJson, createdAt, stepName, branchPath, payloadHash|'']
 const APPEND_ENTRY_LUA = `
 if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
 redis.call('HSET', KEYS[1],
@@ -65,6 +65,9 @@ redis.call('HSET', KEYS[1],
   'branchPath', ARGV[6],
   'exit', ARGV[3],
   'createdAt', ARGV[4])
+if ARGV[7] ~= '' then
+  redis.call('HSET', KEYS[1], 'payloadHash', ARGV[7])
+end
 redis.call('ZADD', KEYS[2], ARGV[1], ARGV[1] .. '|' .. ARGV[6])
 redis.call('SADD', KEYS[3], ARGV[5])
 return 1
@@ -72,7 +75,7 @@ return 1
 
 // Journal: append a PENDING entry (sleep or signal). Idempotent on (wid, step, idx, branch).
 // KEYS: [entryHash, idxZset, stepsSet, sleepsZset (global), signalIdxHash]
-// ARGV: [idx, activityName, stepType, wakeAtMs|'', createdAt, stepName, sleepsMember|'', signalName|'', branchPath]
+// ARGV: [idx, activityName, stepType, wakeAtMs|'', createdAt, stepName, sleepsMember|'', signalName|'', branchPath, payloadHash|'']
 const APPEND_PENDING_LUA = `
 if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
 redis.call('HSET', KEYS[1],
@@ -82,6 +85,9 @@ redis.call('HSET', KEYS[1],
   'wakeAt', ARGV[4],
   'branchPath', ARGV[9],
   'createdAt', ARGV[5])
+if ARGV[10] ~= '' then
+  redis.call('HSET', KEYS[1], 'payloadHash', ARGV[10])
+end
 redis.call('ZADD', KEYS[2], ARGV[1], ARGV[1] .. '|' .. ARGV[9])
 redis.call('SADD', KEYS[3], ARGV[6])
 if ARGV[3] == 'sleep' and ARGV[7] ~= '' then
@@ -1220,6 +1226,7 @@ export class RedisWorkflowStorage
     activityIndex: number;
     branchPath?: string;
     activityName: string;
+    payloadHash?: string;
     exit: NonNullable<JournalEntry["exit"]>;
   }): Promise<void> {
     const branchPath = params.branchPath ?? "";
@@ -1244,6 +1251,7 @@ export class RedisWorkflowStorage
       createdAt,
       params.stepName,
       branchPath,
+      params.payloadHash ?? "",
     );
   }
 
@@ -1255,6 +1263,7 @@ export class RedisWorkflowStorage
     activityIndex: number;
     branchPath?: string;
     activityName: string;
+    payloadHash?: string;
     stepType: "sleep" | "signal" | "activity" | "compensation";
     wakeAt?: Date;
   }): Promise<void> {
@@ -1295,6 +1304,7 @@ export class RedisWorkflowStorage
       sleepsMember,
       signalName,
       branchPath,
+      params.payloadHash ?? "",
     );
   }
 
@@ -1410,6 +1420,7 @@ export class RedisWorkflowStorage
       activityName: hash.activityName!,
       stepType,
       phase,
+      payloadHash: hash.payloadHash,
       exit,
       wakeAt,
       createdAt: this.parseDate(hash.createdAt!),

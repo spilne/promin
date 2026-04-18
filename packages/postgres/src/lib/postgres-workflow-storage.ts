@@ -881,6 +881,7 @@ export class PostgresWorkflowStorage
     activityIndex: number;
     branchPath?: string;
     activityName: string;
+    payloadHash?: string;
     exit: NonNullable<JournalEntry["exit"]>;
   }): Promise<void> {
     // Idempotent append — PK conflict on
@@ -898,6 +899,7 @@ export class PostgresWorkflowStorage
         activityName: params.activityName,
         stepType: "activity",
         phase: "completed",
+        payloadHash: params.payloadHash,
         exit: params.exit,
       })
       .onConflictDoNothing({
@@ -920,6 +922,7 @@ export class PostgresWorkflowStorage
     activityIndex: number;
     branchPath?: string;
     activityName: string;
+    payloadHash?: string;
     stepType: "sleep" | "signal" | "activity" | "compensation";
     wakeAt?: Date;
   }): Promise<void> {
@@ -933,6 +936,7 @@ export class PostgresWorkflowStorage
         activityName: params.activityName,
         stepType: params.stepType,
         phase: "pending",
+        payloadHash: params.payloadHash,
         wakeAt: params.wakeAt,
         exit: null,
       })
@@ -1034,6 +1038,7 @@ function rowToJournalEntry(row: {
   activityName: string;
   stepType: string;
   phase: string;
+  payloadHash: string | null;
   wakeAt: Date | null;
   exit: unknown;
   createdAt: Date;
@@ -1044,6 +1049,7 @@ function rowToJournalEntry(row: {
     activityName: row.activityName,
     stepType: row.stepType as JournalEntry["stepType"],
     phase: row.phase as JournalEntry["phase"],
+    payloadHash: row.payloadHash ?? undefined,
     wakeAt: row.wakeAt ?? undefined,
     exit: (row.exit ?? undefined) as JournalEntry["exit"],
     createdAt: row.createdAt,
