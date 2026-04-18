@@ -250,28 +250,43 @@ function executePlan(plan: LogicalPlan): unknown[] {
           for (const c of plan.columns) keyValues[c] = row[c];
           group = {
             keyValues,
-            accs: aggEntries.map(([, fn]) => ({
-              count: 0,
-              sum: 0,
-              min: undefined as any,
-              max: undefined as any,
-              first: undefined as any,
-              last: undefined as any,
-              collect: [],
-              distinct: new Set<unknown>(),
-              customAcc:
-                typeof fn === "object" && fn._tag === "custom"
-                  ? structuredClone(fn.init)
-                  : undefined,
-            })),
+            accs: aggEntries.map(([, fn]) => {
+              const resolved = typeof fn === "object" && fn._tag === "expr" ? fn.agg : fn;
+              return {
+                count: 0,
+                sum: 0,
+                min: undefined as any,
+                max: undefined as any,
+                first: undefined as any,
+                last: undefined as any,
+                collect: [],
+                distinct: new Set<unknown>(),
+                customAcc:
+                  typeof resolved === "object" && resolved._tag === "custom"
+                    ? structuredClone(resolved.init)
+                    : undefined,
+              };
+            }),
           };
           groups.set(key, group);
         }
 
         for (let j = 0; j < aggEntries.length; j++) {
-          const [col, fn] = aggEntries[j]!;
-          const v = row[col];
+          const [colName, fn] = aggEntries[j]!;
           const acc = group.accs[j]!;
+
+          // Resolve the value and effective agg function
+          let v: unknown;
+          let effectiveFn: typeof fn;
+          if (typeof fn === "object" && fn._tag === "expr") {
+            if (fn.filter && !fn.filter.fn(row)) continue;
+            v = fn.expr.fn(row);
+            effectiveFn = fn.agg;
+          } else {
+            v = row[colName];
+            effectiveFn = fn;
+          }
+
           acc.count++;
           if (v != null) {
             const num = Number(v);
@@ -283,8 +298,8 @@ function executePlan(plan: LogicalPlan): unknown[] {
           if (acc.first === undefined) acc.first = v;
           acc.last = v;
           acc.collect.push(v);
-          if (typeof fn === "object" && fn._tag === "custom") {
-            acc.customAcc = fn.accumulate(acc.customAcc, v);
+          if (typeof effectiveFn === "object" && effectiveFn._tag === "custom") {
+            acc.customAcc = effectiveFn.accumulate(acc.customAcc, v);
           }
         }
       }
@@ -293,38 +308,39 @@ function executePlan(plan: LogicalPlan): unknown[] {
       for (const group of groups.values()) {
         const agged: Record<string, unknown> = { ...group.keyValues };
         for (let j = 0; j < aggEntries.length; j++) {
-          const [col, fn] = aggEntries[j]!;
+          const [colName, rawFn] = aggEntries[j]!;
           const acc = group.accs[j]!;
+          const fn = typeof rawFn === "object" && rawFn._tag === "expr" ? rawFn.agg : rawFn;
 
           if (typeof fn === "object" && fn._tag === "custom") {
-            agged[col] = fn.finalize(acc.customAcc);
+            agged[colName] = fn.finalize(acc.customAcc);
             continue;
           }
 
           switch (fn) {
             case "count":
-              agged[col] = acc.count;
+              agged[colName] = acc.count;
               break;
             case "sum":
-              agged[col] = acc.sum;
+              agged[colName] = acc.sum;
               break;
             case "avg":
-              agged[col] = acc.count > 0 ? acc.sum / acc.count : null;
+              agged[colName] = acc.count > 0 ? acc.sum / acc.count : null;
               break;
             case "min":
-              agged[col] = acc.min;
+              agged[colName] = acc.min;
               break;
             case "max":
-              agged[col] = acc.max;
+              agged[colName] = acc.max;
               break;
             case "first":
-              agged[col] = acc.first;
+              agged[colName] = acc.first;
               break;
             case "last":
-              agged[col] = acc.last;
+              agged[colName] = acc.last;
               break;
             case "collect":
-              agged[col] = acc.collect;
+              agged[colName] = acc.collect;
               break;
             case "median": {
               const nums = acc.collect
@@ -333,10 +349,11 @@ function executePlan(plan: LogicalPlan): unknown[] {
                 .filter((v: number) => !Number.isNaN(v));
               nums.sort((a: number, b: number) => a - b);
               if (nums.length === 0) {
-                agged[col] = null;
+                agged[colName] = null;
               } else {
                 const mid = Math.floor(nums.length / 2);
-                agged[col] = nums.length % 2 !== 0 ? nums[mid] : (nums[mid - 1]! + nums[mid]!) / 2;
+                agged[colName] =
+                  nums.length % 2 !== 0 ? nums[mid] : (nums[mid - 1]! + nums[mid]!) / 2;
               }
               break;
             }
@@ -346,12 +363,12 @@ function executePlan(plan: LogicalPlan): unknown[] {
                 .map(Number)
                 .filter((v: number) => !Number.isNaN(v));
               if (nums.length < 2) {
-                agged[col] = null;
+                agged[colName] = null;
               } else {
                 const mean = nums.reduce((a: number, b: number) => a + b, 0) / nums.length;
                 const variance =
                   nums.reduce((a: number, v: number) => a + (v - mean) ** 2, 0) / (nums.length - 1);
-                agged[col] = Math.sqrt(variance);
+                agged[colName] = Math.sqrt(variance);
               }
               break;
             }
@@ -361,10 +378,10 @@ function executePlan(plan: LogicalPlan): unknown[] {
                 .map(Number)
                 .filter((v: number) => !Number.isNaN(v));
               if (nums.length < 2) {
-                agged[col] = null;
+                agged[colName] = null;
               } else {
                 const mean = nums.reduce((a: number, b: number) => a + b, 0) / nums.length;
-                agged[col] =
+                agged[colName] =
                   nums.reduce((a: number, v: number) => a + (v - mean) ** 2, 0) / (nums.length - 1);
               }
               break;
@@ -382,11 +399,11 @@ function executePlan(plan: LogicalPlan): unknown[] {
                   modeVal = val;
                 }
               }
-              agged[col] = modeVal;
+              agged[colName] = modeVal;
               break;
             }
             case "countDistinct":
-              agged[col] = acc.distinct.size;
+              agged[colName] = acc.distinct.size;
               break;
           }
         }

@@ -128,6 +128,13 @@ export interface CustomAgg<Acc = unknown, Result = unknown> {
   readonly finalize: (acc: Acc) => Result;
 }
 
+export interface ExprAgg {
+  readonly _tag: "expr";
+  readonly expr: import("./expr.ts").Expr;
+  readonly agg: Exclude<AggFn, ExprAgg>;
+  readonly filter?: import("./expr.ts").Expr;
+}
+
 export type AggFn =
   | "sum"
   | "count"
@@ -142,7 +149,8 @@ export type AggFn =
   | "variance"
   | "mode"
   | "countDistinct"
-  | CustomAgg;
+  | CustomAgg
+  | ExprAgg;
 
 export function percentile(q: number): CustomAgg<number[], number> {
   return {
@@ -158,6 +166,14 @@ export function percentile(q: number): CustomAgg<number[], number> {
       return acc[Math.max(0, idx)]!;
     },
   };
+}
+
+export function exprAgg(params: {
+  expr: import("./expr.ts").Expr;
+  agg: Exclude<AggFn, ExprAgg>;
+  filter?: import("./expr.ts").Expr;
+}): ExprAgg {
+  return { _tag: "expr", expr: params.expr, agg: params.agg, filter: params.filter };
 }
 
 export function reduce<Acc, Result>(

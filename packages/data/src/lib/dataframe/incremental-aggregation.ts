@@ -189,7 +189,12 @@ export class IncrementalAggregation {
 
       const group = this.groups.get(key)!;
       for (const [aggKey, aggFn] of Object.entries(this.aggs)) {
-        accumulate(group.accs[aggKey]!, aggFn, row[aggKey]);
+        if (typeof aggFn === "object" && aggFn._tag === "expr") {
+          if (aggFn.filter && !aggFn.filter.fn(row)) continue;
+          accumulate(group.accs[aggKey]!, aggFn, aggFn.expr.fn(row));
+        } else {
+          accumulate(group.accs[aggKey]!, aggFn, row[aggKey]);
+        }
       }
       dirtyKeys.add(key);
     }

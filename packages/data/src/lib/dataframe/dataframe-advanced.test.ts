@@ -2,7 +2,7 @@ import { describe, it, expect } from "bun:test";
 import { DataFrame } from "./dataframe.ts";
 import { optimizePlan } from "./plan-optimizer.ts";
 import { col } from "./expr.ts";
-import { percentile, reduce } from "./logical-plan.ts";
+import { percentile, reduce, exprAgg } from "./logical-plan.ts";
 
 // ---------------------------------------------------------------------------
 // Test data
@@ -845,5 +845,72 @@ describe("Custom aggregation functions — median, stddev, mode, countDistinct, 
     const result = await df.groupBy("g").agg({ v: "variance" }).collect();
     // sample variance (n-1 denominator) is stddev^2
     expect(result[0]!.v).toBeCloseTo(4.571, 2);
+  });
+
+  it("exprAgg — sum of expression", async () => {
+    const df = DataFrame.fromArray([
+      { region: "north", revenue: 100, tax: 10 },
+      { region: "north", revenue: 200, tax: 20 },
+      { region: "south", revenue: 150, tax: 15 },
+    ]);
+    const result = await df
+      .groupBy("region")
+      .agg({
+        revenue: exprAgg({
+          expr: col("revenue").add(col("tax")),
+          agg: "sum",
+        }),
+      })
+      .collect();
+    const north = result.find((r: any) => r.region === "north");
+    const south = result.find((r: any) => r.region === "south");
+    expect(north!.revenue).toBe(330); // (100+10) + (200+20)
+    expect(south!.revenue).toBe(165); // 150+15
+  });
+
+  it("exprAgg — conditional aggregation with filter", async () => {
+    const df = DataFrame.fromArray([
+      { region: "north", revenue: 100, premium: true },
+      { region: "north", revenue: 50, premium: false },
+      { region: "north", revenue: 200, premium: true },
+      { region: "south", revenue: 80, premium: false },
+    ]);
+    const result = await df
+      .groupBy("region")
+      .agg({
+        revenue: exprAgg({
+          expr: col("revenue"),
+          agg: "sum",
+          filter: col("premium").eq(true),
+        }),
+      })
+      .collect();
+    const north = result.find((r: any) => r.region === "north");
+    const south = result.find((r: any) => r.region === "south");
+    expect(north!.revenue).toBe(300); // 100 + 200 (premium only)
+    expect(south!.revenue).toBe(0); // no premium rows
+  });
+
+  it("exprAgg — count with filter", async () => {
+    const df = DataFrame.fromArray([
+      { g: "a", active: true },
+      { g: "a", active: false },
+      { g: "a", active: true },
+      { g: "b", active: true },
+    ]);
+    const result = await df
+      .groupBy("g")
+      .agg({
+        active: exprAgg({
+          expr: col("active"),
+          agg: "count",
+          filter: col("active").eq(true),
+        }),
+      })
+      .collect();
+    const a = result.find((r: any) => r.g === "a");
+    const b = result.find((r: any) => r.g === "b");
+    expect(a!.active).toBe(2);
+    expect(b!.active).toBe(1);
   });
 });

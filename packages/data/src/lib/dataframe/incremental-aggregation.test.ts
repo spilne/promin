@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { IncrementalAggregation } from "./incremental-aggregation.ts";
-import { percentile, reduce } from "./logical-plan.ts";
+import { percentile, reduce, exprAgg } from "./logical-plan.ts";
+import { col } from "./expr.ts";
 
 describe("IncrementalAggregation", () => {
   it("single batch sum and count", async () => {
@@ -181,6 +182,277 @@ describe("IncrementalAggregation", () => {
     );
     expect(rows).toHaveLength(3);
     expect(rows.find((r: any) => r.region === "US" && r.product === "A")!.amount).toBe(250);
+  });
+
+  // -------------------------------------------------------------------------
+  // exprAgg — expression-level aggregations
+  // -------------------------------------------------------------------------
+
+  it("exprAgg sum of expression across batches", async () => {
+    const agg = IncrementalAggregation.create({
+      groupBy: ["g"],
+      agg: {
+        total: exprAgg({ expr: col("revenue").add(col("tax")), agg: "sum" }),
+      },
+    });
+
+    await agg.ingest([
+      { g: "a", revenue: 100, tax: 10 },
+      { g: "b", revenue: 50, tax: 5 },
+    ]);
+    await agg.ingest([
+      { g: "a", revenue: 200, tax: 20 },
+      { g: "b", revenue: 70, tax: 7 },
+    ]);
+
+    const rows = (await (await agg.snapshot()).collect()).sort((a: any, b: any) =>
+      a.g.localeCompare(b.g),
+    );
+    expect(rows[0]!.total).toBe(330); // (100+10) + (200+20)
+    expect(rows[1]!.total).toBe(132); // (50+5) + (70+7)
+  });
+
+  it("exprAgg filter excludes rows across batches", async () => {
+    const aggregator = IncrementalAggregation.create({
+      groupBy: ["g"],
+      agg: {
+        v: exprAgg({
+          expr: col("v"),
+          agg: "sum",
+          filter: col("premium").eq(true),
+        }),
+      },
+    });
+
+    await aggregator.ingest([
+      { g: "a", v: 100, premium: true },
+      { g: "a", v: 50, premium: false },
+    ]);
+    await aggregator.ingest([
+      { g: "a", v: 200, premium: true },
+      { g: "a", v: 30, premium: false },
+    ]);
+
+    const rows = await (await aggregator.snapshot()).collect();
+    expect(rows[0]!.v).toBe(300); // only premium:true rows (100 + 200)
+  });
+
+  it("exprAgg filter that matches no rows still emits group", async () => {
+    const aggregator = IncrementalAggregation.create({
+      groupBy: ["g"],
+      agg: {
+        v: exprAgg({
+          expr: col("v"),
+          agg: "count",
+          filter: col("active").eq(true),
+        }),
+      },
+    });
+
+    await aggregator.ingest([
+      { g: "a", v: 1, active: false },
+      { g: "a", v: 2, active: false },
+    ]);
+
+    const rows = await (await aggregator.snapshot()).collect();
+    expect(rows[0]!.v).toBe(0);
+  });
+
+  it("exprAgg count with filter across batches", async () => {
+    const aggregator = IncrementalAggregation.create({
+      groupBy: ["g"],
+      agg: {
+        n: exprAgg({
+          expr: col("active"),
+          agg: "count",
+          filter: col("active").eq(true),
+        }),
+      },
+    });
+
+    await aggregator.ingest([
+      { g: "a", active: true },
+      { g: "a", active: false },
+    ]);
+    await aggregator.ingest([
+      { g: "a", active: true },
+      { g: "a", active: true },
+    ]);
+
+    const rows = await (await aggregator.snapshot()).collect();
+    expect(rows[0]!.n).toBe(3);
+  });
+
+  it("exprAgg avg of expression across batches", async () => {
+    const aggregator = IncrementalAggregation.create({
+      groupBy: ["g"],
+      agg: {
+        mean: exprAgg({ expr: col("a").mul(2), agg: "avg" }),
+      },
+    });
+
+    await aggregator.ingest([
+      { g: "a", a: 10 },
+      { g: "a", a: 20 },
+    ]);
+    await aggregator.ingest([{ g: "a", a: 30 }]);
+
+    const rows = await (await aggregator.snapshot()).collect();
+    expect(rows[0]!.mean).toBe(40); // (20 + 40 + 60) / 3
+  });
+
+  it("exprAgg min and max across batches", async () => {
+    const aggregator = IncrementalAggregation.create({
+      groupBy: ["g"],
+      agg: {
+        lo: exprAgg({ expr: col("v").neg(), agg: "min" }),
+        hi: exprAgg({ expr: col("v").neg(), agg: "max" }),
+      },
+    });
+
+    await aggregator.ingest([
+      { g: "a", v: 1 },
+      { g: "a", v: 5 },
+    ]);
+    await aggregator.ingest([
+      { g: "a", v: 3 },
+      { g: "a", v: 10 },
+    ]);
+
+    const rows = await (await aggregator.snapshot()).collect();
+    expect(rows[0]!.lo).toBe(-10);
+    expect(rows[0]!.hi).toBe(-1);
+  });
+
+  it("exprAgg countDistinct over expression across batches", async () => {
+    const aggregator = IncrementalAggregation.create({
+      groupBy: ["g"],
+      agg: {
+        v: exprAgg({ expr: col("v").mod(3), agg: "countDistinct" }),
+      },
+    });
+
+    await aggregator.ingest([
+      { g: "a", v: 0 },
+      { g: "a", v: 1 },
+    ]);
+    await aggregator.ingest([
+      { g: "a", v: 3 }, // mod 3 = 0 (already seen)
+      { g: "a", v: 2 },
+    ]);
+
+    const rows = await (await aggregator.snapshot()).collect();
+    expect(rows[0]!.v).toBe(3); // {0, 1, 2}
+  });
+
+  it("exprAgg with percentile custom agg across batches", async () => {
+    const aggregator = IncrementalAggregation.create({
+      groupBy: ["g"],
+      agg: {
+        p: exprAgg({ expr: col("score").mul(10), agg: percentile(0.5) }),
+      },
+    });
+
+    await aggregator.ingest([
+      { g: "a", score: 1 },
+      { g: "a", score: 2 },
+      { g: "a", score: 3 },
+    ]);
+    await aggregator.ingest([
+      { g: "a", score: 4 },
+      { g: "a", score: 5 },
+    ]);
+
+    const rows = await (await aggregator.snapshot()).collect();
+    // values: [10, 20, 30, 40, 50], p50 => idx = ceil(0.5 * 5) - 1 = 2 => 30
+    expect(rows[0]!.p).toBe(30);
+  });
+
+  it("exprAgg with custom reducer across batches", async () => {
+    const sumSquares = reduce(
+      0,
+      (acc: number, val) => acc + Number(val) ** 2,
+      (acc: number) => Math.sqrt(acc),
+    );
+    const aggregator = IncrementalAggregation.create({
+      groupBy: ["g"],
+      agg: {
+        v: exprAgg({ expr: col("x").add(col("y")), agg: sumSquares }),
+      },
+    });
+
+    await aggregator.ingest([
+      { g: "a", x: 1, y: 2 }, // (1+2)^2 = 9
+    ]);
+    await aggregator.ingest([
+      { g: "a", x: 2, y: 2 }, // (2+2)^2 = 16 => sqrt(25) = 5
+    ]);
+
+    const rows = await (await aggregator.snapshot()).collect();
+    expect(rows[0]!.v).toBe(5);
+  });
+
+  it("exprAgg mixes with plain aggs in same groupBy", async () => {
+    const aggregator = IncrementalAggregation.create({
+      groupBy: ["g"],
+      agg: {
+        n: "count",
+        total: exprAgg({ expr: col("a").add(col("b")), agg: "sum" }),
+        premium: exprAgg({
+          expr: col("a"),
+          agg: "sum",
+          filter: col("tier").eq("gold"),
+        }),
+      },
+    });
+
+    await aggregator.ingest([
+      { g: "a", a: 10, b: 1, tier: "gold" },
+      { g: "a", a: 20, b: 2, tier: "silver" },
+    ]);
+    await aggregator.ingest([{ g: "a", a: 30, b: 3, tier: "gold" }]);
+
+    const rows = await (await aggregator.snapshot()).collect();
+    expect(rows[0]!.n).toBe(3);
+    expect(rows[0]!.total).toBe(66); // 11 + 22 + 33
+    expect(rows[0]!.premium).toBe(40); // 10 + 30 (gold only)
+  });
+
+  it("exprAgg with state backend persistence", async () => {
+    const store = new Map<string, unknown>();
+    const backend = {
+      get: async (key: string) => store.get(key),
+      put: async (key: string, value: unknown) => {
+        store.set(key, value);
+      },
+      delete: async (key: string) => {
+        store.delete(key);
+      },
+      keys: async () => [...store.keys()],
+    };
+
+    const agg1 = IncrementalAggregation.create({
+      groupBy: ["g"],
+      agg: { total: exprAgg({ expr: col("a").add(col("b")), agg: "sum" }) },
+      state: backend,
+    });
+    await agg1.ingest([
+      { g: "a", a: 10, b: 5 },
+      { g: "b", a: 20, b: 2 },
+    ]);
+
+    const agg2 = IncrementalAggregation.create({
+      groupBy: ["g"],
+      agg: { total: exprAgg({ expr: col("a").add(col("b")), agg: "sum" }) },
+      state: backend,
+    });
+    await agg2.ingest([{ g: "a", a: 100, b: 50 }]);
+
+    const rows = (await (await agg2.snapshot()).collect()).sort((a: any, b: any) =>
+      a.g.localeCompare(b.g),
+    );
+    expect(rows[0]).toEqual({ g: "a", total: 165 }); // (10+5) + (100+50)
+    expect(rows[1]).toEqual({ g: "b", total: 22 }); // unchanged
   });
 
   it("works with state backend for persistence", async () => {

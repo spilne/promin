@@ -66,6 +66,9 @@ function collectColumns(ast: any): string[] {
     if (ast.otherwise) cols.push(...collectColumns(ast.otherwise));
     return cols;
   }
+  if (ast.type === "field" || ast.type === "listOp") return collectColumns(ast.operand);
+  if (ast.type === "between" || ast.type === "in" || ast.type === "cast")
+    return collectColumns(ast.operand);
   return [];
 }
 

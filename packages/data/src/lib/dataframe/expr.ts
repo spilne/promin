@@ -25,6 +25,8 @@ export type ExprAst =
   | { type: "in"; operand: ExprAst; values: unknown[] }
   | { type: "case"; branches: { condition: ExprAst; value: ExprAst }[]; otherwise: ExprAst }
   | { type: "cast"; operand: ExprAst; to: string }
+  | { type: "field"; operand: ExprAst; name: string }
+  | { type: "listOp"; operand: ExprAst; op: string; args?: unknown[] }
   | { type: "fn"; description: string }; // opaque — can't compile to SQL
 
 // ---------------------------------------------------------------------------
@@ -298,6 +300,28 @@ export class Expr {
       values,
     });
   }
+
+  // -------------------------------------------------------------------------
+  // Struct field access
+  // -------------------------------------------------------------------------
+
+  field(name: string): Expr {
+    return new Expr(
+      (row) => {
+        const v = this.fn(row);
+        return v != null ? v[name] : undefined;
+      },
+      { type: "field", operand: this.ast, name },
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // List/array operations
+  // -------------------------------------------------------------------------
+
+  list(): ListExpr {
+    return new ListExpr(this);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +355,85 @@ export class WhenExpr {
         branches: branches.map((b) => ({ condition: b.condition.ast, value: b.value.ast })),
         otherwise: defaultVal.ast,
       },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ListExpr — operations on array-valued columns
+// ---------------------------------------------------------------------------
+
+export class ListExpr {
+  constructor(private readonly expr: Expr) {}
+
+  private _listOp(op: string, fn: (arr: unknown[]) => unknown, args?: unknown[]): Expr {
+    return new Expr(
+      (row) => {
+        const v = this.expr.fn(row);
+        return Array.isArray(v) ? fn(v) : undefined;
+      },
+      { type: "listOp", operand: this.expr.ast, op, args },
+    );
+  }
+
+  lengths(): Expr {
+    return this._listOp("length", (arr) => arr.length);
+  }
+
+  get(index: number): Expr {
+    return this._listOp(
+      "get",
+      (arr) => {
+        const i = index < 0 ? arr.length + index : index;
+        return arr[i];
+      },
+      [index],
+    );
+  }
+
+  first(): Expr {
+    return this.get(0);
+  }
+
+  last(): Expr {
+    return this.get(-1);
+  }
+
+  contains(value: unknown): Expr {
+    return this._listOp("contains", (arr) => arr.includes(value), [value]);
+  }
+
+  unique(): Expr {
+    return this._listOp("unique", (arr) => [...new Set(arr)]);
+  }
+
+  sort(): Expr {
+    return this._listOp("sort", (arr) => [...arr].sort());
+  }
+
+  join(separator = ","): Expr {
+    return this._listOp("join", (arr) => arr.join(separator), [separator]);
+  }
+
+  sum(): Expr {
+    return this._listOp("sum", (arr) => arr.reduce<number>((acc, v) => acc + Number(v), 0));
+  }
+
+  mean(): Expr {
+    return this._listOp("mean", (arr) =>
+      arr.length > 0 ? arr.reduce<number>((acc, v) => acc + Number(v), 0) / arr.length : null,
+    );
+  }
+
+  min(): Expr {
+    return this._listOp("min", (arr) =>
+      arr.length > 0 ? arr.reduce((a, b) => ((a as number) < (b as number) ? a : b)) : null,
+    );
+  }
+
+  max(): Expr {
+    return this._listOp("max", (arr) =>
+      arr.length > 0 ? arr.reduce((a, b) => ((a as number) > (b as number) ? a : b)) : null,
     );
   }
 }
@@ -397,6 +500,10 @@ export function isCompilable(ast: ExprAst): boolean {
         ast.branches.every((b) => isCompilable(b.condition) && isCompilable(b.value)) &&
         isCompilable(ast.otherwise)
       );
+    case "field":
+      return isCompilable(ast.operand);
+    case "listOp":
+      return isCompilable(ast.operand);
   }
 }
 
@@ -429,6 +536,27 @@ export function astToSql(ast: ExprAst): string {
         .map((b) => `WHEN ${astToSql(b.condition)} THEN ${astToSql(b.value)}`)
         .join(" ");
       return `(CASE ${branches} ELSE ${astToSql(ast.otherwise)} END)`;
+    }
+    case "field":
+      return `(${astToSql(ast.operand)}).${ast.name}`;
+    case "listOp": {
+      const operand = astToSql(ast.operand);
+      switch (ast.op) {
+        case "length":
+          return `array_length(${operand})`;
+        case "get":
+          return `${operand}[${(ast.args?.[0] as number) + 1}]`;
+        case "contains":
+          return `array_contains(${operand}, ${typeof ast.args?.[0] === "string" ? `'${ast.args[0]}'` : ast.args?.[0]})`;
+        case "unique":
+          return `array_distinct(${operand})`;
+        case "sort":
+          return `array_sort(${operand})`;
+        case "join":
+          return `array_to_string(${operand}, '${ast.args?.[0] ?? ","}')`;
+        default:
+          return `list_${ast.op}(${operand})`;
+      }
     }
     case "fn":
       throw new Error("Cannot compile opaque expression to SQL");

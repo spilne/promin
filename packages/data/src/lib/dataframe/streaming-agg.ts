@@ -19,7 +19,12 @@ export interface GroupAccumulator {
   customAcc: unknown;
 }
 
+function resolveAgg(agg: AggFn): Exclude<AggFn, import("./logical-plan.ts").ExprAgg> {
+  return typeof agg === "object" && agg._tag === "expr" ? agg.agg : agg;
+}
+
 export function createAccumulator(agg: AggFn): GroupAccumulator {
+  const resolved = resolveAgg(agg);
   return {
     count: 0,
     sum: 0,
@@ -32,12 +37,15 @@ export function createAccumulator(agg: AggFn): GroupAccumulator {
     sumSq: 0,
     freqMap: new Map(),
     customAcc:
-      typeof agg === "object" && agg._tag === "custom" ? structuredClone(agg.init) : undefined,
+      typeof resolved === "object" && resolved._tag === "custom"
+        ? structuredClone(resolved.init)
+        : undefined,
   };
 }
 
 /** Accumulate a single value into a group accumulator. */
 export function accumulate(acc: GroupAccumulator, agg: AggFn, value: unknown): void {
+  const resolved = resolveAgg(agg);
   acc.count++;
 
   if (value != null) {
@@ -54,22 +62,22 @@ export function accumulate(acc: GroupAccumulator, agg: AggFn, value: unknown): v
   if (acc.first === undefined) acc.first = value;
   acc.last = value;
 
-  if (typeof agg === "object" && agg._tag === "custom") {
-    acc.customAcc = agg.accumulate(acc.customAcc, value);
+  if (typeof resolved === "object" && resolved._tag === "custom") {
+    acc.customAcc = resolved.accumulate(acc.customAcc, value);
   }
 
-  if (agg === "collect") {
+  if (resolved === "collect") {
     acc.values.push(value);
   }
 
-  if (agg === "median" || agg === "stddev" || agg === "variance") {
+  if (resolved === "median" || resolved === "stddev" || resolved === "variance") {
     if (value != null) {
       const num = Number(value);
       if (!Number.isNaN(num)) acc.values.push(num);
     }
   }
 
-  if (agg === "mode") {
+  if (resolved === "mode") {
     if (value != null) {
       acc.freqMap.set(value, (acc.freqMap.get(value) ?? 0) + 1);
     }
@@ -78,11 +86,12 @@ export function accumulate(acc: GroupAccumulator, agg: AggFn, value: unknown): v
 
 /** Finalize an accumulator to produce the result value. */
 export function finalize(acc: GroupAccumulator, agg: AggFn): unknown {
-  if (typeof agg === "object" && agg._tag === "custom") {
-    return agg.finalize(acc.customAcc);
+  const resolved = resolveAgg(agg);
+  if (typeof resolved === "object" && resolved._tag === "custom") {
+    return resolved.finalize(acc.customAcc);
   }
 
-  switch (agg) {
+  switch (resolved) {
     case "sum":
       return acc.sum;
     case "count":

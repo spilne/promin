@@ -2,17 +2,29 @@ export { DataFrame } from "./dataframe.ts";
 export { GroupedDataFrame } from "./grouped-dataframe.ts";
 export { ArrayExecutor } from "./array-executor.ts";
 export { StringAccessor, DateAccessor } from "./accessors.ts";
-export { Expr, WhenExpr, col, lit, when, isCompilable, astToSql, type ExprAst } from "./expr.ts";
+export {
+  Expr,
+  WhenExpr,
+  ListExpr,
+  col,
+  lit,
+  when,
+  isCompilable,
+  astToSql,
+  type ExprAst,
+} from "./expr.ts";
 export { type DataFrameExecutor, type ExecutionCost } from "./executor.ts";
 export {
   type LogicalPlan,
   type AggFn,
   type CustomAgg,
+  type ExprAgg,
   type WindowFn,
   type RollingFn,
   type CumulativeFn,
   percentile,
   reduce,
+  exprAgg,
 } from "./logical-plan.ts";
 export { optimizePlan } from "./plan-optimizer.ts";
 export {

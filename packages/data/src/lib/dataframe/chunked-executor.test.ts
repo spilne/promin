@@ -2,7 +2,8 @@ import { describe, it, expect } from "bun:test";
 import { DataFrame } from "./dataframe.ts";
 import { classifyPlan } from "./plan-classifier.ts";
 import type { LogicalPlan } from "./logical-plan.ts";
-import { percentile, reduce } from "./logical-plan.ts";
+import { percentile, reduce, exprAgg } from "./logical-plan.ts";
+import { col } from "./expr.ts";
 
 // ---------------------------------------------------------------------------
 // Plan classifier
@@ -448,6 +449,232 @@ describe("streaming groupBy aggregation", () => {
       .collect();
 
     const sortByG = (a: any, b: any) => a.g.localeCompare(b.g);
+    expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Streaming exprAgg — expression-level aggregations across chunks
+// ---------------------------------------------------------------------------
+
+describe("streaming exprAgg", () => {
+  const sortByG = (a: any, b: any) => String(a.g).localeCompare(String(b.g));
+
+  it("sum of computed expression matches non-streaming", async () => {
+    const data = Array.from({ length: 100 }, (_, i) => ({
+      g: i % 3 === 0 ? "a" : i % 3 === 1 ? "b" : "c",
+      revenue: i * 10,
+      tax: i,
+    }));
+    const df = DataFrame.fromArray(data);
+
+    const aggDef = {
+      total: exprAgg({ expr: col("revenue").add(col("tax")), agg: "sum" as const }),
+    };
+    const regular = await df.groupBy("g").agg(aggDef).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 7 }).collect();
+
+    expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
+    const total = (regular as any[]).reduce((s, r) => s + Number(r.total), 0);
+    const expected = data.reduce((s, r) => s + r.revenue + r.tax, 0);
+    expect(total).toBe(expected);
+  });
+
+  it("avg of expression matches non-streaming across chunk boundaries", async () => {
+    const data = Array.from({ length: 50 }, (_, i) => ({
+      g: i < 25 ? "x" : "y",
+      a: i,
+      b: 2,
+    }));
+    const df = DataFrame.fromArray(data);
+    const aggDef = { m: exprAgg({ expr: col("a").mul(col("b")), agg: "avg" as const }) };
+
+    const regular = await df.groupBy("g").agg(aggDef).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 11 }).collect();
+
+    regular.sort(sortByG);
+    streamed.sort(sortByG);
+    expect((streamed[0] as any).m).toBeCloseTo((regular[0] as any).m, 5);
+    expect((streamed[1] as any).m).toBeCloseTo((regular[1] as any).m, 5);
+  });
+
+  it("filter excludes rows consistently across chunks", async () => {
+    const data = Array.from({ length: 80 }, (_, i) => ({
+      g: i % 2 === 0 ? "even" : "odd",
+      v: i,
+      premium: i % 3 === 0,
+    }));
+    const df = DataFrame.fromArray(data);
+    const aggDef = {
+      v: exprAgg({
+        expr: col("v"),
+        agg: "sum" as const,
+        filter: col("premium").eq(true),
+      }),
+    };
+
+    const regular = await df.groupBy("g").agg(aggDef).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 9 }).collect();
+
+    expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
+  });
+
+  it("count with filter across chunks", async () => {
+    const data = Array.from({ length: 40 }, (_, i) => ({
+      g: i % 2 === 0 ? "a" : "b",
+      active: i % 4 !== 0,
+    }));
+    const df = DataFrame.fromArray(data);
+    const aggDef = {
+      active: exprAgg({
+        expr: col("active"),
+        agg: "count" as const,
+        filter: col("active").eq(true),
+      }),
+    };
+
+    const regular = await df.groupBy("g").agg(aggDef).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 6 }).collect();
+
+    expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
+  });
+
+  it("min/max of expression across chunks", async () => {
+    const data = Array.from({ length: 60 }, (_, i) => ({
+      g: i % 2 === 0 ? "a" : "b",
+      x: (i * 37) % 100, // spread values across chunks
+    }));
+    const df = DataFrame.fromArray(data);
+    const aggDef = {
+      lo: exprAgg({ expr: col("x").mul(2), agg: "min" as const }),
+      hi: exprAgg({ expr: col("x").mul(2), agg: "max" as const }),
+    };
+
+    const regular = await df.groupBy("g").agg(aggDef).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 8 }).collect();
+
+    expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
+  });
+
+  it("countDistinct over expression across chunks", async () => {
+    // 4 distinct values of floor(v/10) in group a: 0..3
+    const data = [
+      ...Array.from({ length: 10 }, (_, i) => ({ g: "a", v: i })),
+      ...Array.from({ length: 10 }, (_, i) => ({ g: "a", v: 10 + i })),
+      ...Array.from({ length: 10 }, (_, i) => ({ g: "a", v: 20 + i })),
+      ...Array.from({ length: 10 }, (_, i) => ({ g: "a", v: 30 + i })),
+    ];
+    const df = DataFrame.fromArray(data);
+    const aggDef = {
+      v: exprAgg({
+        expr: col("v").div(10).cast("number"),
+        agg: "countDistinct" as const,
+      }),
+    };
+
+    const regular = await df.groupBy("g").agg(aggDef).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 3 }).collect();
+
+    expect((regular[0] as any).v).toBeGreaterThanOrEqual(4);
+    expect(streamed).toEqual(regular);
+  });
+
+  it("exprAgg with percentile custom agg across chunks", async () => {
+    const data = Array.from({ length: 100 }, (_, i) => ({ g: "a", score: i + 1 }));
+    const df = DataFrame.fromArray(data);
+    const aggDef = {
+      score: exprAgg({
+        expr: col("score").mul(2),
+        agg: percentile(0.9),
+      }),
+    };
+
+    const regular = await df.groupBy("g").agg(aggDef).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 13 }).collect();
+
+    expect((streamed[0] as any).score).toBe((regular[0] as any).score);
+    // percentile(0.9) of [2, 4, ..., 200]: idx = ceil(0.9*100)-1 = 89 => value 180
+    expect((regular[0] as any).score).toBe(180);
+  });
+
+  it("exprAgg with custom reducer across chunks", async () => {
+    const sumSquares = reduce(
+      0,
+      (acc: number, val) => acc + Number(val) ** 2,
+      (acc: number) => Math.sqrt(acc),
+    );
+    const data = [
+      { g: "a", x: 1, y: 2 }, // (1+2)^2 = 9
+      { g: "a", x: 2, y: 2 }, // (2+2)^2 = 16 => sqrt(9+16)=5
+      { g: "b", x: 3, y: 0 }, // 9
+      { g: "b", x: 0, y: 4 }, // 16 => sqrt=5
+    ];
+    const df = DataFrame.fromArray(data);
+    const aggDef = {
+      v: exprAgg({ expr: col("x").add(col("y")), agg: sumSquares }),
+    };
+
+    const regular = await df.groupBy("g").agg(aggDef).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 1 }).collect();
+
+    expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
+    const a = (regular as any[]).find((r) => r.g === "a");
+    expect(a!.v).toBe(5);
+  });
+
+  it("mixes plain agg and exprAgg in same groupBy", async () => {
+    const data = Array.from({ length: 30 }, (_, i) => ({
+      g: i % 2 === 0 ? "a" : "b",
+      revenue: 100,
+      tax: 10,
+      unit: 1,
+    }));
+    const df = DataFrame.fromArray(data);
+    const aggDef = {
+      unit: "count" as const,
+      revenue: exprAgg({ expr: col("revenue").add(col("tax")), agg: "sum" as const }),
+    };
+
+    const regular = await df.groupBy("g").agg(aggDef).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 4 }).collect();
+
+    expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
+    const a = (regular as any[]).find((r) => r.g === "a");
+    expect(a!.unit).toBe(15);
+    expect(a!.revenue).toBe(15 * 110);
+  });
+
+  it("filter that matches nothing yields empty-state finalize", async () => {
+    const data = Array.from({ length: 20 }, (_, i) => ({ g: "a", v: i, active: false }));
+    const df = DataFrame.fromArray(data);
+    const aggDef = {
+      v: exprAgg({
+        expr: col("v"),
+        agg: "sum" as const,
+        filter: col("active").eq(true),
+      }),
+    };
+
+    const regular = await df.groupBy("g").agg(aggDef).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 5 }).collect();
+
+    expect(streamed).toEqual(regular);
+    expect((regular[0] as any).v).toBe(0); // nothing accumulated
+  });
+
+  it("expression over nested field access", async () => {
+    const data = Array.from({ length: 30 }, (_, i) => ({
+      g: i % 2 === 0 ? "a" : "b",
+      meta: { price: i * 10 },
+    }));
+    const df = DataFrame.fromArray(data);
+    const aggDef = {
+      price: exprAgg({ expr: col("meta").field("price"), agg: "sum" as const }),
+    };
+
+    const regular = await df.groupBy("g").agg(aggDef).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 4 }).collect();
+
     expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
   });
 });

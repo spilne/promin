@@ -80,7 +80,12 @@ export async function* executeChunked<T>(params: {
 
         for (let j = 0; j < aggEntries.length; j++) {
           const [col, aggFn] = aggEntries[j]!;
-          accumulate(group.accs[j]!, aggFn, r[col]);
+          if (typeof aggFn === "object" && aggFn._tag === "expr") {
+            if (aggFn.filter && !aggFn.filter.fn(r)) continue;
+            accumulate(group.accs[j]!, aggFn, aggFn.expr.fn(r));
+          } else {
+            accumulate(group.accs[j]!, aggFn, r[col]);
+          }
         }
       }
     }
