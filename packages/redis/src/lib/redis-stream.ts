@@ -5,7 +5,7 @@
 // Uses ioredis for XADD/XREADGROUP/XACK/XCLAIM.
 // ---------------------------------------------------------------------------
 
-import { Effect, Stream } from "effect";
+import { Chunk, Effect, Stream } from "effect";
 import type { RedisClient } from "./redis-client.ts";
 import { StreamPipeline, JsonCodec } from "@promin/core";
 import type {
@@ -113,37 +113,42 @@ export class RedisStream<T>
               ">",
             );
 
-            if (results) {
-              for (const [, messages] of results as any[]) {
-                for (const [id, fields] of messages) {
-                  const dataIdx = fields.indexOf("data");
-                  if (dataIdx === -1) continue;
-                  const raw = fields[dataIdx + 1]!;
-                  const value = self.codec.decode(JSON.parse(raw));
+            if (!results) continue;
 
-                  const keyIdx = fields.indexOf("key");
-                  const key = keyIdx !== -1 ? fields[keyIdx + 1] : undefined;
+            // Build the whole batch in memory, then emit once. One
+            // fiber-scheduling event per XREADGROUP poll instead of one
+            // per message — at 10K+ msg/sec the difference shows up.
+            const envelopes: Envelope<T>[] = [];
+            for (const [, messages] of results as any[]) {
+              for (const [id, fields] of messages) {
+                const dataIdx = fields.indexOf("data");
+                if (dataIdx === -1) continue;
+                const raw = fields[dataIdx + 1]!;
+                const value = self.codec.decode(JSON.parse(raw));
 
-                  const envelope: Envelope<T> = {
-                    value,
-                    ack: async () => {
-                      await self.redis.xack(self.stream, self.group, id);
-                    },
-                    nack: async () => {
-                      // Don't ack — message stays in PEL and will be re-claimed
-                    },
-                    metadata: {
-                      id,
-                      stream: self.stream,
-                      group: self.group,
-                      consumer: self.consumer,
-                      key,
-                    },
-                  };
-                  emit.single(envelope);
-                }
+                const keyIdx = fields.indexOf("key");
+                const key = keyIdx !== -1 ? fields[keyIdx + 1] : undefined;
+
+                envelopes.push({
+                  value,
+                  ack: async () => {
+                    await self.redis.xack(self.stream, self.group, id);
+                  },
+                  nack: async () => {
+                    // Don't ack — message stays in PEL and will be re-claimed
+                  },
+                  metadata: {
+                    id,
+                    stream: self.stream,
+                    group: self.group,
+                    consumer: self.consumer,
+                    key,
+                  },
+                });
               }
             }
+
+            if (envelopes.length > 0) emit.chunk(Chunk.fromIterable(envelopes));
           } catch {
             if (running) await new Promise((r) => setTimeout(r, 1000));
           }
@@ -221,20 +226,27 @@ export class RedisStream<T>
               ">",
             );
 
-            if (results) {
-              for (const [, messages] of results as any[]) {
-                for (const [id, fields] of messages) {
-                  const dataIdx = fields.indexOf("data");
-                  if (dataIdx === -1) continue;
-                  const raw = fields[dataIdx + 1]!;
-                  const value = self.codec.decode(JSON.parse(raw));
-                  emit.single(value);
+            if (!results) continue;
 
-                  // Auto-ack in subscribe mode
-                  await self.redis.xack(self.stream, self.group, id);
-                }
+            // Collect the whole batch, emit in one chunk, XACK all ids in a
+            // single call. Net: one fiber-scheduling event + one round-trip
+            // to Redis per poll instead of 2×N (emit + ack) per message.
+            const values: T[] = [];
+            const ids: string[] = [];
+            for (const [, messages] of results as any[]) {
+              for (const [id, fields] of messages) {
+                const dataIdx = fields.indexOf("data");
+                if (dataIdx === -1) continue;
+                const raw = fields[dataIdx + 1]!;
+                values.push(self.codec.decode(JSON.parse(raw)));
+                ids.push(id);
               }
             }
+
+            if (values.length === 0) continue;
+            emit.chunk(Chunk.fromIterable(values));
+            // Auto-ack in subscribe mode — batched XACK.
+            await self.redis.xack(self.stream, self.group, ...ids);
           } catch {
             if (running) await new Promise((r) => setTimeout(r, 1000));
           }
