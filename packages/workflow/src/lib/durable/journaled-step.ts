@@ -51,7 +51,7 @@ export interface ActivityYield {
 }
 
 /** Per-activity configuration. */
-export interface ActivityOptions {
+export interface ActivityOptions<T = unknown> {
   readonly retry?: RetryPolicy<unknown>;
   /**
    * Override the codec used for this activity's result. Defaults to the
@@ -74,6 +74,24 @@ export interface ActivityOptions {
    *   with a caller-supplied idempotency header, etc.).
    */
   readonly idempotent?: boolean;
+  /**
+   * Rollback callback for saga-style intra-step compensation. Registered
+   * AFTER the activity completes successfully (on fresh run OR replay) and
+   * popped in reverse order if a LATER activity in the same journaled body
+   * throws. Each compensation runs as its own journaled activity
+   * (stepType="compensation") so replay after a crash is safe.
+   *
+   * Receives the activity's successful return value for easy "create here,
+   * cancel here" patterns. Does NOT run if this activity itself fails —
+   * nothing was done to roll back.
+   *
+   * ```ts
+   * yield* ctx.activity("createOrder", () => api.create(), {
+   *   compensate: (order) => api.cancel(order.id),
+   * });
+   * ```
+   */
+  readonly compensate?: (result: T) => void | Promise<void>;
 }
 
 /**
@@ -130,7 +148,7 @@ export interface JournaledContext<Input, Prev> {
   activity<T>(
     name: string,
     fn: () => T | Promise<T>,
-    options?: ActivityOptions,
+    options?: ActivityOptions<T>,
   ): Generator<ActivityYield, T, T>;
 
   /**
@@ -236,7 +254,7 @@ function makeCtx<Input, Prev>(params: {
    * the step didn't pass one.
    */
   defaultCodec?: Codec<unknown>;
-}): JournaledContext<Input, Prev> {
+}): { ctx: JournaledContext<Input, Prev>; unwind: (bodyError: unknown) => Promise<void> } {
   const {
     input,
     prev,
@@ -251,17 +269,49 @@ function makeCtx<Input, Prev>(params: {
   } = params;
   const stepCodec = defaultCodec ?? LosslessJsonCodec;
   const patchSet = new Set(patches ?? []);
+  // Single counter for every journal slot — activities, sleeps, signals, and
+  // compensations all draw from it. Compensations reserve their index at
+  // registration time (right after the activity succeeds), BEFORE any later
+  // activity is called, so replay re-derives identical indices from a
+  // deterministic body. This avoids the PK collision that would arise if
+  // activities and compensations each had their own 0-based counter.
   const indexRef = { next: 0 };
-  const journalByIndex = new Map(journal.map((e) => [e.activityIndex, e]));
+  const journalByIndex = new Map<number, JournalEntry>(journal.map((e) => [e.activityIndex, e]));
+
+  interface Compensation {
+    readonly activityIndex: number; // reserved at registration time
+    readonly activityName: string; // for diagnostics
+    readonly run: () => Promise<void>; // bound to the activity's result
+  }
+  const compensations: Compensation[] = [];
 
   function* activity<T>(
     name: string,
     fn: () => T | Promise<T>,
-    options?: ActivityOptions,
+    options?: ActivityOptions<T>,
   ): Generator<ActivityYield, T, T> {
     const activityIndex = indexRef.next++;
     const codec = options?.codec ?? stepCodec;
     const idempotent = options?.idempotent === true;
+    const compensate = options?.compensate;
+    const maybeRegisterCompensation = (result: T): void => {
+      if (!compensate) return;
+      // Reserve a journal slot now; the unwind writes the pending+completed
+      // rows later. The reservation keeps activity and compensation indices
+      // deterministic across replay.
+      const reservedIndex = indexRef.next++;
+      compensations.push({
+        activityIndex: reservedIndex,
+        activityName: name,
+        run: async () => {
+          // Run outside the body scope so Date.now / random inside
+          // compensations aren't flagged by instrumentNonDeterminism.
+          await journaledBodyScope.exit(async () => {
+            await Promise.resolve(compensate(result));
+          });
+        },
+      });
+    };
     // Two-phase record requires the pending-entry primitives. Storages that
     // only implement the base ActivityJournalStorage fall back to the legacy
     // single-phase path (side effect risks duplication under worker crash,
@@ -304,7 +354,12 @@ function makeCtx<Input, Prev>(params: {
           if (recorded.exit.tag === "Failure") {
             throw new Error(recorded.exit.error);
           }
-          return codec.decode(recorded.exit.value) as T;
+          const replayed = codec.decode(recorded.exit.value) as T;
+          // Register compensation on replay too — a LATER activity in this
+          // run might still fail, and the unwind needs to call our rollback
+          // with the replayed value.
+          maybeRegisterCompensation(replayed);
+          return replayed;
         }
         // Pending row on replay — the worker that started this activity
         // crashed between the pending write and the completion write. The
@@ -394,7 +449,9 @@ function makeCtx<Input, Prev>(params: {
           exit: successExit,
         });
       }
-      return codec.decode(encoded) as T;
+      const roundTripped = codec.decode(encoded) as T;
+      maybeRegisterCompensation(roundTripped);
+      return roundTripped;
     })();
 
     // The runner will await the promise and resume via .next(resolvedValue);
@@ -572,7 +629,95 @@ function makeCtx<Input, Prev>(params: {
     return patchSet.has(name);
   }
 
-  return {
+  // ---------------------------------------------------------------------------
+  // unwind — runs compensations in reverse after a body failure
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Run every registered compensation in reverse. Each runs via the
+   * two-phase journal machinery with stepType="compensation" so a crash
+   * during unwind replays cleanly — completed compensations are skipped.
+   *
+   * Compensation failures do NOT halt the unwind — the engine records the
+   * failure in the journal and continues with the remaining compensations.
+   * The caller (runJournaledStep) rethrows the original body error after.
+   */
+  async function unwind(_bodyError: unknown): Promise<void> {
+    const twoPhase = isJournaledSuspendStorage(storage);
+    for (let i = compensations.length - 1; i >= 0; i--) {
+      const comp = compensations[i]!;
+      const compIdx = comp.activityIndex;
+      const compName = `compensation:${comp.activityName}`;
+
+      // Replay: if a completed row already exists for this compensation
+      // index, the previous worker finished it — skip.
+      const recorded = journalByIndex.get(compIdx);
+      if (recorded && (recorded.phase ?? "completed") === "completed") continue;
+
+      if (twoPhase) {
+        try {
+          await storage.appendPendingEntry({
+            workflowId,
+            stepName,
+            activityIndex: compIdx,
+            activityName: compName,
+            stepType: "compensation",
+          });
+        } catch {
+          // Journal unreachable — nothing to do.
+          continue;
+        }
+        try {
+          await comp.run();
+          await storage.completePendingEntry({
+            workflowId,
+            stepName,
+            activityIndex: compIdx,
+            exit: { tag: "Success", value: null },
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          try {
+            await storage.completePendingEntry({
+              workflowId,
+              stepName,
+              activityIndex: compIdx,
+              exit: { tag: "Failure", error: message },
+            });
+          } catch {
+            /* journal unreachable — give up on this one, continue unwind */
+          }
+        }
+      } else {
+        // Legacy single-phase storage — best-effort record. The side effect
+        // risk of a crash here is the same as a non-two-phase activity,
+        // documented at the journal-suspend layer.
+        try {
+          await comp.run();
+          await storage.appendEntry({
+            workflowId,
+            stepName,
+            activityIndex: compIdx,
+            activityName: compName,
+            exit: { tag: "Success", value: null },
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          await storage
+            .appendEntry({
+              workflowId,
+              stepName,
+              activityIndex: compIdx,
+              activityName: compName,
+              exit: { tag: "Failure", error: message },
+            })
+            .catch(() => undefined);
+        }
+      }
+    }
+  }
+
+  const ctx: JournaledContext<Input, Prev> = {
     input,
     prev,
     workflowId,
@@ -582,6 +727,7 @@ function makeCtx<Input, Prev>(params: {
     signal: signalImpl,
     patched,
   };
+  return { ctx, unwind };
 }
 
 // ---------------------------------------------------------------------------
@@ -710,7 +856,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
   } = params;
 
   const journal = await storage.loadJournal(workflowId, stepName);
-  const ctx = makeCtx({
+  const { ctx, unwind } = makeCtx({
     input,
     prev,
     workflowId,
@@ -732,25 +878,32 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
   const bodyCtx = { stepName };
   const tick = <R>(fn: () => R): R => journaledBodyScope.run(bodyCtx, fn);
 
-  let step: IteratorResult<ActivityYield, Output>;
-  try {
+  /** Drive the generator until it returns, propagating or catching errors. */
+  const driveBody = async (): Promise<Output> => {
+    let step: IteratorResult<ActivityYield, Output>;
     step = tick(() => gen.next());
-  } catch (err) {
-    // Body threw synchronously before yielding anything.
-    throw err;
-  }
-
-  while (!step.done) {
-    const yielded = step.value;
-    try {
-      const resolved = await yielded.promise;
-      step = tick(() => gen.next(resolved as never));
-    } catch (err) {
-      // Let the body's try/catch handle it if it wants; otherwise re-throw.
-      step = tick(() => gen.throw(err));
+    while (!step.done) {
+      const yielded = step.value;
+      try {
+        const resolved = await yielded.promise;
+        step = tick(() => gen.next(resolved as never));
+      } catch (err) {
+        // Let the body's try/catch handle it if it wants; otherwise re-throw.
+        step = tick(() => gen.throw(err));
+      }
     }
+    return step.value;
+  };
+
+  try {
+    return await driveBody();
+  } catch (bodyError) {
+    // Body failed. Suspend errors (ctx.sleep, ctx.signal) are NOT saga failures
+    // — they should propagate without triggering intra-step compensation.
+    if (bodyError instanceof WorkflowSuspendedError) throw bodyError;
+    await unwind(bodyError);
+    throw bodyError;
   }
-  return step.value;
 }
 
 // ---------------------------------------------------------------------------

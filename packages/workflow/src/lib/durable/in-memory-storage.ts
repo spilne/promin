@@ -571,7 +571,7 @@ export class InMemoryWorkflowStorage
     stepName: string;
     activityIndex: number;
     activityName: string;
-    stepType: "sleep" | "signal" | "activity";
+    stepType: "sleep" | "signal" | "activity" | "compensation";
     wakeAt?: Date;
   }): Promise<void> {
     const key = this.journalKey(params.workflowId, params.stepName);

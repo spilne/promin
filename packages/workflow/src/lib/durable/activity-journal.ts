@@ -12,7 +12,7 @@
 import type { WorkflowStorage } from "./workflow-storage.ts";
 
 /** What kind of checkpoint an entry records. Used by replay + the sleep scanner. */
-export type JournalStepType = "activity" | "sleep" | "signal";
+export type JournalStepType = "activity" | "sleep" | "signal" | "compensation";
 
 /** Lifecycle phase of an entry. `pending` means suspend is in flight (sleep wake or signal delivery). */
 export type JournalPhase = "pending" | "completed";
@@ -89,17 +89,18 @@ export interface ActivityJournalStorage {
 export interface JournaledSuspendStorage extends ActivityJournalStorage {
   /**
    * Append a `pending` entry — used by `ctx.sleep` / `ctx.signal` when a
-   * journaled step suspends, and by `ctx.activity` for the two-phase record
-   * (pending row written before the side effect, completed after). For
-   * sleep: carries `wakeAt`. For signal / activity: the name lives in
-   * `activityName`. Idempotent on PK.
+   * journaled step suspends, by `ctx.activity` for the two-phase record
+   * (pending row written before the side effect, completed after), and by
+   * the intra-step compensation unwind for each rollback callback. For
+   * sleep: carries `wakeAt`. For signal / activity / compensation: the name
+   * lives in `activityName`. Idempotent on PK.
    */
   appendPendingEntry(params: {
     readonly workflowId: string;
     readonly stepName: string;
     readonly activityIndex: number;
     readonly activityName: string;
-    readonly stepType: "sleep" | "signal" | "activity";
+    readonly stepType: "sleep" | "signal" | "activity" | "compensation";
     readonly wakeAt?: Date;
   }): Promise<void>;
 

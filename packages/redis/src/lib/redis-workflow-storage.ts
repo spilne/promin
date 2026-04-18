@@ -1215,7 +1215,7 @@ export class RedisWorkflowStorage
     stepName: string;
     activityIndex: number;
     activityName: string;
-    stepType: "sleep" | "signal" | "activity";
+    stepType: "sleep" | "signal" | "activity" | "compensation";
     wakeAt?: Date;
   }): Promise<void> {
     const entryKey = this.journalEntryKey(params.workflowId, params.stepName, params.activityIndex);
