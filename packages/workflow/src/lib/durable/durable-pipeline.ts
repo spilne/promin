@@ -23,7 +23,7 @@ import {
 } from "./journaled-step.ts";
 import { Pipeline, type TaggedError } from "@promin/core";
 import type { RetryPolicy } from "@promin/core";
-import type { Codec } from "@promin/core";
+import type { CacheStore, Codec } from "@promin/core";
 import { LosslessJsonCodec } from "@promin/core";
 import type { Show } from "@promin/core";
 import type { Sinkable } from "@promin/core";
@@ -285,6 +285,32 @@ export interface StepOptions<T> {
   readonly skipWhen?: (prev: unknown) => boolean;
   /** Value to pass to the next step when this step is skipped. Defaults to prev. */
   readonly skipValue?: (prev: unknown) => T;
+  /**
+   * Skip-if-recent semantics: wrap the step body in a cache lookup keyed by
+   * the user-supplied `key(ctx)`. On hit, return the cached value without
+   * running the body. On miss, run the body and cache the result for
+   * `ttlMs`. Cache failures never fail the workflow — they fall through to
+   * a cache miss.
+   */
+  readonly cache?: StepCacheOption;
+}
+
+export interface StepCacheOption {
+  /** Compute the cache key from step context (input + prev + workflowId). */
+  readonly key: (ctx: StepContext<unknown, unknown>) => string;
+  /** TTL in milliseconds. Entries expire after this window. */
+  readonly ttlMs: number;
+  /**
+   * Cache backend. Any `CacheStore<string, unknown>` — the in-memory
+   * `MemoryCache`, a `RedisCacheStore`, a `LayeredCache`, etc. No default:
+   * pass the store explicitly so the retention domain is obvious.
+   */
+  readonly store: CacheStore<string, unknown>;
+  /**
+   * Key prefix. Defaults to the workflow name so caches for different
+   * workflows don't collide when they share a backing store.
+   */
+  readonly namespace?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -2237,6 +2263,7 @@ export class WorkflowBuilder<
     this._validateName(params.name);
 
     const codec = (params.options?.codec ?? this._codec()) as Codec<unknown>;
+    const workflowName = this._name;
 
     const stepDef: StepDefinition = {
       name: params.name,
@@ -2250,32 +2277,81 @@ export class WorkflowBuilder<
       skipWhen: params.options?.skipWhen as StepDefinition["skipWhen"],
       skipValue: params.options?.skipValue as StepDefinition["skipValue"],
       execute: (execParams) => {
+        let ctx: StepContext<unknown, unknown> | DagStepContext<unknown, Record<string, unknown>>;
         if (params.isLinear) {
           const prevStepName = params.dependsOn[0];
           const prev = prevStepName != null ? execParams.results[prevStepName] : execParams.input;
-          return params.fn({
+          ctx = {
             input: execParams.input,
             prev,
             workflowId: execParams.workflowId,
             attempt: execParams.attemptRef.current,
-          });
+          };
         } else {
           const deps: Record<string, unknown> = {};
-          for (const dep of params.dependsOn) {
-            deps[dep] = execParams.results[dep];
-          }
-          return params.fn({
+          for (const dep of params.dependsOn) deps[dep] = execParams.results[dep];
+          ctx = {
             input: execParams.input,
             deps,
             workflowId: execParams.workflowId,
             attempt: execParams.attemptRef.current,
-          });
+          };
         }
+
+        const cacheOption = params.options?.cache;
+        if (!cacheOption) return params.fn(ctx);
+        return wrapWithStepCache(
+          cacheOption,
+          ctx as StepContext<unknown, unknown>,
+          () => params.fn(ctx),
+          cacheOption.namespace ?? workflowName,
+        );
       },
     };
 
     return this._derive([...this._steps, stepDef], params.name);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Step-level cache wrapper — runs before the step body, falls through to
+// a cache miss on any cache error so storage hiccups never fail the workflow.
+// ---------------------------------------------------------------------------
+
+function wrapWithStepCache(
+  cache: StepCacheOption,
+  ctx: StepContext<unknown, unknown>,
+  runBody: () => Pipeline<unknown, TaggedError>,
+  namespace: string,
+): Pipeline<unknown, TaggedError> {
+  const cacheKey = `${namespace}:${cache.key(ctx)}`;
+
+  // Lookup is expressed as a Pipeline so we can keep everything inside the
+  // caller's error channel. A sentinel object marks "miss" so `undefined`
+  // cached values are distinguishable from misses.
+  const miss = Symbol("cache-miss");
+  const lookup = Pipeline.fromPromise(async () => {
+    try {
+      const hit = await cache.store.get(cacheKey);
+      return hit === undefined ? miss : hit;
+    } catch {
+      return miss;
+    }
+  });
+
+  return lookup.flatMap((value) => {
+    if (value !== miss) return Pipeline.succeed(value);
+    // Miss — run the body, then write to cache on success. tapAsync blocks
+    // until the write completes (so tests see cache state deterministically),
+    // and we swallow write errors so cache backends can never fail a step.
+    return runBody().tapAsync(async (result) => {
+      try {
+        await cache.store.set(cacheKey, result, cache.ttlMs);
+      } catch {
+        /* ignore cache write failures — ticket contract */
+      }
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
