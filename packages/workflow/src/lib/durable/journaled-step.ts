@@ -250,9 +250,15 @@ export type JournaledStepBody<Input, Prev, Output> = (
 
 /**
  * Thrown when the engine detects that the step body's structure has diverged
- * from the journaled execution (e.g. an activity was renamed between the
- * journaled run and the replay). Today catches activity-name and step-type
- * mismatches; payload-hash checks are a planned refinement.
+ * from the journaled execution. Catches three kinds of divergence:
+ *   - activity-name drift (same index, different name),
+ *   - step-type drift (a `sleep` journal entry collides with an `activity`
+ *     yield at the same index, etc.),
+ *   - payload-hash drift (same activity + index, but the canonicalized
+ *     input's SHA-256 disagrees — opt-in via the `payloadHash` option).
+ *
+ * `expected` and `actual` are short descriptors in a "<kind>=<value>" form
+ * suitable for logging and test assertions.
  */
 export class JournalNonDeterminismError extends Error {
   readonly _tag = "JournalNonDeterminismError";
@@ -486,6 +492,23 @@ function makeCtx<Input, Prev>(params: {
             activityIndex,
             `${recordedType}:${recorded.activityName}`,
             `activity:${name}`,
+          );
+        }
+        // Payload-hash drift check. Fires only when BOTH sides opted in:
+        //   - recorded.payloadHash: the original run stored a fingerprint
+        //   - payloadHashValue:     this replay also computed one
+        // Asymmetric cases (hashing toggled on or off between runs) don't
+        // throw — that's a migration, not a bug. Forcing strictness there
+        // would trap in-flight workflows whenever the operator flipped the
+        // pipeline-level flag. If both hashes exist and they disagree,
+        // something fed the same-named activity a different input on replay
+        // — the exact silent drift this option is meant to surface.
+        if (recorded.payloadHash && payloadHashValue && recorded.payloadHash !== payloadHashValue) {
+          throw new JournalNonDeterminismError(
+            stepName,
+            activityIndex,
+            `payloadHash=${recorded.payloadHash}`,
+            `payloadHash=${payloadHashValue}`,
           );
         }
         const phase = recorded.phase ?? "completed";

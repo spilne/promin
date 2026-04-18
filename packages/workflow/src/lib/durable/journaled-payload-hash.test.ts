@@ -1,9 +1,7 @@
 // ---------------------------------------------------------------------------
 // Payload-hash tests for ctx.activity.
 //
-// Commit 2 scope — we write the fingerprint; we don't check it on replay yet
-// (that's commit 3's JournalNonDeterminismError guard). So the tests here
-// assert:
+// Covers:
 //   * 2-arg ctx.activity(name, fn) still works unchanged.
 //   * 3-arg ctx.activity(name, input, fn) passes the input through.
 //   * Opting in via options.payloadHash writes a hash to the journal row.
@@ -13,10 +11,14 @@
 //     default is on.
 //   * Requesting `payloadHash` with the 2-arg form throws.
 //   * Equal inputs hash identically; different inputs hash differently.
+//   * Replay with matching input hash returns the recorded value.
+//   * Replay with drifted input hash throws JournalNonDeterminismError.
+//   * Asymmetric opt-in across runs (hash recorded but current opted out,
+//     or vice versa) does NOT throw — hashing is a monitor, not a gate.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { runJournaledStep } from "./journaled-step.ts";
+import { runJournaledStep, JournalNonDeterminismError } from "./journaled-step.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
 
 describe("ctx.activity — 3-arg overload", () => {
@@ -233,5 +235,193 @@ describe("ctx.activity — 3-arg under ctx.parallel", () => {
     expect(x.payloadHash).toMatch(/^[0-9a-f]{64}$/);
     expect(y.payloadHash).toMatch(/^[0-9a-f]{64}$/);
     expect(x.payloadHash).not.toBe(y.payloadHash);
+  });
+});
+
+describe("ctx.activity — replay guard", () => {
+  it("replay with the same input returns the recorded value", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    let ran = 0;
+
+    const run = async (input: { id: string }): Promise<number> =>
+      runJournaledStep<unknown, unknown, number>({
+        input: undefined,
+        prev: undefined,
+        workflowId: "wf-ok",
+        stepName: "s",
+        storage,
+        payloadHash: true,
+        body: function* (ctx) {
+          return yield* ctx.activity("charge", input, async (i: { id: string }) => {
+            ran++;
+            return i.id.length;
+          });
+        },
+      });
+
+    const fresh = await run({ id: "abc" });
+    const replay = await run({ id: "abc" });
+    expect(fresh).toBe(3);
+    expect(replay).toBe(3);
+    expect(ran).toBe(1); // replay hit the journal
+  });
+
+  it("replay with a drifted input throws JournalNonDeterminismError", async () => {
+    const storage = new InMemoryWorkflowStorage();
+
+    // First run records `{ id: "abc" }`'s fingerprint.
+    await runJournaledStep<unknown, unknown, number>({
+      input: undefined,
+      prev: undefined,
+      workflowId: "wf-drift",
+      stepName: "s",
+      storage,
+      payloadHash: true,
+      body: function* (ctx) {
+        return yield* ctx.activity(
+          "charge",
+          { id: "abc" },
+          async (i: { id: string }) => i.id.length,
+        );
+      },
+    });
+
+    // Second run passes a DIFFERENT input for the same activity name.
+    // The recorded hash disagrees → throw.
+    let thrown: unknown;
+    try {
+      await runJournaledStep<unknown, unknown, number>({
+        input: undefined,
+        prev: undefined,
+        workflowId: "wf-drift",
+        stepName: "s",
+        storage,
+        payloadHash: true,
+        body: function* (ctx) {
+          return yield* ctx.activity(
+            "charge",
+            { id: "xyz" },
+            async (i: { id: string }) => i.id.length,
+          );
+        },
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(JournalNonDeterminismError);
+    const e = thrown as JournalNonDeterminismError;
+    expect(e.stepName).toBe("s");
+    expect(e.activityIndex).toBe(0);
+    expect(e.expected).toMatch(/^payloadHash=[0-9a-f]{64}$/);
+    expect(e.actual).toMatch(/^payloadHash=[0-9a-f]{64}$/);
+    expect(e.expected).not.toBe(e.actual);
+    expect(e.message).toContain("payloadHash");
+  });
+
+  it("hash recorded but replay opted out — no check, no throw", async () => {
+    const storage = new InMemoryWorkflowStorage();
+
+    // Fresh run: pipeline default ON → hash recorded.
+    await runJournaledStep<unknown, unknown, number>({
+      input: undefined,
+      prev: undefined,
+      workflowId: "wf-off-replay",
+      stepName: "s",
+      storage,
+      payloadHash: true,
+      body: function* (ctx) {
+        return yield* ctx.activity("a", { v: 1 }, async (i: { v: number }) => i.v);
+      },
+    });
+    const recorded = (await storage.loadJournal("wf-off-replay", "s"))[0]!;
+    expect(recorded.payloadHash).toBeDefined();
+
+    // Replay: pipeline default OFF and caller feeds a DIFFERENT input.
+    // Replay should still succeed — the engine returns the recorded value
+    // without looking at the hash because the current run didn't compute one.
+    const replay = await runJournaledStep<unknown, unknown, number>({
+      input: undefined,
+      prev: undefined,
+      workflowId: "wf-off-replay",
+      stepName: "s",
+      storage,
+      // NO payloadHash here — pipeline default is off on replay.
+      body: function* (ctx) {
+        return yield* ctx.activity("a", { v: 999 }, async (i: { v: number }) => i.v);
+      },
+    });
+    expect(replay).toBe(1); // came from the journal, not from the new input
+  });
+
+  it("no hash recorded but replay opted in — no check, no throw", async () => {
+    const storage = new InMemoryWorkflowStorage();
+
+    // Fresh run: no hashing.
+    await runJournaledStep<unknown, unknown, number>({
+      input: undefined,
+      prev: undefined,
+      workflowId: "wf-only-replay",
+      stepName: "s",
+      storage,
+      body: function* (ctx) {
+        return yield* ctx.activity("a", { v: 1 }, async (i: { v: number }) => i.v);
+      },
+    });
+    const recorded = (await storage.loadJournal("wf-only-replay", "s"))[0]!;
+    expect(recorded.payloadHash).toBeUndefined();
+
+    // Replay: hashing turned on. Recorded has no hash to compare against,
+    // so we skip the check and return the recorded value.
+    const replay = await runJournaledStep<unknown, unknown, number>({
+      input: undefined,
+      prev: undefined,
+      workflowId: "wf-only-replay",
+      stepName: "s",
+      storage,
+      payloadHash: true,
+      body: function* (ctx) {
+        return yield* ctx.activity("a", { v: 1 }, async (i: { v: number }) => i.v);
+      },
+    });
+    expect(replay).toBe(1);
+  });
+
+  it("hash mismatch inside a ctx.parallel branch throws from that branch", async () => {
+    const storage = new InMemoryWorkflowStorage();
+
+    await runJournaledStep<unknown, unknown, unknown>({
+      input: undefined,
+      prev: undefined,
+      workflowId: "wf-par-drift",
+      stepName: "s",
+      storage,
+      payloadHash: true,
+      body: function* (ctx) {
+        yield* ctx.parallel([
+          ctx.activity("left", { side: "L" }, async (i: { side: string }) => i.side),
+          ctx.activity("right", { side: "R" }, async (i: { side: string }) => i.side),
+        ]);
+        return null;
+      },
+    });
+
+    await expect(
+      runJournaledStep<unknown, unknown, unknown>({
+        input: undefined,
+        prev: undefined,
+        workflowId: "wf-par-drift",
+        stepName: "s",
+        storage,
+        payloadHash: true,
+        body: function* (ctx) {
+          yield* ctx.parallel([
+            ctx.activity("left", { side: "L" }, async (i: { side: string }) => i.side),
+            // Drifted input for the right branch.
+            ctx.activity("right", { side: "DIFFERENT" }, async (i: { side: string }) => i.side),
+          ]);
+          return null;
+        },
+      }),
+    ).rejects.toThrow(/payloadHash/);
   });
 });
