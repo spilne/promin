@@ -336,6 +336,17 @@ function makeCtx<Input, Prev>(params: {
     const codec = options?.codec ?? stepCodec;
     const idempotent = options?.idempotent === true;
     const compensate = options?.compensate;
+    if (compensate && scope) {
+      // Compensation indices come from the top-level counter; reserving one
+      // while concurrent branches are also bumping the counter is racy and
+      // would make replay non-deterministic. Forbid the combination today;
+      // a per-branch compensation index space is a separate follow-up.
+      throw new Error(
+        `ctx.activity("${name}"): \`compensate\` is not supported inside a ctx.parallel branch. ` +
+          `Hoist the compensation to an activity outside the parallel, or use step-level ` +
+          `StepOptions.compensate for rollback.`,
+      );
+    }
     const maybeRegisterCompensation = (result: T): void => {
       if (!compensate) return;
       // Reserve a journal slot now; the unwind writes the pending+completed
