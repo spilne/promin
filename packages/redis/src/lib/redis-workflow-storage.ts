@@ -2,9 +2,14 @@
 // RedisWorkflowStorage — Redis-backed WorkflowStorage + StepAttemptStorage
 // ---------------------------------------------------------------------------
 //
-// Phase 1 limitations:
-// - cancelWorkflow does not support cascade (no parent index).
-// - listWorkflows does not support parentId filter (no parent index).
+// Unsupported (by design — use PostgresWorkflowStorage if you need these):
+// - cancelWorkflow cascade: no parent index is maintained.
+// - listWorkflows parentId filter: no parent index is maintained.
+// - ActivityJournalStorage / JournaledSuspendStorage (i.e. `.journaled()`
+//   steps, `ctx.sleep`, `ctx.signal`): journal entries require an ordered,
+//   indexable store that Redis can't provide without materially more
+//   complexity. `.journaled()` will throw JournalStorageMissingError at
+//   build time against this storage.
 // ---------------------------------------------------------------------------
 
 import type { WorkflowStorage, StepAttemptStorage } from "@promin/workflow";

@@ -483,6 +483,41 @@ withRedis("RedisWorkflowStorage conformance", (ctx) => {
 });
 
 // ---------------------------------------------------------------------------
+// RedisWorkflowStorage — journal guard
+// ---------------------------------------------------------------------------
+
+withRedis("RedisWorkflowStorage — .journaled() guard", (ctx) => {
+  it("throws JournalStorageMissingError at build time and names Redis as unsupported", async () => {
+    const { workflow, JournalStorageMissingError } = await import("@promin/workflow");
+    const { Pipeline } = await import("@promin/core");
+
+    const storage = new RedisWorkflowStorage({
+      redis: new IoRedis(ctx.port, ctx.host) as unknown as RedisClient,
+      prefix: uniqueName("wf-guard"),
+    });
+
+    expect(() =>
+      workflow<{ x: number }>({ name: "nope", storage })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .journaled("calc", function* () {
+          return { ok: true };
+        }),
+    ).toThrow(JournalStorageMissingError);
+
+    try {
+      workflow<{ x: number }>({ name: "nope", storage })
+        .step("load", ({ input }) => Pipeline.succeed(input))
+        .journaled("calc", function* () {
+          return { ok: true };
+        });
+    } catch (err) {
+      expect((err as Error).message).toContain("RedisWorkflowStorage");
+      expect((err as Error).message).toContain("does NOT support journaled steps");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // RedisStepQueue — portable conformance suite
 // ---------------------------------------------------------------------------
 

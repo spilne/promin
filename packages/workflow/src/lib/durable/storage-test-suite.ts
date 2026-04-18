@@ -8,20 +8,68 @@
 
 import { describe, it, expect } from "bun:test";
 import type { WorkflowStorage } from "./workflow-storage.ts";
+import {
+  isActivityJournalStorage,
+  isJournaledSuspendStorage,
+  type ActivityJournalStorage,
+  type JournaledSuspendStorage,
+} from "./activity-journal.ts";
+
+export interface StorageTestSuiteOptions {
+  /**
+   * Opt in to the `ActivityJournalStorage` conformance section.
+   * Defaults to `false`. When `true`, the factory must return a storage that
+   * also implements `ActivityJournalStorage` (`loadJournal` / `appendEntry`).
+   */
+  hasJournal?: boolean;
+  /**
+   * Opt in to the `JournaledSuspendStorage` conformance section
+   * (`appendPendingEntry` / `completePendingEntry` / `findDueSleeps` /
+   * `findPendingSignal`). Implies `hasJournal: true`.
+   */
+  hasJournaledSuspend?: boolean;
+}
 
 /**
  * Run the full WorkflowStorage conformance suite against any implementation.
  * Verifies CRUD, steps, tasks, locking, signals, suspend, complete/fail,
- * listing, cancellation, and fresh runs.
+ * listing, cancellation, fresh runs, and — when opted in — the optional
+ * journal/suspend extensions.
  *
  * @param factory — called before each test group to get a fresh storage instance
+ * @param options — opt-in flags for optional storage capabilities
  */
-export function storageTestSuite(factory: () => WorkflowStorage | Promise<WorkflowStorage>) {
+export function storageTestSuite(
+  factory: () => WorkflowStorage | Promise<WorkflowStorage>,
+  options: StorageTestSuiteOptions = {},
+) {
   let storage: WorkflowStorage;
 
   async function getStorage(): Promise<WorkflowStorage> {
     storage = await factory();
     return storage;
+  }
+
+  async function getJournalStorage(): Promise<WorkflowStorage & ActivityJournalStorage> {
+    const s = await getStorage();
+    if (!isActivityJournalStorage(s)) {
+      throw new Error(
+        "storageTestSuite was invoked with hasJournal: true, but the factory returned " +
+          "a storage that does not implement ActivityJournalStorage.",
+      );
+    }
+    return s;
+  }
+
+  async function getSuspendStorage(): Promise<WorkflowStorage & JournaledSuspendStorage> {
+    const s = await getJournalStorage();
+    if (!isJournaledSuspendStorage(s)) {
+      throw new Error(
+        "storageTestSuite was invoked with hasJournaledSuspend: true, but the factory " +
+          "returned a storage that does not implement JournaledSuspendStorage.",
+      );
+    }
+    return s as WorkflowStorage & JournaledSuspendStorage;
   }
 
   describe("WorkflowStorage conformance", () => {
@@ -723,5 +771,348 @@ export function storageTestSuite(factory: () => WorkflowStorage | Promise<Workfl
         expect(await s.loadRunHistory("purge-cascade")).toEqual([]);
       });
     });
+
+    // -------------------------------------------------------------------
+    // ActivityJournalStorage (opt-in)
+    // -------------------------------------------------------------------
+
+    if (options.hasJournal || options.hasJournaledSuspend) {
+      describe("journal — ActivityJournalStorage", () => {
+        it("loadJournal returns empty for a non-existent (workflow, step)", async () => {
+          const s = await getJournalStorage();
+          expect(await s.loadJournal("missing", "nope")).toEqual([]);
+        });
+
+        it("appendEntry + loadJournal round-trips success and failure exits", async () => {
+          const s = await getJournalStorage();
+          await s.createWorkflow({ workflowId: "j-rt", workflowName: "test", input: {} });
+          await s.appendEntry({
+            workflowId: "j-rt",
+            stepName: "calc",
+            activityIndex: 0,
+            activityName: "fetch",
+            exit: { tag: "Success", value: { n: 42 } },
+          });
+          await s.appendEntry({
+            workflowId: "j-rt",
+            stepName: "calc",
+            activityIndex: 1,
+            activityName: "failover",
+            exit: { tag: "Failure", error: "boom" },
+          });
+
+          const entries = await s.loadJournal("j-rt", "calc");
+          expect(entries).toHaveLength(2);
+          expect(entries[0]!.activityIndex).toBe(0);
+          expect(entries[0]!.activityName).toBe("fetch");
+          expect(entries[0]!.stepType ?? "activity").toBe("activity");
+          expect(entries[0]!.phase ?? "completed").toBe("completed");
+          expect(entries[0]!.exit).toEqual({ tag: "Success", value: { n: 42 } });
+          expect(entries[1]!.exit).toEqual({ tag: "Failure", error: "boom" });
+        });
+
+        it("loadJournal returns entries ordered by activityIndex ascending", async () => {
+          const s = await getJournalStorage();
+          await s.createWorkflow({ workflowId: "j-ord", workflowName: "test", input: {} });
+          // Insert out of order — storage must still return sorted.
+          for (const idx of [2, 0, 1]) {
+            await s.appendEntry({
+              workflowId: "j-ord",
+              stepName: "calc",
+              activityIndex: idx,
+              activityName: `a${idx}`,
+              exit: { tag: "Success", value: idx },
+            });
+          }
+
+          const entries = await s.loadJournal("j-ord", "calc");
+          expect(entries.map((e) => e.activityIndex)).toEqual([0, 1, 2]);
+        });
+
+        it("appendEntry is idempotent on (workflowId, stepName, activityIndex)", async () => {
+          const s = await getJournalStorage();
+          await s.createWorkflow({ workflowId: "j-idem", workflowName: "test", input: {} });
+          await s.appendEntry({
+            workflowId: "j-idem",
+            stepName: "calc",
+            activityIndex: 0,
+            activityName: "first",
+            exit: { tag: "Success", value: "v1" },
+          });
+          // Second call on same PK — must not duplicate.
+          await s.appendEntry({
+            workflowId: "j-idem",
+            stepName: "calc",
+            activityIndex: 0,
+            activityName: "first",
+            exit: { tag: "Success", value: "v1" },
+          });
+
+          const entries = await s.loadJournal("j-idem", "calc");
+          expect(entries).toHaveLength(1);
+        });
+
+        it("journal is scoped by (workflowId, stepName)", async () => {
+          const s = await getJournalStorage();
+          await s.createWorkflow({ workflowId: "j-scope-a", workflowName: "test", input: {} });
+          await s.createWorkflow({ workflowId: "j-scope-b", workflowName: "test", input: {} });
+          await s.appendEntry({
+            workflowId: "j-scope-a",
+            stepName: "calc",
+            activityIndex: 0,
+            activityName: "a",
+            exit: { tag: "Success", value: "A" },
+          });
+          await s.appendEntry({
+            workflowId: "j-scope-b",
+            stepName: "calc",
+            activityIndex: 0,
+            activityName: "b",
+            exit: { tag: "Success", value: "B" },
+          });
+          await s.appendEntry({
+            workflowId: "j-scope-a",
+            stepName: "other",
+            activityIndex: 0,
+            activityName: "c",
+            exit: { tag: "Success", value: "C" },
+          });
+
+          expect((await s.loadJournal("j-scope-a", "calc")).map((e) => e.exit)).toEqual([
+            { tag: "Success", value: "A" },
+          ]);
+          expect((await s.loadJournal("j-scope-b", "calc")).map((e) => e.exit)).toEqual([
+            { tag: "Success", value: "B" },
+          ]);
+          expect((await s.loadJournal("j-scope-a", "other")).map((e) => e.exit)).toEqual([
+            { tag: "Success", value: "C" },
+          ]);
+        });
+      });
+    }
+
+    // -------------------------------------------------------------------
+    // JournaledSuspendStorage (opt-in)
+    // -------------------------------------------------------------------
+
+    if (options.hasJournaledSuspend) {
+      describe("journal — JournaledSuspendStorage", () => {
+        it("appendPendingEntry writes a pending sleep with wakeAt", async () => {
+          const s = await getSuspendStorage();
+          await s.createWorkflow({ workflowId: "j-sleep", workflowName: "test", input: {} });
+          const wakeAt = new Date(Date.now() + 60_000);
+          await s.appendPendingEntry({
+            workflowId: "j-sleep",
+            stepName: "wait",
+            activityIndex: 0,
+            activityName: "nap",
+            stepType: "sleep",
+            wakeAt,
+          });
+
+          const entries = await s.loadJournal("j-sleep", "wait");
+          expect(entries).toHaveLength(1);
+          const e = entries[0]!;
+          expect(e.stepType).toBe("sleep");
+          expect(e.phase).toBe("pending");
+          expect(e.exit).toBeUndefined();
+          expect(e.wakeAt?.getTime()).toBe(wakeAt.getTime());
+        });
+
+        it("completePendingEntry transitions a pending entry to completed", async () => {
+          const s = await getSuspendStorage();
+          await s.createWorkflow({ workflowId: "j-cp", workflowName: "test", input: {} });
+          await s.appendPendingEntry({
+            workflowId: "j-cp",
+            stepName: "sig",
+            activityIndex: 0,
+            activityName: "approval",
+            stepType: "signal",
+          });
+
+          await s.completePendingEntry({
+            workflowId: "j-cp",
+            stepName: "sig",
+            activityIndex: 0,
+            exit: { tag: "Success", value: { approved: true } },
+          });
+
+          const entries = await s.loadJournal("j-cp", "sig");
+          expect(entries).toHaveLength(1);
+          expect(entries[0]!.phase).toBe("completed");
+          expect(entries[0]!.exit).toEqual({ tag: "Success", value: { approved: true } });
+        });
+
+        it("completePendingEntry is a no-op on an already-completed entry", async () => {
+          const s = await getSuspendStorage();
+          await s.createWorkflow({ workflowId: "j-cp2", workflowName: "test", input: {} });
+          await s.appendPendingEntry({
+            workflowId: "j-cp2",
+            stepName: "sig",
+            activityIndex: 0,
+            activityName: "approval",
+            stepType: "signal",
+          });
+          await s.completePendingEntry({
+            workflowId: "j-cp2",
+            stepName: "sig",
+            activityIndex: 0,
+            exit: { tag: "Success", value: "first" },
+          });
+          // Second delivery must not overwrite.
+          await s.completePendingEntry({
+            workflowId: "j-cp2",
+            stepName: "sig",
+            activityIndex: 0,
+            exit: { tag: "Success", value: "second" },
+          });
+
+          const entries = await s.loadJournal("j-cp2", "sig");
+          expect(entries[0]!.exit).toEqual({ tag: "Success", value: "first" });
+        });
+
+        it("appendPendingEntry is idempotent on (workflowId, stepName, activityIndex)", async () => {
+          const s = await getSuspendStorage();
+          await s.createWorkflow({ workflowId: "j-pidem", workflowName: "test", input: {} });
+          const wakeAt = new Date(Date.now() + 60_000);
+          await s.appendPendingEntry({
+            workflowId: "j-pidem",
+            stepName: "wait",
+            activityIndex: 0,
+            activityName: "nap",
+            stepType: "sleep",
+            wakeAt,
+          });
+          await s.appendPendingEntry({
+            workflowId: "j-pidem",
+            stepName: "wait",
+            activityIndex: 0,
+            activityName: "nap",
+            stepType: "sleep",
+            wakeAt,
+          });
+
+          expect(await s.loadJournal("j-pidem", "wait")).toHaveLength(1);
+        });
+
+        it("findDueSleeps returns pending sleep entries whose wakeAt <= now", async () => {
+          const s = await getSuspendStorage();
+          await s.createWorkflow({ workflowId: "j-due-1", workflowName: "test", input: {} });
+          await s.createWorkflow({ workflowId: "j-due-2", workflowName: "test", input: {} });
+
+          const past = new Date(Date.now() - 60_000);
+          const future = new Date(Date.now() + 60_000);
+
+          await s.appendPendingEntry({
+            workflowId: "j-due-1",
+            stepName: "wait",
+            activityIndex: 0,
+            activityName: "nap",
+            stepType: "sleep",
+            wakeAt: past,
+          });
+          await s.appendPendingEntry({
+            workflowId: "j-due-2",
+            stepName: "wait",
+            activityIndex: 0,
+            activityName: "nap",
+            stepType: "sleep",
+            wakeAt: future,
+          });
+
+          const due = await s.findDueSleeps({ now: new Date(), limit: 10 });
+          const ids = due.map((d) => d.workflowId);
+          expect(ids).toContain("j-due-1");
+          expect(ids).not.toContain("j-due-2");
+        });
+
+        it("findDueSleeps ignores completed entries and respects limit", async () => {
+          const s = await getSuspendStorage();
+          const past = new Date(Date.now() - 60_000);
+
+          for (const wid of ["j-lim-1", "j-lim-2", "j-lim-3"]) {
+            await s.createWorkflow({ workflowId: wid, workflowName: "test", input: {} });
+            await s.appendPendingEntry({
+              workflowId: wid,
+              stepName: "wait",
+              activityIndex: 0,
+              activityName: "nap",
+              stepType: "sleep",
+              wakeAt: past,
+            });
+          }
+          // Mark one as completed — must not appear in due set.
+          await s.completePendingEntry({
+            workflowId: "j-lim-2",
+            stepName: "wait",
+            activityIndex: 0,
+            exit: { tag: "Success", value: "woken" },
+          });
+
+          const due = await s.findDueSleeps({ now: new Date(), limit: 10 });
+          const ids = due.map((d) => d.workflowId);
+          expect(ids).toContain("j-lim-1");
+          expect(ids).toContain("j-lim-3");
+          expect(ids).not.toContain("j-lim-2");
+
+          const capped = await s.findDueSleeps({ now: new Date(), limit: 1 });
+          expect(capped).toHaveLength(1);
+        });
+
+        it("findPendingSignal returns pending signal by name, null otherwise", async () => {
+          const s = await getSuspendStorage();
+          await s.createWorkflow({ workflowId: "j-sig", workflowName: "test", input: {} });
+          await s.appendPendingEntry({
+            workflowId: "j-sig",
+            stepName: "wait",
+            activityIndex: 0,
+            activityName: "approval",
+            stepType: "signal",
+          });
+
+          const hit = await s.findPendingSignal({
+            workflowId: "j-sig",
+            stepName: "wait",
+            signalName: "approval",
+          });
+          expect(hit).not.toBeNull();
+          expect(hit!.activityName).toBe("approval");
+          expect(hit!.stepType).toBe("signal");
+          expect(hit!.phase).toBe("pending");
+
+          const miss = await s.findPendingSignal({
+            workflowId: "j-sig",
+            stepName: "wait",
+            signalName: "cancel",
+          });
+          expect(miss).toBeNull();
+        });
+
+        it("findPendingSignal returns null once the signal is completed", async () => {
+          const s = await getSuspendStorage();
+          await s.createWorkflow({ workflowId: "j-sigc", workflowName: "test", input: {} });
+          await s.appendPendingEntry({
+            workflowId: "j-sigc",
+            stepName: "wait",
+            activityIndex: 0,
+            activityName: "approval",
+            stepType: "signal",
+          });
+          await s.completePendingEntry({
+            workflowId: "j-sigc",
+            stepName: "wait",
+            activityIndex: 0,
+            exit: { tag: "Success", value: { approved: true } },
+          });
+
+          const hit = await s.findPendingSignal({
+            workflowId: "j-sigc",
+            stepName: "wait",
+            signalName: "approval",
+          });
+          expect(hit).toBeNull();
+        });
+      });
+    }
   });
 }
