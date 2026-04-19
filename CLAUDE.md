@@ -49,7 +49,10 @@ function searchVideos(params: { query: string; order: string; videoDuration?: st
 - **Framework**: `bun:test` (`describe`, `it`, `expect`)
 - **Mocking**: Manual mock implementations of interfaces (no mocking library)
 - **Pattern**: Arrange-Act-Assert with helper factories for mocks
-- **Location**: Co-located `*.test.ts` files next to source
+- **Location**: `*.test.ts` files live in a `tests/` subfolder beside the
+  source they cover (e.g. `src/lib/durable/tests/foo.test.ts` tests
+  `src/lib/durable/foo.ts`). Bench files (`*.bench.ts`) and type-fixture
+  files (`*.type-fixture.ts`) stay co-located with source.
 
 ## Running Typecheck
 
