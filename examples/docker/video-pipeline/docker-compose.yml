@@ -4,13 +4,15 @@
 # Brings up a small cluster:
 #   postgres     — workflow storage + step queue
 #   migrator     — one-shot: runs drizzle migrations + exits
-#   coordinator  — leader, enqueues ready steps, watches completions
+#   coordinator  — leader, enqueues ready steps, AND submits a fresh demo
+#                  workflow every SUBMIT_INTERVAL_MS (default 5s) so the
+#                  pipeline keeps producing work without a separate client
 #   worker-gpu   — handles "transcode" (CPU-intensive in real life)
 #   worker-cpu   — handles "thumbnail"
 #   worker-def   — handles everything else (decode, metadata, notify)
 #
-# Submit a job:
-#   docker compose run --rm submit my-video-123
+# Tail the pipeline:
+#   docker compose up --build
 #
 # Scale a worker pool:
 #   docker compose up --scale worker-gpu=3
@@ -83,19 +85,6 @@ services:
       context: ../../../
       dockerfile: examples/docker/video-pipeline/Dockerfile
     command: ["bun", "--conditions=@promin/source", "run", "worker-default.ts"]
-    environment:
-      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
-    depends_on:
-      migrator:
-        condition: service_completed_successfully
-
-  # On-demand: `docker compose run --rm submit <video-id>`
-  submit:
-    build:
-      context: ../../../
-      dockerfile: examples/docker/video-pipeline/Dockerfile
-    profiles: ["tools"]
-    entrypoint: ["bun", "--conditions=@promin/source", "run", "submit.ts"]
     environment:
       DATABASE_URL: postgres://promin:promin@postgres:5432/promin
     depends_on:
