@@ -99,6 +99,24 @@ workers will just take longer to finish each task. A real GPU worker would
 mount `/dev/dri` (or `--gpus all` on nvidia-docker) onto `worker-gpu` and
 call `ffmpeg -hwaccel ...` inside `transcodeHandler`.
 
+## Known quirk — first step runs twice
+
+`submit.ts` spins up a throwaway `createCoordinator` instance just to
+call `.submit()`, which registers the DAG in storage AND enqueues the
+first step. The long-running `coordinator.ts` process then also runs its
+own `enqueueReady` tick against the newly-appearing workflow, so the
+first step (`decode`) gets enqueued by both sides. Two tasks land in
+the step queue, a worker claims both, and the log shows two `[decode]`
+lines. Later steps stay single — once `decode`'s status is `running`/
+`completed` in storage, neither coordinator enqueues it again.
+
+Workflow correctness is unaffected (final result is right; compensation
+and retries behave the same), but throughput-sensitive deployments
+should submit via a single coordinator instance rather than running a
+local submit + a cluster coordinator side-by-side. Fixing this in the
+library would mean making `stepQueue.enqueue` idempotent on
+`(workflowId, stepName, run)` — tracked separately.
+
 ## What it demonstrates
 
 - **Multi-queue routing** — `transcode` always lands on `worker-gpu`,

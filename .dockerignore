@@ -1,0 +1,35 @@
+# Keep Docker build contexts small and deterministic.
+# Without this, `COPY packages packages` pulls in every node_modules and
+# every prebuilt dist/, which turns a 2MB source tree into 1GB+ and can
+# stall the build for 10+ minutes.
+
+# Never ship cache / build output — these get regenerated inside the image.
+**/node_modules
+**/dist
+**/.tsbuildinfo
+**/tsconfig.tsbuildinfo
+
+# Nx cache / workspace data — only meaningful outside the container.
+.nx
+.target
+
+# Version control, editor, OS cruft.
+.git
+.github
+.githooks
+.vscode
+.idea
+.DS_Store
+
+# Project-local docs + beads state — see CLAUDE.md (docs/ is internal only).
+docs
+.beads
+
+# Next.js build output for the documentation site — unrelated to workers.
+documentation/generator/.next
+documentation/generator/node_modules
+
+# Testcontainer / runtime artifacts that may accumulate.
+.env
+.env.*
+*.log

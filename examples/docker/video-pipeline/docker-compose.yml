@@ -37,7 +37,7 @@ services:
     build:
       context: ../../../
       dockerfile: examples/docker/video-pipeline/Dockerfile
-    command: ["bun", "run", "migrator.ts"]
+    command: ["bun", "--conditions=@promin/source", "run", "migrator.ts"]
     environment:
       DATABASE_URL: postgres://promin:promin@postgres:5432/promin
     depends_on:
@@ -49,7 +49,7 @@ services:
     build:
       context: ../../../
       dockerfile: examples/docker/video-pipeline/Dockerfile
-    command: ["bun", "run", "coordinator.ts"]
+    command: ["bun", "--conditions=@promin/source", "run", "coordinator.ts"]
     environment:
       DATABASE_URL: postgres://promin:promin@postgres:5432/promin
     depends_on:
@@ -60,7 +60,7 @@ services:
     build:
       context: ../../../
       dockerfile: examples/docker/video-pipeline/Dockerfile
-    command: ["bun", "run", "worker-transcode.ts"]
+    command: ["bun", "--conditions=@promin/source", "run", "worker-transcode.ts"]
     environment:
       DATABASE_URL: postgres://promin:promin@postgres:5432/promin
     depends_on:
@@ -71,7 +71,7 @@ services:
     build:
       context: ../../../
       dockerfile: examples/docker/video-pipeline/Dockerfile
-    command: ["bun", "run", "worker-thumbnail.ts"]
+    command: ["bun", "--conditions=@promin/source", "run", "worker-thumbnail.ts"]
     environment:
       DATABASE_URL: postgres://promin:promin@postgres:5432/promin
     depends_on:
@@ -82,7 +82,7 @@ services:
     build:
       context: ../../../
       dockerfile: examples/docker/video-pipeline/Dockerfile
-    command: ["bun", "run", "worker-default.ts"]
+    command: ["bun", "--conditions=@promin/source", "run", "worker-default.ts"]
     environment:
       DATABASE_URL: postgres://promin:promin@postgres:5432/promin
     depends_on:
@@ -95,7 +95,7 @@ services:
       context: ../../../
       dockerfile: examples/docker/video-pipeline/Dockerfile
     profiles: ["tools"]
-    entrypoint: ["bun", "run", "submit.ts"]
+    entrypoint: ["bun", "--conditions=@promin/source", "run", "submit.ts"]
     environment:
       DATABASE_URL: postgres://promin:promin@postgres:5432/promin
     depends_on:
