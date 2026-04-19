@@ -33,7 +33,22 @@ export interface StepTask {
 export type FairnessPolicy = "strict-priority" | "round-robin" | "weighted";
 
 export interface StepQueue {
-  /** Enqueue a step for execution on a named queue. Higher priority number = runs first. */
+  /**
+   * Enqueue a step for execution on a named queue. Higher priority number =
+   * runs first.
+   *
+   * **Idempotent on `(workflowId, stepName)`.** While a prior task for the
+   * same pair is still `pending` or `running`, re-calling `enqueue()` is a
+   * no-op: it returns the existing task's id instead of creating a second
+   * row. This keeps things sane when multiple coordinators (or a
+   * coordinator + a client SDK instance) both conclude the step is ready
+   * — without it, a worker could claim two tasks and execute the step
+   * twice. See promin-k6mk for the race this avoids.
+   *
+   * Once the prior task reaches `completed` or `failed`, the next
+   * `enqueue()` IS allowed to create a fresh pending task (needed for
+   * step-level retry and for `startFreshRun()`'s per-step re-execution).
+   */
   enqueue(params: {
     workflowId: string;
     stepName: string;

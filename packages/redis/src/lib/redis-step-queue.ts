@@ -2,16 +2,69 @@
 // RedisStepQueue — Redis-backed StepQueue for distributed step dispatch
 //
 // Key structure:
-//   {prefix}:task:{id}        → Hash (task fields)
-//   {prefix}:pending:{queue}  → Sorted Set (score = priority*1e12 + offset for FIFO)
-//   {prefix}:running          → Set of task IDs
-//   {prefix}:counter          → Incr for task ID generation
+//   {prefix}:task:{id}                             → Hash (task fields)
+//   {prefix}:pending:{queue}                       → Sorted Set (priority+FIFO)
+//   {prefix}:running                               → Set of task IDs
+//   {prefix}:counter                               → Incr for task ID generation
+//   {prefix}:active:{ns}::{wfId}::{stepName}       → taskId of active
+//                                                    (pending/running) task;
+//                                                    drives idempotent enqueue
 // ---------------------------------------------------------------------------
 
 import type { StepQueue, StepTask, FairnessPolicy } from "@promin/workflow";
 import type { RedisClient } from "./redis-client.ts";
 
 // -- Lua scripts -------------------------------------------------------------
+
+/**
+ * Atomically enqueue a task with idempotency on (namespace, workflowId,
+ * stepName) — promin-k6mk. If an active task (key `{prefix}:active:...`
+ * exists) is already pending or running for the same triple, return its
+ * id without creating a new row. Otherwise INCR the counter, HSET the
+ * task hash, ZADD to the pending set, and SET the active key.
+ *
+ * KEYS: [active_key, pending_key, counter_key]
+ * ARGV: [task_key_prefix, workflowId, stepName, queue, priority,
+ *        inputJson, prevResultsJson, namespace, createdAt, version('' if unset)]
+ */
+const ENQUEUE_LUA = `
+local active_key = KEYS[1]
+local pending_key = KEYS[2]
+local counter_key = KEYS[3]
+
+local existing = redis.call('GET', active_key)
+if existing then return existing end
+
+local seq = redis.call('INCR', counter_key)
+local id = tostring(seq)
+local task_key = ARGV[1] .. id
+
+local fields = {
+  'id', id,
+  'workflowId', ARGV[2],
+  'stepName', ARGV[3],
+  'queue', ARGV[4],
+  'priority', ARGV[5],
+  'input', ARGV[6],
+  'prevResults', ARGV[7],
+  'attempt', '1',
+  'status', 'pending',
+  'namespace', ARGV[8],
+  'createdAt', ARGV[9],
+}
+if ARGV[10] ~= '' then
+  table.insert(fields, 'version')
+  table.insert(fields, ARGV[10])
+end
+redis.call('HSET', task_key, unpack(fields))
+
+local priority = tonumber(ARGV[5])
+local score = priority * 1e12 + (1e12 - seq)
+redis.call('ZADD', pending_key, score, id)
+redis.call('SET', active_key, id)
+
+return id
+`;
 
 /**
  * Atomically claim tasks: ZREVRANGE top N from pending set, move to running,
@@ -79,6 +132,15 @@ export class RedisStepQueue implements StepQueue {
     return `${this.prefix}:failed:${queue}`;
   }
 
+  /**
+   * Active-task key for idempotent enqueue. Namespace is defaulted to '' so
+   * NULL/empty-string collapse into the same bucket (matches the Postgres
+   * backend's COALESCE(namespace, '') behaviour).
+   */
+  private activeKey(namespace: string, workflowId: string, stepName: string): string {
+    return `${this.prefix}:active:${namespace}::${workflowId}::${stepName}`;
+  }
+
   // -- StepQueue interface ---------------------------------------------------
 
   async enqueue(params: {
@@ -91,35 +153,29 @@ export class RedisStepQueue implements StepQueue {
     namespace?: string;
     version?: string;
   }): Promise<string> {
-    const seq = await this.redis.incr(`${this.prefix}:counter`);
-    const id = String(seq);
-    const now = Date.now();
+    const namespace = params.namespace ?? "";
     const priority = params.priority ?? 5;
-
-    // Store task as hash. Redis hashes don't support undefined — omit the
-    // version field entirely when unset rather than storing an empty string,
-    // so `parseHashArray` can distinguish "no version" from "empty string".
-    const fields: Record<string, string> = {
-      id,
-      workflowId: params.workflowId,
-      stepName: params.stepName,
-      queue: params.queue,
-      priority: String(priority),
-      input: JSON.stringify(params.input),
-      prevResults: JSON.stringify(params.prevResults),
-      attempt: "1",
-      status: "pending",
-      namespace: params.namespace ?? "",
-      createdAt: new Date(now).toISOString(),
-    };
-    if (params.version !== undefined) fields.version = params.version;
-    await this.redis.hset(this.taskKey(id), fields);
-
-    // Score: higher priority = higher score = popped first by ZREVRANGE.
-    // Within same priority, lower sequence = earlier enqueue = higher offset = FIFO.
-    const score = priority * 1e12 + (1e12 - seq);
-    await this.redis.zadd(this.pendingKey(params.queue), score, id);
-
+    // Single Lua round-trip does the "check active → maybe insert" atomically.
+    // Returns either the existing task id (dedup hit) or the freshly allocated
+    // one — caller sees a uniform string either way, matching the interface
+    // contract.
+    const id = (await this.redis.eval(
+      ENQUEUE_LUA,
+      3,
+      this.activeKey(namespace, params.workflowId, params.stepName),
+      this.pendingKey(params.queue),
+      `${this.prefix}:counter`,
+      `${this.prefix}:task:`,
+      params.workflowId,
+      params.stepName,
+      params.queue,
+      String(priority),
+      JSON.stringify(params.input),
+      JSON.stringify(params.prevResults),
+      namespace,
+      new Date().toISOString(),
+      params.version ?? "",
+    )) as string;
     return id;
   }
 
@@ -192,7 +248,8 @@ export class RedisStepQueue implements StepQueue {
   }
 
   async complete(params: { taskId: string; result: unknown; durationMs: number }): Promise<void> {
-    const queue = await this.redis.hget(this.taskKey(params.taskId), "queue");
+    const hash = await this.redis.hgetall(this.taskKey(params.taskId));
+    const queue = hash?.queue;
     await this.redis.hset(this.taskKey(params.taskId), {
       status: "completed",
       result: JSON.stringify(params.result),
@@ -201,10 +258,16 @@ export class RedisStepQueue implements StepQueue {
     });
     await this.redis.srem(this.runningKey(), params.taskId);
     if (queue) await this.redis.sadd(this.completedKey(queue), params.taskId);
+    // Free the active-key dedupe slot so a retry / fresh-run enqueue can go
+    // through. Namespace defaults to '' to match the enqueue path's bucket.
+    if (hash?.workflowId && hash.stepName) {
+      await this.redis.del(this.activeKey(hash.namespace ?? "", hash.workflowId, hash.stepName));
+    }
   }
 
   async fail(params: { taskId: string; error: string; durationMs: number }): Promise<void> {
-    const queue = await this.redis.hget(this.taskKey(params.taskId), "queue");
+    const hash = await this.redis.hgetall(this.taskKey(params.taskId));
+    const queue = hash?.queue;
     await this.redis.hset(this.taskKey(params.taskId), {
       status: "failed",
       error: params.error,
@@ -213,6 +276,9 @@ export class RedisStepQueue implements StepQueue {
     });
     await this.redis.srem(this.runningKey(), params.taskId);
     if (queue) await this.redis.sadd(this.failedKey(queue), params.taskId);
+    if (hash?.workflowId && hash.stepName) {
+      await this.redis.del(this.activeKey(hash.namespace ?? "", hash.workflowId, hash.stepName));
+    }
   }
 
   async requeueStuck(params: { claimedBy?: string; staleTimeoutMs?: number }): Promise<number> {

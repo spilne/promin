@@ -134,6 +134,13 @@
       "when": 1743400018000,
       "tag": "0018_step_metadata",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1743400019000,
+      "tag": "0019_stepqueue_idempotent",
+      "breakpoints": true
     }
   ]
 }

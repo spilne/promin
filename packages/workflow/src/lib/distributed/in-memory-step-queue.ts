@@ -10,11 +10,23 @@ type MutableTask = {
 
 export class InMemoryStepQueue implements StepQueue {
   private tasks = new Map<string, MutableTask>();
+  /**
+   * `${workflowId}::${stepName}` → taskId of the currently-active (pending or
+   * running) task for that step. Used to dedupe re-enqueues — see
+   * `StepQueue.enqueue` for the full semantics. Cleared when a task hits a
+   * terminal state (complete / fail) so a subsequent enqueue for the same
+   * step can create a fresh task (step retry, fresh workflow runs, etc).
+   */
+  private activeByKey = new Map<string, string>();
   private counter = 0;
   private readonly workerId: string;
 
   constructor(params?: { workerId?: string }) {
     this.workerId = params?.workerId ?? "in-memory";
+  }
+
+  private activeKey(workflowId: string, stepName: string): string {
+    return `${workflowId}::${stepName}`;
   }
 
   async enqueue(params: {
@@ -27,6 +39,13 @@ export class InMemoryStepQueue implements StepQueue {
     namespace?: string;
     version?: string;
   }): Promise<string> {
+    // Idempotency: if a task for this (workflowId, stepName) is already
+    // pending or running, hand back its id instead of creating a second.
+    // The active map is authoritative because we clear it on complete/fail.
+    const key = this.activeKey(params.workflowId, params.stepName);
+    const existing = this.activeByKey.get(key);
+    if (existing !== undefined) return existing;
+
     const id = `task-${++this.counter}`;
     this.tasks.set(id, {
       id,
@@ -41,6 +60,7 @@ export class InMemoryStepQueue implements StepQueue {
       createdAt: new Date(),
       version: params.version,
     });
+    this.activeByKey.set(key, id);
     return id;
   }
 
@@ -126,6 +146,8 @@ export class InMemoryStepQueue implements StepQueue {
     if (task) {
       task.status = "completed";
       task.result = params.result;
+      // Free the dedupe slot so a retry / fresh-run re-enqueue can succeed.
+      this.activeByKey.delete(this.activeKey(task.workflowId, task.stepName));
     }
   }
 
@@ -134,6 +156,7 @@ export class InMemoryStepQueue implements StepQueue {
     if (task) {
       task.status = "failed";
       task.error = params.error;
+      this.activeByKey.delete(this.activeKey(task.workflowId, task.stepName));
     }
   }
 

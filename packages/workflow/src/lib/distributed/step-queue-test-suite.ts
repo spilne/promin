@@ -42,6 +42,133 @@ export function stepQueueTestSuite(factory: () => StepQueue | Promise<StepQueue>
         expect(typeof id).toBe("string");
         expect(id.length).toBeGreaterThan(0);
       });
+
+      it("is idempotent on (workflowId, stepName) while a prior task is pending", async () => {
+        const q = await getQueue();
+        const first = await q.enqueue({
+          workflowId: "wf-idempo",
+          stepName: "charge",
+          queue: "default",
+          input: { amount: 100 },
+          prevResults: {},
+        });
+        // A second coordinator (or an SDK client) concludes the same step is
+        // ready and re-enqueues with different input values. The queue must
+        // return the FIRST task's id and NOT create a second row — otherwise
+        // a worker would claim two tasks and run `charge` twice.
+        const second = await q.enqueue({
+          workflowId: "wf-idempo",
+          stepName: "charge",
+          queue: "default",
+          input: { amount: 999 }, // intentionally different — must be ignored
+          prevResults: {},
+        });
+        expect(second).toBe(first);
+
+        const metrics = await q.metrics();
+        const pendingCount = Object.values(metrics).reduce((sum, m) => sum + m.pending, 0);
+        expect(pendingCount).toBe(1);
+      });
+
+      it("is idempotent while a prior task is claimed (running)", async () => {
+        const q = await getQueue();
+        const first = await q.enqueue({
+          workflowId: "wf-idempo-running",
+          stepName: "charge",
+          queue: "default",
+          input: {},
+          prevResults: {},
+        });
+        // Claim it → status becomes "running". A second enqueue in this
+        // state must still be a no-op; otherwise two workers could end up
+        // processing the same logical step in parallel.
+        await q.claim({ queues: ["default"], limit: 10 });
+
+        const second = await q.enqueue({
+          workflowId: "wf-idempo-running",
+          stepName: "charge",
+          queue: "default",
+          input: {},
+          prevResults: {},
+        });
+        expect(second).toBe(first);
+      });
+
+      it("allows a fresh enqueue after the prior task completes", async () => {
+        const q = await getQueue();
+        const first = await q.enqueue({
+          workflowId: "wf-after-complete",
+          stepName: "charge",
+          queue: "default",
+          input: {},
+          prevResults: {},
+        });
+        const [claimed] = await q.claim({ queues: ["default"], limit: 1 });
+        await q.complete({ taskId: claimed!.id, result: "ok", durationMs: 10 });
+
+        // After completion the dedupe slot is free — a retry / fresh-run
+        // should be able to enqueue the same step again.
+        const second = await q.enqueue({
+          workflowId: "wf-after-complete",
+          stepName: "charge",
+          queue: "default",
+          input: {},
+          prevResults: {},
+        });
+        expect(second).not.toBe(first);
+
+        const all = await q.claim({ queues: ["default"], limit: 10 });
+        expect(all).toHaveLength(1); // just the new task; old one is completed
+        expect(all[0]!.id).toBe(second);
+      });
+
+      it("allows a fresh enqueue after the prior task fails", async () => {
+        const q = await getQueue();
+        const first = await q.enqueue({
+          workflowId: "wf-after-fail",
+          stepName: "charge",
+          queue: "default",
+          input: {},
+          prevResults: {},
+        });
+        const [claimed] = await q.claim({ queues: ["default"], limit: 1 });
+        await q.fail({ taskId: claimed!.id, error: "boom", durationMs: 5 });
+
+        const second = await q.enqueue({
+          workflowId: "wf-after-fail",
+          stepName: "charge",
+          queue: "default",
+          input: {},
+          prevResults: {},
+        });
+        expect(second).not.toBe(first);
+      });
+
+      it("dedupe is per (workflowId, stepName) — different steps don't collide", async () => {
+        const q = await getQueue();
+        const a = await q.enqueue({
+          workflowId: "wf-scope",
+          stepName: "charge",
+          queue: "default",
+          input: {},
+          prevResults: {},
+        });
+        const b = await q.enqueue({
+          workflowId: "wf-scope",
+          stepName: "ship",
+          queue: "default",
+          input: {},
+          prevResults: {},
+        });
+        const c = await q.enqueue({
+          workflowId: "wf-other",
+          stepName: "charge",
+          queue: "default",
+          input: {},
+          prevResults: {},
+        });
+        expect(new Set([a, b, c]).size).toBe(3);
+      });
     });
 
     // -------------------------------------------------------------------

@@ -56,21 +56,46 @@ export class PgStepQueue implements StepQueue {
     version?: string;
   }): Promise<string> {
     const ns = params.namespace ?? this.namespace;
-    const [row] = await this.db
-      .insert(stepQueue)
-      .values({
-        workflowId: params.workflowId,
-        stepName: params.stepName,
-        namespace: ns,
-        queue: params.queue,
-        priority: params.priority ?? 5,
-        input: params.input,
-        prevResults: params.prevResults,
-        version: params.version,
-      })
-      .returning({ id: stepQueue.id });
-
-    return String(row!.id);
+    // Idempotent on (namespace, workflow_id, step_name) while a prior task
+    // is still pending or running — see `StepQueue.enqueue` docstring.
+    // Inferred by the partial unique index `wf_step_queue_active_uniq`
+    // (migration 0019). The DO UPDATE is a no-op self-assignment that
+    // lets RETURNING surface the existing task's id on conflict, so
+    // callers always get an id back (never null, never thrown).
+    //
+    // Hand-written SQL rather than drizzle's onConflictDoUpdate because
+    // drizzle doesn't cleanly express the COALESCE(namespace, '')
+    // expression in the ON CONFLICT target inference list.
+    const priority = params.priority ?? 5;
+    const inputJson = params.input === undefined ? null : JSON.stringify(params.input);
+    const prevResultsJson = JSON.stringify(params.prevResults);
+    const result = await this.db.execute(sql`
+      INSERT INTO wf_step_queue (
+        workflow_id, step_name, namespace, queue, priority, input, prev_results, version
+      )
+      VALUES (
+        ${params.workflowId},
+        ${params.stepName},
+        ${ns},
+        ${params.queue},
+        ${priority},
+        ${inputJson}::jsonb,
+        ${prevResultsJson}::jsonb,
+        ${params.version ?? null}
+      )
+      ON CONFLICT ((COALESCE(namespace, '')), workflow_id, step_name)
+      WHERE status IN ('pending', 'running')
+      DO UPDATE SET workflow_id = wf_step_queue.workflow_id
+      RETURNING id
+    `);
+    const rows =
+      (result as unknown as { rows?: Array<{ id: number | string }> }).rows ??
+      (result as unknown as Array<{ id: number | string }>);
+    const id = Array.isArray(rows) ? rows[0]?.id : undefined;
+    if (id === undefined) {
+      throw new Error("PgStepQueue.enqueue: no row returned from INSERT/UPSERT");
+    }
+    return String(id);
   }
 
   async claim(params: {
@@ -269,5 +294,14 @@ export class PgStepQueue implements StepQueue {
    */
   async ensureTable(): Promise<void> {
     await ensureTableFromSchema(this.db, stepQueue);
+    // Partial unique index — promin-k6mk. Same DDL as migration 0019;
+    // idempotent so running both is fine. COALESCE(namespace, '') folds
+    // NULL + '' into the same bucket since the ON CONFLICT clause infers
+    // this index by matching the expression + WHERE predicate exactly.
+    await this.db.execute(sql`
+      CREATE UNIQUE INDEX IF NOT EXISTS wf_step_queue_active_uniq
+        ON wf_step_queue ((COALESCE(namespace, '')), workflow_id, step_name)
+        WHERE status IN ('pending', 'running')
+    `);
   }
 }

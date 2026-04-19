@@ -185,6 +185,10 @@ export const stepQueue = pgTable(
     index("wf_step_queue_dequeue_idx").on(t.status, t.queue, t.priority, t.createdAt),
     index("wf_step_queue_workflow_idx").on(t.workflowId),
     index("wf_step_queue_namespace_idx").on(t.namespace),
+    // Note: the dedupe partial unique index `wf_step_queue_active_uniq`
+    // (promin-k6mk) isn't declared here because drizzle's index DSL doesn't
+    // cleanly express COALESCE expressions + WHERE predicates together.
+    // It's created by migration 0019 and by PgStepQueue.ensureTable().
   ],
 );
 
