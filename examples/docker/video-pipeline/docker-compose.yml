@@ -1,0 +1,103 @@
+# ---------------------------------------------------------------------------
+# Video pipeline — distributed execution demo.
+#
+# Brings up a small cluster:
+#   postgres     — workflow storage + step queue
+#   migrator     — one-shot: runs drizzle migrations + exits
+#   coordinator  — leader, enqueues ready steps, watches completions
+#   worker-gpu   — handles "transcode" (CPU-intensive in real life)
+#   worker-cpu   — handles "thumbnail"
+#   worker-def   — handles everything else (decode, metadata, notify)
+#
+# Submit a job:
+#   docker compose run --rm submit my-video-123
+#
+# Scale a worker pool:
+#   docker compose up --scale worker-gpu=3
+# ---------------------------------------------------------------------------
+
+name: promin-video-pipeline
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: promin
+      POSTGRES_PASSWORD: promin
+      POSTGRES_DB: promin
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U promin -d promin"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  migrator:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/video-pipeline/Dockerfile
+    command: ["bun", "run", "migrator.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  coordinator:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/video-pipeline/Dockerfile
+    command: ["bun", "run", "coordinator.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+
+  worker-gpu:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/video-pipeline/Dockerfile
+    command: ["bun", "run", "worker-transcode.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+
+  worker-cpu:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/video-pipeline/Dockerfile
+    command: ["bun", "run", "worker-thumbnail.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+
+  worker-def:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/video-pipeline/Dockerfile
+    command: ["bun", "run", "worker-default.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+
+  # On-demand: `docker compose run --rm submit <video-id>`
+  submit:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/video-pipeline/Dockerfile
+    profiles: ["tools"]
+    entrypoint: ["bun", "run", "submit.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
