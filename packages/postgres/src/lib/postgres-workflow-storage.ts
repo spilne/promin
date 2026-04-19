@@ -838,6 +838,7 @@ export class PostgresWorkflowStorage
       durationMs: record.durationMs,
       startedAt: record.startedAt,
       completedAt: record.completedAt,
+      workerId: record.workerId,
     });
   }
 
@@ -867,6 +868,7 @@ export class PostgresWorkflowStorage
       durationMs: Number(r.durationMs ?? 0),
       startedAt: r.startedAt,
       completedAt: r.completedAt,
+      workerId: r.workerId ?? undefined,
     }));
   }
 

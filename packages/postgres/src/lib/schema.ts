@@ -217,6 +217,7 @@ export const stepAttempts = pgTable(
     durationMs: bigint("duration_ms", { mode: "number" }),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
     completedAt: timestamp("completed_at", { withTimezone: true }).notNull(),
+    workerId: text("worker_id"),
   },
   (t) => [
     primaryKey({ columns: [t.workflowId, t.stepName, t.run, t.attempt, t.attemptTypeId] }),

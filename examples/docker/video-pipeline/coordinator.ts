@@ -12,9 +12,15 @@
 //   transcode → "gpu"  (worker-transcode)
 //   thumbnail → "cpu"  (worker-thumbnail)
 //   decode / metadata / notify → default queue (worker-default).
+//
+// Submit shape: this demo uses the registry-keyed form —
+// `coordinator.submit({ name, workflowId, input })`. The workflow
+// definition lives only in the coordinator process; a separate submitter
+// (HTTP handler, CLI, cron) would post the name over the wire and never
+// need to import `buildVideoWorkflow`.
 // ---------------------------------------------------------------------------
 
-import { createCoordinator } from "@promin/workflow";
+import { createCoordinator, WorkflowVersionRegistry } from "@promin/workflow";
 import { buildStack } from "./shared.ts";
 import { buildVideoWorkflow, type VideoInput } from "./workflow.ts";
 
@@ -22,16 +28,18 @@ const SUBMIT_INTERVAL_MS = Number(process.env["SUBMIT_INTERVAL_MS"] ?? 5_000);
 
 const { storage, stepQueue, close } = await buildStack();
 
+const registry = new WorkflowVersionRegistry();
+registry.register(buildVideoWorkflow(storage));
+
 // Routing lives on the step itself via `needs` (see workflow.ts).
 // Workers declare capabilities that match. The coordinator just
 // orchestrates the DAG — no routing table.
 const coordinator = createCoordinator({
   storage,
   stepQueue,
+  registry,
   pollIntervalMs: 500,
 });
-
-const wf = buildVideoWorkflow(storage);
 
 console.log("[coordinator] starting");
 // coordinator.start() runs its own poll loop and never resolves until
@@ -48,7 +56,7 @@ const submitDemo = async (): Promise<void> => {
   const workflowId = `${videoId}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     await coordinator.submit<VideoInput>({
-      workflow: wf,
+      name: "video-pipeline",
       workflowId,
       input: { videoId, sourceUrl: `s3://demo-bucket/${videoId}.mov` },
     });

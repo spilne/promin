@@ -10,6 +10,7 @@ import type { WorkflowStorage } from "../durable/workflow-storage.ts";
 import type { WorkflowState } from "../durable/workflow-state.ts";
 import type { WorkflowDefinition, WorkflowDAG } from "../durable/durable-pipeline.ts";
 import { computeReadySet } from "../durable/workflow-dag.ts";
+import type { WorkflowVersionRegistry } from "../durable/workflow-version-registry.ts";
 import type { StepQueue } from "./step-queue.ts";
 import type { WorkerRegistry } from "./worker-registry.ts";
 import type { LeaderElection } from "./leader-election.ts";
@@ -31,15 +32,36 @@ export interface CoordinatorConfig {
   workerTimeoutMs?: number;
   /** Leader election — ensures only one coordinator runs. Default: SingleLeader (always wins). */
   leaderElection?: LeaderElection;
+  /**
+   * Optional workflow registry. When provided, `submit({ name, ... })`
+   * resolves the definition by name (latest version) via the registry.
+   * Lets submitters stay decoupled from workflow definitions — only the
+   * coordinator process has to know how to build them.
+   */
+  registry?: WorkflowVersionRegistry;
+}
+
+/** Submit a workflow by passing its definition directly. */
+export interface DirectSubmit<Input> {
+  workflow: WorkflowDefinition<Input, unknown>;
+  workflowId: string;
+  input: Input;
+}
+
+/** Submit a workflow by name — requires `registry` on the coordinator. */
+export interface NamedSubmit<Input> {
+  name: string;
+  workflowId: string;
+  input: Input;
+  /** Optional version override. Defaults to the registry's latest. */
+  version?: string;
 }
 
 export interface WorkflowCoordinator {
-  /** Submit a workflow for distributed execution. */
-  submit<Input>(params: {
-    workflow: WorkflowDefinition<Input, unknown>;
-    workflowId: string;
-    input: Input;
-  }): Promise<void>;
+  /** Submit a workflow for distributed execution — by definition. */
+  submit<Input>(params: DirectSubmit<Input>): Promise<void>;
+  /** Submit a workflow for distributed execution — by registered name. */
+  submit<Input>(params: NamedSubmit<Input>): Promise<void>;
 
   /** Get current workflow state. */
   status(workflowId: string): Promise<WorkflowState | null>;
@@ -61,6 +83,7 @@ export class DefaultCoordinator implements WorkflowCoordinator {
   private readonly workerRegistry?: WorkerRegistry;
   private readonly workerTimeoutMs: number;
   private readonly leaderElection: LeaderElection;
+  private readonly registry?: WorkflowVersionRegistry;
   private running = false;
   private isLeader = false;
   private dags = new Map<string, WorkflowDAG>();
@@ -77,14 +100,17 @@ export class DefaultCoordinator implements WorkflowCoordinator {
     this.workerRegistry = config.workerRegistry;
     this.workerTimeoutMs = config.workerTimeoutMs ?? 30_000;
     this.leaderElection = config.leaderElection ?? new SingleLeader();
+    this.registry = config.registry;
   }
 
-  async submit<Input>(params: {
-    workflow: WorkflowDefinition<Input, unknown>;
-    workflowId: string;
-    input: Input;
-  }): Promise<void> {
-    const { workflow, workflowId, input } = params;
+  submit<Input>(params: DirectSubmit<Input>): Promise<void>;
+  submit<Input>(params: NamedSubmit<Input>): Promise<void>;
+  async submit<Input>(params: DirectSubmit<Input> | NamedSubmit<Input>): Promise<void> {
+    const workflow =
+      "workflow" in params
+        ? params.workflow
+        : (this.resolveByName(params.name, params.version) as WorkflowDefinition<Input, unknown>);
+    const { workflowId, input } = params;
     const dag = workflow.dag;
 
     // Create workflow in storage — persist DAG in metadata for recovery.
@@ -151,6 +177,23 @@ export class DefaultCoordinator implements WorkflowCoordinator {
 
   async stop(): Promise<void> {
     this.running = false;
+  }
+
+  private resolveByName(name: string, version?: string): WorkflowDefinition<unknown, unknown> {
+    if (!this.registry) {
+      throw new Error(
+        `coordinator.submit({ name }) requires \`registry\` on CoordinatorConfig. ` +
+          `Pass a WorkflowVersionRegistry or use the { workflow } shape.`,
+      );
+    }
+    const def = this.registry.resolve(name, version);
+    if (!def) {
+      const known = this.registry.names().join(", ") || "(none)";
+      throw new Error(
+        `No workflow "${name}"${version ? ` version "${version}"` : ""} in registry. Registered: ${known}.`,
+      );
+    }
+    return def;
   }
 
   // ---------------------------------------------------------------------------

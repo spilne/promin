@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { Pipeline } from "@promin/core";
-import { workflow, InMemoryWorkflowStorage } from "../durable/index.ts";
+import { workflow, InMemoryWorkflowStorage, WorkflowVersionRegistry } from "../durable/index.ts";
 import { MapStepRegistry } from "./step-registry.ts";
 import { InMemoryStepQueue } from "./in-memory-step-queue.ts";
 import { createCoordinator } from "./coordinator.ts";
@@ -394,11 +394,9 @@ describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow
     registry.register("double", (ctx) => Pipeline.succeed((ctx.input as any).n * 2));
     registry.register("add-ten", (ctx) => Pipeline.succeed((ctx.prev as number) + 10));
 
-    // Create coordinator with routing
     const coordinator = createCoordinator({
       storage,
       stepQueue: queue,
-      routing: {},
     });
 
     // Create worker
@@ -434,8 +432,11 @@ describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow
 
     const wf = workflow<{ text: string }>({ name: "routed", storage })
       .step("preprocess", ({ input }) => Pipeline.succeed(input.text))
-      .step("transcribe", { dependsOn: ["preprocess"] }, ({ deps }) =>
-        Pipeline.succeed(`transcribed: ${deps.preprocess}`),
+      .step(
+        "transcribe",
+        { dependsOn: ["preprocess"] },
+        ({ deps }) => Pipeline.succeed(`transcribed: ${deps.preprocess}`),
+        { needs: ["gpu"] },
       )
       .build();
 
@@ -448,7 +449,6 @@ describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow
     const coordinator = createCoordinator({
       storage,
       stepQueue: queue,
-      routing: { transcribe: "gpu" },
     });
 
     const defaultWorker = createWorker({
@@ -481,6 +481,118 @@ describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow
     const state = await storage.loadWorkflow("routed-1");
     expect(state?.steps["preprocess"]?.status).toBe("completed");
     // GPU step may or may not have completed in time depending on coordination timing
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Registry-keyed submit — decouple submit from workflow definition import
+// ---------------------------------------------------------------------------
+
+describe("Coordinator registry-keyed submit — submit by name, not by object", () => {
+  it("resolves a registered workflow by name and runs it end-to-end", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const queue = new InMemoryStepQueue();
+
+    const wf = workflow<{ n: number }>({ name: "named-wf", storage, version: "1" })
+      .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
+      .build();
+
+    const registry = new WorkflowVersionRegistry();
+    registry.register(wf as any);
+
+    const stepRegistry = new MapStepRegistry();
+    stepRegistry.register("double", (ctx) => Pipeline.succeed((ctx.input as any).n * 2));
+
+    const coordinator = createCoordinator({ storage, stepQueue: queue, registry });
+    const worker = createWorker({
+      storage,
+      stepQueue: queue,
+      registry: stepRegistry,
+      capabilities: [],
+      pollIntervalMs: 50,
+    });
+
+    // Caller never touches `wf` — just the name.
+    await coordinator.submit({ name: "named-wf", workflowId: "named-1", input: { n: 7 } });
+
+    void coordinator.start();
+    void worker.start();
+    await new Promise((r) => setTimeout(r, 400));
+    await coordinator.stop();
+    await worker.stop();
+
+    const state = await storage.loadWorkflow("named-1");
+    expect(state?.steps["double"]?.status).toBe("completed");
+    expect(state?.steps["double"]?.result).toBe(14);
+  });
+
+  it("throws synchronously on unknown name — loud typo failure", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const queue = new InMemoryStepQueue();
+
+    const wf = workflow<number>({ name: "known", storage, version: "1" })
+      .step("only", ({ input }) => Pipeline.succeed(input))
+      .build();
+
+    const registry = new WorkflowVersionRegistry();
+    registry.register(wf as any);
+
+    const coordinator = createCoordinator({ storage, stepQueue: queue, registry });
+
+    await expect(coordinator.submit({ name: "typo", workflowId: "x", input: 1 })).rejects.toThrow(
+      /No workflow "typo"/,
+    );
+  });
+
+  it("throws when submit({ name }) is called without a registry on config", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const queue = new InMemoryStepQueue();
+
+    const coordinator = createCoordinator({ storage, stepQueue: queue });
+
+    await expect(
+      coordinator.submit({ name: "anything", workflowId: "x", input: 0 }),
+    ).rejects.toThrow(/requires `registry`/);
+  });
+
+  it("direct { workflow } shape still works alongside the registry", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const queue = new InMemoryStepQueue();
+
+    // Registry has one workflow — but we can still submit a different def directly.
+    const registered = workflow<number>({ name: "registered", storage, version: "1" })
+      .step("a", ({ input }) => Pipeline.succeed(input))
+      .build();
+    const registry = new WorkflowVersionRegistry();
+    registry.register(registered as any);
+
+    const direct = workflow<number>({ name: "direct", storage })
+      .step("only", ({ input }) => Pipeline.succeed(input + 1))
+      .build();
+
+    const stepRegistry = new MapStepRegistry();
+    stepRegistry.register("only", (ctx) => Pipeline.succeed((ctx.input as number) + 1));
+
+    const coordinator = createCoordinator({ storage, stepQueue: queue, registry });
+    const worker = createWorker({
+      storage,
+      stepQueue: queue,
+      registry: stepRegistry,
+      capabilities: [],
+      pollIntervalMs: 50,
+    });
+
+    await coordinator.submit({ workflow: direct, workflowId: "mixed-1", input: 10 });
+
+    void coordinator.start();
+    void worker.start();
+    await new Promise((r) => setTimeout(r, 300));
+    await coordinator.stop();
+    await worker.stop();
+
+    const state = await storage.loadWorkflow("mixed-1");
+    expect(state?.steps["only"]?.status).toBe("completed");
+    expect(state?.steps["only"]?.result).toBe(11);
   });
 });
 
@@ -873,6 +985,48 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
     expect(attempts).toHaveLength(1);
     expect(attempts[0]!.type).toBe("execution");
     expect(attempts[0]!.status).toBe("completed");
+  });
+
+  it("attempt row carries the worker id that processed it — ops audit trail", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const queue = new InMemoryStepQueue();
+    const registry = new MapStepRegistry();
+
+    registry.register("ok", () => Pipeline.succeed("done"));
+    registry.register("boom", () => Pipeline.fail(new Error("nope") as any));
+
+    await storage.createWorkflow({ workflowId: "worker-trace", workflowName: "t", input: {} });
+    await queue.enqueue({
+      workflowId: "worker-trace",
+      stepName: "ok",
+      input: {},
+      prevResults: {},
+    });
+    await queue.enqueue({
+      workflowId: "worker-trace",
+      stepName: "boom",
+      input: {},
+      prevResults: {},
+    });
+
+    const worker = createWorker({
+      storage,
+      stepQueue: queue,
+      registry,
+      capabilities: [],
+      pollIntervalMs: 50,
+      workerId: "worker-alpha",
+    });
+
+    void worker.start();
+    await new Promise((r) => setTimeout(r, 200));
+    await worker.stop();
+
+    const attempts = await storage.loadStepAttempts("worker-trace");
+    const okAttempt = attempts.find((a) => a.stepName === "ok");
+    const boomAttempt = attempts.find((a) => a.stepName === "boom");
+    expect(okAttempt?.workerId).toBe("worker-alpha");
+    expect(boomAttempt?.workerId).toBe("worker-alpha");
   });
 });
 
