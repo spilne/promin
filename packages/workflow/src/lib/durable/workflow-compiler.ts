@@ -9,8 +9,7 @@
 // ---------------------------------------------------------------------------
 
 import { workflow } from "./durable-pipeline.ts";
-import type { WorkflowDefinition } from "./durable-pipeline.ts";
-import type { WorkflowStorage } from "./workflow-storage.ts";
+import type { Workflow } from "./durable-pipeline.ts";
 import type {
   WorkflowSchema,
   StepSchema,
@@ -118,10 +117,9 @@ export class WorkflowCompilationError extends Error {
  */
 export function compileWorkflow<Input = unknown>(params: {
   schema: WorkflowSchema;
-  storage: WorkflowStorage;
   registry: ActivityRegistry;
-}): WorkflowDefinition<Input, unknown> {
-  const { schema, storage, registry } = params;
+}): Workflow<Input, unknown> {
+  const { schema, registry } = params;
 
   // 1. Validate schema structure
   validateWorkflowSchema(schema);
@@ -157,9 +155,10 @@ export function compileWorkflow<Input = unknown>(params: {
     }
   }
 
-  // 5. Freeze and bind — compileWorkflow returns a RunnableWorkflow so
-  // callers can `.run()` it without a separate bind step.
-  return builder.build().bind(storage) as WorkflowDefinition<Input, unknown>;
+  // 5. Freeze into a pure `Workflow`. The caller drives it via a
+  // `createWorkflowRunner({ storage }).run({ workflow: compiled, ... })`
+  // (or wires it into a `trigger`/`webhookTrigger` with their own runner).
+  return builder.build() as Workflow<Input, unknown>;
 }
 
 // ---------------------------------------------------------------------------

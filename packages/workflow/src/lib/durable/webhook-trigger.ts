@@ -13,7 +13,9 @@
 // - Fire-and-forget by default (202); `wait: true` for sync-until-complete (200)
 // ---------------------------------------------------------------------------
 
-import type { WorkflowDefinition } from "./durable-pipeline.ts";
+import type { Workflow } from "./durable-pipeline.ts";
+import type { WorkflowRunner } from "./workflow-runner.ts";
+import type { WorkflowStorage } from "./workflow-storage.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -46,7 +48,14 @@ export interface WebhookHmacConfig {
 
 export interface WebhookTriggerConfig<Input, Output> {
   /** Workflow to start when a valid webhook arrives. */
-  readonly workflow: WorkflowDefinition<Input, Output>;
+  readonly workflow: Workflow<Input, Output>;
+  /** Runner that drives `workflow.run` when a request arrives. */
+  readonly runner: WorkflowRunner;
+  /**
+   * Storage used for dedup lookup (is this workflowId already present?).
+   * Typically the same storage the runner is configured with.
+   */
+  readonly storage: WorkflowStorage;
   /**
    * Extract a deterministic workflowId from the request. Enables idempotency:
    * re-posting the same event (same id) returns 409 instead of starting twice.
@@ -158,21 +167,21 @@ export function webhookTrigger<Input, Output>(
       const input = await config.input(webhookReq);
 
       // ---- Dedup check ----
-      const existing = await config.workflow.storage.loadWorkflow(workflowId);
+      const existing = await config.storage.loadWorkflow(workflowId);
       if (existing) {
         return jsonResponse(409, { error: "duplicate workflowId", workflowId });
       }
 
       // ---- Start ----
       if (config.wait) {
-        const result = await config.workflow.run({ workflowId, input });
+        const result = await config.runner.run({ workflow: config.workflow, workflowId, input });
         return jsonResponse(200, { workflowId, result });
       }
 
       // Fire-and-forget: kick off the run, swallow rejections at the edge so
       // we don't trigger unhandled-rejection warnings. The workflow's own
       // error handling (retries, DLQ, hooks) still applies.
-      void config.workflow.run({ workflowId, input }).catch(() => {});
+      void config.runner.run({ workflow: config.workflow, workflowId, input }).catch(() => {});
       return jsonResponse(202, { workflowId });
     } catch (error) {
       if (config.onError) return config.onError(error);

@@ -10,18 +10,26 @@
 // ---------------------------------------------------------------------------
 
 import type { WorkflowStorage } from "../durable/workflow-storage.ts";
-import type { WorkflowDefinition } from "../durable/durable-pipeline.ts";
+import type { Workflow } from "../durable/durable-pipeline.ts";
+import type { WorkflowRunner } from "../durable/workflow-runner.ts";
 
 export interface SleepScannerConfig {
   /** Workflow storage to scan for expired sleeps. */
   storage: WorkflowStorage;
+  /**
+   * Runner used to resume woken workflows. Scanner calls
+   * `runner.run({ workflow, workflowId, input })` after `resolveWorkflow`
+   * returns a definition.
+   */
+  runner: WorkflowRunner;
   /** How often to scan (ms). Default: 10_000 (10 seconds). */
   scanIntervalMs?: number;
   /**
-   * Resolve a workflow definition by name.
-   * The scanner needs the definition to call .run() for resumption.
+   * Resolve a pure `Workflow` definition by name. The scanner passes the
+   * returned definition back to the runner for resumption; it doesn't bind
+   * storage itself.
    */
-  resolveWorkflow: (workflowName: string) => WorkflowDefinition<unknown, unknown> | undefined;
+  resolveWorkflow: (workflowName: string) => Workflow<unknown, unknown> | undefined;
   /** Called when a workflow is resumed. */
   onResume?: (workflowId: string) => void;
   /** Called when resumption fails. */
@@ -37,6 +45,7 @@ export interface SleepScanner {
 
 export class DefaultSleepScanner implements SleepScanner {
   private readonly storage: WorkflowStorage;
+  private readonly runner: WorkflowRunner;
   private readonly scanIntervalMs: number;
   private readonly resolveWorkflow: SleepScannerConfig["resolveWorkflow"];
   private readonly onResume?: SleepScannerConfig["onResume"];
@@ -45,6 +54,7 @@ export class DefaultSleepScanner implements SleepScanner {
 
   constructor(config: SleepScannerConfig) {
     this.storage = config.storage;
+    this.runner = config.runner;
     this.scanIntervalMs = config.scanIntervalMs ?? 10_000;
     this.resolveWorkflow = config.resolveWorkflow;
     this.onResume = config.onResume;
@@ -98,7 +108,7 @@ export class DefaultSleepScanner implements SleepScanner {
     if (!definition) return;
 
     try {
-      await definition.run({ workflowId, input });
+      await this.runner.run({ workflow: definition, workflowId, input });
       this.onResume?.(workflowId);
     } catch (err) {
       // WorkflowSuspendedError is expected if another sleep follows

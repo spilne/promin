@@ -25,6 +25,8 @@ import type {
   CompensateConfig,
   DispatchConfig,
   StepDefinition,
+  WorkflowHandle,
+  WorkflowStatusInfo,
 } from "./durable-pipeline.ts";
 import type { WorkflowHooks, IdempotencyConfig } from "./durable-pipeline.ts";
 import { isStepAttemptStorage, type WorkflowStorage } from "./workflow-storage.ts";
@@ -36,15 +38,12 @@ import {
   WorkflowDeadlineError,
   WorkflowVersionMismatchError,
   StepTimeoutError,
+  WorkflowLockError,
 } from "./durable-pipeline-error.ts";
 import { withLock } from "./with-lock.ts";
 import { topologicalSort } from "./workflow-dag.ts";
 import type { RetryPolicy } from "@promin/core";
-import type {
-  WorkflowLockError,
-  WorkflowSuspendedError,
-  WorkflowTimeoutError,
-} from "./durable-pipeline-error.ts";
+import type { WorkflowSuspendedError, WorkflowTimeoutError } from "./durable-pipeline-error.ts";
 import type { WorkflowVersionRegistry } from "./workflow-version-registry.ts";
 
 // ---------------------------------------------------------------------------
@@ -185,6 +184,26 @@ export interface WorkflowRunner {
   runSafe(
     params: WorkflowRunnerRunParams,
   ): Promise<{ data: unknown; error: null } | { data: null; error: WorkflowRunSafeError }>;
+  /**
+   * Fire-and-forget start that returns a `WorkflowHandle` for async inspection.
+   * Honors the workflow's `idempotency.onInFlight` policy: `"reject"` throws
+   * `WorkflowLockError` if a run is already active; `"join"` returns a handle
+   * to the running workflow without starting a second execution.
+   */
+  start(params: {
+    readonly workflow: Workflow<unknown, unknown>;
+    readonly workflowId: string;
+    readonly input: unknown;
+  }): Promise<WorkflowHandle<unknown>>;
+  /**
+   * Snapshot of a workflow's current status: active step, suspended reason,
+   * per-step summary, timestamps. Returns `null` when the workflow doesn't
+   * exist in storage. Intended for status endpoints / dashboards.
+   */
+  getStatus(
+    workflowId: string,
+    params?: { readonly includeStepResults?: boolean },
+  ): Promise<WorkflowStatusInfo<unknown> | null>;
   /** @deprecated Use `run({ workflow, ... })` with a pure `Workflow` instead. */
   execute<Input, Output>(params: WorkflowRunnerExecuteParams<Input>): Promise<Output>;
   /** @deprecated Use `runSafe({ workflow, ... })` with a pure `Workflow` instead. */
@@ -265,6 +284,106 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     } catch (error) {
       return { data: null, error: error as WorkflowRunSafeError };
     }
+  }
+
+  async start(params: {
+    readonly workflow: Workflow<unknown, unknown>;
+    readonly workflowId: string;
+    readonly input: unknown;
+  }): Promise<WorkflowHandle<unknown>> {
+    const storage = this._requireStorage();
+    const { workflow, workflowId, input } = params;
+
+    const existing = await storage.loadWorkflow(workflowId);
+    const isRunning =
+      existing?.status === "pending" ||
+      existing?.status === "running" ||
+      existing?.status === "suspended";
+    const onInFlight = workflow.idempotency?.onInFlight ?? "reject";
+
+    if (isRunning) {
+      if (onInFlight === "reject") {
+        throw new WorkflowLockError({
+          workflowId,
+          message: `Workflow "${workflowId}" is already running`,
+        });
+      }
+      // "join" — caller receives a handle that polls the existing run.
+    } else {
+      // Fire-and-forget. Failures are recorded in storage (and the DLQ /
+      // hooks if configured) so we intentionally swallow the rejection
+      // here to avoid unhandled-rejection warnings on the start path.
+      void this.runSafe({ workflow, workflowId, input });
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    return {
+      workflowId,
+      status: (p) => this.getStatus(workflowId, p),
+      signal: (signalName, payload) => storage.deliverSignal(workflowId, signalName, payload),
+      result: async (p) => {
+        const intervalMs = p?.intervalMs ?? 1_000;
+        const timeoutMs = p?.timeoutMs ?? 60_000;
+        const deadline = Date.now() + timeoutMs;
+
+        while (Date.now() < deadline) {
+          const state = await storage.loadWorkflow(workflowId);
+          if (state?.status === "completed") return state.result;
+          if (state?.status === "failed") {
+            throw new Error(state.error ?? `Workflow ${workflowId} failed`);
+          }
+          await new Promise((r) => setTimeout(r, intervalMs));
+        }
+        throw new Error(`Workflow ${workflowId} did not complete within ${timeoutMs}ms`);
+      },
+    };
+  }
+
+  async getStatus(
+    workflowId: string,
+    params?: { readonly includeStepResults?: boolean },
+  ): Promise<WorkflowStatusInfo<unknown> | null> {
+    const storage = this._requireStorage();
+    const state = await storage.loadWorkflow(workflowId);
+    if (!state) return null;
+
+    const includeResults = params?.includeStepResults ?? false;
+
+    let currentStep: string | undefined;
+    let suspendedReason: "sleeping" | "waiting_for_signal" | undefined;
+
+    for (const [name, step] of Object.entries(state.steps)) {
+      if (step.status === "running" || step.status === "pending") {
+        currentStep = currentStep ?? name;
+      }
+      if (step.status === "sleeping") {
+        currentStep = name;
+        suspendedReason = "sleeping";
+      }
+      if (step.status === "waiting_for_signal") {
+        currentStep = name;
+        suspendedReason = "waiting_for_signal";
+      }
+    }
+
+    const steps: Record<string, { status: string; result?: unknown }> = {};
+    for (const [name, step] of Object.entries(state.steps)) {
+      steps[name] = includeResults
+        ? { status: step.status, result: step.result }
+        : { status: step.status };
+    }
+
+    return {
+      state: state.status === "compensating" ? "failed" : state.status,
+      result: state.status === "completed" ? state.result : undefined,
+      error: state.error,
+      currentStep,
+      suspendedReason,
+      steps,
+      createdAt: state.createdAt,
+      startedAt: state.startedAt,
+      updatedAt: state.updatedAt,
+    };
   }
 
   async execute<Input, Output>(params: WorkflowRunnerExecuteParams<Input>): Promise<Output> {

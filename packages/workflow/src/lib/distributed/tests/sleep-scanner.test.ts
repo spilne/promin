@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { Pipeline } from "@promin/core";
+import { Data } from "effect";
+import { Pipeline, type TaggedError } from "@promin/core";
 import { workflow, InMemoryWorkflowStorage } from "../../durable/index.ts";
 import { createWorkflowRunner } from "../../durable/workflow-runner.ts";
 import { createSleepScanner } from "../sleep-scanner.ts";
@@ -11,6 +12,7 @@ import { createSleepScanner } from "../sleep-scanner.ts";
 describe("Sleep scanner — background process that wakes up sleeping workflows", () => {
   it("1ms sleep expires — scanner detects it and resumes the workflow", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const log: string[] = [];
 
     const wfDef = workflow<{ msg: string }>({ name: "sleepy" })
@@ -24,8 +26,6 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
         return Pipeline.succeed(`woke: ${prev}`);
       })
       .build();
-    const wf = wfDef.bind(storage);
-    const runner = createWorkflowRunner({ storage });
 
     // Run — will suspend at the sleep step
     const { error } = await runner.runSafe({
@@ -43,8 +43,9 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
     const resumed: string[] = [];
     const scanner = createSleepScanner({
       storage,
+      runner,
       scanIntervalMs: 50,
-      resolveWorkflow: (name) => (name === "sleepy" ? wf : undefined),
+      resolveWorkflow: (name) => (name === "sleepy" ? wfDef : undefined),
       onResume: (id) => resumed.push(id),
     });
 
@@ -61,22 +62,22 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
 
   it("workflow sleeping for 31 years is not woken up prematurely", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
 
     const wfDef = workflow<string>({ name: "long-sleep" })
       .step("before", () => Pipeline.succeed("ok"))
       .sleep("nap", 999_999_999) // ~31 years
       .step("after", () => Pipeline.succeed("done"))
       .build();
-    const wf = wfDef.bind(storage);
-    const runner = createWorkflowRunner({ storage });
 
     await runner.runSafe({ workflow: wfDef, workflowId: "sleep-2", input: "x" });
 
     const resumed: string[] = [];
     const scanner = createSleepScanner({
       storage,
+      runner,
       scanIntervalMs: 50,
-      resolveWorkflow: (name) => (name === "long-sleep" ? wf : undefined),
+      resolveWorkflow: (name) => (name === "long-sleep" ? wfDef : undefined),
       onResume: (id) => resumed.push(id),
     });
 
@@ -93,13 +94,13 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
 
   it("unrecognized workflow name — scanner skips it silently without crashing", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
 
     const wfDef = workflow<string>({ name: "unknown-wf" })
       .step("before", () => Pipeline.succeed("ok"))
       .sleep("nap", 1)
       .step("after", () => Pipeline.succeed("done"))
       .build();
-    const runner = createWorkflowRunner({ storage });
 
     await runner.runSafe({ workflow: wfDef, workflowId: "sleep-3", input: "x" });
     await new Promise((r) => setTimeout(r, 50));
@@ -107,6 +108,7 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
     const errors: string[] = [];
     const scanner = createSleepScanner({
       storage,
+      runner,
       scanIntervalMs: 50,
       resolveWorkflow: () => undefined, // can't resolve
       onError: (id) => errors.push(id),
@@ -122,14 +124,13 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
 
   it("three workflows sleeping — scanner wakes all of them in one scan cycle", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
 
     const wfDef = workflow<string>({ name: "multi" })
       .step("before", ({ input }) => Pipeline.succeed(input))
       .sleep("nap", 1)
       .step("after", ({ prev }) => Pipeline.succeed(`done: ${prev}`))
       .build();
-    const wf = wfDef.bind(storage);
-    const runner = createWorkflowRunner({ storage });
 
     await runner.runSafe({ workflow: wfDef, workflowId: "sleep-a", input: "a" });
     await runner.runSafe({ workflow: wfDef, workflowId: "sleep-b", input: "b" });
@@ -140,8 +141,9 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
     const resumed: string[] = [];
     const scanner = createSleepScanner({
       storage,
+      runner,
       scanIntervalMs: 50,
-      resolveWorkflow: (name) => (name === "multi" ? wf : undefined),
+      resolveWorkflow: (name) => (name === "multi" ? wfDef : undefined),
       onResume: (id) => resumed.push(id),
     });
 
@@ -153,45 +155,31 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
   });
 
   it("resume fails — error callback fires but scanner keeps running", async () => {
-    const storage = new InMemoryWorkflowStorage();
+    class ResumeFailure extends Data.TaggedError("ResumeFailure")<{ readonly message: string }> {}
 
-    // Manually create a suspended workflow that will fail on resume
-    await storage.createWorkflow({
-      workflowId: "sleep-err",
-      workflowName: "broken",
-      input: "x",
-    });
-    await storage.suspendWorkflow("sleep-err", "nap", {
-      status: "sleeping",
-      stepType: "sleep",
-      wakeAt: new Date(Date.now() - 1000), // already expired
-    });
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+
+    // A workflow whose post-sleep step always fails — triggers the scanner's
+    // onError path during resumption.
+    const broken = workflow<string>({ name: "broken" })
+      .step("before", () => Pipeline.succeed("ok"))
+      .sleep("nap", 1)
+      .step("boom", () =>
+        Pipeline.fail(new ResumeFailure({ message: "resume failed" }) as TaggedError),
+      )
+      .build();
+
+    // Kick it off so storage has a row sleeping on "nap"; wait for wake.
+    await runner.runSafe({ workflow: broken, workflowId: "sleep-err", input: "x" });
+    await new Promise((r) => setTimeout(r, 50));
 
     const errors: { id: string; err: unknown }[] = [];
     const scanner = createSleepScanner({
       storage,
+      runner,
       scanIntervalMs: 50,
-      resolveWorkflow: (name) => {
-        if (name !== "broken") return undefined;
-        // Return a definition that will fail
-        return {
-          name: "broken",
-          storage,
-          dag: { name: "broken", steps: [] },
-          run: async () => {
-            throw new Error("resume failed");
-          },
-          runSafe: async () => ({ data: null, error: new Error("resume failed") }),
-          invoke: () => Pipeline.fail(new Error("nope") as never),
-          waitForResult: async () => {
-            throw new Error("not implemented");
-          },
-          getStatus: async () => null,
-          start: async () => {
-            throw new Error("not implemented");
-          },
-        };
-      },
+      resolveWorkflow: (name) => (name === "broken" ? broken : undefined),
       onError: (id, err) => errors.push({ id, err }),
     });
 

@@ -106,15 +106,17 @@ describe("WorkflowBuilder.build", () => {
 describe("trigger", () => {
   it("triggers a workflow for each stream item", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const def = workflow<{ value: number }>({ name: "triggered" })
       .step("double", ({ input }) => Pipeline.succeed(input.value * 2))
-      .build()
-      .bind(storage);
+      .build();
 
     const results = await StreamPipeline.fromIterable([1, 2, 3])
       .through(
         trigger({
           workflow: def,
+          runner,
+          storage,
           toInput: (n) => ({ value: n }),
           toWorkflowId: (n) => `wf-${n}`,
         }),
@@ -130,15 +132,17 @@ describe("trigger", () => {
 
   it("returns failed result on workflow failure", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const def = workflow<{ n: number }>({ name: "failing-trigger" })
       .step("boom", () => Pipeline.fail(new ProcessError({ message: "fail" })))
-      .build()
-      .bind(storage);
+      .build();
 
     const results = await StreamPipeline.fromIterable([1])
       .through(
         trigger({
           workflow: def,
+          runner,
+          storage,
           toInput: (n) => ({ n }),
           toWorkflowId: (n) => `wf-fail-${n}`,
         }),
@@ -158,8 +162,7 @@ describe("trigger", () => {
     const runner = createWorkflowRunner({ storage });
     const def = workflow<{ n: number }>({ name: "dedup-trigger" })
       .step("compute", ({ input }) => Pipeline.succeed(input.n * 10))
-      .build()
-      .bind(storage);
+      .build();
 
     // First run creates the workflow
     await runner.run({ workflow: def, workflowId: "dedup-1", input: { n: 1 } });
@@ -169,6 +172,8 @@ describe("trigger", () => {
       .through(
         trigger({
           workflow: def,
+          runner,
+          storage,
           toInput: (n) => ({ n }),
           toWorkflowId: () => "dedup-1",
           onDuplicate: "skip",
@@ -183,6 +188,7 @@ describe("trigger", () => {
 
   it("respects concurrency", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     let maxConcurrent = 0;
     let current = 0;
 
@@ -194,13 +200,14 @@ describe("trigger", () => {
         current--;
         return input.n;
       })
-      .build()
-      .bind(storage);
+      .build();
 
     const results = await StreamPipeline.fromIterable([1, 2, 3, 4])
       .through(
         trigger({
           workflow: def,
+          runner,
+          storage,
           toInput: (n) => ({ n }),
           toWorkflowId: (n) => `conc-${n}`,
           concurrency: 2,
@@ -215,18 +222,20 @@ describe("trigger", () => {
 
   it("tracks durationMs", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const def = workflow<{}>({ name: "duration-trigger" })
       .stepAsync("wait", async () => {
         await new Promise((r) => setTimeout(r, 20));
         return "done";
       })
-      .build()
-      .bind(storage);
+      .build();
 
     const results = await StreamPipeline.fromIterable([1])
       .through(
         trigger({
           workflow: def,
+          runner,
+          storage,
           toInput: () => ({}),
           toWorkflowId: (n) => `dur-${n}`,
         }),
@@ -242,10 +251,10 @@ describe("trigger", () => {
 
   it("composes with stream operators", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const def = workflow<{ n: number }>({ name: "compose-trigger" })
       .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
-      .build()
-      .bind(storage);
+      .build();
 
     // filter + trigger + filter completed + map result
     const results = await StreamPipeline.fromIterable([1, 2, 3, 4, 5])
@@ -253,6 +262,8 @@ describe("trigger", () => {
       .through(
         trigger({
           workflow: def,
+          runner,
+          storage,
           toInput: (n) => ({ n }),
           toWorkflowId: (n) => `compose-${n}`,
         }),
@@ -266,6 +277,7 @@ describe("trigger", () => {
 
   it("works with tick-based cron pattern", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     let runCount = 0;
 
     const def = workflow<{ tick: number }>({ name: "cron-trigger" })
@@ -273,14 +285,15 @@ describe("trigger", () => {
         runCount++;
         return `tick-${input.tick}`;
       })
-      .build()
-      .bind(storage);
+      .build();
 
     await StreamPipeline.tick(10)
       .take(3)
       .through(
         trigger({
           workflow: def,
+          runner,
+          storage,
           toInput: (tick) => ({ tick }),
           toWorkflowId: (tick) => `cron-${tick}`,
         }),

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { InMemoryWorkflowStorage } from "../durable/index.ts";
+import { createWorkflowRunner } from "../durable/workflow-runner.ts";
 import { compileSqlProject } from "./sql-compiler.ts";
 import type { SqlProject } from "./sql-model.ts";
 
@@ -82,6 +83,7 @@ function createMockDb() {
 describe("SQL model orchestration — build analytics tables from raw data", () => {
   it("staging view feeds into a revenue fact table — linear dependency chain", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const db = createMockDb();
 
     const project: SqlProject = {
@@ -102,8 +104,8 @@ describe("SQL model orchestration — build analytics tables from raw data", () 
       ],
     };
 
-    const wf = compileSqlProject({ project, storage, executeSql: db.executeSql });
-    await wf.run({ workflowId: "sql-1", input: {} });
+    const wf = compileSqlProject({ project, executeSql: db.executeSql });
+    await runner.run({ workflow: wf, workflowId: "sql-1", input: {} });
 
     const state = await storage.loadWorkflow("sql-1");
     expect(state?.status).toBe("completed");
@@ -117,6 +119,7 @@ describe("SQL model orchestration — build analytics tables from raw data", () 
 
   it("orders and users merge into revenue, then top regions — diamond dependency graph", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const db = createMockDb();
 
     const project: SqlProject = {
@@ -139,8 +142,8 @@ describe("SQL model orchestration — build analytics tables from raw data", () 
       ],
     };
 
-    const wf = compileSqlProject({ project, storage, executeSql: db.executeSql });
-    await wf.run({ workflowId: "sql-2", input: {} });
+    const wf = compileSqlProject({ project, executeSql: db.executeSql });
+    await runner.run({ workflow: wf, workflowId: "sql-2", input: {} });
 
     const state = await storage.loadWorkflow("sql-2");
     expect(state?.status).toBe("completed");
@@ -151,6 +154,7 @@ describe("SQL model orchestration — build analytics tables from raw data", () 
 
   it("validates order table has no nulls or duplicates after build — quality gate", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const db = createMockDb();
 
     const project: SqlProject = {
@@ -170,8 +174,8 @@ describe("SQL model orchestration — build analytics tables from raw data", () 
       ],
     };
 
-    const wf = compileSqlProject({ project, storage, executeSql: db.executeSql });
-    await wf.run({ workflowId: "sql-3", input: {} });
+    const wf = compileSqlProject({ project, executeSql: db.executeSql });
+    await runner.run({ workflow: wf, workflowId: "sql-3", input: {} });
 
     const state = await storage.loadWorkflow("sql-3");
     expect(state?.status).toBe("completed");
@@ -184,6 +188,7 @@ describe("SQL model orchestration — build analytics tables from raw data", () 
 
   it("workflow name reflects the analytics project — useful for monitoring", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const db = createMockDb();
 
     const project: SqlProject = {
@@ -191,12 +196,13 @@ describe("SQL model orchestration — build analytics tables from raw data", () 
       models: [{ name: "m1", sql: "SELECT 1", dependsOn: [], materialization: "table" }],
     };
 
-    const wf = compileSqlProject({ project, storage, executeSql: db.executeSql });
+    const wf = compileSqlProject({ project, executeSql: db.executeSql });
     expect(wf.name).toBe("sql-project:my-analytics");
   });
 
   it("lightweight staging layer uses views to avoid duplicating raw data", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const db = createMockDb();
 
     const project: SqlProject = {
@@ -206,8 +212,8 @@ describe("SQL model orchestration — build analytics tables from raw data", () 
       ],
     };
 
-    const wf = compileSqlProject({ project, storage, executeSql: db.executeSql });
-    await wf.run({ workflowId: "sql-4", input: {} });
+    const wf = compileSqlProject({ project, executeSql: db.executeSql });
+    await runner.run({ workflow: wf, workflowId: "sql-4", input: {} });
 
     expect(db.executed.some((s) => s.includes("CREATE VIEW my_view"))).toBe(true);
     expect(db.views.has("my_view")).toBe(true);
@@ -215,6 +221,7 @@ describe("SQL model orchestration — build analytics tables from raw data", () 
 
   it("rebuilds table from scratch each run — drop then create for clean state", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const db = createMockDb();
 
     const project: SqlProject = {
@@ -224,8 +231,8 @@ describe("SQL model orchestration — build analytics tables from raw data", () 
       ],
     };
 
-    const wf = compileSqlProject({ project, storage, executeSql: db.executeSql });
-    await wf.run({ workflowId: "sql-5", input: {} });
+    const wf = compileSqlProject({ project, executeSql: db.executeSql });
+    await runner.run({ workflow: wf, workflowId: "sql-5", input: {} });
 
     const dropIdx = db.executed.findIndex((s) => s.includes("DROP TABLE IF EXISTS target"));
     const createIdx = db.executed.findIndex((s) => s.includes("CREATE TABLE target"));
@@ -234,6 +241,7 @@ describe("SQL model orchestration — build analytics tables from raw data", () 
 
   it("re-running the same build is a no-op — safe to retry after partial failure", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const db = createMockDb();
 
     const project: SqlProject = {
@@ -244,11 +252,11 @@ describe("SQL model orchestration — build analytics tables from raw data", () 
     };
 
     // Run twice with same workflowId — second run should just return (checkpointed)
-    const wf = compileSqlProject({ project, storage, executeSql: db.executeSql });
-    await wf.run({ workflowId: "sql-6", input: {} });
+    const wf = compileSqlProject({ project, executeSql: db.executeSql });
+    await runner.run({ workflow: wf, workflowId: "sql-6", input: {} });
 
     const countBefore = db.executed.length;
-    await wf.run({ workflowId: "sql-6", input: {} }); // re-run
+    await runner.run({ workflow: wf, workflowId: "sql-6", input: {} }); // re-run
     const countAfter = db.executed.length;
 
     // No new SQL executed — step was checkpointed

@@ -3,6 +3,7 @@ import { Pipeline } from "@promin/core";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { MapActivityRegistry } from "../activity-registry.ts";
 import { compileWorkflow, WorkflowCompilationError } from "../workflow-compiler.ts";
+import { createWorkflowRunner } from "../workflow-runner.ts";
 import {
   validateWorkflowSchema,
   validateWorkflowSchemaSafe,
@@ -14,6 +15,7 @@ import type { WorkflowSchema } from "../workflow-schema.ts";
 // ---------------------------------------------------------------------------
 
 const storage = new InMemoryWorkflowStorage();
+const runner = createWorkflowRunner({ storage });
 
 const registry = new MapActivityRegistry({
   "transform.uppercase": () => (ctx) => Pipeline.succeed(String(ctx.prev).toUpperCase()),
@@ -109,11 +111,14 @@ describe("compileWorkflow", () => {
             { type: "step", name: "upper", dependsOn: [], activityRef: "transform.uppercase" },
           ],
         },
-        storage,
         registry,
       });
 
-      const result = await definition.run({ workflowId: "compile-1", input: "hello" });
+      const result = await runner.run({
+        workflow: definition,
+        workflowId: "compile-1",
+        input: "hello",
+      });
       expect(result).toBe("HELLO");
     });
 
@@ -132,11 +137,14 @@ describe("compileWorkflow", () => {
             },
           ],
         },
-        storage,
         registry,
       });
 
-      const result = await definition.run({ workflowId: "compile-2", input: "hello" });
+      const result = await runner.run({
+        workflow: definition,
+        workflowId: "compile-2",
+        input: "hello",
+      });
       expect(result).toBe("OLLEH");
     });
   });
@@ -174,11 +182,14 @@ describe("compileWorkflow", () => {
             },
           ],
         },
-        storage,
         registry,
       });
 
-      const result = await definition.run({ workflowId: "compile-dag-1", input: "abc" });
+      const result = await runner.run({
+        workflow: definition,
+        workflowId: "compile-dag-1",
+        input: "abc",
+      });
       expect(result).toBe("ABC-cba");
     });
   });
@@ -203,11 +214,14 @@ describe("compileWorkflow", () => {
             },
           ],
         },
-        storage,
         registry,
       });
 
-      const result = await definition.run({ workflowId: "compile-config-1", input: "a,b,c" });
+      const result = await runner.run({
+        workflow: definition,
+        workflowId: "compile-config-1",
+        input: "a,b,c",
+      });
       expect(result).toEqual(["a", "b", "c"]);
     });
   });
@@ -227,7 +241,6 @@ describe("compileWorkflow", () => {
               { type: "step", name: "a", dependsOn: [], activityRef: "nonexistent.activity" },
             ],
           },
-          storage,
           registry,
         }),
       ).toThrow(WorkflowCompilationError);
@@ -248,7 +261,6 @@ describe("compileWorkflow", () => {
               },
             ],
           },
-          storage,
           registry,
         }),
       ).toThrow(WorkflowCompilationError);
@@ -265,7 +277,6 @@ describe("compileWorkflow", () => {
               { type: "step", name: "a", dependsOn: [], activityRef: "transform.reverse" },
             ],
           },
-          storage,
           registry,
         }),
       ).toThrow(WorkflowCompilationError);
@@ -281,7 +292,6 @@ describe("compileWorkflow", () => {
               { type: "step", name: "a", dependsOn: ["missing"], activityRef: "nonexistent" },
             ],
           },
-          storage,
           registry,
         });
         expect(true).toBe(false); // should not reach
@@ -295,23 +305,21 @@ describe("compileWorkflow", () => {
   });
 
   // ---------------------------------------------------------------------------
-  // WorkflowDefinition interface
+  // Returned Workflow shape
   // ---------------------------------------------------------------------------
 
-  describe("WorkflowDefinition", () => {
-    it("has name and storage", () => {
+  describe("compiled Workflow", () => {
+    it("carries its name", () => {
       const definition = compileWorkflow({
         schema: {
           version: 1,
           name: "named-wf",
           steps: [{ type: "step", name: "a", dependsOn: [], activityRef: "transform.uppercase" }],
         },
-        storage,
         registry,
       });
 
       expect(definition.name).toBe("named-wf");
-      expect(definition.storage).toBe(storage);
     });
 
     it("runSafe returns data on success", async () => {
@@ -321,11 +329,14 @@ describe("compileWorkflow", () => {
           name: "safe-ok",
           steps: [{ type: "step", name: "a", dependsOn: [], activityRef: "transform.uppercase" }],
         },
-        storage,
         registry,
       });
 
-      const result = await definition.runSafe({ workflowId: "safe-1", input: "hi" });
+      const result = await runner.runSafe({
+        workflow: definition,
+        workflowId: "safe-1",
+        input: "hi",
+      });
       expect(result.data).toBe("HI");
       expect(result.error).toBeNull();
     });

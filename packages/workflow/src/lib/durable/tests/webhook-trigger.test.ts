@@ -3,6 +3,7 @@ import { Pipeline } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { webhookTrigger } from "../webhook-trigger.ts";
+import { createWorkflowRunner } from "../workflow-runner.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -13,12 +14,11 @@ interface OrderEvent {
   total: number;
 }
 
-function buildOrderWorkflow(storage: InMemoryWorkflowStorage) {
+function buildOrderWorkflow() {
   return workflow<OrderEvent>({ name: "order-flow" })
     .step("load", ({ input }) => Pipeline.succeed(input))
     .step("process", ({ prev }) => Pipeline.succeed(`processed-${prev.orderId}`))
-    .build()
-    .bind(storage);
+    .build();
 }
 
 async function sha256Hex(secret: string, body: string): Promise<string> {
@@ -57,9 +57,12 @@ describe("webhookTrigger", () => {
 
   describe("happy path", () => {
     it("starts workflow and returns 202 with workflowId (fire-and-forget default)", async () => {
-      const wf = buildOrderWorkflow(storage);
+      const wf = buildOrderWorkflow();
+      const runner = createWorkflowRunner({ storage });
       const handler = webhookTrigger({
         workflow: wf,
+        runner,
+        storage,
         workflowId: (r) => (r.body as OrderEvent).orderId,
         input: (r) => r.body as OrderEvent,
       });
@@ -70,9 +73,12 @@ describe("webhookTrigger", () => {
     });
 
     it("returns 200 + result when wait: true", async () => {
-      const wf = buildOrderWorkflow(storage);
+      const wf = buildOrderWorkflow();
+      const runner = createWorkflowRunner({ storage });
       const handler = webhookTrigger({
         workflow: wf,
+        runner,
+        storage,
         workflowId: (r) => (r.body as OrderEvent).orderId,
         input: (r) => r.body as OrderEvent,
         wait: true,
@@ -86,9 +92,12 @@ describe("webhookTrigger", () => {
 
   describe("idempotency", () => {
     it("returns 409 on duplicate workflowId", async () => {
-      const wf = buildOrderWorkflow(storage);
+      const wf = buildOrderWorkflow();
+      const runner = createWorkflowRunner({ storage });
       const handler = webhookTrigger({
         workflow: wf,
+        runner,
+        storage,
         workflowId: (r) => (r.body as OrderEvent).orderId,
         input: (r) => r.body as OrderEvent,
         wait: true,
@@ -107,9 +116,12 @@ describe("webhookTrigger", () => {
     const SECRET = "super-secret";
 
     it("accepts request with valid signature (bare hex)", async () => {
-      const wf = buildOrderWorkflow(storage);
+      const wf = buildOrderWorkflow();
+      const runner = createWorkflowRunner({ storage });
       const handler = webhookTrigger({
         workflow: wf,
+        runner,
+        storage,
         workflowId: (r) => (r.body as OrderEvent).orderId,
         input: (r) => r.body as OrderEvent,
         hmac: { secret: SECRET },
@@ -124,9 +136,12 @@ describe("webhookTrigger", () => {
     });
 
     it("accepts GitHub-style prefixed signature via hmac.prefix", async () => {
-      const wf = buildOrderWorkflow(storage);
+      const wf = buildOrderWorkflow();
+      const runner = createWorkflowRunner({ storage });
       const handler = webhookTrigger({
         workflow: wf,
+        runner,
+        storage,
         workflowId: (r) => (r.body as OrderEvent).orderId,
         input: (r) => r.body as OrderEvent,
         hmac: { secret: SECRET, header: "x-hub-signature-256", prefix: "sha256=" },
@@ -141,9 +156,12 @@ describe("webhookTrigger", () => {
     });
 
     it("rejects request with bad signature → 401", async () => {
-      const wf = buildOrderWorkflow(storage);
+      const wf = buildOrderWorkflow();
+      const runner = createWorkflowRunner({ storage });
       const handler = webhookTrigger({
         workflow: wf,
+        runner,
+        storage,
         workflowId: (r) => (r.body as OrderEvent).orderId,
         input: (r) => r.body as OrderEvent,
         hmac: { secret: SECRET },
@@ -156,9 +174,12 @@ describe("webhookTrigger", () => {
     });
 
     it("rejects request with missing signature header → 401", async () => {
-      const wf = buildOrderWorkflow(storage);
+      const wf = buildOrderWorkflow();
+      const runner = createWorkflowRunner({ storage });
       const handler = webhookTrigger({
         workflow: wf,
+        runner,
+        storage,
         workflowId: (r) => (r.body as OrderEvent).orderId,
         input: (r) => r.body as OrderEvent,
         hmac: { secret: SECRET },
@@ -169,10 +190,13 @@ describe("webhookTrigger", () => {
     });
 
     it("supports per-request secret resolver (multi-tenant)", async () => {
-      const wf = buildOrderWorkflow(storage);
+      const wf = buildOrderWorkflow();
+      const runner = createWorkflowRunner({ storage });
       const secrets: Record<string, string> = { "tenant-a": "sec-a", "tenant-b": "sec-b" };
       const handler = webhookTrigger({
         workflow: wf,
+        runner,
+        storage,
         workflowId: (r) => (r.body as OrderEvent).orderId,
         input: (r) => r.body as OrderEvent,
         hmac: {
@@ -191,9 +215,12 @@ describe("webhookTrigger", () => {
 
   describe("custom verify()", () => {
     it("accepts when verify returns true", async () => {
-      const wf = buildOrderWorkflow(storage);
+      const wf = buildOrderWorkflow();
+      const runner = createWorkflowRunner({ storage });
       const handler = webhookTrigger({
         workflow: wf,
+        runner,
+        storage,
         workflowId: (r) => (r.body as OrderEvent).orderId,
         input: (r) => r.body as OrderEvent,
         verify: (req) => req.headers.get("x-custom-token") === "expected",
@@ -206,9 +233,12 @@ describe("webhookTrigger", () => {
     });
 
     it("rejects when verify returns false → 401", async () => {
-      const wf = buildOrderWorkflow(storage);
+      const wf = buildOrderWorkflow();
+      const runner = createWorkflowRunner({ storage });
       const handler = webhookTrigger({
         workflow: wf,
+        runner,
+        storage,
         workflowId: (r) => (r.body as OrderEvent).orderId,
         input: (r) => r.body as OrderEvent,
         verify: () => false,
@@ -219,10 +249,13 @@ describe("webhookTrigger", () => {
     });
 
     it("throws at construction when both hmac and verify supplied", () => {
-      const wf = buildOrderWorkflow(storage);
+      const wf = buildOrderWorkflow();
+      const runner = createWorkflowRunner({ storage });
       expect(() =>
         webhookTrigger({
           workflow: wf,
+          runner,
+          storage,
           workflowId: () => "x",
           input: () => ({}) as OrderEvent,
           hmac: { secret: "s" },
@@ -234,9 +267,12 @@ describe("webhookTrigger", () => {
 
   describe("malformed requests", () => {
     it("returns 400 on invalid JSON body", async () => {
-      const wf = buildOrderWorkflow(storage);
+      const wf = buildOrderWorkflow();
+      const runner = createWorkflowRunner({ storage });
       const handler = webhookTrigger({
         workflow: wf,
+        runner,
+        storage,
         workflowId: (r) => (r.body as any)?.orderId ?? "unknown",
         input: (r) => r.body as OrderEvent,
       });
@@ -252,9 +288,12 @@ describe("webhookTrigger", () => {
     });
 
     it("returns 500 with onError override when extractor throws", async () => {
-      const wf = buildOrderWorkflow(storage);
+      const wf = buildOrderWorkflow();
+      const runner = createWorkflowRunner({ storage });
       const handler = webhookTrigger({
         workflow: wf,
+        runner,
+        storage,
         workflowId: () => {
           throw new Error("missing id");
         },

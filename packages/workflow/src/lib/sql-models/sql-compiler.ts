@@ -8,16 +8,13 @@
 
 import { Pipeline } from "@promin/core";
 import { workflow } from "../durable/durable-pipeline.ts";
-import type { WorkflowDefinition } from "../durable/durable-pipeline.ts";
-import type { WorkflowStorage } from "../durable/workflow-storage.ts";
+import type { Workflow } from "../durable/durable-pipeline.ts";
 import { topologicalSort } from "../durable/workflow-dag.ts";
 import type { SqlProject, SqlModel, SqlProjectResult, ExpectationDef } from "./sql-model.ts";
 
 export interface SqlCompilerConfig {
   /** The SQL project to compile. */
   project: SqlProject;
-  /** Workflow storage for durability. */
-  storage: WorkflowStorage;
   /**
    * Execute a SQL statement. This is the bridge to your database.
    * Return rows for SELECT, empty array for DDL.
@@ -38,8 +35,8 @@ export interface SqlCompilerConfig {
  */
 export function compileSqlProject(
   config: SqlCompilerConfig,
-): WorkflowDefinition<{ date?: string }, SqlProjectResult> {
-  const { project, storage, executeSql } = config;
+): Workflow<{ date?: string }, SqlProjectResult> {
+  const { project, executeSql } = config;
 
   // Validate DAG
   const dagNodes = project.models.map((m) => ({
@@ -73,7 +70,7 @@ export function compileSqlProject(
     }
   }
 
-  return builder.build().bind(storage) as WorkflowDefinition<{ date?: string }, SqlProjectResult>;
+  return builder.build() as Workflow<{ date?: string }, SqlProjectResult>;
 }
 
 async function executeModel(

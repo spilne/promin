@@ -5,7 +5,9 @@
 import { Effect, Stream } from "effect";
 import type { TaggedError } from "@promin/core";
 import { StreamPipeline } from "@promin/core";
-import type { WorkflowDefinition } from "./durable-pipeline.ts";
+import type { Workflow } from "./durable-pipeline.ts";
+import type { WorkflowRunner } from "./workflow-runner.ts";
+import type { WorkflowStorage } from "./workflow-storage.ts";
 
 // ---------------------------------------------------------------------------
 // WorkflowResult ADT
@@ -82,7 +84,11 @@ export namespace WorkflowResult {
  * ```
  */
 export function trigger<T, Input, Output>(params: {
-  workflow: WorkflowDefinition<Input, Output>;
+  workflow: Workflow<Input, Output>;
+  /** Runner used to execute each workflow instance. */
+  runner: WorkflowRunner;
+  /** Storage for dedup lookup. Typically the runner's storage. */
+  storage: WorkflowStorage;
   toInput: (item: T) => Input;
   toWorkflowId: (item: T) => string;
   concurrency?: number;
@@ -90,7 +96,15 @@ export function trigger<T, Input, Output>(params: {
 }): <E extends TaggedError>(
   stream: StreamPipeline<T, E>,
 ) => StreamPipeline<WorkflowResult<Output>, E> {
-  const { workflow, toInput, toWorkflowId, concurrency = 1, onDuplicate = "fail" } = params;
+  const {
+    workflow,
+    runner,
+    storage,
+    toInput,
+    toWorkflowId,
+    concurrency = 1,
+    onDuplicate = "fail",
+  } = params;
 
   return <E extends TaggedError>(
     stream: StreamPipeline<T, E>,
@@ -105,7 +119,7 @@ export function trigger<T, Input, Output>(params: {
 
           // Dedup check: see if workflow already exists
           if (onDuplicate === "skip") {
-            const existing = await workflow.storage.loadWorkflow(workflowId);
+            const existing = await storage.loadWorkflow(workflowId);
             if (existing) {
               if (
                 existing.status === "completed" ||
@@ -117,7 +131,7 @@ export function trigger<T, Input, Output>(params: {
             }
           }
 
-          const { data, error } = await workflow.runSafe({ workflowId, input });
+          const { data, error } = await runner.runSafe({ workflow, workflowId, input });
 
           if (error) {
             return WorkflowResult.failed({
