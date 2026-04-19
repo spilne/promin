@@ -33,7 +33,7 @@ import { isStepAttemptStorage } from "./workflow-storage.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
 import type { DagNode } from "./workflow-dag.ts";
 import { topologicalSort, computeReadySet } from "./workflow-dag.ts";
-import { getIdempotencyTtl, compensateWorkflow } from "./workflow-runner.ts";
+import { getIdempotencyTtl, compensateWorkflow, publishDlqRecord } from "./workflow-runner.ts";
 import {
   WorkflowError,
   StepError,
@@ -1659,25 +1659,16 @@ export class WorkflowBuilder<
 
         // Publish to DLQ
         if (this._dlq) {
-          try {
-            const failedState = await this._storage.loadWorkflow(workflowId);
-            await this._dlq.publish({
-              workflowId,
-              workflowName: this._name,
-              input,
-              error: errorMsg,
-              failedAt: new Date(),
-              steps: failedState?.steps ?? {},
-              compensatedSteps: compensationReport.compensated,
-              failedCompensations: compensationReport.failed.map((f) => ({
-                stepName: f.stepName,
-                error: f.error instanceof Error ? f.error.message : String(f.error),
-              })),
-              metadata: this._metadata,
-            });
-          } catch {
-            // DLQ failure is swallowed — the original error is more important
-          }
+          await publishDlqRecord({
+            dlq: this._dlq,
+            storage: this._storage,
+            workflowId,
+            workflowName: this._name,
+            input,
+            errorMsg,
+            compensationReport,
+            metadata: this._metadata,
+          });
         }
 
         throw lastStepError;
