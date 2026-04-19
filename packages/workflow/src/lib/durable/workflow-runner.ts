@@ -16,9 +16,11 @@
 // formalize `StepExecutor` as the in-process vs remote vs queue seam.
 // ---------------------------------------------------------------------------
 
-import type { TaggedError } from "@promin/core";
-import type { RunnableWorkflow, Workflow } from "./durable-pipeline.ts";
+import { Pipeline, type TaggedError } from "@promin/core";
+import type { RunnableWorkflow, Workflow, CompensateConfig } from "./durable-pipeline.ts";
 import type { WorkflowHooks, IdempotencyConfig } from "./durable-pipeline.ts";
+import { isStepAttemptStorage, type WorkflowStorage } from "./workflow-storage.ts";
+import type { DagNode } from "./workflow-dag.ts";
 import type {
   StepError,
   WorkflowError,
@@ -158,6 +160,119 @@ export function createWorkflowRunner(): WorkflowRunner {
 // phase 1b/1c can incrementally move orchestration out of the builder
 // without the runner needing access to private class state.
 // ---------------------------------------------------------------------------
+
+/**
+ * A step definition's view as needed by compensation — just the name and
+ * the rollback function. A full `StepDefinition` is a superset and passes
+ * this check via structural typing; keeps compensation decoupled from the
+ * rest of the step shape (execute / codec / retry / etc.).
+ */
+export interface CompensatableStep {
+  readonly name: string;
+  readonly compensate?: (params: {
+    result: unknown;
+    input: unknown;
+    workflowId: string;
+  }) => Pipeline<void, TaggedError> | Promise<void>;
+}
+
+/**
+ * Run the saga rollback for a workflow — reverses completed steps that
+ * carry a `compensate` function, in last-completed-first order, honoring
+ * the compensate config's per-step retry policy. Records an attempt row
+ * per try when the storage supports `StepAttemptStorage`.
+ *
+ * Formerly `WorkflowBuilder._compensate`. Pure function now — takes the
+ * storage + step list + retry config directly so the runner can drive
+ * compensation without holding a builder reference.
+ */
+export async function compensateWorkflow(params: {
+  storage: WorkflowStorage;
+  steps: ReadonlyArray<CompensatableStep>;
+  compensateConfig?: CompensateConfig;
+  workflowId: string;
+  input: unknown;
+  dagNodes: DagNode[];
+}): Promise<{
+  compensated: string[];
+  failed: { stepName: string; error: unknown }[];
+}> {
+  const { storage, steps, compensateConfig, workflowId, input } = params;
+  const compensated: string[] = [];
+  const failed: { stepName: string; error: unknown }[] = [];
+
+  const state = await storage.loadWorkflow(workflowId);
+  if (!state) return { compensated, failed };
+
+  // Reverse order so last-completed is compensated first — saga semantics.
+  const stepsToCompensate: { stepDef: CompensatableStep; result: unknown }[] = [];
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const stepDef = steps[i]!;
+    const stepState = state.steps[stepDef.name];
+    if (stepState?.status === "completed" && stepDef.compensate) {
+      stepsToCompensate.push({ stepDef, result: stepState.result });
+    }
+  }
+
+  const retryConfig = compensateConfig?.retry;
+  const maxCompRetries = retryConfig?.maxRetries ?? 0;
+  const compRetryDelayMs = retryConfig?.baseDelayMs ?? 500;
+
+  const recordsAttempts = isStepAttemptStorage(storage);
+
+  for (const { stepDef, result } of stepsToCompensate) {
+    for (let attempt = 0; attempt <= maxCompRetries; attempt++) {
+      const compStartedAt = new Date();
+      try {
+        if (attempt > 0) {
+          await new Promise((r) => setTimeout(r, compRetryDelayMs * Math.pow(2, attempt - 1)));
+        }
+        const compensateResult = stepDef.compensate!({ result, input, workflowId });
+        if (compensateResult instanceof Pipeline) {
+          await compensateResult.runPromise();
+        } else if (
+          compensateResult &&
+          typeof (compensateResult as Promise<void>).then === "function"
+        ) {
+          await compensateResult;
+        }
+        compensated.push(stepDef.name);
+        if (recordsAttempts) {
+          await (storage as any).saveStepAttempt({
+            workflowId,
+            stepName: stepDef.name,
+            attempt: attempt + 1,
+            type: "compensation",
+            status: "completed",
+            durationMs: Date.now() - compStartedAt.getTime(),
+            startedAt: compStartedAt,
+            completedAt: new Date(),
+          });
+        }
+        break;
+      } catch (err) {
+        if (recordsAttempts) {
+          await (storage as any).saveStepAttempt({
+            workflowId,
+            stepName: stepDef.name,
+            attempt: attempt + 1,
+            type: "compensation",
+            status: "failed",
+            error: err instanceof Error ? err.message : String(err),
+            durationMs: Date.now() - compStartedAt.getTime(),
+            startedAt: compStartedAt,
+            completedAt: new Date(),
+          });
+        }
+        if (attempt === maxCompRetries) {
+          failed.push({ stepName: stepDef.name, error: err });
+        }
+      }
+    }
+  }
+
+  return { compensated, failed };
+}
 
 /**
  * Resolve the idempotency TTL for a given terminal status.

@@ -33,7 +33,7 @@ import { isStepAttemptStorage } from "./workflow-storage.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
 import type { DagNode } from "./workflow-dag.ts";
 import { topologicalSort, computeReadySet } from "./workflow-dag.ts";
-import { getIdempotencyTtl } from "./workflow-runner.ts";
+import { getIdempotencyTtl, compensateWorkflow } from "./workflow-runner.ts";
 import {
   WorkflowError,
   StepError,
@@ -2067,84 +2067,14 @@ export class WorkflowBuilder<
     compensated: string[];
     failed: { stepName: string; error: unknown }[];
   }> {
-    const { workflowId, input } = params;
-    const compensated: string[] = [];
-    const failed: { stepName: string; error: unknown }[] = [];
-
-    // Load current state to find completed steps
-    const state = await this._storage.loadWorkflow(workflowId);
-    if (!state) return { compensated, failed };
-
-    // Find completed steps that have compensation functions, in reverse order
-    const stepsToCompensate: { stepDef: StepDefinition; result: unknown }[] = [];
-    // Reverse the step list order — last completed first
-    for (let i = this._steps.length - 1; i >= 0; i--) {
-      const stepDef = this._steps[i]!;
-      const stepState = state.steps[stepDef.name];
-      if (stepState?.status === "completed" && stepDef.compensate) {
-        stepsToCompensate.push({ stepDef, result: stepState.result });
-      }
-    }
-
-    // Run compensations sequentially in reverse order
-    const retryConfig = this._compensateConfig?.retry;
-    const maxCompRetries = retryConfig?.maxRetries ?? 0;
-    const compRetryDelayMs = retryConfig?.baseDelayMs ?? 500;
-
-    const recordsAttempts = isStepAttemptStorage(this._storage);
-
-    for (const { stepDef, result } of stepsToCompensate) {
-      for (let attempt = 0; attempt <= maxCompRetries; attempt++) {
-        const compStartedAt = new Date();
-        try {
-          if (attempt > 0) {
-            await new Promise((r) => setTimeout(r, compRetryDelayMs * Math.pow(2, attempt - 1)));
-          }
-          const compensateResult = stepDef.compensate!({ result, input, workflowId });
-          if (compensateResult instanceof Pipeline) {
-            await compensateResult.runPromise();
-          } else if (
-            compensateResult &&
-            typeof (compensateResult as Promise<void>).then === "function"
-          ) {
-            await compensateResult;
-          }
-          compensated.push(stepDef.name);
-          if (recordsAttempts) {
-            await (this._storage as any).saveStepAttempt({
-              workflowId,
-              stepName: stepDef.name,
-              attempt: attempt + 1,
-              type: "compensation",
-              status: "completed",
-              durationMs: Date.now() - compStartedAt.getTime(),
-              startedAt: compStartedAt,
-              completedAt: new Date(),
-            });
-          }
-          break;
-        } catch (err) {
-          if (recordsAttempts) {
-            await (this._storage as any).saveStepAttempt({
-              workflowId,
-              stepName: stepDef.name,
-              attempt: attempt + 1,
-              type: "compensation",
-              status: "failed",
-              error: err instanceof Error ? err.message : String(err),
-              durationMs: Date.now() - compStartedAt.getTime(),
-              startedAt: compStartedAt,
-              completedAt: new Date(),
-            });
-          }
-          if (attempt === maxCompRetries) {
-            failed.push({ stepName: stepDef.name, error: err });
-          }
-        }
-      }
-    }
-
-    return { compensated, failed };
+    return compensateWorkflow({
+      storage: this._storage,
+      steps: this._steps,
+      compensateConfig: this._compensateConfig,
+      workflowId: params.workflowId,
+      input: params.input,
+      dagNodes: params.dagNodes,
+    });
   }
 
   // ---------------------------------------------------------------------------
