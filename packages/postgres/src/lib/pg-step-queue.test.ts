@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { PostgresTestContainer } from "./test-utils.ts";
 import { PgStepQueue } from "./pg-step-queue.ts";
 import { stepQueueTestSuite } from "@promin/workflow/testing";
@@ -22,6 +22,16 @@ afterAll(async () => {
 // ---------------------------------------------------------------------------
 
 describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", () => {
+  // Dedupe is on (workflow_id, step_name) so tests sharing IDs would
+  // accumulate. Create the table once up front, then truncate between
+  // tests so each starts with an empty queue.
+  beforeAll(async () => {
+    await new PgStepQueue({ db: pg.db }).ensureTable();
+  });
+  beforeEach(async () => {
+    await pg.sql`TRUNCATE wf_step_queue RESTART IDENTITY`;
+  });
+
   it("enqueue a step task and claim it for processing", async () => {
     const queue = new PgStepQueue({ db: pg.db });
     await queue.ensureTable();
@@ -29,14 +39,14 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
     const id = await queue.enqueue({
       workflowId: "wf-1",
       stepName: "double",
-      queue: "default",
+      needs: ["default"],
       input: { n: 5 },
       prevResults: {},
     });
 
     expect(id).toBeDefined();
 
-    const tasks = await queue.claim({ queues: ["default"], limit: 10 });
+    const tasks = await queue.claim({ capabilities: ["default"], limit: 10 });
     expect(tasks).toHaveLength(1);
     expect(tasks[0]!.workflowId).toBe("wf-1");
     expect(tasks[0]!.stepName).toBe("double");
@@ -51,16 +61,16 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
     await queue.enqueue({
       workflowId: "wf-2",
       stepName: "step-a",
-      queue: "default",
+      needs: ["default"],
       input: {},
       prevResults: {},
     });
 
-    const first = await queue.claim({ queues: ["default"], limit: 10 });
+    const first = await queue.claim({ capabilities: ["default"], limit: 10 });
     expect(first).toHaveLength(1);
 
     // Second claim should get nothing — task is already running
-    const second = await queue.claim({ queues: ["default"], limit: 10 });
+    const second = await queue.claim({ capabilities: ["default"], limit: 10 });
     expect(second).toHaveLength(0);
   });
 
@@ -71,23 +81,23 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
     await queue.enqueue({
       workflowId: "wf-3",
       stepName: "cpu-step",
-      queue: "cpu",
+      needs: ["cpu"],
       input: {},
       prevResults: {},
     });
     await queue.enqueue({
       workflowId: "wf-3",
       stepName: "gpu-step",
-      queue: "gpu",
+      needs: ["gpu"],
       input: {},
       prevResults: {},
     });
 
-    const cpuTasks = await queue.claim({ queues: ["cpu"], limit: 10 });
+    const cpuTasks = await queue.claim({ capabilities: ["cpu"], limit: 10 });
     expect(cpuTasks).toHaveLength(1);
     expect(cpuTasks[0]!.stepName).toBe("cpu-step");
 
-    const gpuTasks = await queue.claim({ queues: ["gpu"], limit: 10 });
+    const gpuTasks = await queue.claim({ capabilities: ["gpu"], limit: 10 });
     expect(gpuTasks).toHaveLength(1);
     expect(gpuTasks[0]!.stepName).toBe("gpu-step");
   });
@@ -100,13 +110,13 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
       await queue.enqueue({
         workflowId: "wf-4",
         stepName: `step-${i}`,
-        queue: "batch",
+        needs: ["batch"],
         input: {},
         prevResults: {},
       });
     }
 
-    const tasks = await queue.claim({ queues: ["batch"], limit: 2 });
+    const tasks = await queue.claim({ capabilities: ["batch"], limit: 2 });
     expect(tasks).toHaveLength(2);
   });
 
@@ -117,16 +127,16 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
     const id = await queue.enqueue({
       workflowId: "wf-5",
       stepName: "complete-me",
-      queue: "test-complete",
+      needs: ["test-complete"],
       input: {},
       prevResults: {},
     });
 
-    await queue.claim({ queues: ["test-complete"], limit: 1 });
+    await queue.claim({ capabilities: ["test-complete"], limit: 1 });
     await queue.complete({ taskId: id, result: { answer: 42 }, durationMs: 150 });
 
     const metrics = await queue.metrics();
-    expect(metrics["test-complete"]?.completed).toBe(1);
+    expect(metrics.completed).toBe(1);
   });
 
   it("step fails — error message persisted and failure metrics updated", async () => {
@@ -136,16 +146,16 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
     const id = await queue.enqueue({
       workflowId: "wf-6",
       stepName: "fail-me",
-      queue: "test-fail",
+      needs: ["test-fail"],
       input: {},
       prevResults: {},
     });
 
-    await queue.claim({ queues: ["test-fail"], limit: 1 });
+    await queue.claim({ capabilities: ["test-fail"], limit: 1 });
     await queue.fail({ taskId: id, error: "something broke", durationMs: 50 });
 
     const metrics = await queue.metrics();
-    expect(metrics["test-fail"]?.failed).toBe(1);
+    expect(metrics.failed).toBe(1);
   });
 
   it("ops dashboard sees pending/running/completed counts per queue", async () => {
@@ -156,28 +166,29 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
     await queue.enqueue({
       workflowId: "wf-7",
       stepName: "a",
-      queue: "metrics-q1",
+      needs: ["metrics-q1"],
       input: {},
       prevResults: {},
     });
     await queue.enqueue({
       workflowId: "wf-7",
       stepName: "b",
-      queue: "metrics-q1",
+      needs: ["metrics-q1"],
       input: {},
       prevResults: {},
     });
     await queue.enqueue({
       workflowId: "wf-7",
       stepName: "c",
-      queue: "metrics-q2",
+      needs: ["metrics-q2"],
       input: {},
       prevResults: {},
     });
 
     const metrics = await queue.metrics();
-    expect(metrics["metrics-q1"]?.pending).toBe(2);
-    expect(metrics["metrics-q2"]?.pending).toBe(1);
+    // Flat metrics now (per-status totals, not per-queue breakdown). Three
+    // enqueues all land as pending until claimed.
+    expect(metrics.pending).toBe(3);
   });
 
   it("dependent step receives results from prior steps — context flows through the queue", async () => {
@@ -187,12 +198,12 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
     await queue.enqueue({
       workflowId: "wf-8",
       stepName: "with-deps",
-      queue: "deps-test",
+      needs: ["deps-test"],
       input: { x: 1 },
       prevResults: { "step-a": "result-a", "step-b": 42 },
     });
 
-    const tasks = await queue.claim({ queues: ["deps-test"], limit: 1 });
+    const tasks = await queue.claim({ capabilities: ["deps-test"], limit: 1 });
     expect(tasks[0]!.prevResults).toEqual({ "step-a": "result-a", "step-b": 42 });
   });
 
@@ -203,7 +214,7 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
     await queue.enqueue({
       workflowId: "wf-9",
       stepName: "first",
-      queue: "fifo",
+      needs: ["fifo"],
       input: {},
       prevResults: {},
     });
@@ -211,12 +222,12 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
     await queue.enqueue({
       workflowId: "wf-9",
       stepName: "second",
-      queue: "fifo",
+      needs: ["fifo"],
       input: {},
       prevResults: {},
     });
 
-    const tasks = await queue.claim({ queues: ["fifo"], limit: 1 });
+    const tasks = await queue.claim({ capabilities: ["fifo"], limit: 1 });
     expect(tasks[0]!.stepName).toBe("first");
   });
 
@@ -227,7 +238,7 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
     await queue.enqueue({
       workflowId: "wf-p",
       stepName: "low",
-      queue: "prio",
+      needs: ["prio"],
       input: {},
       prevResults: {},
       priority: 1,
@@ -235,7 +246,7 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
     await queue.enqueue({
       workflowId: "wf-p",
       stepName: "high",
-      queue: "prio",
+      needs: ["prio"],
       input: {},
       prevResults: {},
       priority: 10,
@@ -243,13 +254,13 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
     await queue.enqueue({
       workflowId: "wf-p",
       stepName: "medium",
-      queue: "prio",
+      needs: ["prio"],
       input: {},
       prevResults: {},
       priority: 5,
     });
 
-    const tasks = await queue.claim({ queues: ["prio"], limit: 3 });
+    const tasks = await queue.claim({ capabilities: ["prio"], limit: 3 });
     expect(tasks).toHaveLength(3);
     // First claimed should be highest priority (highest number)
     expect(tasks[0]!.stepName).toBe("high");
@@ -261,11 +272,14 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
 // Portable conformance suite
 // ---------------------------------------------------------------------------
 
+// Conformance against the shared container — dedupe is on
+// `(workflow_id, step_name)` (no namespace in the key), so each test needs
+// a clean table. `TRUNCATE ... RESTART IDENTITY` also resets the bigserial
+// id counter so ordering-dependent assertions stay deterministic across
+// runs.
 stepQueueTestSuite(async () => {
-  const queue = new PgStepQueue({
-    db: pg.db,
-    namespace: `test-${crypto.randomUUID().slice(0, 8)}`,
-  });
+  const queue = new PgStepQueue({ db: pg.db });
   await queue.ensureTable();
+  await pg.sql`TRUNCATE wf_step_queue RESTART IDENTITY`;
   return queue;
 });

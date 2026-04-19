@@ -22,7 +22,7 @@ describe("versioned dispatch", () => {
       storage,
       stepQueue,
       registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 25,
     });
     void worker.start();
@@ -31,7 +31,7 @@ describe("versioned dispatch", () => {
       name: "vd-1",
       storage,
       version: "2",
-      dispatch: { stepQueue, routing: { "remote-step": "default" }, pollIntervalMs: 25 },
+      dispatch: { stepQueue, remoteSteps: ["remote-step"], pollIntervalMs: 25 },
     })
       .step("load", ({ input }) => Pipeline.succeed(input.id))
       .step("remote-step", { dependsOn: ["load"] }, ({ deps }) =>
@@ -41,7 +41,7 @@ describe("versioned dispatch", () => {
 
     // After the workflow completes, inspect the completed task's stored version.
     const metrics = await stepQueue.metrics();
-    expect(metrics["default"]!.completed).toBeGreaterThanOrEqual(1);
+    expect(metrics.completed).toBeGreaterThanOrEqual(1);
 
     await worker.stop();
   });
@@ -53,14 +53,12 @@ describe("versioned dispatch", () => {
     await stepQueue.enqueue({
       workflowId: "w-1",
       stepName: "known-step",
-      queue: "default",
       input: { x: 1 },
       prevResults: {},
     });
     await stepQueue.enqueue({
       workflowId: "w-2",
       stepName: "unknown-step",
-      queue: "default",
       input: { y: 2 },
       prevResults: {},
     });
@@ -71,7 +69,7 @@ describe("versioned dispatch", () => {
 
     // Claim directly — avoid spinning the worker loop.
     const claimed = await stepQueue.claim({
-      queues: ["default"],
+      capabilities: [],
       limit: 10,
       filter: (task) => registry.has(task.stepName),
     });
@@ -81,7 +79,7 @@ describe("versioned dispatch", () => {
 
     // The unknown-step task stays pending — another worker can pick it up.
     const second = await stepQueue.claim({
-      queues: ["default"],
+      capabilities: [],
       limit: 10,
       filter: (task) => task.stepName === "unknown-step",
     });
@@ -97,7 +95,6 @@ describe("versioned dispatch", () => {
       await stepQueue.enqueue({
         workflowId: `v${v}-wf`,
         stepName: "s",
-        queue: "default",
         input: {},
         prevResults: {},
         version: v,
@@ -106,7 +103,6 @@ describe("versioned dispatch", () => {
     await stepQueue.enqueue({
       workflowId: "unversioned-wf",
       stepName: "s",
-      queue: "default",
       input: {},
       prevResults: {},
     });
@@ -118,7 +114,7 @@ describe("versioned dispatch", () => {
     // backward compat. v3 is rejected.
     const supported = ["1", "2"];
     const claimed = await stepQueue.claim({
-      queues: ["default"],
+      capabilities: [],
       limit: 10,
       filter: (task) => {
         if (!registry.has(task.stepName)) return false;
@@ -145,7 +141,7 @@ describe("versioned dispatch", () => {
       storage,
       stepQueue,
       registry: v2Registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 25,
       supportedVersions: ["1", "2"],
     });
@@ -156,7 +152,7 @@ describe("versioned dispatch", () => {
       name: "order",
       storage,
       version: "1",
-      dispatch: { stepQueue, routing: { "step-a": "default" }, pollIntervalMs: 25 },
+      dispatch: { stepQueue, remoteSteps: ["step-a"], pollIntervalMs: 25 },
     }).step("step-a", ({ input }) => Pipeline.succeed(`v1-${input.x}`));
     const v1Result = await v1.run({ workflowId: "v1-wf", input: { x: 10 } });
     expect(v1Result).toBe("A-10");
@@ -166,7 +162,7 @@ describe("versioned dispatch", () => {
       name: "order",
       storage,
       version: "2",
-      dispatch: { stepQueue, routing: { "step-a": "default" }, pollIntervalMs: 25 },
+      dispatch: { stepQueue, remoteSteps: ["step-a"], pollIntervalMs: 25 },
     }).step("step-a", ({ input }) => Pipeline.succeed(`v2-${input.x}`));
     const v2Result = await v2.run({ workflowId: "v2-wf", input: { x: 20 } });
     expect(v2Result).toBe("A-20");
@@ -186,7 +182,6 @@ describe("versioned dispatch", () => {
     await stepQueue.enqueue({
       workflowId: "v1-orphan",
       stepName: "step-a",
-      queue: "default",
       input: {},
       prevResults: {},
       version: "1",
@@ -200,7 +195,7 @@ describe("versioned dispatch", () => {
       storage,
       stepQueue,
       registry: v2OnlyRegistry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 25,
       supportedVersions: ["2"],
     });
@@ -212,7 +207,7 @@ describe("versioned dispatch", () => {
 
     // v1 task should still be pending — worker correctly skipped it.
     const metrics = await stepQueue.metrics();
-    expect(metrics["default"]!.pending).toBeGreaterThanOrEqual(1);
-    expect(metrics["default"]!.completed).toBe(0);
+    expect(metrics.pending).toBeGreaterThanOrEqual(1);
+    expect(metrics.completed).toBe(0);
   });
 });

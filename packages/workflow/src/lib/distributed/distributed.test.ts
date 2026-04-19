@@ -34,12 +34,11 @@ describe("Step queue — distribute tasks to available workers", () => {
     await queue.enqueue({
       workflowId: "wf-1",
       stepName: "step-a",
-      queue: "default",
       input: { n: 5 },
       prevResults: {},
     });
 
-    const tasks = await queue.claim({ queues: ["default"], limit: 10 });
+    const tasks = await queue.claim({ capabilities: [], limit: 10 });
     expect(tasks).toHaveLength(1);
     expect(tasks[0]!.stepName).toBe("step-a");
     expect(tasks[0]!.status).toBe("running");
@@ -51,23 +50,22 @@ describe("Step queue — distribute tasks to available workers", () => {
     await queue.enqueue({
       workflowId: "wf-1",
       stepName: "a",
-      queue: "default",
       input: {},
       prevResults: {},
     });
     await queue.enqueue({
       workflowId: "wf-1",
       stepName: "b",
-      queue: "gpu",
+      needs: ["gpu"],
       input: {},
       prevResults: {},
     });
 
-    const defaultTasks = await queue.claim({ queues: ["default"], limit: 10 });
+    const defaultTasks = await queue.claim({ capabilities: [], limit: 10 });
     expect(defaultTasks).toHaveLength(1);
     expect(defaultTasks[0]!.stepName).toBe("a");
 
-    const gpuTasks = await queue.claim({ queues: ["gpu"], limit: 10 });
+    const gpuTasks = await queue.claim({ capabilities: ["gpu"], limit: 10 });
     expect(gpuTasks).toHaveLength(1);
     expect(gpuTasks[0]!.stepName).toBe("b");
   });
@@ -79,13 +77,12 @@ describe("Step queue — distribute tasks to available workers", () => {
       await queue.enqueue({
         workflowId: "wf-1",
         stepName: `s-${i}`,
-        queue: "default",
         input: {},
         prevResults: {},
       });
     }
 
-    const tasks = await queue.claim({ queues: ["default"], limit: 2 });
+    const tasks = await queue.claim({ capabilities: [], limit: 2 });
     expect(tasks).toHaveLength(2);
   });
 
@@ -95,7 +92,6 @@ describe("Step queue — distribute tasks to available workers", () => {
     await queue.enqueue({
       workflowId: "wf-p",
       stepName: "low",
-      queue: "default",
       input: {},
       prevResults: {},
       priority: 1,
@@ -103,7 +99,6 @@ describe("Step queue — distribute tasks to available workers", () => {
     await queue.enqueue({
       workflowId: "wf-p",
       stepName: "high",
-      queue: "default",
       input: {},
       prevResults: {},
       priority: 10,
@@ -111,13 +106,12 @@ describe("Step queue — distribute tasks to available workers", () => {
     await queue.enqueue({
       workflowId: "wf-p",
       stepName: "medium",
-      queue: "default",
       input: {},
       prevResults: {},
       priority: 5,
     });
 
-    const tasks = await queue.claim({ queues: ["default"], limit: 3 });
+    const tasks = await queue.claim({ capabilities: [], limit: 3 });
     expect(tasks.map((t) => t.stepName)).toEqual(["high", "medium", "low"]);
   });
 
@@ -127,12 +121,11 @@ describe("Step queue — distribute tasks to available workers", () => {
     await queue.enqueue({
       workflowId: "wf-d",
       stepName: "default-prio",
-      queue: "default",
       input: {},
       prevResults: {},
     });
 
-    const tasks = await queue.claim({ queues: ["default"], limit: 1 });
+    const tasks = await queue.claim({ capabilities: [], limit: 1 });
     expect(tasks[0]!.priority).toBe(5);
   });
 
@@ -142,15 +135,14 @@ describe("Step queue — distribute tasks to available workers", () => {
     await queue.enqueue({
       workflowId: "wf-1",
       stepName: "a",
-      queue: "default",
       input: {},
       prevResults: {},
     });
 
-    const first = await queue.claim({ queues: ["default"], limit: 10 });
+    const first = await queue.claim({ capabilities: [], limit: 10 });
     expect(first).toHaveLength(1);
 
-    const second = await queue.claim({ queues: ["default"], limit: 10 });
+    const second = await queue.claim({ capabilities: [], limit: 10 });
     expect(second).toHaveLength(0);
   });
 
@@ -160,25 +152,23 @@ describe("Step queue — distribute tasks to available workers", () => {
     const id1 = await queue.enqueue({
       workflowId: "wf-1",
       stepName: "a",
-      queue: "default",
       input: {},
       prevResults: {},
     });
     const id2 = await queue.enqueue({
       workflowId: "wf-1",
       stepName: "b",
-      queue: "default",
       input: {},
       prevResults: {},
     });
 
-    await queue.claim({ queues: ["default"], limit: 10 });
+    await queue.claim({ capabilities: [], limit: 10 });
     await queue.complete({ taskId: id1, result: "ok", durationMs: 100 });
     await queue.fail({ taskId: id2, error: "boom", durationMs: 50 });
 
     const metrics = await queue.metrics();
-    expect(metrics["default"]!.completed).toBe(1);
-    expect(metrics["default"]!.failed).toBe(1);
+    expect(metrics.completed).toBe(1);
+    expect(metrics.failed).toBe(1);
   });
 });
 
@@ -200,7 +190,6 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
     await queue.enqueue({
       workflowId: "wf-1",
       stepName: "double",
-      queue: "default",
       input: { n: 5 },
       prevResults: {},
     });
@@ -209,7 +198,7 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
       storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
       hooks: {
         afterStep: (task, _result, _ms) => {
@@ -245,7 +234,6 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
     await queue.enqueue({
       workflowId: "wf-2",
       stepName: "fail-step",
-      queue: "default",
       input: {},
       prevResults: {},
     });
@@ -254,7 +242,7 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
       storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
       hooks: {
         onError: (task, _err, _ms) => {
@@ -282,7 +270,6 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
     await queue.enqueue({
       workflowId: "wf-3",
       stepName: "unknown-step",
-      queue: "default",
       input: {},
       prevResults: {},
     });
@@ -291,7 +278,7 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
       storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
       hooks: {
         onError: (_task, err, _ms) => {
@@ -310,7 +297,7 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
     // the task was never claimed.
     expect(failures).toHaveLength(0);
     const metrics = await queue.metrics();
-    expect(metrics["default"]!.pending).toBeGreaterThanOrEqual(1);
+    expect(metrics.pending).toBeGreaterThanOrEqual(1);
   });
 
   it("async step handler with I/O delay — worker awaits completion", async () => {
@@ -327,7 +314,6 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
     await queue.enqueue({
       workflowId: "wf-4",
       stepName: "async-step",
-      queue: "default",
       input: { n: 5 },
       prevResults: { "prev-step": 42 },
     });
@@ -336,7 +322,7 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
       storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
     });
 
@@ -360,7 +346,7 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
     await queue.enqueue({
       workflowId: "wf-5",
       stepName: "gpu-step",
-      queue: "gpu",
+      needs: ["gpu"],
       input: {},
       prevResults: {},
     });
@@ -370,7 +356,7 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
       storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
       hooks: {
         afterStep: (task, _result, _ms) => {
@@ -420,7 +406,7 @@ describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow
       storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
     });
 
@@ -469,7 +455,7 @@ describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow
       storage,
       stepQueue: queue,
       registry: defaultRegistry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
     });
 
@@ -477,7 +463,7 @@ describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow
       storage,
       stepQueue: queue,
       registry: gpuRegistry,
-      queues: ["gpu"],
+      capabilities: ["gpu"],
       pollIntervalMs: 50,
     });
 
@@ -515,7 +501,6 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
     await queue.enqueue({
       workflowId: "mw-1",
       stepName: "step-a",
-      queue: "default",
       input: {},
       prevResults: {},
     });
@@ -524,7 +509,7 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
       storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
       middleware: [
         async ({ task, ctx, next }) => {
@@ -558,7 +543,6 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
     await queue.enqueue({
       workflowId: "mw-2",
       stepName: "step-a",
-      queue: "default",
       input: {},
       prevResults: {},
     });
@@ -567,7 +551,7 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
       storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
       middleware: [
         async ({ ctx, next }) => {
@@ -607,7 +591,6 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
     await queue.enqueue({
       workflowId: "mw-3",
       stepName: "slow-step",
-      queue: "default",
       input: {},
       prevResults: {},
     });
@@ -619,7 +602,7 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
       storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
       middleware: [timeoutMiddleware(100)],
       hooks: {
@@ -648,7 +631,6 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
     await queue.enqueue({
       workflowId: "mw-4",
       stepName: "step-a",
-      queue: "default",
       input: {},
       prevResults: {},
     });
@@ -657,7 +639,7 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
       storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
       hooks: {
         beforeStep: () => {
@@ -716,7 +698,6 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
     await queue.enqueue({
       workflowId: "retry-1",
       stepName: "flaky",
-      queue: "default",
       input: {},
       prevResults: {},
     });
@@ -725,7 +706,7 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
       storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
     });
 
@@ -764,7 +745,6 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
     await queue.enqueue({
       workflowId: "when-1",
       stepName: "selective",
-      queue: "default",
       input: {},
       prevResults: {},
     });
@@ -773,7 +753,7 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
       storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
     });
 
@@ -802,7 +782,6 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
     await queue.enqueue({
       workflowId: "skip-1",
       stepName: "optional",
-      queue: "default",
       input: {},
       prevResults: {},
     });
@@ -811,7 +790,7 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
       storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
     });
 
@@ -842,7 +821,6 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
     await queue.enqueue({
       workflowId: "fallback-1",
       stepName: "risky",
-      queue: "default",
       input: {},
       prevResults: {},
     });
@@ -851,7 +829,7 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
       storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
     });
 
@@ -875,7 +853,6 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
     await queue.enqueue({
       workflowId: "attempt-1",
       stepName: "tracked",
-      queue: "default",
       input: {},
       prevResults: {},
     });
@@ -884,7 +861,7 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
       storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
     });
 
@@ -925,7 +902,7 @@ describe("Coordinator recovery — resume workflows after process restart", () =
       storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
     });
 
@@ -972,7 +949,7 @@ describe("Coordinator recovery — resume workflows after process restart", () =
       storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
     });
 

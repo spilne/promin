@@ -174,7 +174,7 @@ withAll("E2E: Postgres step queue — distributed task lifecycle", (ctx) => {
       await queue.enqueue({
         workflowId: "wf-e2e",
         stepName: `step-${i}`,
-        queue: "default",
+        needs: ["default"],
         input: { index: i },
         prevResults: {},
       });
@@ -190,7 +190,7 @@ withAll("E2E: Postgres step queue — distributed task lifecycle", (ctx) => {
 
     async function work(q: PgStepQueue, name: string) {
       while (true) {
-        const tasks = await q.claim({ queues: ["default"], limit: 1 });
+        const tasks = await q.claim({ capabilities: ["default"], limit: 1 });
         if (tasks.length === 0) break;
         const task = tasks[0]!;
         workerAssignments[name]!.push(task.stepName);

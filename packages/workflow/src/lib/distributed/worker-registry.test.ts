@@ -15,7 +15,7 @@ describe("Worker registry — track which workers are online and what they handl
 
     await registry.register({
       workerId: "w-1",
-      queues: ["default"],
+      capabilities: ["default"],
       concurrency: 5,
       metadata: { hostname: "node-1" },
     });
@@ -24,13 +24,13 @@ describe("Worker registry — track which workers are online and what they handl
     expect(workers).toHaveLength(1);
     expect(workers[0]!.workerId).toBe("w-1");
     expect(workers[0]!.status).toBe("active");
-    expect(workers[0]!.queues).toEqual(["default"]);
+    expect(workers[0]!.capabilities).toEqual(["default"]);
     expect(workers[0]!.concurrency).toBe(5);
   });
 
   it("heartbeat proves the worker is still alive — timestamp advances", async () => {
     const registry = new InMemoryWorkerRegistry();
-    await registry.register({ workerId: "w-1", queues: ["default"], concurrency: 1 });
+    await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
 
     const before = (await registry.list())[0]!.lastHeartbeat;
     await new Promise((r) => setTimeout(r, 50));
@@ -42,7 +42,7 @@ describe("Worker registry — track which workers are online and what they handl
 
   it("graceful shutdown — mark worker as draining before stopping", async () => {
     const registry = new InMemoryWorkerRegistry();
-    await registry.register({ workerId: "w-1", queues: ["default"], concurrency: 1 });
+    await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
 
     await registry.drain("w-1");
 
@@ -52,7 +52,7 @@ describe("Worker registry — track which workers are online and what they handl
 
   it("worker shuts down cleanly — removed from the registry", async () => {
     const registry = new InMemoryWorkerRegistry();
-    await registry.register({ workerId: "w-1", queues: ["default"], concurrency: 1 });
+    await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
     await registry.deregister("w-1");
 
     const workers = await registry.list();
@@ -61,7 +61,7 @@ describe("Worker registry — track which workers are online and what they handl
 
   it("worker stopped heartbeating — detected as dead after timeout", async () => {
     const registry = new InMemoryWorkerRegistry();
-    await registry.register({ workerId: "w-1", queues: ["default"], concurrency: 1 });
+    await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
 
     // Wait for heartbeat to go stale
     await new Promise((r) => setTimeout(r, 100));
@@ -78,7 +78,7 @@ describe("Worker registry — track which workers are online and what they handl
 
   it("healthy worker with recent heartbeat is not flagged as dead", async () => {
     const registry = new InMemoryWorkerRegistry();
-    await registry.register({ workerId: "w-1", queues: ["default"], concurrency: 1 });
+    await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
 
     const dead = await registry.detectDead(60_000); // 60s timeout — far in the future
     expect(dead).toHaveLength(0);
@@ -86,8 +86,8 @@ describe("Worker registry — track which workers are online and what they handl
 
   it("list only active or only draining workers — ops dashboard filtering", async () => {
     const registry = new InMemoryWorkerRegistry();
-    await registry.register({ workerId: "w-1", queues: ["default"], concurrency: 1 });
-    await registry.register({ workerId: "w-2", queues: ["gpu"], concurrency: 2 });
+    await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
+    await registry.register({ workerId: "w-2", capabilities: ["gpu"], concurrency: 2 });
     await registry.drain("w-2");
 
     const active = await registry.list({ status: "active" });
@@ -115,7 +115,7 @@ describe("Worker + registry integration — automatic lifecycle management", () 
       storage,
       stepQueue: queue,
       registry: stepRegistry,
-      queues: ["default", "gpu"],
+      capabilities: ["default", "gpu"],
       concurrency: 3,
       pollIntervalMs: 50,
       workerRegistry,
@@ -130,7 +130,7 @@ describe("Worker + registry integration — automatic lifecycle management", () 
     const active = await workerRegistry.list({ status: "active" });
     expect(active).toHaveLength(1);
     expect(active[0]!.workerId).toBe(worker.workerId);
-    expect(active[0]!.queues).toEqual(["default", "gpu"]);
+    expect(active[0]!.capabilities).toEqual(["default", "gpu"]);
     expect(active[0]!.concurrency).toBe(3);
 
     await worker.stop();
@@ -150,7 +150,7 @@ describe("Worker + registry integration — automatic lifecycle management", () 
       storage,
       stepQueue: queue,
       registry: stepRegistry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
       workerRegistry,
       heartbeatIntervalMs: 50,
@@ -191,7 +191,7 @@ describe("Worker + registry integration — automatic lifecycle management", () 
       storage,
       stepQueue: queue,
       registry: stepRegistry,
-      queues: ["default"],
+      capabilities: [],
       pollIntervalMs: 50,
       workerRegistry,
       heartbeatIntervalMs: 50,
@@ -233,7 +233,7 @@ describe("Dead worker recovery — requeue stuck tasks after a worker crash", ()
     });
 
     // Claim — sets claimedBy to "dead-worker"
-    const tasks = await queue.claim({ queues: ["default"], limit: 1 });
+    const tasks = await queue.claim({ capabilities: [], limit: 1 });
     expect(tasks).toHaveLength(1);
 
     // Task is now "running" claimed by "dead-worker" — simulate worker death
@@ -241,7 +241,7 @@ describe("Dead worker recovery — requeue stuck tasks after a worker crash", ()
     expect(requeued).toBe(1);
 
     // Task should be claimable again
-    const reclaimed = await queue.claim({ queues: ["default"], limit: 1 });
+    const reclaimed = await queue.claim({ capabilities: [], limit: 1 });
     expect(reclaimed).toHaveLength(1);
     expect(reclaimed[0]!.stepName).toBe("stuck-step");
   });

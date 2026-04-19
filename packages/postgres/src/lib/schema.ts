@@ -14,6 +14,7 @@ import {
   uniqueIndex,
   primaryKey,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { createLookupTable, type LookupBinding } from "./lookup-table.ts";
 import {
   WorkflowStatusIds,
@@ -166,7 +167,9 @@ export const stepQueue = pgTable(
     workflowId: text("workflow_id").notNull(),
     stepName: text("step_name").notNull(),
     namespace: text("namespace"),
-    queue: text("queue").notNull().default("default"),
+    // Capabilities this task requires (empty = any worker). Workers claim
+    // tasks where `needs <@ capabilities`. Replaces the old `queue` column.
+    needs: text("needs").array().notNull().default([]),
     priority: integer("priority").notNull().default(5),
     input: jsonb("input"),
     prevResults: jsonb("prev_results"),
@@ -182,13 +185,21 @@ export const stepQueue = pgTable(
     version: text("version"),
   },
   (t) => [
-    index("wf_step_queue_dequeue_idx").on(t.status, t.queue, t.priority, t.createdAt),
+    index("wf_step_queue_dequeue_idx").on(t.status, t.priority, t.createdAt),
     index("wf_step_queue_workflow_idx").on(t.workflowId),
     index("wf_step_queue_namespace_idx").on(t.namespace),
-    // Note: the dedupe partial unique index `wf_step_queue_active_uniq`
-    // (promin-k6mk) isn't declared here because drizzle's index DSL doesn't
-    // cleanly express COALESCE expressions + WHERE predicates together.
-    // It's created by migration 0019 and by PgStepQueue.ensureTable().
+    // Partial unique index — enqueue dedupes on (workflow_id, step_name)
+    // while a prior task is still pending or running. Terminal rows stay
+    // outside the predicate so step retries + startFreshRun() keep
+    // working. `ensureTable` and migration 0019 both create this.
+    uniqueIndex("wf_step_queue_active_uniq")
+      .on(t.workflowId, t.stepName)
+      .where(sql`${t.status} IN ('pending', 'running')`),
+    // GIN index powers `needs <@ capabilities` subset filter on claim.
+    // Partial on status='pending' — claim only reads pending rows.
+    index("wf_step_queue_needs_idx")
+      .using("gin", t.needs)
+      .where(sql`${t.status} = 'pending'`),
   ],
 );
 

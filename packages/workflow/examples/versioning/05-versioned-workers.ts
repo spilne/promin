@@ -43,7 +43,9 @@ async function main(): Promise<void> {
     storage,
     stepQueue,
     registry,
-    queues: ["default"],
+    // No `capabilities` declared — this worker is a generalist that can
+    // claim tasks with no `needs` requirement. Routing by queue name is
+    // gone; steps declare `needs` and workers declare `capabilities`.
     pollIntervalMs: 25,
     supportedVersions: ["1", "2"],
   });
@@ -54,7 +56,7 @@ async function main(): Promise<void> {
     name: "order",
     storage,
     version: "1",
-    dispatch: { stepQueue, routing: { process: "default" }, pollIntervalMs: 25 },
+    dispatch: { stepQueue, remoteSteps: ["process"], pollIntervalMs: 25 },
   })
     .step("process", ({ input }) => Pipeline.succeed(`v1-${input.id}`))
     .run({ workflowId: "order-A", input: { id: "abc" } });
@@ -64,7 +66,7 @@ async function main(): Promise<void> {
     name: "order",
     storage,
     version: "2",
-    dispatch: { stepQueue, routing: { process: "default" }, pollIntervalMs: 25 },
+    dispatch: { stepQueue, remoteSteps: ["process"], pollIntervalMs: 25 },
   })
     .step("process", ({ input }) => Pipeline.succeed(`v2-${input.id}`))
     .run({ workflowId: "order-B", input: { id: "def" } });

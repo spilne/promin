@@ -12,6 +12,22 @@ import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
 import { stepQueue } from "./schema.ts";
 import { ensureTable as ensureTableFromSchema } from "./schema-utils.ts";
 
+/**
+ * Render a JS string[] as a Postgres `text[]` literal:
+ *   ["foo", "bar"] → `'{"foo","bar"}'::text[]`
+ *
+ * Drizzle's parameter binding doesn't round-trip string[] cleanly for text[]
+ * columns (it serializes the array into a single delimited string at bind
+ * time). Embedding the literal as raw SQL avoids the binder entirely.
+ * Values are escaped for the Postgres array-literal syntax — double quotes
+ * and backslashes are the only escape targets.
+ */
+function textArrayLiteral(arr: readonly string[]): string {
+  if (arr.length === 0) return `'{}'::text[]`;
+  const escaped = arr.map((s) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
+  return `'{${escaped.join(",")}}'::text[]`;
+}
+
 export interface PgStepQueueConfig {
   db: DrizzleDb;
   /** Worker ID for claiming tasks. Default: random UUID. */
@@ -48,43 +64,43 @@ export class PgStepQueue implements StepQueue {
   async enqueue(params: {
     workflowId: string;
     stepName: string;
-    queue: string;
     input: unknown;
     prevResults: Record<string, unknown>;
+    needs?: readonly string[];
     priority?: number;
     namespace?: string;
     version?: string;
   }): Promise<string> {
     const ns = params.namespace ?? this.namespace;
-    // Idempotent on (namespace, workflow_id, step_name) while a prior task
-    // is still pending or running — see `StepQueue.enqueue` docstring.
-    // Inferred by the partial unique index `wf_step_queue_active_uniq`
-    // (migration 0019). The DO UPDATE is a no-op self-assignment that
-    // lets RETURNING surface the existing task's id on conflict, so
-    // callers always get an id back (never null, never thrown).
-    //
-    // Hand-written SQL rather than drizzle's onConflictDoUpdate because
-    // drizzle doesn't cleanly express the COALESCE(namespace, '')
-    // expression in the ON CONFLICT target inference list.
     const priority = params.priority ?? 5;
+    const needs = params.needs ?? [];
     const inputJson = params.input === undefined ? null : JSON.stringify(params.input);
     const prevResultsJson = JSON.stringify(params.prevResults);
+    // Raw SQL literal for text[] — drizzle's binder doesn't handle JS
+    // arrays cleanly for this column type. Step names / capability names
+    // come from code (readonly string[] on the interface), so the literal
+    // is safe as long as textArrayLiteral escapes the two special chars
+    // (" and \).
+    const needsLiteral = sql.raw(textArrayLiteral(needs));
+    // Idempotent on (workflow_id, step_name) via the partial unique index
+    // `wf_step_queue_active_uniq`. DO UPDATE is a no-op self-assignment
+    // that lets RETURNING surface the existing task id on conflict, so
+    // callers always get an id back.
     const result = await this.db.execute(sql`
       INSERT INTO wf_step_queue (
-        workflow_id, step_name, namespace, queue, priority, input, prev_results, version
+        workflow_id, step_name, namespace, needs, priority, input, prev_results, version
       )
       VALUES (
         ${params.workflowId},
         ${params.stepName},
         ${ns},
-        ${params.queue},
+        ${needsLiteral},
         ${priority},
         ${inputJson}::jsonb,
         ${prevResultsJson}::jsonb,
         ${params.version ?? null}
       )
-      ON CONFLICT ((COALESCE(namespace, '')), workflow_id, step_name)
-      WHERE status IN ('pending', 'running')
+      ON CONFLICT (workflow_id, step_name) WHERE status IN ('pending', 'running')
       DO UPDATE SET workflow_id = wf_step_queue.workflow_id
       RETURNING id
     `);
@@ -99,78 +115,81 @@ export class PgStepQueue implements StepQueue {
   }
 
   async claim(params: {
-    queues: string[];
+    capabilities?: readonly string[];
     limit: number;
     fairness?: FairnessPolicy;
     filter?: (task: StepTask) => boolean;
   }): Promise<StepTask[]> {
-    const sanitizedQueues = params.queues.map((q) => `'${q.replace(/'/g, "")}'`).join(",");
+    const caps = params.capabilities ?? [];
     const limit = Math.max(1, Math.floor(params.limit));
     const workerId = this.workerId.replace(/'/g, "");
     const now = new Date().toISOString();
-    const nsFilter = this.namespace ? `AND namespace = '${this.namespace.replace(/'/g, "")}'` : "";
     const fairness = params.fairness ?? "strict-priority";
 
-    // Build ORDER BY clause based on fairness policy
-    let orderBy: string;
+    // Capability filter: `needs <@ caps` = "every element of needs is in
+    // caps." Empty caps still matches tasks with empty needs (∅ ⊆ ∅).
+    // Use raw literal for the same reason as enqueue — drizzle's
+    // parameter binding doesn't round-trip JS string[] to text[].
+    const capsLiteral = sql.raw(textArrayLiteral(caps));
+    const nsFilter = this.namespace ? sql` AND namespace = ${this.namespace}` : sql``;
+
+    // ORDER BY fragment per fairness policy.
+    let orderBy;
     switch (fairness) {
       case "round-robin":
-        // Round-robin across workflows: interleave by row number within each workflow
-        // ROW_NUMBER() can't be used inside FOR UPDATE SKIP LOCKED, so we use a
-        // two-layer approach: inner selects with SKIP LOCKED, outer orders by interleave
-        orderBy = `rn, created_at ASC`;
+        orderBy = sql`rn, created_at ASC`;
         break;
       case "weighted":
-        orderBy = `(priority * random()) DESC, created_at ASC`;
+        orderBy = sql`(priority * random()) DESC, created_at ASC`;
         break;
       case "strict-priority":
       default:
-        orderBy = `priority DESC, created_at ASC`;
+        orderBy = sql`priority DESC, created_at ASC`;
         break;
     }
 
-    let query: string;
-    if (fairness === "round-robin") {
-      // Round-robin: select all pending with SKIP LOCKED, then apply window function outside
-      query = `
-        UPDATE wf_step_queue
-        SET status = 'running', claimed_by = '${workerId}', claimed_at = '${now}'
-        WHERE id IN (
-          SELECT id FROM (
-            SELECT id, ROW_NUMBER() OVER (PARTITION BY workflow_id ORDER BY created_at ASC) as rn
-            FROM wf_step_queue
-            WHERE status = 'pending' AND queue IN (${sanitizedQueues}) ${nsFilter}
-          ) ranked
-          ORDER BY ${orderBy}
-          LIMIT ${limit}
-          FOR UPDATE SKIP LOCKED
-        )
-        RETURNING id, workflow_id, step_name, queue, priority, input, prev_results, attempt, status, created_at, version
-      `;
-    } else {
-      // strict-priority and weighted: simple ORDER BY with SKIP LOCKED
-      query = `
-        UPDATE wf_step_queue
-        SET status = 'running', claimed_by = '${workerId}', claimed_at = '${now}'
-        WHERE id IN (
-          SELECT id FROM wf_step_queue
-          WHERE status = 'pending' AND queue IN (${sanitizedQueues}) ${nsFilter}
-          ORDER BY ${orderBy}
-          LIMIT ${limit}
-          FOR UPDATE SKIP LOCKED
-        )
-        RETURNING id, workflow_id, step_name, queue, priority, input, prev_results, attempt, status, created_at, version
-      `;
-    }
+    const claimSql =
+      fairness === "round-robin"
+        ? sql`
+            UPDATE wf_step_queue
+            SET status = 'running', claimed_by = ${workerId}, claimed_at = ${now}
+            WHERE id IN (
+              SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (PARTITION BY workflow_id ORDER BY created_at ASC) as rn
+                FROM wf_step_queue
+                WHERE status = 'pending'
+                  AND needs <@ ${capsLiteral}
+                  ${nsFilter}
+              ) ranked
+              ORDER BY ${orderBy}
+              LIMIT ${limit}
+              FOR UPDATE SKIP LOCKED
+            )
+            RETURNING id, workflow_id, step_name, needs, priority, input, prev_results, attempt, status, created_at, version
+          `
+        : sql`
+            UPDATE wf_step_queue
+            SET status = 'running', claimed_by = ${workerId}, claimed_at = ${now}
+            WHERE id IN (
+              SELECT id FROM wf_step_queue
+              WHERE status = 'pending'
+                AND needs <@ ${capsLiteral}
+                ${nsFilter}
+              ORDER BY ${orderBy}
+              LIMIT ${limit}
+              FOR UPDATE SKIP LOCKED
+            )
+            RETURNING id, workflow_id, step_name, needs, priority, input, prev_results, attempt, status, created_at, version
+          `;
 
-    const rows = await execRaw(this.db, sql.raw(query));
+    const rows = await execRaw(this.db, claimSql);
 
     const claimed: StepTask[] = rows
       .map((r: any) => ({
         id: String(r.id),
         workflowId: r.workflow_id,
         stepName: r.step_name,
-        queue: r.queue,
+        needs: (r.needs as string[]) ?? [],
         priority: r.priority ?? 5,
         input: r.input,
         prevResults: (r.prev_results as Record<string, unknown>) ?? {},
@@ -260,30 +279,27 @@ export class PgStepQueue implements StepQueue {
     return rows.length;
   }
 
-  async metrics(): Promise<
-    Record<string, { pending: number; running: number; completed: number; failed: number }>
-  > {
+  async metrics(): Promise<{
+    pending: number;
+    running: number;
+    completed: number;
+    failed: number;
+  }> {
     const nsFilter = this.namespace ? sql` WHERE namespace = ${this.namespace}` : sql``;
     const rows = await execRaw(
       this.db,
       sql`
-        SELECT queue, status, COUNT(*) as count
+        SELECT status, COUNT(*) as count
         FROM wf_step_queue${nsFilter}
-        GROUP BY queue, status
+        GROUP BY status
       `,
     );
 
-    const result: Record<
-      string,
-      { pending: number; running: number; completed: number; failed: number }
-    > = {};
-
+    const result = { pending: 0, running: 0, completed: 0, failed: 0 };
     for (const row of rows) {
-      const q = row.queue as string;
-      if (!result[q]) result[q] = { pending: 0, running: 0, completed: 0, failed: 0 };
-      result[q]![row.status as "pending" | "running" | "completed" | "failed"] = Number(row.count);
+      const s = row.status as keyof typeof result;
+      if (s in result) result[s] = Number(row.count);
     }
-
     return result;
   }
 
@@ -294,14 +310,5 @@ export class PgStepQueue implements StepQueue {
    */
   async ensureTable(): Promise<void> {
     await ensureTableFromSchema(this.db, stepQueue);
-    // Partial unique index — promin-k6mk. Same DDL as migration 0019;
-    // idempotent so running both is fine. COALESCE(namespace, '') folds
-    // NULL + '' into the same bucket since the ON CONFLICT clause infers
-    // this index by matching the expression + WHERE predicate exactly.
-    await this.db.execute(sql`
-      CREATE UNIQUE INDEX IF NOT EXISTS wf_step_queue_active_uniq
-        ON wf_step_queue ((COALESCE(namespace, '')), workflow_id, step_name)
-        WHERE status IN ('pending', 'running')
-    `);
   }
 }

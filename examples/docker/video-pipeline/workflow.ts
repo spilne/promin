@@ -51,23 +51,35 @@ export interface NotifyResult {
 export function buildVideoWorkflow(storage: WorkflowStorage) {
   return (
     workflow<VideoInput>({ name: "video-pipeline", storage, version: "1" })
-      // 1. decode — default queue. Runs first; everything else depends on it.
+      // Routing is per-step via `needs`. Only steps with hardware /
+      // capability requirements declare them. Steps without `needs` run on
+      // any worker — including the specialized GPU / CPU workers when
+      // those are idle. That's a feature: the GPU box can help clear the
+      // decode backlog when no transcode work is queued. Use a worker
+      // "taint" (v2) if you ever need to reserve a specialized worker
+      // exclusively for its specialty.
       .stepAsync("decode", async (): Promise<DecodeResult> => {
         throw new Error("decode body is placeholder — worker runs the real handler");
       })
-      // 2. transcode — routed to "gpu" (see coordinator.routing).
-      .stepAsync("transcode", { dependsOn: ["decode"] }, async (): Promise<TranscodeResult> => {
-        throw new Error("transcode body is placeholder");
-      })
-      // 3. thumbnail — routed to "cpu". Depends on transcode.
-      .stepAsync("thumbnail", { dependsOn: ["transcode"] }, async (): Promise<ThumbnailResult> => {
-        throw new Error("thumbnail body is placeholder");
-      })
-      // 4. metadata — default queue, runs in parallel with transcode.
+      .stepAsync(
+        "transcode",
+        { dependsOn: ["decode"] },
+        async (): Promise<TranscodeResult> => {
+          throw new Error("transcode body is placeholder");
+        },
+        { needs: ["gpu"] },
+      )
+      .stepAsync(
+        "thumbnail",
+        { dependsOn: ["transcode"] },
+        async (): Promise<ThumbnailResult> => {
+          throw new Error("thumbnail body is placeholder");
+        },
+        { needs: ["cpu"] },
+      )
       .stepAsync("metadata", { dependsOn: ["decode"] }, async (): Promise<MetadataResult> => {
         throw new Error("metadata body is placeholder");
       })
-      // 5. notify — default queue, joins thumbnail + metadata.
       .stepAsync(
         "notify",
         { dependsOn: ["thumbnail", "metadata"] },

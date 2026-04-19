@@ -136,7 +136,7 @@ export function metricsMiddleware(
   record: (metric: {
     workflowId: string;
     stepName: string;
-    queue: string;
+    needs: readonly string[];
     status: "completed" | "failed";
     durationMs: number;
   }) => void,
@@ -148,7 +148,7 @@ export function metricsMiddleware(
       record({
         workflowId: task.workflowId,
         stepName: task.stepName,
-        queue: task.queue,
+        needs: task.needs,
         status: "completed",
         durationMs: Date.now() - start,
       });
@@ -157,7 +157,7 @@ export function metricsMiddleware(
       record({
         workflowId: task.workflowId,
         stepName: task.stepName,
-        queue: task.queue,
+        needs: task.needs,
         status: "failed",
         durationMs: Date.now() - start,
       });

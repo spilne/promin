@@ -286,6 +286,24 @@ export interface StepOptions<T> {
   /** Value to pass to the next step when this step is skipped. Defaults to prev. */
   readonly skipValue?: (prev: unknown) => T;
   /**
+   * Capabilities this step requires from a worker. Only takes effect under
+   * distributed execution (coordinator + workers); in-process `.run()`
+   * ignores it. A worker claims this step only when its declared
+   * `capabilities ⊇ needs`. Empty / omitted = any worker can run it.
+   *
+   * Example: a video-processing step that needs GPU hardware encodes this
+   * declaratively:
+   *   .step("transcode", handler, { needs: ["gpu"] })
+   */
+  readonly needs?: readonly string[];
+  /**
+   * Dispatch priority for distributed execution. Higher numbers claim
+   * ahead of lower. Honoured by both `coordinator.submit`'s enqueueReady
+   * and `wf.run`'s DispatchConfig-backed path. Ignored by pure in-process
+   * `.run()` (no queue involved there). Range 0–10, default 5.
+   */
+  readonly priority?: number;
+  /**
    * Skip-if-recent semantics: wrap the step body in a cache lookup keyed by
    * the user-supplied `key(ctx)`. On hit, return the cached value without
    * running the body. On miss, run the body and cache the result for
@@ -346,14 +364,17 @@ export interface DispatchConfig {
   /** Step queue for dispatching tasks to remote workers. */
   stepQueue: import("../distributed/step-queue.ts").StepQueue;
   /**
-   * Map step names to queue names. Unmatched steps execute locally.
+   * Step names to dispatch remotely. Unlisted steps execute locally. Each
+   * dispatched task carries the step's declared `needs` (from its
+   * `StepOptions.needs`), so workers match by capability rather than
+   * queue name.
    *
    * @example
    * ```ts
-   * routing: { "transcribe": "gpu", "train-model": "gpu" }
+   * remoteSteps: ["transcribe", "train-model"]
    * ```
    */
-  routing: Record<string, string>;
+  remoteSteps: readonly string[];
   /** How often to poll for dispatched step completion (ms). Default: 500. */
   pollIntervalMs?: number;
 }
@@ -502,6 +523,10 @@ interface StepDefinition {
   }) => Pipeline<void, any> | Promise<void>;
   readonly skipWhen?: (prev: unknown) => boolean;
   readonly skipValue?: (prev: unknown) => unknown;
+  /** Capability requirements copied onto the dispatched task by the coordinator. */
+  readonly needs?: readonly string[];
+  /** Dispatch priority copied onto the dispatched task. */
+  readonly priority?: number;
   /**
    * Static metadata for visualization/documentation. Currently set by `.match()`
    * to expose its case labels so the DAG can render decision branches; future
@@ -1614,25 +1639,27 @@ export class WorkflowBuilder<
       }
 
       // Split into local and dispatched steps
-      const dispatchRouting = this._dispatch?.routing ?? {};
+      const remoteSet = new Set(this._dispatch?.remoteSteps ?? []);
       const localReady: string[] = [];
-      const dispatchReady: { name: string; queue: string }[] = [];
+      const dispatchReady: string[] = [];
 
       for (const name of ready) {
-        const queue = dispatchRouting[name];
-        if (queue && this._dispatch) {
-          dispatchReady.push({ name, queue });
+        if (remoteSet.has(name) && this._dispatch) {
+          dispatchReady.push(name);
         } else {
           localReady.push(name);
         }
       }
 
-      // Dispatch remote steps — enqueue and poll until completed
-      for (const { name, queue } of dispatchReady) {
+      // Dispatch remote steps — enqueue (with the step's declared needs) and
+      // poll until completed.
+      for (const name of dispatchReady) {
+        const stepDef = this._steps.find((s) => s.name === name);
         await this._dispatch!.stepQueue.enqueue({
           workflowId,
           stepName: name,
-          queue,
+          needs: stepDef?.needs,
+          priority: stepDef?.priority,
           input,
           prevResults: { ...results },
         });
@@ -2241,6 +2268,8 @@ export class WorkflowBuilder<
         name: s.name,
         dependsOn: s.dependsOn,
         kind: s.kind,
+        ...(s.needs && s.needs.length > 0 ? { needs: s.needs } : {}),
+        ...(s.priority !== undefined ? { priority: s.priority } : {}),
         ...(s.viz?.cases ? { cases: s.viz.cases } : {}),
         ...(s.viz?.hasDefault ? { hasDefault: true } : {}),
       })),
@@ -2338,6 +2367,8 @@ export class WorkflowBuilder<
       compensate: params.options?.compensate as StepDefinition["compensate"],
       skipWhen: params.options?.skipWhen as StepDefinition["skipWhen"],
       skipValue: params.options?.skipValue as StepDefinition["skipValue"],
+      needs: params.options?.needs,
+      priority: params.options?.priority,
       execute: (execParams) => {
         let ctx: StepContext<unknown, unknown> | DagStepContext<unknown, Record<string, unknown>>;
         if (params.isLinear) {
@@ -2554,6 +2585,15 @@ export interface WorkflowDAG {
     readonly name: string;
     readonly dependsOn: readonly string[];
     readonly kind: string;
+    /**
+     * Capabilities this step requires from a worker. Empty / omitted = any
+     * worker can run it. The coordinator copies this onto the dispatched
+     * task at enqueue time; workers claim only tasks whose needs are a
+     * subset of their own declared `capabilities`.
+     */
+    readonly needs?: readonly string[];
+    /** Dispatch priority — higher runs first (default 5 at the queue level). */
+    readonly priority?: number;
     /**
      * For decision nodes (currently `match`): the named case alternatives.
      * Visualizers render these as labeled outgoing edges so the static

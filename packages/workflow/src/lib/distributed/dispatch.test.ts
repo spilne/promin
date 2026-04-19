@@ -26,7 +26,7 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
       storage,
       stepQueue,
       registry: gpuRegistry,
-      queues: ["gpu"],
+      capabilities: ["gpu"],
       pollIntervalMs: 50,
     });
     void gpuWorker.start();
@@ -37,7 +37,7 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
       storage,
       dispatch: {
         stepQueue,
-        routing: { transcribe: "gpu" },
+        remoteSteps: ["transcribe"],
         pollIntervalMs: 100,
       },
     })
@@ -45,8 +45,11 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
         log.push("download:local");
         return Pipeline.succeed(`video-${input.videoId}`);
       })
-      .step("transcribe", { dependsOn: ["download"] }, ({ deps }) =>
-        Pipeline.succeed(`transcribed: ${deps.download}`),
+      .step(
+        "transcribe",
+        { dependsOn: ["download"] },
+        ({ deps }) => Pipeline.succeed(`transcribed: ${deps.download}`),
+        { needs: ["gpu"] },
       )
       .step("format", { dependsOn: ["transcribe"] }, ({ deps }) => {
         log.push("format:local");
@@ -73,7 +76,7 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
       storage,
       dispatch: {
         stepQueue,
-        routing: {}, // nothing dispatched
+        remoteSteps: [], // nothing dispatched
       },
     })
       .step(
@@ -118,7 +121,7 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
       storage,
       stepQueue,
       registry,
-      queues: ["remote"],
+      capabilities: ["remote"],
       pollIntervalMs: 50,
     });
     void worker.start();
@@ -128,13 +131,16 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
       storage,
       dispatch: {
         stepQueue,
-        routing: { "bad-step": "remote" },
+        remoteSteps: ["bad-step"],
         pollIntervalMs: 100,
       },
     })
       .step("local-ok", () => Pipeline.succeed("ok"))
-      .step("bad-step", { dependsOn: ["local-ok"] }, () =>
-        Pipeline.succeed("should not run locally"),
+      .step(
+        "bad-step",
+        { dependsOn: ["local-ok"] },
+        () => Pipeline.succeed("should not run locally"),
+        { needs: ["remote"] },
       )
       .runSafe({ workflowId: "fail-1", input: "x" });
 

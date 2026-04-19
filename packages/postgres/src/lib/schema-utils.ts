@@ -66,15 +66,32 @@ export async function ensureTable(db: DrizzleDb, table: PgTable): Promise<void> 
   const createSql = `CREATE TABLE IF NOT EXISTS "${config.name}" (\n  ${allDefs.join(",\n  ")}\n)`;
   await db.execute(sql.raw(createSql));
 
-  // Create indexes
+  // Create indexes. Respects drizzle's optional `.using('gin' | ...)` access
+  // method and `.where(sql\`...\`)` partial predicate — both needed for
+  // promin-k6mk's partial unique + GIN-on-array indexes without having
+  // to hand-write the DDL in a separate place.
+  //
+  // The where predicate is a drizzle SQL fragment; we splice it into a
+  // `sql\`\`` template and let db.execute() render both the parameters
+  // and the column identifiers. Avoids manually invoking toQuery(), which
+  // wants a casing config we don't have here.
   for (const idx of config.indexes) {
-    const unique = idx.config.unique ? "UNIQUE " : "";
-    const cols = idx.config.columns.map((c: any) => `"${c.name}"`).join(", ");
-    const name =
-      idx.config.name ??
-      `idx_${config.name}_${idx.config.columns.map((c: any) => c.name).join("_")}`;
+    const uniquePrefix = idx.config.unique ? sql.raw("UNIQUE ") : sql.raw("");
+    const name = sql.raw(
+      `"${
+        idx.config.name ??
+        `idx_${config.name}_${idx.config.columns.map((c: any) => c.name).join("_")}`
+      }"`,
+    );
+    const table = sql.raw(`"${config.name}"`);
+    const colList = sql.raw(`(${idx.config.columns.map((c: any) => `"${c.name}"`).join(", ")})`);
+    const methodClause =
+      idx.config.method && idx.config.method !== "btree"
+        ? sql.raw(` USING ${idx.config.method}`)
+        : sql.raw("");
+    const whereClause = idx.config.where ? sql` WHERE ${idx.config.where}` : sql.raw("");
     await db.execute(
-      sql.raw(`CREATE ${unique}INDEX IF NOT EXISTS "${name}" ON "${config.name}" (${cols})`),
+      sql`CREATE ${uniquePrefix}INDEX IF NOT EXISTS ${name} ON ${table}${methodClause} ${colList}${whereClause}`,
     );
   }
 }

@@ -22,14 +22,12 @@ const SUBMIT_INTERVAL_MS = Number(process.env["SUBMIT_INTERVAL_MS"] ?? 5_000);
 
 const { storage, stepQueue, close } = await buildStack();
 
+// Routing lives on the step itself via `needs` (see workflow.ts).
+// Workers declare capabilities that match. The coordinator just
+// orchestrates the DAG — no routing table.
 const coordinator = createCoordinator({
   storage,
   stepQueue,
-  routing: {
-    transcode: "gpu",
-    thumbnail: "cpu",
-  },
-  // Everything unlisted (decode, metadata, notify) goes to "default".
   pollIntervalMs: 500,
 });
 

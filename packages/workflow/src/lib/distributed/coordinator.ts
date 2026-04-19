@@ -21,21 +21,9 @@ export interface CoordinatorConfig {
   /** Step queue for dispatching tasks to workers. */
   stepQueue: StepQueue;
   /**
-   * Route step names to queue names.
-   * Unmatched steps go to "default".
-   *
-   * @example
-   * ```ts
-   * routing: {
-   *   "transcribe": "gpu",
-   *   "summarize": "ai",
-   * }
-   * ```
+   * How often to check for completed steps and enqueue next batch (ms).
+   * Default: 1000.
    */
-  routing?: Record<string, string>;
-  /** Default queue name for unrouted steps. Default: "default". */
-  defaultQueue?: string;
-  /** How often to check for completed steps and enqueue next batch (ms). Default: 1000. */
   pollIntervalMs?: number;
   /** Worker registry for health monitoring. Optional — without it, no dead detection. */
   workerRegistry?: WorkerRegistry;
@@ -69,8 +57,6 @@ export interface WorkflowCoordinator {
 export class DefaultCoordinator implements WorkflowCoordinator {
   private readonly storage: WorkflowStorage;
   private readonly stepQueue: StepQueue;
-  private readonly routing: Record<string, string>;
-  private readonly defaultQueue: string;
   private readonly pollIntervalMs: number;
   private readonly workerRegistry?: WorkerRegistry;
   private readonly workerTimeoutMs: number;
@@ -87,8 +73,6 @@ export class DefaultCoordinator implements WorkflowCoordinator {
   constructor(config: CoordinatorConfig) {
     this.storage = config.storage;
     this.stepQueue = config.stepQueue;
-    this.routing = config.routing ?? {};
-    this.defaultQueue = config.defaultQueue ?? "default";
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
     this.workerRegistry = config.workerRegistry;
     this.workerTimeoutMs = config.workerTimeoutMs ?? 30_000;
@@ -250,11 +234,16 @@ export class DefaultCoordinator implements WorkflowCoordinator {
     for (const stepName of ready) {
       if (enqueuedSteps.has(stepName)) continue;
 
-      const queue = this.routing[stepName] ?? this.defaultQueue;
+      // Capabilities + priority come from the step's own declaration on
+      // the DAG node — no coordinator-side routing map.
+      const dagNode = dag.steps.find((s) => s.name === stepName);
+      const needs = dagNode?.needs ?? [];
+      const priority = dagNode?.priority;
       await this.stepQueue.enqueue({
         workflowId,
         stepName,
-        queue,
+        needs,
+        priority,
         input,
         prevResults,
         // Carry the workflow's stored version through to the task so workers

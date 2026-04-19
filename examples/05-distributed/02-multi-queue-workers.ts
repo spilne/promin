@@ -18,15 +18,10 @@ const stepQueue = new InMemoryStepQueue();
 
 // --- Coordinator process ---
 
-const coordinator = createCoordinator({
-  storage,
-  stepQueue,
-  routing: {
-    transcribe: "gpu",
-    summarize: "ai",
-    // everything else → "default"
-  },
-});
+// Routing is now declared on each step via `needs` (see the workflow
+// definition in 01-video-pipeline.ts). Workers declare capabilities;
+// the coordinator just dispatches.
+const coordinator = createCoordinator({ storage, stepQueue });
 
 // --- Default worker (download, general tasks) ---
 
@@ -42,7 +37,7 @@ const defaultWorker = createWorker({
   storage,
   stepQueue,
   registry: defaultRegistry,
-  queues: ["default"],
+  capabilities: ["default"],
   concurrency: 5,
 });
 
@@ -60,7 +55,7 @@ const gpuWorker = createWorker({
   storage,
   stepQueue,
   registry: gpuRegistry,
-  queues: ["gpu"],
+  capabilities: ["gpu"],
   concurrency: 2,
 });
 
@@ -78,7 +73,7 @@ const aiWorker = createWorker({
   storage,
   stepQueue,
   registry: aiRegistry,
-  queues: ["ai"],
+  capabilities: ["ai"],
   concurrency: 10,
 });
 

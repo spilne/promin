@@ -6,16 +6,23 @@ import type { StepQueue, StepTask, FairnessPolicy } from "./step-queue.ts";
 
 type MutableTask = {
   -readonly [K in keyof StepTask]: StepTask[K];
-} & { result?: unknown; error?: string; claimedBy?: string; claimedAt?: Date };
+} & {
+  result?: unknown;
+  error?: string;
+  claimedBy?: string;
+  claimedAt?: Date;
+  // Internal — StepTask hides namespace from consumers, but we need it to
+  // clear the activeByKey slot on complete/fail.
+  namespace?: string;
+};
 
 export class InMemoryStepQueue implements StepQueue {
   private tasks = new Map<string, MutableTask>();
   /**
-   * `${workflowId}::${stepName}` → taskId of the currently-active (pending or
-   * running) task for that step. Used to dedupe re-enqueues — see
-   * `StepQueue.enqueue` for the full semantics. Cleared when a task hits a
-   * terminal state (complete / fail) so a subsequent enqueue for the same
-   * step can create a fresh task (step retry, fresh workflow runs, etc).
+   * `${namespace}::${workflowId}::${stepName}` → active taskId. Drives the
+   * idempotent-enqueue contract: while a prior task for the triple is
+   * pending/running, re-enqueue returns the existing id. Cleared on
+   * complete/fail so retries + fresh runs can re-enqueue cleanly.
    */
   private activeByKey = new Map<string, string>();
   private counter = 0;
@@ -25,24 +32,21 @@ export class InMemoryStepQueue implements StepQueue {
     this.workerId = params?.workerId ?? "in-memory";
   }
 
-  private activeKey(workflowId: string, stepName: string): string {
-    return `${workflowId}::${stepName}`;
+  private activeKey(namespace: string | undefined, workflowId: string, stepName: string): string {
+    return `${namespace ?? ""}::${workflowId}::${stepName}`;
   }
 
   async enqueue(params: {
     workflowId: string;
     stepName: string;
-    queue: string;
     input: unknown;
     prevResults: Record<string, unknown>;
+    needs?: readonly string[];
     priority?: number;
     namespace?: string;
     version?: string;
   }): Promise<string> {
-    // Idempotency: if a task for this (workflowId, stepName) is already
-    // pending or running, hand back its id instead of creating a second.
-    // The active map is authoritative because we clear it on complete/fail.
-    const key = this.activeKey(params.workflowId, params.stepName);
+    const key = this.activeKey(params.namespace, params.workflowId, params.stepName);
     const existing = this.activeByKey.get(key);
     if (existing !== undefined) return existing;
 
@@ -51,7 +55,7 @@ export class InMemoryStepQueue implements StepQueue {
       id,
       workflowId: params.workflowId,
       stepName: params.stepName,
-      queue: params.queue,
+      needs: params.needs ?? [],
       priority: params.priority ?? 5,
       input: params.input,
       prevResults: params.prevResults,
@@ -59,30 +63,35 @@ export class InMemoryStepQueue implements StepQueue {
       status: "pending",
       createdAt: new Date(),
       version: params.version,
+      namespace: params.namespace,
     });
     this.activeByKey.set(key, id);
     return id;
   }
 
   async claim(params: {
-    queues: string[];
+    capabilities?: readonly string[];
     limit: number;
     fairness?: FairnessPolicy;
     filter?: (task: StepTask) => boolean;
   }): Promise<StepTask[]> {
-    const claimed: StepTask[] = [];
-    const queueSet = new Set(params.queues);
+    const caps = new Set(params.capabilities ?? []);
     const fairness = params.fairness ?? "strict-priority";
 
-    const pending = [...this.tasks.values()].filter(
-      (t) => t.status === "pending" && queueSet.has(t.queue),
-    );
+    // Subset check: task.needs ⊆ capabilities. Empty needs matches anyone.
+    const canHandle = (task: MutableTask): boolean => {
+      for (const n of task.needs) {
+        if (!caps.has(n)) return false;
+      }
+      return true;
+    };
+
+    const pending = [...this.tasks.values()].filter((t) => t.status === "pending" && canHandle(t));
 
     let ordered: MutableTask[];
 
     switch (fairness) {
       case "strict-priority":
-        // Highest priority first, FIFO within same priority
         ordered = pending.sort(
           (a, b) =>
             (b.priority ?? 5) - (a.priority ?? 5) || a.createdAt.getTime() - b.createdAt.getTime(),
@@ -90,7 +99,6 @@ export class InMemoryStepQueue implements StepQueue {
         break;
 
       case "round-robin": {
-        // Interleave across workflowIds — one task per workflow, then cycle
         const byWorkflow = new Map<string, MutableTask[]>();
         for (const t of pending.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())) {
           if (!byWorkflow.has(t.workflowId)) byWorkflow.set(t.workflowId, []);
@@ -114,8 +122,6 @@ export class InMemoryStepQueue implements StepQueue {
       }
 
       case "weighted": {
-        // Weighted random — higher priority tasks have proportionally higher chance
-        // Shuffle pending, then sort with randomized priority weight
         ordered = pending
           .map((t) => ({ t, score: (t.priority ?? 5) * (0.5 + Math.random()) }))
           .sort((a, b) => b.score - a.score)
@@ -127,10 +133,10 @@ export class InMemoryStepQueue implements StepQueue {
         ordered = pending;
     }
 
+    const claimed: StepTask[] = [];
     for (const task of ordered) {
       if (claimed.length >= params.limit) break;
       if (task.status !== "pending") continue;
-      // Apply filter predicate — rejected tasks stay pending for other workers.
       if (params.filter && !params.filter({ ...task } as StepTask)) continue;
       task.status = "running";
       task.claimedBy = this.workerId;
@@ -146,8 +152,7 @@ export class InMemoryStepQueue implements StepQueue {
     if (task) {
       task.status = "completed";
       task.result = params.result;
-      // Free the dedupe slot so a retry / fresh-run re-enqueue can succeed.
-      this.activeByKey.delete(this.activeKey(task.workflowId, task.stepName));
+      this.activeByKey.delete(this.activeKey(task.namespace, task.workflowId, task.stepName));
     }
   }
 
@@ -156,7 +161,7 @@ export class InMemoryStepQueue implements StepQueue {
     if (task) {
       task.status = "failed";
       task.error = params.error;
-      this.activeByKey.delete(this.activeKey(task.workflowId, task.stepName));
+      this.activeByKey.delete(this.activeKey(task.namespace, task.workflowId, task.stepName));
     }
   }
 
@@ -180,20 +185,15 @@ export class InMemoryStepQueue implements StepQueue {
     return count;
   }
 
-  async metrics(): Promise<
-    Record<string, { pending: number; running: number; completed: number; failed: number }>
-  > {
-    const result: Record<
-      string,
-      { pending: number; running: number; completed: number; failed: number }
-    > = {};
-    for (const task of this.tasks.values()) {
-      if (!result[task.queue]) {
-        result[task.queue] = { pending: 0, running: 0, completed: 0, failed: 0 };
-      }
-      result[task.queue]![task.status]++;
-    }
-    return result;
+  async metrics(): Promise<{
+    pending: number;
+    running: number;
+    completed: number;
+    failed: number;
+  }> {
+    const counts = { pending: 0, running: 0, completed: 0, failed: 0 };
+    for (const task of this.tasks.values()) counts[task.status]++;
+    return counts;
   }
 
   /** Test helper: get all tasks. */

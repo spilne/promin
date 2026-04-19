@@ -20,7 +20,12 @@ const worker = createWorker({
   storage,
   stepQueue,
   registry,
-  queues: ["default"],
+  // No capabilities declared — matches only tasks with empty `needs` (the
+  // decode / metadata / notify steps in this workflow). The GPU and CPU
+  // workers COULD also claim those steps (their capabilities are supersets
+  // of ∅), so the "default" work is effectively shared — this worker just
+  // guarantees there's always somebody listening for empty-needs tasks.
+  capabilities: [],
   concurrency: 4,
   metadata: { role: "default-worker" },
 });

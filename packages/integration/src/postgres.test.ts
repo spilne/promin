@@ -96,12 +96,12 @@ withPostgres("PgStepQueue — distributed step dispatch", (ctx) => {
     await queue.enqueue({
       workflowId: "wf-1",
       stepName: "process",
-      queue: "default",
+      needs: ["default"],
       input: { data: "hello" },
       prevResults: {},
     });
 
-    const tasks = await queue.claim({ queues: ["default"], limit: 1 });
+    const tasks = await queue.claim({ capabilities: ["default"], limit: 1 });
     expect(tasks).toHaveLength(1);
     expect(tasks[0]!.stepName).toBe("process");
     expect(tasks[0]!.input).toEqual({ data: "hello" });
@@ -118,15 +118,15 @@ withPostgres("PgStepQueue — distributed step dispatch", (ctx) => {
     await q1.enqueue({
       workflowId: "wf-2",
       stepName: "step-a",
-      queue: "default",
+      needs: ["default"],
       input: {},
       prevResults: {},
     });
 
     // Both workers try to claim — only one should succeed
     const [t1, t2] = await Promise.all([
-      q1.claim({ queues: ["default"], limit: 1 }),
-      q2.claim({ queues: ["default"], limit: 1 }),
+      q1.claim({ capabilities: ["default"], limit: 1 }),
+      q2.claim({ capabilities: ["default"], limit: 1 }),
     ]);
 
     const claimed = [...t1, ...t2];
@@ -143,7 +143,7 @@ withPostgres("PgStepQueue — distributed step dispatch", (ctx) => {
     await queue.enqueue({
       workflowId: "wf-lo",
       stepName: "low",
-      queue: "default",
+      needs: ["default"],
       input: {},
       prevResults: {},
       priority: 1,
@@ -151,16 +151,16 @@ withPostgres("PgStepQueue — distributed step dispatch", (ctx) => {
     await queue.enqueue({
       workflowId: "wf-hi",
       stepName: "high",
-      queue: "default",
+      needs: ["default"],
       input: {},
       prevResults: {},
       priority: 10,
     });
 
-    const first = await queue.claim({ queues: ["default"], limit: 1 });
+    const first = await queue.claim({ capabilities: ["default"], limit: 1 });
     expect(first[0]!.stepName).toBe("high"); // higher priority first
 
-    const second = await queue.claim({ queues: ["default"], limit: 1 });
+    const second = await queue.claim({ capabilities: ["default"], limit: 1 });
     expect(second[0]!.stepName).toBe("low");
 
     await close();
@@ -174,12 +174,12 @@ withPostgres("PgStepQueue — distributed step dispatch", (ctx) => {
     await queue.enqueue({
       workflowId: "wf-done",
       stepName: "s1",
-      queue: "default",
+      needs: ["default"],
       input: {},
       prevResults: {},
     });
 
-    const tasks = await queue.claim({ queues: ["default"], limit: 1 });
+    const tasks = await queue.claim({ capabilities: ["default"], limit: 1 });
     await queue.complete({
       taskId: tasks[0]!.id,
       result: { output: "done" },
@@ -187,7 +187,7 @@ withPostgres("PgStepQueue — distributed step dispatch", (ctx) => {
     });
 
     // No more tasks to claim
-    const next = await queue.claim({ queues: ["default"], limit: 1 });
+    const next = await queue.claim({ capabilities: ["default"], limit: 1 });
     expect(next).toHaveLength(0);
 
     await close();

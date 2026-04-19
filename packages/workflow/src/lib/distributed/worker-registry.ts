@@ -4,7 +4,7 @@
 
 export interface WorkerInfo {
   readonly workerId: string;
-  readonly queues: string[];
+  readonly capabilities: readonly string[];
   readonly concurrency: number;
   readonly status: "active" | "draining" | "dead";
   readonly lastHeartbeat: Date;
@@ -16,7 +16,7 @@ export interface WorkerRegistry {
   /** Register a worker as active. */
   register(params: {
     workerId: string;
-    queues: string[];
+    capabilities: readonly string[];
     concurrency: number;
     metadata?: Record<string, unknown>;
   }): Promise<void>;
@@ -45,14 +45,14 @@ export class InMemoryWorkerRegistry implements WorkerRegistry {
 
   async register(params: {
     workerId: string;
-    queues: string[];
+    capabilities: readonly string[];
     concurrency: number;
     metadata?: Record<string, unknown>;
   }): Promise<void> {
     const now = new Date();
     this.workers.set(params.workerId, {
       workerId: params.workerId,
-      queues: params.queues,
+      capabilities: params.capabilities,
       concurrency: params.concurrency,
       status: "active",
       lastHeartbeat: now,

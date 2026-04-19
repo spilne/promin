@@ -16,7 +16,7 @@ const worker = createWorker({
   storage,
   stepQueue,
   registry,
-  queues: ["cpu"],
+  capabilities: ["cpu"],
   concurrency: 4,
   metadata: { role: "cpu-worker" },
 });

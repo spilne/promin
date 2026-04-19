@@ -21,7 +21,7 @@ const worker = createWorker({
   storage,
   stepQueue,
   registry,
-  queues: ["gpu"],
+  capabilities: ["gpu"],
   concurrency: 2,
   metadata: { role: "gpu-worker" },
 });

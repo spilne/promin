@@ -101,7 +101,7 @@ withPostgres("Distributed DAG workflow — video processing pipeline", (ctx) => 
       storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
+      capabilities: ["default"],
       concurrency: 3,
       pollIntervalMs: 100,
       workerId: "worker-1",
@@ -198,7 +198,7 @@ withPostgres("Distributed workers — competing task execution", (ctx) => {
             });
             return r;
           })(),
-          queues: ["default"],
+          capabilities: ["default"],
           concurrency: 5,
           pollIntervalMs: 50,
           workerId: `worker-${id}`,
@@ -213,7 +213,7 @@ withPostgres("Distributed workers — competing task execution", (ctx) => {
     await eventually(
       async () => {
         const metrics = await queue.metrics();
-        const completed = metrics["default"]?.completed ?? 0;
+        const completed = metrics.completed ?? 0;
         expect(completed).toBe(50);
       },
       { timeoutMs: 30_000, intervalMs: 200 },
@@ -258,21 +258,21 @@ withPostgres("Dead worker detection — task recovery", (ctx) => {
     await queue.enqueue({
       workflowId: "wf-recovery",
       stepName: "process",
-      queue: "default",
+      needs: ["default"],
       input: {},
       prevResults: {},
     });
 
     // Worker 1 claims the task
     const w1Queue = new PgStepQueue({ db, workerId: "worker-dead" });
-    const claimed = await w1Queue.claim({ queues: ["default"], limit: 1 });
+    const claimed = await w1Queue.claim({ capabilities: ["default"], limit: 1 });
     expect(claimed).toHaveLength(1);
 
     // Worker 1 "crashes" — task stays in "running" state
     // Register the dead worker so coordinator can detect it
     await workerRegistry.register({
       workerId: "worker-dead",
-      queues: ["default"],
+      capabilities: ["default"],
       concurrency: 1,
     });
 
@@ -294,7 +294,7 @@ withPostgres("Dead worker detection — task recovery", (ctx) => {
 
     // Worker 2 can now claim and complete the task
     const w2Queue = new PgStepQueue({ db, workerId: "worker-alive" });
-    const reclaimed = await w2Queue.claim({ queues: ["default"], limit: 1 });
+    const reclaimed = await w2Queue.claim({ capabilities: ["default"], limit: 1 });
     expect(reclaimed).toHaveLength(1);
     expect(reclaimed[0]!.stepName).toBe("process");
 
@@ -302,8 +302,8 @@ withPostgres("Dead worker detection — task recovery", (ctx) => {
 
     // Verify final metrics
     const metrics = await queue.metrics();
-    expect(metrics["default"]?.completed).toBe(1);
-    expect(metrics["default"]?.running).toBe(0);
+    expect(metrics.completed).toBe(1);
+    expect(metrics.running).toBe(0);
 
     await close();
   });
@@ -327,7 +327,7 @@ withPostgres("Priority queue — critical orders processed first", (ctx) => {
       await queue.enqueue({
         workflowId: `low-${i}`,
         stepName: "process",
-        queue: "default",
+        needs: ["default"],
         input: { priority: "low" },
         prevResults: {},
         priority: 1,
@@ -339,7 +339,7 @@ withPostgres("Priority queue — critical orders processed first", (ctx) => {
       await queue.enqueue({
         workflowId: `high-${i}`,
         stepName: "process",
-        queue: "default",
+        needs: ["default"],
         input: { priority: "high" },
         prevResults: {},
         priority: 10,
@@ -349,7 +349,7 @@ withPostgres("Priority queue — critical orders processed first", (ctx) => {
     // Claim tasks one at a time — should get high-priority first
     const order: string[] = [];
     for (let i = 0; i < 8; i++) {
-      const tasks = await queue.claim({ queues: ["default"], limit: 1 });
+      const tasks = await queue.claim({ capabilities: ["default"], limit: 1 });
       if (tasks.length > 0) {
         order.push(tasks[0]!.workflowId.startsWith("high") ? "high" : "low");
         await queue.complete({ taskId: tasks[0]!.id, result: {}, durationMs: 1 });
@@ -383,19 +383,18 @@ withPostgres("Queue routing — GPU vs CPU workers", (ctx) => {
       name: "ml-pipeline",
       storage,
     })
-      .step("preprocess", (ctx) => Pipeline.succeed({ processed: ctx.input.imageUrl }))
-      .step("inference", (ctx) => Pipeline.succeed({ prediction: "cat", confidence: 0.95 }))
-      .step("postprocess", (ctx) => Pipeline.succeed({ result: ctx.prev }))
+      .step("preprocess", (ctx) => Pipeline.succeed({ processed: ctx.input.imageUrl }), {
+        needs: ["cpu"],
+      })
+      .step("inference", (ctx) => Pipeline.succeed({ prediction: "cat", confidence: 0.95 }), {
+        needs: ["gpu"],
+      })
+      .step("postprocess", (ctx) => Pipeline.succeed({ result: ctx.prev }), { needs: ["cpu"] })
       .build();
 
     const coordinator = new DefaultCoordinator({
       storage,
       stepQueue: queue,
-      routing: {
-        preprocess: "cpu",
-        inference: "gpu",
-        postprocess: "cpu",
-      },
       pollIntervalMs: 50,
     });
 
@@ -412,7 +411,7 @@ withPostgres("Queue routing — GPU vs CPU workers", (ctx) => {
       storage,
       stepQueue: new PgStepQueue({ db, workerId: "gpu-worker" }),
       registry: gpuRegistry,
-      queues: ["gpu"],
+      capabilities: ["gpu"],
       concurrency: 1,
       pollIntervalMs: 50,
       workerId: "gpu-worker",
@@ -432,7 +431,7 @@ withPostgres("Queue routing — GPU vs CPU workers", (ctx) => {
       storage,
       stepQueue: new PgStepQueue({ db, workerId: "cpu-worker" }),
       registry: cpuRegistry,
-      queues: ["cpu"],
+      capabilities: ["cpu"],
       concurrency: 2,
       pollIntervalMs: 50,
       workerId: "cpu-worker",
@@ -580,7 +579,7 @@ withAll("E2E: Kafka orders → distributed workflow → completion", (ctx) => {
       storage,
       stepQueue,
       registry,
-      queues: ["default"],
+      capabilities: ["default"],
       concurrency: 5,
       pollIntervalMs: 50,
     });

@@ -19,7 +19,7 @@ const queue = new InMemoryStepQueue();
 await queue.enqueue({
   workflowId: "order-premium-1",
   stepName: "process",
-  queue: "default",
+  needs: ["default"],
   input: { customer: "premium" },
   prevResults: {},
   priority: 10, // highest priority
@@ -30,7 +30,7 @@ for (let i = 0; i < 5; i++) {
   await queue.enqueue({
     workflowId: `order-standard-${i}`,
     stepName: "process",
-    queue: "default",
+    needs: ["default"],
     input: { customer: "standard" },
     prevResults: {},
     priority: 5, // default priority
@@ -41,7 +41,7 @@ for (let i = 0; i < 5; i++) {
 await queue.enqueue({
   workflowId: "cleanup-1",
   stepName: "gc",
-  queue: "default",
+  needs: ["default"],
   input: {},
   prevResults: {},
   priority: 1, // lowest priority
@@ -52,7 +52,7 @@ await queue.enqueue({
 // ---------------------------------------------------------------------------
 
 const strictTasks = await queue.claim({
-  queues: ["default"],
+  capabilities: ["default"],
   limit: 3,
   fairness: "strict-priority",
 });
@@ -74,7 +74,7 @@ for (const wfId of ["wf-A", "wf-B", "wf-C"]) {
     await queue2.enqueue({
       workflowId: wfId,
       stepName: `step-${i}`,
-      queue: "default",
+      needs: ["default"],
       input: {},
       prevResults: {},
     });
@@ -82,7 +82,7 @@ for (const wfId of ["wf-A", "wf-B", "wf-C"]) {
 }
 
 const rrTasks = await queue2.claim({
-  queues: ["default"],
+  capabilities: ["default"],
   limit: 6,
   fairness: "round-robin",
 });
@@ -102,7 +102,7 @@ for (let i = 0; i < 10; i++) {
   await queue3.enqueue({
     workflowId: `wf-${i}`,
     stepName: "work",
-    queue: "default",
+    needs: ["default"],
     input: {},
     prevResults: {},
     priority: i < 3 ? 10 : 2, // 3 high priority, 7 low priority
@@ -110,7 +110,7 @@ for (let i = 0; i < 10; i++) {
 }
 
 const weightedTasks = await queue3.claim({
-  queues: ["default"],
+  capabilities: ["default"],
   limit: 5,
   fairness: "weighted",
 });

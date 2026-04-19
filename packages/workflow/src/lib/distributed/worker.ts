@@ -32,7 +32,20 @@ export interface WorkerConfig {
   storage: WorkflowStorage;
   stepQueue: StepQueue;
   registry: StepRegistry;
-  queues?: string[];
+  /**
+   * Capabilities this worker offers. Tasks whose `needs` are a subset of
+   * this list are claimable. Empty / omitted = generalist — can only claim
+   * tasks with no `needs` declared.
+   *
+   * @example
+   * ```ts
+   * createWorker({
+   *   // ...
+   *   capabilities: ["gpu", "h265-hw-encode"],
+   * });
+   * ```
+   */
+  capabilities?: readonly string[];
   concurrency?: number;
   pollIntervalMs?: number;
   workerId?: string;
@@ -84,7 +97,7 @@ export class DefaultWorker implements WorkflowWorker {
   private readonly storage: WorkflowStorage;
   private readonly stepQueue: StepQueue;
   private readonly registry: StepRegistry;
-  private readonly queues: string[];
+  private readonly capabilities: readonly string[];
   private readonly concurrency: number;
   private readonly pollIntervalMs: number;
   private readonly hooks: WorkerHooks;
@@ -102,7 +115,7 @@ export class DefaultWorker implements WorkflowWorker {
     this.storage = config.storage;
     this.stepQueue = config.stepQueue;
     this.registry = config.registry;
-    this.queues = config.queues ?? ["default"];
+    this.capabilities = config.capabilities ?? [];
     this.concurrency = config.concurrency ?? 1;
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
     this.hooks = config.hooks ?? {};
@@ -136,7 +149,7 @@ export class DefaultWorker implements WorkflowWorker {
     if (this.workerRegistry) {
       await this.workerRegistry.register({
         workerId: this.workerId,
-        queues: this.queues,
+        capabilities: this.capabilities,
         concurrency: this.concurrency,
         metadata: this.workerMetadata,
       });
@@ -149,7 +162,7 @@ export class DefaultWorker implements WorkflowWorker {
       if (this.activeCount < this.concurrency) {
         const claimCount = this.concurrency - this.activeCount;
         const tasks = await this.stepQueue.claim({
-          queues: this.queues,
+          capabilities: this.capabilities,
           limit: claimCount,
           filter: this.claimFilter,
         });
