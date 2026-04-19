@@ -60,6 +60,17 @@ export {
   GuardError,
 } from "./durable-pipeline-error.ts";
 export { topologicalSort, computeReadySet, type DagNode } from "./workflow-dag.ts";
+export {
+  DefaultWorkflowRunner,
+  InProcessStepExecutor,
+  createWorkflowRunner,
+  type WorkflowRunner,
+  type WorkflowRunnerExecuteParams,
+  type WorkflowRunSafeError,
+  type StepExecutor,
+  type StepExecutionRequest,
+  type StepExecutionResult,
+} from "./workflow-runner.ts";
 export { trigger, WorkflowResult } from "./workflow-trigger.ts";
 export {
   webhookTrigger,
