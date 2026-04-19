@@ -16,20 +16,30 @@
 // formalize `StepExecutor` as the in-process vs remote vs queue seam.
 // ---------------------------------------------------------------------------
 
+import { Effect } from "effect";
 import { Pipeline, type Sinkable, type TaggedError } from "@promin/core";
-import type { RunnableWorkflow, Workflow, CompensateConfig } from "./durable-pipeline.ts";
+import { LosslessJsonCodec } from "@promin/core";
+import type {
+  RunnableWorkflow,
+  Workflow,
+  CompensateConfig,
+  DispatchConfig,
+  StepDefinition,
+} from "./durable-pipeline.ts";
 import type { WorkflowHooks, IdempotencyConfig } from "./durable-pipeline.ts";
 import { isStepAttemptStorage, type WorkflowStorage } from "./workflow-storage.ts";
-import type { DagNode } from "./workflow-dag.ts";
-import type { FailedWorkflowRecord } from "./workflow-state.ts";
-import type {
+import { computeReadySet, type DagNode } from "./workflow-dag.ts";
+import type { FailedWorkflowRecord, WorkflowState } from "./workflow-state.ts";
+import {
   StepError,
   WorkflowError,
+  WorkflowDeadlineError,
+  StepTimeoutError,
+} from "./durable-pipeline-error.ts";
+import type {
   WorkflowLockError,
   WorkflowSuspendedError,
   WorkflowTimeoutError,
-  StepTimeoutError,
-  WorkflowDeadlineError,
 } from "./durable-pipeline-error.ts";
 
 // ---------------------------------------------------------------------------
@@ -161,6 +171,402 @@ export function createWorkflowRunner(): WorkflowRunner {
 // phase 1b/1c can incrementally move orchestration out of the builder
 // without the runner needing access to private class state.
 // ---------------------------------------------------------------------------
+
+/**
+ * Slice of the workflow-runtime state the DAG executor needs. A strict
+ * subset of the broader orchestration context so callers that only want
+ * to drive the DAG (without the surrounding lock / retry / compensation
+ * loop) don't need to construct unused fields.
+ */
+export interface DagExecutionContext {
+  readonly storage: WorkflowStorage;
+  readonly steps: ReadonlyArray<StepDefinition>;
+  readonly hooks?: WorkflowHooks;
+  readonly timeoutMs?: number;
+  readonly dispatch?: DispatchConfig;
+}
+
+/**
+ * Execute the workflow DAG against its current state. Computes the ready
+ * set per iteration, dispatches remote steps via the step queue, runs local
+ * ready steps in parallel with per-step retry + timeout + onFailure, and
+ * checkpoints every completed step via `saveStepResult`. Suspension
+ * errors propagate through as `{ suspension: true }` so the caller can
+ * distinguish "workflow is sleeping / waiting for signal" from real
+ * failures.
+ *
+ * Formerly `WorkflowBuilder._executeDag`. Pure function now — takes
+ * the DAG context directly so the runner can drive DAG execution with
+ * different executors in later phases (step-queue-backed, gRPC).
+ */
+export async function executeWorkflowDag(
+  ctx: DagExecutionContext,
+  params: {
+    workflowId: string;
+    input: unknown;
+    dagNodes: DagNode[];
+    state: WorkflowState | null;
+    workflowStartTime: number;
+    /** Tracks attempt numbers per step — shared across workflow retries so counters keep incrementing. */
+    stepAttempts: Map<string, number>;
+    /** Workflow-level deadline (absolute timestamp). Steps completing after this fail the workflow. */
+    deadlineMs?: number;
+  },
+): Promise<
+  { success: true; result: unknown } | { success: false; error: unknown; suspension: boolean }
+> {
+  const { workflowId, input, dagNodes, state } = params;
+  const results: Record<string, unknown> = {};
+
+  // Load previously completed step results. The stored shape is always the
+  // codec's encoded form (written by saveStepResult above), so we decode
+  // through the step's codec here so downstream steps see the same shape
+  // they would on a fresh run.
+  if (state) {
+    for (const [stepName, stepState] of Object.entries(state.steps)) {
+      if (stepState.status === "completed") {
+        const stepDef = ctx.steps.find((s) => s.name === stepName);
+        const codec = stepDef?.codec ?? LosslessJsonCodec;
+        results[stepName] = codec.decode(stepState.result);
+      }
+    }
+  }
+
+  const completed = new Set(Object.keys(results));
+  const running = new Set<string>();
+
+  while (completed.size < ctx.steps.length) {
+    // Check workflow-level deadline before each batch
+    if (params.deadlineMs != null && Date.now() > params.deadlineMs) {
+      return {
+        success: false,
+        error: new WorkflowDeadlineError({
+          workflowId,
+          timeoutMs: ctx.timeoutMs!,
+          message: `Workflow "${workflowId}" exceeded global deadline of ${ctx.timeoutMs}ms`,
+        }),
+        suspension: false,
+      };
+    }
+
+    const ready = computeReadySet({ nodes: dagNodes, completed, running });
+
+    if (ready.length === 0 && running.size === 0) {
+      return {
+        success: false,
+        error: new WorkflowError({
+          workflowId,
+          message: "Deadlock: no steps are ready and none are running",
+        }),
+        suspension: false,
+      };
+    }
+
+    if (ready.length === 0) {
+      break;
+    }
+
+    for (const name of ready) {
+      running.add(name);
+    }
+
+    // Split into local and dispatched steps
+    const remoteSet = new Set(ctx.dispatch?.remoteSteps ?? []);
+    const localReady: string[] = [];
+    const dispatchReady: string[] = [];
+
+    for (const name of ready) {
+      if (remoteSet.has(name) && ctx.dispatch) {
+        dispatchReady.push(name);
+      } else {
+        localReady.push(name);
+      }
+    }
+
+    // Dispatch remote steps — enqueue (with the step's declared needs) and
+    // poll until completed.
+    for (const name of dispatchReady) {
+      const stepDef = ctx.steps.find((s) => s.name === name);
+      await ctx.dispatch!.stepQueue.enqueue({
+        workflowId,
+        stepName: name,
+        needs: stepDef?.needs,
+        priority: stepDef?.priority,
+        input,
+        prevResults: { ...results },
+      });
+      // Poll until the worker completes this step
+      const pollMs = ctx.dispatch!.pollIntervalMs ?? 500;
+      while (true) {
+        await new Promise((r) => setTimeout(r, pollMs));
+        const currentState = await ctx.storage.loadWorkflow(workflowId);
+        const stepState = currentState?.steps[name];
+        if (stepState?.status === "completed") {
+          results[name] = stepState.result;
+          completed.add(name);
+          running.delete(name);
+          await ctx.hooks?.onStepComplete?.({
+            workflowId,
+            stepName: name,
+            result: stepState.result,
+            durationMs: stepState.durationMs ?? 0,
+          });
+          break;
+        }
+        if (stepState?.status === "failed") {
+          const errorMsg = stepState.error ?? "Remote step failed";
+          await ctx.hooks?.onStepFailure?.({
+            workflowId,
+            stepName: name,
+            error: errorMsg,
+            durationMs: 0,
+          });
+          return {
+            success: false,
+            error: new StepError({ workflowId, stepName: name, message: errorMsg }),
+            suspension: false,
+          };
+        }
+      }
+    }
+
+    // If all ready steps were dispatched, skip local execution
+    if (localReady.length === 0) continue;
+
+    // Execute local ready steps in parallel, with per-step retry and failure handling
+    const readySteps = localReady.map((name) => ctx.steps.find((s) => s.name === name)!);
+
+    // Per-parallel-batch audit metadata map. `.match()` writes its chosen
+    // case here via metadataRef; the failure path reads it back by step
+    // name to persist metadata even when a match branch throws.
+    const stepMetadata = new Map<string, Record<string, unknown>>();
+
+    const pipeline = Pipeline.all(
+      ...readySteps.map((stepDef) => {
+        // Evaluate skipWhen before entering the step execution pipeline
+        if (stepDef.skipWhen) {
+          const prevStepName = stepDef.dependsOn[0];
+          const prev = prevStepName != null ? results[prevStepName] : input;
+          if (stepDef.skipWhen(prev)) {
+            const skipResult = stepDef.skipValue ? stepDef.skipValue(prev) : prev;
+            const encoded = stepDef.codec.encode(skipResult);
+            return Pipeline.succeed({
+              name: stepDef.name,
+              result: encoded,
+              durationMs: 0,
+              startedAt: new Date(),
+              skipped: true as const,
+            });
+          }
+        }
+
+        const startedAt = new Date();
+        const startTime = startedAt.getTime();
+
+        // Get or initialize attempt counter for this step (persists across workflow retries)
+        const currentAttemptForStep = params.stepAttempts.get(stepDef.name) ?? 0;
+        const attemptRef = { current: currentAttemptForStep + 1 };
+        // Shared audit-metadata slot — `.match()` fills it at selector time;
+        // the map() below forwards it onto the stepResult shape. Fresh per
+        // step (not per attempt) so a retry overwrites rather than appends.
+        const metadataRef: { current?: Record<string, unknown> } = { current: undefined };
+
+        // Raw step execution — wrapped in suspend so retry re-invokes the step fn.
+        // attemptRef tracks the attempt number; incremented each invocation so
+        // step retries and workflow retries both see monotonically increasing attempts.
+        let raw: Pipeline<unknown, TaggedError> = Pipeline.from(
+          Effect.suspend(() => {
+            const currentAttempt = attemptRef.current;
+            attemptRef.current = currentAttempt + 1;
+            // Write back to shared map so workflow retries pick up the right count
+            params.stepAttempts.set(stepDef.name, currentAttempt);
+            const executed = stepDef.execute({
+              input,
+              results,
+              workflowId,
+              storage: ctx.storage,
+              attemptRef: { current: currentAttempt },
+              metadataRef,
+            });
+            // Kinds that set metadata synchronously in their execute (e.g.
+            // `.match()` after selector resolution) surface it here BEFORE
+            // the branch pipeline runs. The failure path can then read
+            // the map by step name even when the branch throws.
+            if (metadataRef.current) {
+              stepMetadata.set(stepDef.name, metadataRef.current);
+            }
+            return executed.effect;
+          }),
+        ) as Pipeline<unknown, TaggedError>;
+
+        // Per-step activity timeout — wraps the user's function with a deadline
+        if (stepDef.timeoutMs != null) {
+          const stepTimeoutMs = stepDef.timeoutMs;
+          const stepName = stepDef.name;
+          const timeoutEffect = Effect.sleep(stepTimeoutMs).pipe(
+            Effect.andThen(
+              Effect.fail(
+                new StepTimeoutError({
+                  workflowId,
+                  stepName,
+                  timeoutMs: stepTimeoutMs,
+                  message: `Step "${stepName}" timed out after ${stepTimeoutMs}ms`,
+                }),
+              ),
+            ),
+          );
+          raw = Pipeline.from(Effect.raceFirst(raw.effect, timeoutEffect)) as Pipeline<
+            unknown,
+            TaggedError
+          >;
+        }
+
+        // Step-level retry (before mapping to result shape)
+        if (stepDef.retry) {
+          raw = raw.retry(stepDef.retry);
+        }
+
+        // Step-level failure strategy
+        const strategy = stepDef.onFailure ?? "fail";
+        if (strategy === "skip") {
+          raw = raw.handleError(() => undefined);
+        } else if (strategy !== "fail" && "fallback" in strategy) {
+          const fallbackFn = strategy.fallback;
+          raw = raw.handleError((err) => fallbackFn(err));
+        }
+
+        // Map to step result
+        return raw.map((result) => {
+          const encoded = stepDef.codec.encode(result);
+          return {
+            name: stepDef.name,
+            result: encoded,
+            metadata: metadataRef.current,
+            durationMs: Date.now() - startTime,
+            startedAt,
+          };
+        });
+      }),
+    );
+
+    const { data: stepResults, error: stepError } = await pipeline.runSafe();
+
+    if (stepError) {
+      const tag = (stepError as TaggedError)._tag;
+
+      // Suspension errors propagate without failing the workflow
+      if (tag === "WorkflowSuspendedError") {
+        return { success: false, error: stepError, suspension: true };
+      }
+
+      // Record step failure
+      const stepName =
+        tag === "StepError"
+          ? (stepError as StepError).stepName
+          : tag === "WorkflowTimeoutError"
+            ? (stepError as WorkflowTimeoutError).stepName
+            : tag === "StepTimeoutError"
+              ? (stepError as StepTimeoutError).stepName
+              : (ready[0] ?? "unknown");
+      const errorMsg =
+        stepError instanceof globalThis.Error ? stepError.message : String(stepError);
+      const failStartedAt = new Date();
+      await ctx.storage.saveStepFailure({
+        workflowId,
+        stepName,
+        error: errorMsg,
+        durationMs: 0,
+        startedAt: failStartedAt,
+        metadata: stepMetadata.get(stepName),
+      });
+      if (isStepAttemptStorage(ctx.storage)) {
+        await ctx.storage.saveStepAttempt({
+          workflowId,
+          stepName,
+          attempt: params.stepAttempts.get(stepName) ?? 1,
+          type: "execution",
+          status: "failed",
+          error: errorMsg,
+          durationMs: 0,
+          startedAt: failStartedAt,
+          completedAt: new Date(),
+        });
+      }
+      await ctx.hooks?.onStepFailure?.({
+        workflowId,
+        stepName,
+        error: errorMsg,
+        durationMs: 0,
+      });
+
+      return { success: false, error: stepError, suspension: false };
+    }
+
+    // Checkpoint each completed step. `result` here is the codec-encoded
+    // form; storage keeps that shape. Downstream steps and the
+    // onStepComplete hook see the round-tripped decoded form so fresh-run
+    // and replay paths are identical.
+    for (const stepResult of stepResults!) {
+      const { name, result, durationMs, startedAt } = stepResult;
+      const metadata = "metadata" in stepResult ? stepResult.metadata : undefined;
+      const wasSkipped = "skipped" in stepResult && stepResult.skipped === true;
+      const stepDef = ctx.steps.find((s) => s.name === name);
+      const decoded = stepDef ? stepDef.codec.decode(result) : result;
+      await ctx.storage.saveStepResult({
+        workflowId,
+        stepName: name,
+        result,
+        metadata,
+        durationMs,
+        startedAt,
+      });
+      if (isStepAttemptStorage(ctx.storage)) {
+        await ctx.storage.saveStepAttempt({
+          workflowId,
+          stepName: name,
+          attempt: params.stepAttempts.get(name) ?? 1,
+          type: "execution",
+          status: "completed",
+          result,
+          durationMs,
+          startedAt,
+          completedAt: new Date(),
+        });
+      }
+      if (!wasSkipped) {
+        await ctx.hooks?.onStepComplete?.({
+          workflowId,
+          stepName: name,
+          result: decoded,
+          durationMs,
+        });
+      }
+      results[name] = decoded;
+      completed.add(name);
+      running.delete(name);
+    }
+
+    // Check workflow-level deadline after steps complete
+    if (
+      params.deadlineMs != null &&
+      Date.now() > params.deadlineMs &&
+      completed.size < ctx.steps.length
+    ) {
+      return {
+        success: false,
+        error: new WorkflowDeadlineError({
+          workflowId,
+          timeoutMs: ctx.timeoutMs!,
+          message: `Workflow "${workflowId}" exceeded global deadline of ${ctx.timeoutMs}ms`,
+        }),
+        suspension: false,
+      };
+    }
+  }
+
+  const lastStepName = ctx.steps[ctx.steps.length - 1]!.name;
+  return { success: true, result: results[lastStepName] };
+}
 
 /**
  * A step definition's view as needed by compensation — just the name and
