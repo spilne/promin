@@ -33,6 +33,7 @@ import { isStepAttemptStorage } from "./workflow-storage.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
 import type { DagNode } from "./workflow-dag.ts";
 import { topologicalSort, computeReadySet } from "./workflow-dag.ts";
+import { getIdempotencyTtl } from "./workflow-runner.ts";
 import {
   WorkflowError,
   StepError,
@@ -740,12 +741,7 @@ export class WorkflowBuilder<
 
   /** Resolve TTL for a given workflow status. Returns undefined if no TTL applies. */
   private _getIdempotencyTtl(status: string): number | undefined {
-    if (!this._idempotency) return undefined;
-    const ttl = this._idempotency.ttl;
-    if (typeof ttl === "number") return ttl;
-    if (status === "completed") return ttl.success;
-    if (status === "failed") return ttl.failure;
-    return undefined;
+    return getIdempotencyTtl(this._idempotency, status);
   }
 
   /** Set the workflow version. Used to detect code/state mismatch on resume. */

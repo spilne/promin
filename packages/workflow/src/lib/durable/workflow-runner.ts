@@ -18,7 +18,7 @@
 
 import type { TaggedError } from "@promin/core";
 import type { RunnableWorkflow, Workflow } from "./durable-pipeline.ts";
-import type { WorkflowHooks } from "./durable-pipeline.ts";
+import type { WorkflowHooks, IdempotencyConfig } from "./durable-pipeline.ts";
 import type {
   StepError,
   WorkflowError,
@@ -150,6 +150,33 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
  */
 export function createWorkflowRunner(): WorkflowRunner {
   return new DefaultWorkflowRunner();
+}
+
+// ---------------------------------------------------------------------------
+// Orchestration helpers — pure, context-taking versions of the utilities
+// that used to be private methods on WorkflowBuilder. They live here so
+// phase 1b/1c can incrementally move orchestration out of the builder
+// without the runner needing access to private class state.
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the idempotency TTL for a given terminal status.
+ * Returns `undefined` when no idempotency config is active or no TTL is
+ * configured for the passed status. Formerly a private method on
+ * WorkflowBuilder (`_getIdempotencyTtl`); extracted here so the runner
+ * can make the caching decision without holding a reference to the
+ * builder instance.
+ */
+export function getIdempotencyTtl(
+  idempotency: IdempotencyConfig | undefined,
+  status: string,
+): number | undefined {
+  if (!idempotency) return undefined;
+  const ttl = idempotency.ttl;
+  if (typeof ttl === "number") return ttl;
+  if (status === "completed") return ttl.success;
+  if (status === "failed") return ttl.failure;
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
