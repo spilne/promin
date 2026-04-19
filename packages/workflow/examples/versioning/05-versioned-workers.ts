@@ -54,21 +54,21 @@ async function main(): Promise<void> {
   // v1 in-flight workflow.
   await workflow<{ id: string }>({
     name: "order",
-    storage,
     version: "1",
     dispatch: { stepQueue, remoteSteps: ["process"], pollIntervalMs: 25 },
   })
     .step("process", ({ input }) => Pipeline.succeed(`v1-${input.id}`))
+    .bind(storage)
     .run({ workflowId: "order-A", input: { id: "abc" } });
 
   // Fresh v2 workflow.
   await workflow<{ id: string }>({
     name: "order",
-    storage,
     version: "2",
     dispatch: { stepQueue, remoteSteps: ["process"], pollIntervalMs: 25 },
   })
     .step("process", ({ input }) => Pipeline.succeed(`v2-${input.id}`))
+    .bind(storage)
     .run({ workflowId: "order-B", input: { id: "def" } });
 
   await worker.stop();

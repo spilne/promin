@@ -8,7 +8,7 @@
 
 import type { WorkflowStorage } from "../durable/workflow-storage.ts";
 import type { WorkflowState } from "../durable/workflow-state.ts";
-import type { WorkflowDefinition, WorkflowDAG } from "../durable/durable-pipeline.ts";
+import type { Workflow, WorkflowDAG } from "../durable/durable-pipeline.ts";
 import { computeReadySet } from "../durable/workflow-dag.ts";
 import type { WorkflowVersionRegistry } from "../durable/workflow-version-registry.ts";
 import type { StepQueue } from "./step-queue.ts";
@@ -43,7 +43,7 @@ export interface CoordinatorConfig {
 
 /** Submit a workflow by passing its definition directly. */
 export interface DirectSubmit<Input> {
-  workflow: WorkflowDefinition<Input, unknown>;
+  workflow: Workflow<Input, unknown>;
   workflowId: string;
   input: Input;
 }
@@ -109,7 +109,7 @@ export class DefaultCoordinator implements WorkflowCoordinator {
     const workflow =
       "workflow" in params
         ? params.workflow
-        : (this.resolveByName(params.name, params.version) as WorkflowDefinition<Input, unknown>);
+        : (this.resolveByName(params.name, params.version) as Workflow<Input, unknown>);
     const { workflowId, input } = params;
     const dag = workflow.dag;
 
@@ -179,7 +179,7 @@ export class DefaultCoordinator implements WorkflowCoordinator {
     this.running = false;
   }
 
-  private resolveByName(name: string, version?: string): WorkflowDefinition<unknown, unknown> {
+  private resolveByName(name: string, version?: string): Workflow<unknown, unknown> {
     if (!this.registry) {
       throw new Error(
         `coordinator.submit({ name }) requires \`registry\` on CoordinatorConfig. ` +

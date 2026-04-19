@@ -18,7 +18,7 @@
 // ---------------------------------------------------------------------------
 
 import { Pipeline } from "@promin/core";
-import { workflow, type StepHandler, type WorkflowStorage } from "@promin/workflow";
+import { workflow, type StepHandler } from "@promin/workflow";
 
 export interface VideoInput {
   readonly videoId: string;
@@ -48,9 +48,14 @@ export interface NotifyResult {
   readonly deliveredAt: string;
 }
 
-export function buildVideoWorkflow(storage: WorkflowStorage) {
+/**
+ * Build the video pipeline workflow as a pure `Workflow` definition —
+ * no storage bound. The coordinator (or a registry) is responsible for
+ * binding to a storage; submitters just hold the def.
+ */
+export function buildVideoWorkflow() {
   return (
-    workflow<VideoInput>({ name: "video-pipeline", storage, version: "1" })
+    workflow<VideoInput>({ name: "video-pipeline", version: "1" })
       // Routing is per-step via `needs`. Only steps with hardware /
       // capability requirements declare them. Steps without `needs` run on
       // any worker — including the specialized GPU / CPU workers when

@@ -290,9 +290,10 @@ postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
   });
 
   it("runs a linear workflow", async () => {
-    const result = await workflow<{ n: number }>({ name: "e2e-linear", storage })
+    const result = await workflow<{ n: number }>({ name: "e2e-linear" })
       .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
       .step("add-one", ({ prev }) => Pipeline.succeed(prev + 1))
+      .bind(storage)
       .run({ workflowId: "e2e-1", input: { n: 5 } });
 
     expect(result).toBe(11);
@@ -300,13 +301,14 @@ postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
   });
 
   it("runs a DAG workflow", async () => {
-    const result = await workflow<{ text: string }>({ name: "e2e-dag", storage })
+    const result = await workflow<{ text: string }>({ name: "e2e-dag" })
       .step("parse", ({ input }) => Pipeline.succeed(input.text.split(" ")))
       .step("count", { dependsOn: ["parse"] }, ({ deps }) => Pipeline.succeed(deps.parse.length))
       .step("join", { dependsOn: ["parse"] }, ({ deps }) => Pipeline.succeed(deps.parse.join("-")))
       .step("combine", { dependsOn: ["count", "join"] }, ({ deps }) =>
         Pipeline.succeed(`${deps.join} (${deps.count})`),
       )
+      .bind(storage)
       .run({ workflowId: "e2e-dag-1", input: { text: "hello world" } });
 
     expect(result).toBe("hello-world (2)");
@@ -327,12 +329,13 @@ postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
     });
 
     let step1Called = false;
-    const result = await workflow<{ n: number }>({ name: "e2e-resume", storage })
+    const result = await workflow<{ n: number }>({ name: "e2e-resume" })
       .step("step-1", ({ input }) => {
         step1Called = true;
         return Pipeline.succeed(input.n * 2);
       })
       .step("step-2", ({ prev }) => Pipeline.succeed(prev + 100))
+      .bind(storage)
       .run({ workflowId: "e2e-resume", input: { n: 10 } });
 
     expect(result).toBe(120);
@@ -340,8 +343,9 @@ postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
   });
 
   it("handles step failure", async () => {
-    const { error } = await workflow<{}>({ name: "e2e-fail", storage })
+    const { error } = await workflow<{}>({ name: "e2e-fail" })
       .step("boom", () => Pipeline.fail(new TestError({ message: "test error" })))
+      .bind(storage)
       .runSafe({ workflowId: "e2e-fail-1", input: {} });
 
     expect(error).not.toBeNull();
@@ -349,8 +353,9 @@ postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
   });
 
   it("runs with stepAsync", async () => {
-    const result = await workflow<{ name: string }>({ name: "e2e-async", storage })
+    const result = await workflow<{ name: string }>({ name: "e2e-async" })
       .stepAsync("greet", async ({ input }) => `Hello, ${input.name}!`)
+      .bind(storage)
       .run({ workflowId: "e2e-async-1", input: { name: "Postgres" } });
 
     expect(result).toBe("Hello, Postgres!");
@@ -359,31 +364,31 @@ postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
   it("stores and queries workflow type and metadata", async () => {
     await workflow<{ userId: string }>({
       name: "onboard-user",
-      storage,
       type: "onboarding",
       metadata: { team: "growth", region: "us-east", priority: "high" },
     })
       .step("fetch", ({ input }) => Pipeline.succeed({ name: `User ${input.userId}` }))
       .stepAsync("provision", async ({ prev }) => ({ accountId: `acc-${prev.name}` }))
+      .bind(storage)
       .run({ workflowId: "e2e-meta-onboard", input: { userId: "u_42" } });
 
     await workflow<{ date: string }>({
       name: "daily-report",
-      storage,
       type: "report",
       metadata: { team: "data", schedule: "daily" },
     })
       .step("generate", ({ input }) => Pipeline.succeed(`Report for ${input.date}`))
+      .bind(storage)
       .run({ workflowId: "e2e-meta-report", input: { date: "2026-03-31" } });
 
     await workflow<{ pipeline: string }>({
       name: "etl-pipeline",
-      storage,
       type: "etl",
       metadata: { team: "data", source: "clickhouse", destination: "postgres" },
     })
       .step("extract", () => Pipeline.succeed([1, 2, 3]))
       .step("load", ({ prev }) => Pipeline.succeed({ loaded: prev.length }))
+      .bind(storage)
       .run({ workflowId: "e2e-meta-etl", input: { pipeline: "events" } });
 
     const onboardingWfs = await storage.listWorkflows({ type: "onboarding" });
@@ -421,7 +426,7 @@ postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
     let createCalls = 0;
     let notifyCalls = 0;
 
-    const wf = workflow<{ user: string }>({ name: "signup-pg", storage })
+    const wf = workflow<{ user: string }>({ name: "signup-pg" })
       .step("load", ({ input }) => Pipeline.succeed(input))
       .journaled("setup", function* (ctx, prev) {
         const created = yield* ctx.activity("create", async () => {
@@ -433,7 +438,8 @@ postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
           return `welcome-${created.id}`;
         });
         return { user: created, greeting: notified };
-      });
+      })
+      .bind(storage);
 
     const result = await wf.run({
       workflowId: "pg-journal-1",
@@ -496,17 +502,16 @@ postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
     let postSleepCalls = 0;
 
     const buildWorkflow = () =>
-      workflow<{ id: string }>({ name: "pg-sleep", storage }).journaled(
-        "wait-then-do",
-        function* (ctx) {
+      workflow<{ id: string }>({ name: "pg-sleep" })
+        .journaled("wait-then-do", function* (ctx) {
           yield* ctx.sleep(50);
           yield* ctx.activity("post-sleep", async () => {
             postSleepCalls++;
             return "done";
           });
           return { ok: true };
-        },
-      );
+        })
+        .bind(storage);
 
     // Kick off — suspends at sleep.
     await expect(
@@ -655,14 +660,13 @@ postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
   it("FK cascade — deleting the workflow removes its journal entries", async () => {
     const storage = await PostgresWorkflowStorage.create({ db: pg.db });
 
-    const wf = workflow<{ x: number }>({ name: "cascade-test", storage }).journaled(
-      "body",
-      function* (ctx, _prev) {
+    const wf = workflow<{ x: number }>({ name: "cascade-test" })
+      .journaled("body", function* (ctx, _prev) {
         yield* ctx.activity("a", async () => 1);
         yield* ctx.activity("b", async () => 2);
         return "done";
-      },
-    );
+      })
+      .bind(storage);
 
     await wf.run({ workflowId: "pg-journal-cascade", input: { x: 1 } });
 

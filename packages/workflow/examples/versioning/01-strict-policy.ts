@@ -16,10 +16,9 @@ async function main(): Promise<void> {
   const storage = new InMemoryWorkflowStorage();
 
   // v1 of the workflow — stamps new rows with version "1".
-  const v1 = workflow<{ amount: number }>({ name: "billing", storage, version: "1" }).step(
-    "charge",
-    ({ input }) => Pipeline.succeed({ charged: input.amount }),
-  );
+  const v1 = workflow<{ amount: number }>({ name: "billing", version: "1" })
+    .step("charge", ({ input }) => Pipeline.succeed({ charged: input.amount }))
+    .bind(storage);
 
   // Start a v1 workflow — succeeds.
   const v1Result = await v1.run({ workflowId: "invoice-001", input: { amount: 100 } });
@@ -27,10 +26,9 @@ async function main(): Promise<void> {
 
   // Now "deploy" v2 of the workflow — same workflowId, different definition.
   // Strict policy (the default) refuses to resume.
-  const v2 = workflow<{ amount: number }>({ name: "billing", storage, version: "2" }).step(
-    "charge",
-    ({ input }) => Pipeline.succeed({ charged: input.amount * 1.1, v: "2" }),
-  );
+  const v2 = workflow<{ amount: number }>({ name: "billing", version: "2" })
+    .step("charge", ({ input }) => Pipeline.succeed({ charged: input.amount * 1.1, v: "2" }))
+    .bind(storage);
 
   try {
     await v2.run({ workflowId: "invoice-001", input: { amount: 100 } });

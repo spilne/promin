@@ -8,12 +8,13 @@ describe("workflow singleflight", () => {
   it("start() returns immediately without blocking", async () => {
     const storage = new InMemoryWorkflowStorage();
 
-    const wf = workflow({ name: "nonblocking", storage })
+    const wf = workflow({ name: "nonblocking" })
       .stepAsync("slow", async () => {
         await new Promise((r) => setTimeout(r, 100));
         return { done: true };
       })
-      .build({ idempotency });
+      .build({ idempotency })
+      .bind(storage);
 
     const handle = await wf.start("sf-1", {});
     expect(handle.workflowId).toBe("sf-1");
@@ -29,13 +30,14 @@ describe("workflow singleflight", () => {
     const storage = new InMemoryWorkflowStorage();
     let executionCount = 0;
 
-    const wf = workflow({ name: "singleflight", storage })
+    const wf = workflow({ name: "singleflight" })
       .stepAsync("compute", async () => {
         executionCount++;
         await new Promise((r) => setTimeout(r, 50));
         return { value: 42 };
       })
-      .build({ idempotency });
+      .build({ idempotency })
+      .bind(storage);
 
     const handleA = await wf.start("sf-2", {});
     const handleB = await wf.start("sf-2", {});
@@ -57,13 +59,14 @@ describe("workflow singleflight", () => {
     const storage = new InMemoryWorkflowStorage();
     let executionCount = 0;
 
-    const wf = workflow({ name: "triple", storage })
+    const wf = workflow({ name: "triple" })
       .stepAsync("compute", async () => {
         executionCount++;
         await new Promise((r) => setTimeout(r, 50));
         return { ok: true };
       })
-      .build({ idempotency });
+      .build({ idempotency })
+      .bind(storage);
 
     const [h1, h2, h3] = await Promise.all([
       wf.start("sf-3", {}),
@@ -87,12 +90,13 @@ describe("workflow singleflight", () => {
     const storage = new InMemoryWorkflowStorage();
     let executionCount = 0;
 
-    const wf = workflow({ name: "independent", storage })
+    const wf = workflow({ name: "independent" })
       .stepAsync("compute", async () => {
         executionCount++;
         return { value: executionCount };
       })
-      .build({ idempotency });
+      .build({ idempotency })
+      .bind(storage);
 
     const handleA = await wf.start("sf-4a", {});
     const handleB = await wf.start("sf-4b", {});
@@ -111,12 +115,13 @@ describe("workflow singleflight", () => {
     const storage = new InMemoryWorkflowStorage();
     let executionCount = 0;
 
-    const wf = workflow({ name: "cached", storage })
+    const wf = workflow({ name: "cached" })
       .stepAsync("compute", async () => {
         executionCount++;
         return { run: executionCount };
       })
-      .build({ idempotency });
+      .build({ idempotency })
+      .bind(storage);
 
     const h1 = await wf.start("sf-5", {});
     await h1.result({ timeoutMs: 5_000 });
@@ -133,13 +138,14 @@ describe("workflow singleflight", () => {
     const storage = new InMemoryWorkflowStorage();
     let executionCount = 0;
 
-    const wf = workflow({ name: "suspended-test", storage })
+    const wf = workflow({ name: "suspended-test" })
       .stepAsync("first", async () => {
         executionCount++;
         return { step: 1 };
       })
       .waitForSignal("approval", { signalName: "approve", timeoutMs: 60_000 })
-      .build({ idempotency });
+      .build({ idempotency })
+      .bind(storage);
 
     const h1 = await wf.start("sf-6", {});
     await new Promise((r) => setTimeout(r, 100));
@@ -157,13 +163,14 @@ describe("workflow singleflight", () => {
     const storage = new InMemoryWorkflowStorage();
     let executionCount = 0;
 
-    const wf = workflow({ name: "race-test", storage })
+    const wf = workflow({ name: "race-test" })
       .stepAsync("compute", async () => {
         executionCount++;
         await new Promise((r) => setTimeout(r, 50));
         return { value: 42 };
       })
-      .build({ idempotency });
+      .build({ idempotency })
+      .bind(storage);
 
     // Fire both start() concurrently — no await between them
     const [handleA, handleB] = await Promise.all([wf.start("race-1", {}), wf.start("race-1", {})]);
@@ -183,12 +190,13 @@ describe("workflow singleflight", () => {
   it("without idempotency, start() throws on in-flight workflow", async () => {
     const storage = new InMemoryWorkflowStorage();
 
-    const wf = workflow({ name: "no-idempotency", storage })
+    const wf = workflow({ name: "no-idempotency" })
       .stepAsync("slow", async () => {
         await new Promise((r) => setTimeout(r, 100));
         return { done: true };
       })
-      .build(); // no idempotency config
+      .build()
+      .bind(storage); // no idempotency config
 
     const h1 = await wf.start("sf-7", {});
 
@@ -210,12 +218,13 @@ describe("workflow singleflight", () => {
   it("deriveId generates workflowId from input", async () => {
     const storage = new InMemoryWorkflowStorage();
 
-    const wf = workflow({ name: "derive", storage })
+    const wf = workflow({ name: "derive" })
       .stepAsync("compute", async () => ({ done: true }))
       .build({
         deriveId: (input: any) => `order:${input.userId}:${input.orderId}`,
         idempotency,
-      });
+      })
+      .bind(storage);
 
     const handle = await wf.start({ userId: "u1", orderId: "o5" });
     expect(handle.workflowId).toBe("order:u1:o5");
@@ -228,7 +237,7 @@ describe("workflow singleflight", () => {
     const storage = new InMemoryWorkflowStorage();
     let executions = 0;
 
-    const wf = workflow({ name: "derive-dedup", storage })
+    const wf = workflow({ name: "derive-dedup" })
       .stepAsync("compute", async () => {
         executions++;
         await new Promise((r) => setTimeout(r, 50));
@@ -237,7 +246,8 @@ describe("workflow singleflight", () => {
       .build({
         deriveId: (input: any) => `key:${input.id}`,
         idempotency,
-      });
+      })
+      .bind(storage);
 
     const h1 = await wf.start({ id: "abc" });
     const h2 = await wf.start({ id: "abc" });
@@ -258,12 +268,13 @@ describe("workflow singleflight", () => {
   it("explicit ID overrides deriveId", async () => {
     const storage = new InMemoryWorkflowStorage();
 
-    const wf = workflow({ name: "derive-override", storage })
+    const wf = workflow({ name: "derive-override" })
       .stepAsync("compute", async () => ({ ok: true }))
       .build({
         deriveId: (input: any) => `derived:${input.id}`,
         idempotency,
-      });
+      })
+      .bind(storage);
 
     const handle = await wf.start("explicit-id", { id: "abc" });
     expect(handle.workflowId).toBe("explicit-id");
@@ -274,9 +285,10 @@ describe("workflow singleflight", () => {
   it("start(input) without deriveId throws", async () => {
     const storage = new InMemoryWorkflowStorage();
 
-    const wf = workflow({ name: "no-derive", storage })
+    const wf = workflow({ name: "no-derive" })
       .stepAsync("compute", async () => ({ ok: true }))
-      .build({ idempotency });
+      .build({ idempotency })
+      .bind(storage);
 
     try {
       await (wf as any).start({ id: "abc" });

@@ -14,10 +14,11 @@ interface OrderEvent {
 }
 
 function buildOrderWorkflow(storage: InMemoryWorkflowStorage) {
-  return workflow<OrderEvent>({ name: "order-flow", storage })
+  return workflow<OrderEvent>({ name: "order-flow" })
     .step("load", ({ input }) => Pipeline.succeed(input))
     .step("process", ({ prev }) => Pipeline.succeed(`processed-${prev.orderId}`))
-    .build();
+    .build()
+    .bind(storage);
 }
 
 async function sha256Hex(secret: string, body: string): Promise<string> {

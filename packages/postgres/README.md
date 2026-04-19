@@ -40,9 +40,10 @@ await migrate(db);
 const storage = await PostgresWorkflowStorage.create({ db });
 
 // Use with workflows
-const result = await workflow<{ userId: string }>({ name: "onboard", storage })
+const result = await workflow<{ userId: string }>({ name: "onboard" })
   .step("fetch", ({ input }) => api.get(`/users/${input.userId}`, UserSchema))
   .step("provision", ({ prev }) => api.post("/accounts", AccountSchema, { json: prev }))
+  .bind(storage)
   .run({ workflowId: `onboard-${userId}`, input: { userId } });
 ```
 

@@ -19,11 +19,13 @@ class TestError extends Data.TaggedError("TestError")<{
 describe("WorkflowStorage.listWorkflows", () => {
   it("returns all workflows", async () => {
     const storage = new InMemoryWorkflowStorage();
-    await workflow<{}>({ name: "a", storage })
+    await workflow<{}>({ name: "a" })
       .step("s", () => Pipeline.succeed(1))
+      .bind(storage)
       .run({ workflowId: "wf-1", input: {} });
-    await workflow<{}>({ name: "b", storage })
+    await workflow<{}>({ name: "b" })
       .step("s", () => Pipeline.succeed(2))
+      .bind(storage)
       .run({ workflowId: "wf-2", input: {} });
 
     const all = await storage.listWorkflows();
@@ -32,11 +34,13 @@ describe("WorkflowStorage.listWorkflows", () => {
 
   it("filters by status", async () => {
     const storage = new InMemoryWorkflowStorage();
-    await workflow<{}>({ name: "ok", storage })
+    await workflow<{}>({ name: "ok" })
       .step("s", () => Pipeline.succeed(1))
+      .bind(storage)
       .run({ workflowId: "wf-ok", input: {} });
-    await workflow<{}>({ name: "fail", storage })
+    await workflow<{}>({ name: "fail" })
       .step("s", () => Pipeline.fail(new TestError({ message: "x" })))
+      .bind(storage)
       .runSafe({ workflowId: "wf-fail", input: {} });
 
     const completed = await storage.listWorkflows({ status: "completed" });
@@ -50,11 +54,13 @@ describe("WorkflowStorage.listWorkflows", () => {
 
   it("filters by name", async () => {
     const storage = new InMemoryWorkflowStorage();
-    await workflow<{}>({ name: "alpha", storage })
+    await workflow<{}>({ name: "alpha" })
       .step("s", () => Pipeline.succeed(1))
+      .bind(storage)
       .run({ workflowId: "wf-a", input: {} });
-    await workflow<{}>({ name: "beta", storage })
+    await workflow<{}>({ name: "beta" })
       .step("s", () => Pipeline.succeed(2))
+      .bind(storage)
       .run({ workflowId: "wf-b", input: {} });
 
     const alphas = await storage.listWorkflows({ name: "alpha" });
@@ -65,8 +71,9 @@ describe("WorkflowStorage.listWorkflows", () => {
   it("supports limit and offset", async () => {
     const storage = new InMemoryWorkflowStorage();
     for (let i = 0; i < 5; i++) {
-      await workflow<{}>({ name: "paginated", storage })
+      await workflow<{}>({ name: "paginated" })
         .step("s", () => Pipeline.succeed(i))
+        .bind(storage)
         .run({ workflowId: `wf-${i}`, input: {} });
     }
 
@@ -139,7 +146,6 @@ describe("WorkflowHooks", () => {
 
     await workflow<{ n: number }>({
       name: "hooks-test",
-      storage,
       hooks: {
         onStepComplete: ({ stepName, result }) => {
           events.push({ stepName, result });
@@ -148,6 +154,7 @@ describe("WorkflowHooks", () => {
     })
       .step("add", ({ input }) => Pipeline.succeed(input.n + 1))
       .step("double", ({ prev }) => Pipeline.succeed(prev * 2))
+      .bind(storage)
       .run({ workflowId: "wf-hooks-1", input: { n: 5 } });
 
     expect(events).toEqual([
@@ -162,7 +169,6 @@ describe("WorkflowHooks", () => {
 
     await workflow<{}>({
       name: "hooks-wf-complete",
-      storage,
       hooks: {
         onWorkflowComplete: ({ workflowId, result }) => {
           completed = { workflowId, result };
@@ -170,6 +176,7 @@ describe("WorkflowHooks", () => {
       },
     })
       .step("compute", () => Pipeline.succeed(42))
+      .bind(storage)
       .run({ workflowId: "wf-hooks-2", input: {} });
 
     expect(completed).not.toBeNull();
@@ -183,7 +190,6 @@ describe("WorkflowHooks", () => {
 
     await workflow<{}>({
       name: "hooks-step-fail",
-      storage,
       hooks: {
         onStepFailure: ({ stepName, error }) => {
           failedStep = { stepName, error };
@@ -191,6 +197,7 @@ describe("WorkflowHooks", () => {
       },
     })
       .step("boom", () => Pipeline.fail(new TestError({ message: "kaboom" })))
+      .bind(storage)
       .runSafe({ workflowId: "wf-hooks-3", input: {} });
 
     expect(failedStep).not.toBeNull();
@@ -203,7 +210,6 @@ describe("WorkflowHooks", () => {
 
     await workflow<{}>({
       name: "hooks-wf-fail",
-      storage,
       hooks: {
         onWorkflowFailure: ({ workflowId, error }) => {
           failedWf = { workflowId, error };
@@ -211,6 +217,7 @@ describe("WorkflowHooks", () => {
       },
     })
       .step("boom", () => Pipeline.fail(new TestError({ message: "fail" })))
+      .bind(storage)
       .runSafe({ workflowId: "wf-hooks-4", input: {} });
 
     expect(failedWf).not.toBeNull();
@@ -223,7 +230,6 @@ describe("WorkflowHooks", () => {
 
     await workflow<{}>({
       name: "hooks-duration",
-      storage,
       hooks: {
         onWorkflowComplete: (params) => {
           durationMs = params.durationMs;
@@ -234,6 +240,7 @@ describe("WorkflowHooks", () => {
         await new Promise((r) => setTimeout(r, 10));
         return "done";
       })
+      .bind(storage)
       .run({ workflowId: "wf-hooks-5", input: {} });
 
     expect(durationMs).toBeGreaterThanOrEqual(5);
@@ -245,7 +252,6 @@ describe("WorkflowHooks", () => {
 
     await workflow<{}>({
       name: "hooks-async",
-      storage,
       hooks: {
         onStepComplete: async ({ stepName }) => {
           await new Promise((r) => setTimeout(r, 5));
@@ -259,6 +265,7 @@ describe("WorkflowHooks", () => {
     })
       .step("a", () => Pipeline.succeed(1))
       .step("b", () => Pipeline.succeed(2))
+      .bind(storage)
       .run({ workflowId: "wf-hooks-6", input: {} });
 
     expect(events).toEqual(["a", "b", "workflow-done"]);
@@ -273,7 +280,7 @@ describe("DAG visualization", () => {
   describe("toJSON", () => {
     it("exports the DAG structure", () => {
       const storage = new InMemoryWorkflowStorage();
-      const dag = workflow<{}>({ name: "my-wf", storage })
+      const dag = workflow<{}>({ name: "my-wf" })
         .step("a", () => Pipeline.succeed(1))
         .step("b", { dependsOn: ["a"] }, () => Pipeline.succeed(2))
         .toJSON();
@@ -288,7 +295,7 @@ describe("DAG visualization", () => {
   describe("dagToMermaid", () => {
     it("generates Mermaid for linear chain", () => {
       const storage = new InMemoryWorkflowStorage();
-      const dag = workflow<{}>({ name: "linear", storage })
+      const dag = workflow<{}>({ name: "linear" })
         .step("fetch", () => Pipeline.succeed(1))
         .step("process", () => Pipeline.succeed(2))
         .step("save", () => Pipeline.succeed(3))
@@ -303,7 +310,7 @@ describe("DAG visualization", () => {
 
     it("generates Mermaid for DAG", () => {
       const storage = new InMemoryWorkflowStorage();
-      const dag = workflow<{}>({ name: "dag", storage })
+      const dag = workflow<{}>({ name: "dag" })
         .step("scrape", () => Pipeline.succeed("html"))
         .step("summarize", { dependsOn: ["scrape"] }, () => Pipeline.succeed("summary"))
         .step("keywords", { dependsOn: ["scrape"] }, () => Pipeline.succeed(["kw"]))
@@ -319,7 +326,7 @@ describe("DAG visualization", () => {
 
     it("handles step names with special characters", () => {
       const storage = new InMemoryWorkflowStorage();
-      const dag = workflow<{}>({ name: "special", storage })
+      const dag = workflow<{}>({ name: "special" })
         .step("fetch-data", () => Pipeline.succeed(1))
         .step("process_result", () => Pipeline.succeed(2))
         .toJSON();
@@ -333,7 +340,7 @@ describe("DAG visualization", () => {
   describe("dagToDot", () => {
     it("generates DOT for DAG", () => {
       const storage = new InMemoryWorkflowStorage();
-      const dag = workflow<{}>({ name: "my-workflow", storage })
+      const dag = workflow<{}>({ name: "my-workflow" })
         .step("a", () => Pipeline.succeed(1))
         .step("b", { dependsOn: ["a"] }, () => Pipeline.succeed(2))
         .step("c", { dependsOn: ["a"] }, () => Pipeline.succeed(3))
@@ -355,7 +362,7 @@ describe("DAG visualization", () => {
 
     it("toJSON exposes case labels for selector-mode match", () => {
       const storage = new InMemoryWorkflowStorage();
-      const dag = workflow<Order>({ name: "shipping", storage })
+      const dag = workflow<Order>({ name: "shipping" })
         .step("load", ({ input }) => Pipeline.succeed(input))
         .match("route", {
           on: (o) => o.type,
@@ -376,7 +383,7 @@ describe("DAG visualization", () => {
 
     it("toJSON exposes labels for predicate-mode match (uses provided labels)", () => {
       const storage = new InMemoryWorkflowStorage();
-      const dag = workflow<Order>({ name: "shipping-pred", storage })
+      const dag = workflow<Order>({ name: "shipping-pred" })
         .step("load", ({ input }) => Pipeline.succeed(input))
         .match("route", {
           cases: [
@@ -397,7 +404,7 @@ describe("DAG visualization", () => {
 
     it("toJSON falls back to case[N] for unlabeled predicate cases", () => {
       const storage = new InMemoryWorkflowStorage();
-      const dag = workflow<Order>({ name: "shipping-unlabeled", storage })
+      const dag = workflow<Order>({ name: "shipping-unlabeled" })
         .step("load", ({ input }) => Pipeline.succeed(input))
         .match("route", {
           cases: [
@@ -413,7 +420,7 @@ describe("DAG visualization", () => {
 
     it("dagToMermaid renders match as decision node with labeled outgoing edges", () => {
       const storage = new InMemoryWorkflowStorage();
-      const dag = workflow<Order>({ name: "viz-mermaid", storage })
+      const dag = workflow<Order>({ name: "viz-mermaid" })
         .step("load", ({ input }) => Pipeline.succeed(input))
         .match("route", {
           on: (o) => o.type,
@@ -438,7 +445,7 @@ describe("DAG visualization", () => {
 
     it("dagToDot renders match as diamond with labeled edges", () => {
       const storage = new InMemoryWorkflowStorage();
-      const dag = workflow<Order>({ name: "viz-dot", storage })
+      const dag = workflow<Order>({ name: "viz-dot" })
         .step("load", ({ input }) => Pipeline.succeed(input))
         .match("route", {
           on: (o) => o.type,
@@ -458,7 +465,7 @@ describe("DAG visualization", () => {
 
     it("non-match steps render as plain rectangles, not diamonds", () => {
       const storage = new InMemoryWorkflowStorage();
-      const dag = workflow<{}>({ name: "no-match", storage })
+      const dag = workflow<{}>({ name: "no-match" })
         .step("a", () => Pipeline.succeed(1))
         .step("b", () => Pipeline.succeed(2))
         .toJSON();

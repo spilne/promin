@@ -12,7 +12,7 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
     const storage = new InMemoryWorkflowStorage();
     const log: string[] = [];
 
-    const wf = workflow<{ msg: string }>({ name: "sleepy", storage })
+    const wf = workflow<{ msg: string }>({ name: "sleepy" })
       .step("before", ({ input }) => {
         log.push("before");
         return Pipeline.succeed(input.msg);
@@ -22,7 +22,8 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
         log.push("after");
         return Pipeline.succeed(`woke: ${prev}`);
       })
-      .build();
+      .build()
+      .bind(storage);
 
     // Run — will suspend at the sleep step
     const { error } = await wf.runSafe({ workflowId: "sleep-1", input: { msg: "hello" } });
@@ -55,11 +56,12 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
   it("workflow sleeping for 31 years is not woken up prematurely", async () => {
     const storage = new InMemoryWorkflowStorage();
 
-    const wf = workflow<string>({ name: "long-sleep", storage })
+    const wf = workflow<string>({ name: "long-sleep" })
       .step("before", () => Pipeline.succeed("ok"))
       .sleep("nap", 999_999_999) // ~31 years
       .step("after", () => Pipeline.succeed("done"))
-      .build();
+      .build()
+      .bind(storage);
 
     await wf.runSafe({ workflowId: "sleep-2", input: "x" });
 
@@ -85,11 +87,12 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
   it("unrecognized workflow name — scanner skips it silently without crashing", async () => {
     const storage = new InMemoryWorkflowStorage();
 
-    const wf = workflow<string>({ name: "unknown-wf", storage })
+    const wf = workflow<string>({ name: "unknown-wf" })
       .step("before", () => Pipeline.succeed("ok"))
       .sleep("nap", 1)
       .step("after", () => Pipeline.succeed("done"))
-      .build();
+      .build()
+      .bind(storage);
 
     await wf.runSafe({ workflowId: "sleep-3", input: "x" });
     await new Promise((r) => setTimeout(r, 50));
@@ -113,11 +116,12 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
   it("three workflows sleeping — scanner wakes all of them in one scan cycle", async () => {
     const storage = new InMemoryWorkflowStorage();
 
-    const wf = workflow<string>({ name: "multi", storage })
+    const wf = workflow<string>({ name: "multi" })
       .step("before", ({ input }) => Pipeline.succeed(input))
       .sleep("nap", 1)
       .step("after", ({ prev }) => Pipeline.succeed(`done: ${prev}`))
-      .build();
+      .build()
+      .bind(storage);
 
     await wf.runSafe({ workflowId: "sleep-a", input: "a" });
     await wf.runSafe({ workflowId: "sleep-b", input: "b" });

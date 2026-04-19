@@ -61,9 +61,10 @@ describe("WorkflowResult", () => {
 describe("WorkflowBuilder.build", () => {
   it("returns a WorkflowDefinition with run and runSafe", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const def = workflow<{ n: number }>({ name: "buildable", storage })
+    const def = workflow<{ n: number }>({ name: "buildable" })
       .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
-      .build();
+      .build()
+      .bind(storage);
 
     expect(def.name).toBe("buildable");
     expect(def.storage).toBe(storage);
@@ -74,9 +75,10 @@ describe("WorkflowBuilder.build", () => {
 
   it("runSafe works on built definition", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const def = workflow<{}>({ name: "safe-build", storage })
+    const def = workflow<{}>({ name: "safe-build" })
       .step("fail", () => Pipeline.fail(new ProcessError({ message: "oops" })))
-      .build();
+      .build()
+      .bind(storage);
 
     const { data, error } = await def.runSafe({ workflowId: "b-2", input: {} });
     expect(data).toBeNull();
@@ -85,9 +87,10 @@ describe("WorkflowBuilder.build", () => {
 
   it("built definition is reusable across multiple runs", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const def = workflow<{ n: number }>({ name: "reusable", storage })
+    const def = workflow<{ n: number }>({ name: "reusable" })
       .step("inc", ({ input }) => Pipeline.succeed(input.n + 1))
-      .build();
+      .build()
+      .bind(storage);
 
     const r1 = await def.run({ workflowId: "r-1", input: { n: 10 } });
     const r2 = await def.run({ workflowId: "r-2", input: { n: 20 } });
@@ -103,9 +106,10 @@ describe("WorkflowBuilder.build", () => {
 describe("trigger", () => {
   it("triggers a workflow for each stream item", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const def = workflow<{ value: number }>({ name: "triggered", storage })
+    const def = workflow<{ value: number }>({ name: "triggered" })
       .step("double", ({ input }) => Pipeline.succeed(input.value * 2))
-      .build();
+      .build()
+      .bind(storage);
 
     const results = await StreamPipeline.fromIterable([1, 2, 3])
       .through(
@@ -126,9 +130,10 @@ describe("trigger", () => {
 
   it("returns failed result on workflow failure", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const def = workflow<{ n: number }>({ name: "failing-trigger", storage })
+    const def = workflow<{ n: number }>({ name: "failing-trigger" })
       .step("boom", () => Pipeline.fail(new ProcessError({ message: "fail" })))
-      .build();
+      .build()
+      .bind(storage);
 
     const results = await StreamPipeline.fromIterable([1])
       .through(
@@ -150,9 +155,10 @@ describe("trigger", () => {
 
   it("skips duplicates with onDuplicate=skip", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const def = workflow<{ n: number }>({ name: "dedup-trigger", storage })
+    const def = workflow<{ n: number }>({ name: "dedup-trigger" })
       .step("compute", ({ input }) => Pipeline.succeed(input.n * 10))
-      .build();
+      .build()
+      .bind(storage);
 
     // First run creates the workflow
     await def.run({ workflowId: "dedup-1", input: { n: 1 } });
@@ -179,7 +185,7 @@ describe("trigger", () => {
     let maxConcurrent = 0;
     let current = 0;
 
-    const def = workflow<{ n: number }>({ name: "conc-trigger", storage })
+    const def = workflow<{ n: number }>({ name: "conc-trigger" })
       .stepAsync("slow", async ({ input }) => {
         current++;
         maxConcurrent = Math.max(maxConcurrent, current);
@@ -187,7 +193,8 @@ describe("trigger", () => {
         current--;
         return input.n;
       })
-      .build();
+      .build()
+      .bind(storage);
 
     const results = await StreamPipeline.fromIterable([1, 2, 3, 4])
       .through(
@@ -207,12 +214,13 @@ describe("trigger", () => {
 
   it("tracks durationMs", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const def = workflow<{}>({ name: "duration-trigger", storage })
+    const def = workflow<{}>({ name: "duration-trigger" })
       .stepAsync("wait", async () => {
         await new Promise((r) => setTimeout(r, 20));
         return "done";
       })
-      .build();
+      .build()
+      .bind(storage);
 
     const results = await StreamPipeline.fromIterable([1])
       .through(
@@ -233,9 +241,10 @@ describe("trigger", () => {
 
   it("composes with stream operators", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const def = workflow<{ n: number }>({ name: "compose-trigger", storage })
+    const def = workflow<{ n: number }>({ name: "compose-trigger" })
       .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
-      .build();
+      .build()
+      .bind(storage);
 
     // filter + trigger + filter completed + map result
     const results = await StreamPipeline.fromIterable([1, 2, 3, 4, 5])
@@ -258,12 +267,13 @@ describe("trigger", () => {
     const storage = new InMemoryWorkflowStorage();
     let runCount = 0;
 
-    const def = workflow<{ tick: number }>({ name: "cron-trigger", storage })
+    const def = workflow<{ tick: number }>({ name: "cron-trigger" })
       .stepAsync("process", async ({ input }) => {
         runCount++;
         return `tick-${input.tick}`;
       })
-      .build();
+      .build()
+      .bind(storage);
 
     await StreamPipeline.tick(10)
       .take(3)

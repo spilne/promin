@@ -51,7 +51,6 @@ export function compileSqlProject(
   // Build workflow
   let builder: any = workflow<{ date?: string }>({
     name: `sql-project:${project.name}`,
-    storage,
     type: "sql-model",
     metadata: { project: project.name },
   });
@@ -74,7 +73,7 @@ export function compileSqlProject(
     }
   }
 
-  return builder.build() as WorkflowDefinition<{ date?: string }, SqlProjectResult>;
+  return builder.build().bind(storage) as WorkflowDefinition<{ date?: string }, SqlProjectResult>;
 }
 
 async function executeModel(

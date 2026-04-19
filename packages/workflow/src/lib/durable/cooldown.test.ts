@@ -7,12 +7,13 @@ describe("workflow idempotency TTL", () => {
     const storage = new InMemoryWorkflowStorage();
     let runCount = 0;
 
-    const wf = workflow({ name: "ttl-test", storage })
+    const wf = workflow({ name: "ttl-test" })
       .stepAsync("compute", async () => {
         runCount++;
         return { value: 42 };
       })
-      .build({ idempotency: { ttl: 60_000 } });
+      .build({ idempotency: { ttl: 60_000 } })
+      .bind(storage);
 
     const result1 = await wf.run({ workflowId: "cd-1", input: {} });
     expect(result1).toEqual({ value: 42 });
@@ -26,9 +27,10 @@ describe("workflow idempotency TTL", () => {
   it("re-enters engine when TTL expires", async () => {
     const storage = new InMemoryWorkflowStorage();
 
-    const wf = workflow({ name: "ttl-expire", storage })
+    const wf = workflow({ name: "ttl-expire" })
       .stepAsync("compute", async () => ({ value: 1 }))
-      .build({ idempotency: { ttl: 1 } });
+      .build({ idempotency: { ttl: 1 } })
+      .bind(storage);
 
     await wf.run({ workflowId: "cd-2", input: {} });
     await new Promise((r) => setTimeout(r, 10));
@@ -41,13 +43,14 @@ describe("workflow idempotency TTL", () => {
   it("separate TTL for success and failure", async () => {
     const storage = new InMemoryWorkflowStorage();
 
-    const wf = workflow({ name: "split-ttl", storage })
+    const wf = workflow({ name: "split-ttl" })
       .stepAsync("compute", async () => ({ value: 1 }))
       .build({
         idempotency: {
           ttl: { success: 60_000, failure: 100 },
         },
-      });
+      })
+      .bind(storage);
 
     const result = await wf.run({ workflowId: "cd-3", input: {} });
     expect(result).toEqual({ value: 1 });
@@ -60,9 +63,10 @@ describe("workflow idempotency TTL", () => {
   it("force bypasses idempotency", async () => {
     const storage = new InMemoryWorkflowStorage();
 
-    const wf = workflow({ name: "force-test", storage })
+    const wf = workflow({ name: "force-test" })
       .stepAsync("compute", async () => ({ value: 1 }))
-      .build({ idempotency: { ttl: 60_000 } });
+      .build({ idempotency: { ttl: 60_000 } })
+      .bind(storage);
 
     await wf.run({ workflowId: "cd-4", input: {} });
 
@@ -75,12 +79,13 @@ describe("workflow idempotency TTL", () => {
     const storage = new InMemoryWorkflowStorage();
     let runCount = 0;
 
-    const wf = workflow({ name: "ttl-safe", storage })
+    const wf = workflow({ name: "ttl-safe" })
       .stepAsync("compute", async () => {
         runCount++;
         return { value: 42 };
       })
-      .build({ idempotency: { ttl: 60_000 } });
+      .build({ idempotency: { ttl: 60_000 } })
+      .bind(storage);
 
     const { data: r1 } = await wf.runSafe({ workflowId: "cd-5", input: {} });
     expect(r1).toEqual({ value: 42 });
@@ -94,12 +99,13 @@ describe("workflow idempotency TTL", () => {
     const storage = new InMemoryWorkflowStorage();
     let runCount = 0;
 
-    const wf = workflow({ name: "no-ttl", storage })
+    const wf = workflow({ name: "no-ttl" })
       .stepAsync("compute", async () => {
         runCount++;
         return { value: runCount };
       })
-      .build(); // no idempotency
+      .build()
+      .bind(storage); // no idempotency
 
     await wf.run({ workflowId: "cd-6", input: {} });
     await wf.run({ workflowId: "cd-6", input: {} });

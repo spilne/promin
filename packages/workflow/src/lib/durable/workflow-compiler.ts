@@ -145,7 +145,7 @@ export function compileWorkflow<Input = unknown>(params: {
 
   // 4. Build WorkflowBuilder chain
   // Use `any` for the builder — generics can't be tracked across a dynamic loop
-  let builder: any = workflow<Input>({ name: schema.name, storage });
+  let builder: any = workflow<Input>({ name: schema.name });
 
   for (const stepName of sorted) {
     const step = stepsByName.get(stepName)!;
@@ -157,8 +157,9 @@ export function compileWorkflow<Input = unknown>(params: {
     }
   }
 
-  // 5. Freeze and return
-  return builder.build() as WorkflowDefinition<Input, unknown>;
+  // 5. Freeze and bind — compileWorkflow returns a RunnableWorkflow so
+  // callers can `.run()` it without a separate bind step.
+  return builder.build().bind(storage) as WorkflowDefinition<Input, unknown>;
 }
 
 // ---------------------------------------------------------------------------

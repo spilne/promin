@@ -35,7 +35,7 @@ const { data, error } = await flow<{ url: string }>("fetch")
   .executeSafe({ url: "https://example.com" });
 ```
 
-To make it durable later, change `flow("name")` to `workflow({ name, storage })` and `.execute(input)` to `.run({ workflowId, input })`.
+To make it durable later, change `flow("name")` to `workflow({ name }).bind(storage)` and `.execute(input)` to `.run({ workflowId, input })`.
 
 ### `workflow()` — durable (survives crashes, resumes from checkpoints)
 
@@ -49,7 +49,6 @@ const storage = await PostgresWorkflowStorage.create({ db });
 
 const result = await workflow<{ userId: string }>({
   name: "onboard-user",
-  storage,
   type: "onboarding",
   metadata: { team: "growth" },
 })
@@ -59,6 +58,7 @@ const result = await workflow<{ userId: string }>({
     await mailer.send(prev.email, "Welcome!");
     return { notified: true };
   })
+  .bind(storage)
   .run({ workflowId: "onboard-123", input: { userId: "u_42" } });
 ```
 
@@ -125,10 +125,11 @@ await storage.deliverSignal(workflowId, "manager-approved", { approved: true });
 ```typescript
 import { workflow, trigger, WorkflowResult } from "@promin/workflow";
 
-const analyzeArticle = workflow<{ url: string }>({ name: "analyze", storage })
+const analyzeArticle = workflow<{ url: string }>({ name: "analyze" })
   .step("scrape", ({ input }) => scraper.get(input.url))
   .step("summarize", ({ prev }) => ai.summarize(prev))
-  .build();
+  .build()
+  .bind(storage);
 
 // Trigger from any stream
 await eventStream
@@ -168,11 +169,11 @@ Re-runs from the failed step — completed steps are checkpointed and skipped.
 ```typescript
 workflow<Input>({
   name: "resilient",
-  storage,
   retry: { maxRetries: 3, baseDelayMs: 5000 },
 })
   .step("step-1", fn) // runs once, checkpointed
-  .step("step-2", fn); // if this fails, workflow retries from here
+  .step("step-2", fn) // if this fails, workflow retries from here
+  .bind(storage);
 ```
 
 ### Idempotency & Singleflight
@@ -184,7 +185,6 @@ import { workflow } from "@promin/workflow";
 
 const processOrder = workflow<{ orderId: string }>({
   name: "process-order",
-  storage,
 })
   .step("charge", ({ input }) => payments.charge(input.orderId))
   .step("fulfill", ({ prev }) => warehouse.ship(prev.chargeId))
@@ -194,7 +194,8 @@ const processOrder = workflow<{ orderId: string }>({
       onInFlight: "join", // concurrent calls join the running execution (singleflight)
       onExpiry: "fresh-run", // after TTL: re-execute with fresh run counter
     },
-  });
+  })
+  .bind(storage);
 
 // First call — executes the workflow
 const result1 = await processOrder.run({ workflowId: "order-42", input: { orderId: "42" } });
@@ -240,7 +241,6 @@ import { Pipeline } from "@promin/core";
 
 workflow<{ from: string; to: string; amount: number }>({
   name: "transfer",
-  storage,
   retry: { maxRetries: 2, baseDelayMs: 5000 },
   compensate: {
     trigger: "after-retries", // compensate after all workflow retries exhausted (default)
@@ -257,6 +257,7 @@ workflow<{ from: string; to: string; amount: number }>({
     compensate: ({ result }) => bankClient.reverseCredit(result.txId),
   })
   .step("notify", ({ prev }) => emailClient.send(prev.receipt))
+  .bind(storage)
   .run({ workflowId: "transfer-1", input: { from: "A", to: "B", amount: 100 } });
 ```
 
@@ -285,14 +286,13 @@ Step fails
 // Lifecycle hooks
 workflow<Input>({
   name,
-  storage,
   hooks: {
     onStepComplete: ({ stepName, result, durationMs }) => metrics.record(durationMs),
     onStepFailure: ({ stepName, error }) => alerting.notify(error),
     onWorkflowComplete: ({ workflowId, durationMs }) => log.info("done", { durationMs }),
     onWorkflowFailure: ({ workflowId, error }) => log.error("failed", { error }),
   },
-});
+}).bind(storage);
 
 // Query workflows
 await storage.listWorkflows({ status: "failed", type: "onboarding", limit: 10 });
@@ -363,18 +363,20 @@ Child workflow composition with parent-child tracking.
 import { workflow } from "@promin/workflow";
 import { Pipeline } from "@promin/core";
 
-const enrichUser = workflow<{ userId: string }>({ name: "enrich", storage })
+const enrichUser = workflow<{ userId: string }>({ name: "enrich" })
   .step("fetch", ({ input }) => api.get(`/profiles/${input.userId}`))
-  .build();
+  .build()
+  .bind(storage);
 
 // .subworkflow() — builder sugar
-workflow<{ userId: string }>({ name: "onboard", storage })
+workflow<{ userId: string }>({ name: "onboard" })
   .step("create", ({ input }) => api.post("/accounts", { json: input }))
   .subworkflow("enrich", enrichUser, {
     input: (prev) => ({ userId: prev.id }),
     workflowId: (prev) => `enrich-${prev.id}`,
   })
   .step("notify", ({ prev }) => Pipeline.succeed(`Score: ${prev.score}`))
+  .bind(storage)
   .run({ workflowId: "onboard-1", input: { userId: "u_42" } });
 
 // .invoke() — primitive for use inside any step
@@ -407,12 +409,12 @@ const dlq = await PgQueue.create<FailedWorkflowRecord>(db, "workflow-dlq");
 
 workflow<{ orderId: string }>({
   name: "process-order",
-  storage,
   retry: { maxRetries: 3 },
   dlq,
 })
   .step("charge", fn)
   .step("fulfill", fn)
+  .bind(storage)
   .run({ workflowId: "order-1", input: { orderId: "ord_42" } });
 
 // Failed workflow record includes:
@@ -439,15 +441,15 @@ Run multiple workflow versions simultaneously. New workflows use the latest vers
 ```typescript
 import { workflow, WorkflowVersionRegistry } from "@promin/workflow";
 
-const registry = new WorkflowVersionRegistry();
+const registry = new WorkflowVersionRegistry({ storage });
 
 // Register versioned definitions (must have a version)
-const v1 = workflow({ name: "order", storage, version: "1" })
+const v1 = workflow({ name: "order", version: "1" })
   .step("validate", ({ input }) => validateV1(input))
   .step("charge", ({ prev }) => chargeV1(prev))
   .build();
 
-const v2 = workflow({ name: "order", storage, version: "2" })
+const v2 = workflow({ name: "order", version: "2" })
   .step("verify", ({ input }) => verifyV2(input))
   .step("charge", ({ prev }) => chargeV2(prev))
   .step("notify", ({ prev }) => notifyV2(prev))
@@ -489,8 +491,8 @@ if (counts.get("1")!.running === 0) {
 registry.names(); // ["order", "payment"]
 registry.versions("order"); // ["1", "2"]
 registry.latest("order"); // "2"
-registry.resolve("order", "1"); // WorkflowDefinition for v1
-registry.resolve("order"); // WorkflowDefinition for latest
+registry.resolve("order", "1"); // Workflow for v1
+registry.resolve("order"); // Workflow for latest
 ```
 
 ### RRULE Support

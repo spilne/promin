@@ -29,7 +29,6 @@ describe("versioned dispatch", () => {
 
     await workflow<{ id: string }>({
       name: "vd-1",
-      storage,
       version: "2",
       dispatch: { stepQueue, remoteSteps: ["remote-step"], pollIntervalMs: 25 },
     })
@@ -37,6 +36,7 @@ describe("versioned dispatch", () => {
       .step("remote-step", { dependsOn: ["load"] }, ({ deps }) =>
         Pipeline.succeed(`x-${deps.load}`),
       )
+      .bind(storage)
       .run({ workflowId: "vd-1-a", input: { id: "abc" } });
 
     // After the workflow completes, inspect the completed task's stored version.
@@ -150,20 +150,22 @@ describe("versioned dispatch", () => {
     // v1 in-flight workflow.
     const v1 = workflow<{ x: number }>({
       name: "order",
-      storage,
       version: "1",
       dispatch: { stepQueue, remoteSteps: ["step-a"], pollIntervalMs: 25 },
-    }).step("step-a", ({ input }) => Pipeline.succeed(`v1-${input.x}`));
+    })
+      .step("step-a", ({ input }) => Pipeline.succeed(`v1-${input.x}`))
+      .bind(storage);
     const v1Result = await v1.run({ workflowId: "v1-wf", input: { x: 10 } });
     expect(v1Result).toBe("A-10");
 
     // v2 fresh workflow.
     const v2 = workflow<{ x: number }>({
       name: "order",
-      storage,
       version: "2",
       dispatch: { stepQueue, remoteSteps: ["step-a"], pollIntervalMs: 25 },
-    }).step("step-a", ({ input }) => Pipeline.succeed(`v2-${input.x}`));
+    })
+      .step("step-a", ({ input }) => Pipeline.succeed(`v2-${input.x}`))
+      .bind(storage);
     const v2Result = await v2.run({ workflowId: "v2-wf", input: { x: 20 } });
     expect(v2Result).toBe("A-20");
 

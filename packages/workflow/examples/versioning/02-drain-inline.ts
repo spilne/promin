@@ -20,22 +20,23 @@ async function main(): Promise<void> {
   const storage = new InMemoryWorkflowStorage();
 
   // Build v1 and keep the `.build()` result as a reference we can pass later.
-  const v1 = workflow<{ amount: number }>({ name: "billing", storage, version: "1" })
+  const v1 = workflow<{ amount: number }>({ name: "billing", version: "1" })
     .step("charge", ({ input }) => Pipeline.succeed({ charged: input.amount, v: "1" }))
     .build();
 
   // Start a v1 workflow. This row is stamped `version: "1"` and runs v1 code.
-  await v1.run({ workflowId: "invoice-A", input: { amount: 100 } });
+  await v1.bind(storage).run({ workflowId: "invoice-A", input: { amount: 100 } });
 
   // "Deploy" v2. Note: the same v1 instance above is listed in previousVersions.
   // New workflows will use v2's code; resumes of existing v1 rows delegate to v1.
   const v2 = workflow<{ amount: number }>({
     name: "billing",
-    storage,
     version: "2",
     onVersionMismatch: "drain",
     previousVersions: [v1],
-  }).step("charge", ({ input }) => Pipeline.succeed({ charged: input.amount * 1.1, v: "2" }));
+  })
+    .step("charge", ({ input }) => Pipeline.succeed({ charged: input.amount * 1.1, v: "2" }))
+    .bind(storage);
 
   // Re-running the v1 workflow under v2 code — drain delegates to v1.
   const resumed = await v2.run({ workflowId: "invoice-A", input: { amount: 100 } });

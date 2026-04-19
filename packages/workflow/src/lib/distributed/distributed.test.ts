@@ -384,7 +384,7 @@ describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow
     const queue = new InMemoryStepQueue();
 
     // Define workflow
-    const wf = workflow<{ n: number }>({ name: "distributed-test", storage })
+    const wf = workflow<{ n: number }>({ name: "distributed-test" })
       .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
       .step("add-ten", ({ prev }) => Pipeline.succeed(prev + 10))
       .build();
@@ -430,7 +430,7 @@ describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
 
-    const wf = workflow<{ text: string }>({ name: "routed", storage })
+    const wf = workflow<{ text: string }>({ name: "routed" })
       .step("preprocess", ({ input }) => Pipeline.succeed(input.text))
       .step(
         "transcribe",
@@ -493,7 +493,7 @@ describe("Coordinator registry-keyed submit — submit by name, not by object", 
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
 
-    const wf = workflow<{ n: number }>({ name: "named-wf", storage, version: "1" })
+    const wf = workflow<{ n: number }>({ name: "named-wf", version: "1" })
       .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
       .build();
 
@@ -530,7 +530,7 @@ describe("Coordinator registry-keyed submit — submit by name, not by object", 
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
 
-    const wf = workflow<number>({ name: "known", storage, version: "1" })
+    const wf = workflow<number>({ name: "known", version: "1" })
       .step("only", ({ input }) => Pipeline.succeed(input))
       .build();
 
@@ -560,13 +560,13 @@ describe("Coordinator registry-keyed submit — submit by name, not by object", 
     const queue = new InMemoryStepQueue();
 
     // Registry has one workflow — but we can still submit a different def directly.
-    const registered = workflow<number>({ name: "registered", storage, version: "1" })
+    const registered = workflow<number>({ name: "registered", version: "1" })
       .step("a", ({ input }) => Pipeline.succeed(input))
       .build();
     const registry = new WorkflowVersionRegistry();
     registry.register(registered as any);
 
-    const direct = workflow<number>({ name: "direct", storage })
+    const direct = workflow<number>({ name: "direct" })
       .step("only", ({ input }) => Pipeline.succeed(input + 1))
       .build();
 
@@ -1039,7 +1039,7 @@ describe("Coordinator recovery — resume workflows after process restart", () =
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
 
-    const wf = workflow<{ n: number }>({ name: "recoverable", storage })
+    const wf = workflow<{ n: number }>({ name: "recoverable" })
       .step("step-1", ({ input }) => Pipeline.succeed(input.n * 2))
       .step("step-2", ({ prev }) => Pipeline.succeed(prev + 100))
       .build();
@@ -1088,7 +1088,7 @@ describe("Coordinator recovery — resume workflows after process restart", () =
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
 
-    const wf = workflow<number>({ name: "done-wf", storage })
+    const wf = workflow<number>({ name: "done-wf" })
       .step("only", ({ input }) => Pipeline.succeed(input * 2))
       .build();
 

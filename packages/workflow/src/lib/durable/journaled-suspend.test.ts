@@ -290,9 +290,8 @@ describe("DefaultSleepScanner integration with journaled sleeps", () => {
     let postSleepCalls = 0;
 
     const buildWorkflow = () =>
-      workflow<{ id: string }>({ name: "scanner-test", storage }).journaled(
-        "wait-then-do",
-        function* (ctx) {
+      workflow<{ id: string }>({ name: "scanner-test" })
+        .journaled("wait-then-do", function* (ctx) {
           // Very short sleep so the scanner integration is fast in tests.
           yield* ctx.sleep(50);
           yield* ctx.activity("post-sleep", async () => {
@@ -300,8 +299,8 @@ describe("DefaultSleepScanner integration with journaled sleeps", () => {
             return "done";
           });
           return { ok: true };
-        },
-      );
+        })
+        .bind(storage);
 
     const wf = buildWorkflow();
 
@@ -341,9 +340,8 @@ describe("end-to-end workflow with suspend/resume", () => {
     const storage = new InMemoryWorkflowStorage();
     const activityCalls: Record<string, number> = { create: 0, check: 0, finalize: 0 };
 
-    const wfBuilder = workflow<{ draftId: string }>({ name: "approval-flow", storage }).journaled(
-      "body",
-      function* (ctx, prev) {
+    const wfBuilder = workflow<{ draftId: string }>({ name: "approval-flow" })
+      .journaled("body", function* (ctx, prev) {
         const created = yield* ctx.activity("create", async () => {
           activityCalls.create!++;
           return { id: prev.draftId, state: "draft" };
@@ -359,8 +357,8 @@ describe("end-to-end workflow with suspend/resume", () => {
           return { ...created, approval, state: "final" };
         });
         return { ok: true };
-      },
-    );
+      })
+      .bind(storage);
 
     // Kick off — suspends at sleep. The workflow engine wraps our
     // WorkflowSuspendedError in a FiberFailure at the outer boundary; match
@@ -377,9 +375,8 @@ describe("end-to-end workflow with suspend/resume", () => {
     // Resume — suspends at signal this time.
     // A fresh builder is needed because the previous .run() returned; but the
     // WORKFLOW (journal + storage) is the same. New instance, same workflowId.
-    const wf2 = workflow<{ draftId: string }>({ name: "approval-flow", storage }).journaled(
-      "body",
-      function* (ctx, prev) {
+    const wf2 = workflow<{ draftId: string }>({ name: "approval-flow" })
+      .journaled("body", function* (ctx, prev) {
         const created = yield* ctx.activity("create", async () => {
           activityCalls.create!++;
           return { id: prev.draftId, state: "draft" };
@@ -395,8 +392,8 @@ describe("end-to-end workflow with suspend/resume", () => {
           return { ...created, approval, state: "final" };
         });
         return { ok: true };
-      },
-    );
+      })
+      .bind(storage);
 
     await expect(wf2.run({ workflowId: "apr-1", input: { draftId: "d-1" } })).rejects.toThrow(
       /waiting for signal/,

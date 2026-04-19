@@ -16,7 +16,7 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
     const storage = new InMemoryWorkflowStorage();
     const log: string[] = [];
 
-    const { error } = await workflow<string>({ name: "basic-sleep", storage })
+    const { error } = await workflow<string>({ name: "basic-sleep" })
       .step("before", ({ input }) => {
         log.push("before");
         return Pipeline.succeed(input);
@@ -26,6 +26,7 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
         log.push("after");
         return Pipeline.succeed(prev);
       })
+      .bind(storage)
       .runSafe({ workflowId: "s-1", input: "hello" });
 
     expect((error as WorkflowSuspendedError)._tag).toBe("WorkflowSuspendedError");
@@ -45,7 +46,7 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
     const log: string[] = [];
 
     const buildWf = () =>
-      workflow<number>({ name: "resume-sleep", storage })
+      workflow<number>({ name: "resume-sleep" })
         .step("double", ({ input }) => {
           log.push("double");
           return Pipeline.succeed(input * 2);
@@ -54,7 +55,8 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
         .step("add-100", ({ prev }) => {
           log.push("add-100");
           return Pipeline.succeed(prev + 100);
-        });
+        })
+        .bind(storage);
 
     // First run: suspends
     const { error } = await buildWf().runSafe({ workflowId: "s-2", input: 5 });
@@ -80,7 +82,7 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
     const log: string[] = [];
 
     const buildWf = () =>
-      workflow<string>({ name: "multi-sleep", storage })
+      workflow<string>({ name: "multi-sleep" })
         .step("step-1", ({ input }) => {
           log.push("step-1");
           return Pipeline.succeed(input);
@@ -94,7 +96,8 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
         .step("step-3", () => {
           log.push("step-3");
           return Pipeline.succeed("after-sleep-2");
-        });
+        })
+        .bind(storage);
 
     // Run 1: suspends at sleep-1
     const { error: e1 } = await buildWf().runSafe({ workflowId: "s-3", input: "start" });
@@ -120,10 +123,11 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
     const storage = new InMemoryWorkflowStorage();
 
     const buildWf = () =>
-      workflow<string>({ name: "no-re-suspend", storage })
+      workflow<string>({ name: "no-re-suspend" })
         .step("before", () => Pipeline.succeed("ok"))
         .sleep("nap", 1) // 1ms
-        .step("after", () => Pipeline.succeed("done"));
+        .step("after", () => Pipeline.succeed("done"))
+        .bind(storage);
 
     // Suspend
     await buildWf().runSafe({ workflowId: "s-4", input: "x" });
@@ -143,13 +147,14 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
     let step1Calls = 0;
 
     const buildWf = () =>
-      workflow<number>({ name: "no-reexec", storage })
+      workflow<number>({ name: "no-reexec" })
         .step("expensive", ({ input }) => {
           step1Calls++;
           return Pipeline.succeed(input * 100);
         })
         .sleep("nap", 1)
-        .step("cheap", () => Pipeline.succeed("done"));
+        .step("cheap", () => Pipeline.succeed("done"))
+        .bind(storage);
 
     await buildWf().runSafe({ workflowId: "s-5", input: 5 });
     expect(step1Calls).toBe(1);
@@ -171,7 +176,7 @@ describe("Sleep + compensation — rollback pre-sleep work if post-sleep step fa
     const log: string[] = [];
 
     const buildWf = () =>
-      workflow<string>({ name: "sleep-comp", storage })
+      workflow<string>({ name: "sleep-comp" })
         .step(
           "create",
           () => {
@@ -189,7 +194,8 @@ describe("Sleep + compensation — rollback pre-sleep work if post-sleep step fa
         .step("use", () => {
           log.push("use-fails");
           return Pipeline.fail(new TestError({ message: "post-sleep failure" }));
-        });
+        })
+        .bind(storage);
 
     // Suspend at sleep
     await buildWf().runSafe({ workflowId: "sc-1", input: "x" });
@@ -218,7 +224,6 @@ describe("Sleep + workflow retry — resume from where the workflow left off", (
     const buildWf = () =>
       workflow<string>({
         name: "sleep-retry",
-        storage,
         retry: { maxRetries: 1, baseDelayMs: 10 },
       })
         .step("before", () => {
@@ -233,7 +238,8 @@ describe("Sleep + workflow retry — resume from where the workflow left off", (
             return Pipeline.fail(new TestError({ message: "transient" }));
           }
           return Pipeline.succeed("recovered");
-        });
+        })
+        .bind(storage);
 
     // Suspend
     await buildWf().runSafe({ workflowId: "sr-1", input: "x" });
@@ -258,9 +264,10 @@ describe("Long sleep durations — schedule workflows days or months in the futu
     const storage = new InMemoryWorkflowStorage();
     const before = Date.now();
 
-    await workflow<string>({ name: "long-sleep", storage })
+    await workflow<string>({ name: "long-sleep" })
       .step("start", () => Pipeline.succeed("ok"))
       .sleep("30-days", 30 * 24 * 60 * 60 * 1000)
+      .bind(storage)
       .runSafe({ workflowId: "ls-1", input: "x" });
 
     const state = await storage.loadWorkflow("ls-1");
@@ -278,9 +285,10 @@ describe("Long sleep durations — schedule workflows days or months in the futu
     const storage = new InMemoryWorkflowStorage();
     const before = Date.now();
 
-    await workflow<string>({ name: "year-sleep", storage })
+    await workflow<string>({ name: "year-sleep" })
       .step("start", () => Pipeline.succeed("ok"))
       .sleep("1-year", 365 * 24 * 60 * 60 * 1000)
+      .bind(storage)
       .runSafe({ workflowId: "ls-2", input: "x" });
 
     const state = await storage.loadWorkflow("ls-2");

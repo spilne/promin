@@ -28,8 +28,13 @@ const SUBMIT_INTERVAL_MS = Number(process.env["SUBMIT_INTERVAL_MS"] ?? 5_000);
 
 const { storage, stepQueue, close } = await buildStack();
 
-const registry = new WorkflowVersionRegistry();
-registry.register(buildVideoWorkflow(storage));
+// Registry holds pure Workflow definitions + a single storage. The
+// coordinator uses its own `storage` config for state I/O; the registry's
+// storage is only consulted if someone calls `registry.run()` directly
+// (we don't — the coordinator handles dispatch). Pass it anyway so the
+// registry is self-sufficient in case a future entry point needs it.
+const registry = new WorkflowVersionRegistry({ storage });
+registry.register(buildVideoWorkflow());
 
 // Routing lives on the step itself via `needs` (see workflow.ts).
 // Workers declare capabilities that match. The coordinator just

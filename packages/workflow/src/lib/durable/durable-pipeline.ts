@@ -96,16 +96,44 @@ export interface IdempotencyConfig {
 }
 
 // ---------------------------------------------------------------------------
-// WorkflowDefinition — reusable workflow template
+// Workflow — pure definition (no storage, portable)
+// RunnableWorkflow — Workflow bound to a storage (has run/invoke/etc.)
 // ---------------------------------------------------------------------------
 
-/** A frozen workflow definition. Produced by `.build()` on WorkflowBuilder. */
-export interface WorkflowDefinition<Input, Output> {
+/**
+ * A frozen, portable workflow definition. Pure data — name, version, DAG,
+ * idempotency config. No storage, no runtime methods. Produced by
+ * `.build()` on WorkflowBuilder.
+ *
+ * To actually execute a `Workflow`, call `.bind(storage)` to get a
+ * `RunnableWorkflow`. Keeping definitions storage-free lets a single
+ * process import and dispatch workflow DAGs without also wiring up
+ * storage for every submitter — the coordinator or registry owns that.
+ */
+export interface Workflow<Input, Output> {
   readonly name: string;
   readonly version?: string;
-  readonly storage: WorkflowStorage;
   readonly dag: WorkflowDAG;
   readonly idempotency?: IdempotencyConfig;
+  /**
+   * Bind this definition to a storage backend. Returns a `RunnableWorkflow`
+   * that can actually be run/resumed/inspected. Cheap — no validation, no
+   * I/O; just produces a new object that closes over the storage.
+   */
+  bind(storage: WorkflowStorage): RunnableWorkflow<Input, Output>;
+}
+
+/**
+ * A `Workflow` bound to a specific storage. Carries every runtime method:
+ * run, runSafe, invoke, waitForResult, getStatus, start. Produced by
+ * `Workflow.bind(storage)`.
+ *
+ * `RunnableWorkflow` extends `Workflow`, so APIs that only need the
+ * definition shape (name/version/dag — e.g. the coordinator, the registry)
+ * accept both; APIs that actually run the workflow require the bound form.
+ */
+export interface RunnableWorkflow<Input, Output> extends Workflow<Input, Output> {
+  readonly storage: WorkflowStorage;
   /** Execute workflow synchronously — blocks until completion. */
   run(params: { workflowId: string; input: Input; force?: boolean }): Promise<Output>;
   /** Execute workflow synchronously — returns `{ data, error }` instead of throwing. */
@@ -191,6 +219,39 @@ export interface WorkflowDefinition<Input, Output> {
   start(workflowId: string, input: Input): Promise<WorkflowHandle<Output>>;
   /** Start with ID derived from input (requires idempotency.deriveId config). */
   start(input: Input): Promise<WorkflowHandle<Output>>;
+}
+
+/**
+ * @deprecated Use `Workflow` (pure) or `RunnableWorkflow` (bound) directly.
+ * Alias kept for the internal modules that still read the bound shape.
+ */
+export type WorkflowDefinition<Input, Output> = RunnableWorkflow<Input, Output>;
+
+/**
+ * Sentinel storage for builders produced by `workflow({ name, version })`
+ * (i.e. without a storage). Every method throws with a pointing error that
+ * tells the caller to `.bind(storage)` before executing. Type is still
+ * `WorkflowStorage` so the builder internals don't need to thread an
+ * `| undefined` through every call site.
+ */
+const UNBOUND_STORAGE_MESSAGE =
+  "Workflow has no storage bound. Call .bind(storage) on the builder or on .build() before running. " +
+  "For in-memory, non-durable flows, use `flow(name)` instead of `workflow({ name })`.";
+
+const UNBOUND_STORAGE: WorkflowStorage = new Proxy({} as WorkflowStorage, {
+  get(_target, prop) {
+    // Preserve the common "is it a thenable?" / Symbol introspection checks
+    // so the proxy doesn't accidentally masquerade as a promise or iterator.
+    if (typeof prop === "symbol" || prop === "then") return undefined;
+    return () => {
+      throw new Error(UNBOUND_STORAGE_MESSAGE);
+    };
+  },
+});
+
+/** @internal — test only. True when the storage is the unbound sentinel. */
+export function isUnboundStorage(storage: WorkflowStorage): boolean {
+  return storage === UNBOUND_STORAGE;
 }
 
 /**
@@ -602,7 +663,7 @@ export class WorkflowBuilder<
      * in-flight workflows with the exact code they were started on while
      * new workflows use the current definition.
      */
-    private readonly _previousVersions?: ReadonlyArray<WorkflowDefinition<unknown, unknown>>,
+    private readonly _previousVersions?: ReadonlyArray<Workflow<unknown, unknown>>,
     /**
      * Patch names active in this workflow version. `ctx.patched(name)` in a
      * journaled step returns `patches.includes(name)`. Using the drain
@@ -631,6 +692,50 @@ export class WorkflowBuilder<
   /** Resolve the codec a step or activity should use when no explicit override is set. */
   private _codec(): Codec<unknown> {
     return this._defaultCodec ?? LosslessJsonCodec;
+  }
+
+  /**
+   * Clone this builder with the given storage attached. Used by `.bind()`
+   * and by the fluent-chain shortcut `workflow({ name }).step(...).bind(storage).run(...)`.
+   */
+  private _withStorage(storage: WorkflowStorage): WorkflowBuilder<Input, Steps, Current, Error> {
+    return new WorkflowBuilder(
+      this._name,
+      storage,
+      this._steps,
+      this._lastStepName,
+      this._hooks,
+      this._type,
+      this._metadata,
+      this._retry,
+      this._compensateConfig,
+      this._dlq,
+      this._dispatch,
+      this._idempotency,
+      this._version,
+      this._timeoutMs,
+      this._onVersionMismatch,
+      this._previousVersions,
+      this._patches,
+      this._defaultCodec,
+      this._defaultPayloadHash,
+    );
+  }
+
+  /**
+   * Attach a storage to this builder and return a new, bound builder.
+   * Fluent shortcut for `.build().bind(storage)` when you just want to
+   * chain into `.run()` right away:
+   *
+   * ```ts
+   * await workflow({ name: "x" })
+   *   .step("a", handler)
+   *   .bind(storage)
+   *   .run({ workflowId, input });
+   * ```
+   */
+  bind(storage: WorkflowStorage): WorkflowBuilder<Input, Steps, Current, Error> {
+    return this._withStorage(storage);
   }
 
   /** Resolve TTL for a given workflow status. Returns undefined if no TTL applies. */
@@ -986,13 +1091,27 @@ export class WorkflowBuilder<
     Error | JournalStorageMissingError
   > {
     this._validateName(name);
-    if (!isActivityJournalStorage(this._storage)) {
-      throw new JournalStorageMissingError(name);
-    }
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
     const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
-    const journalStorage = this._storage as WorkflowStorage & ActivityJournalStorage;
+    // Storage capability check is deferred to execute time — at `.journaled()`
+    // call time, the builder may be unbound (a pure `Workflow` is being built
+    // and `.bind(storage)` hasn't been called yet). Validating here would
+    // force callers to bind before defining their DAG, which defeats the
+    // point of separating Workflow from RunnableWorkflow.
+    //
+    // The storage we validate against at runtime is `execParams.storage`
+    // (the bound runtime storage), not `this._storage` — after `.bind()`
+    // the DAG closure still captures the original builder's `this`, which
+    // may be unbound. The runtime storage is always current and correct.
+    const getJournalStorage = (
+      runtimeStorage: WorkflowStorage,
+    ): WorkflowStorage & ActivityJournalStorage => {
+      if (!isActivityJournalStorage(runtimeStorage)) {
+        throw new JournalStorageMissingError(name);
+      }
+      return runtimeStorage as WorkflowStorage & ActivityJournalStorage;
+    };
 
     const stepDef: StepDefinition = {
       name,
@@ -1010,7 +1129,7 @@ export class WorkflowBuilder<
             prev: prev as Current,
             workflowId: execParams.workflowId,
             stepName: name,
-            storage: journalStorage,
+            storage: getJournalStorage(execParams.storage),
             workflowStorage: execParams.storage,
             workflowVersion: builderVersion,
             patches: builderPatches,
@@ -1358,7 +1477,11 @@ export class WorkflowBuilder<
               `onVersionMismatch is "drain" but no matching previousVersion was registered.`,
           });
         }
-        return previousDef.run({ workflowId, input, force }) as Promise<Current>;
+        // Delegate drain to the previous version — bind it to this
+        // workflow's storage so both versions share one state backend.
+        return previousDef
+          .bind(this._storage)
+          .run({ workflowId, input, force }) as Promise<Current>;
       }
     }
 
@@ -2087,13 +2210,43 @@ export class WorkflowBuilder<
   // build — freeze into a reusable WorkflowDefinition
   // ---------------------------------------------------------------------------
 
+  /**
+   * Freeze this builder into a portable `Workflow` (pure data — no storage,
+   * no run methods). Call `.bind(storage)` on the result to get a
+   * `RunnableWorkflow` that can actually execute.
+   *
+   * This split keeps workflow definitions importable without dragging the
+   * state backend along: one process (the coordinator, a registry) binds
+   * once, and other processes (submitters, HTTP handlers) work off the
+   * bare definition.
+   */
   build(options?: {
     idempotency?: IdempotencyConfig;
     /** Derive workflowId from input. Makes the ID deterministic — same input → same workflow. */
     deriveId?: (input: Input) => string;
-  }): WorkflowDefinition<Input, Current> {
-    const builder = options?.idempotency ? this._deriveWithIdempotency(options.idempotency) : this;
-    const self = builder;
+  }): Workflow<Input, Current> {
+    const source = options?.idempotency ? this._deriveWithIdempotency(options.idempotency) : this;
+    const deriveId = options?.deriveId;
+    return {
+      name: source._name,
+      version: source._version,
+      dag: source.toJSON(),
+      idempotency: source._idempotency,
+      bind: (storage) => source._withStorage(storage)._buildRunnable({ deriveId }),
+    };
+  }
+
+  /**
+   * Internal: produce the full `RunnableWorkflow` shape. Only called from
+   * `.bind()` (which guarantees a real storage is attached) or from
+   * `flow()` (which starts with an in-memory storage). Must not be called
+   * with the unbound sentinel — the run methods on the returned object
+   * would throw with a less-helpful error.
+   */
+  private _buildRunnable(options?: {
+    deriveId?: (input: Input) => string;
+  }): RunnableWorkflow<Input, Current> {
+    const self = this;
     const deriveId = options?.deriveId;
     return {
       name: self._name,
@@ -2101,6 +2254,7 @@ export class WorkflowBuilder<
       storage: self._storage,
       dag: self.toJSON(),
       idempotency: self._idempotency,
+      bind: (storage) => self._withStorage(storage)._buildRunnable({ deriveId }),
       run: (params) => self.run(params),
       runSafe: (params) => self.runSafe(params) as any,
       invoke: (params) =>
@@ -2207,9 +2361,7 @@ export class WorkflowBuilder<
           throw new Error("workflowId is required when deriveId is not configured");
         }
 
-        const definition = self.build(
-          self._idempotency ? { idempotency: self._idempotency } : undefined,
-        );
+        const definition = self._buildRunnable(self._idempotency ? { deriveId } : { deriveId });
         const existing = await self._storage.loadWorkflow(workflowId);
         const isRunning =
           existing?.status === "pending" ||
@@ -2453,7 +2605,6 @@ function wrapWithStepCache(
 
 export function workflow<Input>(params: {
   name: string;
-  storage: WorkflowStorage;
   hooks?: WorkflowHooks;
   type?: string;
   metadata?: Record<string, unknown>;
@@ -2483,7 +2634,7 @@ export function workflow<Input>(params: {
    * version different from the current one. Each entry must have its own
    * `version` field set, or it can't be looked up.
    */
-  previousVersions?: ReadonlyArray<WorkflowDefinition<unknown, unknown>>;
+  previousVersions?: ReadonlyArray<Workflow<unknown, unknown>>;
   /**
    * Patch names active in this workflow version. Inside a journaled step
    * body, `ctx.patched(name)` returns `patches.includes(name)`. Each
@@ -2535,7 +2686,7 @@ export function workflow<Input>(params: {
 
   return new WorkflowBuilder(
     params.name,
-    params.storage,
+    UNBOUND_STORAGE,
     [],
     null,
     params.hooks,

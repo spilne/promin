@@ -33,7 +33,7 @@ describe("journaled step", () => {
       let createCalls = 0;
       let notifyCalls = 0;
 
-      const result = await workflow<{ user: string }>({ name: "signup", storage })
+      const result = await workflow<{ user: string }>({ name: "signup" })
         .step("load", ({ input }) => Pipeline.succeed(input))
         .journaled("setup", function* (ctx, prev) {
           const created = yield* ctx.activity("create", async () => {
@@ -46,6 +46,7 @@ describe("journaled step", () => {
           });
           return { user: created, greeting: notified };
         })
+        .bind(storage)
         .run({ workflowId: "wf-happy", input: { user: "alice" } });
 
       expect(createCalls).toBe(1);
@@ -77,9 +78,10 @@ describe("journaled step", () => {
       };
 
       // Seed the journal by running once through a workflow.
-      await workflow<{ msg: string }>({ name: "echo", storage })
+      await workflow<{ msg: string }>({ name: "echo" })
         .step("load", ({ input }) => Pipeline.succeed(input))
         .journaled("body", body as any)
+        .bind(storage)
         .run({ workflowId: "wf-echo", input: { msg: "hi" } });
 
       expect(callCount).toBe(1);
@@ -280,22 +282,53 @@ describe("journaled step", () => {
     });
   });
 
-  describe("build-time safety", () => {
-    it("throws JournalStorageMissingError when storage doesn't support journaling", () => {
+  describe("run-time safety", () => {
+    it("throws JournalStorageMissingError when the bound storage doesn't support journaling", async () => {
       // Bare storage implementing only WorkflowStorage (no journal methods).
+      // Journal support is validated at execute time (not build time)
+      // because a pure `Workflow` has no storage to check against — it
+      // only gets one through `.bind(storage)`.
       const bareStorage: any = {
+        tryLock: async () => true,
+        renewLock: async () => true,
+        releaseLock: async () => {},
         createWorkflow: async () => ({ created: true }),
+        loadWorkflow: async () => ({
+          workflowId: "nope-1",
+          workflowName: "nope",
+          status: "pending",
+          input: undefined,
+          version: undefined,
+          steps: {},
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          metadata: {},
+        }),
         saveStepResult: async () => {},
-        // ...etc — only need to pass the isActivityJournalStorage check, which
-        // it won't (no loadJournal/appendEntry).
+        saveStepFailure: async () => {},
+        saveWorkflow: async () => {},
+        updateWorkflow: async () => {},
+        completeWorkflow: async () => {},
+        failWorkflow: async () => {},
+        updateStatus: async () => {},
+        setHeartbeat: async () => {},
+        deliverSignal: async () => {},
+        loadSignals: async () => [],
+        consumeSignal: async () => null,
+        suspendWorkflow: async () => {},
+        resumeWorkflow: async () => {},
+        // Intentionally NO loadJournal / appendEntry — that's what we're testing.
       };
 
-      expect(() =>
-        workflow({ name: "nope", storage: bareStorage }).journaled("boom", function* (ctx) {
-          yield* ctx.activity("x", async () => 1);
-          return "never";
-        }),
-      ).toThrow(JournalStorageMissingError);
+      await expect(
+        workflow({ name: "nope" })
+          .journaled("boom", function* (ctx) {
+            yield* ctx.activity("x", async () => 1);
+            return "never";
+          })
+          .bind(bareStorage)
+          .run({ workflowId: "nope-1", input: undefined }),
+      ).rejects.toThrow(/requires a WorkflowStorage that implements ActivityJournalStorage/);
     });
   });
 
@@ -303,27 +336,27 @@ describe("journaled step", () => {
     it("ctx.patched returns true for names in the workflow's patches array", async () => {
       const wf = workflow<{ n: number }>({
         name: "p-test",
-        storage,
         version: "2",
         patches: ["new-pricing", "batch"],
-      }).journaled("body", function* (ctx, prev) {
-        const a = ctx.patched("new-pricing");
-        const b = ctx.patched("batch");
-        const c = ctx.patched("unknown"); // not declared — silently false
-        return { a, b, c, n: prev.n };
-      });
+      })
+        .journaled("body", function* (ctx, prev) {
+          const a = ctx.patched("new-pricing");
+          const b = ctx.patched("batch");
+          const c = ctx.patched("unknown"); // not declared — silently false
+          return { a, b, c, n: prev.n };
+        })
+        .bind(storage);
 
       const result = await wf.run({ workflowId: "p-1", input: { n: 42 } });
       expect(result).toEqual({ a: true, b: true, c: false, n: 42 });
     });
 
     it("ctx.patched returns false when no patches declared", async () => {
-      const wf = workflow<{ n: number }>({ name: "p-none", storage, version: "1" }).journaled(
-        "body",
-        function* (ctx) {
+      const wf = workflow<{ n: number }>({ name: "p-none", version: "1" })
+        .journaled("body", function* (ctx) {
           return { patched: ctx.patched("new-pricing") };
-        },
-      );
+        })
+        .bind(storage);
 
       const result = await wf.run({ workflowId: "p-2", input: { n: 1 } });
       expect(result).toEqual({ patched: false });
@@ -332,23 +365,23 @@ describe("journaled step", () => {
     it("ctx.workflowVersion exposes the stored version", async () => {
       const wf = workflow<{ n: number }>({
         name: "v-expose",
-        storage,
         version: "3",
-      }).journaled("body", function* (ctx) {
-        return { version: ctx.workflowVersion };
-      });
+      })
+        .journaled("body", function* (ctx) {
+          return { version: ctx.workflowVersion };
+        })
+        .bind(storage);
 
       const result = await wf.run({ workflowId: "v-1", input: { n: 1 } });
       expect(result).toEqual({ version: "3" });
     });
 
     it("ctx.workflowVersion is undefined when workflow has no version set", async () => {
-      const wf = workflow<{ n: number }>({ name: "v-none", storage }).journaled(
-        "body",
-        function* (ctx) {
+      const wf = workflow<{ n: number }>({ name: "v-none" })
+        .journaled("body", function* (ctx) {
           return { version: ctx.workflowVersion };
-        },
-      );
+        })
+        .bind(storage);
 
       const result = await wf.run({ workflowId: "v-2", input: { n: 1 } });
       expect(result).toEqual({ version: undefined });
@@ -369,27 +402,27 @@ describe("journaled step", () => {
 
       const v1 = workflow<{ amount: number }>({
         name: "priced",
-        storage,
         version: "1",
         patches: [], // patch off
       })
         .step("load", ({ input }) => Pipeline.succeed(input))
         .journaled("calc", body)
-        .build();
+        .build()
+        .bind(storage);
 
       await v1.run({ workflowId: "price-v1", input: { amount: 100 } });
       expect((await storage.getWorkflow("price-v1"))?.result).toEqual({ total: 100 });
 
       const v2 = workflow<{ amount: number }>({
         name: "priced",
-        storage,
         version: "2",
         onVersionMismatch: "drain",
         previousVersions: [v1],
         patches: ["new-pricing"], // patch on
       })
         .step("load", ({ input }) => Pipeline.succeed(input))
-        .journaled("calc", body);
+        .journaled("calc", body)
+        .bind(storage);
 
       // Resume v1 workflow — drain delegates to v1 which has patches=[] →
       // patched returns false → takes v1 path. Already completed so reads cached.
@@ -405,7 +438,7 @@ describe("journaled step", () => {
 
   describe("composition", () => {
     it("chains with .step() before and after", async () => {
-      const result = await workflow<{ n: number }>({ name: "mixed", storage })
+      const result = await workflow<{ n: number }>({ name: "mixed" })
         .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
         .journaled("plus-one-twice", function* (ctx, prev) {
           const a = yield* ctx.activity("a", async () => prev + 1);
@@ -413,6 +446,7 @@ describe("journaled step", () => {
           return b;
         })
         .step("stringify", ({ prev }) => Pipeline.succeed(`result: ${prev}`))
+        .bind(storage)
         .run({ workflowId: "wf-mix", input: { n: 5 } });
 
       // 5 * 2 = 10, +1 = 11, +1 = 12 → "result: 12"

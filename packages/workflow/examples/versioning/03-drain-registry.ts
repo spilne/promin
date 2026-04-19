@@ -16,15 +16,15 @@ async function main(): Promise<void> {
   const storage = new InMemoryWorkflowStorage();
 
   // Each version is a full workflow definition, built and kept around.
-  const v1 = workflow<{ x: number }>({ name: "job", storage, version: "1" })
+  const v1 = workflow<{ x: number }>({ name: "job", version: "1" })
     .step("run", ({ input }) => Pipeline.succeed(`v1-${input.x}`))
     .build();
 
-  const v2 = workflow<{ x: number }>({ name: "job", storage, version: "2" })
+  const v2 = workflow<{ x: number }>({ name: "job", version: "2" })
     .step("run", ({ input }) => Pipeline.succeed(`v2-${input.x}`))
     .build();
 
-  const v3 = workflow<{ x: number }>({ name: "job", storage, version: "3" })
+  const v3 = workflow<{ x: number }>({ name: "job", version: "3" })
     .step("run", ({ input }) => Pipeline.succeed(`v3-${input.x}`))
     .build();
 
@@ -32,6 +32,7 @@ async function main(): Promise<void> {
   // `onDrained` fires when a version's in-flight count hits zero.
   // `autoDeregister: true` removes drained versions (except the latest).
   const registry = WorkflowVersionRegistry.for("job", {
+    storage,
     autoDeregister: true,
     onDrained: (_name, version) => {
       console.log(`version "${version}" has drained`);
@@ -42,8 +43,8 @@ async function main(): Promise<void> {
     .register(v3);
 
   // Start workflows under v1 and v2 directly to seed the storage.
-  await v1.run({ workflowId: "j-1", input: { x: 10 } });
-  await v2.run({ workflowId: "j-2", input: { x: 20 } });
+  await v1.bind(storage).run({ workflowId: "j-1", input: { x: 10 } });
+  await v2.bind(storage).run({ workflowId: "j-2", input: { x: 20 } });
 
   // New workflows go to the latest (v3) — registry resolves that automatically.
   const j3Result = await registry.run<string>({ workflowId: "j-3", input: { x: 30 } });

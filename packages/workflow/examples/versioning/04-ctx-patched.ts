@@ -45,7 +45,6 @@ async function main(): Promise<void> {
   // v1: patches list is empty.
   const v1 = workflow<{ amount: number }>({
     name: "billing-journaled",
-    storage,
     version: "1",
     patches: [],
   })
@@ -56,17 +55,17 @@ async function main(): Promise<void> {
   // v2: patch "new-pricing" is active. Drain policy delegates v1 rows to v1.
   const v2 = workflow<{ amount: number }>({
     name: "billing-journaled",
-    storage,
     version: "2",
     onVersionMismatch: "drain",
     previousVersions: [v1],
     patches: ["new-pricing"],
   })
     .step("load", ({ input }) => Pipeline.succeed(input))
-    .journaled("calculate", calculateTotal);
+    .journaled("calculate", calculateTotal)
+    .bind(storage);
 
   // Start a v1 workflow — runs v1 code, patches: [], takes the else branch.
-  const v1Result = await v1.run({ workflowId: "bill-A", input: { amount: 100 } });
+  const v1Result = await v1.bind(storage).run({ workflowId: "bill-A", input: { amount: 100 } });
   console.log("v1 result (legacy pricing):", v1Result);
 
   // Fresh v2 workflow — runs v2 code, patches: ["new-pricing"], takes the if branch.

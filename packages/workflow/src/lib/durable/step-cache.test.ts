@@ -68,7 +68,7 @@ describe("step cache — hit / miss / TTL", () => {
     const cache = new MemoryCache<string, unknown>({ ttlMs: 60_000 });
     const c = counter();
 
-    const wf = workflow({ name: "hit", storage: new InMemoryWorkflowStorage() })
+    const wf = workflow({ name: "hit" })
       .stepAsync(
         "discover",
         async () => {
@@ -83,7 +83,8 @@ describe("step cache — hit / miss / TTL", () => {
           },
         },
       )
-      .build();
+      .build()
+      .bind(new InMemoryWorkflowStorage());
 
     const r1 = await wf.run({ workflowId: "run-1", input: { accountId: "alice" } });
     const r2 = await wf.run({ workflowId: "run-2", input: { accountId: "alice" } });
@@ -97,7 +98,7 @@ describe("step cache — hit / miss / TTL", () => {
     const cache = new MemoryCache<string, unknown>({ ttlMs: 60_000 });
     const c = counter();
 
-    const wf = workflow({ name: "share", storage: new InMemoryWorkflowStorage() })
+    const wf = workflow({ name: "share" })
       .stepAsync(
         "discover",
         async () => {
@@ -112,7 +113,8 @@ describe("step cache — hit / miss / TTL", () => {
           },
         },
       )
-      .build();
+      .build()
+      .bind(new InMemoryWorkflowStorage());
 
     await wf.run({ workflowId: "alpha", input: {} });
     await wf.run({ workflowId: "beta", input: {} });
@@ -123,7 +125,7 @@ describe("step cache — hit / miss / TTL", () => {
     const cache = new MemoryCache<string, unknown>({ ttlMs: 1 });
     const c = counter();
 
-    const wf = workflow({ name: "ttl", storage: new InMemoryWorkflowStorage() })
+    const wf = workflow({ name: "ttl" })
       .stepAsync(
         "discover",
         async () => {
@@ -138,7 +140,8 @@ describe("step cache — hit / miss / TTL", () => {
           },
         },
       )
-      .build();
+      .build()
+      .bind(new InMemoryWorkflowStorage());
 
     const r1 = await wf.run({ workflowId: "w1", input: {} });
     await new Promise((r) => setTimeout(r, 20));
@@ -153,7 +156,7 @@ describe("step cache — hit / miss / TTL", () => {
     const cache = new MemoryCache<string, unknown>({ ttlMs: 60_000 });
     const c = counter();
 
-    const wf = workflow({ name: "keys", storage: new InMemoryWorkflowStorage() })
+    const wf = workflow({ name: "keys" })
       .stepAsync(
         "discover",
         async ({ input }: any) => {
@@ -168,7 +171,8 @@ describe("step cache — hit / miss / TTL", () => {
           },
         },
       )
-      .build();
+      .build()
+      .bind(new InMemoryWorkflowStorage());
 
     await wf.run({ workflowId: "w-a", input: { tenant: "acme" } });
     await wf.run({ workflowId: "w-b", input: { tenant: "beta" } });
@@ -185,7 +189,7 @@ describe("step cache — failure never caches", () => {
     const cache = new MemoryCache<string, unknown>({ ttlMs: 60_000 });
     let attempts = 0;
 
-    const wf = workflow({ name: "fail", storage: new InMemoryWorkflowStorage() })
+    const wf = workflow({ name: "fail" })
       .stepAsync(
         "discover",
         async () => {
@@ -197,7 +201,8 @@ describe("step cache — failure never caches", () => {
           cache: { key: () => "k", ttlMs: 60_000, store: cache },
         },
       )
-      .build();
+      .build()
+      .bind(new InMemoryWorkflowStorage());
 
     await expect(wf.run({ workflowId: "r1", input: {} })).rejects.toBeDefined();
     expect(await cache.size()).toBe(0); // no poison
@@ -218,7 +223,7 @@ describe("step cache — backend errors are swallowed", () => {
     cache.failures.get = new Error("redis down on read");
     const c = counter();
 
-    const wf = workflow({ name: "get-fail", storage: new InMemoryWorkflowStorage() })
+    const wf = workflow({ name: "get-fail" })
       .stepAsync(
         "discover",
         async () => {
@@ -229,7 +234,8 @@ describe("step cache — backend errors are swallowed", () => {
           cache: { key: () => "k", ttlMs: 60_000, store: cache },
         },
       )
-      .build();
+      .build()
+      .bind(new InMemoryWorkflowStorage());
 
     const r = await wf.run({ workflowId: "w", input: {} });
     expect(r).toBe("value");
@@ -241,7 +247,7 @@ describe("step cache — backend errors are swallowed", () => {
     cache.failures.set = new Error("redis down on write");
     const c = counter();
 
-    const wf = workflow({ name: "set-fail", storage: new InMemoryWorkflowStorage() })
+    const wf = workflow({ name: "set-fail" })
       .stepAsync(
         "discover",
         async () => {
@@ -252,7 +258,8 @@ describe("step cache — backend errors are swallowed", () => {
           cache: { key: () => "k", ttlMs: 60_000, store: cache },
         },
       )
-      .build();
+      .build()
+      .bind(new InMemoryWorkflowStorage());
 
     const r1 = await wf.run({ workflowId: "w1", input: {} });
     expect(r1).toBe(1);
@@ -273,7 +280,7 @@ describe("step cache — namespace keeps different workflows isolated", () => {
     const c1 = counter();
     const c2 = counter();
 
-    const wf1 = workflow({ name: "wfA", storage: new InMemoryWorkflowStorage() })
+    const wf1 = workflow({ name: "wfA" })
       .stepAsync(
         "discover",
         async () => {
@@ -282,9 +289,10 @@ describe("step cache — namespace keeps different workflows isolated", () => {
         },
         { cache: { key: () => "k", ttlMs: 60_000, store: shared } },
       )
-      .build();
+      .build()
+      .bind(new InMemoryWorkflowStorage());
 
-    const wf2 = workflow({ name: "wfB", storage: new InMemoryWorkflowStorage() })
+    const wf2 = workflow({ name: "wfB" })
       .stepAsync(
         "discover",
         async () => {
@@ -293,7 +301,8 @@ describe("step cache — namespace keeps different workflows isolated", () => {
         },
         { cache: { key: () => "k", ttlMs: 60_000, store: shared } },
       )
-      .build();
+      .build()
+      .bind(new InMemoryWorkflowStorage());
 
     await wf1.run({ workflowId: "a1", input: {} });
     await wf2.run({ workflowId: "b1", input: {} });
@@ -306,7 +315,7 @@ describe("step cache — namespace keeps different workflows isolated", () => {
     const shared = new MemoryCache<string, unknown>({ ttlMs: 60_000 });
     const c = counter();
 
-    const wf1 = workflow({ name: "sharedA", storage: new InMemoryWorkflowStorage() })
+    const wf1 = workflow({ name: "sharedA" })
       .stepAsync(
         "discover",
         async () => {
@@ -322,9 +331,10 @@ describe("step cache — namespace keeps different workflows isolated", () => {
           },
         },
       )
-      .build();
+      .build()
+      .bind(new InMemoryWorkflowStorage());
 
-    const wf2 = workflow({ name: "sharedB", storage: new InMemoryWorkflowStorage() })
+    const wf2 = workflow({ name: "sharedB" })
       .stepAsync(
         "discover",
         async () => {
@@ -340,7 +350,8 @@ describe("step cache — namespace keeps different workflows isolated", () => {
           },
         },
       )
-      .build();
+      .build()
+      .bind(new InMemoryWorkflowStorage());
 
     await wf1.run({ workflowId: "1", input: {} });
     await wf2.run({ workflowId: "2", input: {} });

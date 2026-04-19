@@ -34,7 +34,6 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
     // Run workflow with dispatch — "transcribe" goes to GPU worker, rest runs locally
     await workflow<{ videoId: string }>({
       name: "hybrid",
-      storage,
       dispatch: {
         stepQueue,
         remoteSteps: ["transcribe"],
@@ -55,6 +54,7 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
         log.push("format:local");
         return Pipeline.succeed(`formatted: ${deps.transcribe}`);
       })
+      .bind(storage)
       .run({ workflowId: "hybrid-1", input: { videoId: "abc" } });
 
     await gpuWorker.stop();
@@ -73,7 +73,6 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
     // No worker needed for this test — only local steps
     const result = await workflow<number>({
       name: "local-retry",
-      storage,
       dispatch: {
         stepQueue,
         remoteSteps: [], // nothing dispatched
@@ -90,6 +89,7 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
           retry: { maxRetries: 5 },
         },
       )
+      .bind(storage)
       .run({ workflowId: "local-1", input: 5 });
 
     expect(result).toBe(10);
@@ -99,9 +99,10 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
   it("no dispatch config — everything runs locally as a normal workflow", async () => {
     const storage = new InMemoryWorkflowStorage();
 
-    const result = await workflow<number>({ name: "no-dispatch", storage })
+    const result = await workflow<number>({ name: "no-dispatch" })
       .step("double", ({ input }) => Pipeline.succeed(input * 2))
       .step("add", ({ prev }) => Pipeline.succeed(prev + 100))
+      .bind(storage)
       .run({ workflowId: "nd-1", input: 5 });
 
     expect(result).toBe(110);
@@ -128,7 +129,6 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
 
     const { error } = await workflow<string>({
       name: "dispatch-fail",
-      storage,
       dispatch: {
         stepQueue,
         remoteSteps: ["bad-step"],
@@ -142,6 +142,7 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
         () => Pipeline.succeed("should not run locally"),
         { needs: ["remote"] },
       )
+      .bind(storage)
       .runSafe({ workflowId: "fail-1", input: "x" });
 
     await worker.stop();

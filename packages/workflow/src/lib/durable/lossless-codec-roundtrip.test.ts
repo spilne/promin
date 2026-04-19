@@ -38,9 +38,10 @@ describe("workflow — step result codec round-trip on replay", () => {
   it("Date survives replay through JSON storage with default codec", async () => {
     const storage = new JsonRoundTripStorage();
 
-    const wf = workflow({ name: "date-rt", storage })
+    const wf = workflow({ name: "date-rt" })
       .stepAsync("produce", async () => new Date("2026-04-16T12:00:00Z"))
-      .build();
+      .build()
+      .bind(storage);
 
     const r1 = await wf.run({ workflowId: "date-rt-1", input: {} });
     const r2 = await wf.run({ workflowId: "date-rt-1", input: {} });
@@ -54,9 +55,10 @@ describe("workflow — step result codec round-trip on replay", () => {
     const storage = new JsonRoundTripStorage();
     const big = 12345678901234567890n;
 
-    const wf = workflow({ name: "bigint-rt", storage })
+    const wf = workflow({ name: "bigint-rt" })
       .stepAsync("produce", async () => big)
-      .build();
+      .build()
+      .bind(storage);
 
     const r1 = await wf.run({ workflowId: "bi-1", input: {} });
     const r2 = await wf.run({ workflowId: "bi-1", input: {} });
@@ -69,7 +71,7 @@ describe("workflow — step result codec round-trip on replay", () => {
 
   it("Map survives replay with Date keys and BigInt values", async () => {
     const storage = new JsonRoundTripStorage();
-    const wf = workflow({ name: "map-rt", storage })
+    const wf = workflow({ name: "map-rt" })
       .stepAsync(
         "produce",
         async () =>
@@ -78,7 +80,8 @@ describe("workflow — step result codec round-trip on replay", () => {
             [new Date("2026-06-01T00:00:00Z"), 2n],
           ]),
       )
-      .build();
+      .build()
+      .bind(storage);
 
     const r1 = await wf.run({ workflowId: "map-1", input: {} });
     const r2 = await wf.run({ workflowId: "map-1", input: {} });
@@ -95,9 +98,10 @@ describe("workflow — step result codec round-trip on replay", () => {
 
   it("Set survives replay", async () => {
     const storage = new JsonRoundTripStorage();
-    const wf = workflow({ name: "set-rt", storage })
+    const wf = workflow({ name: "set-rt" })
       .stepAsync("produce", async () => new Set(["a", "b", "c"]))
-      .build();
+      .build()
+      .bind(storage);
 
     const r1 = await wf.run({ workflowId: "set-1", input: {} });
     const r2 = await wf.run({ workflowId: "set-1", input: {} });
@@ -109,7 +113,7 @@ describe("workflow — step result codec round-trip on replay", () => {
 
   it("undefined / NaN / ±Infinity / -0 survive replay", async () => {
     const storage = new JsonRoundTripStorage();
-    const wf = workflow({ name: "special-rt", storage })
+    const wf = workflow({ name: "special-rt" })
       .stepAsync("produce", async () => ({
         u: undefined,
         nan: Number.NaN,
@@ -117,7 +121,8 @@ describe("workflow — step result codec round-trip on replay", () => {
         ninf: Number.NEGATIVE_INFINITY,
         nz: -0,
       }))
-      .build();
+      .build()
+      .bind(storage);
 
     const r2 = (await wf.run({ workflowId: "special-1", input: {} })) as any;
     await wf.run({ workflowId: "special-1", input: {} }); // trigger replay path
@@ -135,7 +140,7 @@ describe("workflow — step result codec round-trip on replay", () => {
     let firstStepSawDate = false;
     let secondStepSawDate = false;
 
-    const wf = workflow({ name: "downstream-rt", storage })
+    const wf = workflow({ name: "downstream-rt" })
       .stepAsync("produce", async () => {
         const d = new Date("2026-04-16T00:00:00Z");
         firstStepSawDate = d instanceof Date;
@@ -149,7 +154,8 @@ describe("workflow — step result codec round-trip on replay", () => {
         },
         { codec: JsonCodec },
       )
-      .build();
+      .build()
+      .bind(storage);
 
     const result = await wf.run({ workflowId: "ds-1", input: {} });
     expect(firstStepSawDate).toBe(true);
@@ -163,11 +169,12 @@ describe("workflow — step result codec round-trip on replay", () => {
 describe("workflow — explicit JsonCodec opt-out still works", () => {
   it("identity codec skips round-trip; Date becomes string under JSON storage", async () => {
     const storage = new JsonRoundTripStorage();
-    const wf = workflow({ name: "identity-codec", storage })
+    const wf = workflow({ name: "identity-codec" })
       .stepAsync("produce", async () => new Date("2026-04-16T00:00:00Z"), {
         codec: JsonCodec,
       })
-      .build();
+      .build()
+      .bind(storage);
 
     const r1 = await wf.run({ workflowId: "id-1", input: {} });
     const r2 = await wf.run({ workflowId: "id-1", input: {} });
@@ -184,10 +191,11 @@ describe("workflow — explicit JsonCodec opt-out still works", () => {
 describe("workflow — pipeline-level default codec", () => {
   it("workflow({ codec: JsonCodec }) applies identity to every step by default", async () => {
     const storage = new JsonRoundTripStorage();
-    const wf = workflow({ name: "pipeline-default", storage, codec: JsonCodec })
+    const wf = workflow({ name: "pipeline-default", codec: JsonCodec })
       .stepAsync("a", async () => new Date("2026-04-16T00:00:00Z"))
       .stepAsync("b", async ({ prev }: { prev: unknown }) => prev)
-      .build();
+      .build()
+      .bind(storage);
 
     await wf.run({ workflowId: "pdc-1", input: {} });
     const replay = await wf.run({ workflowId: "pdc-1", input: {} });
@@ -199,14 +207,15 @@ describe("workflow — pipeline-level default codec", () => {
 
   it("per-step codec still overrides the pipeline-level default", async () => {
     const storage = new JsonRoundTripStorage();
-    const wf = workflow({ name: "pipeline-override", storage, codec: JsonCodec })
+    const wf = workflow({ name: "pipeline-override", codec: JsonCodec })
       .stepAsync("lossy", async () => new Date("2026-04-16T00:00:00Z"))
       .stepAsync(
         "lossless",
         async ({ prev: _ }: { prev: unknown }) => new Date("2026-05-01T00:00:00Z"),
         { codec: (await import("@promin/core")).LosslessJsonCodec },
       )
-      .build();
+      .build()
+      .bind(storage);
 
     await wf.run({ workflowId: "po-1", input: {} });
     const replay = await wf.run({ workflowId: "po-1", input: {} });
@@ -218,9 +227,10 @@ describe("workflow — pipeline-level default codec", () => {
 
   it("no pipeline codec set ⇒ default is LosslessJsonCodec (backward compat)", async () => {
     const storage = new JsonRoundTripStorage();
-    const wf = workflow({ name: "no-pipeline-codec", storage })
+    const wf = workflow({ name: "no-pipeline-codec" })
       .stepAsync("produce", async () => new Date("2026-04-16T00:00:00Z"))
-      .build();
+      .build()
+      .bind(storage);
 
     const replay = await wf.run({ workflowId: "npc-1", input: {} });
     // With no pipeline codec, the step picks up LosslessJsonCodec and the

@@ -6,9 +6,9 @@ import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
 describe("workflow versioning", () => {
   it("stores no version when not set", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const wf = workflow<{ x: number }>({ name: "test", storage }).step("add", ({ input }) =>
-      Pipeline.succeed(input.x + 1),
-    );
+    const wf = workflow<{ x: number }>({ name: "test" })
+      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .bind(storage);
 
     await wf.run({ workflowId: "v-default", input: { x: 1 } });
     const state = await storage.loadWorkflow("v-default");
@@ -17,9 +17,10 @@ describe("workflow versioning", () => {
 
   it("stores version from .version() builder method", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const wf = workflow<{ x: number }>({ name: "test", storage })
+    const wf = workflow<{ x: number }>({ name: "test" })
       .version("2")
-      .step("add", ({ input }) => Pipeline.succeed(input.x + 1));
+      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .bind(storage);
 
     await wf.run({ workflowId: "v-explicit", input: { x: 1 } });
     const state = await storage.loadWorkflow("v-explicit");
@@ -28,10 +29,9 @@ describe("workflow versioning", () => {
 
   it("stores version from workflow() params", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const wf = workflow<{ x: number }>({ name: "test", storage, version: "3" }).step(
-      "add",
-      ({ input }) => Pipeline.succeed(input.x + 1),
-    );
+    const wf = workflow<{ x: number }>({ name: "test", version: "3" })
+      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .bind(storage);
 
     await wf.run({ workflowId: "v-params", input: { x: 1 } });
     const state = await storage.loadWorkflow("v-params");
@@ -40,10 +40,9 @@ describe("workflow versioning", () => {
 
   it("resumes successfully when version matches", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const wf = workflow<{ x: number }>({ name: "test", storage, version: "2" }).step(
-      "add",
-      ({ input }) => Pipeline.succeed(input.x + 1),
-    );
+    const wf = workflow<{ x: number }>({ name: "test", version: "2" })
+      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .bind(storage);
 
     const result1 = await wf.run({ workflowId: "v-match", input: { x: 1 } });
     expect(result1).toBe(2);
@@ -57,16 +56,15 @@ describe("workflow versioning", () => {
     const storage = new InMemoryWorkflowStorage();
 
     // Create workflow with explicit version
-    const v1 = workflow<{ x: number }>({ name: "test", storage, version: "1" }).step(
-      "add",
-      ({ input }) => Pipeline.succeed(input.x + 1),
-    );
+    const v1 = workflow<{ x: number }>({ name: "test", version: "1" })
+      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .bind(storage);
     await v1.run({ workflowId: "v-skip", input: { x: 1 } });
 
     // Resume with no version set — should succeed (no check)
-    const noVersion = workflow<{ x: number }>({ name: "test", storage }).step("add", ({ input }) =>
-      Pipeline.succeed(input.x + 1),
-    );
+    const noVersion = workflow<{ x: number }>({ name: "test" })
+      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .bind(storage);
     const result = await noVersion.run({ workflowId: "v-skip", input: { x: 1 } });
     expect(result).toBe(2);
   });
@@ -75,17 +73,15 @@ describe("workflow versioning", () => {
     const storage = new InMemoryWorkflowStorage();
 
     // Create workflow with v1
-    const v1 = workflow<{ x: number }>({ name: "test", storage, version: "1" }).step(
-      "add",
-      ({ input }) => Pipeline.succeed(input.x + 1),
-    );
+    const v1 = workflow<{ x: number }>({ name: "test", version: "1" })
+      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .bind(storage);
     await v1.run({ workflowId: "v-mismatch", input: { x: 1 } });
 
     // Try to resume with v2 — should throw
-    const v2 = workflow<{ x: number }>({ name: "test", storage, version: "2" }).step(
-      "add",
-      ({ input }) => Pipeline.succeed(input.x + 1),
-    );
+    const v2 = workflow<{ x: number }>({ name: "test", version: "2" })
+      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .bind(storage);
 
     try {
       await v2.run({ workflowId: "v-mismatch", input: { x: 1 } });
@@ -103,16 +99,15 @@ describe("workflow versioning", () => {
     const storage = new InMemoryWorkflowStorage();
 
     // Create workflow without version
-    const noVer = workflow<{ x: number }>({ name: "test", storage }).step("add", ({ input }) =>
-      Pipeline.succeed(input.x + 1),
-    );
+    const noVer = workflow<{ x: number }>({ name: "test" })
+      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .bind(storage);
     await noVer.run({ workflowId: "v-upgrade", input: { x: 1 } });
 
     // Try to resume with explicit version — should throw
-    const v2 = workflow<{ x: number }>({ name: "test", storage, version: "2" }).step(
-      "add",
-      ({ input }) => Pipeline.succeed(input.x + 1),
-    );
+    const v2 = workflow<{ x: number }>({ name: "test", version: "2" })
+      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .bind(storage);
 
     try {
       await v2.run({ workflowId: "v-upgrade", input: { x: 1 } });
@@ -127,10 +122,9 @@ describe("workflow versioning", () => {
 
   it("new workflow always creates with builder version", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const wf = workflow<{ x: number }>({ name: "test", storage, version: "5" }).step(
-      "add",
-      ({ input }) => Pipeline.succeed(input.x + 1),
-    );
+    const wf = workflow<{ x: number }>({ name: "test", version: "5" })
+      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .bind(storage);
 
     await wf.run({ workflowId: "v-new", input: { x: 1 } });
     const state = await storage.loadWorkflow("v-new");
@@ -146,9 +140,10 @@ describe("workflow versioning", () => {
       const storage = new InMemoryWorkflowStorage();
 
       // v1 — logic produces input * 10
-      const v1 = workflow<{ x: number }>({ name: "test", storage, version: "1" })
+      const v1 = workflow<{ x: number }>({ name: "test", version: "1" })
         .step("compute", ({ input }) => Pipeline.succeed(input.x * 10))
-        .build();
+        .build()
+        .bind(storage);
 
       // Create a v1 workflow, don't run it to completion (we'll pretend it's in flight).
       await v1.run({ workflowId: "drain-1", input: { x: 3 } });
@@ -158,11 +153,12 @@ describe("workflow versioning", () => {
       // v2 — different logic (input * 100) + drain policy + v1 in previousVersions
       const v2 = workflow<{ x: number }>({
         name: "test",
-        storage,
         version: "2",
         onVersionMismatch: "drain",
         previousVersions: [v1],
-      }).step("compute", ({ input }) => Pipeline.succeed(input.x * 100));
+      })
+        .step("compute", ({ input }) => Pipeline.succeed(input.x * 100))
+        .bind(storage);
 
       // Running v2 against the v1 workflow should delegate to v1's def.
       // With idempotency absent, re-run loads the completed state; but the
@@ -176,23 +172,26 @@ describe("workflow versioning", () => {
     it("throws VersionMismatchError when drain can't find matching previousVersion", async () => {
       const storage = new InMemoryWorkflowStorage();
 
-      const v1 = workflow<{ x: number }>({ name: "test", storage, version: "1" })
+      const v1 = workflow<{ x: number }>({ name: "test", version: "1" })
         .step("compute", ({ input }) => Pipeline.succeed(input.x * 10))
-        .build();
+        .build()
+        .bind(storage);
       await v1.run({ workflowId: "drain-missing", input: { x: 1 } });
 
       // v3 with drain policy but only v2 in previousVersions (not v1).
-      const v2 = workflow<{ x: number }>({ name: "test", storage, version: "2" })
+      const v2 = workflow<{ x: number }>({ name: "test", version: "2" })
         .step("compute", ({ input }) => Pipeline.succeed(input.x * 100))
-        .build();
+        .build()
+        .bind(storage);
 
       const v3 = workflow<{ x: number }>({
         name: "test",
-        storage,
         version: "3",
         onVersionMismatch: "drain",
         previousVersions: [v2], // missing v1
-      }).step("compute", ({ input }) => Pipeline.succeed(input.x * 1000));
+      })
+        .step("compute", ({ input }) => Pipeline.succeed(input.x * 1000))
+        .bind(storage);
 
       try {
         await v3.run({ workflowId: "drain-missing", input: { x: 1 } });
@@ -209,7 +208,6 @@ describe("workflow versioning", () => {
       expect(() =>
         workflow<{ x: number }>({
           name: "test",
-          storage,
           version: "2",
           onVersionMismatch: "drain",
           // previousVersions omitted — should throw
@@ -219,14 +217,13 @@ describe("workflow versioning", () => {
 
     it("throws at construction when previousVersions entries lack `version`", () => {
       const storage = new InMemoryWorkflowStorage();
-      const unversioned = workflow<{ x: number }>({ name: "test", storage })
+      const unversioned = workflow<{ x: number }>({ name: "test" })
         .step("x", ({ input }) => Pipeline.succeed(input))
         .build();
 
       expect(() =>
         workflow<{ x: number }>({
           name: "test",
-          storage,
           version: "2",
           onVersionMismatch: "drain",
           previousVersions: [unversioned],
@@ -236,18 +233,20 @@ describe("workflow versioning", () => {
 
     it("strict policy (default) still throws on mismatch even with previousVersions set", async () => {
       const storage = new InMemoryWorkflowStorage();
-      const v1 = workflow<{ x: number }>({ name: "test", storage, version: "1" })
+      const v1 = workflow<{ x: number }>({ name: "test", version: "1" })
         .step("compute", ({ input }) => Pipeline.succeed(input))
-        .build();
+        .build()
+        .bind(storage);
       await v1.run({ workflowId: "strict-with-prev", input: { x: 1 } });
 
       // previousVersions present but no drain policy — should still throw on mismatch.
       const v2 = workflow<{ x: number }>({
         name: "test",
-        storage,
         version: "2",
         previousVersions: [v1], // present but ignored without "drain"
-      }).step("compute", ({ input }) => Pipeline.succeed(input));
+      })
+        .step("compute", ({ input }) => Pipeline.succeed(input))
+        .bind(storage);
 
       await expect(v2.run({ workflowId: "strict-with-prev", input: { x: 1 } })).rejects.toThrow(
         WorkflowVersionMismatchError,
@@ -256,17 +255,18 @@ describe("workflow versioning", () => {
 
     it("fresh workflow uses current definition regardless of drain", async () => {
       const storage = new InMemoryWorkflowStorage();
-      const v1 = workflow<{ x: number }>({ name: "test", storage, version: "1" })
+      const v1 = workflow<{ x: number }>({ name: "test", version: "1" })
         .step("c", ({ input }) => Pipeline.succeed(input.x * 10))
         .build();
 
       const v2 = workflow<{ x: number }>({
         name: "test",
-        storage,
         version: "2",
         onVersionMismatch: "drain",
         previousVersions: [v1],
-      }).step("c", ({ input }) => Pipeline.succeed(input.x * 100));
+      })
+        .step("c", ({ input }) => Pipeline.succeed(input.x * 100))
+        .bind(storage);
 
       // Brand new workflowId — drain should NOT kick in.
       const result = await v2.run({ workflowId: "fresh-drain", input: { x: 5 } });
