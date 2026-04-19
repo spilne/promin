@@ -22,11 +22,13 @@ import {
   InMemoryStepQueue,
   MapStepRegistry,
   createWorker,
+  createWorkflowRunner,
 } from "@promin/workflow";
 
 async function main(): Promise<void> {
   const storage = new InMemoryWorkflowStorage();
   const stepQueue = new InMemoryStepQueue();
+  const runner = createWorkflowRunner({ storage });
 
   // Worker-side: register handlers. In this example the handler logic is
   // the same for v1 and v2 — real deployments might have version-specific
@@ -52,24 +54,24 @@ async function main(): Promise<void> {
   void worker.start();
 
   // v1 in-flight workflow.
-  await workflow<{ id: string }>({
+  const v1Wf = workflow<{ id: string }>({
     name: "order",
     version: "1",
     dispatch: { stepQueue, remoteSteps: ["process"], pollIntervalMs: 25 },
   })
     .step("process", ({ input }) => Pipeline.succeed(`v1-${input.id}`))
-    .bind(storage)
-    .run({ workflowId: "order-A", input: { id: "abc" } });
+    .build();
+  await runner.run({ workflow: v1Wf, workflowId: "order-A", input: { id: "abc" } });
 
   // Fresh v2 workflow.
-  await workflow<{ id: string }>({
+  const v2Wf = workflow<{ id: string }>({
     name: "order",
     version: "2",
     dispatch: { stepQueue, remoteSteps: ["process"], pollIntervalMs: 25 },
   })
     .step("process", ({ input }) => Pipeline.succeed(`v2-${input.id}`))
-    .bind(storage)
-    .run({ workflowId: "order-B", input: { id: "def" } });
+    .build();
+  await runner.run({ workflow: v2Wf, workflowId: "order-B", input: { id: "def" } });
 
   await worker.stop();
 

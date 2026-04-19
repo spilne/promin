@@ -2,15 +2,21 @@
 // Example 03 — Drain policy via WorkflowVersionRegistry (3+ versions)
 //
 // `previousVersions` works for 2-3 versions but gets unwieldy when you have
-// many coexisting versions. `WorkflowVersionRegistry.for(name)` is the
-// fluent builder for a scoped registry — one entry point, automatic version
-// resolution on resume, optional auto-deregister when a version drains.
+// many coexisting versions. `createWorkflowVersionRegistry()` is a catalog
+// of (name, version) definitions that the runner consults on resume —
+// automatic version resolution, optional auto-deregister when a version
+// drains.
 //
 // Run: bun run packages/workflow/examples/versioning/03-drain-registry.ts
 // ---------------------------------------------------------------------------
 
 import { Pipeline } from "@promin/core";
-import { workflow, InMemoryWorkflowStorage, WorkflowVersionRegistry } from "@promin/workflow";
+import {
+  workflow,
+  InMemoryWorkflowStorage,
+  createWorkflowVersionRegistry,
+  createWorkflowRunner,
+} from "@promin/workflow";
 
 async function main(): Promise<void> {
   const storage = new InMemoryWorkflowStorage();
@@ -28,35 +34,45 @@ async function main(): Promise<void> {
     .step("run", ({ input }) => Pipeline.succeed(`v3-${input.x}`))
     .build();
 
-  // Scoped registry: all calls are pinned to the "job" workflow name.
+  // Registry carries the (name, version) catalog. The runner holds storage
+  // and delegates version resolution to the registry on resume.
   // `onDrained` fires when a version's in-flight count hits zero.
   // `autoDeregister: true` removes drained versions (except the latest).
-  const registry = WorkflowVersionRegistry.for("job", {
-    storage,
+  const registry = createWorkflowVersionRegistry({
     autoDeregister: true,
     onDrained: (_name, version) => {
       console.log(`version "${version}" has drained`);
     },
-  })
-    .register(v1)
-    .register(v2)
-    .register(v3);
+  });
+  registry.register(v1);
+  registry.register(v2);
+  registry.register(v3);
+
+  const runner = createWorkflowRunner({ storage, registry });
 
   // Start workflows under v1 and v2 directly to seed the storage.
-  await v1.bind(storage).run({ workflowId: "j-1", input: { x: 10 } });
-  await v2.bind(storage).run({ workflowId: "j-2", input: { x: 20 } });
+  await runner.run({ workflow: v1, workflowId: "j-1", input: { x: 10 } });
+  await runner.run({ workflow: v2, workflowId: "j-2", input: { x: 20 } });
 
   // New workflows go to the latest (v3) — registry resolves that automatically.
-  const j3Result = await registry.run<string>({ workflowId: "j-3", input: { x: 30 } });
+  const j3Result = (await runner.run({
+    name: "job",
+    workflowId: "j-3",
+    input: { x: 30 },
+  })) as string;
   console.log("fresh workflow result:", j3Result);
 
   // Resuming an existing workflow — registry resolves the stored version
   // and delegates to the matching definition.
-  const j1Resumed = await registry.run<string>({ workflowId: "j-1", input: { x: 10 } });
+  const j1Resumed = (await runner.run({
+    name: "job",
+    workflowId: "j-1",
+    input: { x: 10 },
+  })) as string;
   console.log("resumed j-1 (v1) result:", j1Resumed);
 
   // Ops call — returns per-version counts for monitoring drain progress.
-  const counts = await registry.countByVersion({ storage });
+  const counts = await registry.countByVersion({ name: "job", storage });
   for (const [version, c] of counts) {
     console.log(`v${version}: running=${c.running} completed=${c.completed} failed=${c.failed}`);
   }

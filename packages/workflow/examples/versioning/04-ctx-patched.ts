@@ -17,10 +17,16 @@
 // ---------------------------------------------------------------------------
 
 import { Pipeline } from "@promin/core";
-import { workflow, InMemoryWorkflowStorage, type JournaledContext } from "@promin/workflow";
+import {
+  workflow,
+  InMemoryWorkflowStorage,
+  createWorkflowRunner,
+  type JournaledContext,
+} from "@promin/workflow";
 
 async function main(): Promise<void> {
   const storage = new InMemoryWorkflowStorage();
+  const runner = createWorkflowRunner({ storage });
 
   // Shared body — no separate v1/v2 files. The patch list on each version
   // drives the branch.
@@ -62,14 +68,22 @@ async function main(): Promise<void> {
   })
     .step("load", ({ input }) => Pipeline.succeed(input))
     .journaled("calculate", calculateTotal)
-    .bind(storage);
+    .build();
 
   // Start a v1 workflow — runs v1 code, patches: [], takes the else branch.
-  const v1Result = await v1.bind(storage).run({ workflowId: "bill-A", input: { amount: 100 } });
+  const v1Result = await runner.run({
+    workflow: v1,
+    workflowId: "bill-A",
+    input: { amount: 100 },
+  });
   console.log("v1 result (legacy pricing):", v1Result);
 
   // Fresh v2 workflow — runs v2 code, patches: ["new-pricing"], takes the if branch.
-  const v2Result = await v2.run({ workflowId: "bill-B", input: { amount: 100 } });
+  const v2Result = await runner.run({
+    workflow: v2,
+    workflowId: "bill-B",
+    input: { amount: 100 },
+  });
   console.log("v2 result (new pricing):", v2Result);
 
   // ctx.workflowVersion is also available for custom logic (e.g. semver

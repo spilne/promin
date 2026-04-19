@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from "bun:test";
 import { Data } from "effect";
 import { Pipeline } from "@promin/core";
-import { workflow } from "@promin/workflow";
+import { workflow, createWorkflowRunner } from "@promin/workflow";
 import { PostgresWorkflowStorage } from "./postgres-workflow-storage.ts";
 import { migrate } from "./migrate.ts";
 import { postgresDescribe } from "./test-utils.ts";
@@ -290,26 +290,32 @@ postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
   });
 
   it("runs a linear workflow", async () => {
-    const result = await workflow<{ n: number }>({ name: "e2e-linear" })
+    const wf = workflow<{ n: number }>({ name: "e2e-linear" })
       .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
       .step("add-one", ({ prev }) => Pipeline.succeed(prev + 1))
-      .bind(storage)
-      .run({ workflowId: "e2e-1", input: { n: 5 } });
+      .build();
+    const runner = createWorkflowRunner({ storage });
+    const result = await runner.run({ workflow: wf, workflowId: "e2e-1", input: { n: 5 } });
 
     expect(result).toBe(11);
     expect((await storage.loadWorkflow("e2e-1"))!.status).toBe("completed");
   });
 
   it("runs a DAG workflow", async () => {
-    const result = await workflow<{ text: string }>({ name: "e2e-dag" })
+    const wf = workflow<{ text: string }>({ name: "e2e-dag" })
       .step("parse", ({ input }) => Pipeline.succeed(input.text.split(" ")))
       .step("count", { dependsOn: ["parse"] }, ({ deps }) => Pipeline.succeed(deps.parse.length))
       .step("join", { dependsOn: ["parse"] }, ({ deps }) => Pipeline.succeed(deps.parse.join("-")))
       .step("combine", { dependsOn: ["count", "join"] }, ({ deps }) =>
         Pipeline.succeed(`${deps.join} (${deps.count})`),
       )
-      .bind(storage)
-      .run({ workflowId: "e2e-dag-1", input: { text: "hello world" } });
+      .build();
+    const runner = createWorkflowRunner({ storage });
+    const result = await runner.run({
+      workflow: wf,
+      workflowId: "e2e-dag-1",
+      input: { text: "hello world" },
+    });
 
     expect(result).toBe("hello-world (2)");
   });
@@ -329,67 +335,96 @@ postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
     });
 
     let step1Called = false;
-    const result = await workflow<{ n: number }>({ name: "e2e-resume" })
+    const wf = workflow<{ n: number }>({ name: "e2e-resume" })
       .step("step-1", ({ input }) => {
         step1Called = true;
         return Pipeline.succeed(input.n * 2);
       })
       .step("step-2", ({ prev }) => Pipeline.succeed(prev + 100))
-      .bind(storage)
-      .run({ workflowId: "e2e-resume", input: { n: 10 } });
+      .build();
+    const runner = createWorkflowRunner({ storage });
+    const result = await runner.run({
+      workflow: wf,
+      workflowId: "e2e-resume",
+      input: { n: 10 },
+    });
 
     expect(result).toBe(120);
     expect(step1Called).toBe(false);
   });
 
   it("handles step failure", async () => {
-    const { error } = await workflow<{}>({ name: "e2e-fail" })
+    const wf = workflow<{}>({ name: "e2e-fail" })
       .step("boom", () => Pipeline.fail(new TestError({ message: "test error" })))
-      .bind(storage)
-      .runSafe({ workflowId: "e2e-fail-1", input: {} });
+      .build();
+    const runner = createWorkflowRunner({ storage });
+    const { error } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "e2e-fail-1",
+      input: {},
+    });
 
     expect(error).not.toBeNull();
     expect((await storage.loadWorkflow("e2e-fail-1"))!.status).toBe("failed");
   });
 
   it("runs with stepAsync", async () => {
-    const result = await workflow<{ name: string }>({ name: "e2e-async" })
+    const wf = workflow<{ name: string }>({ name: "e2e-async" })
       .stepAsync("greet", async ({ input }) => `Hello, ${input.name}!`)
-      .bind(storage)
-      .run({ workflowId: "e2e-async-1", input: { name: "Postgres" } });
+      .build();
+    const runner = createWorkflowRunner({ storage });
+    const result = await runner.run({
+      workflow: wf,
+      workflowId: "e2e-async-1",
+      input: { name: "Postgres" },
+    });
 
     expect(result).toBe("Hello, Postgres!");
   });
 
   it("stores and queries workflow type and metadata", async () => {
-    await workflow<{ userId: string }>({
+    const runner = createWorkflowRunner({ storage });
+
+    const onboardWf = workflow<{ userId: string }>({
       name: "onboard-user",
       type: "onboarding",
       metadata: { team: "growth", region: "us-east", priority: "high" },
     })
       .step("fetch", ({ input }) => Pipeline.succeed({ name: `User ${input.userId}` }))
       .stepAsync("provision", async ({ prev }) => ({ accountId: `acc-${prev.name}` }))
-      .bind(storage)
-      .run({ workflowId: "e2e-meta-onboard", input: { userId: "u_42" } });
+      .build();
+    await runner.run({
+      workflow: onboardWf,
+      workflowId: "e2e-meta-onboard",
+      input: { userId: "u_42" },
+    });
 
-    await workflow<{ date: string }>({
+    const reportWf = workflow<{ date: string }>({
       name: "daily-report",
       type: "report",
       metadata: { team: "data", schedule: "daily" },
     })
       .step("generate", ({ input }) => Pipeline.succeed(`Report for ${input.date}`))
-      .bind(storage)
-      .run({ workflowId: "e2e-meta-report", input: { date: "2026-03-31" } });
+      .build();
+    await runner.run({
+      workflow: reportWf,
+      workflowId: "e2e-meta-report",
+      input: { date: "2026-03-31" },
+    });
 
-    await workflow<{ pipeline: string }>({
+    const etlWf = workflow<{ pipeline: string }>({
       name: "etl-pipeline",
       type: "etl",
       metadata: { team: "data", source: "clickhouse", destination: "postgres" },
     })
       .step("extract", () => Pipeline.succeed([1, 2, 3]))
       .step("load", ({ prev }) => Pipeline.succeed({ loaded: prev.length }))
-      .bind(storage)
-      .run({ workflowId: "e2e-meta-etl", input: { pipeline: "events" } });
+      .build();
+    await runner.run({
+      workflow: etlWf,
+      workflowId: "e2e-meta-etl",
+      input: { pipeline: "events" },
+    });
 
     const onboardingWfs = await storage.listWorkflows({ type: "onboarding" });
     expect(onboardingWfs.length).toBeGreaterThanOrEqual(1);
@@ -439,9 +474,11 @@ postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
         });
         return { user: created, greeting: notified };
       })
-      .bind(storage);
+      .build();
+    const runner = createWorkflowRunner({ storage });
 
-    const result = await wf.run({
+    const result = await runner.run({
+      workflow: wf,
       workflowId: "pg-journal-1",
       input: { user: "alice" },
     });
@@ -511,11 +548,12 @@ postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
           });
           return { ok: true };
         })
-        .bind(storage);
+        .build();
+    const runner = createWorkflowRunner({ storage });
 
     // Kick off — suspends at sleep.
     await expect(
-      buildWorkflow().run({ workflowId: "pg-sleep-1", input: { id: "a" } }),
+      runner.run({ workflow: buildWorkflow(), workflowId: "pg-sleep-1", input: { id: "a" } }),
     ).rejects.toThrow(/sleeping until/);
     expect(postSleepCalls).toBe(0);
 
@@ -530,7 +568,8 @@ postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
     // replay sees the pending entry and now >= wakeAt, auto-completes, and
     // the step continues.
     await new Promise((r) => setTimeout(r, 80));
-    const result = await buildWorkflow().run({
+    const result = await runner.run({
+      workflow: buildWorkflow(),
       workflowId: "pg-sleep-1",
       input: { id: "a" },
     });
@@ -666,9 +705,10 @@ postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
         yield* ctx.activity("b", async () => 2);
         return "done";
       })
-      .bind(storage);
+      .build();
+    const runner = createWorkflowRunner({ storage });
 
-    await wf.run({ workflowId: "pg-journal-cascade", input: { x: 1 } });
+    await runner.run({ workflow: wf, workflowId: "pg-journal-cascade", input: { x: 1 } });
 
     const before = await storage.loadJournal("pg-journal-cascade", "body");
     expect(before).toHaveLength(2);

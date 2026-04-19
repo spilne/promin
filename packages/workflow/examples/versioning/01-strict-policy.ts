@@ -10,28 +10,38 @@
 // ---------------------------------------------------------------------------
 
 import { Pipeline } from "@promin/core";
-import { workflow, InMemoryWorkflowStorage, WorkflowVersionMismatchError } from "@promin/workflow";
+import {
+  workflow,
+  InMemoryWorkflowStorage,
+  WorkflowVersionMismatchError,
+  createWorkflowRunner,
+} from "@promin/workflow";
 
 async function main(): Promise<void> {
   const storage = new InMemoryWorkflowStorage();
+  const runner = createWorkflowRunner({ storage });
 
   // v1 of the workflow — stamps new rows with version "1".
   const v1 = workflow<{ amount: number }>({ name: "billing", version: "1" })
     .step("charge", ({ input }) => Pipeline.succeed({ charged: input.amount }))
-    .bind(storage);
+    .build();
 
   // Start a v1 workflow — succeeds.
-  const v1Result = await v1.run({ workflowId: "invoice-001", input: { amount: 100 } });
+  const v1Result = await runner.run({
+    workflow: v1,
+    workflowId: "invoice-001",
+    input: { amount: 100 },
+  });
   console.log("v1 result:", v1Result);
 
   // Now "deploy" v2 of the workflow — same workflowId, different definition.
   // Strict policy (the default) refuses to resume.
   const v2 = workflow<{ amount: number }>({ name: "billing", version: "2" })
     .step("charge", ({ input }) => Pipeline.succeed({ charged: input.amount * 1.1, v: "2" }))
-    .bind(storage);
+    .build();
 
   try {
-    await v2.run({ workflowId: "invoice-001", input: { amount: 100 } });
+    await runner.run({ workflow: v2, workflowId: "invoice-001", input: { amount: 100 } });
   } catch (err) {
     if ((err as { _tag?: string })?._tag === "WorkflowVersionMismatchError") {
       const e = err as InstanceType<typeof WorkflowVersionMismatchError>;
