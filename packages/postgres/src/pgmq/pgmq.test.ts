@@ -305,3 +305,158 @@ describe("PgmqQueue", () => {
       });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Schema validation on read — promin-2wd
+//
+// Producers can drift (rename fields, change types) without the consumer
+// being the one to own the breakage. `schema` on PgmqQueue validates every
+// message on consume; `onSchemaError` controls what happens to poison
+// messages. All four cases are wired through pgmq's own publish/read so we
+// catch integration issues, not just "we wired the SchemaParser interface".
+// ---------------------------------------------------------------------------
+
+// Minimal SchemaParser<Order> — tests don't need a real Zod; we only use
+// the interface the runtime actually sees.
+interface Order {
+  id: string;
+  total: number;
+}
+const orderSchema = {
+  safeParse(data: unknown): { success: true; data: Order } | { success: false; error: unknown } {
+    if (
+      typeof data === "object" &&
+      data !== null &&
+      typeof (data as any).id === "string" &&
+      typeof (data as any).total === "number"
+    ) {
+      return { success: true, data: data as Order };
+    }
+    return { success: false, error: { issue: "not a valid Order shape", received: data } };
+  },
+};
+
+describe("PgmqQueue — schema validation on read", () => {
+  it("valid messages pass through unchanged", async () => {
+    const queue = await PgmqQueue.create<Order>(db, "schema_ok", {
+      schema: orderSchema,
+    });
+    await queue.publish({ id: "ord-1", total: 42 });
+
+    const items: Order[] = [];
+    await queue
+      .subscribe()
+      .take(1)
+      .forEach((item) => {
+        items.push(item);
+      });
+    expect(items).toEqual([{ id: "ord-1", total: 42 }]);
+  });
+
+  it("onSchemaError: 'skip' — subscribe drops the bad message and keeps going", async () => {
+    // Use raw pgmq.send to publish a mis-shaped message the typed publish()
+    // wouldn't let through — simulating producer drift.
+    await pgmq.createQueue(db, "schema_skip");
+    await pgmq.send(db, "schema_skip", { data: { id: 42, total: "nope" } as unknown });
+    await pgmq.send(db, "schema_skip", { data: { id: "ord-2", total: 99 } });
+
+    const queue = PgmqQueue.wrap<Order>({
+      db,
+      queue: "schema_skip",
+      schema: orderSchema,
+      onSchemaError: "skip",
+    });
+
+    const items: Order[] = [];
+    await queue
+      .subscribe()
+      .take(1)
+      .forEach((item) => {
+        items.push(item);
+      });
+    expect(items).toEqual([{ id: "ord-2", total: 99 }]);
+  });
+
+  it("onSchemaError: 'skip' — subscribeAck deletes the poison so it doesn't re-surface", async () => {
+    await pgmq.createQueue(db, "schema_skip_ack");
+    await pgmq.send(db, "schema_skip_ack", { data: { wrong: "shape" } });
+    await pgmq.send(db, "schema_skip_ack", { data: { id: "ord-3", total: 7 } });
+
+    const queue = PgmqQueue.wrap<Order>({
+      db,
+      queue: "schema_skip_ack",
+      schema: orderSchema,
+      onSchemaError: "skip",
+    });
+
+    const items: Order[] = [];
+    await queue
+      .subscribeAck({ readMode: ReadMode.standard({ vt: 1, qty: 10 }) })
+      .take(1)
+      .forEach(async (envelope) => {
+        items.push(envelope.value);
+        await envelope.ack();
+      });
+    expect(items).toEqual([{ id: "ord-3", total: 7 }]);
+
+    // Both messages should be gone: one ack'd, one skipped (deleted).
+    // Wait past vt, then confirm queue is empty.
+    await new Promise((r) => setTimeout(r, 1500));
+    const metrics = await queue.metrics();
+    expect(metrics.queueLength).toBe(0);
+  });
+
+  it("onSchemaError: 'dlq' — poison goes to {queue}_dlq, good one emits", async () => {
+    await pgmq.createQueue(db, "schema_dlq");
+    await pgmq.send(db, "schema_dlq", { data: { bad: true } });
+    await pgmq.send(db, "schema_dlq", { data: { id: "ord-4", total: 1 } });
+
+    const queue = PgmqQueue.wrap<Order>({
+      db,
+      queue: "schema_dlq",
+      schema: orderSchema,
+      onSchemaError: "dlq",
+    });
+
+    const items: Order[] = [];
+    await queue
+      .subscribe()
+      .take(1)
+      .forEach((item) => {
+        items.push(item);
+      });
+    expect(items).toEqual([{ id: "ord-4", total: 1 }]);
+
+    // DLQ queue should exist with the bad message.
+    const dlq = await pgmq.read(db, queue.dlqName, ReadMode.standard({ vt: 5, qty: 10 }));
+    expect(dlq).toHaveLength(1);
+    expect(dlq[0]!.message).toEqual({ bad: true });
+  });
+
+  it("onSchemaError: 'throw' (default) — subscribe fails loud on invalid", async () => {
+    await pgmq.createQueue(db, "schema_throw");
+    await pgmq.send(db, "schema_throw", { data: { broken: "yes" } });
+
+    const queue = PgmqQueue.wrap<Order>({
+      db,
+      queue: "schema_throw",
+      schema: orderSchema,
+      // onSchemaError defaults to "throw"
+    });
+
+    let caught: unknown;
+    try {
+      await queue
+        .subscribe()
+        .take(1)
+        .forEach(() => {});
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeDefined();
+    // Effect wraps errors in FiberFailure; the underlying cause carries
+    // the PgmqSchemaValidationError message.
+    const msg = (caught as { message?: string; toString(): string }).message ?? String(caught);
+    expect(msg).toContain("schema validation");
+  });
+});
