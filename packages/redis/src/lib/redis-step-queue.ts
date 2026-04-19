@@ -265,8 +265,6 @@ export class RedisStepQueue implements StepQueue {
       completedAt: new Date().toISOString(),
     });
     await this.redis.srem(this.runningKey(), params.taskId);
-    // Bump a flat counter for metrics() — no per-queue breakdown now.
-    await this.redis.incr(`${this.prefix}:counter:completed`);
     if (hash?.workflowId && hash.stepName) {
       await this.redis.del(this.activeKey(hash.workflowId, hash.stepName));
     }
@@ -281,7 +279,6 @@ export class RedisStepQueue implements StepQueue {
       completedAt: new Date().toISOString(),
     });
     await this.redis.srem(this.runningKey(), params.taskId);
-    await this.redis.incr(`${this.prefix}:counter:failed`);
     if (hash?.workflowId && hash.stepName) {
       await this.redis.del(this.activeKey(hash.workflowId, hash.stepName));
     }
@@ -312,23 +309,73 @@ export class RedisStepQueue implements StepQueue {
     return count;
   }
 
-  async metrics(): Promise<{
+  async metrics(params: { since: Date; until?: Date }): Promise<{
     pending: number;
     running: number;
     completed: number;
     failed: number;
+    avgWaitMs: number;
+    avgExecMs: number;
+    p95ExecMs: number;
   }> {
-    const [pending, running, completedRaw, failedRaw] = await Promise.all([
-      this.redis.zcard(this.pendingKey),
-      (async () => (await this.redis.smembers(this.runningKey())).length)(),
-      this.redis.get(`${this.prefix}:counter:completed`),
-      this.redis.get(`${this.prefix}:counter:failed`),
-    ]);
+    // Redis has no native time-range index over task hashes, so we SCAN
+    // the task namespace and filter in-process. Acceptable for the modest
+    // backlog sizes Redis is typically used with; if you're running
+    // millions of retained terminal rows, switch to Postgres (which does
+    // use indexed time queries). The SCAN cursor cap keeps the work
+    // bounded per call.
+    const sinceMs = params.since.getTime();
+    const untilMs = (params.until ?? new Date()).getTime();
+    const inWindow = (raw: string | undefined): boolean => {
+      if (!raw) return false;
+      const t = new Date(raw).getTime();
+      return t >= sinceMs && t <= untilMs;
+    };
+
+    let pending = 0;
+    let running = 0;
+    let completed = 0;
+    let failed = 0;
+    let waitSum = 0;
+    let waitN = 0;
+    let execSum = 0;
+    const execTimes: number[] = [];
+
+    const taskKeys = await this.redis.keys(`${this.prefix}:task:*`);
+    for (const key of taskKeys) {
+      const h = await this.redis.hgetall(key);
+      if (!h) continue;
+      const status = h.status;
+      if (status === "pending" && inWindow(h.createdAt)) {
+        pending++;
+      } else if (status === "running" && inWindow(h.claimedAt)) {
+        running++;
+      } else if ((status === "completed" || status === "failed") && inWindow(h.completedAt)) {
+        if (status === "completed") completed++;
+        else failed++;
+        if (h.createdAt && h.claimedAt) {
+          waitSum += new Date(h.claimedAt).getTime() - new Date(h.createdAt).getTime();
+          waitN++;
+        }
+        if (h.durationMs) {
+          const d = Number(h.durationMs);
+          if (Number.isFinite(d)) {
+            execSum += d;
+            execTimes.push(d);
+          }
+        }
+      }
+    }
+
+    const terminalN = execTimes.length;
     return {
       pending,
       running,
-      completed: completedRaw ? Number(completedRaw) : 0,
-      failed: failedRaw ? Number(failedRaw) : 0,
+      completed,
+      failed,
+      avgWaitMs: waitN > 0 ? waitSum / waitN : 0,
+      avgExecMs: terminalN > 0 ? execSum / terminalN : 0,
+      p95ExecMs: terminalN > 0 ? percentile(execTimes, 0.95) : 0,
     };
   }
 
@@ -354,4 +401,17 @@ export class RedisStepQueue implements StepQueue {
       version: map.version,
     };
   }
+}
+
+/**
+ * Linear-interpolation percentile — matches SQL `PERCENTILE_CONT` and the
+ * in-memory implementation so metrics stay comparable across backends.
+ */
+function percentile(values: number[], p: number): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const rank = p * (sorted.length - 1);
+  const lo = Math.floor(rank);
+  const hi = Math.ceil(rank);
+  if (lo === hi) return sorted[lo]!;
+  return sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (rank - lo);
 }

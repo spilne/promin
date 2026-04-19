@@ -2712,7 +2712,10 @@ export function workflow<Input>(params: {
  * Uses in-memory storage, no workflowId needed. For request handlers, scripts, and
  * compositions that don't need crash recovery.
  *
- * To make it durable later, change `flow()` to `workflow({ storage })`.
+ * To make it durable later, swap `flow(name)` for
+ * `workflow({ name }).(...).bind(storage)` — everything in between is the
+ * same builder API. Storage moves from implicit (in-memory) to explicit
+ * (your chosen backend).
  *
  * @example
  * ```ts

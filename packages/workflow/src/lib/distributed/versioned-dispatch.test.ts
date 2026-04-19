@@ -40,7 +40,7 @@ describe("versioned dispatch", () => {
       .run({ workflowId: "vd-1-a", input: { id: "abc" } });
 
     // After the workflow completes, inspect the completed task's stored version.
-    const metrics = await stepQueue.metrics();
+    const metrics = await stepQueue.metrics({ since: new Date(Date.now() - 60_000) });
     expect(metrics.completed).toBeGreaterThanOrEqual(1);
 
     await worker.stop();
@@ -208,7 +208,7 @@ describe("versioned dispatch", () => {
     await worker.stop();
 
     // v1 task should still be pending — worker correctly skipped it.
-    const metrics = await stepQueue.metrics();
+    const metrics = await stepQueue.metrics({ since: new Date(Date.now() - 60_000) });
     expect(metrics.pending).toBeGreaterThanOrEqual(1);
     expect(metrics.completed).toBe(0);
   });

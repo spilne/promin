@@ -135,7 +135,7 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
     await queue.claim({ capabilities: ["test-complete"], limit: 1 });
     await queue.complete({ taskId: id, result: { answer: 42 }, durationMs: 150 });
 
-    const metrics = await queue.metrics();
+    const metrics = await queue.metrics({ since: new Date(Date.now() - 60_000) });
     expect(metrics.completed).toBe(1);
   });
 
@@ -154,7 +154,7 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
     await queue.claim({ capabilities: ["test-fail"], limit: 1 });
     await queue.fail({ taskId: id, error: "something broke", durationMs: 50 });
 
-    const metrics = await queue.metrics();
+    const metrics = await queue.metrics({ since: new Date(Date.now() - 60_000) });
     expect(metrics.failed).toBe(1);
   });
 
@@ -185,7 +185,7 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
       prevResults: {},
     });
 
-    const metrics = await queue.metrics();
+    const metrics = await queue.metrics({ since: new Date(Date.now() - 60_000) });
     // Flat metrics now (per-status totals, not per-queue breakdown). Three
     // enqueues all land as pending until claimed.
     expect(metrics.pending).toBe(3);

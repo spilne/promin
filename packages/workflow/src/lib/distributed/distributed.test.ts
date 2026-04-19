@@ -166,7 +166,7 @@ describe("Step queue — distribute tasks to available workers", () => {
     await queue.complete({ taskId: id1, result: "ok", durationMs: 100 });
     await queue.fail({ taskId: id2, error: "boom", durationMs: 50 });
 
-    const metrics = await queue.metrics();
+    const metrics = await queue.metrics({ since: new Date(Date.now() - 60_000) });
     expect(metrics.completed).toBe(1);
     expect(metrics.failed).toBe(1);
   });
@@ -296,7 +296,7 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
     // "unknown-step" can still pick it up). No errors are recorded because
     // the task was never claimed.
     expect(failures).toHaveLength(0);
-    const metrics = await queue.metrics();
+    const metrics = await queue.metrics({ since: new Date(Date.now() - 60_000) });
     expect(metrics.pending).toBeGreaterThanOrEqual(1);
   });
 

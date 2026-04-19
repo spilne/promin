@@ -56,7 +56,7 @@ export function stepQueueTestSuite(factory: () => StepQueue | Promise<StepQueue>
         });
         expect(second).toBe(first);
 
-        const m = await q.metrics();
+        const m = await q.metrics({ since: new Date(Date.now() - 60_000) });
         expect(m.pending).toBe(1);
       });
 
@@ -393,20 +393,22 @@ export function stepQueueTestSuite(factory: () => StepQueue | Promise<StepQueue>
     // -------------------------------------------------------------------
 
     describe("metrics", () => {
-      it("returns flat counts by status", async () => {
+      it("returns counts scoped to the requested time window", async () => {
         const q = await getQueue();
+        const windowStart = new Date(Date.now() - 60_000);
         await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
         await q.enqueue({ workflowId: "wf-1", stepName: "s2", input: {}, prevResults: {} });
         await q.enqueue({ workflowId: "wf-1", stepName: "s3", input: {}, prevResults: {} });
         await q.claim({ limit: 1 });
 
-        const m = await q.metrics();
+        const m = await q.metrics({ since: windowStart });
         expect(m.pending).toBe(2);
         expect(m.running).toBe(1);
       });
 
-      it("tracks completed and failed counts", async () => {
+      it("tracks completed and failed counts in the window", async () => {
         const q = await getQueue();
+        const windowStart = new Date(Date.now() - 60_000);
         await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
         await q.enqueue({ workflowId: "wf-1", stepName: "s2", input: {}, prevResults: {} });
 
@@ -414,11 +416,63 @@ export function stepQueueTestSuite(factory: () => StepQueue | Promise<StepQueue>
         await q.complete({ taskId: tasks[0]!.id, result: "ok", durationMs: 10 });
         await q.fail({ taskId: tasks[1]!.id, error: "err", durationMs: 10 });
 
-        const m = await q.metrics();
+        const m = await q.metrics({ since: windowStart });
         expect(m.completed).toBe(1);
         expect(m.failed).toBe(1);
         expect(m.pending).toBe(0);
         expect(m.running).toBe(0);
+      });
+
+      it("reports latency stats derived from terminal tasks", async () => {
+        const q = await getQueue();
+        const windowStart = new Date(Date.now() - 60_000);
+
+        // Enqueue three tasks with known wait/exec characteristics.
+        const ids: string[] = [];
+        for (let i = 0; i < 3; i++) {
+          ids.push(
+            await q.enqueue({
+              workflowId: `wf-lat-${i}`,
+              stepName: "s",
+              input: {},
+              prevResults: {},
+            }),
+          );
+        }
+        // Small delay so claimed_at - created_at > 0 in Postgres-resolution time.
+        await new Promise((r) => setTimeout(r, 10));
+        const claimed = await q.claim({ limit: 3 });
+        expect(claimed).toHaveLength(3);
+
+        // Durations 100, 200, 300 → avg 200, p95 ≈ 290.
+        await q.complete({ taskId: claimed[0]!.id, result: "a", durationMs: 100 });
+        await q.complete({ taskId: claimed[1]!.id, result: "b", durationMs: 200 });
+        await q.complete({ taskId: claimed[2]!.id, result: "c", durationMs: 300 });
+
+        const m = await q.metrics({ since: windowStart });
+        expect(m.completed).toBe(3);
+        expect(m.avgExecMs).toBeCloseTo(200, 0);
+        // p95 on [100, 200, 300] with linear interpolation = 290.
+        expect(m.p95ExecMs).toBeCloseTo(290, 0);
+        // Wait time was small but non-negative; just assert it's finite + >= 0.
+        expect(m.avgWaitMs).toBeGreaterThanOrEqual(0);
+      });
+
+      it("excludes events outside the window", async () => {
+        const q = await getQueue();
+        await q.enqueue({ workflowId: "wf-old", stepName: "s", input: {}, prevResults: {} });
+        const claimed = await q.claim({ limit: 1 });
+        await q.complete({ taskId: claimed[0]!.id, result: "ok", durationMs: 50 });
+
+        // Window entirely in the future — nothing should match.
+        const future = new Date(Date.now() + 60_000);
+        const m = await q.metrics({ since: future });
+        expect(m.pending).toBe(0);
+        expect(m.running).toBe(0);
+        expect(m.completed).toBe(0);
+        expect(m.failed).toBe(0);
+        expect(m.avgExecMs).toBe(0);
+        expect(m.p95ExecMs).toBe(0);
       });
     });
 

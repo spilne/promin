@@ -124,11 +124,43 @@ export interface StepQueue {
    */
   requeueStuck(params: { claimedBy?: string; staleTimeoutMs?: number }): Promise<number>;
 
-  /** Current task counts by status. Flat — no per-queue breakdown now that queues are gone. */
-  metrics(): Promise<{
+  /**
+   * Queue metrics over a time window, with wait / exec latency stats.
+   *
+   * **Why the window is mandatory.** A running queue accumulates terminal
+   * rows forever (until retention kicks in). `metrics()` without a window
+   * meant scanning the entire table and returning a useless historical
+   * total. Every count is now bounded:
+   *
+   * - `pending` — tasks in `status='pending'` whose `createdAt ∈ [since, until]`.
+   *   Old createdAt + still pending = stuck; the window catches that.
+   * - `running` — tasks in `status='running'` whose `claimedAt ∈ [since, until]`.
+   *   Old claimedAt + still running = dead worker; window catches that too.
+   * - `completed` / `failed` — terminal tasks whose `completedAt ∈ [since, until]`.
+   *   Rate/throughput over the window, not lifetime.
+   *
+   * **Latency stats** — computed over terminal tasks (`completed` + `failed`)
+   * in the window:
+   *
+   * - `avgWaitMs` — mean `claimedAt - createdAt` (queue time).
+   * - `avgExecMs` — mean `completedAt - claimedAt` (actual step body time).
+   * - `p95ExecMs` — 95th-percentile exec time.
+   *
+   * All latency fields return `0` when no terminal tasks exist in the
+   * window — avoids threading nullable numbers through dashboards.
+   */
+  metrics(params: {
+    /** Inclusive lower bound of the window. Required — no unbounded scans. */
+    since: Date;
+    /** Inclusive upper bound. Default: now. */
+    until?: Date;
+  }): Promise<{
     pending: number;
     running: number;
     completed: number;
     failed: number;
+    avgWaitMs: number;
+    avgExecMs: number;
+    p95ExecMs: number;
   }>;
 }

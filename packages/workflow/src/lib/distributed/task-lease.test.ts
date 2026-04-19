@@ -20,7 +20,7 @@ describe("task leasing race condition", () => {
     const requeued = await queue.requeueStuck({ staleTimeoutMs: 30 });
     expect(requeued).toBe(1);
 
-    const metrics = await queue.metrics();
+    const metrics = await queue.metrics({ since: new Date(Date.now() - 60_000) });
     expect(metrics.pending).toBe(1);
     expect(metrics.running).toBe(0);
   });
@@ -39,7 +39,7 @@ describe("task leasing race condition", () => {
     const requeued = await queue.requeueStuck({ staleTimeoutMs: 60_000 });
     expect(requeued).toBe(0);
 
-    const metrics = await queue.metrics();
+    const metrics = await queue.metrics({ since: new Date(Date.now() - 60_000) });
     expect(metrics.running).toBe(1);
   });
 });

@@ -279,26 +279,78 @@ export class PgStepQueue implements StepQueue {
     return rows.length;
   }
 
-  async metrics(): Promise<{
+  async metrics(params: { since: Date; until?: Date }): Promise<{
     pending: number;
     running: number;
     completed: number;
     failed: number;
+    avgWaitMs: number;
+    avgExecMs: number;
+    p95ExecMs: number;
   }> {
-    const nsFilter = this.namespace ? sql` WHERE namespace = ${this.namespace}` : sql``;
-    const rows = await execRaw(
-      this.db,
-      sql`
-        SELECT status, COUNT(*) as count
-        FROM wf_step_queue${nsFilter}
-        GROUP BY status
-      `,
-    );
+    // postgres-js refuses to bind Date directly against an untyped
+    // parameter; pass ISO strings and let Postgres cast via ::timestamptz.
+    const since = params.since.toISOString();
+    const until = (params.until ?? new Date()).toISOString();
+    // Status uses the column that defines membership-in-window: createdAt
+    // for pending, claimedAt for running, completedAt for terminal. A
+    // single window-aware query per status keeps Postgres-side work minimal.
+    // Namespace filter stays AND'd on top — no double-scope confusion.
+    const nsFilter = this.namespace ? sql` AND namespace = ${this.namespace}` : sql``;
 
-    const result = { pending: 0, running: 0, completed: 0, failed: 0 };
-    for (const row of rows) {
-      const s = row.status as keyof typeof result;
-      if (s in result) result[s] = Number(row.count);
+    const [counts, latency] = await Promise.all([
+      execRaw(
+        this.db,
+        sql`
+          SELECT status, COUNT(*) as count
+          FROM wf_step_queue
+          WHERE (
+            (status = 'pending'   AND created_at   BETWEEN ${since}::timestamptz AND ${until}::timestamptz) OR
+            (status = 'running'   AND claimed_at   BETWEEN ${since}::timestamptz AND ${until}::timestamptz) OR
+            (status IN ('completed', 'failed') AND completed_at BETWEEN ${since}::timestamptz AND ${until}::timestamptz)
+          )${nsFilter}
+          GROUP BY status
+        `,
+      ),
+      // Latency stats pool completed + failed in the window. EXTRACT EPOCH
+      // returns seconds — multiply by 1000 for ms. percentile_cont is the
+      // SQL standard linear-interp percentile, matching the in-memory
+      // implementation.
+      execRaw(
+        this.db,
+        sql`
+          SELECT
+            AVG(EXTRACT(EPOCH FROM (claimed_at - created_at)) * 1000) AS avg_wait_ms,
+            AVG(duration_ms)                                           AS avg_exec_ms,
+            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms)  AS p95_exec_ms
+          FROM wf_step_queue
+          WHERE status IN ('completed', 'failed')
+            AND completed_at BETWEEN ${since}::timestamptz AND ${until}::timestamptz
+            ${nsFilter}
+        `,
+      ),
+    ]);
+
+    const result = {
+      pending: 0,
+      running: 0,
+      completed: 0,
+      failed: 0,
+      avgWaitMs: 0,
+      avgExecMs: 0,
+      p95ExecMs: 0,
+    };
+    for (const row of counts) {
+      const s = row.status as "pending" | "running" | "completed" | "failed";
+      if (s === "pending" || s === "running" || s === "completed" || s === "failed") {
+        result[s] = Number(row.count);
+      }
+    }
+    const lat = latency[0];
+    if (lat) {
+      result.avgWaitMs = lat.avg_wait_ms != null ? Number(lat.avg_wait_ms) : 0;
+      result.avgExecMs = lat.avg_exec_ms != null ? Number(lat.avg_exec_ms) : 0;
+      result.p95ExecMs = lat.p95_exec_ms != null ? Number(lat.p95_exec_ms) : 0;
     }
     return result;
   }

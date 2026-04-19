@@ -11,6 +11,8 @@ type MutableTask = {
   error?: string;
   claimedBy?: string;
   claimedAt?: Date;
+  completedAt?: Date;
+  durationMs?: number;
   // Internal — StepTask hides namespace from consumers, but we need it to
   // clear the activeByKey slot on complete/fail.
   namespace?: string;
@@ -152,6 +154,8 @@ export class InMemoryStepQueue implements StepQueue {
     if (task) {
       task.status = "completed";
       task.result = params.result;
+      task.durationMs = params.durationMs;
+      task.completedAt = new Date();
       this.activeByKey.delete(this.activeKey(task.namespace, task.workflowId, task.stepName));
     }
   }
@@ -161,6 +165,8 @@ export class InMemoryStepQueue implements StepQueue {
     if (task) {
       task.status = "failed";
       task.error = params.error;
+      task.durationMs = params.durationMs;
+      task.completedAt = new Date();
       this.activeByKey.delete(this.activeKey(task.namespace, task.workflowId, task.stepName));
     }
   }
@@ -185,19 +191,85 @@ export class InMemoryStepQueue implements StepQueue {
     return count;
   }
 
-  async metrics(): Promise<{
+  async metrics(params: { since: Date; until?: Date }): Promise<{
     pending: number;
     running: number;
     completed: number;
     failed: number;
+    avgWaitMs: number;
+    avgExecMs: number;
+    p95ExecMs: number;
   }> {
-    const counts = { pending: 0, running: 0, completed: 0, failed: 0 };
-    for (const task of this.tasks.values()) counts[task.status]++;
-    return counts;
+    const sinceMs = params.since.getTime();
+    const untilMs = (params.until ?? new Date()).getTime();
+    const inWindow = (d: Date | undefined): boolean =>
+      d !== undefined && d.getTime() >= sinceMs && d.getTime() <= untilMs;
+
+    let pending = 0;
+    let running = 0;
+    let completed = 0;
+    let failed = 0;
+    let waitSum = 0;
+    let waitN = 0;
+    let execSum = 0;
+    const execTimes: number[] = [];
+
+    for (const task of this.tasks.values()) {
+      // Each status uses the timestamp that defines its current membership
+      // in the window: createdAt for pending, claimedAt for running,
+      // completedAt for terminal. Tasks that don't fit the window don't
+      // count — this is the whole point of the mandatory window.
+      if (task.status === "pending" && inWindow(task.createdAt)) {
+        pending++;
+      } else if (task.status === "running" && inWindow(task.claimedAt)) {
+        running++;
+      } else if (
+        (task.status === "completed" || task.status === "failed") &&
+        inWindow(task.completedAt)
+      ) {
+        if (task.status === "completed") completed++;
+        else failed++;
+        // Latency pool spans both completed and failed — ops wants exec
+        // distribution regardless of outcome.
+        if (task.claimedAt) {
+          waitSum += task.claimedAt.getTime() - task.createdAt.getTime();
+          waitN++;
+        }
+        if (task.durationMs !== undefined) {
+          execSum += task.durationMs;
+          execTimes.push(task.durationMs);
+        }
+      }
+    }
+
+    const terminalN = execTimes.length;
+    return {
+      pending,
+      running,
+      completed,
+      failed,
+      avgWaitMs: waitN > 0 ? waitSum / waitN : 0,
+      avgExecMs: terminalN > 0 ? execSum / terminalN : 0,
+      p95ExecMs: terminalN > 0 ? percentile(execTimes, 0.95) : 0,
+    };
   }
 
   /** Test helper: get all tasks. */
   getAllTasks(): StepTask[] {
     return [...this.tasks.values()];
   }
+}
+
+/**
+ * Linear-interpolation percentile (matches SQL `PERCENTILE_CONT`). Sorts a
+ * copy so callers keep their ordering. Handles the degenerate cases
+ * cleanly: single value returns itself, empty array is guarded by callers.
+ */
+function percentile(values: number[], p: number): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const rank = p * (sorted.length - 1);
+  const lo = Math.floor(rank);
+  const hi = Math.ceil(rank);
+  if (lo === hi) return sorted[lo]!;
+  return sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (rank - lo);
 }
