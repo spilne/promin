@@ -968,6 +968,22 @@ export class RedisWorkflowStorage
     return !!result;
   }
 
+  async tryLockAndLoad(
+    workflowId: string,
+    lockDurationMs: number,
+  ): Promise<{ locked: boolean; state: WorkflowState | null }> {
+    // Sequenced — a Lua script could do this in one round trip, but
+    // `loadWorkflow` reads from several keys (wf hash, steps hash,
+    // signals hash, per-run history) that don't fit neatly in a single
+    // script without reimplementing the deserialization server-side.
+    // The real win — collapsing two HTTP round-trips to one — is
+    // already captured at the workflow-remote RPC layer (one POST
+    // carries the whole tryLockAndLoad call).
+    const locked = await this.tryLock(workflowId, lockDurationMs);
+    const state = await this.loadWorkflow(workflowId);
+    return { locked, state };
+  }
+
   async releaseLock(workflowId: string): Promise<void> {
     await this.redis.eval(RELEASE_LOCK_LUA, 1, this.lockKey(workflowId), this.instanceId);
   }

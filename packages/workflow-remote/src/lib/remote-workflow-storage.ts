@@ -196,6 +196,13 @@ export class RemoteWorkflowStorage implements WorkflowStorage {
     return this.call("tryLock", { workflowId, lockDurationMs });
   }
 
+  tryLockAndLoad(
+    workflowId: string,
+    lockDurationMs: number,
+  ): Promise<{ locked: boolean; state: WorkflowState | null }> {
+    return this.call("tryLockAndLoad", { workflowId, lockDurationMs });
+  }
+
   releaseLock(workflowId: string): Promise<void> {
     return this.call("releaseLock", { workflowId });
   }

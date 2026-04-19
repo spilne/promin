@@ -39,6 +39,7 @@ export function createWorkflowStorageHandler(
     deliverSignal: (p) => storage.deliverSignal(p.workflowId, p.signalName, p.payload),
     loadSignals: (p) => storage.loadSignals(p.workflowId),
     tryLock: (p) => storage.tryLock(p.workflowId, p.lockDurationMs),
+    tryLockAndLoad: (p) => storage.tryLockAndLoad(p.workflowId, p.lockDurationMs),
     releaseLock: (p) => storage.releaseLock(p.workflowId),
     heartbeat: (p) => storage.heartbeat(p.workflowId, p.lockDurationMs),
     startFreshRun: (p) => storage.startFreshRun(p.workflowId),

@@ -523,6 +523,29 @@ export function storageTestSuite(
         // Don't assert false for double-lock — advisory locks allow it
         await s.releaseLock("lock-2");
       });
+
+      it("tryLockAndLoad returns lock=true + the current state in one call", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "lal-ok",
+          workflowName: "test",
+          input: { amount: 42 },
+        });
+        const res = await s.tryLockAndLoad("lal-ok", 30_000);
+        expect(res.locked).toBe(true);
+        expect(res.state).not.toBeNull();
+        expect(res.state!.workflowId).toBe("lal-ok");
+        expect(res.state!.input).toEqual({ amount: 42 });
+        await s.releaseLock("lal-ok");
+      });
+
+      it("tryLockAndLoad returns state=null when the workflow doesn't exist", async () => {
+        const s = await getStorage();
+        const res = await s.tryLockAndLoad("lal-missing", 30_000);
+        expect(res.locked).toBe(true);
+        expect(res.state).toBeNull();
+        await s.releaseLock("lal-missing");
+      });
     });
 
     // -------------------------------------------------------------------

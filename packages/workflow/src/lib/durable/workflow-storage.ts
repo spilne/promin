@@ -140,6 +140,32 @@ export interface WorkflowStorage {
   /** Acquire a lock on a workflow. Returns false if already locked. */
   tryLock(workflowId: string, lockDurationMs: number): Promise<boolean>;
 
+  /**
+   * Acquire the lock AND load the current workflow state in one round trip.
+   *
+   * Exists for the HTTP / remote-storage path, where the typical
+   * `tryLock` → check → `loadWorkflow` sequence is two network calls per
+   * step invocation. Backends SHOULD persist this atomically
+   * (Postgres: same transaction; Redis: Lua script) so the load reflects
+   * the state as-of the moment the lock was acquired — no window where
+   * another actor commits writes between the two observations.
+   *
+   * Return contract:
+   * - `locked: true`  — caller holds the lock; `state` is the current
+   *   state or null if the workflow record doesn't exist yet.
+   * - `locked: false` — someone else holds the lock; `state` is still
+   *   returned for diagnostic use (idempotency joins, "already running"
+   *   branches), or null if absent.
+   *
+   * Default is provided via `tryLockAndLoadDefault` — custom storages
+   * that can't do an atomic read-lock can point this at it and still
+   * satisfy the interface.
+   */
+  tryLockAndLoad(
+    workflowId: string,
+    lockDurationMs: number,
+  ): Promise<{ locked: boolean; state: WorkflowState | null }>;
+
   /** Release a workflow lock. */
   releaseLock(workflowId: string): Promise<void>;
 
@@ -175,6 +201,25 @@ export interface WorkflowStorage {
   purgeCompleted(
     params: { olderThanMs: number; limit: number } | { from: Date; to: Date; limit: number },
   ): Promise<number>;
+}
+
+/**
+ * Fallback `tryLockAndLoad` that sequences tryLock + loadWorkflow.
+ * Atomic across the pair only if the underlying storage serializes both
+ * calls against the same transaction — most local-process backends
+ * (in-memory, same-connection Postgres) are fine, but a distributed
+ * storage with no coupling between the two primitives may see another
+ * writer commit between them. Backends that can do better should
+ * override.
+ */
+export async function tryLockAndLoadDefault(
+  storage: Pick<WorkflowStorage, "tryLock" | "loadWorkflow">,
+  workflowId: string,
+  lockDurationMs: number,
+): Promise<{ locked: boolean; state: import("./workflow-state.ts").WorkflowState | null }> {
+  const locked = await storage.tryLock(workflowId, lockDurationMs);
+  const state = await storage.loadWorkflow(workflowId);
+  return { locked, state };
 }
 
 /**

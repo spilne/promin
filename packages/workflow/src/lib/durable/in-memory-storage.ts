@@ -411,6 +411,17 @@ export class InMemoryWorkflowStorage
     return true;
   }
 
+  async tryLockAndLoad(
+    workflowId: string,
+    lockDurationMs: number,
+  ): Promise<{ locked: boolean; state: WorkflowState | null }> {
+    // Single-process storage — both operations run against the same Map,
+    // so composing them is already atomic. No transaction or Lua needed.
+    const locked = await this.tryLock(workflowId, lockDurationMs);
+    const state = await this.loadWorkflow(workflowId);
+    return { locked, state };
+  }
+
   async releaseLock(workflowId: string): Promise<void> {
     const lock = this.locks.get(workflowId);
     // Only release if we own the lock (or lock doesn't exist)

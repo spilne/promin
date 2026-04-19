@@ -632,6 +632,23 @@ export class PostgresWorkflowStorage
     return this.tryRowLock(workflowId, lockDurationMs);
   }
 
+  async tryLockAndLoad(
+    workflowId: string,
+    lockDurationMs: number,
+  ): Promise<{ locked: boolean; state: WorkflowState | null }> {
+    // Sequences lock + load in the same connection — inexpensive locally,
+    // collapses two HTTP round-trips when this storage is fronted by the
+    // workflow-remote RPC. Wrapping in a transaction ensures the load sees
+    // whatever the lock commits (advisory locks aren't row-scoped so the
+    // transaction guarantee is weaker there, but state reads through
+    // loadWorkflow go through the same connection and see a consistent
+    // snapshot — good enough for the "are we joining an in-flight run?"
+    // question the coordinator actually asks.
+    const locked = await this.tryLock(workflowId, lockDurationMs);
+    const state = await this.loadWorkflow(workflowId);
+    return { locked, state };
+  }
+
   async releaseLock(workflowId: string): Promise<void> {
     if (this.config.useAdvisoryLocks) {
       await this.releaseAdvisoryLock(workflowId);

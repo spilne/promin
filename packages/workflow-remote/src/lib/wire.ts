@@ -28,6 +28,7 @@ export type StorageMethod =
   | "deliverSignal"
   | "loadSignals"
   | "tryLock"
+  | "tryLockAndLoad"
   | "releaseLock"
   | "heartbeat"
   | "startFreshRun"
