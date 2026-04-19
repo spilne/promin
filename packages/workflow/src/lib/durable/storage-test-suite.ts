@@ -218,6 +218,85 @@ export function storageTestSuite(
     });
 
     // -------------------------------------------------------------------
+    // batchSaveStepResults
+    // -------------------------------------------------------------------
+
+    describe("batchSaveStepResults", () => {
+      it("persists every record in the batch", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "batch-wf", workflowName: "t", input: {} });
+        const startedAt = new Date();
+        await s.batchSaveStepResults([
+          { workflowId: "batch-wf", stepName: "a", result: 1, durationMs: 5, startedAt },
+          { workflowId: "batch-wf", stepName: "b", result: 2, durationMs: 6, startedAt },
+          { workflowId: "batch-wf", stepName: "c", result: 3, durationMs: 7, startedAt },
+        ]);
+        const state = (await s.loadWorkflow("batch-wf"))!;
+        expect(state.steps["a"]!.result).toBe(1);
+        expect(state.steps["b"]!.result).toBe(2);
+        expect(state.steps["c"]!.result).toBe(3);
+        expect(state.steps["a"]!.status).toBe("completed");
+        expect(state.steps["b"]!.status).toBe("completed");
+        expect(state.steps["c"]!.status).toBe("completed");
+      });
+
+      it("handles an empty batch as a no-op", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "batch-empty", workflowName: "t", input: {} });
+        await s.batchSaveStepResults([]);
+        const state = (await s.loadWorkflow("batch-empty"))!;
+        expect(Object.keys(state.steps)).toHaveLength(0);
+      });
+
+      it("round-trips metadata per record", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "batch-meta", workflowName: "t", input: {} });
+        const startedAt = new Date();
+        await s.batchSaveStepResults([
+          {
+            workflowId: "batch-meta",
+            stepName: "x",
+            result: "ok",
+            durationMs: 1,
+            startedAt,
+            metadata: { chose: "fast" },
+          },
+          {
+            workflowId: "batch-meta",
+            stepName: "y",
+            result: "ok",
+            durationMs: 1,
+            startedAt,
+            metadata: { chose: "slow" },
+          },
+        ]);
+        const state = (await s.loadWorkflow("batch-meta"))!;
+        expect(state.steps["x"]!.metadata).toEqual({ chose: "fast" });
+        expect(state.steps["y"]!.metadata).toEqual({ chose: "slow" });
+      });
+
+      it("flips a pending workflow to running — same side effect as saveStepResult", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "batch-running", workflowName: "t", input: {} });
+        const pre = (await s.loadWorkflow("batch-running"))!;
+        expect(pre.status).toBe("pending");
+
+        await s.batchSaveStepResults([
+          {
+            workflowId: "batch-running",
+            stepName: "go",
+            result: "ok",
+            durationMs: 1,
+            startedAt: new Date(),
+          },
+        ]);
+
+        const post = (await s.loadWorkflow("batch-running"))!;
+        expect(post.status).toBe("running");
+      });
+    });
+
+    // -------------------------------------------------------------------
     // saveStepFailure
     // -------------------------------------------------------------------
 

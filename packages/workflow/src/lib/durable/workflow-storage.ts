@@ -56,6 +56,37 @@ export interface WorkflowStorage {
     metadata?: Record<string, unknown>;
   }): Promise<void>;
 
+  /**
+   * Save many step results in a single round trip. Exists for the HTTP /
+   * remote-storage path, where looping over `saveStepResult` turns into
+   * one network call per step and dominates wall-clock for workflows with
+   * tall map steps or fan-out DAGs.
+   *
+   * **Atomicity.** Backends SHOULD persist the batch atomically (Postgres
+   * via `INSERT ... VALUES (...), (...), ...`; Redis via a pipeline/Lua
+   * script; in-memory trivially). On partial failure the backend MAY
+   * roll back — callers MUST NOT assume any subset survived.
+   *
+   * **Cross-workflow batches.** Each record carries its own `workflowId`,
+   * so callers can batch across workflows. In practice the engine always
+   * sends records for a single workflow at a time, but the signature stays
+   * generic so cron / migration tooling can reuse the same primitive.
+   *
+   * Default is provided via the `batchSaveStepResultsDefault` helper —
+   * custom storages that only override `saveStepResult` can point this
+   * at it and opt into the interface without a perf gain.
+   */
+  batchSaveStepResults(
+    records: ReadonlyArray<{
+      workflowId: string;
+      stepName: string;
+      result: unknown;
+      durationMs: number;
+      startedAt: Date;
+      metadata?: Record<string, unknown>;
+    }>,
+  ): Promise<void>;
+
   /** Mark a step as failed. */
   saveStepFailure(params: {
     workflowId: string;
@@ -144,6 +175,29 @@ export interface WorkflowStorage {
   purgeCompleted(
     params: { olderThanMs: number; limit: number } | { from: Date; to: Date; limit: number },
   ): Promise<number>;
+}
+
+/**
+ * Fallback `batchSaveStepResults` implementation for backends that can't do
+ * a real multi-row write. Just loops `saveStepResult` in order. Intentionally
+ * not concurrent — callers rely on the batch staying ordered so that step
+ * rows created later in the batch sort after earlier ones on the receiving
+ * side's `created_at` / insertion order.
+ */
+export async function batchSaveStepResultsDefault(
+  storage: Pick<WorkflowStorage, "saveStepResult">,
+  records: ReadonlyArray<{
+    workflowId: string;
+    stepName: string;
+    result: unknown;
+    durationMs: number;
+    startedAt: Date;
+    metadata?: Record<string, unknown>;
+  }>,
+): Promise<void> {
+  for (const r of records) {
+    await storage.saveStepResult(r);
+  }
 }
 
 // ---------------------------------------------------------------------------

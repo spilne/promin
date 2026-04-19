@@ -222,6 +222,23 @@ export class InMemoryWorkflowStorage
     wf.updatedAt = now;
   }
 
+  async batchSaveStepResults(
+    records: ReadonlyArray<{
+      workflowId: string;
+      stepName: string;
+      result: unknown;
+      durationMs: number;
+      startedAt: Date;
+      metadata?: Record<string, unknown>;
+    }>,
+  ): Promise<void> {
+    // In-memory doesn't have a "batch" primitive to exploit — the loop-over-
+    // single-writes form is already O(n) with no round-trip amplification.
+    // Kept explicit (rather than delegating to the default helper) so the
+    // conformance suite's batch tests cover the actual method body here.
+    for (const r of records) await this.saveStepResult(r);
+  }
+
   async saveStepFailure(params: {
     workflowId: string;
     stepName: string;

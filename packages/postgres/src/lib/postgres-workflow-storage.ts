@@ -321,41 +321,95 @@ export class PostgresWorkflowStorage
     startedAt: Date;
     metadata?: Record<string, unknown>;
   }): Promise<void> {
-    await this.markRunning(params.workflowId);
+    await this.batchSaveStepResults([params]);
+  }
+
+  async batchSaveStepResults(
+    records: ReadonlyArray<{
+      workflowId: string;
+      stepName: string;
+      result: unknown;
+      durationMs: number;
+      startedAt: Date;
+      metadata?: Record<string, unknown>;
+    }>,
+  ): Promise<void> {
+    if (records.length === 0) return;
     const now = new Date();
-    const run = await this.getCurrentRun(params.workflowId);
-    await this.db
-      .insert(workflowSteps)
-      .values({
-        workflowId: params.workflowId,
-        stepName: params.stepName,
-        run,
+
+    // Group by workflowId so we issue at most one markRunning + getCurrentRun
+    // per workflow regardless of how many step records target it, then fold
+    // everything into one multi-row INSERT inside a transaction. The 4n
+    // round trips the single-row path costs collapse to O(workflows) reads
+    // plus one bulk write.
+    const byWf = new Map<string, Array<(typeof records)[number]>>();
+    for (const r of records) {
+      const bucket = byWf.get(r.workflowId);
+      if (bucket) bucket.push(r);
+      else byWf.set(r.workflowId, [r]);
+    }
+
+    await this.db.transaction(async (tx) => {
+      const runsByWf = new Map<string, number>();
+      for (const wfId of byWf.keys()) {
+        // markRunning + run lookup need to go through the tx so nested
+        // rows see a consistent run counter. markRunning is idempotent
+        // (only flips pending→running; no-op if already running).
+        await tx
+          .update(workflows)
+          .set({
+            statusId: WorkflowStatusIds.id.running,
+            startedAt: now,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(workflows.workflowId, wfId),
+              eq(workflows.statusId, WorkflowStatusIds.id.pending),
+            ),
+          );
+        const [row] = await tx
+          .select({ run: workflows.run })
+          .from(workflows)
+          .where(eq(workflows.workflowId, wfId));
+        runsByWf.set(wfId, row?.run ?? 1);
+      }
+
+      const values = records.map((r) => ({
+        workflowId: r.workflowId,
+        stepName: r.stepName,
+        run: runsByWf.get(r.workflowId) ?? 1,
         statusId: StepStatusIds.id.completed,
-        result: params.result,
-        metadata: params.metadata,
-        startedAt: params.startedAt,
+        result: r.result,
+        metadata: r.metadata,
+        startedAt: r.startedAt,
         completedAt: now,
-        durationMs: params.durationMs,
+        durationMs: r.durationMs,
         attempt: 1,
-      })
-      .onConflictDoUpdate({
-        target: [workflowSteps.workflowId, workflowSteps.stepName, workflowSteps.run],
-        set: {
-          statusId: StepStatusIds.id.completed,
-          result: params.result,
-          // Only overwrite metadata on update when the caller provides one;
-          // `undefined` means "leave whatever was there" (e.g. metadata
-          // written before the step ran stays on the completed row).
-          ...(params.metadata !== undefined ? { metadata: params.metadata } : {}),
-          completedAt: now,
-          durationMs: params.durationMs,
-          attempt: sql`${workflowSteps.attempt} + 1`,
-        },
-      });
-    await this.db
-      .update(workflows)
-      .set({ updatedAt: now })
-      .where(eq(workflows.workflowId, params.workflowId));
+      }));
+
+      await tx
+        .insert(workflowSteps)
+        .values(values)
+        .onConflictDoUpdate({
+          target: [workflowSteps.workflowId, workflowSteps.stepName, workflowSteps.run],
+          set: {
+            statusId: StepStatusIds.id.completed,
+            // EXCLUDED.* references the would-be-inserted row — lets us
+            // apply per-row values on conflict without unrolling into N
+            // statements. Same semantic as the single-row path.
+            result: sql`EXCLUDED.result`,
+            metadata: sql`COALESCE(EXCLUDED.metadata, ${workflowSteps.metadata})`,
+            completedAt: sql`EXCLUDED.completed_at`,
+            durationMs: sql`EXCLUDED.duration_ms`,
+            attempt: sql`${workflowSteps.attempt} + 1`,
+          },
+        });
+
+      for (const wfId of byWf.keys()) {
+        await tx.update(workflows).set({ updatedAt: now }).where(eq(workflows.workflowId, wfId));
+      }
+    });
   }
 
   async saveStepFailure(params: {

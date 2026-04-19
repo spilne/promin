@@ -126,6 +126,19 @@ export class RemoteWorkflowStorage implements WorkflowStorage {
     return this.call("saveStepResult", params);
   }
 
+  batchSaveStepResults(
+    records: ReadonlyArray<{
+      workflowId: string;
+      stepName: string;
+      result: unknown;
+      durationMs: number;
+      startedAt: Date;
+      metadata?: Record<string, unknown>;
+    }>,
+  ): Promise<void> {
+    return this.call("batchSaveStepResults", records);
+  }
+
   saveStepFailure(params: {
     workflowId: string;
     stepName: string;

@@ -18,6 +18,7 @@ export type StorageMethod =
   | "cancelWorkflow"
   | "createWorkflow"
   | "saveStepResult"
+  | "batchSaveStepResults"
   | "saveStepFailure"
   | "saveTaskResult"
   | "saveTaskFailure"

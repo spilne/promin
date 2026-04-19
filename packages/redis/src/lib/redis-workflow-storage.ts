@@ -555,6 +555,70 @@ export class RedisWorkflowStorage
     await this.redis.hset(this.wfKey(params.workflowId), { updatedAt: this.serializeDate(now) });
   }
 
+  async batchSaveStepResults(
+    records: ReadonlyArray<{
+      workflowId: string;
+      stepName: string;
+      result: unknown;
+      durationMs: number;
+      startedAt: Date;
+      metadata?: Record<string, unknown>;
+    }>,
+  ): Promise<void> {
+    // Redis doesn't have transactions in the Postgres sense, but a pipeline
+    // collapses the round-trip count to one regardless of batch size. We
+    // still have to read existing step state up front (preserve dependsOn /
+    // stepType / attempt counter) and the workflow row (run number), which
+    // stays outside the pipeline to keep the reads sane. Writes go through
+    // the pipeline in one burst.
+    if (records.length === 0) return;
+
+    // Group by (workflowId, run) — same reason as the Postgres path. For
+    // each workflow we fetch its hash once, call markRunning once, and
+    // load the steps hash for the current run once.
+    const byWf = new Map<string, Array<(typeof records)[number]>>();
+    for (const r of records) {
+      const bucket = byWf.get(r.workflowId);
+      if (bucket) bucket.push(r);
+      else byWf.set(r.workflowId, [r]);
+    }
+
+    const pipeline = this.redis.pipeline();
+    const now = new Date();
+    const nowIso = this.serializeDate(now);
+
+    for (const [wfId, rs] of byWf) {
+      const raw = await this.redis.hgetall(this.wfKey(wfId));
+      if (!raw || !raw.id) continue;
+      await this.markRunning(wfId, raw);
+      const run = Number(raw.run);
+      const stepsHashKey = this.stepsKey(wfId, run);
+      const existingAll = await this.redis.hgetall(stepsHashKey);
+
+      for (const r of rs) {
+        const existingJson = existingAll?.[r.stepName];
+        const existing: Partial<StepState> = existingJson ? JSON.parse(existingJson) : {};
+        const step: StepState = {
+          stepName: r.stepName,
+          run,
+          status: "completed",
+          dependsOn: existing.dependsOn ?? [],
+          stepType: existing.stepType ?? "single",
+          result: r.result,
+          metadata: r.metadata ?? existing.metadata,
+          startedAt: r.startedAt,
+          completedAt: now,
+          durationMs: r.durationMs,
+          attempt: ((existing.attempt as number) ?? 0) + 1,
+        };
+        pipeline.hset(stepsHashKey, { [r.stepName]: this.serializeStepState(step) });
+      }
+      pipeline.hset(this.wfKey(wfId), { updatedAt: nowIso });
+    }
+
+    await pipeline.exec();
+  }
+
   async saveStepFailure(params: {
     workflowId: string;
     stepName: string;

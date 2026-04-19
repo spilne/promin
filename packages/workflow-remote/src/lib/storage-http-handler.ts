@@ -29,6 +29,7 @@ export function createWorkflowStorageHandler(
     cancelWorkflow: (p) => storage.cancelWorkflow(p.workflowId, p.options),
     createWorkflow: (p) => storage.createWorkflow(p),
     saveStepResult: (p) => storage.saveStepResult(p),
+    batchSaveStepResults: (p) => storage.batchSaveStepResults(p),
     saveStepFailure: (p) => storage.saveStepFailure(p),
     saveTaskResult: (p) => storage.saveTaskResult(p),
     saveTaskFailure: (p) => storage.saveTaskFailure(p),

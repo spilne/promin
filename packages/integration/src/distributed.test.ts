@@ -212,7 +212,7 @@ withPostgres("Distributed workers — competing task execution", (ctx) => {
     // Wait for all 50 workflows
     await eventually(
       async () => {
-        const metrics = await queue.metrics();
+        const metrics = await queue.metrics({ since: new Date(Date.now() - 60_000) });
         const completed = metrics.completed ?? 0;
         expect(completed).toBe(50);
       },
@@ -301,7 +301,7 @@ withPostgres("Dead worker detection — task recovery", (ctx) => {
     await w2Queue.complete({ taskId: reclaimed[0]!.id, result: { done: true }, durationMs: 5 });
 
     // Verify final metrics
-    const metrics = await queue.metrics();
+    const metrics = await queue.metrics({ since: new Date(Date.now() - 60_000) });
     expect(metrics.completed).toBe(1);
     expect(metrics.running).toBe(0);
 
