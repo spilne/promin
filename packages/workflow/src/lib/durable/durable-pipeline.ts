@@ -30,14 +30,7 @@ import type { Sinkable } from "@promin/core";
 import type { FailedWorkflowRecord } from "./workflow-state.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
-import type { DagNode } from "./workflow-dag.ts";
-import { topologicalSort } from "./workflow-dag.ts";
-import {
-  getIdempotencyTtl,
-  compensateWorkflow,
-  publishDlqRecord,
-  executeWorkflowDag,
-} from "./workflow-runner.ts";
+import { runWorkflowOrchestration } from "./workflow-runner.ts";
 import {
   WorkflowError,
   StepError,
@@ -46,10 +39,8 @@ import {
   WorkflowTimeoutError,
   StepTimeoutError,
   WorkflowDeadlineError,
-  WorkflowVersionMismatchError,
   GuardError,
 } from "./durable-pipeline-error.ts";
-import { withLock } from "./with-lock.ts";
 
 // ---------------------------------------------------------------------------
 // Step contexts
@@ -635,8 +626,6 @@ export interface ExecuteParams {
 // Lock duration
 // ---------------------------------------------------------------------------
 
-const DEFAULT_LOCK_DURATION_MS = 30_000;
-
 // ---------------------------------------------------------------------------
 // WorkflowBuilder
 // ---------------------------------------------------------------------------
@@ -749,11 +738,6 @@ export class WorkflowBuilder<
    */
   bind(storage: WorkflowStorage): WorkflowBuilder<Input, Steps, Current, Error> {
     return this._withStorage(storage);
-  }
-
-  /** Resolve TTL for a given workflow status. Returns undefined if no TTL applies. */
-  private _getIdempotencyTtl(status: string): number | undefined {
-    return getIdempotencyTtl(this._idempotency, status);
   }
 
   /** Set the workflow version. Used to detect code/state mismatch on resume. */
@@ -1458,284 +1442,29 @@ export class WorkflowBuilder<
   // ---------------------------------------------------------------------------
 
   async run(params: { workflowId: string; input: Input; force?: boolean }): Promise<Current> {
-    const { workflowId, input, force } = params;
-    const workflowStartTime = Date.now();
-    const compensateTrigger = this._compensateConfig?.trigger ?? "after-retries";
-    const maxWorkflowRetries =
-      compensateTrigger === "immediate" ? 0 : (this._retry?.maxRetries ?? 0);
-    const workflowRetryDelayMs = this._retry?.baseDelayMs ?? 1000;
-    const idempotency = force ? undefined : this._idempotency;
-
-    // Drain pre-check — if the stored workflow was created under a different
-    // version and this definition has `onVersionMismatch: "drain"`, delegate
-    // the whole run to the matching previousVersion definition. Stored
-    // version is immutable per workflow, so this is race-safe.
-    if (this._onVersionMismatch === "drain" && this._version) {
-      const existing = await this._storage.loadWorkflow(workflowId);
-      if (existing && existing.version !== this._version) {
-        const previousDef = this._previousVersions?.find((d) => d.version === existing.version);
-        if (!previousDef) {
-          throw new WorkflowVersionMismatchError({
-            workflowId,
-            expected: this._version,
-            actual: existing.version ?? "(none)",
-            message:
-              `Workflow "${workflowId}" was created with version "${existing.version ?? "(none)"}" ` +
-              `but current code is version "${this._version}". ` +
-              `onVersionMismatch is "drain" but no matching previousVersion was registered.`,
-          });
-        }
-        // Delegate drain to the previous version — bind it to this
-        // workflow's storage so both versions share one state backend.
-        return previousDef
-          .bind(this._storage)
-          .run({ workflowId, input, force }) as Promise<Current>;
-      }
-    }
-
-    // 0. Idempotency check — return cached result if within TTL
-    if (idempotency) {
-      const existing = await this._storage.loadWorkflow(workflowId);
-      if (existing?.completedAt) {
-        const elapsed = Date.now() - existing.completedAt.getTime();
-        const ttl = this._getIdempotencyTtl(existing.status);
-        if (ttl !== undefined && elapsed < ttl) {
-          if (existing.status === "completed") return existing.result as Current;
-          if (existing.status === "failed")
-            throw new WorkflowError({
-              workflowId,
-              message: existing.error ?? `Workflow "${workflowId}" failed (cached, TTL ${ttl}ms)`,
-            });
-        }
-      }
-    }
-
-    // 1. Acquire lock with heartbeat — keeps lock alive during long steps
-    return withLock({
-      storage: this._storage,
-      workflowId,
-      options: { lockDurationMs: DEFAULT_LOCK_DURATION_MS },
-      fn: async () => {
-        // 2. Load or create workflow state
-        let state = await this._storage.loadWorkflow(workflowId);
-
-        // Double-check idempotency after lock — prevents race
-        if (idempotency && state?.completedAt) {
-          const elapsed = Date.now() - state.completedAt.getTime();
-          const ttl = this._getIdempotencyTtl(state.status);
-          if (ttl !== undefined && elapsed < ttl) {
-            if (state.status === "completed") return state.result as Current;
-            if (state.status === "failed")
-              throw new WorkflowError({
-                workflowId,
-                message: state.error ?? `Workflow "${workflowId}" failed (cached)`,
-              });
-          }
-          // TTL expired — check if we should start a fresh run
-          const onExpiry = idempotency.onExpiry ?? "fresh-run";
-          if (
-            onExpiry === "fresh-run" &&
-            (state.status === "completed" || state.status === "failed")
-          ) {
-            await this._storage.startFreshRun(workflowId);
-            state = await this._storage.loadWorkflow(workflowId);
-          }
-        }
-
-        if (!state) {
-          const createResult = await this._storage.createWorkflow({
-            workflowId,
-            workflowName: this._name,
-            input,
-            workflowType: this._type,
-            metadata: this._metadata,
-            version: this._version,
-          });
-          if (!createResult.created) {
-            // Race: another caller created the workflow between our load and create
-            state = createResult.existing;
-          } else {
-            state = await this._storage.loadWorkflow(workflowId);
-          }
-        } else if (this._version) {
-          // Version mismatch check — only when builder explicitly sets a version
-          const storedVersion = state.version;
-          if (storedVersion !== this._version) {
-            throw new WorkflowVersionMismatchError({
-              workflowId,
-              expected: this._version,
-              actual: storedVersion ?? "(none)",
-              message:
-                `Workflow "${workflowId}" was created with version "${storedVersion ?? "(none)"}" ` +
-                `but current code is version "${this._version}". ` +
-                `To resume this workflow, either use \`onVersionMismatch: "drain"\` + ` +
-                `\`previousVersions: [v${storedVersion ?? "N"}]\` on the workflow config, or ` +
-                `register both versions in a WorkflowVersionRegistry.`,
-            });
-          }
-        }
-
-        // 3. Validate DAG
-        const dagNodes: DagNode[] = this._steps.map((s) => ({
-          name: s.name,
-          dependsOn: s.dependsOn,
-        }));
-        topologicalSort({ nodes: dagNodes, workflowId });
-
-        // 4. Execute DAG with workflow-level retry
-        let lastStepError: unknown = null;
-        // Shared across workflow retries so attempt counters keep incrementing
-        const stepAttempts = new Map<string, number>();
-
-        for (let workflowAttempt = 0; workflowAttempt <= maxWorkflowRetries; workflowAttempt++) {
-          // On retry, wait before re-attempting
-          if (workflowAttempt > 0) {
-            const delay = workflowRetryDelayMs * Math.pow(2, workflowAttempt - 1);
-            await new Promise((r) => setTimeout(r, delay));
-          }
-
-          const dagResult = await this._executeDag({
-            workflowId,
-            input,
-            dagNodes,
-            state,
-            workflowStartTime,
-            stepAttempts,
-            deadlineMs: this._timeoutMs != null ? workflowStartTime + this._timeoutMs : undefined,
-          });
-
-          if (dagResult.success) {
-            // 5. Complete workflow
-            const finalResult = dagResult.result;
-            await this._storage.completeWorkflow(workflowId, finalResult);
-            await this._hooks?.onWorkflowComplete?.({
-              workflowId,
-              result: finalResult,
-              durationMs: Date.now() - workflowStartTime,
-            });
-            return finalResult as Current;
-          }
-
-          // DAG failed — suspension errors always propagate immediately
-          if (dagResult.suspension) {
-            throw dagResult.error;
-          }
-
-          lastStepError = dagResult.error;
-
-          // Check if this error is retryable (workflow-level `when` predicate)
-          const shouldRetry =
-            workflowAttempt < maxWorkflowRetries &&
-            (!this._retry?.when || this._retry.when(dagResult.error as TaggedError));
-
-          if (shouldRetry) {
-            // Reload state to pick up checkpointed steps
-            state = await this._storage.loadWorkflow(workflowId);
-          } else {
-            // Not retryable or retries exhausted — break to compensation
-            break;
-          }
-        }
-
-        // All workflow retries exhausted — run compensation cascade
-        const compensationReport = await this._compensate({ workflowId, input, dagNodes });
-
-        // Fire workflow-level onComplete callback
-        if (this._compensateConfig?.onComplete) {
-          try {
-            const result = this._compensateConfig.onComplete({
-              input,
-              error: lastStepError,
-              compensatedSteps: compensationReport.compensated,
-              failedCompensations: compensationReport.failed,
-            });
-            if (result instanceof Pipeline) {
-              await result.runPromise();
-            } else if (result && typeof (result as Promise<void>).then === "function") {
-              await result;
-            }
-          } catch {
-            // onComplete failure is swallowed — the original error is more important
-          }
-        }
-
-        // Fail the workflow
-        const errorMsg =
-          lastStepError instanceof globalThis.Error ? lastStepError.message : String(lastStepError);
-        await this._storage.failWorkflow(workflowId, errorMsg);
-        await this._hooks?.onWorkflowFailure?.({
-          workflowId,
-          error: errorMsg,
-          durationMs: Date.now() - workflowStartTime,
-        });
-
-        // Publish to DLQ
-        if (this._dlq) {
-          await publishDlqRecord({
-            dlq: this._dlq,
-            storage: this._storage,
-            workflowId,
-            workflowName: this._name,
-            input,
-            errorMsg,
-            compensationReport,
-            metadata: this._metadata,
-          });
-        }
-
-        throw lastStepError;
-      },
-    });
-  }
-
-  // ---------------------------------------------------------------------------
-  // DAG execution (extracted from run for retry loop)
-  // ---------------------------------------------------------------------------
-
-  private async _executeDag(params: {
-    workflowId: string;
-    input: Input;
-    dagNodes: DagNode[];
-    state: import("./workflow-state.ts").WorkflowState | null;
-    workflowStartTime: number;
-    stepAttempts: Map<string, number>;
-    deadlineMs?: number;
-  }): Promise<
-    { success: true; result: unknown } | { success: false; error: unknown; suspension: boolean }
-  > {
-    return executeWorkflowDag(
+    return runWorkflowOrchestration(
       {
         storage: this._storage,
+        name: this._name,
+        version: this._version,
+        type: this._type,
+        metadata: this._metadata,
         steps: this._steps,
-        hooks: this._hooks,
-        timeoutMs: this._timeoutMs,
+        retry: this._retry,
+        compensateConfig: this._compensateConfig,
+        dlq: this._dlq,
         dispatch: this._dispatch,
+        idempotency: this._idempotency,
+        timeoutMs: this._timeoutMs,
+        onVersionMismatch: this._onVersionMismatch,
+        previousVersions: this._previousVersions,
+        hooks: this._hooks,
       },
       params,
-    );
+    ) as Promise<Current>;
   }
 
-  // ---------------------------------------------------------------------------
-  // Compensation cascade — undo completed steps in reverse order
-  // ---------------------------------------------------------------------------
-
-  private async _compensate(params: {
-    workflowId: string;
-    input: Input;
-    dagNodes: DagNode[];
-  }): Promise<{
-    compensated: string[];
-    failed: { stepName: string; error: unknown }[];
-  }> {
-    return compensateWorkflow({
-      storage: this._storage,
-      steps: this._steps,
-      compensateConfig: this._compensateConfig,
-      workflowId: params.workflowId,
-      input: params.input,
-      dagNodes: params.dagNodes,
-    });
-  }
+  /** @deprecated kept briefly to ease diff review; delete in follow-up. */
 
   // ---------------------------------------------------------------------------
   // Terminal: runSafe

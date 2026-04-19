@@ -34,8 +34,12 @@ import {
   StepError,
   WorkflowError,
   WorkflowDeadlineError,
+  WorkflowVersionMismatchError,
   StepTimeoutError,
 } from "./durable-pipeline-error.ts";
+import { withLock } from "./with-lock.ts";
+import { topologicalSort } from "./workflow-dag.ts";
+import type { RetryPolicy } from "@promin/core";
 import type {
   WorkflowLockError,
   WorkflowSuspendedError,
@@ -132,10 +136,12 @@ export interface WorkflowRunner {
 }
 
 /**
- * Default implementation. Phase 1: delegates to the bound workflow's own
- * `.run()` / `.runSafe()`, which still runs the existing orchestration body
- * inside `WorkflowBuilder`. Phase 2 replaces this body with a direct
- * orchestration loop driven by a `StepExecutor`.
+ * Default implementation. Now delegates through `RunnableWorkflow.run` /
+ * `runSafe`, which in turn call `runWorkflowOrchestration` — the
+ * orchestration body moved into this module in phase 1b. Phase 2 will
+ * take a `StepExecutor` parameter and drive the DAG via it directly
+ * (instead of via the bound workflow's step handlers) so the same
+ * runner can front remote / gRPC executors.
  *
  * Intentionally a class (not a bare function) so phase 2 can add config
  * (default step executor, observability hooks, tracing span factory)
@@ -171,6 +177,291 @@ export function createWorkflowRunner(): WorkflowRunner {
 // phase 1b/1c can incrementally move orchestration out of the builder
 // without the runner needing access to private class state.
 // ---------------------------------------------------------------------------
+
+/**
+ * Full workflow-runtime state the orchestration loop needs. A superset
+ * of DagExecutionContext — adds the lock / retry / compensation / DLQ
+ * / idempotency / version knobs that live outside the DAG executor.
+ * Built once per `run()` from the bound workflow's builder state.
+ */
+export interface WorkflowOrchestrationContext {
+  readonly storage: WorkflowStorage;
+  readonly name: string;
+  readonly version?: string;
+  readonly type?: string;
+  readonly metadata?: Record<string, unknown>;
+  readonly steps: ReadonlyArray<StepDefinition>;
+  readonly retry?: RetryPolicy<TaggedError>;
+  readonly compensateConfig?: CompensateConfig;
+  readonly dlq?: Sinkable<FailedWorkflowRecord>;
+  readonly dispatch?: DispatchConfig;
+  readonly idempotency?: IdempotencyConfig;
+  readonly timeoutMs?: number;
+  readonly onVersionMismatch: "strict" | "drain";
+  readonly previousVersions?: ReadonlyArray<Workflow<unknown, unknown>>;
+  readonly hooks?: WorkflowHooks;
+}
+
+/** Default lock TTL. Re-declared here for the runner's own withLock call. */
+const DEFAULT_LOCK_DURATION_MS = 30_000;
+
+/**
+ * Run a workflow end-to-end. Orchestrates version-drain pre-check,
+ * idempotency TTL, lock acquisition + heartbeat, workflow-level retry
+ * around executeWorkflowDag, compensation cascade on exhausted retries,
+ * DLQ publish on failure. Hooks fire at every natural boundary
+ * (onWorkflowComplete / onWorkflowFailure / onStep*).
+ *
+ * Formerly `WorkflowBuilder.run`. Pure function now — takes the full
+ * orchestration context directly so the same loop can be driven by
+ * remote storage, a non-TS submitter process, or future executor
+ * flavors (phase 2 step-queue, phase 3 gRPC).
+ */
+export async function runWorkflowOrchestration(
+  ctx: WorkflowOrchestrationContext,
+  params: { workflowId: string; input: unknown; force?: boolean },
+): Promise<unknown> {
+  const { workflowId, input, force } = params;
+  const workflowStartTime = Date.now();
+  const compensateTrigger = ctx.compensateConfig?.trigger ?? "after-retries";
+  const maxWorkflowRetries = compensateTrigger === "immediate" ? 0 : (ctx.retry?.maxRetries ?? 0);
+  const workflowRetryDelayMs = ctx.retry?.baseDelayMs ?? 1000;
+  const idempotency = force ? undefined : ctx.idempotency;
+
+  // Drain pre-check — if the stored workflow was created under a different
+  // version and this definition has `onVersionMismatch: "drain"`, delegate
+  // the whole run to the matching previousVersion definition. Stored
+  // version is immutable per workflow, so this is race-safe.
+  if (ctx.onVersionMismatch === "drain" && ctx.version) {
+    const existing = await ctx.storage.loadWorkflow(workflowId);
+    if (existing && existing.version !== ctx.version) {
+      const previousDef = ctx.previousVersions?.find((d) => d.version === existing.version);
+      if (!previousDef) {
+        throw new WorkflowVersionMismatchError({
+          workflowId,
+          expected: ctx.version,
+          actual: existing.version ?? "(none)",
+          message:
+            `Workflow "${workflowId}" was created with version "${existing.version ?? "(none)"}" ` +
+            `but current code is version "${ctx.version}". ` +
+            `onVersionMismatch is "drain" but no matching previousVersion was registered.`,
+        });
+      }
+      // Delegate drain to the previous version — bind it to this
+      // workflow's storage so both versions share one state backend.
+      return previousDef.bind(ctx.storage).run({ workflowId, input, force });
+    }
+  }
+
+  // 0. Idempotency check — return cached result if within TTL
+  if (idempotency) {
+    const existing = await ctx.storage.loadWorkflow(workflowId);
+    if (existing?.completedAt) {
+      const elapsed = Date.now() - existing.completedAt.getTime();
+      const ttl = getIdempotencyTtl(idempotency, existing.status);
+      if (ttl !== undefined && elapsed < ttl) {
+        if (existing.status === "completed") return existing.result;
+        if (existing.status === "failed")
+          throw new WorkflowError({
+            workflowId,
+            message: existing.error ?? `Workflow "${workflowId}" failed (cached, TTL ${ttl}ms)`,
+          });
+      }
+    }
+  }
+
+  // 1. Acquire lock with heartbeat — keeps lock alive during long steps
+  return withLock({
+    storage: ctx.storage,
+    workflowId,
+    options: { lockDurationMs: DEFAULT_LOCK_DURATION_MS },
+    fn: async () => {
+      // 2. Load or create workflow state
+      let state = await ctx.storage.loadWorkflow(workflowId);
+
+      // Double-check idempotency after lock — prevents race
+      if (idempotency && state?.completedAt) {
+        const elapsed = Date.now() - state.completedAt.getTime();
+        const ttl = getIdempotencyTtl(idempotency, state.status);
+        if (ttl !== undefined && elapsed < ttl) {
+          if (state.status === "completed") return state.result;
+          if (state.status === "failed")
+            throw new WorkflowError({
+              workflowId,
+              message: state.error ?? `Workflow "${workflowId}" failed (cached)`,
+            });
+        }
+        // TTL expired — check if we should start a fresh run
+        const onExpiry = idempotency.onExpiry ?? "fresh-run";
+        if (
+          onExpiry === "fresh-run" &&
+          (state.status === "completed" || state.status === "failed")
+        ) {
+          await ctx.storage.startFreshRun(workflowId);
+          state = await ctx.storage.loadWorkflow(workflowId);
+        }
+      }
+
+      if (!state) {
+        const createResult = await ctx.storage.createWorkflow({
+          workflowId,
+          workflowName: ctx.name,
+          input,
+          workflowType: ctx.type,
+          metadata: ctx.metadata,
+          version: ctx.version,
+        });
+        if (!createResult.created) {
+          // Race: another caller created the workflow between our load and create
+          state = createResult.existing;
+        } else {
+          state = await ctx.storage.loadWorkflow(workflowId);
+        }
+      } else if (ctx.version) {
+        // Version mismatch check — only when builder explicitly sets a version
+        const storedVersion = state.version;
+        if (storedVersion !== ctx.version) {
+          throw new WorkflowVersionMismatchError({
+            workflowId,
+            expected: ctx.version,
+            actual: storedVersion ?? "(none)",
+            message:
+              `Workflow "${workflowId}" was created with version "${storedVersion ?? "(none)"}" ` +
+              `but current code is version "${ctx.version}". ` +
+              `To resume this workflow, either use \`onVersionMismatch: "drain"\` + ` +
+              `\`previousVersions: [v${storedVersion ?? "N"}]\` on the workflow config, or ` +
+              `register both versions in a WorkflowVersionRegistry.`,
+          });
+        }
+      }
+
+      // 3. Validate DAG
+      const dagNodes: DagNode[] = ctx.steps.map((s) => ({
+        name: s.name,
+        dependsOn: s.dependsOn,
+      }));
+      topologicalSort({ nodes: dagNodes, workflowId });
+
+      // 4. Execute DAG with workflow-level retry
+      let lastStepError: unknown = null;
+      // Shared across workflow retries so attempt counters keep incrementing
+      const stepAttempts = new Map<string, number>();
+
+      const dagCtx: DagExecutionContext = {
+        storage: ctx.storage,
+        steps: ctx.steps,
+        hooks: ctx.hooks,
+        timeoutMs: ctx.timeoutMs,
+        dispatch: ctx.dispatch,
+      };
+
+      for (let workflowAttempt = 0; workflowAttempt <= maxWorkflowRetries; workflowAttempt++) {
+        // On retry, wait before re-attempting
+        if (workflowAttempt > 0) {
+          const delay = workflowRetryDelayMs * Math.pow(2, workflowAttempt - 1);
+          await new Promise((r) => setTimeout(r, delay));
+        }
+
+        const dagResult = await executeWorkflowDag(dagCtx, {
+          workflowId,
+          input,
+          dagNodes,
+          state,
+          workflowStartTime,
+          stepAttempts,
+          deadlineMs: ctx.timeoutMs != null ? workflowStartTime + ctx.timeoutMs : undefined,
+        });
+
+        if (dagResult.success) {
+          // 5. Complete workflow
+          const finalResult = dagResult.result;
+          await ctx.storage.completeWorkflow(workflowId, finalResult);
+          await ctx.hooks?.onWorkflowComplete?.({
+            workflowId,
+            result: finalResult,
+            durationMs: Date.now() - workflowStartTime,
+          });
+          return finalResult;
+        }
+
+        // DAG failed — suspension errors always propagate immediately
+        if (dagResult.suspension) {
+          throw dagResult.error;
+        }
+
+        lastStepError = dagResult.error;
+
+        // Check if this error is retryable (workflow-level `when` predicate)
+        const shouldRetry =
+          workflowAttempt < maxWorkflowRetries &&
+          (!ctx.retry?.when || ctx.retry.when(dagResult.error as TaggedError));
+
+        if (shouldRetry) {
+          // Reload state to pick up checkpointed steps
+          state = await ctx.storage.loadWorkflow(workflowId);
+        } else {
+          // Not retryable or retries exhausted — break to compensation
+          break;
+        }
+      }
+
+      // All workflow retries exhausted — run compensation cascade
+      const compensationReport = await compensateWorkflow({
+        storage: ctx.storage,
+        steps: ctx.steps,
+        compensateConfig: ctx.compensateConfig,
+        workflowId,
+        input,
+        dagNodes,
+      });
+
+      // Fire workflow-level onComplete callback
+      if (ctx.compensateConfig?.onComplete) {
+        try {
+          const result = ctx.compensateConfig.onComplete({
+            input,
+            error: lastStepError,
+            compensatedSteps: compensationReport.compensated,
+            failedCompensations: compensationReport.failed,
+          });
+          if (result instanceof Pipeline) {
+            await result.runPromise();
+          } else if (result && typeof (result as Promise<void>).then === "function") {
+            await result;
+          }
+        } catch {
+          // onComplete failure is swallowed — the original error is more important
+        }
+      }
+
+      // Fail the workflow
+      const errorMsg =
+        lastStepError instanceof globalThis.Error ? lastStepError.message : String(lastStepError);
+      await ctx.storage.failWorkflow(workflowId, errorMsg);
+      await ctx.hooks?.onWorkflowFailure?.({
+        workflowId,
+        error: errorMsg,
+        durationMs: Date.now() - workflowStartTime,
+      });
+
+      // Publish to DLQ
+      if (ctx.dlq) {
+        await publishDlqRecord({
+          dlq: ctx.dlq,
+          storage: ctx.storage,
+          workflowId,
+          workflowName: ctx.name,
+          input,
+          errorMsg,
+          compensationReport,
+          metadata: ctx.metadata,
+        });
+      }
+
+      throw lastStepError;
+    },
+  });
+}
 
 /**
  * Slice of the workflow-runtime state the DAG executor needs. A strict
