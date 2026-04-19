@@ -1,26 +1,19 @@
 // ---------------------------------------------------------------------------
-// WorkflowRunner — orchestration engine, pluggable step execution.
+// WorkflowRunner — orchestration engine.
 //
-// Eventually this owns the entirety of run-loop orchestration: lock /
-// heartbeat / state CRUD, ready-set computation, workflow-level retry,
-// compensation, version drain, idempotency TTL, DLQ publish, journaled-step
-// replay, suspend / resume, deadlines. Step bodies themselves are run via
-// a pluggable `StepExecutor` so in-process TS handlers, remote gRPC workers,
-// and queue-dispatched workers all share one orchestration codepath.
-//
-// Phase 1 (this module) ships the public interfaces + a default runner
-// that delegates to the existing `RunnableWorkflow.run()` method so
-// downstream packages can code against the runner shape today without
-// waiting for the full extraction. Phases 2-3 (promin-e0hd) pull the
-// orchestration body out of `WorkflowBuilder.run` into this class and
-// formalize `StepExecutor` as the in-process vs remote vs queue seam.
+// Owns run-loop orchestration: lock / heartbeat / state CRUD, ready-set
+// computation, workflow-level retry, compensation, version drain,
+// idempotency TTL, DLQ publish, journaled-step replay, suspend / resume,
+// deadlines. Step bodies themselves run through a pluggable `StepExecutor`
+// so in-process TS handlers, remote gRPC workers, and queue-dispatched
+// workers can share one orchestration codepath (promin-e0hd phase 2
+// fills that seam in).
 // ---------------------------------------------------------------------------
 
 import { Effect } from "effect";
 import { Pipeline, type Sinkable, type TaggedError } from "@promin/core";
 import { LosslessJsonCodec } from "@promin/core";
 import type {
-  RunnableWorkflow,
   Workflow,
   CompensateConfig,
   DispatchConfig,
@@ -91,22 +84,6 @@ export interface StepExecutor {
 // WorkflowRunner — orchestration engine.
 // ---------------------------------------------------------------------------
 
-export interface WorkflowRunnerExecuteParams<Input> {
-  /**
-   * The workflow to run. Accepts a `RunnableWorkflow` (already bound to
-   * storage) because `execute` delegates to its `.run()`. This path is
-   * retained for back-compat; new callers should use `runner.run({ workflow, ... })`
-   * with a pure `Workflow`, which drives orchestration via the runner's own
-   * storage (configured at construction time).
-   */
-  readonly workflow: RunnableWorkflow<Input, unknown>;
-  readonly workflowId: string;
-  readonly input: Input;
-  readonly force?: boolean;
-  /** Optional hooks — mirrors what `WorkflowBuilder.run` exposes today. */
-  readonly hooks?: WorkflowHooks;
-}
-
 export type WorkflowRunSafeError =
   | Error
   | WorkflowError
@@ -147,10 +124,9 @@ export type WorkflowRunnerRunParams =
 export interface WorkflowRunnerConfig {
   /**
    * Storage backend that backs every workflow the runner executes. Required
-   * for the new `run()` API. Optional for runners that only use the legacy
-   * `execute()` path (which takes a pre-bound `RunnableWorkflow`).
+   * — the runner is useless without it.
    */
-  readonly storage?: WorkflowStorage;
+  readonly storage: WorkflowStorage;
   /**
    * Optional workflow registry. Enables `run({ name, ... })` to resolve
    * definitions by name + version, and drives version-drain-resume on
@@ -174,10 +150,12 @@ export interface WorkflowRunnerConfig {
  *   `Workflow` through the runner's configured storage.
  * - `run({ name, version?, ... })` — resolve via the configured registry.
  *
- * The legacy `execute` / `executeSafe` accept a pre-bound `RunnableWorkflow`
- * and will be removed once call sites migrate (see promin-c1ds).
+ * `start` returns a `WorkflowHandle` for fire-and-forget + polling.
+ * `getStatus` reads the current state snapshot.
  */
 export interface WorkflowRunner {
+  /** Storage the runner writes workflow state to. */
+  readonly storage: WorkflowStorage;
   /** Run a workflow and throw on failure. */
   run(params: WorkflowRunnerRunParams): Promise<unknown>;
   /** Run a workflow and return `{ data, error }` instead of throwing. */
@@ -204,37 +182,29 @@ export interface WorkflowRunner {
     workflowId: string,
     params?: { readonly includeStepResults?: boolean },
   ): Promise<WorkflowStatusInfo<unknown> | null>;
-  /** @deprecated Use `run({ workflow, ... })` with a pure `Workflow` instead. */
-  execute<Input, Output>(params: WorkflowRunnerExecuteParams<Input>): Promise<Output>;
-  /** @deprecated Use `runSafe({ workflow, ... })` with a pure `Workflow` instead. */
-  executeSafe<Input, Output>(
-    params: WorkflowRunnerExecuteParams<Input>,
-  ): Promise<{ data: Output; error: null } | { data: null; error: WorkflowRunSafeError }>;
 }
 
 /**
  * Default implementation. Uses the configured storage + registry to drive
- * `runWorkflowOrchestration` from a pure `Workflow` definition. The legacy
- * `execute` path delegates to `RunnableWorkflow.run` for callers that still
- * rely on `.bind(storage)`.
+ * `runWorkflowOrchestration` from a pure `Workflow` definition.
  *
  * Intentionally a class (not a bare function) so the runner can add
  * step-executor wiring, observability hooks, and tracing context without
  * breaking callers.
  */
 export class DefaultWorkflowRunner implements WorkflowRunner {
-  private readonly storage?: WorkflowStorage;
+  readonly storage: WorkflowStorage;
   private readonly registry?: WorkflowVersionRegistry;
   private readonly hooks?: WorkflowHooks;
 
-  constructor(config: WorkflowRunnerConfig = {}) {
+  constructor(config: WorkflowRunnerConfig) {
     this.storage = config.storage;
     this.registry = config.registry;
     this.hooks = config.hooks;
   }
 
   async run(params: WorkflowRunnerRunParams): Promise<unknown> {
-    const storage = this._requireStorage();
+    const storage = this.storage;
     const { workflowId, input, force } = params;
 
     if ("workflow" in params) {
@@ -291,7 +261,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     readonly workflowId: string;
     readonly input: unknown;
   }): Promise<WorkflowHandle<unknown>> {
-    const storage = this._requireStorage();
+    const storage = this.storage;
     const { workflow, workflowId, input } = params;
 
     const existing = await storage.loadWorkflow(workflowId);
@@ -343,8 +313,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     workflowId: string,
     params?: { readonly includeStepResults?: boolean },
   ): Promise<WorkflowStatusInfo<unknown> | null> {
-    const storage = this._requireStorage();
-    const state = await storage.loadWorkflow(workflowId);
+    const state = await this.storage.loadWorkflow(workflowId);
     if (!state) return null;
 
     const includeResults = params?.includeStepResults ?? false;
@@ -386,30 +355,6 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     };
   }
 
-  async execute<Input, Output>(params: WorkflowRunnerExecuteParams<Input>): Promise<Output> {
-    const { workflow, workflowId, input, force } = params;
-    return workflow.run({ workflowId, input, force }) as Promise<Output>;
-  }
-
-  async executeSafe<Input, Output>(
-    params: WorkflowRunnerExecuteParams<Input>,
-  ): Promise<{ data: Output; error: null } | { data: null; error: WorkflowRunSafeError }> {
-    const { workflow, workflowId, input, force } = params;
-    return workflow.runSafe({ workflowId, input, force }) as Promise<
-      { data: Output; error: null } | { data: null; error: WorkflowRunSafeError }
-    >;
-  }
-
-  private _requireStorage(): WorkflowStorage {
-    if (!this.storage) {
-      throw new Error(
-        `WorkflowRunner requires \`storage\` in its config to call \`run()\`. ` +
-          `Pass \`createWorkflowRunner({ storage })\`.`,
-      );
-    }
-    return this.storage;
-  }
-
   private _runWorkflow(params: {
     workflow: Workflow<unknown, unknown>;
     storage: WorkflowStorage;
@@ -444,10 +389,10 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
 }
 
 /**
- * Convenience factory — `createWorkflowRunner(config?)` mirrors how other
+ * Convenience factory — `createWorkflowRunner(config)` mirrors how other
  * promin components construct their default implementation.
  */
-export function createWorkflowRunner(config?: WorkflowRunnerConfig): WorkflowRunner {
+export function createWorkflowRunner(config: WorkflowRunnerConfig): WorkflowRunner {
   return new DefaultWorkflowRunner(config);
 }
 
@@ -527,9 +472,28 @@ export async function runWorkflowOrchestration(
             `onVersionMismatch is "drain" but no matching previousVersion was registered.`,
         });
       }
-      // Delegate drain to the previous version — bind it to this
-      // workflow's storage so both versions share one state backend.
-      return previousDef.bind(ctx.storage).run({ workflowId, input, force });
+      // Delegate drain to the previous version by building its own
+      // orchestration context — both versions share this workflow's
+      // storage so the stored state keeps one source of truth.
+      const prevDef = previousDef._definition;
+      const prevCtx: WorkflowOrchestrationContext = {
+        storage: ctx.storage,
+        name: previousDef.name,
+        version: previousDef.version,
+        idempotency: previousDef.idempotency,
+        type: prevDef.type,
+        metadata: prevDef.metadata,
+        steps: prevDef.steps,
+        retry: prevDef.retry,
+        compensateConfig: prevDef.compensateConfig,
+        dlq: prevDef.dlq,
+        dispatch: prevDef.dispatch,
+        timeoutMs: prevDef.timeoutMs,
+        onVersionMismatch: prevDef.onVersionMismatch,
+        previousVersions: prevDef.previousVersions,
+        hooks: ctx.hooks ?? prevDef.hooks,
+      };
+      return runWorkflowOrchestration(prevCtx, { workflowId, input, force });
     }
   }
 
@@ -1326,12 +1290,14 @@ export function getIdempotencyTtl(
 // ---------------------------------------------------------------------------
 
 /**
- * Placeholder for phase 2. The in-process executor will wrap the step
- * handlers attached to a workflow's builder and run them locally.
+ * Placeholder for the future in-process step executor. Real implementation
+ * is gated on promin-e0hd phase 2, which lifts per-step body execution off
+ * `WorkflowBuilder` and behind this seam so remote/gRPC executors can
+ * slot in behind the same interface.
  */
 export class InProcessStepExecutor implements StepExecutor {
   constructor(
-    private readonly workflow: Workflow<unknown, unknown> | RunnableWorkflow<unknown, unknown>,
+    private readonly workflow: Workflow<unknown, unknown>,
     private readonly hooks?: WorkflowHooks,
   ) {
     void this.workflow;
@@ -1339,14 +1305,9 @@ export class InProcessStepExecutor implements StepExecutor {
   }
 
   async executeStep(_req: StepExecutionRequest): Promise<StepExecutionResult> {
-    // Phase 2: this replaces the per-step body in `WorkflowBuilder.run`.
-    // Until then the `DefaultWorkflowRunner` skips this seam and delegates
-    // to the bound workflow's `.run()`. Callers that instantiate an
-    // InProcessStepExecutor directly are building against the future
-    // shape — they'll get the real implementation once phase 2 lands.
     throw new Error(
       "InProcessStepExecutor.executeStep is not implemented yet — wait for promin-e0hd phase 2. " +
-        "Use RunnableWorkflow.run / createWorkflowRunner().execute() for now.",
+        "Use createWorkflowRunner({ storage }).run({ workflow, ... }) for now.",
     );
   }
 }

@@ -2,45 +2,27 @@
 // WorkflowVersionRegistry — maps (workflowName, version) to Workflow
 // ---------------------------------------------------------------------------
 
-import type { Workflow, RunnableWorkflow } from "./durable-pipeline.ts";
+import type { Workflow } from "./durable-pipeline.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
 
 /**
  * Registry mapping (workflowName, version) to pure `Workflow` definitions.
  *
- * Enables running multiple versions simultaneously:
- * - New workflows use the latest registered version
- * - Existing workflows resume with their original version's definition
- *
- * The registry carries a single `storage` — it binds each resolved
- * `Workflow` to that storage on demand, returning a `RunnableWorkflow`.
- * Callers register pure definitions (no storage on the def itself) so
- * the same definition module can be shared across processes that may
- * have different storage wiring.
+ * Pure lookup — no storage, no `.run()`. Hand the registry to a
+ * `WorkflowRunner`, and the runner drives execution against its own
+ * storage, resolving the right version per workflowId.
  *
  * @example
  * ```ts
- * const registry = new WorkflowVersionRegistry({ storage });
- * registry.register(orderV1);  // version "1"
- * registry.register(orderV2);  // version "2"
+ * const registry = createWorkflowVersionRegistry();
+ * registry.register(orderV1);
+ * registry.register(orderV2);
  *
- * // New workflow -> uses v2, bound to registry.storage
- * await registry.run({ workflowId: "order-new", input, name: "order" });
- *
- * // Existing v1 workflow -> resumes with v1 definition
- * await registry.run({ workflowId: "order-old", input, name: "order" });
+ * const runner = createWorkflowRunner({ storage, registry });
+ * await runner.run({ name: "order", workflowId: "order-new", input });
  * ```
  */
-/** Optional config for WorkflowVersionRegistry. */
 export interface WorkflowVersionRegistryConfig {
-  /**
-   * Storage backend used to bind resolved definitions. Required for
-   * `run()`, `resolveRunnable()`, and `countByVersion()`. Optional only
-   * for registries that are used purely as a definition catalog (e.g.
-   * the coordinator's DAG lookup — it reads name/version/dag from the
-   * pure Workflow and never calls .run() through the registry).
-   */
-  storage?: WorkflowStorage;
   /**
    * Automatically deregister versions whose in-flight count hits zero.
    * Polled when `countByVersion()` is called; also triggered via
@@ -64,22 +46,10 @@ export class WorkflowVersionRegistry {
   private drainedNotified = new Set<string>();
   private readonly autoDeregister: boolean;
   private readonly onDrained?: (name: string, version: string) => void | Promise<void>;
-  private readonly storage?: WorkflowStorage;
 
   constructor(config?: WorkflowVersionRegistryConfig) {
     this.autoDeregister = config?.autoDeregister ?? false;
     this.onDrained = config?.onDrained;
-    this.storage = config?.storage;
-  }
-
-  private _requireStorage(op: string): WorkflowStorage {
-    if (!this.storage) {
-      throw new Error(
-        `WorkflowVersionRegistry.${op}() requires \`storage\` on the registry config. ` +
-          `Pass \`new WorkflowVersionRegistry({ storage })\` or bind definitions manually.`,
-      );
-    }
-    return this.storage;
   }
 
   /**
@@ -92,9 +62,6 @@ export class WorkflowVersionRegistry {
    *   .register(v2)
    *   .register(v3);
    * ```
-   *
-   * Returns a thin wrapper that keeps method calls scoped to the given
-   * workflow name but delegates storage to the underlying registry.
    */
   static for(name: string, config?: WorkflowVersionRegistryConfig): ScopedWorkflowVersionRegistry {
     const underlying = new WorkflowVersionRegistry(config);
@@ -102,11 +69,8 @@ export class WorkflowVersionRegistry {
   }
 
   /**
-   * Register a versioned workflow definition.
-   * The definition must have a version (set via `workflow({ version: "2" })` or `.version("2")`).
-   * Accepts pure `Workflow` (no storage) — the registry binds to its own
-   * storage when resolving. `RunnableWorkflow` also works (it extends
-   * `Workflow`); the registry ignores the bound storage in favor of its own.
+   * Register a versioned workflow definition. The definition must have a
+   * `version` (set via `workflow({ version: "2" })`).
    */
   register(definition: Workflow<unknown, unknown>): void {
     const { name, version } = definition;
@@ -134,17 +98,6 @@ export class WorkflowVersionRegistry {
     return latest ? versions.get(latest) : undefined;
   }
 
-  /**
-   * Resolve and bind to the registry's storage, returning a runnable.
-   * Throws if storage wasn't configured on the registry or the name/
-   * version isn't registered.
-   */
-  resolveRunnable(name: string, version?: string): RunnableWorkflow<unknown, unknown> | undefined {
-    const def = this.resolve(name, version);
-    if (!def) return undefined;
-    return def.bind(this._requireStorage("resolveRunnable"));
-  }
-
   /** Get the latest registered version string for a workflow name. */
   latest(name: string): string | undefined {
     return this.latestVersions.get(name);
@@ -162,48 +115,9 @@ export class WorkflowVersionRegistry {
   }
 
   /**
-   * Run a workflow using the registry for version resolution.
-   * - If workflowId exists in storage -> resume with stored version's definition
-   * - If workflowId doesn't exist -> create with latest version
-   */
-  async run<Output>(params: {
-    workflowId: string;
-    input: unknown;
-    name: string;
-    force?: boolean;
-  }): Promise<Output> {
-    const { workflowId, input, name, force } = params;
-    const storage = this._requireStorage("run");
-
-    // Check if workflow already exists in storage
-    const latestDef = this.resolve(name);
-    if (!latestDef) {
-      throw new Error(`No workflow "${name}" registered in the registry`);
-    }
-
-    const existing = await storage.loadWorkflow(workflowId);
-
-    if (existing) {
-      // Resume with stored version
-      const storedVersion = existing.version;
-      const def = this.resolve(name, storedVersion);
-      if (!def) {
-        throw new Error(
-          `Workflow "${name}" version "${storedVersion}" not found in registry. ` +
-            `Available versions: ${this.versions(name).join(", ")}. ` +
-            `Keep old definitions registered until in-flight workflows drain.`,
-        );
-      }
-      return def.bind(storage).run({ workflowId, input, force }) as Promise<Output>;
-    }
-
-    // New workflow — use latest version
-    return latestDef.bind(storage).run({ workflowId, input, force }) as Promise<Output>;
-  }
-
-  /**
-   * Count in-flight (pending/running/suspended) workflows per version.
-   * Useful for monitoring drain progress before deregistering old versions.
+   * Count in-flight (pending/running/suspended) workflows per version
+   * using the supplied storage. Useful for monitoring drain progress
+   * before deregistering old versions.
    */
   async countByVersion(params: {
     name: string;
@@ -318,11 +232,6 @@ export class ScopedWorkflowVersionRegistry {
     return this.registry.versions(this.name);
   }
 
-  /** Run a workflow; see `WorkflowVersionRegistry.run`. */
-  run<Output>(params: { workflowId: string; input: unknown; force?: boolean }): Promise<Output> {
-    return this.registry.run<Output>({ ...params, name: this.name });
-  }
-
   /** Count in-flight workflows per version; see base registry. */
   countByVersion(params: {
     storage: WorkflowStorage;
@@ -342,12 +251,8 @@ export class ScopedWorkflowVersionRegistry {
 }
 
 /**
- * Convenience factory for constructing a `WorkflowVersionRegistry`. Mirrors
- * how every other promin building block (runner, scheduler, coordinator,
- * cache) is constructed — `createThing(config)` — so the registry can move
- * from concrete class to interface without churning every call site.
- *
- * Prefer this over `new WorkflowVersionRegistry(...)` in new code.
+ * Convenience factory. Prefer this over `new WorkflowVersionRegistry(...)`
+ * in new code — mirrors how every other promin building block is built.
  */
 export function createWorkflowVersionRegistry(
   config?: WorkflowVersionRegistryConfig,

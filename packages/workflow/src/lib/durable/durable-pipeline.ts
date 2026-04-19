@@ -34,11 +34,8 @@ import { runWorkflowOrchestration } from "./workflow-runner.ts";
 import {
   WorkflowError,
   StepError,
-  WorkflowLockError,
   WorkflowSuspendedError,
   WorkflowTimeoutError,
-  StepTimeoutError,
-  WorkflowDeadlineError,
   GuardError,
 } from "./durable-pipeline-error.ts";
 
@@ -93,21 +90,25 @@ export interface IdempotencyConfig {
 
 // ---------------------------------------------------------------------------
 // Workflow — pure definition (no storage, portable)
-// RunnableWorkflow — Workflow bound to a storage (has run/invoke/etc.)
 // ---------------------------------------------------------------------------
 
 /**
  * A frozen, portable workflow definition. Pure data — name, version, DAG,
- * idempotency config. Intended to be run via `createWorkflowRunner({ storage }).run({ workflow, ... })`.
+ * idempotency config. Executed via a `WorkflowRunner`:
  *
- * Keeping definitions storage-free lets a single process import and
- * dispatch workflow DAGs without also wiring up storage for every
- * submitter — the runner or coordinator owns that.
+ * ```ts
+ * const runner = createWorkflowRunner({ storage });
+ * await runner.run({ workflow, workflowId, input });
+ * ```
+ *
+ * Keeping definitions storage-free lets a single process import and dispatch
+ * workflow DAGs without also wiring up storage for every submitter — the
+ * runner or coordinator owns that.
  *
  * The `_definition` field carries the runtime internals (steps, retry,
- * compensation, etc.) so the runner can build an orchestration context
- * from the pure shape. It's part of the runtime contract between builder
- * and runner, not a public surface — callers shouldn't read it directly.
+ * compensation, etc.) so the runner can build an orchestration context from
+ * the pure shape. Part of the runtime contract between builder and runner,
+ * not a public surface — callers shouldn't read it directly.
  */
 export interface Workflow<Input, Output> {
   readonly name: string;
@@ -121,14 +122,12 @@ export interface Workflow<Input, Output> {
    */
   readonly _definition: WorkflowDefinitionInternals;
   /**
-   * Bind this definition to a storage backend. Returns a `RunnableWorkflow`
-   * that can actually be run/resumed/inspected. Cheap — no validation, no
-   * I/O; just produces a new object that closes over the storage.
-   *
-   * @deprecated Prefer `createWorkflowRunner({ storage }).run({ workflow, ... })`.
-   * `.bind()` will be removed once the call-site migration completes (see promin-c1ds).
+   * Generic parameter carriers so `Workflow<Input, Output>` stays
+   * distinguishable structurally. Never populated at runtime.
+   * @internal
    */
-  bind(storage: WorkflowStorage): RunnableWorkflow<Input, Output>;
+  readonly __input?: Input;
+  readonly __output?: Output;
 }
 
 /**
@@ -153,138 +152,7 @@ export interface WorkflowDefinitionInternals {
 }
 
 /**
- * A `Workflow` bound to a specific storage. Carries every runtime method:
- * run, runSafe, invoke, waitForResult, getStatus, start. Produced by
- * `Workflow.bind(storage)`.
- *
- * `RunnableWorkflow` extends `Workflow`, so APIs that only need the
- * definition shape (name/version/dag — e.g. the coordinator, the registry)
- * accept both; APIs that actually run the workflow require the bound form.
- */
-export interface RunnableWorkflow<Input, Output> extends Workflow<Input, Output> {
-  readonly storage: WorkflowStorage;
-  /** Execute workflow synchronously — blocks until completion. */
-  run(params: { workflowId: string; input: Input; force?: boolean }): Promise<Output>;
-  /** Execute workflow synchronously — returns `{ data, error }` instead of throwing. */
-  runSafe(params: {
-    workflowId: string;
-    input: Input;
-    force?: boolean;
-  }): Promise<{ data: Output; error: null } | { data: null; error: unknown }>;
-  /**
-   * Invoke as a child workflow — returns Pipeline for composition.
-   * Automatically sets parentWorkflowId for tracking.
-   *
-   * @example
-   * ```ts
-   * .step("enrich", ({ prev }) =>
-   *   enrichUser.invoke({
-   *     workflowId: `enrich-${prev.id}`,
-   *     input: { userId: prev.id },
-   *   })
-   * )
-   * ```
-   */
-  invoke(params: {
-    workflowId: string;
-    input: Input;
-    parentWorkflowId?: string;
-  }): Pipeline<Output, StepError>;
-
-  /**
-   * Wait for a workflow to complete, polling the storage at intervals.
-   * Resumes suspended workflows automatically on each poll.
-   *
-   * @example
-   * ```ts
-   * // Start workflow (may suspend at waitForSignal)
-   * await kycVerification.runSafe({ workflowId, input });
-   *
-   * // Wait for completion (resumes on each poll if signal arrived)
-   * const result = await kycVerification.waitForResult(workflowId, {
-   *   input,
-   *   intervalMs: 5_000,
-   *   timeoutMs: 60_000,
-   * });
-   * ```
-   */
-  waitForResult(
-    workflowId: string,
-    params: {
-      input: Input;
-      intervalMs?: number;
-      timeoutMs?: number;
-    },
-  ): Promise<Output>;
-
-  /**
-   * Get the current status of a workflow. Useful for status endpoints.
-   *
-   * @example
-   * ```ts
-   * // GET /kyc/status handler
-   * const status = await kycVerification.getStatus(workflowId);
-   * if (!status) return { status: 404 };
-   * return { status: 200, body: status };
-   * ```
-   */
-  getStatus(
-    workflowId: string,
-    params?: { includeStepResults?: boolean },
-  ): Promise<WorkflowStatusInfo<Output> | null>;
-
-  /**
-   * Start a workflow and return a handle for interacting with it.
-   * With idempotency config: joins in-flight runs, respects TTL.
-   * Without idempotency: blocks until completion, throws if locked.
-   *
-   * @example
-   * ```ts
-   * const handle = await myWorkflow.start("order-123", orderInput);
-   * const status = await handle.status();
-   * const result = await handle.result({ timeoutMs: 60_000 });
-   * ```
-   */
-  start(workflowId: string, input: Input): Promise<WorkflowHandle<Output>>;
-  /** Start with ID derived from input (requires idempotency.deriveId config). */
-  start(input: Input): Promise<WorkflowHandle<Output>>;
-}
-
-/**
- * @deprecated Use `Workflow` (pure) or `RunnableWorkflow` (bound) directly.
- * Alias kept for the internal modules that still read the bound shape.
- */
-export type WorkflowDefinition<Input, Output> = RunnableWorkflow<Input, Output>;
-
-/**
- * Sentinel storage for builders produced by `workflow({ name, version })`
- * (i.e. without a storage). Every method throws with a pointing error that
- * tells the caller to `.bind(storage)` before executing. Type is still
- * `WorkflowStorage` so the builder internals don't need to thread an
- * `| undefined` through every call site.
- */
-const UNBOUND_STORAGE_MESSAGE =
-  "Workflow has no storage bound. Call .bind(storage) on the builder or on .build() before running. " +
-  "For in-memory, non-durable flows, use `flow(name)` instead of `workflow({ name })`.";
-
-const UNBOUND_STORAGE: WorkflowStorage = new Proxy({} as WorkflowStorage, {
-  get(_target, prop) {
-    // Preserve the common "is it a thenable?" / Symbol introspection checks
-    // so the proxy doesn't accidentally masquerade as a promise or iterator.
-    if (typeof prop === "symbol" || prop === "then") return undefined;
-    return () => {
-      throw new Error(UNBOUND_STORAGE_MESSAGE);
-    };
-  },
-});
-
-/** @internal — test only. True when the storage is the unbound sentinel. */
-export function isUnboundStorage(storage: WorkflowStorage): boolean {
-  return storage === UNBOUND_STORAGE;
-}
-
-/**
- * Handle to a running workflow. Returned by `workflow.start()`.
+ * Handle to a running workflow. Returned by `WorkflowRunner.start()`.
  */
 export interface WorkflowHandle<Output> {
   readonly workflowId: string;
@@ -672,7 +540,6 @@ export class WorkflowBuilder<
   /** @internal */
   constructor(
     private readonly _name: string,
-    private readonly _storage: WorkflowStorage,
     private readonly _steps: StepDefinition[],
     private readonly _lastStepName: string | null,
     private readonly _hooks?: WorkflowHooks,
@@ -729,55 +596,10 @@ export class WorkflowBuilder<
     return this._defaultCodec ?? LosslessJsonCodec;
   }
 
-  /**
-   * Clone this builder with the given storage attached. Used by `.bind()`
-   * and by the fluent-chain shortcut `workflow({ name }).step(...).bind(storage).run(...)`.
-   */
-  private _withStorage(storage: WorkflowStorage): WorkflowBuilder<Input, Steps, Current, Error> {
-    return new WorkflowBuilder(
-      this._name,
-      storage,
-      this._steps,
-      this._lastStepName,
-      this._hooks,
-      this._type,
-      this._metadata,
-      this._retry,
-      this._compensateConfig,
-      this._dlq,
-      this._dispatch,
-      this._idempotency,
-      this._version,
-      this._timeoutMs,
-      this._onVersionMismatch,
-      this._previousVersions,
-      this._patches,
-      this._defaultCodec,
-      this._defaultPayloadHash,
-    );
-  }
-
-  /**
-   * Attach a storage to this builder and return a new, bound builder.
-   * Fluent shortcut for `.build().bind(storage)` when you just want to
-   * chain into `.run()` right away:
-   *
-   * ```ts
-   * await workflow({ name: "x" })
-   *   .step("a", handler)
-   *   .bind(storage)
-   *   .run({ workflowId, input });
-   * ```
-   */
-  bind(storage: WorkflowStorage): WorkflowBuilder<Input, Steps, Current, Error> {
-    return this._withStorage(storage);
-  }
-
   /** Set the workflow version. Used to detect code/state mismatch on resume. */
   version(v: string): WorkflowBuilder<Input, Steps, Current, Error> {
     return new WorkflowBuilder(
       this._name,
-      this._storage,
       this._steps,
       this._lastStepName,
       this._hooks,
@@ -1119,16 +941,9 @@ export class WorkflowBuilder<
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
     const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
-    // Storage capability check is deferred to execute time — at `.journaled()`
-    // call time, the builder may be unbound (a pure `Workflow` is being built
-    // and `.bind(storage)` hasn't been called yet). Validating here would
-    // force callers to bind before defining their DAG, which defeats the
-    // point of separating Workflow from RunnableWorkflow.
-    //
-    // The storage we validate against at runtime is `execParams.storage`
-    // (the bound runtime storage), not `this._storage` — after `.bind()`
-    // the DAG closure still captures the original builder's `this`, which
-    // may be unbound. The runtime storage is always current and correct.
+    // Storage capability check is deferred to execute time — the builder has
+    // no storage of its own; validation runs against the runner's storage
+    // via `execParams.storage`.
     const getJournalStorage = (
       runtimeStorage: WorkflowStorage,
     ): WorkflowStorage & ActivityJournalStorage => {
@@ -1266,7 +1081,7 @@ export class WorkflowBuilder<
    */
   subworkflow<Name extends string, ChildInput, ChildOutput>(
     name: Name,
-    definition: WorkflowDefinition<ChildInput, ChildOutput>,
+    child: Workflow<ChildInput, ChildOutput>,
     config: {
       input: (prev: Current) => ChildInput;
       workflowId: (prev: Current) => string;
@@ -1277,6 +1092,7 @@ export class WorkflowBuilder<
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
     const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
+    const childInternals = child._definition;
 
     const stepDef: StepDefinition = {
       name,
@@ -1288,10 +1104,46 @@ export class WorkflowBuilder<
         const prev = (
           prevStepName != null ? execParams.results[prevStepName] : execParams.input
         ) as Current;
-        return definition.invoke({
-          workflowId: config.workflowId(prev),
-          input: config.input(prev),
-          parentWorkflowId: execParams.workflowId,
+        const childWorkflowId = config.workflowId(prev);
+        const childInput = config.input(prev);
+        const parentWorkflowId = execParams.workflowId;
+        const storage = execParams.storage;
+
+        return Pipeline.fromPromise(async () => {
+          // Seed the child row with the parent pointer before handing it to
+          // the runner so downstream `listWorkflows({ parentId })` queries
+          // and the coordinator's recovery see the relationship.
+          const existing = await storage.loadWorkflow(childWorkflowId);
+          if (!existing) {
+            await storage.createWorkflow({
+              workflowId: childWorkflowId,
+              workflowName: child.name,
+              input: childInput,
+              workflowType: childInternals.type,
+              parentWorkflowId,
+              metadata: childInternals.metadata,
+            });
+          }
+          return runWorkflowOrchestration(
+            {
+              storage,
+              name: child.name,
+              version: child.version,
+              idempotency: child.idempotency,
+              type: childInternals.type,
+              metadata: childInternals.metadata,
+              steps: childInternals.steps,
+              retry: childInternals.retry,
+              compensateConfig: childInternals.compensateConfig,
+              dlq: childInternals.dlq,
+              dispatch: childInternals.dispatch,
+              timeoutMs: childInternals.timeoutMs,
+              onVersionMismatch: childInternals.onVersionMismatch,
+              previousVersions: childInternals.previousVersions,
+              hooks: childInternals.hooks,
+            },
+            { workflowId: childWorkflowId, input: childInput },
+          );
         }) as Pipeline<unknown, TaggedError>;
       },
     };
@@ -1471,13 +1323,20 @@ export class WorkflowBuilder<
   }
 
   // ---------------------------------------------------------------------------
-  // Terminal: run
+  // Terminal: execute — build an ephemeral runner + workflow, run to completion
   // ---------------------------------------------------------------------------
 
-  async run(params: { workflowId: string; input: Input; force?: boolean }): Promise<Current> {
+  /**
+   * Execute this workflow with an auto-generated workflowId against an
+   * ephemeral in-memory storage. Convenient for non-durable flows, request
+   * handlers, and scripts. Construct a `createWorkflowRunner({ storage })`
+   * against a real backend when you need durability.
+   */
+  async execute(input: Input): Promise<Current> {
+    const storage = new InMemoryWorkflowStorage();
     return runWorkflowOrchestration(
       {
-        storage: this._storage,
+        storage,
         name: this._name,
         version: this._version,
         type: this._type,
@@ -1493,95 +1352,31 @@ export class WorkflowBuilder<
         previousVersions: this._previousVersions,
         hooks: this._hooks,
       },
-      params,
+      { workflowId: crypto.randomUUID(), input },
     ) as Promise<Current>;
   }
 
-  /** @deprecated kept briefly to ease diff review; delete in follow-up. */
-
   // ---------------------------------------------------------------------------
-  // Terminal: runSafe
-  // ---------------------------------------------------------------------------
-
-  async runSafe(params: { workflowId: string; input: Input; force?: boolean }): Promise<
-    | { data: Current; error: null }
-    | {
-        data: null;
-        error:
-          | Error
-          | WorkflowError
-          | StepError
-          | WorkflowLockError
-          | WorkflowSuspendedError
-          | WorkflowTimeoutError
-          | StepTimeoutError
-          | WorkflowDeadlineError;
-      }
-  > {
-    try {
-      const data = await this.run(params);
-      return { data, error: null };
-    } catch (error) {
-      return { data: null, error: error as any };
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // Terminal: execute — run without requiring a workflowId (auto-generated)
-  // ---------------------------------------------------------------------------
-
-  /** Execute the workflow with an auto-generated workflowId. For non-durable flows. */
-  async execute(input: Input): Promise<Current> {
-    return this.run({ workflowId: crypto.randomUUID(), input });
-  }
-
-  /** Execute with auto-generated workflowId, returns { data, error }. */
-  async executeSafe(input: Input): Promise<
-    | { data: Current; error: null }
-    | {
-        data: null;
-        error:
-          | Error
-          | WorkflowError
-          | StepError
-          | WorkflowLockError
-          | WorkflowSuspendedError
-          | WorkflowTimeoutError
-          | StepTimeoutError
-          | WorkflowDeadlineError;
-      }
-  > {
-    return this.runSafe({ workflowId: crypto.randomUUID(), input });
-  }
-
-  // ---------------------------------------------------------------------------
-  // build — freeze into a reusable WorkflowDefinition
+  // build — freeze into a reusable Workflow definition
   // ---------------------------------------------------------------------------
 
   /**
    * Freeze this builder into a portable `Workflow` (pure data — no storage,
-   * no run methods). Call `.bind(storage)` on the result to get a
-   * `RunnableWorkflow` that can actually execute.
+   * no run methods). Hand it to a `WorkflowRunner` to execute.
    *
    * This split keeps workflow definitions importable without dragging the
-   * state backend along: one process (the coordinator, a registry) binds
-   * once, and other processes (submitters, HTTP handlers) work off the
+   * state backend along: one process (the coordinator, a registry) wires
+   * storage, and other processes (submitters, HTTP handlers) work off the
    * bare definition.
    */
-  build(options?: {
-    idempotency?: IdempotencyConfig;
-    /** Derive workflowId from input. Makes the ID deterministic — same input → same workflow. */
-    deriveId?: (input: Input) => string;
-  }): Workflow<Input, Current> {
+  build(options?: { idempotency?: IdempotencyConfig }): Workflow<Input, Current> {
     const source = options?.idempotency ? this._deriveWithIdempotency(options.idempotency) : this;
-    const deriveId = options?.deriveId;
     return {
       name: source._name,
       version: source._version,
       dag: source.toJSON(),
       idempotency: source._idempotency,
       _definition: source._toDefinitionInternals(),
-      bind: (storage) => source._withStorage(storage)._buildRunnable({ deriveId }),
     };
   }
 
@@ -1599,179 +1394,6 @@ export class WorkflowBuilder<
       onVersionMismatch: this._onVersionMismatch,
       previousVersions: this._previousVersions,
       hooks: this._hooks,
-    };
-  }
-
-  /**
-   * Internal: produce the full `RunnableWorkflow` shape. Only called from
-   * `.bind()` (which guarantees a real storage is attached) or from
-   * `flow()` (which starts with an in-memory storage). Must not be called
-   * with the unbound sentinel — the run methods on the returned object
-   * would throw with a less-helpful error.
-   */
-  private _buildRunnable(options?: {
-    deriveId?: (input: Input) => string;
-  }): RunnableWorkflow<Input, Current> {
-    const self = this;
-    const deriveId = options?.deriveId;
-    return {
-      name: self._name,
-      version: self._version,
-      storage: self._storage,
-      dag: self.toJSON(),
-      idempotency: self._idempotency,
-      _definition: self._toDefinitionInternals(),
-      bind: (storage) => self._withStorage(storage)._buildRunnable({ deriveId }),
-      run: (params) => self.run(params),
-      runSafe: (params) => self.runSafe(params) as any,
-      invoke: (params) =>
-        Pipeline.fromPromise(async () => {
-          // If parentWorkflowId provided, store it in metadata
-          if (params.parentWorkflowId) {
-            const state = await self._storage.loadWorkflow(params.workflowId);
-            if (!state) {
-              // Best-effort create — if conflict, another caller already created it
-              await self._storage.createWorkflow({
-                workflowId: params.workflowId,
-                workflowName: self._name,
-                input: params.input,
-                workflowType: self._type,
-                parentWorkflowId: params.parentWorkflowId,
-                metadata: self._metadata,
-              });
-            }
-          }
-          return self.run(params);
-        }) as Pipeline<Current, StepError>,
-
-      getStatus: async (workflowId, params) => {
-        const state = await self._storage.loadWorkflow(workflowId);
-        if (!state) return null;
-
-        const includeResults = params?.includeStepResults ?? false;
-
-        // Find the current/blocked step
-        let currentStep: string | undefined;
-        let suspendedReason: "sleeping" | "waiting_for_signal" | undefined;
-
-        for (const [name, step] of Object.entries(state.steps)) {
-          if (step.status === "running" || step.status === "pending") {
-            currentStep = currentStep ?? name;
-          }
-          if (step.status === "sleeping") {
-            currentStep = name;
-            suspendedReason = "sleeping";
-          }
-          if (step.status === "waiting_for_signal") {
-            currentStep = name;
-            suspendedReason = "waiting_for_signal";
-          }
-        }
-
-        const steps: Record<string, { status: string; result?: unknown }> = {};
-        for (const [name, step] of Object.entries(state.steps)) {
-          steps[name] = includeResults
-            ? { status: step.status, result: step.result }
-            : { status: step.status };
-        }
-
-        return {
-          state: state.status === "compensating" ? ("failed" as const) : state.status,
-          result: state.status === "completed" ? (state.result as Current) : undefined,
-          error: state.error,
-          currentStep,
-          suspendedReason,
-          steps,
-          createdAt: state.createdAt,
-          startedAt: state.startedAt,
-          updatedAt: state.updatedAt,
-        };
-      },
-
-      waitForResult: async (workflowId, params) => {
-        const intervalMs = params.intervalMs ?? 5_000;
-        const timeoutMs = params.timeoutMs ?? 60_000;
-        const deadline = Date.now() + timeoutMs;
-
-        while (Date.now() < deadline) {
-          // Try to resume (picks up signals, completes sleep timers)
-          const { data, error } = await self.runSafe({ workflowId, input: params.input });
-
-          // Completed — return result
-          if (data !== null) return data;
-
-          // Failed (non-suspended) — throw
-          if (error && (error as any)._tag !== "WorkflowSuspendedError") {
-            throw error;
-          }
-
-          // Suspended — wait and retry
-          await new Promise((r) => setTimeout(r, intervalMs));
-        }
-
-        throw new Error(`Workflow ${workflowId} did not complete within ${timeoutMs}ms`);
-      },
-
-      start: async (workflowIdOrInput: string | Input, maybeInput?: Input) => {
-        // Resolve workflowId: explicit → deriveId(input) → error
-        let workflowId: string;
-        let input: Input;
-        if (maybeInput !== undefined) {
-          workflowId = workflowIdOrInput as string;
-          input = maybeInput;
-        } else if (deriveId) {
-          input = workflowIdOrInput as Input;
-          workflowId = deriveId(input);
-        } else {
-          // TODO: enforce at compile time via conditional return types on build()
-          // so start(input) is only callable when deriveId is configured
-          throw new Error("workflowId is required when deriveId is not configured");
-        }
-
-        const definition = self._buildRunnable(self._idempotency ? { deriveId } : { deriveId });
-        const existing = await self._storage.loadWorkflow(workflowId);
-        const isRunning =
-          existing?.status === "pending" ||
-          existing?.status === "running" ||
-          existing?.status === "suspended";
-        const onInFlight = self._idempotency?.onInFlight ?? "reject";
-
-        if (isRunning) {
-          if (onInFlight === "reject") {
-            throw new WorkflowLockError({
-              workflowId,
-              message: `Workflow "${workflowId}" is already running`,
-            });
-          }
-          // onInFlight === "join" — return handle to existing run
-        } else {
-          // Not running — fire-and-forget execution
-          definition.runSafe({ workflowId, input });
-          await new Promise((r) => setTimeout(r, 0));
-        }
-
-        return {
-          workflowId,
-          status: (params) => definition.getStatus(workflowId, params),
-          signal: (signalName, payload) =>
-            self._storage.deliverSignal(workflowId, signalName, payload),
-          result: async (params) => {
-            const intervalMs = params?.intervalMs ?? 1_000;
-            const timeoutMs = params?.timeoutMs ?? 60_000;
-            const deadline = Date.now() + timeoutMs;
-
-            while (Date.now() < deadline) {
-              const state = await self._storage.loadWorkflow(workflowId);
-              if (state?.status === "completed") return state.result as Current;
-              if (state?.status === "failed") {
-                throw new Error(state.error ?? `Workflow ${workflowId} failed`);
-              }
-              await new Promise((r) => setTimeout(r, intervalMs));
-            }
-            throw new Error(`Workflow ${workflowId} did not complete within ${timeoutMs}ms`);
-          },
-        };
-      },
     };
   }
 
@@ -1806,7 +1428,6 @@ export class WorkflowBuilder<
   ): WorkflowBuilder<Input, any, any, any> {
     return new WorkflowBuilder(
       this._name,
-      this._storage,
       steps,
       lastStepName,
       this._hooks,
@@ -1832,7 +1453,6 @@ export class WorkflowBuilder<
   ): WorkflowBuilder<Input, Steps, Current, Error> {
     return new WorkflowBuilder(
       this._name,
-      this._storage,
       this._steps,
       this._lastStepName,
       this._hooks,
@@ -2053,7 +1673,6 @@ export function workflow<Input>(params: {
 
   return new WorkflowBuilder(
     params.name,
-    UNBOUND_STORAGE,
     [],
     null,
     params.hooks,
@@ -2075,14 +1694,12 @@ export function workflow<Input>(params: {
 }
 
 /**
- * Create a non-durable flow — same composition as workflow but without persistence.
- * Uses in-memory storage, no workflowId needed. For request handlers, scripts, and
- * compositions that don't need crash recovery.
+ * Create a non-durable flow — same composition as workflow but tuned for
+ * one-shot, in-memory use. Calling `.execute(input)` constructs an
+ * ephemeral `InMemoryWorkflowStorage` and runs to completion.
  *
  * To make it durable later, swap `flow(name)` for
- * `workflow({ name }).(...).bind(storage)` — everything in between is the
- * same builder API. Storage moves from implicit (in-memory) to explicit
- * (your chosen backend).
+ * `workflow({ name })` and drive it via `createWorkflowRunner({ storage })`.
  *
  * @example
  * ```ts
@@ -2093,7 +1710,7 @@ export function workflow<Input>(params: {
  * ```
  */
 export function flow<Input>(name: string, hooks?: WorkflowHooks): WorkflowBuilder<Input> {
-  return new WorkflowBuilder(name, new InMemoryWorkflowStorage(), [], null, hooks);
+  return new WorkflowBuilder(name, [], null, hooks);
 }
 
 // ---------------------------------------------------------------------------
