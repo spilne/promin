@@ -1,0 +1,210 @@
+// ---------------------------------------------------------------------------
+// RemoteWorkflowStorage — client-side WorkflowStorage backed by HTTP.
+//
+// Implements the full WorkflowStorage interface by forwarding each call to
+// a server running `createWorkflowStorageHandler`. Passes the portable
+// conformance suite.
+//
+// Accepts any `fetch`-compatible function — lets tests swap a direct
+// in-process handler in place of real HTTP without spinning up a server.
+// ---------------------------------------------------------------------------
+
+import type {
+  WorkflowStorage,
+  WorkflowState,
+  WorkflowStatus,
+  WorkflowRunSummary,
+  SignalState,
+} from "@promin/workflow";
+import { WIRE_CODEC, type RpcResponse, type StorageMethod } from "./wire.ts";
+
+export type FetchLike = (req: Request) => Promise<Response>;
+
+export interface RemoteWorkflowStorageConfig {
+  /**
+   * URL the client POSTs to. Path doesn't matter — the server handler
+   * dispatches by request body, not path.
+   */
+  readonly url: string;
+  /**
+   * Fetch implementation. Defaults to the global `fetch`. Tests (and
+   * in-process adapters) pass a handler-bound fetch that skips the network.
+   */
+  readonly fetch?: FetchLike;
+  /**
+   * Extra headers applied to every request (auth tokens, tracing, etc.).
+   */
+  readonly headers?: Record<string, string>;
+}
+
+export class RemoteWorkflowStorage implements WorkflowStorage {
+  private readonly url: string;
+  private readonly fetch: FetchLike;
+  private readonly headers: Record<string, string>;
+
+  constructor(config: RemoteWorkflowStorageConfig) {
+    this.url = config.url;
+    this.fetch = config.fetch ?? ((req) => globalThis.fetch(req));
+    this.headers = { "content-type": "application/json", ...(config.headers ?? {}) };
+  }
+
+  /**
+   * Core RPC primitive. Encodes params via LosslessJsonCodec, POSTs, decodes
+   * the response. Surfaces server-side errors as thrown JS errors so callers
+   * see the same semantics they'd get from an in-process storage.
+   */
+  private async call<T>(method: StorageMethod, params: unknown): Promise<T> {
+    const body = JSON.stringify({ method, params: WIRE_CODEC.encode(params) });
+    const req = new Request(this.url, { method: "POST", headers: this.headers, body });
+    const res = await this.fetch(req);
+
+    let envelope: RpcResponse;
+    try {
+      envelope = (await res.json()) as RpcResponse;
+    } catch (err) {
+      throw new Error(
+        `RemoteWorkflowStorage: invalid response from ${this.url} (status ${res.status}): ${
+          (err as Error).message
+        }`,
+      );
+    }
+
+    if (!envelope.ok) {
+      throw new Error(`RemoteWorkflowStorage.${method}: ${envelope.error}`);
+    }
+    return WIRE_CODEC.decode(envelope.result) as T;
+  }
+
+  // -------------------------------------------------------------------------
+  // WorkflowStorage — thin delegates. Each method packs its params into an
+  // object keyed by the target method's own named params, so the server's
+  // dispatcher can unpack them without knowing arity. Keeping this uniform
+  // lets us grow the interface without touching the transport.
+  // -------------------------------------------------------------------------
+
+  loadWorkflow(workflowId: string): Promise<WorkflowState | null> {
+    return this.call("loadWorkflow", { workflowId });
+  }
+
+  listWorkflows(params?: {
+    status?: WorkflowStatus;
+    name?: string;
+    type?: string;
+    parentId?: string;
+    namespace?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<WorkflowState[]> {
+    return this.call("listWorkflows", params ?? {});
+  }
+
+  cancelWorkflow(workflowId: string, options?: { cascade?: boolean }): Promise<void> {
+    return this.call("cancelWorkflow", { workflowId, options });
+  }
+
+  createWorkflow(params: {
+    workflowId: string;
+    workflowName: string;
+    input: unknown;
+    workflowType?: string;
+    parentWorkflowId?: string;
+    namespace?: string;
+    metadata?: Record<string, unknown>;
+    version?: string;
+  }): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
+    return this.call("createWorkflow", params);
+  }
+
+  saveStepResult(params: {
+    workflowId: string;
+    stepName: string;
+    result: unknown;
+    durationMs: number;
+    startedAt: Date;
+    metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    return this.call("saveStepResult", params);
+  }
+
+  saveStepFailure(params: {
+    workflowId: string;
+    stepName: string;
+    error: string;
+    durationMs: number;
+    startedAt: Date;
+    metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    return this.call("saveStepFailure", params);
+  }
+
+  saveTaskResult(params: {
+    workflowId: string;
+    stepName: string;
+    taskIndex: number;
+    result: unknown;
+  }): Promise<void> {
+    return this.call("saveTaskResult", params);
+  }
+
+  saveTaskFailure(params: {
+    workflowId: string;
+    stepName: string;
+    taskIndex: number;
+    error: string;
+  }): Promise<void> {
+    return this.call("saveTaskFailure", params);
+  }
+
+  completeWorkflow(workflowId: string, result: unknown): Promise<void> {
+    return this.call("completeWorkflow", { workflowId, result });
+  }
+
+  failWorkflow(workflowId: string, error: string): Promise<void> {
+    return this.call("failWorkflow", { workflowId, error });
+  }
+
+  suspendWorkflow(
+    workflowId: string,
+    stepName: string,
+    stepUpdate: Record<string, unknown>,
+  ): Promise<void> {
+    return this.call("suspendWorkflow", { workflowId, stepName, stepUpdate });
+  }
+
+  deliverSignal(workflowId: string, signalName: string, payload: unknown): Promise<void> {
+    return this.call("deliverSignal", { workflowId, signalName, payload });
+  }
+
+  loadSignals(workflowId: string): Promise<SignalState[]> {
+    return this.call("loadSignals", { workflowId });
+  }
+
+  tryLock(workflowId: string, lockDurationMs: number): Promise<boolean> {
+    return this.call("tryLock", { workflowId, lockDurationMs });
+  }
+
+  releaseLock(workflowId: string): Promise<void> {
+    return this.call("releaseLock", { workflowId });
+  }
+
+  heartbeat(workflowId: string, lockDurationMs: number): Promise<void> {
+    return this.call("heartbeat", { workflowId, lockDurationMs });
+  }
+
+  startFreshRun(workflowId: string): Promise<number> {
+    return this.call("startFreshRun", { workflowId });
+  }
+
+  loadRunHistory(
+    workflowId: string,
+    params?: { limit?: number; offset?: number },
+  ): Promise<WorkflowRunSummary[]> {
+    return this.call("loadRunHistory", { workflowId, params });
+  }
+
+  purgeCompleted(
+    params: { olderThanMs: number; limit: number } | { from: Date; to: Date; limit: number },
+  ): Promise<number> {
+    return this.call("purgeCompleted", params);
+  }
+}
