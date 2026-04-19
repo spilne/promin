@@ -8,9 +8,15 @@
 //   - @platformatic/kafka (stream-based consumer)
 // ---------------------------------------------------------------------------
 
-import { Effect, Stream } from "effect";
+import { Chunk, Effect, Stream } from "effect";
 import { OffsetTracker } from "./offset-tracker.ts";
-import type { KafkaClient, KafkaConsumer, KafkaProducer, KafkaMessage } from "./kafka-types.ts";
+import type {
+  KafkaBatchPayload,
+  KafkaClient,
+  KafkaConsumer,
+  KafkaProducer,
+  KafkaMessage,
+} from "./kafka-types.ts";
 import { StreamPipeline, JsonCodec } from "@promin/core";
 import type {
   KeyedSinkable,
@@ -34,6 +40,21 @@ export interface KafkaTopicConfig<T> {
   codec?: Codec<T>;
   /** Poll interval for subscribe. Default: 100ms. */
   pollIntervalMs?: number;
+  /**
+   * Use `consumer.run({ eachBatch })` for both subscribe paths when the
+   * driver is callback-style (kafkajs, @confluentinc/kafka-javascript).
+   * Emits one Stream chunk per Kafka FetchResponse so downstream
+   * operators see fewer fiber-scheduling events — noticeable at
+   * ≥10K msg/sec.
+   *
+   * Opt-in because `eachBatch` is mutually exclusive with `eachMessage`
+   * in kafkajs; turning it on for a driver that doesn't implement
+   * `eachBatch` would silently stall consumption. Stream-based drivers
+   * (platformatic) ignore this flag — they always use `consumer.stream()`.
+   *
+   * Default: `false` (per-message eachMessage, unchanged behaviour).
+   */
+  batchEmit?: boolean;
 }
 
 export class KafkaTopic<T>
@@ -48,6 +69,7 @@ export class KafkaTopic<T>
   private readonly kafka: KafkaClient;
   private readonly topic: string;
   private readonly groupId: string;
+  private readonly batchEmit: boolean;
 
   private consumer?: KafkaConsumer;
   private producer?: KafkaProducer;
@@ -58,6 +80,7 @@ export class KafkaTopic<T>
     this.topic = config.topic;
     this.groupId = config.groupId;
     this.codec = config.codec ?? (JsonCodec as Codec<T>);
+    this.batchEmit = config.batchEmit ?? false;
   }
 
   /** Partition count — fetched from broker on first access. */
@@ -198,18 +221,37 @@ export class KafkaTopic<T>
         commitTimer = setInterval(flushCommits, commitIntervalMs);
 
         if (consumer.stream) {
+          // Platformatic-style per-message iteration — no native batch API.
           for await (const msg of consumer.stream()) {
             if (stopped) break;
             emit.single(makeEnvelope(msg));
           }
         } else if (consumer.run) {
-          await consumer.run({
-            autoCommit: false,
-            eachMessage: async (msg: KafkaMessage) => {
-              if (stopped) return;
-              emit.single(makeEnvelope(msg));
-            },
-          });
+          // Callback drivers: eachBatch (opt-in) or eachMessage. Passing
+          // both to kafkajs is a ConfigurationError — they're mutually
+          // exclusive — so commit to one based on the config flag.
+          if (this.batchEmit) {
+            await consumer.run({
+              autoCommit: false,
+              eachBatch: async (payload: KafkaBatchPayload) => {
+                if (stopped) return;
+                const b = payload.batch;
+                if (b.messages.length === 0) return;
+                const envelopes = b.messages.map((m) =>
+                  makeEnvelope({ topic: b.topic, partition: b.partition, message: m }),
+                );
+                emit.chunk(Chunk.fromIterable(envelopes));
+              },
+            });
+          } else {
+            await consumer.run({
+              autoCommit: false,
+              eachMessage: async (msg: KafkaMessage) => {
+                if (stopped) return;
+                emit.single(makeEnvelope(msg));
+              },
+            });
+          }
         }
       };
 
@@ -287,17 +329,32 @@ export class KafkaTopic<T>
         }
 
         if (consumer.stream) {
+          // Platformatic stream mode — per-message, no batch API.
           for await (const msg of consumer.stream()) {
             if (stopped) break;
             emit.single(decodeMessage(msg));
           }
         } else if (consumer.run) {
-          await consumer.run({
-            eachMessage: async (msg: KafkaMessage) => {
-              if (stopped) return;
-              emit.single(decodeMessage(msg));
-            },
-          });
+          if (this.batchEmit) {
+            await consumer.run({
+              eachBatch: async (payload: KafkaBatchPayload) => {
+                if (stopped) return;
+                const b = payload.batch;
+                if (b.messages.length === 0) return;
+                const values = b.messages.map((m) =>
+                  decodeMessage({ topic: b.topic, partition: b.partition, message: m }),
+                );
+                emit.chunk(Chunk.fromIterable(values));
+              },
+            });
+          } else {
+            await consumer.run({
+              eachMessage: async (msg: KafkaMessage) => {
+                if (stopped) return;
+                emit.single(decodeMessage(msg));
+              },
+            });
+          }
         }
       };
 

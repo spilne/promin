@@ -53,12 +53,20 @@ export interface KafkaConsumer {
   subscribe(params: { topic: string; fromBeginning?: boolean }): Promise<void>;
 
   /**
-   * Start consuming messages. Two patterns supported:
+   * Start consuming messages. Three patterns supported, in preference order:
    *
-   * **Callback mode** (kafkajs-compatible):
+   * **Batch callback** (kafkajs-compatible, preferred for callback drivers):
+   * ```ts
+   * await consumer.run({ eachBatch: async ({ batch }) => { ... } });
+   * ```
+   * Lets KafkaTopic emit a whole Kafka batch as a single Stream chunk —
+   * fewer fiber-scheduling events per message at high throughput.
+   *
+   * **Per-message callback** (kafkajs-compatible):
    * ```ts
    * await consumer.run({ eachMessage: async (msg) => { ... } });
    * ```
+   * Fallback when the driver doesn't expose eachBatch.
    *
    * **Stream mode** (platformatic-compatible):
    * ```ts
@@ -66,12 +74,21 @@ export interface KafkaConsumer {
    * for await (const msg of stream) { ... }
    * ```
    *
-   * Implementations must support at least one. KafkaTopic uses
-   * whichever is available, preferring stream mode.
+   * Implementations must support at least one. KafkaTopic picks based on
+   * what the consumer actually exposes.
    */
   run?(params: {
     autoCommit?: boolean;
     eachMessage?: (payload: KafkaMessage) => Promise<void>;
+    /**
+     * Batch callback. Payload shape matches kafkajs's own:
+     * `{ batch: { topic, partition, messages: [{key,value,offset,...}] } }`.
+     * Drivers that don't support this simply ignore the param — their
+     * run() still returns, having processed nothing, and KafkaTopic's
+     * feature-detection (see kafka-topic.ts) never dispatches to
+     * eachBatch on such drivers.
+     */
+    eachBatch?: (payload: KafkaBatchPayload) => Promise<void>;
   }): Promise<void>;
 
   /** Async iterable of messages. Alternative to callback-based run(). */
@@ -114,6 +131,20 @@ export interface KafkaMessage {
     offset: string;
     timestamp: string;
     headers?: Record<string, Buffer | string>;
+  };
+}
+
+/**
+ * Shape of the kafkajs `eachBatch` callback payload, minus the helper
+ * methods (`resolveOffset`, `heartbeat`, etc.) that KafkaTopic doesn't
+ * use. Declared separately so drivers and users can type against the
+ * same shape.
+ */
+export interface KafkaBatchPayload {
+  readonly batch: {
+    readonly topic: string;
+    readonly partition: number;
+    readonly messages: ReadonlyArray<KafkaMessage["message"]>;
   };
 }
 
