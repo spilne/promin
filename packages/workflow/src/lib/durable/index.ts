@@ -45,6 +45,7 @@ export { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
 export {
   WorkflowVersionRegistry,
   ScopedWorkflowVersionRegistry,
+  createWorkflowVersionRegistry,
   type WorkflowVersionRegistryConfig,
 } from "./workflow-version-registry.ts";
 export {

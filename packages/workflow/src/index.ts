@@ -30,6 +30,7 @@ export {
   InMemoryWorkflowStorage,
   WorkflowVersionRegistry,
   ScopedWorkflowVersionRegistry,
+  createWorkflowVersionRegistry,
   type WorkflowVersionRegistryConfig,
   WorkflowError,
   StepError,

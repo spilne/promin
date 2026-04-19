@@ -340,3 +340,17 @@ export class ScopedWorkflowVersionRegistry {
     return this.registry;
   }
 }
+
+/**
+ * Convenience factory for constructing a `WorkflowVersionRegistry`. Mirrors
+ * how every other promin building block (runner, scheduler, coordinator,
+ * cache) is constructed — `createThing(config)` — so the registry can move
+ * from concrete class to interface without churning every call site.
+ *
+ * Prefer this over `new WorkflowVersionRegistry(...)` in new code.
+ */
+export function createWorkflowVersionRegistry(
+  config?: WorkflowVersionRegistryConfig,
+): WorkflowVersionRegistry {
+  return new WorkflowVersionRegistry(config);
+}
