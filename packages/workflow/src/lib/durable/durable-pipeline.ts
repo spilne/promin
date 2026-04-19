@@ -98,13 +98,16 @@ export interface IdempotencyConfig {
 
 /**
  * A frozen, portable workflow definition. Pure data — name, version, DAG,
- * idempotency config. No storage, no runtime methods. Produced by
- * `.build()` on WorkflowBuilder.
+ * idempotency config. Intended to be run via `createWorkflowRunner({ storage }).run({ workflow, ... })`.
  *
- * To actually execute a `Workflow`, call `.bind(storage)` to get a
- * `RunnableWorkflow`. Keeping definitions storage-free lets a single
- * process import and dispatch workflow DAGs without also wiring up
- * storage for every submitter — the coordinator or registry owns that.
+ * Keeping definitions storage-free lets a single process import and
+ * dispatch workflow DAGs without also wiring up storage for every
+ * submitter — the runner or coordinator owns that.
+ *
+ * The `_definition` field carries the runtime internals (steps, retry,
+ * compensation, etc.) so the runner can build an orchestration context
+ * from the pure shape. It's part of the runtime contract between builder
+ * and runner, not a public surface — callers shouldn't read it directly.
  */
 export interface Workflow<Input, Output> {
   readonly name: string;
@@ -112,11 +115,41 @@ export interface Workflow<Input, Output> {
   readonly dag: WorkflowDAG;
   readonly idempotency?: IdempotencyConfig;
   /**
+   * @internal — runtime internals consumed by WorkflowRunner when executing
+   * this workflow. Not part of the public API. Shape may change without
+   * notice; treat as opaque.
+   */
+  readonly _definition: WorkflowDefinitionInternals;
+  /**
    * Bind this definition to a storage backend. Returns a `RunnableWorkflow`
    * that can actually be run/resumed/inspected. Cheap — no validation, no
    * I/O; just produces a new object that closes over the storage.
+   *
+   * @deprecated Prefer `createWorkflowRunner({ storage }).run({ workflow, ... })`.
+   * `.bind()` will be removed once the call-site migration completes (see promin-c1ds).
    */
   bind(storage: WorkflowStorage): RunnableWorkflow<Input, Output>;
+}
+
+/**
+ * Runtime internals of a Workflow. Captured from the builder at `.build()` time
+ * and consumed by `WorkflowRunner` to construct an orchestration context at
+ * run time. Not exported outside the package.
+ *
+ * @internal
+ */
+export interface WorkflowDefinitionInternals {
+  readonly steps: ReadonlyArray<StepDefinition>;
+  readonly type?: string;
+  readonly metadata?: Record<string, unknown>;
+  readonly retry?: RetryPolicy<TaggedError>;
+  readonly compensateConfig?: CompensateConfig;
+  readonly dlq?: Sinkable<FailedWorkflowRecord>;
+  readonly dispatch?: DispatchConfig;
+  readonly timeoutMs?: number;
+  readonly onVersionMismatch: "strict" | "drain";
+  readonly previousVersions?: ReadonlyArray<Workflow<unknown, unknown>>;
+  readonly hooks?: WorkflowHooks;
 }
 
 /**
@@ -1547,7 +1580,25 @@ export class WorkflowBuilder<
       version: source._version,
       dag: source.toJSON(),
       idempotency: source._idempotency,
+      _definition: source._toDefinitionInternals(),
       bind: (storage) => source._withStorage(storage)._buildRunnable({ deriveId }),
+    };
+  }
+
+  /** @internal — project builder state into the Workflow._definition shape. */
+  private _toDefinitionInternals(): WorkflowDefinitionInternals {
+    return {
+      steps: this._steps,
+      type: this._type,
+      metadata: this._metadata,
+      retry: this._retry,
+      compensateConfig: this._compensateConfig,
+      dlq: this._dlq,
+      dispatch: this._dispatch,
+      timeoutMs: this._timeoutMs,
+      onVersionMismatch: this._onVersionMismatch,
+      previousVersions: this._previousVersions,
+      hooks: this._hooks,
     };
   }
 
@@ -1569,6 +1620,7 @@ export class WorkflowBuilder<
       storage: self._storage,
       dag: self.toJSON(),
       idempotency: self._idempotency,
+      _definition: self._toDefinitionInternals(),
       bind: (storage) => self._withStorage(storage)._buildRunnable({ deriveId }),
       run: (params) => self.run(params),
       runSafe: (params) => self.runSafe(params) as any,

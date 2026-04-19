@@ -45,6 +45,7 @@ import type {
   WorkflowSuspendedError,
   WorkflowTimeoutError,
 } from "./durable-pipeline-error.ts";
+import type { WorkflowVersionRegistry } from "./workflow-version-registry.ts";
 
 // ---------------------------------------------------------------------------
 // StepExecutor — pluggable "how to run a single step body" boundary.
@@ -93,10 +94,11 @@ export interface StepExecutor {
 
 export interface WorkflowRunnerExecuteParams<Input> {
   /**
-   * The workflow to run. Phase 1 accepts a `RunnableWorkflow` (already bound
-   * to storage) because the default runner delegates to its `.run()`. Phase
-   * 2 will narrow this to pure `Workflow` + an explicit `storage` param +
-   * `stepExecutor` — at which point the runner owns the orchestration.
+   * The workflow to run. Accepts a `RunnableWorkflow` (already bound to
+   * storage) because `execute` delegates to its `.run()`. This path is
+   * retained for back-compat; new callers should use `runner.run({ workflow, ... })`
+   * with a pure `Workflow`, which drives orchestration via the runner's own
+   * storage (configured at construction time).
    */
   readonly workflow: RunnableWorkflow<Input, unknown>;
   readonly workflowId: string;
@@ -118,36 +120,153 @@ export type WorkflowRunSafeError =
   | TaggedError;
 
 /**
+ * Params for `WorkflowRunner.run` / `runSafe`. Two shapes:
+ *
+ * - `{ workflow, ... }` — run a specific definition directly. The runner
+ *   uses the workflow's internal orchestration config + its own storage.
+ * - `{ name, version?, ... }` — resolve via the runner's registry, then run.
+ *   Implements version-drain-resume: if a prior run exists in storage under
+ *   a different version, the matching definition from the registry drives
+ *   the resume.
+ */
+export type WorkflowRunnerRunParams =
+  | {
+      readonly workflow: Workflow<unknown, unknown>;
+      readonly workflowId: string;
+      readonly input: unknown;
+      readonly force?: boolean;
+    }
+  | {
+      readonly name: string;
+      readonly version?: string;
+      readonly workflowId: string;
+      readonly input: unknown;
+      readonly force?: boolean;
+    };
+
+/** Config for `createWorkflowRunner` / `DefaultWorkflowRunner`. */
+export interface WorkflowRunnerConfig {
+  /**
+   * Storage backend that backs every workflow the runner executes. Required
+   * for the new `run()` API. Optional for runners that only use the legacy
+   * `execute()` path (which takes a pre-bound `RunnableWorkflow`).
+   */
+  readonly storage?: WorkflowStorage;
+  /**
+   * Optional workflow registry. Enables `run({ name, ... })` to resolve
+   * definitions by name + version, and drives version-drain-resume on
+   * resumes.
+   */
+  readonly registry?: WorkflowVersionRegistry;
+  /**
+   * Workflow-level lifecycle hooks. Fired on workflow / step boundaries.
+   * Overrides any hooks carried by the workflow's own `_definition`.
+   */
+  readonly hooks?: WorkflowHooks;
+}
+
+/**
  * Runs a workflow end-to-end. Holds orchestration (DAG ready-set, lock,
  * heartbeat, retry, compensation, idempotency) and delegates step execution
  * to a `StepExecutor`.
  *
- * Phase 1 ships the interface; the default runner here just calls through
- * to `workflow.run()` so downstream packages can adopt the runner-shaped
- * API today. Phase 2 pulls the orchestration body in.
+ * Two shapes:
+ * - `run({ workflow, ... })` / `runSafe({ workflow, ... })` — drive a pure
+ *   `Workflow` through the runner's configured storage.
+ * - `run({ name, version?, ... })` — resolve via the configured registry.
+ *
+ * The legacy `execute` / `executeSafe` accept a pre-bound `RunnableWorkflow`
+ * and will be removed once call sites migrate (see promin-c1ds).
  */
 export interface WorkflowRunner {
-  /** Execute and throw on failure. */
+  /** Run a workflow and throw on failure. */
+  run(params: WorkflowRunnerRunParams): Promise<unknown>;
+  /** Run a workflow and return `{ data, error }` instead of throwing. */
+  runSafe(
+    params: WorkflowRunnerRunParams,
+  ): Promise<{ data: unknown; error: null } | { data: null; error: WorkflowRunSafeError }>;
+  /** @deprecated Use `run({ workflow, ... })` with a pure `Workflow` instead. */
   execute<Input, Output>(params: WorkflowRunnerExecuteParams<Input>): Promise<Output>;
-  /** Execute and return `{ data, error }` instead of throwing. */
+  /** @deprecated Use `runSafe({ workflow, ... })` with a pure `Workflow` instead. */
   executeSafe<Input, Output>(
     params: WorkflowRunnerExecuteParams<Input>,
   ): Promise<{ data: Output; error: null } | { data: null; error: WorkflowRunSafeError }>;
 }
 
 /**
- * Default implementation. Now delegates through `RunnableWorkflow.run` /
- * `runSafe`, which in turn call `runWorkflowOrchestration` — the
- * orchestration body moved into this module in phase 1b. Phase 2 will
- * take a `StepExecutor` parameter and drive the DAG via it directly
- * (instead of via the bound workflow's step handlers) so the same
- * runner can front remote / gRPC executors.
+ * Default implementation. Uses the configured storage + registry to drive
+ * `runWorkflowOrchestration` from a pure `Workflow` definition. The legacy
+ * `execute` path delegates to `RunnableWorkflow.run` for callers that still
+ * rely on `.bind(storage)`.
  *
- * Intentionally a class (not a bare function) so phase 2 can add config
- * (default step executor, observability hooks, tracing span factory)
- * without breaking callers.
+ * Intentionally a class (not a bare function) so the runner can add
+ * step-executor wiring, observability hooks, and tracing context without
+ * breaking callers.
  */
 export class DefaultWorkflowRunner implements WorkflowRunner {
+  private readonly storage?: WorkflowStorage;
+  private readonly registry?: WorkflowVersionRegistry;
+  private readonly hooks?: WorkflowHooks;
+
+  constructor(config: WorkflowRunnerConfig = {}) {
+    this.storage = config.storage;
+    this.registry = config.registry;
+    this.hooks = config.hooks;
+  }
+
+  async run(params: WorkflowRunnerRunParams): Promise<unknown> {
+    const storage = this._requireStorage();
+    const { workflowId, input, force } = params;
+
+    if ("workflow" in params) {
+      return this._runWorkflow({ workflow: params.workflow, storage, workflowId, input, force });
+    }
+
+    // Name-based — resolve via registry, implement version-drain-resume:
+    // if an existing row is stored under a different version, use the
+    // matching older definition to continue the run.
+    const registry = this.registry;
+    if (!registry) {
+      throw new Error(
+        `WorkflowRunner.run({ name }) requires a registry on the runner config. ` +
+          `Pass \`createWorkflowRunner({ storage, registry })\`.`,
+      );
+    }
+    const latestDef = registry.resolve(params.name, params.version);
+    if (!latestDef) {
+      throw new Error(
+        `No workflow "${params.name}"${params.version ? ` version "${params.version}"` : ""} in registry. ` +
+          `Registered: ${registry.names().join(", ") || "(none)"}.`,
+      );
+    }
+
+    const existing = await storage.loadWorkflow(workflowId);
+    if (existing && existing.version && existing.version !== latestDef.version) {
+      const storedDef = registry.resolve(params.name, existing.version);
+      if (!storedDef) {
+        throw new Error(
+          `Workflow "${params.name}" version "${existing.version}" not found in registry. ` +
+            `Available versions: ${registry.versions(params.name).join(", ")}. ` +
+            `Keep old definitions registered until in-flight workflows drain.`,
+        );
+      }
+      return this._runWorkflow({ workflow: storedDef, storage, workflowId, input, force });
+    }
+
+    return this._runWorkflow({ workflow: latestDef, storage, workflowId, input, force });
+  }
+
+  async runSafe(
+    params: WorkflowRunnerRunParams,
+  ): Promise<{ data: unknown; error: null } | { data: null; error: WorkflowRunSafeError }> {
+    try {
+      const data = await this.run(params);
+      return { data, error: null };
+    } catch (error) {
+      return { data: null, error: error as WorkflowRunSafeError };
+    }
+  }
+
   async execute<Input, Output>(params: WorkflowRunnerExecuteParams<Input>): Promise<Output> {
     const { workflow, workflowId, input, force } = params;
     return workflow.run({ workflowId, input, force }) as Promise<Output>;
@@ -161,14 +280,56 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       { data: Output; error: null } | { data: null; error: WorkflowRunSafeError }
     >;
   }
+
+  private _requireStorage(): WorkflowStorage {
+    if (!this.storage) {
+      throw new Error(
+        `WorkflowRunner requires \`storage\` in its config to call \`run()\`. ` +
+          `Pass \`createWorkflowRunner({ storage })\`.`,
+      );
+    }
+    return this.storage;
+  }
+
+  private _runWorkflow(params: {
+    workflow: Workflow<unknown, unknown>;
+    storage: WorkflowStorage;
+    workflowId: string;
+    input: unknown;
+    force?: boolean;
+  }): Promise<unknown> {
+    const def = params.workflow._definition;
+    const ctx: WorkflowOrchestrationContext = {
+      storage: params.storage,
+      name: params.workflow.name,
+      version: params.workflow.version,
+      idempotency: params.workflow.idempotency,
+      type: def.type,
+      metadata: def.metadata,
+      steps: def.steps,
+      retry: def.retry,
+      compensateConfig: def.compensateConfig,
+      dlq: def.dlq,
+      dispatch: def.dispatch,
+      timeoutMs: def.timeoutMs,
+      onVersionMismatch: def.onVersionMismatch,
+      previousVersions: def.previousVersions,
+      hooks: this.hooks ?? def.hooks,
+    };
+    return runWorkflowOrchestration(ctx, {
+      workflowId: params.workflowId,
+      input: params.input,
+      force: params.force,
+    });
+  }
 }
 
 /**
- * Convenience factory — `createWorkflowRunner()` mirrors how other
+ * Convenience factory — `createWorkflowRunner(config?)` mirrors how other
  * promin components construct their default implementation.
  */
-export function createWorkflowRunner(): WorkflowRunner {
-  return new DefaultWorkflowRunner();
+export function createWorkflowRunner(config?: WorkflowRunnerConfig): WorkflowRunner {
+  return new DefaultWorkflowRunner(config);
 }
 
 // ---------------------------------------------------------------------------
