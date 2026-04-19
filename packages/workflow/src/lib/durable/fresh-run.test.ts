@@ -1,10 +1,12 @@
 import { describe, it, expect } from "bun:test";
 import { workflow } from "./durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
+import { createWorkflowRunner } from "./workflow-runner.ts";
 
 describe("workflow fresh run (onExpiry: fresh-run)", () => {
   it("re-executes all steps when TTL expires with fresh-run", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     let runCount = 0;
 
     const wf = workflow({ name: "fresh-test" })
@@ -14,22 +16,22 @@ describe("workflow fresh run (onExpiry: fresh-run)", () => {
       })
       .build({
         idempotency: { ttl: 1, onExpiry: "fresh-run" },
-      })
-      .bind(storage);
+      });
 
-    const r1 = await wf.run({ workflowId: "fr-1", input: {} });
+    const r1 = await runner.run({ workflow: wf, workflowId: "fr-1", input: {} });
     expect(r1).toEqual({ value: 1 });
     expect(runCount).toBe(1);
 
     await new Promise((r) => setTimeout(r, 10));
 
-    const r2 = await wf.run({ workflowId: "fr-1", input: {} });
+    const r2 = await runner.run({ workflow: wf, workflowId: "fr-1", input: {} });
     expect(r2).toEqual({ value: 2 });
     expect(runCount).toBe(2);
   });
 
   it("returns cached result within TTL even with fresh-run", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     let runCount = 0;
 
     const wf = workflow({ name: "fresh-cached" })
@@ -39,37 +41,37 @@ describe("workflow fresh run (onExpiry: fresh-run)", () => {
       })
       .build({
         idempotency: { ttl: 60_000, onExpiry: "fresh-run" },
-      })
-      .bind(storage);
+      });
 
-    await wf.run({ workflowId: "fr-2", input: {} });
-    const r2 = await wf.run({ workflowId: "fr-2", input: {} });
+    await runner.run({ workflow: wf, workflowId: "fr-2", input: {} });
+    const r2 = await runner.run({ workflow: wf, workflowId: "fr-2", input: {} });
     expect(r2).toEqual({ value: 1 });
     expect(runCount).toBe(1);
   });
 
   it("increments run counter on each fresh run", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
 
     const wf = workflow({ name: "run-counter" })
       .stepAsync("compute", async () => ({ ok: true }))
-      .build({ idempotency: { ttl: 1, onExpiry: "fresh-run" } })
-      .bind(storage);
+      .build({ idempotency: { ttl: 1, onExpiry: "fresh-run" } });
 
-    await wf.run({ workflowId: "fr-3", input: {} });
+    await runner.run({ workflow: wf, workflowId: "fr-3", input: {} });
     expect(storage.getWorkflow("fr-3")?.run).toBe(1);
 
     await new Promise((r) => setTimeout(r, 10));
-    await wf.run({ workflowId: "fr-3", input: {} });
+    await runner.run({ workflow: wf, workflowId: "fr-3", input: {} });
     expect(storage.getWorkflow("fr-3")?.run).toBe(2);
 
     await new Promise((r) => setTimeout(r, 10));
-    await wf.run({ workflowId: "fr-3", input: {} });
+    await runner.run({ workflow: wf, workflowId: "fr-3", input: {} });
     expect(storage.getWorkflow("fr-3")?.run).toBe(3);
   });
 
   it("preserves step history from previous runs", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     let callCount = 0;
 
     const wf = workflow({ name: "history-test" })
@@ -77,12 +79,11 @@ describe("workflow fresh run (onExpiry: fresh-run)", () => {
         callCount++;
         return { data: `result-${callCount}` };
       })
-      .build({ idempotency: { ttl: 1, onExpiry: "fresh-run" } })
-      .bind(storage);
+      .build({ idempotency: { ttl: 1, onExpiry: "fresh-run" } });
 
-    await wf.run({ workflowId: "fr-4", input: {} });
+    await runner.run({ workflow: wf, workflowId: "fr-4", input: {} });
     await new Promise((r) => setTimeout(r, 10));
-    await wf.run({ workflowId: "fr-4", input: {} });
+    await runner.run({ workflow: wf, workflowId: "fr-4", input: {} });
 
     const current = storage.getWorkflow("fr-4");
     expect(current?.run).toBe(2);
@@ -96,6 +97,7 @@ describe("workflow fresh run (onExpiry: fresh-run)", () => {
 
   it("multi-step workflow re-executes all steps", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const calls: string[] = [];
 
     const wf = workflow({ name: "multi-step" })
@@ -111,23 +113,23 @@ describe("workflow fresh run (onExpiry: fresh-run)", () => {
         calls.push("c");
         return { ...prev, c: true };
       })
-      .build({ idempotency: { ttl: 1, onExpiry: "fresh-run" } })
-      .bind(storage);
+      .build({ idempotency: { ttl: 1, onExpiry: "fresh-run" } });
 
-    const r1 = await wf.run({ workflowId: "fr-5", input: {} });
+    const r1 = await runner.run({ workflow: wf, workflowId: "fr-5", input: {} });
     expect(r1).toEqual({ a: true, b: true, c: true });
     expect(calls).toEqual(["a", "b", "c"]);
 
     await new Promise((r) => setTimeout(r, 10));
 
     calls.length = 0;
-    const r2 = await wf.run({ workflowId: "fr-5", input: {} });
+    const r2 = await runner.run({ workflow: wf, workflowId: "fr-5", input: {} });
     expect(r2).toEqual({ a: true, b: true, c: true });
     expect(calls).toEqual(["a", "b", "c"]);
   });
 
   it("onExpiry: replay does not start fresh run", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     let runCount = 0;
 
     const wf = workflow({ name: "replay-test" })
@@ -135,14 +137,13 @@ describe("workflow fresh run (onExpiry: fresh-run)", () => {
         runCount++;
         return { value: runCount };
       })
-      .build({ idempotency: { ttl: 1, onExpiry: "replay" } })
-      .bind(storage);
+      .build({ idempotency: { ttl: 1, onExpiry: "replay" } });
 
-    await wf.run({ workflowId: "fr-6", input: {} });
+    await runner.run({ workflow: wf, workflowId: "fr-6", input: {} });
     expect(runCount).toBe(1);
 
     await new Promise((r) => setTimeout(r, 10));
-    const r2 = await wf.run({ workflowId: "fr-6", input: {} });
+    const r2 = await runner.run({ workflow: wf, workflowId: "fr-6", input: {} });
     // Replays from storage — same result, no re-execution
     expect(r2).toEqual({ value: 1 });
     expect(storage.getWorkflow("fr-6")?.run).toBe(1);

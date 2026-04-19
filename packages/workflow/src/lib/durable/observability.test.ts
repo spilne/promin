@@ -3,6 +3,7 @@ import { Data } from "effect";
 import { Pipeline } from "@promin/core";
 import { workflow, dagToMermaid, dagToDot } from "./durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
+import { createWorkflowRunner } from "./workflow-runner.ts";
 
 // ---------------------------------------------------------------------------
 // Test error types
@@ -19,14 +20,15 @@ class TestError extends Data.TaggedError("TestError")<{
 describe("WorkflowStorage.listWorkflows", () => {
   it("returns all workflows", async () => {
     const storage = new InMemoryWorkflowStorage();
-    await workflow<{}>({ name: "a" })
+    const runner = createWorkflowRunner({ storage });
+    const wfA = workflow<{}>({ name: "a" })
       .step("s", () => Pipeline.succeed(1))
-      .bind(storage)
-      .run({ workflowId: "wf-1", input: {} });
-    await workflow<{}>({ name: "b" })
+      .build();
+    await runner.run({ workflow: wfA, workflowId: "wf-1", input: {} });
+    const wfB = workflow<{}>({ name: "b" })
       .step("s", () => Pipeline.succeed(2))
-      .bind(storage)
-      .run({ workflowId: "wf-2", input: {} });
+      .build();
+    await runner.run({ workflow: wfB, workflowId: "wf-2", input: {} });
 
     const all = await storage.listWorkflows();
     expect(all).toHaveLength(2);
@@ -34,14 +36,15 @@ describe("WorkflowStorage.listWorkflows", () => {
 
   it("filters by status", async () => {
     const storage = new InMemoryWorkflowStorage();
-    await workflow<{}>({ name: "ok" })
+    const runner = createWorkflowRunner({ storage });
+    const okWf = workflow<{}>({ name: "ok" })
       .step("s", () => Pipeline.succeed(1))
-      .bind(storage)
-      .run({ workflowId: "wf-ok", input: {} });
-    await workflow<{}>({ name: "fail" })
+      .build();
+    await runner.run({ workflow: okWf, workflowId: "wf-ok", input: {} });
+    const failWf = workflow<{}>({ name: "fail" })
       .step("s", () => Pipeline.fail(new TestError({ message: "x" })))
-      .bind(storage)
-      .runSafe({ workflowId: "wf-fail", input: {} });
+      .build();
+    await runner.runSafe({ workflow: failWf, workflowId: "wf-fail", input: {} });
 
     const completed = await storage.listWorkflows({ status: "completed" });
     expect(completed).toHaveLength(1);
@@ -54,14 +57,15 @@ describe("WorkflowStorage.listWorkflows", () => {
 
   it("filters by name", async () => {
     const storage = new InMemoryWorkflowStorage();
-    await workflow<{}>({ name: "alpha" })
+    const runner = createWorkflowRunner({ storage });
+    const alphaWf = workflow<{}>({ name: "alpha" })
       .step("s", () => Pipeline.succeed(1))
-      .bind(storage)
-      .run({ workflowId: "wf-a", input: {} });
-    await workflow<{}>({ name: "beta" })
+      .build();
+    await runner.run({ workflow: alphaWf, workflowId: "wf-a", input: {} });
+    const betaWf = workflow<{}>({ name: "beta" })
       .step("s", () => Pipeline.succeed(2))
-      .bind(storage)
-      .run({ workflowId: "wf-b", input: {} });
+      .build();
+    await runner.run({ workflow: betaWf, workflowId: "wf-b", input: {} });
 
     const alphas = await storage.listWorkflows({ name: "alpha" });
     expect(alphas).toHaveLength(1);
@@ -70,11 +74,12 @@ describe("WorkflowStorage.listWorkflows", () => {
 
   it("supports limit and offset", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     for (let i = 0; i < 5; i++) {
-      await workflow<{}>({ name: "paginated" })
+      const wf = workflow<{}>({ name: "paginated" })
         .step("s", () => Pipeline.succeed(i))
-        .bind(storage)
-        .run({ workflowId: `wf-${i}`, input: {} });
+        .build();
+      await runner.run({ workflow: wf, workflowId: `wf-${i}`, input: {} });
     }
 
     const page1 = await storage.listWorkflows({ limit: 2 });
@@ -144,7 +149,7 @@ describe("WorkflowHooks", () => {
     const storage = new InMemoryWorkflowStorage();
     const events: { stepName: string; result: unknown }[] = [];
 
-    await workflow<{ n: number }>({
+    const wf = workflow<{ n: number }>({
       name: "hooks-test",
       hooks: {
         onStepComplete: ({ stepName, result }) => {
@@ -154,8 +159,9 @@ describe("WorkflowHooks", () => {
     })
       .step("add", ({ input }) => Pipeline.succeed(input.n + 1))
       .step("double", ({ prev }) => Pipeline.succeed(prev * 2))
-      .bind(storage)
-      .run({ workflowId: "wf-hooks-1", input: { n: 5 } });
+      .build();
+    const runner = createWorkflowRunner({ storage });
+    await runner.run({ workflow: wf, workflowId: "wf-hooks-1", input: { n: 5 } });
 
     expect(events).toEqual([
       { stepName: "add", result: 6 },
@@ -167,7 +173,7 @@ describe("WorkflowHooks", () => {
     const storage = new InMemoryWorkflowStorage();
     let completed: { workflowId: string; result: unknown } | null = null;
 
-    await workflow<{}>({
+    const wf = workflow<{}>({
       name: "hooks-wf-complete",
       hooks: {
         onWorkflowComplete: ({ workflowId, result }) => {
@@ -176,8 +182,9 @@ describe("WorkflowHooks", () => {
       },
     })
       .step("compute", () => Pipeline.succeed(42))
-      .bind(storage)
-      .run({ workflowId: "wf-hooks-2", input: {} });
+      .build();
+    const runner = createWorkflowRunner({ storage });
+    await runner.run({ workflow: wf, workflowId: "wf-hooks-2", input: {} });
 
     expect(completed).not.toBeNull();
     expect(completed!.workflowId).toBe("wf-hooks-2");
@@ -188,7 +195,7 @@ describe("WorkflowHooks", () => {
     const storage = new InMemoryWorkflowStorage();
     let failedStep: { stepName: string; error: string } | null = null;
 
-    await workflow<{}>({
+    const wf = workflow<{}>({
       name: "hooks-step-fail",
       hooks: {
         onStepFailure: ({ stepName, error }) => {
@@ -197,8 +204,9 @@ describe("WorkflowHooks", () => {
       },
     })
       .step("boom", () => Pipeline.fail(new TestError({ message: "kaboom" })))
-      .bind(storage)
-      .runSafe({ workflowId: "wf-hooks-3", input: {} });
+      .build();
+    const runner = createWorkflowRunner({ storage });
+    await runner.runSafe({ workflow: wf, workflowId: "wf-hooks-3", input: {} });
 
     expect(failedStep).not.toBeNull();
     expect(failedStep!.stepName).toBe("boom");
@@ -208,7 +216,7 @@ describe("WorkflowHooks", () => {
     const storage = new InMemoryWorkflowStorage();
     let failedWf: { workflowId: string; error: string } | null = null;
 
-    await workflow<{}>({
+    const wf = workflow<{}>({
       name: "hooks-wf-fail",
       hooks: {
         onWorkflowFailure: ({ workflowId, error }) => {
@@ -217,8 +225,9 @@ describe("WorkflowHooks", () => {
       },
     })
       .step("boom", () => Pipeline.fail(new TestError({ message: "fail" })))
-      .bind(storage)
-      .runSafe({ workflowId: "wf-hooks-4", input: {} });
+      .build();
+    const runner = createWorkflowRunner({ storage });
+    await runner.runSafe({ workflow: wf, workflowId: "wf-hooks-4", input: {} });
 
     expect(failedWf).not.toBeNull();
     expect(failedWf!.workflowId).toBe("wf-hooks-4");
@@ -228,7 +237,7 @@ describe("WorkflowHooks", () => {
     const storage = new InMemoryWorkflowStorage();
     let durationMs = -1;
 
-    await workflow<{}>({
+    const wf = workflow<{}>({
       name: "hooks-duration",
       hooks: {
         onWorkflowComplete: (params) => {
@@ -240,8 +249,9 @@ describe("WorkflowHooks", () => {
         await new Promise((r) => setTimeout(r, 10));
         return "done";
       })
-      .bind(storage)
-      .run({ workflowId: "wf-hooks-5", input: {} });
+      .build();
+    const runner = createWorkflowRunner({ storage });
+    await runner.run({ workflow: wf, workflowId: "wf-hooks-5", input: {} });
 
     expect(durationMs).toBeGreaterThanOrEqual(5);
   });
@@ -250,7 +260,7 @@ describe("WorkflowHooks", () => {
     const storage = new InMemoryWorkflowStorage();
     const events: string[] = [];
 
-    await workflow<{}>({
+    const wf = workflow<{}>({
       name: "hooks-async",
       hooks: {
         onStepComplete: async ({ stepName }) => {
@@ -265,8 +275,9 @@ describe("WorkflowHooks", () => {
     })
       .step("a", () => Pipeline.succeed(1))
       .step("b", () => Pipeline.succeed(2))
-      .bind(storage)
-      .run({ workflowId: "wf-hooks-6", input: {} });
+      .build();
+    const runner = createWorkflowRunner({ storage });
+    await runner.run({ workflow: wf, workflowId: "wf-hooks-6", input: {} });
 
     expect(events).toEqual(["a", "b", "workflow-done"]);
   });

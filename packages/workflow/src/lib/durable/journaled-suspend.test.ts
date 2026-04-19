@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach } from "bun:test";
 import { Pipeline } from "@promin/core";
 import { workflow } from "./durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
+import { createWorkflowRunner } from "./workflow-runner.ts";
 import { runJournaledStep, completeSignal, completeDueSleeps } from "./journaled-step.ts";
 import type { JournaledContext } from "./journaled-step.ts";
 import { WorkflowSuspendedError } from "./durable-pipeline-error.ts";
@@ -300,15 +301,16 @@ describe("DefaultSleepScanner integration with journaled sleeps", () => {
           });
           return { ok: true };
         })
-        .bind(storage);
+        .build();
 
     const wf = buildWorkflow();
+    const runner = createWorkflowRunner({ storage });
 
     // Kick off — suspends at sleep. ctx.sleep also calls suspendWorkflow,
     // so the workflow's step.wakeAt is set for the scanner.
-    await expect(wf.run({ workflowId: "scan-1", input: { id: "a" } })).rejects.toThrow(
-      /sleeping until/,
-    );
+    await expect(
+      runner.run({ workflow: wf, workflowId: "scan-1", input: { id: "a" } }),
+    ).rejects.toThrow(/sleeping until/);
     expect(postSleepCalls).toBe(0);
 
     // Verify the workflow is marked suspended with the expected wakeAt.
@@ -324,7 +326,11 @@ describe("DefaultSleepScanner integration with journaled sleeps", () => {
     // Re-run the workflow (simulating what DefaultSleepScanner does).
     // ctx.sleep auto-completes the pending journal entry since now >= wakeAt,
     // the step proceeds past sleep, and post-sleep activity fires.
-    const result = await buildWorkflow().run({ workflowId: "scan-1", input: { id: "a" } });
+    const result = await runner.run({
+      workflow: buildWorkflow(),
+      workflowId: "scan-1",
+      input: { id: "a" },
+    });
     expect(result).toEqual({ ok: true });
     expect(postSleepCalls).toBe(1);
 
@@ -358,14 +364,16 @@ describe("end-to-end workflow with suspend/resume", () => {
         });
         return { ok: true };
       })
-      .bind(storage);
+      .build();
+
+    const runner = createWorkflowRunner({ storage });
 
     // Kick off — suspends at sleep. The workflow engine wraps our
     // WorkflowSuspendedError in a FiberFailure at the outer boundary; match
     // on the human-readable "sleeping until" message.
-    await expect(wfBuilder.run({ workflowId: "apr-1", input: { draftId: "d-1" } })).rejects.toThrow(
-      /sleeping until/,
-    );
+    await expect(
+      runner.run({ workflow: wfBuilder, workflowId: "apr-1", input: { draftId: "d-1" } }),
+    ).rejects.toThrow(/sleeping until/);
     expect(activityCalls).toEqual({ create: 1, check: 0, finalize: 0 });
 
     // Advance time past sleep, complete due sleeps.
@@ -393,11 +401,11 @@ describe("end-to-end workflow with suspend/resume", () => {
         });
         return { ok: true };
       })
-      .bind(storage);
+      .build();
 
-    await expect(wf2.run({ workflowId: "apr-1", input: { draftId: "d-1" } })).rejects.toThrow(
-      /waiting for signal/,
-    );
+    await expect(
+      runner.run({ workflow: wf2, workflowId: "apr-1", input: { draftId: "d-1" } }),
+    ).rejects.toThrow(/waiting for signal/);
     // create was replayed from journal, check just ran, finalize hasn't.
     expect(activityCalls).toEqual({ create: 1, check: 1, finalize: 0 });
 
@@ -411,7 +419,11 @@ describe("end-to-end workflow with suspend/resume", () => {
     });
 
     // Final resume.
-    const result = await wf2.run({ workflowId: "apr-1", input: { draftId: "d-1" } });
+    const result = await runner.run({
+      workflow: wf2,
+      workflowId: "apr-1",
+      input: { draftId: "d-1" },
+    });
     expect(result).toEqual({ ok: true });
     // create + check replay, finalize ran.
     expect(activityCalls).toEqual({ create: 1, check: 1, finalize: 1 });

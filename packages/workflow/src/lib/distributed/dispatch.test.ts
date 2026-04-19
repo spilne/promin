@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { Pipeline } from "@promin/core";
 import { workflow, InMemoryWorkflowStorage } from "../durable/index.ts";
+import { createWorkflowRunner } from "../durable/workflow-runner.ts";
 import { MapStepRegistry } from "./step-registry.ts";
 import { InMemoryStepQueue } from "./in-memory-step-queue.ts";
 import { createWorker } from "./worker.ts";
@@ -32,7 +33,7 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
     void gpuWorker.start();
 
     // Run workflow with dispatch — "transcribe" goes to GPU worker, rest runs locally
-    await workflow<{ videoId: string }>({
+    const wf = workflow<{ videoId: string }>({
       name: "hybrid",
       dispatch: {
         stepQueue,
@@ -54,8 +55,9 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
         log.push("format:local");
         return Pipeline.succeed(`formatted: ${deps.transcribe}`);
       })
-      .bind(storage)
-      .run({ workflowId: "hybrid-1", input: { videoId: "abc" } });
+      .build();
+    const runner = createWorkflowRunner({ storage });
+    await runner.run({ workflow: wf, workflowId: "hybrid-1", input: { videoId: "abc" } });
 
     await gpuWorker.stop();
 
@@ -71,7 +73,7 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
     let attempts = 0;
 
     // No worker needed for this test — only local steps
-    const result = await workflow<number>({
+    const wf = workflow<number>({
       name: "local-retry",
       dispatch: {
         stepQueue,
@@ -89,8 +91,9 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
           retry: { maxRetries: 5 },
         },
       )
-      .bind(storage)
-      .run({ workflowId: "local-1", input: 5 });
+      .build();
+    const runner = createWorkflowRunner({ storage });
+    const result = await runner.run({ workflow: wf, workflowId: "local-1", input: 5 });
 
     expect(result).toBe(10);
     expect(attempts).toBe(3);
@@ -99,11 +102,12 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
   it("no dispatch config — everything runs locally as a normal workflow", async () => {
     const storage = new InMemoryWorkflowStorage();
 
-    const result = await workflow<number>({ name: "no-dispatch" })
+    const wf = workflow<number>({ name: "no-dispatch" })
       .step("double", ({ input }) => Pipeline.succeed(input * 2))
       .step("add", ({ prev }) => Pipeline.succeed(prev + 100))
-      .bind(storage)
-      .run({ workflowId: "nd-1", input: 5 });
+      .build();
+    const runner = createWorkflowRunner({ storage });
+    const result = await runner.run({ workflow: wf, workflowId: "nd-1", input: 5 });
 
     expect(result).toBe(110);
   });
@@ -127,7 +131,7 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
     });
     void worker.start();
 
-    const { error } = await workflow<string>({
+    const wf = workflow<string>({
       name: "dispatch-fail",
       dispatch: {
         stepQueue,
@@ -142,8 +146,13 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
         () => Pipeline.succeed("should not run locally"),
         { needs: ["remote"] },
       )
-      .bind(storage)
-      .runSafe({ workflowId: "fail-1", input: "x" });
+      .build();
+    const runner = createWorkflowRunner({ storage });
+    const { error } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "fail-1",
+      input: "x",
+    });
 
     await worker.stop();
 

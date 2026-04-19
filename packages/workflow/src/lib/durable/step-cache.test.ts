@@ -16,6 +16,7 @@ import { describe, it, expect } from "bun:test";
 import { MemoryCache, type CacheStore } from "@promin/core";
 import { workflow } from "./durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
+import { createWorkflowRunner } from "./workflow-runner.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -68,6 +69,9 @@ describe("step cache — hit / miss / TTL", () => {
     const cache = new MemoryCache<string, unknown>({ ttlMs: 60_000 });
     const c = counter();
 
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+
     const wf = workflow({ name: "hit" })
       .stepAsync(
         "discover",
@@ -83,11 +87,18 @@ describe("step cache — hit / miss / TTL", () => {
           },
         },
       )
-      .build()
-      .bind(new InMemoryWorkflowStorage());
+      .build();
 
-    const r1 = await wf.run({ workflowId: "run-1", input: { accountId: "alice" } });
-    const r2 = await wf.run({ workflowId: "run-2", input: { accountId: "alice" } });
+    const r1 = await runner.run({
+      workflow: wf,
+      workflowId: "run-1",
+      input: { accountId: "alice" },
+    });
+    const r2 = await runner.run({
+      workflow: wf,
+      workflowId: "run-2",
+      input: { accountId: "alice" },
+    });
 
     expect(r1).toEqual(["v1", "v2", "v3"]);
     expect(r2).toEqual(["v1", "v2", "v3"]);
@@ -97,6 +108,9 @@ describe("step cache — hit / miss / TTL", () => {
   it("different workflowIds with the same cache key share the entry", async () => {
     const cache = new MemoryCache<string, unknown>({ ttlMs: 60_000 });
     const c = counter();
+
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
 
     const wf = workflow({ name: "share" })
       .stepAsync(
@@ -113,17 +127,19 @@ describe("step cache — hit / miss / TTL", () => {
           },
         },
       )
-      .build()
-      .bind(new InMemoryWorkflowStorage());
+      .build();
 
-    await wf.run({ workflowId: "alpha", input: {} });
-    await wf.run({ workflowId: "beta", input: {} });
+    await runner.run({ workflow: wf, workflowId: "alpha", input: {} });
+    await runner.run({ workflow: wf, workflowId: "beta", input: {} });
     expect(c.box.value).toBe(1);
   });
 
   it("expired entry triggers re-execution", async () => {
     const cache = new MemoryCache<string, unknown>({ ttlMs: 1 });
     const c = counter();
+
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
 
     const wf = workflow({ name: "ttl" })
       .stepAsync(
@@ -140,12 +156,11 @@ describe("step cache — hit / miss / TTL", () => {
           },
         },
       )
-      .build()
-      .bind(new InMemoryWorkflowStorage());
+      .build();
 
-    const r1 = await wf.run({ workflowId: "w1", input: {} });
+    const r1 = await runner.run({ workflow: wf, workflowId: "w1", input: {} });
     await new Promise((r) => setTimeout(r, 20));
-    const r2 = await wf.run({ workflowId: "w2", input: {} });
+    const r2 = await runner.run({ workflow: wf, workflowId: "w2", input: {} });
 
     expect(r1).toBe(1);
     expect(r2).toBe(2); // fresh run after expiry
@@ -155,6 +170,9 @@ describe("step cache — hit / miss / TTL", () => {
   it("different cache keys do NOT collide", async () => {
     const cache = new MemoryCache<string, unknown>({ ttlMs: 60_000 });
     const c = counter();
+
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
 
     const wf = workflow({ name: "keys" })
       .stepAsync(
@@ -171,11 +189,10 @@ describe("step cache — hit / miss / TTL", () => {
           },
         },
       )
-      .build()
-      .bind(new InMemoryWorkflowStorage());
+      .build();
 
-    await wf.run({ workflowId: "w-a", input: { tenant: "acme" } });
-    await wf.run({ workflowId: "w-b", input: { tenant: "beta" } });
+    await runner.run({ workflow: wf, workflowId: "w-a", input: { tenant: "acme" } });
+    await runner.run({ workflow: wf, workflowId: "w-b", input: { tenant: "beta" } });
     expect(c.box.value).toBe(2); // each tenant key ran its own body
   });
 });
@@ -189,6 +206,9 @@ describe("step cache — failure never caches", () => {
     const cache = new MemoryCache<string, unknown>({ ttlMs: 60_000 });
     let attempts = 0;
 
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+
     const wf = workflow({ name: "fail" })
       .stepAsync(
         "discover",
@@ -201,13 +221,12 @@ describe("step cache — failure never caches", () => {
           cache: { key: () => "k", ttlMs: 60_000, store: cache },
         },
       )
-      .build()
-      .bind(new InMemoryWorkflowStorage());
+      .build();
 
-    await expect(wf.run({ workflowId: "r1", input: {} })).rejects.toBeDefined();
+    await expect(runner.run({ workflow: wf, workflowId: "r1", input: {} })).rejects.toBeDefined();
     expect(await cache.size()).toBe(0); // no poison
 
-    const r2 = await wf.run({ workflowId: "r2", input: {} });
+    const r2 = await runner.run({ workflow: wf, workflowId: "r2", input: {} });
     expect(r2).toBe("ok");
     expect(attempts).toBe(2);
   });
@@ -223,6 +242,9 @@ describe("step cache — backend errors are swallowed", () => {
     cache.failures.get = new Error("redis down on read");
     const c = counter();
 
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+
     const wf = workflow({ name: "get-fail" })
       .stepAsync(
         "discover",
@@ -234,10 +256,9 @@ describe("step cache — backend errors are swallowed", () => {
           cache: { key: () => "k", ttlMs: 60_000, store: cache },
         },
       )
-      .build()
-      .bind(new InMemoryWorkflowStorage());
+      .build();
 
-    const r = await wf.run({ workflowId: "w", input: {} });
+    const r = await runner.run({ workflow: wf, workflowId: "w", input: {} });
     expect(r).toBe("value");
     expect(c.box.value).toBe(1);
   });
@@ -246,6 +267,9 @@ describe("step cache — backend errors are swallowed", () => {
     const cache = new FaultyCache();
     cache.failures.set = new Error("redis down on write");
     const c = counter();
+
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
 
     const wf = workflow({ name: "set-fail" })
       .stepAsync(
@@ -258,13 +282,12 @@ describe("step cache — backend errors are swallowed", () => {
           cache: { key: () => "k", ttlMs: 60_000, store: cache },
         },
       )
-      .build()
-      .bind(new InMemoryWorkflowStorage());
+      .build();
 
-    const r1 = await wf.run({ workflowId: "w1", input: {} });
+    const r1 = await runner.run({ workflow: wf, workflowId: "w1", input: {} });
     expect(r1).toBe(1);
     // set failed so nothing was cached; next run runs body again.
-    const r2 = await wf.run({ workflowId: "w2", input: {} });
+    const r2 = await runner.run({ workflow: wf, workflowId: "w2", input: {} });
     expect(r2).toBe(2);
     expect(c.box.value).toBe(2);
   });
@@ -280,6 +303,9 @@ describe("step cache — namespace keeps different workflows isolated", () => {
     const c1 = counter();
     const c2 = counter();
 
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+
     const wf1 = workflow({ name: "wfA" })
       .stepAsync(
         "discover",
@@ -289,8 +315,7 @@ describe("step cache — namespace keeps different workflows isolated", () => {
         },
         { cache: { key: () => "k", ttlMs: 60_000, store: shared } },
       )
-      .build()
-      .bind(new InMemoryWorkflowStorage());
+      .build();
 
     const wf2 = workflow({ name: "wfB" })
       .stepAsync(
@@ -301,11 +326,10 @@ describe("step cache — namespace keeps different workflows isolated", () => {
         },
         { cache: { key: () => "k", ttlMs: 60_000, store: shared } },
       )
-      .build()
-      .bind(new InMemoryWorkflowStorage());
+      .build();
 
-    await wf1.run({ workflowId: "a1", input: {} });
-    await wf2.run({ workflowId: "b1", input: {} });
+    await runner.run({ workflow: wf1, workflowId: "a1", input: {} });
+    await runner.run({ workflow: wf2, workflowId: "b1", input: {} });
 
     expect(c1.box.value).toBe(1);
     expect(c2.box.value).toBe(1); // different namespace → both bodies ran
@@ -314,6 +338,9 @@ describe("step cache — namespace keeps different workflows isolated", () => {
   it("explicit namespace overrides the workflow-name default", async () => {
     const shared = new MemoryCache<string, unknown>({ ttlMs: 60_000 });
     const c = counter();
+
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
 
     const wf1 = workflow({ name: "sharedA" })
       .stepAsync(
@@ -331,8 +358,7 @@ describe("step cache — namespace keeps different workflows isolated", () => {
           },
         },
       )
-      .build()
-      .bind(new InMemoryWorkflowStorage());
+      .build();
 
     const wf2 = workflow({ name: "sharedB" })
       .stepAsync(
@@ -350,11 +376,10 @@ describe("step cache — namespace keeps different workflows isolated", () => {
           },
         },
       )
-      .build()
-      .bind(new InMemoryWorkflowStorage());
+      .build();
 
-    await wf1.run({ workflowId: "1", input: {} });
-    await wf2.run({ workflowId: "2", input: {} });
+    await runner.run({ workflow: wf1, workflowId: "1", input: {} });
+    await runner.run({ workflow: wf2, workflowId: "2", input: {} });
 
     expect(c.box.value).toBe(1); // shared namespace → second run hits the cache
   });

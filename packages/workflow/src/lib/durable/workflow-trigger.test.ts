@@ -5,6 +5,7 @@ import { StreamPipeline } from "@promin/core";
 import { workflow } from "./durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
 import { trigger, WorkflowResult } from "./workflow-trigger.ts";
+import { createWorkflowRunner } from "./workflow-runner.ts";
 
 // ---------------------------------------------------------------------------
 // Test error types
@@ -61,39 +62,38 @@ describe("WorkflowResult", () => {
 describe("WorkflowBuilder.build", () => {
   it("returns a WorkflowDefinition with run and runSafe", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const def = workflow<{ n: number }>({ name: "buildable" })
       .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
-      .build()
-      .bind(storage);
+      .build();
 
     expect(def.name).toBe("buildable");
-    expect(def.storage).toBe(storage);
 
-    const result = await def.run({ workflowId: "b-1", input: { n: 5 } });
+    const result = await runner.run({ workflow: def, workflowId: "b-1", input: { n: 5 } });
     expect(result).toBe(10);
   });
 
   it("runSafe works on built definition", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const def = workflow<{}>({ name: "safe-build" })
       .step("fail", () => Pipeline.fail(new ProcessError({ message: "oops" })))
-      .build()
-      .bind(storage);
+      .build();
 
-    const { data, error } = await def.runSafe({ workflowId: "b-2", input: {} });
+    const { data, error } = await runner.runSafe({ workflow: def, workflowId: "b-2", input: {} });
     expect(data).toBeNull();
     expect(error).not.toBeNull();
   });
 
   it("built definition is reusable across multiple runs", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const def = workflow<{ n: number }>({ name: "reusable" })
       .step("inc", ({ input }) => Pipeline.succeed(input.n + 1))
-      .build()
-      .bind(storage);
+      .build();
 
-    const r1 = await def.run({ workflowId: "r-1", input: { n: 10 } });
-    const r2 = await def.run({ workflowId: "r-2", input: { n: 20 } });
+    const r1 = await runner.run({ workflow: def, workflowId: "r-1", input: { n: 10 } });
+    const r2 = await runner.run({ workflow: def, workflowId: "r-2", input: { n: 20 } });
     expect(r1).toBe(11);
     expect(r2).toBe(21);
   });
@@ -155,13 +155,14 @@ describe("trigger", () => {
 
   it("skips duplicates with onDuplicate=skip", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const def = workflow<{ n: number }>({ name: "dedup-trigger" })
       .step("compute", ({ input }) => Pipeline.succeed(input.n * 10))
       .build()
       .bind(storage);
 
     // First run creates the workflow
-    await def.run({ workflowId: "dedup-1", input: { n: 1 } });
+    await runner.run({ workflow: def, workflowId: "dedup-1", input: { n: 1 } });
 
     // Trigger with same ID — should skip
     const results = await StreamPipeline.fromIterable([1])

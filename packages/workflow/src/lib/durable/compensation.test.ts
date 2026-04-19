@@ -3,6 +3,7 @@ import { Data } from "effect";
 import { Pipeline } from "@promin/core";
 import { workflow } from "./durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
+import { createWorkflowRunner } from "./workflow-runner.ts";
 
 // ---------------------------------------------------------------------------
 // Test error
@@ -39,8 +40,9 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
   it("payment was charged but shipping failed — automatically refund the payment", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    const { error } = await workflow<{ n: number }>({
+    const wf = workflow<{ n: number }>({
       name: "compensate-basic",
     })
       .step(
@@ -73,8 +75,9 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
         t.track("step-3:execute");
         return Pipeline.fail(new TestError({ message: "boom" }));
       })
-      .bind(storage)
-      .runSafe({ workflowId: "comp-1", input: { n: 5 } });
+      .build();
+
+    const { error } = await runner.runSafe({ workflow: wf, workflowId: "comp-1", input: { n: 5 } });
 
     expect(error).not.toBeNull();
     expect(t.calls).toEqual([
@@ -90,8 +93,9 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
   it("failed step has nothing to undo — only completed steps get rolled back", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    const { error } = await workflow<string>({ name: "no-self-comp" })
+    const wf = workflow<string>({ name: "no-self-comp" })
       .step(
         "ok",
         () => {
@@ -118,8 +122,13 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
           },
         },
       )
-      .bind(storage)
-      .runSafe({ workflowId: "comp-no-self", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "comp-no-self",
+      input: "x",
+    });
 
     expect(error).not.toBeNull();
     // Only "ok" should be compensated, not "fail" (it didn't complete)
@@ -129,8 +138,9 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
   it("read-only steps have no rollback — only steps with undo logic are compensated", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    const { error } = await workflow<string>({ name: "partial-comp" })
+    const wf = workflow<string>({ name: "partial-comp" })
       .step(
         "step-1",
         () => {
@@ -153,8 +163,13 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
         t.track("step-3:execute");
         return Pipeline.fail(new TestError({ message: "fail" }));
       })
-      .bind(storage)
-      .runSafe({ workflowId: "comp-partial", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "comp-partial",
+      input: "x",
+    });
 
     expect(error).not.toBeNull();
     expect(t.calls).toEqual([
@@ -169,8 +184,9 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
   it("one refund fails but the other still runs — best-effort rollback", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    const { error } = await workflow<string>({ name: "comp-failure" })
+    const wf = workflow<string>({ name: "comp-failure" })
       .step(
         "step-1",
         () => {
@@ -201,8 +217,9 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
         t.track("step-3:execute");
         return Pipeline.fail(new TestError({ message: "fail" }));
       })
-      .bind(storage)
-      .runSafe({ workflowId: "comp-fail", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({ workflow: wf, workflowId: "comp-fail", input: "x" });
 
     expect(error).not.toBeNull();
     // step-2 compensation fails but step-1 still runs
@@ -217,9 +234,10 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
 
   it("rollback handler knows what was created — can target the exact resource to delete", async () => {
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     let receivedParams: any = null;
 
-    const { error } = await workflow<{ userId: string }>({ name: "comp-params" })
+    const wf = workflow<{ userId: string }>({ name: "comp-params" })
       .step("create", ({ input }) => Pipeline.succeed({ id: "acc_123", user: input.userId }), {
         compensate: (params) => {
           receivedParams = params;
@@ -227,8 +245,13 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
         },
       })
       .step("fail", () => Pipeline.fail(new TestError({ message: "fail" })))
-      .bind(storage)
-      .runSafe({ workflowId: "comp-params-1", input: { userId: "u_42" } });
+      .build();
+
+    const { error } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "comp-params-1",
+      input: { userId: "u_42" },
+    });
 
     expect(error).not.toBeNull();
     expect(receivedParams).not.toBeNull();
@@ -240,8 +263,9 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
   it("async rollback handler — call an external API to reverse a charge", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    const { error } = await workflow<string>({ name: "comp-async" })
+    const wf = workflow<string>({ name: "comp-async" })
       .step(
         "step-1",
         () => {
@@ -255,8 +279,13 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
         },
       )
       .step("fail", () => Pipeline.fail(new TestError({ message: "fail" })))
-      .bind(storage)
-      .runSafe({ workflowId: "comp-async-1", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "comp-async-1",
+      input: "x",
+    });
 
     expect(error).not.toBeNull();
     expect(t.calls).toContain("step-1:compensate-async");
@@ -265,16 +294,18 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
   it("happy path completes — no rollback actions are triggered", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    const { data } = await workflow<number>({ name: "no-comp" })
+    const wf = workflow<number>({ name: "no-comp" })
       .step("step-1", ({ input }) => Pipeline.succeed(input + 1), {
         compensate: () => {
           t.track("should-not-run");
           return Pipeline.succeed(undefined as void);
         },
       })
-      .bind(storage)
-      .runSafe({ workflowId: "no-comp-1", input: 5 });
+      .build();
+
+    const { data } = await runner.runSafe({ workflow: wf, workflowId: "no-comp-1", input: 5 });
 
     expect(data).toBe(6);
     expect(t.calls).toEqual([]);
@@ -289,8 +320,9 @@ describe("Failure strategy interaction — skip or fallback avoids unnecessary r
   it("optional enrichment step is skipped on failure — no rollback needed", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    const { data } = await workflow<string>({ name: "skip-no-comp" })
+    const wf = workflow<string>({ name: "skip-no-comp" })
       .step(
         "step-1",
         () => {
@@ -318,8 +350,9 @@ describe("Failure strategy interaction — skip or fallback avoids unnecessary r
         t.track("step-3:execute");
         return Pipeline.succeed("ok");
       })
-      .bind(storage)
-      .runSafe({ workflowId: "skip-1", input: "x" });
+      .build();
+
+    const { data } = await runner.runSafe({ workflow: wf, workflowId: "skip-1", input: "x" });
 
     // Workflow succeeds because step-2 was skipped
     expect(data).toBe("ok");
@@ -330,8 +363,9 @@ describe("Failure strategy interaction — skip or fallback avoids unnecessary r
   it("fallback value substituted for failed step — workflow continues without rollback", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    const { data } = await workflow<string>({ name: "fallback-no-comp" })
+    const wf = workflow<string>({ name: "fallback-no-comp" })
       .step(
         "step-1",
         () => {
@@ -354,8 +388,9 @@ describe("Failure strategy interaction — skip or fallback avoids unnecessary r
           onFailure: { fallback: () => "fallback-value" },
         },
       )
-      .bind(storage)
-      .runSafe({ workflowId: "fallback-1", input: "x" });
+      .build();
+
+    const { data } = await runner.runSafe({ workflow: wf, workflowId: "fallback-1", input: "x" });
 
     expect(data).toBe("fallback-value");
     expect(t.calls).not.toContain("step-1:compensate");
@@ -364,8 +399,9 @@ describe("Failure strategy interaction — skip or fallback avoids unnecessary r
   it("default fail strategy triggers rollback — critical steps must be undone", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    const { error } = await workflow<string>({ name: "fail-comp" })
+    const wf = workflow<string>({ name: "fail-comp" })
       .step(
         "step-1",
         () => {
@@ -380,8 +416,9 @@ describe("Failure strategy interaction — skip or fallback avoids unnecessary r
         },
       )
       .step("step-2", () => Pipeline.fail(new TestError({ message: "fail" })))
-      .bind(storage)
-      .runSafe({ workflowId: "fail-comp-1", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({ workflow: wf, workflowId: "fail-comp-1", input: "x" });
 
     expect(error).not.toBeNull();
     expect(t.calls).toContain("step-1:compensate");
@@ -396,9 +433,10 @@ describe("Workflow-level retry — recover from transient failures before giving
   it("transient DB timeout on second step — retry succeeds without re-running first step", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     let attempt = 0;
 
-    const { data } = await workflow<number>({
+    const wf = workflow<number>({
       name: "wf-retry",
       retry: { maxRetries: 2, baseDelayMs: 10 },
     })
@@ -414,8 +452,9 @@ describe("Workflow-level retry — recover from transient failures before giving
         }
         return Pipeline.succeed(prev + 100);
       })
-      .bind(storage)
-      .runSafe({ workflowId: "wf-retry-1", input: 5 });
+      .build();
+
+    const { data } = await runner.runSafe({ workflow: wf, workflowId: "wf-retry-1", input: 5 });
 
     // step-1 runs once (checkpointed), step-2 runs twice (first fails, second succeeds)
     expect(data).toBe(110);
@@ -430,9 +469,10 @@ describe("Workflow-level retry — recover from transient failures before giving
   it("permanent failure after all retries — rollback only happens once at the end", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     let attempt = 0;
 
-    const { error } = await workflow<string>({
+    const wf = workflow<string>({
       name: "wf-retry-then-comp",
       retry: { maxRetries: 1, baseDelayMs: 10 },
     })
@@ -454,8 +494,13 @@ describe("Workflow-level retry — recover from transient failures before giving
         t.track(`step-2:execute(attempt=${attempt})`);
         return Pipeline.fail(new TestError({ message: `always-fail-${attempt}` }));
       })
-      .bind(storage)
-      .runSafe({ workflowId: "wf-retry-comp-1", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "wf-retry-comp-1",
+      input: "x",
+    });
 
     expect(error).not.toBeNull();
     expect(t.calls).toEqual([
@@ -471,9 +516,10 @@ describe("Workflow-level retry — recover from transient failures before giving
   it("step retries within each workflow attempt — total attempts multiply", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     let totalAttempts = 0;
 
-    const { error } = await workflow<string>({
+    const wf = workflow<string>({
       name: "combined-retry",
       retry: { maxRetries: 1, baseDelayMs: 10 },
     })
@@ -501,8 +547,13 @@ describe("Workflow-level retry — recover from transient failures before giving
           retry: { maxRetries: 1 },
         },
       )
-      .bind(storage)
-      .runSafe({ workflowId: "combined-retry-1", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "combined-retry-1",
+      input: "x",
+    });
 
     expect(error).not.toBeNull();
     // Workflow attempt 1: step-2 tries 1,2 (both fail) → workflow fails
@@ -514,8 +565,9 @@ describe("Workflow-level retry — recover from transient failures before giving
   it("no retry configured — failure triggers immediate rollback", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    const { error } = await workflow<string>({ name: "no-wf-retry" })
+    const wf = workflow<string>({ name: "no-wf-retry" })
       .step(
         "step-1",
         () => {
@@ -533,8 +585,13 @@ describe("Workflow-level retry — recover from transient failures before giving
         t.track("step-2:execute");
         return Pipeline.fail(new TestError({ message: "fail" }));
       })
-      .bind(storage)
-      .runSafe({ workflowId: "no-wf-retry-1", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "no-wf-retry-1",
+      input: "x",
+    });
 
     expect(error).not.toBeNull();
     // No retry, immediate compensation
@@ -549,9 +606,10 @@ describe("Workflow-level retry — recover from transient failures before giving
 describe("Post-rollback hook — notify ops team after saga compensation", () => {
   it("report lists which steps were rolled back and which rollbacks failed", async () => {
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     let report: any = null;
 
-    const { error } = await workflow<string>({
+    const wf = workflow<string>({
       name: "oncomp-report",
       compensate: {
         onComplete: (params) => {
@@ -569,8 +627,9 @@ describe("Post-rollback hook — notify ops team after saga compensation", () =>
         },
       })
       .step("fail", () => Pipeline.fail(new TestError({ message: "boom" })))
-      .bind(storage)
-      .runSafe({ workflowId: "oncomp-1", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({ workflow: wf, workflowId: "oncomp-1", input: "x" });
 
     expect(error).not.toBeNull();
     expect(report).not.toBeNull();
@@ -582,8 +641,9 @@ describe("Post-rollback hook — notify ops team after saga compensation", () =>
 
   it("notification hook crashes — original business error is still surfaced", async () => {
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    const { error } = await workflow<string>({
+    const wf = workflow<string>({
       name: "oncomp-fail",
       compensate: {
         onComplete: () => {
@@ -595,8 +655,13 @@ describe("Post-rollback hook — notify ops team after saga compensation", () =>
         compensate: () => Pipeline.succeed(undefined as void),
       })
       .step("fail", () => Pipeline.fail(new TestError({ message: "original error" })))
-      .bind(storage)
-      .runSafe({ workflowId: "oncomp-fail-1", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "oncomp-fail-1",
+      input: "x",
+    });
 
     // Original error should be preserved, not masked by onComplete failure
     expect(error).not.toBeNull();
@@ -605,9 +670,10 @@ describe("Post-rollback hook — notify ops team after saga compensation", () =>
 
   it("async notification hook — post rollback summary to Slack", async () => {
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     const t = tracker();
 
-    await workflow<string>({
+    const wf = workflow<string>({
       name: "oncomp-async",
       compensate: {
         onComplete: async () => {
@@ -617,8 +683,9 @@ describe("Post-rollback hook — notify ops team after saga compensation", () =>
     })
       .step("step-1", () => Pipeline.succeed("a"))
       .step("fail", () => Pipeline.fail(new TestError({ message: "fail" })))
-      .bind(storage)
-      .runSafe({ workflowId: "oncomp-async-1", input: "x" });
+      .build();
+
+    await runner.runSafe({ workflow: wf, workflowId: "oncomp-async-1", input: "x" });
 
     expect(t.calls).toContain("onComplete-async");
   });
@@ -632,8 +699,9 @@ describe("DAG rollback order — undo dependent steps before their prerequisites
   it("parallel branches rolled back before the shared root step", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    await workflow<string>({ name: "dag-comp" })
+    const wf = workflow<string>({ name: "dag-comp" })
       .step(
         "a",
         () => {
@@ -679,8 +747,9 @@ describe("DAG rollback order — undo dependent steps before their prerequisites
         t.track("d:execute");
         return Pipeline.fail(new TestError({ message: "fail" }));
       })
-      .bind(storage)
-      .runSafe({ workflowId: "dag-comp-1", input: "x" });
+      .build();
+
+    await runner.runSafe({ workflow: wf, workflowId: "dag-comp-1", input: "x" });
 
     // c, b, a — reverse of definition order for completed steps
     const compCalls = t.calls.filter((c) => c.includes("compensate"));
@@ -696,9 +765,10 @@ describe("Full recovery cascade — step retry, workflow retry, then rollback", 
   it("exhausts step retries, then workflow retries, then compensates — full escalation path", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     let step2Calls = 0;
 
-    const { error } = await workflow<string>({
+    const wf = workflow<string>({
       name: "full-cascade",
       retry: { maxRetries: 1, baseDelayMs: 10 },
       compensate: {
@@ -732,8 +802,9 @@ describe("Full recovery cascade — step retry, workflow retry, then rollback", 
           retry: { maxRetries: 1 },
         },
       )
-      .bind(storage)
-      .runSafe({ workflowId: "cascade-1", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({ workflow: wf, workflowId: "cascade-1", input: "x" });
 
     expect(error).not.toBeNull();
 
@@ -758,9 +829,10 @@ describe("Full recovery cascade — step retry, workflow retry, then rollback", 
 
   it("transient network glitch clears up on retry — no rollback needed", async () => {
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     let step2Calls = 0;
 
-    const { data } = await workflow<number>({
+    const wf = workflow<number>({
       name: "transient-recovery",
       retry: { maxRetries: 2, baseDelayMs: 10 },
     })
@@ -776,8 +848,9 @@ describe("Full recovery cascade — step retry, workflow retry, then rollback", 
         }
         return Pipeline.succeed(prev * 10);
       })
-      .bind(storage)
-      .runSafe({ workflowId: "transient-1", input: 5 });
+      .build();
+
+    const { data } = await runner.runSafe({ workflow: wf, workflowId: "transient-1", input: 5 });
 
     // step-2 fails twice (workflow retries), succeeds on third
     expect(data).toBe(60); // (5+1)*10
@@ -792,10 +865,11 @@ describe("Full recovery cascade — step retry, workflow retry, then rollback", 
 describe("Edge cases — boundary conditions for compensation logic", () => {
   it("single step fails with no prior work — nothing to roll back", async () => {
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     const t = tracker();
 
     // Single step that fails — nothing to compensate
-    const { error } = await workflow<string>({
+    const wf = workflow<string>({
       name: "single-fail",
       compensate: {
         onComplete: () => {
@@ -805,8 +879,13 @@ describe("Edge cases — boundary conditions for compensation logic", () => {
       },
     })
       .step("only-step", () => Pipeline.fail(new TestError({ message: "fail" })))
-      .bind(storage)
-      .runSafe({ workflowId: "single-fail-1", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "single-fail-1",
+      input: "x",
+    });
 
     expect(error).not.toBeNull();
     // onCompensate still called (with empty lists)
@@ -816,16 +895,18 @@ describe("Edge cases — boundary conditions for compensation logic", () => {
   it("very first step fails — its own compensate is not invoked since it never completed", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    await workflow<string>({ name: "first-fail" })
+    const wf = workflow<string>({ name: "first-fail" })
       .step("step-1", () => Pipeline.fail(new TestError({ message: "fail" })), {
         compensate: () => {
           t.track("should-not-run");
           return Pipeline.succeed(undefined as void);
         },
       })
-      .bind(storage)
-      .runSafe({ workflowId: "first-fail-1", input: "x" });
+      .build();
+
+    await runner.runSafe({ workflow: wf, workflowId: "first-fail-1", input: "x" });
 
     // step-1 failed, so its compensate should NOT run (it never completed)
     expect(t.calls).toEqual([]);
@@ -833,6 +914,7 @@ describe("Edge cases — boundary conditions for compensation logic", () => {
 
   it("pre-built workflow definition retains all retry and rollback settings", async () => {
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     const t = tracker();
     let step2Calls = 0;
 
@@ -856,10 +938,13 @@ describe("Edge cases — boundary conditions for compensation logic", () => {
         step2Calls++;
         return Pipeline.fail(new TestError({ message: `fail-${step2Calls}` }));
       })
-      .build()
-      .bind(storage);
+      .build();
 
-    const { error } = await definition.runSafe({ workflowId: "build-1", input: "x" });
+    const { error } = await runner.runSafe({
+      workflow: definition,
+      workflowId: "build-1",
+      input: "x",
+    });
 
     expect(error).not.toBeNull();
     // Workflow retry happened (step2Calls > 1)
@@ -878,9 +963,10 @@ describe("Selective retry — only retry transient errors, fail fast on permanen
   it("business validation error is permanent — skip retries and compensate immediately", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     let step2Calls = 0;
 
-    const { error } = await workflow<string>({
+    const wf = workflow<string>({
       name: "when-skip",
       retry: {
         maxRetries: 3,
@@ -906,8 +992,9 @@ describe("Selective retry — only retry transient errors, fail fast on permanen
         t.track(`step-2:call=${step2Calls}`);
         return Pipeline.fail(new TestError({ message: "non-retryable" }));
       })
-      .bind(storage)
-      .runSafe({ workflowId: "when-skip-1", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({ workflow: wf, workflowId: "when-skip-1", input: "x" });
 
     expect(error).not.toBeNull();
     // Despite maxRetries: 3, TestError is not retryable → no workflow retry → immediate compensation
@@ -917,13 +1004,14 @@ describe("Selective retry — only retry transient errors, fail fast on permanen
 
   it("network errors retry, but auth errors stop immediately — mixed error types", async () => {
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     let step2Calls = 0;
 
     class RetryableError extends Data.TaggedError("RetryableError")<{
       readonly message: string;
     }> {}
 
-    const { error } = await workflow<string>({
+    const wf = workflow<string>({
       name: "when-mixed",
       retry: {
         maxRetries: 3,
@@ -939,8 +1027,13 @@ describe("Selective retry — only retry transient errors, fail fast on permanen
         }
         return Pipeline.fail(new TestError({ message: "permanent" }));
       })
-      .bind(storage)
-      .runSafe({ workflowId: "when-mixed-1", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "when-mixed-1",
+      input: "x",
+    });
 
     expect(error).not.toBeNull();
     // Attempts 1,2: RetryableError → workflow retries
@@ -957,9 +1050,10 @@ describe("Selective retry — only retry transient errors, fail fast on permanen
 describe("Attempt tracking — steps know which try they are on for backoff decisions", () => {
   it("step-level retry increments the attempt counter each time", async () => {
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     const attempts: number[] = [];
 
-    const { data } = await workflow<string>({ name: "attempt-step" })
+    const wf = workflow<string>({ name: "attempt-step" })
       .step(
         "flaky",
         (ctx) => {
@@ -973,8 +1067,13 @@ describe("Attempt tracking — steps know which try they are on for backoff deci
           retry: { maxRetries: 5 },
         },
       )
-      .bind(storage)
-      .runSafe({ workflowId: "attempt-step-1", input: "x" });
+      .build();
+
+    const { data } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "attempt-step-1",
+      input: "x",
+    });
 
     expect(data).toBe("ok");
     expect(attempts).toEqual([1, 2, 3]);
@@ -982,10 +1081,11 @@ describe("Attempt tracking — steps know which try they are on for backoff deci
 
   it("attempt counter keeps incrementing across workflow retries — no reset", async () => {
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     const attempts: number[] = [];
     let totalCalls = 0;
 
-    const { data } = await workflow<string>({
+    const wf = workflow<string>({
       name: "attempt-wf",
       retry: { maxRetries: 2, baseDelayMs: 10 },
     })
@@ -998,8 +1098,9 @@ describe("Attempt tracking — steps know which try they are on for backoff deci
         }
         return Pipeline.succeed("done");
       })
-      .bind(storage)
-      .runSafe({ workflowId: "attempt-wf-1", input: "x" });
+      .build();
+
+    const { data } = await runner.runSafe({ workflow: wf, workflowId: "attempt-wf-1", input: "x" });
 
     expect(data).toBe("done");
     // Attempt 1 (workflow attempt 1), attempt 2 (workflow attempt 2), attempt 3 (workflow attempt 3)
@@ -1008,9 +1109,10 @@ describe("Attempt tracking — steps know which try they are on for backoff deci
 
   it("combined step and workflow retries — monotonically increasing attempt numbers", async () => {
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     const attempts: number[] = [];
 
-    const { error } = await workflow<string>({
+    const wf = workflow<string>({
       name: "attempt-combined",
       retry: { maxRetries: 1, baseDelayMs: 10 },
     })
@@ -1025,8 +1127,13 @@ describe("Attempt tracking — steps know which try they are on for backoff deci
           retry: { maxRetries: 1 },
         },
       )
-      .bind(storage)
-      .runSafe({ workflowId: "attempt-combined-1", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "attempt-combined-1",
+      input: "x",
+    });
 
     expect(error).not.toBeNull();
     // Attempts are monotonically increasing across step + workflow retries
@@ -1047,9 +1154,10 @@ describe("Immediate rollback — undo right away without retrying the workflow",
   it("financial transaction needs instant reversal — skip workflow retries", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     let step2Calls = 0;
 
-    const { error } = await workflow<string>({
+    const wf = workflow<string>({
       name: "immediate-comp",
       retry: { maxRetries: 3, baseDelayMs: 10 }, // would retry 3x normally
       compensate: { trigger: "immediate" },
@@ -1072,8 +1180,9 @@ describe("Immediate rollback — undo right away without retrying the workflow",
         t.track(`step-2:call=${step2Calls}`);
         return Pipeline.fail(new TestError({ message: "fail" }));
       })
-      .bind(storage)
-      .runSafe({ workflowId: "immediate-1", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({ workflow: wf, workflowId: "immediate-1", input: "x" });
 
     expect(error).not.toBeNull();
     // Despite retry: { maxRetries: 3 }, immediate trigger skips workflow retries
@@ -1084,9 +1193,10 @@ describe("Immediate rollback — undo right away without retrying the workflow",
   it("step-level retries still exhaust before immediate rollback kicks in", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     let step2Calls = 0;
 
-    const { error } = await workflow<string>({
+    const wf = workflow<string>({
       name: "immediate-step-retry",
       retry: { maxRetries: 2 },
       compensate: { trigger: "immediate" },
@@ -1115,8 +1225,13 @@ describe("Immediate rollback — undo right away without retrying the workflow",
           retry: { maxRetries: 2 },
         },
       )
-      .bind(storage)
-      .runSafe({ workflowId: "immediate-step-retry-1", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "immediate-step-retry-1",
+      input: "x",
+    });
 
     expect(error).not.toBeNull();
     // Step retries: 3 calls (1 + 2 retries), then immediate compensation (no workflow retry)
@@ -1129,9 +1244,10 @@ describe("After-retries rollback (default) — exhaust all retries before compen
   it("workflow retries twice before giving up and rolling back", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     let step2Calls = 0;
 
-    const { error } = await workflow<string>({
+    const wf = workflow<string>({
       name: "after-retries-comp",
       retry: { maxRetries: 1, baseDelayMs: 10 },
       compensate: { trigger: "after-retries" },
@@ -1154,8 +1270,13 @@ describe("After-retries rollback (default) — exhaust all retries before compen
         t.track(`step-2:call=${step2Calls}`);
         return Pipeline.fail(new TestError({ message: "fail" }));
       })
-      .bind(storage)
-      .runSafe({ workflowId: "after-retries-1", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "after-retries-1",
+      input: "x",
+    });
 
     expect(error).not.toBeNull();
     // 2 workflow attempts (1 + 1 retry), then compensation
@@ -1172,9 +1293,10 @@ describe("Compensation retry — retry the rollback itself if the undo API is fl
   it("refund API fails twice then succeeds — rollback retries until it works", async () => {
     const t = tracker();
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     let compAttempts = 0;
 
-    const { error } = await workflow<string>({
+    const wf = workflow<string>({
       name: "comp-retry",
       compensate: {
         retry: { maxRetries: 2, baseDelayMs: 10 },
@@ -1191,8 +1313,13 @@ describe("Compensation retry — retry the rollback itself if the undo API is fl
         },
       })
       .step("fail", () => Pipeline.fail(new TestError({ message: "fail" })))
-      .bind(storage)
-      .runSafe({ workflowId: "comp-retry-1", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "comp-retry-1",
+      input: "x",
+    });
 
     expect(error).not.toBeNull();
     // Compensation retried 3 times (1 + 2 retries), succeeded on 3rd
@@ -1206,9 +1333,10 @@ describe("Compensation retry — retry the rollback itself if the undo API is fl
 
   it("rollback retries exhausted — failure recorded for manual intervention", async () => {
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     let report: any = null;
 
-    const { error } = await workflow<string>({
+    const wf = workflow<string>({
       name: "comp-retry-exhaust",
       compensate: {
         retry: { maxRetries: 1, baseDelayMs: 10 },
@@ -1224,8 +1352,13 @@ describe("Compensation retry — retry the rollback itself if the undo API is fl
         },
       })
       .step("fail", () => Pipeline.fail(new TestError({ message: "fail" })))
-      .bind(storage)
-      .runSafe({ workflowId: "comp-retry-exhaust-1", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "comp-retry-exhaust-1",
+      input: "x",
+    });
 
     expect(error).not.toBeNull();
     expect(report).not.toBeNull();
@@ -1236,10 +1369,11 @@ describe("Compensation retry — retry the rollback itself if the undo API is fl
 
   it("no retry by default", async () => {
     const storage = createStorage();
+    const runner = createWorkflowRunner({ storage });
     let compAttempts = 0;
     let report: any = null;
 
-    const { error } = await workflow<string>({
+    const wf = workflow<string>({
       name: "comp-no-retry",
       compensate: {
         onComplete: (params) => {
@@ -1255,8 +1389,13 @@ describe("Compensation retry — retry the rollback itself if the undo API is fl
         },
       })
       .step("fail", () => Pipeline.fail(new TestError({ message: "fail" })))
-      .bind(storage)
-      .runSafe({ workflowId: "comp-no-retry-1", input: "x" });
+      .build();
+
+    const { error } = await runner.runSafe({
+      workflow: wf,
+      workflowId: "comp-no-retry-1",
+      input: "x",
+    });
 
     expect(error).not.toBeNull();
     // Only 1 attempt — no retry

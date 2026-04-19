@@ -1,11 +1,15 @@
 import { describe, it, expect } from "bun:test";
 import { workflow } from "./durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
-import { WorkflowVersionRegistry } from "./workflow-version-registry.ts";
+import {
+  createWorkflowVersionRegistry,
+  WorkflowVersionRegistry,
+} from "./workflow-version-registry.ts";
+import { createWorkflowRunner } from "./workflow-runner.ts";
 
 describe("WorkflowVersionRegistry", () => {
   it("registers and resolves versioned workflows", () => {
-    const registry = new WorkflowVersionRegistry();
+    const registry = createWorkflowVersionRegistry();
 
     const v1 = workflow({ name: "order", version: "1" })
       .stepAsync("validate", async () => "v1-result")
@@ -25,7 +29,7 @@ describe("WorkflowVersionRegistry", () => {
   });
 
   it("throws when registering without version", () => {
-    const registry = new WorkflowVersionRegistry();
+    const registry = createWorkflowVersionRegistry();
 
     const noVersion = workflow({ name: "order" })
       .stepAsync("step", async () => "done")
@@ -36,7 +40,7 @@ describe("WorkflowVersionRegistry", () => {
 
   it("run() creates new workflow with latest version", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const registry = new WorkflowVersionRegistry({ storage });
+    const registry = createWorkflowVersionRegistry();
 
     const v1 = workflow({ name: "order", version: "1" })
       .stepAsync("step", async () => "v1")
@@ -48,7 +52,8 @@ describe("WorkflowVersionRegistry", () => {
     registry.register(v1);
     registry.register(v2);
 
-    const result = await registry.run({
+    const runner = createWorkflowRunner({ storage, registry });
+    const result = await runner.run({
       workflowId: "new-1",
       input: {},
       name: "order",
@@ -61,7 +66,7 @@ describe("WorkflowVersionRegistry", () => {
 
   it("run() resumes existing workflow with stored version", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const registry = new WorkflowVersionRegistry({ storage });
+    const registry = createWorkflowVersionRegistry();
 
     // Register v1 and v2
     let v1Calls = 0;
@@ -78,15 +83,17 @@ describe("WorkflowVersionRegistry", () => {
     registry.register(v1);
     registry.register(v2);
 
+    const runner = createWorkflowRunner({ storage, registry });
+
     // Create workflow with v1 directly
-    await v1.bind(storage).run({ workflowId: "old-1", input: {} });
+    await runner.run({ workflow: v1, workflowId: "old-1", input: {} });
     expect(v1Calls).toBe(1);
 
     // Reset for re-run test — start fresh run
     await storage.startFreshRun("old-1");
 
     // Registry.run should pick v1 for existing workflow
-    const result = await registry.run({
+    const result = await runner.run({
       workflowId: "old-1",
       input: {},
       name: "order",
@@ -97,13 +104,14 @@ describe("WorkflowVersionRegistry", () => {
 
   it("run() throws if stored version not in registry", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const registry = new WorkflowVersionRegistry({ storage });
+    const registry = createWorkflowVersionRegistry();
 
     // Create workflow with v1
     const v1 = workflow({ name: "order", version: "1" })
       .stepAsync("step", async () => "v1")
       .build();
-    await v1.bind(storage).run({ workflowId: "old-1", input: {} });
+    const seedRunner = createWorkflowRunner({ storage });
+    await seedRunner.run({ workflow: v1, workflowId: "old-1", input: {} });
     await storage.startFreshRun("old-1");
 
     // Only register v2 (v1 not registered)
@@ -112,13 +120,14 @@ describe("WorkflowVersionRegistry", () => {
       .build();
     registry.register(v2);
 
-    await expect(registry.run({ workflowId: "old-1", input: {}, name: "order" })).rejects.toThrow(
+    const runner = createWorkflowRunner({ storage, registry });
+    await expect(runner.run({ workflowId: "old-1", input: {}, name: "order" })).rejects.toThrow(
       "version",
     );
   });
 
   it("names() lists registered workflows", () => {
-    const registry = new WorkflowVersionRegistry();
+    const registry = createWorkflowVersionRegistry();
 
     registry.register(
       workflow({ name: "order", version: "1" })
@@ -136,7 +145,7 @@ describe("WorkflowVersionRegistry", () => {
 
   it("countByVersion reports in-flight workflows per version", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const registry = new WorkflowVersionRegistry();
+    const registry = createWorkflowVersionRegistry();
 
     const v1 = workflow({ name: "order", version: "1" })
       .stepAsync("step", async () => "v1")
@@ -148,11 +157,10 @@ describe("WorkflowVersionRegistry", () => {
     registry.register(v1);
     registry.register(v2);
 
-    const v1Bound = v1.bind(storage);
-    const v2Bound = v2.bind(storage);
-    await v1Bound.run({ workflowId: "v1-a", input: {} });
-    await v1Bound.run({ workflowId: "v1-b", input: {} });
-    await v2Bound.run({ workflowId: "v2-a", input: {} });
+    const runner = createWorkflowRunner({ storage });
+    await runner.run({ workflow: v1, workflowId: "v1-a", input: {} });
+    await runner.run({ workflow: v1, workflowId: "v1-b", input: {} });
+    await runner.run({ workflow: v2, workflowId: "v2-a", input: {} });
 
     const counts = await registry.countByVersion({
       name: "order",
@@ -168,7 +176,7 @@ describe("WorkflowVersionRegistry", () => {
 
   it("multiple workflow types in same registry", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const registry = new WorkflowVersionRegistry({ storage });
+    const registry = createWorkflowVersionRegistry();
 
     const order = workflow({ name: "order", version: "1" })
       .stepAsync("s", async () => "order-result")
@@ -180,8 +188,9 @@ describe("WorkflowVersionRegistry", () => {
     registry.register(order);
     registry.register(payment);
 
-    const r1 = await registry.run({ workflowId: "o1", name: "order", input: {} });
-    const r2 = await registry.run({ workflowId: "p1", name: "payment", input: {} });
+    const runner = createWorkflowRunner({ storage, registry });
+    const r1 = await runner.run({ workflowId: "o1", name: "order", input: {} });
+    const r2 = await runner.run({ workflowId: "p1", name: "payment", input: {} });
 
     expect(r1).toBe("order-result");
     expect(r2).toBe("payment-result");
@@ -190,7 +199,7 @@ describe("WorkflowVersionRegistry", () => {
 
   it("re-registering same version overwrites definition", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const registry = new WorkflowVersionRegistry({ storage });
+    const registry = createWorkflowVersionRegistry();
 
     const v1a = workflow({ name: "order", version: "1" })
       .stepAsync("s", async () => "first")
@@ -203,12 +212,13 @@ describe("WorkflowVersionRegistry", () => {
     registry.register(v1b);
 
     expect(registry.versions("order")).toEqual(["1"]); // still one version
-    const result = await registry.run({ workflowId: "r1", name: "order", input: {} });
+    const runner = createWorkflowRunner({ storage, registry });
+    const result = await runner.run({ workflowId: "r1", name: "order", input: {} });
     expect(result).toBe("replaced"); // uses the latest registration
   });
 
   it("resolve returns undefined for non-existent workflow name", () => {
-    const registry = new WorkflowVersionRegistry();
+    const registry = createWorkflowVersionRegistry();
     expect(registry.resolve("nonexistent")).toBeUndefined();
     expect(registry.resolve("nonexistent", "1")).toBeUndefined();
     expect(registry.latest("nonexistent")).toBeUndefined();
@@ -217,14 +227,15 @@ describe("WorkflowVersionRegistry", () => {
 
   it("run throws for non-existent workflow name", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const registry = new WorkflowVersionRegistry({ storage });
-    await expect(registry.run({ workflowId: "x", name: "nonexistent", input: {} })).rejects.toThrow(
+    const registry = createWorkflowVersionRegistry();
+    const runner = createWorkflowRunner({ storage, registry });
+    await expect(runner.run({ workflowId: "x", name: "nonexistent", input: {} })).rejects.toThrow(
       "No workflow",
     );
   });
 
   it("latest is always the last registered version", () => {
-    const registry = new WorkflowVersionRegistry();
+    const registry = createWorkflowVersionRegistry();
 
     registry.register(
       workflow({ name: "order", version: "3" })
@@ -248,7 +259,7 @@ describe("WorkflowVersionRegistry", () => {
 
   it("different versions can have different step structures", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const registry = new WorkflowVersionRegistry({ storage });
+    const registry = createWorkflowVersionRegistry();
 
     // v1: 2 steps
     const v1 = workflow({ name: "order", version: "1" })
@@ -266,13 +277,15 @@ describe("WorkflowVersionRegistry", () => {
     registry.register(v1);
     registry.register(v2);
 
+    const runner = createWorkflowRunner({ storage, registry });
+
     // Create a v1 workflow directly, then resume via registry
-    await v1.bind(storage).run({ workflowId: "v1-1", input: {} });
+    await runner.run({ workflow: v1, workflowId: "v1-1", input: {} });
     await storage.startFreshRun("v1-1");
-    const r1 = await registry.run({ workflowId: "v1-1", name: "order", input: {} });
+    const r1 = await runner.run({ workflowId: "v1-1", name: "order", input: {} });
 
     // New workflow gets v2
-    const r2 = await registry.run({ workflowId: "v2-1", name: "order", input: {} });
+    const r2 = await runner.run({ workflowId: "v2-1", name: "order", input: {} });
 
     expect(r1).toBe("v1-charged"); // resumed with v1 definition
     expect(r2).toBe("v2-notified"); // new, used v2
@@ -280,7 +293,7 @@ describe("WorkflowVersionRegistry", () => {
 
   it("concurrent workflows on different versions", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const registry = new WorkflowVersionRegistry({ storage });
+    const registry = createWorkflowVersionRegistry();
 
     let v1Count = 0;
     let v2Count = 0;
@@ -301,10 +314,11 @@ describe("WorkflowVersionRegistry", () => {
     registry.register(v1);
     registry.register(v2);
 
+    const runner = createWorkflowRunner({ storage, registry });
+
     // Create v1 workflows directly
-    const v1Bound = v1.bind(storage);
-    await v1Bound.run({ workflowId: "j1", input: {} });
-    await v1Bound.run({ workflowId: "j2", input: {} });
+    await runner.run({ workflow: v1, workflowId: "j1", input: {} });
+    await runner.run({ workflow: v1, workflowId: "j2", input: {} });
 
     // Fresh runs to simulate resume
     await storage.startFreshRun("j1");
@@ -312,10 +326,10 @@ describe("WorkflowVersionRegistry", () => {
 
     // Run all concurrently — j1,j2 should use v1, j3,j4 use v2 (latest)
     const results = await Promise.all([
-      registry.run({ workflowId: "j1", name: "job", input: {} }),
-      registry.run({ workflowId: "j2", name: "job", input: {} }),
-      registry.run({ workflowId: "j3", name: "job", input: {} }),
-      registry.run({ workflowId: "j4", name: "job", input: {} }),
+      runner.run({ workflowId: "j1", name: "job", input: {} }),
+      runner.run({ workflowId: "j2", name: "job", input: {} }),
+      runner.run({ workflowId: "j3", name: "job", input: {} }),
+      runner.run({ workflowId: "j4", name: "job", input: {} }),
     ]);
 
     expect(results).toEqual(["v1", "v1", "v2", "v2"]);
@@ -372,7 +386,7 @@ describe("WorkflowVersionRegistry", () => {
     it("fires onDrained when a version's in-flight count hits zero", async () => {
       const storage = new InMemoryWorkflowStorage();
       const drained: Array<[string, string]> = [];
-      const registry = new WorkflowVersionRegistry({
+      const registry = createWorkflowVersionRegistry({
         onDrained: (name, version) => {
           drained.push([name, version]);
         },
@@ -389,7 +403,8 @@ describe("WorkflowVersionRegistry", () => {
       registry.register(v2);
 
       // Create a v1 workflow and complete it (contributes to v1's completed counter).
-      await v1.bind(storage).run({ workflowId: "o1", input: {} });
+      const runner = createWorkflowRunner({ storage });
+      await runner.run({ workflow: v1, workflowId: "o1", input: {} });
 
       // Trigger the drain detection.
       await registry.countByVersion({ name: "order", storage });
@@ -400,7 +415,7 @@ describe("WorkflowVersionRegistry", () => {
 
     it("autoDeregister removes drained versions (except the latest)", async () => {
       const storage = new InMemoryWorkflowStorage();
-      const registry = new WorkflowVersionRegistry({ autoDeregister: true });
+      const registry = createWorkflowVersionRegistry({ autoDeregister: true });
 
       const v1 = workflow({ name: "order", version: "1" })
         .stepAsync("x", async () => "v1")
@@ -412,7 +427,8 @@ describe("WorkflowVersionRegistry", () => {
       registry.register(v1);
       registry.register(v2);
 
-      await v1.bind(storage).run({ workflowId: "o1", input: {} });
+      const runner = createWorkflowRunner({ storage });
+      await runner.run({ workflow: v1, workflowId: "o1", input: {} });
 
       // v1 drained (0 running), v2 has no workflows at all (also drained)
       await registry.countByVersion({ name: "order", storage });
@@ -425,7 +441,7 @@ describe("WorkflowVersionRegistry", () => {
     it("doesn't double-fire onDrained for the same version", async () => {
       const storage = new InMemoryWorkflowStorage();
       let count = 0;
-      const registry = new WorkflowVersionRegistry({
+      const registry = createWorkflowVersionRegistry({
         onDrained: () => {
           count++;
         },

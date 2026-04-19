@@ -3,6 +3,7 @@ import { Data } from "effect";
 import { Pipeline } from "@promin/core";
 import { workflow } from "./durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
+import { createWorkflowRunner } from "./workflow-runner.ts";
 
 // ---------------------------------------------------------------------------
 // Test errors
@@ -19,11 +20,13 @@ class TestError extends Data.TaggedError("TestError")<{
 describe("Step audit log — track every execution attempt for observability", () => {
   it("successful step logs timing, result, and attempt number", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    await workflow<string>({ name: "record-success" })
+    const wf = workflow<string>({ name: "record-success" })
       .step("step-1", ({ input }) => Pipeline.succeed(input.toUpperCase()))
-      .bind(storage)
-      .run({ workflowId: "rec-1", input: "hello" });
+      .build();
+
+    await runner.run({ workflow: wf, workflowId: "rec-1", input: "hello" });
 
     const attempts = await storage.loadStepAttempts("rec-1");
     expect(attempts).toHaveLength(1);
@@ -38,11 +41,13 @@ describe("Step audit log — track every execution attempt for observability", (
 
   it("failed step records the error for post-mortem analysis", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    await workflow<string>({ name: "record-fail" })
+    const wf = workflow<string>({ name: "record-fail" })
       .step("step-1", () => Pipeline.fail(new TestError({ message: "boom" })))
-      .bind(storage)
-      .runSafe({ workflowId: "rec-2", input: "x" });
+      .build();
+
+    await runner.runSafe({ workflow: wf, workflowId: "rec-2", input: "x" });
 
     const attempts = await storage.loadStepAttempts("rec-2");
     expect(attempts).toHaveLength(1);
@@ -53,9 +58,10 @@ describe("Step audit log — track every execution attempt for observability", (
 
   it("flaky step retries three times — final success is recorded", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     let calls = 0;
 
-    await workflow<string>({ name: "record-retries" })
+    const wf = workflow<string>({ name: "record-retries" })
       .step(
         "flaky",
         () => {
@@ -67,8 +73,9 @@ describe("Step audit log — track every execution attempt for observability", (
           retry: { maxRetries: 5 },
         },
       )
-      .bind(storage)
-      .run({ workflowId: "rec-3", input: "x" });
+      .build();
+
+    await runner.run({ workflow: wf, workflowId: "rec-3", input: "x" });
 
     // Only the final successful attempt is recorded via saveStepResult
     // Step-level retries happen inside Effect, only the outcome is checkpointed
@@ -79,9 +86,10 @@ describe("Step audit log — track every execution attempt for observability", (
 
   it("workflow-level retries produce separate attempt records per step", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     let calls = 0;
 
-    await workflow<string>({
+    const wf = workflow<string>({
       name: "record-wf-retries",
       retry: { maxRetries: 2, baseDelayMs: 10 },
     })
@@ -91,8 +99,9 @@ describe("Step audit log — track every execution attempt for observability", (
         if (calls < 3) return Pipeline.fail(new TestError({ message: `fail-${calls}` }));
         return Pipeline.succeed("done");
       })
-      .bind(storage)
-      .run({ workflowId: "rec-4", input: "x" });
+      .build();
+
+    await runner.run({ workflow: wf, workflowId: "rec-4", input: "x" });
 
     const allAttempts = await storage.loadStepAttempts("rec-4");
 
@@ -109,12 +118,14 @@ describe("Step audit log — track every execution attempt for observability", (
 
   it("query attempts for a single step — isolate one step's history", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    await workflow<string>({ name: "filter-step" })
+    const wf = workflow<string>({ name: "filter-step" })
       .step("a", () => Pipeline.succeed("A"))
       .step("b", () => Pipeline.succeed("B"))
-      .bind(storage)
-      .run({ workflowId: "rec-5", input: "x" });
+      .build();
+
+    await runner.run({ workflow: wf, workflowId: "rec-5", input: "x" });
 
     const all = await storage.loadStepAttempts("rec-5");
     expect(all).toHaveLength(2);
@@ -126,16 +137,18 @@ describe("Step audit log — track every execution attempt for observability", (
 
   it("all four steps in a fan-out DAG are recorded — complete execution trace", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    await workflow<string>({ name: "dag-attempts" })
+    const wf = workflow<string>({ name: "dag-attempts" })
       .step("root", ({ input }) => Pipeline.succeed(input))
       .step("left", { dependsOn: ["root"] }, () => Pipeline.succeed("L"))
       .step("right", { dependsOn: ["root"] }, () => Pipeline.succeed("R"))
       .step("join", { dependsOn: ["left", "right"] }, ({ deps }) =>
         Pipeline.succeed(`${deps.left}-${deps.right}`),
       )
-      .bind(storage)
-      .run({ workflowId: "rec-6", input: "x" });
+      .build();
+
+    await runner.run({ workflow: wf, workflowId: "rec-6", input: "x" });
 
     const all = await storage.loadStepAttempts("rec-6");
     expect(all).toHaveLength(4);
@@ -152,14 +165,16 @@ describe("Step audit log — track every execution attempt for observability", (
 describe("Compensation audit log — track rollback attempts for compliance", () => {
   it("successful rollback is recorded with timing and attempt number", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    await workflow<string>({ name: "comp-record" })
+    const wf = workflow<string>({ name: "comp-record" })
       .step("step-1", () => Pipeline.succeed("done"), {
         compensate: () => Pipeline.succeed(undefined as void),
       })
       .step("fail", () => Pipeline.fail(new TestError({ message: "boom" })))
-      .bind(storage)
-      .runSafe({ workflowId: "comp-rec-1", input: "x" });
+      .build();
+
+    await runner.runSafe({ workflow: wf, workflowId: "comp-rec-1", input: "x" });
 
     const attempts = await storage.loadStepAttempts("comp-rec-1", "step-1");
     const compAttempts = attempts.filter((a) => a.type === "compensation");
@@ -170,16 +185,18 @@ describe("Compensation audit log — track rollback attempts for compliance", ()
 
   it("failed rollback logs the error — ops can investigate manually", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    await workflow<string>({ name: "comp-fail-record" })
+    const wf = workflow<string>({ name: "comp-fail-record" })
       .step("step-1", () => Pipeline.succeed("done"), {
         compensate: () => {
           throw new Error("comp-failed");
         },
       })
       .step("fail", () => Pipeline.fail(new TestError({ message: "boom" })))
-      .bind(storage)
-      .runSafe({ workflowId: "comp-rec-2", input: "x" });
+      .build();
+
+    await runner.runSafe({ workflow: wf, workflowId: "comp-rec-2", input: "x" });
 
     const attempts = await storage.loadStepAttempts("comp-rec-2", "step-1");
     const compAttempts = attempts.filter((a) => a.type === "compensation");
@@ -190,9 +207,10 @@ describe("Compensation audit log — track rollback attempts for compliance", ()
 
   it("rollback retries produce sequential attempt records — full retry history", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     let compCalls = 0;
 
-    await workflow<string>({
+    const wf = workflow<string>({
       name: "comp-retry-record",
       compensate: {
         retry: { maxRetries: 2, baseDelayMs: 10 },
@@ -206,8 +224,9 @@ describe("Compensation audit log — track rollback attempts for compliance", ()
         },
       })
       .step("fail", () => Pipeline.fail(new TestError({ message: "boom" })))
-      .bind(storage)
-      .runSafe({ workflowId: "comp-rec-3", input: "x" });
+      .build();
+
+    await runner.runSafe({ workflow: wf, workflowId: "comp-rec-3", input: "x" });
 
     const attempts = await storage.loadStepAttempts("comp-rec-3", "step-1");
     const compAttempts = attempts.filter((a) => a.type === "compensation");
@@ -221,8 +240,9 @@ describe("Compensation audit log — track rollback attempts for compliance", ()
 
   it("execution and rollback attempts coexist — complete lifecycle audit trail", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
 
-    await workflow<string>({ name: "both-types" })
+    const wf = workflow<string>({ name: "both-types" })
       .step("step-1", () => Pipeline.succeed("ok"), {
         compensate: () => Pipeline.succeed(undefined as void),
       })
@@ -230,8 +250,9 @@ describe("Compensation audit log — track rollback attempts for compliance", ()
         compensate: () => Pipeline.succeed(undefined as void),
       })
       .step("fail", () => Pipeline.fail(new TestError({ message: "boom" })))
-      .bind(storage)
-      .runSafe({ workflowId: "comp-rec-4", input: "x" });
+      .build();
+
+    await runner.runSafe({ workflow: wf, workflowId: "comp-rec-4", input: "x" });
 
     const all = await storage.loadStepAttempts("comp-rec-4");
     const execAttempts = all.filter((a) => a.type === "execution");
@@ -273,10 +294,12 @@ describe("Graceful degradation — audit logging is optional", () => {
       // NO saveStepAttempt or loadStepAttempts
     };
 
-    const result = await workflow<number>({ name: "no-attempts" })
+    const wf = workflow<number>({ name: "no-attempts" })
       .step("double", ({ input }) => Pipeline.succeed(input * 2))
-      .bind(minimalStorage)
-      .run({ workflowId: "no-att-1", input: 5 });
+      .build();
+
+    const runner = createWorkflowRunner({ storage: minimalStorage });
+    const result = await runner.run({ workflow: wf, workflowId: "no-att-1", input: 5 });
 
     expect(result).toBe(10);
   });

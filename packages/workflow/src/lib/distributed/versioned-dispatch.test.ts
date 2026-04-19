@@ -6,6 +6,7 @@
 import { describe, it, expect } from "bun:test";
 import { Pipeline } from "@promin/core";
 import { workflow, InMemoryWorkflowStorage } from "../durable/index.ts";
+import { createWorkflowRunner } from "../durable/workflow-runner.ts";
 import { MapStepRegistry } from "./step-registry.ts";
 import { InMemoryStepQueue } from "./in-memory-step-queue.ts";
 import { createWorker } from "./worker.ts";
@@ -27,7 +28,7 @@ describe("versioned dispatch", () => {
     });
     void worker.start();
 
-    await workflow<{ id: string }>({
+    const wf = workflow<{ id: string }>({
       name: "vd-1",
       version: "2",
       dispatch: { stepQueue, remoteSteps: ["remote-step"], pollIntervalMs: 25 },
@@ -36,8 +37,9 @@ describe("versioned dispatch", () => {
       .step("remote-step", { dependsOn: ["load"] }, ({ deps }) =>
         Pipeline.succeed(`x-${deps.load}`),
       )
-      .bind(storage)
-      .run({ workflowId: "vd-1-a", input: { id: "abc" } });
+      .build();
+    const runner = createWorkflowRunner({ storage });
+    await runner.run({ workflow: wf, workflowId: "vd-1-a", input: { id: "abc" } });
 
     // After the workflow completes, inspect the completed task's stored version.
     const metrics = await stepQueue.metrics({ since: new Date(Date.now() - 60_000) });
@@ -147,6 +149,8 @@ describe("versioned dispatch", () => {
     });
     void worker.start();
 
+    const runner = createWorkflowRunner({ storage });
+
     // v1 in-flight workflow.
     const v1 = workflow<{ x: number }>({
       name: "order",
@@ -154,8 +158,12 @@ describe("versioned dispatch", () => {
       dispatch: { stepQueue, remoteSteps: ["step-a"], pollIntervalMs: 25 },
     })
       .step("step-a", ({ input }) => Pipeline.succeed(`v1-${input.x}`))
-      .bind(storage);
-    const v1Result = await v1.run({ workflowId: "v1-wf", input: { x: 10 } });
+      .build();
+    const v1Result = await runner.run({
+      workflow: v1,
+      workflowId: "v1-wf",
+      input: { x: 10 },
+    });
     expect(v1Result).toBe("A-10");
 
     // v2 fresh workflow.
@@ -165,8 +173,12 @@ describe("versioned dispatch", () => {
       dispatch: { stepQueue, remoteSteps: ["step-a"], pollIntervalMs: 25 },
     })
       .step("step-a", ({ input }) => Pipeline.succeed(`v2-${input.x}`))
-      .bind(storage);
-    const v2Result = await v2.run({ workflowId: "v2-wf", input: { x: 20 } });
+      .build();
+    const v2Result = await runner.run({
+      workflow: v2,
+      workflowId: "v2-wf",
+      input: { x: 20 },
+    });
     expect(v2Result).toBe("A-20");
 
     await worker.stop();

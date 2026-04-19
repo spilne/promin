@@ -26,7 +26,8 @@ import { Data } from "effect";
 import { Pipeline } from "@promin/core";
 import { workflow } from "./durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
-import { WorkflowVersionRegistry } from "./workflow-version-registry.ts";
+import { createWorkflowRunner } from "./workflow-runner.ts";
+import { createWorkflowVersionRegistry } from "./workflow-version-registry.ts";
 
 class BoomError extends Data.TaggedError("BoomError")<{
   readonly stepName: string;
@@ -36,6 +37,7 @@ class BoomError extends Data.TaggedError("BoomError")<{
 describe("versioning drain — compensation uses the stored version's code", () => {
   it("drain-resolved v1 fires v1's compensation, not v2's", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const v1Log: string[] = [];
     const v2Log: string[] = [];
 
@@ -49,8 +51,7 @@ describe("versioning drain — compensation uses the stored version's code", () 
       .step("ship", () =>
         Pipeline.fail(new BoomError({ stepName: "ship", message: "v1 ship failed" })),
       )
-      .build()
-      .bind(storage);
+      .build();
 
     const v2 = workflow<{ n: number }>({
       name: "pay",
@@ -67,7 +68,7 @@ describe("versioning drain — compensation uses the stored version's code", () 
       .step("ship", () =>
         Pipeline.fail(new BoomError({ stepName: "ship", message: "v2 ship failed" })),
       )
-      .bind(storage);
+      .build();
 
     // Seed a pending workflow with stored version=1 — simulates an
     // in-flight v1 run that the operator is about to resume after a
@@ -82,7 +83,11 @@ describe("versioning drain — compensation uses the stored version's code", () 
     // Drive via v2 — drain precheck sees stored version=1, delegates the
     // whole run to v1's definition. v1 runs "charge" (success), "ship"
     // (fails), then compensation unwinds in reverse.
-    const { error } = await v2.runSafe({ workflowId: "wf-drain-comp", input: { n: 5 } });
+    const { error } = await runner.runSafe({
+      workflow: v2,
+      workflowId: "wf-drain-comp",
+      input: { n: 5 },
+    });
     expect(error).not.toBeNull();
 
     // v1's compensation ran. v2's did NOT.
@@ -94,7 +99,7 @@ describe("versioning drain — compensation uses the stored version's code", () 
     const storage = new InMemoryWorkflowStorage();
     const v1Log: string[] = [];
     const v2Log: string[] = [];
-    const registry = new WorkflowVersionRegistry({ storage });
+    const registry = createWorkflowVersionRegistry();
 
     const v1 = workflow<{ n: number }>({ name: "pay", version: "1" })
       .step("charge", ({ input }) => Pipeline.succeed(input.n * 10), {
@@ -106,8 +111,7 @@ describe("versioning drain — compensation uses the stored version's code", () 
       .step("ship", () =>
         Pipeline.fail(new BoomError({ stepName: "ship", message: "v1 ship failed" })),
       )
-      .build()
-      .bind(storage);
+      .build();
 
     const v2 = workflow<{ n: number }>({ name: "pay", version: "2" })
       .step("charge", ({ input }) => Pipeline.succeed(input.n * 100), {
@@ -119,11 +123,12 @@ describe("versioning drain — compensation uses the stored version's code", () 
       .step("ship", () =>
         Pipeline.fail(new BoomError({ stepName: "ship", message: "v2 ship failed" })),
       )
-      .build()
-      .bind(storage);
+      .build();
 
     registry.register(v1);
     registry.register(v2);
+
+    const runner = createWorkflowRunner({ storage, registry });
 
     // Seed a pending v1 workflow. Registry.run() reads its stored version
     // and dispatches to v1.run(), so v1's compensation closures fire on
@@ -136,7 +141,7 @@ describe("versioning drain — compensation uses the stored version's code", () 
     });
 
     await expect(
-      registry.run({ workflowId: "wf-registry-comp", input: { n: 5 }, name: "pay" }),
+      runner.run({ workflowId: "wf-registry-comp", input: { n: 5 }, name: "pay" }),
     ).rejects.toThrow();
 
     expect(v1Log).toEqual(["v1:refund"]);
@@ -149,6 +154,7 @@ describe("versioning drain — compensation uses the stored version's code", () 
     // silently skipped compensation in both paths). Running a fresh v2
     // and asserting v2 logs rules that out.
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const v2Log: string[] = [];
 
     const v2 = workflow<{ n: number }>({ name: "pay-fresh", version: "2" })
@@ -161,10 +167,13 @@ describe("versioning drain — compensation uses the stored version's code", () 
       .step("ship", () =>
         Pipeline.fail(new BoomError({ stepName: "ship", message: "fresh v2 fail" })),
       )
-      .build()
-      .bind(storage);
+      .build();
 
-    const { error } = await v2.runSafe({ workflowId: "wf-fresh-v2", input: { n: 5 } });
+    const { error } = await runner.runSafe({
+      workflow: v2,
+      workflowId: "wf-fresh-v2",
+      input: { n: 5 },
+    });
     expect(error).not.toBeNull();
     expect(v2Log).toEqual(["v2:refund"]);
   });

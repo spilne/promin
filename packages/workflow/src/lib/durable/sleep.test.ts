@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test";
 import { Data } from "effect";
 import { Pipeline } from "@promin/core";
 import { workflow, WorkflowSuspendedError, InMemoryWorkflowStorage } from "./index.ts";
+import { createWorkflowRunner } from "./workflow-runner.ts";
 
 class TestError extends Data.TaggedError("TestError")<{
   readonly message: string;
@@ -14,9 +15,10 @@ class TestError extends Data.TaggedError("TestError")<{
 describe("Durable sleep — pause a workflow and resume it later", () => {
   it("email campaign waits 60s before sending — workflow suspends at the delay", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const log: string[] = [];
 
-    const { error } = await workflow<string>({ name: "basic-sleep" })
+    const wf = workflow<string>({ name: "basic-sleep" })
       .step("before", ({ input }) => {
         log.push("before");
         return Pipeline.succeed(input);
@@ -26,8 +28,9 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
         log.push("after");
         return Pipeline.succeed(prev);
       })
-      .bind(storage)
-      .runSafe({ workflowId: "s-1", input: "hello" });
+      .build();
+
+    const { error } = await runner.runSafe({ workflow: wf, workflowId: "s-1", input: "hello" });
 
     expect((error as WorkflowSuspendedError)._tag).toBe("WorkflowSuspendedError");
     expect((error as WorkflowSuspendedError).reason).toBe("sleep");
@@ -43,6 +46,7 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
 
   it("delay expires and workflow picks up where it left off — prior results preserved", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const log: string[] = [];
 
     const buildWf = () =>
@@ -56,10 +60,10 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
           log.push("add-100");
           return Pipeline.succeed(prev + 100);
         })
-        .bind(storage);
+        .build();
 
     // First run: suspends
-    const { error } = await buildWf().runSafe({ workflowId: "s-2", input: 5 });
+    const { error } = await runner.runSafe({ workflow: buildWf(), workflowId: "s-2", input: 5 });
     expect((error as WorkflowSuspendedError)._tag).toBe("WorkflowSuspendedError");
     expect(log).toEqual(["double"]);
 
@@ -67,7 +71,7 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
     await new Promise((r) => setTimeout(r, 10));
 
     // Resume: completes
-    await buildWf().run({ workflowId: "s-2", input: 5 });
+    await runner.run({ workflow: buildWf(), workflowId: "s-2", input: 5 });
 
     // "double" should NOT re-execute — it was checkpointed
     // But prev through sleep may be undefined (sleep doesn't pass through value)
@@ -79,6 +83,7 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
 
   it("multi-stage drip campaign — pause between each email send", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const log: string[] = [];
 
     const buildWf = () =>
@@ -97,44 +102,53 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
           log.push("step-3");
           return Pipeline.succeed("after-sleep-2");
         })
-        .bind(storage);
+        .build();
 
     // Run 1: suspends at sleep-1
-    const { error: e1 } = await buildWf().runSafe({ workflowId: "s-3", input: "start" });
+    const { error: e1 } = await runner.runSafe({
+      workflow: buildWf(),
+      workflowId: "s-3",
+      input: "start",
+    });
     expect((e1 as WorkflowSuspendedError).stepName).toBe("sleep-1");
     expect(log).toEqual(["step-1"]);
 
     await new Promise((r) => setTimeout(r, 10));
 
     // Run 2: resumes, executes step-2, suspends at sleep-2
-    const { error: e2 } = await buildWf().runSafe({ workflowId: "s-3", input: "start" });
+    const { error: e2 } = await runner.runSafe({
+      workflow: buildWf(),
+      workflowId: "s-3",
+      input: "start",
+    });
     expect((e2 as WorkflowSuspendedError).stepName).toBe("sleep-2");
     expect(log).toEqual(["step-1", "step-2"]);
 
     await new Promise((r) => setTimeout(r, 10));
 
     // Run 3: resumes, executes step-3, completes
-    const result = await buildWf().run({ workflowId: "s-3", input: "start" });
+    const result = await runner.run({ workflow: buildWf(), workflowId: "s-3", input: "start" });
     expect(result).toBe("after-sleep-2");
     expect(log).toEqual(["step-1", "step-2", "step-3"]);
   });
 
   it("already-expired sleep completes immediately — no double suspension", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
 
     const buildWf = () =>
       workflow<string>({ name: "no-re-suspend" })
         .step("before", () => Pipeline.succeed("ok"))
         .sleep("nap", 1) // 1ms
         .step("after", () => Pipeline.succeed("done"))
-        .bind(storage);
+        .build();
 
     // Suspend
-    await buildWf().runSafe({ workflowId: "s-4", input: "x" });
+    await runner.runSafe({ workflow: buildWf(), workflowId: "s-4", input: "x" });
     await new Promise((r) => setTimeout(r, 10));
 
     // Resume — should complete without re-suspending
-    const result = await buildWf().run({ workflowId: "s-4", input: "x" });
+    const result = await runner.run({ workflow: buildWf(), workflowId: "s-4", input: "x" });
     expect(result).toBe("done");
 
     // Run again — already completed, should just return
@@ -144,6 +158,7 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
 
   it("expensive API call before sleep is not repeated on resume — checkpointed", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     let step1Calls = 0;
 
     const buildWf = () =>
@@ -154,14 +169,14 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
         })
         .sleep("nap", 1)
         .step("cheap", () => Pipeline.succeed("done"))
-        .bind(storage);
+        .build();
 
-    await buildWf().runSafe({ workflowId: "s-5", input: 5 });
+    await runner.runSafe({ workflow: buildWf(), workflowId: "s-5", input: 5 });
     expect(step1Calls).toBe(1);
 
     await new Promise((r) => setTimeout(r, 10));
 
-    await buildWf().run({ workflowId: "s-5", input: 5 });
+    await runner.run({ workflow: buildWf(), workflowId: "s-5", input: 5 });
     expect(step1Calls).toBe(1); // NOT re-executed
   });
 });
@@ -173,6 +188,7 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
 describe("Sleep + compensation — rollback pre-sleep work if post-sleep step fails", () => {
   it("resource provisioned before delay, usage fails after — resource is cleaned up", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const log: string[] = [];
 
     const buildWf = () =>
@@ -195,16 +211,16 @@ describe("Sleep + compensation — rollback pre-sleep work if post-sleep step fa
           log.push("use-fails");
           return Pipeline.fail(new TestError({ message: "post-sleep failure" }));
         })
-        .bind(storage);
+        .build();
 
     // Suspend at sleep
-    await buildWf().runSafe({ workflowId: "sc-1", input: "x" });
+    await runner.runSafe({ workflow: buildWf(), workflowId: "sc-1", input: "x" });
     expect(log).toEqual(["create"]);
 
     await new Promise((r) => setTimeout(r, 10));
 
     // Resume — "use" fails → compensate "create"
-    const { error } = await buildWf().runSafe({ workflowId: "sc-1", input: "x" });
+    const { error } = await runner.runSafe({ workflow: buildWf(), workflowId: "sc-1", input: "x" });
     expect(error).not.toBeNull();
     expect(log).toContain("use-fails");
     expect(log).toContain("compensate-create(resource-1)");
@@ -218,6 +234,7 @@ describe("Sleep + compensation — rollback pre-sleep work if post-sleep step fa
 describe("Sleep + workflow retry — resume from where the workflow left off", () => {
   it("flaky step after sleep retries without re-sleeping — delay already elapsed", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const log: string[] = [];
     let step2Calls = 0;
 
@@ -239,14 +256,14 @@ describe("Sleep + workflow retry — resume from where the workflow left off", (
           }
           return Pipeline.succeed("recovered");
         })
-        .bind(storage);
+        .build();
 
     // Suspend
-    await buildWf().runSafe({ workflowId: "sr-1", input: "x" });
+    await runner.runSafe({ workflow: buildWf(), workflowId: "sr-1", input: "x" });
     await new Promise((r) => setTimeout(r, 10));
 
     // Resume — flaky fails once, workflow retries, flaky succeeds
-    const result = await buildWf().run({ workflowId: "sr-1", input: "x" });
+    const result = await runner.run({ workflow: buildWf(), workflowId: "sr-1", input: "x" });
     expect(result).toBe("recovered");
     expect(step2Calls).toBe(2);
 
@@ -262,13 +279,15 @@ describe("Sleep + workflow retry — resume from where the workflow left off", (
 describe("Long sleep durations — schedule workflows days or months in the future", () => {
   it("30-day trial expiry reminder — wake-at timestamp is accurate", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const before = Date.now();
 
-    await workflow<string>({ name: "long-sleep" })
+    const wf = workflow<string>({ name: "long-sleep" })
       .step("start", () => Pipeline.succeed("ok"))
       .sleep("30-days", 30 * 24 * 60 * 60 * 1000)
-      .bind(storage)
-      .runSafe({ workflowId: "ls-1", input: "x" });
+      .build();
+
+    await runner.runSafe({ workflow: wf, workflowId: "ls-1", input: "x" });
 
     const state = await storage.loadWorkflow("ls-1");
     const wakeAt = state?.steps["30-days"]?.wakeAt;
@@ -283,13 +302,15 @@ describe("Long sleep durations — schedule workflows days or months in the futu
 
   it("annual contract renewal in 1 year — wake-at timestamp is accurate", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
     const before = Date.now();
 
-    await workflow<string>({ name: "year-sleep" })
+    const wf = workflow<string>({ name: "year-sleep" })
       .step("start", () => Pipeline.succeed("ok"))
       .sleep("1-year", 365 * 24 * 60 * 60 * 1000)
-      .bind(storage)
-      .runSafe({ workflowId: "ls-2", input: "x" });
+      .build();
+
+    await runner.runSafe({ workflow: wf, workflowId: "ls-2", input: "x" });
 
     const state = await storage.loadWorkflow("ls-2");
     const wakeAt = state?.steps["1-year"]?.wakeAt;

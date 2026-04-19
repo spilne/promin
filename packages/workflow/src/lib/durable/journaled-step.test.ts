@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "bun:test";
 import { Pipeline } from "@promin/core";
 import { workflow } from "./durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
+import { createWorkflowRunner } from "./workflow-runner.ts";
 import {
   runJournaledStep,
   JournalNonDeterminismError,
@@ -33,7 +34,7 @@ describe("journaled step", () => {
       let createCalls = 0;
       let notifyCalls = 0;
 
-      const result = await workflow<{ user: string }>({ name: "signup" })
+      const wf = workflow<{ user: string }>({ name: "signup" })
         .step("load", ({ input }) => Pipeline.succeed(input))
         .journaled("setup", function* (ctx, prev) {
           const created = yield* ctx.activity("create", async () => {
@@ -46,8 +47,13 @@ describe("journaled step", () => {
           });
           return { user: created, greeting: notified };
         })
-        .bind(storage)
-        .run({ workflowId: "wf-happy", input: { user: "alice" } });
+        .build();
+      const runner = createWorkflowRunner({ storage });
+      const result = await runner.run({
+        workflow: wf,
+        workflowId: "wf-happy",
+        input: { user: "alice" },
+      });
 
       expect(createCalls).toBe(1);
       expect(notifyCalls).toBe(1);
@@ -78,11 +84,12 @@ describe("journaled step", () => {
       };
 
       // Seed the journal by running once through a workflow.
-      await workflow<{ msg: string }>({ name: "echo" })
+      const seedWf = workflow<{ msg: string }>({ name: "echo" })
         .step("load", ({ input }) => Pipeline.succeed(input))
         .journaled("body", body as any)
-        .bind(storage)
-        .run({ workflowId: "wf-echo", input: { msg: "hi" } });
+        .build();
+      const seedRunner = createWorkflowRunner({ storage });
+      await seedRunner.run({ workflow: seedWf, workflowId: "wf-echo", input: { msg: "hi" } });
 
       expect(callCount).toBe(1);
 
@@ -320,14 +327,15 @@ describe("journaled step", () => {
         // Intentionally NO loadJournal / appendEntry — that's what we're testing.
       };
 
+      const bareWf = workflow({ name: "nope" })
+        .journaled("boom", function* (ctx) {
+          yield* ctx.activity("x", async () => 1);
+          return "never";
+        })
+        .build();
+      const bareRunner = createWorkflowRunner({ storage: bareStorage });
       await expect(
-        workflow({ name: "nope" })
-          .journaled("boom", function* (ctx) {
-            yield* ctx.activity("x", async () => 1);
-            return "never";
-          })
-          .bind(bareStorage)
-          .run({ workflowId: "nope-1", input: undefined }),
+        bareRunner.run({ workflow: bareWf, workflowId: "nope-1", input: undefined }),
       ).rejects.toThrow(/requires a WorkflowStorage that implements ActivityJournalStorage/);
     });
   });
@@ -345,9 +353,9 @@ describe("journaled step", () => {
           const c = ctx.patched("unknown"); // not declared — silently false
           return { a, b, c, n: prev.n };
         })
-        .bind(storage);
-
-      const result = await wf.run({ workflowId: "p-1", input: { n: 42 } });
+        .build();
+      const runner = createWorkflowRunner({ storage });
+      const result = await runner.run({ workflow: wf, workflowId: "p-1", input: { n: 42 } });
       expect(result).toEqual({ a: true, b: true, c: false, n: 42 });
     });
 
@@ -356,9 +364,9 @@ describe("journaled step", () => {
         .journaled("body", function* (ctx) {
           return { patched: ctx.patched("new-pricing") };
         })
-        .bind(storage);
-
-      const result = await wf.run({ workflowId: "p-2", input: { n: 1 } });
+        .build();
+      const runner = createWorkflowRunner({ storage });
+      const result = await runner.run({ workflow: wf, workflowId: "p-2", input: { n: 1 } });
       expect(result).toEqual({ patched: false });
     });
 
@@ -370,9 +378,9 @@ describe("journaled step", () => {
         .journaled("body", function* (ctx) {
           return { version: ctx.workflowVersion };
         })
-        .bind(storage);
-
-      const result = await wf.run({ workflowId: "v-1", input: { n: 1 } });
+        .build();
+      const runner = createWorkflowRunner({ storage });
+      const result = await runner.run({ workflow: wf, workflowId: "v-1", input: { n: 1 } });
       expect(result).toEqual({ version: "3" });
     });
 
@@ -381,9 +389,9 @@ describe("journaled step", () => {
         .journaled("body", function* (ctx) {
           return { version: ctx.workflowVersion };
         })
-        .bind(storage);
-
-      const result = await wf.run({ workflowId: "v-2", input: { n: 1 } });
+        .build();
+      const runner = createWorkflowRunner({ storage });
+      const result = await runner.run({ workflow: wf, workflowId: "v-2", input: { n: 1 } });
       expect(result).toEqual({ version: undefined });
     });
 
@@ -407,10 +415,10 @@ describe("journaled step", () => {
       })
         .step("load", ({ input }) => Pipeline.succeed(input))
         .journaled("calc", body)
-        .build()
-        .bind(storage);
+        .build();
 
-      await v1.run({ workflowId: "price-v1", input: { amount: 100 } });
+      const runner = createWorkflowRunner({ storage });
+      await runner.run({ workflow: v1, workflowId: "price-v1", input: { amount: 100 } });
       expect((await storage.getWorkflow("price-v1"))?.result).toEqual({ total: 100 });
 
       const v2 = workflow<{ amount: number }>({
@@ -422,23 +430,31 @@ describe("journaled step", () => {
       })
         .step("load", ({ input }) => Pipeline.succeed(input))
         .journaled("calc", body)
-        .bind(storage);
+        .build();
 
       // Resume v1 workflow — drain delegates to v1 which has patches=[] →
       // patched returns false → takes v1 path. Already completed so reads cached.
-      const existing = await v2.run({ workflowId: "price-v1", input: { amount: 100 } });
+      const existing = await runner.run({
+        workflow: v2,
+        workflowId: "price-v1",
+        input: { amount: 100 },
+      });
       expect(existing).toEqual({ total: 100 });
 
       // Fresh workflow — uses v2 def directly, patches=["new-pricing"] →
       // patched returns true → takes v2 path.
-      const fresh = await v2.run({ workflowId: "price-v2", input: { amount: 100 } });
+      const fresh = await runner.run({
+        workflow: v2,
+        workflowId: "price-v2",
+        input: { amount: 100 },
+      });
       expect(fresh).toEqual({ total: 200 });
     });
   });
 
   describe("composition", () => {
     it("chains with .step() before and after", async () => {
-      const result = await workflow<{ n: number }>({ name: "mixed" })
+      const wf = workflow<{ n: number }>({ name: "mixed" })
         .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
         .journaled("plus-one-twice", function* (ctx, prev) {
           const a = yield* ctx.activity("a", async () => prev + 1);
@@ -446,8 +462,13 @@ describe("journaled step", () => {
           return b;
         })
         .step("stringify", ({ prev }) => Pipeline.succeed(`result: ${prev}`))
-        .bind(storage)
-        .run({ workflowId: "wf-mix", input: { n: 5 } });
+        .build();
+      const runner = createWorkflowRunner({ storage });
+      const result = await runner.run({
+        workflow: wf,
+        workflowId: "wf-mix",
+        input: { n: 5 },
+      });
 
       // 5 * 2 = 10, +1 = 11, +1 = 12 → "result: 12"
       expect(result).toBe("result: 12");
