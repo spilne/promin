@@ -1246,7 +1246,7 @@ describe("WorkflowBuilder", () => {
         .step("noop", () => Pipeline.succeed("ok"))
         .build();
       await runner.run({ workflow: wf, workflowId: "wf-release", input: {} });
-      expect(await storage.tryLock("wf-release", 60_000)).toBe(true);
+      expect((await storage.tryLock("wf-release", 60_000)).acquired).toBe(true);
     });
 
     it("releases lock on failure", async () => {
@@ -1256,7 +1256,7 @@ describe("WorkflowBuilder", () => {
         .step("boom", () => Pipeline.fail(new FetchError({ message: "fail" })))
         .build();
       await runner.runSafe({ workflow: wf, workflowId: "wf-fail-release", input: {} });
-      expect(await storage.tryLock("wf-fail-release", 60_000)).toBe(true);
+      expect((await storage.tryLock("wf-fail-release", 60_000)).acquired).toBe(true);
     });
   });
 
@@ -1722,29 +1722,29 @@ describe("InMemoryWorkflowStorage", () => {
 
   it("lock prevents double acquisition", async () => {
     const storage = new InMemoryWorkflowStorage();
-    expect(await storage.tryLock("l1", 60_000)).toBe(true);
-    expect(await storage.tryLock("l1", 60_000)).toBe(false);
+    expect((await storage.tryLock("l1", 60_000)).acquired).toBe(true);
+    expect((await storage.tryLock("l1", 60_000)).acquired).toBe(false);
   });
 
   it("lock can be released and re-acquired", async () => {
     const storage = new InMemoryWorkflowStorage();
     await storage.tryLock("l2", 60_000);
     await storage.releaseLock("l2");
-    expect(await storage.tryLock("l2", 60_000)).toBe(true);
+    expect((await storage.tryLock("l2", 60_000)).acquired).toBe(true);
   });
 
   it("expired lock can be re-acquired", async () => {
     const storage = new InMemoryWorkflowStorage();
     await storage.tryLock("l3", 1);
     await new Promise((r) => setTimeout(r, 10));
-    expect(await storage.tryLock("l3", 60_000)).toBe(true);
+    expect((await storage.tryLock("l3", 60_000)).acquired).toBe(true);
   });
 
   it("heartbeat extends the lock", async () => {
     const storage = new InMemoryWorkflowStorage();
-    await storage.tryLock("l4", 1);
-    await storage.heartbeat("l4", 60_000);
-    expect(await storage.tryLock("l4", 60_000)).toBe(false);
+    const { token } = await storage.tryLock("l4", 1);
+    await storage.heartbeat("l4", 60_000, token ? { fenceToken: token } : undefined);
+    expect((await storage.tryLock("l4", 60_000)).acquired).toBe(false);
   });
 
   it("clear removes all data", async () => {

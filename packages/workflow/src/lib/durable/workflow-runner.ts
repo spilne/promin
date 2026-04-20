@@ -22,7 +22,7 @@ import type {
   WorkflowStatusInfo,
 } from "./durable-pipeline.ts";
 import type { WorkflowHooks, IdempotencyConfig } from "./durable-pipeline.ts";
-import { isStepAttemptStorage, type WorkflowStorage } from "./workflow-storage.ts";
+import { isStepAttemptStorage, type WorkflowStorage, type FenceGuard } from "./workflow-storage.ts";
 import { computeReadySet, type DagNode } from "./workflow-dag.ts";
 import type { FailedWorkflowRecord, WorkflowState } from "./workflow-state.ts";
 import {
@@ -519,7 +519,8 @@ export async function runWorkflowOrchestration(
     storage: ctx.storage,
     workflowId,
     options: { lockDurationMs: DEFAULT_LOCK_DURATION_MS },
-    fn: async () => {
+    fn: async ({ fenceToken }) => {
+      const guard = fenceToken ? { fenceToken } : undefined;
       // 2. Load or create workflow state
       let state = await ctx.storage.loadWorkflow(workflowId);
 
@@ -597,6 +598,7 @@ export async function runWorkflowOrchestration(
         hooks: ctx.hooks,
         timeoutMs: ctx.timeoutMs,
         dispatch: ctx.dispatch,
+        guard,
       };
 
       for (let workflowAttempt = 0; workflowAttempt <= maxWorkflowRetries; workflowAttempt++) {
@@ -619,7 +621,7 @@ export async function runWorkflowOrchestration(
         if (dagResult.success) {
           // 5. Complete workflow
           const finalResult = dagResult.result;
-          await ctx.storage.completeWorkflow(workflowId, finalResult);
+          await ctx.storage.completeWorkflow(workflowId, finalResult, guard);
           await ctx.hooks?.onWorkflowComplete?.({
             workflowId,
             result: finalResult,
@@ -657,6 +659,7 @@ export async function runWorkflowOrchestration(
         workflowId,
         input,
         dagNodes,
+        guard,
       });
 
       // Fire workflow-level onComplete callback
@@ -681,7 +684,7 @@ export async function runWorkflowOrchestration(
       // Fail the workflow
       const errorMsg =
         lastStepError instanceof globalThis.Error ? lastStepError.message : String(lastStepError);
-      await ctx.storage.failWorkflow(workflowId, errorMsg);
+      await ctx.storage.failWorkflow(workflowId, errorMsg, guard);
       await ctx.hooks?.onWorkflowFailure?.({
         workflowId,
         error: errorMsg,
@@ -719,6 +722,15 @@ export interface DagExecutionContext {
   readonly hooks?: WorkflowHooks;
   readonly timeoutMs?: number;
   readonly dispatch?: DispatchConfig;
+  /**
+   * Fence guard for mutating writes. Captured by the orchestration loop
+   * after `tryLock` and threaded into every `saveStepResult` /
+   * `saveStepFailure` / `saveStepAttempt` call so a stale holder that
+   * wakes up past lock expiry is rejected by the backend. `undefined`
+   * on backends without fencing or when the caller is running a
+   * sub-DAG outside a lock.
+   */
+  readonly guard?: FenceGuard;
 }
 
 /**
@@ -1006,26 +1018,32 @@ export async function executeWorkflowDag(
       const errorMsg =
         stepError instanceof globalThis.Error ? stepError.message : String(stepError);
       const failStartedAt = new Date();
-      await ctx.storage.saveStepFailure({
-        workflowId,
-        stepName,
-        error: errorMsg,
-        durationMs: 0,
-        startedAt: failStartedAt,
-        metadata: stepMetadata.get(stepName),
-      });
-      if (isStepAttemptStorage(ctx.storage)) {
-        await ctx.storage.saveStepAttempt({
+      await ctx.storage.saveStepFailure(
+        {
           workflowId,
           stepName,
-          attempt: params.stepAttempts.get(stepName) ?? 1,
-          type: "execution",
-          status: "failed",
           error: errorMsg,
           durationMs: 0,
           startedAt: failStartedAt,
-          completedAt: new Date(),
-        });
+          metadata: stepMetadata.get(stepName),
+        },
+        ctx.guard,
+      );
+      if (isStepAttemptStorage(ctx.storage)) {
+        await ctx.storage.saveStepAttempt(
+          {
+            workflowId,
+            stepName,
+            attempt: params.stepAttempts.get(stepName) ?? 1,
+            type: "execution",
+            status: "failed",
+            error: errorMsg,
+            durationMs: 0,
+            startedAt: failStartedAt,
+            completedAt: new Date(),
+          },
+          ctx.guard,
+        );
       }
       await ctx.hooks?.onStepFailure?.({
         workflowId,
@@ -1047,26 +1065,32 @@ export async function executeWorkflowDag(
       const wasSkipped = "skipped" in stepResult && stepResult.skipped === true;
       const stepDef = ctx.steps.find((s) => s.name === name);
       const decoded = stepDef ? stepDef.codec.decode(result) : result;
-      await ctx.storage.saveStepResult({
-        workflowId,
-        stepName: name,
-        result,
-        metadata,
-        durationMs,
-        startedAt,
-      });
-      if (isStepAttemptStorage(ctx.storage)) {
-        await ctx.storage.saveStepAttempt({
+      await ctx.storage.saveStepResult(
+        {
           workflowId,
           stepName: name,
-          attempt: params.stepAttempts.get(name) ?? 1,
-          type: "execution",
-          status: "completed",
           result,
+          metadata,
           durationMs,
           startedAt,
-          completedAt: new Date(),
-        });
+        },
+        ctx.guard,
+      );
+      if (isStepAttemptStorage(ctx.storage)) {
+        await ctx.storage.saveStepAttempt(
+          {
+            workflowId,
+            stepName: name,
+            attempt: params.stepAttempts.get(name) ?? 1,
+            type: "execution",
+            status: "completed",
+            result,
+            durationMs,
+            startedAt,
+            completedAt: new Date(),
+          },
+          ctx.guard,
+        );
       }
       if (!wasSkipped) {
         await ctx.hooks?.onStepComplete?.({
@@ -1135,11 +1159,13 @@ export async function compensateWorkflow(params: {
   workflowId: string;
   input: unknown;
   dagNodes: DagNode[];
+  /** Optional fence guard — threaded to `saveStepAttempt` writes so a stale holder's compensation rows are rejected. */
+  guard?: FenceGuard;
 }): Promise<{
   compensated: string[];
   failed: { stepName: string; error: unknown }[];
 }> {
-  const { storage, steps, compensateConfig, workflowId, input } = params;
+  const { storage, steps, compensateConfig, workflowId, input, guard } = params;
   const compensated: string[] = [];
   const failed: { stepName: string; error: unknown }[] = [];
 
@@ -1180,31 +1206,37 @@ export async function compensateWorkflow(params: {
         }
         compensated.push(stepDef.name);
         if (recordsAttempts) {
-          await (storage as any).saveStepAttempt({
-            workflowId,
-            stepName: stepDef.name,
-            attempt: attempt + 1,
-            type: "compensation",
-            status: "completed",
-            durationMs: Date.now() - compStartedAt.getTime(),
-            startedAt: compStartedAt,
-            completedAt: new Date(),
-          });
+          await (storage as any).saveStepAttempt(
+            {
+              workflowId,
+              stepName: stepDef.name,
+              attempt: attempt + 1,
+              type: "compensation",
+              status: "completed",
+              durationMs: Date.now() - compStartedAt.getTime(),
+              startedAt: compStartedAt,
+              completedAt: new Date(),
+            },
+            guard,
+          );
         }
         break;
       } catch (err) {
         if (recordsAttempts) {
-          await (storage as any).saveStepAttempt({
-            workflowId,
-            stepName: stepDef.name,
-            attempt: attempt + 1,
-            type: "compensation",
-            status: "failed",
-            error: err instanceof Error ? err.message : String(err),
-            durationMs: Date.now() - compStartedAt.getTime(),
-            startedAt: compStartedAt,
-            completedAt: new Date(),
-          });
+          await (storage as any).saveStepAttempt(
+            {
+              workflowId,
+              stepName: stepDef.name,
+              attempt: attempt + 1,
+              type: "compensation",
+              status: "failed",
+              error: err instanceof Error ? err.message : String(err),
+              durationMs: Date.now() - compStartedAt.getTime(),
+              startedAt: compStartedAt,
+              completedAt: new Date(),
+            },
+            guard,
+          );
         }
         if (attempt === maxCompRetries) {
           failed.push({ stepName: stepDef.name, error: err });

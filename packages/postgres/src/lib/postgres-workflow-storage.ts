@@ -627,15 +627,23 @@ export class PostgresWorkflowStorage
     }));
   }
 
-  async tryLock(workflowId: string, lockDurationMs: number): Promise<boolean> {
-    if (this.config.useAdvisoryLocks) return this.tryAdvisoryLock(workflowId);
-    return this.tryRowLock(workflowId, lockDurationMs);
+  async tryLock(
+    workflowId: string,
+    lockDurationMs: number,
+  ): Promise<{ acquired: boolean; token?: string }> {
+    // NOTE: fence token support lands with the Postgres schema migration
+    // in a follow-up commit. Today the backend still uses the
+    // `lockedBy = instanceId` check on writes; no token returned.
+    const acquired = this.config.useAdvisoryLocks
+      ? await this.tryAdvisoryLock(workflowId)
+      : await this.tryRowLock(workflowId, lockDurationMs);
+    return { acquired };
   }
 
   async tryLockAndLoad(
     workflowId: string,
     lockDurationMs: number,
-  ): Promise<{ locked: boolean; state: WorkflowState | null }> {
+  ): Promise<{ locked: boolean; token?: string; state: WorkflowState | null }> {
     // Sequences lock + load in the same connection — inexpensive locally,
     // collapses two HTTP round-trips when this storage is fronted by the
     // workflow-remote RPC. Wrapping in a transaction ensures the load sees
@@ -644,9 +652,9 @@ export class PostgresWorkflowStorage
     // loadWorkflow go through the same connection and see a consistent
     // snapshot — good enough for the "are we joining an in-flight run?"
     // question the coordinator actually asks.
-    const locked = await this.tryLock(workflowId, lockDurationMs);
+    const { acquired, token } = await this.tryLock(workflowId, lockDurationMs);
     const state = await this.loadWorkflow(workflowId);
-    return { locked, state };
+    return { locked: acquired, token, state };
   }
 
   async releaseLock(workflowId: string): Promise<void> {

@@ -10,6 +10,32 @@ import type {
   StepAttemptRecord,
 } from "./workflow-state.ts";
 
+/**
+ * Opaque monotonic token handed back by `tryLock` / `tryLockAndLoad` and
+ * passed to every subsequent mutating call for the same workflow. Backends
+ * validate that the token matches the current lock holder (or is higher
+ * than the last-observed one, depending on monotonicity) before accepting
+ * the write. Protects against the classic split-brain window: worker A's
+ * lock expires while it's mid-step, worker B acquires a fresh lock, then
+ * worker A wakes up and tries to commit stale state.
+ *
+ * A string (rather than number) so backends can choose their own monotonic
+ * source — Postgres bigserial ("42"), a UUID+counter composite, a redis
+ * INCR result, etc. Clients treat the value as opaque.
+ */
+export type FenceToken = string;
+
+/**
+ * Optional fencing field carried on every mutating write. When the backend
+ * supports fencing AND the caller holds a token, the write is rejected
+ * if the token doesn't match the current lock. When the backend doesn't
+ * support fencing (or the caller doesn't pass a token), the write is
+ * accepted — keeping legacy call sites working during migration.
+ */
+export interface FenceGuard {
+  readonly fenceToken?: FenceToken;
+}
+
 export interface WorkflowStorage {
   /** Load the full workflow state. Returns null if workflow doesn't exist. */
   loadWorkflow(workflowId: string): Promise<WorkflowState | null>;
@@ -26,7 +52,11 @@ export interface WorkflowStorage {
   }): Promise<WorkflowState[]>;
 
   /** Cancel a running or suspended workflow. With cascade, also cancels children. */
-  cancelWorkflow(workflowId: string, options?: { cascade?: boolean }): Promise<void>;
+  cancelWorkflow(
+    workflowId: string,
+    options?: { cascade?: boolean },
+    guard?: FenceGuard,
+  ): Promise<void>;
 
   /** Create a new workflow record. Returns `{ created: false, existing }` on conflict. */
   createWorkflow(params: {
@@ -41,20 +71,23 @@ export interface WorkflowStorage {
   }): Promise<{ created: true } | { created: false; existing: WorkflowState }>;
 
   /** Save a completed step result. */
-  saveStepResult(params: {
-    workflowId: string;
-    stepName: string;
-    result: unknown;
-    durationMs: number;
-    startedAt: Date;
-    /**
-     * Step-kind-specific audit data (e.g. `.match()` writes the chosen
-     * case). Stored verbatim on the step row. Omitted / `undefined` for
-     * steps that don't produce audit data, which must round-trip as
-     * `undefined` on load — not an empty object.
-     */
-    metadata?: Record<string, unknown>;
-  }): Promise<void>;
+  saveStepResult(
+    params: {
+      workflowId: string;
+      stepName: string;
+      result: unknown;
+      durationMs: number;
+      startedAt: Date;
+      /**
+       * Step-kind-specific audit data (e.g. `.match()` writes the chosen
+       * case). Stored verbatim on the step row. Omitted / `undefined` for
+       * steps that don't produce audit data, which must round-trip as
+       * `undefined` on load — not an empty object.
+       */
+      metadata?: Record<string, unknown>;
+    },
+    guard?: FenceGuard,
+  ): Promise<void>;
 
   /**
    * Save many step results in a single round trip. Exists for the HTTP /
@@ -85,50 +118,61 @@ export interface WorkflowStorage {
       startedAt: Date;
       metadata?: Record<string, unknown>;
     }>,
+    guard?: FenceGuard,
   ): Promise<void>;
 
   /** Mark a step as failed. */
-  saveStepFailure(params: {
-    workflowId: string;
-    stepName: string;
-    error: string;
-    durationMs: number;
-    startedAt: Date;
-    /**
-     * Step-kind-specific audit data set before the step ran. Preserved on
-     * the failure row so ops can still see "which case fired" when a
-     * `.match()` branch threw.
-     */
-    metadata?: Record<string, unknown>;
-  }): Promise<void>;
+  saveStepFailure(
+    params: {
+      workflowId: string;
+      stepName: string;
+      error: string;
+      durationMs: number;
+      startedAt: Date;
+      /**
+       * Step-kind-specific audit data set before the step ran. Preserved on
+       * the failure row so ops can still see "which case fired" when a
+       * `.match()` branch threw.
+       */
+      metadata?: Record<string, unknown>;
+    },
+    guard?: FenceGuard,
+  ): Promise<void>;
 
   /** Save a completed task result within a map step. */
-  saveTaskResult(params: {
-    workflowId: string;
-    stepName: string;
-    taskIndex: number;
-    result: unknown;
-  }): Promise<void>;
+  saveTaskResult(
+    params: {
+      workflowId: string;
+      stepName: string;
+      taskIndex: number;
+      result: unknown;
+    },
+    guard?: FenceGuard,
+  ): Promise<void>;
 
   /** Mark a task within a map step as failed. */
-  saveTaskFailure(params: {
-    workflowId: string;
-    stepName: string;
-    taskIndex: number;
-    error: string;
-  }): Promise<void>;
+  saveTaskFailure(
+    params: {
+      workflowId: string;
+      stepName: string;
+      taskIndex: number;
+      error: string;
+    },
+    guard?: FenceGuard,
+  ): Promise<void>;
 
   /** Mark the entire workflow as completed. */
-  completeWorkflow(workflowId: string, result: unknown): Promise<void>;
+  completeWorkflow(workflowId: string, result: unknown, guard?: FenceGuard): Promise<void>;
 
   /** Mark the entire workflow as failed. */
-  failWorkflow(workflowId: string, error: string): Promise<void>;
+  failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void>;
 
   /** Suspend the workflow (sleeping or waiting for signal). */
   suspendWorkflow(
     workflowId: string,
     stepName: string,
     stepUpdate: Record<string, unknown>,
+    guard?: FenceGuard,
   ): Promise<void>;
 
   /** Deliver a signal to a workflow. */
@@ -137,8 +181,17 @@ export interface WorkflowStorage {
   /** Load signals delivered to a workflow. */
   loadSignals(workflowId: string): Promise<SignalState[]>;
 
-  /** Acquire a lock on a workflow. Returns false if already locked. */
-  tryLock(workflowId: string, lockDurationMs: number): Promise<boolean>;
+  /**
+   * Acquire a lock on a workflow. On success returns `{ acquired: true,
+   * token }` — hand the token to every subsequent mutating call so the
+   * backend can reject stale writes after the lock expires + someone else
+   * picks it up. Backends that don't support fencing omit the `token`
+   * (callers treat that as "no fencing", same as passing no token).
+   */
+  tryLock(
+    workflowId: string,
+    lockDurationMs: number,
+  ): Promise<{ acquired: boolean; token?: FenceToken }>;
 
   /**
    * Acquire the lock AND load the current workflow state in one round trip.
@@ -152,10 +205,12 @@ export interface WorkflowStorage {
    *
    * Return contract:
    * - `locked: true`  — caller holds the lock; `state` is the current
-   *   state or null if the workflow record doesn't exist yet.
+   *   state or null if the workflow record doesn't exist yet; `token` is
+   *   the fence token to pass to subsequent writes (omitted on backends
+   *   without fencing support).
    * - `locked: false` — someone else holds the lock; `state` is still
    *   returned for diagnostic use (idempotency joins, "already running"
-   *   branches), or null if absent.
+   *   branches), or null if absent; `token` is always absent.
    *
    * Default is provided via `tryLockAndLoadDefault` — custom storages
    * that can't do an atomic read-lock can point this at it and still
@@ -164,13 +219,21 @@ export interface WorkflowStorage {
   tryLockAndLoad(
     workflowId: string,
     lockDurationMs: number,
-  ): Promise<{ locked: boolean; state: WorkflowState | null }>;
+  ): Promise<{ locked: boolean; token?: FenceToken; state: WorkflowState | null }>;
 
-  /** Release a workflow lock. */
-  releaseLock(workflowId: string): Promise<void>;
+  /**
+   * Release a workflow lock. When fencing is in play, only the token
+   * holder releases — a stale holder whose lock already expired silently
+   * no-ops. Callers usually pass the token they got from `tryLock`.
+   */
+  releaseLock(workflowId: string, guard?: FenceGuard): Promise<void>;
 
-  /** Heartbeat to extend a lock (for long-running steps). */
-  heartbeat(workflowId: string, lockDurationMs: number): Promise<void>;
+  /**
+   * Heartbeat to extend a lock (for long-running steps). When fencing is
+   * in play, only the token holder can extend — stale holders silently
+   * no-op and their lock expires on schedule.
+   */
+  heartbeat(workflowId: string, lockDurationMs: number, guard?: FenceGuard): Promise<void>;
 
   /**
    * Reset a completed workflow for a fresh re-execution.
@@ -216,10 +279,14 @@ export async function tryLockAndLoadDefault(
   storage: Pick<WorkflowStorage, "tryLock" | "loadWorkflow">,
   workflowId: string,
   lockDurationMs: number,
-): Promise<{ locked: boolean; state: import("./workflow-state.ts").WorkflowState | null }> {
-  const locked = await storage.tryLock(workflowId, lockDurationMs);
+): Promise<{
+  locked: boolean;
+  token?: FenceToken;
+  state: import("./workflow-state.ts").WorkflowState | null;
+}> {
+  const { acquired, token } = await storage.tryLock(workflowId, lockDurationMs);
   const state = await storage.loadWorkflow(workflowId);
-  return { locked, state };
+  return { locked: acquired, token, state };
 }
 
 /**
@@ -239,9 +306,10 @@ export async function batchSaveStepResultsDefault(
     startedAt: Date;
     metadata?: Record<string, unknown>;
   }>,
+  guard?: FenceGuard,
 ): Promise<void> {
   for (const r of records) {
-    await storage.saveStepResult(r);
+    await storage.saveStepResult(r, guard);
   }
 }
 
@@ -258,7 +326,7 @@ export async function batchSaveStepResultsDefault(
  */
 export interface StepAttemptStorage {
   /** Append a step attempt record (execution or compensation). */
-  saveStepAttempt(record: StepAttemptRecord): Promise<void>;
+  saveStepAttempt(record: StepAttemptRecord, guard?: FenceGuard): Promise<void>;
 
   /** Load attempt history for a workflow, optionally filtered by step name. */
   loadStepAttempts(workflowId: string, stepName?: string): Promise<StepAttemptRecord[]>;

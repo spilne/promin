@@ -26,6 +26,22 @@ export class WorkflowLockError extends Data.TaggedError("WorkflowLockError")<{
   readonly message: string;
 }> {}
 
+/**
+ * A mutating call carried a fence token that doesn't match the current
+ * lock holder. Thrown when a stale worker (whose lock expired + was picked
+ * up by someone else) tries to commit state after the fact.
+ *
+ * Expected during normal operation when clocks skew or a step runs long
+ * enough to miss its heartbeat; the orchestration should abandon the
+ * write and exit — the new holder re-drives the workflow from storage.
+ */
+export class FenceTokenMismatchError extends Data.TaggedError("FenceTokenMismatchError")<{
+  readonly workflowId: string;
+  readonly expected: string;
+  readonly provided: string;
+  readonly message: string;
+}> {}
+
 /** Workflow is suspended (sleeping or waiting for signal). Not a failure — expected state. */
 export class WorkflowSuspendedError extends Data.TaggedError("WorkflowSuspendedError")<{
   readonly workflowId: string;

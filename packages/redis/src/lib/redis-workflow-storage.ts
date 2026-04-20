@@ -957,7 +957,13 @@ export class RedisWorkflowStorage
 
   // -- Locking --------------------------------------------------------------
 
-  async tryLock(workflowId: string, lockDurationMs: number): Promise<boolean> {
+  async tryLock(
+    workflowId: string,
+    lockDurationMs: number,
+  ): Promise<{ acquired: boolean; token?: string }> {
+    // NOTE: fence token support lands with the Lua-script rewrite in a
+    // follow-up commit. Today the backend still uses the instance-id
+    // RELEASE_LOCK_LUA guard on writes; no token returned.
     const result = await this.redis.set(
       this.lockKey(workflowId),
       this.instanceId,
@@ -965,13 +971,13 @@ export class RedisWorkflowStorage
       "PX",
       lockDurationMs,
     );
-    return !!result;
+    return { acquired: !!result };
   }
 
   async tryLockAndLoad(
     workflowId: string,
     lockDurationMs: number,
-  ): Promise<{ locked: boolean; state: WorkflowState | null }> {
+  ): Promise<{ locked: boolean; token?: string; state: WorkflowState | null }> {
     // Sequenced — a Lua script could do this in one round trip, but
     // `loadWorkflow` reads from several keys (wf hash, steps hash,
     // signals hash, per-run history) that don't fit neatly in a single
@@ -979,9 +985,9 @@ export class RedisWorkflowStorage
     // The real win — collapsing two HTTP round-trips to one — is
     // already captured at the workflow-remote RPC layer (one POST
     // carries the whole tryLockAndLoad call).
-    const locked = await this.tryLock(workflowId, lockDurationMs);
+    const { acquired, token } = await this.tryLock(workflowId, lockDurationMs);
     const state = await this.loadWorkflow(workflowId);
-    return { locked, state };
+    return { locked: acquired, token, state };
   }
 
   async releaseLock(workflowId: string): Promise<void> {

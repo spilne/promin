@@ -296,9 +296,10 @@ describe("journaled step", () => {
       // because a pure `Workflow` has no storage to check against — it
       // only gets one through `.bind(storage)`.
       const bareStorage: any = {
-        tryLock: async () => true,
+        tryLock: async () => ({ acquired: true }),
         renewLock: async () => true,
         releaseLock: async () => {},
+        heartbeat: async () => {},
         createWorkflow: async () => ({ created: true }),
         loadWorkflow: async () => ({
           workflowId: "nope-1",

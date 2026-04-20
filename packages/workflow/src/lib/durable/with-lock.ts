@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// withLock — workflow lock acquisition with automatic heartbeat
+// withLock — workflow lock acquisition with automatic heartbeat + fencing
 // ---------------------------------------------------------------------------
 //
 // Why this exists:
@@ -11,10 +11,15 @@
 //
 // How it works:
 //
-//   1. tryLock() — acquire the lock (or throw WorkflowLockError)
-//   2. setInterval — background heartbeat extends the lock every 10s
-//   3. fn() — execute the workflow steps
-//   4. finally — clear heartbeat timer, release the lock
+//   1. tryLock() — acquire the lock (or throw WorkflowLockError). The
+//      returned fence token is handed to `fn` via `ctx.fenceToken` and
+//      threaded to every subsequent mutating call, so a stale holder
+//      that wakes up after its lock expired can't corrupt fresh state.
+//   2. setInterval — background heartbeat extends the lock every 10s,
+//      carrying the fence token so only the current holder can extend.
+//   3. fn(ctx) — execute the workflow steps, passing `ctx.fenceToken`
+//      down into every storage mutation.
+//   4. finally — clear heartbeat timer, release the lock (fenced).
 //
 // The heartbeat runs independently of the main execution. If a heartbeat
 // call fails (e.g. storage is temporarily unavailable), it is silently
@@ -28,7 +33,7 @@
 //   - Advisory locks (Postgres): heartbeat is a no-op (see storage impl)
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage } from "./workflow-storage.ts";
+import type { FenceToken, WorkflowStorage } from "./workflow-storage.ts";
 import { WorkflowLockError } from "./durable-pipeline-error.ts";
 
 /** Heartbeat every 10s by default */
@@ -42,6 +47,17 @@ export interface WithLockOptions {
   heartbeatIntervalMs?: number;
   /** How long to extend the lock on each heartbeat (ms). Default: 30_000 */
   lockDurationMs?: number;
+}
+
+/** Context passed to `withLock`'s callback. */
+export interface LockContext {
+  /**
+   * Fence token for the lock this callback holds, if the backend supports
+   * fencing. Thread into every mutating call (`storage.saveStepResult(..., { fenceToken })`)
+   * so a stale holder that wakes up after its lock expired is rejected.
+   * `undefined` when the backend doesn't issue tokens.
+   */
+  readonly fenceToken?: FenceToken;
 }
 
 /**
@@ -58,9 +74,10 @@ export interface WithLockOptions {
  * const result = await withLock({
  *   storage,
  *   workflowId: "order-123",
- *   fn: async () => {
- *     // steps execute here — lock stays alive via heartbeat
- *     return await executeSteps();
+ *   fn: async ({ fenceToken }) => {
+ *     // storage mutations carry { fenceToken } so a stale holder that
+ *     // wakes up after the lock expired is rejected by the backend.
+ *     return await executeSteps(fenceToken);
  *   },
  * });
  * ```
@@ -68,33 +85,35 @@ export interface WithLockOptions {
 export async function withLock<T>(params: {
   storage: WorkflowStorage;
   workflowId: string;
-  fn: () => Promise<T>;
+  fn: (ctx: LockContext) => Promise<T>;
   options?: WithLockOptions;
 }): Promise<T> {
   const { storage, workflowId, fn } = params;
   const heartbeatMs = params.options?.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   const lockDurationMs = params.options?.lockDurationMs ?? DEFAULT_LOCK_EXTENSION_MS;
 
-  const locked = await storage.tryLock(workflowId, lockDurationMs);
-  if (!locked) {
+  const { acquired, token } = await storage.tryLock(workflowId, lockDurationMs);
+  if (!acquired) {
     throw new WorkflowLockError({
       workflowId,
       message: `Could not acquire lock on workflow "${workflowId}" — already running`,
     });
   }
 
+  const guard = token ? { fenceToken: token } : undefined;
+
   const heartbeatTimer = setInterval(async () => {
     try {
-      await storage.heartbeat(workflowId, lockDurationMs);
+      await storage.heartbeat(workflowId, lockDurationMs, guard);
     } catch {
       // Heartbeat failure is swallowed — lock expires naturally
     }
   }, heartbeatMs);
 
   try {
-    return await fn();
+    return await fn({ fenceToken: token });
   } finally {
     clearInterval(heartbeatTimer);
-    await storage.releaseLock(workflowId);
+    await storage.releaseLock(workflowId, guard);
   }
 }

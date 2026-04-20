@@ -12,7 +12,12 @@
 // cannot interleave.
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage, StepAttemptStorage } from "./workflow-storage.ts";
+import type {
+  WorkflowStorage,
+  StepAttemptStorage,
+  FenceGuard,
+  FenceToken,
+} from "./workflow-storage.ts";
 import type {
   ActivityJournalStorage,
   JournaledSuspendStorage,
@@ -27,6 +32,7 @@ import type {
   SignalState,
   StepAttemptRecord,
 } from "./workflow-state.ts";
+import { FenceTokenMismatchError } from "./durable-pipeline-error.ts";
 
 /** Mutable internal workflow state — avoids spread-copy on every mutation. */
 interface MutableWorkflow {
@@ -53,7 +59,18 @@ export class InMemoryWorkflowStorage
   implements WorkflowStorage, StepAttemptStorage, ActivityJournalStorage, JournaledSuspendStorage
 {
   private workflows = new Map<string, MutableWorkflow>();
-  private locks = new Map<string, { expiresAt: number; lockedBy: string }>(); // workflowId → lock info
+  /**
+   * Workflow locks. `token` is the fence stamp handed back by `tryLock`
+   * and required by every subsequent mutating call — guards against a
+   * stale holder that woke up past lock expiry.
+   */
+  private locks = new Map<string, { expiresAt: number; lockedBy: string; token: FenceToken }>();
+  /**
+   * Monotonic fence-token counter. Each successful `tryLock` bumps it so
+   * the token a new holder gets is strictly greater than any prior one,
+   * even when a stale holder's entry was already cleared from `locks`.
+   */
+  private nextFenceToken = 1;
   private readonly instanceId: string;
   private signals = new Map<string, SignalState[]>();
   private attempts = new Map<string, StepAttemptRecord[]>();
@@ -131,7 +148,12 @@ export class InMemoryWorkflowStorage
     return results;
   }
 
-  async cancelWorkflow(workflowId: string, options?: { cascade?: boolean }): Promise<void> {
+  async cancelWorkflow(
+    workflowId: string,
+    options?: { cascade?: boolean },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    this.checkFence(workflowId, guard);
     const wf = this.workflows.get(workflowId);
     if (!wf) return;
     if (wf.status !== "pending" && wf.status !== "running" && wf.status !== "suspended") return;
@@ -191,14 +213,18 @@ export class InMemoryWorkflowStorage
     }
   }
 
-  async saveStepResult(params: {
-    workflowId: string;
-    stepName: string;
-    result: unknown;
-    durationMs: number;
-    startedAt: Date;
-    metadata?: Record<string, unknown>;
-  }): Promise<void> {
+  async saveStepResult(
+    params: {
+      workflowId: string;
+      stepName: string;
+      result: unknown;
+      durationMs: number;
+      startedAt: Date;
+      metadata?: Record<string, unknown>;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    this.checkFence(params.workflowId, guard);
     const wf = this.workflows.get(params.workflowId);
     if (!wf) return;
     this.markRunning(wf);
@@ -231,22 +257,27 @@ export class InMemoryWorkflowStorage
       startedAt: Date;
       metadata?: Record<string, unknown>;
     }>,
+    guard?: FenceGuard,
   ): Promise<void> {
     // In-memory doesn't have a "batch" primitive to exploit — the loop-over-
     // single-writes form is already O(n) with no round-trip amplification.
     // Kept explicit (rather than delegating to the default helper) so the
     // conformance suite's batch tests cover the actual method body here.
-    for (const r of records) await this.saveStepResult(r);
+    for (const r of records) await this.saveStepResult(r, guard);
   }
 
-  async saveStepFailure(params: {
-    workflowId: string;
-    stepName: string;
-    error: string;
-    durationMs: number;
-    startedAt: Date;
-    metadata?: Record<string, unknown>;
-  }): Promise<void> {
+  async saveStepFailure(
+    params: {
+      workflowId: string;
+      stepName: string;
+      error: string;
+      durationMs: number;
+      startedAt: Date;
+      metadata?: Record<string, unknown>;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    this.checkFence(params.workflowId, guard);
     const wf = this.workflows.get(params.workflowId);
     if (!wf) return;
     this.markRunning(wf);
@@ -270,12 +301,16 @@ export class InMemoryWorkflowStorage
     wf.updatedAt = now;
   }
 
-  async saveTaskResult(params: {
-    workflowId: string;
-    stepName: string;
-    taskIndex: number;
-    result: unknown;
-  }): Promise<void> {
+  async saveTaskResult(
+    params: {
+      workflowId: string;
+      stepName: string;
+      taskIndex: number;
+      result: unknown;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    this.checkFence(params.workflowId, guard);
     const wf = this.workflows.get(params.workflowId);
     if (!wf) return;
 
@@ -310,12 +345,16 @@ export class InMemoryWorkflowStorage
     wf.updatedAt = now;
   }
 
-  async saveTaskFailure(params: {
-    workflowId: string;
-    stepName: string;
-    taskIndex: number;
-    error: string;
-  }): Promise<void> {
+  async saveTaskFailure(
+    params: {
+      workflowId: string;
+      stepName: string;
+      taskIndex: number;
+      error: string;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    this.checkFence(params.workflowId, guard);
     const wf = this.workflows.get(params.workflowId);
     if (!wf) return;
 
@@ -350,7 +389,8 @@ export class InMemoryWorkflowStorage
     wf.updatedAt = now;
   }
 
-  async completeWorkflow(workflowId: string, result: unknown): Promise<void> {
+  async completeWorkflow(workflowId: string, result: unknown, guard?: FenceGuard): Promise<void> {
+    this.checkFence(workflowId, guard);
     const wf = this.workflows.get(workflowId);
     if (!wf) return;
     const now = new Date();
@@ -360,7 +400,8 @@ export class InMemoryWorkflowStorage
     wf.updatedAt = now;
   }
 
-  async failWorkflow(workflowId: string, error: string): Promise<void> {
+  async failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void> {
+    this.checkFence(workflowId, guard);
     const wf = this.workflows.get(workflowId);
     if (!wf) return;
     const now = new Date();
@@ -374,7 +415,9 @@ export class InMemoryWorkflowStorage
     workflowId: string,
     stepName: string,
     stepUpdate: Record<string, unknown>,
+    guard?: FenceGuard,
   ): Promise<void> {
+    this.checkFence(workflowId, guard);
     const wf = this.workflows.get(workflowId);
     if (!wf) return;
 
@@ -403,40 +446,92 @@ export class InMemoryWorkflowStorage
     return this.signals.get(workflowId) ?? [];
   }
 
-  async tryLock(workflowId: string, lockDurationMs: number): Promise<boolean> {
+  async tryLock(
+    workflowId: string,
+    lockDurationMs: number,
+  ): Promise<{ acquired: boolean; token?: FenceToken }> {
     const lock = this.locks.get(workflowId);
     const now = Date.now();
-    if (lock !== undefined && lock.expiresAt > now) return false;
-    this.locks.set(workflowId, { expiresAt: now + lockDurationMs, lockedBy: this.instanceId });
-    return true;
+    if (lock !== undefined && lock.expiresAt > now) return { acquired: false };
+    const token = String(this.nextFenceToken++);
+    this.locks.set(workflowId, {
+      expiresAt: now + lockDurationMs,
+      lockedBy: this.instanceId,
+      token,
+    });
+    return { acquired: true, token };
   }
 
   async tryLockAndLoad(
     workflowId: string,
     lockDurationMs: number,
-  ): Promise<{ locked: boolean; state: WorkflowState | null }> {
+  ): Promise<{ locked: boolean; token?: FenceToken; state: WorkflowState | null }> {
     // Single-process storage — both operations run against the same Map,
     // so composing them is already atomic. No transaction or Lua needed.
-    const locked = await this.tryLock(workflowId, lockDurationMs);
+    const { acquired, token } = await this.tryLock(workflowId, lockDurationMs);
     const state = await this.loadWorkflow(workflowId);
-    return { locked, state };
+    return { locked: acquired, token, state };
   }
 
-  async releaseLock(workflowId: string): Promise<void> {
+  async releaseLock(workflowId: string, guard?: FenceGuard): Promise<void> {
     const lock = this.locks.get(workflowId);
-    // Only release if we own the lock (or lock doesn't exist)
-    if (lock && lock.lockedBy !== this.instanceId) return;
+    if (!lock) return;
+    // Token check when the caller holds one — silent no-op on mismatch so
+    // a stale worker's late `releaseLock` doesn't rip away a fresh holder's
+    // lease. Callers that don't pass a token fall back to the instanceId
+    // check.
+    if (guard?.fenceToken) {
+      if (lock.token !== guard.fenceToken) return;
+    } else if (lock.lockedBy !== this.instanceId) {
+      return;
+    }
     this.locks.delete(workflowId);
   }
 
-  async heartbeat(workflowId: string, lockDurationMs: number): Promise<void> {
+  async heartbeat(workflowId: string, lockDurationMs: number, guard?: FenceGuard): Promise<void> {
     const lock = this.locks.get(workflowId);
-    // Only extend if we own the lock
-    if (lock && lock.lockedBy !== this.instanceId) return;
+    if (!lock) return;
+    // Same reasoning as releaseLock — silent no-op when a stale holder
+    // tries to extend. The real holder keeps ticking.
+    if (guard?.fenceToken) {
+      if (lock.token !== guard.fenceToken) return;
+    } else if (lock.lockedBy !== this.instanceId) {
+      return;
+    }
     this.locks.set(workflowId, {
       expiresAt: Date.now() + lockDurationMs,
-      lockedBy: this.instanceId,
+      lockedBy: lock.lockedBy,
+      token: lock.token,
     });
+  }
+
+  /**
+   * Reject a mutating call when the caller's fence token doesn't match the
+   * current lock. `guard` is optional — legacy call sites that don't pass
+   * a token still succeed (fencing is additive during migration). Pass a
+   * token and back it up with a lock, or don't pass one at all.
+   */
+  private checkFence(workflowId: string, guard?: FenceGuard): void {
+    if (!guard?.fenceToken) return;
+    const lock = this.locks.get(workflowId);
+    // No lock at all — the new holder already released, or never held.
+    // Either way, the stale write must be rejected.
+    if (!lock) {
+      throw new FenceTokenMismatchError({
+        workflowId,
+        expected: "(no lock)",
+        provided: guard.fenceToken,
+        message: `Fenced write for "${workflowId}" rejected — no active lock`,
+      });
+    }
+    if (lock.token !== guard.fenceToken) {
+      throw new FenceTokenMismatchError({
+        workflowId,
+        expected: lock.token,
+        provided: guard.fenceToken,
+        message: `Fenced write for "${workflowId}" rejected — token mismatch (expected "${lock.token}", got "${guard.fenceToken}")`,
+      });
+    }
   }
 
   async startFreshRun(workflowId: string): Promise<number> {
@@ -548,7 +643,8 @@ export class InMemoryWorkflowStorage
   // StepAttemptStorage
   // ---------------------------------------------------------------------------
 
-  async saveStepAttempt(record: StepAttemptRecord): Promise<void> {
+  async saveStepAttempt(record: StepAttemptRecord, guard?: FenceGuard): Promise<void> {
+    this.checkFence(record.workflowId, guard);
     const existing = this.attempts.get(record.workflowId) ?? [];
     existing.push(record);
     this.attempts.set(record.workflowId, existing);

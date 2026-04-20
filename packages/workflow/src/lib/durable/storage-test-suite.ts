@@ -507,9 +507,9 @@ export function storageTestSuite(
     describe("locking", () => {
       it("acquires and releases a lock", async () => {
         const s = await getStorage();
-        expect(await s.tryLock("lock-1", 30_000)).toBe(true);
+        expect((await s.tryLock("lock-1", 30_000)).acquired).toBe(true);
         await s.releaseLock("lock-1");
-        expect(await s.tryLock("lock-1", 30_000)).toBe(true);
+        expect((await s.tryLock("lock-1", 30_000)).acquired).toBe(true);
         await s.releaseLock("lock-1");
       });
 
@@ -518,7 +518,7 @@ export function storageTestSuite(
         // can acquire the same lock twice. This test validates row-level locks
         // and in-memory locks where re-locking is rejected.
         const s = await getStorage();
-        const acquired = await s.tryLock("lock-2", 30_000);
+        const { acquired } = await s.tryLock("lock-2", 30_000);
         expect(acquired).toBe(true);
         // Don't assert false for double-lock — advisory locks allow it
         await s.releaseLock("lock-2");
@@ -545,6 +545,101 @@ export function storageTestSuite(
         expect(res.locked).toBe(true);
         expect(res.state).toBeNull();
         await s.releaseLock("lal-missing");
+      });
+    });
+
+    // -------------------------------------------------------------------
+    // fencing — optional; backends that don't return a token are exempt
+    // -------------------------------------------------------------------
+
+    describe("fencing", () => {
+      it("tryLock returns a token that saveStepResult accepts", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "fence-ok", workflowName: "t", input: {} });
+        const { acquired, token } = await s.tryLock("fence-ok", 30_000);
+        expect(acquired).toBe(true);
+        if (token === undefined) {
+          // Backend doesn't support fencing — conformance ends here.
+          await s.releaseLock("fence-ok");
+          return;
+        }
+        await s.saveStepResult(
+          {
+            workflowId: "fence-ok",
+            stepName: "s1",
+            result: "ok",
+            durationMs: 1,
+            startedAt: new Date(),
+          },
+          { fenceToken: token },
+        );
+        const state = await s.loadWorkflow("fence-ok");
+        expect(state?.steps["s1"]?.result).toBe("ok");
+        await s.releaseLock("fence-ok", { fenceToken: token });
+      });
+
+      it("stale-token write is rejected after the lock moves on", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "fence-stale", workflowName: "t", input: {} });
+        // A acquires → stale.
+        const { token: staleToken } = await s.tryLock("fence-stale", 1);
+        if (staleToken === undefined) return; // no fencing on this backend
+        await new Promise((r) => setTimeout(r, 10));
+        // B acquires fresh token for the same workflow.
+        const { acquired: bAcquired, token: freshToken } = await s.tryLock("fence-stale", 30_000);
+        expect(bAcquired).toBe(true);
+        expect(freshToken).not.toBe(staleToken);
+
+        // A tries to write with its stale token — must be rejected.
+        await expect(
+          s.saveStepResult(
+            {
+              workflowId: "fence-stale",
+              stepName: "stale-step",
+              result: "should-not-persist",
+              durationMs: 1,
+              startedAt: new Date(),
+            },
+            { fenceToken: staleToken },
+          ),
+        ).rejects.toMatchObject({ _tag: "FenceTokenMismatchError" });
+
+        // B's fresh write still works.
+        await s.saveStepResult(
+          {
+            workflowId: "fence-stale",
+            stepName: "fresh-step",
+            result: "kept",
+            durationMs: 1,
+            startedAt: new Date(),
+          },
+          { fenceToken: freshToken },
+        );
+        const state = await s.loadWorkflow("fence-stale");
+        expect(state?.steps["stale-step"]).toBeUndefined();
+        expect(state?.steps["fresh-step"]?.result).toBe("kept");
+        await s.releaseLock("fence-stale", { fenceToken: freshToken });
+      });
+
+      it("tryLockAndLoad round-trips the token to saveStepResult", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "fence-lal", workflowName: "t", input: {} });
+        const res = await s.tryLockAndLoad("fence-lal", 30_000);
+        expect(res.locked).toBe(true);
+        if (res.token === undefined) return; // backend without fencing
+        await s.saveStepResult(
+          {
+            workflowId: "fence-lal",
+            stepName: "s",
+            result: 1,
+            durationMs: 1,
+            startedAt: new Date(),
+          },
+          { fenceToken: res.token },
+        );
+        const state = await s.loadWorkflow("fence-lal");
+        expect(state?.steps["s"]?.result).toBe(1);
+        await s.releaseLock("fence-lal", { fenceToken: res.token });
       });
     });
 

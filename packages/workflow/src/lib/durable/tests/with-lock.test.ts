@@ -43,7 +43,7 @@ describe("withLock", () => {
       fn: async () => "ok",
     });
     // Lock should be released — can acquire again
-    expect(await storage.tryLock("wf-1", 60_000)).toBe(true);
+    expect((await storage.tryLock("wf-1", 60_000)).acquired).toBe(true);
   });
 
   it("releases lock when fn throws", async () => {
@@ -59,7 +59,7 @@ describe("withLock", () => {
       // expected
     }
     // Lock should be released
-    expect(await storage.tryLock("wf-1", 60_000)).toBe(true);
+    expect((await storage.tryLock("wf-1", 60_000)).acquired).toBe(true);
   });
 
   it("heartbeat extends lock during execution", async () => {
@@ -130,7 +130,7 @@ describe("withLock", () => {
     // instance2 tries to release — should be rejected (different owner)
     await instance2.releaseLock("wf-1");
     // Lock should still be held — instance1 can't re-acquire
-    expect(await instance1.tryLock("wf-1", 60_000)).toBe(false);
+    expect((await instance1.tryLock("wf-1", 60_000)).acquired).toBe(false);
   });
 
   it("heartbeat from wrong instance is rejected", async () => {
@@ -145,6 +145,6 @@ describe("withLock", () => {
     // Wait for original lock to expire
     await new Promise((r) => setTimeout(r, 150));
     // Lock should have expired (heartbeat from wrong instance didn't extend it)
-    expect(await instance1.tryLock("wf-1", 60_000)).toBe(true);
+    expect((await instance1.tryLock("wf-1", 60_000)).acquired).toBe(true);
   });
 });
