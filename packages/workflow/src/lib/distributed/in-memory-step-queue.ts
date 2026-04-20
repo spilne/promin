@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import type { StepQueue, StepTask, FairnessPolicy } from "./step-queue.ts";
+import { SystemClock, type Clock } from "@promin/core";
 
 type MutableTask = {
   -readonly [K in keyof StepTask]: StepTask[K];
@@ -29,9 +30,12 @@ export class InMemoryStepQueue implements StepQueue {
   private activeByKey = new Map<string, string>();
   private counter = 0;
   private readonly workerId: string;
+  /** Time source — drives createdAt/claimedAt/completedAt + metrics window. */
+  private readonly clock: Clock;
 
-  constructor(params?: { workerId?: string }) {
+  constructor(params?: { workerId?: string; clock?: Clock }) {
     this.workerId = params?.workerId ?? "in-memory";
+    this.clock = params?.clock ?? SystemClock;
   }
 
   private activeKey(namespace: string | undefined, workflowId: string, stepName: string): string {
@@ -63,7 +67,7 @@ export class InMemoryStepQueue implements StepQueue {
       prevResults: params.prevResults,
       attempt: 1,
       status: "pending",
-      createdAt: new Date(),
+      createdAt: this.clock.now(),
       version: params.version,
       namespace: params.namespace,
     });
@@ -142,7 +146,7 @@ export class InMemoryStepQueue implements StepQueue {
       if (params.filter && !params.filter({ ...task } as StepTask)) continue;
       task.status = "running";
       task.claimedBy = this.workerId;
-      task.claimedAt = new Date();
+      task.claimedAt = this.clock.now();
       claimed.push({ ...task });
     }
 
@@ -155,7 +159,7 @@ export class InMemoryStepQueue implements StepQueue {
       task.status = "completed";
       task.result = params.result;
       task.durationMs = params.durationMs;
-      task.completedAt = new Date();
+      task.completedAt = this.clock.now();
       this.activeByKey.delete(this.activeKey(task.namespace, task.workflowId, task.stepName));
     }
   }
@@ -166,14 +170,16 @@ export class InMemoryStepQueue implements StepQueue {
       task.status = "failed";
       task.error = params.error;
       task.durationMs = params.durationMs;
-      task.completedAt = new Date();
+      task.completedAt = this.clock.now();
       this.activeByKey.delete(this.activeKey(task.namespace, task.workflowId, task.stepName));
     }
   }
 
   async requeueStuck(params: { claimedBy?: string; staleTimeoutMs?: number }): Promise<number> {
     let count = 0;
-    const cutoff = params.staleTimeoutMs ? Date.now() - params.staleTimeoutMs : undefined;
+    const cutoff = params.staleTimeoutMs
+      ? this.clock.currentTimeMs() - params.staleTimeoutMs
+      : undefined;
 
     for (const task of this.tasks.values()) {
       if (task.status !== "running") continue;
@@ -201,7 +207,7 @@ export class InMemoryStepQueue implements StepQueue {
     p95ExecMs: number;
   }> {
     const sinceMs = params.since.getTime();
-    const untilMs = (params.until ?? new Date()).getTime();
+    const untilMs = (params.until ?? this.clock.now()).getTime();
     const inWindow = (d: Date | undefined): boolean =>
       d !== undefined && d.getTime() >= sinceMs && d.getTime() <= untilMs;
 

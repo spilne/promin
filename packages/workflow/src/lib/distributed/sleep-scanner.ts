@@ -12,6 +12,7 @@
 import type { WorkflowStorage } from "../durable/workflow-storage.ts";
 import type { Workflow } from "../durable/durable-pipeline.ts";
 import type { WorkflowRunner } from "../durable/workflow-runner.ts";
+import { SystemClock, type Clock } from "@promin/core";
 
 export interface SleepScannerConfig {
   /** Workflow storage to scan for expired sleeps. */
@@ -34,6 +35,13 @@ export interface SleepScannerConfig {
   onResume?: (workflowId: string) => void;
   /** Called when resumption fails. */
   onError?: (workflowId: string, error: unknown) => void;
+  /**
+   * Time source. Drives the scan-loop cadence + the `wakeAt <= now`
+   * check for expired sleeps. Default: `SystemClock`. Tests pass a
+   * `FakeClock` so `advance(ms)` both moves the wake-threshold and
+   * re-ticks the scan loop deterministically.
+   */
+  clock?: Clock;
 }
 
 export interface SleepScanner {
@@ -50,6 +58,7 @@ export class DefaultSleepScanner implements SleepScanner {
   private readonly resolveWorkflow: SleepScannerConfig["resolveWorkflow"];
   private readonly onResume?: SleepScannerConfig["onResume"];
   private readonly onError?: SleepScannerConfig["onError"];
+  private readonly clock: Clock;
   private running = false;
 
   constructor(config: SleepScannerConfig) {
@@ -59,13 +68,14 @@ export class DefaultSleepScanner implements SleepScanner {
     this.resolveWorkflow = config.resolveWorkflow;
     this.onResume = config.onResume;
     this.onError = config.onError;
+    this.clock = config.clock ?? SystemClock;
   }
 
   async start(): Promise<void> {
     this.running = true;
     while (this.running) {
       await this.scan();
-      await new Promise((r) => setTimeout(r, this.scanIntervalMs));
+      await new Promise<void>((r) => this.clock.setTimeout(() => r(), this.scanIntervalMs));
     }
   }
 
@@ -74,7 +84,7 @@ export class DefaultSleepScanner implements SleepScanner {
   }
 
   private async scan(): Promise<void> {
-    const now = new Date();
+    const now = this.clock.now();
     let offset = 0;
     const pageSize = 100;
 
