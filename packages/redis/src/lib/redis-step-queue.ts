@@ -17,6 +17,7 @@
 
 import type { StepQueue, StepTask, FairnessPolicy } from "@promin/workflow";
 import type { RedisClient } from "./redis-client.ts";
+import { SystemClock, type Clock } from "@promin/core";
 
 // -- Lua scripts -------------------------------------------------------------
 
@@ -132,16 +133,20 @@ return results
 export class RedisStepQueue implements StepQueue {
   private readonly prefix: string;
   private readonly workerId: string;
+  private readonly clock: Clock;
 
   constructor(
     private readonly redis: RedisClient,
     config?: {
       prefix?: string;
       workerId?: string;
+      /** Time source for client-side timestamps. Default: `SystemClock`. */
+      clock?: Clock;
     },
   ) {
     this.prefix = config?.prefix ?? "sq";
     this.workerId = config?.workerId ?? crypto.randomUUID();
+    this.clock = config?.clock ?? SystemClock;
   }
 
   // -- Key helpers -----------------------------------------------------------
@@ -195,7 +200,7 @@ export class RedisStepQueue implements StepQueue {
       JSON.stringify(params.input),
       JSON.stringify(params.prevResults),
       JSON.stringify(needs),
-      new Date().toISOString(),
+      this.clock.now().toISOString(),
       params.version ?? "",
     )) as string;
     return id;
@@ -221,7 +226,7 @@ export class RedisStepQueue implements StepQueue {
       this.pendingKey,
       this.runningKey(),
       this.workerId,
-      new Date().toISOString(),
+      this.clock.now().toISOString(),
       String(limit),
       this.prefix,
       JSON.stringify(caps),
@@ -262,7 +267,7 @@ export class RedisStepQueue implements StepQueue {
       status: "completed",
       result: JSON.stringify(params.result),
       durationMs: String(params.durationMs),
-      completedAt: new Date().toISOString(),
+      completedAt: this.clock.now().toISOString(),
     });
     await this.redis.srem(this.runningKey(), params.taskId);
     if (hash?.workflowId && hash.stepName) {
@@ -276,7 +281,7 @@ export class RedisStepQueue implements StepQueue {
       status: "failed",
       error: params.error,
       durationMs: String(params.durationMs),
-      completedAt: new Date().toISOString(),
+      completedAt: this.clock.now().toISOString(),
     });
     await this.redis.srem(this.runningKey(), params.taskId);
     if (hash?.workflowId && hash.stepName) {
@@ -295,7 +300,7 @@ export class RedisStepQueue implements StepQueue {
       if (params.claimedBy && raw.claimedBy !== params.claimedBy) continue;
       if (params.staleTimeoutMs && raw.claimedAt) {
         const claimedAt = new Date(raw.claimedAt).getTime();
-        if (Date.now() - claimedAt < params.staleTimeoutMs) continue;
+        if (this.clock.currentTimeMs() - claimedAt < params.staleTimeoutMs) continue;
       }
 
       const priority = parseInt(raw.priority ?? "5", 10);
@@ -325,7 +330,7 @@ export class RedisStepQueue implements StepQueue {
     // use indexed time queries). The SCAN cursor cap keeps the work
     // bounded per call.
     const sinceMs = params.since.getTime();
-    const untilMs = (params.until ?? new Date()).getTime();
+    const untilMs = (params.until ?? this.clock.now()).getTime();
     const inWindow = (raw: string | undefined): boolean => {
       if (!raw) return false;
       const t = new Date(raw).getTime();
@@ -397,7 +402,7 @@ export class RedisStepQueue implements StepQueue {
       prevResults: map.prevResults ? JSON.parse(map.prevResults) : {},
       attempt: parseInt(map.attempt ?? "1", 10),
       status: "running" as const,
-      createdAt: new Date(map.createdAt ?? Date.now()),
+      createdAt: new Date(map.createdAt ?? this.clock.currentTimeMs()),
       version: map.version,
     };
   }

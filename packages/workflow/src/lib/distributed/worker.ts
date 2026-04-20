@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------
 
 import { Pipeline, type TaggedError } from "@promin/core";
+import { SystemClock, type Clock, type TimerHandle } from "@promin/core";
 import type { WorkflowStorage } from "../durable/workflow-storage.ts";
 import { isStepAttemptStorage } from "../durable/workflow-storage.ts";
 import type { StepRegistry, StepContext, StepRegistration } from "./step-registry.ts";
@@ -76,6 +77,12 @@ export interface WorkerConfig {
    * `supportedVersions` if both are supplied.
    */
   taskFilter?: (task: StepTask) => boolean;
+  /**
+   * Time source. Drives the poll-loop cadence, heartbeat interval, step
+   * duration tracking, retry backoff, and per-attempt timestamps.
+   * Default: `SystemClock`.
+   */
+  clock?: Clock;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,9 +113,10 @@ export class DefaultWorker implements WorkflowWorker {
   private readonly heartbeatIntervalMs: number;
   private readonly workerMetadata?: Record<string, unknown>;
   private readonly claimFilter: (task: StepTask) => boolean;
+  private readonly clock: Clock;
   private running = false;
   private activeCount = 0;
-  private heartbeatTimer?: ReturnType<typeof setInterval>;
+  private heartbeatTimer?: TimerHandle;
 
   constructor(config: WorkerConfig) {
     this.workerId = config.workerId ?? crypto.randomUUID();
@@ -123,6 +131,7 @@ export class DefaultWorker implements WorkflowWorker {
     this.workerRegistry = config.workerRegistry;
     this.heartbeatIntervalMs = config.heartbeatIntervalMs ?? 5000;
     this.workerMetadata = config.metadata;
+    this.clock = config.clock ?? SystemClock;
 
     // Build the claim-time filter. Explicit `taskFilter` wins; otherwise
     // compose registry-has-handler + optional version allow-list.
@@ -153,8 +162,8 @@ export class DefaultWorker implements WorkflowWorker {
         concurrency: this.concurrency,
         metadata: this.workerMetadata,
       });
-      this.heartbeatTimer = setInterval(async () => {
-        await this.workerRegistry!.heartbeat(this.workerId);
+      this.heartbeatTimer = this.clock.setInterval(() => {
+        this.workerRegistry!.heartbeat(this.workerId).catch(() => {});
       }, this.heartbeatIntervalMs);
     }
 
@@ -174,7 +183,7 @@ export class DefaultWorker implements WorkflowWorker {
           });
         }
       }
-      await new Promise((r) => setTimeout(r, this.pollIntervalMs));
+      await new Promise<void>((r) => this.clock.setTimeout(() => r(), this.pollIntervalMs));
     }
   }
 
@@ -187,12 +196,12 @@ export class DefaultWorker implements WorkflowWorker {
     }
 
     while (this.activeCount > 0) {
-      await new Promise((r) => setTimeout(r, 100));
+      await new Promise<void>((r) => this.clock.setTimeout(() => r(), 100));
     }
 
     // Deregister and stop heartbeat
     if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer.clear();
     }
     if (this.workerRegistry) {
       await this.workerRegistry.deregister(this.workerId);
@@ -200,7 +209,7 @@ export class DefaultWorker implements WorkflowWorker {
   }
 
   private async executeTask(task: StepTask): Promise<void> {
-    const startTime = Date.now();
+    const startTime = this.clock.currentTimeMs();
     const registration = this.registry.resolve(task.stepName);
 
     if (!registration) {
@@ -224,7 +233,7 @@ export class DefaultWorker implements WorkflowWorker {
       const chain = this.buildChain(task, registration);
       const value = await chain(ctx);
 
-      const durationMs = Date.now() - startTime;
+      const durationMs = this.clock.currentTimeMs() - startTime;
 
       await this.stepQueue.complete({ taskId: task.id, result: value, durationMs });
       await this.storage.saveStepResult({
@@ -245,14 +254,14 @@ export class DefaultWorker implements WorkflowWorker {
           result: value,
           durationMs,
           startedAt: new Date(startTime),
-          completedAt: new Date(),
+          completedAt: this.clock.now(),
           workerId: this.workerId,
         });
       }
 
       await this.hooks.afterStep?.(task, value, durationMs);
     } catch (err) {
-      const durationMs = Date.now() - startTime;
+      const durationMs = this.clock.currentTimeMs() - startTime;
 
       // Apply onFailure strategy
       const strategy = registration.options?.onFailure ?? "fail";
@@ -315,7 +324,9 @@ export class DefaultWorker implements WorkflowWorker {
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
           try {
             if (attempt > 0) {
-              await new Promise((r) => setTimeout(r, baseDelayMs * Math.pow(2, attempt - 1)));
+              await new Promise<void>((r) =>
+                this.clock.setTimeout(() => r(), baseDelayMs * Math.pow(2, attempt - 1)),
+              );
             }
             return await innerBase({ ...ctx, attempt: ctx.attempt + attempt });
           } catch (err) {
@@ -335,7 +346,7 @@ export class DefaultWorker implements WorkflowWorker {
   }
 
   private async failTask(task: StepTask, error: string, startTime: number): Promise<void> {
-    const durationMs = Date.now() - startTime;
+    const durationMs = this.clock.currentTimeMs() - startTime;
 
     await this.stepQueue.fail({ taskId: task.id, error, durationMs });
     await this.storage.saveStepFailure({
@@ -356,7 +367,7 @@ export class DefaultWorker implements WorkflowWorker {
         error,
         durationMs,
         startedAt: new Date(startTime),
-        completedAt: new Date(),
+        completedAt: this.clock.now(),
         workerId: this.workerId,
       });
     }

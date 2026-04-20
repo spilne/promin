@@ -11,6 +11,7 @@ import { and, asc, eq, inArray, isNotNull, lte, sql, type SQL } from "drizzle-or
 import type { DurableScheduleConfig, SchedulerStorage } from "@promin/workflow";
 import { durableSchedules, durableScheduleTicks } from "./scheduler-schema.ts";
 import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
+import { SystemClock, type Clock } from "@promin/core";
 
 export interface PgSchedulerStorageConfig {
   db: DrizzleDb;
@@ -20,6 +21,11 @@ export interface PgSchedulerStorageConfig {
    * multiple per-namespace leaders should provide unique IDs per namespace.
    */
   leaderLockId?: number;
+  /**
+   * Time source for client-side `updatedAt` timestamps on schedule CRUD.
+   * Default: `SystemClock`. Pass a `FakeClock` for deterministic tests.
+   */
+  clock?: Clock;
 }
 
 export class PgSchedulerStorage implements SchedulerStorage {
@@ -31,10 +37,12 @@ export class PgSchedulerStorage implements SchedulerStorage {
 
   private readonly db: DrizzleDb;
   private readonly leaderLockId: number;
+  private readonly clock: Clock;
 
   constructor(config: PgSchedulerStorageConfig) {
     this.db = config.db;
     this.leaderLockId = config.leaderLockId ?? hashToInt32("wf-scheduler-leader");
+    this.clock = config.clock ?? SystemClock;
   }
 
   // -------------------------------------------------------------------------
@@ -119,7 +127,7 @@ export class PgSchedulerStorage implements SchedulerStorage {
       .set({
         lastFiredAt: firedAt,
         tickCount: sql`${durableSchedules.tickCount} + ${count}`,
-        updatedAt: new Date(),
+        updatedAt: this.clock.now(),
       })
       .where(eq(durableSchedules.id, id));
   }
@@ -127,7 +135,7 @@ export class PgSchedulerStorage implements SchedulerStorage {
   async setNextRun(id: string, nextRun: Date | null): Promise<void> {
     await this.db
       .update(durableSchedules)
-      .set({ nextRun, updatedAt: new Date() })
+      .set({ nextRun, updatedAt: this.clock.now() })
       .where(eq(durableSchedules.id, id));
   }
 
@@ -162,7 +170,7 @@ export class PgSchedulerStorage implements SchedulerStorage {
         lastFiredAt: sql`COALESCE(v.fired_at, ${durableSchedules.lastFiredAt})`,
         tickCount: sql`${durableSchedules.tickCount} + v.tick_inc`,
         nextRun: sql`v.next_run::timestamptz`,
-        updatedAt: new Date(),
+        updatedAt: this.clock.now(),
       })
       .from(sql`(VALUES ${valuesSql}) AS v(id, fired_at, tick_inc, next_run)` as any)
       .where(sql`${durableSchedules.id} = v.id`);
@@ -194,7 +202,7 @@ export class PgSchedulerStorage implements SchedulerStorage {
       .values(values)
       .onConflictDoUpdate({
         target: durableSchedules.id,
-        set: { ...values, updatedAt: new Date() },
+        set: { ...values, updatedAt: this.clock.now() },
       });
   }
 
@@ -205,7 +213,7 @@ export class PgSchedulerStorage implements SchedulerStorage {
   async setEnabled(id: string, enabled: boolean): Promise<void> {
     await this.db
       .update(durableSchedules)
-      .set({ enabled, updatedAt: new Date() })
+      .set({ enabled, updatedAt: this.clock.now() })
       .where(eq(durableSchedules.id, id));
   }
 
