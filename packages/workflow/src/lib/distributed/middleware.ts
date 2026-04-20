@@ -2,6 +2,7 @@
 // Worker middleware — composable wrappers around step execution
 // ---------------------------------------------------------------------------
 
+import { SystemClock, type Clock } from "@promin/core";
 import type { StepTask } from "./step-queue.ts";
 import type { StepContext } from "./step-registry.ts";
 
@@ -36,17 +37,20 @@ export function composeMiddleware(middleware: WorkerMiddleware[], handler: NextF
 /**
  * Timeout middleware — fails the step if it takes longer than `ms`.
  *
+ * Pass `clock` to drive the deadline off an injected `Clock` — tests can
+ * advance a `FakeClock` to trigger the timeout without a real wait.
+ *
  * @example
  * ```ts
  * createWorker({ middleware: [timeoutMiddleware(30_000)] })
  * ```
  */
-export function timeoutMiddleware(ms: number): WorkerMiddleware {
+export function timeoutMiddleware(ms: number, clock: Clock = SystemClock): WorkerMiddleware {
   return async ({ ctx, next }) => {
     return Promise.race([
       next(ctx),
       new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Step timed out after ${ms}ms`)), ms),
+        clock.setTimeout(() => reject(new Error(`Step timed out after ${ms}ms`)), ms),
       ),
     ]);
   };
@@ -64,15 +68,19 @@ export function retryMiddleware(params: {
   maxRetries: number;
   baseDelayMs?: number;
   when?: (error: unknown) => boolean;
+  /** Time source for backoff waits. Default: `SystemClock`. */
+  clock?: Clock;
 }): WorkerMiddleware {
   return async ({ ctx, next }) => {
-    const { maxRetries, baseDelayMs = 500, when } = params;
+    const { maxRetries, baseDelayMs = 500, when, clock = SystemClock } = params;
     let lastError: unknown;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         if (attempt > 0) {
-          await new Promise((r) => setTimeout(r, baseDelayMs * Math.pow(2, attempt - 1)));
+          await new Promise<void>((r) =>
+            clock.setTimeout(() => r(), baseDelayMs * Math.pow(2, attempt - 1)),
+          );
         }
         return await next(ctx);
       } catch (err) {
@@ -94,9 +102,10 @@ export function retryMiddleware(params: {
  */
 export function loggingMiddleware(
   log: (message: string, meta?: Record<string, unknown>) => void = console.log,
+  clock: Clock = SystemClock,
 ): WorkerMiddleware {
   return async ({ task, ctx, next }) => {
-    const start = Date.now();
+    const start = clock.currentTimeMs();
     log("step:start", {
       workflowId: task.workflowId,
       stepName: task.stepName,
@@ -107,7 +116,7 @@ export function loggingMiddleware(
       log("step:complete", {
         workflowId: task.workflowId,
         stepName: task.stepName,
-        durationMs: Date.now() - start,
+        durationMs: clock.currentTimeMs() - start,
       });
       return result;
     } catch (err) {
@@ -115,7 +124,7 @@ export function loggingMiddleware(
         workflowId: task.workflowId,
         stepName: task.stepName,
         error: err instanceof Error ? err.message : String(err),
-        durationMs: Date.now() - start,
+        durationMs: clock.currentTimeMs() - start,
       });
       throw err;
     }
@@ -140,9 +149,10 @@ export function metricsMiddleware(
     status: "completed" | "failed";
     durationMs: number;
   }) => void,
+  clock: Clock = SystemClock,
 ): WorkerMiddleware {
   return async ({ task, ctx, next }) => {
-    const start = Date.now();
+    const start = clock.currentTimeMs();
     try {
       const result = await next(ctx);
       record({
@@ -150,7 +160,7 @@ export function metricsMiddleware(
         stepName: task.stepName,
         needs: task.needs,
         status: "completed",
-        durationMs: Date.now() - start,
+        durationMs: clock.currentTimeMs() - start,
       });
       return result;
     } catch (err) {
@@ -159,7 +169,7 @@ export function metricsMiddleware(
         stepName: task.stepName,
         needs: task.needs,
         status: "failed",
-        durationMs: Date.now() - start,
+        durationMs: clock.currentTimeMs() - start,
       });
       throw err;
     }

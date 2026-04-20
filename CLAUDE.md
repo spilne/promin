@@ -54,6 +54,64 @@ function searchVideos(params: { query: string; order: string; videoDuration?: st
   `src/lib/durable/foo.ts`). Bench files (`*.bench.ts`) and type-fixture
   files (`*.type-fixture.ts`) stay co-located with source.
 
+### Time-sensitive code: use `Clock`, never `Date.now()` or `setTimeout`
+
+Any new subsystem that does time math — duration tracking, deadline
+checks, retry backoff, heartbeats, periodic polls, expiry windows —
+takes a `clock?: Clock` config field, defaults to `SystemClock`, and
+funnels every time read or scheduled callback through it:
+
+```ts
+import { SystemClock, type Clock } from "@promin/core";
+
+export interface FooConfig {
+  // ...
+  /** Time source. Default: `SystemClock`. Tests pass a `FakeClock`. */
+  clock?: Clock;
+}
+
+export class Foo {
+  private readonly clock: Clock;
+  constructor(config: FooConfig) {
+    this.clock = config.clock ?? SystemClock;
+  }
+
+  async run() {
+    const start = this.clock.currentTimeMs();  // NOT Date.now()
+    await something();
+    const duration = this.clock.currentTimeMs() - start;
+
+    // Interval + timeout go through the clock too so FakeClock.advance(ms)
+    // can drive them deterministically in tests.
+    const handle = this.clock.setInterval(() => tick(), 1_000);
+    await new Promise<void>((r) => this.clock.setTimeout(() => r(), 500));
+    handle.clear();
+  }
+}
+```
+
+Tests swap in `FakeClock` and call `clock.advance(ms)` to both move time
+and fire any due callbacks, synchronously:
+
+```ts
+import { FakeClock } from "@promin/core";
+
+const clock = FakeClock.create(0);
+const foo = new Foo({ clock });
+const done = foo.run();
+
+// Hand off a microtask so async internals reach their scheduled callbacks.
+await Promise.resolve();
+clock.advance(500);
+await done;
+```
+
+When time sensitivity crosses a client/server boundary (e.g. Postgres
+`created_at` vs app-side `until`), prefer letting the server clock decide
+— embed `NOW()` directly in the SQL rather than binding a client-side
+`new Date()` that can skew by a few ms. See `PgStepQueue.metrics` for
+the pattern.
+
 ## Running Typecheck
 
 Use nx to run typecheck (this is what CI does):
