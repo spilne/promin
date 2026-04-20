@@ -291,7 +291,12 @@ export class PgStepQueue implements StepQueue {
     // postgres-js refuses to bind Date directly against an untyped
     // parameter; pass ISO strings and let Postgres cast via ::timestamptz.
     const since = params.since.toISOString();
-    const until = (params.until ?? new Date()).toISOString();
+    // When caller omits `until`, default a couple of seconds in the future.
+    // The app-side `new Date()` can be behind the DB-side `created_at` of a
+    // row that was just inserted (tiny clock skew in CI environments); the
+    // buffer keeps the BETWEEN filter from dropping rows that genuinely
+    // exist at call time.
+    const until = (params.until ?? new Date(Date.now() + 5_000)).toISOString();
     // Status uses the column that defines membership-in-window: createdAt
     // for pending, claimedAt for running, completedAt for terminal. A
     // single window-aware query per status keeps Postgres-side work minimal.
