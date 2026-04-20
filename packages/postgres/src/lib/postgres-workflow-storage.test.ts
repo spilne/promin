@@ -270,9 +270,9 @@ postgresDescribe("PostgresWorkflowStorage", { migrate }, (pg) => {
 
   describe("locking", () => {
     it("acquires and releases a lock", async () => {
-      expect(await storage.tryLock("lock-1", 30_000)).toBe(true);
+      expect((await storage.tryLock("lock-1", 30_000)).acquired).toBe(true);
       await storage.releaseLock("lock-1");
-      expect(await storage.tryLock("lock-1", 30_000)).toBe(true);
+      expect((await storage.tryLock("lock-1", 30_000)).acquired).toBe(true);
       await storage.releaseLock("lock-1");
     });
   });
