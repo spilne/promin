@@ -8,8 +8,8 @@
 import { Effect, Stream, Duration, Schedule } from "effect";
 import { Cron } from "croner";
 import { RRule } from "rrule";
-import { StreamPipeline, JsonCodec } from "@promin/core";
-import type { Codec } from "@promin/core";
+import { StreamPipeline, JsonCodec, SystemClock } from "@promin/core";
+import type { Codec, Clock } from "@promin/core";
 import type { Scheduler } from "./scheduler.ts";
 import type { DurableScheduleConfig, ScheduleConfig, ScheduleTick } from "./types.ts";
 import type { SchedulerStorage } from "./scheduler-storage.ts";
@@ -42,6 +42,12 @@ export interface DurableSchedulerConfig {
    * happens in the scheduler shell so any storage backend works without changes.
    */
   partition?: { index: number; count: number };
+  /**
+   * Time source. Drives nextRun seeding, due-computation cursor advances,
+   * leader-lock acquisition timestamps, jitter `firedAt`, and the poll-
+   * loop tick cadence. Default: `SystemClock`.
+   */
+  clock?: Clock;
 }
 
 /**
@@ -62,6 +68,7 @@ export class DurableScheduler implements Scheduler {
   private readonly namespace?: string;
   private readonly batchSize: number;
   private readonly partition?: { index: number; count: number };
+  private readonly clock: Clock;
 
   constructor(config: DurableSchedulerConfig) {
     this.storage = config.storage;
@@ -70,6 +77,7 @@ export class DurableScheduler implements Scheduler {
     this.leaderLockTtlMs = config.leaderLockTtlMs ?? this.pollIntervalMs * 3;
     this.namespace = config.namespace;
     this.batchSize = config.batchSize ?? 100;
+    this.clock = config.clock ?? SystemClock;
     if (config.partition) {
       if (
         config.partition.count < 1 ||
@@ -103,7 +111,7 @@ export class DurableScheduler implements Scheduler {
     await this.storage.upsertSchedule(stored);
 
     // Seed nextRun = now so the first poll picks it up immediately.
-    await this.storage.setNextRun(config.id, new Date());
+    await this.storage.setNextRun(config.id, this.clock.now());
   }
 
   /**
@@ -195,7 +203,7 @@ export class DurableScheduler implements Scheduler {
     if (config.cron) {
       const cron = new Cron(config.cron, { timezone: config.timezone ?? "UTC" });
       const times: Date[] = [];
-      let cursor = new Date();
+      let cursor = this.clock.now();
       for (let i = 0; i < count; i++) {
         const next = cron.nextRun(cursor);
         if (!next) break;
@@ -206,7 +214,7 @@ export class DurableScheduler implements Scheduler {
     }
     if (config.rrule) {
       const rule = RRule.fromString(config.rrule);
-      const now = new Date();
+      const now = this.clock.now();
       const occurrences = rule.between(
         now,
         new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000),
@@ -222,7 +230,7 @@ export class DurableScheduler implements Scheduler {
     const config = await this.storage.loadSchedule(scheduleId);
     if (!config) return null;
     const state = await this.storage.loadScheduleState(scheduleId);
-    const now = new Date();
+    const now = this.clock.now();
     const tickNumber = state?.tickCount ?? 0;
     const tick: ScheduleTick = {
       scheduleId,
@@ -251,7 +259,7 @@ export class DurableScheduler implements Scheduler {
 
     const ticks: ScheduleTick[] = [];
     for (const scheduledAt of occurrences) {
-      const now = new Date();
+      const now = this.clock.now();
       ticks.push({
         scheduleId,
         scheduleName: config.name,
@@ -283,7 +291,7 @@ export class DurableScheduler implements Scheduler {
         if (!isLeader) return [] as ScheduleTick[];
 
         const dueIds = await self.storage.findDue({
-          now: new Date(),
+          now: this.clock.now(),
           limit: self.batchSize,
           namespace: self.namespace,
         });
@@ -392,8 +400,9 @@ export function computeDueTicks(
   config: DurableScheduleConfig,
   lastFired: Date | null,
   tickCount: number,
+  clock: Clock = SystemClock,
 ): ScheduleTick[] {
-  const now = new Date();
+  const now = clock.now();
   if (config.startAt && now < config.startAt) return [];
   if (config.endAt && now > config.endAt) return [];
 
@@ -485,21 +494,25 @@ function makeTick(
   scheduledAt: Date,
   jitterMs: number,
   tickNumber: number,
+  clock: Clock = SystemClock,
 ): ScheduleTick {
   const jitter = jitterMs > 0 ? Math.random() * jitterMs : 0;
   return {
     scheduleId: config.id,
     scheduleName: config.name,
     scheduledAt,
-    firedAt: new Date(Date.now() + jitter),
+    firedAt: new Date(clock.currentTimeMs() + jitter),
     tickNumber,
     metadata: config.metadata,
   };
 }
 
 /** Compute the next time a schedule will fire — used to update the due index. */
-export function computeNextRun(config: DurableScheduleConfig): Date | null {
-  const now = new Date();
+export function computeNextRun(
+  config: DurableScheduleConfig,
+  clock: Clock = SystemClock,
+): Date | null {
+  const now = clock.now();
   if (config.endAt && now >= config.endAt) return null;
 
   const candidate = (() => {
