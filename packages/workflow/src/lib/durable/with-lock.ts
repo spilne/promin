@@ -35,6 +35,7 @@
 
 import type { FenceToken, WorkflowStorage } from "./workflow-storage.ts";
 import { WorkflowLockError } from "./durable-pipeline-error.ts";
+import { SystemClock, type Clock } from "@promin/core";
 
 /**
  * Heartbeat every 30s by default. The previous 10s cadence amplified into
@@ -54,10 +55,16 @@ const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 const DEFAULT_LOCK_EXTENSION_MS = 120_000;
 
 export interface WithLockOptions {
-  /** How often to heartbeat (ms). Default: 10_000 */
+  /** How often to heartbeat (ms). Default: 30_000 */
   heartbeatIntervalMs?: number;
-  /** How long to extend the lock on each heartbeat (ms). Default: 30_000 */
+  /** How long to extend the lock on each heartbeat (ms). Default: 120_000 */
   lockDurationMs?: number;
+  /**
+   * Time source. Drives the heartbeat interval via `clock.setInterval`.
+   * Default: real system clock. Tests pass a `FakeClock` so advancing
+   * time fires heartbeats deterministically without real waits.
+   */
+  clock?: Clock;
 }
 
 /** Context passed to `withLock`'s callback. */
@@ -102,6 +109,7 @@ export async function withLock<T>(params: {
   const { storage, workflowId, fn } = params;
   const heartbeatMs = params.options?.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   const lockDurationMs = params.options?.lockDurationMs ?? DEFAULT_LOCK_EXTENSION_MS;
+  const clock = params.options?.clock ?? SystemClock;
 
   const { acquired, token } = await storage.tryLock(workflowId, lockDurationMs);
   if (!acquired) {
@@ -113,18 +121,16 @@ export async function withLock<T>(params: {
 
   const guard = token ? { fenceToken: token } : undefined;
 
-  const heartbeatTimer = setInterval(async () => {
-    try {
-      await storage.heartbeat(workflowId, lockDurationMs, guard);
-    } catch {
-      // Heartbeat failure is swallowed — lock expires naturally
-    }
+  const heartbeatHandle = clock.setInterval(() => {
+    storage.heartbeat(workflowId, lockDurationMs, guard).catch(() => {
+      // Heartbeat failure is swallowed — lock expires naturally.
+    });
   }, heartbeatMs);
 
   try {
     return await fn({ fenceToken: token });
   } finally {
-    clearInterval(heartbeatTimer);
+    heartbeatHandle.clear();
     await storage.releaseLock(workflowId, guard);
   }
 }

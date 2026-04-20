@@ -12,7 +12,7 @@
 
 import { Effect } from "effect";
 import { Pipeline, type Sinkable, type TaggedError } from "@promin/core";
-import { LosslessJsonCodec } from "@promin/core";
+import { LosslessJsonCodec, SystemClock, type Clock } from "@promin/core";
 import type {
   Workflow,
   CompensateConfig,
@@ -138,6 +138,13 @@ export interface WorkflowRunnerConfig {
    * Overrides any hooks carried by the workflow's own `_definition`.
    */
   readonly hooks?: WorkflowHooks;
+  /**
+   * Time source + scheduler. Drives all orchestration-level time math —
+   * workflow deadline, step duration tracking, retry backoff, poll waits,
+   * heartbeat cadence via `withLock`. Default: real system clock. Tests
+   * pass a `FakeClock` to advance time deterministically.
+   */
+  readonly clock?: Clock;
 }
 
 /**
@@ -196,11 +203,13 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   readonly storage: WorkflowStorage;
   private readonly registry?: WorkflowVersionRegistry;
   private readonly hooks?: WorkflowHooks;
+  private readonly clock: Clock;
 
   constructor(config: WorkflowRunnerConfig) {
     this.storage = config.storage;
     this.registry = config.registry;
     this.hooks = config.hooks;
+    this.clock = config.clock ?? SystemClock;
   }
 
   async run(params: WorkflowRunnerRunParams): Promise<unknown> {
@@ -287,6 +296,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       await new Promise((r) => setTimeout(r, 0));
     }
 
+    const clock = this.clock;
     return {
       workflowId,
       status: (p) => this.getStatus(workflowId, p),
@@ -294,15 +304,15 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       result: async (p) => {
         const intervalMs = p?.intervalMs ?? 1_000;
         const timeoutMs = p?.timeoutMs ?? 60_000;
-        const deadline = Date.now() + timeoutMs;
+        const deadline = clock.currentTimeMs() + timeoutMs;
 
-        while (Date.now() < deadline) {
+        while (clock.currentTimeMs() < deadline) {
           const state = await storage.loadWorkflow(workflowId);
           if (state?.status === "completed") return state.result;
           if (state?.status === "failed") {
             throw new Error(state.error ?? `Workflow ${workflowId} failed`);
           }
-          await new Promise((r) => setTimeout(r, intervalMs));
+          await new Promise((r) => clock.setTimeout(() => r(undefined), intervalMs));
         }
         throw new Error(`Workflow ${workflowId} did not complete within ${timeoutMs}ms`);
       },
@@ -379,6 +389,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       onVersionMismatch: def.onVersionMismatch,
       previousVersions: def.previousVersions,
       hooks: this.hooks ?? def.hooks,
+      clock: this.clock,
     };
     return runWorkflowOrchestration(ctx, {
       workflowId: params.workflowId,
@@ -425,6 +436,14 @@ export interface WorkflowOrchestrationContext {
   readonly onVersionMismatch: "strict" | "drain";
   readonly previousVersions?: ReadonlyArray<Workflow<unknown, unknown>>;
   readonly hooks?: WorkflowHooks;
+  /**
+   * Time source. Drives workflow start/deadline math, idempotency TTL
+   * comparisons, step duration tracking, retry/compensation backoff sleeps,
+   * and the `withLock` heartbeat interval. Defaults to `SystemClock` when
+   * omitted — callers building contexts by hand should only override it
+   * for tests.
+   */
+  readonly clock?: Clock;
 }
 
 /** Default lock TTL. Re-declared here for the runner's own withLock call. */
@@ -452,7 +471,8 @@ export async function runWorkflowOrchestration(
   params: { workflowId: string; input: unknown; force?: boolean },
 ): Promise<unknown> {
   const { workflowId, input, force } = params;
-  const workflowStartTime = Date.now();
+  const clock = ctx.clock ?? SystemClock;
+  const workflowStartTime = clock.currentTimeMs();
   const compensateTrigger = ctx.compensateConfig?.trigger ?? "after-retries";
   const maxWorkflowRetries = compensateTrigger === "immediate" ? 0 : (ctx.retry?.maxRetries ?? 0);
   const workflowRetryDelayMs = ctx.retry?.baseDelayMs ?? 1000;
@@ -497,6 +517,7 @@ export async function runWorkflowOrchestration(
         onVersionMismatch: prevDef.onVersionMismatch,
         previousVersions: prevDef.previousVersions,
         hooks: ctx.hooks ?? prevDef.hooks,
+        clock,
       };
       return runWorkflowOrchestration(prevCtx, { workflowId, input, force });
     }
@@ -506,7 +527,7 @@ export async function runWorkflowOrchestration(
   if (idempotency) {
     const existing = await ctx.storage.loadWorkflow(workflowId);
     if (existing?.completedAt) {
-      const elapsed = Date.now() - existing.completedAt.getTime();
+      const elapsed = clock.currentTimeMs() - existing.completedAt.getTime();
       const ttl = getIdempotencyTtl(idempotency, existing.status);
       if (ttl !== undefined && elapsed < ttl) {
         if (existing.status === "completed") return existing.result;
@@ -523,7 +544,7 @@ export async function runWorkflowOrchestration(
   return withLock({
     storage: ctx.storage,
     workflowId,
-    options: { lockDurationMs: DEFAULT_LOCK_DURATION_MS },
+    options: { lockDurationMs: DEFAULT_LOCK_DURATION_MS, clock },
     fn: async ({ fenceToken }) => {
       const guard = fenceToken ? { fenceToken } : undefined;
       // 2. Load or create workflow state
@@ -531,7 +552,7 @@ export async function runWorkflowOrchestration(
 
       // Double-check idempotency after lock — prevents race
       if (idempotency && state?.completedAt) {
-        const elapsed = Date.now() - state.completedAt.getTime();
+        const elapsed = clock.currentTimeMs() - state.completedAt.getTime();
         const ttl = getIdempotencyTtl(idempotency, state.status);
         if (ttl !== undefined && elapsed < ttl) {
           if (state.status === "completed") return state.result;
@@ -604,13 +625,14 @@ export async function runWorkflowOrchestration(
         timeoutMs: ctx.timeoutMs,
         dispatch: ctx.dispatch,
         guard,
+        clock,
       };
 
       for (let workflowAttempt = 0; workflowAttempt <= maxWorkflowRetries; workflowAttempt++) {
         // On retry, wait before re-attempting
         if (workflowAttempt > 0) {
           const delay = workflowRetryDelayMs * Math.pow(2, workflowAttempt - 1);
-          await new Promise((r) => setTimeout(r, delay));
+          await new Promise((r) => clock.setTimeout(() => r(undefined), delay));
         }
 
         const dagResult = await executeWorkflowDag(dagCtx, {
@@ -630,7 +652,7 @@ export async function runWorkflowOrchestration(
           await ctx.hooks?.onWorkflowComplete?.({
             workflowId,
             result: finalResult,
-            durationMs: Date.now() - workflowStartTime,
+            durationMs: clock.currentTimeMs() - workflowStartTime,
           });
           return finalResult;
         }
@@ -665,6 +687,7 @@ export async function runWorkflowOrchestration(
         input,
         dagNodes,
         guard,
+        clock,
       });
 
       // Fire workflow-level onComplete callback
@@ -693,7 +716,7 @@ export async function runWorkflowOrchestration(
       await ctx.hooks?.onWorkflowFailure?.({
         workflowId,
         error: errorMsg,
-        durationMs: Date.now() - workflowStartTime,
+        durationMs: clock.currentTimeMs() - workflowStartTime,
       });
 
       // Publish to DLQ
@@ -705,6 +728,7 @@ export async function runWorkflowOrchestration(
           workflowName: ctx.name,
           input,
           errorMsg,
+          clock,
           compensationReport,
           metadata: ctx.metadata,
         });
@@ -736,6 +760,8 @@ export interface DagExecutionContext {
    * sub-DAG outside a lock.
    */
   readonly guard?: FenceGuard;
+  /** Time source. Drives deadline checks, step durations, dispatch poll waits. Default: `SystemClock`. */
+  readonly clock?: Clock;
 }
 
 /**
@@ -768,6 +794,7 @@ export async function executeWorkflowDag(
   { success: true; result: unknown } | { success: false; error: unknown; suspension: boolean }
 > {
   const { workflowId, input, dagNodes, state } = params;
+  const clock = ctx.clock ?? SystemClock;
   const results: Record<string, unknown> = {};
 
   // Load previously completed step results. The stored shape is always the
@@ -789,7 +816,7 @@ export async function executeWorkflowDag(
 
   while (completed.size < ctx.steps.length) {
     // Check workflow-level deadline before each batch
-    if (params.deadlineMs != null && Date.now() > params.deadlineMs) {
+    if (params.deadlineMs != null && clock.currentTimeMs() > params.deadlineMs) {
       return {
         success: false,
         error: new WorkflowDeadlineError({
@@ -850,7 +877,7 @@ export async function executeWorkflowDag(
       // Poll until the worker completes this step
       const pollMs = ctx.dispatch!.pollIntervalMs ?? 500;
       while (true) {
-        await new Promise((r) => setTimeout(r, pollMs));
+        await new Promise((r) => clock.setTimeout(() => r(undefined), pollMs));
         const currentState = await ctx.storage.loadWorkflow(workflowId);
         const stepState = currentState?.steps[name];
         if (stepState?.status === "completed") {
@@ -906,13 +933,13 @@ export async function executeWorkflowDag(
               name: stepDef.name,
               result: encoded,
               durationMs: 0,
-              startedAt: new Date(),
+              startedAt: clock.now(),
               skipped: true as const,
             });
           }
         }
 
-        const startedAt = new Date();
+        const startedAt = clock.now();
         const startTime = startedAt.getTime();
 
         // Get or initialize attempt counter for this step (persists across workflow retries)
@@ -994,7 +1021,7 @@ export async function executeWorkflowDag(
             name: stepDef.name,
             result: encoded,
             metadata: metadataRef.current,
-            durationMs: Date.now() - startTime,
+            durationMs: clock.currentTimeMs() - startTime,
             startedAt,
           };
         });
@@ -1022,7 +1049,7 @@ export async function executeWorkflowDag(
               : (ready[0] ?? "unknown");
       const errorMsg =
         stepError instanceof globalThis.Error ? stepError.message : String(stepError);
-      const failStartedAt = new Date();
+      const failStartedAt = clock.now();
       await ctx.storage.saveStepFailure(
         {
           workflowId,
@@ -1045,7 +1072,7 @@ export async function executeWorkflowDag(
             error: errorMsg,
             durationMs: 0,
             startedAt: failStartedAt,
-            completedAt: new Date(),
+            completedAt: clock.now(),
           },
           ctx.guard,
         );
@@ -1092,7 +1119,7 @@ export async function executeWorkflowDag(
             result,
             durationMs,
             startedAt,
-            completedAt: new Date(),
+            completedAt: clock.now(),
           },
           ctx.guard,
         );
@@ -1113,7 +1140,7 @@ export async function executeWorkflowDag(
     // Check workflow-level deadline after steps complete
     if (
       params.deadlineMs != null &&
-      Date.now() > params.deadlineMs &&
+      clock.currentTimeMs() > params.deadlineMs &&
       completed.size < ctx.steps.length
     ) {
       return {
@@ -1166,11 +1193,14 @@ export async function compensateWorkflow(params: {
   dagNodes: DagNode[];
   /** Optional fence guard — threaded to `saveStepAttempt` writes so a stale holder's compensation rows are rejected. */
   guard?: FenceGuard;
+  /** Time source. Drives compensation retry backoff + attempt timestamps. Default: SystemClock. */
+  clock?: Clock;
 }): Promise<{
   compensated: string[];
   failed: { stepName: string; error: unknown }[];
 }> {
   const { storage, steps, compensateConfig, workflowId, input, guard } = params;
+  const clock = params.clock ?? SystemClock;
   const compensated: string[] = [];
   const failed: { stepName: string; error: unknown }[] = [];
 
@@ -1195,10 +1225,12 @@ export async function compensateWorkflow(params: {
 
   for (const { stepDef, result } of stepsToCompensate) {
     for (let attempt = 0; attempt <= maxCompRetries; attempt++) {
-      const compStartedAt = new Date();
+      const compStartedAt = clock.now();
       try {
         if (attempt > 0) {
-          await new Promise((r) => setTimeout(r, compRetryDelayMs * Math.pow(2, attempt - 1)));
+          await new Promise((r) =>
+            clock.setTimeout(() => r(undefined), compRetryDelayMs * Math.pow(2, attempt - 1)),
+          );
         }
         const compensateResult = stepDef.compensate!({ result, input, workflowId });
         if (compensateResult instanceof Pipeline) {
@@ -1218,9 +1250,9 @@ export async function compensateWorkflow(params: {
               attempt: attempt + 1,
               type: "compensation",
               status: "completed",
-              durationMs: Date.now() - compStartedAt.getTime(),
+              durationMs: clock.currentTimeMs() - compStartedAt.getTime(),
               startedAt: compStartedAt,
-              completedAt: new Date(),
+              completedAt: clock.now(),
             },
             guard,
           );
@@ -1236,9 +1268,9 @@ export async function compensateWorkflow(params: {
               type: "compensation",
               status: "failed",
               error: err instanceof Error ? err.message : String(err),
-              durationMs: Date.now() - compStartedAt.getTime(),
+              durationMs: clock.currentTimeMs() - compStartedAt.getTime(),
               startedAt: compStartedAt,
-              completedAt: new Date(),
+              completedAt: clock.now(),
             },
             guard,
           );
@@ -1275,7 +1307,10 @@ export async function publishDlqRecord(params: {
     failed: { stepName: string; error: unknown }[];
   };
   metadata?: Record<string, unknown>;
+  /** Time source for the `failedAt` timestamp. Default: SystemClock. */
+  clock?: Clock;
 }): Promise<void> {
+  const clock = params.clock ?? SystemClock;
   try {
     const failedState = await params.storage.loadWorkflow(params.workflowId);
     await params.dlq.publish({
@@ -1283,7 +1318,7 @@ export async function publishDlqRecord(params: {
       workflowName: params.workflowName,
       input: params.input,
       error: params.errorMsg,
-      failedAt: new Date(),
+      failedAt: clock.now(),
       steps: failedState?.steps ?? {},
       compensatedSteps: params.compensationReport.compensated,
       failedCompensations: params.compensationReport.failed.map((f) => ({
