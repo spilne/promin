@@ -4,13 +4,13 @@
  * If credit fails, the debit is automatically reversed.
  */
 
-import { workflow, InMemoryWorkflowStorage } from "@promin/workflow";
+import { workflow, InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 
 const storage = new InMemoryWorkflowStorage();
+const runner = createWorkflowRunner({ storage });
 
 const transfer = workflow<{ from: string; to: string; amount: number }>({
   name: "bank-transfer",
-  storage,
   retry: { maxRetries: 2 },
   compensate: { trigger: "after-retries" },
 })
@@ -40,10 +40,12 @@ const transfer = workflow<{ from: string; to: string; amount: number }>({
   )
   .stepAsync("notify", async ({ input }) => {
     await email.send(input.from, `Transferred $${input.amount} to ${input.to}`);
-  });
+  })
+  .build();
 
 // If credit fails after retries → debit is automatically reversed
-await transfer.runSafe({
+await runner.runSafe({
+  workflow: transfer,
   workflowId: "txn-001",
   input: { from: "alice", to: "bob", amount: 100 },
 });

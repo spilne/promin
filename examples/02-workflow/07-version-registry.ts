@@ -9,16 +9,22 @@
  * based on the version stored when the workflow was created.
  */
 
-import { workflow, WorkflowVersionRegistry, InMemoryWorkflowStorage } from "@promin/workflow";
+import {
+  workflow,
+  createWorkflowVersionRegistry,
+  createWorkflowRunner,
+  InMemoryWorkflowStorage,
+} from "@promin/workflow";
 
 const storage = new InMemoryWorkflowStorage();
-const registry = new WorkflowVersionRegistry();
+const registry = createWorkflowVersionRegistry();
+const runner = createWorkflowRunner({ storage, registry });
 
 // ---------------------------------------------------------------------------
 // 1. Define v1 — the original workflow
 // ---------------------------------------------------------------------------
 
-const orderV1 = workflow({ name: "order", storage, version: "1" })
+const orderV1 = workflow({ name: "order", version: "1" })
   .stepAsync("validate", async (input: any) => {
     console.log("[v1] Validating order...");
     return { ...input, validated: true };
@@ -33,7 +39,7 @@ const orderV1 = workflow({ name: "order", storage, version: "1" })
 // 2. Define v2 — renamed "validate" to "verify", added fraud check
 // ---------------------------------------------------------------------------
 
-const orderV2 = workflow({ name: "order", storage, version: "2" })
+const orderV2 = workflow({ name: "order", version: "2" })
   .stepAsync("verify", async (input: any) => {
     console.log("[v2] Verifying order + fraud check...");
     return { ...input, verified: true, fraudScore: 0.1 };
@@ -58,7 +64,7 @@ console.log("Latest:", registry.latest("order")); // "2"
 // 4. New workflows use the latest version (v2)
 // ---------------------------------------------------------------------------
 
-const newResult = await registry.run({
+const newResult = await runner.run({
   workflowId: "order-new",
   name: "order",
   input: { items: ["Widget"] },
@@ -72,14 +78,18 @@ console.log("New order result:", newResult);
 // ---------------------------------------------------------------------------
 
 // Simulate: a v1 workflow was created before deployment, needs to resume
-await orderV1.run({ workflowId: "order-legacy", input: { items: ["Gadget"] } });
+await runner.run({
+  workflow: orderV1,
+  workflowId: "order-legacy",
+  input: { items: ["Gadget"] },
+});
 // Creates with version "1" in storage
 
 // Start a fresh run (simulating resume after crash/restart)
 await storage.startFreshRun("order-legacy");
 
 // Registry picks v1 definition for this workflow (stored version = "1")
-const legacyResult = await registry.run({
+const legacyResult = await runner.run({
   workflowId: "order-legacy",
   name: "order",
   input: { items: ["Gadget"] },

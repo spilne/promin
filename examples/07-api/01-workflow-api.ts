@@ -3,14 +3,14 @@
  * Shows how workflows integrate with HTTP endpoints.
  */
 
-import { workflow, InMemoryWorkflowStorage } from "@promin/workflow";
+import { workflow, InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 
 const storage = new InMemoryWorkflowStorage();
+const runner = createWorkflowRunner({ storage });
 
 // KYC verification workflow
 const kycVerification = workflow<{ userId: string; documentUrl: string }>({
   name: "kyc-verification",
-  storage,
 })
   .stepAsync("submit-check", async ({ input }) => {
     const checkId = await submitToProvider(input.documentUrl);
@@ -33,16 +33,20 @@ async function handleStartKyc(
   const workflowId = `kyc-${userId}`;
 
   // Idempotent — returns existing status if already started
-  const existing = await kycVerification.getStatus(workflowId);
+  const existing = await runner.getStatus(workflowId);
   if (existing) return { status: 200, body: existing };
 
-  await kycVerification.start(workflowId, { userId, documentUrl });
+  await runner.start({
+    workflow: kycVerification,
+    workflowId,
+    input: { userId, documentUrl },
+  });
   return { status: 202, body: { workflowId, status: "started" } };
 }
 
 // GET /kyc/:userId/status — poll for result
 async function handleGetStatus(userId: string): Promise<{ status: number; body?: unknown }> {
-  const status = await kycVerification.getStatus(`kyc-${userId}`);
+  const status = await runner.getStatus(`kyc-${userId}`);
   if (!status) return { status: 404 };
   return { status: 200, body: status };
 }

@@ -125,6 +125,6 @@ console.log(
 // 5. Queue metrics
 // ---------------------------------------------------------------------------
 
-const metrics = await queue.metrics();
+const metrics = await queue.metrics({ since: new Date(Date.now() - 60_000) });
 console.log("Queue metrics:", metrics);
 // { default: { pending: 4, running: 3, completed: 0, failed: 0 } }

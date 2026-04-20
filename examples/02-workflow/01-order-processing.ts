@@ -3,17 +3,17 @@
  * If it crashes after charging, it resumes from shipping (not re-charges).
  */
 
-import { workflow } from "@promin/workflow";
+import { workflow, createWorkflowRunner } from "@promin/workflow";
 import { PostgresWorkflowStorage, migrate } from "@promin/postgres";
 
 declare const db: any;
 
 await migrate(db);
 const storage = await PostgresWorkflowStorage.create({ db });
+const runner = createWorkflowRunner({ storage });
 
 const processOrder = workflow<{ orderId: string; amount: number }>({
   name: "process-order",
-  storage,
 })
   .stepAsync("validate", async ({ input }) => {
     if (input.amount <= 0) throw new Error("Invalid amount");
@@ -30,7 +30,8 @@ const processOrder = workflow<{ orderId: string; amount: number }>({
   .build();
 
 // Run — crashes resume from last completed step
-const result = await processOrder.run({
+const result = await runner.run({
+  workflow: processOrder,
   workflowId: "order-123",
   input: { orderId: "ord_42", amount: 99.99 },
 });

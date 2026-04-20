@@ -4,14 +4,14 @@
  * Same workflow runs in-process (dev) or distributed (prod).
  */
 
-import { workflow, InMemoryWorkflowStorage } from "@promin/workflow";
+import { workflow, InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 
 const storage = new InMemoryWorkflowStorage();
+const runner = createWorkflowRunner({ storage });
 
 // Define the workflow — same code for both modes
 const processVideo = workflow<{ videoId: string }>({
   name: "process-video",
-  storage,
 })
   .stepAsync("download", async ({ input }) => {
     const path = await downloadVideo(input.videoId);
@@ -28,7 +28,8 @@ const processVideo = workflow<{ videoId: string }>({
   .build();
 
 // Dev: run everything in-process
-const result = await processVideo.run({
+const result = await runner.run({
+  workflow: processVideo,
   workflowId: "video-abc",
   input: { videoId: "abc" },
 });

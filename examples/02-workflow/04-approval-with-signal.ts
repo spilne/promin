@@ -4,13 +4,13 @@
  * The workflow suspends durably — survives server restarts.
  */
 
-import { workflow, InMemoryWorkflowStorage } from "@promin/workflow";
+import { workflow, InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 
 const storage = new InMemoryWorkflowStorage();
+const runner = createWorkflowRunner({ storage });
 
 const approval = workflow<{ requestId: string; requestedBy: string }>({
   name: "approval-flow",
-  storage,
 })
   .stepAsync("submit", async ({ input }) => {
     await notifyManager(input.requestId, input.requestedBy);
@@ -30,9 +30,10 @@ const approval = workflow<{ requestId: string; requestedBy: string }>({
   .build();
 
 // Start the workflow — suspends at waitForSignal
-const handle = await approval.start("req-001", {
-  requestId: "req-001",
-  requestedBy: "alice",
+const handle = await runner.start({
+  workflow: approval,
+  workflowId: "req-001",
+  input: { requestId: "req-001", requestedBy: "alice" },
 });
 
 // Later, when manager approves (e.g. from a webhook):

@@ -3,9 +3,10 @@
  * The compiler turns this into a durable workflow: crash-safe, parallel where possible.
  */
 
-import { compileSqlProject, InMemoryWorkflowStorage } from "@promin/workflow";
+import { compileSqlProject, InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 
 const storage = new InMemoryWorkflowStorage();
+const runner = createWorkflowRunner({ storage });
 
 const project = {
   name: "analytics",
@@ -41,7 +42,6 @@ const project = {
 
 const wf = compileSqlProject({
   project,
-  storage,
   executeSql: async (sql) => {
     console.log(`Executing: ${sql.slice(0, 60)}...`);
     return [];
@@ -49,5 +49,9 @@ const wf = compileSqlProject({
 });
 
 // stg_orders and stg_users run in parallel, then fct_revenue
-const result = await wf.run({ workflowId: "daily-2026-04-06", input: {} });
+const result = (await runner.run({
+  workflow: wf,
+  workflowId: "daily-2026-04-06",
+  input: {},
+})) as { modelsRun: number; testsPassed: number };
 console.log(`${result.modelsRun} models, ${result.testsPassed} tests passed`);
