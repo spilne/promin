@@ -428,7 +428,12 @@ export interface WorkflowOrchestrationContext {
 }
 
 /** Default lock TTL. Re-declared here for the runner's own withLock call. */
-const DEFAULT_LOCK_DURATION_MS = 30_000;
+/**
+ * Default lock extension for orchestration runs. Matches `withLock`'s
+ * `DEFAULT_LOCK_EXTENSION_MS` so a 30s heartbeat keeps the lock healthy
+ * with a ~90s grace window for transient network hiccups.
+ */
+const DEFAULT_LOCK_DURATION_MS = 120_000;
 
 /**
  * Run a workflow end-to-end. Orchestrates version-drain pre-check,

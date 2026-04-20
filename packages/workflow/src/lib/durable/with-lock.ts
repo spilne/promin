@@ -36,11 +36,22 @@
 import type { FenceToken, WorkflowStorage } from "./workflow-storage.ts";
 import { WorkflowLockError } from "./durable-pipeline-error.ts";
 
-/** Heartbeat every 10s by default */
-const DEFAULT_HEARTBEAT_INTERVAL_MS = 10_000;
+/**
+ * Heartbeat every 30s by default. The previous 10s cadence amplified into
+ * N heartbeats per step for remote WorkflowStorage; coarser keeps locks
+ * fresh without flooding the wire on long-running workflows.
+ */
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 30_000;
 
-/** Each heartbeat extends the lock by 30s (3x the interval = safe margin) */
-const DEFAULT_LOCK_EXTENSION_MS = 30_000;
+/**
+ * Each heartbeat extends the lock by 120s (4x the interval). The difference
+ * between `lockDurationMs` and `heartbeatIntervalMs` is the implicit grace
+ * period: if a heartbeat is delayed by a transient network hiccup, the lock
+ * still has ~90s of runway before another worker can steal it. Tune both
+ * via `WithLockOptions` when a workflow has different latency/contention
+ * characteristics.
+ */
+const DEFAULT_LOCK_EXTENSION_MS = 120_000;
 
 export interface WithLockOptions {
   /** How often to heartbeat (ms). Default: 10_000 */
