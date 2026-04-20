@@ -23,25 +23,30 @@ import { WIRE_CODEC, type RpcRequest, type RpcResponse, type StorageMethod } fro
 export function createWorkflowStorageHandler(
   storage: WorkflowStorage,
 ): (req: Request) => Promise<Response> {
+  // Every write RPC carries an optional `guard: { fenceToken }` field on
+  // its params object so a stale holder's stray writes get rejected
+  // server-side. The param shape is exactly `{ ...originalArgs, guard? }`
+  // — new clients send it, legacy clients omit it, both work.
   const dispatchers: Record<StorageMethod, (params: any) => Promise<unknown>> = {
     loadWorkflow: (p) => storage.loadWorkflow(p.workflowId),
     listWorkflows: (p) => storage.listWorkflows(p),
-    cancelWorkflow: (p) => storage.cancelWorkflow(p.workflowId, p.options),
+    cancelWorkflow: (p) => storage.cancelWorkflow(p.workflowId, p.options, p.guard),
     createWorkflow: (p) => storage.createWorkflow(p),
-    saveStepResult: (p) => storage.saveStepResult(p),
-    batchSaveStepResults: (p) => storage.batchSaveStepResults(p),
-    saveStepFailure: (p) => storage.saveStepFailure(p),
-    saveTaskResult: (p) => storage.saveTaskResult(p),
-    saveTaskFailure: (p) => storage.saveTaskFailure(p),
-    completeWorkflow: (p) => storage.completeWorkflow(p.workflowId, p.result),
-    failWorkflow: (p) => storage.failWorkflow(p.workflowId, p.error),
-    suspendWorkflow: (p) => storage.suspendWorkflow(p.workflowId, p.stepName, p.stepUpdate),
+    saveStepResult: (p) => storage.saveStepResult(p, p.guard),
+    batchSaveStepResults: (p) => storage.batchSaveStepResults(p.records, p.guard),
+    saveStepFailure: (p) => storage.saveStepFailure(p, p.guard),
+    saveTaskResult: (p) => storage.saveTaskResult(p, p.guard),
+    saveTaskFailure: (p) => storage.saveTaskFailure(p, p.guard),
+    completeWorkflow: (p) => storage.completeWorkflow(p.workflowId, p.result, p.guard),
+    failWorkflow: (p) => storage.failWorkflow(p.workflowId, p.error, p.guard),
+    suspendWorkflow: (p) =>
+      storage.suspendWorkflow(p.workflowId, p.stepName, p.stepUpdate, p.guard),
     deliverSignal: (p) => storage.deliverSignal(p.workflowId, p.signalName, p.payload),
     loadSignals: (p) => storage.loadSignals(p.workflowId),
     tryLock: (p) => storage.tryLock(p.workflowId, p.lockDurationMs),
     tryLockAndLoad: (p) => storage.tryLockAndLoad(p.workflowId, p.lockDurationMs),
-    releaseLock: (p) => storage.releaseLock(p.workflowId),
-    heartbeat: (p) => storage.heartbeat(p.workflowId, p.lockDurationMs),
+    releaseLock: (p) => storage.releaseLock(p.workflowId, p.guard),
+    heartbeat: (p) => storage.heartbeat(p.workflowId, p.lockDurationMs, p.guard),
     startFreshRun: (p) => storage.startFreshRun(p.workflowId),
     loadRunHistory: (p) => storage.loadRunHistory(p.workflowId, p.params),
     purgeCompleted: (p) => storage.purgeCompleted(p),
@@ -75,10 +80,30 @@ export function createWorkflowStorageHandler(
       const result = await fn(envelope.params);
       return jsonResponse({ ok: true, result: WIRE_CODEC.encode(result) }, 200);
     } catch (err) {
-      return jsonResponse(
-        { ok: false, error: err instanceof Error ? err.message : String(err) },
-        500,
-      );
+      const message = err instanceof Error ? err.message : String(err);
+      // Preserve Effect tagged-error shape so the client can rebuild
+      // `{ _tag, ...fields }` objects — the conformance suite relies on
+      // `.toMatchObject({ _tag: "FenceTokenMismatchError" })` passing over
+      // the wire the same way it does in-process.
+      const tagged = err as { _tag?: string } & Record<string, unknown>;
+      if (typeof tagged._tag === "string") {
+        const fields: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(tagged)) {
+          if (k === "_tag" || k === "message" || k === "stack" || k === "name") continue;
+          if (typeof v === "function") continue;
+          fields[k] = v;
+        }
+        return jsonResponse(
+          {
+            ok: false,
+            error: message,
+            errorTag: tagged._tag,
+            errorFields: WIRE_CODEC.encode(fields) as Record<string, unknown>,
+          },
+          500,
+        );
+      }
+      return jsonResponse({ ok: false, error: message }, 500);
     }
   };
 }

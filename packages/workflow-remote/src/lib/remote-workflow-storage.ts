@@ -15,6 +15,7 @@ import type {
   WorkflowStatus,
   WorkflowRunSummary,
   SignalState,
+  FenceGuard,
 } from "@promin/workflow";
 import { WIRE_CODEC, type RpcResponse, type StorageMethod } from "./wire.ts";
 
@@ -70,6 +71,21 @@ export class RemoteWorkflowStorage implements WorkflowStorage {
     }
 
     if (!envelope.ok) {
+      // Rehydrate Effect tagged errors — the server packs `_tag` + public
+      // fields into the envelope so `.toMatchObject({ _tag: "..." })` and
+      // downstream `err._tag === "FenceTokenMismatchError"` branches work
+      // the same way they would for an in-process storage.
+      if (envelope.errorTag) {
+        const decoded = (envelope.errorFields ? WIRE_CODEC.decode(envelope.errorFields) : {}) as
+          | Record<string, unknown>
+          | undefined;
+        const tagged = Object.assign(
+          new Error(envelope.error),
+          { _tag: envelope.errorTag },
+          decoded ?? {},
+        );
+        throw tagged;
+      }
       throw new Error(`RemoteWorkflowStorage.${method}: ${envelope.error}`);
     }
     return WIRE_CODEC.decode(envelope.result) as T;
@@ -98,8 +114,12 @@ export class RemoteWorkflowStorage implements WorkflowStorage {
     return this.call("listWorkflows", params ?? {});
   }
 
-  cancelWorkflow(workflowId: string, options?: { cascade?: boolean }): Promise<void> {
-    return this.call("cancelWorkflow", { workflowId, options });
+  cancelWorkflow(
+    workflowId: string,
+    options?: { cascade?: boolean },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    return this.call("cancelWorkflow", { workflowId, options, guard });
   }
 
   createWorkflow(params: {
@@ -115,15 +135,18 @@ export class RemoteWorkflowStorage implements WorkflowStorage {
     return this.call("createWorkflow", params);
   }
 
-  saveStepResult(params: {
-    workflowId: string;
-    stepName: string;
-    result: unknown;
-    durationMs: number;
-    startedAt: Date;
-    metadata?: Record<string, unknown>;
-  }): Promise<void> {
-    return this.call("saveStepResult", params);
+  saveStepResult(
+    params: {
+      workflowId: string;
+      stepName: string;
+      result: unknown;
+      durationMs: number;
+      startedAt: Date;
+      metadata?: Record<string, unknown>;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    return this.call("saveStepResult", { ...params, guard });
   }
 
   batchSaveStepResults(
@@ -135,53 +158,64 @@ export class RemoteWorkflowStorage implements WorkflowStorage {
       startedAt: Date;
       metadata?: Record<string, unknown>;
     }>,
+    guard?: FenceGuard,
   ): Promise<void> {
-    return this.call("batchSaveStepResults", records);
+    return this.call("batchSaveStepResults", { records, guard });
   }
 
-  saveStepFailure(params: {
-    workflowId: string;
-    stepName: string;
-    error: string;
-    durationMs: number;
-    startedAt: Date;
-    metadata?: Record<string, unknown>;
-  }): Promise<void> {
-    return this.call("saveStepFailure", params);
+  saveStepFailure(
+    params: {
+      workflowId: string;
+      stepName: string;
+      error: string;
+      durationMs: number;
+      startedAt: Date;
+      metadata?: Record<string, unknown>;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    return this.call("saveStepFailure", { ...params, guard });
   }
 
-  saveTaskResult(params: {
-    workflowId: string;
-    stepName: string;
-    taskIndex: number;
-    result: unknown;
-  }): Promise<void> {
-    return this.call("saveTaskResult", params);
+  saveTaskResult(
+    params: {
+      workflowId: string;
+      stepName: string;
+      taskIndex: number;
+      result: unknown;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    return this.call("saveTaskResult", { ...params, guard });
   }
 
-  saveTaskFailure(params: {
-    workflowId: string;
-    stepName: string;
-    taskIndex: number;
-    error: string;
-  }): Promise<void> {
-    return this.call("saveTaskFailure", params);
+  saveTaskFailure(
+    params: {
+      workflowId: string;
+      stepName: string;
+      taskIndex: number;
+      error: string;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    return this.call("saveTaskFailure", { ...params, guard });
   }
 
-  completeWorkflow(workflowId: string, result: unknown): Promise<void> {
-    return this.call("completeWorkflow", { workflowId, result });
+  completeWorkflow(workflowId: string, result: unknown, guard?: FenceGuard): Promise<void> {
+    return this.call("completeWorkflow", { workflowId, result, guard });
   }
 
-  failWorkflow(workflowId: string, error: string): Promise<void> {
-    return this.call("failWorkflow", { workflowId, error });
+  failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void> {
+    return this.call("failWorkflow", { workflowId, error, guard });
   }
 
   suspendWorkflow(
     workflowId: string,
     stepName: string,
     stepUpdate: Record<string, unknown>,
+    guard?: FenceGuard,
   ): Promise<void> {
-    return this.call("suspendWorkflow", { workflowId, stepName, stepUpdate });
+    return this.call("suspendWorkflow", { workflowId, stepName, stepUpdate, guard });
   }
 
   deliverSignal(workflowId: string, signalName: string, payload: unknown): Promise<void> {
@@ -206,12 +240,12 @@ export class RemoteWorkflowStorage implements WorkflowStorage {
     return this.call("tryLockAndLoad", { workflowId, lockDurationMs });
   }
 
-  releaseLock(workflowId: string): Promise<void> {
-    return this.call("releaseLock", { workflowId });
+  releaseLock(workflowId: string, guard?: FenceGuard): Promise<void> {
+    return this.call("releaseLock", { workflowId, guard });
   }
 
-  heartbeat(workflowId: string, lockDurationMs: number): Promise<void> {
-    return this.call("heartbeat", { workflowId, lockDurationMs });
+  heartbeat(workflowId: string, lockDurationMs: number, guard?: FenceGuard): Promise<void> {
+    return this.call("heartbeat", { workflowId, lockDurationMs, guard });
   }
 
   startFreshRun(workflowId: string): Promise<number> {

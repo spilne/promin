@@ -46,6 +46,21 @@ export type RpcResponse =
   | {
       readonly ok: false;
       readonly error: string;
+      /**
+       * Optional tag for Effect `Data.TaggedError` subclasses (e.g.
+       * `"FenceTokenMismatchError"`). When present, the client rehydrates
+       * a plain object carrying `_tag`, `message`, and the other public
+       * fields so downstream code can branch on `_tag` the same way it
+       * would for an in-process storage.
+       */
+      readonly errorTag?: string;
+      /**
+       * Additional public fields from a tagged error (e.g.
+       * `{ workflowId, expected, provided }` on `FenceTokenMismatchError`).
+       * Decoded via `WIRE_CODEC` server-side so Date / BigInt / Map fields
+       * round-trip intact.
+       */
+      readonly errorFields?: Record<string, unknown>;
     };
 
 /** Shared codec — both client and server must agree on encoding. */
