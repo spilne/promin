@@ -23,6 +23,8 @@ export {
 export {
   type WorkflowStorage,
   type StepAttemptStorage,
+  type FenceGuard,
+  type FenceToken,
   isStepAttemptStorage,
 } from "./workflow-storage.ts";
 export {
@@ -56,6 +58,7 @@ export {
   StepTimeoutError,
   WorkflowDeadlineError,
   WorkflowVersionMismatchError,
+  FenceTokenMismatchError,
   GuardError,
 } from "./durable-pipeline-error.ts";
 export { topologicalSort, computeReadySet, type DagNode } from "./workflow-dag.ts";

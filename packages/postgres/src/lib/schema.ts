@@ -158,6 +158,13 @@ export const workflowLocks = pgTable("wf_workflow_locks", {
   lockedAt: timestamp("locked_at", { withTimezone: true }).notNull().defaultNow(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   lockedBy: text("locked_by"),
+  /**
+   * Monotonic fence token. Bumped on every successful `tryLock`, carried by
+   * subsequent mutating calls, validated against this row before the write
+   * commits. Lets a new holder safely take over after the previous one's
+   * lock expired without risk of the stale holder committing late writes.
+   */
+  fenceToken: bigserial("fence_token", { mode: "number" }).notNull(),
 });
 
 export const stepQueue = pgTable(

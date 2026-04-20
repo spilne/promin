@@ -18,7 +18,9 @@ import type {
   ActivityJournalStorage,
   JournaledSuspendStorage,
   JournalEntry,
+  FenceGuard,
 } from "@promin/workflow";
+import { FenceTokenMismatchError } from "@promin/workflow";
 import {
   workflows,
   workflowRuns,
@@ -241,7 +243,12 @@ export class PostgresWorkflowStorage
     return rows.map((row: any) => this.rowToWorkflowState(row, []));
   }
 
-  async cancelWorkflow(workflowId: string): Promise<void> {
+  async cancelWorkflow(
+    workflowId: string,
+    _options?: { cascade?: boolean },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    await this.checkFence(workflowId, guard);
     const now = new Date();
     await this.db
       .update(workflows)
@@ -313,15 +320,18 @@ export class PostgresWorkflowStorage
     return row?.run ?? 1;
   }
 
-  async saveStepResult(params: {
-    workflowId: string;
-    stepName: string;
-    result: unknown;
-    durationMs: number;
-    startedAt: Date;
-    metadata?: Record<string, unknown>;
-  }): Promise<void> {
-    await this.batchSaveStepResults([params]);
+  async saveStepResult(
+    params: {
+      workflowId: string;
+      stepName: string;
+      result: unknown;
+      durationMs: number;
+      startedAt: Date;
+      metadata?: Record<string, unknown>;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    await this.batchSaveStepResults([params], guard);
   }
 
   async batchSaveStepResults(
@@ -333,8 +343,13 @@ export class PostgresWorkflowStorage
       startedAt: Date;
       metadata?: Record<string, unknown>;
     }>,
+    guard?: FenceGuard,
   ): Promise<void> {
     if (records.length === 0) return;
+    // One fence check covers the whole batch — the engine already batches
+    // per-workflow, so the unique set is tiny.
+    const workflowIds = new Set(records.map((r) => r.workflowId));
+    for (const id of workflowIds) await this.checkFence(id, guard);
     const now = new Date();
 
     // Group by workflowId so we issue at most one markRunning + getCurrentRun
@@ -412,14 +427,18 @@ export class PostgresWorkflowStorage
     });
   }
 
-  async saveStepFailure(params: {
-    workflowId: string;
-    stepName: string;
-    error: string;
-    durationMs: number;
-    startedAt: Date;
-    metadata?: Record<string, unknown>;
-  }): Promise<void> {
+  async saveStepFailure(
+    params: {
+      workflowId: string;
+      stepName: string;
+      error: string;
+      durationMs: number;
+      startedAt: Date;
+      metadata?: Record<string, unknown>;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    await this.checkFence(params.workflowId, guard);
     await this.markRunning(params.workflowId);
     const now = new Date();
     const run = await this.getCurrentRun(params.workflowId);
@@ -454,12 +473,16 @@ export class PostgresWorkflowStorage
       .where(eq(workflows.workflowId, params.workflowId));
   }
 
-  async saveTaskResult(params: {
-    workflowId: string;
-    stepName: string;
-    taskIndex: number;
-    result: unknown;
-  }): Promise<void> {
+  async saveTaskResult(
+    params: {
+      workflowId: string;
+      stepName: string;
+      taskIndex: number;
+      result: unknown;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    await this.checkFence(params.workflowId, guard);
     const now = new Date();
     const run = await this.getCurrentRun(params.workflowId);
     // Ensure parent step row exists
@@ -504,12 +527,16 @@ export class PostgresWorkflowStorage
       });
   }
 
-  async saveTaskFailure(params: {
-    workflowId: string;
-    stepName: string;
-    taskIndex: number;
-    error: string;
-  }): Promise<void> {
+  async saveTaskFailure(
+    params: {
+      workflowId: string;
+      stepName: string;
+      taskIndex: number;
+      error: string;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    await this.checkFence(params.workflowId, guard);
     const now = new Date();
     const run = await this.getCurrentRun(params.workflowId);
     // Ensure parent step row exists
@@ -554,7 +581,8 @@ export class PostgresWorkflowStorage
       });
   }
 
-  async completeWorkflow(workflowId: string, result: unknown): Promise<void> {
+  async completeWorkflow(workflowId: string, result: unknown, guard?: FenceGuard): Promise<void> {
+    await this.checkFence(workflowId, guard);
     const now = new Date();
     await this.db
       .update(workflows)
@@ -562,7 +590,8 @@ export class PostgresWorkflowStorage
       .where(eq(workflows.workflowId, workflowId));
   }
 
-  async failWorkflow(workflowId: string, error: string): Promise<void> {
+  async failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void> {
+    await this.checkFence(workflowId, guard);
     const now = new Date();
     await this.db
       .update(workflows)
@@ -574,7 +603,9 @@ export class PostgresWorkflowStorage
     workflowId: string,
     stepName: string,
     stepUpdate: Record<string, unknown>,
+    guard?: FenceGuard,
   ): Promise<void> {
+    await this.checkFence(workflowId, guard);
     const now = new Date();
     const run = await this.getCurrentRun(workflowId);
     const stepValues = {
@@ -631,13 +662,14 @@ export class PostgresWorkflowStorage
     workflowId: string,
     lockDurationMs: number,
   ): Promise<{ acquired: boolean; token?: string }> {
-    // NOTE: fence token support lands with the Postgres schema migration
-    // in a follow-up commit. Today the backend still uses the
-    // `lockedBy = instanceId` check on writes; no token returned.
-    const acquired = this.config.useAdvisoryLocks
-      ? await this.tryAdvisoryLock(workflowId)
-      : await this.tryRowLock(workflowId, lockDurationMs);
-    return { acquired };
+    // Advisory locks live in pg_locks (not wf_workflow_locks) and have no
+    // row to carry a fence token — same-session semantics are the guard
+    // already. Row locks use the lock-table's bigserial fence_token.
+    if (this.config.useAdvisoryLocks) {
+      const acquired = await this.tryAdvisoryLock(workflowId);
+      return { acquired };
+    }
+    return this.tryRowLock(workflowId, lockDurationMs);
   }
 
   async tryLockAndLoad(
@@ -657,9 +689,22 @@ export class PostgresWorkflowStorage
     return { locked: acquired, token, state };
   }
 
-  async releaseLock(workflowId: string): Promise<void> {
+  async releaseLock(workflowId: string, guard?: FenceGuard): Promise<void> {
     if (this.config.useAdvisoryLocks) {
       await this.releaseAdvisoryLock(workflowId);
+      return;
+    }
+    // When a token is provided, only the current holder releases — a stale
+    // holder whose lock already moved on silently no-ops (matches InMemory).
+    if (guard?.fenceToken) {
+      await this.db
+        .delete(workflowLocks)
+        .where(
+          and(
+            eq(workflowLocks.workflowId, workflowId),
+            eq(workflowLocks.fenceToken, Number(guard.fenceToken)),
+          ),
+        );
       return;
     }
     await this.db
@@ -672,8 +717,20 @@ export class PostgresWorkflowStorage
       );
   }
 
-  async heartbeat(workflowId: string, lockDurationMs: number): Promise<void> {
+  async heartbeat(workflowId: string, lockDurationMs: number, guard?: FenceGuard): Promise<void> {
     if (this.config.useAdvisoryLocks) return;
+    if (guard?.fenceToken) {
+      await this.db
+        .update(workflowLocks)
+        .set({ expiresAt: new Date(Date.now() + lockDurationMs) })
+        .where(
+          and(
+            eq(workflowLocks.workflowId, workflowId),
+            eq(workflowLocks.fenceToken, Number(guard.fenceToken)),
+          ),
+        );
+      return;
+    }
     await this.db
       .update(workflowLocks)
       .set({ expiresAt: new Date(Date.now() + lockDurationMs) })
@@ -683,6 +740,32 @@ export class PostgresWorkflowStorage
           eq(workflowLocks.lockedBy, this.config.instanceId),
         ),
       );
+  }
+
+  /**
+   * Reject a mutating call when the caller's fence token doesn't match the
+   * current row-lock. Advisory-lock mode and callers that don't pass a
+   * token skip the check (fencing is additive — legacy call sites keep
+   * working).
+   */
+  private async checkFence(workflowId: string, guard?: FenceGuard): Promise<void> {
+    if (!guard?.fenceToken) return;
+    if (this.config.useAdvisoryLocks) return; // no per-row fence in advisory mode
+    const [row] = await this.db
+      .select({ fenceToken: workflowLocks.fenceToken })
+      .from(workflowLocks)
+      .where(eq(workflowLocks.workflowId, workflowId));
+    const current = row ? String(row.fenceToken) : undefined;
+    if (current !== guard.fenceToken) {
+      throw new FenceTokenMismatchError({
+        workflowId,
+        expected: current ?? "(no lock)",
+        provided: guard.fenceToken,
+        message:
+          `Fenced write for "${workflowId}" rejected — ` +
+          `token mismatch (expected "${current ?? "(no lock)"}", got "${guard.fenceToken}")`,
+      });
+    }
   }
 
   async startFreshRun(workflowId: string): Promise<number> {
@@ -882,29 +965,43 @@ export class PostgresWorkflowStorage
     await execRaw(this.db, sql`SELECT pg_advisory_unlock(${hashToInt32(workflowId)})`);
   }
 
-  private async tryRowLock(workflowId: string, lockDurationMs: number): Promise<boolean> {
+  private async tryRowLock(
+    workflowId: string,
+    lockDurationMs: number,
+  ): Promise<{ acquired: boolean; token?: string }> {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + lockDurationMs);
+    // On fresh insert the bigserial column populates from its sequence; on
+    // expired-lock takeover we force a new value via `nextval(...)` so the
+    // token strictly increases across holders. The `WHERE expires_at < now`
+    // clause on the UPDATE path guarantees we only rotate the token when
+    // the previous holder's lease is dead.
     const [result] = await execRaw(
       this.db,
       sql`
       INSERT INTO wf_workflow_locks (workflow_id, locked_at, expires_at, locked_by)
       VALUES (${workflowId}, ${now}, ${expiresAt}, ${this.config.instanceId})
       ON CONFLICT (workflow_id) DO UPDATE
-        SET locked_at = ${now}, expires_at = ${expiresAt}, locked_by = ${this.config.instanceId}
+        SET locked_at = ${now},
+            expires_at = ${expiresAt},
+            locked_by = ${this.config.instanceId},
+            fence_token = nextval(pg_get_serial_sequence('wf_workflow_locks', 'fence_token'))
         WHERE wf_workflow_locks.expires_at < ${now}
-      RETURNING workflow_id
+      RETURNING fence_token
     `,
     );
-    return !!result;
+    if (!result) return { acquired: false };
+    const token = String((result as { fence_token: number | string }).fence_token);
+    return { acquired: true, token };
   }
 
   // ---------------------------------------------------------------------------
   // StepAttemptStorage — attempt history (opt-in via recordAttempts config)
   // ---------------------------------------------------------------------------
 
-  async saveStepAttempt(record: StepAttemptRecord): Promise<void> {
+  async saveStepAttempt(record: StepAttemptRecord, guard?: FenceGuard): Promise<void> {
     if (!this.config.recordAttempts) return;
+    await this.checkFence(record.workflowId, guard);
 
     await this.db.insert(stepAttempts).values({
       workflowId: record.workflowId,
