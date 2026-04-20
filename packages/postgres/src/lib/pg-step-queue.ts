@@ -11,6 +11,7 @@ import type { StepQueue, StepTask, FairnessPolicy } from "@promin/workflow";
 import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
 import { stepQueue } from "./schema.ts";
 import { ensureTable as ensureTableFromSchema } from "./schema-utils.ts";
+import { SystemClock, type Clock } from "@promin/core";
 
 /**
  * Render a JS string[] as a Postgres `text[]` literal:
@@ -34,17 +35,26 @@ export interface PgStepQueueConfig {
   workerId?: string;
   /** Default namespace for task isolation. Null means unscoped. Default: null. */
   namespace?: string | null;
+  /**
+   * Time source for client-side timestamps — claimedAt on claim, completedAt
+   * on complete/fail, staleTimeoutMs cutoff on requeue. Default: `SystemClock`.
+   * The `metrics()` default `until` stays server-side (`NOW()` in SQL) so it
+   * remains skew-immune independent of this clock.
+   */
+  clock?: Clock;
 }
 
 export class PgStepQueue implements StepQueue {
   private readonly db: DrizzleDb;
   private readonly workerId: string;
   private readonly namespace: string | null;
+  private readonly clock: Clock;
 
   constructor(config: PgStepQueueConfig) {
     this.db = config.db;
     this.workerId = config.workerId ?? crypto.randomUUID();
     this.namespace = config.namespace ?? null;
+    this.clock = config.clock ?? SystemClock;
   }
 
   /**
@@ -123,7 +133,7 @@ export class PgStepQueue implements StepQueue {
     const caps = params.capabilities ?? [];
     const limit = Math.max(1, Math.floor(params.limit));
     const workerId = this.workerId.replace(/'/g, "");
-    const now = new Date().toISOString();
+    const now = this.clock.now().toISOString();
     const fairness = params.fairness ?? "strict-priority";
 
     // Capability filter: `needs <@ caps` = "every element of needs is in
@@ -230,7 +240,7 @@ export class PgStepQueue implements StepQueue {
   }
 
   async complete(params: { taskId: string; result: unknown; durationMs: number }): Promise<void> {
-    const now = new Date();
+    const now = this.clock.now();
     await this.db
       .update(stepQueue)
       .set({
@@ -243,7 +253,7 @@ export class PgStepQueue implements StepQueue {
   }
 
   async fail(params: { taskId: string; error: string; durationMs: number }): Promise<void> {
-    const now = new Date();
+    const now = this.clock.now();
     await this.db
       .update(stepQueue)
       .set({
@@ -265,7 +275,9 @@ export class PgStepQueue implements StepQueue {
     if (params.claimedBy) {
       conditions.push(eq(stepQueue.claimedBy, params.claimedBy));
     } else if (params.staleTimeoutMs) {
-      conditions.push(lt(stepQueue.claimedAt, new Date(Date.now() - params.staleTimeoutMs)));
+      conditions.push(
+        lt(stepQueue.claimedAt, new Date(this.clock.currentTimeMs() - params.staleTimeoutMs)),
+      );
     } else {
       return 0;
     }
@@ -292,7 +304,7 @@ export class PgStepQueue implements StepQueue {
     // parameter; pass ISO strings and let Postgres cast via ::timestamptz.
     const since = params.since.toISOString();
     // When caller omits `until`, use the DB's `NOW()` inside the query
-    // instead of an app-side `new Date()`. Rows are inserted with the
+    // instead of an app-side `this.clock.now()`. Rows are inserted with the
     // DB's own `created_at` — pulling `until` from the same clock
     // avoids the app-vs-DB skew that previously dropped just-inserted
     // rows out of the BETWEEN filter (the 5s buffer this replaces).
