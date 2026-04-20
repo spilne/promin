@@ -249,7 +249,7 @@ export class PostgresWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     await this.checkFence(workflowId, guard);
-    const now = new Date();
+    const now = this.config.clock.now();
     await this.db
       .update(workflows)
       .set({
@@ -300,7 +300,7 @@ export class PostgresWorkflowStorage
 
   /** Transition pending → running on first step activity. */
   private async markRunning(workflowId: string): Promise<void> {
-    const now = new Date();
+    const now = this.config.clock.now();
     await this.db
       .update(workflows)
       .set({ statusId: WorkflowStatusIds.id.running, startedAt: now, updatedAt: now })
@@ -350,7 +350,7 @@ export class PostgresWorkflowStorage
     // per-workflow, so the unique set is tiny.
     const workflowIds = new Set(records.map((r) => r.workflowId));
     for (const id of workflowIds) await this.checkFence(id, guard);
-    const now = new Date();
+    const now = this.config.clock.now();
 
     // Group by workflowId so we issue at most one markRunning + getCurrentRun
     // per workflow regardless of how many step records target it, then fold
@@ -440,7 +440,7 @@ export class PostgresWorkflowStorage
   ): Promise<void> {
     await this.checkFence(params.workflowId, guard);
     await this.markRunning(params.workflowId);
-    const now = new Date();
+    const now = this.config.clock.now();
     const run = await this.getCurrentRun(params.workflowId);
     await this.db
       .insert(workflowSteps)
@@ -483,7 +483,7 @@ export class PostgresWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     await this.checkFence(params.workflowId, guard);
-    const now = new Date();
+    const now = this.config.clock.now();
     const run = await this.getCurrentRun(params.workflowId);
     // Ensure parent step row exists
     await this.db
@@ -537,7 +537,7 @@ export class PostgresWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     await this.checkFence(params.workflowId, guard);
-    const now = new Date();
+    const now = this.config.clock.now();
     const run = await this.getCurrentRun(params.workflowId);
     // Ensure parent step row exists
     await this.db
@@ -583,7 +583,7 @@ export class PostgresWorkflowStorage
 
   async completeWorkflow(workflowId: string, result: unknown, guard?: FenceGuard): Promise<void> {
     await this.checkFence(workflowId, guard);
-    const now = new Date();
+    const now = this.config.clock.now();
     await this.db
       .update(workflows)
       .set({ statusId: WorkflowStatusIds.id.completed, result, completedAt: now, updatedAt: now })
@@ -592,7 +592,7 @@ export class PostgresWorkflowStorage
 
   async failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void> {
     await this.checkFence(workflowId, guard);
-    const now = new Date();
+    const now = this.config.clock.now();
     await this.db
       .update(workflows)
       .set({ statusId: WorkflowStatusIds.id.failed, error, completedAt: now, updatedAt: now })
@@ -606,7 +606,7 @@ export class PostgresWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     await this.checkFence(workflowId, guard);
-    const now = new Date();
+    const now = this.config.clock.now();
     const run = await this.getCurrentRun(workflowId);
     const stepValues = {
       workflowId,
@@ -642,7 +642,7 @@ export class PostgresWorkflowStorage
       .values({ workflowId, signalName, payload })
       .onConflictDoUpdate({
         target: [workflowSignals.workflowId, workflowSignals.signalName],
-        set: { payload, deliveredAt: new Date() },
+        set: { payload, deliveredAt: this.config.clock.now() },
       });
   }
 
@@ -722,7 +722,7 @@ export class PostgresWorkflowStorage
     if (guard?.fenceToken) {
       await this.db
         .update(workflowLocks)
-        .set({ expiresAt: new Date(Date.now() + lockDurationMs) })
+        .set({ expiresAt: new Date(this.config.clock.currentTimeMs() + lockDurationMs) })
         .where(
           and(
             eq(workflowLocks.workflowId, workflowId),
@@ -733,7 +733,7 @@ export class PostgresWorkflowStorage
     }
     await this.db
       .update(workflowLocks)
-      .set({ expiresAt: new Date(Date.now() + lockDurationMs) })
+      .set({ expiresAt: new Date(this.config.clock.currentTimeMs() + lockDurationMs) })
       .where(
         and(
           eq(workflowLocks.workflowId, workflowId),
@@ -769,7 +769,7 @@ export class PostgresWorkflowStorage
   }
 
   async startFreshRun(workflowId: string): Promise<number> {
-    const now = new Date();
+    const now = this.config.clock.now();
 
     // Archive current run before resetting
     const [current] = await this.db
@@ -910,7 +910,7 @@ export class PostgresWorkflowStorage
 
     if ("olderThanMs" in params) {
       from = new Date(0);
-      to = new Date(Date.now() - params.olderThanMs);
+      to = new Date(this.config.clock.currentTimeMs() - params.olderThanMs);
     } else {
       from = params.from;
       to = params.to;
@@ -969,7 +969,7 @@ export class PostgresWorkflowStorage
     workflowId: string,
     lockDurationMs: number,
   ): Promise<{ acquired: boolean; token?: string }> {
-    const now = new Date();
+    const now = this.config.clock.now();
     const expiresAt = new Date(now.getTime() + lockDurationMs);
     // On fresh insert the bigserial column populates from its sequence; on
     // expired-lock takeover we force a new value via `nextval(...)` so the

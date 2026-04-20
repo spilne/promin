@@ -27,6 +27,7 @@ import type {
 } from "@promin/workflow";
 import { FenceTokenMismatchError } from "@promin/workflow";
 import type { RedisClient } from "./redis-client.ts";
+import { SystemClock, type Clock } from "@promin/core";
 
 export interface RedisWorkflowStorageConfig {
   redis: RedisClient;
@@ -37,6 +38,13 @@ export interface RedisWorkflowStorageConfig {
     completedTtlMs?: number;
     maxRunsPerWorkflow?: number;
   };
+  /**
+   * Time source for client-side timestamps (everything the client
+   * serializes into the Redis payload before `HSET`: createdAt, startedAt,
+   * completedAt, deliveredAt, purge cutoffs, fresh-run archive stamps).
+   * Default: `SystemClock`. Pass a `FakeClock` for deterministic tests.
+   */
+  clock?: Clock;
 }
 
 // -- Lua scripts ----------------------------------------------------------
@@ -164,6 +172,7 @@ export class RedisWorkflowStorage
   private readonly instanceId: string;
   private readonly completedTtlMs?: number;
   private readonly maxRunsPerWorkflow: number;
+  private readonly clock: Clock;
 
   constructor(config: RedisWorkflowStorageConfig) {
     this.redis = config.redis;
@@ -172,6 +181,7 @@ export class RedisWorkflowStorage
     this.instanceId = config.instanceId ?? crypto.randomUUID();
     this.completedTtlMs = config.retention?.completedTtlMs;
     this.maxRunsPerWorkflow = config.retention?.maxRunsPerWorkflow ?? 5;
+    this.clock = config.clock ?? SystemClock;
   }
 
   // -- Key helpers ----------------------------------------------------------
@@ -418,7 +428,7 @@ export class RedisWorkflowStorage
       return { created: false, existing: existing! };
     }
 
-    const now = this.serializeDate(new Date());
+    const now = this.serializeDate(this.clock.now());
     const ns = this.resolveNamespace(params.namespace);
 
     const fields: Record<string, string> = {
@@ -531,7 +541,7 @@ export class RedisWorkflowStorage
     const status = raw.status as WorkflowStatus;
     if (status !== "pending" && status !== "running" && status !== "suspended") return;
 
-    const now = this.serializeDate(new Date());
+    const now = this.serializeDate(this.clock.now());
     await this.redis.hset(this.wfKey(workflowId), {
       status: "failed",
       error: "Cancelled",
@@ -549,7 +559,7 @@ export class RedisWorkflowStorage
   /** Transition pending → running on first step activity. */
   private async markRunning(workflowId: string, raw: Record<string, string>): Promise<void> {
     if (raw.status !== "pending") return;
-    const now = this.serializeDate(new Date());
+    const now = this.serializeDate(this.clock.now());
     await this.redis.hset(this.wfKey(workflowId), {
       status: "running",
       startedAt: now,
@@ -577,7 +587,7 @@ export class RedisWorkflowStorage
     await this.markRunning(params.workflowId, raw);
 
     const run = Number(raw.run);
-    const now = new Date();
+    const now = this.clock.now();
 
     // Load existing step to preserve fields
     const existingJson = await this.redis.hget(
@@ -642,7 +652,7 @@ export class RedisWorkflowStorage
     }
 
     const pipeline = this.redis.pipeline();
-    const now = new Date();
+    const now = this.clock.now();
     const nowIso = this.serializeDate(now);
 
     for (const [wfId, rs] of byWf) {
@@ -695,7 +705,7 @@ export class RedisWorkflowStorage
     await this.markRunning(params.workflowId, raw);
 
     const run = Number(raw.run);
-    const now = new Date();
+    const now = this.clock.now();
 
     const existingJson = await this.redis.hget(
       this.stepsKey(params.workflowId, run),
@@ -741,7 +751,7 @@ export class RedisWorkflowStorage
     if (!raw || !raw.id) return;
 
     const run = Number(raw.run);
-    const now = new Date();
+    const now = this.clock.now();
 
     // Load existing task
     const taskField = String(params.taskIndex);
@@ -808,7 +818,7 @@ export class RedisWorkflowStorage
     if (!raw || !raw.id) return;
 
     const run = Number(raw.run);
-    const now = new Date();
+    const now = this.clock.now();
 
     const taskField = String(params.taskIndex);
     const existingTaskJson = await this.redis.hget(
@@ -867,7 +877,7 @@ export class RedisWorkflowStorage
     const raw = await this.redis.hgetall(this.wfKey(workflowId));
     if (!raw || !raw.id) return;
 
-    const now = new Date();
+    const now = this.clock.now();
     const oldStatus = raw.status;
 
     await this.redis.hset(this.wfKey(workflowId), {
@@ -890,7 +900,7 @@ export class RedisWorkflowStorage
     const raw = await this.redis.hgetall(this.wfKey(workflowId));
     if (!raw || !raw.id) return;
 
-    const now = new Date();
+    const now = this.clock.now();
     const oldStatus = raw.status;
 
     await this.redis.hset(this.wfKey(workflowId), {
@@ -963,7 +973,7 @@ export class RedisWorkflowStorage
     if (!raw || !raw.id) return;
 
     const run = Number(raw.run);
-    const now = new Date();
+    const now = this.clock.now();
     const oldStatus = raw.status;
 
     // Load existing step
@@ -1003,7 +1013,7 @@ export class RedisWorkflowStorage
     const signal: SignalState = {
       signalName,
       payload,
-      deliveredAt: new Date(),
+      deliveredAt: this.clock.now(),
     };
     await this.redis.hset(
       this.signalsKey(workflowId),
@@ -1151,7 +1161,7 @@ export class RedisWorkflowStorage
     );
 
     const newRun = currentRun + 1;
-    const now = this.serializeDate(new Date());
+    const now = this.serializeDate(this.clock.now());
     const oldStatus = raw.status;
 
     await this.redis.hset(this.wfKey(workflowId), {
@@ -1250,7 +1260,7 @@ export class RedisWorkflowStorage
 
     if ("olderThanMs" in params) {
       minScore = 0;
-      maxScore = Date.now() - params.olderThanMs;
+      maxScore = this.clock.currentTimeMs() - params.olderThanMs;
     } else {
       minScore = params.from.getTime();
       maxScore = params.to.getTime();
@@ -1434,7 +1444,7 @@ export class RedisWorkflowStorage
     );
     const idxKey = this.journalIdxKey(params.workflowId, params.stepName);
     const stepsKey = this.journalStepsKey(params.workflowId);
-    const createdAt = this.serializeDate(new Date());
+    const createdAt = this.serializeDate(this.clock.now());
     await this.redis.eval(
       APPEND_ENTRY_LUA,
       3,
@@ -1495,7 +1505,7 @@ export class RedisWorkflowStorage
       params.activityName,
       params.stepType,
       wakeAtMs,
-      this.serializeDate(new Date()),
+      this.serializeDate(this.clock.now()),
       params.stepName,
       sleepsMember,
       signalName,
