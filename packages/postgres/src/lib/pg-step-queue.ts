@@ -291,12 +291,12 @@ export class PgStepQueue implements StepQueue {
     // postgres-js refuses to bind Date directly against an untyped
     // parameter; pass ISO strings and let Postgres cast via ::timestamptz.
     const since = params.since.toISOString();
-    // When caller omits `until`, default a couple of seconds in the future.
-    // The app-side `new Date()` can be behind the DB-side `created_at` of a
-    // row that was just inserted (tiny clock skew in CI environments); the
-    // buffer keeps the BETWEEN filter from dropping rows that genuinely
-    // exist at call time.
-    const until = (params.until ?? new Date(Date.now() + 5_000)).toISOString();
+    // When caller omits `until`, use the DB's `NOW()` inside the query
+    // instead of an app-side `new Date()`. Rows are inserted with the
+    // DB's own `created_at` — pulling `until` from the same clock
+    // avoids the app-vs-DB skew that previously dropped just-inserted
+    // rows out of the BETWEEN filter (the 5s buffer this replaces).
+    const untilExpr = params.until ? sql`${params.until.toISOString()}::timestamptz` : sql`NOW()`;
     // Status uses the column that defines membership-in-window: createdAt
     // for pending, claimedAt for running, completedAt for terminal. A
     // single window-aware query per status keeps Postgres-side work minimal.
@@ -310,9 +310,9 @@ export class PgStepQueue implements StepQueue {
           SELECT status, COUNT(*) as count
           FROM wf_step_queue
           WHERE (
-            (status = 'pending'   AND created_at   BETWEEN ${since}::timestamptz AND ${until}::timestamptz) OR
-            (status = 'running'   AND claimed_at   BETWEEN ${since}::timestamptz AND ${until}::timestamptz) OR
-            (status IN ('completed', 'failed') AND completed_at BETWEEN ${since}::timestamptz AND ${until}::timestamptz)
+            (status = 'pending'   AND created_at   BETWEEN ${since}::timestamptz AND ${untilExpr}) OR
+            (status = 'running'   AND claimed_at   BETWEEN ${since}::timestamptz AND ${untilExpr}) OR
+            (status IN ('completed', 'failed') AND completed_at BETWEEN ${since}::timestamptz AND ${untilExpr})
           )${nsFilter}
           GROUP BY status
         `,
@@ -330,7 +330,7 @@ export class PgStepQueue implements StepQueue {
             PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms)  AS p95_exec_ms
           FROM wf_step_queue
           WHERE status IN ('completed', 'failed')
-            AND completed_at BETWEEN ${since}::timestamptz AND ${until}::timestamptz
+            AND completed_at BETWEEN ${since}::timestamptz AND ${untilExpr}
             ${nsFilter}
         `,
       ),
