@@ -14,6 +14,7 @@ import type {
   ActivityJournalStorage,
   JournaledSuspendStorage,
   JournalEntry,
+  FenceGuard,
 } from "@promin/workflow";
 import type {
   WorkflowState,
@@ -24,6 +25,7 @@ import type {
   SignalState,
   StepAttemptRecord,
 } from "@promin/workflow";
+import { FenceTokenMismatchError } from "@promin/workflow";
 import type { RedisClient } from "./redis-client.ts";
 
 export interface RedisWorkflowStorageConfig {
@@ -39,15 +41,54 @@ export interface RedisWorkflowStorageConfig {
 
 // -- Lua scripts ----------------------------------------------------------
 
+// Lock is stored as a hash with { lockedBy, token } fields + a PEXPIRE TTL.
+// Token is minted from a global INCR counter so each holder's stamp is
+// strictly greater than any prior one — mutating writes carry it back
+// through `checkFence` and a mismatch rejects the stale writer.
+//
+// TRY_LOCK
+// KEYS: [lockKey, counterKey]
+// ARGV: [instanceId, lockDurationMs]
+// Returns: [acquired (0/1), token (string, empty on miss)]
+const TRY_LOCK_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  return {0, ''}
+end
+local token = redis.call('INCR', KEYS[2])
+redis.call('HSET', KEYS[1], 'lockedBy', ARGV[1], 'token', token)
+redis.call('PEXPIRE', KEYS[1], ARGV[2])
+return {1, tostring(token)}
+`;
+
+// RELEASE_LOCK: honor the fence token when provided, else fall back to
+// the instanceId check (matches InMemory/Postgres semantics during the
+// migration window where some callers don't yet pass guards).
+// KEYS: [lockKey]
+// ARGV: [instanceId, fenceToken|'']
 const RELEASE_LOCK_LUA = `
-if redis.call('GET', KEYS[1]) == ARGV[1] then
+if ARGV[2] ~= '' then
+  if redis.call('HGET', KEYS[1], 'token') == ARGV[2] then
+    return redis.call('DEL', KEYS[1])
+  end
+  return 0
+end
+if redis.call('HGET', KEYS[1], 'lockedBy') == ARGV[1] then
   return redis.call('DEL', KEYS[1])
 end
 return 0
 `;
 
+// HEARTBEAT: same fence-or-instanceId semantics as RELEASE_LOCK.
+// KEYS: [lockKey]
+// ARGV: [instanceId, lockDurationMs, fenceToken|'']
 const HEARTBEAT_LUA = `
-if redis.call('GET', KEYS[1]) == ARGV[1] then
+if ARGV[3] ~= '' then
+  if redis.call('HGET', KEYS[1], 'token') == ARGV[3] then
+    return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+  end
+  return 0
+end
+if redis.call('HGET', KEYS[1], 'lockedBy') == ARGV[1] then
   return redis.call('PEXPIRE', KEYS[1], ARGV[2])
 end
 return 0
@@ -161,6 +202,11 @@ export class RedisWorkflowStorage
 
   private lockKey(id: string): string {
     return `${this.prefix}:lock:${id}`;
+  }
+
+  /** Global monotonic counter key for fence tokens. One per prefix. */
+  private get fenceCounterKey(): string {
+    return `${this.prefix}:lock-fence-counter`;
   }
 
   private statusIndexKey(status: string): string {
@@ -473,7 +519,12 @@ export class RedisWorkflowStorage
     return results;
   }
 
-  async cancelWorkflow(workflowId: string, _options?: { cascade?: boolean }): Promise<void> {
+  async cancelWorkflow(
+    workflowId: string,
+    _options?: { cascade?: boolean },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    await this.checkFence(workflowId, guard);
     const raw = await this.redis.hgetall(this.wfKey(workflowId));
     if (!raw || !raw.id) return;
 
@@ -508,14 +559,18 @@ export class RedisWorkflowStorage
     raw.status = "running";
   }
 
-  async saveStepResult(params: {
-    workflowId: string;
-    stepName: string;
-    result: unknown;
-    durationMs: number;
-    startedAt: Date;
-    metadata?: Record<string, unknown>;
-  }): Promise<void> {
+  async saveStepResult(
+    params: {
+      workflowId: string;
+      stepName: string;
+      result: unknown;
+      durationMs: number;
+      startedAt: Date;
+      metadata?: Record<string, unknown>;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    await this.checkFence(params.workflowId, guard);
     const raw = await this.redis.hgetall(this.wfKey(params.workflowId));
     if (!raw || !raw.id) return;
 
@@ -564,7 +619,10 @@ export class RedisWorkflowStorage
       startedAt: Date;
       metadata?: Record<string, unknown>;
     }>,
+    guard?: FenceGuard,
   ): Promise<void> {
+    const workflowIds = new Set(records.map((r) => r.workflowId));
+    for (const id of workflowIds) await this.checkFence(id, guard);
     // Redis doesn't have transactions in the Postgres sense, but a pipeline
     // collapses the round-trip count to one regardless of batch size. We
     // still have to read existing step state up front (preserve dependsOn /
@@ -619,14 +677,18 @@ export class RedisWorkflowStorage
     await pipeline.exec();
   }
 
-  async saveStepFailure(params: {
-    workflowId: string;
-    stepName: string;
-    error: string;
-    durationMs: number;
-    startedAt: Date;
-    metadata?: Record<string, unknown>;
-  }): Promise<void> {
+  async saveStepFailure(
+    params: {
+      workflowId: string;
+      stepName: string;
+      error: string;
+      durationMs: number;
+      startedAt: Date;
+      metadata?: Record<string, unknown>;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    await this.checkFence(params.workflowId, guard);
     const raw = await this.redis.hgetall(this.wfKey(params.workflowId));
     if (!raw || !raw.id) return;
 
@@ -665,12 +727,16 @@ export class RedisWorkflowStorage
 
   // -- Task results ---------------------------------------------------------
 
-  async saveTaskResult(params: {
-    workflowId: string;
-    stepName: string;
-    taskIndex: number;
-    result: unknown;
-  }): Promise<void> {
+  async saveTaskResult(
+    params: {
+      workflowId: string;
+      stepName: string;
+      taskIndex: number;
+      result: unknown;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    await this.checkFence(params.workflowId, guard);
     const raw = await this.redis.hgetall(this.wfKey(params.workflowId));
     if (!raw || !raw.id) return;
 
@@ -728,12 +794,16 @@ export class RedisWorkflowStorage
     await this.redis.hset(this.wfKey(params.workflowId), { updatedAt: this.serializeDate(now) });
   }
 
-  async saveTaskFailure(params: {
-    workflowId: string;
-    stepName: string;
-    taskIndex: number;
-    error: string;
-  }): Promise<void> {
+  async saveTaskFailure(
+    params: {
+      workflowId: string;
+      stepName: string;
+      taskIndex: number;
+      error: string;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    await this.checkFence(params.workflowId, guard);
     const raw = await this.redis.hgetall(this.wfKey(params.workflowId));
     if (!raw || !raw.id) return;
 
@@ -792,7 +862,8 @@ export class RedisWorkflowStorage
 
   // -- Workflow completion --------------------------------------------------
 
-  async completeWorkflow(workflowId: string, result: unknown): Promise<void> {
+  async completeWorkflow(workflowId: string, result: unknown, guard?: FenceGuard): Promise<void> {
+    await this.checkFence(workflowId, guard);
     const raw = await this.redis.hgetall(this.wfKey(workflowId));
     if (!raw || !raw.id) return;
 
@@ -814,7 +885,8 @@ export class RedisWorkflowStorage
     }
   }
 
-  async failWorkflow(workflowId: string, error: string): Promise<void> {
+  async failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void> {
+    await this.checkFence(workflowId, guard);
     const raw = await this.redis.hgetall(this.wfKey(workflowId));
     if (!raw || !raw.id) return;
 
@@ -884,7 +956,9 @@ export class RedisWorkflowStorage
     workflowId: string,
     stepName: string,
     stepUpdate: Record<string, unknown>,
+    guard?: FenceGuard,
   ): Promise<void> {
+    await this.checkFence(workflowId, guard);
     const raw = await this.redis.hgetall(this.wfKey(workflowId));
     if (!raw || !raw.id) return;
 
@@ -961,17 +1035,19 @@ export class RedisWorkflowStorage
     workflowId: string,
     lockDurationMs: number,
   ): Promise<{ acquired: boolean; token?: string }> {
-    // NOTE: fence token support lands with the Lua-script rewrite in a
-    // follow-up commit. Today the backend still uses the instance-id
-    // RELEASE_LOCK_LUA guard on writes; no token returned.
-    const result = await this.redis.set(
+    // Atomic via Lua: EXISTS → INCR (monotonic fence counter) → HSET lock
+    // hash → PEXPIRE. Redis serializes script execution, so no interleave.
+    const result = (await this.redis.eval(
+      TRY_LOCK_LUA,
+      2,
       this.lockKey(workflowId),
+      this.fenceCounterKey,
       this.instanceId,
-      "NX",
-      "PX",
-      lockDurationMs,
-    );
-    return { acquired: !!result };
+      lockDurationMs.toString(),
+    )) as [number, string];
+    const [acquired, token] = result;
+    if (acquired !== 1) return { acquired: false };
+    return { acquired: true, token };
   }
 
   async tryLockAndLoad(
@@ -990,18 +1066,45 @@ export class RedisWorkflowStorage
     return { locked: acquired, token, state };
   }
 
-  async releaseLock(workflowId: string): Promise<void> {
-    await this.redis.eval(RELEASE_LOCK_LUA, 1, this.lockKey(workflowId), this.instanceId);
+  async releaseLock(workflowId: string, guard?: FenceGuard): Promise<void> {
+    await this.redis.eval(
+      RELEASE_LOCK_LUA,
+      1,
+      this.lockKey(workflowId),
+      this.instanceId,
+      guard?.fenceToken ?? "",
+    );
   }
 
-  async heartbeat(workflowId: string, lockDurationMs: number): Promise<void> {
+  async heartbeat(workflowId: string, lockDurationMs: number, guard?: FenceGuard): Promise<void> {
     await this.redis.eval(
       HEARTBEAT_LUA,
       1,
       this.lockKey(workflowId),
       this.instanceId,
-      lockDurationMs,
+      lockDurationMs.toString(),
+      guard?.fenceToken ?? "",
     );
+  }
+
+  /**
+   * Reject a mutating call when the caller's fence token doesn't match the
+   * current lock hash's `token` field. Calls without a token (legacy path)
+   * skip the check so the migration can land additively.
+   */
+  private async checkFence(workflowId: string, guard?: FenceGuard): Promise<void> {
+    if (!guard?.fenceToken) return;
+    const current = await this.redis.hget(this.lockKey(workflowId), "token");
+    if (current !== guard.fenceToken) {
+      throw new FenceTokenMismatchError({
+        workflowId,
+        expected: current ?? "(no lock)",
+        provided: guard.fenceToken,
+        message:
+          `Fenced write for "${workflowId}" rejected — ` +
+          `token mismatch (expected "${current ?? "(no lock)"}", got "${guard.fenceToken}")`,
+      });
+    }
   }
 
   // -- Run history ----------------------------------------------------------
@@ -1259,7 +1362,8 @@ export class RedisWorkflowStorage
 
   // -- StepAttemptStorage ---------------------------------------------------
 
-  async saveStepAttempt(record: StepAttemptRecord): Promise<void> {
+  async saveStepAttempt(record: StepAttemptRecord, guard?: FenceGuard): Promise<void> {
+    await this.checkFence(record.workflowId, guard);
     await this.redis.rpush(
       this.attemptsKey(record.workflowId),
       JSON.stringify({
