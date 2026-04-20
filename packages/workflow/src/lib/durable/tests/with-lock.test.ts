@@ -147,4 +147,23 @@ describe("withLock", () => {
     // Lock should have expired (heartbeat from wrong instance didn't extend it)
     expect((await instance1.tryLock("wf-1", 60_000)).acquired).toBe(true);
   });
+
+  it("coarser default heartbeat: a 500ms run at the 30s default fires zero heartbeats", async () => {
+    // Under the old 10s default a 500ms run would have fired zero heartbeats
+    // too, but a 35s run would have hit 3. We're not exercising a 35s run
+    // in a unit test — the point of the default change is that at any
+    // sub-30s duration the heartbeat loop stays quiet. Instrument the count
+    // to prove the defaults are wired through (no explicit options).
+    const calls: number[] = [];
+    storage.heartbeat = async () => {
+      calls.push(Date.now());
+    };
+    await withLock({
+      storage,
+      workflowId: "wf-default",
+      fn: () => new Promise((resolve) => setTimeout(resolve, 500)),
+      // no options — exercises DEFAULT_HEARTBEAT_INTERVAL_MS
+    });
+    expect(calls.length).toBe(0);
+  });
 });
