@@ -33,6 +33,7 @@ import type {
   StepAttemptRecord,
 } from "./workflow-state.ts";
 import { FenceTokenMismatchError } from "./durable-pipeline-error.ts";
+import { SystemClock, type Clock } from "@promin/core";
 
 /** Mutable internal workflow state — avoids spread-copy on every mutation. */
 interface MutableWorkflow {
@@ -78,10 +79,17 @@ export class InMemoryWorkflowStorage
   /** Activity journal keyed by `${workflowId}::${stepName}` → ordered entries. */
   private journal = new Map<string, JournalEntry[]>();
   private readonly namespace: string | null;
+  /**
+   * Time source. Every timestamp + lock-expiry check routes through here
+   * — pass a `FakeClock` in tests to drive deterministic semantics
+   * without real waits.
+   */
+  private readonly clock: Clock;
 
-  constructor(config?: { namespace?: string | null; instanceId?: string }) {
+  constructor(config?: { namespace?: string | null; instanceId?: string; clock?: Clock }) {
     this.namespace = config?.namespace ?? null;
     this.instanceId = config?.instanceId ?? crypto.randomUUID();
+    this.clock = config?.clock ?? SystemClock;
   }
 
   private resolveNamespace(workflowNamespace?: string): string | undefined {
@@ -158,7 +166,7 @@ export class InMemoryWorkflowStorage
     if (!wf) return;
     if (wf.status !== "pending" && wf.status !== "running" && wf.status !== "suspended") return;
 
-    const now = new Date();
+    const now = this.clock.now();
     wf.status = "failed";
     wf.error = "Cancelled";
     wf.completedAt = now;
@@ -186,7 +194,7 @@ export class InMemoryWorkflowStorage
     const existing = this.workflows.get(params.workflowId);
     if (existing) return { created: false, existing: this.toState(existing) };
 
-    const now = new Date();
+    const now = this.clock.now();
     this.workflows.set(params.workflowId, {
       workflowId: params.workflowId,
       workflowName: params.workflowName,
@@ -209,7 +217,7 @@ export class InMemoryWorkflowStorage
   private markRunning(wf: MutableWorkflow): void {
     if (wf.status === "pending") {
       wf.status = "running";
-      wf.startedAt = new Date();
+      wf.startedAt = this.clock.now();
     }
   }
 
@@ -230,7 +238,7 @@ export class InMemoryWorkflowStorage
     this.markRunning(wf);
 
     const existing = wf.steps.get(params.stepName);
-    const now = new Date();
+    const now = this.clock.now();
     wf.steps.set(params.stepName, {
       stepName: params.stepName,
       run: wf.run,
@@ -283,7 +291,7 @@ export class InMemoryWorkflowStorage
     this.markRunning(wf);
 
     const existing = wf.steps.get(params.stepName);
-    const now = new Date();
+    const now = this.clock.now();
     wf.steps.set(params.stepName, {
       stepName: params.stepName,
       run: wf.run,
@@ -316,7 +324,7 @@ export class InMemoryWorkflowStorage
 
     const existing = wf.steps.get(params.stepName);
     const tasks = existing?.tasks ? [...existing.tasks] : [];
-    const now = new Date();
+    const now = this.clock.now();
 
     const idx = tasks.findIndex((t) => t.taskIndex === params.taskIndex);
     const prev = idx >= 0 ? tasks[idx] : undefined;
@@ -360,7 +368,7 @@ export class InMemoryWorkflowStorage
 
     const existing = wf.steps.get(params.stepName);
     const tasks = existing?.tasks ? [...existing.tasks] : [];
-    const now = new Date();
+    const now = this.clock.now();
 
     const idx = tasks.findIndex((t) => t.taskIndex === params.taskIndex);
     const prev = idx >= 0 ? tasks[idx] : undefined;
@@ -393,7 +401,7 @@ export class InMemoryWorkflowStorage
     this.checkFence(workflowId, guard);
     const wf = this.workflows.get(workflowId);
     if (!wf) return;
-    const now = new Date();
+    const now = this.clock.now();
     wf.status = "completed";
     wf.result = result;
     wf.completedAt = now;
@@ -404,7 +412,7 @@ export class InMemoryWorkflowStorage
     this.checkFence(workflowId, guard);
     const wf = this.workflows.get(workflowId);
     if (!wf) return;
-    const now = new Date();
+    const now = this.clock.now();
     wf.status = "failed";
     wf.error = error;
     wf.completedAt = now;
@@ -422,7 +430,7 @@ export class InMemoryWorkflowStorage
     if (!wf) return;
 
     const existing = wf.steps.get(stepName);
-    const now = new Date();
+    const now = this.clock.now();
     wf.steps.set(stepName, {
       stepName,
       run: wf.run,
@@ -438,7 +446,7 @@ export class InMemoryWorkflowStorage
 
   async deliverSignal(workflowId: string, signalName: string, payload: unknown): Promise<void> {
     const existing = this.signals.get(workflowId) ?? [];
-    existing.push({ signalName, payload, deliveredAt: new Date() });
+    existing.push({ signalName, payload, deliveredAt: this.clock.now() });
     this.signals.set(workflowId, existing);
   }
 
@@ -451,7 +459,7 @@ export class InMemoryWorkflowStorage
     lockDurationMs: number,
   ): Promise<{ acquired: boolean; token?: FenceToken }> {
     const lock = this.locks.get(workflowId);
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     if (lock !== undefined && lock.expiresAt > now) return { acquired: false };
     const token = String(this.nextFenceToken++);
     this.locks.set(workflowId, {
@@ -499,7 +507,7 @@ export class InMemoryWorkflowStorage
       return;
     }
     this.locks.set(workflowId, {
-      expiresAt: Date.now() + lockDurationMs,
+      expiresAt: this.clock.currentTimeMs() + lockDurationMs,
       lockedBy: lock.lockedBy,
       token: lock.token,
     });
@@ -563,7 +571,7 @@ export class InMemoryWorkflowStorage
     wf.startedAt = undefined;
     wf.completedAt = undefined;
     wf.steps = new Map();
-    wf.updatedAt = new Date();
+    wf.updatedAt = this.clock.now();
     return wf.run;
   }
 
@@ -607,7 +615,7 @@ export class InMemoryWorkflowStorage
 
     if ("olderThanMs" in params) {
       fromMs = 0;
-      toMs = Date.now() - params.olderThanMs;
+      toMs = this.clock.currentTimeMs() - params.olderThanMs;
     } else {
       fromMs = params.from.getTime();
       toMs = params.to.getTime();
@@ -711,7 +719,7 @@ export class InMemoryWorkflowStorage
       phase: "completed",
       payloadHash: params.payloadHash ?? priorHash,
       exit: params.exit,
-      createdAt: new Date(),
+      createdAt: this.clock.now(),
     };
     if (existing !== -1) entries[existing] = entry;
     else entries.push(entry);
@@ -741,7 +749,7 @@ export class InMemoryWorkflowStorage
       phase: "pending",
       payloadHash: params.payloadHash,
       wakeAt: params.wakeAt,
-      createdAt: new Date(),
+      createdAt: this.clock.now(),
     });
     this.journal.set(key, entries);
   }
