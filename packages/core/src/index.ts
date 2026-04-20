@@ -27,8 +27,8 @@ export {
   type PollOptions,
 } from "./lib/combinators.ts";
 
-// Clock
-export { type Clock, SystemClock, FakeClock } from "./lib/clock.ts";
+// Clock — time source + scheduler (unified)
+export { type Clock, type TimerHandle, SystemClock, FakeClock } from "./lib/clock.ts";
 
 // Duration
 export { Duration, type DurationInput, resolveMs } from "./lib/duration.ts";
