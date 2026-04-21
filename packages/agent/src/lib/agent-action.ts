@@ -1,11 +1,13 @@
 import { workflow } from "@promin/workflow";
 import type { Workflow } from "@promin/workflow";
 import type { RateLimiter, Clock } from "@promin/core";
+import { z } from "zod";
 import type { LLMProvider } from "./llm-provider.ts";
 import type { AgentTool, ApprovalDecision, AutoApprove } from "./tool.ts";
 import { shouldAutoApprove } from "./tool.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
 import { buildToolDefs } from "./tool-registry.ts";
+import { zodToJsonSchema } from "./zod-to-json-schema.ts";
 import type { MemoryStore, MemoryScope } from "./memory-store.ts";
 import type { Message, AssistantMessage, ToolResultMessage, ToolCall } from "./message.ts";
 
@@ -16,6 +18,8 @@ export interface AgentInput {
 
 export interface AgentResult {
   answer: string;
+  /** Populated when outputSchema is set. The parsed, schema-validated output object. */
+  output?: unknown;
   messages: Message[];
   steps: number;
   usage?: { inputTokens: number; outputTokens: number };
@@ -49,7 +53,8 @@ export interface AgentActionMemoryConfig {
   saveOnComplete?: boolean;
 }
 
-export interface AgentActionConfig {
+// biome-ignore lint/suspicious/noExplicitAny: outputSchema generic
+export interface AgentActionConfig<TOutput = any> {
   name: string;
   llm: LLMProvider;
   // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
@@ -61,6 +66,12 @@ export interface AgentActionConfig {
   rateLimiter?: RateLimiter;
   clock?: Clock;
   memory?: AgentActionMemoryConfig;
+  /**
+   * When set, forces the LLM to return a structured response matching this Zod schema.
+   * Uses tool-calling under the hood for maximum compatibility across providers.
+   * result.output will be the parsed, type-safe value.
+   */
+  outputSchema?: z.ZodType<TOutput>;
   onStep?: (ctx: StepContext) => { continue: boolean; feedback?: string } | void;
   onToolCall?: (call: ToolCall) => void;
   onToolResult?: (call: ToolCall, output: unknown) => void;
@@ -73,7 +84,25 @@ export class MaxStepsError extends Error {
   }
 }
 
-export function agentAction(config: AgentActionConfig): Workflow<AgentInput, AgentResult> {
+export class StructuredOutputParseError extends Error {
+  readonly _tag = "StructuredOutputParseError";
+  constructor(override readonly cause: unknown) {
+    super(`Agent structured output failed schema validation: ${String(cause)}`);
+  }
+}
+
+// ---- overloads for type narrowing ----
+
+export function agentAction<TOutput>(
+  config: AgentActionConfig<TOutput> & { outputSchema: z.ZodType<TOutput> },
+): Workflow<AgentInput, AgentResult & { output: TOutput }>;
+export function agentAction(
+  config: AgentActionConfig<never> & { outputSchema?: undefined },
+): Workflow<AgentInput, AgentResult>;
+export function agentAction(
+  // biome-ignore lint/suspicious/noExplicitAny: overload implementation accepts both forms
+  config: AgentActionConfig<any>,
+): Workflow<AgentInput, AgentResult> {
   const maxSteps = config.maxSteps ?? 20;
 
   return workflow<AgentInput>({ name: config.name })
@@ -82,6 +111,20 @@ export function agentAction(config: AgentActionConfig): Workflow<AgentInput, Age
         ...(config.systemPrompt ? [{ role: "system" as const, content: config.systemPrompt }] : []),
         ...(input.messages ?? []),
       ];
+
+      // Inject structured output instruction when outputSchema is set
+      if (config.outputSchema) {
+        messages = [
+          ...messages,
+          {
+            role: "system" as const,
+            content:
+              "When you have gathered all needed information and are ready to respond, " +
+              "call the `_respond` tool with your final structured answer. " +
+              "Do not produce a text reply — always use the `_respond` tool for your final answer.",
+          },
+        ];
+      }
 
       // Inject relevant memories before the first think step
       if (config.memory && (config.memory.injectLimit ?? 5) > 0) {
@@ -105,11 +148,22 @@ export function agentAction(config: AgentActionConfig): Workflow<AgentInput, Age
 
       let totalInputTokens = 0;
       let totalOutputTokens = 0;
+      let structuredOutput: unknown;
 
       for (let step = 0; step < maxSteps; step++) {
         // Resolve tools fresh each step so a toolRegistry update is visible immediately
         const toolMap = config.toolRegistry?.getTools() ?? config.tools ?? {};
         const toolDefs = buildToolDefs(toolMap);
+
+        // Inject synthetic _respond tool for structured output
+        if (config.outputSchema) {
+          toolDefs.push({
+            name: "_respond",
+            description:
+              "Provide your final structured response. Call this when you have all the information needed.",
+            parameters: zodToJsonSchema(config.outputSchema),
+          });
+        }
 
         const response = yield* ctx.activity(`think-${step}`, () => {
           const call = () =>
@@ -123,6 +177,39 @@ export function agentAction(config: AgentActionConfig): Workflow<AgentInput, Age
         if (response.usage) {
           totalInputTokens += response.usage.inputTokens;
           totalOutputTokens += response.usage.outputTokens;
+        }
+
+        // Intercept _respond tool call for structured output
+        if (config.outputSchema && response.toolCalls) {
+          const respondCall = response.toolCalls.find((c) => c.name === "_respond");
+          if (respondCall) {
+            try {
+              structuredOutput = config.outputSchema.parse(respondCall.input);
+            } catch (err) {
+              throw new StructuredOutputParseError(err);
+            }
+            const answer = JSON.stringify(respondCall.input);
+            messages = [
+              ...messages,
+              { role: "assistant" as const, content: null, toolCalls: response.toolCalls },
+            ];
+            if (config.memory?.saveOnComplete) {
+              yield* ctx.activity("save-memory", () =>
+                config.memory!.store.save(
+                  { content: answer, metadata: { task: input.task } },
+                  config.memory!.scope,
+                ),
+              );
+            }
+            return buildResult(
+              answer,
+              messages,
+              step + 1,
+              totalInputTokens,
+              totalOutputTokens,
+              structuredOutput,
+            );
+          }
         }
 
         const assistantMsg: AssistantMessage = {
@@ -223,9 +310,11 @@ function buildResult(
   steps: number,
   inputTokens: number,
   outputTokens: number,
+  output?: unknown,
 ): AgentResult {
   return {
     answer,
+    ...(output !== undefined ? { output } : {}),
     messages,
     steps,
     usage: inputTokens > 0 || outputTokens > 0 ? { inputTokens, outputTokens } : undefined,

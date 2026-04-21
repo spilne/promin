@@ -1,4 +1,4 @@
-export { agentAction, MaxStepsError } from "./agent-action.ts";
+export { agentAction, MaxStepsError, StructuredOutputParseError } from "./agent-action.ts";
 export type {
   AgentActionConfig,
   AgentActionMemoryConfig,
