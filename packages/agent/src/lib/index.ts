@@ -71,3 +71,6 @@ export type { OpenAIEmbeddingOptions } from "./adapters/openai-embedding.ts";
 
 export { voyageEmbedding } from "./adapters/voyage-embedding.ts";
 export type { VoyageEmbeddingOptions } from "./adapters/voyage-embedding.ts";
+
+export { SystemClock, FakeClock } from "@promin/core";
+export type { Clock, TimerHandle } from "@promin/core";

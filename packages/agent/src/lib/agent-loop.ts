@@ -5,7 +5,8 @@ import {
   isJournaledSuspendStorage,
 } from "@promin/workflow";
 import type { WorkflowRunner, JournaledSuspendStorage } from "@promin/workflow";
-import type { RateLimiter } from "@promin/core";
+import { SystemClock } from "@promin/core";
+import type { RateLimiter, Clock, TimerHandle } from "@promin/core";
 import type { LLMProvider } from "./llm-provider.ts";
 import type { AgentTool, AutoApprove } from "./tool.ts";
 import { shouldAutoApprove } from "./tool.ts";
@@ -39,6 +40,17 @@ export interface HooksConfig {
    * Runs as a journaled activity — crash-safe, skipped on replay.
    */
   afterTurn?: (params: HooksAfterTurnParams) => Promise<void>;
+  /**
+   * Fires when no send() arrives within idleTimeoutMs after the previous turn ended.
+   * Not journaled — runs outside the workflow via a clock timer.
+   * Receives the actual elapsed idle time in milliseconds.
+   */
+  onIdle?: (idleMs: number) => Promise<void>;
+  /**
+   * How long (ms) the session must be idle before onIdle fires.
+   * Required when onIdle is set.
+   */
+  idleTimeoutMs?: number;
   /**
    * Runs when session.close() is called.
    * Not journaled — use for cleanup, flushing buffers, or final memory writes.
@@ -99,6 +111,8 @@ export interface AgentLoopConfig {
   context?: ContextConfig;
   memory?: MemoryConfig;
   hooks?: HooksConfig;
+  /** Time source. Default: SystemClock. Pass FakeClock in tests to drive idle timers. */
+  clock?: Clock;
 }
 
 export interface AgentSession {
@@ -178,9 +192,24 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
       }
       const journalStorage = runner.storage as unknown as JournaledSuspendStorage;
 
+      const clock = config.clock ?? SystemClock;
       const pendingResponses = new Map<number, (answer: string) => void>();
       let sessionTurn = 0;
       let closed = false;
+      let idleTimer: TimerHandle | null = null;
+      let idleStart = 0;
+
+      const resetIdleTimer = () => {
+        idleTimer?.clear();
+        idleTimer = null;
+        const { onIdle, idleTimeoutMs } = config.hooks ?? {};
+        if (!onIdle || !idleTimeoutMs) return;
+        idleStart = clock.currentTimeMs();
+        idleTimer = clock.setTimeout(() => {
+          idleTimer = null;
+          onIdle(clock.currentTimeMs() - idleStart).catch(() => {});
+        }, idleTimeoutMs);
+      };
 
       const sessionWorkflow = workflow<void>({ name: config.name }).journaled(
         "conversation",
@@ -370,10 +399,14 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
           });
 
           // The emit-N activity resolved the promise during the runSafe call above.
-          return promise;
+          const answer = await promise;
+          resetIdleTimer();
+          return answer;
         },
         async close() {
           closed = true;
+          idleTimer?.clear();
+          idleTimer = null;
           pendingResponses.clear();
           await config.hooks?.onClose?.();
         },
