@@ -6,7 +6,7 @@ import type { AgentTool, ApprovalDecision, AutoApprove } from "./tool.ts";
 import { shouldAutoApprove } from "./tool.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
 import { buildToolDefs } from "./tool-registry.ts";
-import type { MemoryStore } from "./memory-store.ts";
+import type { MemoryStore, MemoryScope } from "./memory-store.ts";
 import type { Message, AssistantMessage, ToolResultMessage, ToolCall } from "./message.ts";
 
 export interface AgentInput {
@@ -29,6 +29,11 @@ export interface StepContext {
 
 export interface AgentActionMemoryConfig {
   store: MemoryStore;
+  /**
+   * Scope for all read and write operations on this store.
+   * Omit for the global namespace (same as pre-scoping behaviour).
+   */
+  scope?: MemoryScope;
   /**
    * How many memories to retrieve and inject before the first think step.
    * Default: 5. Set to 0 to disable injection.
@@ -84,6 +89,7 @@ export function agentAction(config: AgentActionConfig): Workflow<AgentInput, Age
           config.memory!.store.search(
             config.memory!.searchQuery ?? input.task,
             config.memory!.injectLimit ?? 5,
+            config.memory!.scope,
           ),
         );
         if (memories.length > 0) {
@@ -132,7 +138,10 @@ export function agentAction(config: AgentActionConfig): Workflow<AgentInput, Age
             const answer = response.content ?? "";
             if (config.memory?.saveOnComplete) {
               yield* ctx.activity("save-memory", () =>
-                config.memory!.store.save({ content: answer, metadata: { task: input.task } }),
+                config.memory!.store.save(
+                  { content: answer, metadata: { task: input.task } },
+                  config.memory!.scope,
+                ),
               );
             }
             return buildResult(answer, messages, step + 1, totalInputTokens, totalOutputTokens);
@@ -147,7 +156,10 @@ export function agentAction(config: AgentActionConfig): Workflow<AgentInput, Age
           const answer = response.content ?? "";
           if (config.memory?.saveOnComplete) {
             yield* ctx.activity("save-memory", () =>
-              config.memory!.store.save({ content: answer, metadata: { task: input.task } }),
+              config.memory!.store.save(
+                { content: answer, metadata: { task: input.task } },
+                config.memory!.scope,
+              ),
             );
           }
           return buildResult(answer, messages, step + 1, totalInputTokens, totalOutputTokens);

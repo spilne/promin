@@ -12,7 +12,7 @@ import type { AgentTool, AutoApprove } from "./tool.ts";
 import { shouldAutoApprove } from "./tool.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
 import { buildToolDefs } from "./tool-registry.ts";
-import type { MemoryStore } from "./memory-store.ts";
+import type { MemoryStore, MemoryScope } from "./memory-store.ts";
 import type { Message, AssistantMessage, ToolResultMessage } from "./message.ts";
 
 // ---- hooks ----
@@ -80,6 +80,12 @@ export interface ContextConfig {
 
 export interface MemoryConfig {
   store: MemoryStore;
+  /**
+   * Scope for all read and write operations on this store.
+   * Omit for the global namespace (same as pre-scoping behaviour).
+   * Example: { resourceId: userId, threadId: sessionId }
+   */
+  scope?: MemoryScope;
   /**
    * Save compaction summaries to the memory store so they are retrievable
    * in future sessions. Default: true.
@@ -226,6 +232,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               config.memory!.store.search(
                 config.memory!.searchQuery ?? config.systemPrompt ?? "general context",
                 config.memory!.injectLimit ?? 5,
+                config.memory!.scope,
               ),
             );
             if (memories.length > 0) {
@@ -355,10 +362,13 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                 config.memory?.store
               ) {
                 yield* ctx.activity(`save-memory-${turn}`, () =>
-                  config.memory!.store.save({
-                    content: result.summary!,
-                    metadata: { sessionId, turn, type: "compaction-summary" },
-                  }),
+                  config.memory!.store.save(
+                    {
+                      content: result.summary!,
+                      metadata: { sessionId, turn, type: "compaction-summary" },
+                    },
+                    config.memory!.scope,
+                  ),
                 );
               }
             }

@@ -7,14 +7,24 @@ export interface MemoryEntry {
   createdAt: Date;
 }
 
+export interface MemoryScope {
+  /** User, org, or entity identifier. */
+  resourceId?: string;
+  /** Conversation or session identifier. */
+  threadId?: string;
+}
+
 export interface EmbeddingProvider {
   embed(text: string): Promise<number[]>;
 }
 
 export interface MemoryStore {
-  save(entry: { content: string; metadata?: Record<string, unknown> }): Promise<string>;
-  search(query: string, limit?: number): Promise<MemoryEntry[]>;
-  list(limit?: number): Promise<MemoryEntry[]>;
+  save(
+    entry: { content: string; metadata?: Record<string, unknown> },
+    scope?: MemoryScope,
+  ): Promise<string>;
+  search(query: string, limit?: number, scope?: MemoryScope): Promise<MemoryEntry[]>;
+  list(limit?: number, scope?: MemoryScope): Promise<MemoryEntry[]>;
   delete(id: string): Promise<void>;
 }
 
@@ -51,11 +61,29 @@ function keywordScore(query: string, content: string): number {
   return matches / queryWords.size;
 }
 
+// ---- scope helpers ----
+
+function scopeMatches(
+  entryScope: MemoryScope | undefined,
+  queryScope: MemoryScope | undefined,
+): boolean {
+  // No query scope → global namespace: only match entries with no scope
+  if (!queryScope) return !entryScope;
+  // Scoped query, unscoped entry → no match
+  if (!entryScope) return false;
+  if (queryScope.resourceId !== undefined && entryScope.resourceId !== queryScope.resourceId)
+    return false;
+  if (queryScope.threadId !== undefined && entryScope.threadId !== queryScope.threadId)
+    return false;
+  return true;
+}
+
 // ---- InMemoryMemoryStore ----
 
 interface StoredEntry {
   entry: MemoryEntry;
   embedding?: number[];
+  scope?: MemoryScope;
 }
 
 export interface InMemoryMemoryStoreConfig {
@@ -74,7 +102,10 @@ export class InMemoryMemoryStore implements MemoryStore {
     this.embeddings = config.embeddings;
   }
 
-  async save(input: { content: string; metadata?: Record<string, unknown> }): Promise<string> {
+  async save(
+    input: { content: string; metadata?: Record<string, unknown> },
+    scope?: MemoryScope,
+  ): Promise<string> {
     const id = randomUUID();
     const entry: MemoryEntry = {
       id,
@@ -84,16 +115,17 @@ export class InMemoryMemoryStore implements MemoryStore {
     };
 
     const embedding = this.embeddings ? await this.embeddings.embed(input.content) : undefined;
-    this.entries.push({ entry, embedding });
+    this.entries.push({ entry, embedding, scope });
     return id;
   }
 
-  async search(query: string, limit = 5): Promise<MemoryEntry[]> {
-    if (this.entries.length === 0) return [];
+  async search(query: string, limit = 5, scope?: MemoryScope): Promise<MemoryEntry[]> {
+    const candidates = this.entries.filter((e) => scopeMatches(e.scope, scope));
+    if (candidates.length === 0) return [];
 
     if (this.embeddings) {
       const queryEmbedding = await this.embeddings.embed(query);
-      return this.entries
+      return candidates
         .map(({ entry, embedding }) => ({
           entry,
           score: embedding ? cosineSimilarity(queryEmbedding, embedding) : 0,
@@ -103,7 +135,7 @@ export class InMemoryMemoryStore implements MemoryStore {
         .map(({ entry }) => entry);
     }
 
-    return this.entries
+    return candidates
       .map(({ entry }) => ({ entry, score: keywordScore(query, entry.content) }))
       .filter(({ score }) => score > 0)
       .sort((a, b) => b.score - a.score)
@@ -111,9 +143,11 @@ export class InMemoryMemoryStore implements MemoryStore {
       .map(({ entry }) => entry);
   }
 
-  async list(limit?: number): Promise<MemoryEntry[]> {
-    // Reverse preserves stable insertion order — most recently added first.
-    const all = [...this.entries].reverse().map(({ entry }) => entry);
+  async list(limit?: number, scope?: MemoryScope): Promise<MemoryEntry[]> {
+    const all = this.entries
+      .filter((e) => scopeMatches(e.scope, scope))
+      .reverse()
+      .map(({ entry }) => entry);
     return limit ? all.slice(0, limit) : all;
   }
 

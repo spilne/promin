@@ -20,7 +20,7 @@ export type {
 } from "./agent-loop.ts";
 
 export { InMemoryMemoryStore } from "./memory-store.ts";
-export type { MemoryStore, MemoryEntry, EmbeddingProvider } from "./memory-store.ts";
+export type { MemoryStore, MemoryEntry, MemoryScope, EmbeddingProvider } from "./memory-store.ts";
 
 export { tool } from "./tool.ts";
 export type { AgentTool, ApprovalDecision, AutoApprove } from "./tool.ts";
