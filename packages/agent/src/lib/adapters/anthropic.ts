@@ -5,8 +5,10 @@ interface AnthropicContentBlock {
   type: string;
   text?: string;
   id?: string;
+  tool_use_id?: string;
   name?: string;
   input?: unknown;
+  content?: string;
 }
 
 interface AnthropicResponse {
@@ -104,11 +106,11 @@ function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
 
     if (msg.role === "tool") {
       const last = result[result.length - 1];
-      const toolResult: AnthropicContentBlock = {
+      const toolResult = {
         type: "tool_result",
-        id: msg.toolCallId,
+        tool_use_id: msg.toolCallId,
         content: msg.content,
-      } as AnthropicContentBlock & { id: string; content: string };
+      };
 
       if (last?.role === "user" && Array.isArray(last.content)) {
         (last.content as AnthropicContentBlock[]).push(toolResult);
