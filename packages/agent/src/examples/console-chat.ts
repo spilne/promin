@@ -20,16 +20,19 @@
  *   ANTHROPIC_API_KEY=sk-... bun packages/agent/src/examples/console-chat.ts
  *
  * Commands:
- *   /history  — print conversation messages
- *   /steps    — print full workflow step tree from storage
- *   /state    — print agent lifecycle state machine (current state + transition history)
- *   /tools    — list currently loaded dynamic tools
- *   exit      — quit
+ *   /history          — print conversation messages
+ *   /steps            — print full workflow step tree from storage
+ *   /state            — print agent lifecycle state machine (current state + transition history)
+ *   /tools            — list currently loaded dynamic tools
+ *   /memories [query] — search memories (omit query to list all)
+ *   /remember <text>  — save a memory entry directly (bypasses LLM)
+ *   exit              — quit
  */
 
 import { createInterface } from "node:readline";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { InMemoryMemoryStore } from "../lib/memory-store.ts";
 import { stateMachine, InMemoryStateMachineStorage } from "@promin/workflow";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { anthropic } from "../lib/adapters/anthropic.ts";
@@ -204,6 +207,27 @@ const agentMachine = stateMachine<AgentStates>({ name: "agent-lifecycle", storag
   .initial("idle")
   .build();
 
+// ---- memory store ----
+
+const memoryStore = new InMemoryMemoryStore();
+
+async function printMemories(query?: string) {
+  const entries = query
+    ? await memoryStore.search(query, 10)
+    : await memoryStore.list(50);
+  if (entries.length === 0) {
+    console.log(query ? `\n(no memories matching "${query}")\n` : "\n(no memories saved yet)\n");
+    return;
+  }
+  const label = query ? `memories matching "${query}"` : "all memories";
+  console.log(`\n--- ${label} (${entries.length}) ---`);
+  for (const e of entries) {
+    const ts = e.createdAt.toLocaleTimeString();
+    console.log(`  [${ts}] ${e.id.slice(0, 8)}  ${e.content}`);
+  }
+  console.log("");
+}
+
 // ---- infrastructure ----
 
 const storage = new InMemoryWorkflowStorage();
@@ -221,6 +245,7 @@ const loop = agentLoop({
     "You are a helpful assistant. Be concise. " +
     "You have a writeTool that lets you create new tools at runtime — use it when you need a capability no existing tool covers. " +
     "If a tool needs an API key or credential, call requireSecret first to get it from the user — never ask for secrets in chat.",
+  memory: { store: memoryStore },
 });
 
 let turnCounter = 0;
@@ -353,6 +378,23 @@ function prompt() {
       prompt();
       return;
     }
+    if (task.startsWith("/memories")) {
+      const query = task.slice("/memories".length).trim() || undefined;
+      await printMemories(query);
+      prompt();
+      return;
+    }
+    if (task.startsWith("/remember ")) {
+      const text = task.slice("/remember ".length).trim();
+      if (text) {
+        const id = await memoryStore.save({ content: text });
+        console.log(`\nSaved memory ${id.slice(0, 8)}: "${text}"\n`);
+      } else {
+        console.log("\nUsage: /remember <text>\n");
+      }
+      prompt();
+      return;
+    }
 
     const turn = turnCounter++;
     await agentMachine.send({ id: "session", event: "message", data: { turn, task } });
@@ -375,5 +417,5 @@ function prompt() {
 
 console.log(`Console agent ready. Tools dir: ${toolsDir}`);
 console.log(`Static tools: calculator, currentTime, showHistory, writeTool, requireSecret`);
-console.log('Type "/history", "/steps", "/state", "/tools", or "exit".\n');
+console.log('Commands: /history, /steps, /state, /tools, /memories [query], /remember <text>, exit\n');
 prompt();
