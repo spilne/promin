@@ -194,6 +194,7 @@ export {
   retryMiddleware,
   loggingMiddleware,
   metricsMiddleware,
+  StepQueueExecutor,
 } from "./lib/distributed/index.ts";
 
 // SQL Models (dbt-style)

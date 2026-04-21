@@ -107,20 +107,21 @@ describe("WorkflowRunner", () => {
     ).rejects.toThrow(/registry/);
   });
 
-  it("InProcessStepExecutor is constructable but throws until phase 2 — guards against premature adoption", async () => {
-    const wf = workflow<void>({ name: "placeholder" })
-      .step("noop", () => Pipeline.succeed(undefined))
+  it("InProcessStepExecutor runs a step body and returns the encoded result", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const wf = workflow<{ n: number }>({ name: "executor-test" })
+      .step("double", ({ input }) => Pipeline.succeed((input as { n: number }).n * 2))
       .build();
 
-    const executor = new InProcessStepExecutor(wf);
-    await expect(
-      executor.executeStep({
-        workflowId: "x",
-        stepName: "noop",
-        input: undefined,
-        prevResults: {},
-        attempt: 1,
-      }),
-    ).rejects.toThrow(/phase 2/);
+    const executor = new InProcessStepExecutor(wf, { storage });
+    const res = await executor.executeStep({
+      workflowId: "exec-1",
+      stepName: "double",
+      input: { n: 7 },
+      prevResults: {},
+      attempt: 1,
+    });
+    expect(res.ok).toBe(true);
+    if (res.ok) expect(res.result).toBe(14);
   });
 });

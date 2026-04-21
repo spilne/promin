@@ -38,3 +38,4 @@ export {
   loggingMiddleware,
   metricsMiddleware,
 } from "./middleware.ts";
+export { StepQueueExecutor } from "./step-queue-executor.ts";

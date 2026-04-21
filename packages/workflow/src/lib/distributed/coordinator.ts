@@ -1,23 +1,30 @@
 // ---------------------------------------------------------------------------
-// WorkflowCoordinator — submits workflows and dispatches steps to queues
+// WorkflowCoordinator — submits workflows and orchestrates step dispatch
 //
-// The coordinator computes the DAG ready-set and enqueues steps.
-// Workers poll their queue, execute, and checkpoint results.
-// The coordinator detects completions and enqueues the next batch.
+// The coordinator holds a WorkflowRunner backed by StepQueueExecutor.
+// Each submitted workflow runs as a background Promise: the runner computes
+// the DAG ready-set, delegates step bodies to StepQueueExecutor (which
+// enqueues + polls storage), and fires waiters on completion.
+//
+// The start() loop handles leader election and dead-worker detection only —
+// the DAG loop lives inside WorkflowRunner now.
 // ---------------------------------------------------------------------------
 
 import type { WorkflowStorage } from "../durable/workflow-storage.ts";
 import type { WorkflowState } from "../durable/workflow-state.ts";
-import type { Workflow, WorkflowDAG } from "../durable/durable-pipeline.ts";
-import { computeReadySet } from "../durable/workflow-dag.ts";
+import type { Workflow, WorkflowDAG, StepDefinition } from "../durable/durable-pipeline.ts";
+import { LosslessJsonCodec } from "@promin/core";
 import type {
   IWorkflowVersionRegistry,
   WorkflowVersionRegistry,
 } from "../durable/workflow-version-registry.ts";
+import { createWorkflowRunner, type WorkflowRunner } from "../durable/workflow-runner.ts";
+import { WorkflowLockError } from "../durable/durable-pipeline-error.ts";
 import type { StepQueue } from "./step-queue.ts";
 import type { WorkerRegistry } from "./worker-registry.ts";
 import type { LeaderElection } from "./leader-election.ts";
 import { SingleLeader } from "./leader-election.ts";
+import { StepQueueExecutor } from "./step-queue-executor.ts";
 
 export interface CoordinatorConfig {
   /** Workflow storage for state persistence. */
@@ -25,7 +32,7 @@ export interface CoordinatorConfig {
   /** Step queue for dispatching tasks to workers. */
   stepQueue: StepQueue;
   /**
-   * How often to check for completed steps and enqueue next batch (ms).
+   * How often to check for dead workers and recover active workflows (ms).
    * Default: 1000.
    */
   pollIntervalMs?: number;
@@ -42,6 +49,11 @@ export interface CoordinatorConfig {
    * coordinator process has to know how to build them.
    */
   registry?: WorkflowVersionRegistry | IWorkflowVersionRegistry;
+  /**
+   * How often the StepQueueExecutor polls storage while waiting for a step
+   * to complete. Default: 500ms.
+   */
+  stepPollIntervalMs?: number;
 }
 
 /** Submit a workflow by passing its definition directly. */
@@ -72,7 +84,7 @@ export interface WorkflowCoordinator {
   /** Wait for a workflow to complete. Returns the final result. */
   waitForResult<Output>(workflowId: string): Promise<Output>;
 
-  /** Run the coordination loop (enqueue ready steps, watch completions). */
+  /** Run the coordination loop (leader election + dead-worker detection). */
   start(): Promise<void>;
 
   /** Stop the coordination loop gracefully. */
@@ -82,6 +94,7 @@ export interface WorkflowCoordinator {
 export class DefaultCoordinator implements WorkflowCoordinator {
   private readonly storage: WorkflowStorage;
   private readonly stepQueue: StepQueue;
+  private readonly runner: WorkflowRunner;
   private readonly pollIntervalMs: number;
   private readonly workerRegistry?: WorkerRegistry;
   private readonly workerTimeoutMs: number;
@@ -89,8 +102,7 @@ export class DefaultCoordinator implements WorkflowCoordinator {
   private readonly registry?: WorkflowVersionRegistry | IWorkflowVersionRegistry;
   private running = false;
   private isLeader = false;
-  private dags = new Map<string, WorkflowDAG>();
-  private enqueued = new Map<string, Set<string>>(); // workflowId → set of enqueued step names
+  private runningWorkflows = new Map<string, Promise<unknown>>();
   private waiters = new Map<
     string,
     { resolve: (v: unknown) => void; reject: (e: unknown) => void }[]
@@ -104,6 +116,19 @@ export class DefaultCoordinator implements WorkflowCoordinator {
     this.workerTimeoutMs = config.workerTimeoutMs ?? 30_000;
     this.leaderElection = config.leaderElection ?? new SingleLeader();
     this.registry = config.registry;
+
+    const executor = new StepQueueExecutor({
+      stepQueue: config.stepQueue,
+      storage: config.storage,
+      pollIntervalMs: config.stepPollIntervalMs ?? config.pollIntervalMs ?? 500,
+      staleTimeoutMs: config.workerTimeoutMs ?? 30_000,
+    });
+
+    this.runner = createWorkflowRunner({
+      storage: config.storage,
+      registry: config.registry,
+      stepExecutor: executor,
+    });
   }
 
   submit<Input>(params: DirectSubmit<Input>): Promise<void>;
@@ -114,24 +139,28 @@ export class DefaultCoordinator implements WorkflowCoordinator {
         ? params.workflow
         : ((await this.resolveByName(params.name, params.version)) as Workflow<Input, unknown>);
     const { workflowId, input } = params;
-    const dag = workflow.dag;
 
-    // Create workflow in storage — persist DAG in metadata for recovery.
-    // Also persist the workflow's version (if any) so it propagates through
-    // to step-queue tasks via enqueueReady → worker filter.
-    const createResult = await this.storage.createWorkflow({
+    if (this.runningWorkflows.has(workflowId)) return;
+
+    // Pre-create in storage with DAG embedded in metadata so crash-recovery
+    // can rebuild the stub workflow without the original definition object.
+    await this.storage.createWorkflow({
       workflowId,
       workflowName: workflow.name,
       input,
       version: workflow.version,
-      metadata: { ...((workflow as any).metadata ?? {}), _dag: dag },
+      metadata: { ...((workflow as any).metadata ?? {}), _dag: workflow.dag },
     });
 
-    // Store the DAG for coordination
-    this.dags.set(workflowId, dag);
-
-    // Enqueue initial ready steps (even on conflict — the workflow may need re-evaluation)
-    await this.enqueueReady(workflowId, createResult.created ? input : createResult.existing.input);
+    const p = this.runner
+      .run({ workflow, workflowId, input })
+      .then((r) => this.resolveWaiters(workflowId, r))
+      .catch((e) => {
+        if (e instanceof WorkflowLockError) return;
+        this.rejectWaiters(workflowId, e);
+      })
+      .finally(() => this.runningWorkflows.delete(workflowId));
+    this.runningWorkflows.set(workflowId, p);
   }
 
   async status(workflowId: string): Promise<WorkflowState | null> {
@@ -139,12 +168,10 @@ export class DefaultCoordinator implements WorkflowCoordinator {
   }
 
   async waitForResult<Output>(workflowId: string): Promise<Output> {
-    // Check if already complete
     const state = await this.storage.loadWorkflow(workflowId);
     if (state?.status === "completed") return state.result as Output;
     if (state?.status === "failed") throw new Error(state.error ?? "Workflow failed");
 
-    // Wait via promise
     return new Promise<Output>((resolve, reject) => {
       if (!this.waiters.has(workflowId)) this.waiters.set(workflowId, []);
       this.waiters.get(workflowId)!.push({
@@ -158,15 +185,13 @@ export class DefaultCoordinator implements WorkflowCoordinator {
     this.running = true;
 
     while (this.running) {
-      // Leader election — only one coordinator runs at a time
       this.isLeader = await this.leaderElection.tryAcquire();
 
       if (this.isLeader) {
-        // First tick as leader — recover active workflows
-        if (this.dags.size === 0) {
+        if (this.runningWorkflows.size === 0) {
           await this.recoverActiveWorkflows();
         }
-        await this.tick();
+        await this.tickDeadWorkers();
       }
 
       await new Promise((r) => setTimeout(r, this.pollIntervalMs));
@@ -199,139 +224,32 @@ export class DefaultCoordinator implements WorkflowCoordinator {
     return def;
   }
 
-  // ---------------------------------------------------------------------------
-  // Coordination loop
-  // ---------------------------------------------------------------------------
-
-  private async tick(): Promise<void> {
-    // Detect dead workers and re-enqueue their stuck tasks
+  private async tickDeadWorkers(): Promise<void> {
     if (this.workerRegistry) {
       const dead = await this.workerRegistry.detectDead(this.workerTimeoutMs);
       for (const worker of dead) {
-        await this.reEnqueueStuckTasks(worker.workerId);
+        await this.stepQueue.requeueStuck({ claimedBy: worker.workerId });
       }
     }
-
-    // Catch-all: requeue any task stuck in 'running' longer than the timeout.
-    // This handles workers that crashed before registering or heartbeating.
     await this.stepQueue.requeueStuck({ staleTimeoutMs: this.workerTimeoutMs });
-
-    // Check all tracked workflows for completed steps
-    for (const [workflowId] of this.dags) {
-      const state = await this.storage.loadWorkflow(workflowId);
-      if (!state) continue;
-
-      if (state.status === "completed") {
-        this.resolveWaiters(workflowId, state.result);
-        this.dags.delete(workflowId);
-        continue;
-      }
-
-      if (state.status === "failed") {
-        this.rejectWaiters(workflowId, new Error(state.error ?? "Workflow failed"));
-        this.dags.delete(workflowId);
-        continue;
-      }
-
-      // Enqueue any newly ready steps
-      await this.enqueueReady(workflowId, state.input);
-    }
-  }
-
-  private async enqueueReady(workflowId: string, input: unknown): Promise<void> {
-    const dag = this.dags.get(workflowId);
-    if (!dag) return;
-
-    const state = await this.storage.loadWorkflow(workflowId);
-    if (!state) return;
-
-    // Track already-enqueued steps for this workflow
-    if (!this.enqueued.has(workflowId)) this.enqueued.set(workflowId, new Set());
-    const enqueuedSteps = this.enqueued.get(workflowId)!;
-
-    const completed = new Set<string>();
-    const running = new Set<string>();
-
-    for (const [stepName, stepState] of Object.entries(state.steps)) {
-      if (stepState.status === "completed") completed.add(stepName);
-      if (stepState.status === "running" || stepState.status === "failed") running.add(stepName);
-    }
-
-    // Treat enqueued-but-not-yet-completed steps as running
-    for (const name of enqueuedSteps) {
-      if (!completed.has(name)) running.add(name);
-    }
-
-    const dagNodes = dag.steps.map((s) => ({
-      name: s.name,
-      dependsOn: [...s.dependsOn],
-    }));
-
-    const ready = computeReadySet({ nodes: dagNodes, completed, running });
-
-    // Build results map from completed steps
-    const prevResults: Record<string, unknown> = {};
-    for (const [stepName, stepState] of Object.entries(state.steps)) {
-      if (stepState.status === "completed") {
-        prevResults[stepName] = stepState.result;
-      }
-    }
-
-    for (const stepName of ready) {
-      if (enqueuedSteps.has(stepName)) continue;
-
-      // Capabilities + priority come from the step's own declaration on
-      // the DAG node — no coordinator-side routing map.
-      const dagNode = dag.steps.find((s) => s.name === stepName);
-      const needs = dagNode?.needs ?? [];
-      const priority = dagNode?.priority;
-      await this.stepQueue.enqueue({
-        workflowId,
-        stepName,
-        needs,
-        priority,
-        input,
-        prevResults,
-        // Carry the workflow's stored version through to the task so workers
-        // can filter by supported versions during rolling deploys.
-        version: state.version,
-      });
-      enqueuedSteps.add(stepName);
-    }
-
-    // Check if all steps are complete
-    if (completed.size === dag.steps.length) {
-      const lastStep = dag.steps[dag.steps.length - 1];
-      const finalResult = lastStep ? prevResults[lastStep.name] : undefined;
-      await this.storage.completeWorkflow(workflowId, finalResult);
-      this.enqueued.delete(workflowId);
-    }
   }
 
   private async recoverActiveWorkflows(): Promise<void> {
-    // Reload running/suspended workflows in pages to handle large counts
     for (const status of ["pending", "running", "suspended"] as const) {
       let offset = 0;
       const pageSize = 100;
       while (true) {
         const page = await this.storage.listWorkflows({ status, limit: pageSize, offset });
         for (const state of page) {
-          if (this.dags.has(state.workflowId)) continue;
+          if (this.runningWorkflows.has(state.workflowId)) continue;
           const dag = state.metadata?._dag as WorkflowDAG | undefined;
           if (!dag) continue;
-          this.dags.set(state.workflowId, dag);
+          const stub = buildStubWorkflow(dag, state.workflowName ?? dag.name, state.version);
+          await this.submit({ workflow: stub, workflowId: state.workflowId, input: state.input });
         }
         if (page.length < pageSize) break;
         offset += pageSize;
       }
-    }
-  }
-
-  private async reEnqueueStuckTasks(deadWorkerId: string): Promise<void> {
-    const requeued = await this.stepQueue.requeueStuck({ claimedBy: deadWorkerId });
-    if (requeued > 0) {
-      // The next tick will re-evaluate ready-sets and re-enqueue naturally
-      // since stuck tasks are now back to "pending"
     }
   }
 
@@ -346,6 +264,41 @@ export class DefaultCoordinator implements WorkflowCoordinator {
     for (const w of waiters) w.reject(error);
     this.waiters.delete(workflowId);
   }
+}
+
+/**
+ * Build a minimal Workflow stub from a persisted DAG for crash recovery.
+ * Step execute functions are unreachable — the coordinator delegates all
+ * step bodies to StepQueueExecutor, which enqueues + polls storage.
+ */
+function buildStubWorkflow(
+  dag: WorkflowDAG,
+  name: string,
+  version?: string,
+): Workflow<unknown, unknown> {
+  const steps: StepDefinition[] = dag.steps.map((node) => ({
+    name: node.name,
+    dependsOn: [...node.dependsOn],
+    kind: node.kind as StepDefinition["kind"],
+    execute: () => {
+      throw new Error(
+        `unreachable: stub workflow step "${node.name}" should never be executed in-process`,
+      );
+    },
+    codec: LosslessJsonCodec,
+    needs: node.needs,
+    priority: node.priority,
+  }));
+
+  return {
+    name,
+    version,
+    dag,
+    _definition: {
+      steps,
+      onVersionMismatch: "strict",
+    },
+  };
 }
 
 export function createCoordinator(config: CoordinatorConfig): WorkflowCoordinator {
