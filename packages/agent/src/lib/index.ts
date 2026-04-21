@@ -44,6 +44,9 @@ export { createApiKeyBootstrap } from "./api-key-bootstrap.ts";
 export type { ApiKeyBootstrapConfig } from "./api-key-bootstrap.ts";
 
 export { createGetSecretTool, createSetSecretTool } from "./tools/secret-tools.ts";
+
+export { createSearchMemoryTool, createSaveMemoryTool, createMemoryTools } from "./tools/memory-tools.ts";
+export type { MemoryToolConfig } from "./tools/memory-tools.ts";
 export type { SecretToolConfig, SetSecretToolConfig } from "./tools/secret-tools.ts";
 
 export {
