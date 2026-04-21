@@ -1,487 +1,283 @@
 /**
- * Single-session console agent — one persistent workflow for the entire conversation.
- *
- * Each user message arrives as a signal (task-N). The journaled step suspends
- * between turns, so the /steps tree shows all turns nested under one session:
- *
- *   └─ ◎ session  (running)
- *      └─ ◎ conversation
- *         ├─ ✓ signal: task-0  →  {"task":"hello"}
- *         ├─ ✓ think-0-0
- *         ├─ ✓ emit-0
- *         ├─ ✓ signal: task-1  →  {"task":"what time is it?"}
- *         ├─ ✓ think-1-0
- *         ├─ ✓ tool-currentTime-1-0-...
- *         ├─ ✓ think-1-1
- *         ├─ ✓ emit-1
- *         └─ ○ signal: task-2   ← waiting for next input
+ * Interactive console agent with persistent memory, filesystem access, and multi-LLM delegation.
  *
  * Run:
  *   ANTHROPIC_API_KEY=sk-... bun packages/agent/src/examples/console-chat.ts
+ *   AGENT_WORKSPACE=/path/to/project ...   (default: cwd)
  *
  * Commands:
- *   /history          — print conversation messages
- *   /steps            — print full workflow step tree from storage
- *   /state            — print agent lifecycle state machine (current state + transition history)
- *   /tools            — list currently loaded dynamic tools
+ *   /history          — conversation messages
+ *   /steps            — workflow step tree
+ *   /state            — agent lifecycle state machine
+ *   /tools            — loaded tools
  *   /memories [query] — search memories (omit query to list all)
- *   /remember <text>  — save a memory entry directly (bypasses LLM)
+ *   /remember <text>  — save a memory directly
  *   exit              — quit
  */
 
 import { createInterface } from "node:readline";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { InMemoryMemoryStore } from "../lib/memory-store.ts";
-import { stateMachine, InMemoryStateMachineStorage } from "@promin/workflow";
-import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
+import { stateMachine, InMemoryStateMachineStorage, InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { anthropic } from "../lib/adapters/anthropic.ts";
 import { openai } from "../lib/adapters/openai.ts";
-import { InMemorySecretStore } from "../lib/secret-store.ts";
 import { agentLoop } from "../lib/agent-loop.ts";
 import { tool } from "../lib/tool.ts";
+import { InMemoryMemoryStore } from "../lib/memory-store.ts";
+import { InMemorySecretStore } from "../lib/secret-store.ts";
 import { createWriteToolTool } from "../lib/tools/write-tool.ts";
 import { createRequireSecretTool } from "../lib/tools/require-secret-tool.ts";
 import { createFilesystemTools } from "../lib/tools/filesystem-tools.ts";
 import { createShellTool } from "../lib/tools/shell-tool.ts";
 import { createMemoryTools } from "../lib/tools/memory-tools.ts";
+import { createLlmTool } from "../lib/tools/llm-tool.ts";
 import { createFileToolRegistry } from "../lib/tool-registry.ts";
 import type { ToolRegistry } from "../lib/tool-registry.ts";
 import type { AgentTool } from "../lib/tool.ts";
+import type { Message } from "../lib/message.ts";
 import { z } from "zod";
 
-// ---- config ----
-
 const apiKey = process.env.ANTHROPIC_API_KEY;
-if (!apiKey) {
-  console.error("Set ANTHROPIC_API_KEY to run this example.");
-  process.exit(1);
-}
+if (!apiKey) { console.error("Set ANTHROPIC_API_KEY to run."); process.exit(1); }
 
-// Root directory for filesystem + shell tools. Defaults to the directory from
-// which the process is started; override with AGENT_WORKSPACE env var.
 const workspace = process.env.AGENT_WORKSPACE ?? process.cwd();
 
-// ---- conversation history (updated after each turn for /history command) ----
-
-import type { Message } from "../lib/message.ts";
-
-let conversationHistory: Message[] = [];
-
-function printHistory() {
-  if (conversationHistory.length === 0) {
-    console.log("\n(no history yet)\n");
-    return;
-  }
-  console.log("\n--- conversation history ---");
-  for (const m of conversationHistory) {
-    if (m.role === "user") {
-      console.log(`\n[user]\n${m.content}`);
-    } else if (m.role === "assistant") {
-      if (m.content) console.log(`\n[assistant]\n${m.content}`);
-      for (const tc of m.toolCalls ?? []) {
-        console.log(`\n[tool call: ${tc.name}]\n${JSON.stringify(tc.input, null, 2)}`);
-      }
-    } else if (m.role === "tool") {
-      console.log(`\n[tool result: ${m.toolCallId}]\n${m.content}`);
-    }
-  }
-  console.log(`\n--- ${conversationHistory.length} messages ---\n`);
-}
-
-// ---- readline (created early so tools can use it for out-of-band prompts) ----
-
+// readline
 const rl = createInterface({ input: process.stdin, output: process.stdout });
 
-// ---- dynamic tool registry ----
+function ask(question: string): Promise<string> {
+  return new Promise((resolve) => {
+    rl.question(`\n${question}: `, (v) => { process.stdout.write("\n"); resolve(v.trim()); });
+  });
+}
 
+// dynamic tool registry (watches examples/tools/ for hot-loaded tools)
 const toolsDir = join(import.meta.dir, "tools");
 await mkdir(toolsDir, { recursive: true });
 
 const fileRegistry = await createFileToolRegistry({
   dir: toolsDir,
-  onLoad: (name, category) =>
-    console.log(`[registry] loaded: ${category ? `${category}/` : ""}${name}`),
-  onUnload: (name, category) =>
-    console.log(`[registry] unloaded: ${category ? `${category}/` : ""}${name}`),
+  onLoad:  (name, cat) => console.log(`[registry] +${cat ? `${cat}/` : ""}${name}`),
+  onUnload: (name, cat) => console.log(`[registry] -${cat ? `${cat}/` : ""}${name}`),
   onError: (file, err) => console.error(`[registry] error in ${file}:`, err),
 });
 
-// ---- memory store (declared early; used by tools and REPL commands) ----
-
+// memory
 const memoryStore = new InMemoryMemoryStore();
 
 async function printMemories(query?: string) {
-  const entries = query
-    ? await memoryStore.search(query, 10)
-    : await memoryStore.list(50);
-  if (entries.length === 0) {
-    console.log(query ? `\n(no memories matching "${query}")\n` : "\n(no memories saved yet)\n");
+  const entries = query ? await memoryStore.search(query, 10) : await memoryStore.list(50);
+  if (!entries.length) {
+    console.log(query ? `\n(no memories matching "${query}")\n` : "\n(no memories yet)\n");
     return;
   }
-  const label = query ? `memories matching "${query}"` : "all memories";
-  console.log(`\n--- ${label} (${entries.length}) ---`);
-  for (const e of entries) {
-    const ts = e.createdAt.toLocaleTimeString();
-    console.log(`  [${ts}] ${e.id.slice(0, 8)}  ${e.content}`);
-  }
+  console.log(`\n--- ${query ? `"${query}"` : "all memories"} (${entries.length}) ---`);
+  for (const e of entries)
+    console.log(`  [${e.createdAt.toLocaleTimeString()}] ${e.id.slice(0, 8)}  ${e.content}`);
   console.log("");
 }
 
-// ---- tools ----
-
-const calculator = tool({
-  name: "calculator",
-  description: "Evaluate a mathematical expression and return the numeric result.",
-  usage: "Use for arithmetic, exponentiation, and trig. Not for string manipulation.",
-  examples: [
-    { input: { expression: "2 ** 10" }, output: "1024" },
-    { input: { expression: "Math.sqrt(144)" }, output: "12" },
-  ],
-  parameters: z.object({
-    expression: z.string().describe("A valid JS math expression, e.g. '2 ** 10'"),
-  }),
-  execute: async ({ expression }) => {
-    try {
-      // biome-ignore lint/security/noEval: example only
-      return String(eval(expression));
-    } catch {
-      return `Error evaluating: ${expression}`;
-    }
-  },
-});
-
-const currentTime = tool({
-  name: "currentTime",
-  description: "Return the current local date and time.",
-  parameters: z.object({}),
-  execute: async () => new Date().toLocaleString(),
-});
-
-const showHistory = tool({
-  name: "showHistory",
-  description: "Print the full conversation history stored in memory.",
-  parameters: z.object({}),
-  execute: async () => {
-    printHistory();
-    return `Printed ${conversationHistory.length} messages.`;
-  },
-});
-
-// "../../lib/index.ts" resolves correctly from examples/tools/*.ts → src/lib/index.ts
-const writeTool = createWriteToolTool({
-  dir: toolsDir,
-  requireApproval: false,
-  toolImportPath: "../../lib/index.ts",
-});
-
-const requireSecret = createRequireSecretTool({
-  readSecret: (prompt) =>
-    new Promise((resolve) => {
-      // Value is captured here and never forwarded to the LLM
-      rl.question(`\n[secret needed] ${prompt}: `, (value) => {
-        process.stdout.write("\n");
-        resolve(value);
-      });
-    }),
-});
-
-const fsTools = createFilesystemTools({ rootDir: workspace });
-
-const shell = createShellTool({
-  cwd: workspace,
-  allowedCommands: ["bun", "git", "ls", "cat", "find", "grep", "npm", "npx"],
-});
-
-const memoryTools = createMemoryTools({ store: memoryStore });
-
-// ---- chatGPT tool — prompts for OPENAI_API_KEY on first use ----
-
+// tools
 const openaiKeyStore = new InMemorySecretStore();
-
-function askForOpenAiKey(): Promise<string> {
-  return new Promise((resolve) => {
-    rl.question("\n[chatGPT] Enter OPENAI_API_KEY: ", (value) => {
-      process.stdout.write("\n");
-      resolve(value.trim());
-    });
-  });
-}
-
-const chatGPT = tool({
-  name: "chatGPT",
-  description:
-    "Send a message to ChatGPT (GPT-4o) and get its response. " +
-    "Use when you want a second opinion, a different perspective, or need GPT-4o's specific capabilities.",
-  parameters: z.object({
-    prompt: z.string().describe("The message to send to ChatGPT"),
-  }),
-  execute: async ({ prompt }) => {
-    let apiKey = await openaiKeyStore.get("OPENAI_API_KEY");
-    if (!apiKey) {
-      apiKey = process.env.OPENAI_API_KEY ?? await askForOpenAiKey();
-      await openaiKeyStore.set("OPENAI_API_KEY", apiKey);
-    }
-    const provider = openai("gpt-4o", { apiKey });
-    const response = await provider.chat({
-      messages: [{ role: "user", content: prompt }],
-    });
-    return response.content ?? "(no response)";
-  },
-});
 
 // biome-ignore lint/suspicious/noExplicitAny: tool registry uses runtime Zod validation
 const staticTools: Record<string, AgentTool<any, any>> = {
-  calculator,
-  currentTime,
-  showHistory,
-  writeTool,
-  requireSecret,
-  ...fsTools,
-  shell,
-  ...memoryTools,
-  chatGPT,
+  calculator: tool({
+    name: "calculator",
+    description: "Evaluate a JS math expression and return the result.",
+    parameters: z.object({ expression: z.string() }),
+    // biome-ignore lint/security/noEval: example only
+    execute: async ({ expression }) => { try { return String(eval(expression)); } catch { return `Error: ${expression}`; } },
+  }),
+
+  currentTime: tool({
+    name: "currentTime",
+    description: "Return the current local date and time.",
+    parameters: z.object({}),
+    execute: async () => new Date().toLocaleString(),
+  }),
+
+  // lets the LLM create new tools at runtime, saved to examples/tools/
+  writeTool: createWriteToolTool({ dir: toolsDir, requireApproval: false, toolImportPath: "../../lib/index.ts" }),
+
+  requireSecret: createRequireSecretTool({
+    readSecret: (prompt) => ask(`[secret] ${prompt}`),
+  }),
+
+  ...createFilesystemTools({ rootDir: workspace }),
+
+  shell: createShellTool({
+    cwd: workspace,
+    allowedCommands: ["bun", "git", "ls", "cat", "find", "grep", "npm", "npx"],
+  }),
+
+  ...createMemoryTools({ store: memoryStore }),
+
+  chatGPT: createLlmTool(
+    {
+      // provider resolved lazily so the key is only prompted on first use
+      chat: async (params) => {
+        let key = await openaiKeyStore.get("OPENAI_API_KEY");
+        if (!key) {
+          key = process.env.OPENAI_API_KEY ?? await ask("[chatGPT] Enter OPENAI_API_KEY");
+          await openaiKeyStore.set("OPENAI_API_KEY", key);
+        }
+        return openai("gpt-4o", { apiKey: key }).chat(params);
+      },
+    },
+    { name: "chatGPT", description: "Consult ChatGPT (GPT-4o) for a second opinion or different perspective." },
+  ),
 };
 
-// Merges static tools with the file registry so both are visible each think step.
-// Static tools take precedence; registry tools fill in everything else.
 const mergedRegistry: ToolRegistry = {
   getTools: () => ({ ...fileRegistry.getTools(), ...staticTools }),
   close: () => fileRegistry.close(),
 };
 
-// ---- agent lifecycle state machine ----
-
+// agent lifecycle state machine (tracks turns for /state command)
 type AgentStates = {
-  idle: {
-    context: { completedTurns: number };
-    transitions: { message: "thinking" };
-  };
-  thinking: {
-    context: { completedTurns: number; turn: number; task: string };
-    transitions: { done: "idle" };
-  };
+  idle:     { context: { turns: number };                            transitions: { message: "thinking" } };
+  thinking: { context: { turns: number; turn: number; task: string }; transitions: { done: "idle" } };
 };
 
-const smStorage = new InMemoryStateMachineStorage();
-// biome-ignore lint/suspicious/noExplicitAny: state machine actions receive runtime data
-const agentMachine = stateMachine<AgentStates>({ name: "agent-lifecycle", storage: smStorage })
+const agentMachine = stateMachine<AgentStates>({
+  name: "agent-lifecycle",
+  storage: new InMemoryStateMachineStorage(),
+})
   .state("idle")
   .state("thinking")
-  .on("message", {
-    from: "idle",
-    to: "thinking",
-    action: (ctx: any, data: any) => ({
-      completedTurns: ctx.completedTurns,
-      turn: data.turn,
-      task: data.task,
-    }),
-  })
-  .on("done", {
-    from: "thinking",
-    to: "idle",
-    action: (ctx: any) => ({ completedTurns: ctx.completedTurns + 1 }),
-  })
+  // biome-ignore lint/suspicious/noExplicitAny: state machine action context is dynamically typed
+  .on("message", { from: "idle",     to: "thinking", action: (ctx: any, d: any) => ({ turns: ctx.turns, turn: d.turn, task: d.task }) })
+  // biome-ignore lint/suspicious/noExplicitAny: state machine action context is dynamically typed
+  .on("done",    { from: "thinking", to: "idle",     action: (ctx: any)         => ({ turns: ctx.turns + 1 }) })
   .initial("idle")
   .build();
 
-// ---- infrastructure ----
-
+// infrastructure
 const storage = new InMemoryWorkflowStorage();
-const runner = createWorkflowRunner({ storage });
+const runner  = createWorkflowRunner({ storage });
 
-await agentMachine.start({ id: "session", context: { completedTurns: 0 } });
+await agentMachine.start({ id: "session", context: { turns: 0 } });
 
-// ---- agentLoop session ----
-
-const loop = agentLoop({
+const session = await agentLoop({
   name: "console-agent",
   llm: anthropic("claude-sonnet-4-6", { apiKey }),
   toolRegistry: mergedRegistry,
-  // All tools are auto-approved in this interactive example — the user is watching.
-  // In production, replace with a function that prompts for approval on write/shell ops.
   autoApprove: true,
-  systemPrompt:
-    "You are a helpful assistant running in an interactive console. Be concise. " +
-    `Your workspace directory is: ${workspace}\n` +
-    "You have filesystem tools (readFile, writeFile, listDir, statFile) to read and edit files in the workspace. " +
-    "You have a shell tool to run commands like 'bun test', 'git log', or 'grep'. " +
-    "You have memory tools (searchMemory, saveMemory) to recall and persist facts across sessions. " +
-    "You have a writeTool to create new tools at runtime when no existing tool covers a need. " +
-    "If a tool needs an API key, call requireSecret first — never ask for secrets in chat.",
+  systemPrompt: [
+    "You are a helpful assistant in an interactive console. Be concise.",
+    `Workspace: ${workspace}`,
+    "Tools: readFile, writeFile, listDir, statFile (filesystem), shell (run commands),",
+    "       searchMemory, saveMemory (long-term memory), chatGPT (delegate to GPT-4o),",
+    "       writeTool (create new tools at runtime), requireSecret (prompt user for API keys).",
+    "Never ask for secrets in chat — always use requireSecret.",
+  ].join("\n"),
   memory: { store: memoryStore },
-});
+}).session({ runner, sessionId: "session" });
 
-let turnCounter = 0;
+// debug helpers
+let history: Message[] = [];
 
-const session = await loop.session({ runner, sessionId: "session" });
-
-// ---- /state: agent lifecycle ----
+function printHistory() {
+  if (!history.length) { console.log("\n(no history yet)\n"); return; }
+  console.log("\n--- history ---");
+  for (const m of history) {
+    if (m.role === "user") console.log(`\n[user]\n${m.content}`);
+    else if (m.role === "assistant") {
+      if (m.content) console.log(`\n[assistant]\n${m.content}`);
+      for (const tc of m.toolCalls ?? [])
+        console.log(`\n[tool: ${tc.name}]\n${JSON.stringify(tc.input, null, 2)}`);
+    } else if (m.role === "tool") console.log(`\n[result: ${m.toolCallId}]\n${m.content}`);
+  }
+  console.log(`\n--- ${history.length} messages ---\n`);
+}
 
 async function printAgentState() {
-  const state = await agentMachine.getState("session");
-  const history = await agentMachine.getHistory("session");
-  if (!state) {
-    console.log("\n(no state yet)\n");
-    return;
-  }
-
-  console.log(`\n agent lifecycle`);
-  console.log(`  current: ${state.current}`);
-  console.log(`  context: ${JSON.stringify(state.context, null, 4).replace(/\n/g, "\n  ")}`);
-
-  if (history.length > 0) {
-    console.log(`\n  transitions:`);
-    for (const t of history) {
-      const ts = t.createdAt.toLocaleTimeString();
-      console.log(`    ${t.from.padEnd(12)} --[${t.event}]--> ${t.to}  @ ${ts}`);
-    }
-  }
+  const state   = await agentMachine.getState("session");
+  const transitions = await agentMachine.getHistory("session");
+  if (!state) { console.log("\n(no state yet)\n"); return; }
+  console.log(`\n state: ${state.current}  context: ${JSON.stringify(state.context)}`);
+  for (const t of transitions)
+    console.log(`  ${t.from} --[${t.event}]--> ${t.to}  @ ${t.createdAt.toLocaleTimeString()}`);
   console.log("");
 }
 
-// ---- /steps tree ----
-
-const STATUS_ICON: Record<string, string> = {
-  completed: "✓",
-  failed: "✗",
-  running: "◎",
-  pending: "○",
-  sleeping: "⏸",
-  waiting_for_signal: "⏳",
-  skipped: "—",
+const ICON: Record<string, string> = {
+  completed: "✓", failed: "✗", running: "◎", pending: "○", sleeping: "⏸", waiting_for_signal: "⏳",
 };
 
-async function printWorkflowSteps() {
+async function printSteps() {
   const runs = await storage.listWorkflows({ name: "console-agent" });
-  if (runs.length === 0) {
-    console.log("\n(no workflow runs in storage yet)\n");
-    return;
-  }
-  console.log(`\n workflow step history`);
-  for (let i = 0; i < runs.length; i++) {
-    const run = runs[i]!;
-    const isLastRun = i === runs.length - 1;
-    const runPrefix = isLastRun ? "└─" : "├─";
-    const runIndent = isLastRun ? "   " : "│  ";
-
+  if (!runs.length) { console.log("\n(no runs yet)\n"); return; }
+  console.log("");
+  for (const [ri, run] of runs.entries()) {
+    const last = ri === runs.length - 1;
     const info = await runner.getStatus(run.workflowId, { includeStepResults: false });
     if (!info) continue;
-
-    console.log(
-      `${runPrefix} ${STATUS_ICON[info.state] ?? "?"} ${run.workflowId}  (${info.state})`,
-    );
-
-    const stepEntries = Object.entries(info.steps);
-    for (let j = 0; j < stepEntries.length; j++) {
-      const [stepName, step] = stepEntries[j]!;
-      const isLastStep = j === stepEntries.length - 1;
-      const stepPrefix = isLastStep ? "└─" : "├─";
-      const stepIndent = runIndent + (isLastStep ? "   " : "│  ");
-
-      console.log(`${runIndent}${stepPrefix} ${STATUS_ICON[step.status] ?? "?"} ${stepName}`);
-
-      const entries = await storage.loadJournal(run.workflowId, stepName);
-      for (let k = 0; k < entries.length; k++) {
-        const entry = entries[k]!;
-        const isLastEntry = k === entries.length - 1;
-        const entryPrefix = isLastEntry ? "└─" : "├─";
-        const exitTag = entry.exit?.tag;
-        const entryIcon = exitTag === "Success" ? "✓" : exitTag === "Failure" ? "✗" : "○";
-
-        let resultStr = "";
-        if (entry.exit?.tag === "Success") {
-          const raw = JSON.stringify(entry.exit.value);
-          resultStr = `  →  ${raw.length > 80 ? `${raw.slice(0, 80)}…` : raw}`;
-        } else if (entry.exit?.tag === "Failure") {
-          resultStr = `  ✗  ${entry.exit.error.slice(0, 80)}`;
-        }
-
-        const label =
-          entry.stepType === "signal" ? `signal: ${entry.activityName}` : entry.activityName;
-        console.log(`${stepIndent}${entryPrefix} ${entryIcon} ${label}${resultStr}`);
+    const rp = last ? "└─" : "├─"; const ri2 = last ? "   " : "│  ";
+    console.log(`${rp} ${ICON[info.state] ?? "?"} ${run.workflowId}  (${info.state})`);
+    const steps = Object.entries(info.steps);
+    for (const [si, [name, step]] of steps.entries()) {
+      const slast = si === steps.length - 1;
+      const sp = slast ? "└─" : "├─"; const si2 = ri2 + (slast ? "   " : "│  ");
+      console.log(`${ri2}${sp} ${ICON[step.status] ?? "?"} ${name}`);
+      const entries = await storage.loadJournal(run.workflowId, name);
+      for (const [ei, entry] of entries.entries()) {
+        const elast = ei === entries.length - 1;
+        const ep = elast ? "└─" : "├─";
+        const icon = entry.exit?.tag === "Success" ? "✓" : entry.exit?.tag === "Failure" ? "✗" : "○";
+        const label = entry.stepType === "signal" ? `signal: ${entry.activityName}` : entry.activityName;
+        let suffix = "";
+        if (entry.exit?.tag === "Success") { const r = JSON.stringify(entry.exit.value); suffix = `  →  ${r.length > 80 ? `${r.slice(0, 80)}…` : r}`; }
+        if (entry.exit?.tag === "Failure") suffix = `  ✗  ${entry.exit.error.slice(0, 80)}`;
+        console.log(`${si2}${ep} ${icon} ${label}${suffix}`);
       }
     }
   }
   console.log("");
 }
 
-// ---- REPL ----
+// REPL
+let turn = 0;
 
 function prompt() {
   rl.question("\nYou: ", async (line) => {
-    const task = line.trim();
-    if (!task) {
-      prompt();
-      return;
+    const input = line.trim();
+    if (!input) return prompt();
+
+    if (input === "exit" || input === "quit") {
+      await session.close(); mergedRegistry.close(); return rl.close();
     }
-    if (task === "exit" || task === "quit") {
-      await session.close();
-      mergedRegistry.close();
-      rl.close();
-      return;
+    if (input === "/history")  { printHistory();     return prompt(); }
+    if (input === "/steps")    { await printSteps(); return prompt(); }
+    if (input === "/state")    { await printAgentState(); return prompt(); }
+    if (input === "/tools") {
+      const names = Object.keys(mergedRegistry.getTools());
+      console.log(`\nTools (${names.length}): ${names.join(", ")}\n`);
+      return prompt();
     }
-    if (task === "/history") {
-      printHistory();
-      prompt();
-      return;
+    if (input.startsWith("/memories")) {
+      await printMemories(input.slice("/memories".length).trim() || undefined);
+      return prompt();
     }
-    if (task === "/steps") {
-      await printWorkflowSteps();
-      prompt();
-      return;
-    }
-    if (task === "/state") {
-      await printAgentState();
-      prompt();
-      return;
-    }
-    if (task === "/tools") {
-      const loaded = Object.keys(mergedRegistry.getTools());
-      console.log(`\nLoaded tools (${loaded.length}): ${loaded.join(", ")}\n`);
-      prompt();
-      return;
-    }
-    if (task.startsWith("/memories")) {
-      const query = task.slice("/memories".length).trim() || undefined;
-      await printMemories(query);
-      prompt();
-      return;
-    }
-    if (task.startsWith("/remember ")) {
-      const text = task.slice("/remember ".length).trim();
-      if (text) {
-        const id = await memoryStore.save({ content: text });
-        console.log(`\nSaved memory ${id.slice(0, 8)}: "${text}"\n`);
-      } else {
-        console.log("\nUsage: /remember <text>\n");
-      }
-      prompt();
-      return;
+    if (input.startsWith("/remember ")) {
+      const text = input.slice("/remember ".length).trim();
+      if (text) { const id = await memoryStore.save({ content: text }); console.log(`\nSaved ${id.slice(0, 8)}: "${text}"\n`); }
+      return prompt();
     }
 
-    const turn = turnCounter++;
-    await agentMachine.send({ id: "session", event: "message", data: { turn, task } });
+    await agentMachine.send({ id: "session", event: "message", data: { turn, task: input } });
     process.stdout.write("\nAgent: ");
-    let streamed = "";
-    for await (const chunk of session.stream(task)) {
-      process.stdout.write(chunk);
-      streamed += chunk;
-    }
+    let answer = "";
+    for await (const chunk of session.stream(input)) { process.stdout.write(chunk); answer += chunk; }
     process.stdout.write("\n");
-    conversationHistory = [
-      ...conversationHistory,
-      { role: "user", content: task },
-      { role: "assistant", content: streamed, toolCalls: undefined },
-    ];
+    history.push({ role: "user", content: input }, { role: "assistant", content: answer, toolCalls: undefined });
+    turn++;
     await agentMachine.send({ id: "session", event: "done" });
     prompt();
   });
 }
 
-console.log(`Console agent ready.`);
-console.log(`  Workspace : ${workspace}`);
-console.log(`  Tools dir : ${toolsDir}`);
-console.log(`  Tools     : ${Object.keys(staticTools).join(", ")}`);
-console.log('  Commands  : /history, /steps, /state, /tools, /memories [query], /remember <text>, exit\n');
+console.log(`\nConsole agent  workspace=${workspace}  tools=${Object.keys(staticTools).join(", ")}`);
+console.log(`Commands: /history /steps /state /tools /memories [q] /remember <text> exit\n`);
 prompt();
