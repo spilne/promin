@@ -40,6 +40,9 @@ import { agentLoop } from "../lib/agent-loop.ts";
 import { tool } from "../lib/tool.ts";
 import { createWriteToolTool } from "../lib/tools/write-tool.ts";
 import { createRequireSecretTool } from "../lib/tools/require-secret-tool.ts";
+import { createFilesystemTools } from "../lib/tools/filesystem-tools.ts";
+import { createShellTool } from "../lib/tools/shell-tool.ts";
+import { createMemoryTools } from "../lib/tools/memory-tools.ts";
 import { createFileToolRegistry } from "../lib/tool-registry.ts";
 import type { ToolRegistry } from "../lib/tool-registry.ts";
 import type { AgentTool } from "../lib/tool.ts";
@@ -52,6 +55,10 @@ if (!apiKey) {
   console.error("Set ANTHROPIC_API_KEY to run this example.");
   process.exit(1);
 }
+
+// Root directory for filesystem + shell tools. Defaults to the directory from
+// which the process is started; override with AGENT_WORKSPACE env var.
+const workspace = process.env.AGENT_WORKSPACE ?? process.cwd();
 
 // ---- conversation history (updated after each turn for /history command) ----
 
@@ -97,6 +104,27 @@ const fileRegistry = await createFileToolRegistry({
     console.log(`[registry] unloaded: ${category ? `${category}/` : ""}${name}`),
   onError: (file, err) => console.error(`[registry] error in ${file}:`, err),
 });
+
+// ---- memory store (declared early; used by tools and REPL commands) ----
+
+const memoryStore = new InMemoryMemoryStore();
+
+async function printMemories(query?: string) {
+  const entries = query
+    ? await memoryStore.search(query, 10)
+    : await memoryStore.list(50);
+  if (entries.length === 0) {
+    console.log(query ? `\n(no memories matching "${query}")\n` : "\n(no memories saved yet)\n");
+    return;
+  }
+  const label = query ? `memories matching "${query}"` : "all memories";
+  console.log(`\n--- ${label} (${entries.length}) ---`);
+  for (const e of entries) {
+    const ts = e.createdAt.toLocaleTimeString();
+    console.log(`  [${ts}] ${e.id.slice(0, 8)}  ${e.content}`);
+  }
+  console.log("");
+}
 
 // ---- tools ----
 
@@ -156,6 +184,15 @@ const requireSecret = createRequireSecretTool({
     }),
 });
 
+const fsTools = createFilesystemTools({ rootDir: workspace });
+
+const shell = createShellTool({
+  cwd: workspace,
+  allowedCommands: ["bun", "git", "ls", "cat", "find", "grep", "npm", "npx"],
+});
+
+const memoryTools = createMemoryTools({ store: memoryStore });
+
 // biome-ignore lint/suspicious/noExplicitAny: tool registry uses runtime Zod validation
 const staticTools: Record<string, AgentTool<any, any>> = {
   calculator,
@@ -163,6 +200,9 @@ const staticTools: Record<string, AgentTool<any, any>> = {
   showHistory,
   writeTool,
   requireSecret,
+  ...fsTools,
+  shell,
+  ...memoryTools,
 };
 
 // Merges static tools with the file registry so both are visible each think step.
@@ -207,27 +247,6 @@ const agentMachine = stateMachine<AgentStates>({ name: "agent-lifecycle", storag
   .initial("idle")
   .build();
 
-// ---- memory store ----
-
-const memoryStore = new InMemoryMemoryStore();
-
-async function printMemories(query?: string) {
-  const entries = query
-    ? await memoryStore.search(query, 10)
-    : await memoryStore.list(50);
-  if (entries.length === 0) {
-    console.log(query ? `\n(no memories matching "${query}")\n` : "\n(no memories saved yet)\n");
-    return;
-  }
-  const label = query ? `memories matching "${query}"` : "all memories";
-  console.log(`\n--- ${label} (${entries.length}) ---`);
-  for (const e of entries) {
-    const ts = e.createdAt.toLocaleTimeString();
-    console.log(`  [${ts}] ${e.id.slice(0, 8)}  ${e.content}`);
-  }
-  console.log("");
-}
-
 // ---- infrastructure ----
 
 const storage = new InMemoryWorkflowStorage();
@@ -241,10 +260,17 @@ const loop = agentLoop({
   name: "console-agent",
   llm: anthropic("claude-sonnet-4-6", { apiKey }),
   toolRegistry: mergedRegistry,
+  // All tools are auto-approved in this interactive example — the user is watching.
+  // In production, replace with a function that prompts for approval on write/shell ops.
+  autoApprove: true,
   systemPrompt:
-    "You are a helpful assistant. Be concise. " +
-    "You have a writeTool that lets you create new tools at runtime — use it when you need a capability no existing tool covers. " +
-    "If a tool needs an API key or credential, call requireSecret first to get it from the user — never ask for secrets in chat.",
+    "You are a helpful assistant running in an interactive console. Be concise. " +
+    `Your workspace directory is: ${workspace}\n` +
+    "You have filesystem tools (readFile, writeFile, listDir, statFile) to read and edit files in the workspace. " +
+    "You have a shell tool to run commands like 'bun test', 'git log', or 'grep'. " +
+    "You have memory tools (searchMemory, saveMemory) to recall and persist facts across sessions. " +
+    "You have a writeTool to create new tools at runtime when no existing tool covers a need. " +
+    "If a tool needs an API key, call requireSecret first — never ask for secrets in chat.",
   memory: { store: memoryStore },
 });
 
@@ -415,7 +441,9 @@ function prompt() {
   });
 }
 
-console.log(`Console agent ready. Tools dir: ${toolsDir}`);
-console.log(`Static tools: calculator, currentTime, showHistory, writeTool, requireSecret`);
-console.log('Commands: /history, /steps, /state, /tools, /memories [query], /remember <text>, exit\n');
+console.log(`Console agent ready.`);
+console.log(`  Workspace : ${workspace}`);
+console.log(`  Tools dir : ${toolsDir}`);
+console.log(`  Tools     : ${Object.keys(staticTools).join(", ")}`);
+console.log('  Commands  : /history, /steps, /state, /tools, /memories [query], /remember <text>, exit\n');
 prompt();
