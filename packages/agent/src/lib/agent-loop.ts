@@ -121,6 +121,12 @@ export interface AgentLoopConfig {
   processors?: ProcessorsConfig;
   /** Time source. Default: SystemClock. Pass FakeClock in tests to drive idle timers. */
   clock?: Clock;
+  /**
+   * Separate LLM used only for context compaction (summarising dropped messages).
+   * Useful for routing summaries to a cheaper or locally-hosted model.
+   * Falls back to `llm` when omitted.
+   */
+  compactionLlm?: LLMProvider;
 }
 
 export interface AgentSession {
@@ -402,7 +408,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
             const nonSystemCount = messages.filter((m) => m.role !== "system").length;
             if (nonSystemCount > contextConfig.maxMessages) {
               const result = yield* ctx.activity(`compact-${turn}`, () =>
-                compact(messages, contextConfig, config.llm),
+                compact(messages, contextConfig, config.compactionLlm ?? config.llm),
               );
               messages = result.messages;
 
