@@ -14,7 +14,7 @@ import type { ToolRegistry } from "./tool-registry.ts";
 import { buildToolDefs } from "./tool-registry.ts";
 import type { MemoryStore, MemoryScope } from "./memory-store.ts";
 import type { ProcessorsConfig } from "./processors.ts";
-import type { Message, AssistantMessage, ToolResultMessage } from "./message.ts";
+import type { Message, AssistantMessage, ToolResultMessage, ToolCall } from "./message.ts";
 
 // ---- hooks ----
 
@@ -342,6 +342,10 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               }
 
               const toolResultMsgs: ToolResultMessage[] = [];
+              // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
+              const toExecute: Array<{ call: ToolCall; toolDef: AgentTool<any, any> }> = [];
+
+              // Phase 1: resolve approvals sequentially (each may need a user signal)
               for (const call of response.toolCalls) {
                 const toolDef = toolMap[call.name];
                 if (!toolDef) {
@@ -352,7 +356,6 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                   });
                   continue;
                 }
-
                 if (
                   toolDef.requireApproval &&
                   !shouldAutoApprove(config.autoApprove, call, toolDef)
@@ -369,24 +372,29 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                     continue;
                   }
                 }
-
-                // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
-                const output = yield* ctx.activity(
-                  `tool-${call.name}-${turn}-${step}-${call.id}`,
-                  async () => {
-                    const parsed = toolDef.parameters.parse(call.input);
-                    return toolDef.execute(parsed as any);
-                  },
-                );
-
-                const content = toolDef.toModelOutput
-                  ? toolDef.toModelOutput(output)
-                  : typeof output === "string"
-                    ? output
-                    : JSON.stringify(output);
-
-                toolResultMsgs.push({ role: "tool", toolCallId: call.id, content });
+                toExecute.push({ call, toolDef });
               }
+
+              // Phase 2: run all approved tools in parallel, each individually journaled
+              if (toExecute.length > 0) {
+                const results = yield* ctx.parallel(
+                  toExecute.map(({ call, toolDef }) =>
+                    ctx.activity(`tool-${call.name}-${turn}-${step}-${call.id}`, async () => {
+                      const parsed = toolDef.parameters.parse(call.input);
+                      // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
+                      const output = await toolDef.execute(parsed as any);
+                      const content = toolDef.toModelOutput
+                        ? toolDef.toModelOutput(output)
+                        : typeof output === "string"
+                          ? output
+                          : JSON.stringify(output);
+                      return { role: "tool" as const, toolCallId: call.id, content };
+                    }),
+                  ),
+                );
+                toolResultMsgs.push(...results);
+              }
+
               messages = [...messages, ...toolResultMsgs];
             }
 

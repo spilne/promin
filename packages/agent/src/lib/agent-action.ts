@@ -289,7 +289,10 @@ export function agentAction(
         }
 
         const toolResultMsgs: ToolResultMessage[] = [];
+        // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
+        const toExecute: Array<{ call: ToolCall; toolDef: AgentTool<any, any> }> = [];
 
+        // Phase 1: resolve approvals sequentially (each may need a user signal)
         for (const call of response.toolCalls) {
           config.onToolCall?.(call);
 
@@ -315,21 +318,28 @@ export function agentAction(
             }
           }
 
-          const output = yield* ctx.activity(`tool-${call.name}-${step}-${call.id}`, () => {
-            const parsed = toolDef.parameters.parse(call.input);
-            // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
-            return toolDef.execute(parsed as any);
-          });
+          toExecute.push({ call, toolDef });
+        }
 
-          config.onToolResult?.(call, output);
-
-          const content = toolDef.toModelOutput
-            ? toolDef.toModelOutput(output)
-            : typeof output === "string"
-              ? output
-              : JSON.stringify(output);
-
-          toolResultMsgs.push({ role: "tool", toolCallId: call.id, content });
+        // Phase 2: run all approved tools in parallel, each individually journaled
+        if (toExecute.length > 0) {
+          const results = yield* ctx.parallel(
+            toExecute.map(({ call, toolDef }) =>
+              ctx.activity(`tool-${call.name}-${step}-${call.id}`, async () => {
+                const parsed = toolDef.parameters.parse(call.input);
+                // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
+                const output = await toolDef.execute(parsed as any);
+                config.onToolResult?.(call, output);
+                const content = toolDef.toModelOutput
+                  ? toolDef.toModelOutput(output)
+                  : typeof output === "string"
+                    ? output
+                    : JSON.stringify(output);
+                return { role: "tool" as const, toolCallId: call.id, content };
+              }),
+            ),
+          );
+          toolResultMsgs.push(...results);
         }
 
         messages = [...messages, ...toolResultMsgs];
