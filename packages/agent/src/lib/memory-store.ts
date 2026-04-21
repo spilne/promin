@@ -8,10 +8,10 @@ export interface MemoryEntry {
 }
 
 export interface MemoryScope {
-  /** User, org, or entity identifier. */
-  resourceId?: string;
-  /** Conversation or session identifier. */
-  threadId?: string;
+  /** Logical namespace — user ID, org ID, agent ID, or any other grouping. */
+  namespaceId?: string;
+  /** Session or conversation identifier within the namespace. */
+  sessionId?: string;
 }
 
 export interface EmbeddingProvider {
@@ -71,9 +71,9 @@ function scopeMatches(
   if (!queryScope) return !entryScope;
   // Scoped query, unscoped entry → no match
   if (!entryScope) return false;
-  if (queryScope.resourceId !== undefined && entryScope.resourceId !== queryScope.resourceId)
+  if (queryScope.namespaceId !== undefined && entryScope.namespaceId !== queryScope.namespaceId)
     return false;
-  if (queryScope.threadId !== undefined && entryScope.threadId !== queryScope.threadId)
+  if (queryScope.sessionId !== undefined && entryScope.sessionId !== queryScope.sessionId)
     return false;
   return true;
 }

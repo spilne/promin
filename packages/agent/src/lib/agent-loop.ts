@@ -83,7 +83,7 @@ export interface MemoryConfig {
   /**
    * Scope for all read and write operations on this store.
    * Omit for the global namespace (same as pre-scoping behaviour).
-   * Example: { resourceId: userId, threadId: sessionId }
+   * Example: { namespaceId: orgId, sessionId: sessionId }
    */
   scope?: MemoryScope;
   /**
