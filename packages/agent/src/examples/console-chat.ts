@@ -9,7 +9,8 @@
  * always-on workflow. Crash mid-turn → resume from the last journaled step.
  *
  * Commands:
- *   /history  — print all stored messages
+ *   /history  — print all stored conversation messages
+ *   /steps    — print workflow step history from storage for every turn
  *   exit      — quit
  */
 
@@ -86,6 +87,54 @@ const showHistory = tool({
   },
 });
 
+const STATUS_ICON: Record<string, string> = {
+  completed: "✓",
+  failed: "✗",
+  running: "◎",
+  pending: "○",
+  sleeping: "⏸",
+  waiting_for_signal: "⏳",
+  skipped: "—",
+};
+
+async function printWorkflowSteps() {
+  const runs = await storage.listWorkflows({ name: "console-agent" });
+  if (runs.length === 0) {
+    console.log("\n(no workflow runs in storage yet)\n");
+    return;
+  }
+  console.log(`\n workflow step history`);
+  for (let i = 0; i < runs.length; i++) {
+    const run = runs[i]!;
+    const isLastRun = i === runs.length - 1;
+    const runPrefix = isLastRun ? "└─" : "├─";
+    const childIndent = isLastRun ? "   " : "│  ";
+
+    const info = await runner.getStatus(run.workflowId, { includeStepResults: true });
+    if (!info) continue;
+
+    const runIcon = STATUS_ICON[info.state] ?? "?";
+    console.log(`${runPrefix} ${runIcon} ${run.workflowId}  (${info.state})`);
+
+    const stepEntries = Object.entries(info.steps);
+    for (let j = 0; j < stepEntries.length; j++) {
+      const [stepName, step] = stepEntries[j]!;
+      const isLastStep = j === stepEntries.length - 1;
+      const stepPrefix = isLastStep ? "└─" : "├─";
+      const stepIcon = STATUS_ICON[step.status] ?? "?";
+
+      let resultStr = "";
+      if (step.result !== undefined) {
+        const raw = JSON.stringify(step.result);
+        resultStr = `  →  ${raw.length > 100 ? `${raw.slice(0, 100)}…` : raw}`;
+      }
+
+      console.log(`${childIndent}${stepPrefix} ${stepIcon} ${stepName}${resultStr}`);
+    }
+  }
+  console.log("");
+}
+
 // --- agent ---
 
 const storage = new InMemoryWorkflowStorage();
@@ -123,6 +172,12 @@ function prompt() {
       return;
     }
 
+    if (task === "/steps") {
+      await printWorkflowSteps();
+      prompt();
+      return;
+    }
+
     const { data, error } = await runner.runSafe({
       workflow: agent,
       workflowId: `turn-${turn++}`,
@@ -143,5 +198,5 @@ function prompt() {
 }
 
 console.log("Console agent ready. Tools: calculator, currentTime, showHistory.");
-console.log('Type "/history" to inspect stored messages, "exit" to quit.\n');
+console.log('Type "/history" for messages, "/steps" for workflow step tree, "exit" to quit.\n');
 prompt();
