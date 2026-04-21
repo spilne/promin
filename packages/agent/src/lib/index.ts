@@ -47,6 +47,9 @@ export { createGetSecretTool, createSetSecretTool } from "./tools/secret-tools.t
 
 export { createSearchMemoryTool, createSaveMemoryTool, createMemoryTools } from "./tools/memory-tools.ts";
 export type { MemoryToolConfig } from "./tools/memory-tools.ts";
+
+export { createLlmTool } from "./tools/llm-tool.ts";
+export type { LlmToolConfig } from "./tools/llm-tool.ts";
 export type { SecretToolConfig, SetSecretToolConfig } from "./tools/secret-tools.ts";
 
 export {
