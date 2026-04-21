@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
-import { agentLoop, MaxIterationsError } from "../agent-loop.ts";
+import { agentAction, MaxStepsError } from "../agent-action.ts";
 import { tool } from "../tool.ts";
 import type { LLMProvider, LLMResponse } from "../llm-provider.ts";
 import type { LLMChatParams } from "../llm-provider.ts";
@@ -22,9 +22,9 @@ function makeRunner() {
   return { storage, runner: createWorkflowRunner({ storage }) };
 }
 
-describe("agentLoop", () => {
+describe("agentAction", () => {
   it("returns final answer when LLM stops immediately", async () => {
-    const agent = agentLoop({
+    const agent = agentAction({
       name: "test-agent",
       llm: mockLLM([{ content: "The answer is 42.", finishReason: "stop" }]),
     });
@@ -38,7 +38,7 @@ describe("agentLoop", () => {
     const result = await handle.result({ timeoutMs: 5_000 });
 
     expect(result.answer).toBe("The answer is 42.");
-    expect(result.iterations).toBe(1);
+    expect(result.steps).toBe(1);
   });
 
   it("executes tools then returns final answer", async () => {
@@ -48,7 +48,7 @@ describe("agentLoop", () => {
       execute: async ({ query }) => `Results for: ${query}`,
     });
 
-    const agent = agentLoop({
+    const agent = agentAction({
       name: "tool-agent",
       llm: mockLLM([
         {
@@ -70,7 +70,7 @@ describe("agentLoop", () => {
     const result = await handle.result({ timeoutMs: 5_000 });
 
     expect(result.answer).toBe("TypeScript is great.");
-    expect(result.iterations).toBe(2);
+    expect(result.steps).toBe(2);
 
     const toolMsg = result.messages.find((m) => m.role === "tool");
     expect(toolMsg?.content).toBe("Results for: TypeScript");
@@ -83,7 +83,7 @@ describe("agentLoop", () => {
       execute: async ({ count }) => `count=${count}`,
     });
 
-    const agent = agentLoop({
+    const agent = agentAction({
       name: "strict-agent",
       llm: mockLLM([
         {
@@ -107,7 +107,7 @@ describe("agentLoop", () => {
   });
 
   it("handles unknown tool gracefully", async () => {
-    const agent = agentLoop({
+    const agent = agentAction({
       name: "unknown-tool-agent",
       llm: mockLLM([
         {
@@ -131,7 +131,7 @@ describe("agentLoop", () => {
     expect(toolMsg?.content).toContain("unknown tool");
   });
 
-  it("throws MaxIterationsError when loop exceeds limit", async () => {
+  it("throws MaxStepsError when loop exceeds limit", async () => {
     const infiniteResponses: LLMResponse[] = Array.from({ length: 5 }, (_, i) => ({
       content: null,
       finishReason: "tool_calls" as const,
@@ -144,11 +144,11 @@ describe("agentLoop", () => {
       execute: async () => "still searching...",
     });
 
-    const agent = agentLoop({
+    const agent = agentAction({
       name: "infinite-agent",
       llm: mockLLM(infiniteResponses),
       tools: { search: searchTool },
-      maxIterations: 3,
+      maxSteps: 3,
     });
 
     const { runner } = makeRunner();
@@ -159,11 +159,11 @@ describe("agentLoop", () => {
     });
 
     expect(data).toBeNull();
-    expect(String(error)).toContain("maximum iterations");
+    expect(String(error)).toContain("maximum steps");
   });
 
-  it("stops early via onIteration hook", async () => {
-    const agent = agentLoop({
+  it("stops early via onStep hook", async () => {
+    const agent = agentAction({
       name: "hookable-agent",
       llm: mockLLM([
         {
@@ -180,8 +180,8 @@ describe("agentLoop", () => {
           execute: async () => "result",
         }),
       },
-      onIteration: ({ iteration }) => {
-        if (iteration === 0) return { continue: false };
+      onStep: ({ step }) => {
+        if (step === 0) return { continue: false };
       },
     });
 
@@ -193,13 +193,13 @@ describe("agentLoop", () => {
     });
     const result = await handle.result({ timeoutMs: 5_000 });
 
-    expect(result.iterations).toBe(1);
+    expect(result.steps).toBe(1);
   });
 
   it("seeds conversation with prior messages", async () => {
     let capturedMessages: unknown[] = [];
 
-    const agent = agentLoop({
+    const agent = agentAction({
       name: "seeded-agent",
       llm: {
         chat: async (params) => {

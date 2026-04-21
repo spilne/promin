@@ -14,38 +14,38 @@ export interface AgentInput {
 export interface AgentResult {
   answer: string;
   messages: Message[];
-  iterations: number;
+  steps: number;
   usage?: { inputTokens: number; outputTokens: number };
 }
 
-export interface IterationContext {
-  iteration: number;
+export interface StepContext {
+  step: number;
   messages: Message[];
   workflowId: string;
 }
 
-export interface AgentConfig {
+export interface AgentActionConfig {
   name: string;
   llm: LLMProvider;
   tools?: Record<string, AgentTool<unknown, unknown>>;
-  maxIterations?: number;
+  maxSteps?: number;
   systemPrompt?: string;
   rateLimiter?: RateLimiter;
   clock?: Clock;
-  onIteration?: (ctx: IterationContext) => { continue: boolean; feedback?: string } | void;
+  onStep?: (ctx: StepContext) => { continue: boolean; feedback?: string } | void;
   onToolCall?: (call: ToolCall) => void;
   onToolResult?: (call: ToolCall, output: unknown) => void;
 }
 
-export class MaxIterationsError extends Error {
-  readonly _tag = "MaxIterationsError";
-  constructor(readonly maxIterations: number) {
-    super(`Agent exceeded maximum iterations (${maxIterations})`);
+export class MaxStepsError extends Error {
+  readonly _tag = "MaxStepsError";
+  constructor(readonly maxSteps: number) {
+    super(`Agent exceeded maximum steps (${maxSteps})`);
   }
 }
 
-export function agentLoop(config: AgentConfig): Workflow<AgentInput, AgentResult> {
-  const maxIterations = config.maxIterations ?? 20;
+export function agentAction(config: AgentActionConfig): Workflow<AgentInput, AgentResult> {
+  const maxSteps = config.maxSteps ?? 20;
   const tools = config.tools ?? {};
 
   const llmToolDefs: LLMToolDefinition[] = Object.entries(tools).map(([name, t]) => ({
@@ -65,8 +65,9 @@ export function agentLoop(config: AgentConfig): Workflow<AgentInput, AgentResult
       let totalInputTokens = 0;
       let totalOutputTokens = 0;
 
-      for (let iteration = 0; iteration < maxIterations; iteration++) {
-        const response = yield* ctx.activity(`llm-${iteration}`, () => {
+      for (let step = 0; step < maxSteps; step++) {
+        // Agent thinks — response is journaled, so this IS the branch decision on replay
+        const response = yield* ctx.activity(`think-${step}`, () => {
           const call = () =>
             config.llm.chat({
               messages,
@@ -87,29 +88,35 @@ export function agentLoop(config: AgentConfig): Workflow<AgentInput, AgentResult
         };
         messages = [...messages, assistantMsg];
 
-        if (config.onIteration) {
-          const decision = config.onIteration({ iteration, messages, workflowId: ctx.workflowId });
+        if (config.onStep) {
+          const decision = config.onStep({ step, messages, workflowId: ctx.workflowId });
           if (decision && !decision.continue) {
             return buildResult(
               response.content ?? "",
               messages,
-              iteration + 1,
+              step + 1,
               totalInputTokens,
               totalOutputTokens,
             );
           }
         }
 
-        if (!response.toolCalls || response.toolCalls.length === 0) {
+        // Agent decided: done
+        if (
+          response.finishReason === "stop" ||
+          !response.toolCalls ||
+          response.toolCalls.length === 0
+        ) {
           return buildResult(
             response.content ?? "",
             messages,
-            iteration + 1,
+            step + 1,
             totalInputTokens,
             totalOutputTokens,
           );
         }
 
+        // Agent decided: use tools
         const toolResultMsgs: ToolResultMessage[] = [];
 
         for (const call of response.toolCalls) {
@@ -137,7 +144,7 @@ export function agentLoop(config: AgentConfig): Workflow<AgentInput, AgentResult
             }
           }
 
-          const output = yield* ctx.activity(`tool-${call.name}-${iteration}-${call.id}`, () => {
+          const output = yield* ctx.activity(`tool-${call.name}-${step}-${call.id}`, () => {
             const parsed = toolDef.parameters.parse(call.input);
             return toolDef.execute(parsed);
           });
@@ -156,7 +163,7 @@ export function agentLoop(config: AgentConfig): Workflow<AgentInput, AgentResult
         messages = [...messages, ...toolResultMsgs];
       }
 
-      throw new MaxIterationsError(maxIterations);
+      throw new MaxStepsError(maxSteps);
     })
     .build();
 }
@@ -164,14 +171,14 @@ export function agentLoop(config: AgentConfig): Workflow<AgentInput, AgentResult
 function buildResult(
   answer: string,
   messages: Message[],
-  iterations: number,
+  steps: number,
   inputTokens: number,
   outputTokens: number,
 ): AgentResult {
   return {
     answer,
     messages,
-    iterations,
+    steps,
     usage: inputTokens > 0 || outputTokens > 0 ? { inputTokens, outputTokens } : undefined,
   };
 }

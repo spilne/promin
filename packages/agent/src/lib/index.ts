@@ -1,5 +1,5 @@
-export { agentLoop, MaxIterationsError } from "./agent-loop.ts";
-export type { AgentConfig, AgentInput, AgentResult, IterationContext } from "./agent-loop.ts";
+export { agentAction, MaxStepsError } from "./agent-action.ts";
+export type { AgentActionConfig, AgentInput, AgentResult, StepContext } from "./agent-action.ts";
 
 export { tool } from "./tool.ts";
 export type { AgentTool, ApprovalDecision } from "./tool.ts";
