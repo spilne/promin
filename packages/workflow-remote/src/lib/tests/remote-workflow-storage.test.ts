@@ -11,8 +11,8 @@
 
 import { InMemoryWorkflowStorage } from "@promin/workflow";
 import { storageTestSuite } from "@promin/workflow/testing";
-import { RemoteWorkflowStorage } from "./remote-workflow-storage.ts";
-import { createWorkflowStorageHandler } from "./storage-http-handler.ts";
+import { RemoteWorkflowStorage } from "../remote-workflow-storage.ts";
+import { createWorkflowStorageHandler } from "../storage-http-handler.ts";
 
 storageTestSuite(() => {
   // Fresh in-memory backend per test — matches how the suite's factory is

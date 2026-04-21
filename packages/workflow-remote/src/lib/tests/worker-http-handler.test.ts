@@ -7,8 +7,8 @@
 
 import { describe, it, expect, beforeEach } from "bun:test";
 import { InMemoryStepQueue, InMemoryWorkflowStorage } from "@promin/workflow";
-import { createWorkerApiHandler } from "./worker-http-handler.ts";
-import { WORKER_WIRE_CODEC } from "./worker-wire.ts";
+import { createWorkerApiHandler } from "../worker-http-handler.ts";
+import { WORKER_WIRE_CODEC } from "../worker-wire.ts";
 
 function post(handler: (r: Request) => Promise<Response>, method: string, params: unknown) {
   const body = JSON.stringify({ method, params: WORKER_WIRE_CODEC.encode(params) });
