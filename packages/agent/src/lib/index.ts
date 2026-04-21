@@ -40,6 +40,9 @@ export type { WriteToolConfig } from "./tools/write-tool.ts";
 export { createRequireSecretTool } from "./tools/require-secret-tool.ts";
 export type { RequireSecretToolConfig } from "./tools/require-secret-tool.ts";
 
+export { createApiKeyBootstrap } from "./api-key-bootstrap.ts";
+export type { ApiKeyBootstrapConfig } from "./api-key-bootstrap.ts";
+
 export { createGetSecretTool, createSetSecretTool } from "./tools/secret-tools.ts";
 export type { SecretToolConfig, SetSecretToolConfig } from "./tools/secret-tools.ts";
 
