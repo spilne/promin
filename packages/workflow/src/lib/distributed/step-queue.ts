@@ -114,6 +114,13 @@ export interface StepQueue {
   fail(params: { taskId: string; error: string; durationMs: number }): Promise<void>;
 
   /**
+   * Extend the running lease on a task. Workers call this periodically while
+   * executing a long step so `requeueStuck` doesn't reclaim it prematurely.
+   * No-op if the task is not in `running` state.
+   */
+  heartbeat(params: { taskId: string }): Promise<void>;
+
+  /**
    * Re-enqueue tasks stuck in "running" state. Returns count re-enqueued.
    *
    * Two modes:

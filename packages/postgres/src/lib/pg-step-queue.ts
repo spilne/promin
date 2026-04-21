@@ -265,6 +265,13 @@ export class PgStepQueue implements StepQueue {
       .where(eq(stepQueue.id, Number(params.taskId)));
   }
 
+  async heartbeat(params: { taskId: string }): Promise<void> {
+    await this.db
+      .update(stepQueue)
+      .set({ heartbeatAt: this.clock.now() })
+      .where(and(eq(stepQueue.id, Number(params.taskId)), eq(stepQueue.status, "running")));
+  }
+
   async requeueStuck(params: { claimedBy?: string; staleTimeoutMs?: number }): Promise<number> {
     const conditions = [eq(stepQueue.status, "running")];
 
@@ -275,16 +282,15 @@ export class PgStepQueue implements StepQueue {
     if (params.claimedBy) {
       conditions.push(eq(stepQueue.claimedBy, params.claimedBy));
     } else if (params.staleTimeoutMs) {
-      conditions.push(
-        lt(stepQueue.claimedAt, new Date(this.clock.currentTimeMs() - params.staleTimeoutMs)),
-      );
+      const cutoff = new Date(this.clock.currentTimeMs() - params.staleTimeoutMs);
+      conditions.push(lt(sql`COALESCE(${stepQueue.heartbeatAt}, ${stepQueue.claimedAt})`, cutoff));
     } else {
       return 0;
     }
 
     const rows = await this.db
       .update(stepQueue)
-      .set({ status: "pending", claimedBy: null, claimedAt: null })
+      .set({ status: "pending", claimedBy: null, claimedAt: null, heartbeatAt: null })
       .where(and(...conditions))
       .returning({ id: stepQueue.id });
 

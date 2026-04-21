@@ -12,6 +12,7 @@ type MutableTask = {
   error?: string;
   claimedBy?: string;
   claimedAt?: Date;
+  heartbeatAt?: Date;
   completedAt?: Date;
   durationMs?: number;
   // Internal — StepTask hides namespace from consumers, but we need it to
@@ -164,6 +165,13 @@ export class InMemoryStepQueue implements StepQueue {
     }
   }
 
+  async heartbeat(params: { taskId: string }): Promise<void> {
+    const task = this.tasks.get(params.taskId);
+    if (task?.status === "running") {
+      task.heartbeatAt = this.clock.now();
+    }
+  }
+
   async fail(params: { taskId: string; error: string; durationMs: number }): Promise<void> {
     const task = this.tasks.get(params.taskId);
     if (task) {
@@ -185,7 +193,8 @@ export class InMemoryStepQueue implements StepQueue {
       if (task.status !== "running") continue;
 
       const matchesByWorker = params.claimedBy && task.claimedBy === params.claimedBy;
-      const matchesByTimeout = cutoff && task.claimedAt && task.claimedAt.getTime() < cutoff;
+      const lastActivity = task.heartbeatAt ?? task.claimedAt;
+      const matchesByTimeout = cutoff && lastActivity && lastActivity.getTime() < cutoff;
 
       if (matchesByWorker || matchesByTimeout) {
         task.status = "pending";

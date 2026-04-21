@@ -373,6 +373,20 @@ export function stepQueueTestSuite(factory: () => StepQueue | Promise<StepQueue>
         expect(requeued).toBe(0);
       });
 
+      it("heartbeat prevents premature requeue", async () => {
+        const q = await getQueue();
+        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
+        const [task] = await q.claim({ limit: 1 });
+
+        // Wait so claimedAt is in the past, then heartbeat to reset last-activity
+        await new Promise((r) => setTimeout(r, 20));
+        await q.heartbeat({ taskId: task!.id });
+
+        // staleTimeoutMs: 500 — heartbeat was < 500ms ago, so should not requeue
+        const requeued = await q.requeueStuck({ staleTimeoutMs: 500 });
+        expect(requeued).toBe(0);
+      });
+
       it("does not requeue completed or failed tasks", async () => {
         const q = await getQueue();
         await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });

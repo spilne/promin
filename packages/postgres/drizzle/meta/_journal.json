@@ -162,6 +162,13 @@
       "when": 1743400022000,
       "tag": "0022_workflow_registry",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1743400023000,
+      "tag": "0023_stepqueue_heartbeat",
+      "breakpoints": true
     }
   ]
 }

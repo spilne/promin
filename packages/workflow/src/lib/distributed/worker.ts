@@ -227,6 +227,10 @@ export class DefaultWorker implements WorkflowWorker {
       attempt: task.attempt,
     };
 
+    const taskHeartbeatTimer = this.clock.setInterval(() => {
+      this.stepQueue.heartbeat({ taskId: task.id }).catch(() => {});
+    }, this.heartbeatIntervalMs);
+
     try {
       await this.hooks.beforeStep?.(task);
 
@@ -294,6 +298,8 @@ export class DefaultWorker implements WorkflowWorker {
 
       // Default: fail
       await this.failTask(task, err instanceof Error ? err.message : String(err), startTime);
+    } finally {
+      taskHeartbeatTimer.clear();
     }
   }
 

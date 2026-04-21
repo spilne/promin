@@ -289,6 +289,15 @@ export class RedisStepQueue implements StepQueue {
     }
   }
 
+  async heartbeat(params: { taskId: string }): Promise<void> {
+    const raw = await this.redis.hgetall(this.taskKey(params.taskId));
+    if (raw?.status === "running") {
+      await this.redis.hset(this.taskKey(params.taskId), {
+        heartbeatAt: this.clock.now().toISOString(),
+      });
+    }
+  }
+
   async requeueStuck(params: { claimedBy?: string; staleTimeoutMs?: number }): Promise<number> {
     const runningIds = await this.redis.smembers(this.runningKey());
     let count = 0;
@@ -298,14 +307,21 @@ export class RedisStepQueue implements StepQueue {
       if (!raw || raw.status !== "running") continue;
 
       if (params.claimedBy && raw.claimedBy !== params.claimedBy) continue;
-      if (params.staleTimeoutMs && raw.claimedAt) {
-        const claimedAt = new Date(raw.claimedAt).getTime();
-        if (this.clock.currentTimeMs() - claimedAt < params.staleTimeoutMs) continue;
+      if (params.staleTimeoutMs) {
+        const lastActivity = raw.heartbeatAt ?? raw.claimedAt;
+        if (!lastActivity) continue;
+        const lastActivityMs = new Date(lastActivity).getTime();
+        if (this.clock.currentTimeMs() - lastActivityMs < params.staleTimeoutMs) continue;
       }
 
       const priority = parseInt(raw.priority ?? "5", 10);
       const score = priority * 1e12 + (1e12 - Number(id));
-      await this.redis.hset(this.taskKey(id), { status: "pending", claimedBy: "", claimedAt: "" });
+      await this.redis.hset(this.taskKey(id), {
+        status: "pending",
+        claimedBy: "",
+        claimedAt: "",
+        heartbeatAt: "",
+      });
       await this.redis.srem(this.runningKey(), id);
       await this.redis.zadd(this.pendingKey, score, id);
       count++;

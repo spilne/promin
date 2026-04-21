@@ -187,6 +187,7 @@ export const stepQueue = pgTable(
     durationMs: bigint("duration_ms", { mode: "number" }),
     claimedBy: text("claimed_by"),
     claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     version: text("version"),
