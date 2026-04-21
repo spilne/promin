@@ -22,11 +22,12 @@
  * Commands:
  *   /history  — print conversation messages
  *   /steps    — print full workflow step tree from storage
+ *   /state    — print agent lifecycle state machine (current state + transition history)
  *   exit      — quit
  */
 
 import { createInterface } from "node:readline";
-import { workflow } from "@promin/workflow";
+import { workflow, stateMachine, InMemoryStateMachineStorage } from "@promin/workflow";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { anthropic } from "../lib/adapters/anthropic.ts";
 import { tool } from "../lib/tool.ts";
@@ -114,6 +115,68 @@ const llmToolDefs: LLMToolDefinition[] = Object.entries(toolsMap).map(([name, t]
 
 const llm = anthropic("claude-sonnet-4-6", { apiKey });
 
+// ---- agent lifecycle state machine ----
+
+type AgentStates = {
+  idle: {
+    context: { completedTurns: number };
+    transitions: { message: "thinking" };
+  };
+  thinking: {
+    context: { completedTurns: number; turn: number; step: number; task: string };
+    transitions: { tool_calls: "tool_calling"; done: "idle" };
+  };
+  tool_calling: {
+    context: {
+      completedTurns: number;
+      turn: number;
+      step: number;
+      task: string;
+      activeTools: string[];
+    };
+    transitions: { tools_done: "thinking" };
+  };
+};
+
+const smStorage = new InMemoryStateMachineStorage();
+// biome-ignore lint/suspicious/noExplicitAny: state machine actions receive runtime data
+const agentMachine = stateMachine<AgentStates>({ name: "agent-lifecycle", storage: smStorage })
+  .state("idle")
+  .state("thinking")
+  .state("tool_calling")
+  .on("message", {
+    from: "idle",
+    to: "thinking",
+    action: (ctx: any, data: any) => ({
+      completedTurns: ctx.completedTurns,
+      turn: data.turn,
+      step: 0,
+      task: data.task,
+    }),
+  })
+  .on("tool_calls", {
+    from: "thinking",
+    to: "tool_calling",
+    action: (ctx: any, data: any) => ({ ...ctx, activeTools: data.tools }),
+  })
+  .on("tools_done", {
+    from: "tool_calling",
+    to: "thinking",
+    action: (ctx: any) => ({
+      completedTurns: ctx.completedTurns,
+      turn: ctx.turn,
+      step: ctx.step + 1,
+      task: ctx.task,
+    }),
+  })
+  .on("done", {
+    from: "thinking",
+    to: "idle",
+    action: (ctx: any) => ({ completedTurns: ctx.completedTurns + 1 }),
+  })
+  .initial("idle")
+  .build();
+
 // ---- in-process response delivery ----
 // The journaled step resolves these promises from inside emit-N activities.
 // Works in-process; a real system would use SSE/WebSocket.
@@ -133,6 +196,10 @@ const sessionWorkflow = workflow<void>({ name: "console-agent" })
       const { task } = yield* ctx.signal<{ task: string }>(`task-${turn}`);
       messages = [...messages, { role: "user", content: task }];
 
+      yield* ctx.activity(`sm-message-${turn}`, () =>
+        agentMachine.send({ id: "session", event: "message", data: { turn, task } }),
+      );
+
       let answer = "";
 
       for (let step = 0; step < MAX_STEPS_PER_TURN; step++) {
@@ -149,10 +216,21 @@ const sessionWorkflow = workflow<void>({ name: "console-agent" })
 
         if (response.finishReason === "stop" || !response.toolCalls?.length) {
           answer = response.content ?? "";
+          yield* ctx.activity(`sm-done-${turn}`, () =>
+            agentMachine.send({ id: "session", event: "done" }),
+          );
           break;
         }
 
         // Agent decided to use tools
+        yield* ctx.activity(`sm-tool-calls-${turn}-${step}`, () =>
+          agentMachine.send({
+            id: "session",
+            event: "tool_calls",
+            data: { tools: response.toolCalls!.map((c) => c.name) },
+          }),
+        );
+
         const toolResultMsgs: ToolResultMessage[] = [];
         for (const call of response.toolCalls) {
           const toolDef = toolsMap[call.name as keyof typeof toolsMap];
@@ -176,6 +254,10 @@ const sessionWorkflow = workflow<void>({ name: "console-agent" })
           toolResultMsgs.push({ role: "tool", toolCallId: call.id, content });
         }
         messages = [...messages, ...toolResultMsgs];
+
+        yield* ctx.activity(`sm-tools-done-${turn}-${step}`, () =>
+          agentMachine.send({ id: "session", event: "tools_done" }),
+        );
       }
 
       // Journaled — executes exactly once, skipped on replay
@@ -194,6 +276,9 @@ const sessionWorkflow = workflow<void>({ name: "console-agent" })
 const storage = new InMemoryWorkflowStorage();
 const runner = createWorkflowRunner({ storage });
 
+// Start the state machine instance for this session
+await agentMachine.start({ id: "session", context: { completedTurns: 0 } });
+
 // Single persistent session — fire-and-forget, never completes
 const handle = await runner.start({
   workflow: sessionWorkflow,
@@ -208,6 +293,30 @@ async function sendTask(task: string): Promise<string> {
   const promise = new Promise<string>((resolve) => pendingResponses.set(turn, resolve));
   await handle.signal(`task-${turn}`, { task });
   return promise;
+}
+
+// ---- /state: agent lifecycle ----
+
+async function printAgentState() {
+  const state = await agentMachine.getState("session");
+  const history = await agentMachine.getHistory("session");
+  if (!state) {
+    console.log("\n(no state yet)\n");
+    return;
+  }
+
+  console.log(`\n agent lifecycle`);
+  console.log(`  current: ${state.current}`);
+  console.log(`  context: ${JSON.stringify(state.context, null, 4).replace(/\n/g, "\n  ")}`);
+
+  if (history.length > 0) {
+    console.log(`\n  transitions:`);
+    for (const t of history) {
+      const ts = t.createdAt.toLocaleTimeString();
+      console.log(`    ${t.from.padEnd(12)} --[${t.event}]--> ${t.to}  @ ${ts}`);
+    }
+  }
+  console.log("");
 }
 
 // ---- /steps tree ----
@@ -301,6 +410,11 @@ function prompt() {
       prompt();
       return;
     }
+    if (task === "/state") {
+      await printAgentState();
+      prompt();
+      return;
+    }
 
     const answer = await sendTask(task);
     console.log(`\nAgent: ${answer}`);
@@ -309,5 +423,5 @@ function prompt() {
 }
 
 console.log("Console agent ready. Tools: calculator, currentTime, showHistory.");
-console.log('Type "/history" for messages, "/steps" for workflow step tree, "exit" to quit.\n');
+console.log('Type "/history", "/steps", "/state", or "exit".\n');
 prompt();
