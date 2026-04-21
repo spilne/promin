@@ -1,0 +1,64 @@
+{
+  "name": "@promin/agent",
+  "version": "0.1.0",
+  "description": "Durable AI agent loops and tool orchestration for promin workflows.",
+  "keywords": [
+    "agent",
+    "ai",
+    "durable-execution",
+    "llm",
+    "tool-calling",
+    "typescript",
+    "workflow"
+  ],
+  "homepage": "https://github.com/spilne/promin/tree/main/packages/agent",
+  "bugs": {
+    "url": "https://github.com/spilne/promin/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spilne/promin.git",
+    "directory": "packages/agent"
+  },
+  "files": [
+    "dist",
+    "package.json"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "@promin/source": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@promin/core": "workspace:*",
+    "@promin/workflow": "workspace:*",
+    "effect": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:"
+  },
+  "nx": {
+    "targets": {
+      "typecheck": {},
+      "test": {},
+      "lint": {},
+      "format": {},
+      "format-check": {},
+      "ci": {},
+      "publish": {}
+    }
+  }
+}
