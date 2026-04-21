@@ -2,7 +2,7 @@ import { workflow } from "@promin/workflow";
 import type { Workflow } from "@promin/workflow";
 import type { RateLimiter, Clock } from "@promin/core";
 import { z } from "zod";
-import type { LLMProvider } from "./llm-provider.ts";
+import type { LLMProvider, LLMResponse } from "./llm-provider.ts";
 import type { AgentTool, ApprovalDecision, AutoApprove } from "./tool.ts";
 import { shouldAutoApprove } from "./tool.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
@@ -77,6 +77,8 @@ export interface AgentActionConfig<TOutput = any> {
   onStep?: (ctx: StepContext) => { continue: boolean; feedback?: string } | void;
   onToolCall?: (call: ToolCall) => void;
   onToolResult?: (call: ToolCall, output: unknown) => void;
+  /** Called with each text delta as the LLM streams its response. Requires the provider to support chatStream. */
+  onChunk?: (delta: string) => void;
 }
 
 export class MaxStepsError extends Error {
@@ -173,12 +175,35 @@ export function agentAction(
             ? await config.processors.beforeLLM(messages, processorCtx)
             : messages;
 
-          const call = () =>
-            config.llm.chat({
-              messages: processedMessages,
-              tools: toolDefs.length > 0 ? toolDefs : undefined,
-            });
-          const raw = await (config.rateLimiter ? config.rateLimiter.withLimitAsync(call) : call());
+          const chatParams = {
+            messages: processedMessages,
+            tools: toolDefs.length > 0 ? toolDefs : undefined,
+          };
+
+          let raw: LLMResponse;
+          if (config.onChunk && config.llm.chatStream) {
+            const startStream = () => Promise.resolve(config.llm.chatStream!(chatParams));
+            const stream = await (config.rateLimiter
+              ? config.rateLimiter.withLimitAsync(startStream)
+              : startStream());
+            let content = "";
+            let finishReason: LLMResponse["finishReason"] = "stop";
+            let toolCalls: LLMResponse["toolCalls"];
+            let usage: LLMResponse["usage"];
+            for await (const chunk of stream) {
+              if (chunk.delta) {
+                content += chunk.delta;
+                config.onChunk(chunk.delta);
+              }
+              if (chunk.toolCalls) toolCalls = chunk.toolCalls;
+              if (chunk.finishReason) finishReason = chunk.finishReason;
+              if (chunk.usage) usage = chunk.usage;
+            }
+            raw = { content: content || null, toolCalls, finishReason, usage };
+          } else {
+            const call = () => config.llm.chat(chatParams);
+            raw = await (config.rateLimiter ? config.rateLimiter.withLimitAsync(call) : call());
+          }
 
           return config.processors?.afterLLM
             ? await config.processors.afterLLM(raw, processorCtx)
