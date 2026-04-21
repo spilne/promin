@@ -27,7 +27,8 @@ export interface StepContext {
 export interface AgentActionConfig {
   name: string;
   llm: LLMProvider;
-  tools?: Record<string, AgentTool<unknown, unknown>>;
+  // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
+  tools?: Record<string, AgentTool<any, any>>;
   maxSteps?: number;
   systemPrompt?: string;
   rateLimiter?: RateLimiter;
@@ -46,7 +47,8 @@ export class MaxStepsError extends Error {
 
 export function agentAction(config: AgentActionConfig): Workflow<AgentInput, AgentResult> {
   const maxSteps = config.maxSteps ?? 20;
-  const tools = config.tools ?? {};
+  // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
+  const tools: Record<string, AgentTool<any, any>> = config.tools ?? {};
 
   const llmToolDefs: LLMToolDefinition[] = Object.entries(tools).map(([name, t]) => ({
     name,
