@@ -32,6 +32,7 @@ export {
   ScopedWorkflowVersionRegistry,
   createWorkflowVersionRegistry,
   type WorkflowVersionRegistryConfig,
+  type IWorkflowVersionRegistry,
   WorkflowError,
   StepError,
   StorageError,

@@ -265,6 +265,26 @@ export const activityJournal = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Workflow definition registry — stores serialized WorkflowDAG entries
+// so coordinators can resolve definitions from a shared store.
+// ---------------------------------------------------------------------------
+
+export const workflowRegistry = pgTable(
+  "wf_workflow_registry",
+  {
+    name: text("name").notNull(),
+    version: text("version").notNull(),
+    dagJson: jsonb("dag_json").notNull(),
+    idempotency: jsonb("idempotency"),
+    registeredAt: timestamp("registered_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.name, t.version] }),
+    index("wf_workflow_registry_name_idx").on(t.name),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // State machine tables
 // ---------------------------------------------------------------------------
 

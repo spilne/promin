@@ -47,6 +47,7 @@ export {
   ScopedWorkflowVersionRegistry,
   createWorkflowVersionRegistry,
   type WorkflowVersionRegistryConfig,
+  type IWorkflowVersionRegistry,
 } from "./workflow-version-registry.ts";
 export {
   WorkflowError,

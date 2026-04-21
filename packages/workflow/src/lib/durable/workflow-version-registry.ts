@@ -5,6 +5,38 @@
 import type { Workflow } from "./durable-pipeline.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
 
+// ---------------------------------------------------------------------------
+// Async registry interface — implemented by both the local in-memory class
+// and remote backends (Postgres, HTTP). Coordinator + runner accept either.
+// ---------------------------------------------------------------------------
+
+/**
+ * Async interface for resolving workflow definitions by name/version.
+ * All backends (in-memory, Postgres, HTTP) implement this interface so
+ * coordinator and runner code is backend-agnostic.
+ *
+ * The local `WorkflowVersionRegistry` class also implements this interface
+ * (its sync methods are exposed via trivially-async wrappers) so existing
+ * code continues to work without changes.
+ */
+export interface IWorkflowVersionRegistry {
+  /** Register a workflow definition (persists for remote backends). */
+  register(definition: Workflow<unknown, unknown>): Promise<void> | void;
+  /** Resolve by name + optional version. `undefined` when not found. */
+  resolve(
+    name: string,
+    version?: string,
+  ): Promise<Workflow<unknown, unknown> | undefined> | Workflow<unknown, unknown> | undefined;
+  /** All registered version strings for a workflow name. */
+  versions(name: string): Promise<readonly string[]> | readonly string[];
+  /** Latest registered version string, or undefined. */
+  latest(name: string): Promise<string | undefined> | string | undefined;
+  /** All registered workflow names. */
+  names(): Promise<readonly string[]> | readonly string[];
+  /** Remove a specific (name, version) from the registry. */
+  deregister(name: string, version: string): Promise<void> | void;
+}
+
 /**
  * Registry mapping (workflowName, version) to pure `Workflow` definitions.
  *

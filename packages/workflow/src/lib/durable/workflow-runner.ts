@@ -37,7 +37,10 @@ import { withLock } from "./with-lock.ts";
 import { topologicalSort } from "./workflow-dag.ts";
 import type { RetryPolicy } from "@promin/core";
 import type { WorkflowSuspendedError, WorkflowTimeoutError } from "./durable-pipeline-error.ts";
-import type { WorkflowVersionRegistry } from "./workflow-version-registry.ts";
+import type {
+  IWorkflowVersionRegistry,
+  WorkflowVersionRegistry,
+} from "./workflow-version-registry.ts";
 
 // ---------------------------------------------------------------------------
 // StepExecutor — pluggable "how to run a single step body" boundary.
@@ -132,7 +135,7 @@ export interface WorkflowRunnerConfig {
    * definitions by name + version, and drives version-drain-resume on
    * resumes.
    */
-  readonly registry?: WorkflowVersionRegistry;
+  readonly registry?: WorkflowVersionRegistry | IWorkflowVersionRegistry;
   /**
    * Workflow-level lifecycle hooks. Fired on workflow / step boundaries.
    * Overrides any hooks carried by the workflow's own `_definition`.
@@ -201,7 +204,7 @@ export interface WorkflowRunner {
  */
 export class DefaultWorkflowRunner implements WorkflowRunner {
   readonly storage: WorkflowStorage;
-  private readonly registry?: WorkflowVersionRegistry;
+  private readonly registry?: WorkflowVersionRegistry | IWorkflowVersionRegistry;
   private readonly hooks?: WorkflowHooks;
   private readonly clock: Clock;
 
@@ -230,21 +233,23 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
           `Pass \`createWorkflowRunner({ storage, registry })\`.`,
       );
     }
-    const latestDef = registry.resolve(params.name, params.version);
+    const latestDef = await registry.resolve(params.name, params.version);
     if (!latestDef) {
+      const allNames = await registry.names();
       throw new Error(
         `No workflow "${params.name}"${params.version ? ` version "${params.version}"` : ""} in registry. ` +
-          `Registered: ${registry.names().join(", ") || "(none)"}.`,
+          `Registered: ${(allNames as string[]).join(", ") || "(none)"}.`,
       );
     }
 
     const existing = await storage.loadWorkflow(workflowId);
     if (existing && existing.version && existing.version !== latestDef.version) {
-      const storedDef = registry.resolve(params.name, existing.version);
+      const storedDef = await registry.resolve(params.name, existing.version);
       if (!storedDef) {
+        const allVersions = await registry.versions(params.name);
         throw new Error(
           `Workflow "${params.name}" version "${existing.version}" not found in registry. ` +
-            `Available versions: ${registry.versions(params.name).join(", ")}. ` +
+            `Available versions: ${(allVersions as string[]).join(", ")}. ` +
             `Keep old definitions registered until in-flight workflows drain.`,
         );
       }

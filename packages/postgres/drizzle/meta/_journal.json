@@ -155,6 +155,13 @@
       "when": 1743400021000,
       "tag": "0021_stepattempts_workerid",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1743400022000,
+      "tag": "0022_workflow_registry",
+      "breakpoints": true
     }
   ]
 }

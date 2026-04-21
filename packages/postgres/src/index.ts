@@ -3,6 +3,7 @@ export type { DrizzleDb } from "./lib/drizzle-db.ts";
 
 // Storage
 export { PostgresWorkflowStorage } from "./lib/postgres-workflow-storage.ts";
+export { PostgresWorkflowVersionRegistry } from "./lib/postgres-workflow-version-registry.ts";
 export { type PostgresStorageConfig } from "./lib/config.ts";
 export { migrate, type MigrateOptions } from "./lib/migrate.ts";
 

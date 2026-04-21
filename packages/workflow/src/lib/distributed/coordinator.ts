@@ -10,7 +10,10 @@ import type { WorkflowStorage } from "../durable/workflow-storage.ts";
 import type { WorkflowState } from "../durable/workflow-state.ts";
 import type { Workflow, WorkflowDAG } from "../durable/durable-pipeline.ts";
 import { computeReadySet } from "../durable/workflow-dag.ts";
-import type { WorkflowVersionRegistry } from "../durable/workflow-version-registry.ts";
+import type {
+  IWorkflowVersionRegistry,
+  WorkflowVersionRegistry,
+} from "../durable/workflow-version-registry.ts";
 import type { StepQueue } from "./step-queue.ts";
 import type { WorkerRegistry } from "./worker-registry.ts";
 import type { LeaderElection } from "./leader-election.ts";
@@ -38,7 +41,7 @@ export interface CoordinatorConfig {
    * Lets submitters stay decoupled from workflow definitions — only the
    * coordinator process has to know how to build them.
    */
-  registry?: WorkflowVersionRegistry;
+  registry?: WorkflowVersionRegistry | IWorkflowVersionRegistry;
 }
 
 /** Submit a workflow by passing its definition directly. */
@@ -83,7 +86,7 @@ export class DefaultCoordinator implements WorkflowCoordinator {
   private readonly workerRegistry?: WorkerRegistry;
   private readonly workerTimeoutMs: number;
   private readonly leaderElection: LeaderElection;
-  private readonly registry?: WorkflowVersionRegistry;
+  private readonly registry?: WorkflowVersionRegistry | IWorkflowVersionRegistry;
   private running = false;
   private isLeader = false;
   private dags = new Map<string, WorkflowDAG>();
@@ -109,7 +112,7 @@ export class DefaultCoordinator implements WorkflowCoordinator {
     const workflow =
       "workflow" in params
         ? params.workflow
-        : (this.resolveByName(params.name, params.version) as Workflow<Input, unknown>);
+        : ((await this.resolveByName(params.name, params.version)) as Workflow<Input, unknown>);
     const { workflowId, input } = params;
     const dag = workflow.dag;
 
@@ -179,18 +182,18 @@ export class DefaultCoordinator implements WorkflowCoordinator {
     this.running = false;
   }
 
-  private resolveByName(name: string, version?: string): Workflow<unknown, unknown> {
+  private async resolveByName(name: string, version?: string): Promise<Workflow<unknown, unknown>> {
     if (!this.registry) {
       throw new Error(
         `coordinator.submit({ name }) requires \`registry\` on CoordinatorConfig. ` +
           `Pass a WorkflowVersionRegistry or use the { workflow } shape.`,
       );
     }
-    const def = this.registry.resolve(name, version);
+    const def = await this.registry.resolve(name, version);
     if (!def) {
-      const known = this.registry.names().join(", ") || "(none)";
+      const allNames = await this.registry.names();
       throw new Error(
-        `No workflow "${name}"${version ? ` version "${version}"` : ""} in registry. Registered: ${known}.`,
+        `No workflow "${name}"${version ? ` version "${version}"` : ""} in registry. Registered: ${(allNames as string[]).join(", ") || "(none)"}.`,
       );
     }
     return def;
