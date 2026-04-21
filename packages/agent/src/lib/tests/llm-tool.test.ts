@@ -54,12 +54,37 @@ describe("createLlmTool", () => {
   });
 
   it("tool name matches config", () => {
-    const t = createLlmTool({ name: "cheapSummarize", description: "d", llm: makeLlm() });
+    const t = createLlmTool({ name: "cheapSummarize", llm: makeLlm() });
     expect(t.name).toBe("cheapSummarize");
   });
 
   it("does not set requireApproval", () => {
-    const t = createLlmTool({ name: "test", description: "d", llm: makeLlm() });
+    const t = createLlmTool({ llm: makeLlm() });
     expect(t.requireApproval).toBeFalsy();
+  });
+});
+
+describe("createLlmTool — simple overload", () => {
+  it("accepts a bare LLMProvider and defaults name to 'llm'", () => {
+    const t = createLlmTool(makeLlm());
+    expect(t.name).toBe("llm");
+  });
+
+  it("accepts a bare provider with options override", () => {
+    const t = createLlmTool(makeLlm(), { name: "deepReason", description: "Hard logic." });
+    expect(t.name).toBe("deepReason");
+  });
+
+  it("calls the provider correctly via simple overload", async () => {
+    const llm = makeLlm({ content: "42" });
+    const t = createLlmTool(llm);
+    const result = await t.execute({ prompt: "what is 6x7?" });
+    expect(result).toBe("42");
+    expect(llm.calls).toHaveLength(1);
+  });
+
+  it("has a non-empty default description", () => {
+    const t = createLlmTool(makeLlm());
+    expect(t.description.length).toBeGreaterThan(10);
   });
 });
