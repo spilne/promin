@@ -108,9 +108,9 @@ async function printWorkflowSteps() {
     const run = runs[i]!;
     const isLastRun = i === runs.length - 1;
     const runPrefix = isLastRun ? "└─" : "├─";
-    const childIndent = isLastRun ? "   " : "│  ";
+    const runIndent = isLastRun ? "   " : "│  ";
 
-    const info = await runner.getStatus(run.workflowId, { includeStepResults: true });
+    const info = await runner.getStatus(run.workflowId, { includeStepResults: false });
     if (!info) continue;
 
     const runIcon = STATUS_ICON[info.state] ?? "?";
@@ -121,15 +121,32 @@ async function printWorkflowSteps() {
       const [stepName, step] = stepEntries[j]!;
       const isLastStep = j === stepEntries.length - 1;
       const stepPrefix = isLastStep ? "└─" : "├─";
+      const stepIndent = runIndent + (isLastStep ? "   " : "│  ");
       const stepIcon = STATUS_ICON[step.status] ?? "?";
 
-      let resultStr = "";
-      if (step.result !== undefined) {
-        const raw = JSON.stringify(step.result);
-        resultStr = `  →  ${raw.length > 100 ? `${raw.slice(0, 100)}…` : raw}`;
-      }
+      console.log(`${runIndent}${stepPrefix} ${stepIcon} ${stepName}`);
 
-      console.log(`${childIndent}${stepPrefix} ${stepIcon} ${stepName}${resultStr}`);
+      // Show each journaled activity as a child of this step
+      const entries = await storage.loadJournal(run.workflowId, stepName);
+      for (let k = 0; k < entries.length; k++) {
+        const entry = entries[k]!;
+        const isLastEntry = k === entries.length - 1;
+        const entryPrefix = isLastEntry ? "└─" : "├─";
+        const exitTag = entry.exit?.tag;
+        const entryIcon = exitTag === "Success" ? "✓" : exitTag === "Failure" ? "✗" : "○";
+
+        let resultStr = "";
+        if (entry.exit?.tag === "Success") {
+          const raw = JSON.stringify(entry.exit.value);
+          resultStr = `  →  ${raw.length > 80 ? `${raw.slice(0, 80)}…` : raw}`;
+        } else if (entry.exit?.tag === "Failure") {
+          resultStr = `  ✗  ${entry.exit.error.slice(0, 80)}`;
+        }
+
+        const label =
+          entry.stepType === "signal" ? `signal: ${entry.activityName}` : entry.activityName;
+        console.log(`${stepIndent}${entryPrefix} ${entryIcon} ${label}${resultStr}`);
+      }
     }
   }
   console.log("");
