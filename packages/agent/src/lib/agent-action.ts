@@ -1,10 +1,12 @@
 import { workflow } from "@promin/workflow";
 import type { Workflow } from "@promin/workflow";
 import type { RateLimiter, Clock } from "@promin/core";
-import type { LLMProvider, LLMToolDefinition } from "./llm-provider.ts";
-import type { AgentTool, ApprovalDecision } from "./tool.ts";
+import type { LLMProvider } from "./llm-provider.ts";
+import type { AgentTool, ApprovalDecision, AutoApprove } from "./tool.ts";
+import { shouldAutoApprove } from "./tool.ts";
+import type { ToolRegistry } from "./tool-registry.ts";
+import { buildToolDefs } from "./tool-registry.ts";
 import type { Message, AssistantMessage, ToolResultMessage, ToolCall } from "./message.ts";
-import { zodToJsonSchema } from "./zod-to-json-schema.ts";
 
 export interface AgentInput {
   task: string;
@@ -29,6 +31,8 @@ export interface AgentActionConfig {
   llm: LLMProvider;
   // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
   tools?: Record<string, AgentTool<any, any>>;
+  toolRegistry?: ToolRegistry;
+  autoApprove?: AutoApprove;
   maxSteps?: number;
   systemPrompt?: string;
   rateLimiter?: RateLimiter;
@@ -47,14 +51,6 @@ export class MaxStepsError extends Error {
 
 export function agentAction(config: AgentActionConfig): Workflow<AgentInput, AgentResult> {
   const maxSteps = config.maxSteps ?? 20;
-  // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
-  const tools: Record<string, AgentTool<any, any>> = config.tools ?? {};
-
-  const llmToolDefs: LLMToolDefinition[] = Object.entries(tools).map(([name, t]) => ({
-    name,
-    description: t.description,
-    parameters: zodToJsonSchema(t.parameters),
-  }));
 
   return workflow<AgentInput>({ name: config.name })
     .journaled("agent", function* (ctx, input) {
@@ -68,12 +64,15 @@ export function agentAction(config: AgentActionConfig): Workflow<AgentInput, Age
       let totalOutputTokens = 0;
 
       for (let step = 0; step < maxSteps; step++) {
-        // Agent thinks — response is journaled, so this IS the branch decision on replay
+        // Resolve tools fresh each step so a toolRegistry update is visible immediately
+        const toolMap = config.toolRegistry?.getTools() ?? config.tools ?? {};
+        const toolDefs = buildToolDefs(toolMap);
+
         const response = yield* ctx.activity(`think-${step}`, () => {
           const call = () =>
             config.llm.chat({
               messages,
-              tools: llmToolDefs.length > 0 ? llmToolDefs : undefined,
+              tools: toolDefs.length > 0 ? toolDefs : undefined,
             });
           return config.rateLimiter ? config.rateLimiter.withLimitAsync(call) : call();
         });
@@ -103,7 +102,6 @@ export function agentAction(config: AgentActionConfig): Workflow<AgentInput, Age
           }
         }
 
-        // Agent decided: done
         if (
           response.finishReason === "stop" ||
           !response.toolCalls ||
@@ -118,13 +116,12 @@ export function agentAction(config: AgentActionConfig): Workflow<AgentInput, Age
           );
         }
 
-        // Agent decided: use tools
         const toolResultMsgs: ToolResultMessage[] = [];
 
         for (const call of response.toolCalls) {
           config.onToolCall?.(call);
 
-          const toolDef = tools[call.name];
+          const toolDef = toolMap[call.name];
           if (!toolDef) {
             toolResultMsgs.push({
               role: "tool",
@@ -134,7 +131,7 @@ export function agentAction(config: AgentActionConfig): Workflow<AgentInput, Age
             continue;
           }
 
-          if (toolDef.requireApproval) {
+          if (toolDef.requireApproval && !shouldAutoApprove(config.autoApprove, call, toolDef)) {
             const decision = yield* ctx.signal<ApprovalDecision>(`approve:${call.id}`);
             if (!decision.approved) {
               toolResultMsgs.push({
@@ -148,7 +145,8 @@ export function agentAction(config: AgentActionConfig): Workflow<AgentInput, Age
 
           const output = yield* ctx.activity(`tool-${call.name}-${step}-${call.id}`, () => {
             const parsed = toolDef.parameters.parse(call.input);
-            return toolDef.execute(parsed);
+            // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
+            return toolDef.execute(parsed as any);
           });
 
           config.onToolResult?.(call, output);

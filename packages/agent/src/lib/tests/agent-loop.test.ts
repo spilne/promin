@@ -43,6 +43,7 @@ describe("agentAction", () => {
 
   it("executes tools then returns final answer", async () => {
     const searchTool = tool({
+      name: "search",
       description: "Search the web",
       parameters: z.object({ query: z.string() }),
       execute: async ({ query }) => `Results for: ${query}`,
@@ -78,6 +79,7 @@ describe("agentAction", () => {
 
   it("validates tool input with Zod schema", async () => {
     const strictTool = tool({
+      name: "strictTool",
       description: "A strict tool",
       parameters: z.object({ count: z.number().int().positive() }),
       execute: async ({ count }) => `count=${count}`,
@@ -139,6 +141,7 @@ describe("agentAction", () => {
     }));
 
     const searchTool = tool({
+      name: "search",
       description: "Search",
       parameters: z.object({ query: z.string() }),
       execute: async () => "still searching...",
@@ -175,6 +178,7 @@ describe("agentAction", () => {
       ]),
       tools: {
         search: tool({
+          name: "search",
           description: "Search",
           parameters: z.object({ query: z.string() }),
           execute: async () => "result",

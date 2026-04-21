@@ -27,13 +27,11 @@
  */
 
 import { createInterface } from "node:readline";
-import { workflow, stateMachine, InMemoryStateMachineStorage } from "@promin/workflow";
+import { stateMachine, InMemoryStateMachineStorage } from "@promin/workflow";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { anthropic } from "../lib/adapters/anthropic.ts";
+import { agentLoop } from "../lib/agent-loop.ts";
 import { tool } from "../lib/tool.ts";
-import { zodToJsonSchema } from "../lib/zod-to-json-schema.ts";
-import type { Message, AssistantMessage, ToolResultMessage } from "../lib/message.ts";
-import type { LLMToolDefinition } from "../lib/llm-provider.ts";
 import { z } from "zod";
 
 // ---- config ----
@@ -44,10 +42,9 @@ if (!apiKey) {
   process.exit(1);
 }
 
-const MAX_TURNS = 100;
-const MAX_STEPS_PER_TURN = 10;
+// ---- conversation history (updated after each turn for /history command) ----
 
-// ---- conversation history (updated after each emit, used by /history and showHistory tool) ----
+import type { Message } from "../lib/message.ts";
 
 let conversationHistory: Message[] = [];
 
@@ -75,7 +72,13 @@ function printHistory() {
 // ---- tools ----
 
 const calculator = tool({
+  name: "calculator",
   description: "Evaluate a mathematical expression and return the numeric result.",
+  usage: "Use for arithmetic, exponentiation, and trig. Not for string manipulation.",
+  examples: [
+    { input: { expression: "2 ** 10" }, output: "1024" },
+    { input: { expression: "Math.sqrt(144)" }, output: "12" },
+  ],
   parameters: z.object({
     expression: z.string().describe("A valid JS math expression, e.g. '2 ** 10'"),
   }),
@@ -90,12 +93,14 @@ const calculator = tool({
 });
 
 const currentTime = tool({
+  name: "currentTime",
   description: "Return the current local date and time.",
   parameters: z.object({}),
   execute: async () => new Date().toLocaleString(),
 });
 
 const showHistory = tool({
+  name: "showHistory",
   description: "Print the full conversation history stored in memory.",
   parameters: z.object({}),
   execute: async () => {
@@ -103,17 +108,6 @@ const showHistory = tool({
     return `Printed ${conversationHistory.length} messages.`;
   },
 });
-
-const toolsMap = { calculator, currentTime, showHistory };
-
-// Pre-compute tool defs for LLM (constant — lives outside the journaled step)
-const llmToolDefs: LLMToolDefinition[] = Object.entries(toolsMap).map(([name, t]) => ({
-  name,
-  description: t.description,
-  parameters: zodToJsonSchema(t.parameters),
-}));
-
-const llm = anthropic("claude-sonnet-4-6", { apiKey });
 
 // ---- agent lifecycle state machine ----
 
@@ -123,18 +117,8 @@ type AgentStates = {
     transitions: { message: "thinking" };
   };
   thinking: {
-    context: { completedTurns: number; turn: number; step: number; task: string };
-    transitions: { tool_calls: "tool_calling"; done: "idle" };
-  };
-  tool_calling: {
-    context: {
-      completedTurns: number;
-      turn: number;
-      step: number;
-      task: string;
-      activeTools: string[];
-    };
-    transitions: { tools_done: "thinking" };
+    context: { completedTurns: number; turn: number; task: string };
+    transitions: { done: "idle" };
   };
 };
 
@@ -143,30 +127,13 @@ const smStorage = new InMemoryStateMachineStorage();
 const agentMachine = stateMachine<AgentStates>({ name: "agent-lifecycle", storage: smStorage })
   .state("idle")
   .state("thinking")
-  .state("tool_calling")
   .on("message", {
     from: "idle",
     to: "thinking",
     action: (ctx: any, data: any) => ({
       completedTurns: ctx.completedTurns,
       turn: data.turn,
-      step: 0,
       task: data.task,
-    }),
-  })
-  .on("tool_calls", {
-    from: "thinking",
-    to: "tool_calling",
-    action: (ctx: any, data: any) => ({ ...ctx, activeTools: data.tools }),
-  })
-  .on("tools_done", {
-    from: "tool_calling",
-    to: "thinking",
-    action: (ctx: any) => ({
-      completedTurns: ctx.completedTurns,
-      turn: ctx.turn,
-      step: ctx.step + 1,
-      task: ctx.task,
     }),
   })
   .on("done", {
@@ -177,122 +144,41 @@ const agentMachine = stateMachine<AgentStates>({ name: "agent-lifecycle", storag
   .initial("idle")
   .build();
 
-// ---- in-process response delivery ----
-// The journaled step resolves these promises from inside emit-N activities.
-// Works in-process; a real system would use SSE/WebSocket.
-
-const pendingResponses = new Map<number, (answer: string) => void>();
-
-// ---- single session workflow ----
-
-const sessionWorkflow = workflow<void>({ name: "console-agent" })
-  .journaled("conversation", function* (ctx, _input) {
-    let messages: Message[] = [
-      { role: "system", content: "You are a helpful assistant. Be concise." },
-    ];
-
-    for (let turn = 0; turn < MAX_TURNS; turn++) {
-      // Suspend here until the user sends their next message via handle.signal()
-      const { task } = yield* ctx.signal<{ task: string }>(`task-${turn}`);
-      messages = [...messages, { role: "user", content: task }];
-
-      yield* ctx.activity(`sm-message-${turn}`, () =>
-        agentMachine.send({ id: "session", event: "message", data: { turn, task } }),
-      );
-
-      let answer = "";
-
-      for (let step = 0; step < MAX_STEPS_PER_TURN; step++) {
-        const response = yield* ctx.activity(`think-${turn}-${step}`, () =>
-          llm.chat({ messages, tools: llmToolDefs }),
-        );
-
-        const assistantMsg: AssistantMessage = {
-          role: "assistant",
-          content: response.content,
-          toolCalls: response.toolCalls,
-        };
-        messages = [...messages, assistantMsg];
-
-        if (response.finishReason === "stop" || !response.toolCalls?.length) {
-          answer = response.content ?? "";
-          yield* ctx.activity(`sm-done-${turn}`, () =>
-            agentMachine.send({ id: "session", event: "done" }),
-          );
-          break;
-        }
-
-        // Agent decided to use tools
-        yield* ctx.activity(`sm-tool-calls-${turn}-${step}`, () =>
-          agentMachine.send({
-            id: "session",
-            event: "tool_calls",
-            data: { tools: response.toolCalls!.map((c) => c.name) },
-          }),
-        );
-
-        const toolResultMsgs: ToolResultMessage[] = [];
-        for (const call of response.toolCalls) {
-          const toolDef = toolsMap[call.name as keyof typeof toolsMap];
-          if (!toolDef) {
-            toolResultMsgs.push({
-              role: "tool",
-              toolCallId: call.id,
-              content: `Error: unknown tool "${call.name}"`,
-            });
-            continue;
-          }
-          // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
-          const output = yield* ctx.activity(
-            `tool-${call.name}-${turn}-${step}-${call.id}`,
-            async () => {
-              const parsed = toolDef.parameters.parse(call.input);
-              return toolDef.execute(parsed as any);
-            },
-          );
-          const content = typeof output === "string" ? output : JSON.stringify(output);
-          toolResultMsgs.push({ role: "tool", toolCallId: call.id, content });
-        }
-        messages = [...messages, ...toolResultMsgs];
-
-        yield* ctx.activity(`sm-tools-done-${turn}-${step}`, () =>
-          agentMachine.send({ id: "session", event: "tools_done" }),
-        );
-      }
-
-      // Journaled — executes exactly once, skipped on replay
-      yield* ctx.activity(`emit-${turn}`, async () => {
-        conversationHistory = messages.filter((m) => m.role !== "system");
-        pendingResponses.get(turn)?.(answer);
-        pendingResponses.delete(turn);
-        return answer;
-      });
-    }
-  })
-  .build();
-
 // ---- infrastructure ----
 
 const storage = new InMemoryWorkflowStorage();
 const runner = createWorkflowRunner({ storage });
 
-// Start the state machine instance for this session
 await agentMachine.start({ id: "session", context: { completedTurns: 0 } });
 
-// Single persistent session — fire-and-forget, never completes
-const handle = await runner.start({
-  workflow: sessionWorkflow,
-  workflowId: "session",
-  input: undefined,
+// ---- agentLoop session ----
+
+const loop = agentLoop({
+  name: "console-agent",
+  llm: anthropic("claude-sonnet-4-6", { apiKey }),
+  tools: { calculator, currentTime, showHistory },
+  systemPrompt: "You are a helpful assistant. Be concise.",
 });
 
-let sessionTurn = 0;
+let turnCounter = 0;
+
+const session = await loop.session({ runner, sessionId: "session" });
 
 async function sendTask(task: string): Promise<string> {
-  const turn = sessionTurn++;
-  const promise = new Promise<string>((resolve) => pendingResponses.set(turn, resolve));
-  await handle.signal(`task-${turn}`, { task });
-  return promise;
+  const turn = turnCounter++;
+
+  await agentMachine.send({ id: "session", event: "message", data: { turn, task } });
+  const answer = await session.send(task);
+  await agentMachine.send({ id: "session", event: "done" });
+
+  // Collect messages for /history
+  conversationHistory = [
+    ...conversationHistory,
+    { role: "user", content: task },
+    { role: "assistant", content: answer, toolCalls: undefined },
+  ];
+
+  return answer;
 }
 
 // ---- /state: agent lifecycle ----
@@ -397,6 +283,7 @@ function prompt() {
       return;
     }
     if (task === "exit" || task === "quit") {
+      session.close();
       rl.close();
       return;
     }
