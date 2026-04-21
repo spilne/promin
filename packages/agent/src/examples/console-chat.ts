@@ -1,27 +1,41 @@
 /**
- * Interactive console agent — type a task, get a durable answer.
+ * Single-session console agent — one persistent workflow for the entire conversation.
+ *
+ * Each user message arrives as a signal (task-N). The journaled step suspends
+ * between turns, so the /steps tree shows all turns nested under one session:
+ *
+ *   └─ ◎ session  (running)
+ *      └─ ◎ conversation
+ *         ├─ ✓ signal: task-0  →  {"task":"hello"}
+ *         ├─ ✓ think-0-0
+ *         ├─ ✓ emit-0
+ *         ├─ ✓ signal: task-1  →  {"task":"what time is it?"}
+ *         ├─ ✓ think-1-0
+ *         ├─ ✓ tool-currentTime-1-0-...
+ *         ├─ ✓ think-1-1
+ *         ├─ ✓ emit-1
+ *         └─ ○ signal: task-2   ← waiting for next input
  *
  * Run:
  *   ANTHROPIC_API_KEY=sk-... bun packages/agent/src/examples/console-chat.ts
  *
- * Each turn is a separate agentAction run with the full conversation history
- * passed as seed messages, giving the agent multi-turn memory without an
- * always-on workflow. Crash mid-turn → resume from the last journaled step.
- *
  * Commands:
- *   /history  — print all stored conversation messages
- *   /steps    — print workflow step history from storage for every turn
+ *   /history  — print conversation messages
+ *   /steps    — print full workflow step tree from storage
  *   exit      — quit
  */
 
 import { createInterface } from "node:readline";
-import { agentAction } from "../lib/agent-action.ts";
-import type { AgentResult } from "../lib/agent-action.ts";
+import { workflow } from "@promin/workflow";
+import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { anthropic } from "../lib/adapters/anthropic.ts";
 import { tool } from "../lib/tool.ts";
-import type { Message } from "../lib/message.ts";
-import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
+import { zodToJsonSchema } from "../lib/zod-to-json-schema.ts";
+import type { Message, AssistantMessage, ToolResultMessage } from "../lib/message.ts";
+import type { LLMToolDefinition } from "../lib/llm-provider.ts";
 import { z } from "zod";
+
+// ---- config ----
 
 const apiKey = process.env.ANTHROPIC_API_KEY;
 if (!apiKey) {
@@ -29,17 +43,20 @@ if (!apiKey) {
   process.exit(1);
 }
 
-// --- history state (shared between REPL commands and the showHistory tool) ---
+const MAX_TURNS = 100;
+const MAX_STEPS_PER_TURN = 10;
 
-let history: Message[] = [];
+// ---- conversation history (updated after each emit, used by /history and showHistory tool) ----
+
+let conversationHistory: Message[] = [];
 
 function printHistory() {
-  if (history.length === 0) {
+  if (conversationHistory.length === 0) {
     console.log("\n(no history yet)\n");
     return;
   }
   console.log("\n--- conversation history ---");
-  for (const m of history) {
+  for (const m of conversationHistory) {
     if (m.role === "user") {
       console.log(`\n[user]\n${m.content}`);
     } else if (m.role === "assistant") {
@@ -51,10 +68,10 @@ function printHistory() {
       console.log(`\n[tool result: ${m.toolCallId}]\n${m.content}`);
     }
   }
-  console.log(`\n--- ${history.length} messages ---\n`);
+  console.log(`\n--- ${conversationHistory.length} messages ---\n`);
 }
 
-// --- tools ---
+// ---- tools ----
 
 const calculator = tool({
   description: "Evaluate a mathematical expression and return the numeric result.",
@@ -64,8 +81,7 @@ const calculator = tool({
   execute: async ({ expression }) => {
     try {
       // biome-ignore lint/security/noEval: example only
-      const result = eval(expression);
-      return String(result);
+      return String(eval(expression));
     } catch {
       return `Error evaluating: ${expression}`;
     }
@@ -83,9 +99,118 @@ const showHistory = tool({
   parameters: z.object({}),
   execute: async () => {
     printHistory();
-    return `Printed ${history.length} messages from history.`;
+    return `Printed ${conversationHistory.length} messages.`;
   },
 });
+
+const toolsMap = { calculator, currentTime, showHistory };
+
+// Pre-compute tool defs for LLM (constant — lives outside the journaled step)
+const llmToolDefs: LLMToolDefinition[] = Object.entries(toolsMap).map(([name, t]) => ({
+  name,
+  description: t.description,
+  parameters: zodToJsonSchema(t.parameters),
+}));
+
+const llm = anthropic("claude-sonnet-4-6", { apiKey });
+
+// ---- in-process response delivery ----
+// The journaled step resolves these promises from inside emit-N activities.
+// Works in-process; a real system would use SSE/WebSocket.
+
+const pendingResponses = new Map<number, (answer: string) => void>();
+
+// ---- single session workflow ----
+
+const sessionWorkflow = workflow<void>({ name: "console-agent" })
+  .journaled("conversation", function* (ctx, _input) {
+    let messages: Message[] = [
+      { role: "system", content: "You are a helpful assistant. Be concise." },
+    ];
+
+    for (let turn = 0; turn < MAX_TURNS; turn++) {
+      // Suspend here until the user sends their next message via handle.signal()
+      const { task } = yield* ctx.signal<{ task: string }>(`task-${turn}`);
+      messages = [...messages, { role: "user", content: task }];
+
+      let answer = "";
+
+      for (let step = 0; step < MAX_STEPS_PER_TURN; step++) {
+        const response = yield* ctx.activity(`think-${turn}-${step}`, () =>
+          llm.chat({ messages, tools: llmToolDefs }),
+        );
+
+        const assistantMsg: AssistantMessage = {
+          role: "assistant",
+          content: response.content,
+          toolCalls: response.toolCalls,
+        };
+        messages = [...messages, assistantMsg];
+
+        if (response.finishReason === "stop" || !response.toolCalls?.length) {
+          answer = response.content ?? "";
+          break;
+        }
+
+        // Agent decided to use tools
+        const toolResultMsgs: ToolResultMessage[] = [];
+        for (const call of response.toolCalls) {
+          const toolDef = toolsMap[call.name as keyof typeof toolsMap];
+          if (!toolDef) {
+            toolResultMsgs.push({
+              role: "tool",
+              toolCallId: call.id,
+              content: `Error: unknown tool "${call.name}"`,
+            });
+            continue;
+          }
+          // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
+          const output = yield* ctx.activity(
+            `tool-${call.name}-${turn}-${step}-${call.id}`,
+            async () => {
+              const parsed = toolDef.parameters.parse(call.input);
+              return toolDef.execute(parsed as any);
+            },
+          );
+          const content = typeof output === "string" ? output : JSON.stringify(output);
+          toolResultMsgs.push({ role: "tool", toolCallId: call.id, content });
+        }
+        messages = [...messages, ...toolResultMsgs];
+      }
+
+      // Journaled — executes exactly once, skipped on replay
+      yield* ctx.activity(`emit-${turn}`, async () => {
+        conversationHistory = messages.filter((m) => m.role !== "system");
+        pendingResponses.get(turn)?.(answer);
+        pendingResponses.delete(turn);
+        return answer;
+      });
+    }
+  })
+  .build();
+
+// ---- infrastructure ----
+
+const storage = new InMemoryWorkflowStorage();
+const runner = createWorkflowRunner({ storage });
+
+// Single persistent session — fire-and-forget, never completes
+const handle = await runner.start({
+  workflow: sessionWorkflow,
+  workflowId: "session",
+  input: undefined,
+});
+
+let sessionTurn = 0;
+
+async function sendTask(task: string): Promise<string> {
+  const turn = sessionTurn++;
+  const promise = new Promise<string>((resolve) => pendingResponses.set(turn, resolve));
+  await handle.signal(`task-${turn}`, { task });
+  return promise;
+}
+
+// ---- /steps tree ----
 
 const STATUS_ICON: Record<string, string> = {
   completed: "✓",
@@ -113,8 +238,9 @@ async function printWorkflowSteps() {
     const info = await runner.getStatus(run.workflowId, { includeStepResults: false });
     if (!info) continue;
 
-    const runIcon = STATUS_ICON[info.state] ?? "?";
-    console.log(`${runPrefix} ${runIcon} ${run.workflowId}  (${info.state})`);
+    console.log(
+      `${runPrefix} ${STATUS_ICON[info.state] ?? "?"} ${run.workflowId}  (${info.state})`,
+    );
 
     const stepEntries = Object.entries(info.steps);
     for (let j = 0; j < stepEntries.length; j++) {
@@ -122,11 +248,9 @@ async function printWorkflowSteps() {
       const isLastStep = j === stepEntries.length - 1;
       const stepPrefix = isLastStep ? "└─" : "├─";
       const stepIndent = runIndent + (isLastStep ? "   " : "│  ");
-      const stepIcon = STATUS_ICON[step.status] ?? "?";
 
-      console.log(`${runIndent}${stepPrefix} ${stepIcon} ${stepName}`);
+      console.log(`${runIndent}${stepPrefix} ${STATUS_ICON[step.status] ?? "?"} ${stepName}`);
 
-      // Show each journaled activity as a child of this step
       const entries = await storage.loadJournal(run.workflowId, stepName);
       for (let k = 0; k < entries.length; k++) {
         const entry = entries[k]!;
@@ -152,24 +276,9 @@ async function printWorkflowSteps() {
   console.log("");
 }
 
-// --- agent ---
-
-const storage = new InMemoryWorkflowStorage();
-const runner = createWorkflowRunner({ storage });
-
-const agent = agentAction({
-  name: "console-agent",
-  llm: anthropic("claude-sonnet-4-6", { apiKey }),
-  systemPrompt: "You are a helpful assistant. Be concise.",
-  tools: { calculator, currentTime, showHistory },
-  maxSteps: 10,
-});
-
-// --- REPL ---
+// ---- REPL ----
 
 const rl = createInterface({ input: process.stdin, output: process.stdout });
-
-let turn = 0;
 
 function prompt() {
   rl.question("\nYou: ", async (line) => {
@@ -182,34 +291,19 @@ function prompt() {
       rl.close();
       return;
     }
-
     if (task === "/history") {
       printHistory();
       prompt();
       return;
     }
-
     if (task === "/steps") {
       await printWorkflowSteps();
       prompt();
       return;
     }
 
-    const { data, error } = await runner.runSafe({
-      workflow: agent,
-      workflowId: `turn-${turn++}`,
-      input: { task, messages: history },
-    });
-
-    if (error || !data) {
-      console.error("\nError:", String(error));
-    } else {
-      const result = data as AgentResult;
-      console.log(`\nAgent: ${result.answer}`);
-      // Strip system messages — agentAction prepends its own each turn.
-      history = result.messages.filter((m): m is Message => m.role !== "system");
-    }
-
+    const answer = await sendTask(task);
+    console.log(`\nAgent: ${answer}`);
     prompt();
   });
 }
