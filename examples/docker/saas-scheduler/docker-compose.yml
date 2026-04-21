@@ -1,0 +1,83 @@
+# ---------------------------------------------------------------------------
+# SaaS scheduler — priority worker tiers via capability routing.
+#
+# Stack:
+#   postgres         — workflow storage + step queue
+#   migrator         — one-shot Drizzle migrations, then exits
+#   coordinator      — registers premium-job + standard-job, submits alternating tenant jobs
+#   worker-premium   — claims needs=["premium"] (execute-premium-job), concurrency=2
+#   worker-default   — claims tasks with no needs, concurrency=4
+#
+# Run:
+#   docker compose up --build
+#
+# Watch premium vs standard throughput:
+#   docker compose logs -f worker-premium worker-default
+#
+# Premium jobs complete the execute step in ~500ms; standard jobs in ~1.5s.
+# The premium worker never serves standard work — premium tenants always get
+# their own dedicated execution capacity regardless of standard queue depth.
+# ---------------------------------------------------------------------------
+
+name: promin-saas-scheduler
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: promin
+      POSTGRES_PASSWORD: promin
+      POSTGRES_DB: promin
+    ports:
+      - "5436:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U promin -d promin"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  migrator:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/saas-scheduler/Dockerfile
+    command: ["bun", "--conditions=@promin/source", "run", "migrator.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  coordinator:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/saas-scheduler/Dockerfile
+    command: ["bun", "--conditions=@promin/source", "run", "coordinator.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+      SUBMIT_INTERVAL_MS: "5000"
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+
+  worker-premium:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/saas-scheduler/Dockerfile
+    command: ["bun", "--conditions=@promin/source", "run", "worker-premium.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+
+  worker-default:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/saas-scheduler/Dockerfile
+    command: ["bun", "--conditions=@promin/source", "run", "worker-default.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+    depends_on:
+      migrator:
+        condition: service_completed_successfully

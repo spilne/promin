@@ -1,0 +1,83 @@
+# ---------------------------------------------------------------------------
+# ML training — workflow versioning + GPU/CPU capability routing.
+#
+# Stack:
+#   postgres      — workflow storage + step queue
+#   migrator      — one-shot Drizzle migrations, then exits
+#   coordinator   — registers v1 + v2, submits alternating experiments every 10s
+#   worker-gpu    — claims needs=["gpu"] (train-model), concurrency=1
+#   worker-cpu    — claims needs=["cpu"] (prepare-data, evaluate, optimize)
+#
+# Run:
+#   docker compose up --build
+#
+# Watch a single experiment's journey:
+#   docker compose logs -f | grep ml-training-1
+#
+# The GPU worker processes one training job at a time (concurrency=1).
+# CPU steps from multiple experiments run in parallel across worker-cpu.
+# v1 experiments complete after evaluate; v2 experiments continue to optimize.
+# ---------------------------------------------------------------------------
+
+name: promin-ml-training
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: promin
+      POSTGRES_PASSWORD: promin
+      POSTGRES_DB: promin
+    ports:
+      - "5435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U promin -d promin"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  migrator:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/ml-training/Dockerfile
+    command: ["bun", "--conditions=@promin/source", "run", "migrator.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  coordinator:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/ml-training/Dockerfile
+    command: ["bun", "--conditions=@promin/source", "run", "coordinator.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+      SUBMIT_INTERVAL_MS: "10000"
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+
+  worker-gpu:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/ml-training/Dockerfile
+    command: ["bun", "--conditions=@promin/source", "run", "worker-gpu.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+
+  worker-cpu:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/ml-training/Dockerfile
+    command: ["bun", "--conditions=@promin/source", "run", "worker-cpu.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
