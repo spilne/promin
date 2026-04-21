@@ -1,6 +1,6 @@
 import { watch } from "node:fs";
 import { readdir, access } from "node:fs/promises";
-import { join, extname } from "node:path";
+import { join, extname, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AgentTool } from "./tool.ts";
 import type { LLMToolDefinition } from "./llm-provider.ts";
@@ -17,8 +17,14 @@ export interface FileToolRegistryConfig {
   dir: string;
   /** Set to false to disable file watching after initial load. Default: true. */
   watch?: boolean;
-  onLoad?: (name: string) => void;
-  onUnload?: (name: string) => void;
+  /**
+   * Scan subdirectories recursively for tool files.
+   * Subdirectories act as categories — tool names stay flat (from t.name), only the
+   * file path is nested. Default: true.
+   */
+  recursive?: boolean;
+  onLoad?: (name: string, category?: string) => void;
+  onUnload?: (name: string, category?: string) => void;
   onError?: (file: string, error: unknown) => void;
 }
 
@@ -73,7 +79,14 @@ export async function createFileToolRegistry(
   // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
   const tools = new Map<string, AgentTool<any, any>>();
   const fileToName = new Map<string, string>();
+  const recursive = config.recursive !== false;
   let watcher: ReturnType<typeof watch> | null = null;
+
+  function categoryOf(filePath: string): string | undefined {
+    const rel = relative(config.dir, filePath);
+    const parts = rel.split("/");
+    return parts.length > 1 ? parts[0] : undefined;
+  }
 
   async function loadFile(filePath: string): Promise<void> {
     try {
@@ -92,7 +105,7 @@ export async function createFileToolRegistry(
       if (prev && prev !== t.name) tools.delete(prev);
       tools.set(t.name, t);
       fileToName.set(filePath, t.name);
-      config.onLoad?.(t.name);
+      config.onLoad?.(t.name, categoryOf(filePath));
     } catch (err) {
       config.onError?.(filePath, err);
     }
@@ -103,20 +116,20 @@ export async function createFileToolRegistry(
     if (!name) return;
     tools.delete(name);
     fileToName.delete(filePath);
-    config.onUnload?.(name);
+    config.onUnload?.(name, categoryOf(filePath));
   }
 
-  // Initial load
-  const entries = await readdir(config.dir);
+  // Initial load — readdir with recursive:true returns relative paths like "search/google.ts"
+  const entries = await readdir(config.dir, { recursive });
   await Promise.all(
-    entries
+    (entries as string[])
       .filter((f) => TOOL_EXTENSIONS.has(extname(f)))
       .map((f) => loadFile(join(config.dir, f))),
   );
 
-  // File watch
+  // File watch — recursive option watches subdirectories too
   if (config.watch !== false) {
-    watcher = watch(config.dir, (_, filename) => {
+    watcher = watch(config.dir, { recursive }, (_, filename) => {
       if (!filename || !TOOL_EXTENSIONS.has(extname(filename))) return;
       const filePath = join(config.dir, filename);
       access(filePath)

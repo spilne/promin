@@ -1,4 +1,4 @@
-import type { LLMProvider, LLMChatParams, LLMResponse } from "../llm-provider.ts";
+import type { LLMProvider, LLMChatParams, LLMResponse, LLMStreamChunk, LLMFinishReason } from "../llm-provider.ts";
 import type { Message, ToolCall } from "../message.ts";
 
 interface AnthropicContentBlock {
@@ -22,6 +22,28 @@ interface AnthropicMessage {
   content: string | AnthropicContentBlock[];
 }
 
+// SSE event types for streaming
+interface SSEMessageStart {
+  type: "message_start";
+  message: { usage: { input_tokens: number } };
+}
+interface SSEContentBlockStart {
+  type: "content_block_start";
+  index: number;
+  content_block: { type: "text" } | { type: "tool_use"; id: string; name: string };
+}
+interface SSEContentBlockDelta {
+  type: "content_block_delta";
+  index: number;
+  delta: { type: "text_delta"; text: string } | { type: "input_json_delta"; partial_json: string };
+}
+interface SSEMessageDelta {
+  type: "message_delta";
+  delta: { stop_reason: string };
+  usage: { output_tokens: number };
+}
+type SSEEvent = SSEMessageStart | SSEContentBlockStart | SSEContentBlockDelta | SSEMessageDelta | { type: string };
+
 export interface AnthropicOptions {
   apiKey?: string;
   baseUrl?: string;
@@ -33,37 +55,42 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
   const apiKey = options.apiKey ?? process.env["ANTHROPIC_API_KEY"];
   const baseUrl = options.baseUrl ?? "https://api.anthropic.com";
 
+  function buildBody(params: LLMChatParams, stream?: boolean): Record<string, unknown> {
+    const system = extractSystem(params.messages);
+    return {
+      model,
+      max_tokens: params.maxTokens ?? options.maxTokens ?? 4096,
+      messages: toAnthropicMessages(params.messages),
+      ...(system ? { system } : {}),
+      ...(params.temperature !== undefined ? { temperature: params.temperature } : {}),
+      ...(params.tools && params.tools.length > 0
+        ? {
+            tools: params.tools.map((t) => ({
+              name: t.name,
+              description: t.description,
+              input_schema: t.parameters,
+            })),
+          }
+        : {}),
+      ...(stream ? { stream: true } : {}),
+    };
+  }
+
+  function headers(): Record<string, string> {
+    return {
+      "content-type": "application/json",
+      "x-api-key": apiKey ?? "",
+      "anthropic-version": "2023-06-01",
+      ...options.defaultHeaders,
+    };
+  }
+
   return {
     async chat(params: LLMChatParams): Promise<LLMResponse> {
-      const system = extractSystem(params.messages);
-      const messages = toAnthropicMessages(params.messages);
-
-      const body: Record<string, unknown> = {
-        model,
-        max_tokens: params.maxTokens ?? options.maxTokens ?? 4096,
-        messages,
-        ...(system ? { system } : {}),
-        ...(params.temperature !== undefined ? { temperature: params.temperature } : {}),
-        ...(params.tools && params.tools.length > 0
-          ? {
-              tools: params.tools.map((t) => ({
-                name: t.name,
-                description: t.description,
-                input_schema: t.parameters,
-              })),
-            }
-          : {}),
-      };
-
       const resp = await fetch(`${baseUrl}/v1/messages`, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": apiKey ?? "",
-          "anthropic-version": "2023-06-01",
-          ...options.defaultHeaders,
-        },
-        body: JSON.stringify(body),
+        headers: headers(),
+        body: JSON.stringify(buildBody(params)),
         signal: params.signal,
       });
 
@@ -75,7 +102,106 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
       const data = (await resp.json()) as AnthropicResponse;
       return parseAnthropicResponse(data);
     },
+
+    async *chatStream(params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
+      const resp = await fetch(`${baseUrl}/v1/messages`, {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify(buildBody(params, true)),
+        signal: params.signal,
+      });
+
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`Anthropic API error ${resp.status}: ${text}`);
+      }
+
+      // Accumulate per-block state keyed by block index
+      const textBlocks = new Map<number, string>();
+      const toolBlocks = new Map<number, { id: string; name: string; inputJson: string }>();
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let finishReason: LLMFinishReason = "stop";
+
+      for await (const event of parseSSE(resp.body!)) {
+        if (event.type === "message_start") {
+          inputTokens = (event as SSEMessageStart).message.usage.input_tokens;
+        } else if (event.type === "content_block_start") {
+          const e = event as SSEContentBlockStart;
+          if (e.content_block.type === "text") {
+            textBlocks.set(e.index, "");
+          } else if (e.content_block.type === "tool_use") {
+            toolBlocks.set(e.index, {
+              id: e.content_block.id,
+              name: e.content_block.name,
+              inputJson: "",
+            });
+          }
+        } else if (event.type === "content_block_delta") {
+          const e = event as SSEContentBlockDelta;
+          if (e.delta.type === "text_delta") {
+            textBlocks.set(e.index, (textBlocks.get(e.index) ?? "") + e.delta.text);
+            yield { delta: e.delta.text };
+          } else if (e.delta.type === "input_json_delta") {
+            const block = toolBlocks.get(e.index);
+            if (block) block.inputJson += e.delta.partial_json;
+          }
+        } else if (event.type === "message_delta") {
+          const e = event as SSEMessageDelta;
+          outputTokens = e.usage.output_tokens;
+          finishReason =
+            e.delta.stop_reason === "end_turn"
+              ? "stop"
+              : e.delta.stop_reason === "tool_use"
+                ? "tool_calls"
+                : e.delta.stop_reason === "max_tokens"
+                  ? "length"
+                  : "stop";
+        }
+      }
+
+      const toolCalls: ToolCall[] = [...toolBlocks.values()].map(({ id, name, inputJson }) => ({
+        id,
+        name,
+        input: JSON.parse(inputJson || "{}") as unknown,
+      }));
+
+      yield {
+        delta: "",
+        finishReason,
+        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+        usage: { inputTokens, outputTokens },
+      };
+    },
   };
+}
+
+async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncIterable<SSEEvent> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() ?? "";
+      for (const part of parts) {
+        for (const line of part.split("\n")) {
+          if (line.startsWith("data: ")) {
+            const data = line.slice(6);
+            if (data === "[DONE]") return;
+            try {
+              yield JSON.parse(data) as SSEEvent;
+            } catch {}
+          }
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 function extractSystem(messages: Message[]): string | undefined {

@@ -37,6 +37,9 @@ export type { ProcessorsConfig, ProcessorContext } from "./processors.ts";
 export { createWriteToolTool } from "./tools/write-tool.ts";
 export type { WriteToolConfig } from "./tools/write-tool.ts";
 
+export { createRequireSecretTool } from "./tools/require-secret-tool.ts";
+export type { RequireSecretToolConfig } from "./tools/require-secret-tool.ts";
+
 export { createGetSecretTool, createSetSecretTool } from "./tools/secret-tools.ts";
 export type { SecretToolConfig, SetSecretToolConfig } from "./tools/secret-tools.ts";
 
@@ -52,6 +55,7 @@ export type {
   LLMProvider,
   LLMChatParams,
   LLMResponse,
+  LLMStreamChunk,
   LLMToolDefinition,
   LLMUsage,
   LLMFinishReason,
@@ -78,8 +82,18 @@ export type { OpenAIEmbeddingOptions } from "./adapters/openai-embedding.ts";
 export { voyageEmbedding } from "./adapters/voyage-embedding.ts";
 export type { VoyageEmbeddingOptions } from "./adapters/voyage-embedding.ts";
 
+export { routerLLM } from "./adapters/router-llm.ts";
+export type { LLMRoute } from "./adapters/router-llm.ts";
+
+export { fallbackLLM } from "./adapters/fallback-llm.ts";
+
+export { twoSpeedLLM } from "./adapters/two-speed-llm.ts";
+export type { TwoSpeedLLMConfig } from "./adapters/two-speed-llm.ts";
+
 export { SystemClock, FakeClock } from "@promin/core";
 export type { Clock, TimerHandle } from "@promin/core";
 
 export { runEval, exactMatch, containsAll, llmJudge } from "./eval.ts";
 export type { EvalCase, EvalScore, EvalResult, EvalScorer } from "./eval.ts";
+
+export { broadcast } from "./broadcast.ts";

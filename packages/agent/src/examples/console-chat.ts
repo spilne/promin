@@ -23,15 +23,23 @@
  *   /history  — print conversation messages
  *   /steps    — print full workflow step tree from storage
  *   /state    — print agent lifecycle state machine (current state + transition history)
+ *   /tools    — list currently loaded dynamic tools
  *   exit      — quit
  */
 
 import { createInterface } from "node:readline";
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import { stateMachine, InMemoryStateMachineStorage } from "@promin/workflow";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { anthropic } from "../lib/adapters/anthropic.ts";
 import { agentLoop } from "../lib/agent-loop.ts";
 import { tool } from "../lib/tool.ts";
+import { createWriteToolTool } from "../lib/tools/write-tool.ts";
+import { createRequireSecretTool } from "../lib/tools/require-secret-tool.ts";
+import { createFileToolRegistry } from "../lib/tool-registry.ts";
+import type { ToolRegistry } from "../lib/tool-registry.ts";
+import type { AgentTool } from "../lib/tool.ts";
 import { z } from "zod";
 
 // ---- config ----
@@ -68,6 +76,24 @@ function printHistory() {
   }
   console.log(`\n--- ${conversationHistory.length} messages ---\n`);
 }
+
+// ---- readline (created early so tools can use it for out-of-band prompts) ----
+
+const rl = createInterface({ input: process.stdin, output: process.stdout });
+
+// ---- dynamic tool registry ----
+
+const toolsDir = join(import.meta.dir, "tools");
+await mkdir(toolsDir, { recursive: true });
+
+const fileRegistry = await createFileToolRegistry({
+  dir: toolsDir,
+  onLoad: (name, category) =>
+    console.log(`[registry] loaded: ${category ? `${category}/` : ""}${name}`),
+  onUnload: (name, category) =>
+    console.log(`[registry] unloaded: ${category ? `${category}/` : ""}${name}`),
+  onError: (file, err) => console.error(`[registry] error in ${file}:`, err),
+});
 
 // ---- tools ----
 
@@ -108,6 +134,40 @@ const showHistory = tool({
     return `Printed ${conversationHistory.length} messages.`;
   },
 });
+
+// "../../lib/index.ts" resolves correctly from examples/tools/*.ts → src/lib/index.ts
+const writeTool = createWriteToolTool({
+  dir: toolsDir,
+  requireApproval: false,
+  toolImportPath: "../../lib/index.ts",
+});
+
+const requireSecret = createRequireSecretTool({
+  readSecret: (prompt) =>
+    new Promise((resolve) => {
+      // Value is captured here and never forwarded to the LLM
+      rl.question(`\n[secret needed] ${prompt}: `, (value) => {
+        process.stdout.write("\n");
+        resolve(value);
+      });
+    }),
+});
+
+// biome-ignore lint/suspicious/noExplicitAny: tool registry uses runtime Zod validation
+const staticTools: Record<string, AgentTool<any, any>> = {
+  calculator,
+  currentTime,
+  showHistory,
+  writeTool,
+  requireSecret,
+};
+
+// Merges static tools with the file registry so both are visible each think step.
+// Static tools take precedence; registry tools fill in everything else.
+const mergedRegistry: ToolRegistry = {
+  getTools: () => ({ ...fileRegistry.getTools(), ...staticTools }),
+  close: () => fileRegistry.close(),
+};
 
 // ---- agent lifecycle state machine ----
 
@@ -156,30 +216,16 @@ await agentMachine.start({ id: "session", context: { completedTurns: 0 } });
 const loop = agentLoop({
   name: "console-agent",
   llm: anthropic("claude-sonnet-4-6", { apiKey }),
-  tools: { calculator, currentTime, showHistory },
-  systemPrompt: "You are a helpful assistant. Be concise.",
+  toolRegistry: mergedRegistry,
+  systemPrompt:
+    "You are a helpful assistant. Be concise. " +
+    "You have a writeTool that lets you create new tools at runtime — use it when you need a capability no existing tool covers. " +
+    "If a tool needs an API key or credential, call requireSecret first to get it from the user — never ask for secrets in chat.",
 });
 
 let turnCounter = 0;
 
 const session = await loop.session({ runner, sessionId: "session" });
-
-async function sendTask(task: string): Promise<string> {
-  const turn = turnCounter++;
-
-  await agentMachine.send({ id: "session", event: "message", data: { turn, task } });
-  const answer = await session.send(task);
-  await agentMachine.send({ id: "session", event: "done" });
-
-  // Collect messages for /history
-  conversationHistory = [
-    ...conversationHistory,
-    { role: "user", content: task },
-    { role: "assistant", content: answer, toolCalls: undefined },
-  ];
-
-  return answer;
-}
 
 // ---- /state: agent lifecycle ----
 
@@ -273,8 +319,6 @@ async function printWorkflowSteps() {
 
 // ---- REPL ----
 
-const rl = createInterface({ input: process.stdin, output: process.stdout });
-
 function prompt() {
   rl.question("\nYou: ", async (line) => {
     const task = line.trim();
@@ -283,7 +327,8 @@ function prompt() {
       return;
     }
     if (task === "exit" || task === "quit") {
-      session.close();
+      await session.close();
+      mergedRegistry.close();
       rl.close();
       return;
     }
@@ -302,13 +347,33 @@ function prompt() {
       prompt();
       return;
     }
+    if (task === "/tools") {
+      const loaded = Object.keys(mergedRegistry.getTools());
+      console.log(`\nLoaded tools (${loaded.length}): ${loaded.join(", ")}\n`);
+      prompt();
+      return;
+    }
 
-    const answer = await sendTask(task);
-    console.log(`\nAgent: ${answer}`);
+    const turn = turnCounter++;
+    await agentMachine.send({ id: "session", event: "message", data: { turn, task } });
+    process.stdout.write("\nAgent: ");
+    let streamed = "";
+    for await (const chunk of session.stream(task)) {
+      process.stdout.write(chunk);
+      streamed += chunk;
+    }
+    process.stdout.write("\n");
+    conversationHistory = [
+      ...conversationHistory,
+      { role: "user", content: task },
+      { role: "assistant", content: streamed, toolCalls: undefined },
+    ];
+    await agentMachine.send({ id: "session", event: "done" });
     prompt();
   });
 }
 
-console.log("Console agent ready. Tools: calculator, currentTime, showHistory.");
-console.log('Type "/history", "/steps", "/state", or "exit".\n');
+console.log(`Console agent ready. Tools dir: ${toolsDir}`);
+console.log(`Static tools: calculator, currentTime, showHistory, writeTool, requireSecret`);
+console.log('Type "/history", "/steps", "/state", "/tools", or "exit".\n');
 prompt();

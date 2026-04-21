@@ -28,6 +28,22 @@ export interface LLMResponse {
   usage?: LLMUsage;
 }
 
+export interface LLMStreamChunk {
+  /** Partial text delta. Empty on the final chunk or when the step is a pure tool call. */
+  delta: string;
+  /** Assembled tool calls. Only present on the final chunk. */
+  toolCalls?: ToolCall[];
+  /** Set on the final chunk. */
+  finishReason?: LLMFinishReason;
+  usage?: LLMUsage;
+}
+
 export interface LLMProvider {
   chat(params: LLMChatParams): Promise<LLMResponse>;
+  /**
+   * Optional streaming variant. When present, agentLoop.stream() uses it to push
+   * token deltas to the caller in real time. Falls back to chat() when absent.
+   * Yields text deltas followed by a final chunk carrying finishReason + toolCalls.
+   */
+  chatStream?(params: LLMChatParams): AsyncIterable<LLMStreamChunk>;
 }

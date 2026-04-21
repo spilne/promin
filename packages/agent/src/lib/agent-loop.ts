@@ -125,6 +125,11 @@ export interface AgentLoopConfig {
 
 export interface AgentSession {
   send(task: string): Promise<string>;
+  /**
+   * Send a task and receive the answer as a stream of token deltas.
+   * Falls back to a single-chunk stream when the LLM adapter has no chatStream.
+   */
+  stream(task: string): AsyncIterable<string>;
   close(): Promise<void>;
 }
 
@@ -202,6 +207,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
 
       const clock = config.clock ?? SystemClock;
       const pendingResponses = new Map<number, (answer: string) => void>();
+      const pendingStreams = new Map<number, (chunk: string | null) => void>();
       let sessionTurn = 0;
       let closed = false;
       let idleTimer: TimerHandle | null = null;
@@ -273,14 +279,44 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                   ? await config.processors.beforeLLM(messages, processorCtx)
                   : messages;
 
-                const call = () =>
-                  config.llm.chat({
-                    messages: processedMessages,
-                    tools: toolDefs.length > 0 ? toolDefs : undefined,
-                  });
-                const raw = await (config.rateLimiter
-                  ? config.rateLimiter.withLimitAsync(call)
-                  : call());
+                const chatParams = {
+                  messages: processedMessages,
+                  tools: toolDefs.length > 0 ? toolDefs : undefined,
+                };
+
+                const pushChunk = pendingStreams.get(turn);
+                let raw: import("./llm-provider.ts").LLMResponse;
+
+                if (pushChunk && config.llm.chatStream) {
+                  let content = "";
+                  let finishReason: import("./llm-provider.ts").LLMFinishReason = "stop";
+                  let usage: import("./llm-provider.ts").LLMUsage | undefined;
+                  const toolCalls: import("./message.ts").ToolCall[] = [];
+
+                  for await (const chunk of config.llm.chatStream(chatParams)) {
+                    if (chunk.delta) {
+                      content += chunk.delta;
+                      pushChunk(chunk.delta);
+                    }
+                    if (chunk.toolCalls) toolCalls.push(...chunk.toolCalls);
+                    if (chunk.finishReason) finishReason = chunk.finishReason;
+                    if (chunk.usage) usage = chunk.usage;
+                  }
+
+                  raw = {
+                    content: content || null,
+                    toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+                    finishReason,
+                    usage,
+                  };
+                } else {
+                  const call = () => config.llm.chat(chatParams);
+                  raw = await (config.rateLimiter
+                    ? config.rateLimiter.withLimitAsync(call)
+                    : call());
+                  // Push full content so stream() callers get something even without chatStream
+                  if (pushChunk && raw.content) pushChunk(raw.content);
+                }
 
                 return config.processors?.afterLLM
                   ? await config.processors.afterLLM(raw, processorCtx)
@@ -351,6 +387,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
             yield* ctx.activity(`emit-${turn}`, async () => {
               pendingResponses.get(turn)?.(answer);
               pendingResponses.delete(turn);
+              pendingStreams.get(turn)?.(null); // null = end of stream
               return answer;
             });
 
@@ -397,13 +434,50 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
         input: undefined,
       });
 
+      async function deliverAndRun(task: string, turn: number): Promise<void> {
+        await completeSignal({
+          storage: journalStorage,
+          workflowId: sessionId,
+          stepName: "conversation",
+          signalName: `task-${turn}`,
+          value: { task },
+        });
+        // Re-run: replays journal, consumes signal, suspends at next signal.
+        await runner.runSafe({
+          workflow: builtWorkflow,
+          workflowId: sessionId,
+          input: undefined,
+        });
+      }
+
       return {
         async send(task: string): Promise<string> {
           if (closed) throw new Error("Session is closed");
           const turn = sessionTurn++;
           const promise = new Promise<string>((resolve) => pendingResponses.set(turn, resolve));
+          await deliverAndRun(task, turn);
+          const answer = await promise;
+          resetIdleTimer();
+          return answer;
+        },
 
-          // Deliver signal into the journal entry (journaled steps don't use deliverSignal)
+        async *stream(task: string): AsyncIterable<string> {
+          if (closed) throw new Error("Session is closed");
+          const turn = sessionTurn++;
+
+          const queue: Array<string | null> = [];
+          let notify: (() => void) | null = null;
+
+          pendingStreams.set(turn, (chunk) => {
+            queue.push(chunk);
+            notify?.();
+            notify = null;
+          });
+
+          const answerPromise = new Promise<string>((resolve) =>
+            pendingResponses.set(turn, resolve),
+          );
+
           await completeSignal({
             storage: journalStorage,
             workflowId: sessionId,
@@ -412,25 +486,42 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
             value: { task },
           });
 
-          // Re-run the workflow. It replays past activities from the journal,
-          // consumes the delivered signal, runs until the next signal, then
-          // suspends (WorkflowSuspendedError is swallowed by runSafe).
-          await runner.runSafe({
+          // Start workflow run concurrently — chunks arrive during this call
+          const runPromise = runner.runSafe({
             workflow: builtWorkflow,
             workflowId: sessionId,
             input: undefined,
           });
 
-          // The emit-N activity resolved the promise during the runSafe call above.
-          const answer = await promise;
-          resetIdleTimer();
-          return answer;
+          try {
+            outer: while (true) {
+              while (queue.length > 0) {
+                const item = queue.shift()!;
+                if (item === null) break outer;
+                yield item;
+              }
+              await new Promise<void>((r) => {
+                notify = r;
+              });
+            }
+            // Flush any remaining chunks before null was processed
+            for (const item of queue) {
+              if (item !== null) yield item;
+            }
+          } finally {
+            pendingStreams.delete(turn);
+            await runPromise;
+            await answerPromise;
+            resetIdleTimer();
+          }
         },
+
         async close() {
           closed = true;
           idleTimer?.clear();
           idleTimer = null;
           pendingResponses.clear();
+          pendingStreams.clear();
           await config.hooks?.onClose?.();
         },
       };
