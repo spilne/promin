@@ -47,6 +47,18 @@ export { createGetSecretTool, createSetSecretTool } from "./tools/secret-tools.t
 export type { SecretToolConfig, SetSecretToolConfig } from "./tools/secret-tools.ts";
 
 export {
+  createFilesystemTools,
+  createReadFileTool,
+  createWriteFileTool,
+  createListDirTool,
+  createStatTool,
+} from "./tools/filesystem-tools.ts";
+export type { FilesystemToolsConfig, FilesystemTools } from "./tools/filesystem-tools.ts";
+
+export { createShellTool } from "./tools/shell-tool.ts";
+export type { ShellToolConfig } from "./tools/shell-tool.ts";
+
+export {
   InMemorySecretStore,
   EnvSecretStore,
   FileSecretStore,
