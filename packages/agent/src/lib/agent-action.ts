@@ -6,6 +6,7 @@ import type { AgentTool, ApprovalDecision, AutoApprove } from "./tool.ts";
 import { shouldAutoApprove } from "./tool.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
 import { buildToolDefs } from "./tool-registry.ts";
+import type { MemoryStore } from "./memory-store.ts";
 import type { Message, AssistantMessage, ToolResultMessage, ToolCall } from "./message.ts";
 
 export interface AgentInput {
@@ -26,6 +27,23 @@ export interface StepContext {
   workflowId: string;
 }
 
+export interface AgentActionMemoryConfig {
+  store: MemoryStore;
+  /**
+   * How many memories to retrieve and inject before the first think step.
+   * Default: 5. Set to 0 to disable injection.
+   */
+  injectLimit?: number;
+  /**
+   * Query for memory retrieval. Defaults to the task text.
+   */
+  searchQuery?: string;
+  /**
+   * Save the final answer as a memory entry. Default: false.
+   */
+  saveOnComplete?: boolean;
+}
+
 export interface AgentActionConfig {
   name: string;
   llm: LLMProvider;
@@ -37,6 +55,7 @@ export interface AgentActionConfig {
   systemPrompt?: string;
   rateLimiter?: RateLimiter;
   clock?: Clock;
+  memory?: AgentActionMemoryConfig;
   onStep?: (ctx: StepContext) => { continue: boolean; feedback?: string } | void;
   onToolCall?: (call: ToolCall) => void;
   onToolResult?: (call: ToolCall, output: unknown) => void;
@@ -57,8 +76,26 @@ export function agentAction(config: AgentActionConfig): Workflow<AgentInput, Age
       let messages: Message[] = [
         ...(config.systemPrompt ? [{ role: "system" as const, content: config.systemPrompt }] : []),
         ...(input.messages ?? []),
-        { role: "user" as const, content: input.task },
       ];
+
+      // Inject relevant memories before the first think step
+      if (config.memory && (config.memory.injectLimit ?? 5) > 0) {
+        const memories = yield* ctx.activity("inject-memories", () =>
+          config.memory!.store.search(
+            config.memory!.searchQuery ?? input.task,
+            config.memory!.injectLimit ?? 5,
+          ),
+        );
+        if (memories.length > 0) {
+          const block = memories.map((m) => `- ${m.content}`).join("\n");
+          messages = [
+            ...messages,
+            { role: "system" as const, content: `Relevant context from memory:\n${block}` },
+          ];
+        }
+      }
+
+      messages = [...messages, { role: "user" as const, content: input.task }];
 
       let totalInputTokens = 0;
       let totalOutputTokens = 0;
@@ -92,13 +129,13 @@ export function agentAction(config: AgentActionConfig): Workflow<AgentInput, Age
         if (config.onStep) {
           const decision = config.onStep({ step, messages, workflowId: ctx.workflowId });
           if (decision && !decision.continue) {
-            return buildResult(
-              response.content ?? "",
-              messages,
-              step + 1,
-              totalInputTokens,
-              totalOutputTokens,
-            );
+            const answer = response.content ?? "";
+            if (config.memory?.saveOnComplete) {
+              yield* ctx.activity("save-memory", () =>
+                config.memory!.store.save({ content: answer, metadata: { task: input.task } }),
+              );
+            }
+            return buildResult(answer, messages, step + 1, totalInputTokens, totalOutputTokens);
           }
         }
 
@@ -107,13 +144,13 @@ export function agentAction(config: AgentActionConfig): Workflow<AgentInput, Age
           !response.toolCalls ||
           response.toolCalls.length === 0
         ) {
-          return buildResult(
-            response.content ?? "",
-            messages,
-            step + 1,
-            totalInputTokens,
-            totalOutputTokens,
-          );
+          const answer = response.content ?? "";
+          if (config.memory?.saveOnComplete) {
+            yield* ctx.activity("save-memory", () =>
+              config.memory!.store.save({ content: answer, metadata: { task: input.task } }),
+            );
+          }
+          return buildResult(answer, messages, step + 1, totalInputTokens, totalOutputTokens);
         }
 
         const toolResultMsgs: ToolResultMessage[] = [];

@@ -1,5 +1,11 @@
 export { agentAction, MaxStepsError } from "./agent-action.ts";
-export type { AgentActionConfig, AgentInput, AgentResult, StepContext } from "./agent-action.ts";
+export type {
+  AgentActionConfig,
+  AgentActionMemoryConfig,
+  AgentInput,
+  AgentResult,
+  StepContext,
+} from "./agent-action.ts";
 
 export { agentLoop } from "./agent-loop.ts";
 export type {
@@ -8,6 +14,9 @@ export type {
   AgentLoop,
   ContextConfig,
   MemoryConfig,
+  HooksConfig,
+  HooksTurnParams,
+  HooksAfterTurnParams,
 } from "./agent-loop.ts";
 
 export { InMemoryMemoryStore } from "./memory-store.ts";
@@ -56,3 +65,9 @@ export type { AnthropicOptions } from "./adapters/anthropic.ts";
 
 export { openai } from "./adapters/openai.ts";
 export type { OpenAIOptions } from "./adapters/openai.ts";
+
+export { openaiEmbedding } from "./adapters/openai-embedding.ts";
+export type { OpenAIEmbeddingOptions } from "./adapters/openai-embedding.ts";
+
+export { voyageEmbedding } from "./adapters/voyage-embedding.ts";
+export type { VoyageEmbeddingOptions } from "./adapters/voyage-embedding.ts";

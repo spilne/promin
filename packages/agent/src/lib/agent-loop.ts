@@ -14,6 +14,38 @@ import { buildToolDefs } from "./tool-registry.ts";
 import type { MemoryStore } from "./memory-store.ts";
 import type { Message, AssistantMessage, ToolResultMessage } from "./message.ts";
 
+// ---- hooks ----
+
+export interface HooksTurnParams {
+  task: string;
+  messages: Message[];
+}
+
+export interface HooksAfterTurnParams {
+  task: string;
+  answer: string;
+  messages: Message[];
+}
+
+export interface HooksConfig {
+  /**
+   * Runs before the LLM think loop for each turn.
+   * Return an updated message list to inject extra context, or void to leave unchanged.
+   * Runs as a journaled activity — crash-safe, skipped on replay.
+   */
+  beforeTurn?: (params: HooksTurnParams) => Promise<Message[] | void>;
+  /**
+   * Runs after the answer is emitted for each turn.
+   * Runs as a journaled activity — crash-safe, skipped on replay.
+   */
+  afterTurn?: (params: HooksAfterTurnParams) => Promise<void>;
+  /**
+   * Runs when session.close() is called.
+   * Not journaled — use for cleanup, flushing buffers, or final memory writes.
+   */
+  onClose?: () => Promise<void>;
+}
+
 // ---- config types ----
 
 export interface ContextConfig {
@@ -66,11 +98,12 @@ export interface AgentLoopConfig {
   rateLimiter?: RateLimiter;
   context?: ContextConfig;
   memory?: MemoryConfig;
+  hooks?: HooksConfig;
 }
 
 export interface AgentSession {
   send(task: string): Promise<string>;
-  close(): void;
+  close(): Promise<void>;
 }
 
 export interface AgentLoop {
@@ -182,6 +215,14 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
             const { task } = yield* ctx.signal<{ task: string }>(`task-${turn}`);
             messages = [...messages, { role: "user", content: task }];
 
+            // beforeTurn hook — can inject additional context into the message list
+            if (config.hooks?.beforeTurn) {
+              const modified = yield* ctx.activity(`before-turn-${turn}`, () =>
+                config.hooks!.beforeTurn!({ task, messages }),
+              );
+              if (modified) messages = modified;
+            }
+
             let answer = "";
 
             for (let step = 0; step < maxStepsPerTurn; step++) {
@@ -264,6 +305,13 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               return answer;
             });
 
+            // afterTurn hook — logging, memory writes, analytics
+            if (config.hooks?.afterTurn) {
+              yield* ctx.activity(`after-turn-${turn}`, () =>
+                config.hooks!.afterTurn!({ task, answer, messages }),
+              );
+            }
+
             // Compact if non-system messages exceed the threshold
             const nonSystemCount = messages.filter((m) => m.role !== "system").length;
             if (nonSystemCount > contextConfig.maxMessages) {
@@ -324,9 +372,10 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
           // The emit-N activity resolved the promise during the runSafe call above.
           return promise;
         },
-        close() {
+        async close() {
           closed = true;
           pendingResponses.clear();
+          await config.hooks?.onClose?.();
         },
       };
     },
