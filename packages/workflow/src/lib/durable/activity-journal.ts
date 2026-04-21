@@ -12,7 +12,7 @@
 import type { WorkflowStorage } from "./workflow-storage.ts";
 
 /** What kind of checkpoint an entry records. Used by replay + the sleep scanner. */
-export type JournalStepType = "activity" | "sleep" | "signal" | "compensation";
+export type JournalStepType = "activity" | "sleep" | "signal" | "compensation" | "child";
 
 /** Lifecycle phase of an entry. `pending` means suspend is in flight (sleep wake or signal delivery). */
 export type JournalPhase = "pending" | "completed";
@@ -122,7 +122,7 @@ export interface JournaledSuspendStorage extends ActivityJournalStorage {
     readonly branchPath?: string;
     readonly activityName: string;
     readonly payloadHash?: string;
-    readonly stepType: "sleep" | "signal" | "activity" | "compensation";
+    readonly stepType: "sleep" | "signal" | "activity" | "compensation" | "child";
     readonly wakeAt?: Date;
   }): Promise<void>;
 

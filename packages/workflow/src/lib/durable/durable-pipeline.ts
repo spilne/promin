@@ -963,18 +963,57 @@ export class WorkflowBuilder<
         const prev = prevStepName != null ? execParams.results[prevStepName] : execParams.input;
         const builderVersion = this._version;
         const builderPatches = this._patches;
+        const runtimeStorage = execParams.storage;
         return Pipeline.fromPromise(() =>
           runJournaledStep<Input, Current, Output>({
             input: execParams.input as Input,
             prev: prev as Current,
             workflowId: execParams.workflowId,
             stepName: name,
-            storage: getJournalStorage(execParams.storage),
-            workflowStorage: execParams.storage,
+            storage: getJournalStorage(runtimeStorage),
+            workflowStorage: runtimeStorage,
             workflowVersion: builderVersion,
             patches: builderPatches,
             codec,
             payloadHash: this._defaultPayloadHash,
+            runChild: async ({
+              workflow: childWorkflow,
+              workflowId: childId,
+              input: childInput,
+            }) => {
+              const childDef = (childWorkflow as any)._definition as any;
+              await runtimeStorage
+                .createWorkflow({
+                  workflowId: childId,
+                  workflowName: childWorkflow.name,
+                  input: childInput,
+                  parentWorkflowId: execParams.workflowId,
+                  version: childWorkflow.version,
+                  workflowType: childDef.type,
+                  metadata: childDef.metadata,
+                })
+                .catch(() => undefined); // no-op on conflict (idempotent re-run)
+              return runWorkflowOrchestration(
+                {
+                  storage: runtimeStorage,
+                  name: childWorkflow.name,
+                  version: childWorkflow.version,
+                  idempotency: childWorkflow.idempotency,
+                  type: childDef.type,
+                  metadata: childDef.metadata,
+                  steps: childDef.steps,
+                  retry: childDef.retry,
+                  compensateConfig: childDef.compensateConfig,
+                  dlq: childDef.dlq,
+                  dispatch: childDef.dispatch,
+                  timeoutMs: childDef.timeoutMs,
+                  onVersionMismatch: childDef.onVersionMismatch,
+                  previousVersions: childDef.previousVersions,
+                  hooks: childDef.hooks,
+                },
+                { workflowId: childId, input: childInput },
+              );
+            },
             body,
           }),
         ) as Pipeline<unknown, TaggedError>;

@@ -27,6 +27,7 @@ import {
   type ActivityJournalStorage,
   type JournaledSuspendStorage,
 } from "./activity-journal.ts";
+import type { Workflow } from "./durable-pipeline.ts";
 import {
   AmbiguousActivityOutcome,
   RetryableError,
@@ -236,6 +237,37 @@ export interface JournaledContext<Input, Prev> {
   parallel<T>(
     branches: ReadonlyArray<Generator<ActivityYield, T, T>>,
   ): Generator<ActivityYield, T[], unknown>;
+
+  /**
+   * Run another workflow inline as a durable nested execution. The child runs
+   * as a separate workflow record in storage (own workflowId, own journal, own
+   * compensation scope). The parent step waits for the child to complete and
+   * receives its result. On replay the result is read from the journal — the
+   * child is not re-executed.
+   *
+   * The child `workflowId` defaults to
+   * `"${parentWorkflowId}.${stepName}.${activityIndex}"` so replay always
+   * locates the same child record without extra bookkeeping.
+   *
+   * ```ts
+   * .journaled("signup", function*(ctx, input) {
+   *   const user = yield* ctx.activity("create-user", () => createUser(input));
+   *   const enrichment = yield* ctx.child(enrichWorkflow, {
+   *     input: { userId: user.id },
+   *     workflowId: `enrich-${user.id}`,
+   *   });
+   *   return { user, enrichment };
+   * })
+   * ```
+   *
+   * Requires the runner to supply a `runChild` callback to `runJournaledStep`.
+   * Throws a clear error if invoked without one (e.g. in a unit test that
+   * drives `runJournaledStep` directly without the callback).
+   */
+  child<Output>(
+    workflow: Workflow<unknown, Output>,
+    options?: { readonly input?: unknown; readonly workflowId?: string },
+  ): Generator<ActivityYield, Output, Output>;
 }
 
 /** The body function passed to `.journaled()`. */
@@ -330,6 +362,17 @@ function makeCtx<Input, Prev>(params: {
    * `payloadHash: false` overrides. The 2-arg form is unaffected.
    */
   defaultPayloadHash?: boolean;
+  /**
+   * Executes a child workflow inline. Provided by the `.journaled()` step's
+   * execute closure so `ctx.child()` can call the runner without coupling
+   * `journaled-step.ts` to `workflow-runner.ts`. Omitting it causes
+   * `ctx.child()` to throw a clear error at call time.
+   */
+  runChild?: (params: {
+    workflow: Workflow<unknown, unknown>;
+    workflowId: string;
+    input: unknown;
+  }) => Promise<unknown>;
 }): { ctx: JournaledContext<Input, Prev>; unwind: (bodyError: unknown) => Promise<void> } {
   const {
     input,
@@ -343,6 +386,7 @@ function makeCtx<Input, Prev>(params: {
     patches,
     defaultCodec,
     defaultPayloadHash,
+    runChild,
   } = params;
   const stepCodec = defaultCodec ?? LosslessJsonCodec;
   const patchSet = new Set(patches ?? []);
@@ -820,6 +864,134 @@ function makeCtx<Input, Prev>(params: {
     return (yield { _tag: "Activity", name: "parallel", promise }) as unknown as T[];
   }
 
+  // -------------------------------------------------------------------------
+  // ctx.child — inline child workflow execution
+  // -------------------------------------------------------------------------
+
+  function* childImpl<Output>(
+    workflow: Workflow<unknown, Output>,
+    options?: { readonly input?: unknown; readonly workflowId?: string },
+  ): Generator<ActivityYield, Output, Output> {
+    const activityIndex = indexRef.next++;
+    const childWorkflowId = options?.workflowId ?? `${workflowId}.${stepName}.${activityIndex}`;
+    const childInput = options?.input;
+    const activityName = workflow.name;
+
+    const promise = (async (): Promise<Output> => {
+      const recorded = journalByKey.get(journalKey(activityIndex, ""));
+
+      if (recorded) {
+        const recordedType = recorded.stepType ?? "activity";
+        if (recordedType !== "child") {
+          throw new JournalNonDeterminismError(
+            stepName,
+            activityIndex,
+            `${recordedType}:${recorded.activityName}`,
+            `child:${activityName}`,
+          );
+        }
+        if (recorded.activityName !== activityName) {
+          throw new JournalNonDeterminismError(
+            stepName,
+            activityIndex,
+            `child:${recorded.activityName}`,
+            `child:${activityName}`,
+          );
+        }
+        // Replay — return cached result without re-running the child.
+        const phase = recorded.phase ?? "completed";
+        if (phase === "completed") {
+          if (!recorded.exit) {
+            throw new Error(
+              `journal entry ${activityIndex} for step "${stepName}" (child: ${activityName}) is completed but has no exit`,
+            );
+          }
+          if (recorded.exit.tag === "Failure") throw new Error(recorded.exit.error);
+          return stepCodec.decode(recorded.exit.value) as Output;
+        }
+        // Pending row — previous worker started the child but didn't record
+        // the result. Re-running is safe: the child workflow has its own
+        // storage row and idempotency, so calling runChild again just resumes
+        // it from where it left off.
+      }
+
+      if (!runChild) {
+        throw new Error(
+          `ctx.child("${activityName}"): requires a \`runChild\` callback to be provided ` +
+            `to runJournaledStep. When using WorkflowRunner, this is wired automatically. ` +
+            `If you are calling runJournaledStep directly from tests, pass a stub runChild.`,
+        );
+      }
+
+      const twoPhase = isJournaledSuspendStorage(storage);
+      if (twoPhase) {
+        await storage.appendPendingEntry({
+          workflowId,
+          stepName,
+          activityIndex,
+          branchPath: "",
+          activityName,
+          stepType: "child",
+        });
+      }
+
+      let result: Output;
+      try {
+        result = (await journaledBodyScope.exit(async () =>
+          runChild({
+            workflow: workflow as Workflow<unknown, unknown>,
+            workflowId: childWorkflowId,
+            input: childInput,
+          }),
+        )) as Output;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const failureExit = { tag: "Failure", error: message } as const;
+        if (twoPhase) {
+          await storage.completePendingEntry({
+            workflowId,
+            stepName,
+            activityIndex,
+            exit: failureExit,
+          });
+        } else {
+          await storage.appendEntry({
+            workflowId,
+            stepName,
+            activityIndex,
+            branchPath: "",
+            activityName,
+            exit: failureExit,
+          });
+        }
+        throw err;
+      }
+
+      const encoded = stepCodec.encode(result);
+      const successExit = { tag: "Success", value: encoded } as const;
+      if (twoPhase) {
+        await storage.completePendingEntry({
+          workflowId,
+          stepName,
+          activityIndex,
+          exit: successExit,
+        });
+      } else {
+        await storage.appendEntry({
+          workflowId,
+          stepName,
+          activityIndex,
+          branchPath: "",
+          activityName,
+          exit: successExit,
+        });
+      }
+      return stepCodec.decode(encoded) as Output;
+    })();
+
+    return yield { _tag: "Activity", name: activityName, promise };
+  }
+
   function patched(name: string): boolean {
     // Pure set membership. Returns false (not throws) for names not in the
     // currently-running definition's patches array — this is load-bearing
@@ -934,6 +1106,7 @@ function makeCtx<Input, Prev>(params: {
     signal: signalImpl,
     patched,
     parallel,
+    child: childImpl,
   };
   return { ctx, unwind };
 }
@@ -1084,6 +1257,16 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
    * still opts out. The 2-arg form is unaffected (no reified input to hash).
    */
   payloadHash?: boolean;
+  /**
+   * Executes a child workflow inline. Wired automatically when called through
+   * `WorkflowRunner` / the `.journaled()` builder; pass a stub in unit tests
+   * that call `runJournaledStep` directly and want to exercise `ctx.child`.
+   */
+  runChild?: (params: {
+    workflow: Workflow<unknown, unknown>;
+    workflowId: string;
+    input: unknown;
+  }) => Promise<unknown>;
   body: JournaledStepBody<Input, Prev, Output>;
 }): Promise<Output> {
   const {
@@ -1097,6 +1280,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     patches,
     codec,
     payloadHash,
+    runChild,
     body,
   } = params;
 
@@ -1113,6 +1297,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     patches,
     defaultCodec: codec,
     defaultPayloadHash: payloadHash,
+    runChild,
   });
   const gen = body(ctx, prev);
 
