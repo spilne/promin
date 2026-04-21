@@ -1,0 +1,106 @@
+# ---------------------------------------------------------------------------
+# Data pipeline — parallel fan-out/fan-in + singleflight dedup.
+#
+# Stack:
+#   postgres            — workflow storage + step queue
+#   migrator            — one-shot drizzle migrations, then exits
+#   coordinator         — leader, submits demo datasets every 8s
+#   worker-ingest       — claims needs=["ingest"] (ingest-dataset)
+#   worker-transform    — claims needs=["transform"] (shard-a/b/c in parallel)
+#   worker-loader       — claims needs=["loader"] (reduce-results)
+#   worker-default      — claims tasks with no needs (publish-report)
+#
+# Run:
+#   docker compose up --build
+#
+# Scale the transform pool to run shards concurrently:
+#   docker compose up --scale worker-transform=3
+#
+# Watch a single dataset's journey:
+#   docker compose logs -f | grep dataset-pipeline-1
+# ---------------------------------------------------------------------------
+
+name: promin-data-pipeline
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: promin
+      POSTGRES_PASSWORD: promin
+      POSTGRES_DB: promin
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U promin -d promin"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  migrator:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/data-pipeline/Dockerfile
+    command: ["bun", "--conditions=@promin/source", "run", "migrator.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  coordinator:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/data-pipeline/Dockerfile
+    command: ["bun", "--conditions=@promin/source", "run", "coordinator.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+      SUBMIT_INTERVAL_MS: "8000"
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+
+  worker-ingest:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/data-pipeline/Dockerfile
+    command: ["bun", "--conditions=@promin/source", "run", "worker-ingest.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+
+  worker-transform:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/data-pipeline/Dockerfile
+    command: ["bun", "--conditions=@promin/source", "run", "worker-transform.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+
+  worker-loader:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/data-pipeline/Dockerfile
+    command: ["bun", "--conditions=@promin/source", "run", "worker-loader.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+
+  worker-default:
+    build:
+      context: ../../../
+      dockerfile: examples/docker/data-pipeline/Dockerfile
+    command: ["bun", "--conditions=@promin/source", "run", "worker-default.ts"]
+    environment:
+      DATABASE_URL: postgres://promin:promin@postgres:5432/promin
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
