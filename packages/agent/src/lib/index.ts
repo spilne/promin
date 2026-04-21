@@ -90,6 +90,12 @@ export type { LLMRoute } from "./adapters/router-llm.ts";
 
 export { fallbackLLM } from "./adapters/fallback-llm.ts";
 
+export { ollama } from "./adapters/ollama.ts";
+export type { OllamaOptions } from "./adapters/ollama.ts";
+
+export { llamacpp } from "./adapters/llamacpp.ts";
+export type { LlamaCppOptions } from "./adapters/llamacpp.ts";
+
 export { twoSpeedLLM } from "./adapters/two-speed-llm.ts";
 export type { TwoSpeedLLMConfig } from "./adapters/two-speed-llm.ts";
 
