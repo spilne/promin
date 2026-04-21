@@ -13,6 +13,7 @@ import { shouldAutoApprove } from "./tool.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
 import { buildToolDefs } from "./tool-registry.ts";
 import type { MemoryStore, MemoryScope } from "./memory-store.ts";
+import type { ProcessorsConfig } from "./processors.ts";
 import type { Message, AssistantMessage, ToolResultMessage } from "./message.ts";
 
 // ---- hooks ----
@@ -117,6 +118,7 @@ export interface AgentLoopConfig {
   context?: ContextConfig;
   memory?: MemoryConfig;
   hooks?: HooksConfig;
+  processors?: ProcessorsConfig;
   /** Time source. Default: SystemClock. Pass FakeClock in tests to drive idle timers. */
   clock?: Clock;
 }
@@ -265,13 +267,24 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               const toolMap = config.toolRegistry?.getTools() ?? config.tools ?? {};
               const toolDefs = buildToolDefs(toolMap);
 
-              const response = yield* ctx.activity(`think-${turn}-${step}`, () => {
+              const response = yield* ctx.activity(`think-${turn}-${step}`, async () => {
+                const processorCtx = { step, turn, workflowId: ctx.workflowId };
+                const processedMessages = config.processors?.beforeLLM
+                  ? await config.processors.beforeLLM(messages, processorCtx)
+                  : messages;
+
                 const call = () =>
                   config.llm.chat({
-                    messages,
+                    messages: processedMessages,
                     tools: toolDefs.length > 0 ? toolDefs : undefined,
                   });
-                return config.rateLimiter ? config.rateLimiter.withLimitAsync(call) : call();
+                const raw = await (config.rateLimiter
+                  ? config.rateLimiter.withLimitAsync(call)
+                  : call());
+
+                return config.processors?.afterLLM
+                  ? await config.processors.afterLLM(raw, processorCtx)
+                  : raw;
               });
 
               const assistantMsg: AssistantMessage = {

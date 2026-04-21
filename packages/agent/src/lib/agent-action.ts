@@ -9,6 +9,7 @@ import type { ToolRegistry } from "./tool-registry.ts";
 import { buildToolDefs } from "./tool-registry.ts";
 import { zodToJsonSchema } from "./zod-to-json-schema.ts";
 import type { MemoryStore, MemoryScope } from "./memory-store.ts";
+import type { ProcessorsConfig } from "./processors.ts";
 import type { Message, AssistantMessage, ToolResultMessage, ToolCall } from "./message.ts";
 
 export interface AgentInput {
@@ -72,6 +73,7 @@ export interface AgentActionConfig<TOutput = any> {
    * result.output will be the parsed, type-safe value.
    */
   outputSchema?: z.ZodType<TOutput>;
+  processors?: ProcessorsConfig;
   onStep?: (ctx: StepContext) => { continue: boolean; feedback?: string } | void;
   onToolCall?: (call: ToolCall) => void;
   onToolResult?: (call: ToolCall, output: unknown) => void;
@@ -165,13 +167,22 @@ export function agentAction(
           });
         }
 
-        const response = yield* ctx.activity(`think-${step}`, () => {
+        const response = yield* ctx.activity(`think-${step}`, async () => {
+          const processorCtx = { step, turn: 0, workflowId: ctx.workflowId };
+          const processedMessages = config.processors?.beforeLLM
+            ? await config.processors.beforeLLM(messages, processorCtx)
+            : messages;
+
           const call = () =>
             config.llm.chat({
-              messages,
+              messages: processedMessages,
               tools: toolDefs.length > 0 ? toolDefs : undefined,
             });
-          return config.rateLimiter ? config.rateLimiter.withLimitAsync(call) : call();
+          const raw = await (config.rateLimiter ? config.rateLimiter.withLimitAsync(call) : call());
+
+          return config.processors?.afterLLM
+            ? await config.processors.afterLLM(raw, processorCtx)
+            : raw;
         });
 
         if (response.usage) {

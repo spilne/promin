@@ -28,6 +28,9 @@ export type { AgentTool, ApprovalDecision, AutoApprove } from "./tool.ts";
 export { buildToolDefs, createFileToolRegistry } from "./tool-registry.ts";
 export type { ToolRegistry, FileToolRegistryConfig } from "./tool-registry.ts";
 
+export { combineProcessors } from "./processors.ts";
+export type { ProcessorsConfig, ProcessorContext } from "./processors.ts";
+
 export { createWriteToolTool } from "./tools/write-tool.ts";
 export type { WriteToolConfig } from "./tools/write-tool.ts";
 
