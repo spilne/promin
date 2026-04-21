@@ -7,6 +7,10 @@
  * Each turn is a separate agentAction run with the full conversation history
  * passed as seed messages, giving the agent multi-turn memory without an
  * always-on workflow. Crash mid-turn → resume from the last journaled step.
+ *
+ * Commands:
+ *   /history  — print all stored messages
+ *   exit      — quit
  */
 
 import { createInterface } from "node:readline";
@@ -22,6 +26,31 @@ const apiKey = process.env.ANTHROPIC_API_KEY;
 if (!apiKey) {
   console.error("Set ANTHROPIC_API_KEY to run this example.");
   process.exit(1);
+}
+
+// --- history state (shared between REPL commands and the showHistory tool) ---
+
+let history: Message[] = [];
+
+function printHistory() {
+  if (history.length === 0) {
+    console.log("\n(no history yet)\n");
+    return;
+  }
+  console.log("\n--- conversation history ---");
+  for (const m of history) {
+    if (m.role === "user") {
+      console.log(`\n[user]\n${m.content}`);
+    } else if (m.role === "assistant") {
+      if (m.content) console.log(`\n[assistant]\n${m.content}`);
+      for (const tc of m.toolCalls ?? []) {
+        console.log(`\n[tool call: ${tc.name}]\n${JSON.stringify(tc.input, null, 2)}`);
+      }
+    } else if (m.role === "tool") {
+      console.log(`\n[tool result: ${m.toolCallId}]\n${m.content}`);
+    }
+  }
+  console.log(`\n--- ${history.length} messages ---\n`);
 }
 
 // --- tools ---
@@ -48,6 +77,15 @@ const currentTime = tool({
   execute: async () => new Date().toLocaleString(),
 });
 
+const showHistory = tool({
+  description: "Print the full conversation history stored in memory.",
+  parameters: z.object({}),
+  execute: async () => {
+    printHistory();
+    return `Printed ${history.length} messages from history.`;
+  },
+});
+
 // --- agent ---
 
 const storage = new InMemoryWorkflowStorage();
@@ -57,7 +95,7 @@ const agent = agentAction({
   name: "console-agent",
   llm: anthropic("claude-sonnet-4-6", { apiKey }),
   systemPrompt: "You are a helpful assistant. Be concise.",
-  tools: { calculator, currentTime },
+  tools: { calculator, currentTime, showHistory },
   maxSteps: 10,
 });
 
@@ -65,8 +103,6 @@ const agent = agentAction({
 
 const rl = createInterface({ input: process.stdin, output: process.stdout });
 
-// history excludes system messages — agentAction prepends its own
-let history: Message[] = [];
 let turn = 0;
 
 function prompt() {
@@ -78,6 +114,12 @@ function prompt() {
     }
     if (task === "exit" || task === "quit") {
       rl.close();
+      return;
+    }
+
+    if (task === "/history") {
+      printHistory();
+      prompt();
       return;
     }
 
@@ -100,5 +142,6 @@ function prompt() {
   });
 }
 
-console.log('Console agent ready. Tools: calculator, currentTime. Type "exit" to quit.\n');
+console.log("Console agent ready. Tools: calculator, currentTime, showHistory.");
+console.log('Type "/history" to inspect stored messages, "exit" to quit.\n');
 prompt();
