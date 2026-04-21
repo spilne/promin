@@ -36,6 +36,8 @@ import { InMemoryMemoryStore } from "../lib/memory-store.ts";
 import { stateMachine, InMemoryStateMachineStorage } from "@promin/workflow";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { anthropic } from "../lib/adapters/anthropic.ts";
+import { openai } from "../lib/adapters/openai.ts";
+import { InMemorySecretStore } from "../lib/secret-store.ts";
 import { agentLoop } from "../lib/agent-loop.ts";
 import { tool } from "../lib/tool.ts";
 import { createWriteToolTool } from "../lib/tools/write-tool.ts";
@@ -193,6 +195,41 @@ const shell = createShellTool({
 
 const memoryTools = createMemoryTools({ store: memoryStore });
 
+// ---- chatGPT tool — prompts for OPENAI_API_KEY on first use ----
+
+const openaiKeyStore = new InMemorySecretStore();
+
+function askForOpenAiKey(): Promise<string> {
+  return new Promise((resolve) => {
+    rl.question("\n[chatGPT] Enter OPENAI_API_KEY: ", (value) => {
+      process.stdout.write("\n");
+      resolve(value.trim());
+    });
+  });
+}
+
+const chatGPT = tool({
+  name: "chatGPT",
+  description:
+    "Send a message to ChatGPT (GPT-4o) and get its response. " +
+    "Use when you want a second opinion, a different perspective, or need GPT-4o's specific capabilities.",
+  parameters: z.object({
+    prompt: z.string().describe("The message to send to ChatGPT"),
+  }),
+  execute: async ({ prompt }) => {
+    let apiKey = await openaiKeyStore.get("OPENAI_API_KEY");
+    if (!apiKey) {
+      apiKey = process.env.OPENAI_API_KEY ?? await askForOpenAiKey();
+      await openaiKeyStore.set("OPENAI_API_KEY", apiKey);
+    }
+    const provider = openai("gpt-4o", { apiKey });
+    const response = await provider.chat({
+      messages: [{ role: "user", content: prompt }],
+    });
+    return response.content ?? "(no response)";
+  },
+});
+
 // biome-ignore lint/suspicious/noExplicitAny: tool registry uses runtime Zod validation
 const staticTools: Record<string, AgentTool<any, any>> = {
   calculator,
@@ -203,6 +240,7 @@ const staticTools: Record<string, AgentTool<any, any>> = {
   ...fsTools,
   shell,
   ...memoryTools,
+  chatGPT,
 };
 
 // Merges static tools with the file registry so both are visible each think step.
