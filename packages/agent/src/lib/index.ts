@@ -7,6 +7,9 @@ export type {
   StepContext,
 } from "./agent-action.ts";
 
+export { agentTool } from "./agent-tool.ts";
+export type { AgentToolConfig } from "./agent-tool.ts";
+
 export { agentLoop } from "./agent-loop.ts";
 export type {
   AgentLoopConfig,
@@ -77,3 +80,6 @@ export type { VoyageEmbeddingOptions } from "./adapters/voyage-embedding.ts";
 
 export { SystemClock, FakeClock } from "@promin/core";
 export type { Clock, TimerHandle } from "@promin/core";
+
+export { runEval, exactMatch, containsAll, llmJudge } from "./eval.ts";
+export type { EvalCase, EvalScore, EvalResult, EvalScorer } from "./eval.ts";
