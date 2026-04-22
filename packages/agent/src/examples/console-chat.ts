@@ -924,26 +924,35 @@ function prompt() {
         if (term.agentHasTextOnLine) process.stdout.write("\n");
         term.agentHasTextOnLine = false;
 
-        // "Prompt too long" errors leave the workflow permanently stuck at the
-        // failing think activity — replaying the same poisoned history every time.
-        // Auto-clear so the user can continue without having to know about /clear.
+        // Some errors leave the workflow permanently stuck — auto-clear so the user
+        // can continue without knowing about /clear.
         const contextFull =
           streamError.message.includes("prompt is too long") ||
           streamError.message.includes("context_length_exceeded") ||
           streamError.message.includes("maximum context");
 
-        if (contextFull) {
-          process.stdout.write(
-            "\x1b[31mContext window full — conversation history is too large to continue.\x1b[0m\n",
-          );
+        // Journal divergence: workflow code changed between runs (e.g. new tool loaded,
+        // or LLM made non-deterministic choice after a partial failure). The session
+        // cannot recover — must start fresh.
+        const journalDiverged = streamError.message.includes("diverged at activity");
+
+        if (contextFull || journalDiverged) {
+          if (contextFull) {
+            process.stdout.write(
+              "\x1b[31mContext window full — conversation history is too large to continue.\x1b[0m\n",
+            );
+          } else {
+            process.stdout.write(
+              "\x1b[31mWorkflow journal diverged — session state is inconsistent.\x1b[0m\n",
+            );
+            process.stdout.write(`\x1b[2m  ${streamError.message}\x1b[0m\n`);
+          }
           await session.close();
           session = await makeAgentSession(`session-${++sessionIdSeq}`);
           sessionRef = session;
           turn = 0;
-          sessionUsage.input = 0;
-          sessionUsage.output = 0;
-          sessionUsage.cacheRead = 0;
-          sessionUsage.cacheWrite = 0;
+          Object.assign(sessionUsage, zeroTotals());
+          sessionUsageByModel.clear();
           lastTurnUsage = zeroTotals();
           lastTurnByModel = new Map();
           process.stdout.write(
