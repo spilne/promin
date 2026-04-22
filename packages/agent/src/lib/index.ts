@@ -131,3 +131,16 @@ export { runEval, exactMatch, containsAll, llmJudge } from "./eval.ts";
 export type { EvalCase, EvalScore, EvalResult, EvalScorer } from "./eval.ts";
 
 export { broadcast } from "./broadcast.ts";
+
+export { agentNetwork } from "./agent-network.ts";
+export type { AgentSpec, AgentNetworkConfig, AgentNetwork } from "./agent-network.ts";
+
+export { runCouncil, createCouncilTool, formatCouncilResult } from "./council.ts";
+export type {
+  Councilor,
+  CouncilConfig,
+  CouncilContribution,
+  CouncilRound,
+  CouncilResult,
+  CouncilToolConfig,
+} from "./council.ts";
