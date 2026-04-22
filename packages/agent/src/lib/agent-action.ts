@@ -2,7 +2,7 @@ import { workflow } from "@promin/workflow";
 import type { Workflow } from "@promin/workflow";
 import type { RateLimiter, Clock } from "@promin/core";
 import { z } from "zod";
-import type { LLMProvider, LLMResponse } from "./llm-provider.ts";
+import type { LLMProvider } from "./llm-provider.ts";
 import type { AgentTool, ApprovalDecision, AutoApprove } from "./tool.ts";
 import { shouldAutoApprove } from "./tool.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
@@ -11,6 +11,7 @@ import { zodToJsonSchema } from "./zod-to-json-schema.ts";
 import type { MemoryStore, MemoryScope } from "./memory-store.ts";
 import type { ProcessorsConfig } from "./processors.ts";
 import type { Message, AssistantMessage, ToolResultMessage, ToolCall } from "./message.ts";
+import { executeToolCall, runLlmCall } from "./agent-shared.ts";
 
 export interface AgentInput {
   task: string;
@@ -169,46 +170,17 @@ export function agentAction(
           });
         }
 
-        const response = yield* ctx.activity(`think-${step}`, async () => {
-          const processorCtx = { step, turn: 0, workflowId: ctx.workflowId };
-          const processedMessages = config.processors?.beforeLLM
-            ? await config.processors.beforeLLM(messages, processorCtx)
-            : messages;
-
-          const chatParams = {
-            messages: processedMessages,
+        const response = yield* ctx.activity(`think-${step}`, () =>
+          runLlmCall({
+            llm: config.llm,
+            messages,
             tools: toolDefs.length > 0 ? toolDefs : undefined,
-          };
-
-          let raw: LLMResponse;
-          if (config.onChunk && config.llm.chatStream) {
-            const startStream = () => Promise.resolve(config.llm.chatStream!(chatParams));
-            const stream = await (config.rateLimiter
-              ? config.rateLimiter.withLimitAsync(startStream)
-              : startStream());
-            let content = "";
-            let finishReason: LLMResponse["finishReason"] = "stop";
-            let toolCalls: LLMResponse["toolCalls"];
-            let usage: LLMResponse["usage"];
-            for await (const chunk of stream) {
-              if (chunk.delta) {
-                content += chunk.delta;
-                config.onChunk(chunk.delta);
-              }
-              if (chunk.toolCalls) toolCalls = chunk.toolCalls;
-              if (chunk.finishReason) finishReason = chunk.finishReason;
-              if (chunk.usage) usage = chunk.usage;
-            }
-            raw = { content: content || null, toolCalls, finishReason, usage };
-          } else {
-            const call = () => config.llm.chat(chatParams);
-            raw = await (config.rateLimiter ? config.rateLimiter.withLimitAsync(call) : call());
-          }
-
-          return config.processors?.afterLLM
-            ? await config.processors.afterLLM(raw, processorCtx)
-            : raw;
-        });
+            rateLimiter: config.rateLimiter,
+            processors: config.processors,
+            processorCtx: { step, turn: 0, workflowId: ctx.workflowId },
+            onChunk: config.onChunk,
+          }),
+        );
 
         if (response.usage) {
           totalInputTokens += response.usage.inputTokens;
@@ -325,18 +297,9 @@ export function agentAction(
         if (toExecute.length > 0) {
           const results = yield* ctx.parallel(
             toExecute.map(({ call, toolDef }) =>
-              ctx.activity(`tool-${call.name}-${step}-${call.id}`, async () => {
-                const parsed = toolDef.parameters.parse(call.input);
-                // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
-                const output = await toolDef.execute(parsed as any);
-                config.onToolResult?.(call, output);
-                const content = toolDef.toModelOutput
-                  ? toolDef.toModelOutput(output)
-                  : typeof output === "string"
-                    ? output
-                    : JSON.stringify(output);
-                return { role: "tool" as const, toolCallId: call.id, content };
-              }),
+              ctx.activity(`tool-${call.name}-${step}-${call.id}`, () =>
+                executeToolCall(call, toolDef, config.onToolResult),
+              ),
             ),
           );
           toolResultMsgs.push(...results);

@@ -49,8 +49,8 @@ export function createShellTool(config: ShellToolConfig = {}) {
     requireApproval: true,
     execute: async ({ command }) => {
       if (config.allowedCommands) {
-        const allowed = config.allowedCommands.some((prefix) =>
-          command === prefix || command.startsWith(`${prefix} `),
+        const allowed = config.allowedCommands.some(
+          (prefix) => command === prefix || command.startsWith(`${prefix} `),
         );
         if (!allowed) {
           return `Rejected: command must start with one of: ${config.allowedCommands.join(", ")}`;
@@ -72,9 +72,10 @@ export function createShellTool(config: ShellToolConfig = {}) {
       clearTimeout(timer);
 
       const combined = [stdout, stderr].filter(Boolean).join("\n");
-      const output = combined.length > maxOutput
-        ? `${combined.slice(0, maxOutput)}\n[…output truncated at ${maxOutput} chars]`
-        : combined;
+      const output =
+        combined.length > maxOutput
+          ? `${combined.slice(0, maxOutput)}\n[…output truncated at ${maxOutput} chars]`
+          : combined;
 
       return `exit ${exitCode}\n${output || "(no output)"}`;
     },

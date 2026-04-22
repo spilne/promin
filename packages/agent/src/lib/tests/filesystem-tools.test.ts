@@ -25,14 +25,16 @@ afterEach(async () => {
 
 describe("createReadFileTool", () => {
   it("reads file contents", async () => {
-    const root = await tempDir(); dirs.push(root);
+    const root = await tempDir();
+    dirs.push(root);
     await writeFile(join(root, "hello.txt"), "hello world");
     const t = createReadFileTool({ rootDir: root });
     expect(await t.execute({ path: "hello.txt" })).toBe("hello world");
   });
 
   it("truncates large files", async () => {
-    const root = await tempDir(); dirs.push(root);
+    const root = await tempDir();
+    dirs.push(root);
     await writeFile(join(root, "big.txt"), "x".repeat(200));
     const t = createReadFileTool({ rootDir: root, maxReadBytes: 100 });
     const result = await t.execute({ path: "big.txt" });
@@ -41,13 +43,15 @@ describe("createReadFileTool", () => {
   });
 
   it("rejects path traversal outside root", async () => {
-    const root = await tempDir(); dirs.push(root);
+    const root = await tempDir();
+    dirs.push(root);
     const t = createReadFileTool({ rootDir: root });
     await expect(t.execute({ path: "../etc/passwd" })).rejects.toThrow("escapes");
   });
 
   it("rejects double-dot traversal two levels up", async () => {
-    const root = await tempDir(); dirs.push(root);
+    const root = await tempDir();
+    dirs.push(root);
     const t = createReadFileTool({ rootDir: root });
     await expect(t.execute({ path: "../../etc/hosts" })).rejects.toThrow("escapes");
   });
@@ -57,7 +61,8 @@ describe("createReadFileTool", () => {
 
 describe("createWriteFileTool", () => {
   it("writes file and returns confirmation", async () => {
-    const root = await tempDir(); dirs.push(root);
+    const root = await tempDir();
+    dirs.push(root);
     const t = createWriteFileTool({ rootDir: root });
     const result = await t.execute({ path: "out.txt", content: "hello" });
     expect(result).toContain("out.txt");
@@ -66,7 +71,8 @@ describe("createWriteFileTool", () => {
   });
 
   it("creates parent directories as needed", async () => {
-    const root = await tempDir(); dirs.push(root);
+    const root = await tempDir();
+    dirs.push(root);
     const t = createWriteFileTool({ rootDir: root });
     await t.execute({ path: "a/b/c.ts", content: "// hi" });
     const buf = await Bun.file(join(root, "a/b/c.ts")).text();
@@ -74,7 +80,8 @@ describe("createWriteFileTool", () => {
   });
 
   it("rejects path traversal", async () => {
-    const root = await tempDir(); dirs.push(root);
+    const root = await tempDir();
+    dirs.push(root);
     const t = createWriteFileTool({ rootDir: root });
     await expect(t.execute({ path: "../../evil.txt", content: "x" })).rejects.toThrow("escapes");
   });
@@ -90,7 +97,8 @@ describe("createWriteFileTool", () => {
 
 describe("createListDirTool", () => {
   it("lists files in the root", async () => {
-    const root = await tempDir(); dirs.push(root);
+    const root = await tempDir();
+    dirs.push(root);
     await writeFile(join(root, "a.ts"), "");
     await writeFile(join(root, "b.ts"), "");
     const t = createListDirTool({ rootDir: root });
@@ -100,14 +108,16 @@ describe("createListDirTool", () => {
   });
 
   it("returns (empty) for empty directory", async () => {
-    const root = await tempDir(); dirs.push(root);
+    const root = await tempDir();
+    dirs.push(root);
     const t = createListDirTool({ rootDir: root });
     const result = await t.execute({ path: ".", recursive: false });
     expect(result).toBe("(empty)");
   });
 
   it("includes subdirectory files when recursive:true", async () => {
-    const root = await tempDir(); dirs.push(root);
+    const root = await tempDir();
+    dirs.push(root);
     await mkdir(join(root, "sub"));
     await writeFile(join(root, "top.ts"), "");
     await writeFile(join(root, "sub", "nested.ts"), "");
@@ -118,7 +128,8 @@ describe("createListDirTool", () => {
   });
 
   it("rejects traversal outside root", async () => {
-    const root = await tempDir(); dirs.push(root);
+    const root = await tempDir();
+    dirs.push(root);
     const t = createListDirTool({ rootDir: root });
     await expect(t.execute({ path: "..", recursive: false })).rejects.toThrow("escapes");
   });
@@ -128,7 +139,8 @@ describe("createListDirTool", () => {
 
 describe("createStatTool", () => {
   it("returns file metadata", async () => {
-    const root = await tempDir(); dirs.push(root);
+    const root = await tempDir();
+    dirs.push(root);
     await writeFile(join(root, "x.txt"), "hello");
     const t = createStatTool({ rootDir: root });
     const result = JSON.parse(await t.execute({ path: "x.txt" }));
@@ -138,7 +150,8 @@ describe("createStatTool", () => {
   });
 
   it("identifies directories", async () => {
-    const root = await tempDir(); dirs.push(root);
+    const root = await tempDir();
+    dirs.push(root);
     await mkdir(join(root, "sub"));
     const t = createStatTool({ rootDir: root });
     const result = JSON.parse(await t.execute({ path: "sub" }));

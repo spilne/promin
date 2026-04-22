@@ -26,9 +26,7 @@ function buildTool(config: LlmToolConfig) {
     }),
     execute: async ({ prompt }) => {
       const messages = [
-        ...(config.systemPrompt
-          ? [{ role: "system" as const, content: config.systemPrompt }]
-          : []),
+        ...(config.systemPrompt ? [{ role: "system" as const, content: config.systemPrompt }] : []),
         { role: "user" as const, content: prompt },
       ];
       const response = await config.llm.chat({
@@ -55,7 +53,10 @@ function buildTool(config: LlmToolConfig) {
  * The main LLM writes the prompt; the sub-LLM responds in one turn.
  * For multi-step sub-tasks that need their own tools, use agentTool() instead.
  */
-export function createLlmTool(llm: LLMProvider, options?: Omit<LlmToolConfig, "llm">): ReturnType<typeof buildTool>;
+export function createLlmTool(
+  llm: LLMProvider,
+  options?: Omit<LlmToolConfig, "llm">,
+): ReturnType<typeof buildTool>;
 export function createLlmTool(config: LlmToolConfig): ReturnType<typeof buildTool>;
 export function createLlmTool(
   llmOrConfig: LLMProvider | LlmToolConfig,

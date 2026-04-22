@@ -13,13 +13,20 @@ export interface ProcessorsConfig {
   /**
    * Transform the message list immediately before each LLM call.
    * Return the modified list — or the same list to pass through unchanged.
-   * Runs inside the think activity closure (not journaled separately).
+   *
+   * Runs inside the journaled `think-N` activity. On workflow replay the
+   * activity result is read from the journal and `beforeLLM` is **not called
+   * again**. Do not perform side effects here that must run on every execution
+   * (use `hooks.beforeTurn` for that, which has its own journaled activity).
    */
   beforeLLM?: (messages: Message[], ctx: ProcessorContext) => Promise<Message[]> | Message[];
   /**
    * Transform the LLM response before it is appended to the message history.
    * Return the modified response — or the same response to pass through unchanged.
-   * Runs inside the think activity closure (not journaled separately).
+   *
+   * Same replay caveat as `beforeLLM`: this runs inside the journaled
+   * `think-N` activity and is skipped when the activity result is replayed
+   * from the journal.
    */
   afterLLM?: (response: LLMResponse, ctx: ProcessorContext) => Promise<LLMResponse> | LLMResponse;
 }

@@ -1,6 +1,9 @@
 import type { LLMProvider, LLMChatParams, LLMResponse, LLMStreamChunk } from "../llm-provider.ts";
 
-async function* providerStream(provider: LLMProvider, params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
+async function* providerStream(
+  provider: LLMProvider,
+  params: LLMChatParams,
+): AsyncIterable<LLMStreamChunk> {
   if (provider.chatStream) {
     yield* provider.chatStream(params);
   } else {

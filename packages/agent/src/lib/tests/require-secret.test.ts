@@ -5,7 +5,10 @@ describe("createRequireSecretTool", () => {
   it("calls readSecret with the provided prompt", async () => {
     const prompts: string[] = [];
     const t = createRequireSecretTool({
-      readSecret: (p) => { prompts.push(p); return Promise.resolve("val"); },
+      readSecret: (p) => {
+        prompts.push(p);
+        return Promise.resolve("val");
+      },
     });
     await t.execute({ key: "MY_KEY", prompt: "Enter your key" });
     expect(prompts).toEqual(["Enter your key"]);
@@ -14,7 +17,10 @@ describe("createRequireSecretTool", () => {
   it("defaults prompt to 'Enter <key>' when omitted", async () => {
     const prompts: string[] = [];
     const t = createRequireSecretTool({
-      readSecret: (p) => { prompts.push(p); return Promise.resolve("val"); },
+      readSecret: (p) => {
+        prompts.push(p);
+        return Promise.resolve("val");
+      },
     });
     await t.execute({ key: "MY_KEY" });
     expect(prompts[0]).toBe("Enter MY_KEY");
@@ -34,7 +40,10 @@ describe("createRequireSecretTool", () => {
     const stored: Array<[string, string]> = [];
     const t = createRequireSecretTool({
       readSecret: () => Promise.resolve("secret-value"),
-      store: (key, value) => { stored.push([key, value]); return Promise.resolve(); },
+      store: (key, value) => {
+        stored.push([key, value]);
+        return Promise.resolve();
+      },
     });
     await t.execute({ key: "VAULT_TOKEN", prompt: "Token" });
     expect(stored).toEqual([["VAULT_TOKEN", "secret-value"]]);

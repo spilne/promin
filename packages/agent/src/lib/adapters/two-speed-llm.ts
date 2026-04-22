@@ -16,7 +16,10 @@ function selectProvider(config: TwoSpeedLLMConfig, params: LLMChatParams): LLMPr
   return config.capable;
 }
 
-async function* chatViaChat(provider: LLMProvider, params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
+async function* chatViaChat(
+  provider: LLMProvider,
+  params: LLMChatParams,
+): AsyncIterable<LLMStreamChunk> {
   const response = await provider.chat(params);
   if (response.content) {
     yield { delta: response.content };

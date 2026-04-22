@@ -66,21 +66,53 @@ export function createWriteFileTool(config: FilesystemToolsConfig) {
   });
 }
 
+// Directories that are nearly always enormous and never useful to list.
+const IGNORED_DIR_SEGMENTS = new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  ".turbo",
+  ".nx",
+  "coverage",
+  ".cache",
+  ".vite",
+  "__pycache__",
+  ".pytest_cache",
+  "vendor",
+  "target",
+  ".gradle",
+]);
+
+const MAX_LIST_LINES = 2_000;
+
 export function createListDirTool(config: FilesystemToolsConfig) {
   return tool({
     name: "listDir",
-    description: `List files in a directory. Paths are relative to ${config.rootDir}.`,
+    description: [
+      `List files in a directory. Paths are relative to ${config.rootDir}.`,
+      `Ignores: ${[...IGNORED_DIR_SEGMENTS].join(", ")}.`,
+      "Non-recursive by default — prefer that unless you need a deep tree.",
+      `Results are capped at ${MAX_LIST_LINES} entries.`,
+    ].join(" "),
     parameters: z.object({
       path: z.string().optional().describe("Directory path relative to the root (default: '.')"),
       recursive: z.boolean().default(false).describe("Descend into subdirectories"),
     }),
     execute: async ({ path, recursive }) => {
       const abs = safePath(config.rootDir, path ?? ".");
-      const names = await readdir(abs, { recursive }) as string[];
+      const names = (await readdir(abs, { recursive })) as string[];
       if (names.length === 0) return "(empty)";
-      // Mark directories with a trailing slash by stat-ing each entry
+
+      // Filter out entries whose first path segment is in the ignore list.
+      const filtered = names.filter((name) => !IGNORED_DIR_SEGMENTS.has(name.split(/[\\/]/)[0]));
+
+      const capped = filtered.slice(0, MAX_LIST_LINES);
+      const omitted = filtered.length - capped.length;
+
+      // Mark directories with a trailing slash by stat-ing each entry.
       const lines = await Promise.all(
-        names.map(async (name) => {
+        capped.map(async (name) => {
           try {
             const s = await stat(join(abs, name));
             return s.isDirectory() ? `${name}/` : name;
@@ -89,7 +121,12 @@ export function createListDirTool(config: FilesystemToolsConfig) {
           }
         }),
       );
-      return lines.join("\n");
+
+      const suffix =
+        omitted > 0
+          ? `\n\n[…${omitted} more entries omitted — narrow your path or use a more specific query]`
+          : "";
+      return lines.join("\n") + suffix;
     },
   });
 }

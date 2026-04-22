@@ -58,10 +58,7 @@ describe("runEval", () => {
 
     const scorer = containsAll(["typescript", "javascript"]);
 
-    const cases: EvalCase[] = [
-      { input: "describe TypeScript" },
-      { input: "describe TypeScript" },
-    ];
+    const cases: EvalCase[] = [{ input: "describe TypeScript" }, { input: "describe TypeScript" }];
 
     const results = await runEval({
       agent,

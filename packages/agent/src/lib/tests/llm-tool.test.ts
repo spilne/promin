@@ -2,7 +2,9 @@ import { describe, it, expect } from "bun:test";
 import { createLlmTool } from "../tools/llm-tool.ts";
 import type { LLMProvider, LLMResponse } from "../llm-provider.ts";
 
-function makeLlm(response: Partial<LLMResponse> = {}): LLMProvider & { calls: { messages: unknown[] }[] } {
+function makeLlm(
+  response: Partial<LLMResponse> = {},
+): LLMProvider & { calls: { messages: unknown[] }[] } {
   const calls: { messages: unknown[] }[] = [];
   return {
     calls,
@@ -31,7 +33,12 @@ describe("createLlmTool", () => {
 
   it("prepends systemPrompt when provided", async () => {
     const llm = makeLlm();
-    const t = createLlmTool({ name: "test", description: "d", llm, systemPrompt: "You are a summariser." });
+    const t = createLlmTool({
+      name: "test",
+      description: "d",
+      llm,
+      systemPrompt: "You are a summariser.",
+    });
     await t.execute({ prompt: "summarise this" });
     const msgs = llm.calls[0]!.messages as Array<{ role: string; content: string }>;
     expect(msgs[0]).toEqual({ role: "system", content: "You are a summariser." });

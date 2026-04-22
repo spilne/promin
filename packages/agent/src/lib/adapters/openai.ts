@@ -1,4 +1,10 @@
-import type { LLMProvider, LLMChatParams, LLMResponse, LLMStreamChunk, LLMFinishReason } from "../llm-provider.ts";
+import type {
+  LLMProvider,
+  LLMChatParams,
+  LLMResponse,
+  LLMStreamChunk,
+  LLMFinishReason,
+} from "../llm-provider.ts";
 import type { Message, ToolCall } from "../message.ts";
 
 interface OpenAIMessage {
@@ -100,21 +106,25 @@ export function openai(model: string, options: OpenAIOptions = {}): LLMProvider 
       let outputTokens = 0;
 
       for await (const chunk of parseSSE(resp.body!)) {
-        const choice = (chunk.choices as Array<{
-          delta: {
-            content?: string | null;
-            tool_calls?: Array<{
-              index: number;
-              id?: string;
-              function?: { name?: string; arguments?: string };
-            }>;
-          };
-          finish_reason?: string | null;
-        }>)?.[0];
+        const choice = (
+          chunk.choices as Array<{
+            delta: {
+              content?: string | null;
+              tool_calls?: Array<{
+                index: number;
+                id?: string;
+                function?: { name?: string; arguments?: string };
+              }>;
+            };
+            finish_reason?: string | null;
+          }>
+        )?.[0];
 
         if (!choice) {
           // usage-only chunk (stream_options: include_usage)
-          const usage = chunk.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined;
+          const usage = chunk.usage as
+            | { prompt_tokens?: number; completion_tokens?: number }
+            | undefined;
           if (usage) {
             inputTokens = usage.prompt_tokens ?? 0;
             outputTokens = usage.completion_tokens ?? 0;

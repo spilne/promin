@@ -77,7 +77,7 @@ describe("agentAction", () => {
     expect(toolMsg?.content).toBe("Results for: TypeScript");
   });
 
-  it("validates tool input with Zod schema", async () => {
+  it("validates tool input with Zod schema — parse error is fed back to LLM as tool result", async () => {
     const strictTool = tool({
       name: "strictTool",
       description: "A strict tool",
@@ -85,27 +85,37 @@ describe("agentAction", () => {
       execute: async ({ count }) => `count=${count}`,
     });
 
+    let toolResultContent = "";
     const agent = agentAction({
       name: "strict-agent",
-      llm: mockLLM([
-        {
-          content: null,
-          finishReason: "tool_calls",
-          toolCalls: [{ id: "tc-1", name: "strictTool", input: { count: "not-a-number" } }],
+      llm: {
+        chat: async (params: LLMChatParams) => {
+          const toolResult = params.messages.find((m) => m.role === "tool");
+          if (toolResult) {
+            toolResultContent = (toolResult as { content: string }).content;
+            return { content: "Got an error.", finishReason: "stop" as const };
+          }
+          return {
+            content: null,
+            finishReason: "tool_calls" as const,
+            toolCalls: [{ id: "tc-1", name: "strictTool", input: { count: "not-a-number" } }],
+          };
         },
-      ]),
+      },
       tools: { strictTool: strictTool },
     });
 
     const { runner } = makeRunner();
-    const { data, error } = await runner.runSafe({
+    const handle = await runner.start({
       workflow: agent,
       workflowId: "w-3",
       input: { task: "run it" },
     });
+    const result = await handle.result({ timeoutMs: 5_000 });
 
-    expect(data).toBeNull();
-    expect(error).not.toBeNull();
+    expect(result.answer).toBe("Got an error.");
+    expect(toolResultContent).toContain("Invalid input");
+    expect(toolResultContent).toContain("count");
   });
 
   it("handles unknown tool gracefully", async () => {

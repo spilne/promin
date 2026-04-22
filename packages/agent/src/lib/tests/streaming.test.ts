@@ -42,7 +42,8 @@ function mockStreamingLLM(turns: StreamingTurn[]): LLMProvider {
                   value: {
                     delta: "",
                     toolCalls: turn.toolCalls,
-                    finishReason: turn.finishReason ?? (turn.toolCalls?.length ? "tool_calls" : "stop"),
+                    finishReason:
+                      turn.finishReason ?? (turn.toolCalls?.length ? "tool_calls" : "stop"),
                   },
                   done: false,
                 };

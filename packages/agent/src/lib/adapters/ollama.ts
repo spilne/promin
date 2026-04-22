@@ -1,4 +1,10 @@
-import type { LLMProvider, LLMChatParams, LLMResponse, LLMStreamChunk, LLMFinishReason } from "../llm-provider.ts";
+import type {
+  LLMProvider,
+  LLMChatParams,
+  LLMResponse,
+  LLMStreamChunk,
+  LLMFinishReason,
+} from "../llm-provider.ts";
 import type { Message, ToolCall } from "../message.ts";
 
 // ---- wire types ----
@@ -102,7 +108,8 @@ export function ollama(options: OllamaOptions): LLMProvider {
           if (chunk.prompt_eval_count !== undefined) {
             usage = { inputTokens: chunk.prompt_eval_count, outputTokens: chunk.eval_count ?? 0 };
           }
-          finishReason = rawToolCalls.length > 0 ? "tool_calls" : mapFinishReason(chunk.done_reason);
+          finishReason =
+            rawToolCalls.length > 0 ? "tool_calls" : mapFinishReason(chunk.done_reason);
         }
       }
 

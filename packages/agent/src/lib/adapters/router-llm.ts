@@ -24,7 +24,10 @@ async function* responseToStream(response: LLMResponse): AsyncIterable<LLMStream
   };
 }
 
-async function* chatViaChat(provider: LLMProvider, params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
+async function* chatViaChat(
+  provider: LLMProvider,
+  params: LLMChatParams,
+): AsyncIterable<LLMStreamChunk> {
   const response = await provider.chat(params);
   yield* responseToStream(response);
 }

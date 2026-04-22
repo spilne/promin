@@ -72,9 +72,15 @@ describe("ollama — chat()", () => {
 
   it("maps done_reason:length to finish reason 'length'", async () => {
     mockFetch(
-      JSON.stringify({ message: { role: "assistant", content: "truncated" }, done: true, done_reason: "length" }),
+      JSON.stringify({
+        message: { role: "assistant", content: "truncated" },
+        done: true,
+        done_reason: "length",
+      }),
     );
-    const result = await ollama({ model: "llama3.2" }).chat({ messages: [{ role: "user", content: "hi" }] });
+    const result = await ollama({ model: "llama3.2" }).chat({
+      messages: [{ role: "user", content: "hi" }],
+    });
     expect(result.finishReason).toBe("length");
   });
 
@@ -90,7 +96,9 @@ describe("ollama — chat()", () => {
         done_reason: "stop",
       }),
     );
-    const result = await ollama({ model: "llama3.2" }).chat({ messages: [{ role: "user", content: "weather?" }] });
+    const result = await ollama({ model: "llama3.2" }).chat({
+      messages: [{ role: "user", content: "weather?" }],
+    });
     expect(result.finishReason).toBe("tool_calls");
     expect(result.toolCalls).toHaveLength(1);
     expect(result.toolCalls![0].name).toBe("get_weather");
@@ -110,7 +118,9 @@ describe("ollama — chat()", () => {
         done_reason: "stop",
       }),
     );
-    const result = await ollama({ model: "llama3.2" }).chat({ messages: [{ role: "user", content: "search" }] });
+    const result = await ollama({ model: "llama3.2" }).chat({
+      messages: [{ role: "user", content: "search" }],
+    });
     expect(result.toolCalls![0].input).toEqual({ query: "bun" });
   });
 
@@ -230,7 +240,9 @@ describe("ollama — chatStream()", () => {
     async function drain() {
       for await (const _ of ollama({ model: "llama3.2" }).chatStream!({
         messages: [{ role: "user", content: "hi" }],
-      })) { /* empty */ }
+      })) {
+        /* empty */
+      }
     }
     await expect(drain()).rejects.toThrow("Ollama API error 503");
   });

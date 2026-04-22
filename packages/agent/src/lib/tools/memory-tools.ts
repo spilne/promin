@@ -25,9 +25,7 @@ export function createSearchMemoryTool(config: MemoryToolConfig) {
     execute: async ({ query, limit }) => {
       const entries = await config.store.search(query, limit, config.scope);
       if (entries.length === 0) return "No memories found matching that query.";
-      return entries
-        .map((e, i) => `${i + 1}. [${e.id.slice(0, 8)}] ${e.content}`)
-        .join("\n");
+      return entries.map((e, i) => `${i + 1}. [${e.id.slice(0, 8)}] ${e.content}`).join("\n");
     },
   });
 }

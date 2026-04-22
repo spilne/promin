@@ -198,6 +198,20 @@ describe("agentLoop session", () => {
     await expect(session.send("second")).rejects.toThrow("closed");
   });
 
+  it("send() rejects (not hangs) when the LLM throws", async () => {
+    const session = await makeSession({
+      name: "llm-throw-test",
+      llm: {
+        chat: async () => {
+          throw new Error("LLM unavailable");
+        },
+      },
+    });
+
+    await expect(session.send("hello")).rejects.toThrow("LLM unavailable");
+    session.close();
+  });
+
   describe("context compaction", () => {
     it("triggers compaction when non-system messages exceed maxMessages", async () => {
       const calls: string[] = [];

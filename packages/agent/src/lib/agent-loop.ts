@@ -4,7 +4,11 @@ import {
   isActivityJournalStorage,
   isJournaledSuspendStorage,
 } from "@promin/workflow";
-import type { WorkflowRunner, JournaledSuspendStorage } from "@promin/workflow";
+import type {
+  WorkflowRunner,
+  JournaledSuspendStorage,
+  ActivityJournalStorage,
+} from "@promin/workflow";
 import { SystemClock } from "@promin/core";
 import type { RateLimiter, Clock, TimerHandle } from "@promin/core";
 import type { LLMProvider } from "./llm-provider.ts";
@@ -15,6 +19,7 @@ import { buildToolDefs } from "./tool-registry.ts";
 import type { MemoryStore, MemoryScope } from "./memory-store.ts";
 import type { ProcessorsConfig } from "./processors.ts";
 import type { Message, AssistantMessage, ToolResultMessage, ToolCall } from "./message.ts";
+import { executeToolCall, runLlmCall } from "./agent-shared.ts";
 
 // ---- hooks ----
 
@@ -57,6 +62,16 @@ export interface HooksConfig {
    * Not journaled — use for cleanup, flushing buffers, or final memory writes.
    */
   onClose?: () => Promise<void>;
+  /**
+   * Called when a tool with `requireApproval: true` needs user approval.
+   * Return `{ approved: true }` to allow execution, or `{ approved: false, reason? }` to reject.
+   *
+   * When set, the workflow does NOT suspend — the decision is awaited inline inside a journaled
+   * activity, so it is skipped on replay. This is simpler than the `session.approve()` /
+   * `session.reject()` signal path; use it when the approval UI lives in the same process (e.g. a
+   * terminal REPL). Falls back to the signal-based path when omitted.
+   */
+  onApprovalRequired?: (call: ToolCall) => Promise<{ approved: boolean; reason?: string }>;
 }
 
 // ---- config types ----
@@ -171,24 +186,6 @@ export interface AgentLoop {
   session(params: { runner: WorkflowRunner; sessionId: string }): Promise<AgentSession>;
 }
 
-// ---- tool error formatting ----
-
-/** Format a tool parse/execute error into a concise string the LLM can act on. */
-function formatToolError(err: unknown): string {
-  if (
-    err instanceof Error &&
-    "issues" in err &&
-    Array.isArray((err as { issues: unknown }).issues)
-  ) {
-    // ZodError — format each issue as "field: message"
-    const issues = (err as { issues: Array<{ path: unknown[]; message: string }> }).issues;
-    return issues
-      .map((i) => `${i.path.length ? i.path.join(".") : "(root)"}: ${i.message}`)
-      .join("; ");
-  }
-  return err instanceof Error ? err.message : String(err);
-}
-
 // ---- compaction ----
 
 interface CompactionResult {
@@ -211,28 +208,116 @@ async function compact(
     return { messages: [...systemMessages, ...keep], summary: null };
   }
 
-  const summaryResp = await llm.chat({
-    messages: [
-      {
-        role: "system",
-        content:
-          "Summarize the following conversation segment concisely. " +
-          "Preserve key facts, decisions, user preferences, and any context needed for future turns.",
-      },
-      ...dropped,
-      { role: "user", content: "Summarize the above conversation." },
-    ],
-  });
+  let summary: string | null = null;
+  try {
+    const summaryResp = await llm.chat({
+      messages: [
+        {
+          role: "system",
+          content:
+            "Summarize the following conversation segment concisely. " +
+            "Preserve key facts, decisions, user preferences, and any context needed for future turns.",
+        },
+        ...dropped,
+        { role: "user", content: "Summarize the above conversation." },
+      ],
+    });
+    summary = summaryResp.content ?? "";
+  } catch (err) {
+    // Summarization failed — drop messages without a summary rather than crashing the turn.
+    console.error("[agentLoop] compaction summarization failed, dropping without summary:", err);
+  }
 
-  const summary = summaryResp.content ?? "";
   return {
     messages: [
       ...systemMessages,
-      { role: "system", content: `Earlier conversation summary:\n${summary}` },
+      ...(summary
+        ? [{ role: "system" as const, content: `Earlier conversation summary:\n${summary}` }]
+        : []),
       ...keep,
     ],
     summary,
   };
+}
+
+// Effect wraps thrown errors inside journaled steps in a FiberFailure.
+// WorkflowSuspendedError is a normal signal that the workflow is waiting —
+// not a real failure. Check both the direct tag and the FiberFailure defect.
+// Validated against Effect 3.x; the cause symbol is a stable public API.
+const FIBER_FAILURE_CAUSE = Symbol.for("effect/Runtime/FiberFailure/Cause");
+
+type FiberFailureCause =
+  | { _tag: "Die"; defect: unknown }
+  | { _tag: "Fail"; error: unknown }
+  | { _tag: string };
+
+function getFiberFailureCause(error: unknown): FiberFailureCause | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  return (error as Record<symbol, FiberFailureCause | undefined>)[FIBER_FAILURE_CAUSE];
+}
+
+function isWorkflowSuspension(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  if ((error as { _tag?: string })._tag === "WorkflowSuspendedError") return true;
+  const cause = getFiberFailureCause(error);
+  return (
+    cause?._tag === "Die" &&
+    (cause as { defect?: { _tag?: string } }).defect?._tag === "WorkflowSuspendedError"
+  );
+}
+
+/** Unwrap an Effect FiberFailure to get the underlying thrown error, if any. */
+function unwrapFiberFailure(error: unknown): unknown {
+  const cause = getFiberFailureCause(error);
+  if (cause?._tag === "Die") return (cause as { defect: unknown }).defect;
+  if (cause?._tag === "Fail") return (cause as { error: unknown }).error;
+  return error;
+}
+
+// ---- ChunkQueue ----
+
+// Single-consumer async queue for streaming token chunks.
+// Synchronous push/close (safe to call from inside ctx.activity) with a pull-based
+// AsyncIterable consumer. Replaces the hand-rolled array+notify+null-sentinel pattern.
+class ChunkQueue implements AsyncIterable<string> {
+  private readonly _buf: string[] = [];
+  private _closed = false;
+  private _notify: (() => void) | null = null;
+
+  push(chunk: string): void {
+    this._buf.push(chunk);
+    this._notify?.();
+    this._notify = null;
+  }
+
+  close(): void {
+    this._closed = true;
+    this._notify?.();
+    this._notify = null;
+  }
+
+  async *[Symbol.asyncIterator](): AsyncGenerator<string> {
+    while (true) {
+      while (this._buf.length > 0) yield this._buf.shift()!;
+      if (this._closed) return;
+      await new Promise<void>((r) => {
+        this._notify = r;
+      });
+    }
+  }
+}
+
+// ---- SessionState ----
+
+interface SessionState {
+  /** Next turn number to assign on send()/stream(). */
+  turn: number;
+  closed: boolean;
+  inTurn: boolean;
+  inDelivery: boolean;
+  latestMessages: Message[];
+  idleStart: number;
+  idleTimer: TimerHandle | null;
 }
 
 // ---- agentLoop ----
@@ -256,28 +341,33 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
         );
       }
       const journalStorage = runner.storage as unknown as JournaledSuspendStorage;
+      const activityStorage = runner.storage as unknown as ActivityJournalStorage;
 
       const clock = config.clock ?? SystemClock;
       const pendingResponses = new Map<number, (answer: string) => void>();
-      const pendingStreams = new Map<number, (chunk: string | null) => void>();
+      const pendingStreams = new Map<number, ChunkQueue>();
       const pendingSignals = new Map<number, AbortSignal>();
-      let sessionTurn = 0;
-      let closed = false;
-      let idleTimer: TimerHandle | null = null;
-      let inTurn = false;
-      let inDelivery = false;
-      let latestMessages: Message[] = [];
-      let idleStart = 0;
+      const state: SessionState = {
+        turn: 0,
+        closed: false,
+        inTurn: false,
+        inDelivery: false,
+        latestMessages: [],
+        idleStart: 0,
+        idleTimer: null,
+      };
 
       const resetIdleTimer = () => {
-        idleTimer?.clear();
-        idleTimer = null;
+        state.idleTimer?.clear();
+        state.idleTimer = null;
         const { onIdle, idleTimeoutMs } = config.hooks ?? {};
         if (!onIdle || !idleTimeoutMs) return;
-        idleStart = clock.currentTimeMs();
-        idleTimer = clock.setTimeout(() => {
-          idleTimer = null;
-          onIdle(clock.currentTimeMs() - idleStart).catch(() => {});
+        state.idleStart = clock.currentTimeMs();
+        state.idleTimer = clock.setTimeout(() => {
+          state.idleTimer = null;
+          onIdle(clock.currentTimeMs() - state.idleStart).catch((err) =>
+            console.error("[agentLoop] onIdle error:", err),
+          );
         }, idleTimeoutMs);
       };
 
@@ -320,79 +410,29 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               const modified = yield* ctx.activity(`before-turn-${turn}`, () =>
                 config.hooks!.beforeTurn!({ task, messages }),
               );
-              if (modified) messages = modified;
+              if (modified !== undefined) messages = modified;
             }
 
             let answer = "";
+            let hitStepLimit = true;
+
+            const toolMap = config.toolRegistry?.getTools() ?? config.tools ?? {};
+            const toolDefs = buildToolDefs(toolMap);
 
             for (let step = 0; step < maxStepsPerTurn; step++) {
-              const toolMap = config.toolRegistry?.getTools() ?? config.tools ?? {};
-              const toolDefs = buildToolDefs(toolMap);
-
-              const response = yield* ctx.activity(`think-${turn}-${step}`, async () => {
-                const turnSignal = pendingSignals.get(turn);
-                const processorCtx = { step, turn, workflowId: ctx.workflowId };
-                const processedMessages = config.processors?.beforeLLM
-                  ? await config.processors.beforeLLM(messages, processorCtx)
-                  : messages;
-
-                const chatParams = {
-                  messages: processedMessages,
+              const chunkQueue = pendingStreams.get(turn);
+              const response = yield* ctx.activity(`think-${turn}-${step}`, () =>
+                runLlmCall({
+                  llm: config.llm,
+                  messages,
                   tools: toolDefs.length > 0 ? toolDefs : undefined,
-                  signal: turnSignal,
-                };
-
-                const pushChunk = pendingStreams.get(turn);
-                let raw: import("./llm-provider.ts").LLMResponse;
-
-                try {
-                  if (pushChunk && config.llm.chatStream) {
-                    let content = "";
-                    let finishReason: import("./llm-provider.ts").LLMFinishReason = "stop";
-                    let usage: import("./llm-provider.ts").LLMUsage | undefined;
-                    const toolCalls: import("./message.ts").ToolCall[] = [];
-
-                    for await (const chunk of config.llm.chatStream(chatParams)) {
-                      if (chunk.delta) {
-                        content += chunk.delta;
-                        pushChunk(chunk.delta);
-                      }
-                      if (chunk.toolCalls) toolCalls.push(...chunk.toolCalls);
-                      if (chunk.finishReason) finishReason = chunk.finishReason;
-                      if (chunk.usage) usage = chunk.usage;
-                    }
-
-                    raw = {
-                      content: content || null,
-                      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-                      finishReason,
-                      usage,
-                    };
-                  } else {
-                    const call = () => config.llm.chat(chatParams);
-                    raw = await (config.rateLimiter
-                      ? config.rateLimiter.withLimitAsync(call)
-                      : call());
-                    // Push full content so stream() callers get something even without chatStream
-                    if (pushChunk && raw.content) pushChunk(raw.content);
-                  }
-                } catch (err) {
-                  // When the caller aborts (Ctrl+C), treat it as an empty "stop" response so the
-                  // workflow completes the turn cleanly and conversation history stays consistent.
-                  if (turnSignal?.aborted || (err instanceof Error && err.name === "AbortError")) {
-                    return {
-                      content: null,
-                      toolCalls: undefined,
-                      finishReason: "stop" as const,
-                    } as import("./llm-provider.ts").LLMResponse;
-                  }
-                  throw err;
-                }
-
-                return config.processors?.afterLLM
-                  ? await config.processors.afterLLM(raw, processorCtx)
-                  : raw;
-              });
+                  rateLimiter: config.rateLimiter,
+                  processors: config.processors,
+                  processorCtx: { step, turn, workflowId: ctx.workflowId },
+                  onChunk: chunkQueue ? (delta) => chunkQueue.push(delta) : undefined,
+                  signal: pendingSignals.get(turn),
+                }),
+              );
 
               const assistantMsg: AssistantMessage = {
                 role: "assistant",
@@ -402,6 +442,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               messages = [...messages, assistantMsg];
 
               if (response.finishReason === "stop" || !response.toolCalls?.length) {
+                hitStepLimit = false;
                 answer = response.content ?? "";
                 break;
               }
@@ -425,9 +466,16 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                   toolDef.requireApproval &&
                   !shouldAutoApprove(config.autoApprove, call, toolDef)
                 ) {
-                  const decision = yield* ctx.signal<{ approved: boolean; reason?: string }>(
-                    `approve:${call.id}`,
-                  );
+                  let decision: { approved: boolean; reason?: string };
+                  if (config.hooks?.onApprovalRequired) {
+                    decision = yield* ctx.activity(`approval-${call.id}`, () =>
+                      config.hooks!.onApprovalRequired!(call),
+                    );
+                  } else {
+                    decision = yield* ctx.signal<{ approved: boolean; reason?: string }>(
+                      `approve:${call.id}`,
+                    );
+                  }
                   if (!decision.approved) {
                     toolResultMsgs.push({
                       role: "tool",
@@ -444,39 +492,9 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               if (toExecute.length > 0) {
                 const results = yield* ctx.parallel(
                   toExecute.map(({ call, toolDef }) =>
-                    ctx.activity(`tool-${call.name}-${turn}-${step}-${call.id}`, async () => {
-                      // Parse errors are the LLM's fault (wrong input shape) — convert to a
-                      // readable tool result so the model can self-correct on the next step.
-                      let parsed: unknown;
-                      try {
-                        parsed = toolDef.parameters.parse(call.input);
-                      } catch (err) {
-                        return {
-                          role: "tool" as const,
-                          toolCallId: call.id,
-                          content: `Invalid input: ${formatToolError(err)}`,
-                        };
-                      }
-
-                      // Execution errors (network, business logic, etc.) also feed back to
-                      // the LLM rather than failing the workflow.
-                      try {
-                        // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
-                        const output = await toolDef.execute(parsed as any);
-                        const content = toolDef.toModelOutput
-                          ? toolDef.toModelOutput(output)
-                          : typeof output === "string"
-                            ? output
-                            : JSON.stringify(output);
-                        return { role: "tool" as const, toolCallId: call.id, content };
-                      } catch (err) {
-                        return {
-                          role: "tool" as const,
-                          toolCallId: call.id,
-                          content: `Tool execution failed: ${formatToolError(err)}`,
-                        };
-                      }
-                    }),
+                    ctx.activity(`tool-${call.name}-${turn}-${step}-${call.id}`, () =>
+                      executeToolCall(call, toolDef),
+                    ),
                   ),
                 );
                 toolResultMsgs.push(...results);
@@ -485,17 +503,27 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               messages = [...messages, ...toolResultMsgs];
             }
 
+            if (hitStepLimit) {
+              console.warn(
+                `[agentLoop] turn ${turn}: maxStepsPerTurn (${maxStepsPerTurn}) reached without a final answer — emitting empty response.`,
+              );
+            }
+
             yield* ctx.activity(`emit-${turn}`, async () => {
               pendingResponses.get(turn)?.(answer);
               pendingResponses.delete(turn);
-              pendingStreams.get(turn)?.(null); // null = end of stream
+              pendingStreams.get(turn)?.close();
               pendingSignals.delete(turn);
               return answer;
             });
 
-            // afterTurn hook — capture messages + user hook (logging, memory writes, analytics)
+            // afterTurn hook — capture messages + user hook (logging, memory writes, analytics).
+            // latestMessages is updated here, not at emit-N, so messages() reflects a
+            // consistent post-turn snapshot. If the session is closed between emit and
+            // after-turn (crash), messages() still returns the previous turn's state —
+            // intentional, because partial state would be misleading.
             yield* ctx.activity(`after-turn-${turn}`, async () => {
-              latestMessages = messages;
+              state.latestMessages = messages;
               await config.hooks?.afterTurn?.({ task, answer, messages });
             });
 
@@ -535,6 +563,15 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
         input: undefined,
       });
 
+      // Restore turn counter from the journal so that recreating the session
+      // object (e.g. server restart with persistent storage) doesn't re-deliver
+      // task-0. Count completed emit-N activities — each represents one done turn.
+      const pastEntries = await activityStorage.loadJournal(sessionId, "conversation");
+      state.turn = pastEntries.reduce((max, e) => {
+        const m = e.activityName.match(/^emit-(\d+)$/);
+        return m && e.exit?.tag === "Success" ? Math.max(max, Number(m[1]) + 1) : max;
+      }, 0);
+
       async function deliverAndRun(task: string, turn: number): Promise<void> {
         await completeSignal({
           storage: journalStorage,
@@ -544,123 +581,165 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
           value: { task },
         });
         // Re-run: replays journal, consumes signal, suspends at next signal.
-        await runner.runSafe({
+        const { error } = await runner.runSafe({
           workflow: builtWorkflow,
           workflowId: sessionId,
           input: undefined,
         });
+        if (error && !isWorkflowSuspension(error)) {
+          throw unwrapFiberFailure(error);
+        }
       }
 
       return {
         async send(task: string): Promise<string> {
-          if (closed) throw new Error("Session is closed");
-          const turn = sessionTurn++;
+          if (state.closed) throw new Error("Session is closed");
+          const turn = state.turn++;
           const promise = new Promise<string>((resolve) => pendingResponses.set(turn, resolve));
-          inTurn = true;
-          inDelivery = true;
-          await deliverAndRun(task, turn);
-          inDelivery = false;
-          const answer = await promise;
-          inTurn = false;
-          resetIdleTimer();
-          return answer;
+          state.inTurn = true;
+          state.inDelivery = true;
+          try {
+            await deliverAndRun(task, turn);
+            state.inDelivery = false;
+            const answer = await promise;
+            return answer;
+          } catch (err) {
+            pendingResponses.delete(turn);
+            pendingStreams.delete(turn);
+            pendingSignals.delete(turn);
+            throw err;
+          } finally {
+            state.inTurn = false;
+            state.inDelivery = false;
+            resetIdleTimer();
+          }
         },
 
         async *stream(task: string, signal?: AbortSignal): AsyncIterable<string> {
-          if (closed) throw new Error("Session is closed");
-          const turn = sessionTurn++;
+          if (state.closed) throw new Error("Session is closed");
+          const turn = state.turn++;
           if (signal) pendingSignals.set(turn, signal);
 
-          const queue: Array<string | null> = [];
-          let notify: (() => void) | null = null;
-
-          pendingStreams.set(turn, (chunk) => {
-            queue.push(chunk);
-            notify?.();
-            notify = null;
-          });
+          const chunkQueue = new ChunkQueue();
+          pendingStreams.set(turn, chunkQueue);
 
           const answerPromise = new Promise<string>((resolve) =>
             pendingResponses.set(turn, resolve),
           );
 
-          await completeSignal({
-            storage: journalStorage,
-            workflowId: sessionId,
-            stepName: "conversation",
-            signalName: `task-${turn}`,
-            value: { task },
-          });
-
-          // Start workflow run concurrently — chunks arrive during this call
-          const runPromise = runner.runSafe({
-            workflow: builtWorkflow,
-            workflowId: sessionId,
-            input: undefined,
-          });
-
-          inTurn = true;
+          state.inTurn = true;
           try {
-            outer: while (true) {
-              while (queue.length > 0) {
-                const item = queue.shift()!;
-                if (item === null) break outer;
-                yield item;
-              }
-              await new Promise<void>((r) => {
-                notify = r;
+            state.inDelivery = true;
+            try {
+              await completeSignal({
+                storage: journalStorage,
+                workflowId: sessionId,
+                stepName: "conversation",
+                signalName: `task-${turn}`,
+                value: { task },
               });
+            } finally {
+              // inDelivery = false while runSafe is still in flight. status()
+              // returns "thinking" via the runner.getStatus() fallback (inTurn=true),
+              // which is correct — the agent is actively processing, just past the
+              // signal-delivery phase.
+              state.inDelivery = false;
             }
-            // Flush any remaining chunks before null was processed
-            for (const item of queue) {
-              if (item !== null) yield item;
+
+            // Start workflow run concurrently — chunks arrive via chunkQueue during this call.
+            // On failure, close the queue to unblock the for-await below.
+            let runError: unknown = undefined;
+            const runPromise = runner
+              .runSafe({
+                workflow: builtWorkflow,
+                workflowId: sessionId,
+                input: undefined,
+              })
+              .then(({ error }) => {
+                if (error && !isWorkflowSuspension(error)) {
+                  runError = unwrapFiberFailure(error);
+                  chunkQueue.close();
+                }
+              });
+
+            try {
+              for await (const chunk of chunkQueue) yield chunk;
+              if (runError) throw runError;
+            } finally {
+              pendingStreams.delete(turn);
+              pendingResponses.delete(turn);
+              pendingSignals.delete(turn);
+              await runPromise;
+              // Invariant: if the run succeeded, emit-N has already resolved
+              // answerPromise. If it failed before emit-N, runError is set and
+              // we skip the await to avoid hanging on an unresolved promise.
+              if (!runError) await answerPromise;
+              // Resets the idle timer after each stream turn so onIdle fires relative to
+              // the last completed turn, not to send() or close() calls.
+              resetIdleTimer();
             }
           } finally {
-            inTurn = false;
-            pendingStreams.delete(turn);
-            await runPromise;
-            await answerPromise;
-            resetIdleTimer();
+            state.inTurn = false;
           }
         },
 
         async approve(toolCallId: string): Promise<boolean> {
-          const delivered = await completeSignal({
-            storage: journalStorage,
-            workflowId: sessionId,
-            stepName: "conversation",
-            signalName: `approve:${toolCallId}`,
-            value: { approved: true },
-          });
-          if (!delivered) return false;
-          await runner.runSafe({
-            workflow: builtWorkflow,
-            workflowId: sessionId,
-            input: undefined,
-          });
-          return true;
+          // Concurrency invariant: the toolCallId is generated inside the workflow and
+          // only becomes visible externally after the workflow suspends at ctx.signal.
+          // By that point, any concurrent runSafe from stream() has already returned,
+          // so the fresh runSafe below is never truly concurrent with another run.
+          //
+          // Race guard: if approve() is called before the workflow has reached ctx.signal
+          // (e.g. UI sends the decision before the suspension is registered), retry up to
+          // 5 times with 50ms gaps to let the workflow reach its suspension point.
+          for (let attempt = 0; attempt < 5; attempt++) {
+            const delivered = await completeSignal({
+              storage: journalStorage,
+              workflowId: sessionId,
+              stepName: "conversation",
+              signalName: `approve:${toolCallId}`,
+              value: { approved: true },
+            });
+            if (delivered) {
+              const { error } = await runner.runSafe({
+                workflow: builtWorkflow,
+                workflowId: sessionId,
+                input: undefined,
+              });
+              if (error && !isWorkflowSuspension(error)) throw unwrapFiberFailure(error);
+              return true;
+            }
+            if (attempt < 4) await new Promise<void>((r) => setTimeout(r, 50));
+          }
+          return false;
         },
 
         async reject(toolCallId: string, reason?: string): Promise<boolean> {
-          const delivered = await completeSignal({
-            storage: journalStorage,
-            workflowId: sessionId,
-            stepName: "conversation",
-            signalName: `approve:${toolCallId}`,
-            value: { approved: false, reason },
-          });
-          if (!delivered) return false;
-          await runner.runSafe({
-            workflow: builtWorkflow,
-            workflowId: sessionId,
-            input: undefined,
-          });
-          return true;
+          for (let attempt = 0; attempt < 5; attempt++) {
+            const delivered = await completeSignal({
+              storage: journalStorage,
+              workflowId: sessionId,
+              stepName: "conversation",
+              signalName: `approve:${toolCallId}`,
+              value: { approved: false, reason },
+            });
+            if (delivered) {
+              const { error } = await runner.runSafe({
+                workflow: builtWorkflow,
+                workflowId: sessionId,
+                input: undefined,
+              });
+              if (error && !isWorkflowSuspension(error)) throw unwrapFiberFailure(error);
+              return true;
+            }
+            if (attempt < 4) await new Promise<void>((r) => setTimeout(r, 50));
+          }
+          return false;
         },
 
         async status(): Promise<AgentStatus> {
-          if (closed || !inTurn) return "idle";
-          if (inDelivery) return "thinking";
+          if (state.closed || !state.inTurn) return "idle";
+          if (state.inDelivery) return "thinking";
           const info = await runner.getStatus(sessionId, {});
           if (!info || info.state === "completed" || info.state === "failed") return "idle";
           if (info.state === "suspended") return "waiting_approval";
@@ -668,13 +747,13 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
         },
 
         messages(): Message[] {
-          return latestMessages;
+          return state.latestMessages;
         },
 
         async close() {
-          closed = true;
-          idleTimer?.clear();
-          idleTimer = null;
+          state.closed = true;
+          state.idleTimer?.clear();
+          state.idleTimer = null;
           pendingResponses.clear();
           pendingStreams.clear();
           pendingSignals.clear();
