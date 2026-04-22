@@ -44,6 +44,7 @@ import { createShellTool } from "../lib/tools/shell-tool.ts";
 import { createMemoryTools } from "../lib/tools/memory-tools.ts";
 import { createLlmTool } from "../lib/tools/llm-tool.ts";
 import { createSchedulerTools } from "../lib/tools/scheduler-tools.ts";
+import { createAgentTool } from "../lib/tools/agent-tool-factory.ts";
 import { createFileToolRegistry } from "../lib/tool-registry.ts";
 import { Terminal, PROMPT } from "./terminal.ts";
 import type { TreeNode } from "./terminal.ts";
@@ -279,6 +280,25 @@ function withStatusTracking(registry: ToolRegistry): ToolRegistry {
 
 // tools
 const openaiKeyStore = new InMemorySecretStore();
+
+// Shared one-shot GPT-4o tool — used by both the main agent and sub-agents.
+const chatGptOneShotTool = createLlmTool(
+  {
+    // provider resolved lazily so the key is only prompted on first use
+    chat: async (params) => {
+      let key = await openaiKeyStore.get("OPENAI_API_KEY");
+      if (!key) {
+        key = process.env.OPENAI_API_KEY ?? (await ask("[chatGPT] Enter OPENAI_API_KEY"));
+        await openaiKeyStore.set("OPENAI_API_KEY", key);
+      }
+      return openai("gpt-4o", { apiKey: key }).chat(params);
+    },
+  },
+  {
+    name: "chatGPT",
+    description: "Consult ChatGPT (GPT-4o) for a second opinion or different perspective.",
+  },
+);
 const scheduler = new InMemoryScheduler();
 // Tracks schedule IDs with an in-flight onTick call — prevents pileup.
 const activeTicks = new Set<string>();
@@ -329,23 +349,7 @@ const staticTools: Record<string, AgentTool<any, any>> = {
 
   ...createMemoryTools({ store: memoryStore }),
 
-  chatGPT: createLlmTool(
-    {
-      // provider resolved lazily so the key is only prompted on first use
-      chat: async (params) => {
-        let key = await openaiKeyStore.get("OPENAI_API_KEY");
-        if (!key) {
-          key = process.env.OPENAI_API_KEY ?? (await ask("[chatGPT] Enter OPENAI_API_KEY"));
-          await openaiKeyStore.set("OPENAI_API_KEY", key);
-        }
-        return openai("gpt-4o", { apiKey: key }).chat(params);
-      },
-    },
-    {
-      name: "chatGPT",
-      description: "Consult ChatGPT (GPT-4o) for a second opinion or different perspective.",
-    },
-  ),
+  chatGPT: chatGptOneShotTool,
 
   ...createSchedulerTools({
     scheduler,
@@ -410,6 +414,60 @@ const runner = createWorkflowRunner({ storage });
 
 await agentMachine.start({ id: "session", context: { turns: 0 } });
 
+// Shared tool set given to every sub-agent: workspace access + cross-model consultation.
+const subagentTools = {
+  ...createFilesystemTools({ rootDir: workspace }),
+  shell: createShellTool({
+    cwd: workspace,
+    allowedCommands: ["bun", "git", "ls", "cat", "find", "grep", "npm", "npx"],
+  }),
+  ...createMemoryTools({ store: memoryStore }),
+  chatGPT: chatGptOneShotTool,
+};
+
+const subagentSystemPrompt = `You are a focused sub-agent. Be concise and task-focused.\nWorkspace: ${workspace}`;
+
+// claudeAgent: parallel Claude Sonnet sub-agent — delegates independent subtasks.
+staticTools.claudeAgent = createAgentTool({
+  runner,
+  llm: anthropic("claude-sonnet-4-6", { apiKey }),
+  name: "claudeAgent",
+  description:
+    "Delegate a task to a parallel Claude (Sonnet) sub-agent with filesystem, shell, memory, and chatGPT access. Use to parallelise independent subtasks or run deep research alongside the main thread.",
+  tools: subagentTools,
+  systemPrompt: subagentSystemPrompt,
+});
+
+// gptAgent: parallel GPT-4o sub-agent with the same workspace tools (key prompted on first use).
+const lazyOpenAI: LLMProvider = {
+  chat: async (params) => {
+    let key = await openaiKeyStore.get("OPENAI_API_KEY");
+    if (!key) {
+      key = process.env.OPENAI_API_KEY ?? (await ask("[gptAgent] Enter OPENAI_API_KEY"));
+      await openaiKeyStore.set("OPENAI_API_KEY", key);
+    }
+    return openai("gpt-4o", { apiKey: key }).chat(params);
+  },
+  chatStream: async function* (params) {
+    let key = await openaiKeyStore.get("OPENAI_API_KEY");
+    if (!key) {
+      key = process.env.OPENAI_API_KEY ?? (await ask("[gptAgent] Enter OPENAI_API_KEY"));
+      await openaiKeyStore.set("OPENAI_API_KEY", key);
+    }
+    yield* openai("gpt-4o", { apiKey: key }).chatStream!(params);
+  },
+};
+
+staticTools.gptAgent = createAgentTool({
+  runner,
+  llm: lazyOpenAI,
+  name: "gptAgent",
+  description:
+    "Delegate a task to a parallel GPT-4o sub-agent with filesystem, shell, memory, and chatGPT access. Use for a second opinion, different reasoning style, or to parallelise work.",
+  tools: subagentTools,
+  systemPrompt: subagentSystemPrompt,
+});
+
 const rateLimitRpm = process.env.RATE_LIMIT_RPM ? Number(process.env.RATE_LIMIT_RPM) : null;
 const rateLimiter = rateLimitRpm
   ? PipelineRateLimiter.make({ limit: rateLimitRpm, windowMs: 60_000, strategy: "sliding-window" })
@@ -421,9 +479,13 @@ const SYSTEM_PROMPT = [
   "reply confirming what was done. Never end a turn silently — the user cannot see tool results.",
   `Workspace: ${workspace}`,
   "Tools: readFile, writeFile, listDir, statFile (filesystem), shell (run commands),",
-  "       searchMemory, saveMemory (long-term memory), chatGPT (delegate to GPT-4o),",
+  "       searchMemory, saveMemory (long-term memory),",
+  "       chatGPT (one-shot GPT-4o query for a quick second opinion),",
+  "       claudeAgent (parallel Claude sub-agent with filesystem/shell/memory/chatGPT access),",
+  "       gptAgent (parallel GPT-4o sub-agent with filesystem/shell/memory/chatGPT access),",
   "       scheduleTask, listSchedules, cancelSchedule (recurring tasks),",
   "       writeTool (create new tools at runtime), requireSecret (prompt user for API keys).",
+  "Use claudeAgent or gptAgent to parallelise independent subtasks or get a different perspective.",
   "Never ask for secrets in chat — always use requireSecret.",
 ].join("\n");
 
