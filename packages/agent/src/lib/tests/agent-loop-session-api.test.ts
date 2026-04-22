@@ -144,6 +144,40 @@ describe("status()", () => {
 // ---- approve() ----
 
 describe("approve()", () => {
+  it("returns true when the workflow is at an approval gate", async () => {
+    const session = await makeSession({
+      name: "approve-true",
+      llm: mockLLM([
+        {
+          content: null,
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "tc-ret-1", name: "guarded", input: { x: "x" } }],
+        },
+        { content: "done", finishReason: "stop" },
+      ]),
+      tools: { guarded: needsApprovalTool },
+    });
+
+    const sendPromise = session.send("go");
+    await waitForStatus(session, "waiting_approval");
+
+    const delivered = await session.approve("tc-ret-1");
+    expect(delivered).toBe(true);
+    await sendPromise;
+    await session.close();
+  });
+
+  it("returns false when no approval signal is pending for that id", async () => {
+    const session = await makeSession({
+      name: "approve-false",
+      llm: mockLLM([{ content: "ok", finishReason: "stop" }]),
+    });
+    await session.send("go");
+    const delivered = await session.approve("nonexistent-id");
+    expect(delivered).toBe(false);
+    await session.close();
+  });
+
   it("resumes a turn suspended at a tool approval gate", async () => {
     const session = await makeSession({
       name: "approve-resume",
@@ -206,6 +240,40 @@ describe("approve()", () => {
 // ---- reject() ----
 
 describe("reject()", () => {
+  it("returns true when the workflow is at an approval gate", async () => {
+    const session = await makeSession({
+      name: "reject-true",
+      llm: mockLLM([
+        {
+          content: null,
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "tc-rej-ret-1", name: "guarded", input: { x: "x" } }],
+        },
+        { content: "done", finishReason: "stop" },
+      ]),
+      tools: { guarded: needsApprovalTool },
+    });
+
+    const sendPromise = session.send("go");
+    await waitForStatus(session, "waiting_approval");
+
+    const delivered = await session.reject("tc-rej-ret-1");
+    expect(delivered).toBe(true);
+    await sendPromise;
+    await session.close();
+  });
+
+  it("returns false when no approval signal is pending for that id", async () => {
+    const session = await makeSession({
+      name: "reject-false",
+      llm: mockLLM([{ content: "ok", finishReason: "stop" }]),
+    });
+    await session.send("go");
+    const delivered = await session.reject("nonexistent-id");
+    expect(delivered).toBe(false);
+    await session.close();
+  });
+
   it("cancels the tool and the turn continues with a rejection message", async () => {
     const executed: string[] = [];
     const guardedExec = tool({

@@ -150,14 +150,16 @@ export interface AgentSession {
   stream(task: string, signal?: AbortSignal): AsyncIterable<string>;
   /**
    * Approve a pending tool call that has `requireApproval: true`.
-   * Resumes the workflow from the approval gate.
+   * Returns `true` if the signal was delivered and the workflow was resumed,
+   * `false` if no approval gate is pending for that `toolCallId`.
    */
-  approve(toolCallId: string): Promise<void>;
+  approve(toolCallId: string): Promise<boolean>;
   /**
    * Reject a pending tool call. The agent receives the rejection as a tool
    * result and continues its turn without executing the tool.
+   * Returns `true` if the signal was delivered, `false` if nothing was pending.
    */
-  reject(toolCallId: string, reason?: string): Promise<void>;
+  reject(toolCallId: string, reason?: string): Promise<boolean>;
   /** Query the current processing state of this session. */
   status(): Promise<AgentStatus>;
   /** Return the full conversation message history as of the last completed turn. */
@@ -582,34 +584,38 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
           }
         },
 
-        async approve(toolCallId: string): Promise<void> {
-          await completeSignal({
+        async approve(toolCallId: string): Promise<boolean> {
+          const delivered = await completeSignal({
             storage: journalStorage,
             workflowId: sessionId,
             stepName: "conversation",
             signalName: `approve:${toolCallId}`,
             value: { approved: true },
           });
+          if (!delivered) return false;
           await runner.runSafe({
             workflow: builtWorkflow,
             workflowId: sessionId,
             input: undefined,
           });
+          return true;
         },
 
-        async reject(toolCallId: string, reason?: string): Promise<void> {
-          await completeSignal({
+        async reject(toolCallId: string, reason?: string): Promise<boolean> {
+          const delivered = await completeSignal({
             storage: journalStorage,
             workflowId: sessionId,
             stepName: "conversation",
             signalName: `approve:${toolCallId}`,
             value: { approved: false, reason },
           });
+          if (!delivered) return false;
           await runner.runSafe({
             workflow: builtWorkflow,
             workflowId: sessionId,
             input: undefined,
           });
+          return true;
         },
 
         async status(): Promise<AgentStatus> {
