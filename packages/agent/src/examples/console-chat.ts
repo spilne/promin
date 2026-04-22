@@ -147,9 +147,7 @@ const agentMachine = stateMachine<AgentStates>({
   .initial("idle")
   .build();
 
-await agentMachine.start({ id: "session", context: { turns: 0 } });
-
-// ---- session factory ----
+// ---- agent loop (created once, reused across sessions) ----
 const SYSTEM_PROMPT = [
   "You are a helpful assistant in an interactive console. Be concise.",
   "IMPORTANT: After every tool call (or sequence of tool calls), always write a brief text",
@@ -168,46 +166,56 @@ const SYSTEM_PROMPT = [
 
 let autoApprove = process.env.TOOL_AUTO_APPROVE === "true";
 let sessionIdSeq = 0;
+let currentSessionId = "session";
 
-async function makeAgentSession(id: string): Promise<AgentSession> {
-  return agentLoop({
-    name: "console-agent",
-    llm: usage.withTracking(anthropic("claude-sonnet-4-6", { apiKey }), "claude-sonnet-4-6"),
-    toolRegistry: spinner.withStatusTracking(registry),
-    rateLimiter,
-    systemPrompt: SYSTEM_PROMPT,
-    memory: { store: memoryStore },
-    hooks: {
-      onApprovalRequired: async (call) => {
-        if (autoApprove) return { approved: true };
-        term.stopSpinner();
-        const input = (call.input as Record<string, unknown>) ?? {};
-        const paramStr = abbrevInput(input) || JSON.stringify(input).slice(0, 80);
-        const answer = await ask(
-          `Allow tool "${call.name}"${paramStr ? `  \x1b[2m${paramStr}\x1b[0m` : ""}? [y/n/always]`,
-        );
-        if (answer.toLowerCase() === "always") {
-          autoApprove = true;
-          term.printAbove("\x1b[2mAuto-approve enabled for this session.\x1b[0m");
-        }
-        const approved = answer.toLowerCase().startsWith("y") || answer.toLowerCase() === "always";
-        if (approved) term.startSpinner(`thinking...  \x1b[2mstep ${spinner.step + 1}\x1b[0m`);
-        return { approved };
-      },
+const loop = agentLoop({
+  name: "console-agent",
+  llm: usage.withTracking(anthropic("claude-sonnet-4-6", { apiKey }), "claude-sonnet-4-6"),
+  toolRegistry: spinner.withStatusTracking(registry),
+  rateLimiter,
+  systemPrompt: SYSTEM_PROMPT,
+  memory: { store: memoryStore },
+  hooks: {
+    onApprovalRequired: async (call) => {
+      if (autoApprove) return { approved: true };
+      term.stopSpinner();
+      const input = (call.input as Record<string, unknown>) ?? {};
+      const paramStr = abbrevInput(input) || JSON.stringify(input).slice(0, 80);
+      const answer = await ask(
+        `Allow tool "${call.name}"${paramStr ? `  \x1b[2m${paramStr}\x1b[0m` : ""}? [y/n/always]`,
+      );
+      if (answer.toLowerCase() === "always") {
+        autoApprove = true;
+        term.printAbove("\x1b[2mAuto-approve enabled for this session.\x1b[0m");
+      }
+      const approved = answer.toLowerCase().startsWith("y") || answer.toLowerCase() === "always";
+      if (approved) term.startSpinner(`thinking...  \x1b[2mstep ${spinner.step + 1}\x1b[0m`);
+      return { approved };
     },
-  }).session({ runner, sessionId: id });
-}
+  },
+  onLifecycle: (e) => {
+    if (e.event === "message") {
+      agentMachine
+        // biome-ignore lint/suspicious/noExplicitAny: lifecycle context is dynamically typed
+        .send({ id: e.sessionId, event: "message", data: e.context as any })
+        .catch(() => {});
+    } else if (e.event === "done") {
+      agentMachine.send({ id: e.sessionId, event: "done" }).catch(() => {});
+    }
+  },
+});
 
 // ---- session reset helper ----
 async function resetSession(newId: string): Promise<AgentSession> {
-  const s = await makeAgentSession(newId);
+  currentSessionId = newId;
+  await agentMachine.start({ id: newId, context: { turns: 0 } }).catch(() => {});
+  const s = await loop.session({ runner, sessionId: newId });
   sessionRef.current = s;
   usage.resetSession();
   return s;
 }
 
 let session = await resetSession("session");
-sessionRef.current = session;
 
 // ---- SIGINT ----
 let currentAc: AbortController | null = null;
@@ -235,7 +243,6 @@ rl.on("SIGINT", () => {
 });
 
 // ---- REPL ----
-let turn = 0;
 
 function prompt() {
   const parts: string[] = [];
@@ -293,7 +300,6 @@ function prompt() {
       if (input === "/clear") {
         await session.close();
         session = await resetSession(`session-${++sessionIdSeq}`);
-        turn = 0;
         term.printAbove(
           "\x1b[2mConversation cleared — new session started. Memories persist.\x1b[0m",
         );
@@ -311,7 +317,7 @@ function prompt() {
         return prompt();
       }
       if (input === "/state") {
-        await term.showPane("state", await buildAgentState(agentMachine, "session"));
+        await term.showPane("state", await buildAgentState(agentMachine, currentSessionId));
         return prompt();
       }
       if (input === "/tools") {
@@ -363,8 +369,6 @@ function prompt() {
       }
 
       // ---- agent turn ----
-      await agentMachine.send({ id: "session", event: "message", data: { turn, task: input } });
-
       if (usage.tokenBudget && usage.sessionTokensUsed() >= usage.tokenBudget) {
         process.stdout.write(
           `\n\x1b[33m  Token budget exhausted (${fmtN(usage.sessionTokensUsed())} / ${fmtN(usage.tokenBudget)}). Start a new session to continue.\x1b[0m\n`,
@@ -380,7 +384,6 @@ function prompt() {
       term.startSpinner("thinking...");
       term.agentHasTextOnLine = false;
 
-      let answer = "";
       let labelShown = false;
       let streamError: Error | undefined;
       try {
@@ -392,7 +395,6 @@ function prompt() {
           }
           term.writeChunk(chunk);
           term.agentHasTextOnLine = true;
-          answer += chunk;
         }
         term.flushChunks();
       } catch (err) {
@@ -405,7 +407,6 @@ function prompt() {
 
       if (ac.signal.aborted) {
         term.agentHasTextOnLine = false;
-        await agentMachine.send({ id: "session", event: "done" }).catch(() => {});
         prompt();
         return;
       }
@@ -428,7 +429,6 @@ function prompt() {
           );
           await session.close();
           session = await resetSession(`session-${++sessionIdSeq}`);
-          turn = 0;
           process.stdout.write(
             "\x1b[2m  Session automatically cleared. Memories persist.\x1b[0m\n",
           );
@@ -436,7 +436,6 @@ function prompt() {
           process.stdout.write(`\x1b[31mError: ${streamError.message}\x1b[0m\n`);
         }
 
-        await agentMachine.send({ id: "session", event: "done" }).catch(() => {});
         prompt();
         return;
       }
@@ -453,8 +452,6 @@ function prompt() {
         }
       }
       term.agentHasTextOnLine = false;
-      turn++;
-      await agentMachine.send({ id: "session", event: "done" });
       prompt();
     });
 

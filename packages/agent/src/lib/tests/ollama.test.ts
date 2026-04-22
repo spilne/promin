@@ -47,8 +47,6 @@ function ollamaChunk(content: string, done: boolean, extra: object = {}): string
   });
 }
 
-const userMsg = { task: "hello", messages: [] };
-
 // ---- chat() ----
 
 describe("ollama — chat()", () => {

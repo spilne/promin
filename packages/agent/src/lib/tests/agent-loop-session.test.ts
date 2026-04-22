@@ -163,13 +163,10 @@ describe("agentLoop session", () => {
   });
 
   it("handles unknown tool gracefully", async () => {
-    let lastMessages: unknown[] = [];
-
     const session = await makeSession({
       name: "unknown-tool-session",
       llm: {
         chat: async (params) => {
-          lastMessages = params.messages;
           const hasToolResult = params.messages.some((m: any) => m.role === "tool");
           if (hasToolResult) return { content: "Could not use tool.", finishReason: "stop" };
           return {

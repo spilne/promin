@@ -123,7 +123,7 @@ describe("runCouncil", () => {
     expect(bobRound2).toContain("microservices scale better");
   });
 
-  it("does NOT include own output in cross-critique prompt", async () => {
+  it("includes own prior output separately from others in round 2+", async () => {
     const { advocate, skeptic, synth } = makeCouncil();
     await runCouncil(QUESTION, {
       councilors: [
@@ -133,8 +133,13 @@ describe("runCouncil", () => {
       synthesizer: synth,
       rounds: 2,
     });
-    // Alice should NOT see her own round 1 output in round 2
-    expect(advocate.calls[1]!.userContent).not.toContain("microservices scale better");
+    const aliceRound2 = advocate.calls[1]!.userContent;
+    // Alice sees her own round-1 output under "Your previous analysis"
+    expect(aliceRound2).toContain("Your previous analysis");
+    expect(aliceRound2).toContain("microservices scale better");
+    // Alice also sees Bob's output under "Other council members"
+    expect(aliceRound2).toContain("Other council members");
+    expect(aliceRound2).toContain("monolith is simpler to start");
   });
 
   it("passes full deliberation transcript to synthesizer", async () => {

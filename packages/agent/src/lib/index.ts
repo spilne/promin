@@ -111,6 +111,9 @@ export type { AnthropicOptions } from "./adapters/anthropic.ts";
 export { openai } from "./adapters/openai.ts";
 export type { OpenAIOptions } from "./adapters/openai.ts";
 
+export { gemini } from "./adapters/gemini.ts";
+export type { GeminiOptions } from "./adapters/gemini.ts";
+
 export { openaiEmbedding } from "./adapters/openai-embedding.ts";
 export type { OpenAIEmbeddingOptions } from "./adapters/openai-embedding.ts";
 

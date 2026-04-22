@@ -15,6 +15,7 @@ interface AnthropicContentBlock {
   name?: string;
   input?: unknown;
   content?: string;
+  cache_control?: { type: "ephemeral" };
 }
 
 interface AnthropicResponse {
@@ -78,15 +79,15 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
   const baseUrl = options.baseUrl ?? "https://api.anthropic.com";
 
   function buildBody(params: LLMChatParams, stream?: boolean): Record<string, unknown> {
-    const systemText = extractSystem(params.messages);
+    const systemBlocks = extractSystemBlocks(params.messages);
     return {
       model,
       max_tokens: params.maxTokens ?? options.maxTokens ?? 4096,
       messages: toAnthropicMessages(params.messages),
-      // Cache the system prompt — same every turn, saves re-processing on each call.
-      ...(systemText
-        ? { system: [{ type: "text", text: systemText, cache_control: { type: "ephemeral" } }] }
-        : {}),
+      // All system messages are collected into blocks. The last block gets
+      // cache_control so the entire system prefix (including memory injections,
+      // tool descriptions, etc.) is cached as one unit.
+      ...(systemBlocks.length > 0 ? { system: systemBlocks } : {}),
       ...(params.temperature !== undefined ? { temperature: params.temperature } : {}),
       ...(params.tools && params.tools.length > 0
         ? {
@@ -246,9 +247,25 @@ async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncIterable<SSEEve
   }
 }
 
-function extractSystem(messages: Message[]): string | undefined {
-  const sys = messages.find((m) => m.role === "system");
-  return sys ? sys.content : undefined;
+/**
+ * Collect all system messages into Anthropic system blocks.
+ * The last block gets cache_control so the entire system prefix —
+ * including memory injections, tool listings, compaction summaries, etc. —
+ * is cached as one unit across turns.
+ *
+ * Previously this used `.find()` which silently dropped all system messages
+ * after the first one (memory injections, tool descriptions, etc. were lost).
+ */
+function extractSystemBlocks(messages: Message[]): AnthropicContentBlock[] {
+  const systemMessages = messages.filter((m) => m.role === "system");
+  if (systemMessages.length === 0) return [];
+
+  return systemMessages.map((m, i) => ({
+    type: "text",
+    text: m.content,
+    // Cache on the last block so the whole prefix is one cache entry.
+    ...(i === systemMessages.length - 1 ? { cache_control: { type: "ephemeral" as const } } : {}),
+  }));
 }
 
 function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {

@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { mkdir } from "node:fs/promises";
 import { openai } from "../lib/adapters/openai.ts";
 import { anthropic } from "../lib/adapters/anthropic.ts";
+import { gemini } from "../lib/adapters/gemini.ts";
 import { tool } from "../lib/tool.ts";
 import { InMemorySecretStore } from "../lib/secret-store.ts";
 import { createWriteToolTool } from "../lib/tools/write-tool.ts";
@@ -106,9 +107,10 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
       name: "calculator",
       description: "Evaluate a JS math expression and return the result.",
       parameters: z.object({ expression: z.string() }),
-      // biome-ignore lint/security/noEval: example only
       execute: async ({ expression }) => {
         try {
+          // biome-ignore lint/security/noEval: example only
+          // eslint-disable-next-line no-eval
           return String(eval(expression));
         } catch {
           return `Error: ${expression}`;
@@ -158,7 +160,15 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
             activeTicks.delete(tick.scheduleId);
           }
         };
-        run().catch((err) => console.error("[scheduler] tick error:", err));
+        run().catch((err) => {
+          if (err instanceof Error && err.message.includes("Session is busy")) {
+            console.log(
+              `\x1b[2m[scheduler] skipped tick "${tick.scheduleId}" — session busy\x1b[0m`,
+            );
+          } else {
+            console.error("[scheduler] tick error:", err);
+          }
+        });
       },
     }),
   };
@@ -203,6 +213,37 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
     name: "gptAgent",
     description:
       "Delegate a task to a parallel GPT-4o sub-agent with filesystem, shell, memory, and chatGPT access. Use for a second opinion, different reasoning style, or to parallelise work.",
+    tools: subagentTools,
+    systemPrompt: subagentSystemPrompt,
+  });
+
+  const geminiKeyStore = new InMemorySecretStore();
+  async function getGeminiKey(): Promise<string> {
+    let key = await geminiKeyStore.get("GEMINI_API_KEY");
+    if (!key) {
+      key = process.env["GEMINI_API_KEY"] ?? (await ask("[geminiAgent] Enter GEMINI_API_KEY"));
+      await geminiKeyStore.set("GEMINI_API_KEY", key);
+    }
+    return key;
+  }
+
+  const lazyGemini: LLMProvider = {
+    chat: async (params) => {
+      const key = await getGeminiKey();
+      return gemini("gemini-2.0-flash", { apiKey: key }).chat(params);
+    },
+    chatStream: async function* (params) {
+      const key = await getGeminiKey();
+      yield* gemini("gemini-2.0-flash", { apiKey: key }).chatStream!(params);
+    },
+  };
+
+  staticTools.geminiAgent = createAgentTool({
+    runner,
+    llm: usage.withTracking(lazyGemini, "gemini-2.0-flash"),
+    name: "geminiAgent",
+    description:
+      "Delegate a task to a parallel Gemini (gemini-2.0-flash) sub-agent with filesystem, shell, memory, and chatGPT access. Use for a third perspective, fast drafts, or to parallelise work.",
     tools: subagentTools,
     systemPrompt: subagentSystemPrompt,
   });

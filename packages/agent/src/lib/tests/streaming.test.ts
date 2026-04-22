@@ -23,7 +23,7 @@ function mockStreamingLLM(turns: StreamingTurn[]): LLMProvider {
     chat: async () => {
       throw new Error("chat() should not be called when chatStream is present");
     },
-    chatStream(params) {
+    chatStream(_params) {
       const turn = turns[callIndex++];
       if (!turn) throw new Error("mockStreamingLLM: exhausted turns");
       return {

@@ -235,7 +235,8 @@ export class Terminal implements AgentUIRenderer {
 
     // Strip ANSI codes to get visible length; truncate long lines naively.
     const clip = (s: string, w: number): string => {
-      const plain = s.replace(/\x1b\[[^m]*m/g, "");
+      // eslint-disable-next-line no-control-regex
+      const plain = s.replace(/\u001b\[[^m]*m/g, "");
       return plain.length > w ? `${plain.slice(0, w - 1)}…` : s;
     };
 
@@ -419,11 +420,13 @@ export class Terminal implements AgentUIRenderer {
 
       if (s.includes("\x1b[200~")) {
         inPaste = true;
-        s = s.replace(/\x1b\[200~/g, "");
+        // eslint-disable-next-line no-control-regex
+        s = s.replace(/\u001b\[200~/g, "");
       }
       if (s.includes("\x1b[201~")) {
         inPaste = false;
-        s = s.replace(/\x1b\[201~/g, "");
+        // eslint-disable-next-line no-control-regex
+        s = s.replace(/\u001b\[201~/g, "");
       }
       if (inPaste) s = s.replace(/[\r\n]/g, " ");
 

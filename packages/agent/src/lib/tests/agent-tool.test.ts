@@ -65,7 +65,7 @@ describe("agentTool", () => {
     const agent = agentAction({
       name: "id-tracking-agent",
       llm: {
-        chat: async (params) => {
+        chat: async (_params) => {
           return { content: "ok", finishReason: "stop" as const };
         },
       },

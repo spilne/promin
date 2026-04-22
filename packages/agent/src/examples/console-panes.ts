@@ -33,7 +33,6 @@ export function buildHistory(session: AgentSession): string[] {
   return lines;
 }
 
-// Minimal interface covering what we actually call on the machine.
 interface LifecycleMachine {
   getState(id: string): Promise<{ current: string; context: unknown } | null>;
   getHistory(
@@ -45,17 +44,18 @@ export async function buildAgentState(
   machine: LifecycleMachine,
   sessionId: string,
 ): Promise<string[]> {
-  const state = await machine.getState(sessionId);
+  const st = await machine.getState(sessionId);
   const transitions = await machine.getHistory(sessionId);
-  if (!state) return ["(no state yet)"];
+  if (!st) return ["(no state yet)"];
   const lines: string[] = [
-    `state: \x1b[1m${state.current}\x1b[0m   context: ${JSON.stringify(state.context)}`,
+    `state: \x1b[1m${st.current}\x1b[0m   context: ${JSON.stringify(st.context)}`,
     "",
   ];
   for (const t of transitions)
     lines.push(
       `  ${t.from} \x1b[2m──[\x1b[0m${t.event}\x1b[2m]──▶\x1b[0m ${t.to}   \x1b[2m${t.createdAt.toLocaleTimeString()}\x1b[0m`,
     );
+  if (!transitions.length) lines.push("  (no transitions yet)");
   return lines;
 }
 

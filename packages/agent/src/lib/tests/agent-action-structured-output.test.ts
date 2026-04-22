@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
-import { agentAction, StructuredOutputParseError } from "../agent-action.ts";
+import { agentAction } from "../agent-action.ts";
 import type { LLMResponse } from "../llm-provider.ts";
 
 async function runAction(

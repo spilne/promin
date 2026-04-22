@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
-import { agentAction, MaxStepsError } from "../agent-action.ts";
+import { agentAction } from "../agent-action.ts";
 import { tool } from "../tool.ts";
 import type { LLMProvider, LLMResponse } from "../llm-provider.ts";
 import type { LLMChatParams } from "../llm-provider.ts";

@@ -14,7 +14,11 @@ export interface AgentToolFactoryConfig {
   name?: string;
   /** Description the orchestrator reads to decide when to delegate. */
   description?: string;
-  /** System prompt injected into the sub-agent session. */
+  /**
+   * System prompt injected into the sub-agent session.
+   * A tools section listing available tool names and descriptions is always
+   * appended automatically so the sub-agent knows what it can call.
+   */
   systemPrompt?: string;
   /** Tools the sub-agent is allowed to call. */
   // biome-ignore lint/suspicious/noExplicitAny: tool inputs validated at runtime via Zod
@@ -24,12 +28,28 @@ export interface AgentToolFactoryConfig {
 }
 
 /**
+ * Builds a human-readable tools section from a tool map and appends it to a
+ * base system prompt. This makes the sub-agent aware of what tools it has
+ * available without relying solely on the LLM schema definitions.
+ */
+// biome-ignore lint/suspicious/noExplicitAny: tool inputs validated at runtime via Zod
+function buildSystemPrompt(base: string, tools: Record<string, AgentTool<any, any>>): string {
+  const entries = Object.values(tools);
+  if (entries.length === 0) return base;
+  const lines = entries.map((t) => `- ${t.name}: ${t.description}`);
+  return `${base}\n\nYou have access to the following tools:\n${lines.join("\n")}\n\nAlways use tools when they are relevant to the task rather than relying on your own knowledge.`;
+}
+
+/**
  * Creates a tool that delegates tasks to a sub-agent powered by any LLMProvider.
  *
  * The sub-agent runs a full `agentAction` loop: it can call tools, reason over
  * results, and iterate until it reaches a final answer — just like the main agent.
  * Unlike `createLlmTool` (single one-shot call, no tools), this supports multi-step
  * reasoning with a full tool set.
+ *
+ * The sub-agent's system prompt is automatically enriched with a listing of all
+ * available tools so it knows what it can call and when to use them.
  *
  * Works with any adapter: openai(), anthropic(), ollama(), llamacpp(), etc.
  *
@@ -62,12 +82,17 @@ export function createAgentTool(
   // biome-ignore lint/suspicious/noExplicitAny: tool inputs validated at runtime via Zod
 ): AgentTool<{ task: string }, string> {
   const name = config.name ?? "agent";
+  const tools = config.tools ?? {};
+
+  const basePrompt =
+    config.systemPrompt ?? "You are a focused sub-agent. Be concise and task-focused.";
+  const systemPrompt = buildSystemPrompt(basePrompt, tools);
 
   const agentWorkflow = agentAction({
     name: `${name}-action`,
     llm: config.llm,
-    tools: config.tools ?? {},
-    systemPrompt: config.systemPrompt,
+    tools,
+    systemPrompt,
     maxSteps: config.maxSteps ?? 20,
   });
 

@@ -85,22 +85,28 @@ export async function runCouncil(question: string, config: CouncilConfig): Promi
   for (let r = 0; r < numRounds; r++) {
     const previousContributions = rounds[r - 1]?.contributions ?? [];
 
-    const contributions = await Promise.all(
+    const settled = await Promise.allSettled(
       config.councilors.map(async (c): Promise<CouncilContribution> => {
         const isFirstRound = r === 0;
 
         const systemPrompt = isFirstRound
           ? `You are ${c.name}, a council member.\nYour role: ${c.role}.\nAnalyze the question from your perspective. Be direct, specific, and honest about uncertainty.`
-          : `You are ${c.name}, a council member.\nYour role: ${c.role}.\nYou have seen others' analyses. Critique, challenge, or refine them from your perspective. Be direct about disagreements.`;
+          : `You are ${c.name}, a council member.\nYour role: ${c.role}.\nYou have seen the previous round's analyses. Critique, challenge, or refine them from your perspective. Be direct about disagreements.`;
 
-        const othersText = previousContributions
-          .filter((p) => p.councilor !== c.name)
-          .map((p) => `[${p.councilor} — ${p.role}]:\n${p.text}`)
-          .join("\n\n");
-
-        const userContent = isFirstRound
-          ? question
-          : `${question}\n\nOther council members' analyses:\n\n${othersText}`;
+        let userContent: string;
+        if (isFirstRound) {
+          userContent = question;
+        } else {
+          const own = previousContributions.find((p) => p.councilor === c.name);
+          const others = previousContributions.filter((p) => p.councilor !== c.name);
+          const sections: string[] = [];
+          if (own) sections.push(`Your previous analysis:\n${own.text}`);
+          if (others.length)
+            sections.push(
+              `Other council members' analyses:\n\n${others.map((p) => `[${p.councilor} — ${p.role}]:\n${p.text}`).join("\n\n")}`,
+            );
+          userContent = `${question}\n\n${sections.join("\n\n")}`;
+        }
 
         const resp = await c.llm.chat({
           messages: [
@@ -114,6 +120,13 @@ export async function runCouncil(question: string, config: CouncilConfig): Promi
         return { councilor: c.name, role: c.role, text: resp.content ?? "" };
       }),
     );
+
+    const contributions: CouncilContribution[] = settled.map((result, i) => {
+      if (result.status === "fulfilled") return result.value;
+      const c = config.councilors[i]!;
+      console.error(`[council] councilor "${c.name}" failed:`, result.reason);
+      return { councilor: c.name, role: c.role, text: "[unavailable]" };
+    });
 
     rounds.push({ round: r + 1, contributions });
   }

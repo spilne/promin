@@ -33,6 +33,8 @@ export interface HooksAfterTurnParams {
   answer: string;
   messages: Message[];
   usage: { inputTokens: number; outputTokens: number };
+  /** True when the turn was cut short by maxStepsPerTurn — the answer is a "(step limit reached)" sentinel. */
+  truncated: boolean;
 }
 
 export interface HooksConfig {
@@ -143,6 +145,17 @@ export interface AgentLoopConfig {
    * Falls back to `llm` when omitted.
    */
   compactionLlm?: LLMProvider;
+  /**
+   * Called on every agent lifecycle transition across all sessions created by this loop.
+   * Fires from inside a journaled activity — async return values are awaited in the
+   * background (errors are logged, never thrown into the workflow).
+   *
+   * **At-most-once semantics:** because the activity is skipped on journal replay (e.g.
+   * after a server restart), the callback does NOT re-fire for historical turns.
+   * Use it for observability — driving an external state machine, websocket push, etc.
+   * Do not rely on it for durable side-effects.
+   */
+  onLifecycle?: (event: AgentLifecycleEvent) => void | Promise<void>;
 }
 
 /**
@@ -152,6 +165,22 @@ export interface AgentLoopConfig {
  * - `"waiting_approval"` — suspended mid-turn waiting for `approve()` / `reject()`.
  */
 export type AgentStatus = "idle" | "thinking" | "waiting_approval";
+
+/** Mirrors AgentStatus — the set of states the embedded lifecycle machine can be in. */
+export type AgentLifecycleState = "idle" | "thinking" | "waiting_approval";
+
+export interface AgentLifecycleEntry {
+  from: AgentLifecycleState;
+  event: string;
+  to: AgentLifecycleState;
+  createdAt: Date;
+}
+
+export interface AgentLifecycleEvent extends AgentLifecycleEntry {
+  sessionId: string;
+  /** The context of the destination state (e.g. `{ turn, task }` for "thinking"). */
+  context: unknown;
+}
 
 export interface AgentSession {
   send(task: string): Promise<string>;
@@ -182,6 +211,14 @@ export interface AgentSession {
   messages(): Message[];
   /** Cumulative token usage for this session across all completed turns. */
   usage(): { inputTokens: number; outputTokens: number };
+  /** Current lifecycle state. Matches `status()` but is synchronous and sourced from in-memory state. */
+  lifecycleState(): { current: AgentLifecycleState; context: unknown };
+  /**
+   * Full lifecycle transition history for this session.
+   * **Ephemeral** — stored in-memory only, resets on server restart. For durable tracking,
+   * use `onLifecycle` to drive an external state machine.
+   */
+  lifecycleHistory(): AgentLifecycleEntry[];
   close(): Promise<void>;
 }
 
@@ -204,8 +241,17 @@ async function compact(
   const systemMessages = messages.filter((m) => m.role === "system");
   const nonSystem = messages.filter((m) => m.role !== "system");
 
-  const keep = nonSystem.slice(-config.keepMessages);
-  const dropped = nonSystem.slice(0, nonSystem.length - config.keepMessages);
+  // Find a clean slice boundary: the first user-turn at or after the keep window.
+  // Slicing mid-sequence (e.g. keeping a tool_result without its tool_use) produces
+  // invalid Anthropic API input — messages[0] would contain a tool_result block with
+  // no matching tool_use in the previous message.
+  let keepStart = Math.max(0, nonSystem.length - config.keepMessages);
+  while (keepStart < nonSystem.length && nonSystem[keepStart]!.role !== "user") {
+    keepStart++;
+  }
+
+  const keep = nonSystem.slice(keepStart);
+  const dropped = nonSystem.slice(0, keepStart);
 
   if (!config.summarize || dropped.length === 0) {
     return { messages: [...systemMessages, ...keep], summary: null };
@@ -324,6 +370,10 @@ interface SessionState {
   /** Cumulative token usage across all completed turns. */
   totalInputTokens: number;
   totalOutputTokens: number;
+  /** Embedded lifecycle state machine. */
+  lifecycleState: AgentLifecycleState;
+  lifecycleContext: unknown;
+  lifecycleHistory: AgentLifecycleEntry[];
 }
 
 // ---- agentLoop ----
@@ -350,7 +400,12 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
       const activityStorage = runner.storage as unknown as ActivityJournalStorage;
 
       const clock = config.clock ?? SystemClock;
-      const pendingResponses = new Map<number, (answer: string) => void>();
+      // Aborted by close() to cancel any in-flight LLM fetch.
+      const sessionAc = new AbortController();
+      const pendingResponses = new Map<
+        number,
+        { resolve: (answer: string) => void; reject: (err: Error) => void }
+      >();
       const pendingStreams = new Map<number, ChunkQueue>();
       const pendingSignals = new Map<number, AbortSignal>();
       const state: SessionState = {
@@ -363,7 +418,25 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
         idleTimer: null,
         totalInputTokens: 0,
         totalOutputTokens: 0,
+        lifecycleState: "idle",
+        lifecycleContext: { turns: 0 },
+        lifecycleHistory: [],
       };
+
+      function transitionLifecycle(event: string, to: AgentLifecycleState, ctx: unknown) {
+        const entry: AgentLifecycleEntry = {
+          from: state.lifecycleState,
+          event,
+          to,
+          createdAt: new Date(),
+        };
+        state.lifecycleHistory.push(entry);
+        state.lifecycleState = to;
+        state.lifecycleContext = ctx;
+        Promise.resolve(config.onLifecycle?.({ ...entry, sessionId, context: ctx })).catch((err) =>
+          console.error("[agentLoop] onLifecycle error:", err),
+        );
+      }
 
       const resetIdleTimer = () => {
         state.idleTimer?.clear();
@@ -382,11 +455,9 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
       const sessionWorkflow = workflow<void>({ name: config.name }).journaled(
         "conversation",
         function* (ctx, _input) {
-          let messages: Message[] = [
-            ...(config.systemPrompt
-              ? [{ role: "system" as const, content: config.systemPrompt }]
-              : []),
-          ];
+          let messages: Message[] = config.systemPrompt
+            ? [{ role: "system" as const, content: config.systemPrompt }]
+            : [];
 
           // Inject relevant memories from previous sessions
           if (config.memory && (config.memory.injectLimit ?? 5) > 0) {
@@ -411,6 +482,9 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
 
           for (let turn = 0; turn < maxTurns; turn++) {
             const { task } = yield* ctx.signal<{ task: string }>(`task-${turn}`);
+            yield* ctx.activity(`lc-${turn}-message`, async () => {
+              transitionLifecycle("message", "thinking", { turns: turn, turn, task });
+            });
             messages = [...messages, { role: "user", content: task }];
 
             // beforeTurn hook — can inject additional context into the message list
@@ -496,9 +570,20 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                       config.hooks!.onApprovalRequired!(call),
                     );
                   } else {
+                    yield* ctx.activity(`lc-${turn}-approval-${call.id}-start`, async () => {
+                      transitionLifecycle("approval-required", "waiting_approval", {
+                        toolCallId: call.id,
+                      });
+                    });
                     decision = yield* ctx.signal<{ approved: boolean; reason?: string }>(
                       `approve:${call.id}`,
                     );
+                    yield* ctx.activity(`lc-${turn}-approval-${call.id}-end`, async () => {
+                      transitionLifecycle(decision.approved ? "approved" : "rejected", "thinking", {
+                        toolCallId: call.id,
+                        approved: decision.approved,
+                      });
+                    });
                   }
                   if (!decision.approved) {
                     toolResultMsgs.push({
@@ -529,25 +614,28 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
 
             if (hitStepLimit) {
               console.warn(
-                `[agentLoop] turn ${turn}: maxStepsPerTurn (${maxStepsPerTurn}) reached without a final answer — emitting empty response.`,
+                `[agentLoop] turn ${turn}: maxStepsPerTurn (${maxStepsPerTurn}) reached without a final answer.`,
               );
+              // Synthesize a closing assistant message so history doesn't end on tool
+              // results. Without this, the next turn's LLM call receives malformed context
+              // (consecutive user-role messages in Anthropic's format).
+              answer = "(step limit reached)";
+              messages = [...messages, { role: "assistant", content: answer }];
             }
 
             yield* ctx.activity(`emit-${turn}`, async () => {
-              pendingResponses.get(turn)?.(answer);
+              // Update messages snapshot here so messages() is consistent immediately
+              // after send() / stream() returns, not only after after-turn-N completes.
+              state.latestMessages = messages;
+              pendingResponses.get(turn)?.resolve(answer);
               pendingResponses.delete(turn);
               pendingStreams.get(turn)?.close();
               pendingSignals.delete(turn);
               return answer;
             });
 
-            // afterTurn hook — capture messages + user hook (logging, memory writes, analytics).
-            // latestMessages is updated here, not at emit-N, so messages() reflects a
-            // consistent post-turn snapshot. If the session is closed between emit and
-            // after-turn (crash), messages() still returns the previous turn's state —
-            // intentional, because partial state would be misleading.
+            // afterTurn hook — user hook for logging, memory writes, analytics.
             yield* ctx.activity(`after-turn-${turn}`, async () => {
-              state.latestMessages = messages;
               state.totalInputTokens += turnInputTokens;
               state.totalOutputTokens += turnOutputTokens;
               await config.hooks?.afterTurn?.({
@@ -555,7 +643,11 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                 answer,
                 messages,
                 usage: { inputTokens: turnInputTokens, outputTokens: turnOutputTokens },
+                truncated: hitStepLimit,
               });
+            });
+            yield* ctx.activity(`lc-${turn}-done`, async () => {
+              transitionLifecycle("done", "idle", { turns: turn + 1 });
             });
 
             // Compact if non-system messages exceed the threshold
@@ -625,15 +717,18 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
       return {
         async send(task: string): Promise<string> {
           if (state.closed) throw new Error("Session is closed");
+          if (state.inTurn) throw new Error("Session is busy — only one turn at a time");
           const turn = state.turn++;
-          const promise = new Promise<string>((resolve) => pendingResponses.set(turn, resolve));
           state.inTurn = true;
           state.inDelivery = true;
+          pendingSignals.set(turn, sessionAc.signal);
+          const promise = new Promise<string>((resolve, reject) =>
+            pendingResponses.set(turn, { resolve, reject }),
+          );
           try {
             await deliverAndRun(task, turn);
             state.inDelivery = false;
-            const answer = await promise;
-            return answer;
+            return await promise;
           } catch (err) {
             pendingResponses.delete(turn);
             pendingStreams.delete(turn);
@@ -648,17 +743,23 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
 
         async *stream(task: string, signal?: AbortSignal): AsyncIterable<string> {
           if (state.closed) throw new Error("Session is closed");
+          if (state.inTurn) throw new Error("Session is busy — only one turn at a time");
           const turn = state.turn++;
-          if (signal) pendingSignals.set(turn, signal);
+          state.inTurn = true;
+
+          // Combine caller's abort signal with the session-level close signal.
+          const combinedSignal = signal
+            ? AbortSignal.any([signal, sessionAc.signal])
+            : sessionAc.signal;
+          pendingSignals.set(turn, combinedSignal);
 
           const chunkQueue = new ChunkQueue();
           pendingStreams.set(turn, chunkQueue);
 
-          const answerPromise = new Promise<string>((resolve) =>
-            pendingResponses.set(turn, resolve),
+          const answerPromise = new Promise<string>((resolve, reject) =>
+            pendingResponses.set(turn, { resolve, reject }),
           );
 
-          state.inTurn = true;
           try {
             state.inDelivery = true;
             try {
@@ -701,12 +802,10 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               pendingResponses.delete(turn);
               pendingSignals.delete(turn);
               await runPromise;
-              // Invariant: if the run succeeded, emit-N has already resolved
-              // answerPromise. If it failed before emit-N, runError is set and
-              // we skip the await to avoid hanging on an unresolved promise.
-              if (!runError) await answerPromise;
-              // Resets the idle timer after each stream turn so onIdle fires relative to
-              // the last completed turn, not to send() or close() calls.
+              // Invariant: if the run succeeded, emit-N has resolved answerPromise.
+              // Skip if the session was closed (close() already rejected the promise and
+              // the caller should not see a "Session closed" error propagated here).
+              if (!runError && !state.closed) await answerPromise;
               resetIdleTimer();
             }
           } finally {
@@ -740,7 +839,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               if (error && !isWorkflowSuspension(error)) throw unwrapFiberFailure(error);
               return true;
             }
-            if (attempt < 4) await new Promise<void>((r) => setTimeout(r, 50));
+            if (attempt < 4) await new Promise<void>((r) => clock.setTimeout(r, 50));
           }
           return false;
         },
@@ -763,7 +862,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               if (error && !isWorkflowSuspension(error)) throw unwrapFiberFailure(error);
               return true;
             }
-            if (attempt < 4) await new Promise<void>((r) => setTimeout(r, 50));
+            if (attempt < 4) await new Promise<void>((r) => clock.setTimeout(r, 50));
           }
           return false;
         },
@@ -785,11 +884,26 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
           return { inputTokens: state.totalInputTokens, outputTokens: state.totalOutputTokens };
         },
 
+        lifecycleState() {
+          return { current: state.lifecycleState, context: state.lifecycleContext };
+        },
+
+        lifecycleHistory() {
+          return [...state.lifecycleHistory];
+        },
+
         async close() {
           state.closed = true;
           state.idleTimer?.clear();
           state.idleTimer = null;
+          // Cancel any in-flight LLM fetch so runSafe returns promptly.
+          sessionAc.abort();
+          // Unblock callers awaiting send() or the answerPromise inside stream().
+          const closeErr = new Error("Session closed");
+          pendingResponses.forEach(({ reject }) => reject(closeErr));
           pendingResponses.clear();
+          // Unblock any for-await loops on chunk streams.
+          pendingStreams.forEach((q) => q.close());
           pendingStreams.clear();
           pendingSignals.clear();
           await config.hooks?.onClose?.();
