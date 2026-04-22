@@ -17,6 +17,8 @@ export interface LLMChatParams {
 export interface LLMUsage {
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
 }
 
 export type LLMFinishReason = "stop" | "tool_calls" | "length" | "error";

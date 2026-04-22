@@ -134,8 +134,12 @@ export interface AgentSession {
   /**
    * Send a task and receive the answer as a stream of token deltas.
    * Falls back to a single-chunk stream when the LLM adapter has no chatStream.
+   *
+   * Pass an AbortSignal to cancel the current LLM call mid-flight.
+   * The signal is propagated to the underlying fetch — the workflow completes
+   * the turn with an empty response so conversation history stays consistent.
    */
-  stream(task: string): AsyncIterable<string>;
+  stream(task: string, signal?: AbortSignal): AsyncIterable<string>;
   close(): Promise<void>;
 }
 
@@ -214,6 +218,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
       const clock = config.clock ?? SystemClock;
       const pendingResponses = new Map<number, (answer: string) => void>();
       const pendingStreams = new Map<number, (chunk: string | null) => void>();
+      const pendingSignals = new Map<number, AbortSignal>();
       let sessionTurn = 0;
       let closed = false;
       let idleTimer: TimerHandle | null = null;
@@ -280,6 +285,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               const toolDefs = buildToolDefs(toolMap);
 
               const response = yield* ctx.activity(`think-${turn}-${step}`, async () => {
+                const turnSignal = pendingSignals.get(turn);
                 const processorCtx = { step, turn, workflowId: ctx.workflowId };
                 const processedMessages = config.processors?.beforeLLM
                   ? await config.processors.beforeLLM(messages, processorCtx)
@@ -288,40 +294,54 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                 const chatParams = {
                   messages: processedMessages,
                   tools: toolDefs.length > 0 ? toolDefs : undefined,
+                  signal: turnSignal,
                 };
 
                 const pushChunk = pendingStreams.get(turn);
                 let raw: import("./llm-provider.ts").LLMResponse;
 
-                if (pushChunk && config.llm.chatStream) {
-                  let content = "";
-                  let finishReason: import("./llm-provider.ts").LLMFinishReason = "stop";
-                  let usage: import("./llm-provider.ts").LLMUsage | undefined;
-                  const toolCalls: import("./message.ts").ToolCall[] = [];
+                try {
+                  if (pushChunk && config.llm.chatStream) {
+                    let content = "";
+                    let finishReason: import("./llm-provider.ts").LLMFinishReason = "stop";
+                    let usage: import("./llm-provider.ts").LLMUsage | undefined;
+                    const toolCalls: import("./message.ts").ToolCall[] = [];
 
-                  for await (const chunk of config.llm.chatStream(chatParams)) {
-                    if (chunk.delta) {
-                      content += chunk.delta;
-                      pushChunk(chunk.delta);
+                    for await (const chunk of config.llm.chatStream(chatParams)) {
+                      if (chunk.delta) {
+                        content += chunk.delta;
+                        pushChunk(chunk.delta);
+                      }
+                      if (chunk.toolCalls) toolCalls.push(...chunk.toolCalls);
+                      if (chunk.finishReason) finishReason = chunk.finishReason;
+                      if (chunk.usage) usage = chunk.usage;
                     }
-                    if (chunk.toolCalls) toolCalls.push(...chunk.toolCalls);
-                    if (chunk.finishReason) finishReason = chunk.finishReason;
-                    if (chunk.usage) usage = chunk.usage;
-                  }
 
-                  raw = {
-                    content: content || null,
-                    toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-                    finishReason,
-                    usage,
-                  };
-                } else {
-                  const call = () => config.llm.chat(chatParams);
-                  raw = await (config.rateLimiter
-                    ? config.rateLimiter.withLimitAsync(call)
-                    : call());
-                  // Push full content so stream() callers get something even without chatStream
-                  if (pushChunk && raw.content) pushChunk(raw.content);
+                    raw = {
+                      content: content || null,
+                      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+                      finishReason,
+                      usage,
+                    };
+                  } else {
+                    const call = () => config.llm.chat(chatParams);
+                    raw = await (config.rateLimiter
+                      ? config.rateLimiter.withLimitAsync(call)
+                      : call());
+                    // Push full content so stream() callers get something even without chatStream
+                    if (pushChunk && raw.content) pushChunk(raw.content);
+                  }
+                } catch (err) {
+                  // When the caller aborts (Ctrl+C), treat it as an empty "stop" response so the
+                  // workflow completes the turn cleanly and conversation history stays consistent.
+                  if (turnSignal?.aborted || (err instanceof Error && err.name === "AbortError")) {
+                    return {
+                      content: null,
+                      toolCalls: undefined,
+                      finishReason: "stop" as const,
+                    } as import("./llm-provider.ts").LLMResponse;
+                  }
+                  throw err;
                 }
 
                 return config.processors?.afterLLM
@@ -402,6 +422,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               pendingResponses.get(turn)?.(answer);
               pendingResponses.delete(turn);
               pendingStreams.get(turn)?.(null); // null = end of stream
+              pendingSignals.delete(turn);
               return answer;
             });
 
@@ -475,9 +496,10 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
           return answer;
         },
 
-        async *stream(task: string): AsyncIterable<string> {
+        async *stream(task: string, signal?: AbortSignal): AsyncIterable<string> {
           if (closed) throw new Error("Session is closed");
           const turn = sessionTurn++;
+          if (signal) pendingSignals.set(turn, signal);
 
           const queue: Array<string | null> = [];
           let notify: (() => void) | null = null;
@@ -536,6 +558,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
           idleTimer = null;
           pendingResponses.clear();
           pendingStreams.clear();
+          pendingSignals.clear();
           await config.hooks?.onClose?.();
         },
       };

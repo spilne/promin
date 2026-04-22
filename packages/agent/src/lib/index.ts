@@ -45,7 +45,11 @@ export type { ApiKeyBootstrapConfig } from "./api-key-bootstrap.ts";
 
 export { createGetSecretTool, createSetSecretTool } from "./tools/secret-tools.ts";
 
-export { createSearchMemoryTool, createSaveMemoryTool, createMemoryTools } from "./tools/memory-tools.ts";
+export {
+  createSearchMemoryTool,
+  createSaveMemoryTool,
+  createMemoryTools,
+} from "./tools/memory-tools.ts";
 export type { MemoryToolConfig } from "./tools/memory-tools.ts";
 
 export { createLlmTool } from "./tools/llm-tool.ts";
@@ -63,6 +67,9 @@ export type { FilesystemToolsConfig, FilesystemTools } from "./tools/filesystem-
 
 export { createShellTool } from "./tools/shell-tool.ts";
 export type { ShellToolConfig } from "./tools/shell-tool.ts";
+
+export { createSchedulerTools } from "./tools/scheduler-tools.ts";
+export type { SchedulerToolsConfig } from "./tools/scheduler-tools.ts";
 
 export {
   InMemorySecretStore,

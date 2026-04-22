@@ -19,7 +19,7 @@
       "version": "0.0.1",
       "dependencies": {
         "fumadocs-core": "^16.0.0",
-        "fumadocs-mdx": "latest",
+        "fumadocs-mdx": "^14.2.13",
         "fumadocs-ui": "^16.0.0",
         "next": "^16.0.0",
         "react": "^19.0.0",
@@ -51,9 +51,22 @@
         "@types/bun": "catalog:",
       },
     },
+    "packages/agent": {
+      "name": "@promin/agent",
+      "version": "0.1.0",
+      "dependencies": {
+        "@promin/core": "workspace:*",
+        "@promin/workflow": "workspace:*",
+        "effect": "catalog:",
+        "zod": "catalog:",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+      },
+    },
     "packages/container": {
       "name": "@promin/container",
-      "version": "0.9.0",
+      "version": "0.1.0",
       "dependencies": {
         "@kubernetes/client-node": "^1.4.0",
         "@promin/core": "workspace:*",
@@ -65,7 +78,7 @@
     },
     "packages/core": {
       "name": "@promin/core",
-      "version": "0.9.0",
+      "version": "0.1.0",
       "dependencies": {
         "effect": "catalog:",
       },
@@ -75,7 +88,7 @@
     },
     "packages/data": {
       "name": "@promin/data",
-      "version": "0.9.0",
+      "version": "0.1.0",
       "dependencies": {
         "@promin/core": "workspace:*",
         "effect": "catalog:",
@@ -87,7 +100,7 @@
     },
     "packages/duckdb": {
       "name": "@promin/duckdb",
-      "version": "0.9.0",
+      "version": "0.1.0",
       "dependencies": {
         "@promin/core": "workspace:*",
         "@promin/data": "workspace:*",
@@ -100,7 +113,7 @@
     },
     "packages/http": {
       "name": "@promin/http",
-      "version": "0.9.0",
+      "version": "0.1.0",
       "dependencies": {
         "@effect/platform": "catalog:",
         "@promin/core": "workspace:*",
@@ -137,7 +150,7 @@
     },
     "packages/kafka": {
       "name": "@promin/kafka",
-      "version": "0.9.0",
+      "version": "0.1.0",
       "dependencies": {
         "@confluentinc/kafka-javascript": "^1.9.0",
         "@promin/core": "workspace:*",
@@ -149,7 +162,7 @@
     },
     "packages/postgres": {
       "name": "@promin/postgres",
-      "version": "0.9.0",
+      "version": "0.1.0",
       "dependencies": {
         "@promin/core": "workspace:*",
         "@promin/workflow": "workspace:*",
@@ -164,7 +177,7 @@
     },
     "packages/redis": {
       "name": "@promin/redis",
-      "version": "0.9.0",
+      "version": "0.1.0",
       "dependencies": {
         "@promin/core": "workspace:*",
         "@promin/workflow": "workspace:*",
@@ -182,7 +195,7 @@
     },
     "packages/topology": {
       "name": "@promin/topology",
-      "version": "0.9.0",
+      "version": "0.1.0",
       "dependencies": {
         "@promin/core": "workspace:*",
         "effect": "catalog:",
@@ -193,12 +206,23 @@
     },
     "packages/workflow": {
       "name": "@promin/workflow",
-      "version": "0.9.0",
+      "version": "0.1.0",
       "dependencies": {
         "@promin/core": "workspace:*",
         "croner": "^10.0.1",
         "effect": "catalog:",
         "rrule": "^2.8.1",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+      },
+    },
+    "packages/workflow-remote": {
+      "name": "@promin/workflow-remote",
+      "version": "0.1.0",
+      "dependencies": {
+        "@promin/core": "workspace:*",
+        "@promin/workflow": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "catalog:",
@@ -734,6 +758,8 @@
 
     "@platformatic/wasm-utils": ["@platformatic/wasm-utils@0.1.0", "", { "dependencies": { "@platformatic/dynamic-buffer": "^0.3.0" } }, "sha512-1fMkKsdud0pNlBh0JRELpWi3NE3/Kb0SCKR+5g2vH3ANDNlWDPJVDjNIJZYNdXA73yBfTVVve7xxBV22PUqZeg=="],
 
+    "@promin/agent": ["@promin/agent@workspace:packages/agent"],
+
     "@promin/container": ["@promin/container@workspace:packages/container"],
 
     "@promin/core": ["@promin/core@workspace:packages/core"],
@@ -759,6 +785,8 @@
     "@promin/topology": ["@promin/topology@workspace:packages/topology"],
 
     "@promin/workflow": ["@promin/workflow@workspace:packages/workflow"],
+
+    "@promin/workflow-remote": ["@promin/workflow-remote@workspace:packages/workflow-remote"],
 
     "@protobufjs/aspromise": ["@protobufjs/aspromise@1.1.2", "", {}, "sha512-j+gKExEuLmKwvz3OgROXtrJ2UG2x8Ch2YZUxahh+s1F2HZ+wAceUNLkvy6zKCPVRkU++ZWQrdxsUeQXmcg4uoQ=="],
 

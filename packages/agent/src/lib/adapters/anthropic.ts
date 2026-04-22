@@ -1,4 +1,10 @@
-import type { LLMProvider, LLMChatParams, LLMResponse, LLMStreamChunk, LLMFinishReason } from "../llm-provider.ts";
+import type {
+  LLMProvider,
+  LLMChatParams,
+  LLMResponse,
+  LLMStreamChunk,
+  LLMFinishReason,
+} from "../llm-provider.ts";
 import type { Message, ToolCall } from "../message.ts";
 
 interface AnthropicContentBlock {
@@ -14,7 +20,12 @@ interface AnthropicContentBlock {
 interface AnthropicResponse {
   content: AnthropicContentBlock[];
   stop_reason: string;
-  usage: { input_tokens: number; output_tokens: number };
+  usage: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
 }
 
 interface AnthropicMessage {
@@ -25,7 +36,13 @@ interface AnthropicMessage {
 // SSE event types for streaming
 interface SSEMessageStart {
   type: "message_start";
-  message: { usage: { input_tokens: number } };
+  message: {
+    usage: {
+      input_tokens: number;
+      cache_read_input_tokens?: number;
+      cache_creation_input_tokens?: number;
+    };
+  };
 }
 interface SSEContentBlockStart {
   type: "content_block_start";
@@ -42,7 +59,12 @@ interface SSEMessageDelta {
   delta: { stop_reason: string };
   usage: { output_tokens: number };
 }
-type SSEEvent = SSEMessageStart | SSEContentBlockStart | SSEContentBlockDelta | SSEMessageDelta | { type: string };
+type SSEEvent =
+  | SSEMessageStart
+  | SSEContentBlockStart
+  | SSEContentBlockDelta
+  | SSEMessageDelta
+  | { type: string };
 
 export interface AnthropicOptions {
   apiKey?: string;
@@ -56,19 +78,26 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
   const baseUrl = options.baseUrl ?? "https://api.anthropic.com";
 
   function buildBody(params: LLMChatParams, stream?: boolean): Record<string, unknown> {
-    const system = extractSystem(params.messages);
+    const systemText = extractSystem(params.messages);
     return {
       model,
       max_tokens: params.maxTokens ?? options.maxTokens ?? 4096,
       messages: toAnthropicMessages(params.messages),
-      ...(system ? { system } : {}),
+      // Cache the system prompt — same every turn, saves re-processing on each call.
+      ...(systemText
+        ? { system: [{ type: "text", text: systemText, cache_control: { type: "ephemeral" } }] }
+        : {}),
       ...(params.temperature !== undefined ? { temperature: params.temperature } : {}),
       ...(params.tools && params.tools.length > 0
         ? {
-            tools: params.tools.map((t) => ({
+            tools: params.tools.map((t, i) => ({
               name: t.name,
               description: t.description,
               input_schema: t.parameters,
+              // Cache after the last tool so the entire system+tools prefix is cached.
+              ...(i === (params.tools?.length ?? 0) - 1
+                ? { cache_control: { type: "ephemeral" } }
+                : {}),
             })),
           }
         : {}),
@@ -81,6 +110,7 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
       "content-type": "application/json",
       "x-api-key": apiKey ?? "",
       "anthropic-version": "2023-06-01",
+      "anthropic-beta": "prompt-caching-2024-07-31",
       ...options.defaultHeaders,
     };
   }
@@ -121,11 +151,16 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
       const toolBlocks = new Map<number, { id: string; name: string; inputJson: string }>();
       let inputTokens = 0;
       let outputTokens = 0;
+      let cacheReadTokens = 0;
+      let cacheWriteTokens = 0;
       let finishReason: LLMFinishReason = "stop";
 
       for await (const event of parseSSE(resp.body!)) {
         if (event.type === "message_start") {
-          inputTokens = (event as SSEMessageStart).message.usage.input_tokens;
+          const u = (event as SSEMessageStart).message.usage;
+          inputTokens = u.input_tokens;
+          cacheReadTokens = u.cache_read_input_tokens ?? 0;
+          cacheWriteTokens = u.cache_creation_input_tokens ?? 0;
         } else if (event.type === "content_block_start") {
           const e = event as SSEContentBlockStart;
           if (e.content_block.type === "text") {
@@ -170,7 +205,7 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
         delta: "",
         finishReason,
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-        usage: { inputTokens, outputTokens },
+        usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
       };
     },
   };
@@ -277,6 +312,8 @@ function parseAnthropicResponse(data: AnthropicResponse): LLMResponse {
     usage: {
       inputTokens: data.usage.input_tokens,
       outputTokens: data.usage.output_tokens,
+      cacheReadTokens: data.usage.cache_read_input_tokens ?? 0,
+      cacheWriteTokens: data.usage.cache_creation_input_tokens ?? 0,
     },
   };
 }

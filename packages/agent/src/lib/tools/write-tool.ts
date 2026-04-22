@@ -102,8 +102,15 @@ export function createWriteToolTool(
     execute: async ({ name, code, category }) => {
       const dir = category ? join(config.dir, category) : config.dir;
       await mkdir(dir, { recursive: true });
+
+      // Relative import paths need an extra ../ for each category nesting level
+      let finalCode = code;
+      if (category && importPath.startsWith(".")) {
+        finalCode = code.replaceAll(importPath, `../${importPath}`);
+      }
+
       const filePath = join(dir, `${name}.ts`);
-      await writeFile(filePath, code, "utf8");
+      await writeFile(filePath, finalCode, "utf8");
       const location = category ? `tools/${category}/${name}.ts` : `tools/${name}.ts`;
       return `Tool "${name}" written to ${location} and registered.`;
     },
