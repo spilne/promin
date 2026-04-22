@@ -240,17 +240,27 @@ let turnStep = 0;
 // Used to show all parallel tool names in the spinner label simultaneously.
 const activeToolCalls = new Map<string, { name: string; abbrevDim: string; startMs: number }>();
 let _callSeq = 0;
+let _liveRefresh: ReturnType<typeof setInterval> | null = null;
+
+// Warn in spinner after this many ms without completion.
+const HANG_WARN_MS = 30_000;
 
 function _refreshSpinner(): void {
   if (activeToolCalls.size === 0) {
     term.startSpinner(`thinking...  \x1b[2mstep ${turnStep + 1}\x1b[0m`);
     return;
   }
-  const labels = [...activeToolCalls.values()].map((e) => `→ ${e.name}${e.abbrevDim}`);
+  const now = Date.now();
+  const labels = [...activeToolCalls.values()].map((e) => {
+    const ms = now - e.startMs;
+    const elapsed = ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : "";
+    const warn = ms >= HANG_WARN_MS ? " \x1b[33m⚠ hanging?\x1b[0m" : "";
+    const suffix = elapsed ? `  \x1b[2m${elapsed}${warn}\x1b[0m` : warn;
+    return `→ ${e.name}${e.abbrevDim}${suffix}`;
+  });
   if (labels.length === 1) {
     term.startSpinner(labels[0]);
   } else {
-    // Show all parallel tools separated by  ║
     term.startSpinner(labels.join(`  \x1b[2m║\x1b[0m  `));
   }
 }
@@ -276,6 +286,7 @@ function withStatusTracking(registry: ToolRegistry): ToolRegistry {
               const startMs = Date.now();
               activeToolCalls.set(callId, { name, abbrevDim, startMs });
               _refreshSpinner();
+              if (!_liveRefresh) _liveRefresh = setInterval(_refreshSpinner, 1_000);
               let failed = false;
               try {
                 return await t.execute(input);
@@ -284,6 +295,10 @@ function withStatusTracking(registry: ToolRegistry): ToolRegistry {
                 throw err;
               } finally {
                 activeToolCalls.delete(callId);
+                if (activeToolCalls.size === 0 && _liveRefresh) {
+                  clearInterval(_liveRefresh);
+                  _liveRefresh = null;
+                }
                 const ms = Date.now() - startMs;
                 const elapsedStr = ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
                 if (failed) {

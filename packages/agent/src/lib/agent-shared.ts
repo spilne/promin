@@ -39,7 +39,12 @@ export async function executeToolCall(
   try {
     parsed = toolDef.parameters.parse(call.input);
   } catch (err) {
-    return { role: "tool", toolCallId: call.id, content: `Invalid input: ${formatToolError(err)}` };
+    const received = JSON.stringify(call.input ?? null);
+    return {
+      role: "tool",
+      toolCallId: call.id,
+      content: `Invalid input: ${formatToolError(err)}\nReceived: ${received}`,
+    };
   }
   try {
     // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime

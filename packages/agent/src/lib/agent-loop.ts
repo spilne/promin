@@ -32,6 +32,7 @@ export interface HooksAfterTurnParams {
   task: string;
   answer: string;
   messages: Message[];
+  usage: { inputTokens: number; outputTokens: number };
 }
 
 export interface HooksConfig {
@@ -179,6 +180,8 @@ export interface AgentSession {
   status(): Promise<AgentStatus>;
   /** Return the full conversation message history as of the last completed turn. */
   messages(): Message[];
+  /** Cumulative token usage for this session across all completed turns. */
+  usage(): { inputTokens: number; outputTokens: number };
   close(): Promise<void>;
 }
 
@@ -318,6 +321,9 @@ interface SessionState {
   latestMessages: Message[];
   idleStart: number;
   idleTimer: TimerHandle | null;
+  /** Cumulative token usage across all completed turns. */
+  totalInputTokens: number;
+  totalOutputTokens: number;
 }
 
 // ---- agentLoop ----
@@ -355,6 +361,8 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
         latestMessages: [],
         idleStart: 0,
         idleTimer: null,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
       };
 
       const resetIdleTimer = () => {
@@ -415,6 +423,8 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
 
             let answer = "";
             let hitStepLimit = true;
+            let turnInputTokens = 0;
+            let turnOutputTokens = 0;
 
             const toolMap = config.toolRegistry?.getTools() ?? config.tools ?? {};
             const toolDefs = buildToolDefs(toolMap);
@@ -433,6 +443,11 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                   signal: pendingSignals.get(turn),
                 }),
               );
+
+              if (response.usage) {
+                turnInputTokens += response.usage.inputTokens;
+                turnOutputTokens += response.usage.outputTokens;
+              }
 
               const assistantMsg: AssistantMessage = {
                 role: "assistant",
@@ -524,7 +539,14 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
             // intentional, because partial state would be misleading.
             yield* ctx.activity(`after-turn-${turn}`, async () => {
               state.latestMessages = messages;
-              await config.hooks?.afterTurn?.({ task, answer, messages });
+              state.totalInputTokens += turnInputTokens;
+              state.totalOutputTokens += turnOutputTokens;
+              await config.hooks?.afterTurn?.({
+                task,
+                answer,
+                messages,
+                usage: { inputTokens: turnInputTokens, outputTokens: turnOutputTokens },
+              });
             });
 
             // Compact if non-system messages exceed the threshold
@@ -748,6 +770,10 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
 
         messages(): Message[] {
           return state.latestMessages;
+        },
+
+        usage(): { inputTokens: number; outputTokens: number } {
+          return { inputTokens: state.totalInputTokens, outputTokens: state.totalOutputTokens };
         },
 
         async close() {
