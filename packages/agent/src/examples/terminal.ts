@@ -26,6 +26,40 @@ export interface TreeNode {
   expanded: boolean;
 }
 
+/**
+ * Renderer interface for agent UI output — the boundary between agent logic
+ * and any concrete display implementation (terminal, web, native, test stub).
+ *
+ * Covers the agent-facing surface only. Terminal-specific concerns
+ * (prompt animation, readline state flags) live on the Terminal subtype.
+ */
+export interface AgentUIRenderer {
+  /** Start or relabel the activity spinner. */
+  startSpinner(label: string): void;
+  /** Stop the spinner and erase the status line. Idempotent. */
+  stopSpinner(): void;
+  /** Milliseconds elapsed since the spinner started. 0 when not spinning. */
+  readonly elapsedMs: number;
+  /**
+   * Buffer a streaming text chunk for batched output.
+   * Coalesces chunks arriving in the same event-loop tick into one write.
+   */
+  writeChunk(s: string): void;
+  /** Flush any buffered chunks immediately. Call at end-of-stream. */
+  flushChunks(): void;
+  /**
+   * Print lines above the current spinner / prompt without disrupting the display.
+   * Safe to call at any time (scheduler ticks, Ctrl+C handlers, etc.).
+   */
+  printAbove(...lines: string[]): void;
+  /** Show a transient bordered pane. Resolves when the user dismisses it. */
+  showPane(title: string, lines: string[]): Promise<void>;
+  /** Show a keyboard-navigable tree pane. Resolves when the user dismisses it. */
+  showInteractiveTree(title: string, roots: TreeNode[]): Promise<void>;
+  /** Release all resources. Call on process / component exit. */
+  close(): void;
+}
+
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const FRAME_MS = 80;
 
@@ -49,7 +83,7 @@ const PROMPT_FRAME_MS = 600;
  *  Wrapped in RL_PROMPT_IGNORE markers so readline counts width correctly. */
 export const PROMPT = `\n${RI}${CLAY}${RE}❯❯${RI}${RST}${RE} `;
 
-export class Terminal {
+export class Terminal implements AgentUIRenderer {
   /** True while readline.question() is waiting for input. */
   inPrompt = false;
 
