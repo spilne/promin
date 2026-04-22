@@ -70,19 +70,29 @@ const term = new Terminal(rl);
 // ---- token usage tracking ----
 
 type Totals = { input: number; output: number; cacheRead: number; cacheWrite: number };
-const sessionUsage: Totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-let lastTurnUsage: Totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+const zeroTotals = (): Totals => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 
-function withUsageTracking(llm: LLMProvider): LLMProvider {
+const sessionUsage: Totals = zeroTotals();
+const sessionUsageByModel = new Map<string, Totals>();
+let lastTurnUsage: Totals = zeroTotals();
+let lastTurnByModel = new Map<string, Totals>();
+
+function withUsageTracking(llm: LLMProvider, label: string): LLMProvider {
   const add = (u: LLMUsage) => {
-    lastTurnUsage.input += u.inputTokens;
-    lastTurnUsage.output += u.outputTokens;
-    lastTurnUsage.cacheRead += u.cacheReadTokens ?? 0;
-    lastTurnUsage.cacheWrite += u.cacheWriteTokens ?? 0;
-    sessionUsage.input += u.inputTokens;
-    sessionUsage.output += u.outputTokens;
-    sessionUsage.cacheRead += u.cacheReadTokens ?? 0;
-    sessionUsage.cacheWrite += u.cacheWriteTokens ?? 0;
+    const addTo = (t: Totals) => {
+      t.input += u.inputTokens;
+      t.output += u.outputTokens;
+      t.cacheRead += u.cacheReadTokens ?? 0;
+      t.cacheWrite += u.cacheWriteTokens ?? 0;
+    };
+    addTo(lastTurnUsage);
+    addTo(sessionUsage);
+    const lt = lastTurnByModel.get(label) ?? zeroTotals();
+    addTo(lt);
+    lastTurnByModel.set(label, lt);
+    const sm = sessionUsageByModel.get(label) ?? zeroTotals();
+    addTo(sm);
+    sessionUsageByModel.set(label, sm);
   };
   const wrapped: LLMProvider = {
     chat: async (params) => {
@@ -122,6 +132,8 @@ function sessionTokensUsed(): number {
 function printUsage(): void {
   const t = lastTurnUsage;
   if (!t.input && !t.output) return;
+
+  // Turn summary line
   const parts: string[] = [`in ${fmtN(t.input)}`, `out ${fmtN(t.output)}`];
   if (t.cacheRead) parts.push(`cached ${fmtN(t.cacheRead)}`);
   if (t.cacheWrite) parts.push(`wrote ${fmtN(t.cacheWrite)}`);
@@ -131,6 +143,17 @@ function printUsage(): void {
     : `${fmtN(used)} tokens`;
   parts.push(`·  session ${budgetStr}`);
   process.stdout.write(`\x1b[2m  ${parts.join("  ")}\x1b[0m\n`);
+
+  // Per-model session breakdown (only when more than one model has been used)
+  if (sessionUsageByModel.size > 1) {
+    const labelWidth = Math.max(...[...sessionUsageByModel.keys()].map((k) => k.length));
+    for (const [label, m] of sessionUsageByModel) {
+      if (!m.input && !m.output) continue;
+      const mp: string[] = [`in ${fmtN(m.input)}`, `out ${fmtN(m.output)}`];
+      if (m.cacheRead) mp.push(`cached ${fmtN(m.cacheRead)}`);
+      process.stdout.write(`\x1b[2m    ${label.padEnd(labelWidth)}  ${mp.join("  ")}\x1b[0m\n`);
+    }
+  }
 }
 
 function ask(question: string): Promise<string> {
@@ -470,7 +493,7 @@ const subagentSystemPrompt = `You are a focused sub-agent. Be concise and task-f
 // claudeAgent: parallel Claude Sonnet sub-agent — delegates independent subtasks.
 staticTools.claudeAgent = createAgentTool({
   runner,
-  llm: anthropic("claude-sonnet-4-6", { apiKey }),
+  llm: withUsageTracking(anthropic("claude-sonnet-4-6", { apiKey }), "claude-sonnet-4-6"),
   name: "claudeAgent",
   description:
     "Delegate a task to a parallel Claude (Sonnet) sub-agent with filesystem, shell, memory, and chatGPT access. Use to parallelise independent subtasks or run deep research alongside the main thread.",
@@ -500,7 +523,7 @@ const lazyOpenAI: LLMProvider = {
 
 staticTools.gptAgent = createAgentTool({
   runner,
-  llm: lazyOpenAI,
+  llm: withUsageTracking(lazyOpenAI, "gpt-4o"),
   name: "gptAgent",
   description:
     "Delegate a task to a parallel GPT-4o sub-agent with filesystem, shell, memory, and chatGPT access. Use for a second opinion, different reasoning style, or to parallelise work.",
@@ -535,7 +558,7 @@ let sessionIdSeq = 0;
 async function makeAgentSession(id: string) {
   return agentLoop({
     name: "console-agent",
-    llm: withUsageTracking(anthropic("claude-sonnet-4-6", { apiKey })),
+    llm: withUsageTracking(anthropic("claude-sonnet-4-6", { apiKey }), "claude-sonnet-4-6"),
     toolRegistry: withStatusTracking(mergedRegistry),
     rateLimiter,
     systemPrompt: SYSTEM_PROMPT,
@@ -781,11 +804,10 @@ function prompt() {
         session = await makeAgentSession(`session-${++sessionIdSeq}`);
         sessionRef = session;
         turn = 0;
-        sessionUsage.input = 0;
-        sessionUsage.output = 0;
-        sessionUsage.cacheRead = 0;
-        sessionUsage.cacheWrite = 0;
-        lastTurnUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+        Object.assign(sessionUsage, zeroTotals());
+        sessionUsageByModel.clear();
+        lastTurnUsage = zeroTotals();
+        lastTurnByModel = new Map();
         term.printAbove(
           "\x1b[2mConversation cleared — new session started. Memories persist.\x1b[0m",
         );
@@ -922,7 +944,8 @@ function prompt() {
           sessionUsage.output = 0;
           sessionUsage.cacheRead = 0;
           sessionUsage.cacheWrite = 0;
-          lastTurnUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+          lastTurnUsage = zeroTotals();
+          lastTurnByModel = new Map();
           process.stdout.write(
             "\x1b[2m  Session automatically cleared. Memories persist.\x1b[0m\n",
           );
