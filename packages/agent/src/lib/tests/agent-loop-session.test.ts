@@ -89,6 +89,77 @@ describe("agentLoop session", () => {
     session.close();
   });
 
+  it("returns tool error to LLM when input validation fails", async () => {
+    const strictTool = tool({
+      name: "strict",
+      description: "Requires a prompt string",
+      parameters: z.object({ prompt: z.string() }),
+      execute: async ({ prompt }) => `result: ${prompt}`,
+    });
+
+    let toolResultContent = "";
+    const session = await makeSession({
+      name: "validation-error-session",
+      llm: {
+        chat: async (params) => {
+          const toolResult = params.messages.find((m: any) => m.role === "tool");
+          if (toolResult) {
+            toolResultContent = (toolResult as any).content;
+            return { content: "I see an error occurred.", finishReason: "stop" };
+          }
+          // LLM sends invalid input — missing required `prompt`
+          return {
+            content: null,
+            finishReason: "tool_calls",
+            toolCalls: [{ id: "tc-bad", name: "strict", input: {} }],
+          };
+        },
+      },
+      tools: { strict: strictTool },
+    });
+
+    const answer = await session.send("call strict tool badly");
+    expect(answer).toBe("I see an error occurred.");
+    expect(toolResultContent).toContain("Error");
+    session.close();
+  });
+
+  it("returns tool error to LLM when execute throws", async () => {
+    const faultyTool = tool({
+      name: "faulty",
+      description: "Always throws",
+      parameters: z.object({ x: z.string() }),
+      execute: async () => {
+        throw new Error("upstream service unavailable");
+      },
+    });
+
+    let toolResultContent = "";
+    const session = await makeSession({
+      name: "execute-error-session",
+      llm: {
+        chat: async (params) => {
+          const toolResult = params.messages.find((m: any) => m.role === "tool");
+          if (toolResult) {
+            toolResultContent = (toolResult as any).content;
+            return { content: "Tool failed.", finishReason: "stop" };
+          }
+          return {
+            content: null,
+            finishReason: "tool_calls",
+            toolCalls: [{ id: "tc-faulty", name: "faulty", input: { x: "anything" } }],
+          };
+        },
+      },
+      tools: { faulty: faultyTool },
+    });
+
+    const answer = await session.send("run faulty tool");
+    expect(answer).toBe("Tool failed.");
+    expect(toolResultContent).toContain("upstream service unavailable");
+    session.close();
+  });
+
   it("handles unknown tool gracefully", async () => {
     let lastMessages: unknown[] = [];
 

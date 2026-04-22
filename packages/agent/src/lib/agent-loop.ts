@@ -427,15 +427,24 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                 const results = yield* ctx.parallel(
                   toExecute.map(({ call, toolDef }) =>
                     ctx.activity(`tool-${call.name}-${turn}-${step}-${call.id}`, async () => {
-                      const parsed = toolDef.parameters.parse(call.input);
-                      // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
-                      const output = await toolDef.execute(parsed as any);
-                      const content = toolDef.toModelOutput
-                        ? toolDef.toModelOutput(output)
-                        : typeof output === "string"
-                          ? output
-                          : JSON.stringify(output);
-                      return { role: "tool" as const, toolCallId: call.id, content };
+                      try {
+                        const parsed = toolDef.parameters.parse(call.input);
+                        // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
+                        const output = await toolDef.execute(parsed as any);
+                        const content = toolDef.toModelOutput
+                          ? toolDef.toModelOutput(output)
+                          : typeof output === "string"
+                            ? output
+                            : JSON.stringify(output);
+                        return { role: "tool" as const, toolCallId: call.id, content };
+                      } catch (err) {
+                        const message = err instanceof Error ? err.message : String(err);
+                        return {
+                          role: "tool" as const,
+                          toolCallId: call.id,
+                          content: `Error: ${message}`,
+                        };
+                      }
                     }),
                   ),
                 );
