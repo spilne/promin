@@ -15,6 +15,7 @@ export type {
   AgentLoopConfig,
   AgentSession,
   AgentLoop,
+  AgentStatus,
   ContextConfig,
   MemoryConfig,
   HooksConfig,

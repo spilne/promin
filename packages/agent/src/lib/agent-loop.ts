@@ -129,6 +129,14 @@ export interface AgentLoopConfig {
   compactionLlm?: LLMProvider;
 }
 
+/**
+ * Current processing state of the session.
+ * - `"idle"` — waiting for the next `send()` / `stream()` call.
+ * - `"thinking"` — LLM call or tool execution in progress.
+ * - `"waiting_approval"` — suspended mid-turn waiting for `approve()` / `reject()`.
+ */
+export type AgentStatus = "idle" | "thinking" | "waiting_approval";
+
 export interface AgentSession {
   send(task: string): Promise<string>;
   /**
@@ -140,6 +148,20 @@ export interface AgentSession {
    * the turn with an empty response so conversation history stays consistent.
    */
   stream(task: string, signal?: AbortSignal): AsyncIterable<string>;
+  /**
+   * Approve a pending tool call that has `requireApproval: true`.
+   * Resumes the workflow from the approval gate.
+   */
+  approve(toolCallId: string): Promise<void>;
+  /**
+   * Reject a pending tool call. The agent receives the rejection as a tool
+   * result and continues its turn without executing the tool.
+   */
+  reject(toolCallId: string, reason?: string): Promise<void>;
+  /** Query the current processing state of this session. */
+  status(): Promise<AgentStatus>;
+  /** Return the full conversation message history as of the last completed turn. */
+  messages(): Message[];
   close(): Promise<void>;
 }
 
@@ -222,6 +244,9 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
       let sessionTurn = 0;
       let closed = false;
       let idleTimer: TimerHandle | null = null;
+      let inTurn = false;
+      let inDelivery = false;
+      let latestMessages: Message[] = [];
       let idleStart = 0;
 
       const resetIdleTimer = () => {
@@ -426,12 +451,11 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               return answer;
             });
 
-            // afterTurn hook — logging, memory writes, analytics
-            if (config.hooks?.afterTurn) {
-              yield* ctx.activity(`after-turn-${turn}`, () =>
-                config.hooks!.afterTurn!({ task, answer, messages }),
-              );
-            }
+            // afterTurn hook — capture messages + user hook (logging, memory writes, analytics)
+            yield* ctx.activity(`after-turn-${turn}`, async () => {
+              latestMessages = messages;
+              await config.hooks?.afterTurn?.({ task, answer, messages });
+            });
 
             // Compact if non-system messages exceed the threshold
             const nonSystemCount = messages.filter((m) => m.role !== "system").length;
@@ -490,8 +514,12 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
           if (closed) throw new Error("Session is closed");
           const turn = sessionTurn++;
           const promise = new Promise<string>((resolve) => pendingResponses.set(turn, resolve));
+          inTurn = true;
+          inDelivery = true;
           await deliverAndRun(task, turn);
+          inDelivery = false;
           const answer = await promise;
+          inTurn = false;
           resetIdleTimer();
           return answer;
         },
@@ -529,6 +557,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
             input: undefined,
           });
 
+          inTurn = true;
           try {
             outer: while (true) {
               while (queue.length > 0) {
@@ -545,11 +574,55 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               if (item !== null) yield item;
             }
           } finally {
+            inTurn = false;
             pendingStreams.delete(turn);
             await runPromise;
             await answerPromise;
             resetIdleTimer();
           }
+        },
+
+        async approve(toolCallId: string): Promise<void> {
+          await completeSignal({
+            storage: journalStorage,
+            workflowId: sessionId,
+            stepName: "conversation",
+            signalName: `approve:${toolCallId}`,
+            value: { approved: true },
+          });
+          await runner.runSafe({
+            workflow: builtWorkflow,
+            workflowId: sessionId,
+            input: undefined,
+          });
+        },
+
+        async reject(toolCallId: string, reason?: string): Promise<void> {
+          await completeSignal({
+            storage: journalStorage,
+            workflowId: sessionId,
+            stepName: "conversation",
+            signalName: `approve:${toolCallId}`,
+            value: { approved: false, reason },
+          });
+          await runner.runSafe({
+            workflow: builtWorkflow,
+            workflowId: sessionId,
+            input: undefined,
+          });
+        },
+
+        async status(): Promise<AgentStatus> {
+          if (closed || !inTurn) return "idle";
+          if (inDelivery) return "thinking";
+          const info = await runner.getStatus(sessionId, {});
+          if (!info || info.state === "completed" || info.state === "failed") return "idle";
+          if (info.state === "suspended") return "waiting_approval";
+          return "thinking";
+        },
+
+        messages(): Message[] {
+          return latestMessages;
         },
 
         async close() {
