@@ -50,7 +50,6 @@ import type { TreeNode } from "./terminal.ts";
 import type { LLMProvider, LLMUsage } from "../lib/llm-provider.ts";
 import type { ToolRegistry } from "../lib/tool-registry.ts";
 import type { AgentTool } from "../lib/tool.ts";
-import type { Message } from "../lib/message.ts";
 import { z } from "zod";
 
 const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -62,7 +61,7 @@ if (!apiKey) {
 const workspace = process.env.AGENT_WORKSPACE ?? process.cwd();
 
 // readline
-const rl = createInterface({ input: process.stdin, output: process.stdout });
+const rl = createInterface({ input: process.stdin, output: process.stdout, historySize: 100 });
 const term = new Terminal(rl);
 
 // ---- token usage tracking ----
@@ -202,7 +201,40 @@ async function* abortable(
   // Intentionally NOT calling iter.return() — lets background workflow finish on its own.
 }
 
-// Wraps every tool's execute to show its name in the spinner while it runs.
+// Picks the most human-readable value from a tool's input for spinner display.
+const ABBREV_PRIORITY = [
+  "command",
+  "cmd",
+  "path",
+  "file",
+  "url",
+  "query",
+  "expression",
+  "text",
+  "message",
+  "content",
+  "name",
+  "prompt",
+  "input",
+];
+function abbrevInput(input: Record<string, unknown>): string {
+  for (const key of ABBREV_PRIORITY) {
+    if (key in input && typeof input[key] === "string") {
+      const v = input[key] as string;
+      return v.length > 42 ? `${v.slice(0, 39)}…` : v;
+    }
+  }
+  for (const v of Object.values(input)) {
+    if (typeof v === "string") return v.length > 42 ? `${v.slice(0, 39)}…` : v;
+  }
+  return "";
+}
+
+// Counts completed tool calls in the current turn (reset before each stream()).
+let turnStep = 0;
+
+// Wraps every tool's execute to show name + abbreviated input in the spinner,
+// then prints a one-line summary above the prompt when the call finishes.
 // biome-ignore lint/suspicious/noExplicitAny: preserves runtime behavior
 function withStatusTracking(registry: ToolRegistry): ToolRegistry {
   return {
@@ -215,12 +247,26 @@ function withStatusTracking(registry: ToolRegistry): ToolRegistry {
             ...t,
             // biome-ignore lint/suspicious/noExplicitAny: runtime-validated by Zod in agentAction
             execute: async (input: any) => {
-              term.startSpinner(`→ ${name}`);
+              const abbrev = abbrevInput(input ?? {});
+              const abbrevDim = abbrev ? `  \x1b[2m${abbrev}\x1b[0m` : "";
+              term.startSpinner(`→ ${name}${abbrevDim}`);
+              let failed = false;
               try {
                 return await t.execute(input);
+              } catch (err) {
+                failed = true;
+                throw err;
               } finally {
+                const ms = term.elapsedMs;
+                const elapsedStr = ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+                if (failed) {
+                  term.printAbove(`\x1b[31m✗ ${name}${abbrevDim}  failed  (${elapsedStr})\x1b[0m`);
+                } else {
+                  term.printAbove(`\x1b[2m✓ ${name}${abbrevDim}  (${elapsedStr})\x1b[0m`);
+                }
+                turnStep++;
                 term.stopSpinner();
-                term.startSpinner("thinking...");
+                term.startSpinner(`thinking...  \x1b[2mstep ${turnStep + 1}\x1b[0m`);
               }
             },
           } as AgentTool<any, any>,
@@ -369,38 +415,57 @@ const rateLimiter = rateLimitRpm
   ? PipelineRateLimiter.make({ limit: rateLimitRpm, windowMs: 60_000, strategy: "sliding-window" })
   : undefined;
 
-const session = await agentLoop({
-  name: "console-agent",
-  llm: withUsageTracking(anthropic("claude-sonnet-4-6", { apiKey })),
-  toolRegistry: withStatusTracking(mergedRegistry),
-  rateLimiter,
-  autoApprove: true,
-  systemPrompt: [
-    "You are a helpful assistant in an interactive console. Be concise.",
-    "IMPORTANT: After every tool call (or sequence of tool calls), always write a brief text",
-    "reply confirming what was done. Never end a turn silently — the user cannot see tool results.",
-    `Workspace: ${workspace}`,
-    "Tools: readFile, writeFile, listDir, statFile (filesystem), shell (run commands),",
-    "       searchMemory, saveMemory (long-term memory), chatGPT (delegate to GPT-4o),",
-    "       scheduleTask, listSchedules, cancelSchedule (recurring tasks),",
-    "       writeTool (create new tools at runtime), requireSecret (prompt user for API keys).",
-    "Never ask for secrets in chat — always use requireSecret.",
-  ].join("\n"),
-  memory: { store: memoryStore },
-}).session({ runner, sessionId: "session" });
+const SYSTEM_PROMPT = [
+  "You are a helpful assistant in an interactive console. Be concise.",
+  "IMPORTANT: After every tool call (or sequence of tool calls), always write a brief text",
+  "reply confirming what was done. Never end a turn silently — the user cannot see tool results.",
+  `Workspace: ${workspace}`,
+  "Tools: readFile, writeFile, listDir, statFile (filesystem), shell (run commands),",
+  "       searchMemory, saveMemory (long-term memory), chatGPT (delegate to GPT-4o),",
+  "       scheduleTask, listSchedules, cancelSchedule (recurring tasks),",
+  "       writeTool (create new tools at runtime), requireSecret (prompt user for API keys).",
+  "Never ask for secrets in chat — always use requireSecret.",
+].join("\n");
 
+let sessionIdSeq = 0;
+
+async function makeAgentSession(id: string) {
+  return agentLoop({
+    name: "console-agent",
+    llm: withUsageTracking(anthropic("claude-sonnet-4-6", { apiKey })),
+    toolRegistry: withStatusTracking(mergedRegistry),
+    rateLimiter,
+    systemPrompt: SYSTEM_PROMPT,
+    memory: { store: memoryStore },
+    hooks: {
+      onApprovalRequired: async (call) => {
+        term.stopSpinner();
+        const abbrev = abbrevInput((call.input as Record<string, unknown>) ?? {});
+        const answer = await ask(
+          `Allow tool "${call.name}"${abbrev ? `  (${abbrev})` : ""}? [y/n]`,
+        );
+        const approved = answer.toLowerCase().startsWith("y");
+        if (!approved) term.startSpinner("thinking...");
+        return { approved };
+      },
+    },
+  }).session({ runner, sessionId: id });
+}
+
+let session = await makeAgentSession("session");
 sessionRef = session;
 
 // ---- command pane builders ----
 // Each returns string[] so command handlers can pass to term.showPane().
 
-let history: Message[] = [];
-
 function buildHistory(): string[] {
-  if (!history.length) return ["(no history yet)"];
+  const msgs = session.messages();
+  if (!msgs.length) return ["(no history yet)"];
   const lines: string[] = [];
-  for (const m of history) {
-    if (m.role === "user") {
+  for (const m of msgs) {
+    if (m.role === "system") {
+      lines.push("", "\x1b[2m[system]\x1b[0m", m.content ?? "");
+    } else if (m.role === "user") {
       lines.push("", "\x1b[2m[user]\x1b[0m", m.content ?? "");
     } else if (m.role === "assistant") {
       if (m.content) lines.push("", "\x1b[2m[assistant]\x1b[0m", m.content);
@@ -410,7 +475,7 @@ function buildHistory(): string[] {
       lines.push("", `\x1b[2m[result: ${m.toolCallId?.slice(0, 8)}]\x1b[0m`, m.content ?? "");
     }
   }
-  lines.push("", `\x1b[2m${history.length} messages\x1b[0m`);
+  lines.push("", `\x1b[2m${msgs.length} messages\x1b[0m`);
   return lines;
 }
 
@@ -547,131 +612,235 @@ rl.on("SIGINT", () => {
 let turn = 0;
 
 function prompt() {
-  rl.question(PROMPT, async (line) => {
-    term.inPrompt = false;
-    term.stopPromptAnimation();
-    const input = line.trim();
-    if (!input) return prompt();
+  const parts: string[] = [];
 
-    if (input === "exit" || input === "quit") {
-      await session.close();
-      mergedRegistry.close();
-      term.close();
-      return rl.close();
-    }
-
-    // Display commands — shown as transient panes that erase on dismiss.
-    if (input === "/history") {
-      await term.showPane("history", buildHistory());
-      return prompt();
-    }
-    if (input === "/steps") {
-      await term.showInteractiveTree("steps", await buildStepsTree());
-      return prompt();
-    }
-    if (input === "/state") {
-      await term.showPane("state", await buildAgentState());
-      return prompt();
-    }
-    if (input === "/tools") {
-      await term.showPane(
-        "tools",
-        Object.keys(mergedRegistry.getTools()).map((n) => `  ${n}`),
-      );
-      return prompt();
-    }
-    if (input === "/schedules") {
-      await term.showPane("schedules", buildSchedules());
-      return prompt();
-    }
-    if (input.startsWith("/memories")) {
-      const q = input.slice("/memories".length).trim();
-      await term.showPane(`memories${q ? ` · "${q}"` : ""}`, await buildMemories(q || undefined));
-      return prompt();
-    }
-
-    // Action commands — inline confirmation, no pane.
-    if (input.startsWith("/remember ")) {
-      const text = input.slice("/remember ".length).trim();
-      if (text) {
-        const id = await memoryStore.save({ content: text });
-        console.log(`\n\x1b[2mSaved ${id.slice(0, 8)}: "${text}"\x1b[0m\n`);
+  function readLine(isFirst: boolean): void {
+    rl.question(isFirst ? PROMPT : "... ", async (line) => {
+      if (isFirst) {
+        term.inPrompt = false;
+        term.stopPromptAnimation();
       }
-      return prompt();
-    }
-    if (input.startsWith("/cancel-schedule ")) {
-      const id = input.slice("/cancel-schedule ".length).trim();
-      scheduler.unregister(id);
-      activeTicks.delete(id);
-      console.log(`\n\x1b[2mCancelled schedule "${id}"\x1b[0m\n`);
-      return prompt();
-    }
-    if (input.startsWith("/pause-schedule ")) {
-      const id = input.slice("/pause-schedule ".length).trim();
-      scheduler.pause(id);
-      console.log(`\n\x1b[2mPaused schedule "${id}"\x1b[0m\n`);
-      return prompt();
-    }
 
-    await agentMachine.send({ id: "session", event: "message", data: { turn, task: input } });
-
-    if (tokenBudget && sessionTokensUsed() >= tokenBudget) {
-      const used = fmtN(sessionTokensUsed());
-      process.stdout.write(
-        `\n\x1b[33m  Token budget exhausted (${used} / ${fmtN(tokenBudget)}). Start a new session to continue.\x1b[0m\n`,
-      );
-      return prompt();
-    }
-
-    const ac = new AbortController();
-    currentAc = ac;
-    lastTurnUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-    term.suppress = false;
-    term.startSpinner("thinking...");
-    term.agentHasTextOnLine = false;
-
-    let answer = "";
-    let labelShown = false;
-    for await (const chunk of abortable(session.stream(input, ac.signal), ac.signal)) {
-      term.stopSpinner();
-      if (!labelShown) {
-        process.stdout.write("Agent: ");
-        labelShown = true;
+      // Multi-line continuation: trailing backslash collects more lines.
+      if (line.endsWith("\\")) {
+        parts.push(line.slice(0, -1));
+        readLine(false);
+        return;
       }
-      process.stdout.write(chunk);
-      term.agentHasTextOnLine = true;
-      answer += chunk;
-    }
 
-    currentAc = null;
-    term.stopSpinner();
+      parts.push(line);
+      const input = parts.join("\n").trim();
+      parts.length = 0;
 
-    if (ac.signal.aborted) {
+      if (!input) return prompt();
+
+      if (input === "exit" || input === "quit") {
+        await session.close();
+        mergedRegistry.close();
+        term.close();
+        return rl.close();
+      }
+
+      // Display commands — shown as transient panes that erase on dismiss.
+      if (input === "/help") {
+        await term.showPane("help", [
+          "  /history                  — conversation messages (full session truth)",
+          "  /clear                    — start a new conversation (memories persist)",
+          "  /steps                    — workflow step tree",
+          "  /state                    — agent lifecycle state machine",
+          "  /tools                    — loaded tools",
+          "  /memories [query]         — search memories (omit query to list all)",
+          "  /remember <text>          — save a memory directly",
+          "  /schedules                — list active schedules",
+          "  /cancel-schedule <id>     — immediately cancel a schedule",
+          "  /pause-schedule <id>      — pause a schedule",
+          "  /help                     — show this help",
+          "  exit                      — quit",
+          "",
+          "  Multi-line input: end a line with \\ to continue on the next line.",
+          "  Ctrl+C during a turn: interrupt (background run continues).",
+          "  Ctrl+C at prompt: exit.",
+        ]);
+        return prompt();
+      }
+      if (input === "/clear") {
+        await session.close();
+        session = await makeAgentSession(`session-${++sessionIdSeq}`);
+        sessionRef = session;
+        turn = 0;
+        sessionUsage.input = 0;
+        sessionUsage.output = 0;
+        sessionUsage.cacheRead = 0;
+        sessionUsage.cacheWrite = 0;
+        lastTurnUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+        term.printAbove(
+          "\x1b[2mConversation cleared — new session started. Memories persist.\x1b[0m",
+        );
+        return prompt();
+      }
+      if (input === "/history") {
+        await term.showPane("history", buildHistory());
+        return prompt();
+      }
+      if (input === "/steps") {
+        await term.showInteractiveTree("steps", await buildStepsTree());
+        return prompt();
+      }
+      if (input === "/state") {
+        await term.showPane("state", await buildAgentState());
+        return prompt();
+      }
+      if (input === "/tools") {
+        await term.showPane(
+          "tools",
+          Object.keys(mergedRegistry.getTools()).map((n) => `  ${n}`),
+        );
+        return prompt();
+      }
+      if (input === "/schedules") {
+        await term.showPane("schedules", buildSchedules());
+        return prompt();
+      }
+      if (input.startsWith("/memories")) {
+        const q = input.slice("/memories".length).trim();
+        await term.showPane(`memories${q ? ` · "${q}"` : ""}`, await buildMemories(q || undefined));
+        return prompt();
+      }
+
+      // Action commands — inline confirmation, no pane.
+      if (input.startsWith("/remember ")) {
+        const text = input.slice("/remember ".length).trim();
+        if (text) {
+          const id = await memoryStore.save({ content: text });
+          console.log(`\n\x1b[2mSaved ${id.slice(0, 8)}: "${text}"\x1b[0m\n`);
+        }
+        return prompt();
+      }
+      if (input.startsWith("/cancel-schedule ")) {
+        const id = input.slice("/cancel-schedule ".length).trim();
+        scheduler.unregister(id);
+        activeTicks.delete(id);
+        console.log(`\n\x1b[2mCancelled schedule "${id}"\x1b[0m\n`);
+        return prompt();
+      }
+      if (input.startsWith("/pause-schedule ")) {
+        const id = input.slice("/pause-schedule ".length).trim();
+        scheduler.pause(id);
+        console.log(`\n\x1b[2mPaused schedule "${id}"\x1b[0m\n`);
+        return prompt();
+      }
+
+      await agentMachine.send({ id: "session", event: "message", data: { turn, task: input } });
+
+      if (tokenBudget && sessionTokensUsed() >= tokenBudget) {
+        const used = fmtN(sessionTokensUsed());
+        process.stdout.write(
+          `\n\x1b[33m  Token budget exhausted (${used} / ${fmtN(tokenBudget)}). Start a new session to continue.\x1b[0m\n`,
+        );
+        return prompt();
+      }
+
+      const ac = new AbortController();
+      currentAc = ac;
+      lastTurnUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+      turnStep = 0;
+      term.suppress = false;
+      term.startSpinner("thinking...");
       term.agentHasTextOnLine = false;
-      await agentMachine.send({ id: "session", event: "done" }).catch(() => {});
-      prompt();
-      return;
-    }
 
-    process.stdout.write("\n");
-    printUsage();
-    term.agentHasTextOnLine = false;
-    history.push(
-      { role: "user", content: input },
-      { role: "assistant", content: answer, toolCalls: undefined },
-    );
-    turn++;
-    await agentMachine.send({ id: "session", event: "done" });
-    prompt();
-  });
-  term.inPrompt = true;
-  term.startPromptAnimation();
+      let answer = "";
+      let labelShown = false;
+      let streamError: Error | undefined;
+      try {
+        for await (const chunk of abortable(session.stream(input, ac.signal), ac.signal)) {
+          term.stopSpinner();
+          if (!labelShown) {
+            process.stdout.write("Agent: ");
+            labelShown = true;
+          }
+          process.stdout.write(chunk);
+          term.agentHasTextOnLine = true;
+          answer += chunk;
+        }
+      } catch (err) {
+        streamError = err instanceof Error ? err : new Error(String(err));
+      }
+
+      currentAc = null;
+      term.stopSpinner();
+
+      if (ac.signal.aborted) {
+        term.agentHasTextOnLine = false;
+        await agentMachine.send({ id: "session", event: "done" }).catch(() => {});
+        prompt();
+        return;
+      }
+
+      if (streamError) {
+        if (term.agentHasTextOnLine) process.stdout.write("\n");
+        term.agentHasTextOnLine = false;
+
+        // "Prompt too long" errors leave the workflow permanently stuck at the
+        // failing think activity — replaying the same poisoned history every time.
+        // Auto-clear so the user can continue without having to know about /clear.
+        const contextFull =
+          streamError.message.includes("prompt is too long") ||
+          streamError.message.includes("context_length_exceeded") ||
+          streamError.message.includes("maximum context");
+
+        if (contextFull) {
+          process.stdout.write(
+            "\x1b[31mContext window full — conversation history is too large to continue.\x1b[0m\n",
+          );
+          await session.close();
+          session = await makeAgentSession(`session-${++sessionIdSeq}`);
+          sessionRef = session;
+          turn = 0;
+          sessionUsage.input = 0;
+          sessionUsage.output = 0;
+          sessionUsage.cacheRead = 0;
+          sessionUsage.cacheWrite = 0;
+          lastTurnUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+          process.stdout.write(
+            "\x1b[2m  Session automatically cleared. Memories persist.\x1b[0m\n",
+          );
+        } else {
+          process.stdout.write(`\x1b[31mError: ${streamError.message}\x1b[0m\n`);
+        }
+
+        await agentMachine.send({ id: "session", event: "done" }).catch(() => {});
+        prompt();
+        return;
+      }
+
+      process.stdout.write("\n");
+      printUsage();
+      if (tokenBudget) {
+        const used = sessionTokensUsed();
+        const pct = used / tokenBudget;
+        if (pct >= 0.8 && pct < 1.0) {
+          term.printAbove(
+            `\x1b[33m  Token budget ${Math.round(pct * 100)}% used — ${fmtN(tokenBudget - used)} remaining\x1b[0m`,
+          );
+        }
+      }
+      term.agentHasTextOnLine = false;
+      turn++;
+      await agentMachine.send({ id: "session", event: "done" });
+      prompt();
+    });
+
+    if (isFirst) {
+      term.inPrompt = true;
+      term.startPromptAnimation();
+    }
+  }
+
+  readLine(true);
 }
 
 console.log(
   `\nConsole agent  workspace=${workspace}  tools=${Object.keys(staticTools).join(", ")}`,
 );
-console.log(
-  `Commands: /history /steps /state /tools /memories [q] /remember <text> /schedules /cancel-schedule <id> exit\n`,
-);
+console.log(`Type /help for commands. Use \\ at line end for multi-line input.\n`);
 prompt();

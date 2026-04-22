@@ -318,6 +318,11 @@ export class Terminal {
     }
   }
 
+  /** Milliseconds elapsed since the spinner started. 0 when the spinner is not running. */
+  get elapsedMs(): number {
+    return this._timer ? Date.now() - this._startMs : 0;
+  }
+
   /** Release all timers. Call on process exit. */
   close(): void {
     this.stopSpinner();
