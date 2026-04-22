@@ -6,6 +6,7 @@
  *   AGENT_WORKSPACE=/path/to/project ...    (default: cwd)
  *   RATE_LIMIT_RPM=10 ...                   (max LLM calls per minute)
  *   SESSION_TOKEN_BUDGET=100000 ...         (session token cap; blocks new turns when exhausted)
+ *   TOOL_AUTO_APPROVE=true ...              (skip approval prompts; same as /approve-all)
  *
  * Commands:
  *   /history                  — conversation messages
@@ -17,6 +18,7 @@
  *   /schedules                — list active schedules
  *   /cancel-schedule <id>     — immediately cancel a schedule (bypasses agent)
  *   /pause-schedule <id>      — pause a schedule
+ *   /approve-all              — toggle auto-approve for all tool calls
  *   exit                      — quit
  */
 
@@ -234,8 +236,28 @@ function abbrevInput(input: Record<string, unknown>): string {
 // Counts completed tool calls in the current turn (reset before each stream()).
 let turnStep = 0;
 
+// Tracks concurrently active tool calls: callId -> { name, abbrevDim, startMs }
+// Used to show all parallel tool names in the spinner label simultaneously.
+const activeToolCalls = new Map<string, { name: string; abbrevDim: string; startMs: number }>();
+let _callSeq = 0;
+
+function _refreshSpinner(): void {
+  if (activeToolCalls.size === 0) {
+    term.startSpinner(`thinking...  \x1b[2mstep ${turnStep + 1}\x1b[0m`);
+    return;
+  }
+  const labels = [...activeToolCalls.values()].map((e) => `→ ${e.name}${e.abbrevDim}`);
+  if (labels.length === 1) {
+    term.startSpinner(labels[0]);
+  } else {
+    // Show all parallel tools separated by  ║
+    term.startSpinner(labels.join(`  \x1b[2m║\x1b[0m  `));
+  }
+}
+
 // Wraps every tool's execute to show name + abbreviated input in the spinner,
 // then prints a one-line summary above the prompt when the call finishes.
+// Supports parallel tool calls: all concurrently active tools appear in the spinner.
 // biome-ignore lint/suspicious/noExplicitAny: preserves runtime behavior
 function withStatusTracking(registry: ToolRegistry): ToolRegistry {
   return {
@@ -250,7 +272,10 @@ function withStatusTracking(registry: ToolRegistry): ToolRegistry {
             execute: async (input: any) => {
               const abbrev = abbrevInput(input ?? {});
               const abbrevDim = abbrev ? `  \x1b[2m${abbrev}\x1b[0m` : "";
-              term.startSpinner(`→ ${name}${abbrevDim}`);
+              const callId = String(++_callSeq);
+              const startMs = Date.now();
+              activeToolCalls.set(callId, { name, abbrevDim, startMs });
+              _refreshSpinner();
               let failed = false;
               try {
                 return await t.execute(input);
@@ -258,7 +283,8 @@ function withStatusTracking(registry: ToolRegistry): ToolRegistry {
                 failed = true;
                 throw err;
               } finally {
-                const ms = term.elapsedMs;
+                activeToolCalls.delete(callId);
+                const ms = Date.now() - startMs;
                 const elapsedStr = ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
                 if (failed) {
                   term.printAbove(`\x1b[31m✗ ${name}${abbrevDim}  failed  (${elapsedStr})\x1b[0m`);
@@ -266,8 +292,7 @@ function withStatusTracking(registry: ToolRegistry): ToolRegistry {
                   term.printAbove(`\x1b[2m✓ ${name}${abbrevDim}  (${elapsedStr})\x1b[0m`);
                 }
                 turnStep++;
-                term.stopSpinner();
-                term.startSpinner(`thinking...  \x1b[2mstep ${turnStep + 1}\x1b[0m`);
+                _refreshSpinner();
               }
             },
           } as AgentTool<any, any>,
@@ -489,6 +514,7 @@ const SYSTEM_PROMPT = [
   "Never ask for secrets in chat — always use requireSecret.",
 ].join("\n");
 
+let autoApprove = process.env.TOOL_AUTO_APPROVE === "true";
 let sessionIdSeq = 0;
 
 async function makeAgentSession(id: string) {
@@ -501,13 +527,21 @@ async function makeAgentSession(id: string) {
     memory: { store: memoryStore },
     hooks: {
       onApprovalRequired: async (call) => {
+        if (autoApprove) return { approved: true };
         term.stopSpinner();
-        const abbrev = abbrevInput((call.input as Record<string, unknown>) ?? {});
+        const input = (call.input as Record<string, unknown>) ?? {};
+        const abbrev = abbrevInput(input);
+        // Fall back to truncated JSON if no priority key matched.
+        const paramStr = abbrev || JSON.stringify(input).slice(0, 80);
         const answer = await ask(
-          `Allow tool "${call.name}"${abbrev ? `  (${abbrev})` : ""}? [y/n]`,
+          `Allow tool "${call.name}"${paramStr ? `  \x1b[2m${paramStr}\x1b[0m` : ""}? [y/n/always]`,
         );
-        const approved = answer.toLowerCase().startsWith("y");
-        if (!approved) term.startSpinner("thinking...");
+        if (answer.toLowerCase() === "always") {
+          autoApprove = true;
+          term.printAbove("\x1b[2mAuto-approve enabled for this session.\x1b[0m");
+        }
+        const approved = answer.toLowerCase().startsWith("y") || answer.toLowerCase() === "always";
+        if (approved) term.startSpinner(`thinking...  \x1b[2mstep ${turnStep + 1}\x1b[0m`);
         return { approved };
       },
     },
@@ -716,12 +750,14 @@ function prompt() {
           "  /schedules                — list active schedules",
           "  /cancel-schedule <id>     — immediately cancel a schedule",
           "  /pause-schedule <id>      — pause a schedule",
+          `  /approve-all              — toggle auto-approve (currently: ${autoApprove ? "ON" : "OFF"})`,
           "  /help                     — show this help",
           "  exit                      — quit",
           "",
           "  Multi-line input: end a line with \\ to continue on the next line.",
           "  Ctrl+C during a turn: interrupt (background run continues).",
           "  Ctrl+C at prompt: exit.",
+          "  Approval prompt: answer 'always' to enable auto-approve for the session.",
         ]);
         return prompt();
       }
@@ -769,6 +805,12 @@ function prompt() {
         return prompt();
       }
 
+      if (input === "/approve-all") {
+        autoApprove = !autoApprove;
+        console.log(`\n\x1b[2mAuto-approve: ${autoApprove ? "ON" : "OFF"}\x1b[0m\n`);
+        return prompt();
+      }
+
       // Action commands — inline confirmation, no pane.
       if (input.startsWith("/remember ")) {
         const text = input.slice("/remember ".length).trim();
@@ -806,6 +848,7 @@ function prompt() {
       currentAc = ac;
       lastTurnUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
       turnStep = 0;
+      activeToolCalls.clear();
       term.suppress = false;
       term.startSpinner("thinking...");
       term.agentHasTextOnLine = false;
