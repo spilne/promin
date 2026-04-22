@@ -171,6 +171,24 @@ export interface AgentLoop {
   session(params: { runner: WorkflowRunner; sessionId: string }): Promise<AgentSession>;
 }
 
+// ---- tool error formatting ----
+
+/** Format a tool parse/execute error into a concise string the LLM can act on. */
+function formatToolError(err: unknown): string {
+  if (
+    err instanceof Error &&
+    "issues" in err &&
+    Array.isArray((err as { issues: unknown }).issues)
+  ) {
+    // ZodError — format each issue as "field: message"
+    const issues = (err as { issues: Array<{ path: unknown[]; message: string }> }).issues;
+    return issues
+      .map((i) => `${i.path.length ? i.path.join(".") : "(root)"}: ${i.message}`)
+      .join("; ");
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
 // ---- compaction ----
 
 interface CompactionResult {
@@ -427,8 +445,22 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                 const results = yield* ctx.parallel(
                   toExecute.map(({ call, toolDef }) =>
                     ctx.activity(`tool-${call.name}-${turn}-${step}-${call.id}`, async () => {
+                      // Parse errors are the LLM's fault (wrong input shape) — convert to a
+                      // readable tool result so the model can self-correct on the next step.
+                      let parsed: unknown;
                       try {
-                        const parsed = toolDef.parameters.parse(call.input);
+                        parsed = toolDef.parameters.parse(call.input);
+                      } catch (err) {
+                        return {
+                          role: "tool" as const,
+                          toolCallId: call.id,
+                          content: `Invalid input: ${formatToolError(err)}`,
+                        };
+                      }
+
+                      // Execution errors (network, business logic, etc.) also feed back to
+                      // the LLM rather than failing the workflow.
+                      try {
                         // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
                         const output = await toolDef.execute(parsed as any);
                         const content = toolDef.toModelOutput
@@ -438,11 +470,10 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                             : JSON.stringify(output);
                         return { role: "tool" as const, toolCallId: call.id, content };
                       } catch (err) {
-                        const message = err instanceof Error ? err.message : String(err);
                         return {
                           role: "tool" as const,
                           toolCallId: call.id,
-                          content: `Error: ${message}`,
+                          content: `Tool execution failed: ${formatToolError(err)}`,
                         };
                       }
                     }),

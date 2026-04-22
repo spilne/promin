@@ -120,7 +120,8 @@ describe("agentLoop session", () => {
 
     const answer = await session.send("call strict tool badly");
     expect(answer).toBe("I see an error occurred.");
-    expect(toolResultContent).toContain("Error");
+    expect(toolResultContent).toContain("Invalid input");
+    expect(toolResultContent).toContain("prompt");
     session.close();
   });
 
@@ -156,6 +157,7 @@ describe("agentLoop session", () => {
 
     const answer = await session.send("run faulty tool");
     expect(answer).toBe("Tool failed.");
+    expect(toolResultContent).toContain("Tool execution failed");
     expect(toolResultContent).toContain("upstream service unavailable");
     session.close();
   });
