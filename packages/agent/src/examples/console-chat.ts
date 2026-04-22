@@ -33,6 +33,7 @@ import { PipelineRateLimiter } from "@promin/core";
 import { anthropic } from "../lib/adapters/anthropic.ts";
 import { agentLoop } from "../lib/agent-loop.ts";
 import { InMemoryMemoryStore } from "../lib/memory-store.ts";
+import { CompositeSecretStore, EnvSecretStore, InMemorySecretStore } from "../lib/secret-store.ts";
 import { Terminal, PROMPT } from "./terminal.ts";
 import { UsageTracker, fmtN } from "./console-usage.ts";
 import { createSpinnerTracker, abbrevInput } from "./console-spinner.ts";
@@ -60,6 +61,8 @@ const term = new Terminal(rl);
 
 // ---- infrastructure ----
 const memoryStore = new InMemoryMemoryStore();
+// Env vars checked first; user-provided secrets (via requireSecret or key prompts) go to in-memory.
+const secrets = new CompositeSecretStore([new EnvSecretStore(), new InMemorySecretStore()]);
 const storage = new InMemoryWorkflowStorage();
 const runner = createWorkflowRunner({ storage });
 
@@ -114,6 +117,7 @@ const sessionRef: { current: { send: (task: string) => Promise<string> } | undef
 const { registry, scheduler, activeTicks } = await createToolRegistry({
   workspace,
   memoryStore,
+  secrets,
   apiKey,
   ask,
   runner,

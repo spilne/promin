@@ -4,7 +4,7 @@ import { openai } from "../lib/adapters/openai.ts";
 import { anthropic } from "../lib/adapters/anthropic.ts";
 import { gemini } from "../lib/adapters/gemini.ts";
 import { tool } from "../lib/tool.ts";
-import { InMemorySecretStore } from "../lib/secret-store.ts";
+import type { SecretStore } from "../lib/secret-store.ts";
 import { createWriteToolTool } from "../lib/tools/write-tool.ts";
 import { createRequireSecretTool } from "../lib/tools/require-secret-tool.ts";
 import { createFilesystemTools } from "../lib/tools/filesystem-tools.ts";
@@ -26,6 +26,8 @@ import { z } from "zod";
 export interface ToolDeps {
   workspace: string;
   memoryStore: MemoryStore;
+  /** Shared secret store — checked env-first via CompositeSecretStore. */
+  secrets: SecretStore;
   apiKey: string;
   /** Async prompt used by tools that need secrets or user input. */
   ask: (question: string) => Promise<string>;
@@ -42,7 +44,7 @@ export interface ToolSetup {
 }
 
 export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
-  const { workspace, memoryStore, apiKey, ask, runner, usage, sessionRef } = deps;
+  const { workspace, memoryStore, secrets, apiKey, ask, runner, usage, sessionRef } = deps;
 
   const toolsDir = join(import.meta.dir, "tools");
   await mkdir(toolsDir, { recursive: true });
@@ -73,22 +75,21 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
     onError: (file, err) => console.error(`tool error: ${file}`, err),
   });
 
-  const openaiKeyStore = new InMemorySecretStore();
-
-  async function getOpenAIKey(prompt: string): Promise<string> {
-    let key = await openaiKeyStore.get("OPENAI_API_KEY");
-    if (!key) {
-      key = process.env.OPENAI_API_KEY ?? (await ask(`[${prompt}] Enter OPENAI_API_KEY`));
-      await openaiKeyStore.set("OPENAI_API_KEY", key);
+  /** Resolve a secret: CompositeSecretStore checks env first, then in-memory. Prompt once if absent. */
+  async function getSecret(envKey: string, toolName: string): Promise<string> {
+    let value = await secrets.get(envKey);
+    if (!value) {
+      value = await ask(`[${toolName}] Enter ${envKey}`);
+      await secrets.set(envKey, value);
     }
-    return key;
+    return value;
   }
 
   // One-shot GPT-4o tool shared by main agent and sub-agents.
   const chatGptOneShotTool = createLlmTool(
     {
       chat: async (params) => {
-        const key = await getOpenAIKey("chatGPT");
+        const key = await getSecret("OPENAI_API_KEY", "chatGPT");
         return openai("gpt-4o", { apiKey: key }).chat(params);
       },
     },
@@ -133,6 +134,7 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
 
     requireSecret: createRequireSecretTool({
       readSecret: (prompt) => ask(`[secret] ${prompt}`),
+      store: (key, value) => secrets.set(key, value),
     }),
 
     ...createFilesystemTools({ rootDir: workspace }),
@@ -198,11 +200,11 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
 
   const lazyOpenAI: LLMProvider = {
     chat: async (params) => {
-      const key = await getOpenAIKey("gptAgent");
+      const key = await getSecret("OPENAI_API_KEY", "gptAgent");
       return openai("gpt-4o", { apiKey: key }).chat(params);
     },
     chatStream: async function* (params) {
-      const key = await getOpenAIKey("gptAgent");
+      const key = await getSecret("OPENAI_API_KEY", "gptAgent");
       yield* openai("gpt-4o", { apiKey: key }).chatStream!(params);
     },
   };
@@ -217,20 +219,10 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
     systemPrompt: subagentSystemPrompt,
   });
 
-  const geminiKeyStore = new InMemorySecretStore();
-  async function getGeminiKey(prompt: string): Promise<string> {
-    let key = await geminiKeyStore.get("GEMINI_API_KEY");
-    if (!key) {
-      key = process.env["GEMINI_API_KEY"] ?? (await ask(`[${prompt}] Enter GEMINI_API_KEY`));
-      await geminiKeyStore.set("GEMINI_API_KEY", key);
-    }
-    return key;
-  }
-
   staticTools.chatGemini = createLlmTool(
     {
       chat: async (params) => {
-        const key = await getGeminiKey("chatGemini");
+        const key = await getSecret("GEMINI_API_KEY", "chatGemini");
         return gemini("gemini-2.0-flash", { apiKey: key }).chat(params);
       },
     },
