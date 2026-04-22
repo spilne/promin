@@ -218,35 +218,28 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
   });
 
   const geminiKeyStore = new InMemorySecretStore();
-  async function getGeminiKey(): Promise<string> {
+  async function getGeminiKey(prompt: string): Promise<string> {
     let key = await geminiKeyStore.get("GEMINI_API_KEY");
     if (!key) {
-      key = process.env["GEMINI_API_KEY"] ?? (await ask("[geminiAgent] Enter GEMINI_API_KEY"));
+      key = process.env["GEMINI_API_KEY"] ?? (await ask(`[${prompt}] Enter GEMINI_API_KEY`));
       await geminiKeyStore.set("GEMINI_API_KEY", key);
     }
     return key;
   }
 
-  const lazyGemini: LLMProvider = {
-    chat: async (params) => {
-      const key = await getGeminiKey();
-      return gemini("gemini-2.0-flash", { apiKey: key }).chat(params);
+  staticTools.chatGemini = createLlmTool(
+    {
+      chat: async (params) => {
+        const key = await getGeminiKey("chatGemini");
+        return gemini("gemini-2.0-flash", { apiKey: key }).chat(params);
+      },
     },
-    chatStream: async function* (params) {
-      const key = await getGeminiKey();
-      yield* gemini("gemini-2.0-flash", { apiKey: key }).chatStream!(params);
+    {
+      name: "chatGemini",
+      description:
+        "Consult Gemini (gemini-2.0-flash) for a second opinion or different perspective.",
     },
-  };
-
-  staticTools.geminiAgent = createAgentTool({
-    runner,
-    llm: usage.withTracking(lazyGemini, "gemini-2.0-flash"),
-    name: "geminiAgent",
-    description:
-      "Delegate a task to a parallel Gemini (gemini-2.0-flash) sub-agent with filesystem, shell, memory, and chatGPT access. Use for a third perspective, fast drafts, or to parallelise work.",
-    tools: subagentTools,
-    systemPrompt: subagentSystemPrompt,
-  });
+  );
 
   const registry: ToolRegistry = {
     getTools: () => ({ ...fileRegistry.getTools(), ...staticTools }),
