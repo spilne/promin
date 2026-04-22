@@ -426,7 +426,16 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
             let turnInputTokens = 0;
             let turnOutputTokens = 0;
 
-            const toolMap = config.toolRegistry?.getTools() ?? config.tools ?? {};
+            // Snapshot tool names at turn start so replay always sees the same tool set,
+            // even if the live registry changed (e.g. writeTool hot-loaded a new file).
+            // Tool implementations come from the live registry — only names are journaled.
+            const allTools = config.toolRegistry?.getTools() ?? config.tools ?? {};
+            const turnToolNames = yield* ctx.activity(`tool-snapshot-${turn}`, async () =>
+              Object.keys(allTools),
+            );
+            const toolMap = Object.fromEntries(
+              turnToolNames.flatMap((name) => (allTools[name] ? [[name, allTools[name]]] : [])),
+            );
             const toolDefs = buildToolDefs(toolMap);
 
             for (let step = 0; step < maxStepsPerTurn; step++) {
