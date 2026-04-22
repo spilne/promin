@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { createRequireSecretTool } from "../tools/require-secret-tool.ts";
+import { CompositeSecretStore, EnvSecretStore, InMemorySecretStore } from "../secret-store.ts";
 
 describe("createRequireSecretTool", () => {
   it("calls readSecret with the provided prompt", async () => {
@@ -66,5 +67,57 @@ describe("createRequireSecretTool", () => {
     const t = createRequireSecretTool({ readSecret: () => Promise.resolve("x") });
     expect(() => t.parameters.parse({ key: "lower-case" })).toThrow();
     expect(() => t.parameters.parse({ key: "VALID_KEY" })).not.toThrow();
+  });
+});
+
+describe("requireSecret + CompositeSecretStore integration", () => {
+  it("secret written via requireSecret is readable from the shared store", async () => {
+    const store = new CompositeSecretStore([new EnvSecretStore(), new InMemorySecretStore()]);
+    const t = createRequireSecretTool({
+      readSecret: () => Promise.resolve("my-gemini-key"),
+      store: (key, value) => store.set(key, value),
+    });
+
+    await t.execute({ key: "GEMINI_API_KEY" });
+    expect(await store.get("GEMINI_API_KEY")).toBe("my-gemini-key");
+  });
+
+  it("env var takes precedence over secret written via requireSecret", async () => {
+    const envKey = "OPENAI_API_KEY_TEST_INTEGRATION";
+    process.env[envKey] = "env-key";
+    const store = new CompositeSecretStore([new EnvSecretStore(), new InMemorySecretStore()]);
+    const t = createRequireSecretTool({
+      readSecret: () => Promise.resolve("user-provided-key"),
+      store: (key, value) => store.set(key, value),
+    });
+
+    await t.execute({ key: envKey });
+    expect(await store.get(envKey)).toBe("env-key");
+    delete process.env[envKey];
+  });
+
+  it("second tool reads secret written by requireSecret without re-prompting", async () => {
+    const store = new CompositeSecretStore([new EnvSecretStore(), new InMemorySecretStore()]);
+    const requireSecret = createRequireSecretTool({
+      readSecret: () => Promise.resolve("chatgpt-key"),
+      store: (key, value) => store.set(key, value),
+    });
+
+    await requireSecret.execute({ key: "OPENAI_API_KEY" });
+
+    // Simulates getSecret() in console-tools: reads from shared store, no prompt needed
+    const promptCalls: string[] = [];
+    async function getSecret(envKey: string): Promise<string> {
+      const value = await store.get(envKey);
+      if (!value) {
+        promptCalls.push(envKey);
+        return "fallback";
+      }
+      return value;
+    }
+
+    const key = await getSecret("OPENAI_API_KEY");
+    expect(key).toBe("chatgpt-key");
+    expect(promptCalls).toHaveLength(0);
   });
 });

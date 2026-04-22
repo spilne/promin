@@ -153,9 +153,15 @@ export class CompositeSecretStore implements SecretStore {
   }
 
   async set(key: string, value: string): Promise<void> {
-    const primary = this.stores[0];
-    if (!primary) throw new Error("CompositeSecretStore has no stores");
-    await primary.set(key, value);
+    for (const s of this.stores) {
+      try {
+        await s.set(key, value);
+        return;
+      } catch {
+        // read-only store — try next
+      }
+    }
+    throw new Error("CompositeSecretStore: no writable store available");
   }
 
   async has(key: string): Promise<boolean> {
@@ -166,8 +172,14 @@ export class CompositeSecretStore implements SecretStore {
   }
 
   async delete(key: string): Promise<void> {
-    const primary = this.stores[0];
-    if (!primary) throw new Error("CompositeSecretStore has no stores");
-    await primary.delete(key);
+    for (const s of this.stores) {
+      try {
+        await s.delete(key);
+        return;
+      } catch {
+        // read-only store — try next
+      }
+    }
+    throw new Error("CompositeSecretStore: no writable store available");
   }
 }

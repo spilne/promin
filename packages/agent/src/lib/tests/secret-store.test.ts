@@ -121,6 +121,61 @@ describe("CompositeSecretStore", () => {
     const store = new CompositeSecretStore([new InMemorySecretStore()]);
     expect(await store.get("MISSING")).toBeUndefined();
   });
+
+  it("skips read-only primary and writes to next writable store", async () => {
+    const mem = new InMemorySecretStore();
+    const store = new CompositeSecretStore([new EnvSecretStore(), mem]);
+    await store.set("COMPOSITE_WRITE_TEST", "written");
+    expect(await mem.get("COMPOSITE_WRITE_TEST")).toBe("written");
+    expect(process.env["COMPOSITE_WRITE_TEST"]).toBeUndefined();
+  });
+
+  it("throws when all stores reject writes", async () => {
+    const store = new CompositeSecretStore([new EnvSecretStore()]);
+    await expect(store.set("K", "v")).rejects.toThrow("no writable store");
+  });
+
+  it("skips read-only primary and deletes from next writable store", async () => {
+    const mem = new InMemorySecretStore();
+    await mem.set("DEL_KEY", "val");
+    const store = new CompositeSecretStore([new EnvSecretStore(), mem]);
+    await store.delete("DEL_KEY");
+    expect(await mem.has("DEL_KEY")).toBe(false);
+  });
+});
+
+describe("CompositeSecretStore — env-first pattern", () => {
+  const KEY = "COMPOSITE_ENV_TEST_KEY";
+
+  it("reads from env when present", async () => {
+    process.env[KEY] = "from-env";
+    const store = new CompositeSecretStore([new EnvSecretStore(), new InMemorySecretStore()]);
+    expect(await store.get(KEY)).toBe("from-env");
+    delete process.env[KEY];
+  });
+
+  it("falls back to in-memory when env var is absent", async () => {
+    delete process.env[KEY];
+    const store = new CompositeSecretStore([new EnvSecretStore(), new InMemorySecretStore()]);
+    await store.set(KEY, "in-memory-value");
+    expect(await store.get(KEY)).toBe("in-memory-value");
+  });
+
+  it("env var takes precedence over written in-memory value", async () => {
+    process.env[KEY] = "env-value";
+    const store = new CompositeSecretStore([new EnvSecretStore(), new InMemorySecretStore()]);
+    await store.set(KEY, "mem-value");
+    expect(await store.get(KEY)).toBe("env-value");
+    delete process.env[KEY];
+  });
+
+  it("set writes to in-memory, not to process.env", async () => {
+    delete process.env[KEY];
+    const store = new CompositeSecretStore([new EnvSecretStore(), new InMemorySecretStore()]);
+    await store.set(KEY, "written");
+    expect(process.env[KEY]).toBeUndefined();
+    expect(await store.get(KEY)).toBe("written");
+  });
 });
 
 describe("FileSecretStore", () => {
