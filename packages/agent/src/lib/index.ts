@@ -72,6 +72,12 @@ export type { ShellToolConfig } from "./tools/shell-tool.ts";
 export { createSchedulerTools } from "./tools/scheduler-tools.ts";
 export type { SchedulerToolsConfig } from "./tools/scheduler-tools.ts";
 
+export { createAgentTool } from "./tools/agent-tool-factory.ts";
+export type { AgentToolFactoryConfig } from "./tools/agent-tool-factory.ts";
+
+export { createChatGptAgentTool } from "./tools/chatgpt-agent-tool.ts";
+export type { ChatGptAgentToolConfig } from "./tools/chatgpt-agent-tool.ts";
+
 export {
   InMemorySecretStore,
   EnvSecretStore,

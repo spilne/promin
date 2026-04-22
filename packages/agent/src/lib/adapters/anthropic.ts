@@ -195,11 +195,18 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
         }
       }
 
-      const toolCalls: ToolCall[] = [...toolBlocks.values()].map(({ id, name, inputJson }) => ({
-        id,
-        name,
-        input: JSON.parse(inputJson || "{}") as unknown,
-      }));
+      const toolCalls: ToolCall[] = [...toolBlocks.values()].map(({ id, name, inputJson }) => {
+        let input: unknown;
+        try {
+          input = JSON.parse(inputJson || "{}");
+        } catch {
+          // Truncated stream (e.g. max_tokens hit mid-JSON) — fall back to empty object so
+          // Zod validation in executeToolCall returns a clean "Invalid input" to the agent
+          // rather than crashing the workflow with a permanent journal failure.
+          input = {};
+        }
+        return { id, name, input };
+      });
 
       yield {
         delta: "",

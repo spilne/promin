@@ -758,11 +758,13 @@ function prompt() {
             process.stdout.write("Agent: ");
             labelShown = true;
           }
-          process.stdout.write(chunk);
+          term.writeChunk(chunk);
           term.agentHasTextOnLine = true;
           answer += chunk;
         }
+        term.flushChunks();
       } catch (err) {
+        term.flushChunks();
         streamError = err instanceof Error ? err : new Error(String(err));
       }
 

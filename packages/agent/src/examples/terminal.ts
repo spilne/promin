@@ -69,9 +69,12 @@ export class Terminal {
   private _startMs = 0;
   private _promptTimer: ReturnType<typeof setInterval> | null = null;
   private _promptFrame = 0;
+  private _chunkBuf = "";
+  private _chunkFlush: ReturnType<typeof setImmediate> | null = null;
 
   constructor(rl: Interface) {
     this._rl = rl;
+    this._initBracketedPaste();
   }
 
   /**
@@ -323,10 +326,77 @@ export class Terminal {
     return this._timer ? Date.now() - this._startMs : 0;
   }
 
-  /** Release all timers. Call on process exit. */
+  /**
+   * Buffer a streaming text chunk for low-flicker batched output.
+   * Coalesces all chunks that arrive in the same event-loop tick into a single
+   * stdout.write, reducing per-chunk syscall overhead and visible stutter.
+   */
+  writeChunk(s: string): void {
+    this._chunkBuf += s;
+    if (!this._chunkFlush) {
+      this._chunkFlush = setImmediate(() => {
+        this._chunkFlush = null;
+        const buf = this._chunkBuf;
+        this._chunkBuf = "";
+        if (buf) process.stdout.write(buf);
+      });
+    }
+  }
+
+  /** Flush any buffered chunks immediately. Call at end-of-stream. */
+  flushChunks(): void {
+    if (this._chunkFlush) {
+      clearImmediate(this._chunkFlush);
+      this._chunkFlush = null;
+    }
+    const buf = this._chunkBuf;
+    this._chunkBuf = "";
+    if (buf) process.stdout.write(buf);
+  }
+
+  /** Release all timers and restore terminal state. Call on process exit. */
   close(): void {
     this.stopSpinner();
     this.stopPromptAnimation();
+    this.flushChunks();
+    if (process.stdout.isTTY) process.stdout.write("\x1b[?2004l"); // disable bracketed paste
+  }
+
+  // Enable bracketed paste mode so pasted content doesn't trigger premature readline submission.
+  //
+  // Without this, raw mode (which readline uses on TTYs) makes any \r or \n in the clipboard —
+  // including a common trailing newline — indistinguishable from Enter.
+  //
+  // With bracketed paste enabled, the terminal wraps paste with \x1b[200~ ... \x1b[201~.
+  // We intercept stdin, strip the markers, and replace newlines inside the paste with spaces
+  // before readline sees the data. The filter is installed as the sole 'data' listener; the
+  // original readline listener is captured and called by the filter, so _waitForKey / _readKey
+  // (which temporarily swap all listeners) continue to work correctly.
+  private _initBracketedPaste(): void {
+    if (!process.stdin.isTTY) return;
+    process.stdout.write("\x1b[?2004h");
+
+    const upstream = process.stdin.rawListeners("data") as ((b: Buffer) => void)[];
+    for (const l of upstream) process.stdin.removeListener("data", l);
+
+    let inPaste = false;
+    process.stdin.on("data", (raw: Buffer) => {
+      let s = raw.toString();
+
+      if (s.includes("\x1b[200~")) {
+        inPaste = true;
+        s = s.replace(/\x1b\[200~/g, "");
+      }
+      if (s.includes("\x1b[201~")) {
+        inPaste = false;
+        s = s.replace(/\x1b\[201~/g, "");
+      }
+      if (inPaste) s = s.replace(/[\r\n]/g, " ");
+
+      if (!s) return;
+      const buf = Buffer.from(s);
+      for (const l of upstream) l(buf);
+    });
   }
 
   // Read a single raw keypress without letting readline also process it.
