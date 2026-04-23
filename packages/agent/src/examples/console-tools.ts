@@ -9,7 +9,7 @@ import { createWriteToolTool } from "../lib/tools/write-tool.ts";
 import { createRequireSecretTool } from "../lib/tools/require-secret-tool.ts";
 import { createFilesystemTools } from "../lib/tools/filesystem-tools.ts";
 import { createShellTool } from "../lib/tools/shell-tool.ts";
-import { createMemoryTools } from "../lib/tools/memory-tools.ts";
+import { multiTool, command } from "../lib/multi-tool.ts";
 import { createLlmTool } from "../lib/tools/llm-tool.ts";
 import { createSchedulerTools } from "../lib/tools/scheduler-tools.ts";
 import { createAgentTool } from "../lib/tools/agent-tool-factory.ts";
@@ -40,6 +40,37 @@ export interface ToolSetup {
   registry: ToolRegistry;
   scheduler: InMemoryScheduler;
   activeTicks: Set<string>;
+}
+
+function createMemoryTool(store: MemoryStore) {
+  return multiTool({
+    name: "memory",
+    description: "Read and write long-term memory that persists across sessions.",
+    commands: {
+      search: command({
+        description: "Search for relevant memories by natural-language query",
+        parameters: z.object({
+          query: z.string().describe("Natural-language search query"),
+          limit: z.number().int().min(1).max(20).default(5).describe("Max entries to return"),
+        }),
+        execute: async ({ query, limit }) => {
+          const entries = await store.search(query, limit);
+          if (entries.length === 0) return "No memories found matching that query.";
+          return entries.map((e, i) => `${i + 1}. [${e.id.slice(0, 8)}] ${e.content}`).join("\n");
+        },
+      }),
+      save: command({
+        description: "Persist a fact or insight so it can be recalled in future sessions",
+        parameters: z.object({
+          content: z.string().min(1).describe("The fact or insight to remember"),
+        }),
+        execute: async ({ content }) => {
+          const id = await store.save({ content });
+          return `Saved to memory (id: ${id.slice(0, 8)}).`;
+        },
+      }),
+    },
+  });
 }
 
 export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
@@ -143,7 +174,7 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
       allowedCommands: ["bun", "git", "ls", "cat", "find", "grep", "npm", "npx"],
     }),
 
-    ...createMemoryTools({ store: memoryStore }),
+    memory: createMemoryTool(memoryStore),
 
     chatGPT: chatGptOneShotTool,
 
@@ -181,7 +212,7 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
       cwd: workspace,
       allowedCommands: ["bun", "git", "ls", "cat", "find", "grep", "npm", "npx"],
     }),
-    ...createMemoryTools({ store: memoryStore }),
+    memory: createMemoryTool(memoryStore),
     chatGPT: chatGptOneShotTool,
   };
 

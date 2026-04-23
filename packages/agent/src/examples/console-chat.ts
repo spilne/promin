@@ -194,7 +194,7 @@ const SYSTEM_PROMPT = [
   "reply confirming what was done. Never end a turn silently — the user cannot see tool results.",
   `Workspace: ${workspace}`,
   "Tools: readFile, writeFile, listDir, statFile (filesystem), shell (run commands),",
-  "       searchMemory, saveMemory (long-term memory),",
+  "       memory (long-term memory — commands: search, save),",
   "       chatGPT (one-shot GPT-4o query for a quick second opinion),",
   "       claudeAgent (parallel Claude sub-agent with filesystem/shell/memory/chatGPT access),",
   "       gptAgent (parallel GPT-4o sub-agent with filesystem/shell/memory/chatGPT access),",

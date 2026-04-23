@@ -273,11 +273,11 @@ function prompt(): void {
 
     if (input === "/tools") {
       const lines: string[] = [
-        "  director    sendMessage, readInbox, searchMemory, saveMemory, searchSharedMemory, saveSharedMemory",
-        "  researcher  webSearch, fetchUrl, sendMessage, searchMemory, saveMemory",
-        "  analyst     sendMessage, searchMemory, saveMemory",
-        "  factChecker webSearch, sendMessage, searchMemory, saveMemory",
-        "  writer      sendMessage, searchMemory, saveMemory",
+        "  director    sendMessage, readInbox, memory, searchSharedMemory, saveSharedMemory",
+        "  researcher  webSearch, fetchUrl, sendMessage, memory",
+        "  analyst     sendMessage, memory",
+        "  factChecker webSearch, sendMessage, memory",
+        "  writer      sendMessage, memory",
       ];
       await term.showPane("tools", lines);
       return prompt();
