@@ -32,7 +32,7 @@ describe("multiTool", () => {
     expect(calls).toEqual(["ping:hello", "echo:world"]);
   });
 
-  it("builds a discriminated union schema with the command field", () => {
+  it("exposes a flat object schema (type:object) compatible with LLM APIs", () => {
     const t = multiTool({
       name: "ops",
       description: "...",
@@ -45,15 +45,31 @@ describe("multiTool", () => {
       },
     });
 
-    // Valid inputs parse successfully
+    // Valid inputs parse at the flat schema level
     expect(() => t.parameters.parse({ command: "read", id: "1" })).not.toThrow();
     expect(() => t.parameters.parse({ command: "write", id: "1", data: "x" })).not.toThrow();
 
-    // Unknown command is rejected by Zod
+    // Unknown command is rejected by the enum
     expect(() => t.parameters.parse({ command: "delete", id: "1" })).toThrow();
 
-    // Missing required field for the chosen command is rejected
-    expect(() => t.parameters.parse({ command: "write", id: "1" })).toThrow();
+    // Non-command fields are optional in the flat schema (per-command validation in execute)
+    expect(() => t.parameters.parse({ command: "write", id: "1" })).not.toThrow();
+  });
+
+  it("validates per-command required fields inside execute", async () => {
+    const t = multiTool({
+      name: "ops",
+      description: "...",
+      commands: {
+        write: command({
+          parameters: z.object({ id: z.string(), data: z.string() }),
+          execute: async () => "ok",
+        }),
+      },
+    });
+
+    // Missing required field "data" is caught by the per-command schema inside execute
+    await expect(t.execute({ command: "write", id: "1" })).rejects.toThrow();
   });
 
   it("single-command tool still works", async () => {

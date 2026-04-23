@@ -38,21 +38,39 @@ export function command<T extends z.ZodRawShape>(def: CommandDef<T>): CommandDef
 // biome-ignore lint/suspicious/noExplicitAny: widened for the heterogeneous map
 type AnyCommandDef = CommandDef<any>;
 
-function buildSchema(commands: Record<string, AnyCommandDef>): z.ZodType {
-  const variants = Object.entries(commands).map(([name, def]) =>
-    def.parameters.extend({ command: z.literal(name) }),
-  );
-  if (variants.length === 0) throw new Error("multiTool: commands must not be empty");
-  if (variants.length === 1) return variants[0]!;
-  // Cast through unknown: each variant has a ZodLiteral "command" field at runtime
-  // even though the static type (ZodRawShape) can't express the literal constraint.
-  type DiscriminantOption = z.ZodObject<{ command: z.ZodLiteral<string> } & z.ZodRawShape>;
-  const typed = variants as unknown as [
-    DiscriminantOption,
-    DiscriminantOption,
-    ...DiscriminantOption[],
-  ];
-  return z.discriminatedUnion("command", typed);
+/**
+ * Build a flat `z.object` schema from all commands.
+ *
+ * LLM APIs (including Anthropic) require `input_schema.type === "object"` at
+ * the root. A `z.discriminatedUnion` serialises to `{ anyOf: [...] }` which
+ * fails that check. Instead we expose a single flat object where:
+ *   - `command` is a required enum of all command names
+ *   - every other field from every command is present as optional
+ *
+ * Per-command required-field validation happens inside `execute` by calling
+ * each command's own schema after dispatch.
+ */
+function buildFlatSchema(commands: Record<string, AnyCommandDef>): z.ZodObject<z.ZodRawShape> {
+  const names = Object.keys(commands);
+  if (names.length === 0) throw new Error("multiTool: commands must not be empty");
+
+  const shape: z.ZodRawShape = {
+    command: z.enum(names as [string, ...string[]]).describe("Which operation to perform"),
+  };
+
+  for (const def of Object.values(commands)) {
+    for (const [field, fieldSchema] of Object.entries(def.parameters.shape as z.ZodRawShape)) {
+      if (field in shape) continue;
+      // All non-command fields are optional at the top-level schema; per-command
+      // required checks happen inside execute() via each command's own schema.
+      shape[field] =
+        fieldSchema instanceof z.ZodOptional || fieldSchema instanceof z.ZodDefault
+          ? fieldSchema
+          : (fieldSchema as z.ZodTypeAny).optional();
+    }
+  }
+
+  return z.object(shape);
 }
 
 function buildDescription(description: string, commands: Record<string, AnyCommandDef>): string {
@@ -90,8 +108,9 @@ function buildDescription(description: string, commands: Record<string, AnyComma
  * });
  * ```
  *
- * The LLM receives one tool whose parameter schema is a discriminated union:
- * `{ command: "search", query: string, limit?: number } | { command: "save", content: string }`.
+ * The LLM receives one tool whose `input_schema` is a flat object with a
+ * required `command` enum and all other fields optional. Per-command required
+ * fields are validated at dispatch time.
  */
 // biome-ignore lint/suspicious/noExplicitAny: dispatched and Zod-validated at runtime
 export function multiTool(config: {
@@ -102,7 +121,8 @@ export function multiTool(config: {
    *  gate runs before execute() is called and cannot inspect the command field. */
   requireApproval?: boolean;
 }): AgentTool<any, unknown> {
-  const schema = buildSchema(config.commands);
+  // biome-ignore lint/suspicious/noExplicitAny: flat schema is runtime-validated per command
+  const schema = buildFlatSchema(config.commands) as z.ZodType<any>;
   return tool({
     name: config.name,
     description: buildDescription(config.description, config.commands),
@@ -112,7 +132,9 @@ export function multiTool(config: {
       const { command, ...rest } = input;
       const def = config.commands[command];
       if (!def) throw new Error(`multiTool "${config.name}": unknown command "${command}"`);
-      return def.execute(rest);
+      // Validate per-command fields (enforces required fields, applies defaults, etc.)
+      const parsed = def.parameters.parse(rest);
+      return def.execute(parsed);
     },
   });
 }
