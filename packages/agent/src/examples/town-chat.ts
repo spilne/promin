@@ -95,9 +95,21 @@ const town = createAgentTown({
   mayor: "director",
   sharedMemory: new InMemoryMemoryStore(),
 
-  onAgentActivity: ({ agent, state }) => {
-    term.startSpinner(state === "thinking" ? `${agent} thinking...` : "director thinking...");
-  },
+  onAgentActivity: (() => {
+    const active = new Set<string>();
+    return ({ agent, state }: { agent: string; state: "thinking" | "idle" }) => {
+      if (state === "thinking") {
+        active.add(agent);
+        term.startSpinner(`${agent} thinking...`);
+      } else {
+        active.delete(agent);
+        if (active.size > 0) {
+          term.startSpinner(`${[...active].join(", ")} thinking...`);
+        }
+        // when all daemons are idle the director's own stream loop owns the spinner
+      }
+    };
+  })(),
 
   onToolApproval: async ({ agent, call }) => {
     if (autoApprove) return { approved: true };

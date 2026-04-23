@@ -171,12 +171,19 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
     throw new Error(`AgentTown: mayor "${mayorName}" is not in the agents map`);
   }
 
-  // One inbox per agent + "human" as a named participant.
+  // One inbox per agent + "human" as a named participant (consumed only by the mayor via readInbox).
   const inboxes = new Map<string, AsyncQueue<InboxMessage>>();
   for (const name of agentNames) inboxes.set(name, new AsyncQueue<InboxMessage>());
   inboxes.set("human", new AsyncQueue<InboxMessage>());
 
-  const peers = (self: string) => agentNames.filter((n) => n !== self).concat("human");
+  // The mayor can address "human" (its own readInbox reads from its own inbox, not the human one —
+  // "human" is listed so the mayor's sendMessage description is accurate for its UX).
+  // Daemons exclude "human": they should reply to the sender (usually the mayor), not directly to
+  // the end user. Allowing daemon→human would create a dead-letter queue since no code consumes it.
+  const peers = (self: string) => {
+    const others = agentNames.filter((n) => n !== self);
+    return self === mayorName ? others.concat("human") : others;
+  };
 
   // Per-daemon turn tracker: which inboxes did this agent push to this turn?
   // Used to auto-reply if the agent's LLM forgets to call sendMessage.
@@ -305,7 +312,9 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
           `Do not end your turn without calling sendMessage — the sender is blocked waiting for your reply.`,
         ];
 
-    // If onToolApproval or requireApprovalForAllTools is set, mark user tools as requiring approval.
+    // Tool approval only applies to daemon agents, not the mayor.
+    // The mayor streams directly to the human user who can exercise judgment in-band;
+    // daemons run headlessly and need an out-of-band approval callback.
     const userTools: Record<string, AgentTool<any, any>> = def.tools ?? {};
     const toolsForAgent =
       !isMayor && (config.onToolApproval || def.requireApprovalForAllTools)
@@ -317,6 +326,7 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
           )
         : userTools;
 
+    // Similarly, onApprovalRequired hook is only wired for daemons.
     const agentHooks: typeof def.hooks =
       !isMayor && config.onToolApproval
         ? {
@@ -367,10 +377,12 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
               reject(new Error(`Agent "${name}" turn timed out after ${daemonTurnTimeoutMs}ms`)),
             ),
           );
-          const answer = await Promise.race([
-            session.send(`[from ${msg.from}] ${msg.content}`),
-            timeoutPromise,
-          ]);
+          // Attach .catch() before the race so that if timeoutPromise wins and then
+          // session.close() later rejects sendPromise, it doesn't become an unhandled rejection.
+          // The result is discarded either way — the sender is unblocked via the catch block below.
+          const sendPromise = session.send(`[from ${msg.from}] ${msg.content}`);
+          sendPromise.catch(() => {});
+          const answer = await Promise.race([sendPromise, timeoutPromise]);
 
           config.onAgentActivity?.({ agent: name, state: "idle" });
 

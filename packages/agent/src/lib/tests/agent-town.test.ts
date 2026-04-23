@@ -373,3 +373,139 @@ describe("createAgentTown — shared memory", () => {
     await town.close();
   });
 });
+
+// ---- daemon turn timeout ----
+
+describe("createAgentTown — daemon turn timeout", () => {
+  it("sends an error reply to the sender when the daemon hangs past daemonTurnTimeoutMs", async () => {
+    let receivedToolResult = "";
+    // Captured when the worker LLM is called; resolved before town.close() to avoid
+    // orphaned session.send() that would cause unhandled rejections during session teardown.
+    let resolveWorkerLLM!: (r: LLMResponse) => void;
+
+    const town = createAgentTown({
+      runner: makeRunner(),
+      mayor: "coord",
+      daemonTurnTimeoutMs: 30,
+      agents: {
+        coord: {
+          llm: {
+            chat: async (params) => {
+              const lastTool = params.messages.findLast((m) => m.role === "tool");
+              if (lastTool) {
+                receivedToolResult = typeof lastTool.content === "string" ? lastTool.content : "";
+                return { content: "done", finishReason: "stop" as const };
+              }
+              return {
+                content: null,
+                finishReason: "tool_calls" as const,
+                toolCalls: [
+                  { id: "tc-1", name: "sendMessage", input: { to: "worker", content: "do work" } },
+                  { id: "tc-2", name: "readInbox", input: {} },
+                ],
+              };
+            },
+          },
+          prompt: "Coordinate.",
+        },
+        worker: {
+          // Hangs until resolved below — simulates a slow LLM that exceeds the timeout.
+          llm: {
+            chat: () =>
+              new Promise<LLMResponse>((r) => {
+                resolveWorkerLLM = r;
+              }),
+          },
+          prompt: "Work.",
+        },
+      },
+    });
+
+    const result = await town.ask("go");
+
+    // Drain the orphaned session.send() by resolving the slow LLM before calling
+    // town.close(). If we close while session.send() is still pending, session.close()
+    // rejects the workflow-internal promises and produces unhandled rejections.
+    resolveWorkerLLM({ content: "late response", finishReason: "stop" });
+    await new Promise<void>((r) => setTimeout(r, 10));
+
+    expect(result).toBe("done");
+    expect(receivedToolResult).toContain("[from worker]");
+    expect(receivedToolResult).toContain("timed out");
+    await town.close();
+  });
+});
+
+// ---- interruptMayorInbox ----
+
+describe("createAgentTown — interruptMayorInbox", () => {
+  it("unblocks the mayor's readInbox and returns the interrupt sentinel", async () => {
+    let firstCallDone = false;
+    let receivedInboxResult = "";
+
+    const town = createAgentTown({
+      runner: makeRunner(),
+      mayor: "coord",
+      agents: {
+        coord: {
+          llm: {
+            chat: async (params) => {
+              const lastTool = params.messages.findLast((m) => m.role === "tool");
+              if (lastTool) {
+                // Second call: capture what readInbox returned.
+                receivedInboxResult = typeof lastTool.content === "string" ? lastTool.content : "";
+                return { content: "interrupted", finishReason: "stop" as const };
+              }
+              // First call: block on readInbox.
+              firstCallDone = true;
+              return {
+                content: null,
+                finishReason: "tool_calls" as const,
+                toolCalls: [{ id: "tc-1", name: "readInbox", input: {} }],
+              };
+            },
+          },
+          prompt: "Coordinate.",
+        },
+      },
+    });
+
+    const askPromise = town.ask("go");
+
+    // Wait until the first LLM call has completed and readInbox is awaiting.
+    await new Promise<void>((r) => {
+      const poll = () => (firstCallDone ? r() : setTimeout(poll, 5));
+      poll();
+    });
+    // Yield to let the async workflow machinery reach inbox.pop().
+    await new Promise<void>((r) => setTimeout(r, 10));
+
+    town.interruptMayorInbox();
+
+    const result = await askPromise;
+    expect(result).toBe("interrupted");
+    expect(receivedInboxResult).toBe("(turn interrupted by user)");
+    await town.close();
+  });
+
+  it("is a no-op when the mayor is not currently waiting in readInbox", async () => {
+    const town = createAgentTown({
+      runner: makeRunner(),
+      mayor: "coord",
+      agents: {
+        coord: {
+          llm: mockLLM([{ content: "hello", finishReason: "stop" }]),
+          prompt: "Coordinate.",
+        },
+      },
+    });
+
+    // Call before any turn — should be a silent no-op.
+    expect(() => town.interruptMayorInbox()).not.toThrow();
+    const result = await town.ask("hi");
+    expect(result).toBe("hello");
+    // Call after turn completes — also a no-op.
+    expect(() => town.interruptMayorInbox()).not.toThrow();
+    await town.close();
+  });
+});
