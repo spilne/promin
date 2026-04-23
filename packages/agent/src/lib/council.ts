@@ -36,6 +36,11 @@ export interface CouncilConfig {
   maxTokens?: number;
   /** Max tokens for the synthesizer. Default: 2048. */
   synthMaxTokens?: number;
+  /**
+   * Abort signal threaded through to every LLM call (councilors and synthesizer).
+   * To enforce a per-round wall-clock budget, pass a signal from `AbortSignal.timeout(ms)`.
+   * Individual councilor failures do not abort the round — only an explicit signal does.
+   */
   signal?: AbortSignal;
 }
 

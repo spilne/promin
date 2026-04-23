@@ -35,6 +35,12 @@ export function fallbackLLM(providers: LLMProvider[]): LLMProvider {
     },
 
     async *chatStream(params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
+      // NOTE: If a provider starts yielding chunks and then throws mid-stream,
+      // the caller has already received those chunks. Generators cannot un-yield,
+      // so the caller sees a partial stream. The next provider (if any) will then
+      // stream from the beginning, meaning the caller receives two interleaved
+      // partial responses. Callers that cannot tolerate this should use chat()
+      // instead, which retries cleanly on the full response.
       const errors: string[] = [];
       for (const provider of providers) {
         try {

@@ -135,6 +135,21 @@ export class InMemoryMemoryStore implements MemoryStore {
         .map(({ entry }) => entry);
     }
 
+    // If the query has no scorable terms (all words ≤ 2 chars — e.g. "is it a"),
+    // keyword scoring degenerates to 0 for every entry. Fall back to recency so
+    // the caller gets best-effort results instead of an empty list.
+    const hasTerms = query
+      .toLowerCase()
+      .split(/\W+/)
+      .some((w) => w.length > 2);
+    if (!hasTerms) {
+      return candidates
+        .slice()
+        .reverse()
+        .slice(0, limit)
+        .map(({ entry }) => entry);
+    }
+
     return candidates
       .map(({ entry }) => ({ entry, score: keywordScore(query, entry.content) }))
       .filter(({ score }) => score > 0)
