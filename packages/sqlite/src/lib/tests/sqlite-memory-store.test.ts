@@ -1,153 +1,20 @@
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
+import { memoryStoreTestSuite } from "@promin/agent/testing";
 import { SqliteMemoryStore } from "../sqlite-memory-store.ts";
 
 function makeStore() {
   return SqliteMemoryStore.make({ db: new Database(":memory:") });
 }
 
+// ---- conformance suite ----
+
+memoryStoreTestSuite(makeStore);
+
+// ---- SQLite-specific tests ----
+
 describe("SqliteMemoryStore", () => {
-  let store: SqliteMemoryStore;
-
-  beforeEach(() => {
-    store = makeStore();
-  });
-
-  it("save returns a unique id", async () => {
-    const id1 = await store.save({ content: "hello world" });
-    const id2 = await store.save({ content: "foo bar" });
-    expect(typeof id1).toBe("string");
-    expect(id1.length).toBeGreaterThan(0);
-    expect(id1).not.toBe(id2);
-  });
-
-  it("list returns entries newest first", async () => {
-    await store.save({ content: "first" });
-    await store.save({ content: "second" });
-    await store.save({ content: "third" });
-    const entries = await store.list();
-    expect(entries.map((e) => e.content)).toEqual(["third", "second", "first"]);
-  });
-
-  it("list respects limit", async () => {
-    for (let i = 0; i < 5; i++) await store.save({ content: `entry ${i}` });
-    const entries = await store.list(3);
-    expect(entries).toHaveLength(3);
-  });
-
-  it("delete removes an entry", async () => {
-    const id = await store.save({ content: "to be deleted" });
-    await store.delete(id);
-    const entries = await store.list();
-    expect(entries.find((e) => e.id === id)).toBeUndefined();
-  });
-
-  it("round-trips metadata", async () => {
-    const id = await store.save({
-      content: "Paris is the capital of France",
-      metadata: { source: "geography", confidence: 0.99 },
-    });
-    const [entry] = await store.list();
-    expect(entry!.id).toBe(id);
-    expect(entry!.metadata).toEqual({ source: "geography", confidence: 0.99 });
-  });
-
-  it("metadata is undefined when not provided", async () => {
-    await store.save({ content: "no metadata here" });
-    const [entry] = await store.list();
-    expect(entry!.metadata).toBeUndefined();
-  });
-
-  it("createdAt is a Date", async () => {
-    await store.save({ content: "timestamp check" });
-    const [entry] = await store.list();
-    expect(entry!.createdAt).toBeInstanceOf(Date);
-  });
-
-  // ---- search ----
-
-  it("search returns entries with matching keywords", async () => {
-    await store.save({ content: "The capital of France is Paris" });
-    await store.save({ content: "Berlin is the capital of Germany" });
-    await store.save({ content: "Unrelated content about clouds" });
-
-    const results = await store.search("capital France");
-    expect(results.length).toBeGreaterThanOrEqual(1);
-    expect(results[0]!.content).toContain("France");
-  });
-
-  it("search respects limit", async () => {
-    for (let i = 0; i < 10; i++)
-      await store.save({ content: `The quick brown fox jumps over the lazy dog ${i}` });
-    const results = await store.search("quick brown fox", 3);
-    expect(results).toHaveLength(3);
-  });
-
-  it("search returns recency order for unscored queries (all short words)", async () => {
-    await store.save({ content: "first entry" });
-    await store.save({ content: "second entry" });
-    const results = await store.search("is it");
-    expect(results.length).toBeGreaterThan(0);
-  });
-
-  it("search returns empty when nothing matches", async () => {
-    await store.save({ content: "completely different" });
-    const results = await store.search("quantum entanglement superposition");
-    expect(results).toHaveLength(0);
-  });
-
-  // ---- scope isolation ----
-
-  it("entries without scope are isolated from scoped entries", async () => {
-    const db = new Database(":memory:");
-    const s = SqliteMemoryStore.make({ db });
-
-    await s.save({ content: "global entry" });
-    await s.save({ content: "scoped entry" }, { namespaceId: "ns-1" });
-
-    const global = await s.list();
-    expect(global).toHaveLength(1);
-    expect(global[0]!.content).toBe("global entry");
-
-    const scoped = await s.list(undefined, { namespaceId: "ns-1" });
-    expect(scoped).toHaveLength(1);
-    expect(scoped[0]!.content).toBe("scoped entry");
-  });
-
-  it("namespaceId filters entries correctly", async () => {
-    const db = new Database(":memory:");
-    const s = SqliteMemoryStore.make({ db });
-    await s.save({ content: "ns-a memory" }, { namespaceId: "ns-a" });
-    await s.save({ content: "ns-b memory" }, { namespaceId: "ns-b" });
-
-    const a = await s.list(undefined, { namespaceId: "ns-a" });
-    expect(a).toHaveLength(1);
-    expect(a[0]!.content).toBe("ns-a memory");
-  });
-
-  it("sessionId sub-scopes within namespace", async () => {
-    const db = new Database(":memory:");
-    const s = SqliteMemoryStore.make({ db });
-    await s.save({ content: "session-1 memory" }, { namespaceId: "ns", sessionId: "s1" });
-    await s.save({ content: "session-2 memory" }, { namespaceId: "ns", sessionId: "s2" });
-
-    const s1 = await s.list(undefined, { namespaceId: "ns", sessionId: "s1" });
-    expect(s1).toHaveLength(1);
-    expect(s1[0]!.content).toBe("session-1 memory");
-  });
-
-  it("search is scoped", async () => {
-    const db = new Database(":memory:");
-    const s = SqliteMemoryStore.make({ db });
-    await s.save({ content: "capital of France is Paris" }, { namespaceId: "ns-a" });
-    await s.save({ content: "capital of Germany is Berlin" }, { namespaceId: "ns-b" });
-
-    const results = await s.search("capital France", 10, { namespaceId: "ns-a" });
-    expect(results).toHaveLength(1);
-    expect(results[0]!.content).toContain("France");
-  });
-
-  it("persistence across instances sharing the same db", async () => {
+  it("persists across instances sharing the same db", async () => {
     const db = new Database(":memory:");
     const s1 = SqliteMemoryStore.make({ db });
     const id = await s1.save({ content: "persisted across instances" });
@@ -157,10 +24,90 @@ describe("SqliteMemoryStore", () => {
     expect(entries.find((e) => e.id === id)).toBeDefined();
   });
 
-  it("custom table name works", async () => {
-    const s = SqliteMemoryStore.make({ db: new Database(":memory:"), table: "my_memories" });
-    const id = await s.save({ content: "custom table" });
-    const [entry] = await s.list();
-    expect(entry!.id).toBe(id);
+  it("custom table name avoids conflicts", async () => {
+    const db = new Database(":memory:");
+    const a = SqliteMemoryStore.make({ db, table: "mem_a" });
+    const b = SqliteMemoryStore.make({ db, table: "mem_b" });
+
+    await a.save({ content: "only in a" });
+    expect(await a.list()).toHaveLength(1);
+    expect(await b.list()).toHaveLength(0);
+  });
+
+  // ---- namespace option ----
+
+  it("store-level namespace isolates entries from unscoped stores", async () => {
+    const db = new Database(":memory:");
+    const global = SqliteMemoryStore.make({ db });
+    const ns = SqliteMemoryStore.make({ db, namespace: "agent-1" });
+
+    await global.save({ content: "global entry" });
+    await ns.save({ content: "agent-1 entry" });
+
+    expect(await global.list()).toHaveLength(1);
+    expect((await global.list())[0]!.content).toBe("global entry");
+
+    expect(await ns.list()).toHaveLength(1);
+    expect((await ns.list())[0]!.content).toBe("agent-1 entry");
+  });
+
+  it("two stores with different namespaces share one table without interference", async () => {
+    const db = new Database(":memory:");
+    const a = SqliteMemoryStore.make({ db, namespace: "agent-a" });
+    const b = SqliteMemoryStore.make({ db, namespace: "agent-b" });
+
+    await a.save({ content: "memory A" });
+    await b.save({ content: "memory B" });
+
+    const aEntries = await a.list();
+    const bEntries = await b.list();
+    expect(aEntries).toHaveLength(1);
+    expect(aEntries[0]!.content).toBe("memory A");
+    expect(bEntries).toHaveLength(1);
+    expect(bEntries[0]!.content).toBe("memory B");
+  });
+
+  it("explicit per-call scope overrides store-level namespace", async () => {
+    const db = new Database(":memory:");
+    const s = SqliteMemoryStore.make({ db, namespace: "agent-1" });
+
+    await s.save({ content: "default ns entry" });
+    await s.save({ content: "override ns entry" }, { namespaceId: "agent-2" });
+
+    const ns1 = await s.list();
+    expect(ns1).toHaveLength(1);
+    expect(ns1[0]!.content).toBe("default ns entry");
+
+    const ns2 = await s.list(undefined, { namespaceId: "agent-2" });
+    expect(ns2).toHaveLength(1);
+    expect(ns2[0]!.content).toBe("override ns entry");
+  });
+
+  it("store-level namespace applies to search", async () => {
+    const db = new Database(":memory:");
+    const a = SqliteMemoryStore.make({ db, namespace: "ns-a" });
+    const b = SqliteMemoryStore.make({ db, namespace: "ns-b" });
+
+    await a.save({ content: "capital of France is Paris" });
+    await b.save({ content: "capital of Germany is Berlin" });
+
+    const resultsA = await a.search("capital France");
+    expect(resultsA).toHaveLength(1);
+    expect(resultsA[0]!.content).toContain("France");
+
+    const resultsB = await b.search("Paris France");
+    expect(resultsB).toHaveLength(0);
+  });
+
+  it("sessionId still works within a store-level namespace", async () => {
+    const db = new Database(":memory:");
+    const s = SqliteMemoryStore.make({ db, namespace: "agent-1" });
+
+    await s.save({ content: "session-1 memory" }, { sessionId: "s1" });
+    await s.save({ content: "session-2 memory" }, { sessionId: "s2" });
+
+    const s1 = await s.list(undefined, { sessionId: "s1" });
+    expect(s1).toHaveLength(1);
+    expect(s1[0]!.content).toBe("session-1 memory");
   });
 });

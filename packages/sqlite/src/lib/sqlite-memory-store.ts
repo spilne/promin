@@ -6,7 +6,9 @@ import type { SqliteDatabase } from "./sqlite-database.ts";
  * Persistent memory store backed by SQLite.
  *
  * Entries are stored as JSON and searched by keyword overlap scoring.
- * Scope filtering (namespaceId, sessionId) maps to nullable columns.
+ * An optional store-level `namespace` acts as the default `namespaceId`
+ * when no per-call scope is passed — useful for isolating separate agents
+ * that share one database file.
  *
  * Schema (auto-created on first use):
  *   CREATE TABLE promin_memory (
@@ -22,28 +24,43 @@ import type { SqliteDatabase } from "./sqlite-database.ts";
  * ```ts
  * import { Database } from "bun:sqlite";
  * const db = new Database("agent.db");
- * const store = SqliteMemoryStore.make({ db });
+ * // Scoped to "agent-42" — all unscoped calls resolve to that namespace.
+ * const store = SqliteMemoryStore.make({ db, namespace: "agent-42" });
  * await store.save({ content: "The capital of France is Paris." });
  * const results = await store.search("France");
  * ```
  */
 export class SqliteMemoryStore implements MemoryStore {
   private readonly _table: string;
+  private readonly _namespace: string | null;
 
   private constructor(
     private readonly db: SqliteDatabase,
     table: string,
+    namespace: string | null,
   ) {
     this._table = table;
+    this._namespace = namespace;
     this._setup();
   }
 
   static make(params: {
     db: SqliteDatabase;
+    /**
+     * Default namespace for this store instance. When provided, all calls
+     * without an explicit scope use `{ namespaceId: namespace }` as their
+     * effective scope. Useful for giving each agent its own isolated memory
+     * partition in a shared database.
+     */
+    namespace?: string;
     /** Override the table name (default: `promin_memory`). */
     table?: string;
   }): SqliteMemoryStore {
-    return new SqliteMemoryStore(params.db, params.table ?? "promin_memory");
+    return new SqliteMemoryStore(
+      params.db,
+      params.table ?? "promin_memory",
+      params.namespace ?? null,
+    );
   }
 
   private _setup(): void {
@@ -62,10 +79,21 @@ export class SqliteMemoryStore implements MemoryStore {
     );
   }
 
+  /** Merge the store-level default namespace into a per-call scope. */
+  private _resolveScope(scope?: MemoryScope): MemoryScope | undefined {
+    if (this._namespace === null) return scope;
+    // Explicit per-call namespaceId takes precedence over the store default.
+    return {
+      namespaceId: scope?.namespaceId ?? this._namespace,
+      sessionId: scope?.sessionId,
+    };
+  }
+
   async save(
     input: { content: string; metadata?: Record<string, unknown> },
     scope?: MemoryScope,
   ): Promise<string> {
+    const resolved = this._resolveScope(scope);
     const id = randomUUID();
     this.db
       .query(
@@ -76,15 +104,15 @@ export class SqliteMemoryStore implements MemoryStore {
         id,
         input.content,
         input.metadata != null ? JSON.stringify(input.metadata) : null,
-        scope?.namespaceId ?? null,
-        scope?.sessionId ?? null,
+        resolved?.namespaceId ?? null,
+        resolved?.sessionId ?? null,
         Date.now(),
       );
     return id;
   }
 
   async search(query: string, limit = 5, scope?: MemoryScope): Promise<MemoryEntry[]> {
-    const rows = this._listRows(scope);
+    const rows = this._listRows(this._resolveScope(scope));
     if (rows.length === 0) return [];
 
     const hasTerms = query
@@ -112,7 +140,7 @@ export class SqliteMemoryStore implements MemoryStore {
   }
 
   async list(limit?: number, scope?: MemoryScope): Promise<MemoryEntry[]> {
-    const rows = this._listRows(scope);
+    const rows = this._listRows(this._resolveScope(scope));
     const limited = limit ? rows.slice(0, limit) : rows;
     return limited.map(toEntry);
   }
