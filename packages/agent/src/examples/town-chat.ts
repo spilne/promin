@@ -17,7 +17,7 @@ import { createInterface } from "node:readline";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { z } from "zod";
 import { anthropic, createAgentTown, InMemoryMemoryStore, tool } from "../lib/index.ts";
-import { Terminal, PROMPT } from "./common/terminal.ts";
+import { Terminal } from "./common/terminal.ts";
 import { MarkdownRenderer } from "./common/terminal-markdown.ts";
 
 const fetchUrl = tool({
@@ -137,6 +137,8 @@ async function* abortable(
 
 // ---- SIGINT: interrupt turn or exit ----
 let currentAc: AbortController | null = null;
+let lastCtrlC = 0;
+let savedPlaceholder = "";
 
 rl.on("SIGINT", () => {
   if (currentAc) {
@@ -146,18 +148,28 @@ rl.on("SIGINT", () => {
     currentAc.abort();
     currentAc = null;
   } else {
-    process.stdout.write("\n");
-    town.close().finally(() => {
-      term.close();
-      rl.close();
-      process.exit(0);
-    });
+    const now = Date.now();
+    if (now - lastCtrlC < 2_000) {
+      process.stdout.write("\n");
+      town.close().finally(() => {
+        term.close();
+        rl.close();
+        process.exit(0);
+      });
+    } else {
+      lastCtrlC = now;
+      // biome-ignore lint/suspicious/noExplicitAny: readline internals
+      savedPlaceholder = (rl as any).line ?? "";
+      process.stdout.write("\n\x1b[2m(Ctrl+C again to exit)\x1b[0m\n");
+      prompt();
+    }
   }
 });
 
 // ---- REPL ----
 function prompt(): void {
-  rl.question(PROMPT, async (input) => {
+  term.printRule();
+  rl.question(term.promptStr, async (input) => {
     input = input.trim();
     if (!input) return prompt();
 
@@ -177,23 +189,38 @@ function prompt(): void {
     let labelShown = false;
     let streamError: Error | undefined;
 
-    try {
-      for await (const chunk of abortable(town.stream(input, ac.signal), ac.signal)) {
-        term.stopSpinner();
-        if (!labelShown) {
-          process.stdout.write("\nDirector:\n");
-          labelShown = true;
+    // Retry up to 5 times with 500ms gaps if the session is still settling
+    // after a previous interrupted turn.
+    let attempts = 0;
+    while (attempts < 5) {
+      try {
+        for await (const chunk of abortable(town.stream(input, ac.signal), ac.signal)) {
+          term.stopSpinner();
+          if (!labelShown) {
+            process.stdout.write("\nDirector:\n");
+            labelShown = true;
+          }
+          const rendered = md.push(chunk);
+          if (rendered) term.writeChunk(rendered);
+          term.agentHasTextOnLine = true;
         }
-        const rendered = md.push(chunk);
-        if (rendered) term.writeChunk(rendered);
-        term.agentHasTextOnLine = true;
+        term.flushChunks();
+        const tail = md.flush();
+        if (tail) process.stdout.write(tail);
+        streamError = undefined;
+        break;
+      } catch (err) {
+        term.flushChunks();
+        const e = err instanceof Error ? err : new Error(String(err));
+        if (e.message.includes("busy") && attempts < 4 && !ac.signal.aborted) {
+          attempts++;
+          term.startSpinner(`settling… (${attempts})`);
+          await new Promise((r) => setTimeout(r, 500));
+          continue;
+        }
+        streamError = e;
+        break;
       }
-      term.flushChunks();
-      const tail = md.flush();
-      if (tail) process.stdout.write(tail);
-    } catch (err) {
-      term.flushChunks();
-      streamError = err instanceof Error ? err : new Error(String(err));
     }
 
     currentAc = null;
@@ -211,6 +238,11 @@ function prompt(): void {
     term.agentHasTextOnLine = false;
     prompt();
   });
+
+  if (savedPlaceholder) {
+    rl.write(savedPlaceholder);
+    savedPlaceholder = "";
+  }
 }
 
 console.log("\nTown Chat  agents=director,researcher,writer");

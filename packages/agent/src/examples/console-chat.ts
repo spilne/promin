@@ -35,7 +35,7 @@ import { anthropic } from "../lib/adapters/anthropic.ts";
 import { agentLoop } from "../lib/agent-loop.ts";
 import { InMemoryMemoryStore } from "../lib/memory-store.ts";
 import { CompositeSecretStore, EnvSecretStore, InMemorySecretStore } from "../lib/secret-store.ts";
-import { Terminal, PROMPT } from "./common/terminal.ts";
+import { Terminal } from "./common/terminal.ts";
 import { MarkdownRenderer } from "./common/terminal-markdown.ts";
 import { UsageTracker, fmtN } from "./console-usage.ts";
 import { createSpinnerTracker, abbrevInput } from "./console-spinner.ts";
@@ -282,6 +282,8 @@ let session = await resetSession("session");
 
 // ---- SIGINT ----
 let currentAc: AbortController | null = null;
+let lastCtrlC = 0;
+let savedPlaceholder = "";
 
 rl.on("SIGINT", () => {
   if (currentAc) {
@@ -292,16 +294,27 @@ rl.on("SIGINT", () => {
     currentAc.abort();
     currentAc = null;
   } else {
-    process.stdout.write("\n");
-    session
-      .close()
-      .catch(() => {})
-      .finally(() => {
-        registry.close();
-        term.close();
-        rl.close();
-        process.exit(0);
-      });
+    const now = Date.now();
+    if (now - lastCtrlC < 2_000) {
+      // Second Ctrl+C within 2s — exit.
+      process.stdout.write("\n");
+      session
+        .close()
+        .catch(() => {})
+        .finally(() => {
+          registry.close();
+          term.close();
+          rl.close();
+          process.exit(0);
+        });
+    } else {
+      // First Ctrl+C at idle prompt — save typed text and hint.
+      lastCtrlC = now;
+      // biome-ignore lint/suspicious/noExplicitAny: readline internals
+      savedPlaceholder = (rl as any).line ?? "";
+      process.stdout.write("\n\x1b[2m(Ctrl+C again to exit)\x1b[0m\n");
+      prompt();
+    }
   }
 });
 
@@ -311,7 +324,8 @@ function prompt() {
   const parts: string[] = [];
 
   function readLine(isFirst: boolean): void {
-    rl.question(isFirst ? PROMPT : "... ", async (line) => {
+    if (isFirst) term.printRule();
+    rl.question(isFirst ? term.promptStr : "... ", async (line) => {
       if (isFirst) {
         term.inPrompt = false;
         term.stopPromptAnimation();
@@ -523,6 +537,10 @@ function prompt() {
     });
 
     if (isFirst) {
+      if (savedPlaceholder) {
+        rl.write(savedPlaceholder);
+        savedPlaceholder = "";
+      }
       term.inPrompt = true;
       term.startPromptAnimation();
     }

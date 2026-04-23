@@ -64,6 +64,7 @@ export interface AgentUIRenderer {
 }
 
 const FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const FRAMES_PLAIN = ["-", "\\", "|", "/"];
 const FRAME_MS = 80;
 
 const CLAY = "\x1b[38;2;217;119;87m"; // Anthropic clay #d97757
@@ -85,6 +86,17 @@ const PROMPT_FRAME_MS = 600;
 /** readline.question() prompt string — clay ❯❯, newline before.
  *  Wrapped in RL_PROMPT_IGNORE markers so readline counts width correctly. */
 export const PROMPT = `\n${RI}${CLAY}${RE}❯❯${RI}${RST}${RE} `;
+/** Plain-text fallback prompt for NO_COLOR / dumb terminals. */
+export const PLAIN_PROMPT = "\n> ";
+
+/** Returns true when the terminal cannot render ANSI color or is not a TTY. */
+export function isDumbTerminal(): boolean {
+  return (
+    (!!process.env.NO_COLOR && process.env.NO_COLOR !== "") ||
+    process.env.TERM === "dumb" ||
+    !process.stdout.isTTY
+  );
+}
 
 export class Terminal implements AgentUIRenderer {
   /** True while readline.question() is waiting for input. */
@@ -98,6 +110,9 @@ export class Terminal implements AgentUIRenderer {
 
   /** True when the agent streamed text on the current line without a trailing \n. */
   agentHasTextOnLine = false;
+
+  /** True when NO_COLOR is set, TERM=dumb, or stdout is not a TTY. */
+  readonly noColor: boolean;
 
   private readonly _rl: Interface;
   private readonly _io: TerminalIO;
@@ -114,6 +129,12 @@ export class Terminal implements AgentUIRenderer {
   constructor(rl: Interface) {
     this._rl = rl;
     this._io = new TerminalIO(rl);
+    this.noColor = isDumbTerminal();
+  }
+
+  /** The prompt string to pass to rl.question() — colored or plain based on noColor. */
+  get promptStr(): string {
+    return this.noColor ? PLAIN_PROMPT : PROMPT;
   }
 
   /**
@@ -511,6 +532,16 @@ export class Terminal implements AgentUIRenderer {
     });
   }
 
+  /**
+   * Print a full-width horizontal rule — use between turns to separate responses.
+   * Uses dim `─` on color terminals, plain `-` on NO_COLOR / dumb terminals.
+   */
+  printRule(): void {
+    const cols = process.stdout.columns ?? 80;
+    const rule = this.noColor ? `-`.repeat(cols) : `${DIM}${"─".repeat(cols)}${RST}`;
+    this._sync(() => process.stdout.write(`${rule}\n`));
+  }
+
   /** Release all timers and restore terminal state. Call on process exit. */
   close(): void {
     this.stopSpinner();
@@ -595,9 +626,12 @@ export class Terminal implements AgentUIRenderer {
 
   private _render(): void {
     if (this.suppress) return;
-    const frame = FRAMES[this._frame % FRAMES.length];
+    const frames = this.noColor ? FRAMES_PLAIN : FRAMES;
+    const frame = frames[this._frame % frames.length];
     const elapsed = ((Date.now() - this._startMs) / 1000).toFixed(1);
-    const line = `${DIM}${frame} ${this._label} (${elapsed}s)${RST}`;
+    const line = this.noColor
+      ? `${frame} ${this._label} (${elapsed}s)`
+      : `${DIM}${frame} ${this._label} (${elapsed}s)${RST}`;
     const cols = process.stdout.columns ?? 80;
     const newLines = Math.max(1, Math.ceil(Terminal._visibleLen(line) / cols));
     this._sync(() => {
