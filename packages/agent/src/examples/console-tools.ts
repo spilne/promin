@@ -14,13 +14,16 @@ import { createLlmTool } from "../lib/tools/llm-tool.ts";
 import { createSchedulerTools } from "../lib/tools/scheduler-tools.ts";
 import { createAgentTool } from "../lib/tools/agent-tool-factory.ts";
 import { createFileToolRegistry } from "../lib/tool-registry.ts";
-import { InMemoryScheduler } from "@promin/workflow";
+import { InMemoryScheduler, isActivityJournalStorage } from "@promin/workflow";
 import type { WorkflowRunner } from "@promin/workflow";
 import type { MemoryStore } from "../lib/memory-store.ts";
 import type { ToolRegistry } from "../lib/tool-registry.ts";
 import type { AgentTool } from "../lib/tool.ts";
 import type { LLMProvider } from "../lib/llm-provider.ts";
 import type { UsageTracker } from "./console-usage.ts";
+import type { AgentSession } from "../lib/agent-loop.ts";
+import type { SessionLogger } from "../lib/session-logger.ts";
+import { abbrevInput } from "./console-spinner.ts";
 import { z } from "zod";
 
 export interface ToolDeps {
@@ -33,11 +36,15 @@ export interface ToolDeps {
   runner: WorkflowRunner;
   usage: UsageTracker;
   /** Mutable reference to the current session — filled in after session creation. */
-  sessionRef: { current: { send: (task: string) => Promise<string> } | undefined };
+  sessionRef: { current: AgentSession | undefined };
+  /** Mutable reference to the current session ID — used to look up the activity journal. */
+  sessionIdRef: { current: string };
   /** Shared auto-approve flag — subagents read and write this so "always" propagates globally. */
   autoApproveRef: { value: boolean };
   /** Print a line above the current spinner/prompt — used to surface sub-agent activity. */
   printAbove: (...lines: string[]) => void;
+  /** Session event logger — used by sessionDebug and sub-agent tracking. */
+  logger?: SessionLogger;
 }
 
 export interface ToolSetup {
@@ -54,7 +61,7 @@ function fmtAge(d: Date): string {
   return `${Math.floor(sec / 86400)}d ago`;
 }
 
-function createMemoryTool(store: MemoryStore) {
+export function createMemoryTool(store: MemoryStore) {
   return multiTool({
     name: "memory",
     description: "Read and write long-term memory that persists across sessions.",
@@ -148,6 +155,152 @@ function createMemoryTool(store: MemoryStore) {
   });
 }
 
+export function createSessionDebugTool(
+  sessionRef: { current: AgentSession | undefined },
+  sessionIdRef: { current: string },
+  runner: WorkflowRunner,
+  logger?: SessionLogger,
+) {
+  return multiTool({
+    name: "sessionDebug",
+    description: "Inspect the current agent session to diagnose failures and errors.",
+    commands: {
+      errors: command({
+        description:
+          "List activity failures from the workflow journal (survives context compaction)",
+        parameters: z.object({
+          limit: z.number().int().min(1).max(50).default(20).describe("Max failures to return"),
+        }),
+        execute: async ({ limit }) => {
+          const storage = runner.storage;
+          if (!isActivityJournalStorage(storage)) return "Journal storage not available.";
+          const entries = await storage.loadJournal(sessionIdRef.current, "conversation");
+          const failures = entries.filter((e) => e.exit?.tag === "Failure");
+          if (failures.length === 0) return "No errors recorded in current session.";
+          return failures
+            .slice(-limit)
+            .map((e, i) => {
+              const t = e.createdAt.toLocaleTimeString();
+              return `${i + 1}. [${t}] ${e.activityName}\n   ${(e.exit as { tag: "Failure"; error: string }).error}`;
+            })
+            .join("\n");
+        },
+      }),
+      calls: command({
+        description: "Show recent tool calls with their results (from current context window)",
+        parameters: z.object({
+          limit: z.number().int().min(1).max(30).default(10).describe("Max calls to return"),
+          errorsOnly: z.boolean().default(false).describe("Show only failed calls"),
+        }),
+        execute: async ({ limit, errorsOnly }) => {
+          const session = sessionRef.current;
+          if (!session) return "No active session.";
+          const messages = session.messages();
+          type Pair = { name: string; input: unknown; result: string; failed: boolean };
+          const pairs: Pair[] = [];
+          for (const msg of messages) {
+            if (msg.role !== "assistant" || !msg.toolCalls?.length) continue;
+            for (const call of msg.toolCalls) {
+              const resultMsg = messages.find(
+                (m): m is { role: "tool"; toolCallId: string; content: string } =>
+                  m.role === "tool" && (m as any).toolCallId === call.id,
+              );
+              if (!resultMsg) continue;
+              const content = resultMsg.content;
+              const failed =
+                content.startsWith("Tool execution failed") ||
+                content.startsWith("Invalid input") ||
+                content.startsWith("Error:");
+              if (errorsOnly && !failed) continue;
+              pairs.push({ name: call.name, input: call.input, result: content, failed });
+            }
+          }
+          if (pairs.length === 0)
+            return errorsOnly ? "No failed tool calls in current context." : "No tool calls found.";
+          return pairs
+            .slice(-limit)
+            .map((p, i) => {
+              const marker = p.failed ? "✗" : "✓";
+              const param = abbrevInput((p.input as Record<string, unknown>) ?? {});
+              const preview = p.result.length > 200 ? `${p.result.slice(0, 197)}…` : p.result;
+              return `${i + 1}. ${marker} ${p.name}${param ? `  ${param}` : ""}\n   ${preview}`;
+            })
+            .join("\n\n");
+        },
+      }),
+      status: command({
+        description: "Current session status, cumulative token usage, and lifecycle state",
+        parameters: z.object({}),
+        execute: async () => {
+          const session = sessionRef.current;
+          if (!session) return "No active session.";
+          const agentStatus = await session.status();
+          const usage = session.usage();
+          const lc = session.lifecycleState();
+          return [
+            `Status:    ${agentStatus}`,
+            `Tokens:    ${usage.inputTokens.toLocaleString()} in / ${usage.outputTokens.toLocaleString()} out`,
+            `Lifecycle: ${lc.current}`,
+          ].join("\n");
+        },
+      }),
+      log: command({
+        description:
+          "Show the structured session event log (turn, llm.call, tool, compact, approval events)",
+        parameters: z.object({
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(200)
+            .default(50)
+            .describe("Max events to return (most recent first)"),
+          type: z
+            .string()
+            .optional()
+            .describe("Filter by event type prefix, e.g. 'tool' or 'turn'"),
+          turn: z.number().int().optional().describe("Filter to a specific turn number"),
+        }),
+        execute: async ({ limit, type: typeFilter, turn: turnFilter }) => {
+          const session = sessionRef.current;
+          const events = session ? session.eventLog() : (logger?.events() ?? []);
+          if (events.length === 0) return "No session events recorded yet.";
+          let filtered = events;
+          if (typeFilter) filtered = filtered.filter((e) => e.type.startsWith(typeFilter));
+          if (turnFilter !== undefined) {
+            filtered = filtered.filter(
+              (e) => "turn" in e && (e as { turn: number }).turn === turnFilter,
+            );
+          }
+          if (filtered.length === 0) return "No events match the filter.";
+          const shown = filtered.slice(-limit).reverse();
+          return shown
+            .map((e) => {
+              const t = new Date(e.ts).toLocaleTimeString();
+              const rest = { ...e } as Record<string, unknown>;
+              delete rest.type;
+              delete rest.ts;
+              const detail = Object.entries(rest)
+                .map(([k, v]) => {
+                  if (k === "task" || k === "answer") {
+                    const s = String(v);
+                    return `${k}=${s.length > 60 ? `${s.slice(0, 57)}…` : s}`;
+                  }
+                  if (k === "input" && typeof v === "object" && v !== null) {
+                    return `input=${abbrevInput(v as Record<string, unknown>) || JSON.stringify(v).slice(0, 40)}`;
+                  }
+                  return `${k}=${JSON.stringify(v)}`;
+                })
+                .join("  ");
+              return `[${t}] ${e.type}  ${detail}`;
+            })
+            .join("\n");
+        },
+      }),
+    },
+  });
+}
+
 export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
   const {
     workspace,
@@ -158,8 +311,10 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
     runner,
     usage,
     sessionRef,
+    sessionIdRef,
     autoApproveRef,
     printAbove,
+    logger,
   } = deps;
 
   const toolsDir = join(import.meta.dir, "tools");
@@ -191,11 +346,26 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
     onError: (file, err) => console.error(`tool error: ${file}`, err),
   });
 
+  // Serialize all ask() calls so concurrent tool executions never overlap prompts.
+  // Without this, parallel tools (chatGPT + chatGemini) both call rl.question()
+  // simultaneously: the second prompt is never shown and its ask() hangs until
+  // Ctrl+C aborts the turn with "Tool execution failed: Aborted".
+  let askQueue: Promise<void> = Promise.resolve();
+  function serialAsk(question: string): Promise<string> {
+    const result = askQueue.then(() => ask(question));
+    // Advance the queue even if ask() throws (e.g. abort), so the next caller unblocks.
+    askQueue = result.then(
+      () => {},
+      () => {},
+    );
+    return result;
+  }
+
   /** Resolve a secret: CompositeSecretStore checks env first, then in-memory. Prompt once if absent. */
   async function getSecret(envKey: string, toolName: string): Promise<string> {
     let value = await secrets.get(envKey);
     if (!value) {
-      value = await ask(`[${toolName}] Enter ${envKey}`);
+      value = await serialAsk(`[${toolName}] Enter ${envKey}`);
       await secrets.set(envKey, value);
     }
     return value;
@@ -261,6 +431,8 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
     }),
 
     memory: createMemoryTool(memoryStore),
+
+    sessionDebug: createSessionDebugTool(sessionRef, sessionIdRef, runner, logger),
 
     chatGPT: chatGptOneShotTool,
 
@@ -337,6 +509,8 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
     ask,
     autoApproveRef,
     onStep: makeOnStep("[claudeAgent]"),
+    onSubagentStart: (p) => logger?.emit({ type: "subagent.start", name: "claudeAgent", ...p }),
+    onSubagentEnd: (p) => logger?.emit({ type: "subagent.end", name: "claudeAgent", ...p }),
   });
 
   const lazyOpenAI: LLMProvider = {
@@ -361,6 +535,8 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
     ask,
     autoApproveRef,
     onStep: makeOnStep("[gptAgent]"),
+    onSubagentStart: (p) => logger?.emit({ type: "subagent.start", name: "gptAgent", ...p }),
+    onSubagentEnd: (p) => logger?.emit({ type: "subagent.end", name: "gptAgent", ...p }),
   });
 
   staticTools.chatGemini = createLlmTool(

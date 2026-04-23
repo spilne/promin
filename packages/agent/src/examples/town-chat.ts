@@ -26,7 +26,14 @@
 import { createInterface } from "node:readline";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { z } from "zod";
-import { anthropic, createAgentTown, InMemoryMemoryStore, tool } from "../lib/index.ts";
+import {
+  anthropic,
+  createAgentTown,
+  InMemoryMemoryStore,
+  InMemorySessionLogger,
+  tool,
+} from "../lib/index.ts";
+import { abbrevInput } from "./console-spinner.ts";
 import { Terminal } from "./common/terminal.ts";
 import { ConsoleRunner } from "./common/console-runner.ts";
 import { UsageTracker } from "./console-usage.ts";
@@ -75,6 +82,12 @@ if (!apiKey) {
 }
 
 const autoApproveEnv = process.env.TOOL_AUTO_APPROVE === "true";
+
+const agentNames = ["director", "researcher", "analyst", "factChecker", "writer"] as const;
+type AgentName = (typeof agentNames)[number];
+const loggers = Object.fromEntries(
+  agentNames.map((n) => [n, new InMemorySessionLogger()]),
+) as Record<AgentName, InMemorySessionLogger>;
 
 const storage = new InMemoryWorkflowStorage();
 const runner = createWorkflowRunner({ storage });
@@ -139,6 +152,7 @@ const town = createAgentTown({
     director: {
       llm: claude,
       memory: new InMemoryMemoryStore(),
+      logger: loggers.director,
       prompt: [
         "You are the director of a research town. Coordinate specialist agents to answer questions.",
         "",
@@ -160,6 +174,7 @@ const town = createAgentTown({
     researcher: {
       llm: claude,
       memory: new InMemoryMemoryStore(),
+      logger: loggers.researcher,
       tools: { fetchUrl, webSearch },
       requireApprovalForAllTools: true,
       prompt: [
@@ -173,6 +188,7 @@ const town = createAgentTown({
     analyst: {
       llm: claude,
       memory: new InMemoryMemoryStore(),
+      logger: loggers.analyst,
       prompt: [
         "You are an analyst. You receive research tasks from the director.",
         "Apply domain knowledge to synthesise, interpret, and add context beyond raw search results.",
@@ -184,6 +200,7 @@ const town = createAgentTown({
     factChecker: {
       llm: claude,
       memory: new InMemoryMemoryStore(),
+      logger: loggers.factChecker,
       tools: { webSearch },
       requireApprovalForAllTools: true,
       prompt: [
@@ -197,6 +214,7 @@ const town = createAgentTown({
     writer: {
       llm: claude,
       memory: new InMemoryMemoryStore(),
+      logger: loggers.writer,
       prompt: [
         "You are a writer. You receive a question, research findings, analysis, and a fact-check from the director.",
         "Combine all inputs into clear, well-structured markdown prose.",
@@ -237,13 +255,15 @@ function prompt(): void {
     // ---- slash commands ----
     if (input === "/help") {
       await term.showPane("help", [
-        "  /history  — director conversation history",
-        "  /steps    — director workflow step tree",
-        "  /tools    — agents and their tools",
-        `  /approve-all  — toggle auto-approve (currently: ${autoApprove ? "ON" : "OFF"})`,
-        "  /help     — show this list",
-        "  exit      — quit",
+        "  /history          — director conversation history",
+        "  /steps            — director workflow step tree",
+        "  /tools            — agents and their tools",
+        "  /log [agent]      — session event log (all agents or one)",
+        `  /approve-all      — toggle auto-approve (currently: ${autoApprove ? "ON" : "OFF"})`,
+        "  /help             — show this list",
+        "  exit              — quit",
         "",
+        "  Agents: director, researcher, analyst, factChecker, writer",
         "  Ctrl+C during a turn: interrupt (session recovers quickly).",
         "  Ctrl+C at prompt twice: exit.",
         "  Tool approval: y=yes  a=always  N=no",
@@ -280,6 +300,41 @@ function prompt(): void {
         "  writer      sendMessage, memory",
       ];
       await term.showPane("tools", lines);
+      return prompt();
+    }
+
+    if (input.startsWith("/log")) {
+      const agentArg = input.slice("/log".length).trim() as AgentName | "";
+      const targets: AgentName[] =
+        agentArg && agentArg in loggers ? [agentArg as AgentName] : [...agentNames];
+      const lines: string[] = [];
+      for (const name of targets) {
+        const events = loggers[name].events();
+        if (events.length === 0) continue;
+        lines.push(`\x1b[1m${name}\x1b[0m  (${events.length} events)`);
+        for (const e of events.slice(-30).reverse()) {
+          const t = new Date(e.ts).toLocaleTimeString();
+          const rest = { ...e } as Record<string, unknown>;
+          delete rest.type;
+          delete rest.ts;
+          const detail = Object.entries(rest)
+            .map(([k, v]) => {
+              if (k === "task" || k === "answer") {
+                const s = String(v);
+                return `${k}=${s.length > 60 ? `${s.slice(0, 57)}…` : s}`;
+              }
+              if (k === "input" && typeof v === "object" && v !== null) {
+                return `input=${abbrevInput(v as Record<string, unknown>) || JSON.stringify(v).slice(0, 40)}`;
+              }
+              return `${k}=${JSON.stringify(v)}`;
+            })
+            .join("  ");
+          lines.push(`  [${t}] ${e.type}  ${detail}`);
+        }
+        lines.push("");
+      }
+      if (lines.length === 0) lines.push("  No events recorded yet.");
+      await term.showPane(`log${agentArg ? ` · ${agentArg}` : ""}`, lines);
       return prompt();
     }
 

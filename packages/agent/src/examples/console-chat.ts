@@ -38,6 +38,7 @@ import { CompositeSecretStore, EnvSecretStore, InMemorySecretStore } from "../li
 import { Terminal } from "./common/terminal.ts";
 import { ConsoleRunner } from "./common/console-runner.ts";
 import { UsageTracker, fmtN } from "./console-usage.ts";
+import { InMemorySessionLogger } from "../lib/session-logger.ts";
 import { createSpinnerTracker, abbrevInput } from "./console-spinner.ts";
 import { createToolRegistry } from "./console-tools.ts";
 import {
@@ -146,10 +147,10 @@ const spinner = createSpinnerTracker(term);
 const consoleRunner = new ConsoleRunner(term, usage);
 
 // ---- tools ----
-const sessionRef: { current: { send: (task: string) => Promise<string> } | undefined } = {
-  current: undefined,
-};
+const sessionRef: { current: AgentSession | undefined } = { current: undefined };
+const sessionIdRef: { current: string } = { current: "session" };
 const autoApproveRef = { value: process.env.TOOL_AUTO_APPROVE === "true" };
+const sessionLogger = new InMemorySessionLogger();
 
 const { registry, scheduler, activeTicks } = await createToolRegistry({
   workspace,
@@ -161,7 +162,9 @@ const { registry, scheduler, activeTicks } = await createToolRegistry({
   runner,
   usage,
   sessionRef,
+  sessionIdRef,
   autoApproveRef,
+  logger: sessionLogger,
 });
 
 // ---- agent lifecycle state machine ----
@@ -198,6 +201,7 @@ const SYSTEM_PROMPT = [
   `Workspace: ${workspace}`,
   "Tools: readFile, writeFile, listDir, statFile (filesystem), shell (run commands),",
   "       memory (long-term memory — commands: search, save),",
+  "       sessionDebug (diagnose failures — commands: errors, calls, status, log),",
   "       chatGPT (one-shot GPT-4o query for a quick second opinion),",
   "       claudeAgent (parallel Claude sub-agent with filesystem/shell/memory/chatGPT access),",
   "       gptAgent (parallel GPT-4o sub-agent with filesystem/shell/memory/chatGPT access),",
@@ -213,6 +217,7 @@ let currentSessionId = "session";
 const loop = agentLoop({
   name: "console-agent",
   llm: usage.withTracking(anthropic("claude-sonnet-4-6", { apiKey }), "claude-sonnet-4-6"),
+  logger: sessionLogger,
   toolRegistry: spinner.withStatusTracking(registry),
   rateLimiter,
   systemPrompt: SYSTEM_PROMPT,
@@ -250,6 +255,8 @@ const loop = agentLoop({
 // ---- session reset helper ----
 async function resetSession(newId: string): Promise<AgentSession> {
   currentSessionId = newId;
+  sessionIdRef.current = newId;
+  sessionLogger.clear();
   await agentMachine.start({ id: newId, context: { turns: 0 } }).catch(() => {});
   const s = await loop.session({ runner, sessionId: newId });
   sessionRef.current = s;

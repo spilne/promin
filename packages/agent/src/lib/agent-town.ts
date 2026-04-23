@@ -8,6 +8,7 @@ import type { AgentTool } from "./tool.ts";
 import type { AgentSession, HooksConfig } from "./agent-loop.ts";
 import type { ToolCall } from "./message.ts";
 import type { MemoryStore } from "./memory-store.ts";
+import type { SessionLogger } from "./session-logger.ts";
 
 // ---- AsyncQueue ----
 
@@ -63,6 +64,8 @@ export interface AgentDefinition {
    * routing through `AgentTownConfig.onToolApproval`.
    */
   requireApprovalForAllTools?: boolean;
+  /** Structured event logger for this agent's session. */
+  logger?: SessionLogger;
 }
 
 export interface AgentTownConfig {
@@ -112,6 +115,8 @@ export interface AgentTown {
   interruptMayorInbox(): void;
   /** Return the mayor's AgentSession (for inspecting history, etc.). */
   getMayorSession(): Promise<AgentSession>;
+  /** Return any agent's session by name (for eventLog, messages, etc.). */
+  getAgentSession(name: string): Promise<AgentSession>;
   /** Shut down all agents and release resources. */
   close(): Promise<void>;
 }
@@ -343,6 +348,7 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
       llm: def.llm,
       tools: { ...toolsForAgent, ...injected },
       hooks: agentHooks,
+      logger: def.logger,
       systemPrompt: [
         def.prompt,
         `You are agent "${name}" in a multi-agent town.`,
@@ -436,6 +442,12 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
 
     getMayorSession(): Promise<AgentSession> {
       return sessionPromises.get(mayorName)!;
+    },
+
+    getAgentSession(name: string): Promise<AgentSession> {
+      const sp = sessionPromises.get(name);
+      if (!sp) throw new Error(`No agent named "${name}" in this town.`);
+      return sp;
     },
 
     async close(): Promise<void> {
