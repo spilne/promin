@@ -5,7 +5,8 @@ import { createMemoryTools } from "./tools/memory-tools.ts";
 import type { WorkflowRunner } from "@promin/workflow";
 import type { LLMProvider } from "./llm-provider.ts";
 import type { AgentTool } from "./tool.ts";
-import type { AgentSession } from "./agent-loop.ts";
+import type { AgentSession, HooksConfig } from "./agent-loop.ts";
+import type { ToolCall } from "./message.ts";
 import type { MemoryStore } from "./memory-store.ts";
 
 // ---- AsyncQueue ----
@@ -33,6 +34,11 @@ class AsyncQueue<T> {
   get length(): number {
     return this._items.length;
   }
+
+  /** True when a `pop()` call is currently blocked waiting for a message. */
+  get hasPendingPop(): boolean {
+    return this._waiters.length > 0;
+  }
 }
 
 // ---- types ----
@@ -50,6 +56,13 @@ export interface AgentDefinition {
   prompt: string;
   /** Private memory store. Injects searchMemory / saveMemory tools scoped to this agent. */
   memory?: MemoryStore;
+  /** Per-agent hooks (beforeTurn, afterTurn, onApprovalRequired, etc.). */
+  hooks?: HooksConfig;
+  /**
+   * When true, all user-defined tools for this agent require approval before execution,
+   * routing through `AgentTownConfig.onToolApproval`.
+   */
+  requireApprovalForAllTools?: boolean;
 }
 
 export interface AgentTownConfig {
@@ -71,6 +84,16 @@ export interface AgentTownConfig {
    * Use this to update a spinner or status line in the UI.
    */
   onAgentActivity?: (event: { agent: string; state: "thinking" | "idle" }) => void;
+  /**
+   * Called when a daemon agent's tool has `requireApproval: true` (or when
+   * `requireApprovalForAllTools` is set on the agent definition).
+   * Return `{ approved: true }` to allow execution, `{ approved: false }` to skip it.
+   * When omitted, tools run without prompting (auto-approved).
+   */
+  onToolApproval?: (event: {
+    agent: string;
+    call: ToolCall;
+  }) => Promise<{ approved: boolean; reason?: string }>;
 }
 
 export interface AgentTown {
@@ -78,6 +101,12 @@ export interface AgentTown {
   ask(task: string): Promise<string>;
   /** Stream the Mayor's reply token-by-token. */
   stream(task: string, signal?: AbortSignal): AsyncIterable<string>;
+  /**
+   * Unblock the mayor if it is currently waiting in `readInbox()`.
+   * Call this when the user interrupts a turn (e.g. Ctrl+C) so the session
+   * can become idle quickly rather than waiting for a daemon to reply.
+   */
+  interruptMayorInbox(): void;
   /** Shut down all agents and release resources. */
   close(): Promise<void>;
 }
@@ -193,6 +222,7 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
         execute: async () => {
           const inbox = inboxes.get(agentName)!;
           const msg = await inbox.pop();
+          if (msg.from === "__interrupted__") return "(turn interrupted by user)";
           return `[from ${msg.from}] ${msg.content}`;
         },
       });
@@ -273,10 +303,31 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
           `Do not end your turn without calling sendMessage — the sender is blocked waiting for your reply.`,
         ];
 
+    // If onToolApproval or requireApprovalForAllTools is set, mark user tools as requiring approval.
+    const userTools: Record<string, AgentTool<any, any>> = def.tools ?? {};
+    const toolsForAgent =
+      !isMayor && (config.onToolApproval || def.requireApprovalForAllTools)
+        ? Object.fromEntries(
+            Object.entries(userTools).map(([k, t]) => [
+              k,
+              t.requireApproval !== undefined ? t : { ...t, requireApproval: true },
+            ]),
+          )
+        : userTools;
+
+    const agentHooks: typeof def.hooks =
+      !isMayor && config.onToolApproval
+        ? {
+            ...def.hooks,
+            onApprovalRequired: async (call) => config.onToolApproval!({ agent: name, call }),
+          }
+        : def.hooks;
+
     const loop = agentLoop({
       name: `town-${name}`,
       llm: def.llm,
-      tools: { ...def.tools, ...injected },
+      tools: { ...toolsForAgent, ...injected },
+      hooks: agentHooks,
       systemPrompt: [
         def.prompt,
         `You are agent "${name}" in a multi-agent town.`,
@@ -352,6 +403,15 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
         const session = await sessionPromises.get(mayorName)!;
         yield* session.stream(task, signal);
       })();
+    },
+
+    interruptMayorInbox(): void {
+      const inbox = inboxes.get(mayorName);
+      // Only push the sentinel when the mayor is actually blocked in readInbox.
+      // If nobody is waiting, we'd leave a stale message that would confuse the next turn.
+      if (inbox?.hasPendingPop) {
+        inbox.push({ from: "__interrupted__", content: "" });
+      }
     },
 
     async close(): Promise<void> {

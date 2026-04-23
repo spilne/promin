@@ -61,12 +61,30 @@ if (!apiKey) {
 const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
 const claude = anthropic("claude-sonnet-4-6", { apiKey });
 
+// ---- terminal ----
+const rl = createInterface({ input: process.stdin, output: process.stdout, historySize: 100 });
+const term = new Terminal(rl);
+
 const town = createAgentTown({
   runner,
   mayor: "director",
   sharedMemory: new InMemoryMemoryStore(),
   onAgentActivity: ({ agent, state }) => {
     term.startSpinner(state === "thinking" ? `${agent} thinking...` : "director thinking...");
+  },
+  onToolApproval: async ({ agent, call }) => {
+    term.stopSpinner();
+    const inputPreview = JSON.stringify(call.input).slice(0, 80);
+    return new Promise((resolve) => {
+      rl.question(
+        `\n[${agent}] Approve tool "${call.name}"(${inputPreview})? [y/N]: `,
+        (answer) => {
+          const approved = answer.trim().toLowerCase() === "y";
+          if (approved) term.startSpinner(`${agent} thinking...`);
+          resolve({ approved });
+        },
+      );
+    });
   },
   agents: {
     director: {
@@ -91,6 +109,7 @@ const town = createAgentTown({
       llm: claude,
       memory: new InMemoryMemoryStore(),
       tools: { fetchUrl, webSearch },
+      requireApprovalForAllTools: true,
       prompt: [
         "You are a researcher in a multi-agent town. You receive research tasks from the director.",
         "Use webSearch to find relevant pages and fetchUrl to read them for details.",
@@ -111,10 +130,6 @@ const town = createAgentTown({
     },
   },
 });
-
-// ---- terminal ----
-const rl = createInterface({ input: process.stdin, output: process.stdout, historySize: 100 });
-const term = new Terminal(rl);
 
 // ---- abortable stream wrapper ----
 async function* abortable(
@@ -152,6 +167,7 @@ rl.on("SIGINT", () => {
     process.stdout.write("\x1b[2m(interrupted)\x1b[0m\n");
     currentAc.abort();
     currentAc = null;
+    town.interruptMayorInbox();
   } else {
     const now = Date.now();
     if (now - lastCtrlC < 2_000) {
