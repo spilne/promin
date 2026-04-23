@@ -145,6 +145,9 @@ export { broadcast } from "./broadcast.ts";
 export { agentNetwork } from "./agent-network.ts";
 export type { AgentSpec, AgentNetworkConfig, AgentNetwork } from "./agent-network.ts";
 
+export { createAgentTown } from "./agent-town.ts";
+export type { AgentDefinition, AgentTownConfig, AgentTown } from "./agent-town.ts";
+
 export { runCouncil, createCouncilTool, formatCouncilResult } from "./council.ts";
 export type {
   Councilor,
