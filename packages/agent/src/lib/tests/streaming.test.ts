@@ -5,7 +5,7 @@ import { agentLoop } from "../agent-loop.ts";
 import { broadcast } from "../broadcast.ts";
 import { tool } from "../tool.ts";
 import type { LLMProvider, LLMResponse, LLMStreamChunk, LLMFinishReason } from "../llm-provider.ts";
-import type { ToolCall } from "../message.ts";
+import type { ToolCall, ThinkingBlock } from "../message.ts";
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -13,6 +13,8 @@ import type { ToolCall } from "../message.ts";
 
 interface StreamingTurn {
   chunks?: string[];
+  thinkingChunks?: string[];
+  thinkingBlocks?: ThinkingBlock[];
   toolCalls?: ToolCall[];
   finishReason?: LLMFinishReason;
 }
@@ -28,20 +30,29 @@ function mockStreamingLLM(turns: StreamingTurn[]): LLMProvider {
       if (!turn) throw new Error("mockStreamingLLM: exhausted turns");
       return {
         [Symbol.asyncIterator](): AsyncIterator<LLMStreamChunk> {
+          const thinkingChunks = turn.thinkingChunks ?? [];
           const textChunks = turn.chunks ?? [];
+          let phase: "thinking" | "text" | "final" = thinkingChunks.length ? "thinking" : "text";
           let pos = 0;
-          let finalEmitted = false;
           return {
             async next(): Promise<IteratorResult<LLMStreamChunk>> {
-              if (pos < textChunks.length) {
+              if (phase === "thinking" && pos < thinkingChunks.length) {
+                return { value: { delta: "", thinkingDelta: thinkingChunks[pos++]! }, done: false };
+              }
+              if (phase === "thinking") {
+                phase = "text";
+                pos = 0;
+              }
+              if (phase === "text" && pos < textChunks.length) {
                 return { value: { delta: textChunks[pos++]! }, done: false };
               }
-              if (!finalEmitted) {
-                finalEmitted = true;
+              if (phase !== "final") {
+                phase = "final";
                 return {
                   value: {
                     delta: "",
                     toolCalls: turn.toolCalls,
+                    thinkingBlocks: turn.thinkingBlocks,
                     finishReason:
                       turn.finishReason ?? (turn.toolCalls?.length ? "tool_calls" : "stop"),
                   },
@@ -164,6 +175,71 @@ describe("session.stream() — fallback without chatStream", () => {
     await session.close();
 
     expect(chunks).toEqual(["The full answer."]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// session.stream() — extended thinking via onThinking callback
+// ---------------------------------------------------------------------------
+
+describe("session.stream() — extended thinking", () => {
+  it("delivers thinking deltas to onThinking and text deltas to the stream", async () => {
+    const session = await makeSession({
+      name: "stream-thinking",
+      llm: mockStreamingLLM([
+        {
+          thinkingChunks: ["Let me", " think..."],
+          thinkingBlocks: [{ thinking: "Let me think...", signature: "sig-abc" }],
+          chunks: ["The answer"],
+          finishReason: "stop",
+        },
+      ]),
+    });
+
+    const thinkingDeltas: string[] = [];
+    const textChunks = await collectStream(
+      session.stream("solve this", {
+        onThinking: (delta) => thinkingDeltas.push(delta),
+      }),
+    );
+    await session.close();
+
+    expect(textChunks).toEqual(["The answer"]);
+    expect(thinkingDeltas).toEqual(["Let me", " think..."]);
+  });
+
+  it("stores thinking blocks on the assistant message in history", async () => {
+    const session = await makeSession({
+      name: "stream-thinking-history",
+      llm: mockStreamingLLM([
+        {
+          thinkingChunks: ["reasoning"],
+          thinkingBlocks: [{ thinking: "reasoning", signature: "sig-xyz" }],
+          chunks: ["answer"],
+          finishReason: "stop",
+        },
+      ]),
+    });
+
+    await collectStream(session.stream("question"));
+    const msgs = session.messages();
+    await session.close();
+
+    const assistant = msgs.find((m) => m.role === "assistant");
+    expect(assistant?.thinkingBlocks).toEqual([{ thinking: "reasoning", signature: "sig-xyz" }]);
+  });
+
+  it("backward-compatible: bare AbortSignal still works alongside thinking", async () => {
+    const session = await makeSession({
+      name: "stream-thinking-signal-compat",
+      llm: mockStreamingLLM([{ chunks: ["ok"], finishReason: "stop" }]),
+    });
+
+    const ac = new AbortController();
+    const chunks = await collectStream(session.stream("hi", ac.signal));
+    await session.close();
+
+    expect(chunks).toEqual(["ok"]);
   });
 });
 

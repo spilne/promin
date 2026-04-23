@@ -156,6 +156,12 @@ export interface AgentLoopConfig {
    * Do not rely on it for durable side-effects.
    */
   onLifecycle?: (event: AgentLifecycleEvent) => void | Promise<void>;
+  /**
+   * Token budget for extended thinking. When set, every LLM call will include a
+   * thinking phase up to this many tokens before producing the final response.
+   * Requires a model that supports extended thinking (e.g. Claude 3.7+).
+   */
+  thinkingBudgetTokens?: number;
 }
 
 /**
@@ -182,17 +188,27 @@ export interface AgentLifecycleEvent extends AgentLifecycleEntry {
   context: unknown;
 }
 
+export interface StreamOptions {
+  signal?: AbortSignal;
+  /**
+   * Called with each thinking delta when extended thinking is enabled.
+   * Fires before the first text delta for the same step.
+   */
+  onThinking?: (delta: string) => void;
+}
+
 export interface AgentSession {
   send(task: string): Promise<string>;
   /**
    * Send a task and receive the answer as a stream of token deltas.
    * Falls back to a single-chunk stream when the LLM adapter has no chatStream.
    *
-   * Pass an AbortSignal to cancel the current LLM call mid-flight.
+   * Pass an AbortSignal (or `options.signal`) to cancel mid-flight.
+   * Pass `options.onThinking` to receive extended-thinking deltas in real time.
    * The signal is propagated to the underlying fetch — the workflow completes
    * the turn with an empty response so conversation history stays consistent.
    */
-  stream(task: string, signal?: AbortSignal): AsyncIterable<string>;
+  stream(task: string, options?: AbortSignal | StreamOptions): AsyncIterable<string>;
   /**
    * Approve a pending tool call that has `requireApproval: true`.
    * Returns `true` if the signal was delivered and the workflow was resumed,
@@ -407,6 +423,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
         { resolve: (answer: string) => void; reject: (err: Error) => void }
       >();
       const pendingStreams = new Map<number, ChunkQueue>();
+      const pendingThinkingCallbacks = new Map<number, (delta: string) => void>();
       const pendingSignals = new Map<number, AbortSignal>();
       const state: SessionState = {
         turn: 0,
@@ -513,6 +530,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               );
               const toolDefs = buildToolDefs(toolMap);
               const chunkQueue = pendingStreams.get(turn);
+              const thinkingCb = pendingThinkingCallbacks.get(turn);
               const response = yield* ctx.activity(`think-${turn}-${step}`, () =>
                 runLlmCall({
                   llm: config.llm,
@@ -522,6 +540,8 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                   processors: config.processors,
                   processorCtx: { step, turn, workflowId: ctx.workflowId },
                   onChunk: chunkQueue ? (delta) => chunkQueue.push(delta) : undefined,
+                  onThinking: thinkingCb,
+                  thinkingBudgetTokens: config.thinkingBudgetTokens,
                   signal: pendingSignals.get(turn),
                 }),
               );
@@ -535,6 +555,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                 role: "assistant",
                 content: response.content,
                 toolCalls: response.toolCalls,
+                thinkingBlocks: response.thinkingBlocks,
               };
               messages = [...messages, assistantMsg];
 
@@ -629,6 +650,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               pendingResponses.get(turn)?.resolve(answer);
               pendingResponses.delete(turn);
               pendingStreams.get(turn)?.close();
+              pendingThinkingCallbacks.delete(turn);
               pendingSignals.delete(turn);
               return answer;
             });
@@ -731,6 +753,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
           } catch (err) {
             pendingResponses.delete(turn);
             pendingStreams.delete(turn);
+            pendingThinkingCallbacks.delete(turn);
             pendingSignals.delete(turn);
             throw err;
           } finally {
@@ -740,20 +763,24 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
           }
         },
 
-        async *stream(task: string, signal?: AbortSignal): AsyncIterable<string> {
+        async *stream(task: string, options?: AbortSignal | StreamOptions): AsyncIterable<string> {
           if (state.closed) throw new Error("Session is closed");
           if (state.inTurn) throw new Error("Session is busy — only one turn at a time");
           const turn = state.turn++;
           state.inTurn = true;
 
+          const opts: StreamOptions =
+            options instanceof AbortSignal ? { signal: options } : (options ?? {});
+
           // Combine caller's abort signal with the session-level close signal.
-          const combinedSignal = signal
-            ? AbortSignal.any([signal, sessionAc.signal])
+          const combinedSignal = opts.signal
+            ? AbortSignal.any([opts.signal, sessionAc.signal])
             : sessionAc.signal;
           pendingSignals.set(turn, combinedSignal);
 
           const chunkQueue = new ChunkQueue();
           pendingStreams.set(turn, chunkQueue);
+          if (opts.onThinking) pendingThinkingCallbacks.set(turn, opts.onThinking);
 
           const answerPromise = new Promise<string>((resolve, reject) =>
             pendingResponses.set(turn, { resolve, reject }),
@@ -798,6 +825,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               if (runError) throw runError;
             } finally {
               pendingStreams.delete(turn);
+              pendingThinkingCallbacks.delete(turn);
               pendingResponses.delete(turn);
               pendingSignals.delete(turn);
               await runPromise;
@@ -904,6 +932,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
           // Unblock any for-await loops on chunk streams.
           pendingStreams.forEach((q) => q.close());
           pendingStreams.clear();
+          pendingThinkingCallbacks.clear();
           pendingSignals.clear();
           await config.hooks?.onClose?.();
         },

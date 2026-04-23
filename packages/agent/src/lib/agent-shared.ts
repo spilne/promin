@@ -9,6 +9,7 @@ import type {
   LLMUsage,
   LLMToolDefinition,
 } from "./llm-provider.ts";
+import type { ThinkingBlock } from "./message.ts";
 import type { ProcessorsConfig, ProcessorContext } from "./processors.ts";
 
 export function formatToolError(err: unknown): string {
@@ -81,6 +82,10 @@ export interface RunLlmCallParams {
   processorCtx: ProcessorContext;
   /** Called with each text delta when the LLM streams. When omitted, falls back to non-streaming. */
   onChunk?: (delta: string) => void;
+  /** Called with each thinking delta when the LLM streams extended thinking. */
+  onThinking?: (delta: string) => void;
+  /** Token budget for extended thinking. Forwarded to the LLM as-is. */
+  thinkingBudgetTokens?: number;
   signal?: AbortSignal;
 }
 
@@ -97,13 +102,20 @@ export async function runLlmCall({
   processors,
   processorCtx,
   onChunk,
+  onThinking,
+  thinkingBudgetTokens,
   signal,
 }: RunLlmCallParams): Promise<LLMResponse> {
   const processedMessages = processors?.beforeLLM
     ? await processors.beforeLLM(messages, processorCtx)
     : messages;
 
-  const chatParams: LLMChatParams = { messages: processedMessages, tools, signal };
+  const chatParams: LLMChatParams = {
+    messages: processedMessages,
+    tools,
+    signal,
+    thinkingBudgetTokens,
+  };
 
   let raw: LLMResponse;
   try {
@@ -114,11 +126,16 @@ export async function runLlmCall({
       let finishReason: LLMFinishReason = "stop";
       let usage: LLMUsage | undefined;
       const toolCalls: ToolCall[] = [];
+      const thinkingBlocks: ThinkingBlock[] = [];
       for await (const chunk of stream) {
+        if (chunk.thinkingDelta) {
+          onThinking?.(chunk.thinkingDelta);
+        }
         if (chunk.delta) {
           content += chunk.delta;
           onChunk(chunk.delta);
         }
+        if (chunk.thinkingBlocks) thinkingBlocks.push(...chunk.thinkingBlocks);
         if (chunk.toolCalls) toolCalls.push(...chunk.toolCalls);
         if (chunk.finishReason) finishReason = chunk.finishReason;
         if (chunk.usage) usage = chunk.usage;
@@ -128,6 +145,7 @@ export async function runLlmCall({
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
         finishReason,
         usage,
+        thinkingBlocks: thinkingBlocks.length > 0 ? thinkingBlocks : undefined,
       };
     } else {
       const call = () => llm.chat(chatParams);

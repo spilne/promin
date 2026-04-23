@@ -14,10 +14,18 @@ export interface ToolCall {
   input: unknown;
 }
 
+export interface ThinkingBlock {
+  thinking: string;
+  /** Anthropic-issued signature required to replay thinking in subsequent turns. */
+  signature: string;
+}
+
 export interface AssistantMessage {
   role: "assistant";
   content: string | null;
   toolCalls?: ToolCall[];
+  /** Extended-thinking blocks emitted before the text response. Must be replayed verbatim on subsequent turns. */
+  thinkingBlocks?: ThinkingBlock[];
 }
 
 export interface ToolResultMessage {

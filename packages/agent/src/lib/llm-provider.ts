@@ -1,4 +1,4 @@
-import type { Message, ToolCall } from "./message.ts";
+import type { Message, ToolCall, ThinkingBlock } from "./message.ts";
 
 export interface LLMToolDefinition {
   name: string;
@@ -12,6 +12,12 @@ export interface LLMChatParams {
   temperature?: number;
   maxTokens?: number;
   signal?: AbortSignal;
+  /**
+   * When set, enables extended thinking. The value is the token budget for the
+   * thinking phase. Requires a model that supports extended thinking (Claude 3.7+).
+   * Forces temperature=1 in the Anthropic adapter.
+   */
+  thinkingBudgetTokens?: number;
 }
 
 export interface LLMUsage {
@@ -28,13 +34,19 @@ export interface LLMResponse {
   toolCalls?: ToolCall[];
   finishReason: LLMFinishReason;
   usage?: LLMUsage;
+  /** Thinking blocks produced by extended thinking, if enabled. */
+  thinkingBlocks?: ThinkingBlock[];
 }
 
 export interface LLMStreamChunk {
   /** Partial text delta. Empty on the final chunk or when the step is a pure tool call. */
   delta: string;
+  /** Partial thinking delta. Only present on chunks that carry extended-thinking text. */
+  thinkingDelta?: string;
   /** Assembled tool calls. Only present on the final chunk. */
   toolCalls?: ToolCall[];
+  /** Complete thinking blocks. Only present on the final chunk when extended thinking was used. */
+  thinkingBlocks?: ThinkingBlock[];
   /** Set on the final chunk. */
   finishReason?: LLMFinishReason;
   usage?: LLMUsage;

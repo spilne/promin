@@ -5,11 +5,13 @@ import type {
   LLMStreamChunk,
   LLMFinishReason,
 } from "../llm-provider.ts";
-import type { Message, ToolCall } from "../message.ts";
+import type { Message, ToolCall, ThinkingBlock } from "../message.ts";
 
 interface AnthropicContentBlock {
   type: string;
   text?: string;
+  thinking?: string;
+  signature?: string;
   id?: string;
   tool_use_id?: string;
   name?: string;
@@ -48,12 +50,19 @@ interface SSEMessageStart {
 interface SSEContentBlockStart {
   type: "content_block_start";
   index: number;
-  content_block: { type: "text" } | { type: "tool_use"; id: string; name: string };
+  content_block:
+    | { type: "text" }
+    | { type: "thinking" }
+    | { type: "tool_use"; id: string; name: string };
 }
 interface SSEContentBlockDelta {
   type: "content_block_delta";
   index: number;
-  delta: { type: "text_delta"; text: string } | { type: "input_json_delta"; partial_json: string };
+  delta:
+    | { type: "text_delta"; text: string }
+    | { type: "thinking_delta"; thinking: string }
+    | { type: "signature_delta"; signature: string }
+    | { type: "input_json_delta"; partial_json: string };
 }
 interface SSEMessageDelta {
   type: "message_delta";
@@ -80,6 +89,9 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
 
   function buildBody(params: LLMChatParams, stream?: boolean): Record<string, unknown> {
     const systemBlocks = extractSystemBlocks(params.messages);
+    const thinking = params.thinkingBudgetTokens
+      ? { type: "enabled", budget_tokens: params.thinkingBudgetTokens }
+      : undefined;
     return {
       model,
       max_tokens: params.maxTokens ?? options.maxTokens ?? 4096,
@@ -88,7 +100,8 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
       // cache_control so the entire system prefix (including memory injections,
       // tool descriptions, etc.) is cached as one unit.
       ...(systemBlocks.length > 0 ? { system: systemBlocks } : {}),
-      ...(params.temperature !== undefined ? { temperature: params.temperature } : {}),
+      // Extended thinking requires temperature=1.
+      temperature: thinking ? 1 : (params.temperature ?? undefined),
       ...(params.tools && params.tools.length > 0
         ? {
             tools: params.tools.map((t, i) => ({
@@ -102,16 +115,19 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
             })),
           }
         : {}),
+      ...(thinking ? { thinking } : {}),
       ...(stream ? { stream: true } : {}),
     };
   }
 
-  function headers(): Record<string, string> {
+  function headers(params?: LLMChatParams): Record<string, string> {
+    const betaFeatures = ["prompt-caching-2024-07-31"];
+    if (params?.thinkingBudgetTokens) betaFeatures.push("interleaved-thinking-2025-05-14");
     return {
       "content-type": "application/json",
       "x-api-key": apiKey ?? "",
       "anthropic-version": "2023-06-01",
-      "anthropic-beta": "prompt-caching-2024-07-31",
+      "anthropic-beta": betaFeatures.join(","),
       ...options.defaultHeaders,
     };
   }
@@ -120,7 +136,7 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
     async chat(params: LLMChatParams): Promise<LLMResponse> {
       const resp = await fetch(`${baseUrl}/v1/messages`, {
         method: "POST",
-        headers: headers(),
+        headers: headers(params),
         body: JSON.stringify(buildBody(params)),
         signal: params.signal,
       });
@@ -137,7 +153,7 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
     async *chatStream(params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
       const resp = await fetch(`${baseUrl}/v1/messages`, {
         method: "POST",
-        headers: headers(),
+        headers: headers(params),
         body: JSON.stringify(buildBody(params, true)),
         signal: params.signal,
       });
@@ -150,6 +166,7 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
       // Accumulate per-block state keyed by block index
       const textBlocks = new Map<number, string>();
       const toolBlocks = new Map<number, { id: string; name: string; inputJson: string }>();
+      const thinkingBlocks = new Map<number, { thinking: string; signature: string }>();
       let inputTokens = 0;
       let outputTokens = 0;
       let cacheReadTokens = 0;
@@ -166,6 +183,8 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
           const e = event as SSEContentBlockStart;
           if (e.content_block.type === "text") {
             textBlocks.set(e.index, "");
+          } else if (e.content_block.type === "thinking") {
+            thinkingBlocks.set(e.index, { thinking: "", signature: "" });
           } else if (e.content_block.type === "tool_use") {
             toolBlocks.set(e.index, {
               id: e.content_block.id,
@@ -178,6 +197,13 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
           if (e.delta.type === "text_delta") {
             textBlocks.set(e.index, (textBlocks.get(e.index) ?? "") + e.delta.text);
             yield { delta: e.delta.text };
+          } else if (e.delta.type === "thinking_delta") {
+            const block = thinkingBlocks.get(e.index);
+            if (block) block.thinking += e.delta.thinking;
+            yield { delta: "", thinkingDelta: e.delta.thinking };
+          } else if (e.delta.type === "signature_delta") {
+            const block = thinkingBlocks.get(e.index);
+            if (block) block.signature = e.delta.signature;
           } else if (e.delta.type === "input_json_delta") {
             const block = toolBlocks.get(e.index);
             if (block) block.inputJson += e.delta.partial_json;
@@ -209,10 +235,15 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
         return { id, name, input };
       });
 
+      const completedThinkingBlocks: ThinkingBlock[] = [...thinkingBlocks.values()].filter(
+        (b) => b.signature,
+      );
+
       yield {
         delta: "",
         finishReason,
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+        thinkingBlocks: completedThinkingBlocks.length > 0 ? completedThinkingBlocks : undefined,
         usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
       };
     },
@@ -281,6 +312,10 @@ function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
 
     if (msg.role === "assistant") {
       const content: AnthropicContentBlock[] = [];
+      // Thinking blocks must precede text/tool blocks and be replayed verbatim.
+      for (const tb of msg.thinkingBlocks ?? []) {
+        content.push({ type: "thinking", thinking: tb.thinking, signature: tb.signature });
+      }
       if (msg.content) content.push({ type: "text", text: msg.content });
       for (const tc of msg.toolCalls ?? []) {
         content.push({ type: "tool_use", id: tc.id, name: tc.name, input: tc.input });
@@ -311,9 +346,12 @@ function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
 function parseAnthropicResponse(data: AnthropicResponse): LLMResponse {
   let content: string | null = null;
   const toolCalls: ToolCall[] = [];
+  const thinkingBlocks: ThinkingBlock[] = [];
 
   for (const block of data.content) {
-    if (block.type === "text" && block.text) {
+    if (block.type === "thinking" && block.thinking && block.signature) {
+      thinkingBlocks.push({ thinking: block.thinking, signature: block.signature });
+    } else if (block.type === "text" && block.text) {
       content = block.text;
     } else if (block.type === "tool_use" && block.id && block.name) {
       toolCalls.push({ id: block.id, name: block.name, input: block.input });
@@ -332,6 +370,7 @@ function parseAnthropicResponse(data: AnthropicResponse): LLMResponse {
   return {
     content,
     toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+    thinkingBlocks: thinkingBlocks.length > 0 ? thinkingBlocks : undefined,
     finishReason,
     usage: {
       inputTokens: data.usage.input_tokens,

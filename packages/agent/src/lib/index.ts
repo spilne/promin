@@ -16,6 +16,7 @@ export type {
   AgentSession,
   AgentLoop,
   AgentStatus,
+  StreamOptions,
   ContextConfig,
   MemoryConfig,
   HooksConfig,
@@ -103,6 +104,7 @@ export type {
   AssistantMessage,
   ToolResultMessage,
   ToolCall,
+  ThinkingBlock,
 } from "./message.ts";
 
 export { anthropic } from "./adapters/anthropic.ts";
