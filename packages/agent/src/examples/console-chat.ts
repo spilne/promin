@@ -415,9 +415,13 @@ function prompt() {
       term.suppress = false;
 
       const { aborted, error: streamError } = await consoleRunner.runTurn(
-        (signal) => session.stream(input, signal),
+        (signal) => {
+          term.setActiveSignal(signal);
+          return session.stream(input, signal);
+        },
         { label: "Agent", workspace },
       );
+      term.setActiveSignal(null);
 
       if (aborted) {
         term.agentHasTextOnLine = false;
