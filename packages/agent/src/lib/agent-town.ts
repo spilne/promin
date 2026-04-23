@@ -159,7 +159,6 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
           const inbox = inboxes.get(to);
           if (!inbox)
             return `Unknown recipient "${to}". Available: ${peers(agentName).join(", ")}.`;
-          console.error(`[agentTown] ${agentName} → sendMessage(to=${to})`);
           inbox.push({ from: agentName, content });
           sentTo?.add(to);
           return `Delivered to ${to}.`;
@@ -179,10 +178,8 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
           "Use this after sendMessage to wait for a specialist's reply.",
         parameters: z.object({}),
         execute: async () => {
-          console.error(`[agentTown] ${agentName} → readInbox (blocking…)`);
           const inbox = inboxes.get(agentName)!;
           const msg = await inbox.pop();
-          console.error(`[agentTown] ${agentName} ← readInbox resolved (from=${msg.from})`);
           return `[from ${msg.from}] ${msg.content}`;
         },
       });
@@ -294,7 +291,6 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
         if (closed) break;
         if (msg.from === "__shutdown__") break;
 
-        console.error(`[agentTown] daemon ${name} ← message from ${msg.from}`);
         sentTo.clear();
 
         try {
@@ -303,13 +299,9 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
           // If the agent's LLM didn't call sendMessage back to the sender,
           // auto-reply with its text output so the sender's readInbox unblocks.
           if (!sentTo.has(msg.from) && inboxes.has(msg.from)) {
-            console.error(
-              `[agentTown] daemon ${name}: no explicit sendMessage to ${msg.from}, auto-replying`,
-            );
             inboxes.get(msg.from)!.push({ from: name, content: answer });
           }
         } catch (err) {
-          console.error(`[agentTown] ${name} error:`, err);
           // On error, unblock the sender with an error notice.
           if (inboxes.has(msg.from)) {
             inboxes
