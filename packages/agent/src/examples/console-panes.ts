@@ -1,6 +1,6 @@
 import type { AgentSession } from "../lib/agent-loop.ts";
 import type { MemoryStore } from "../lib/memory-store.ts";
-import type { TreeNode } from "./terminal.ts";
+import type { TreeNode } from "./common/terminal.ts";
 import type { InMemoryWorkflowStorage, InMemoryScheduler, WorkflowRunner } from "@promin/workflow";
 
 export const WORKFLOW_ICON: Record<string, string> = {

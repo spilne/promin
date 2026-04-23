@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import type { Interface } from "node:readline";
-import { Terminal } from "../terminal.ts";
+import { Terminal } from "../common/terminal.ts";
 
 function fakeRl(): Interface {
   return {

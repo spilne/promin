@@ -1,4 +1,4 @@
-import type { Terminal } from "./terminal.ts";
+import type { Terminal } from "./common/terminal.ts";
 import type { ToolRegistry } from "../lib/tool-registry.ts";
 import type { AgentTool } from "../lib/tool.ts";
 
