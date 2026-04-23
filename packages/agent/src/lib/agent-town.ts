@@ -134,10 +134,17 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
 
   const peers = (self: string) => agentNames.filter((n) => n !== self).concat("human");
 
+  // Per-daemon turn tracker: which inboxes did this agent push to this turn?
+  // Used to auto-reply if the agent's LLM forgets to call sendMessage.
+  const daemonSentTo = new Map<string, Set<string>>();
+
   function buildInjectedTools(
     agentName: string,
     def: AgentDefinition,
   ): Record<string, AgentTool<any, any>> {
+    const isMayor = agentName === mayorName;
+    const sentTo = isMayor ? null : daemonSentTo.get(agentName)!;
+
     const messaging: Record<string, AgentTool<any, any>> = {
       sendMessage: tool({
         name: "sendMessage",
@@ -152,22 +159,34 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
           const inbox = inboxes.get(to);
           if (!inbox)
             return `Unknown recipient "${to}". Available: ${peers(agentName).join(", ")}.`;
+          console.error(`[agentTown] ${agentName} → sendMessage(to=${to})`);
           inbox.push({ from: agentName, content });
+          sentTo?.add(to);
           return `Delivered to ${to}.`;
         },
       }),
+    };
 
-      readInbox: tool({
+    // readInbox is only available to the mayor.
+    // Daemon agents receive their next task via the daemon loop (inbox.pop()),
+    // so giving them readInbox too would cause deadlocks: both sides block waiting
+    // for the other to send first.
+    if (isMayor) {
+      messaging.readInbox = tool({
         name: "readInbox",
-        description: "Block until a message arrives in your inbox and return it.",
+        description:
+          "Block until a peer agent sends a message to your inbox and return it. " +
+          "Use this after sendMessage to wait for a specialist's reply.",
         parameters: z.object({}),
         execute: async () => {
+          console.error(`[agentTown] ${agentName} → readInbox (blocking…)`);
           const inbox = inboxes.get(agentName)!;
           const msg = await inbox.pop();
+          console.error(`[agentTown] ${agentName} ← readInbox resolved (from=${msg.from})`);
           return `[from ${msg.from}] ${msg.content}`;
         },
-      }),
-    };
+      });
+    }
 
     const privateMemory: Record<string, AgentTool<any, any>> = def.memory
       ? createMemoryTools({ store: def.memory })
@@ -216,6 +235,11 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
   let closed = false;
 
   for (const [name, def] of Object.entries(agents)) {
+    const isMayor = name === mayorName;
+
+    // Initialize per-daemon sent-tracker before building tools (tools close over it).
+    if (!isMayor) daemonSentTo.set(name, new Set());
+
     const injected = buildInjectedTools(name, def);
     const memoryLines: string[] = [];
     if (def.memory) {
@@ -228,6 +252,17 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
         "You share a town memory with all agents (searchSharedMemory / saveSharedMemory). Use it for cross-agent coordination facts.",
       );
     }
+
+    const roleLines = isMayor
+      ? [
+          `To delegate: call sendMessage with the task, then call readInbox to block until the specialist replies.`,
+          `Reply directly to the user when done — do not call sendMessage for the final answer.`,
+        ]
+      : [
+          `When your task is complete, ALWAYS call sendMessage to deliver your result to the sender.`,
+          `Do not end your turn without calling sendMessage — the sender is blocked waiting for your reply.`,
+        ];
+
     const loop = agentLoop({
       name: `town-${name}`,
       llm: def.llm,
@@ -236,8 +271,7 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
         def.prompt,
         `You are agent "${name}" in a multi-agent town.`,
         `Peers you can message: ${peers(name).join(", ")}.`,
-        `To collaborate: call sendMessage then readInbox to get the reply.`,
-        `When done with a task for another agent, call sendMessage to deliver your result.`,
+        ...roleLines,
         ...memoryLines,
       ].join("\n"),
     });
@@ -253,18 +287,35 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
     const daemon = (async () => {
       const session = await sessionPromises.get(name)!;
       const inbox = inboxes.get(name)!;
+      const sentTo = daemonSentTo.get(name)!;
 
       while (!closed) {
         const msg = await inbox.pop();
         if (closed) break;
         if (msg.from === "__shutdown__") break;
 
+        console.error(`[agentTown] daemon ${name} ← message from ${msg.from}`);
+        sentTo.clear();
+
         try {
-          // Run the agent's LLM turn. The agent is responsible for calling
-          // sendMessage to deliver its result — the daemon does not auto-reply.
-          await session.send(`[from ${msg.from}] ${msg.content}`);
+          const answer = await session.send(`[from ${msg.from}] ${msg.content}`);
+
+          // If the agent's LLM didn't call sendMessage back to the sender,
+          // auto-reply with its text output so the sender's readInbox unblocks.
+          if (!sentTo.has(msg.from) && inboxes.has(msg.from)) {
+            console.error(
+              `[agentTown] daemon ${name}: no explicit sendMessage to ${msg.from}, auto-replying`,
+            );
+            inboxes.get(msg.from)!.push({ from: name, content: answer });
+          }
         } catch (err) {
           console.error(`[agentTown] ${name} error:`, err);
+          // On error, unblock the sender with an error notice.
+          if (inboxes.has(msg.from)) {
+            inboxes
+              .get(msg.from)!
+              .push({ from: name, content: `Error: ${(err as Error).message}` });
+          }
         }
       }
     })();
