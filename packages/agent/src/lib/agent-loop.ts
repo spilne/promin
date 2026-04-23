@@ -95,6 +95,17 @@ export interface ContextConfig {
    * Default: true.
    */
   summarize?: boolean;
+  /**
+   * Model context limit in tokens. When set, enables token-based compaction:
+   * if the input tokens for a think step exceed `contextLimit * compressAt`,
+   * the message history is compacted before the next step.
+   */
+  contextLimit?: number;
+  /**
+   * Fraction of `contextLimit` at which token-based compaction fires.
+   * Default: 0.70.
+   */
+  compressAt?: number;
 }
 
 export interface MemoryConfig {
@@ -249,10 +260,20 @@ interface CompactionResult {
   summary: string | null;
 }
 
+const DEFAULT_SUMMARY_PROMPT =
+  "Summarize the following conversation segment concisely. " +
+  "Preserve key facts, decisions, user preferences, and any context needed for future turns.";
+
+const RECAP_SUMMARY_PROMPT =
+  "Produce a ≤150-word summary of the conversation below. " +
+  "Preserve: key decisions made, facts established, open tasks, and current task state. " +
+  "Write in past tense. Output only the summary, no preamble.";
+
 async function compact(
   messages: Message[],
   config: Required<Pick<ContextConfig, "keepMessages" | "summarize">>,
   llm: LLMProvider,
+  summaryPrompt = DEFAULT_SUMMARY_PROMPT,
 ): Promise<CompactionResult> {
   const systemMessages = messages.filter((m) => m.role === "system");
   const nonSystem = messages.filter((m) => m.role !== "system");
@@ -277,12 +298,7 @@ async function compact(
   try {
     const summaryResp = await llm.chat({
       messages: [
-        {
-          role: "system",
-          content:
-            "Summarize the following conversation segment concisely. " +
-            "Preserve key facts, decisions, user preferences, and any context needed for future turns.",
-        },
+        { role: "system", content: summaryPrompt },
         ...dropped,
         { role: "user", content: "Summarize the above conversation." },
       ],
@@ -398,11 +414,14 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
   const maxTurns = config.maxTurns ?? 1000;
   const maxStepsPerTurn = config.maxStepsPerTurn ?? 20;
 
-  const contextConfig: Required<ContextConfig> = {
-    maxMessages: config.context?.maxMessages ?? 80,
-    keepMessages: config.context?.keepMessages ?? 40,
-    summarize: config.context?.summarize ?? true,
-  };
+  const contextConfig: Required<Pick<ContextConfig, "maxMessages" | "keepMessages" | "summarize">> =
+    {
+      maxMessages: config.context?.maxMessages ?? 80,
+      keepMessages: config.context?.keepMessages ?? 40,
+      summarize: config.context?.summarize ?? true,
+    };
+  const contextLimit = config.context?.contextLimit;
+  const compressAt = config.context?.compressAt ?? 0.7;
 
   return {
     async session({ runner, sessionId }) {
@@ -549,6 +568,39 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               if (response.usage) {
                 turnInputTokens += response.usage.inputTokens;
                 turnOutputTokens += response.usage.outputTokens;
+
+                // Token-based rolling RECAP: compact before the next think step when
+                // input tokens approach the model context limit, so we never hit a
+                // hard "prompt too long" error mid-session.
+                if (
+                  contextLimit !== undefined &&
+                  response.usage.inputTokens >= contextLimit * compressAt
+                ) {
+                  const recapResult = yield* ctx.activity(`compress-${turn}-${step}`, () =>
+                    compact(
+                      messages,
+                      contextConfig,
+                      config.compactionLlm ?? config.llm,
+                      RECAP_SUMMARY_PROMPT,
+                    ),
+                  );
+                  messages = recapResult.messages;
+                  if (
+                    recapResult.summary &&
+                    config.memory?.saveOnCompact !== false &&
+                    config.memory?.store
+                  ) {
+                    yield* ctx.activity(`save-memory-recap-${turn}-${step}`, () =>
+                      config.memory!.store.save(
+                        {
+                          content: recapResult.summary!,
+                          metadata: { sessionId, turn, step, type: "recap-summary" },
+                        },
+                        config.memory!.scope,
+                      ),
+                    );
+                  }
+                }
               }
 
               const assistantMsg: AssistantMessage = {

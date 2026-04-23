@@ -116,6 +116,7 @@ export class Terminal implements AgentUIRenderer {
 
   private readonly _rl: Interface;
   private readonly _io: TerminalIO;
+  private _activeSignal: AbortSignal | null = null;
   private _timer: ReturnType<typeof setInterval> | null = null;
   private _frame = 0;
   private _label = "";
@@ -206,25 +207,39 @@ export class Terminal implements AgentUIRenderer {
    * Call with `await` from command handlers between readline questions.
    */
   async showPane(title: string, lines: string[]): Promise<void> {
-    const cols = process.stdout.columns ?? 80;
-    const rows = process.stdout.rows ?? 24;
-    const hr = `${DIM}${"─".repeat(cols)}${RST}`;
+    let cols = process.stdout.columns ?? 80;
+    let rows = process.stdout.rows ?? 24;
 
-    const out = [
-      "",
-      hr,
-      `  ${CLAY}${title}${RST}`,
-      hr,
-      ...lines,
-      hr,
-      `  ${DIM}any key · close${RST}`,
-      hr,
-      "",
-    ];
+    const buildOut = (c: number): string[] => {
+      const hr = `${DIM}${"─".repeat(c)}${RST}`;
+      return [
+        "",
+        hr,
+        `  ${CLAY}${title}${RST}`,
+        hr,
+        ...lines,
+        hr,
+        `  ${DIM}any key · close${RST}`,
+        hr,
+        "",
+      ];
+    };
 
+    let out = buildOut(cols);
     for (const line of out) process.stdout.write(`${line}\n`);
 
+    const onResize = () => {
+      const prevLen = out.length;
+      cols = process.stdout.columns ?? 80;
+      rows = process.stdout.rows ?? 24;
+      process.stdout.write(`\x1b[${prevLen}A\x1b[0J`);
+      out = buildOut(cols);
+      for (const line of out) process.stdout.write(`${line}\n`);
+    };
+
+    process.stdout.on("resize", onResize);
     await this._waitForKey();
+    process.stdout.off("resize", onResize);
 
     // Erase only if the pane fits — if it scrolled off the top, leave it.
     if (out.length < rows - 1) {
@@ -238,12 +253,12 @@ export class Terminal implements AgentUIRenderer {
    * Erases itself on exit (like showPane). Call with `await` between readline questions.
    */
   async showInteractiveTree(title: string, roots: TreeNode[]): Promise<void> {
-    const cols = process.stdout.columns ?? 80;
-    const rows = process.stdout.rows ?? 24;
-    const hr = `${DIM}${"─".repeat(cols)}${RST}`;
+    let cols = process.stdout.columns ?? 80;
+    let rows = process.stdout.rows ?? 24;
+    let hr = `${DIM}${"─".repeat(cols)}${RST}`;
     // 4 header lines: "", hr, title, hr
     // 4 footer lines: hr, help, hr, ""
-    const VIEW_H = Math.max(1, rows - 8);
+    let VIEW_H = Math.max(1, rows - 8);
 
     type FlatEntry = { node: TreeNode; depth: number };
 
@@ -323,6 +338,15 @@ export class Terminal implements AgentUIRenderer {
     let flat = flatten();
     render(flat);
 
+    const onResize = () => {
+      cols = process.stdout.columns ?? 80;
+      rows = process.stdout.rows ?? 24;
+      hr = `${DIM}${"─".repeat(cols)}${RST}`;
+      VIEW_H = Math.max(1, rows - 8);
+      render(flat);
+    };
+    process.stdout.on("resize", onResize);
+
     while (true) {
       const key = await this._readKey();
       if (key === "q" || key === "\x1b") break;
@@ -369,6 +393,7 @@ export class Terminal implements AgentUIRenderer {
       render(flat);
     }
 
+    process.stdout.off("resize", onResize);
     if (rendered < rows - 1) {
       this._sync(() => process.stdout.write(`\x1b[${rendered}A\x1b[0J`));
     }
@@ -514,16 +539,52 @@ export class Terminal implements AgentUIRenderer {
   }
 
   /**
+   * Register the active turn's AbortSignal so that a pending ask() prompt
+   * is rejected immediately when the turn is aborted (e.g. via Ctrl+C).
+   * Call with null to clear after the turn completes.
+   */
+  setActiveSignal(signal: AbortSignal | null): void {
+    this._activeSignal = signal;
+  }
+
+  /**
    * Stop the spinner, suspend rendering, show a readline question, then restore.
    * Centralises the suppress/inPrompt dance so callers cannot forget a step
    * and accidentally let the spinner overwrite the question prompt.
+   *
+   * If an active signal (set via setActiveSignal) is already aborted, or aborts
+   * while waiting, the promise rejects with an AbortError so the turn can unwind.
    */
   ask(question: string): Promise<string> {
-    return new Promise((resolve) => {
+    const signal = this._activeSignal;
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(Object.assign(new Error("Aborted"), { name: "AbortError" }));
+        return;
+      }
       this.stopSpinner();
       this.suppress = true;
       this.inPrompt = true;
+      let settled = false;
+
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        this.inPrompt = false;
+        // Write a synthetic newline so the pending readline 'line' listener fires
+        // with an empty answer and is removed — prevents it from consuming the
+        // next real user input at the REPL prompt.
+        this._rl.write("\n");
+        this.suppress = false;
+        reject(Object.assign(new Error("Aborted"), { name: "AbortError" }));
+      };
+
+      signal?.addEventListener("abort", onAbort, { once: true });
+
       this._rl.question(`\n${question}: `, (v) => {
+        signal?.removeEventListener("abort", onAbort);
+        if (settled) return;
+        settled = true;
         this.suppress = false;
         this.inPrompt = false;
         process.stdout.write("\n");
