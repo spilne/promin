@@ -20,6 +20,7 @@ import type { MemoryStore, MemoryScope } from "./memory-store.ts";
 import type { ProcessorsConfig } from "./processors.ts";
 import type { Message, AssistantMessage, ToolResultMessage, ToolCall } from "./message.ts";
 import { executeToolCall, runLlmCall } from "./agent-shared.ts";
+import type { SessionLogger } from "./session-logger.ts";
 
 // ---- hooks ----
 
@@ -173,6 +174,12 @@ export interface AgentLoopConfig {
    * Requires a model that supports extended thinking (e.g. Claude 3.7+).
    */
   thinkingBudgetTokens?: number;
+  /**
+   * Structured event log for this session. When provided, the agent emits
+   * turn, llm.call, tool, compact, and approval events to this logger.
+   * Use InMemorySessionLogger for an in-process ring buffer.
+   */
+  logger?: SessionLogger;
 }
 
 /**
@@ -246,6 +253,11 @@ export interface AgentSession {
    * use `onLifecycle` to drive an external state machine.
    */
   lifecycleHistory(): AgentLifecycleEntry[];
+  /**
+   * Returns all session events emitted so far (turn, llm.call, tool, compact, approval).
+   * Empty when no logger was passed to agentLoop. Ephemeral — resets on server restart.
+   */
+  eventLog(): import("./session-logger.ts").SessionEvent[];
   close(): Promise<void>;
 }
 
@@ -435,6 +447,9 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
       const activityStorage = runner.storage as unknown as ActivityJournalStorage;
 
       const clock = config.clock ?? SystemClock;
+      const sessionLogger = config.logger ?? null;
+      // Tracks when each turn started (used to compute turn.end durationMs).
+      const turnStarts = new Map<number, number>();
       // Aborted by close() to cancel any in-flight LLM fetch.
       const sessionAc = new AbortController();
       const pendingResponses = new Map<
@@ -520,6 +535,8 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
             const { task } = yield* ctx.signal<{ task: string }>(`task-${turn}`);
             yield* ctx.activity(`lc-${turn}-message`, async () => {
               transitionLifecycle("message", "thinking", { turns: turn, turn, task });
+              turnStarts.set(turn, Date.now());
+              sessionLogger?.emit({ type: "turn.start", turn, task });
             });
             messages = [...messages, { role: "user", content: task }];
 
@@ -550,8 +567,9 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               const toolDefs = buildToolDefs(toolMap);
               const chunkQueue = pendingStreams.get(turn);
               const thinkingCb = pendingThinkingCallbacks.get(turn);
-              const response = yield* ctx.activity(`think-${turn}-${step}`, () =>
-                runLlmCall({
+              const response = yield* ctx.activity(`think-${turn}-${step}`, async () => {
+                const llmStart = Date.now();
+                const result = await runLlmCall({
                   llm: config.llm,
                   messages,
                   tools: toolDefs.length > 0 ? toolDefs : undefined,
@@ -562,8 +580,16 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                   onThinking: thinkingCb,
                   thinkingBudgetTokens: config.thinkingBudgetTokens,
                   signal: pendingSignals.get(turn),
-                }),
-              );
+                });
+                sessionLogger?.emit({
+                  type: "llm.call",
+                  turn,
+                  step,
+                  durationMs: Date.now() - llmStart,
+                  tokens: result.usage,
+                });
+                return result;
+              });
 
               if (response.usage) {
                 turnInputTokens += response.usage.inputTokens;
@@ -576,14 +602,24 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                   contextLimit !== undefined &&
                   response.usage.inputTokens >= contextLimit * compressAt
                 ) {
-                  const recapResult = yield* ctx.activity(`compress-${turn}-${step}`, () =>
-                    compact(
+                  const beforeRecap = messages.filter((m) => m.role !== "system").length;
+                  const recapResult = yield* ctx.activity(`compress-${turn}-${step}`, async () => {
+                    const r = await compact(
                       messages,
                       contextConfig,
                       config.compactionLlm ?? config.llm,
                       RECAP_SUMMARY_PROMPT,
-                    ),
-                  );
+                    );
+                    const afterRecap = r.messages.filter((m) => m.role !== "system").length;
+                    sessionLogger?.emit({
+                      type: "compact",
+                      turn,
+                      reason: "token_limit",
+                      kept: afterRecap,
+                      dropped: beforeRecap - afterRecap,
+                    });
+                    return r;
+                  });
                   messages = recapResult.messages;
                   if (
                     recapResult.summary &&
@@ -638,13 +674,31 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                 ) {
                   let decision: { approved: boolean; reason?: string };
                   if (config.hooks?.onApprovalRequired) {
+                    sessionLogger?.emit({
+                      type: "approval.requested",
+                      turn,
+                      toolCallId: call.id,
+                      toolName: call.name,
+                    });
                     decision = yield* ctx.activity(`approval-${call.id}`, () =>
                       config.hooks!.onApprovalRequired!(call),
                     );
+                    sessionLogger?.emit({
+                      type: "approval.decision",
+                      turn,
+                      toolCallId: call.id,
+                      approved: decision.approved,
+                    });
                   } else {
                     yield* ctx.activity(`lc-${turn}-approval-${call.id}-start`, async () => {
                       transitionLifecycle("approval-required", "waiting_approval", {
                         toolCallId: call.id,
+                      });
+                      sessionLogger?.emit({
+                        type: "approval.requested",
+                        turn,
+                        toolCallId: call.id,
+                        toolName: call.name,
                       });
                     });
                     decision = yield* ctx.signal<{ approved: boolean; reason?: string }>(
@@ -652,6 +706,12 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                     );
                     yield* ctx.activity(`lc-${turn}-approval-${call.id}-end`, async () => {
                       transitionLifecycle(decision.approved ? "approved" : "rejected", "thinking", {
+                        toolCallId: call.id,
+                        approved: decision.approved,
+                      });
+                      sessionLogger?.emit({
+                        type: "approval.decision",
+                        turn,
                         toolCallId: call.id,
                         approved: decision.approved,
                       });
@@ -673,9 +733,39 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               if (toExecute.length > 0) {
                 const results = yield* ctx.parallel(
                   toExecute.map(({ call, toolDef }) =>
-                    ctx.activity(`tool-${call.name}-${turn}-${step}-${call.id}`, () =>
-                      executeToolCall(call, toolDef),
-                    ),
+                    ctx.activity(`tool-${call.name}-${turn}-${step}-${call.id}`, async () => {
+                      sessionLogger?.emit({
+                        type: "tool.start",
+                        turn,
+                        step,
+                        name: call.name,
+                        input: call.input,
+                      });
+                      const toolStart = Date.now();
+                      const result = await executeToolCall(call, toolDef);
+                      const durationMs = Date.now() - toolStart;
+                      const isParseError = result.content.startsWith("Invalid input");
+                      const failed =
+                        isParseError || result.content.startsWith("Tool execution failed");
+                      if (isParseError) {
+                        sessionLogger?.emit({
+                          type: "tool.parse_error",
+                          turn,
+                          step,
+                          name: call.name,
+                          error: result.content,
+                        });
+                      }
+                      sessionLogger?.emit({
+                        type: "tool.end",
+                        turn,
+                        step,
+                        name: call.name,
+                        durationMs,
+                        failed,
+                      });
+                      return result;
+                    }),
                   ),
                 );
                 toolResultMsgs.push(...results);
@@ -693,6 +783,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               // (consecutive user-role messages in Anthropic's format).
               answer = "(step limit reached)";
               messages = [...messages, { role: "assistant", content: answer }];
+              sessionLogger?.emit({ type: "step_limit.hit", turn, maxSteps: maxStepsPerTurn });
             }
 
             yield* ctx.activity(`emit-${turn}`, async () => {
@@ -704,6 +795,15 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               pendingStreams.get(turn)?.close();
               pendingThinkingCallbacks.delete(turn);
               pendingSignals.delete(turn);
+              const durationMs = turnStarts.has(turn) ? Date.now() - turnStarts.get(turn)! : 0;
+              turnStarts.delete(turn);
+              sessionLogger?.emit({
+                type: "turn.end",
+                turn,
+                answer,
+                durationMs,
+                tokens: { inputTokens: turnInputTokens, outputTokens: turnOutputTokens },
+              });
               return answer;
             });
 
@@ -726,9 +826,23 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
             // Compact if non-system messages exceed the threshold
             const nonSystemCount = messages.filter((m) => m.role !== "system").length;
             if (nonSystemCount > contextConfig.maxMessages) {
-              const result = yield* ctx.activity(`compact-${turn}`, () =>
-                compact(messages, contextConfig, config.compactionLlm ?? config.llm),
-              );
+              const beforeCompact = nonSystemCount;
+              const result = yield* ctx.activity(`compact-${turn}`, async () => {
+                const r = await compact(
+                  messages,
+                  contextConfig,
+                  config.compactionLlm ?? config.llm,
+                );
+                const afterCompact = r.messages.filter((m) => m.role !== "system").length;
+                sessionLogger?.emit({
+                  type: "compact",
+                  turn,
+                  reason: "message_count",
+                  kept: afterCompact,
+                  dropped: beforeCompact - afterCompact,
+                });
+                return r;
+              });
               messages = result.messages;
 
               if (
@@ -874,6 +988,13 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
 
             try {
               for await (const chunk of chunkQueue) yield chunk;
+              if (combinedSignal.aborted && !runError) {
+                sessionLogger?.emit({
+                  type: "turn.aborted",
+                  turn,
+                  reason: sessionAc.signal.aborted ? "close" : "signal",
+                });
+              }
               if (runError) throw runError;
             } finally {
               pendingStreams.delete(turn);
@@ -969,6 +1090,10 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
 
         lifecycleHistory() {
           return [...state.lifecycleHistory];
+        },
+
+        eventLog() {
+          return sessionLogger?.events() ?? [];
         },
 
         async close() {

@@ -24,6 +24,9 @@ export type {
   HooksAfterTurnParams,
 } from "./agent-loop.ts";
 
+export { InMemorySessionLogger } from "./session-logger.ts";
+export type { SessionLogger, SessionEvent, LogUsage } from "./session-logger.ts";
+
 export { InMemoryMemoryStore } from "./memory-store.ts";
 export type { MemoryStore, MemoryEntry, MemoryScope, EmbeddingProvider } from "./memory-store.ts";
 

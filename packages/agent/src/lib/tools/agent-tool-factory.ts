@@ -63,6 +63,10 @@ export interface AgentToolFactoryConfig {
    * `[claudeAgent] ✓ readFile  src/index.ts  (2ms)` line via `printAbove`.
    */
   onStep?: (params: { tool: string; param: string; durationMs: number; failed: boolean }) => void;
+  /** Called when the sub-agent workflow starts. */
+  onSubagentStart?: (params: { workflowId: string; task: string }) => void;
+  /** Called when the sub-agent workflow ends (success, failure, or timeout). */
+  onSubagentEnd?: (params: { workflowId: string; durationMs: number; timedOut: boolean }) => void;
 }
 
 /**
@@ -232,12 +236,17 @@ export function createAgentTool(
       const workflowId = `${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const run = config.runner.run({ workflow: agentWorkflow, workflowId, input: { task } });
 
+      config.onSubagentStart?.({ workflowId, task });
+      const subStart = Date.now();
+      let timedOut = false;
+
       // Poll-based timeout that ignores time spent in approval prompts.
       let tid: ReturnType<typeof setTimeout> | null = null;
       const timeout = new Promise<never>((_, reject) => {
         const check = () => {
           const remaining = timeoutMs - activeMs();
           if (remaining <= 0) {
+            timedOut = true;
             reject(new Error(`Sub-agent "${name}" timed out after ${timeoutMs / 1000}s`));
           } else {
             tid = setTimeout(check, Math.min(remaining, 500));
@@ -251,6 +260,7 @@ export function createAgentTool(
         return (result as { answer: string }).answer;
       } finally {
         if (tid !== null) clearTimeout(tid);
+        config.onSubagentEnd?.({ workflowId, durationMs: Date.now() - subStart, timedOut });
       }
     },
   });
