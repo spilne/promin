@@ -16,31 +16,34 @@ describe("MarkdownRenderer — code fences", () => {
   it("renders opening fence with language label", () => {
     const r = new MarkdownRenderer({ width: 40 });
     const out = r.push("```typescript\n");
-    expect(out).toContain("typescript");
-    expect(out).toContain("┌");
+    expect(strip(out)).toContain("typescript");
     expect(out).toContain("─");
+    expect(out).not.toContain("┌");
   });
 
-  it("renders closing fence", () => {
+  it("renders closing fence as horizontal rule", () => {
     const r = new MarkdownRenderer({ width: 40 });
     r.push("```\n");
     const out = r.push("```\n");
-    expect(out).toContain("└");
+    expect(strip(out)).toContain("─".repeat(10));
+    expect(out).not.toContain("└");
   });
 
-  it("prefixes code lines with │", () => {
+  it("indents code lines without a │ border", () => {
     const r = new MarkdownRenderer({ width: 40 });
     r.push("```\n");
     const out = r.push("const x = 1;\n");
-    expect(strip(out)).toContain("│  const x = 1;");
+    expect(strip(out)).toContain("const x = 1;");
+    expect(strip(out)).not.toContain("│  const x = 1;");
   });
 
-  it("flush closes unclosed fence", () => {
+  it("flush closes unclosed fence with horizontal rule", () => {
     const r = new MarkdownRenderer({ width: 40 });
     r.push("```ts\n");
     r.push("code\n");
     const tail = r.flush();
-    expect(tail).toContain("└");
+    expect(strip(tail)).toContain("─".repeat(10));
+    expect(tail).not.toContain("└");
   });
 });
 

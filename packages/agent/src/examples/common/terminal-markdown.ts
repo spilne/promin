@@ -8,12 +8,13 @@
  *
  * Supported syntax:
  *   Block:   # h1  ## h2  ### h3  > blockquote  - / * unordered  1. ordered
- *   Fence:   ```lang … ``` (nested not supported)
+ *   Fence:   ```lang … ``` (nested not supported) — syntax-highlighted via cli-highlight
  *   Inline:  **bold**  *italic*  `code`  [text](url)  https://auto-link
  *   OSC 8:   markdown links, auto-links, and ./relative /absolute file paths
  */
 
 import { join } from "node:path";
+import { highlight, supportsLanguage } from "cli-highlight";
 
 const BOLD = "\x1b[1m";
 const ITAL = "\x1b[3m";
@@ -73,7 +74,7 @@ export class MarkdownRenderer {
     this._buf = "";
     if (this._state === "code") {
       this._state = "normal";
-      const closer = DIM + "└" + "─".repeat(Math.max(0, this._width - 1)) + RST;
+      const closer = DIM + "─".repeat(Math.max(0, this._width)) + RST;
       out = out ? `${out}\n${closer}` : closer;
     }
     return out;
@@ -85,20 +86,30 @@ export class MarkdownRenderer {
     if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
       if (this._state === "code") {
         this._state = "normal";
-        return DIM + "└" + "─".repeat(Math.max(0, this._width - 1)) + RST;
+        return DIM + "─".repeat(Math.max(0, this._width)) + RST;
       }
-      this._codeLang = trimmed.slice(3).trim();
+      this._codeLang = trimmed.slice(3).trim().toLowerCase();
       this._state = "code";
-      const lang = this._codeLang ? ` ${this._codeLang} ` : " ";
-      const fill = "─".repeat(Math.max(0, this._width - 1 - lang.length));
-      return `${DIM}┌${lang}${fill}${RST}`;
+      const label = this._codeLang ? ` ${this._codeLang} ` : "";
+      const fill = "─".repeat(Math.max(0, this._width - 2 - label.length));
+      return `${DIM}──${label}${fill}${RST}`;
     }
 
     if (this._state === "code") {
-      return `${DIM}│${RST}  ${raw}`;
+      return `  ${this._highlightLine(raw)}`;
     }
 
     return this._block(raw);
+  }
+
+  private _highlightLine(raw: string): string {
+    if (!this._codeLang || !raw.trim()) return raw;
+    try {
+      if (!supportsLanguage(this._codeLang)) return raw;
+      return highlight(raw, { language: this._codeLang, ignoreIllegals: true });
+    } catch {
+      return raw;
+    }
   }
 
   private _block(line: string): string {
