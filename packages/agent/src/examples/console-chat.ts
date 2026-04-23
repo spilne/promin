@@ -23,6 +23,7 @@
  */
 
 import { createInterface } from "node:readline";
+import { readdir } from "node:fs/promises";
 import {
   stateMachine,
   InMemoryStateMachineStorage,
@@ -35,6 +36,7 @@ import { agentLoop } from "../lib/agent-loop.ts";
 import { InMemoryMemoryStore } from "../lib/memory-store.ts";
 import { CompositeSecretStore, EnvSecretStore, InMemorySecretStore } from "../lib/secret-store.ts";
 import { Terminal, PROMPT } from "./terminal.ts";
+import { MarkdownRenderer } from "./terminal-markdown.ts";
 import { UsageTracker, fmtN } from "./console-usage.ts";
 import { createSpinnerTracker, abbrevInput } from "./console-spinner.ts";
 import { createToolRegistry } from "./console-tools.ts";
@@ -55,9 +57,76 @@ if (!apiKey) {
 
 const workspace = process.env.AGENT_WORKSPACE ?? process.cwd();
 
+// ---- slash-command completions ----
+const SLASH_COMPLETIONS = [
+  "/help",
+  "/history",
+  "/clear",
+  "/steps",
+  "/state",
+  "/tools",
+  "/memories",
+  "/remember",
+  "/schedules",
+  "/approve-all",
+  "/cancel-schedule",
+  "/pause-schedule",
+];
+
+// ---- @-file: list workspace files matching a prefix ----
+async function listWorkspaceFiles(ws: string, prefix: string, limit = 20): Promise<string[]> {
+  try {
+    const all = (await readdir(ws, { recursive: true })) as string[];
+    const skip = (f: string) =>
+      f.split("/").some((p) => p.startsWith(".")) ||
+      f.includes("node_modules") ||
+      f.includes("/dist/");
+    return all.filter((f) => !skip(f) && (!prefix || f.startsWith(prefix))).slice(0, limit);
+  } catch {
+    return [];
+  }
+}
+
+// ---- async dropdown completer ----
+// term is assigned immediately after createInterface — no Tab can fire before then.
+let term!: Terminal;
+
+type CompleterCb = (err: Error | null, result: [string[], string]) => void;
+
+function makeCompleterEntry(line: string, cb: CompleterCb): void {
+  (async (): Promise<[string[], string]> => {
+    // @-file fuzzy match
+    const atMatch = line.match(/@(\S*)$/);
+    if (atMatch) {
+      const files = await listWorkspaceFiles(workspace, atMatch[1]);
+      if (files.length === 0) return [[], line];
+      const selected = await term.showInlineMenu(files.map((f) => `@${f}`));
+      if (!selected) return [[], line];
+      return [[line.slice(0, line.length - atMatch[0].length) + selected], line];
+    }
+    // slash-command dropdown
+    if (line.startsWith("/")) {
+      const hits = SLASH_COMPLETIONS.filter((c) => c.startsWith(line));
+      if (hits.length === 0) return [[], line];
+      const selected = await term.showInlineMenu(hits);
+      if (!selected) return [[], line];
+      return [[selected], line];
+    }
+    return [[], line];
+  })().then(
+    (r) => cb(null, r),
+    (e) => cb(e instanceof Error ? e : new Error(String(e)), [[], line]),
+  );
+}
+
 // ---- terminal ----
-const rl = createInterface({ input: process.stdin, output: process.stdout, historySize: 100 });
-const term = new Terminal(rl);
+const rl = createInterface({
+  input: process.stdin,
+  output: process.stdout,
+  historySize: 100,
+  completer: makeCompleterEntry,
+});
+term = new Terminal(rl);
 
 // ---- infrastructure ----
 const memoryStore = new InMemoryMemoryStore();
@@ -75,17 +144,7 @@ const rateLimiter = rateLimitRpm
 const usage = new UsageTracker();
 const spinner = createSpinnerTracker(term);
 
-// ---- ask + abortable utilities ----
-function ask(question: string): Promise<string> {
-  return new Promise((resolve) => {
-    term.stopSpinner();
-    rl.question(`\n${question}: `, (v) => {
-      process.stdout.write("\n");
-      resolve(v.trim());
-    });
-  });
-}
-
+// ---- abortable utility ----
 async function* abortable(
   source: AsyncIterable<string>,
   signal: AbortSignal,
@@ -119,7 +178,7 @@ const { registry, scheduler, activeTicks } = await createToolRegistry({
   memoryStore,
   secrets,
   apiKey,
-  ask,
+  ask: (q) => term.ask(q),
   runner,
   usage,
   sessionRef,
@@ -185,7 +244,7 @@ const loop = agentLoop({
       term.stopSpinner();
       const input = (call.input as Record<string, unknown>) ?? {};
       const paramStr = abbrevInput(input) || JSON.stringify(input).slice(0, 80);
-      const answer = await ask(
+      const answer = await term.ask(
         `Allow tool "${call.name}"${paramStr ? `  \x1b[2m${paramStr}\x1b[0m` : ""}? [y/n/always]`,
       );
       if (answer.toLowerCase() === "always") {
@@ -388,19 +447,23 @@ function prompt() {
       term.startSpinner("thinking...");
       term.agentHasTextOnLine = false;
 
+      const mdRenderer = new MarkdownRenderer({ width: process.stdout.columns ?? 80, workspace });
       let labelShown = false;
       let streamError: Error | undefined;
       try {
         for await (const chunk of abortable(session.stream(input, ac.signal), ac.signal)) {
           term.stopSpinner();
           if (!labelShown) {
-            process.stdout.write("Agent: ");
+            process.stdout.write("\nAgent:\n");
             labelShown = true;
           }
-          term.writeChunk(chunk);
+          const rendered = mdRenderer.push(chunk);
+          if (rendered) term.writeChunk(rendered);
           term.agentHasTextOnLine = true;
         }
         term.flushChunks();
+        const tail = mdRenderer.flush();
+        if (tail) process.stdout.write(tail);
       } catch (err) {
         term.flushChunks();
         streamError = err instanceof Error ? err : new Error(String(err));

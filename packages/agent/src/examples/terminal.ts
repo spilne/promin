@@ -7,6 +7,8 @@
  *   - printAbove() — interrupt-safe output that restores the readline prompt
  *   - showPane() — transient command overlay that erases on dismiss (any key)
  *   - Clay-colored ❯ prompt matching Anthropic's brand color
+ *   - Multi-line spinner erase with \x1b[J (handles wrapped labels)
+ *   - Wide-character (CJK / emoji) column-width support
  *
  * Usage:
  *   const term = new Terminal(rl);
@@ -19,6 +21,7 @@
  */
 
 import type { Interface } from "node:readline";
+import { TerminalIO } from "./terminal-io.ts";
 
 export interface TreeNode {
   label: string;
@@ -97,10 +100,12 @@ export class Terminal implements AgentUIRenderer {
   agentHasTextOnLine = false;
 
   private readonly _rl: Interface;
+  private readonly _io: TerminalIO;
   private _timer: ReturnType<typeof setInterval> | null = null;
   private _frame = 0;
   private _label = "";
   private _startMs = 0;
+  private _renderedLines = 1;
   private _promptTimer: ReturnType<typeof setInterval> | null = null;
   private _promptFrame = 0;
   private _chunkBuf = "";
@@ -108,7 +113,7 @@ export class Terminal implements AgentUIRenderer {
 
   constructor(rl: Interface) {
     this._rl = rl;
-    this._initBracketedPaste();
+    this._io = new TerminalIO(rl);
   }
 
   /**
@@ -233,11 +238,11 @@ export class Terminal implements AgentUIRenderer {
       return out;
     };
 
-    // Strip ANSI codes to get visible length; truncate long lines naively.
     const clip = (s: string, w: number): string => {
+      if (Terminal._visibleLen(s) <= w) return s;
       // eslint-disable-next-line no-control-regex
-      const plain = s.replace(/\u001b\[[^m]*m/g, "");
-      return plain.length > w ? `${plain.slice(0, w - 1)}…` : s;
+      const stripped = s.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
+      return `${Terminal._clipToWidth(stripped, w - 1)}…`;
     };
 
     let cursor = 0;
@@ -274,7 +279,12 @@ export class Terminal implements AgentUIRenderer {
         flat.length > VIEW_H
           ? `   ${DIM}${scrollTop + 1}–${Math.min(scrollTop + VIEW_H, flat.length)}/${flat.length}${RST}`
           : "";
-      out.push(hr, `  ${DIM}↑↓ navigate  space/→ expand  ← collapse  q close${note}${RST}`, hr, "");
+      out.push(
+        hr,
+        `  ${DIM}↑↓ navigate  PgUp/PgDn scroll  Home/End jump  space/→ expand  ← collapse  q close${note}${RST}`,
+        hr,
+        "",
+      );
 
       this._sync(() => {
         if (rendered > 0) process.stdout.write(`\x1b[${rendered}A\x1b[0J`);
@@ -326,6 +336,14 @@ export class Terminal implements AgentUIRenderer {
             }
           }
         }
+      } else if (key === "pageup") {
+        cursor = Math.max(0, cursor - VIEW_H);
+      } else if (key === "pagedown") {
+        cursor = Math.min(flat.length - 1, cursor + VIEW_H);
+      } else if (key === "home") {
+        cursor = 0;
+      } else if (key === "end") {
+        cursor = Math.max(0, flat.length - 1);
       }
       render(flat);
     }
@@ -389,100 +407,125 @@ export class Terminal implements AgentUIRenderer {
     if (buf) process.stdout.write(buf);
   }
 
+  /**
+   * Show a compact dropdown menu below the current prompt line.
+   *
+   * Designed for use inside an async readline completer callback — readline
+   * pauses input processing while the completer runs, so this has exclusive
+   * access to stdin with no readline interference.
+   *
+   * - Returns the selected item on Enter.
+   * - Returns null on Escape, Ctrl+C-exit, or any non-navigation key.
+   * - Returns the single item immediately when `items.length === 1`.
+   *
+   * Rendering uses DEC cursor save/restore (ESC 7 / ESC 8) so the prompt
+   * cursor position is preserved regardless of how many items are drawn.
+   */
+  async showInlineMenu(items: string[]): Promise<string | null> {
+    if (items.length === 0) return null;
+    if (items.length === 1) return items[0]!;
+
+    const MAX_VISIBLE = 10;
+    let cursor = 0;
+    let scrollOffset = 0;
+    let rendered = 0; // lines drawn below the prompt
+
+    const draw = (): void => {
+      this._sync(() => {
+        // ESC 7 = save cursor (at current input position)
+        process.stdout.write("\x1b7");
+        if (rendered > 0) {
+          // Erase previous render: go to next line col-0, erase to screen bottom, restore
+          process.stdout.write("\r\n\x1b[0J\x1b8\x1b7");
+        }
+        const end = Math.min(scrollOffset + MAX_VISIBLE, items.length);
+        for (let i = scrollOffset; i < end; i++) {
+          const sel = i === cursor;
+          const label = items[i]!;
+          if (sel) {
+            process.stdout.write(`\r\n  ${CLAY}❯${RST} ${label}\x1b[K`);
+          } else {
+            process.stdout.write(`\r\n  ${DIM}  ${label}${RST}\x1b[K`);
+          }
+        }
+        const extra = items.length - end;
+        if (extra > 0) {
+          process.stdout.write(`\r\n  ${DIM}…${extra} more${RST}\x1b[K`);
+        }
+        rendered = end - scrollOffset + (extra > 0 ? 1 : 0);
+        process.stdout.write("\x1b8"); // ESC 8 = restore cursor to input position
+      });
+    };
+
+    const erase = (): void => {
+      if (rendered === 0) return;
+      this._sync(() => process.stdout.write("\x1b7\r\n\x1b[0J\x1b8"));
+      rendered = 0;
+    };
+
+    draw();
+
+    while (true) {
+      const key = await this._readKey();
+      if (key === "up") {
+        cursor = cursor > 0 ? cursor - 1 : items.length - 1;
+        if (cursor < scrollOffset) scrollOffset = cursor;
+        else if (cursor === items.length - 1)
+          scrollOffset = Math.max(0, items.length - MAX_VISIBLE);
+        draw();
+      } else if (key === "down") {
+        cursor = cursor < items.length - 1 ? cursor + 1 : 0;
+        if (cursor >= scrollOffset + MAX_VISIBLE) scrollOffset = cursor - MAX_VISIBLE + 1;
+        else if (cursor === 0) scrollOffset = 0;
+        draw();
+      } else if (key === "\r" || key === "\n") {
+        erase();
+        return items[cursor] ?? null;
+      } else {
+        erase();
+        if (key === "\x03") {
+          process.stdout.write("\n");
+          process.exit(0);
+        }
+        return null;
+      }
+    }
+  }
+
+  /**
+   * Stop the spinner, suspend rendering, show a readline question, then restore.
+   * Centralises the suppress/inPrompt dance so callers cannot forget a step
+   * and accidentally let the spinner overwrite the question prompt.
+   */
+  ask(question: string): Promise<string> {
+    return new Promise((resolve) => {
+      this.stopSpinner();
+      this.suppress = true;
+      this.inPrompt = true;
+      this._rl.question(`\n${question}: `, (v) => {
+        this.suppress = false;
+        this.inPrompt = false;
+        process.stdout.write("\n");
+        resolve(v.trim());
+      });
+    });
+  }
+
   /** Release all timers and restore terminal state. Call on process exit. */
   close(): void {
     this.stopSpinner();
     this.stopPromptAnimation();
     this.flushChunks();
-    if (process.stdout.isTTY) process.stdout.write("\x1b[?2004l"); // disable bracketed paste
+    this._io.dispose();
   }
 
-  // Enable bracketed paste mode so pasted content doesn't trigger premature readline submission.
-  //
-  // Without this, raw mode (which readline uses on TTYs) makes any \r or \n in the clipboard —
-  // including a common trailing newline — indistinguishable from Enter.
-  //
-  // With bracketed paste enabled, the terminal wraps paste with \x1b[200~ ... \x1b[201~.
-  // We intercept stdin, strip the markers, and replace newlines inside the paste with spaces
-  // before readline sees the data. The filter is installed as the sole 'data' listener; the
-  // original readline listener is captured and called by the filter, so _waitForKey / _readKey
-  // (which temporarily swap all listeners) continue to work correctly.
-  private _initBracketedPaste(): void {
-    if (!process.stdin.isTTY) return;
-    process.stdout.write("\x1b[?2004h");
-
-    const upstream = process.stdin.rawListeners("data") as ((b: Buffer) => void)[];
-    for (const l of upstream) process.stdin.removeListener("data", l);
-
-    let inPaste = false;
-    process.stdin.on("data", (raw: Buffer) => {
-      let s = raw.toString();
-
-      if (s.includes("\x1b[200~")) {
-        inPaste = true;
-        // eslint-disable-next-line no-control-regex
-        s = s.replace(/\u001b\[200~/g, "");
-      }
-      if (s.includes("\x1b[201~")) {
-        inPaste = false;
-        // eslint-disable-next-line no-control-regex
-        s = s.replace(/\u001b\[201~/g, "");
-      }
-      if (inPaste) s = s.replace(/[\r\n]/g, " ");
-
-      if (!s) return;
-      const buf = Buffer.from(s);
-      for (const l of upstream) l(buf);
-    });
-  }
-
-  // Read a single raw keypress without letting readline also process it.
-  //
-  // Why not rl.pause() + setRawMode: rl.pause() pauses the stdin stream, but
-  // when we resume it readline's own data listener is still attached and receives
-  // the keypress, corrupting its line buffer and causing the next prompt to erase
-  // typed text as the animation redraws stale rl.line content.
-  //
-  // Instead: briefly remove all existing stdin data listeners (readline's included),
-  // install ours, then restore them after the keypress. readline already called
-  // setRawMode(true) during construction so individual keypresses arrive without Enter.
-  // Ctrl+C (\x03) exits instead of dismissing.
+  // Delegate exclusive-listener key I/O to TerminalIO.
   private _waitForKey(): Promise<void> {
-    return new Promise<void>((resolve) => {
-      const saved = process.stdin.rawListeners("data") as ((...args: unknown[]) => void)[];
-      for (const l of saved) process.stdin.removeListener("data", l);
-
-      const onData = (key: Buffer) => {
-        process.stdin.removeListener("data", onData);
-        for (const l of saved) process.stdin.on("data", l);
-        if (key[0] === 3) {
-          process.stdout.write("\n");
-          process.exit(0);
-        }
-        resolve();
-      };
-      process.stdin.on("data", onData);
-    });
+    return this._io.waitForKey();
   }
 
-  // Read a single raw keypress and return it as a logical key string.
-  // Uses the same exclusive stdin listener pattern as _waitForKey().
   private _readKey(): Promise<string> {
-    return new Promise<string>((resolve) => {
-      const saved = process.stdin.rawListeners("data") as ((...args: unknown[]) => void)[];
-      for (const l of saved) process.stdin.removeListener("data", l);
-      const onData = (buf: Buffer) => {
-        process.stdin.removeListener("data", onData);
-        for (const l of saved) process.stdin.on("data", l);
-        const s = buf.toString();
-        if (s === "\x1b[A") resolve("up");
-        else if (s === "\x1b[B") resolve("down");
-        else if (s === "\x1b[C") resolve("right");
-        else if (s === "\x1b[D") resolve("left");
-        else resolve(s);
-      };
-      process.stdin.on("data", onData);
-    });
+    return this._io.readKey();
   }
 
   private _redrawPrompt(): void {
@@ -499,25 +542,83 @@ export class Terminal implements AgentUIRenderer {
     });
   }
 
+  // Returns the terminal column width of a Unicode code point.
+  // Double-width: CJK ideographs, Hangul, fullwidth forms, and most emoji.
+  private static _charWidth(cp: number): number {
+    if (cp < 0x1100) return 1;
+    if (
+      cp <= 0x115f || // Hangul Jamo
+      cp === 0x2329 ||
+      cp === 0x232a || // CJK angle brackets
+      (cp >= 0x2e80 && cp <= 0x303e) || // CJK Radicals / Kangxi
+      (cp >= 0x3041 && cp <= 0x9fff) || // Hiragana … CJK Unified Ideographs
+      (cp >= 0xa000 && cp <= 0xa4cf) || // Yi
+      (cp >= 0xa960 && cp <= 0xa97f) || // Hangul Jamo Extended-A
+      (cp >= 0xac00 && cp <= 0xd7af) || // Hangul Syllables
+      (cp >= 0xf900 && cp <= 0xfaff) || // CJK Compatibility Ideographs
+      (cp >= 0xfe10 && cp <= 0xfe6f) || // Vertical / CJK Compatibility Forms
+      (cp >= 0xff01 && cp <= 0xff60) || // Fullwidth Latin & punctuation
+      (cp >= 0xffe0 && cp <= 0xffe6) || // Fullwidth signs
+      (cp >= 0x1b000 && cp <= 0x1b0ff) || // Kana Supplement
+      (cp >= 0x1f004 && cp <= 0x1f251) || // Enclosed CJK / Mahjong / Playing-card
+      (cp >= 0x1f300 && cp <= 0x1f9ff) || // Misc symbols, emoticons, transport…
+      (cp >= 0x1fa00 && cp <= 0x1faff) || // Chess, medical, newer emoji
+      (cp >= 0x20000 && cp <= 0x2fffd) || // CJK Extension B–F
+      (cp >= 0x30000 && cp <= 0x3fffd) // CJK Extension G+
+    )
+      return 2;
+    return 1;
+  }
+
+  // Strip ANSI CSI sequences then sum column widths of each code point.
+  // Uses _charWidth so CJK / fullwidth / emoji all count correctly.
+  // eslint-disable-next-line no-control-regex
+  private static _visibleLen(s: string): number {
+    const stripped = s.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
+    let w = 0;
+    for (const ch of stripped) w += Terminal._charWidth(ch.codePointAt(0) ?? 0);
+    return w;
+  }
+
+  // Truncate a plain (ANSI-stripped) string to at most `cols` terminal columns.
+  private static _clipToWidth(s: string, cols: number): string {
+    let w = 0;
+    let result = "";
+    for (const ch of s) {
+      const cw = Terminal._charWidth(ch.codePointAt(0) ?? 0);
+      if (w + cw > cols) break;
+      result += ch;
+      w += cw;
+    }
+    return result;
+  }
+
   private _render(): void {
     if (this.suppress) return;
     const frame = FRAMES[this._frame % FRAMES.length];
     const elapsed = ((Date.now() - this._startMs) / 1000).toFixed(1);
+    const line = `${DIM}${frame} ${this._label} (${elapsed}s)${RST}`;
+    const cols = process.stdout.columns ?? 80;
+    const newLines = Math.max(1, Math.ceil(Terminal._visibleLen(line) / cols));
     this._sync(() => {
-      process.stdout.write(`\r\x1b[K${DIM}${frame} ${this._label} (${elapsed}s)${RST}`);
+      if (this._renderedLines > 1) process.stdout.write(`\x1b[${this._renderedLines - 1}A`);
+      process.stdout.write(`\r\x1b[J${line}`);
     });
+    this._renderedLines = newLines;
   }
 
   private _erase(): void {
-    this._sync(() => process.stdout.write("\r\x1b[K"));
+    this._sync(() => {
+      if (this._renderedLines > 1) process.stdout.write(`\x1b[${this._renderedLines - 1}A`);
+      process.stdout.write("\r\x1b[J");
+    });
+    this._renderedLines = 1;
   }
 
   // Synchronized output mode — batches writes into a single terminal repaint.
   // Prevents partial-frame flicker on fast-scrolling or high-latency terminals.
   // Gracefully ignored by terminals that don't support DEC mode 2026.
   private _sync(fn: () => void): void {
-    process.stdout.write("\x1b[?2026h");
-    fn();
-    process.stdout.write("\x1b[?2026l");
+    this._io.sync(fn);
   }
 }

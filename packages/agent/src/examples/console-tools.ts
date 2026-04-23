@@ -29,7 +29,6 @@ export interface ToolDeps {
   /** Shared secret store — checked env-first via CompositeSecretStore. */
   secrets: SecretStore;
   apiKey: string;
-  /** Async prompt used by tools that need secrets or user input. */
   ask: (question: string) => Promise<string>;
   runner: WorkflowRunner;
   usage: UsageTracker;
@@ -196,6 +195,10 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
       "Delegate a task to a parallel Claude (Sonnet) sub-agent with filesystem, shell, memory, and chatGPT access. Use to parallelise independent subtasks or run deep research alongside the main thread.",
     tools: subagentTools,
     systemPrompt: subagentSystemPrompt,
+    onRequiresApproval: async (call) => {
+      const answer = await ask(`[claudeAgent] Approve tool "${call.name}"? [y/N]`);
+      return { approved: answer.toLowerCase().startsWith("y") };
+    },
   });
 
   const lazyOpenAI: LLMProvider = {
@@ -217,6 +220,10 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
       "Delegate a task to a parallel GPT-4o sub-agent with filesystem, shell, memory, and chatGPT access. Use for a second opinion, different reasoning style, or to parallelise work.",
     tools: subagentTools,
     systemPrompt: subagentSystemPrompt,
+    onRequiresApproval: async (call) => {
+      const answer = await ask(`[gptAgent] Approve tool "${call.name}"? [y/N]`);
+      return { approved: answer.toLowerCase().startsWith("y") };
+    },
   });
 
   staticTools.chatGemini = createLlmTool(
