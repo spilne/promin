@@ -30,6 +30,9 @@ export type { MemoryStore, MemoryEntry, MemoryScope, EmbeddingProvider } from ".
 export { tool } from "./tool.ts";
 export type { AgentTool, ApprovalDecision, AutoApprove } from "./tool.ts";
 
+export { multiTool, command } from "./multi-tool.ts";
+export type { CommandDef } from "./multi-tool.ts";
+
 export { buildToolDefs, createFileToolRegistry } from "./tool-registry.ts";
 export type { ToolRegistry, FileToolRegistryConfig } from "./tool-registry.ts";
 
