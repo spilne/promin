@@ -21,7 +21,6 @@ import type { ToolRegistry } from "../lib/tool-registry.ts";
 import type { AgentTool } from "../lib/tool.ts";
 import type { LLMProvider } from "../lib/llm-provider.ts";
 import type { UsageTracker } from "./console-usage.ts";
-import { abbrevInput } from "./console-spinner.ts";
 import { z } from "zod";
 
 export interface ToolDeps {
@@ -239,17 +238,8 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
       "Delegate a task to a parallel Claude (Sonnet) sub-agent with filesystem, shell, memory, and chatGPT access. Use to parallelise independent subtasks or run deep research alongside the main thread.",
     tools: subagentTools,
     systemPrompt: subagentSystemPrompt,
-    onRequiresApproval: async (call) => {
-      if (autoApproveRef.value) return { approved: true };
-      const paramStr = abbrevInput((call.input as Record<string, unknown>) ?? {});
-      const answer = await ask(
-        `[claudeAgent] Allow tool "${call.name}"${paramStr ? `  \x1b[2m${paramStr}\x1b[0m` : ""}? [y/n/always]`,
-      );
-      if (answer.toLowerCase() === "always") autoApproveRef.value = true;
-      return {
-        approved: answer.toLowerCase().startsWith("y") || answer.toLowerCase() === "always",
-      };
-    },
+    ask,
+    autoApproveRef,
   });
 
   const lazyOpenAI: LLMProvider = {
@@ -271,17 +261,8 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
       "Delegate a task to a parallel GPT-4o sub-agent with filesystem, shell, memory, and chatGPT access. Use for a second opinion, different reasoning style, or to parallelise work.",
     tools: subagentTools,
     systemPrompt: subagentSystemPrompt,
-    onRequiresApproval: async (call) => {
-      if (autoApproveRef.value) return { approved: true };
-      const paramStr = abbrevInput((call.input as Record<string, unknown>) ?? {});
-      const answer = await ask(
-        `[gptAgent] Allow tool "${call.name}"${paramStr ? `  \x1b[2m${paramStr}\x1b[0m` : ""}? [y/n/always]`,
-      );
-      if (answer.toLowerCase() === "always") autoApproveRef.value = true;
-      return {
-        approved: answer.toLowerCase().startsWith("y") || answer.toLowerCase() === "always",
-      };
-    },
+    ask,
+    autoApproveRef,
   });
 
   staticTools.chatGemini = createLlmTool(
