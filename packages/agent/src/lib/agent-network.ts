@@ -52,6 +52,17 @@ export interface AgentNetwork {
  * Under the hood, delegating to a specialist starts a new durable workflow run:
  * crash-safe, journaled, and observable via /steps.
  *
+ * ## agentNetwork vs createAgentTown
+ *
+ * | Dimension            | agentNetwork                          | createAgentTown                                                 |
+ * |----------------------|---------------------------------------|-----------------------------------------------------------------|
+ * | Specialist lifetime  | Ephemeral — new workflow per call     | Persistent — shared session accumulates history                 |
+ * | Communication        | Synchronous tool call (hub-and-spoke) | Async message-passing (peer-to-peer)                            |
+ * | Multi-step exchange  | Coordinator waits for the full result | Agents can exchange many messages                               |
+ * | Topology             | Star (orchestrator is the hub)        | Mesh (any agent can message any other)                          |
+ * | Durability           | Fully journaled via WorkflowRunner    | LLM turns journaled; inbox queue and daemon loop are in-memory  |
+ * | Best for             | Stateless, one-shot subtasks          | Long-running agents that maintain context across interactions    |
+ *
  * Usage:
  *
  *   const network = agentNetwork({

@@ -87,6 +87,22 @@ export interface AgentTown {
  * Shutdown: `town.close()` sets a closed flag, sends a wake-up sentinel to each
  * inbox so blocked `readInbox()` calls return, then closes all sessions.
  *
+ * ## Durability
+ *
+ * Each agent's LLM turns are individually journaled because `agentLoop.session()`
+ * runs each `session.send()` as a workflow. Using a durable storage backend (e.g.
+ * `PgWorkflowStorage`) makes those turns crash-safe and replayable.
+ *
+ * What is **not** journaled:
+ * - The daemon loops (`while (!closed) { inbox.pop(); session.send() }`) — they
+ *   are plain async loops and will not restart after a process crash.
+ * - The `AsyncQueue` inboxes — in-memory only; messages in flight are lost on crash.
+ *
+ * To make the town fully restartable, replace `AsyncQueue` with a durable message
+ * queue (e.g. `PgStepQueue` or a Kafka topic) and wrap each daemon iteration in a
+ * workflow activity. Session history survives automatically as long as `sessionId`
+ * stays stable (`town-<name>`) and the workflow storage is persistent.
+ *
  * @example
  * ```ts
  * const town = createAgentTown({
