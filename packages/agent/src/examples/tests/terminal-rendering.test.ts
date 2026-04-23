@@ -193,3 +193,98 @@ describe("Terminal — wide-character column width", () => {
     });
   });
 });
+
+describe("Terminal.printAbove — flushes buffered chunks before writing", () => {
+  it("text buffered via writeChunk appears before printAbove content", () => {
+    const term = new Terminal(fakeRl());
+    const written: string[] = [];
+    const orig = process.stdout.write.bind(process.stdout);
+    (process.stdout as any).write = (chunk: string | Buffer) => {
+      written.push(typeof chunk === "string" ? chunk : chunk.toString());
+      return true;
+    };
+    try {
+      // Buffer a streaming text chunk (setImmediate-deferred).
+      term.writeChunk("streaming-text");
+      // printAbove fires before setImmediate would fire (simulating onStep during tool exec).
+      term.printAbove("tool-step-line");
+    } finally {
+      (process.stdout as any).write = orig;
+      // Cancel any leftover setImmediate from writeChunk.
+      term.flushChunks();
+    }
+
+    const joined = written.join("");
+    const textPos = joined.indexOf("streaming-text");
+    const stepPos = joined.indexOf("tool-step-line");
+    expect(textPos).toBeGreaterThanOrEqual(0);
+    expect(stepPos).toBeGreaterThanOrEqual(0);
+    expect(textPos).toBeLessThan(stepPos);
+  });
+
+  it("printAbove with no buffered chunks still writes its lines", () => {
+    const term = new Terminal(fakeRl());
+    const out = captureStdout(() => {
+      term.printAbove("only-this-line");
+    });
+    expect(out).toContain("only-this-line");
+  });
+
+  it("multiple writeChunk calls all appear before printAbove content", () => {
+    const term = new Terminal(fakeRl());
+    const written: string[] = [];
+    const orig = process.stdout.write.bind(process.stdout);
+    (process.stdout as any).write = (chunk: string | Buffer) => {
+      written.push(typeof chunk === "string" ? chunk : chunk.toString());
+      return true;
+    };
+    try {
+      term.writeChunk("chunk-a");
+      term.writeChunk("chunk-b");
+      term.printAbove("onStep-result");
+    } finally {
+      (process.stdout as any).write = orig;
+      term.flushChunks();
+    }
+
+    const joined = written.join("");
+    expect(joined.indexOf("chunk-a")).toBeLessThan(joined.indexOf("onStep-result"));
+    expect(joined.indexOf("chunk-b")).toBeLessThan(joined.indexOf("onStep-result"));
+  });
+
+  it("chunk flush happens after spinner erase — spinner does not re-render on a displaced line", () => {
+    // Regression: if flushChunks() is called BEFORE _erase(), the cursor moves
+    // below the spinner before _erase() runs, so _erase() clears the wrong line
+    // and the spinner re-renders at a displaced position on every frame.
+    //
+    // The correct order is: _erase() first (cursor → spinner line), then flush
+    // chunks at that position, then write the printAbove lines below.
+    const term = new Terminal(fakeRl());
+    term.startSpinner("working...");
+
+    const written: string[] = [];
+    const orig = process.stdout.write.bind(process.stdout);
+    (process.stdout as any).write = (chunk: string | Buffer) => {
+      written.push(typeof chunk === "string" ? chunk : chunk.toString());
+      return true;
+    };
+    try {
+      term.writeChunk("llm-text");
+      term.printAbove("step-line");
+    } finally {
+      // Stop the spinner's interval so it doesn't fire after the test.
+      term.stopSpinner();
+      (process.stdout as any).write = orig;
+      term.flushChunks();
+    }
+
+    const joined = written.join("");
+    // Spinner erase (\r\x1b[J) must appear before "llm-text" — _erase() runs first.
+    const erasePos = joined.indexOf("\r\x1b[J");
+    const textPos = joined.indexOf("llm-text");
+    const stepPos = joined.indexOf("step-line");
+    expect(erasePos).toBeGreaterThanOrEqual(0);
+    expect(erasePos).toBeLessThan(textPos);
+    expect(textPos).toBeLessThan(stepPos);
+  });
+});

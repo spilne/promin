@@ -190,6 +190,19 @@ export class Terminal implements AgentUIRenderer {
         const frame = PROMPT_FRAMES[this._promptFrame];
         process.stdout.write(`\n${frame} ${typed}`);
       } else {
+        // Flush any streaming text buffered by writeChunk so it appears before
+        // this tool-step line. Must happen after _erase() so the cursor is at
+        // the erased spinner position, not below it.
+        if (this._chunkBuf) {
+          if (this._chunkFlush) {
+            clearImmediate(this._chunkFlush);
+            this._chunkFlush = null;
+          }
+          const buf = this._chunkBuf;
+          this._chunkBuf = "";
+          process.stdout.write(buf);
+          this.agentHasTextOnLine = true;
+        }
         if (this.agentHasTextOnLine) process.stdout.write("\n");
         process.stdout.write("\r\x1b[K");
         for (const line of lines) process.stdout.write(`${line}\n`);
