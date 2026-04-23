@@ -5,7 +5,7 @@
 // No polling. No setInterval. No busy-wait. Event loop stays free.
 // ---------------------------------------------------------------------------
 
-import { Effect, Stream, Duration, Option, MutableQueue } from "effect";
+import { Effect, Stream, Duration, Option, Queue } from "effect";
 import { Cron } from "croner";
 import { RRule } from "rrule";
 import { StreamPipeline } from "@promin/core";
@@ -151,52 +151,43 @@ export class InMemoryScheduler implements Scheduler {
   // ---------------------------------------------------------------------------
   // All-schedules stream — dynamic merge on register
   //
-  // An outer async-generator yields a new inner Stream<ScheduleTick> each time
-  // register() is called. Stream.flatMap with unbounded concurrency merges all
-  // inner streams as they arrive — exactly "join stream with next schedule".
+  // Uses Effect's Queue<Stream> as the outer channel so take()/interrupt()
+  // propagates cleanly. The async-generator approach used a never-resolving
+  // Promise for backpressure, which caused generator.return() to hang when
+  // Effect tried to interrupt the stream after take(N) completed.
   // ---------------------------------------------------------------------------
 
   private createAllSchedulesStream(): StreamPipeline<ScheduleTick, never> {
     const self = this;
-    // MutableQueue<Stream> is the Effect-ts equivalent of Queue[IO, Stream[IO, A]] in fs2.
-    // register() offers into it synchronously; the async generator below drains it.
-    const queue = MutableQueue.unbounded<Stream.Stream<ScheduleTick, never>>();
-    let wakeup: (() => void) | null = null;
 
-    function addSchedule(id: string) {
-      MutableQueue.offer(queue, self.createScheduleStream(id).stream);
-      wakeup?.();
-      wakeup = null;
-    }
+    const s = Stream.unwrapScoped(
+      Effect.gen(function* () {
+        const q = yield* Queue.unbounded<Stream.Stream<ScheduleTick, never>>();
 
-    for (const id of self.schedules.keys()) addSchedule(id);
-
-    const onRegister = (id: string) => addSchedule(id);
-    self._registerCallbacks.add(onRegister);
-
-    // fromQueueUnterminated equivalent: drain the queue, suspend when empty.
-    // The wakeup Promise is the only non-functional seam — needed because register()
-    // is sync and can't return IO[Unit] to notify the consumer natively.
-    async function* streamOfStreams(): AsyncGenerator<Stream.Stream<ScheduleTick, never>> {
-      try {
-        while (true) {
-          const item = MutableQueue.poll(queue, MutableQueue.EmptyMutableQueue);
-          if (item !== MutableQueue.EmptyMutableQueue) {
-            yield item;
-          } else {
-            await new Promise<void>((r) => {
-              wakeup = r;
-            });
-          }
+        // Seed with schedules already registered at call time.
+        for (const id of self.schedules.keys()) {
+          yield* Queue.offer(q, self.createScheduleStream(id).stream);
         }
-      } finally {
-        self._registerCallbacks.delete(onRegister);
-      }
-    }
 
-    // parJoinUnbounded equivalent: merge all inner streams as they arrive.
-    const outer = Stream.fromAsyncIterable(streamOfStreams(), (e) => e as never);
-    const s = Stream.flatMap(outer, (inner) => inner, { concurrency: "unbounded" });
+        // Forward future registrations into the queue.
+        const onRegister = (id: string) => {
+          Effect.runFork(Queue.offer(q, self.createScheduleStream(id).stream));
+        };
+        self._registerCallbacks.add(onRegister);
+
+        // Remove the callback when the stream scope is released (interrupted or done).
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => self._registerCallbacks.delete(onRegister)),
+        );
+
+        // Stream.fromQueue with shutdown:false keeps the stream open indefinitely;
+        // take() / interrupt() will terminate it via Effect's interrupt mechanism.
+        return Stream.flatMap(Stream.fromQueue(q, { shutdown: false }), (inner) => inner, {
+          concurrency: "unbounded",
+        });
+      }),
+    );
+
     return StreamPipeline.from(s) as StreamPipeline<ScheduleTick, never>;
   }
 
