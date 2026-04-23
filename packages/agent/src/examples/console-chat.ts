@@ -149,6 +149,7 @@ const consoleRunner = new ConsoleRunner(term, usage);
 const sessionRef: { current: { send: (task: string) => Promise<string> } | undefined } = {
   current: undefined,
 };
+const autoApproveRef = { value: process.env.TOOL_AUTO_APPROVE === "true" };
 
 const { registry, scheduler, activeTicks } = await createToolRegistry({
   workspace,
@@ -159,6 +160,7 @@ const { registry, scheduler, activeTicks } = await createToolRegistry({
   runner,
   usage,
   sessionRef,
+  autoApproveRef,
 });
 
 // ---- agent lifecycle state machine ----
@@ -204,7 +206,6 @@ const SYSTEM_PROMPT = [
   "Never ask for secrets in chat — always use requireSecret.",
 ].join("\n");
 
-let autoApprove = process.env.TOOL_AUTO_APPROVE === "true";
 let sessionIdSeq = 0;
 let currentSessionId = "session";
 
@@ -217,7 +218,7 @@ const loop = agentLoop({
   memory: { store: memoryStore },
   hooks: {
     onApprovalRequired: async (call) => {
-      if (autoApprove) return { approved: true };
+      if (autoApproveRef.value) return { approved: true };
       term.stopSpinner();
       const input = (call.input as Record<string, unknown>) ?? {};
       const paramStr = abbrevInput(input) || JSON.stringify(input).slice(0, 80);
@@ -225,7 +226,7 @@ const loop = agentLoop({
         `Allow tool "${call.name}"${paramStr ? `  \x1b[2m${paramStr}\x1b[0m` : ""}? [y/n/always]`,
       );
       if (answer.toLowerCase() === "always") {
-        autoApprove = true;
+        autoApproveRef.value = true;
         term.printAbove("\x1b[2mAuto-approve enabled for this session.\x1b[0m");
       }
       const approved = answer.toLowerCase().startsWith("y") || answer.toLowerCase() === "always";
@@ -321,7 +322,7 @@ function prompt() {
           "  /schedules                — list active schedules",
           "  /cancel-schedule <id>     — immediately cancel a schedule",
           "  /pause-schedule <id>      — pause a schedule",
-          `  /approve-all              — toggle auto-approve (currently: ${autoApprove ? "ON" : "OFF"})`,
+          `  /approve-all              — toggle auto-approve (currently: ${autoApproveRef.value ? "ON" : "OFF"})`,
           "  /help                     — show this help",
           "  exit                      — quit",
           "",
@@ -375,8 +376,8 @@ function prompt() {
         return prompt();
       }
       if (input === "/approve-all") {
-        autoApprove = !autoApprove;
-        console.log(`\n\x1b[2mAuto-approve: ${autoApprove ? "ON" : "OFF"}\x1b[0m\n`);
+        autoApproveRef.value = !autoApproveRef.value;
+        console.log(`\n\x1b[2mAuto-approve: ${autoApproveRef.value ? "ON" : "OFF"}\x1b[0m\n`);
         return prompt();
       }
 

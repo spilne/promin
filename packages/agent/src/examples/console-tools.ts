@@ -21,6 +21,7 @@ import type { ToolRegistry } from "../lib/tool-registry.ts";
 import type { AgentTool } from "../lib/tool.ts";
 import type { LLMProvider } from "../lib/llm-provider.ts";
 import type { UsageTracker } from "./console-usage.ts";
+import { abbrevInput } from "./console-spinner.ts";
 import { z } from "zod";
 
 export interface ToolDeps {
@@ -34,6 +35,8 @@ export interface ToolDeps {
   usage: UsageTracker;
   /** Mutable reference to the current session — filled in after session creation. */
   sessionRef: { current: { send: (task: string) => Promise<string> } | undefined };
+  /** Shared auto-approve flag — subagents read and write this so "always" propagates globally. */
+  autoApproveRef: { value: boolean };
 }
 
 export interface ToolSetup {
@@ -74,7 +77,17 @@ function createMemoryTool(store: MemoryStore) {
 }
 
 export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
-  const { workspace, memoryStore, secrets, apiKey, ask, runner, usage, sessionRef } = deps;
+  const {
+    workspace,
+    memoryStore,
+    secrets,
+    apiKey,
+    ask,
+    runner,
+    usage,
+    sessionRef,
+    autoApproveRef,
+  } = deps;
 
   const toolsDir = join(import.meta.dir, "tools");
   await mkdir(toolsDir, { recursive: true });
@@ -227,8 +240,15 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
     tools: subagentTools,
     systemPrompt: subagentSystemPrompt,
     onRequiresApproval: async (call) => {
-      const answer = await ask(`[claudeAgent] Approve tool "${call.name}"? [y/N]`);
-      return { approved: answer.toLowerCase().startsWith("y") };
+      if (autoApproveRef.value) return { approved: true };
+      const paramStr = abbrevInput((call.input as Record<string, unknown>) ?? {});
+      const answer = await ask(
+        `[claudeAgent] Allow tool "${call.name}"${paramStr ? `  \x1b[2m${paramStr}\x1b[0m` : ""}? [y/n/always]`,
+      );
+      if (answer.toLowerCase() === "always") autoApproveRef.value = true;
+      return {
+        approved: answer.toLowerCase().startsWith("y") || answer.toLowerCase() === "always",
+      };
     },
   });
 
@@ -252,8 +272,15 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
     tools: subagentTools,
     systemPrompt: subagentSystemPrompt,
     onRequiresApproval: async (call) => {
-      const answer = await ask(`[gptAgent] Approve tool "${call.name}"? [y/N]`);
-      return { approved: answer.toLowerCase().startsWith("y") };
+      if (autoApproveRef.value) return { approved: true };
+      const paramStr = abbrevInput((call.input as Record<string, unknown>) ?? {});
+      const answer = await ask(
+        `[gptAgent] Allow tool "${call.name}"${paramStr ? `  \x1b[2m${paramStr}\x1b[0m` : ""}? [y/n/always]`,
+      );
+      if (answer.toLowerCase() === "always") autoApproveRef.value = true;
+      return {
+        approved: answer.toLowerCase().startsWith("y") || answer.toLowerCase() === "always",
+      };
     },
   });
 
