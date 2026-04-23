@@ -63,6 +63,12 @@ export interface AgentActionConfig<TOutput = any> {
   tools?: Record<string, AgentTool<any, any>>;
   toolRegistry?: ToolRegistry;
   autoApprove?: AutoApprove;
+  /**
+   * Async callback invoked when a tool with `requireApproval: true` needs a decision.
+   * Wraps the call in an activity so it is journaled (skipped on replay).
+   * When omitted, approval falls back to `ctx.signal("approve:<id>")`.
+   */
+  onApprovalRequired?: (call: ToolCall) => Promise<ApprovalDecision>;
   maxSteps?: number;
   systemPrompt?: string;
   rateLimiter?: RateLimiter;
@@ -279,7 +285,11 @@ export function agentAction(
           }
 
           if (toolDef.requireApproval && !shouldAutoApprove(config.autoApprove, call, toolDef)) {
-            const decision = yield* ctx.signal<ApprovalDecision>(`approve:${call.id}`);
+            const decision: ApprovalDecision = config.onApprovalRequired
+              ? yield* ctx.activity(`approval-${call.name}-${step}-${call.id}`, () =>
+                  config.onApprovalRequired!(call),
+                )
+              : yield* ctx.signal<ApprovalDecision>(`approve:${call.id}`);
             if (!decision.approved) {
               toolResultMsgs.push({
                 role: "tool",
