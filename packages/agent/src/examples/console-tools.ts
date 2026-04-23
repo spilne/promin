@@ -36,6 +36,8 @@ export interface ToolDeps {
   sessionRef: { current: { send: (task: string) => Promise<string> } | undefined };
   /** Shared auto-approve flag — subagents read and write this so "always" propagates globally. */
   autoApproveRef: { value: boolean };
+  /** Print a line above the current spinner/prompt — used to surface sub-agent activity. */
+  printAbove: (...lines: string[]) => void;
 }
 
 export interface ToolSetup {
@@ -157,6 +159,7 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
     usage,
     sessionRef,
     autoApproveRef,
+    printAbove,
   } = deps;
 
   const toolsDir = join(import.meta.dir, "tools");
@@ -301,6 +304,28 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
 
   const subagentSystemPrompt = `You are a focused sub-agent. Be concise and task-focused.\nWorkspace: ${workspace}`;
 
+  const makeOnStep =
+    (prefix: string) =>
+    ({
+      tool,
+      param,
+      durationMs,
+      failed,
+    }: {
+      tool: string;
+      param: string;
+      durationMs: number;
+      failed: boolean;
+    }) => {
+      const elapsed = durationMs >= 1000 ? `${(durationMs / 1000).toFixed(1)}s` : `${durationMs}ms`;
+      const hint = param ? `  \x1b[2m${param}\x1b[0m` : "";
+      if (failed) {
+        printAbove(`\x1b[31m✗ ${prefix} ${tool}${hint}  failed  (${elapsed})\x1b[0m`);
+      } else {
+        printAbove(`\x1b[2m✓ ${prefix} ${tool}${hint}  (${elapsed})\x1b[0m`);
+      }
+    };
+
   staticTools.claudeAgent = createAgentTool({
     runner,
     llm: usage.withTracking(anthropic("claude-sonnet-4-6", { apiKey }), "claude-sonnet-4-6"),
@@ -311,6 +336,7 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
     systemPrompt: subagentSystemPrompt,
     ask,
     autoApproveRef,
+    onStep: makeOnStep("[claudeAgent]"),
   });
 
   const lazyOpenAI: LLMProvider = {
@@ -334,6 +360,7 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
     systemPrompt: subagentSystemPrompt,
     ask,
     autoApproveRef,
+    onStep: makeOnStep("[gptAgent]"),
   });
 
   staticTools.chatGemini = createLlmTool(

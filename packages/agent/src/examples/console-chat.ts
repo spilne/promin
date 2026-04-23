@@ -157,6 +157,7 @@ const { registry, scheduler, activeTicks } = await createToolRegistry({
   secrets,
   apiKey,
   ask: (q) => term.ask(q),
+  printAbove: (...lines) => term.printAbove(...lines),
   runner,
   usage,
   sessionRef,

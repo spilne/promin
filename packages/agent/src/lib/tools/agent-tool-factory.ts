@@ -57,6 +57,12 @@ export interface AgentToolFactoryConfig {
    * blocked indefinitely. Default: 120 000 ms (2 min).
    */
   timeoutMs?: number;
+  /**
+   * Called after each tool execution inside the sub-agent.
+   * Use this to surface sub-agent activity to the parent UI — e.g. print a
+   * `[claudeAgent] ✓ readFile  src/index.ts  (2ms)` line via `printAbove`.
+   */
+  onStep?: (params: { tool: string; param: string; durationMs: number; failed: boolean }) => void;
 }
 
 /**
@@ -109,6 +115,15 @@ function buildSystemPrompt(base: string, tools: Record<string, AgentTool<any, an
  *     tools: { gpt_researcher: gptAgent, summariser: llamaAgent },
  *   });
  */
+// biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
+function abbrevParam(input: Record<string, unknown> | any): string {
+  const raw = (input as Record<string, unknown>) ?? {};
+  for (const v of Object.values(raw)) {
+    if (typeof v === "string") return v.length > 42 ? `${v.slice(0, 39)}…` : v;
+  }
+  return "";
+}
+
 function buildApprovalHandler(
   name: string,
   ask: (q: string) => Promise<string>,
@@ -117,14 +132,7 @@ function buildApprovalHandler(
 ): (call: { id: string; name: string; input: any }) => Promise<{ approved: boolean }> {
   return async (call) => {
     if (autoApproveRef?.value) return { approved: true };
-    // Grab the first string value from the input as a short hint.
-    const raw = (call.input as Record<string, unknown>) ?? {};
-    const paramStr = (() => {
-      for (const v of Object.values(raw)) {
-        if (typeof v === "string") return v.length > 42 ? `${v.slice(0, 39)}…` : v;
-      }
-      return "";
-    })();
+    const paramStr = abbrevParam(call.input);
     const hint = paramStr ? `  \x1b[2m${paramStr}\x1b[0m` : "";
     const answer = await ask(`[${name}] Allow tool "${call.name}"${hint}? [y/n/always]`);
     if (answer.toLowerCase() === "always" && autoApproveRef) autoApproveRef.value = true;
@@ -181,10 +189,41 @@ export function createAgentTool(
         return buildApprovalHandler(name, pausableAsk, config.autoApproveRef);
       })();
 
+      // Wrap tools with step tracking if onStep is provided.
+      // biome-ignore lint/suspicious/noExplicitAny: tool inputs validated at runtime via Zod
+      const trackedTools: Record<string, AgentTool<any, any>> = config.onStep
+        ? Object.fromEntries(
+            Object.entries(tools).map(([k, t]) => [
+              k,
+              {
+                ...t,
+                // biome-ignore lint/suspicious/noExplicitAny: tool inputs validated at runtime via Zod
+                execute: async (input: any) => {
+                  const start = Date.now();
+                  let failed = false;
+                  try {
+                    return await t.execute(input);
+                  } catch (err) {
+                    failed = true;
+                    throw err;
+                  } finally {
+                    config.onStep!({
+                      tool: k,
+                      param: abbrevParam(input),
+                      durationMs: Date.now() - start,
+                      failed,
+                    });
+                  }
+                },
+              },
+            ]),
+          )
+        : tools;
+
       const agentWorkflow = agentAction({
         name: `${name}-action`,
         llm: config.llm,
-        tools,
+        tools: trackedTools,
         systemPrompt,
         maxSteps: config.maxSteps ?? 20,
         onApprovalRequired,
