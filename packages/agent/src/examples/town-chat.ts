@@ -20,12 +20,14 @@ import { anthropic, createAgentTown, InMemoryMemoryStore, tool } from "../lib/in
 import { Terminal } from "./common/terminal.ts";
 import { MarkdownRenderer } from "./common/terminal-markdown.ts";
 
+const FETCH_TIMEOUT_MS = 15_000;
+
 const fetchUrl = tool({
   name: "fetchUrl",
   description: "Fetch the text content of a URL.",
   parameters: z.object({ url: z.string().url() }),
   execute: async ({ url }) => {
-    const resp = await fetch(url);
+    const resp = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     return resp.text();
   },
 });
@@ -36,7 +38,7 @@ const webSearch = tool({
   parameters: z.object({ query: z.string() }),
   execute: async ({ query }) => {
     const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
-    const resp = await fetch(url);
+    const resp = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
     const data = (await resp.json()) as Record<string, unknown>;
     const topics = (data.RelatedTopics as { Text?: string }[] | undefined) ?? [];
     const results = [
@@ -63,6 +65,9 @@ const town = createAgentTown({
   runner,
   mayor: "director",
   sharedMemory: new InMemoryMemoryStore(),
+  onAgentActivity: ({ agent, state }) => {
+    term.startSpinner(state === "thinking" ? `${agent} thinking...` : "director thinking...");
+  },
   agents: {
     director: {
       llm: claude,

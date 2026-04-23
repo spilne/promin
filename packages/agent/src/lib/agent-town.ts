@@ -59,6 +59,18 @@ export interface AgentTownConfig {
   agents: Record<string, AgentDefinition>;
   /** Shared memory visible to all agents via searchSharedMemory / saveSharedMemory. */
   sharedMemory?: MemoryStore;
+  /**
+   * Maximum milliseconds a daemon agent's turn may run before it is force-timed-out.
+   * When a turn exceeds this limit the sender receives an error reply so their
+   * readInbox() unblocks rather than hanging forever.
+   * Default: 120 000 ms (2 min).
+   */
+  daemonTurnTimeoutMs?: number;
+  /**
+   * Fires whenever a daemon agent starts or finishes a turn.
+   * Use this to update a spinner or status line in the UI.
+   */
+  onAgentActivity?: (event: { agent: string; state: "thinking" | "idle" }) => void;
 }
 
 export interface AgentTown {
@@ -121,6 +133,7 @@ export interface AgentTown {
  */
 export function createAgentTown(config: AgentTownConfig): AgentTown {
   const { runner, mayor: mayorName, agents } = config;
+  const daemonTurnTimeoutMs = config.daemonTurnTimeoutMs ?? 120_000;
   const agentNames = Object.keys(agents);
 
   if (!agents[mayorName]) {
@@ -292,9 +305,21 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
         if (msg.from === "__shutdown__") break;
 
         sentTo.clear();
+        config.onAgentActivity?.({ agent: name, state: "thinking" });
 
         try {
-          const answer = await session.send(`[from ${msg.from}] ${msg.content}`);
+          const timeoutSignal = AbortSignal.timeout(daemonTurnTimeoutMs);
+          const timeoutPromise = new Promise<never>((_, reject) =>
+            timeoutSignal.addEventListener("abort", () =>
+              reject(new Error(`Agent "${name}" turn timed out after ${daemonTurnTimeoutMs}ms`)),
+            ),
+          );
+          const answer = await Promise.race([
+            session.send(`[from ${msg.from}] ${msg.content}`),
+            timeoutPromise,
+          ]);
+
+          config.onAgentActivity?.({ agent: name, state: "idle" });
 
           // If the agent's LLM didn't call sendMessage back to the sender,
           // auto-reply with its text output so the sender's readInbox unblocks.
@@ -302,6 +327,7 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
             inboxes.get(msg.from)!.push({ from: name, content: answer });
           }
         } catch (err) {
+          config.onAgentActivity?.({ agent: name, state: "idle" });
           // On error, unblock the sender with an error notice.
           if (inboxes.has(msg.from)) {
             inboxes
