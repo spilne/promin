@@ -5,6 +5,7 @@ export interface MemoryEntry {
   content: string;
   metadata?: Record<string, unknown>;
   createdAt: Date;
+  updatedAt?: Date;
 }
 
 export interface MemoryScope {
@@ -23,6 +24,10 @@ export interface MemoryStore {
     entry: { content: string; metadata?: Record<string, unknown> },
     scope?: MemoryScope,
   ): Promise<string>;
+  update(
+    id: string,
+    patch: { content?: string; metadata?: Record<string, unknown> },
+  ): Promise<void>;
   search(query: string, limit?: number, scope?: MemoryScope): Promise<MemoryEntry[]>;
   list(limit?: number, scope?: MemoryScope): Promise<MemoryEntry[]>;
   delete(id: string): Promise<void>;
@@ -117,6 +122,23 @@ export class InMemoryMemoryStore implements MemoryStore {
     const embedding = this.embeddings ? await this.embeddings.embed(input.content) : undefined;
     this.entries.push({ entry, embedding, scope });
     return id;
+  }
+
+  async update(
+    id: string,
+    patch: { content?: string; metadata?: Record<string, unknown> },
+  ): Promise<void> {
+    const stored = this.entries.find(({ entry }) => entry.id === id);
+    if (!stored) throw new Error(`Memory entry not found: ${id}`);
+    if (patch.content !== undefined) {
+      stored.entry = { ...stored.entry, content: patch.content, updatedAt: new Date() };
+      if (this.embeddings) {
+        stored.embedding = await this.embeddings.embed(patch.content);
+      }
+    }
+    if (patch.metadata !== undefined) {
+      stored.entry = { ...stored.entry, metadata: patch.metadata, updatedAt: new Date() };
+    }
   }
 
   async search(query: string, limit = 5, scope?: MemoryScope): Promise<MemoryEntry[]> {

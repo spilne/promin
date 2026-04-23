@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { MemoryStore, MemoryEntry, MemoryScope } from "@promin/agent";
+import type { MemoryStore, MemoryEntry, MemoryScope, EmbeddingProvider } from "@promin/agent";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
 /**
@@ -10,14 +10,25 @@ import type { SqliteDatabase } from "./sqlite-database.ts";
  * when no per-call scope is passed — useful for isolating separate agents
  * that share one database file.
  *
+ * When an `embeddings` provider is supplied, `save()` stores a vector
+ * alongside each entry and `search()` uses cosine-similarity ranking
+ * instead of keyword overlap. Keyword search is used as a fallback when
+ * no embedding rows exist for the scoped entries.
+ *
  * Schema (auto-created on first use):
  *   CREATE TABLE promin_memory (
- *     id           TEXT NOT NULL PRIMARY KEY,
- *     content      TEXT NOT NULL,
+ *     id           TEXT    NOT NULL PRIMARY KEY,
+ *     content      TEXT    NOT NULL,
  *     metadata     TEXT,
  *     namespace_id TEXT,
  *     session_id   TEXT,
- *     created_at   INTEGER NOT NULL
+ *     created_at   INTEGER NOT NULL,
+ *     updated_at   INTEGER
+ *   )
+ *
+ *   CREATE TABLE promin_memory_embeddings (
+ *     id        TEXT NOT NULL PRIMARY KEY REFERENCES promin_memory(id) ON DELETE CASCADE,
+ *     embedding TEXT NOT NULL
  *   )
  *
  * @example
@@ -33,14 +44,17 @@ import type { SqliteDatabase } from "./sqlite-database.ts";
 export class SqliteMemoryStore implements MemoryStore {
   private readonly _table: string;
   private readonly _namespace: string | null;
+  private readonly _embeddings: EmbeddingProvider | null;
 
   private constructor(
     private readonly db: SqliteDatabase,
     table: string,
     namespace: string | null,
+    embeddings: EmbeddingProvider | null,
   ) {
     this._table = table;
     this._namespace = namespace;
+    this._embeddings = embeddings;
     this._setup();
   }
 
@@ -55,11 +69,18 @@ export class SqliteMemoryStore implements MemoryStore {
     namespace?: string;
     /** Override the table name (default: `promin_memory`). */
     table?: string;
+    /**
+     * Optional embedding provider for semantic search. When supplied, each
+     * saved entry gets an embedding vector stored in a companion table, and
+     * `search()` ranks by cosine similarity instead of keyword overlap.
+     */
+    embeddings?: EmbeddingProvider;
   }): SqliteMemoryStore {
     return new SqliteMemoryStore(
       params.db,
       params.table ?? "promin_memory",
       params.namespace ?? null,
+      params.embeddings ?? null,
     );
   }
 
@@ -71,12 +92,19 @@ export class SqliteMemoryStore implements MemoryStore {
         metadata     TEXT,
         namespace_id TEXT,
         session_id   TEXT,
-        created_at   INTEGER NOT NULL
+        created_at   INTEGER NOT NULL,
+        updated_at   INTEGER
       )
     `);
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${this._table}_scope ON ${this._table} (namespace_id, session_id)`,
     );
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS ${this._table}_embeddings (
+        id        TEXT NOT NULL PRIMARY KEY REFERENCES ${this._table}(id) ON DELETE CASCADE,
+        embedding TEXT NOT NULL
+      )
+    `);
   }
 
   /** Merge the store-level default namespace into a per-call scope. */
@@ -108,11 +136,86 @@ export class SqliteMemoryStore implements MemoryStore {
         resolved?.sessionId ?? null,
         Date.now(),
       );
+
+    if (this._embeddings) {
+      const embedding = await this._embeddings.embed(input.content);
+      this.db
+        .query(`INSERT INTO ${this._table}_embeddings (id, embedding) VALUES (?, ?)`)
+        .run(id, JSON.stringify(embedding));
+    }
+
     return id;
   }
 
+  /**
+   * Update an existing memory entry's content and/or metadata.
+   *
+   * @throws {Error} If no entry with the given `id` exists.
+   */
+  async update(
+    id: string,
+    patch: { content?: string; metadata?: Record<string, unknown> },
+  ): Promise<void> {
+    const setClauses: string[] = [];
+    const params: unknown[] = [];
+
+    if (patch.content !== undefined) {
+      setClauses.push("content = ?");
+      params.push(patch.content);
+    }
+
+    if (patch.metadata !== undefined) {
+      setClauses.push("metadata = ?");
+      params.push(JSON.stringify(patch.metadata));
+    }
+
+    // Always touch updated_at.
+    setClauses.push("updated_at = ?");
+    params.push(Date.now());
+
+    // WHERE param.
+    params.push(id);
+
+    const exists = this.db
+      .query<{ id: string }>(`SELECT id FROM ${this._table} WHERE id = ?`)
+      .get(id);
+    if (!exists) throw new Error(`Memory entry not found: ${id}`);
+
+    this.db.query(`UPDATE ${this._table} SET ${setClauses.join(", ")} WHERE id = ?`).run(...params);
+
+    if (patch.content !== undefined && this._embeddings) {
+      const embedding = await this._embeddings.embed(patch.content);
+      this.db
+        .query(`INSERT OR REPLACE INTO ${this._table}_embeddings (id, embedding) VALUES (?, ?)`)
+        .run(id, JSON.stringify(embedding));
+    }
+  }
+
   async search(query: string, limit = 5, scope?: MemoryScope): Promise<MemoryEntry[]> {
-    const rows = this._listRows(this._resolveScope(scope));
+    const resolved = this._resolveScope(scope);
+
+    // ---- semantic search ------------------------------------------------
+    if (this._embeddings) {
+      const queryEmbedding = await this._embeddings.embed(query);
+
+      // Load all scoped rows that also have an embedding.
+      const embRows = this._listRowsWithEmbeddings(resolved);
+
+      if (embRows.length > 0) {
+        return embRows
+          .map(({ row, embedding }) => ({
+            row,
+            score: cosineSimilarity(queryEmbedding, embedding),
+          }))
+          .sort((a, b) => b.score - a.score)
+          .slice(0, limit)
+          .map(({ row }) => toEntry(row));
+      }
+      // Fall through to keyword search when no embeddings exist yet.
+    }
+
+    // ---- keyword search -------------------------------------------------
+    const rows = this._listRows(resolved);
     if (rows.length === 0) return [];
 
     const hasTerms = query
@@ -149,7 +252,10 @@ export class SqliteMemoryStore implements MemoryStore {
     this.db.query(`DELETE FROM ${this._table} WHERE id = ?`).run(id);
   }
 
-  private _listRows(scope?: MemoryScope): DbMemoryRow[] {
+  private _buildScopeConditions(scope?: MemoryScope): {
+    conditions: string[];
+    params: unknown[];
+  } {
     const conditions: string[] = [];
     const params: unknown[] = [];
 
@@ -170,15 +276,61 @@ export class SqliteMemoryStore implements MemoryStore {
       }
     }
 
+    return { conditions, params };
+  }
+
+  private _listRows(scope?: MemoryScope): DbMemoryRow[] {
+    const { conditions, params } = this._buildScopeConditions(scope);
     const where = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
     return this.db
       .query<DbMemoryRow>(
-        `SELECT id, content, metadata, namespace_id, session_id, created_at
+        `SELECT id, content, metadata, namespace_id, session_id, created_at, updated_at
          FROM ${this._table}${where} ORDER BY created_at DESC, rowid DESC`,
       )
       .all(...params);
   }
+
+  /** Load scoped rows that have a matching embedding, together with the parsed vector. */
+  private _listRowsWithEmbeddings(
+    scope?: MemoryScope,
+  ): Array<{ row: DbMemoryRow; embedding: number[] }> {
+    const { conditions, params } = this._buildScopeConditions(scope);
+    const tableAlias = "m";
+    const scopedConditions = conditions.map((c) =>
+      // Prefix unqualified column references with the table alias.
+      c.replace(/^(namespace_id|session_id)/, `${tableAlias}.$1`),
+    );
+    const where = scopedConditions.length > 0 ? ` WHERE ${scopedConditions.join(" AND ")}` : "";
+
+    const rows = this.db
+      .query<DbMemoryRowWithEmbedding>(
+        `SELECT m.id, m.content, m.metadata, m.namespace_id, m.session_id,
+                m.created_at, m.updated_at, e.embedding
+         FROM ${this._table} m
+         INNER JOIN ${this._table}_embeddings e ON e.id = m.id
+         ${where}
+         ORDER BY m.created_at DESC, m.rowid DESC`,
+      )
+      .all(...params);
+
+    return rows.map((r) => ({
+      row: {
+        id: r.id,
+        content: r.content,
+        metadata: r.metadata,
+        namespace_id: r.namespace_id,
+        session_id: r.session_id,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+      },
+      embedding: JSON.parse(r.embedding) as number[],
+    }));
+  }
 }
+
+// ---------------------------------------------------------------------------
+// DB row types
+// ---------------------------------------------------------------------------
 
 interface DbMemoryRow {
   id: string;
@@ -187,7 +339,16 @@ interface DbMemoryRow {
   namespace_id: string | null;
   session_id: string | null;
   created_at: number;
+  updated_at: number | null;
 }
+
+interface DbMemoryRowWithEmbedding extends DbMemoryRow {
+  embedding: string;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function toEntry(row: DbMemoryRow): MemoryEntry {
   return {
@@ -195,7 +356,21 @@ function toEntry(row: DbMemoryRow): MemoryEntry {
     content: row.content,
     metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
     createdAt: new Date(row.created_at),
+    updatedAt: row.updated_at ? new Date(row.updated_at) : undefined,
   };
+}
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dot = 0;
+  let magA = 0;
+  let magB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    magA += a[i] ** 2;
+    magB += b[i] ** 2;
+  }
+  const denom = Math.sqrt(magA) * Math.sqrt(magB);
+  return denom === 0 ? 0 : dot / denom;
 }
 
 function keywordScore(queryWords: Set<string>, content: string): number {

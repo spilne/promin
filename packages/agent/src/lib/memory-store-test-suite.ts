@@ -99,6 +99,42 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
     });
 
     // -------------------------------------------------------------------
+    // update
+    // -------------------------------------------------------------------
+
+    describe("update", () => {
+      it("updates content in place", async () => {
+        const s = await make();
+        const id = await s.save({ content: "original content" });
+        await s.update(id, { content: "revised content" });
+        const [entry] = await s.list();
+        expect(entry!.content).toBe("revised content");
+        expect(entry!.id).toBe(id);
+      });
+
+      it("updates metadata in place", async () => {
+        const s = await make();
+        const id = await s.save({ content: "hello", metadata: { v: 1 } });
+        await s.update(id, { metadata: { v: 2 } });
+        const [entry] = await s.list();
+        expect(entry!.metadata).toEqual({ v: 2 });
+      });
+
+      it("sets updatedAt on update", async () => {
+        const s = await make();
+        const id = await s.save({ content: "hello" });
+        await s.update(id, { content: "world" });
+        const [entry] = await s.list();
+        expect(entry!.updatedAt).toBeInstanceOf(Date);
+      });
+
+      it("throws for unknown id", async () => {
+        const s = await make();
+        await expect(s.update("no-such-id", { content: "x" })).rejects.toThrow();
+      });
+    });
+
+    // -------------------------------------------------------------------
     // search
     // -------------------------------------------------------------------
 
