@@ -1,16 +1,26 @@
 /**
  * Town Chat — a multi-agent research town built with createAgentTown.
  *
- * Three agents collaborate to answer questions:
- *   director (mayor) — receives user questions, orchestrates peers, presents answers
- *   researcher       — searches the web and fetches URLs; replies to director
- *   writer           — polishes research notes into clear prose; replies to director
+ * Five agents collaborate to answer questions:
+ *   director  (mayor) — orchestrates peers; dispatches tasks in parallel
+ *   researcher        — searches the web and fetches URLs
+ *   analyst           — interprets and synthesises findings (runs in parallel with researcher)
+ *   factChecker       — verifies claims and adds caveats
+ *   writer            — polishes the combined output into clear prose
  *
  * Run:
  *   ANTHROPIC_API_KEY=sk-... bun packages/agent/src/examples/town-chat.ts
+ *   TOOL_AUTO_APPROVE=true      (skip per-tool approval prompts)
  *
- * Type "exit" or press Ctrl+C at the prompt to quit.
+ * Slash commands:
+ *   /help    — show this list
+ *   /history — director conversation history
+ *   /steps   — director workflow step tree
+ *   /tools   — all agents and their tools
+ *   exit     — quit
+ *
  * Ctrl+C during a response interrupts the current turn.
+ * Ctrl+C at the prompt twice exits.
  */
 
 import { createInterface } from "node:readline";
@@ -18,7 +28,11 @@ import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow"
 import { z } from "zod";
 import { anthropic, createAgentTown, InMemoryMemoryStore, tool } from "../lib/index.ts";
 import { Terminal } from "./common/terminal.ts";
-import { MarkdownRenderer } from "./common/terminal-markdown.ts";
+import { ConsoleRunner } from "./common/console-runner.ts";
+import { UsageTracker } from "./console-usage.ts";
+import { buildHistory, buildStepsTree } from "./console-panes.ts";
+
+// ---- tools ----
 
 const FETCH_TIMEOUT_MS = 15_000;
 
@@ -52,55 +66,80 @@ const webSearch = tool({
   },
 });
 
+// ---- setup ----
+
 const apiKey = process.env.ANTHROPIC_API_KEY;
 if (!apiKey) {
   console.error("Set ANTHROPIC_API_KEY to run.");
   process.exit(1);
 }
 
-const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
-const claude = anthropic("claude-sonnet-4-6", { apiKey });
+const autoApproveEnv = process.env.TOOL_AUTO_APPROVE === "true";
+
+const storage = new InMemoryWorkflowStorage();
+const runner = createWorkflowRunner({ storage });
+
+const usage = new UsageTracker();
+const claude = usage.withTracking(anthropic("claude-sonnet-4-6", { apiKey }), "claude-sonnet-4-6");
 
 // ---- terminal ----
 const rl = createInterface({ input: process.stdin, output: process.stdout, historySize: 100 });
 const term = new Terminal(rl);
+const consoleRunner = new ConsoleRunner(term, usage);
+
+// ---- approval state ----
+let autoApprove = autoApproveEnv;
 
 const town = createAgentTown({
   runner,
   mayor: "director",
   sharedMemory: new InMemoryMemoryStore(),
+
   onAgentActivity: ({ agent, state }) => {
     term.startSpinner(state === "thinking" ? `${agent} thinking...` : "director thinking...");
   },
+
   onToolApproval: async ({ agent, call }) => {
+    if (autoApprove) return { approved: true };
     term.stopSpinner();
     const inputPreview = JSON.stringify(call.input).slice(0, 80);
     return new Promise((resolve) => {
       rl.question(
-        `\n[${agent}] Approve tool "${call.name}"(${inputPreview})? [y/N]: `,
+        `\n[${agent}] Approve tool "${call.name}"(${inputPreview})? [y/a/N]: `,
         (answer) => {
-          const approved = answer.trim().toLowerCase() === "y";
-          if (approved) term.startSpinner(`${agent} thinking...`);
-          resolve({ approved });
+          const a = answer.trim().toLowerCase();
+          if (a === "a") {
+            autoApprove = true;
+            term.startSpinner(`${agent} thinking...`);
+            resolve({ approved: true });
+          } else if (a === "y") {
+            term.startSpinner(`${agent} thinking...`);
+            resolve({ approved: true });
+          } else {
+            resolve({ approved: false });
+          }
         },
       );
     });
   },
+
   agents: {
     director: {
       llm: claude,
       memory: new InMemoryMemoryStore(),
       prompt: [
-        "You are the director of a research town. You receive questions from the user and coordinate your specialist agents.",
+        "You are the director of a research town. Coordinate specialist agents to answer questions.",
         "",
-        "Workflow for research questions:",
-        "1. Send the question to the researcher via sendMessage.",
-        "2. Call readInbox to wait for the researcher's findings.",
-        "3. Send the original question and the researcher's findings to the writer via sendMessage.",
-        "4. Call readInbox to wait for the writer's polished answer.",
-        "5. Present the polished answer to the user.",
+        "For research questions, use this parallel workflow:",
+        "1. sendMessage to BOTH researcher AND analyst simultaneously (two sendMessage calls).",
+        "2. readInbox twice to collect both replies (they run in parallel).",
+        "3. sendMessage to factChecker with the question + both findings.",
+        "4. readInbox once for the fact-checker's report.",
+        "5. sendMessage to writer with the question + all findings + fact-check.",
+        "6. readInbox once for the polished answer.",
+        "7. Present the polished answer directly to the user.",
         "",
-        "For simple or conversational questions, answer directly without delegating.",
+        "For simple/conversational questions, answer directly without delegating.",
         "Always reply with markdown formatting.",
       ].join("\n"),
     },
@@ -111,10 +150,34 @@ const town = createAgentTown({
       tools: { fetchUrl, webSearch },
       requireApprovalForAllTools: true,
       prompt: [
-        "You are a researcher in a multi-agent town. You receive research tasks from the director.",
-        "Use webSearch to find relevant pages and fetchUrl to read them for details.",
-        "Summarize your findings as concise bullet points. Include source URLs for specific facts.",
-        "When finished, send your findings back to the director via sendMessage.",
+        "You are a researcher. You receive tasks from the director.",
+        "Use webSearch to find relevant pages and fetchUrl to read details.",
+        "Summarize findings as concise bullet points with source URLs.",
+        "When finished, send findings to the director via sendMessage.",
+      ].join("\n"),
+    },
+
+    analyst: {
+      llm: claude,
+      memory: new InMemoryMemoryStore(),
+      prompt: [
+        "You are an analyst. You receive research tasks from the director.",
+        "Apply domain knowledge to synthesise, interpret, and add context beyond raw search results.",
+        "Identify patterns, implications, and key takeaways. Be concise.",
+        "When finished, send your analysis to the director via sendMessage.",
+      ].join("\n"),
+    },
+
+    factChecker: {
+      llm: claude,
+      memory: new InMemoryMemoryStore(),
+      tools: { webSearch },
+      requireApprovalForAllTools: true,
+      prompt: [
+        "You are a fact-checker. You receive a question and research findings from the director.",
+        "Verify key claims, flag uncertainties, and add important caveats.",
+        "Use webSearch to cross-check critical facts if needed.",
+        "When finished, send your fact-check report to the director via sendMessage.",
       ].join("\n"),
     },
 
@@ -122,69 +185,26 @@ const town = createAgentTown({
       llm: claude,
       memory: new InMemoryMemoryStore(),
       prompt: [
-        "You are a writer in a multi-agent town. You receive a user question and research notes from the director.",
-        "Transform the raw notes into clear, well-structured markdown prose.",
-        "Be concise — a focused answer, not an essay. Preserve any source links.",
-        "When finished, send your polished answer back to the director via sendMessage.",
+        "You are a writer. You receive a question, research findings, analysis, and a fact-check from the director.",
+        "Combine all inputs into clear, well-structured markdown prose.",
+        "Be concise — a focused answer, not an essay. Preserve important source links.",
+        "When finished, send the polished answer to the director via sendMessage.",
       ].join("\n"),
     },
   },
 });
 
-// ---- abortable stream wrapper ----
-async function* abortable(
-  source: AsyncIterable<string>,
-  signal: AbortSignal,
-): AsyncGenerator<string> {
-  if (signal.aborted) return;
-  const iter = source[Symbol.asyncIterator]();
-  const abortPromise = new Promise<void>((r) =>
-    signal.addEventListener("abort", () => r(), { once: true }),
-  );
-  while (true) {
-    let aborted = false;
-    const result = await Promise.race([
-      iter.next(),
-      abortPromise.then(() => {
-        aborted = true;
-        return { done: true as const, value: "" };
-      }),
-    ]);
-    if (aborted || result.done) break;
-    yield result.value;
-  }
-}
-
 // ---- SIGINT: interrupt turn or exit ----
-let currentAc: AbortController | null = null;
-let lastCtrlC = 0;
-let savedPlaceholder = "";
-
-rl.on("SIGINT", () => {
-  if (currentAc) {
-    term.stopSpinner();
-    if (term.agentHasTextOnLine) process.stdout.write("\n");
-    process.stdout.write("\x1b[2m(interrupted)\x1b[0m\n");
-    currentAc.abort();
-    currentAc = null;
-    town.interruptMayorInbox();
-  } else {
-    const now = Date.now();
-    if (now - lastCtrlC < 2_000) {
-      process.stdout.write("\n");
-      town.close().finally(() => {
-        term.close();
-        rl.close();
-        process.exit(0);
-      });
-    } else {
-      lastCtrlC = now;
-      // biome-ignore lint/suspicious/noExplicitAny: readline internals
-      savedPlaceholder = (rl as any).line ?? "";
-      process.stdout.write("\n\x1b[2m(Ctrl+C again to exit)\x1b[0m\n");
-      prompt();
-    }
-  }
+consoleRunner.setupSigInt(rl, {
+  onInterrupt: () => town.interruptMayorInbox(),
+  onIdleHint: () => prompt(),
+  onExit: () => {
+    town.close().finally(() => {
+      term.close();
+      rl.close();
+      process.exit(0);
+    });
+  },
 });
 
 // ---- REPL ----
@@ -201,71 +221,85 @@ function prompt(): void {
       return;
     }
 
-    const ac = new AbortController();
-    currentAc = ac;
-    term.agentHasTextOnLine = false;
-    term.startSpinner("director thinking...");
-
-    const md = new MarkdownRenderer({ width: process.stdout.columns ?? 80 });
-    let labelShown = false;
-    let streamError: Error | undefined;
-
-    // Retry up to 5 times with 500ms gaps if the session is still settling
-    // after a previous interrupted turn.
-    let attempts = 0;
-    while (attempts < 5) {
-      try {
-        for await (const chunk of abortable(town.stream(input, ac.signal), ac.signal)) {
-          term.stopSpinner();
-          if (!labelShown) {
-            process.stdout.write("\nDirector:\n");
-            labelShown = true;
-          }
-          const rendered = md.push(chunk);
-          if (rendered) term.writeChunk(rendered);
-          term.agentHasTextOnLine = true;
-        }
-        term.flushChunks();
-        const tail = md.flush();
-        if (tail) process.stdout.write(tail);
-        streamError = undefined;
-        break;
-      } catch (err) {
-        term.flushChunks();
-        const e = err instanceof Error ? err : new Error(String(err));
-        if (e.message.includes("busy") && attempts < 4 && !ac.signal.aborted) {
-          attempts++;
-          term.startSpinner(`settling… (${attempts})`);
-          await new Promise((r) => setTimeout(r, 500));
-          continue;
-        }
-        streamError = e;
-        break;
-      }
+    // ---- slash commands ----
+    if (input === "/help") {
+      await term.showPane("help", [
+        "  /history  — director conversation history",
+        "  /steps    — director workflow step tree",
+        "  /tools    — agents and their tools",
+        `  /approve-all  — toggle auto-approve (currently: ${autoApprove ? "ON" : "OFF"})`,
+        "  /help     — show this list",
+        "  exit      — quit",
+        "",
+        "  Ctrl+C during a turn: interrupt (session recovers quickly).",
+        "  Ctrl+C at prompt twice: exit.",
+        "  Tool approval: y=yes  a=always  N=no",
+      ]);
+      return prompt();
     }
 
-    currentAc = null;
-    term.stopSpinner();
+    if (input === "/approve-all") {
+      autoApprove = !autoApprove;
+      term.printAbove(`\x1b[2mAuto-approve: ${autoApprove ? "ON" : "OFF"}\x1b[0m`);
+      return prompt();
+    }
 
-    if (!ac.signal.aborted) {
-      if (streamError) {
+    if (input === "/history") {
+      const mayorSession = await town.getMayorSession();
+      await term.showPane("director history", buildHistory(mayorSession));
+      return prompt();
+    }
+
+    if (input === "/steps") {
+      await term.showInteractiveTree(
+        "director steps",
+        await buildStepsTree(storage, runner, "town-director"),
+      );
+      return prompt();
+    }
+
+    if (input === "/tools") {
+      const lines: string[] = [
+        "  director    sendMessage, readInbox, searchMemory, saveMemory, searchSharedMemory, saveSharedMemory",
+        "  researcher  webSearch, fetchUrl, sendMessage, searchMemory, saveMemory",
+        "  analyst     sendMessage, searchMemory, saveMemory",
+        "  factChecker webSearch, sendMessage, searchMemory, saveMemory",
+        "  writer      sendMessage, searchMemory, saveMemory",
+      ];
+      await term.showPane("tools", lines);
+      return prompt();
+    }
+
+    // ---- normal turn ----
+    const { aborted, error } = await consoleRunner.runTurn((signal) => town.stream(input, signal), {
+      initialSpinner: "director thinking...",
+      label: "Director",
+      maxRetries: 4,
+      retryOn: (e) => e.message.includes("busy"),
+      retrySpinner: (n) => `settling… (${n})`,
+    });
+
+    if (!aborted) {
+      if (error) {
         if (term.agentHasTextOnLine) process.stdout.write("\n");
-        process.stdout.write(`\x1b[31mError: ${streamError.message}\x1b[0m\n`);
+        process.stdout.write(`\x1b[31mError: ${error.message}\x1b[0m\n`);
       } else {
         process.stdout.write("\n");
+        usage.printUsage();
       }
     }
 
     term.agentHasTextOnLine = false;
+
+    if (consoleRunner.savedPlaceholder) {
+      rl.write(consoleRunner.savedPlaceholder);
+      consoleRunner.clearSavedPlaceholder();
+    }
+
     prompt();
   });
-
-  if (savedPlaceholder) {
-    rl.write(savedPlaceholder);
-    savedPlaceholder = "";
-  }
 }
 
-console.log("\nTown Chat  agents=director,researcher,writer");
-console.log("Type a question or 'exit' to quit. Ctrl+C to interrupt a turn.\n");
+console.log("\nTown Chat  agents=director,researcher,analyst,factChecker,writer");
+console.log("Type /help for commands. Type 'exit' or Ctrl+C twice to quit.\n");
 prompt();

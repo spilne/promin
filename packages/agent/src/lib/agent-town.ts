@@ -107,6 +107,8 @@ export interface AgentTown {
    * can become idle quickly rather than waiting for a daemon to reply.
    */
   interruptMayorInbox(): void;
+  /** Return the mayor's AgentSession (for inspecting history, etc.). */
+  getMayorSession(): Promise<AgentSession>;
   /** Shut down all agents and release resources. */
   close(): Promise<void>;
 }
@@ -412,6 +414,10 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
       if (inbox?.hasPendingPop) {
         inbox.push({ from: "__interrupted__", content: "" });
       }
+    },
+
+    getMayorSession(): Promise<AgentSession> {
+      return sessionPromises.get(mayorName)!;
     },
 
     async close(): Promise<void> {
