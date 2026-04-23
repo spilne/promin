@@ -25,6 +25,24 @@ export interface AgentToolFactoryConfig {
   tools?: Record<string, AgentTool<any, any>>;
   /** Maximum think/tool steps per invocation. Default: 20. */
   maxSteps?: number;
+  /**
+   * Called when a sub-agent tool with `requireApproval: true` needs a decision.
+   * Surface this to the user (e.g. via ask()) so approvals reach the terminal.
+   * When omitted, the sub-agent hangs waiting for an external signal (likely timing out).
+   */
+  // biome-ignore lint/suspicious/noExplicitAny: ToolCall input is validated by Zod at runtime
+  onRequiresApproval?: (call: {
+    id: string;
+    name: string;
+    input: any;
+  }) => Promise<{ approved: boolean; reason?: string }>;
+  /**
+   * Hard wall-clock timeout for the entire sub-agent run in milliseconds.
+   * If the sub-agent (including any LLM calls) does not complete within this
+   * window, the tool rejects with a timeout error so the parent session is not
+   * blocked indefinitely. Default: 120 000 ms (2 min).
+   */
+  timeoutMs?: number;
 }
 
 /**
@@ -94,6 +112,7 @@ export function createAgentTool(
     tools,
     systemPrompt,
     maxSteps: config.maxSteps ?? 20,
+    onApprovalRequired: config.onRequiresApproval,
   });
 
   return tool({
@@ -106,12 +125,21 @@ export function createAgentTool(
     }),
     execute: async ({ task }) => {
       const workflowId = `${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const result = await config.runner.run({
-        workflow: agentWorkflow,
-        workflowId,
-        input: { task },
+      const timeoutMs = config.timeoutMs ?? 120_000;
+      const run = config.runner.run({ workflow: agentWorkflow, workflowId, input: { task } });
+      let tid: ReturnType<typeof setTimeout>;
+      const timeout = new Promise<never>((_, reject) => {
+        tid = setTimeout(
+          () => reject(new Error(`Sub-agent "${name}" timed out after ${timeoutMs / 1000}s`)),
+          timeoutMs,
+        );
       });
-      return (result as { answer: string }).answer;
+      try {
+        const result = await Promise.race([run, timeout]);
+        return (result as { answer: string }).answer;
+      } finally {
+        clearTimeout(tid!);
+      }
     },
   });
 }
