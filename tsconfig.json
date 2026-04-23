@@ -49,6 +49,9 @@
     },
     {
       "path": "./packages/agent"
+    },
+    {
+      "path": "./packages/sqlite"
     }
   ]
 }

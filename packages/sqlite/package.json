@@ -1,0 +1,61 @@
+{
+  "name": "@promin/sqlite",
+  "version": "0.1.0",
+  "description": "SQLite backends for promin — persistent RateLimiter, Throttle, and Queue via a driver-agnostic interface.",
+  "keywords": [
+    "queue",
+    "rate-limiter",
+    "sqlite",
+    "throttle",
+    "typescript"
+  ],
+  "homepage": "https://github.com/spilne/promin/tree/main/packages/sqlite",
+  "bugs": {
+    "url": "https://github.com/spilne/promin/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spilne/promin.git",
+    "directory": "packages/sqlite"
+  },
+  "files": [
+    "dist",
+    "package.json"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "@promin/source": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@promin/agent": "workspace:*",
+    "@promin/core": "workspace:*",
+    "@promin/workflow": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:"
+  },
+  "nx": {
+    "targets": {
+      "typecheck": {},
+      "test": {},
+      "lint": {},
+      "format": {},
+      "format-check": {},
+      "ci": {},
+      "publish": {}
+    }
+  }
+}
