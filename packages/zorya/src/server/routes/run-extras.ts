@@ -157,3 +157,63 @@ export function getRunChildren(storage: WorkflowStorage) {
     return json(200, response);
   };
 }
+
+// ---------------------------------------------------------------------------
+// Admin actions — mark success / failed / rerun
+// ---------------------------------------------------------------------------
+
+export function markRunSuccess(storage: WorkflowStorage) {
+  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
+    const id = params.id;
+    if (!id) return jsonError(400, "missing_id");
+    try {
+      await storage.completeWorkflow(id, null);
+      return json(200, { ok: true });
+    } catch (err) {
+      return jsonError(
+        400,
+        "mark_success_failed",
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  };
+}
+
+export function markRunFailed(storage: WorkflowStorage) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const id = params.id;
+    if (!id) return jsonError(400, "missing_id");
+    let reason = "marked failed";
+    try {
+      const body = (await req.json().catch(() => null)) as { reason?: string } | null;
+      if (body?.reason) reason = body.reason;
+    } catch {
+      // body is optional
+    }
+    try {
+      await storage.failWorkflow(id, reason);
+      return json(200, { ok: true });
+    } catch (err) {
+      return jsonError(400, "mark_failed_failed", err instanceof Error ? err.message : String(err));
+    }
+  };
+}
+
+/**
+ * Reset a completed/failed run for a fresh execution. Requires a trigger
+ * function because re-running a workflow definition needs the runner; the
+ * server never owns workflow code itself.
+ */
+export function rerunRun(storage: WorkflowStorage, trigger?: (id: string) => Promise<void>) {
+  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
+    const id = params.id;
+    if (!id) return jsonError(400, "missing_id");
+    try {
+      await storage.startFreshRun(id);
+      if (trigger) await trigger(id);
+      return json(200, { ok: true });
+    } catch (err) {
+      return jsonError(400, "rerun_failed", err instanceof Error ? err.message : String(err));
+    }
+  };
+}

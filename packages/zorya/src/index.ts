@@ -24,6 +24,7 @@ export type {
   RunHistoryResponse,
   ChildrenResponse,
 } from "./server/routes/run-extras.ts";
+export type { GridRunDto, GridResponse, SparklinesResponse } from "./server/routes/grid.ts";
 
 // Wire format
 export type {

@@ -13,6 +13,7 @@ import type {
   RunHistoryResponse,
   ChildrenResponse,
 } from "../../server/routes/run-extras.ts";
+import type { GridResponse, SparklinesResponse } from "../../server/routes/grid.ts";
 
 const BASE = ""; // served from same origin
 
@@ -82,6 +83,25 @@ export const api = {
   },
   getRunChildren(id: string): Promise<ChildrenResponse> {
     return req(`/api/runs/${encodeURIComponent(id)}/children`);
+  },
+  markRunSuccess(id: string): Promise<{ ok: boolean }> {
+    return req(`/api/runs/${encodeURIComponent(id)}/mark-success`, { method: "POST" });
+  },
+  markRunFailed(id: string, reason?: string): Promise<{ ok: boolean }> {
+    return req(`/api/runs/${encodeURIComponent(id)}/mark-failed`, {
+      method: "POST",
+      headers: reason ? { "content-type": "application/json" } : undefined,
+      body: reason ? JSON.stringify({ reason }) : undefined,
+    });
+  },
+  rerunRun(id: string): Promise<{ ok: boolean }> {
+    return req(`/api/runs/${encodeURIComponent(id)}/rerun`, { method: "POST" });
+  },
+  getWorkflowGrid(name: string, limit = 25): Promise<GridResponse> {
+    return req(`/api/workflows/${encodeURIComponent(name)}/grid?limit=${limit}`);
+  },
+  getSparklines(limit = 14): Promise<SparklinesResponse> {
+    return req(`/api/workflows/sparklines?limit=${limit}`);
   },
   listWorkflowNames(): Promise<{ names: string[]; types?: string[]; namespaces?: string[] }> {
     return req(`/api/workflows`);

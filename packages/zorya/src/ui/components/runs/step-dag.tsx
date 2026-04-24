@@ -8,7 +8,8 @@
 
 import { useMemo } from "preact/hooks";
 import type { RunDto, StepDto } from "../../../server/api-types.ts";
-import { STEP_STATUS_VISUAL, STEP_TYPE_ICON } from "../../lib/format.ts";
+import { STEP_STATUS_VISUAL, STEP_TYPE_ICON, effectiveStepStatus } from "../../lib/format.ts";
+import type { ExtendedStepStatus } from "../../../server/api-types.ts";
 
 interface StepDagProps {
   run: RunDto;
@@ -115,13 +116,14 @@ function NodeRect({
   onSelect: () => void;
 }) {
   const step = node.step;
-  const v = STEP_STATUS_VISUAL[step.status];
+  const renderStatus = effectiveStepStatus(step);
+  const v = STEP_STATUS_VISUAL[renderStatus];
   const isPlanned = step.isPlanned === true;
 
   // Strip + fill use Tailwind CSS classes (compiled to concrete colors) rather
   // than SVG fill attributes with CSS variables — latter don't resolve across
   // all browsers when referenced via hsl(var(--x)).
-  const stripClass = classForStatusStrip(step.status);
+  const stripClass = classForStatusStrip(renderStatus);
   const cardFillClass = isPlanned ? "fill-base-200/30" : "fill-base-200";
   const borderClass = isSelected
     ? "stroke-primary"
@@ -187,7 +189,7 @@ function NodeRect({
 }
 
 /** Tailwind-compiled fill utility per status. */
-function classForStatusStrip(status: StepDto["status"]): string {
+function classForStatusStrip(status: ExtendedStepStatus): string {
   switch (status) {
     case "running":
       return "fill-info";
@@ -199,6 +201,7 @@ function classForStatusStrip(status: StepDto["status"]): string {
       return "fill-error";
     case "sleeping":
     case "waiting_for_signal":
+    case "upstream_failed":
       return "fill-warning";
     case "skipped":
     case "pending":

@@ -1,6 +1,7 @@
 import { useState } from "preact/hooks";
 import type { RunDto, StepDto } from "../../../server/api-types.ts";
 import {
+  effectiveStepStatus,
   formatDuration,
   formatRelative,
   STEP_STATUS_VISUAL,
@@ -164,7 +165,8 @@ function StepRow({
   const width = Math.max(2, end - start);
   const leftPct = (Math.max(0, start) / totalMs) * 100;
   const widthPct = Math.max(0.5, (width / totalMs) * 100);
-  const v = STEP_STATUS_VISUAL[step.status];
+  const renderStatus = effectiveStepStatus(step);
+  const v = STEP_STATUS_VISUAL[renderStatus];
   const isHatched = step.status === "sleeping" || step.status === "waiting_for_signal";
 
   const tooltip = [

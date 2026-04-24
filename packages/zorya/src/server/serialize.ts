@@ -3,7 +3,13 @@
 // ---------------------------------------------------------------------------
 
 import type { WorkflowState, StepState, StepTaskState } from "@promin/workflow";
-import type { RunDto, RunSummaryDto, StepDto, StepTaskDto } from "./api-types.ts";
+import type {
+  ExtendedStepStatus,
+  RunDto,
+  RunSummaryDto,
+  StepDto,
+  StepTaskDto,
+} from "./api-types.ts";
 
 function iso(d?: Date): string | undefined {
   return d ? d.toISOString() : undefined;
@@ -47,6 +53,23 @@ export function stepToDto(s: StepState): StepDto {
 }
 
 export function runToDto(w: WorkflowState): RunDto {
+  const steps = Object.values(w.steps).map(stepToDto);
+  // Compute "upstream_failed" — a pending step whose dependency already
+  // failed won't run, and surfacing it as just "pending" is misleading.
+  const byName = new Map(steps.map((s) => [s.stepName, s]));
+  for (const s of steps) {
+    if (s.status !== "pending") continue;
+    const hasFailedDep = s.dependsOn.some((dep) => {
+      const upstream = byName.get(dep);
+      if (!upstream) return false;
+      return (
+        upstream.status === "failed" ||
+        upstream.status === "compensation_failed" ||
+        (upstream.effectiveStatus as ExtendedStepStatus | undefined) === "upstream_failed"
+      );
+    });
+    if (hasFailedDep) s.effectiveStatus = "upstream_failed";
+  }
   return {
     workflowId: w.workflowId,
     workflowName: w.workflowName,
@@ -59,7 +82,7 @@ export function runToDto(w: WorkflowState): RunDto {
     result: w.result,
     error: w.error,
     metadata: w.metadata,
-    steps: Object.values(w.steps).map(stepToDto),
+    steps,
     parentWorkflowId: w.parentWorkflowId,
     createdAt: w.createdAt.toISOString(),
     startedAt: iso(w.startedAt),

@@ -6,6 +6,8 @@ import type { RunListQuery } from "../../../server/api-types.ts";
 import { StatsBar } from "./stats-bar.tsx";
 import { StatusBadge } from "../ui/status-badge.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
+import { Sparkline } from "../ui/sparkline.tsx";
+import type { SparklinesResponse } from "../../../server/routes/grid.ts";
 import { formatDuration, formatRelative, WORKFLOW_STATUS_VISUAL } from "../../lib/format.ts";
 
 interface NamesAndTypes {
@@ -51,6 +53,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
   const [status, setStatus] = useState<WorkflowStatus | "all">(initialStatus);
   const [page, setPage] = useState(initialPage);
   const [meta, setMeta] = useState<NamesAndTypes>({ names: [], types: [], namespaces: [] });
+  const [sparklines, setSparklines] = useState<SparklinesResponse>({});
 
   useEffect(() => {
     api
@@ -59,6 +62,23 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
         setMeta({ names: r.names, types: r.types ?? [], namespaces: r.namespaces ?? [] }),
       )
       .catch(() => {});
+  }, []);
+
+  // Refresh sparklines alongside the main fetch so rows and sparkbars stay
+  // in step as new runs arrive.
+  useEffect(() => {
+    let cancelled = false;
+    const load = () =>
+      api
+        .getSparklines(14)
+        .then((r) => !cancelled && setSparklines(r))
+        .catch(() => {});
+    load();
+    const h = setInterval(load, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(h);
+    };
   }, []);
 
   const PAGE_SIZE = 25;
@@ -196,6 +216,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
               <tr class="bg-base-200 text-xs uppercase tracking-wider text-base-content/50">
                 <th>ID</th>
                 <th>Name</th>
+                <th>Recent</th>
                 <th>Type</th>
                 <th>Namespace</th>
                 <th>Status</th>
@@ -204,10 +225,10 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
               </tr>
             </thead>
             <tbody>
-              {loading && !data && <SkeletonRows rows={10} cols={7} />}
+              {loading && !data && <SkeletonRows rows={10} cols={8} />}
               {data && data.runs.length === 0 && !loading && (
                 <tr>
-                  <td colSpan={7} class="text-center py-12">
+                  <td colSpan={8} class="text-center py-12">
                     <div class="text-base-content/50">No runs match the current filters</div>
                   </td>
                 </tr>
@@ -216,6 +237,9 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
                 <tr class="hover:bg-base-200 cursor-pointer" onClick={() => onOpen(r.workflowId)}>
                   <td class="font-mono text-sm">{r.workflowId}</td>
                   <td>{r.workflowName}</td>
+                  <td>
+                    <Sparkline runs={sparklines[r.workflowName] ?? []} />
+                  </td>
                   <td class="text-base-content/60">{r.workflowType ?? "—"}</td>
                   <td>
                     {r.namespace ? (

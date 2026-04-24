@@ -1,4 +1,5 @@
 import type { WorkflowStatus, StepStatus, StepType } from "@promin/workflow";
+import type { ExtendedStepStatus } from "../../server/api-types.ts";
 
 export function formatDuration(ms?: number): string {
   if (ms === undefined || ms === null) return "—";
@@ -93,7 +94,7 @@ export const WORKFLOW_STATUS_VISUAL: Record<WorkflowStatus, StatusVisual> = {
   },
 };
 
-export const STEP_STATUS_VISUAL: Record<StepStatus, StatusVisual> = {
+export const STEP_STATUS_VISUAL: Record<ExtendedStepStatus, StatusVisual> = {
   pending: {
     icon: "·",
     badgeClass: "badge-ghost",
@@ -157,6 +158,13 @@ export const STEP_STATUS_VISUAL: Record<StepStatus, StatusVisual> = {
     textClass: "text-error",
     label: "Comp. failed",
   },
+  upstream_failed: {
+    icon: "⇦",
+    badgeClass: "badge-warning",
+    barClass: "bg-warning/60",
+    textClass: "text-warning",
+    label: "Upstream failed",
+  },
 };
 
 export const STEP_TYPE_ICON: Record<StepType, string> = {
@@ -165,3 +173,15 @@ export const STEP_TYPE_ICON: Record<StepType, string> = {
   sleep: "⏱",
   signal: "⚑",
 };
+
+/**
+ * Returns the status to RENDER for a step — uses `effectiveStatus`
+ * (e.g. upstream_failed) when set, falls back to the raw engine
+ * `status`. Centralised so every view agrees.
+ */
+export function effectiveStepStatus(step: {
+  status: StepStatus;
+  effectiveStatus?: ExtendedStepStatus;
+}): ExtendedStepStatus {
+  return step.effectiveStatus ?? step.status;
+}

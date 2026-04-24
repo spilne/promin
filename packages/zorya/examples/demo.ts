@@ -353,6 +353,16 @@ const server = new ZoryaServer({
   workflows: workflowsByName,
   uiDir,
   trigger: (name, input) => triggerRun(name, input),
+  rerun: async (workflowId) => {
+    // After startFreshRun the row is reset; we still need to drive the
+    // workflow again. Look up the name from storage, find its definition,
+    // and call runner.run with the same workflow id.
+    const state = await storage.loadWorkflow(workflowId);
+    if (!state) return;
+    const def = workflowsByName[state.workflowName];
+    if (!def) return;
+    runner.run({ workflow: def, workflowId, input: state.input }).catch(() => {});
+  },
   workers: {
     listWorkers: async () => [
       {

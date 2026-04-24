@@ -7,6 +7,7 @@ import { Skeleton } from "../ui/skeleton.tsx";
 import { Tabs, type TabDef } from "../ui/tabs.tsx";
 import { StepTimeline } from "./step-timeline.tsx";
 import { StepDag } from "./step-dag.tsx";
+import { StepGrid } from "./step-grid.tsx";
 import { OverviewTab } from "./tabs/overview-tab.tsx";
 import { StepTab } from "./tabs/step-tab.tsx";
 import { PayloadTab } from "./tabs/payload-tab.tsx";
@@ -28,7 +29,7 @@ interface RunDetailProps {
 }
 
 type RightTab = "overview" | "step" | "payload" | "signals" | "history" | "children";
-type StepView = "timeline" | "graph";
+type StepView = "timeline" | "graph" | "grid";
 
 const RIGHT_TABS: ReadonlyArray<RightTab> = [
   "overview",
@@ -39,12 +40,17 @@ const RIGHT_TABS: ReadonlyArray<RightTab> = [
   "children",
 ];
 
+const STEP_VIEWS: ReadonlyArray<StepView> = ["timeline", "graph", "grid"];
+
 export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }: RunDetailProps) {
   const initialTabRaw = queryParams?.get("tab");
   const initialTab: RightTab = RIGHT_TABS.includes(initialTabRaw as RightTab)
     ? (initialTabRaw as RightTab)
     : "overview";
-  const initialStepView: StepView = queryParams?.get("view") === "graph" ? "graph" : "timeline";
+  const viewParam = queryParams?.get("view");
+  const initialStepView: StepView = STEP_VIEWS.includes(viewParam as StepView)
+    ? (viewParam as StepView)
+    : "timeline";
   const initialSelectedStep = queryParams?.get("step") ?? undefined;
 
   const [run, setRun] = useState<RunDto | undefined>(undefined);
@@ -106,6 +112,42 @@ export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }:
   // prefilling from the waiting step, JSON validation, and delivery.
   const openSignalModal = useCallback(() => setSignalOpen(true), []);
 
+  const rerun = useCallback(async () => {
+    if (!confirm("Re-run this workflow from the beginning?\n\nPrior run history is preserved."))
+      return;
+    try {
+      await api.rerunRun(id);
+      setRun(await api.getRun(id));
+    } catch (e) {
+      alert(`Re-run failed: ${e}`);
+    }
+  }, [id]);
+
+  const markSuccess = useCallback(async () => {
+    if (
+      !confirm(
+        "Mark this run as completed (success)?\n\nThis is an admin override — use only when the run is stuck.",
+      )
+    )
+      return;
+    try {
+      await api.markRunSuccess(id);
+      setRun(await api.getRun(id));
+    } catch (e) {
+      alert(`Mark success failed: ${e}`);
+    }
+  }, [id]);
+
+  const markFailed = useCallback(async () => {
+    const reason = prompt("Reason for marking failed", "manual override") ?? "manual override";
+    try {
+      await api.markRunFailed(id, reason);
+      setRun(await api.getRun(id));
+    } catch (e) {
+      alert(`Mark failed: ${e}`);
+    }
+  }, [id]);
+
   const selected = useMemo(() => {
     if (!run || !selectedStep) return undefined;
     return run.steps.find((s) => s.stepName === selectedStep);
@@ -156,9 +198,35 @@ export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }:
             Cancel
           </button>
         )}
+        {/* Overflow menu for less-common admin actions. */}
+        <div class="dropdown dropdown-end">
+          <button tabIndex={0} class="btn btn-sm btn-ghost" title="More actions">
+            ⋯
+          </button>
+          <ul
+            tabIndex={0}
+            class="dropdown-content z-10 menu menu-sm bg-base-200 shadow rounded-box w-52 mt-1"
+          >
+            <li>
+              <a onClick={rerun}>↻ Re-run from start</a>
+            </li>
+            {!terminal && (
+              <>
+                <li>
+                  <a onClick={markSuccess}>✓ Mark success</a>
+                </li>
+                <li>
+                  <a class="text-error" onClick={markFailed}>
+                    ✕ Mark failed
+                  </a>
+                </li>
+              </>
+            )}
+          </ul>
+        </div>
       </div>
 
-      {/* Timeline / Graph toggle */}
+      {/* Timeline / Graph / Grid toggle */}
       <div class="flex items-center gap-2">
         <div class="join">
           <button
@@ -173,14 +241,28 @@ export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }:
           >
             Graph
           </button>
+          <button
+            class={`btn btn-sm join-item ${stepView === "grid" ? "btn-primary" : "btn-ghost"}`}
+            onClick={() => setStepView("grid")}
+          >
+            Grid
+          </button>
         </div>
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_380px] gap-4">
-        {stepView === "timeline" ? (
+        {stepView === "timeline" && (
           <StepTimeline run={run} selectedStep={selectedStep} onSelectStep={setSelectedStep} />
-        ) : (
+        )}
+        {stepView === "graph" && (
           <StepDag run={run} selectedStep={selectedStep} onSelectStep={setSelectedStep} />
+        )}
+        {stepView === "grid" && (
+          <StepGrid
+            workflowName={run.workflowName}
+            currentWorkflowId={run.workflowId}
+            onOpenRun={(id) => onOpenRun?.(id)}
+          />
         )}
 
         <div class="card bg-base-100 shadow self-start">

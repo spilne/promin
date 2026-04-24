@@ -7,7 +7,12 @@ import { Section } from "../../ui/section.tsx";
 import { JsonBlock } from "../../ui/json-block.tsx";
 import { EmptyState } from "../../ui/empty-state.tsx";
 import { StepStatusBadge } from "../../ui/status-badge.tsx";
-import { formatDuration, formatRelative, STEP_STATUS_VISUAL } from "../../../lib/format.ts";
+import {
+  effectiveStepStatus,
+  formatDuration,
+  formatRelative,
+  STEP_STATUS_VISUAL,
+} from "../../../lib/format.ts";
 
 interface StepTabProps {
   runId: string;
@@ -15,14 +20,15 @@ interface StepTabProps {
 }
 
 export function StepTab({ runId, step }: StepTabProps) {
-  const v = STEP_STATUS_VISUAL[step.status];
+  const renderStatus = effectiveStepStatus(step);
+  const v = STEP_STATUS_VISUAL[renderStatus];
   const isPlanned = step.isPlanned === true;
 
   return (
     <div class="space-y-4">
       <div class="flex items-center gap-2 flex-wrap">
         <span class="font-mono text-sm bg-base-200 px-1.5 py-0.5 rounded">{step.stepName}</span>
-        <StepStatusBadge status={step.status} />
+        <StepStatusBadge status={renderStatus} />
         {isPlanned && <span class="badge badge-sm badge-ghost">planned</span>}
       </div>
 

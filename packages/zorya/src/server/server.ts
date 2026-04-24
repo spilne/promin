@@ -41,7 +41,11 @@ import {
   getRunChildren,
   getRunHistory,
   getRunSignals,
+  markRunFailed,
+  markRunSuccess,
+  rerunRun,
 } from "./routes/run-extras.ts";
+import { getSparklines, getWorkflowGrid } from "./routes/grid.ts";
 
 export interface ZoryaServerConfig extends AuthConfig {
   storage: WorkflowStorage;
@@ -60,6 +64,13 @@ export interface ZoryaServerConfig extends AuthConfig {
    * it the UI still works, it just can't render planned steps.
    */
   workflows?: Readonly<Record<string, Workflow<unknown, unknown>>>;
+  /**
+   * Optional re-run hook. When present, `POST /api/runs/:id/rerun` calls
+   * this after `startFreshRun` so the caller can actually drive the
+   * workflow again. Without it the storage row is reset but nothing
+   * executes (the storage row stays in `running`).
+   */
+  rerun?: (workflowId: string) => Promise<void>;
   /** Directory with compiled dashboard assets (index.html, app.js, app.css). */
   uiDir?: string;
   /** SSE watcher poll interval. Default 1000ms. */
@@ -106,6 +117,11 @@ export class ZoryaServer {
       .get("/api/runs/:id/attempts", getRunAttempts(config.storage))
       .get("/api/runs/:id/history", getRunHistory(config.storage))
       .get("/api/runs/:id/children", getRunChildren(config.storage))
+      .post("/api/runs/:id/mark-success", markRunSuccess(config.storage))
+      .post("/api/runs/:id/mark-failed", markRunFailed(config.storage))
+      .post("/api/runs/:id/rerun", rerunRun(config.storage, config.rerun))
+      .get("/api/workflows/sparklines", getSparklines(config.storage))
+      .get("/api/workflows/:name/grid", getWorkflowGrid(config.storage))
       .post("/api/runs/trigger/:name", triggerRun(deps))
       .post("/api/runs/:id/cancel", cancelRun(deps))
       .post("/api/runs/:id/signal", sendSignal(deps))

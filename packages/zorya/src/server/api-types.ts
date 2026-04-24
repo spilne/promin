@@ -19,10 +19,21 @@ export interface StepTaskDto {
   attempt: number;
 }
 
+/**
+ * Client-derived extension of StepStatus. The engine only stores the types
+ * in @promin/workflow — `upstream_failed` is synthesised by the server
+ * when a `pending` step has a dependency that already failed, so the UI
+ * can colour "blocked because of an upstream problem" differently from
+ * "this step actually failed". Not persisted anywhere.
+ */
+export type ExtendedStepStatus = StepStatus | "upstream_failed";
+
 export interface StepDto {
   stepName: string;
   run: number;
   status: StepStatus;
+  /** Only set when different from `status` (currently: upstream_failed). */
+  effectiveStatus?: ExtendedStepStatus;
   stepType: StepType;
   dependsOn: string[];
   result?: unknown;
