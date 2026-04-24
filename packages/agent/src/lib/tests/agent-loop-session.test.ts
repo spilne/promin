@@ -515,5 +515,41 @@ describe("agentLoop session", () => {
       expect(await store.list()).toHaveLength(0);
       session.close();
     });
+
+    it("uses a custom recapPrompt when provided", async () => {
+      const capturedSystemPrompts: string[] = [];
+      const session = await makeSession({
+        name: "recap-custom-prompt",
+        llm: {
+          chat: async () => ({
+            content: "reply",
+            finishReason: "stop" as const,
+            usage: { inputTokens: 700, outputTokens: 50 },
+          }),
+        },
+        compactionLlm: {
+          chat: async (params) => {
+            const sys = params.messages.find((m: { role: string }) => m.role === "system");
+            if (sys) capturedSystemPrompts.push((sys as { content: string }).content);
+            return { content: "summary", finishReason: "stop" as const };
+          },
+        },
+        context: {
+          contextLimit: 1000,
+          compressAt: 0.6,
+          keepMessages: 1,
+          maxMessages: 100,
+          recapPrompt: "CUSTOM RECAP PROMPT",
+        },
+      });
+
+      await session.send("turn 1");
+      await session.send("turn 2");
+      await session.send("turn 3");
+      session.close();
+
+      expect(capturedSystemPrompts.length).toBeGreaterThan(0);
+      expect(capturedSystemPrompts.every((p) => p === "CUSTOM RECAP PROMPT")).toBe(true);
+    });
   });
 });
