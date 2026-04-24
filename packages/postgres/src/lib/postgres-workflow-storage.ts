@@ -367,20 +367,24 @@ export class PostgresWorkflowStorage
     await this.db.transaction(async (tx) => {
       const runsByWf = new Map<string, number>();
       for (const wfId of byWf.keys()) {
-        // markRunning + run lookup need to go through the tx so nested
-        // rows see a consistent run counter. markRunning is idempotent
-        // (only flips pending→running; no-op if already running).
+        // pending → running: record startedAt on the first transition.
         await tx
           .update(workflows)
-          .set({
-            statusId: WorkflowStatusIds.id.running,
-            startedAt: now,
-            updatedAt: now,
-          })
+          .set({ statusId: WorkflowStatusIds.id.running, startedAt: now, updatedAt: now })
           .where(
             and(
               eq(workflows.workflowId, wfId),
               eq(workflows.statusId, WorkflowStatusIds.id.pending),
+            ),
+          );
+        // suspended → running: resume without overwriting startedAt.
+        await tx
+          .update(workflows)
+          .set({ statusId: WorkflowStatusIds.id.running, updatedAt: now })
+          .where(
+            and(
+              eq(workflows.workflowId, wfId),
+              eq(workflows.statusId, WorkflowStatusIds.id.suspended),
             ),
           );
         const [row] = await tx

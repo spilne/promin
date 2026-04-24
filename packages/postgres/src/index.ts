@@ -81,3 +81,11 @@ export { PgRateLimiter, type PgRateLimiterConfig } from "./lib/pg-rate-limiter.t
 export { PgThrottle, type PgThrottleConfig } from "./lib/pg-throttle.ts";
 export { PgSingleflight, type PgSingleflightConfig } from "./lib/pg-singleflight.ts";
 export { PgRef, type PgRefConfig } from "./lib/pg-ref.ts";
+
+// Metrics
+export {
+  PgWorkflowMetrics,
+  type WorkflowMetrics,
+  type MetricsQuery,
+  type WorkflowMetricsSummary,
+} from "./lib/pg-workflow-metrics.ts";
