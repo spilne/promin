@@ -22,6 +22,8 @@
     "bench:http": "bun --conditions=@promin/source run packages/http/src/lib/client/http-client.bench.ts",
     "bench:workflow": "bun --conditions=@promin/source run packages/workflow/src/lib/durable/journaled-step.bench.ts",
     "bench:all": "bun run bench:stream && bun run bench:pipeline && bun run bench:dataframe && bun run bench:topology && bun run bench:http && bun run bench:workflow && bun run bench",
+    "zorya": "bun run packages/zorya/scripts/dev.ts",
+    "zorya:build": "bun run packages/zorya/scripts/build-ui.ts",
     "docs": "bun run --filter @promin/docs build",
     "docs:dev": "bun run --filter @promin/docs dev",
     "docs:serve": "bunx serve .target/docs -p 4002",

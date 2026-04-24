@@ -41,7 +41,9 @@
     "access": "public"
   },
   "scripts": {
-    "build:ui": "bun scripts/build-ui.ts"
+    "build:ui": "bun scripts/build-ui.ts",
+    "dev": "bun scripts/dev.ts",
+    "demo": "bun scripts/dev.ts"
   },
   "dependencies": {
     "@promin/core": "workspace:*",
