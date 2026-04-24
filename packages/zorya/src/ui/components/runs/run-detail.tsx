@@ -13,6 +13,7 @@ import { PayloadTab } from "./tabs/payload-tab.tsx";
 import { SignalsTab } from "./tabs/signals-tab.tsx";
 import { HistoryTab } from "./tabs/history-tab.tsx";
 import { ChildrenTab } from "./tabs/children-tab.tsx";
+import { SignalModal } from "./signal-modal.tsx";
 import { formatDuration } from "../../lib/format.ts";
 
 interface RunDetailProps {
@@ -31,6 +32,7 @@ export function RunDetail({ id, onBack, onOpenRun }: RunDetailProps) {
   const [selectedStep, setSelectedStep] = useState<string | undefined>(undefined);
   const [tab, setTab] = useState<RightTab>("overview");
   const [stepView, setStepView] = useState<StepView>("timeline");
+  const [signalOpen, setSignalOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -61,25 +63,9 @@ export function RunDetail({ id, onBack, onOpenRun }: RunDetailProps) {
     }
   }, [id]);
 
-  const signal = useCallback(async () => {
-    const name = prompt("Signal name");
-    if (!name) return;
-    const payloadRaw = prompt("Payload (JSON, blank for null)") ?? "";
-    let payload: unknown = null;
-    if (payloadRaw) {
-      try {
-        payload = JSON.parse(payloadRaw);
-      } catch {
-        alert("Invalid JSON");
-        return;
-      }
-    }
-    try {
-      await api.signalRun(id, { signalName: name, payload });
-    } catch (e) {
-      alert(`Signal failed: ${e}`);
-    }
-  }, [id]);
+  // `signal` action now just opens the modal — the form inside handles
+  // prefilling from the waiting step, JSON validation, and delivery.
+  const openSignalModal = useCallback(() => setSignalOpen(true), []);
 
   const selected = useMemo(() => {
     if (!run || !selectedStep) return undefined;
@@ -123,7 +109,7 @@ export function RunDetail({ id, onBack, onOpenRun }: RunDetailProps) {
         <StatusBadge status={run.status} size="md" />
         <div class="text-sm text-base-content/60">{formatDuration(totalMs)} total</div>
         <div class="flex-1" />
-        <button class="btn btn-sm btn-outline" onClick={signal}>
+        <button class="btn btn-sm btn-outline" onClick={openSignalModal}>
           Send signal
         </button>
         {!terminal && (
@@ -177,6 +163,14 @@ export function RunDetail({ id, onBack, onOpenRun }: RunDetailProps) {
           </div>
         </div>
       </div>
+
+      {signalOpen && (
+        <SignalModal
+          run={run}
+          onClose={() => setSignalOpen(false)}
+          onSent={() => setSignalOpen(false)}
+        />
+      )}
     </div>
   );
 }

@@ -27,16 +27,8 @@ import {
 import type { Clock } from "@promin/core";
 import { SqliteWorkflowStorage } from "@promin/sqlite";
 import { Database } from "bun:sqlite";
-import { ZoryaServer } from "../src/index.ts";
+import { ZoryaServer, scanWorkflowsFolder } from "../src/index.ts";
 import path from "node:path";
-import { orderWorkflow } from "./workflows/order.ts";
-import { paymentWorkflow } from "./workflows/payment.ts";
-import { videoTranscodeWorkflow } from "./workflows/video-transcode.ts";
-import { onboardingWorkflow } from "./workflows/onboarding.ts";
-import { etlWorkflow } from "./workflows/etl.ts";
-import { orderFulfillmentWorkflow } from "./workflows/order-fulfillment.ts";
-import { batchProcessWorkflow } from "./workflows/batch-process.ts";
-import { approvalFlowWorkflow } from "./workflows/approval-flow.ts";
 
 // ---------------------------------------------------------------------------
 // Storage + runner
@@ -56,16 +48,16 @@ const schedulerStorage = new InMemorySchedulerStorage();
 const runner = createWorkflowRunner({ storage });
 
 // Registry so trigger-by-name works.
-const workflowsByName: Record<string, Workflow<unknown, unknown>> = {
-  order: orderWorkflow as unknown as Workflow<unknown, unknown>,
-  payment: paymentWorkflow as unknown as Workflow<unknown, unknown>,
-  "video-transcode": videoTranscodeWorkflow as unknown as Workflow<unknown, unknown>,
-  onboarding: onboardingWorkflow as unknown as Workflow<unknown, unknown>,
-  etl: etlWorkflow as unknown as Workflow<unknown, unknown>,
-  "order-fulfillment": orderFulfillmentWorkflow as unknown as Workflow<unknown, unknown>,
-  "batch-process": batchProcessWorkflow as unknown as Workflow<unknown, unknown>,
-  "approval-flow": approvalFlowWorkflow as unknown as Workflow<unknown, unknown>,
-};
+// Auto-discover workflows by scanning ./workflows. Every .ts module under
+// that directory whose exports include a Workflow is registered under its
+// `workflow.name`. Add a new file and restart — no edits here needed.
+const scanRoot = path.join(import.meta.dir, "workflows");
+const scanResult = await scanWorkflowsFolder(scanRoot, {
+  onWorkflow: (name, _wf, src) =>
+    console.log(`[zorya] discovered workflow ${name} (${path.relative(scanRoot, src)})`),
+});
+for (const w of scanResult.warnings) console.warn(`[zorya] ${w}`);
+const workflowsByName: Record<string, Workflow<unknown, unknown>> = scanResult.workflows;
 
 function inputFor(name: string): unknown {
   switch (name) {
