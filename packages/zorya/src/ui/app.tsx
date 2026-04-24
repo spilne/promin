@@ -45,8 +45,18 @@ function renderRoute(route: string, navigate: (p: string) => void) {
     return (
       <RunDetail
         id={decodeURIComponent(runMatch[1]!)}
+        queryParams={params}
         onBack={() => navigate("/")}
         onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)}
+        onQueryChange={(qp) => {
+          const qs = qp.toString();
+          const base = `/runs/${encodeURIComponent(decodeURIComponent(runMatch[1]!))}`;
+          const next = qs ? `${base}?${qs}` : base;
+          const current = locationToRoute();
+          if (next === current) return;
+          history.replaceState(null, "", `#${next}`);
+          window.dispatchEvent(new HashChangeEvent("hashchange"));
+        }}
       />
     );
   }

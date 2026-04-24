@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
+import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api } from "../../api/client.ts";
 import { useSse } from "../../hooks/use-sse.ts";
 import type { RunDto, RunEvent, StepDto } from "../../../server/api-types.ts";
@@ -21,18 +21,49 @@ interface RunDetailProps {
   onBack: () => void;
   /** Open another run in the detail view (used by parent-link + children-tab). */
   onOpenRun?: (id: string) => void;
+  /** URL query params — drives initial tab/step/view selection. */
+  queryParams?: URLSearchParams;
+  /** Emit tab/step/view changes back to the URL hash. */
+  onQueryChange?: (params: URLSearchParams) => void;
 }
 
 type RightTab = "overview" | "step" | "payload" | "signals" | "history" | "children";
 type StepView = "timeline" | "graph";
 
-export function RunDetail({ id, onBack, onOpenRun }: RunDetailProps) {
+const RIGHT_TABS: ReadonlyArray<RightTab> = [
+  "overview",
+  "step",
+  "payload",
+  "signals",
+  "history",
+  "children",
+];
+
+export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }: RunDetailProps) {
+  const initialTabRaw = queryParams?.get("tab");
+  const initialTab: RightTab = RIGHT_TABS.includes(initialTabRaw as RightTab)
+    ? (initialTabRaw as RightTab)
+    : "overview";
+  const initialStepView: StepView = queryParams?.get("view") === "graph" ? "graph" : "timeline";
+  const initialSelectedStep = queryParams?.get("step") ?? undefined;
+
   const [run, setRun] = useState<RunDto | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
-  const [selectedStep, setSelectedStep] = useState<string | undefined>(undefined);
-  const [tab, setTab] = useState<RightTab>("overview");
-  const [stepView, setStepView] = useState<StepView>("timeline");
+  const [selectedStep, setSelectedStep] = useState<string | undefined>(initialSelectedStep);
+  const [tab, setTab] = useState<RightTab>(initialTab);
+  const [stepView, setStepView] = useState<StepView>(initialStepView);
   const [signalOpen, setSignalOpen] = useState(false);
+
+  // Sync tab/view/selected-step back to the URL hash so refresh preserves them.
+  useEffect(() => {
+    if (!onQueryChange) return;
+    const qp = new URLSearchParams();
+    if (tab !== "overview") qp.set("tab", tab);
+    if (stepView !== "timeline") qp.set("view", stepView);
+    if (selectedStep) qp.set("step", selectedStep);
+    onQueryChange(qp);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, stepView, selectedStep]);
 
   useEffect(() => {
     let cancelled = false;
@@ -49,7 +80,15 @@ export function RunDetail({ id, onBack, onOpenRun }: RunDetailProps) {
     setRun((prev) => applyEvent(prev, ev));
   });
 
+  // Auto-jump to Step tab when the user selects a step in the timeline.
+  // Skipped on initial mount so deep links that set { tab: overview,
+  // step: foo } don't get flipped to the Step tab automatically.
+  const skipFirstSelect = useRef(true);
   useEffect(() => {
+    if (skipFirstSelect.current) {
+      skipFirstSelect.current = false;
+      return;
+    }
     if (selectedStep) setTab("step");
   }, [selectedStep]);
 

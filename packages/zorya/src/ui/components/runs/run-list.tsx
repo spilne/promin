@@ -1,4 +1,4 @@
-import { useEffect, useState } from "preact/hooks";
+import { useEffect, useRef, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api } from "../../api/client.ts";
 import type { WorkflowStatus } from "@promin/workflow";
@@ -63,8 +63,14 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
 
   const PAGE_SIZE = 25;
 
-  // Changing filters resets to page 1.
+  // Changing filters resets to page 1 — but NOT on the initial mount, or
+  // else the `?page=N` in the URL would be clobbered on refresh.
+  const firstFilterChange = useRef(true);
   useEffect(() => {
+    if (firstFilterChange.current) {
+      firstFilterChange.current = false;
+      return;
+    }
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name, type, namespace, status]);
