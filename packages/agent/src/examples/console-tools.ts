@@ -253,7 +253,7 @@ export function createSessionDebugTool(
             .int()
             .min(1)
             .max(200)
-            .default(50)
+            .default(100)
             .describe("Max events to return (most recent first)"),
           type: z
             .string()
