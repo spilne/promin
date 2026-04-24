@@ -228,6 +228,15 @@ export interface StreamOptions {
   onThinking?: (delta: string) => void;
 }
 
+export interface CompactResult {
+  /** Non-system messages kept after compaction. */
+  kept: number;
+  /** Non-system messages dropped. */
+  dropped: number;
+  /** LLM-generated summary of the dropped messages, or null when summarization was skipped. */
+  summary: string | null;
+}
+
 export interface AgentSession {
   send(task: string): Promise<string>;
   /**
@@ -271,6 +280,13 @@ export interface AgentSession {
    * Empty when no logger was passed to agentLoop. Ephemeral — resets on server restart.
    */
   eventLog(): import("./session-logger.ts").SessionEvent[];
+  /**
+   * Compact the conversation history right now, between turns.
+   * The compacted messages are applied at the start of the next turn via the
+   * task signal (so they are journaled and survive replay).
+   * Throws if called while a turn is in progress.
+   */
+  compact(config?: { keepMessages?: number }): Promise<CompactResult>;
   close(): Promise<void>;
 }
 
@@ -367,6 +383,38 @@ interface SessionState {
 
 // ---- agentLoop ----
 
+/**
+ * Create a persistent interactive agent loop.
+ *
+ * Returns an `AgentLoop` whose `session()` creates an `AgentSession` — a long-lived
+ * conversational handle that accumulates message history across many `send()` / `stream()`
+ * calls. Each session is a durable workflow (journaled, crash-safe) so it can be
+ * recreated on server restart by passing the same `sessionId` and storage backend.
+ *
+ * Key features vs `agentAction`:
+ * - **Multi-turn**: one session, many user turns.
+ * - **Streaming**: `session.stream(task)` yields token deltas in real time.
+ * - **Context management**: auto-compacts when message count exceeds `context.maxMessages`.
+ * - **Memory**: retrieves relevant memories at session start; saves compaction summaries.
+ * - **Approval gate**: tools with `requireApproval: true` pause the turn until
+ *   `session.approve(toolCallId)` or `session.reject(toolCallId)` is called.
+ * - **Idle hook**: `hooks.onIdle` fires after the session sits quiet for `idleTimeoutMs`.
+ *
+ * @example
+ * ```ts
+ * const loop = agentLoop({
+ *   name: "my-agent",
+ *   llm: anthropic("claude-sonnet-4-6", { apiKey }),
+ *   tools: { search: webSearchTool },
+ *   systemPrompt: "You are a helpful assistant.",
+ *   memory: { store: memoryStore },
+ * });
+ *
+ * const session = await loop.session({ runner, sessionId: "s1" });
+ * for await (const chunk of session.stream("Hello!")) process.stdout.write(chunk);
+ * await session.close();
+ * ```
+ */
 export function agentLoop(config: AgentLoopConfig): AgentLoop {
   const maxTurns = config.maxTurns ?? 1000;
   const maxStepsPerTurn = config.maxStepsPerTurn ?? 20;
@@ -464,7 +512,12 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
           }
 
           for (let turn = 0; turn < maxTurns; turn++) {
-            const { task } = yield* ctx.signal<{ task: string }>(`task-${turn}`);
+            const { task, compactedMessages } = yield* ctx.signal<{
+              task: string;
+              compactedMessages?: Message[];
+            }>(`task-${turn}`);
+            // Apply manually-triggered compaction (delivered via the task signal so it is journaled).
+            if (compactedMessages !== undefined) messages = compactedMessages;
             yield* ctx.activity(`lc-${turn}-message`, async () => {
               transitionLifecycle("message", "thinking", { turns: turn, turn, task });
               turnStarts.set(turn, Date.now());
@@ -817,13 +870,21 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
         return m && e.exit?.tag === "Success" ? Math.max(max, Number(m[1]) + 1) : max;
       }, 0);
 
+      // Holds compacted messages to inject on the next deliverAndRun call.
+      let _pendingCompact: Message[] | null = null;
+
       async function deliverAndRun(task: string, turn: number): Promise<void> {
+        const value: { task: string; compactedMessages?: Message[] } = { task };
+        if (_pendingCompact !== null) {
+          value.compactedMessages = _pendingCompact;
+          _pendingCompact = null;
+        }
         await completeSignal({
           storage: journalStorage,
           workflowId: sessionId,
           stepName: "conversation",
           signalName: `task-${turn}`,
-          value: { task },
+          value,
         });
         // Re-run: replays journal, consumes signal, suspends at next signal.
         const { error } = await runner.runSafe({
@@ -1005,6 +1066,29 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
 
         eventLog() {
           return sessionLogger?.events() ?? [];
+        },
+
+        async compact(cfg?: { keepMessages?: number }): Promise<CompactResult> {
+          if (state.closed) throw new Error("Session is closed");
+          if (state.inTurn) throw new Error("Cannot compact while a turn is in progress");
+          const msgs = state.latestMessages;
+          const before = nonSystemMsgs(msgs).length;
+          if (before === 0) return { kept: 0, dropped: 0, summary: null };
+          const compactCfg: CompactionConfig = {
+            keepMessages: cfg?.keepMessages ?? contextConfig.keepMessages,
+            summarize: contextConfig.summarize,
+          };
+          const result = await compact(msgs, compactCfg, config.compactionLlm ?? config.llm);
+          const after = nonSystemMsgs(result.messages).length;
+          _pendingCompact = result.messages;
+          state.latestMessages = result.messages;
+          if (result.summary && config.memory?.saveOnCompact !== false && config.memory?.store) {
+            await config.memory.store.save(
+              { content: result.summary, metadata: { sessionId, type: "compaction-summary" } },
+              config.memory.scope,
+            );
+          }
+          return { kept: after, dropped: before - after, summary: result.summary };
         },
 
         async close() {

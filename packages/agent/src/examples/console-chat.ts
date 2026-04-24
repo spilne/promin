@@ -149,6 +149,26 @@ const COMMANDS: ReplCommand[] = [
     },
   },
   {
+    cmd: "/compact",
+    desc: "compact conversation history now (summarise and drop old messages)",
+    handle: async () => {
+      term.startSpinner("compacting…");
+      try {
+        const r = await session.compact();
+        term.stopSpinner();
+        const summary = r.summary
+          ? `\n\x1b[2m  Summary: ${r.summary.slice(0, 120)}${r.summary.length > 120 ? "…" : ""}\x1b[0m`
+          : "";
+        term.printAbove(
+          `\x1b[2mCompacted — kept ${r.kept} messages, dropped ${r.dropped}.${summary}\x1b[0m`,
+        );
+      } catch (e) {
+        term.stopSpinner();
+        console.log(`\n\x1b[31m${e instanceof Error ? e.message : String(e)}\x1b[0m\n`);
+      }
+    },
+  },
+  {
     cmd: "/approve-all",
     desc: () => `toggle auto-approve (currently: ${autoApproveRef.value ? "ON" : "OFF"})`,
     handle: () => {
@@ -315,11 +335,24 @@ async function resetSession(newId: string): Promise<AgentSession> {
 let session = await resetSession("session");
 
 // ---- SIGINT ----
+
+let _inMultiLine = false;
+let _cancelInput = false;
+
 consoleRunner.setupSigInt(rl, {
   onInterrupt: () => {
     term.suppress = true;
   },
-  onIdleHint: () => prompt(),
+  onIdleHint: () => {
+    // Defer rl.write to avoid re-entrant _ttyWrite while the SIGINT handler is still on the stack.
+    _cancelInput = true;
+    setImmediate(() => rl.write("\n"));
+  },
+  isMultiLine: () => _inMultiLine,
+  onCancelMultiLine: () => {
+    _cancelInput = true;
+    setImmediate(() => rl.write("\n")); // resolve the pending "... " question so the callback can clean up
+  },
   onExit: () => {
     session
       .close()
@@ -340,10 +373,19 @@ function prompt() {
 
   function readLine(isFirst: boolean): void {
     if (isFirst) term.printRule();
+    _inMultiLine = !isFirst;
     rl.question(isFirst ? term.promptStr : "... ", async (line) => {
       if (isFirst) {
         term.inPrompt = false;
         term.stopPromptAnimation();
+      }
+      _inMultiLine = false;
+
+      // Ctrl+C fired during first-line or continuation — discard input and restart.
+      if (_cancelInput) {
+        _cancelInput = false;
+        parts.length = 0;
+        return prompt();
       }
 
       if (line.endsWith("\\")) {

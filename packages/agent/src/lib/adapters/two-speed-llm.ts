@@ -46,6 +46,22 @@ async function* chatViaChat(
   };
 }
 
+/**
+ * Cost-optimized composite provider that routes to `fast` or `capable` based on
+ * the message context.
+ *
+ * Default heuristic: if the last non-system message is a tool result (synthesis
+ * step), use `fast`; otherwise use `capable` (reasoning step). Override with
+ * `config.when` for domain-specific logic.
+ *
+ * @example
+ * ```ts
+ * const llm = twoSpeedLLM({
+ *   capable: anthropic("claude-opus-4-7", { apiKey }),
+ *   fast:    anthropic("claude-haiku-4-5-20251001", { apiKey }),
+ * });
+ * ```
+ */
 export function twoSpeedLLM(config: TwoSpeedLLMConfig): LLMProvider {
   return {
     chat(params: LLMChatParams): Promise<LLMResponse> {

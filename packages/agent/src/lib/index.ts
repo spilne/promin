@@ -22,6 +22,7 @@ export type {
   HooksConfig,
   HooksTurnParams,
   HooksAfterTurnParams,
+  CompactResult,
 } from "./agent-loop.ts";
 
 export { InMemorySessionLogger } from "./session-logger.ts";

@@ -32,6 +32,19 @@ async function* chatViaChat(
   yield* responseToStream(response);
 }
 
+/**
+ * Route each LLM call to the first `LLMRoute` whose `when` predicate returns true.
+ * Falls back to the last route's provider if none match — make the last route a
+ * catch-all (e.g. `when: () => true`) to guarantee a match.
+ *
+ * @example
+ * ```ts
+ * const llm = routerLLM([
+ *   { when: (p) => (p.messages.length ?? 0) > 50, use: claude },  // long context → Claude
+ *   { when: () => true,                            use: gpt4 },    // default → GPT-4
+ * ]);
+ * ```
+ */
 export function routerLLM(routes: LLMRoute[]): LLMProvider {
   return {
     chat(params: LLMChatParams): Promise<LLMResponse> {

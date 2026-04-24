@@ -15,6 +15,20 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
   toModelOutput?: (output: TOutput) => string;
 }
 
+/**
+ * Identity helper that infers `TInput` and `TOutput` from the Zod `parameters`
+ * schema and the `execute` return type, giving full type-safety on the callback.
+ *
+ * @example
+ * ```ts
+ * const myTool = tool({
+ *   name: "add",
+ *   description: "Add two numbers.",
+ *   parameters: z.object({ a: z.number(), b: z.number() }),
+ *   execute: async ({ a, b }) => a + b,
+ * });
+ * ```
+ */
 export function tool<TInput, TOutput>(
   config: AgentTool<TInput, TOutput>,
 ): AgentTool<TInput, TOutput> {

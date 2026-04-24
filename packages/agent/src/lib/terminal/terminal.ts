@@ -645,11 +645,19 @@ export class Terminal implements AgentUIRenderer {
     // biome-ignore lint/suspicious/noExplicitAny: readline internals
     const typed = (this._rl as any).line ?? "";
     // biome-ignore lint/suspicious/noExplicitAny: readline internals
-    const cursor = (this._rl as any).cursor ?? typed.length;
+    const cursorPos = (this._rl as any).cursor ?? typed.length;
+    const cols = process.stdout.columns ?? 80;
+    // Visible width of "❯❯ " (the frame + space prefix).
+    const PROMPT_VW = 3;
     this._sync(() => {
-      process.stdout.write(`\r\x1b[K${frame} ${typed}`);
+      // The cursor is at absolute col (PROMPT_VW + cursorPos) from the prompt-line
+      // start. If that wraps, we must move up to the prompt start row before
+      // rewriting — otherwise each tick starts one row lower, cascading down.
+      const linesBelow = Math.floor((PROMPT_VW + cursorPos) / cols);
+      if (linesBelow > 0) process.stdout.write(`\x1b[${linesBelow}A`);
+      process.stdout.write(`\r\x1b[J${frame} ${typed}`);
       // Reposition cursor if user moved it left inside the typed text.
-      if (cursor < typed.length) process.stdout.write(`\x1b[${typed.length - cursor}D`);
+      if (cursorPos < typed.length) process.stdout.write(`\x1b[${typed.length - cursorPos}D`);
     });
   }
 

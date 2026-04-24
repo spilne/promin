@@ -142,7 +142,8 @@ export class ConsoleRunner {
   /**
    * Wire up the standard Ctrl+C behaviour:
    *   - First Ctrl+C during a turn: abort it (calls onInterrupt if provided).
-   *   - First Ctrl+C at idle prompt: print hint.
+   *   - Ctrl+C during multi-line continuation: cancel input (calls onCancelMultiLine).
+   *   - First Ctrl+C at idle prompt: print hint and call onIdleHint.
    *   - Second Ctrl+C within 2 s at idle prompt: call onExit.
    */
   setupSigInt(
@@ -152,6 +153,10 @@ export class ConsoleRunner {
       /** Called after the "(Ctrl+C again to exit)" hint — typically to reprint the prompt. */
       onIdleHint?: () => void;
       onExit: () => void;
+      /** Returns true when the REPL is collecting a multi-line continuation. */
+      isMultiLine?: () => boolean;
+      /** Called instead of onIdleHint when isMultiLine() is true. */
+      onCancelMultiLine?: () => void;
     },
   ): void {
     rl.on("SIGINT", () => {
@@ -162,6 +167,9 @@ export class ConsoleRunner {
         this._currentAc.abort();
         this._currentAc = null;
         opts.onInterrupt?.();
+      } else if (opts.isMultiLine?.()) {
+        process.stdout.write("\n\x1b[2m(cancelled)\x1b[0m\n");
+        opts.onCancelMultiLine?.();
       } else {
         const now = Date.now();
         if (now - this._lastCtrlC < 2_000) {

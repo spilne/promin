@@ -28,6 +28,26 @@ export interface EvalScorer {
   score(params: { output: string; expected: string | undefined; input: string }): Promise<number>;
 }
 
+/**
+ * Run an offline evaluation suite against an `agentAction` workflow.
+ *
+ * Each case is run in its own isolated `InMemoryWorkflowStorage`, so cases cannot
+ * share state. Results include the agent's output, per-scorer scores, and wall-clock
+ * duration. Errors during a case are caught and recorded — the suite never throws.
+ *
+ * `concurrency` controls how many cases run in parallel (default: 1 = sequential).
+ *
+ * @example
+ * ```ts
+ * const results = await runEval({
+ *   agent: myAgent,
+ *   runner: createWorkflowRunner({ storage: new InMemoryWorkflowStorage() }),
+ *   cases: [{ input: "What is 2+2?", expected: "4" }],
+ *   scorers: [exactMatch, llmJudge({ llm: claude, rubric: "..." })],
+ *   concurrency: 5,
+ * });
+ * ```
+ */
 export async function runEval(params: {
   agent: Workflow<AgentInput, AgentResult>;
   runner: WorkflowRunner;
@@ -97,6 +117,7 @@ export async function runEval(params: {
   return results;
 }
 
+/** Scores 1 when output and expected match (case-insensitive trim), 0 otherwise. */
 export const exactMatch: EvalScorer = {
   name: "exactMatch",
   score: async ({ output, expected }) => {
@@ -105,6 +126,7 @@ export const exactMatch: EvalScorer = {
   },
 };
 
+/** Scores 1 when the output contains every string in `substrings` (case-insensitive), 0 otherwise. */
 export function containsAll(substrings: string[]): EvalScorer {
   return {
     name: "containsAll",
@@ -115,6 +137,10 @@ export function containsAll(substrings: string[]): EvalScorer {
   };
 }
 
+/**
+ * LLM-as-judge scorer. Asks `llm` to score the output 0–10 using `rubric` as the
+ * system prompt. Returns a normalized 0–1 score.
+ */
 export function llmJudge(params: { llm: LLMProvider; rubric: string }): EvalScorer {
   return {
     name: "llmJudge",

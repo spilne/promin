@@ -263,9 +263,14 @@ const town = createAgentTown({
 });
 
 // ---- SIGINT: interrupt turn or exit ----
+let _cancelInput = false;
+
 consoleRunner.setupSigInt(rl, {
   onInterrupt: () => town.interruptMayorInbox(),
-  onIdleHint: () => prompt(),
+  onIdleHint: () => {
+    _cancelInput = true;
+    setImmediate(() => rl.write("\n"));
+  },
   onExit: () => {
     town.close().finally(() => {
       term.close();
@@ -280,6 +285,12 @@ function prompt(): void {
   term.printRule();
   rl.question(term.promptStr, async (input) => {
     input = input.trim();
+
+    if (_cancelInput) {
+      _cancelInput = false;
+      return prompt();
+    }
+
     if (!input) return prompt();
 
     if (input === "exit" || input === "quit") {

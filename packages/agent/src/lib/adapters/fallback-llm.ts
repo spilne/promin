@@ -20,6 +20,19 @@ async function* providerStream(
   }
 }
 
+/**
+ * Try each provider in order, returning the first successful response.
+ *
+ * On `chat()`, failures are caught and the next provider is tried cleanly.
+ * On `chatStream()`, if a provider throws mid-stream, already-yielded chunks are
+ * lost and the next provider restarts from the beginning — callers that cannot
+ * tolerate duplicate output should prefer `chat()`.
+ *
+ * @example
+ * ```ts
+ * const llm = fallbackLLM([primaryProvider, backupProvider]);
+ * ```
+ */
 export function fallbackLLM(providers: LLMProvider[]): LLMProvider {
   return {
     async chat(params: LLMChatParams): Promise<LLMResponse> {

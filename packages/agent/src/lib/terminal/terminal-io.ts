@@ -112,6 +112,10 @@ export class TerminalIO {
         s = s.replace(/\x1b\[201~/g, "");
       }
 
+      // Shift+Enter — various terminal encodings.
+      // Convert to backslash + Enter so readline's \ continuation mode handles it.
+      s = s.replace(/\x1b\[13~|\x1b\[27;2;13~|\x1b\[13;2u/g, "\\\r");
+
       if (!s) return;
       const buf = Buffer.from(s);
       for (const l of upstream) l(buf);

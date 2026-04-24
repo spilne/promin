@@ -99,6 +99,16 @@ export interface InMemoryMemoryStoreConfig {
   embeddings?: EmbeddingProvider;
 }
 
+/**
+ * In-process `MemoryStore` backed by a plain array.
+ *
+ * Search uses cosine similarity when an `EmbeddingProvider` is configured, or
+ * falls back to keyword-overlap scoring. Scoped via `MemoryScope` so the same
+ * store can serve multiple users or sessions without cross-contamination.
+ *
+ * Drop-in for production stores (Postgres vector store, Pinecone, etc.) — they
+ * all implement the same `MemoryStore` interface.
+ */
 export class InMemoryMemoryStore implements MemoryStore {
   private readonly entries: StoredEntry[] = [];
   private readonly embeddings?: EmbeddingProvider;

@@ -44,6 +44,14 @@ export interface SessionLogger {
   clear(): void;
 }
 
+/**
+ * In-process ring-buffer `SessionLogger`.
+ *
+ * Keeps up to `maxSize` events (default 2 000). Older events are dropped when the
+ * buffer is full. Pass an instance to `agentLoop({ logger })` or `agentAction` to
+ * capture `turn.start`, `llm.call`, `tool.start/end`, `compact`, and `approval`
+ * events, then read them back with `events()` or surface them in a `/log` REPL pane.
+ */
 export class InMemorySessionLogger implements SessionLogger {
   private readonly _buf: SessionEvent[] = [];
   private readonly _maxSize: number;

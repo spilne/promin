@@ -21,6 +21,14 @@ export const RECAP_SUMMARY_PROMPT =
   "Preserve: key decisions made, facts established, open tasks, and current task state. " +
   "Write in past tense. Output only the summary, no preamble.";
 
+/**
+ * Compact a message list by dropping the oldest non-system messages.
+ *
+ * Keeps the most recent `config.keepMessages` turns, slicing at a clean user-turn
+ * boundary so the resulting history is never malformed (no orphaned tool results).
+ * When `config.summarize` is true, the dropped segment is summarized by `llm` and
+ * injected as a `system` message so the agent retains high-level context.
+ */
 export async function compact(
   messages: Message[],
   config: CompactionConfig,

@@ -109,6 +109,29 @@ export class StructuredOutputParseError extends Error {
 
 // ---- overloads for type narrowing ----
 
+/**
+ * Build a single-shot agent workflow.
+ *
+ * Runs a think → tool → think loop up to `maxSteps` times and returns the agent's
+ * final answer (plus structured output when `outputSchema` is set). Journaled via
+ * `@promin/workflow`, so it is crash-safe and replayable.
+ *
+ * Use `agentLoop` instead when you need a persistent interactive session with
+ * multiple user turns, streaming, or manual context compaction.
+ *
+ * @example
+ * ```ts
+ * const agent = agentAction({
+ *   name: "researcher",
+ *   llm: anthropic("claude-sonnet-4-6", { apiKey }),
+ *   tools: { search: webSearchTool, fetch: fetchUrlTool },
+ *   systemPrompt: "You are a research assistant.",
+ * });
+ *
+ * const result = await runner.run({ workflow: agent, workflowId: "r1", input: { task } });
+ * console.log(result.answer);
+ * ```
+ */
 export function agentAction<TOutput>(
   config: AgentActionConfig<TOutput> & { outputSchema: z.ZodType<TOutput> },
 ): Workflow<AgentInput, AgentResult & { output: TOutput }>;

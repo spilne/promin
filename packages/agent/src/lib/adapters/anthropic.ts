@@ -83,6 +83,21 @@ export interface AnthropicOptions {
   defaultHeaders?: Record<string, string>;
 }
 
+/**
+ * Create an `LLMProvider` backed by the Anthropic Messages API.
+ *
+ * Supports both `chat` (single request/response) and `chatStream` (SSE token stream).
+ * Automatically enables prompt caching (`anthropic-beta: prompt-caching-2024-07-31`) —
+ * the last system block and the last tool definition are marked `cache_control: ephemeral`
+ * so the combined system + tools prefix is cached across turns.
+ * Extended thinking is enabled when `params.thinkingBudgetTokens` is set.
+ *
+ * @example
+ * ```ts
+ * const llm = anthropic("claude-sonnet-4-6", { apiKey: process.env.ANTHROPIC_API_KEY });
+ * const { content } = await llm.chat({ messages: [{ role: "user", content: "Hello" }] });
+ * ```
+ */
 export function anthropic(model: string, options: AnthropicOptions = {}): LLMProvider {
   const apiKey = options.apiKey ?? process.env["ANTHROPIC_API_KEY"];
   const baseUrl = options.baseUrl ?? "https://api.anthropic.com";
