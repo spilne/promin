@@ -1,0 +1,30 @@
+# Scoped to packages/zorya/Dockerfile (BuildKit convention).
+#
+# bun.lock references every workspace in the monorepo, so --frozen-lockfile
+# fails if any are missing. We include all packages (their package.json at
+# minimum) but strip heavy build artifacts.
+**/node_modules
+**/dist
+**/.nx
+**/.target
+**/.tsbuildinfo
+**/*.tsbuildinfo
+
+.git
+.github
+.githooks
+.vscode
+.idea
+.DS_Store
+
+docs
+.beads
+.claude
+benchmarks
+
+documentation/generator/.next
+documentation/generator/node_modules
+
+*.log
+.env
+.env.*

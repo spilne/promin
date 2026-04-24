@@ -240,7 +240,7 @@ await seedSchedules();
 void startScheduleFirer();
 await seedInitialRuns();
 
-const uiDir = path.join(import.meta.dir, "..", "dist", "public");
+const uiDir = process.env.ZORYA_UI_DIR ?? path.join(import.meta.dir, "..", "dist", "public");
 
 const server = new ZoryaServer({
   storage,
