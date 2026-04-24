@@ -3,6 +3,7 @@ import { useFetch } from "../../hooks/use-fetch.ts";
 import { api } from "../../api/client.ts";
 import type { ScheduleDto } from "../../../server/routes/schedules.ts";
 import { formatCountdown, formatDuration, formatRelative } from "../../lib/format.ts";
+import { confirm, toast } from "../../lib/dialogs.ts";
 import { CreateScheduleModal } from "./create-schedule-modal.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 
@@ -60,18 +61,26 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
     try {
       await api.patchSchedule(s.id, { enabled: !s.enabled });
       refresh();
+      toast(s.enabled ? "Schedule paused" : "Schedule resumed", { variant: "success" });
     } catch (e) {
-      alert(`Failed: ${e}`);
+      toast(`Failed: ${e}`, { variant: "error" });
     }
   };
 
   const remove = async (s: ScheduleDto) => {
-    if (!confirm(`Delete schedule ${s.id}?`)) return;
+    const ok = await confirm({
+      title: `Delete schedule ${s.id}?`,
+      message: "Prior fire history is preserved; only the schedule definition is removed.",
+      confirmLabel: "Delete",
+      variant: "danger",
+    });
+    if (!ok) return;
     try {
       await api.deleteSchedule(s.id);
       refresh();
+      toast("Schedule deleted", { variant: "success" });
     } catch (e) {
-      alert(`Failed: ${e}`);
+      toast(`Failed: ${e}`, { variant: "error" });
     }
   };
 

@@ -1,3 +1,5 @@
+import { prompt } from "../../lib/dialogs.ts";
+
 interface SidebarProps {
   route: string;
   onNavigate: (path: string) => void;
@@ -85,9 +87,14 @@ function isActive(route: string, path: string): boolean {
 }
 
 function ApiKeyButton() {
-  const setKey = () => {
+  const setKey = async () => {
     const current = localStorage.getItem("zorya_api_key") ?? "";
-    const next = prompt("API key (blank to clear)", current);
+    const next = await prompt({
+      title: "API key",
+      label: "Bearer token",
+      initial: current,
+      placeholder: "leave blank to clear",
+    });
     if (next === null) return;
     if (next) localStorage.setItem("zorya_api_key", next);
     else localStorage.removeItem("zorya_api_key");

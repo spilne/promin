@@ -5,6 +5,7 @@ import { RunDetail } from "./components/runs/run-detail.tsx";
 import { WorkerGrid } from "./components/workers/worker-grid.tsx";
 import { ScheduleList } from "./components/schedules/schedule-list.tsx";
 import { WorkflowList } from "./components/workflows/workflow-list.tsx";
+import { DialogHost, ToastHost } from "./components/ui/dialog-host.tsx";
 
 export function App() {
   const [route, setRoute] = useState(locationToRoute());
@@ -23,6 +24,8 @@ export function App() {
     <div class="flex min-h-screen">
       <Sidebar route={route} onNavigate={navigate} />
       <main class="flex-1 min-w-0">{renderRoute(route, navigate)}</main>
+      <DialogHost />
+      <ToastHost />
     </div>
   );
 }

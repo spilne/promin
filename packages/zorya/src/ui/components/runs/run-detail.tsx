@@ -17,6 +17,7 @@ import { ChildrenTab } from "./tabs/children-tab.tsx";
 import { CalendarTab } from "./tabs/calendar-tab.tsx";
 import { SignalModal } from "./signal-modal.tsx";
 import { formatDuration } from "../../lib/format.ts";
+import { confirm, prompt, toast } from "../../lib/dialogs.ts";
 
 interface RunDetailProps {
   id: string;
@@ -101,12 +102,19 @@ export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }:
   }, [selectedStep]);
 
   const cancel = useCallback(async () => {
-    if (!confirm("Cancel this run?")) return;
+    const ok = await confirm({
+      title: "Cancel this run?",
+      message: "The workflow will stop at its next checkpoint.",
+      confirmLabel: "Cancel run",
+      variant: "danger",
+    });
+    if (!ok) return;
     try {
       await api.cancelRun(id);
       setRun(await api.getRun(id));
+      toast("Run cancelled", { variant: "success" });
     } catch (e) {
-      alert(`Cancel failed: ${e}`);
+      toast(`Cancel failed: ${e}`, { variant: "error" });
     }
   }, [id]);
 
@@ -115,38 +123,54 @@ export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }:
   const openSignalModal = useCallback(() => setSignalOpen(true), []);
 
   const rerun = useCallback(async () => {
-    if (!confirm("Re-run this workflow from the beginning?\n\nPrior run history is preserved."))
-      return;
+    const ok = await confirm({
+      title: "Re-run this workflow?",
+      message:
+        "Starts from the beginning. Prior run history is preserved and visible in the History tab.",
+      confirmLabel: "Re-run",
+    });
+    if (!ok) return;
     try {
       await api.rerunRun(id);
       setRun(await api.getRun(id));
+      toast("Re-run started", { variant: "success" });
     } catch (e) {
-      alert(`Re-run failed: ${e}`);
+      toast(`Re-run failed: ${e}`, { variant: "error" });
     }
   }, [id]);
 
   const markSuccess = useCallback(async () => {
-    if (
-      !confirm(
-        "Mark this run as completed (success)?\n\nThis is an admin override — use only when the run is stuck.",
-      )
-    )
-      return;
+    const ok = await confirm({
+      title: "Mark run as completed?",
+      message:
+        "Admin override — only use when the run is stuck and you've verified it succeeded out-of-band.",
+      confirmLabel: "Mark success",
+    });
+    if (!ok) return;
     try {
       await api.markRunSuccess(id);
       setRun(await api.getRun(id));
+      toast("Marked as completed", { variant: "success" });
     } catch (e) {
-      alert(`Mark success failed: ${e}`);
+      toast(`Mark success failed: ${e}`, { variant: "error" });
     }
   }, [id]);
 
   const markFailed = useCallback(async () => {
-    const reason = prompt("Reason for marking failed", "manual override") ?? "manual override";
+    const reason = await prompt({
+      title: "Mark run as failed",
+      label: "Reason",
+      initial: "manual override",
+      placeholder: "Why this run is being force-failed",
+      confirmLabel: "Mark failed",
+    });
+    if (reason === null) return;
     try {
-      await api.markRunFailed(id, reason);
+      await api.markRunFailed(id, reason || "manual override");
       setRun(await api.getRun(id));
+      toast("Marked as failed", { variant: "warning" });
     } catch (e) {
-      alert(`Mark failed: ${e}`);
+      toast(`Mark failed: ${e}`, { variant: "error" });
     }
   }, [id]);
 
