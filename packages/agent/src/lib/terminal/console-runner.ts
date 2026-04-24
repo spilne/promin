@@ -9,7 +9,10 @@
 import type { Interface } from "node:readline";
 import { MarkdownRenderer } from "./terminal-markdown.ts";
 import type { Terminal } from "./terminal.ts";
-import type { UsageTracker } from "../console-usage.ts";
+
+export interface TurnTracker {
+  resetTurn(): void;
+}
 
 // ---- abortable ----
 
@@ -68,7 +71,7 @@ export class ConsoleRunner {
 
   constructor(
     private readonly term: Terminal,
-    private readonly usage: UsageTracker,
+    private readonly usage: TurnTracker,
   ) {}
 
   get currentAc(): AbortController | null {

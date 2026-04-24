@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import type { Interface } from "node:readline";
-import { Terminal } from "../common/terminal.ts";
+import { Terminal } from "../../lib/terminal/terminal.ts";
 
 // Visible spinner line = `${frame}(1) ${label_visible} (${elapsed}s)` ≈ label_visible + 9
 // chars when elapsed = "0.0" (t ≈ 0). At cols=80: label ≥ 72 → 2 lines, label ≥ 152 → 3 lines.

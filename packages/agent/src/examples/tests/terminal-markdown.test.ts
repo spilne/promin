@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { MarkdownRenderer, osc8 } from "../common/terminal-markdown.ts";
+import { MarkdownRenderer, osc8 } from "../../lib/terminal/terminal-markdown.ts";
 
 // Strip all ANSI codes for plain-text assertions
 // eslint-disable-next-line no-control-regex

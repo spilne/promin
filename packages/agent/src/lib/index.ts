@@ -87,6 +87,20 @@ export type { AgentToolFactoryConfig } from "./tools/agent-tool-factory.ts";
 export { createChatGptAgentTool } from "./tools/chatgpt-agent-tool.ts";
 export type { ChatGptAgentToolConfig } from "./tools/chatgpt-agent-tool.ts";
 
+export { Terminal, isDumbTerminal, PROMPT, PLAIN_PROMPT } from "./terminal/terminal.ts";
+export type { TreeNode, AgentUIRenderer } from "./terminal/terminal.ts";
+
+export { TerminalIO } from "./terminal/terminal-io.ts";
+
+export { MarkdownRenderer, osc8 } from "./terminal/terminal-markdown.ts";
+export type { MarkdownRendererConfig } from "./terminal/terminal-markdown.ts";
+
+export { ChatTerminal } from "./terminal/chat-terminal.ts";
+export type { ChatTerminalConfig } from "./terminal/chat-terminal.ts";
+
+export { ConsoleRunner, abortable } from "./terminal/console-runner.ts";
+export type { RunTurnOptions, RunTurnResult, TurnTracker } from "./terminal/console-runner.ts";
+
 export { createFetchUrlTool, createWebSearchTool, fetchUrl, webSearch } from "./tools/web-tools.ts";
 export type { WebToolsConfig } from "./tools/web-tools.ts";
 

@@ -1,11 +1,16 @@
 import { createInterface, type Interface } from "node:readline";
 import { readdir } from "node:fs/promises";
-import type { ToolRegistry } from "../../lib/tool-registry.ts";
+import type { ToolRegistry } from "../tool-registry.ts";
 import { Terminal } from "./terminal.ts";
-import type { CommandDef } from "../console-panes.ts";
 
 const DIM = "\x1b[2m";
 const RST = "\x1b[0m";
+
+export interface CommandDef {
+  cmd: string;
+  args?: string;
+  desc: string | (() => string);
+}
 
 export interface ChatTerminalConfig {
   /** Slash commands shown in the dropdown and /help. */

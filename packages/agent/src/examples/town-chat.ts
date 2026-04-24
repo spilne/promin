@@ -32,8 +32,8 @@ import {
   fetchUrl,
   webSearch,
 } from "../lib/index.ts";
-import { ChatTerminal } from "./common/chat-terminal.ts";
-import { ConsoleRunner } from "./common/console-runner.ts";
+import { ChatTerminal } from "../lib/terminal/chat-terminal.ts";
+import { ConsoleRunner } from "../lib/terminal/console-runner.ts";
 import { UsageTracker } from "./console-usage.ts";
 import { buildHistory, buildStepsTree, buildHelp, buildEventLog } from "./console-panes.ts";
 import { dispatchCommand, type ReplCommand } from "./console-repl.ts";

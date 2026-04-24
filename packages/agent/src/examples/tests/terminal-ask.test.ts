@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import type { Interface } from "node:readline";
-import { Terminal } from "../common/terminal.ts";
+import { Terminal } from "../../lib/terminal/terminal.ts";
 
 type QuestionCallback = (answer: string) => void;
 

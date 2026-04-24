@@ -1,13 +1,10 @@
 import type { AgentSession } from "../lib/agent-loop.ts";
 import type { MemoryStore } from "../lib/memory-store.ts";
-import type { TreeNode } from "./common/terminal.ts";
+import type { TreeNode } from "../lib/terminal/terminal.ts";
 import type { InMemoryWorkflowStorage, InMemoryScheduler, WorkflowRunner } from "@promin/workflow";
 
-export interface CommandDef {
-  cmd: string;
-  args?: string;
-  desc: string | (() => string);
-}
+import type { CommandDef } from "../lib/terminal/chat-terminal.ts";
+export type { CommandDef };
 
 export function buildHelp(
   commands: CommandDef[],
