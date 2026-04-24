@@ -17,7 +17,7 @@ export interface FilesystemToolsConfig {
 
 // ---- shared path guard ----
 
-function safePath(rootDir: string, userPath: string): string {
+export function safePath(rootDir: string, userPath: string): string {
   const abs = resolve(rootDir, userPath);
   const rel = relative(rootDir, abs);
   if (rel.startsWith("..")) {

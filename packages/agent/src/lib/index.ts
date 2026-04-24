@@ -70,6 +70,7 @@ export {
   createWriteFileTool,
   createListDirTool,
   createStatTool,
+  safePath,
 } from "./tools/filesystem-tools.ts";
 export type { FilesystemToolsConfig, FilesystemTools } from "./tools/filesystem-tools.ts";
 
@@ -149,6 +150,9 @@ export { runEval, exactMatch, containsAll, llmJudge } from "./eval.ts";
 export type { EvalCase, EvalScore, EvalResult, EvalScorer } from "./eval.ts";
 
 export { broadcast } from "./broadcast.ts";
+
+export { compact, DEFAULT_SUMMARY_PROMPT, RECAP_SUMMARY_PROMPT } from "./agent-loop-compaction.ts";
+export type { CompactionConfig, CompactionResult } from "./agent-loop-compaction.ts";
 
 export { agentNetwork } from "./agent-network.ts";
 export type { AgentSpec, AgentNetworkConfig, AgentNetwork } from "./agent-network.ts";

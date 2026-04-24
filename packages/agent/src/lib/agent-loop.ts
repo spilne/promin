@@ -12,15 +12,23 @@ import type {
 import { SystemClock } from "@promin/core";
 import type { RateLimiter, Clock, TimerHandle } from "@promin/core";
 import type { LLMProvider } from "./llm-provider.ts";
-import type { AgentTool, AutoApprove } from "./tool.ts";
+import type { AgentTool, AutoApprove, ApprovalDecision } from "./tool.ts";
 import { shouldAutoApprove } from "./tool.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
 import { buildToolDefs } from "./tool-registry.ts";
 import type { MemoryStore, MemoryScope } from "./memory-store.ts";
 import type { ProcessorsConfig } from "./processors.ts";
 import type { Message, AssistantMessage, ToolResultMessage, ToolCall } from "./message.ts";
-import { executeToolCall, runLlmCall } from "./agent-shared.ts";
+import {
+  executeToolCall,
+  runLlmCall,
+  nonSystemMsgs,
+  resolveTools,
+  searchRelevantMemories,
+} from "./agent-shared.ts";
 import type { SessionLogger } from "./session-logger.ts";
+import { compact, RECAP_SUMMARY_PROMPT } from "./agent-loop-compaction.ts";
+import type { CompactionConfig } from "./agent-loop-compaction.ts";
 
 // ---- hooks ----
 
@@ -107,6 +115,11 @@ export interface ContextConfig {
    * Default: 0.70.
    */
   compressAt?: number;
+  /**
+   * System prompt used when compacting via token-based RECAP.
+   * Defaults to RECAP_SUMMARY_PROMPT. Override to customise the summary style.
+   */
+  recapPrompt?: string;
 }
 
 export interface MemoryConfig {
@@ -265,74 +278,6 @@ export interface AgentLoop {
   session(params: { runner: WorkflowRunner; sessionId: string }): Promise<AgentSession>;
 }
 
-// ---- compaction ----
-
-interface CompactionResult {
-  messages: Message[];
-  summary: string | null;
-}
-
-const DEFAULT_SUMMARY_PROMPT =
-  "Summarize the following conversation segment concisely. " +
-  "Preserve key facts, decisions, user preferences, and any context needed for future turns.";
-
-const RECAP_SUMMARY_PROMPT =
-  "Produce a ≤150-word summary of the conversation below. " +
-  "Preserve: key decisions made, facts established, open tasks, and current task state. " +
-  "Write in past tense. Output only the summary, no preamble.";
-
-async function compact(
-  messages: Message[],
-  config: Required<Pick<ContextConfig, "keepMessages" | "summarize">>,
-  llm: LLMProvider,
-  summaryPrompt = DEFAULT_SUMMARY_PROMPT,
-): Promise<CompactionResult> {
-  const systemMessages = messages.filter((m) => m.role === "system");
-  const nonSystem = messages.filter((m) => m.role !== "system");
-
-  // Find a clean slice boundary: the first user-turn at or after the keep window.
-  // Slicing mid-sequence (e.g. keeping a tool_result without its tool_use) produces
-  // invalid Anthropic API input — messages[0] would contain a tool_result block with
-  // no matching tool_use in the previous message.
-  let keepStart = Math.max(0, nonSystem.length - config.keepMessages);
-  while (keepStart < nonSystem.length && nonSystem[keepStart]!.role !== "user") {
-    keepStart++;
-  }
-
-  const keep = nonSystem.slice(keepStart);
-  const dropped = nonSystem.slice(0, keepStart);
-
-  if (!config.summarize || dropped.length === 0) {
-    return { messages: [...systemMessages, ...keep], summary: null };
-  }
-
-  let summary: string | null = null;
-  try {
-    const summaryResp = await llm.chat({
-      messages: [
-        { role: "system", content: summaryPrompt },
-        ...dropped,
-        { role: "user", content: "Summarize the above conversation." },
-      ],
-    });
-    summary = summaryResp.content ?? "";
-  } catch (err) {
-    // Summarization failed — drop messages without a summary rather than crashing the turn.
-    console.error("[agentLoop] compaction summarization failed, dropping without summary:", err);
-  }
-
-  return {
-    messages: [
-      ...systemMessages,
-      ...(summary
-        ? [{ role: "system" as const, content: `Earlier conversation summary:\n${summary}` }]
-        : []),
-      ...keep,
-    ],
-    summary,
-  };
-}
-
 // Effect wraps thrown errors inside journaled steps in a FiberFailure.
 // WorkflowSuspendedError is a normal signal that the workflow is waiting —
 // not a real failure. Check both the direct tag and the FiberFailure defect.
@@ -426,14 +371,14 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
   const maxTurns = config.maxTurns ?? 1000;
   const maxStepsPerTurn = config.maxStepsPerTurn ?? 20;
 
-  const contextConfig: Required<Pick<ContextConfig, "maxMessages" | "keepMessages" | "summarize">> =
-    {
-      maxMessages: config.context?.maxMessages ?? 80,
-      keepMessages: config.context?.keepMessages ?? 40,
-      summarize: config.context?.summarize ?? true,
-    };
+  const contextConfig: CompactionConfig & { maxMessages: number } = {
+    maxMessages: config.context?.maxMessages ?? 80,
+    keepMessages: config.context?.keepMessages ?? 40,
+    summarize: config.context?.summarize ?? true,
+  };
   const contextLimit = config.context?.contextLimit;
   const compressAt = config.context?.compressAt ?? 0.7;
+  const recapPrompt = config.context?.recapPrompt ?? RECAP_SUMMARY_PROMPT;
 
   return {
     async session({ runner, sessionId }) {
@@ -512,23 +457,10 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
 
           // Inject relevant memories from previous sessions
           if (config.memory && (config.memory.injectLimit ?? 5) > 0) {
-            const memories = yield* ctx.activity("inject-memories", () =>
-              config.memory!.store.search(
-                config.memory!.searchQuery ?? config.systemPrompt ?? "general context",
-                config.memory!.injectLimit ?? 5,
-                config.memory!.scope,
-              ),
+            const memMsgs = yield* ctx.activity("inject-memories", () =>
+              searchRelevantMemories(config.memory!, config.systemPrompt ?? "general context"),
             );
-            if (memories.length > 0) {
-              const block = memories.map((m) => `- ${m.content}`).join("\n");
-              messages = [
-                ...messages,
-                {
-                  role: "system",
-                  content: `Relevant context from previous sessions:\n${block}`,
-                },
-              ];
-            }
+            messages = [...messages, ...memMsgs];
           }
 
           for (let turn = 0; turn < maxTurns; turn++) {
@@ -557,7 +489,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               // Snapshot tool names each step so new tools hot-loaded via writeTool are visible
               // immediately on the next think step. Only names are journaled — implementations
               // come from the live registry so replay sees the same names but current code.
-              const allTools = config.toolRegistry?.getTools() ?? config.tools ?? {};
+              const allTools = resolveTools(config);
               const stepToolNames = yield* ctx.activity(`tool-snapshot-${turn}-${step}`, async () =>
                 Object.keys(allTools),
               );
@@ -602,15 +534,15 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                   contextLimit !== undefined &&
                   response.usage.inputTokens >= contextLimit * compressAt
                 ) {
-                  const beforeRecap = messages.filter((m) => m.role !== "system").length;
+                  const beforeRecap = nonSystemMsgs(messages).length;
                   const recapResult = yield* ctx.activity(`compress-${turn}-${step}`, async () => {
                     const r = await compact(
                       messages,
                       contextConfig,
                       config.compactionLlm ?? config.llm,
-                      RECAP_SUMMARY_PROMPT,
+                      recapPrompt,
                     );
-                    const afterRecap = r.messages.filter((m) => m.role !== "system").length;
+                    const afterRecap = nonSystemMsgs(r.messages).length;
                     sessionLogger?.emit({
                       type: "compact",
                       turn,
@@ -672,49 +604,42 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                   toolDef.requireApproval &&
                   !shouldAutoApprove(config.autoApprove, call, toolDef)
                 ) {
-                  let decision: { approved: boolean; reason?: string };
-                  if (config.hooks?.onApprovalRequired) {
+                  const logRequested = () =>
                     sessionLogger?.emit({
                       type: "approval.requested",
                       turn,
                       toolCallId: call.id,
                       toolName: call.name,
                     });
-                    decision = yield* ctx.activity(`approval-${call.id}`, () =>
-                      config.hooks!.onApprovalRequired!(call),
-                    );
+                  const logDecision = (approved: boolean) =>
                     sessionLogger?.emit({
                       type: "approval.decision",
                       turn,
                       toolCallId: call.id,
-                      approved: decision.approved,
+                      approved,
                     });
+
+                  let decision: ApprovalDecision;
+                  if (config.hooks?.onApprovalRequired) {
+                    logRequested();
+                    decision = yield* ctx.activity(`approval-${call.id}`, () =>
+                      config.hooks!.onApprovalRequired!(call),
+                    );
+                    logDecision(decision.approved);
                   } else {
                     yield* ctx.activity(`lc-${turn}-approval-${call.id}-start`, async () => {
                       transitionLifecycle("approval-required", "waiting_approval", {
                         toolCallId: call.id,
                       });
-                      sessionLogger?.emit({
-                        type: "approval.requested",
-                        turn,
-                        toolCallId: call.id,
-                        toolName: call.name,
-                      });
+                      logRequested();
                     });
-                    decision = yield* ctx.signal<{ approved: boolean; reason?: string }>(
-                      `approve:${call.id}`,
-                    );
+                    decision = yield* ctx.signal<ApprovalDecision>(`approve:${call.id}`);
                     yield* ctx.activity(`lc-${turn}-approval-${call.id}-end`, async () => {
                       transitionLifecycle(decision.approved ? "approved" : "rejected", "thinking", {
                         toolCallId: call.id,
                         approved: decision.approved,
                       });
-                      sessionLogger?.emit({
-                        type: "approval.decision",
-                        turn,
-                        toolCallId: call.id,
-                        approved: decision.approved,
-                      });
+                      logDecision(decision.approved);
                     });
                   }
                   if (!decision.approved) {
@@ -824,7 +749,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
             });
 
             // Compact if non-system messages exceed the threshold
-            const nonSystemCount = messages.filter((m) => m.role !== "system").length;
+            const nonSystemCount = nonSystemMsgs(messages).length;
             if (nonSystemCount > contextConfig.maxMessages) {
               const beforeCompact = nonSystemCount;
               const result = yield* ctx.activity(`compact-${turn}`, async () => {
@@ -833,7 +758,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                   contextConfig,
                   config.compactionLlm ?? config.llm,
                 );
-                const afterCompact = r.messages.filter((m) => m.role !== "system").length;
+                const afterCompact = nonSystemMsgs(r.messages).length;
                 sessionLogger?.emit({
                   type: "compact",
                   turn,
@@ -899,6 +824,35 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
         if (error && !isWorkflowSuspension(error)) {
           throw unwrapFiberFailure(error);
         }
+      }
+
+      // Race guard: if approve/reject is called before the workflow has reached ctx.signal
+      // (e.g. UI sends the decision before the suspension is registered), retry up to
+      // 5 times with 50ms gaps to let the workflow reach its suspension point.
+      async function deliverApprovalSignal(
+        toolCallId: string,
+        value: ApprovalDecision,
+      ): Promise<boolean> {
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const delivered = await completeSignal({
+            storage: journalStorage,
+            workflowId: sessionId,
+            stepName: "conversation",
+            signalName: `approve:${toolCallId}`,
+            value,
+          });
+          if (delivered) {
+            const { error } = await runner.runSafe({
+              workflow: builtWorkflow,
+              workflowId: sessionId,
+              input: undefined,
+            });
+            if (error && !isWorkflowSuspension(error)) throw unwrapFiberFailure(error);
+            return true;
+          }
+          if (attempt < 4) await new Promise<void>((r) => clock.setTimeout(r, 50));
+        }
+        return false;
       }
 
       return {
@@ -1014,57 +968,11 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
         },
 
         async approve(toolCallId: string): Promise<boolean> {
-          // Concurrency invariant: the toolCallId is generated inside the workflow and
-          // only becomes visible externally after the workflow suspends at ctx.signal.
-          // By that point, any concurrent runSafe from stream() has already returned,
-          // so the fresh runSafe below is never truly concurrent with another run.
-          //
-          // Race guard: if approve() is called before the workflow has reached ctx.signal
-          // (e.g. UI sends the decision before the suspension is registered), retry up to
-          // 5 times with 50ms gaps to let the workflow reach its suspension point.
-          for (let attempt = 0; attempt < 5; attempt++) {
-            const delivered = await completeSignal({
-              storage: journalStorage,
-              workflowId: sessionId,
-              stepName: "conversation",
-              signalName: `approve:${toolCallId}`,
-              value: { approved: true },
-            });
-            if (delivered) {
-              const { error } = await runner.runSafe({
-                workflow: builtWorkflow,
-                workflowId: sessionId,
-                input: undefined,
-              });
-              if (error && !isWorkflowSuspension(error)) throw unwrapFiberFailure(error);
-              return true;
-            }
-            if (attempt < 4) await new Promise<void>((r) => clock.setTimeout(r, 50));
-          }
-          return false;
+          return deliverApprovalSignal(toolCallId, { approved: true });
         },
 
         async reject(toolCallId: string, reason?: string): Promise<boolean> {
-          for (let attempt = 0; attempt < 5; attempt++) {
-            const delivered = await completeSignal({
-              storage: journalStorage,
-              workflowId: sessionId,
-              stepName: "conversation",
-              signalName: `approve:${toolCallId}`,
-              value: { approved: false, reason },
-            });
-            if (delivered) {
-              const { error } = await runner.runSafe({
-                workflow: builtWorkflow,
-                workflowId: sessionId,
-                input: undefined,
-              });
-              if (error && !isWorkflowSuspension(error)) throw unwrapFiberFailure(error);
-              return true;
-            }
-            if (attempt < 4) await new Promise<void>((r) => clock.setTimeout(r, 50));
-          }
-          return false;
+          return deliverApprovalSignal(toolCallId, { approved: false, reason });
         },
 
         async status(): Promise<AgentStatus> {

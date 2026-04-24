@@ -11,7 +11,12 @@ import { zodToJsonSchema } from "./zod-to-json-schema.ts";
 import type { MemoryStore, MemoryScope } from "./memory-store.ts";
 import type { ProcessorsConfig } from "./processors.ts";
 import type { Message, AssistantMessage, ToolResultMessage, ToolCall } from "./message.ts";
-import { executeToolCall, runLlmCall } from "./agent-shared.ts";
+import {
+  executeToolCall,
+  runLlmCall,
+  resolveTools,
+  searchRelevantMemories,
+} from "./agent-shared.ts";
 
 export interface AgentInput {
   task: string;
@@ -139,20 +144,10 @@ export function agentAction(
 
       // Inject relevant memories before the first think step
       if (config.memory && (config.memory.injectLimit ?? 5) > 0) {
-        const memories = yield* ctx.activity("inject-memories", () =>
-          config.memory!.store.search(
-            config.memory!.searchQuery ?? input.task,
-            config.memory!.injectLimit ?? 5,
-            config.memory!.scope,
-          ),
+        const memMsgs = yield* ctx.activity("inject-memories", () =>
+          searchRelevantMemories(config.memory!, input.task),
         );
-        if (memories.length > 0) {
-          const block = memories.map((m) => `- ${m.content}`).join("\n");
-          messages = [
-            ...messages,
-            { role: "system" as const, content: `Relevant context from memory:\n${block}` },
-          ];
-        }
+        messages = [...messages, ...memMsgs];
       }
 
       messages = [...messages, { role: "user" as const, content: input.task }];
@@ -161,9 +156,20 @@ export function agentAction(
       let totalOutputTokens = 0;
       let structuredOutput: unknown;
 
+      function* maybeSaveMemory(answer: string) {
+        if (config.memory?.saveOnComplete) {
+          yield* ctx.activity("save-memory", () =>
+            config.memory!.store.save(
+              { content: answer, metadata: { task: input.task } },
+              config.memory!.scope,
+            ),
+          );
+        }
+      }
+
       for (let step = 0; step < maxSteps; step++) {
         // Resolve tools fresh each step so a toolRegistry update is visible immediately
-        const toolMap = config.toolRegistry?.getTools() ?? config.tools ?? {};
+        const toolMap = resolveTools(config);
         const toolDefs = buildToolDefs(toolMap);
 
         // Inject synthetic _respond tool for structured output
@@ -207,14 +213,7 @@ export function agentAction(
               ...messages,
               { role: "assistant" as const, content: null, toolCalls: response.toolCalls },
             ];
-            if (config.memory?.saveOnComplete) {
-              yield* ctx.activity("save-memory", () =>
-                config.memory!.store.save(
-                  { content: answer, metadata: { task: input.task } },
-                  config.memory!.scope,
-                ),
-              );
-            }
+            yield* maybeSaveMemory(answer);
             return buildResult(
               answer,
               messages,
@@ -237,14 +236,7 @@ export function agentAction(
           const decision = config.onStep({ step, messages, workflowId: ctx.workflowId });
           if (decision && !decision.continue) {
             const answer = response.content ?? "";
-            if (config.memory?.saveOnComplete) {
-              yield* ctx.activity("save-memory", () =>
-                config.memory!.store.save(
-                  { content: answer, metadata: { task: input.task } },
-                  config.memory!.scope,
-                ),
-              );
-            }
+            yield* maybeSaveMemory(answer);
             return buildResult(answer, messages, step + 1, totalInputTokens, totalOutputTokens);
           }
         }
@@ -255,14 +247,7 @@ export function agentAction(
           response.toolCalls.length === 0
         ) {
           const answer = response.content ?? "";
-          if (config.memory?.saveOnComplete) {
-            yield* ctx.activity("save-memory", () =>
-              config.memory!.store.save(
-                { content: answer, metadata: { task: input.task } },
-                config.memory!.scope,
-              ),
-            );
-          }
+          yield* maybeSaveMemory(answer);
           return buildResult(answer, messages, step + 1, totalInputTokens, totalOutputTokens);
         }
 
