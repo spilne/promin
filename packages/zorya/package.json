@@ -52,6 +52,7 @@
   "devDependencies": {
     "@types/bun": "catalog:",
     "daisyui": "^4.12.14",
+    "happy-dom": "^20.9.0",
     "preact": "^10.25.0",
     "tailwindcss": "^3.4.15"
   },
