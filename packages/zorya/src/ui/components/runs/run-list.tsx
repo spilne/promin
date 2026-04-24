@@ -135,7 +135,11 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
         </button>
       </div>
 
-      <StatsBar />
+      <StatsBar
+        onPickStatus={(s) => {
+          setStatus(s ?? "all");
+        }}
+      />
 
       {/* Filter bar (chip-style) */}
       <div class="flex items-center gap-2 flex-wrap">

@@ -22,6 +22,19 @@ export function formatRelative(iso?: string): string {
   return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
+/** Format a future ISO timestamp as "in 30s / in 2m / in 4h / in 3d". */
+export function formatCountdown(iso?: string): string {
+  if (!iso) return "—";
+  const then = new Date(iso).getTime();
+  const now = Date.now();
+  const diff = then - now;
+  if (diff <= 0) return "now";
+  if (diff < 60_000) return `in ${Math.max(1, Math.floor(diff / 1000))}s`;
+  if (diff < 3_600_000) return `in ${Math.floor(diff / 60_000)}m`;
+  if (diff < 86_400_000) return `in ${Math.floor(diff / 3_600_000)}h`;
+  return `in ${Math.floor(diff / 86_400_000)}d`;
+}
+
 // ---------------------------------------------------------------------------
 // Status / step visual registries — single source of truth.
 //

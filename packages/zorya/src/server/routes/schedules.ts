@@ -7,6 +7,8 @@
 // ---------------------------------------------------------------------------
 
 import type { DurableScheduleConfig, SchedulerStorage } from "@promin/workflow";
+import { computeNextRun } from "@promin/workflow";
+import type { Clock } from "@promin/core";
 import { json, jsonError, readJson } from "../router.ts";
 
 export interface ScheduleDto {
@@ -28,6 +30,8 @@ export interface ScheduleDto {
   lastFiredAt?: string;
   /** Running fire counter. */
   tickCount?: number;
+  /** ISO timestamp of the next scheduled fire. Null when no next run. */
+  nextRunAt?: string;
 }
 
 export interface SchedulesResponse {
@@ -64,6 +68,31 @@ function iso(d?: Date | null): string | undefined {
   return d ? d.toISOString() : undefined;
 }
 
+function fakeClockAt(when: Date): Clock {
+  return {
+    currentTimeMs: () => when.getTime(),
+    now: () => new Date(when.getTime()),
+    setTimeout: (fn, ms) => {
+      const h = setTimeout(fn, ms);
+      return { clear: () => clearTimeout(h) };
+    },
+    setInterval: (fn, ms) => {
+      const h = setInterval(fn, ms);
+      return { clear: () => clearInterval(h) };
+    },
+  };
+}
+
+function nextRunIso(config: DurableScheduleConfig): string | undefined {
+  if (!(config.enabled ?? true)) return undefined;
+  try {
+    const next = computeNextRun(config, fakeClockAt(new Date()));
+    return next ? next.toISOString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function toDto(
   config: DurableScheduleConfig,
   state?: { lastFired: Date | null; tickCount: number } | null,
@@ -85,6 +114,7 @@ function toDto(
     maxCatchUp: config.maxCatchUp,
     lastFiredAt: state?.lastFired ? iso(state.lastFired) : undefined,
     tickCount: state?.tickCount,
+    nextRunAt: nextRunIso(config),
   };
 }
 

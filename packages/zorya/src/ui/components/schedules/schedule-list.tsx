@@ -2,7 +2,7 @@ import { useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api } from "../../api/client.ts";
 import type { ScheduleDto } from "../../../server/routes/schedules.ts";
-import { formatDuration, formatRelative } from "../../lib/format.ts";
+import { formatCountdown, formatDuration, formatRelative } from "../../lib/format.ts";
 import { CreateScheduleModal } from "./create-schedule-modal.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 
@@ -128,6 +128,7 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
                   <th>Trigger</th>
                   <th>TZ</th>
                   <th>Last fire</th>
+                  <th>Next fire</th>
                   <th class="text-right">Ticks</th>
                   <th>Status</th>
                   <th />
@@ -157,6 +158,13 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
                       <td class="font-mono text-sm">{triggerLabel(s)}</td>
                       <td class="text-sm text-base-content/60">{s.timezone ?? "UTC"}</td>
                       <td class="text-sm text-base-content/60">{formatRelative(s.lastFiredAt)}</td>
+                      <td class="text-sm text-base-content/60" title={s.nextRunAt ?? ""}>
+                        {s.enabled
+                          ? s.nextRunAt
+                            ? formatCountdown(s.nextRunAt)
+                            : "—"
+                          : "(paused)"}
+                      </td>
                       <td class="font-mono text-sm text-right">{s.tickCount ?? 0}</td>
                       <td>
                         <span

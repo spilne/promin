@@ -168,6 +168,7 @@ function StepRow({
   const renderStatus = effectiveStepStatus(step);
   const v = STEP_STATUS_VISUAL[renderStatus];
   const isHatched = step.status === "sleeping" || step.status === "waiting_for_signal";
+  const retried = step.attempt > 1;
 
   const tooltip = [
     `${step.stepName} (${v.label})`,
@@ -229,12 +230,21 @@ function StepRow({
           <div class="absolute inset-y-1 left-0 right-0 border border-dashed border-base-content/20 rounded" />
         ) : (
           <div
-            class={`gantt-bar absolute top-1 bottom-1 rounded ${v.barClass} ${isHatched ? "gantt-hatched" : ""}`}
+            class={`gantt-bar absolute top-1 bottom-1 rounded ${v.barClass} ${isHatched ? "gantt-hatched" : ""} ${retried ? "ring-1 ring-warning/70" : ""}`}
             style={{
               left: `${leftPct}%`,
               width: `${widthPct}%`,
             }}
           />
+        )}
+        {retried && (
+          <span
+            class="absolute top-0 text-[10px] text-warning font-bold"
+            style={{ left: `calc(${leftPct}% - 14px)` }}
+            title={`${step.attempt} attempts`}
+          >
+            ↻{step.attempt}
+          </span>
         )}
       </div>
     </div>

@@ -14,6 +14,7 @@ import { PayloadTab } from "./tabs/payload-tab.tsx";
 import { SignalsTab } from "./tabs/signals-tab.tsx";
 import { HistoryTab } from "./tabs/history-tab.tsx";
 import { ChildrenTab } from "./tabs/children-tab.tsx";
+import { CalendarTab } from "./tabs/calendar-tab.tsx";
 import { SignalModal } from "./signal-modal.tsx";
 import { formatDuration } from "../../lib/format.ts";
 
@@ -28,7 +29,7 @@ interface RunDetailProps {
   onQueryChange?: (params: URLSearchParams) => void;
 }
 
-type RightTab = "overview" | "step" | "payload" | "signals" | "history" | "children";
+type RightTab = "overview" | "step" | "payload" | "signals" | "history" | "children" | "calendar";
 type StepView = "timeline" | "graph" | "grid";
 
 const RIGHT_TABS: ReadonlyArray<RightTab> = [
@@ -38,6 +39,7 @@ const RIGHT_TABS: ReadonlyArray<RightTab> = [
   "signals",
   "history",
   "children",
+  "calendar",
 ];
 
 const STEP_VIEWS: ReadonlyArray<StepView> = ["timeline", "graph", "grid"];
@@ -175,6 +177,7 @@ export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }:
     { id: "signals", label: "Signals" },
     { id: "history", label: "History" },
     { id: "children", label: "Children" },
+    { id: "calendar", label: "Calendar" },
   ];
 
   return (
@@ -280,6 +283,7 @@ export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }:
               {tab === "signals" && <SignalsTab runId={id} />}
               {tab === "history" && <HistoryTab runId={id} />}
               {tab === "children" && <ChildrenTab runId={id} onOpenRun={onOpenRun ?? (() => {})} />}
+              {tab === "calendar" && <CalendarTab workflowName={run.workflowName} />}
             </div>
           </div>
         </div>

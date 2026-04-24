@@ -65,6 +65,9 @@ export const api = {
   getMetrics(): Promise<MetricsDto> {
     return req<MetricsDto>(`/api/metrics`);
   },
+  getHealth(): Promise<{ ok: boolean }> {
+    return req<{ ok: boolean }>(`/api/health`);
+  },
   listWorkers(): Promise<WorkersResponse> {
     return req<WorkersResponse>(`/api/workers`);
   },
