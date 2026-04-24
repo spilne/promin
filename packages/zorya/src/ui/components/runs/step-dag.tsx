@@ -16,11 +16,12 @@ interface StepDagProps {
   onSelectStep?: (stepName: string | undefined) => void;
 }
 
-const NODE_W = 180;
-const NODE_H = 48;
-const COL_GAP = 80;
+const NODE_W = 200;
+const NODE_H = 56;
+const COL_GAP = 90;
 const ROW_GAP = 20;
 const PADDING = 24;
+const STRIPE_W = 4;
 
 interface LaidOutNode {
   step: StepDto;
@@ -70,7 +71,7 @@ export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
                 markerHeight={6}
                 orient="auto"
               >
-                <path d="M0,0 L10,5 L0,10 Z" class="fill-base-content/40" />
+                <path d="M0,0 L10,5 L0,10 Z" class="fill-base-content/60" />
               </marker>
             </defs>
 
@@ -80,8 +81,8 @@ export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
                 key={`e-${i}`}
                 d={edgePath(e.from, e.to)}
                 fill="none"
-                stroke-width={1.5}
-                class="stroke-base-content/25"
+                stroke-width={2}
+                class="stroke-base-content/40"
                 marker-end="url(#dag-arrow)"
               />
             ))}
@@ -117,60 +118,93 @@ function NodeRect({
   const v = STEP_STATUS_VISUAL[step.status];
   const isPlanned = step.isPlanned === true;
 
-  // Map DaisyUI bar class names to SVG fill colors. Using the CSS variable
-  // would be cleaner, but a small static table is easier to reason about.
-  const fill = isPlanned ? "transparent" : barToSvgFill(v.barClass);
-  const strokeClass = isSelected
+  // Strip + fill use Tailwind CSS classes (compiled to concrete colors) rather
+  // than SVG fill attributes with CSS variables — latter don't resolve across
+  // all browsers when referenced via hsl(var(--x)).
+  const stripClass = classForStatusStrip(step.status);
+  const cardFillClass = isPlanned ? "fill-base-200/30" : "fill-base-200";
+  const borderClass = isSelected
     ? "stroke-primary"
     : isPlanned
-      ? "stroke-base-content/30"
-      : "stroke-base-content/40";
+      ? "stroke-base-content/20"
+      : "stroke-base-content/15";
 
   return (
     <g transform={`translate(${node.x} ${node.y})`} onClick={onSelect} class="cursor-pointer">
+      {/* Card body */}
       <rect
         width={NODE_W}
         height={NODE_H}
-        rx={6}
-        class={`${strokeClass} transition-all`}
-        fill={fill}
-        fill-opacity={isPlanned ? 0 : 0.9}
-        stroke-width={isSelected ? 2.5 : 1.5}
+        rx={8}
+        class={`${cardFillClass} ${borderClass} transition-all`}
+        stroke-width={isSelected ? 2 : 1}
         stroke-dasharray={isPlanned ? "4 3" : undefined}
       />
-      {/* Type icon badge */}
+      {/* Status stripe on the left */}
+      <rect
+        x={0}
+        y={0}
+        width={STRIPE_W + 4}
+        height={NODE_H}
+        rx={8}
+        class={stripClass}
+        opacity={isPlanned ? 0.35 : 1}
+      />
+      {/* Step type glyph */}
       <text
-        x={12}
-        y={NODE_H / 2 + 4}
-        class="fill-base-content/60"
+        x={STRIPE_W + 16}
+        y={NODE_H / 2 - 6}
+        class="fill-base-content/50"
         font-family="ui-monospace, monospace"
-        font-size={12}
+        font-size={11}
       >
-        {STEP_TYPE_ICON[step.stepType]}
+        {step.stepType.toUpperCase()} {STEP_TYPE_ICON[step.stepType]}
       </text>
       {/* Step name */}
       <text
-        x={32}
-        y={NODE_H / 2 - 3}
-        class={`${isPlanned ? "fill-base-content/60" : "fill-base-100"} font-medium`}
+        x={STRIPE_W + 16}
+        y={NODE_H / 2 + 9}
+        class="fill-base-content font-semibold"
         font-family="ui-sans-serif, system-ui"
         font-size={13}
       >
-        {truncate(step.stepName, 20)}
+        {truncate(step.stepName, 22)}
       </text>
-      {/* Status line */}
-      <text
-        x={32}
-        y={NODE_H / 2 + 12}
-        class={`${v.textClass} opacity-90`}
-        font-family="ui-sans-serif, system-ui"
-        font-size={10}
-      >
-        {v.icon} {v.label}
-        {step.attempt > 1 ? ` · ×${step.attempt}` : ""}
-      </text>
+      {/* Status line at the bottom right */}
+      <g transform={`translate(${NODE_W - 8} ${NODE_H - 8})`}>
+        <text
+          text-anchor="end"
+          class={`${v.textClass} font-medium`}
+          font-family="ui-sans-serif, system-ui"
+          font-size={10}
+        >
+          {v.icon} {v.label.toLowerCase()}
+          {step.attempt > 1 ? ` · ×${step.attempt}` : ""}
+        </text>
+      </g>
     </g>
   );
+}
+
+/** Tailwind-compiled fill utility per status. */
+function classForStatusStrip(status: StepDto["status"]): string {
+  switch (status) {
+    case "running":
+      return "fill-info";
+    case "completed":
+    case "compensated":
+      return "fill-success";
+    case "failed":
+    case "compensation_failed":
+      return "fill-error";
+    case "sleeping":
+    case "waiting_for_signal":
+      return "fill-warning";
+    case "skipped":
+    case "pending":
+    default:
+      return "fill-base-content/30";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -267,19 +301,4 @@ function edgePath(from: LaidOutNode, to: LaidOutNode): string {
 function truncate(s: string, n: number): string {
   if (s.length <= n) return s;
   return s.slice(0, n - 1) + "…";
-}
-
-function barToSvgFill(barClass: string): string {
-  switch (barClass) {
-    case "bg-success":
-      return "hsl(var(--su))";
-    case "bg-info":
-      return "hsl(var(--in))";
-    case "bg-warning":
-      return "hsl(var(--wa))";
-    case "bg-error":
-      return "hsl(var(--er))";
-    default:
-      return "hsl(var(--b3))";
-  }
 }
