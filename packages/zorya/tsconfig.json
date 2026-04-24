@@ -8,10 +8,13 @@
   "include": [],
   "references": [
     {
-      "path": "../workflow"
+      "path": "../core"
     },
     {
-      "path": "../core"
+      "path": "../sqlite"
+    },
+    {
+      "path": "../workflow"
     },
     {
       "path": "./tsconfig.lib.json"

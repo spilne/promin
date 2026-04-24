@@ -41,15 +41,16 @@
     "access": "public"
   },
   "scripts": {
-    "build:ui": "bun scripts/build-ui.ts",
-    "dev": "bun scripts/dev.ts",
-    "demo": "bun scripts/dev.ts"
+    "build:ui": "bun --conditions=@promin/source scripts/build-ui.ts",
+    "dev": "bun --conditions=@promin/source scripts/dev.ts",
+    "demo": "bun --conditions=@promin/source scripts/dev.ts"
   },
   "dependencies": {
     "@promin/core": "workspace:*",
     "@promin/workflow": "workspace:*"
   },
   "devDependencies": {
+    "@promin/sqlite": "workspace:*",
     "@types/bun": "catalog:",
     "daisyui": "^4.12.14",
     "happy-dom": "^20.9.0",

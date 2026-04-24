@@ -14,10 +14,13 @@
   "exclude": ["src/**/*.test.ts", "src/**/*.bench.ts", "src/ui/**/*"],
   "references": [
     {
-      "path": "../workflow/tsconfig.lib.json"
+      "path": "../core/tsconfig.lib.json"
     },
     {
-      "path": "../core/tsconfig.lib.json"
+      "path": "../sqlite/tsconfig.lib.json"
+    },
+    {
+      "path": "../workflow/tsconfig.lib.json"
     }
   ]
 }

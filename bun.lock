@@ -249,6 +249,7 @@
         "@promin/workflow": "workspace:*",
       },
       "devDependencies": {
+        "@promin/sqlite": "workspace:*",
         "@types/bun": "catalog:",
         "daisyui": "^4.12.14",
         "happy-dom": "^20.9.0",
