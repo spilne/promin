@@ -42,7 +42,13 @@ function renderRoute(route: string, navigate: (p: string) => void) {
   }
   const runMatch = /^\/runs\/([^/]+)$/.exec(path ?? "");
   if (runMatch) {
-    return <RunDetail id={decodeURIComponent(runMatch[1]!)} onBack={() => navigate("/")} />;
+    return (
+      <RunDetail
+        id={decodeURIComponent(runMatch[1]!)}
+        onBack={() => navigate("/")}
+        onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)}
+      />
+    );
   }
   return (
     <RunList

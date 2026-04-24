@@ -21,6 +21,7 @@ const ALL_STATUSES: WorkflowStatus[] = [
   "completed",
   "failed",
   "compensating",
+  "tripwire",
 ];
 
 export class StorageMetricsProvider implements MetricsProvider {
@@ -41,6 +42,7 @@ export class StorageMetricsProvider implements MetricsProvider {
       completed: 0,
       failed: 0,
       compensating: 0,
+      tripwire: 0,
     };
     const durations: number[] = [];
     let total = 0;

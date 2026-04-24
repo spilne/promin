@@ -8,6 +8,17 @@
 
 import type { WorkflowStatus, StepStatus, StepType } from "@promin/workflow";
 
+export interface StepTaskDto {
+  taskIndex: number;
+  status: StepStatus;
+  input?: unknown;
+  result?: unknown;
+  error?: string;
+  startedAt?: string;
+  completedAt?: string;
+  attempt: number;
+}
+
 export interface StepDto {
   stepName: string;
   run: number;
@@ -35,6 +46,13 @@ export interface StepDto {
    * (status: "pending", attempt: 0, etc.).
    */
   isPlanned?: boolean;
+  /** Fan-out (mapOver) sub-tasks. Present for map steps. */
+  tasks?: StepTaskDto[];
+  /** Saga compensation status. Present when compensation ran. */
+  compensationStatus?: "pending" | "compensated" | "compensation_failed";
+  compensationError?: string;
+  /** ISO timestamp. */
+  compensatedAt?: string;
 }
 
 export interface RunDto {
@@ -50,6 +68,8 @@ export interface RunDto {
   error?: string;
   metadata?: Record<string, unknown>;
   steps: StepDto[];
+  /** Parent workflow id, when this run was spawned by another workflow. */
+  parentWorkflowId?: string;
   /** ISO timestamp. */
   createdAt: string;
   /** ISO timestamp. */
@@ -64,6 +84,7 @@ export interface RunSummaryDto {
   workflowId: string;
   workflowName: string;
   workflowType?: string;
+  namespace?: string;
   status: WorkflowStatus;
   run: number;
   createdAt: string;

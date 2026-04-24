@@ -146,15 +146,18 @@ export function cancelRun(deps: RunRoutesDeps) {
 
 export function listWorkflowNames(deps: RunRoutesDeps) {
   return async (): Promise<Response> => {
-    // Pull a wide page of recent workflows and distinct their names/types.
-    // Good enough for "populate a dropdown"; a real backend should expose
-    // dedicated distinct queries.
+    // Pull a wide page of recent workflows and distinct their names/types/
+    // namespaces. Good enough for "populate a dropdown"; a real backend
+    // should expose dedicated distinct queries.
     const rows = await deps.storage.listWorkflows({ limit: 1000 });
     const names = Array.from(new Set(rows.map((r) => r.workflowName))).sort();
     const types = Array.from(
       new Set(rows.map((r) => r.workflowType).filter((t): t is string => !!t)),
     ).sort();
-    return json(200, { names, types });
+    const namespaces = Array.from(
+      new Set(rows.map((r) => r.namespace).filter((n): n is string => !!n)),
+    ).sort();
+    return json(200, { names, types, namespaces });
   };
 }
 

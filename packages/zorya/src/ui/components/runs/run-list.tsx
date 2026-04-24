@@ -11,6 +11,7 @@ import { formatDuration, formatRelative, WORKFLOW_STATUS_VISUAL } from "../../li
 interface NamesAndTypes {
   names: string[];
   types: string[];
+  namespaces: string[];
 }
 
 interface RunListProps {
@@ -37,6 +38,7 @@ function isWorkflowStatus(s: string): s is WorkflowStatus {
 export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
   const initialName = queryParams?.get("name") ?? "";
   const initialType = queryParams?.get("type") ?? "";
+  const initialNamespace = queryParams?.get("namespace") ?? "";
   const initialStatusRaw = queryParams?.get("status") ?? "all";
   const initialStatus: WorkflowStatus | "all" = isWorkflowStatus(initialStatusRaw)
     ? initialStatusRaw
@@ -45,14 +47,17 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
 
   const [name, setName] = useState(initialName);
   const [type, setType] = useState(initialType);
+  const [namespace, setNamespace] = useState(initialNamespace);
   const [status, setStatus] = useState<WorkflowStatus | "all">(initialStatus);
   const [page, setPage] = useState(initialPage);
-  const [namesAndTypes, setNamesAndTypes] = useState<NamesAndTypes>({ names: [], types: [] });
+  const [meta, setMeta] = useState<NamesAndTypes>({ names: [], types: [], namespaces: [] });
 
   useEffect(() => {
     api
       .listWorkflowNames()
-      .then((r) => setNamesAndTypes({ names: r.names, types: r.types ?? [] }))
+      .then((r) =>
+        setMeta({ names: r.names, types: r.types ?? [], namespaces: r.namespaces ?? [] }),
+      )
       .catch(() => {});
   }, []);
 
@@ -62,7 +67,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
   useEffect(() => {
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, type, status]);
+  }, [name, type, namespace, status]);
 
   // Sync local state back to URL so filters survive refresh / share links.
   useEffect(() => {
@@ -70,22 +75,24 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
     const qp = new URLSearchParams();
     if (name) qp.set("name", name);
     if (type) qp.set("type", type);
+    if (namespace) qp.set("namespace", namespace);
     if (status !== "all") qp.set("status", status);
     if (page > 1) qp.set("page", String(page));
     onQueryChange(qp);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, type, status, page]);
+  }, [name, type, namespace, status, page]);
 
   const query: RunListQuery = {
     name: name || undefined,
     type: type || undefined,
+    namespace: namespace || undefined,
     status: status === "all" ? undefined : status,
     limit: PAGE_SIZE,
     offset: (page - 1) * PAGE_SIZE,
   };
   const { data, loading, error, refresh } = useFetch(
     () => api.listRuns(query),
-    [name, type, status, page],
+    [name, type, namespace, status, page],
     5000,
   );
 
@@ -127,28 +134,41 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
           onChange={(e) => setName((e.target as HTMLSelectElement).value)}
         >
           <option value="">All names</option>
-          {namesAndTypes.names.map((n) => (
+          {meta.names.map((n) => (
             <option value={n}>{n}</option>
           ))}
         </select>
-        {namesAndTypes.types.length > 0 && (
+        {meta.types.length > 0 && (
           <select
             class="select select-bordered select-sm w-40"
             value={type}
             onChange={(e) => setType((e.target as HTMLSelectElement).value)}
           >
             <option value="">All types</option>
-            {namesAndTypes.types.map((t) => (
+            {meta.types.map((t) => (
               <option value={t}>{t}</option>
             ))}
           </select>
         )}
-        {(name || type || status !== "all") && (
+        {meta.namespaces.length > 0 && (
+          <select
+            class="select select-bordered select-sm w-40"
+            value={namespace}
+            onChange={(e) => setNamespace((e.target as HTMLSelectElement).value)}
+          >
+            <option value="">All namespaces</option>
+            {meta.namespaces.map((n) => (
+              <option value={n}>{n}</option>
+            ))}
+          </select>
+        )}
+        {(name || type || namespace || status !== "all") && (
           <button
             class="btn btn-sm btn-ghost"
             onClick={() => {
               setName("");
               setType("");
+              setNamespace("");
               setStatus("all");
             }}
           >
@@ -171,16 +191,17 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
                 <th>ID</th>
                 <th>Name</th>
                 <th>Type</th>
+                <th>Namespace</th>
                 <th>Status</th>
                 <th>Started</th>
                 <th>Duration</th>
               </tr>
             </thead>
             <tbody>
-              {loading && !data && <SkeletonRows rows={10} cols={6} />}
+              {loading && !data && <SkeletonRows rows={10} cols={7} />}
               {data && data.runs.length === 0 && !loading && (
                 <tr>
-                  <td colSpan={6} class="text-center py-12">
+                  <td colSpan={7} class="text-center py-12">
                     <div class="text-base-content/50">No runs match the current filters</div>
                   </td>
                 </tr>
@@ -190,6 +211,13 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
                   <td class="font-mono text-sm">{r.workflowId}</td>
                   <td>{r.workflowName}</td>
                   <td class="text-base-content/60">{r.workflowType ?? "—"}</td>
+                  <td>
+                    {r.namespace ? (
+                      <span class="badge badge-sm badge-ghost font-mono">{r.namespace}</span>
+                    ) : (
+                      <span class="text-base-content/40">—</span>
+                    )}
+                  </td>
                   <td>
                     <StatusBadge status={r.status} />
                   </td>

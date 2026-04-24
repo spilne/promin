@@ -36,6 +36,12 @@ import {
   listSchedules,
   patchSchedule,
 } from "./routes/schedules.ts";
+import {
+  getRunAttempts,
+  getRunChildren,
+  getRunHistory,
+  getRunSignals,
+} from "./routes/run-extras.ts";
 
 export interface ZoryaServerConfig extends AuthConfig {
   storage: WorkflowStorage;
@@ -96,6 +102,10 @@ export class ZoryaServer {
       .get("/api/runs", listRuns(deps))
       .get("/api/workflows", listWorkflowNames(deps))
       .get("/api/runs/:id", getRun(deps))
+      .get("/api/runs/:id/signals", getRunSignals(config.storage))
+      .get("/api/runs/:id/attempts", getRunAttempts(config.storage))
+      .get("/api/runs/:id/history", getRunHistory(config.storage))
+      .get("/api/runs/:id/children", getRunChildren(config.storage))
       .post("/api/runs/trigger/:name", triggerRun(deps))
       .post("/api/runs/:id/cancel", cancelRun(deps))
       .post("/api/runs/:id/signal", sendSignal(deps))

@@ -7,6 +7,12 @@ import type {
   SignalRequest,
 } from "../../server/api-types.ts";
 import type { SchedulesResponse, ScheduleDto } from "../../server/routes/schedules.ts";
+import type {
+  SignalHistoryResponse,
+  AttemptsResponse,
+  RunHistoryResponse,
+  ChildrenResponse,
+} from "../../server/routes/run-extras.ts";
 
 const BASE = ""; // served from same origin
 
@@ -64,7 +70,20 @@ export const api = {
   eventsUrl(id: string): string {
     return `${BASE}/api/runs/${encodeURIComponent(id)}/events`;
   },
-  listWorkflowNames(): Promise<{ names: string[]; types?: string[] }> {
+  getRunSignals(id: string): Promise<SignalHistoryResponse> {
+    return req(`/api/runs/${encodeURIComponent(id)}/signals`);
+  },
+  getRunAttempts(id: string, stepName?: string): Promise<AttemptsResponse> {
+    const qs = stepName ? `?stepName=${encodeURIComponent(stepName)}` : "";
+    return req(`/api/runs/${encodeURIComponent(id)}/attempts${qs}`);
+  },
+  getRunHistory(id: string): Promise<RunHistoryResponse> {
+    return req(`/api/runs/${encodeURIComponent(id)}/history`);
+  },
+  getRunChildren(id: string): Promise<ChildrenResponse> {
+    return req(`/api/runs/${encodeURIComponent(id)}/children`);
+  },
+  listWorkflowNames(): Promise<{ names: string[]; types?: string[]; namespaces?: string[] }> {
     return req(`/api/workflows`);
   },
   listSchedules(): Promise<SchedulesResponse & { configured?: boolean }> {

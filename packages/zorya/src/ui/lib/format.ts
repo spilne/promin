@@ -84,6 +84,13 @@ export const WORKFLOW_STATUS_VISUAL: Record<WorkflowStatus, StatusVisual> = {
     textClass: "text-warning",
     label: "Compensating",
   },
+  tripwire: {
+    icon: "⚠",
+    badgeClass: "badge-error",
+    barClass: "bg-error",
+    textClass: "text-error",
+    label: "Tripwire",
+  },
 };
 
 export const STEP_STATUS_VISUAL: Record<StepStatus, StatusVisual> = {

@@ -10,6 +10,15 @@ export { StorageMetricsProvider, type MetricsProvider } from "./server/routes/me
 export { emptyWorkersProvider, type WorkersProvider } from "./server/routes/workers.ts";
 export type { RunTrigger } from "./server/routes/runs.ts";
 export type { ScheduleDto, SchedulesResponse } from "./server/routes/schedules.ts";
+export type {
+  SignalDto,
+  SignalHistoryResponse,
+  AttemptDto,
+  AttemptsResponse,
+  RunHistoryEntryDto,
+  RunHistoryResponse,
+  ChildrenResponse,
+} from "./server/routes/run-extras.ts";
 
 // Wire format
 export type {

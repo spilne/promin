@@ -2,11 +2,24 @@
 // Serialisers — WorkflowState / StepState → wire DTOs
 // ---------------------------------------------------------------------------
 
-import type { WorkflowState, StepState } from "@promin/workflow";
-import type { RunDto, RunSummaryDto, StepDto } from "./api-types.ts";
+import type { WorkflowState, StepState, StepTaskState } from "@promin/workflow";
+import type { RunDto, RunSummaryDto, StepDto, StepTaskDto } from "./api-types.ts";
 
 function iso(d?: Date): string | undefined {
   return d ? d.toISOString() : undefined;
+}
+
+function taskToDto(t: StepTaskState): StepTaskDto {
+  return {
+    taskIndex: t.taskIndex,
+    status: t.status,
+    input: t.input,
+    result: t.result,
+    error: t.error,
+    startedAt: iso(t.startedAt),
+    completedAt: iso(t.completedAt),
+    attempt: t.attempt,
+  };
 }
 
 export function stepToDto(s: StepState): StepDto {
@@ -26,6 +39,10 @@ export function stepToDto(s: StepState): StepDto {
     signalName: s.signalName,
     signalTimeoutAt: iso(s.signalTimeoutAt),
     metadata: s.metadata,
+    tasks: s.tasks ? s.tasks.map(taskToDto) : undefined,
+    compensationStatus: s.compensationStatus,
+    compensationError: s.compensationError,
+    compensatedAt: iso(s.compensatedAt),
   };
 }
 
@@ -43,6 +60,7 @@ export function runToDto(w: WorkflowState): RunDto {
     error: w.error,
     metadata: w.metadata,
     steps: Object.values(w.steps).map(stepToDto),
+    parentWorkflowId: w.parentWorkflowId,
     createdAt: w.createdAt.toISOString(),
     startedAt: iso(w.startedAt),
     updatedAt: w.updatedAt.toISOString(),
@@ -56,6 +74,7 @@ export function runToSummaryDto(w: WorkflowState): RunSummaryDto {
     workflowId: w.workflowId,
     workflowName: w.workflowName,
     workflowType: w.workflowType,
+    namespace: w.namespace,
     status: w.status,
     run: w.run,
     createdAt: w.createdAt.toISOString(),
