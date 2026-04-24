@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact",
+    "lib": ["es2023", "dom", "dom.iterable"],
+    "types": ["@types/bun"],
+    "moduleResolution": "bundler",
+    "module": "esnext",
+    "target": "es2023"
+  },
+  "include": ["src/ui/**/*.ts", "src/ui/**/*.tsx", "src/server/api-types.ts"]
+}

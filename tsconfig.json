@@ -52,6 +52,9 @@
     },
     {
       "path": "./packages/sqlite"
+    },
+    {
+      "path": "./packages/zorya"
     }
   ]
 }

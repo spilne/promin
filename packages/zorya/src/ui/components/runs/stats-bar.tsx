@@ -1,0 +1,46 @@
+import { useFetch } from "../../hooks/use-fetch.ts";
+import { api } from "../../api/client.ts";
+import { formatDuration } from "../../lib/format.ts";
+
+export function StatsBar() {
+  const { data } = useFetch(() => api.getMetrics(), [], 5000);
+  if (!data) {
+    return (
+      <div class="stats stats-horizontal bg-base-300 shadow w-full">
+        <div class="stat">
+          <div class="stat-title">Loading…</div>
+        </div>
+      </div>
+    );
+  }
+  const stats = [
+    { label: "Total", value: data.total, color: "" },
+    { label: "Completed", value: data.byStatus.completed, color: "text-success" },
+    { label: "Running", value: data.byStatus.running, color: "text-info" },
+    { label: "Failed", value: data.byStatus.failed, color: "text-error" },
+    { label: "Suspended", value: data.byStatus.suspended, color: "text-warning" },
+  ];
+
+  return (
+    <div class="stats stats-horizontal bg-base-300 shadow w-full">
+      {stats.map((s) => (
+        <div class="stat">
+          <div class="stat-title text-xs">{s.label}</div>
+          <div class={`stat-value text-2xl ${s.color}`}>{s.value}</div>
+        </div>
+      ))}
+      <div class="stat">
+        <div class="stat-title text-xs">Avg</div>
+        <div class="stat-value text-2xl">{formatDuration(data.avgDurationMs)}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-title text-xs">p95</div>
+        <div class="stat-value text-2xl">{formatDuration(data.p95DurationMs)}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-title text-xs">p99</div>
+        <div class="stat-value text-2xl">{formatDuration(data.p99DurationMs)}</div>
+      </div>
+    </div>
+  );
+}

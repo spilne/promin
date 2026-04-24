@@ -1,0 +1,66 @@
+import type {
+  RunDto,
+  RunListResponse,
+  RunListQuery,
+  MetricsDto,
+  WorkersResponse,
+  SignalRequest,
+} from "../../server/api-types.ts";
+
+const BASE = ""; // served from same origin
+
+function authHeader(): HeadersInit {
+  const k = localStorage.getItem("zorya_api_key");
+  return k ? { authorization: `Bearer ${k}` } : {};
+}
+
+async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    ...init,
+    headers: { ...(init?.headers ?? {}), ...authHeader() },
+  });
+  if (!res.ok) throw new ApiError(res.status, await res.text());
+  return (await res.json()) as T;
+}
+
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    body: string,
+  ) {
+    super(`HTTP ${status}: ${body}`);
+  }
+}
+
+export const api = {
+  listRuns(q: RunListQuery = {}): Promise<RunListResponse> {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(q)) {
+      if (v !== undefined && v !== null && v !== "") params.set(k, String(v));
+    }
+    const qs = params.toString();
+    return req<RunListResponse>(`/api/runs${qs ? `?${qs}` : ""}`);
+  },
+  getRun(id: string): Promise<RunDto> {
+    return req<RunDto>(`/api/runs/${encodeURIComponent(id)}`);
+  },
+  cancelRun(id: string): Promise<{ ok: boolean }> {
+    return req(`/api/runs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+  },
+  signalRun(id: string, body: SignalRequest): Promise<{ ok: boolean }> {
+    return req(`/api/runs/${encodeURIComponent(id)}/signal`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  getMetrics(): Promise<MetricsDto> {
+    return req<MetricsDto>(`/api/metrics`);
+  },
+  listWorkers(): Promise<WorkersResponse> {
+    return req<WorkersResponse>(`/api/workers`);
+  },
+  eventsUrl(id: string): string {
+    return `${BASE}/api/runs/${encodeURIComponent(id)}/events`;
+  },
+};

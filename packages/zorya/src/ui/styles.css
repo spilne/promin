@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom: Gantt bar hatching for sleeping / waiting steps */
+.gantt-hatched {
+  background-image: repeating-linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.12) 0,
+    rgba(255, 255, 255, 0.12) 4px,
+    transparent 4px,
+    transparent 8px
+  );
+}
+
+.gantt-grid-line {
+  background: linear-gradient(
+    to right,
+    transparent 0,
+    transparent calc(100% - 1px),
+    rgba(255, 255, 255, 0.08) calc(100% - 1px),
+    rgba(255, 255, 255, 0.08) 100%
+  );
+}

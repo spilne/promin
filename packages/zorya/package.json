@@ -1,0 +1,94 @@
+{
+  "name": "@promin/zorya",
+  "version": "0.1.0",
+  "description": "Zorya — self-hostable workflow platform server + dashboard for promin.",
+  "keywords": [
+    "dashboard",
+    "preact",
+    "server",
+    "typescript",
+    "workflow",
+    "zorya"
+  ],
+  "homepage": "https://github.com/spilne/promin/tree/main/packages/zorya",
+  "bugs": {
+    "url": "https://github.com/spilne/promin/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spilne/promin.git",
+    "directory": "packages/zorya"
+  },
+  "files": [
+    "dist",
+    "package.json"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "@promin/source": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build:ui": "bun scripts/build-ui.ts"
+  },
+  "dependencies": {
+    "@promin/core": "workspace:*",
+    "@promin/workflow": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:",
+    "daisyui": "^4.12.14",
+    "preact": "^10.25.0",
+    "tailwindcss": "^3.4.15"
+  },
+  "nx": {
+    "targets": {
+      "typecheck": {
+        "dependsOn": [
+          "^typecheck",
+          "typecheck-ui"
+        ]
+      },
+      "typecheck-ui": {
+        "executor": "nx:run-commands",
+        "options": {
+          "command": "bunx tsc -p tsconfig.ui.json --noEmit",
+          "cwd": "{projectRoot}"
+        },
+        "inputs": [
+          "{projectRoot}/src/ui/**/*",
+          "{projectRoot}/src/server/api-types.ts",
+          "{projectRoot}/tsconfig.ui.json"
+        ]
+      },
+      "test": {},
+      "lint": {},
+      "format": {},
+      "format-check": {},
+      "ci": {},
+      "publish": {},
+      "build-ui": {
+        "executor": "nx:run-commands",
+        "options": {
+          "command": "bun run build:ui",
+          "cwd": "{projectRoot}"
+        },
+        "outputs": [
+          "{projectRoot}/dist/public"
+        ]
+      }
+    }
+  }
+}
