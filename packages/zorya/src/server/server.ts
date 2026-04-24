@@ -115,6 +115,14 @@ export interface ZoryaServerConfig extends AuthConfig {
     stepQueue: StepQueue;
     workerRegistry?: WorkerRegistry;
     advertisements?: WorkflowAdvertisementRegistry;
+    /**
+     * API keys required on /rpc/storage, /rpc/worker, and
+     * /api/advertisements. When omitted, the worker surface is open —
+     * safe behind a private network, risky on a public one. Kept
+     * separate from the dashboard's top-level `apiKeys` so you can
+     * rotate one without the other and issue worker-only keys.
+     */
+    apiKeys?: ReadonlyArray<string>;
   };
 }
 
@@ -126,6 +134,8 @@ export interface ListenOptions {
 export class ZoryaServer {
   readonly config: Required<Pick<ZoryaServerConfig, "storage">> & ZoryaServerConfig;
   private readonly auth: Auth;
+  /** Separate auth for worker-protocol endpoints. Open when no keys set. */
+  private readonly workerAuth: Auth;
   private readonly bus: RunEventBus;
   private readonly router: Router;
   private server?: { stop(): void; port: number; hostname: string };
@@ -133,6 +143,7 @@ export class ZoryaServer {
   constructor(config: ZoryaServerConfig) {
     this.config = config;
     this.auth = new Auth(config);
+    this.workerAuth = new Auth({ apiKeys: config.workerProtocol?.apiKeys });
     this.bus = new RunEventBus();
 
     const metrics = config.metrics ?? new StorageMetricsProvider(config.storage);
@@ -249,9 +260,18 @@ export class ZoryaServer {
   /** Expose the router for tests or embedding. */
   async handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
-    if (url.pathname.startsWith("/api/") && !this.auth.check(req)) {
-      return jsonError(401, "unauthorized");
+    const path = url.pathname;
+
+    // Worker-protocol surface has its own keyset. /api/advertisements lives
+    // under /api/ so strip it from the dashboard-auth branch too.
+    const isWorkerPath = path.startsWith("/rpc/") || path.startsWith("/api/advertisements");
+
+    if (isWorkerPath) {
+      if (!this.workerAuth.check(req)) return jsonError(401, "unauthorized_worker");
+    } else if (path.startsWith("/api/")) {
+      if (!this.auth.check(req)) return jsonError(401, "unauthorized");
     }
+
     return this.router.handle(req);
   }
 
