@@ -176,11 +176,12 @@ function StepRow({
     .filter(Boolean)
     .join(" · ");
 
+  const isPlanned = step.isPlanned === true;
   return (
     <div
       class={`flex items-center gap-2 h-9 px-1 rounded cursor-pointer transition-colors duration-150 ${
         isSelected ? "bg-primary/10 ring-1 ring-primary/40" : "hover:bg-base-200"
-      }`}
+      } ${isPlanned ? "opacity-60" : ""}`}
       onClick={onSelect}
     >
       {/* Step name + indentation + chevron */}
@@ -214,19 +215,25 @@ function StepRow({
 
       {/* Duration */}
       <div class="w-20 shrink-0 text-right pr-2 font-mono text-xs text-base-content/70">
-        {formatDuration(step.durationMs)}
+        {isPlanned ? "—" : formatDuration(step.durationMs)}
       </div>
 
       {/* Bar */}
       <div class="relative flex-1 h-full" title={tooltip}>
         <div class="absolute inset-y-1 left-0 right-0 bg-base-200/50 rounded" />
-        <div
-          class={`gantt-bar absolute top-1 bottom-1 rounded ${v.barClass} ${isHatched ? "gantt-hatched" : ""}`}
-          style={{
-            left: `${leftPct}%`,
-            width: `${widthPct}%`,
-          }}
-        />
+        {isPlanned ? (
+          // Dashed placeholder for planned steps — shows that the step exists
+          // in the DAG but hasn't executed yet.
+          <div class="absolute inset-y-1 left-0 right-0 border border-dashed border-base-content/20 rounded" />
+        ) : (
+          <div
+            class={`gantt-bar absolute top-1 bottom-1 rounded ${v.barClass} ${isHatched ? "gantt-hatched" : ""}`}
+            style={{
+              left: `${leftPct}%`,
+              width: `${widthPct}%`,
+            }}
+          />
+        )}
       </div>
     </div>
   );

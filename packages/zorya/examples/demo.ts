@@ -75,24 +75,21 @@ async function triggerRun(
 }
 
 // ---------------------------------------------------------------------------
-// Background: random triggers to keep the UI alive
+// Background: seed a handful of runs on startup so the first page has data.
+// Ongoing traffic comes from schedules — pausing a schedule actually stops
+// its runs (no hidden random loop).
 
-async function startRandomTraffic() {
-  const names = Object.keys(workflowsByName);
-  const tick = async () => {
-    const name = names[Math.floor(Math.random() * names.length)]!;
-    const input =
-      name === "order"
-        ? {
-            orderId: Math.floor(Math.random() * 10_000),
-            customer: `cust-${Math.floor(Math.random() * 100)}`,
-          }
-        : { amount: Math.floor(Math.random() * 5_000) + 100, currency: "USD" };
-    await triggerRun(name, input);
-  };
-  // Seed a handful immediately so the page has something on first load.
-  for (let i = 0; i < 6; i++) void tick();
-  setInterval(() => void tick(), 3_500);
+async function seedInitialRuns() {
+  for (let i = 0; i < 3; i++) {
+    await triggerRun("order", {
+      orderId: Math.floor(Math.random() * 10_000),
+      customer: `cust-${Math.floor(Math.random() * 100)}`,
+    });
+    await triggerRun("payment", {
+      amount: Math.floor(Math.random() * 5_000) + 100,
+      currency: "USD",
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -210,13 +207,14 @@ function computeNextScheduleRun(s: DurableScheduleConfig, from: Date): Date | nu
 
 await seedSchedules();
 void startScheduleFirer();
-void startRandomTraffic();
+await seedInitialRuns();
 
 const uiDir = path.join(import.meta.dir, "..", "dist", "public");
 
 const server = new ZoryaServer({
   storage,
   scheduler: schedulerStorage,
+  workflows: workflowsByName,
   uiDir,
   trigger: (name, input) => triggerRun(name, input),
   workers: {
@@ -238,5 +236,4 @@ const { port: actualPort, hostname } = server.listen({ port });
 const host = hostname === "0.0.0.0" ? "localhost" : hostname;
 console.log(`Zorya demo server on http://${host}:${actualPort}`);
 console.log(`  - Storage: sqlite (${dbPath})`);
-console.log(`  - Random traffic every ~3.5s`);
-console.log(`  - Schedules fire on their cadence (1s poll)`);
+console.log(`  - Traffic comes only from schedules — pause one to stop its runs`);

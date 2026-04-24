@@ -21,7 +21,7 @@ function delay(minMs: number, maxMs: number): number {
   return minMs + Math.floor(Math.random() * (maxMs - minMs));
 }
 
-export const orderWorkflow = workflow<OrderInput>({ name: "order" })
+export const orderWorkflow = workflow<OrderInput>({ name: "order", type: "commerce" })
   .stepAsync("validate", async ({ input }) => {
     await sleep(delay(2_000, 8_000));
     if (!input.orderId || input.orderId < 0) {

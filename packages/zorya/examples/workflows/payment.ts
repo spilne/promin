@@ -19,7 +19,7 @@ function delay(minMs: number, maxMs: number): number {
   return minMs + Math.floor(Math.random() * (maxMs - minMs));
 }
 
-export const paymentWorkflow = workflow<PaymentInput>({ name: "payment" })
+export const paymentWorkflow = workflow<PaymentInput>({ name: "payment", type: "billing" })
   .stepAsync("authorize", async ({ input }) => {
     await sleep(delay(5_000, 20_000));
     if (Math.random() < 0.15) {

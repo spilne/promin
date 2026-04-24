@@ -64,7 +64,7 @@ export const api = {
   eventsUrl(id: string): string {
     return `${BASE}/api/runs/${encodeURIComponent(id)}/events`;
   },
-  listWorkflowNames(): Promise<{ names: string[] }> {
+  listWorkflowNames(): Promise<{ names: string[]; types?: string[] }> {
     return req(`/api/workflows`);
   },
   listSchedules(): Promise<SchedulesResponse & { configured?: boolean }> {

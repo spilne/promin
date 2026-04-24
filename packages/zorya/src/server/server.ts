@@ -13,7 +13,7 @@
 // ```
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage, SchedulerStorage } from "@promin/workflow";
+import type { WorkflowStorage, SchedulerStorage, Workflow } from "@promin/workflow";
 import { Auth, type AuthConfig } from "./auth.ts";
 import { Router, jsonError } from "./router.ts";
 import { RunEventBus } from "./run-event-bus.ts";
@@ -47,6 +47,13 @@ export interface ZoryaServerConfig extends AuthConfig {
   workers?: WorkersProvider;
   /** Plug in a scheduler storage. When omitted, /api/schedules returns a stub. */
   scheduler?: SchedulerStorage;
+  /**
+   * Registry of known workflow definitions, keyed by workflow name. Used by
+   * `GET /api/runs/:id` to enrich the response with the full static step
+   * list (including steps that haven't executed yet). Optional — without
+   * it the UI still works, it just can't render planned steps.
+   */
+  workflows?: Readonly<Record<string, Workflow<unknown, unknown>>>;
   /** Directory with compiled dashboard assets (index.html, app.js, app.css). */
   uiDir?: string;
   /** SSE watcher poll interval. Default 1000ms. */
@@ -72,7 +79,11 @@ export class ZoryaServer {
 
     const metrics = config.metrics ?? new StorageMetricsProvider(config.storage);
     const workers = config.workers ?? emptyWorkersProvider;
-    const deps = { storage: config.storage, trigger: config.trigger };
+    const deps = {
+      storage: config.storage,
+      trigger: config.trigger,
+      workflows: config.workflows,
+    };
 
     this.router = new Router()
       .get(

@@ -5,6 +5,7 @@ import type { RunDto, RunEvent, StepDto } from "../../../server/api-types.ts";
 import { StatusBadge, StepStatusBadge } from "../ui/status-badge.tsx";
 import { Skeleton } from "../ui/skeleton.tsx";
 import { StepTimeline } from "./step-timeline.tsx";
+import { StepDag } from "./step-dag.tsx";
 import { formatDuration, formatRelative, STEP_STATUS_VISUAL } from "../../lib/format.ts";
 
 interface RunDetailProps {
@@ -13,12 +14,14 @@ interface RunDetailProps {
 }
 
 type RightTab = "overview" | "step" | "payload";
+type StepView = "timeline" | "graph";
 
 export function RunDetail({ id, onBack }: RunDetailProps) {
   const [run, setRun] = useState<RunDto | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
   const [selectedStep, setSelectedStep] = useState<string | undefined>(undefined);
   const [tab, setTab] = useState<RightTab>("overview");
+  const [stepView, setStepView] = useState<StepView>("timeline");
 
   useEffect(() => {
     let cancelled = false;
@@ -116,9 +119,31 @@ export function RunDetail({ id, onBack }: RunDetailProps) {
         )}
       </div>
 
+      {/* View toggle */}
+      <div class="flex items-center gap-2">
+        <div class="join">
+          <button
+            class={`btn btn-sm join-item ${stepView === "timeline" ? "btn-primary" : "btn-ghost"}`}
+            onClick={() => setStepView("timeline")}
+          >
+            Timeline
+          </button>
+          <button
+            class={`btn btn-sm join-item ${stepView === "graph" ? "btn-primary" : "btn-ghost"}`}
+            onClick={() => setStepView("graph")}
+          >
+            Graph
+          </button>
+        </div>
+      </div>
+
       {/* Main two-column layout */}
       <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px] gap-4">
-        <StepTimeline run={run} selectedStep={selectedStep} onSelectStep={setSelectedStep} />
+        {stepView === "timeline" ? (
+          <StepTimeline run={run} selectedStep={selectedStep} onSelectStep={setSelectedStep} />
+        ) : (
+          <StepDag run={run} selectedStep={selectedStep} onSelectStep={setSelectedStep} />
+        )}
 
         <div class="card bg-base-100 shadow self-start">
           <div class="card-body p-0">

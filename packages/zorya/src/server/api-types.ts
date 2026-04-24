@@ -28,6 +28,13 @@ export interface StepDto {
   /** ISO timestamp. */
   signalTimeoutAt?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * True when this step hasn't been saved to storage yet — synthesised from
+   * the workflow definition so the UI can show "not-yet-executed" steps on
+   * the timeline. All other fields on such a row are default values
+   * (status: "pending", attempt: 0, etc.).
+   */
+  isPlanned?: boolean;
 }
 
 export interface RunDto {

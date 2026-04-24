@@ -8,6 +8,11 @@ import { StatusBadge } from "../ui/status-badge.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { formatDuration, formatRelative, WORKFLOW_STATUS_VISUAL } from "../../lib/format.ts";
 
+interface NamesAndTypes {
+  names: string[];
+  types: string[];
+}
+
 interface RunListProps {
   onOpen: (id: string) => void;
   /** Filter state from the URL. Source of truth — changes here re-render. */
@@ -31,6 +36,7 @@ function isWorkflowStatus(s: string): s is WorkflowStatus {
 
 export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
   const initialName = queryParams?.get("name") ?? "";
+  const initialType = queryParams?.get("type") ?? "";
   const initialStatusRaw = queryParams?.get("status") ?? "all";
   const initialStatus: WorkflowStatus | "all" = isWorkflowStatus(initialStatusRaw)
     ? initialStatusRaw
@@ -38,8 +44,17 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
   const initialPage = Math.max(1, Number.parseInt(queryParams?.get("page") ?? "1", 10) || 1);
 
   const [name, setName] = useState(initialName);
+  const [type, setType] = useState(initialType);
   const [status, setStatus] = useState<WorkflowStatus | "all">(initialStatus);
   const [page, setPage] = useState(initialPage);
+  const [namesAndTypes, setNamesAndTypes] = useState<NamesAndTypes>({ names: [], types: [] });
+
+  useEffect(() => {
+    api
+      .listWorkflowNames()
+      .then((r) => setNamesAndTypes({ names: r.names, types: r.types ?? [] }))
+      .catch(() => {});
+  }, []);
 
   const PAGE_SIZE = 25;
 
@@ -47,28 +62,30 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
   useEffect(() => {
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, status]);
+  }, [name, type, status]);
 
   // Sync local state back to URL so filters survive refresh / share links.
   useEffect(() => {
     if (!onQueryChange) return;
     const qp = new URLSearchParams();
     if (name) qp.set("name", name);
+    if (type) qp.set("type", type);
     if (status !== "all") qp.set("status", status);
     if (page > 1) qp.set("page", String(page));
     onQueryChange(qp);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, status, page]);
+  }, [name, type, status, page]);
 
   const query: RunListQuery = {
     name: name || undefined,
+    type: type || undefined,
     status: status === "all" ? undefined : status,
     limit: PAGE_SIZE,
     offset: (page - 1) * PAGE_SIZE,
   };
   const { data, loading, error, refresh } = useFetch(
     () => api.listRuns(query),
-    [name, status, page],
+    [name, type, status, page],
     5000,
   );
 
@@ -104,23 +121,34 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
           })}
         </div>
         <div class="h-5 w-px bg-base-content/20 mx-1" />
-        <div class="relative">
-          <input
-            type="text"
-            placeholder="Filter by name…"
-            class="input input-bordered input-sm w-56 pl-7"
-            value={name}
-            onInput={(e) => setName((e.target as HTMLInputElement).value)}
-          />
-          <span class="absolute left-2 top-1/2 -translate-y-1/2 text-base-content/40 text-sm">
-            ⌕
-          </span>
-        </div>
-        {(name || status !== "all") && (
+        <select
+          class="select select-bordered select-sm w-40"
+          value={name}
+          onChange={(e) => setName((e.target as HTMLSelectElement).value)}
+        >
+          <option value="">All names</option>
+          {namesAndTypes.names.map((n) => (
+            <option value={n}>{n}</option>
+          ))}
+        </select>
+        {namesAndTypes.types.length > 0 && (
+          <select
+            class="select select-bordered select-sm w-40"
+            value={type}
+            onChange={(e) => setType((e.target as HTMLSelectElement).value)}
+          >
+            <option value="">All types</option>
+            {namesAndTypes.types.map((t) => (
+              <option value={t}>{t}</option>
+            ))}
+          </select>
+        )}
+        {(name || type || status !== "all") && (
           <button
             class="btn btn-sm btn-ghost"
             onClick={() => {
               setName("");
+              setType("");
               setStatus("all");
             }}
           >

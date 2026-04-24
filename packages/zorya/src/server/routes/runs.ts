@@ -2,13 +2,15 @@
 // Runs route handlers — list, get, trigger, cancel, signal.
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage, WorkflowStatus } from "@promin/workflow";
+import type { WorkflowStorage, WorkflowStatus, Workflow } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 import { runToDto, runToSummaryDto } from "../serialize.ts";
 import type {
+  RunDto,
   RunListQuery,
   RunListResponse,
   SignalRequest,
+  StepDto,
   TriggerRunRequest,
   TriggerRunResponse,
 } from "../api-types.ts";
@@ -30,6 +32,8 @@ export interface RunRoutesDeps {
   storage: WorkflowStorage;
   /** Called to start a new run. Server doesn't know how to run workflows by name. */
   trigger?: RunTrigger;
+  /** Registry of workflow definitions, used to augment /api/runs/:id with planned steps. */
+  workflows?: Readonly<Record<string, Workflow<unknown, unknown>>>;
 }
 
 export function listRuns(deps: RunRoutesDeps) {
@@ -55,8 +59,49 @@ export function getRun(deps: RunRoutesDeps) {
     if (!id) return jsonError(400, "missing_id");
     const state = await deps.storage.loadWorkflow(id);
     if (!state) return jsonError(404, "not_found");
-    return json(200, runToDto(state));
+    const dto = runToDto(state);
+    const def = deps.workflows?.[state.workflowName];
+    if (def) {
+      dto.steps = mergePlannedSteps(dto, def);
+    }
+    return json(200, dto);
   };
+}
+
+/**
+ * Merge the workflow definition's static step list with the executed-step
+ * DTOs so the UI can render not-yet-executed steps in the timeline. Executed
+ * steps are kept as-is; definition steps missing from the executed set are
+ * appended with `isPlanned: true` + status "pending".
+ */
+function mergePlannedSteps(dto: RunDto, wf: Workflow<unknown, unknown>): StepDto[] {
+  const executedByName = new Map(dto.steps.map((s) => [s.stepName, s]));
+  const out: StepDto[] = [];
+  const seen = new Set<string>();
+
+  for (const defStep of wf.dag.steps) {
+    const executed = executedByName.get(defStep.name);
+    if (executed) {
+      out.push(executed);
+    } else {
+      out.push({
+        stepName: defStep.name,
+        run: dto.run,
+        status: "pending",
+        stepType: (defStep.kind as StepDto["stepType"]) ?? "single",
+        dependsOn: [...defStep.dependsOn],
+        attempt: 0,
+        isPlanned: true,
+      });
+    }
+    seen.add(defStep.name);
+  }
+
+  // Append any executed steps not in the definition (e.g. dynamic names).
+  for (const s of dto.steps) {
+    if (!seen.has(s.stepName)) out.push(s);
+  }
+  return out;
 }
 
 export function triggerRun(deps: RunRoutesDeps) {
@@ -101,12 +146,15 @@ export function cancelRun(deps: RunRoutesDeps) {
 
 export function listWorkflowNames(deps: RunRoutesDeps) {
   return async (): Promise<Response> => {
-    // Pull a wide page of recent workflows and distinct their names. Good
-    // enough for "populate a dropdown"; a real backend should expose a
-    // dedicated distinct-name query.
+    // Pull a wide page of recent workflows and distinct their names/types.
+    // Good enough for "populate a dropdown"; a real backend should expose
+    // dedicated distinct queries.
     const rows = await deps.storage.listWorkflows({ limit: 1000 });
     const names = Array.from(new Set(rows.map((r) => r.workflowName))).sort();
-    return json(200, { names });
+    const types = Array.from(
+      new Set(rows.map((r) => r.workflowType).filter((t): t is string => !!t)),
+    ).sort();
+    return json(200, { names, types });
   };
 }
 
