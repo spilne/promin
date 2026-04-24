@@ -17,7 +17,10 @@
 import {
   InMemorySchedulerStorage,
   createWorkflowRunner,
+  createSleepScanner,
+  completeSignal,
   computeNextRun,
+  isJournaledSuspendStorage,
   type Workflow,
   type DurableScheduleConfig,
 } from "@promin/workflow";
@@ -31,6 +34,9 @@ import { paymentWorkflow } from "./workflows/payment.ts";
 import { videoTranscodeWorkflow } from "./workflows/video-transcode.ts";
 import { onboardingWorkflow } from "./workflows/onboarding.ts";
 import { etlWorkflow } from "./workflows/etl.ts";
+import { orderFulfillmentWorkflow } from "./workflows/order-fulfillment.ts";
+import { batchProcessWorkflow } from "./workflows/batch-process.ts";
+import { approvalFlowWorkflow } from "./workflows/approval-flow.ts";
 
 // ---------------------------------------------------------------------------
 // Storage + runner
@@ -56,6 +62,9 @@ const workflowsByName: Record<string, Workflow<unknown, unknown>> = {
   "video-transcode": videoTranscodeWorkflow as unknown as Workflow<unknown, unknown>,
   onboarding: onboardingWorkflow as unknown as Workflow<unknown, unknown>,
   etl: etlWorkflow as unknown as Workflow<unknown, unknown>,
+  "order-fulfillment": orderFulfillmentWorkflow as unknown as Workflow<unknown, unknown>,
+  "batch-process": batchProcessWorkflow as unknown as Workflow<unknown, unknown>,
+  "approval-flow": approvalFlowWorkflow as unknown as Workflow<unknown, unknown>,
 };
 
 function inputFor(name: string): unknown {
@@ -76,6 +85,21 @@ function inputFor(name: string): unknown {
       return { email: `user-${Math.floor(Math.random() * 10_000)}@example.com` };
     case "etl":
       return { source: "events-prod", batch: Math.floor(Math.random() * 100) };
+    case "order-fulfillment":
+      return {
+        orderId: Math.floor(Math.random() * 10_000),
+        items: ["sku-a", "sku-b"],
+      };
+    case "batch-process":
+      return {
+        batchId: `batch-${Math.floor(Math.random() * 10_000)}`,
+        itemCount: 6 + Math.floor(Math.random() * 8),
+      };
+    case "approval-flow":
+      return {
+        requestId: Math.floor(Math.random() * 10_000),
+        requester: `user-${Math.floor(Math.random() * 100)}`,
+      };
     default:
       return {};
   }
@@ -156,6 +180,27 @@ async function seedSchedules() {
     metadata: { workflowName: "etl" },
   });
   await schedulerStorage.upsertSchedule({
+    id: "fulfillment-every-40s",
+    name: "Order fulfillment saga every 40s",
+    intervalMs: 40_000,
+    enabled: true,
+    metadata: { workflowName: "order-fulfillment" },
+  });
+  await schedulerStorage.upsertSchedule({
+    id: "batch-every-50s",
+    name: "Batch process every 50s",
+    intervalMs: 50_000,
+    enabled: true,
+    metadata: { workflowName: "batch-process" },
+  });
+  await schedulerStorage.upsertSchedule({
+    id: "approvals-every-75s",
+    name: "Approval flow every 75s",
+    intervalMs: 75_000,
+    enabled: true,
+    metadata: { workflowName: "approval-flow" },
+  });
+  await schedulerStorage.upsertSchedule({
     id: "weekly-payment-audit",
     name: "Weekly payment audit (paused)",
     cron: "0 2 * * 1",
@@ -163,6 +208,61 @@ async function seedSchedules() {
     enabled: false,
     metadata: { workflowName: "payment", input: { mode: "audit" } },
   });
+}
+
+/**
+ * Auto-delivers the "approval" signal to any approval-flow run that's been
+ * waiting for one. Runs every 5s. Half the approvals are approved, half
+ * rejected — so the dashboard shows both terminal outcomes.
+ */
+async function startApprovalAutoSignaler(): Promise<void> {
+  const delivered = new Set<string>();
+  setInterval(async () => {
+    const runs = await storage.listWorkflows({
+      name: "approval-flow",
+      status: "suspended",
+      limit: 50,
+    });
+    for (const r of runs) {
+      if (delivered.has(r.workflowId)) continue;
+      // Only deliver to runs whose review step is waiting for a signal.
+      // Engine currently stores "waiting_signal" (bug: should be
+      // "waiting_for_signal" per the type declaration) — check both so
+      // this demo keeps working after the upstream fix.
+      const waiting = Object.values(r.steps).some(
+        (s) =>
+          s.stepName === "review" &&
+          (s.status === "waiting_for_signal" || (s.status as string) === "waiting_signal"),
+      );
+      if (!waiting) continue;
+      const approved = Math.random() < 0.5;
+      const payload = { approved, by: `auto-signaler` };
+      // Three steps: store for the Signals tab, complete the pending journal
+      // entry, and re-run the workflow so the journaled step picks up the
+      // completed entry and continues. The sleep scanner only handles
+      // sleep resumption — signal completion needs its own nudge.
+      await storage.deliverSignal(r.workflowId, "approval", payload);
+      if (isJournaledSuspendStorage(storage)) {
+        await completeSignal({
+          storage,
+          workflowId: r.workflowId,
+          stepName: "review",
+          signalName: "approval",
+          value: payload,
+        });
+      }
+      delivered.add(r.workflowId);
+      runner
+        .run({
+          workflow: workflowsByName["approval-flow"]!,
+          workflowId: r.workflowId,
+          input: r.input,
+        })
+        .catch(() => {
+          // Suspended errors are expected; failures are recorded in storage.
+        });
+    }
+  }, 5_000);
 }
 
 /**
@@ -238,6 +338,19 @@ function computeNextScheduleRun(s: DurableScheduleConfig, from: Date): Date | nu
 
 await seedSchedules();
 void startScheduleFirer();
+void startApprovalAutoSignaler();
+
+// Wake suspended workflows whose sleep has expired or whose signal was
+// delivered. Without this, runs that entered ctx.sleep / ctx.signal never
+// resume after their wake condition — they just sit in "suspended" forever.
+const sleepScanner = createSleepScanner({
+  storage,
+  runner,
+  scanIntervalMs: 2_000,
+  resolveWorkflow: (name) => workflowsByName[name],
+});
+void sleepScanner.start();
+
 await seedInitialRuns();
 
 const uiDir = process.env.ZORYA_UI_DIR ?? path.join(import.meta.dir, "..", "dist", "public");
