@@ -28,6 +28,9 @@ import { ZoryaServer } from "../src/index.ts";
 import path from "node:path";
 import { orderWorkflow } from "./workflows/order.ts";
 import { paymentWorkflow } from "./workflows/payment.ts";
+import { videoTranscodeWorkflow } from "./workflows/video-transcode.ts";
+import { onboardingWorkflow } from "./workflows/onboarding.ts";
+import { etlWorkflow } from "./workflows/etl.ts";
 
 // ---------------------------------------------------------------------------
 // Storage + runner
@@ -50,7 +53,33 @@ const runner = createWorkflowRunner({ storage });
 const workflowsByName: Record<string, Workflow<unknown, unknown>> = {
   order: orderWorkflow as unknown as Workflow<unknown, unknown>,
   payment: paymentWorkflow as unknown as Workflow<unknown, unknown>,
+  "video-transcode": videoTranscodeWorkflow as unknown as Workflow<unknown, unknown>,
+  onboarding: onboardingWorkflow as unknown as Workflow<unknown, unknown>,
+  etl: etlWorkflow as unknown as Workflow<unknown, unknown>,
 };
+
+function inputFor(name: string): unknown {
+  switch (name) {
+    case "order":
+      return {
+        orderId: Math.floor(Math.random() * 10_000),
+        customer: `cust-${Math.floor(Math.random() * 100)}`,
+      };
+    case "payment":
+      return { amount: Math.floor(Math.random() * 5_000) + 100, currency: "USD" };
+    case "video-transcode":
+      return {
+        videoId: `vid-${Math.floor(Math.random() * 1_000_000)}`,
+        url: "https://example.com/video.mp4",
+      };
+    case "onboarding":
+      return { email: `user-${Math.floor(Math.random() * 10_000)}@example.com` };
+    case "etl":
+      return { source: "events-prod", batch: Math.floor(Math.random() * 100) };
+    default:
+      return {};
+  }
+}
 
 let idCounter = 0;
 function nextId(name: string): string {
@@ -80,15 +109,8 @@ async function triggerRun(
 // its runs (no hidden random loop).
 
 async function seedInitialRuns() {
-  for (let i = 0; i < 3; i++) {
-    await triggerRun("order", {
-      orderId: Math.floor(Math.random() * 10_000),
-      customer: `cust-${Math.floor(Math.random() * 100)}`,
-    });
-    await triggerRun("payment", {
-      amount: Math.floor(Math.random() * 5_000) + 100,
-      currency: "USD",
-    });
+  for (const name of Object.keys(workflowsByName)) {
+    await triggerRun(name, inputFor(name));
   }
 }
 
@@ -97,19 +119,11 @@ async function seedInitialRuns() {
 
 async function seedSchedules() {
   await schedulerStorage.upsertSchedule({
-    id: "orders-every-minute",
-    name: "Orders every minute",
-    cron: "* * * * *",
-    timezone: "UTC",
+    id: "orders-every-15s",
+    name: "Orders every 15s",
+    intervalMs: 15_000,
     enabled: true,
-    metadata: { workflowName: "order", input: { source: "scheduled-minute" } },
-  });
-  await schedulerStorage.upsertSchedule({
-    id: "orders-every-10s",
-    name: "Orders every 10s",
-    intervalMs: 10_000,
-    enabled: true,
-    metadata: { workflowName: "order", input: { source: "fast-schedule" } },
+    metadata: { workflowName: "order" },
   });
   await schedulerStorage.upsertSchedule({
     id: "payments-every-30s",
@@ -117,15 +131,29 @@ async function seedSchedules() {
     intervalMs: 30_000,
     enabled: true,
     jitterMs: 2_000,
-    metadata: { workflowName: "payment", input: { mode: "scheduled" } },
+    metadata: { workflowName: "payment" },
   });
   await schedulerStorage.upsertSchedule({
-    id: "daily-orders-batch",
-    name: "Daily orders batch (9am local)",
-    cron: "0 9 * * *",
-    timezone: "America/Edmonton",
+    id: "video-transcodes-every-45s",
+    name: "Video transcodes every 45s",
+    intervalMs: 45_000,
     enabled: true,
-    metadata: { workflowName: "order", input: { source: "daily-batch" } },
+    metadata: { workflowName: "video-transcode" },
+  });
+  await schedulerStorage.upsertSchedule({
+    id: "onboarding-every-60s",
+    name: "Onboarding every 60s",
+    intervalMs: 60_000,
+    enabled: true,
+    metadata: { workflowName: "onboarding" },
+  });
+  await schedulerStorage.upsertSchedule({
+    id: "etl-hourly",
+    name: "ETL hourly",
+    cron: "0 * * * *",
+    timezone: "UTC",
+    enabled: true,
+    metadata: { workflowName: "etl" },
   });
   await schedulerStorage.upsertSchedule({
     id: "weekly-payment-audit",
@@ -166,8 +194,11 @@ async function startScheduleFirer() {
       }
       if (next && next.getTime() <= now.getTime()) {
         const wfName = (s.metadata?.["workflowName"] as string | undefined) ?? undefined;
-        const input = (s.metadata?.["input"] as unknown) ?? {};
         if (wfName && workflowsByName[wfName]) {
+          // Prefer explicit metadata.input, otherwise synthesise one using the
+          // same generator as ad-hoc runs.
+          const explicit = s.metadata?.["input"];
+          const input = explicit === undefined ? inputFor(wfName) : explicit;
           await triggerRun(wfName, input);
         }
         await schedulerStorage.recordFire(s.id, now);
