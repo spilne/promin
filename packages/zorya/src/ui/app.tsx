@@ -1,5 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
-import { Navbar } from "./components/layout/navbar.tsx";
+import { Sidebar } from "./components/layout/sidebar.tsx";
 import { RunList } from "./components/runs/run-list.tsx";
 import { RunDetail } from "./components/runs/run-detail.tsx";
 import { WorkerGrid } from "./components/workers/worker-grid.tsx";
@@ -18,9 +18,9 @@ export function App() {
   };
 
   return (
-    <div>
-      <Navbar route={route} onNavigate={navigate} />
-      {renderRoute(route, navigate)}
+    <div class="flex min-h-screen">
+      <Sidebar route={route} onNavigate={navigate} />
+      <main class="flex-1 min-w-0">{renderRoute(route, navigate)}</main>
     </div>
   );
 }

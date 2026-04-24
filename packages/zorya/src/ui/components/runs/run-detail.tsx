@@ -1,20 +1,23 @@
-import { useCallback, useEffect, useState } from "preact/hooks";
+import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 import { api } from "../../api/client.ts";
 import { useSse } from "../../hooks/use-sse.ts";
 import type { RunDto, RunEvent, StepDto } from "../../../server/api-types.ts";
-import { StatusBadge } from "../ui/status-badge.tsx";
+import { StatusBadge, StepStatusBadge } from "../ui/status-badge.tsx";
 import { StepTimeline } from "./step-timeline.tsx";
-import { StepList } from "./step-list.tsx";
-import { formatDuration, formatRelative } from "../../lib/format.ts";
+import { formatDuration, formatRelative, STEP_STATUS_VISUAL } from "../../lib/format.ts";
 
 interface RunDetailProps {
   id: string;
   onBack: () => void;
 }
 
+type RightTab = "overview" | "step" | "payload";
+
 export function RunDetail({ id, onBack }: RunDetailProps) {
   const [run, setRun] = useState<RunDto | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
+  const [selectedStep, setSelectedStep] = useState<string | undefined>(undefined);
+  const [tab, setTab] = useState<RightTab>("overview");
 
   useEffect(() => {
     let cancelled = false;
@@ -30,6 +33,11 @@ export function RunDetail({ id, onBack }: RunDetailProps) {
   useSse<RunEvent>(api.eventsUrl(id), (ev) => {
     setRun((prev) => applyEvent(prev, ev));
   });
+
+  // When a step is selected, flip the right pane to the Step tab.
+  useEffect(() => {
+    if (selectedStep) setTab("step");
+  }, [selectedStep]);
 
   const cancel = useCallback(async () => {
     if (!confirm("Cancel this run?")) return;
@@ -62,6 +70,11 @@ export function RunDetail({ id, onBack }: RunDetailProps) {
     }
   }, [id]);
 
+  const selected = useMemo(() => {
+    if (!run || !selectedStep) return undefined;
+    return run.steps.find((s) => s.stepName === selectedStep);
+  }, [run, selectedStep]);
+
   if (error) {
     return (
       <div class="p-4 max-w-7xl mx-auto">
@@ -77,118 +90,200 @@ export function RunDetail({ id, onBack }: RunDetailProps) {
     ? new Date(run.completedAt).getTime() - new Date(run.createdAt).getTime()
     : Date.now() - new Date(run.createdAt).getTime();
 
+  const terminal = run.status === "completed" || run.status === "failed";
+
   return (
-    <div class="p-4 max-w-7xl mx-auto space-y-4">
+    <div class="anim-page p-4 max-w-[1400px] mx-auto space-y-4">
+      {/* Header */}
       <div class="flex items-center gap-3">
         <button class="btn btn-sm btn-ghost" onClick={onBack}>
           ← Runs
         </button>
         <div class="text-base-content/40">/</div>
         <div class="font-semibold">{run.workflowName}</div>
-        <div class="font-mono text-xs text-base-content/60">{run.workflowId}</div>
+        <div class="font-mono text-sm text-base-content/60">{run.workflowId}</div>
         <StatusBadge status={run.status} size="md" />
         <div class="text-sm text-base-content/60">{formatDuration(totalMs)} total</div>
         <div class="flex-1" />
         <button class="btn btn-sm btn-outline" onClick={signal}>
           Send signal
         </button>
-        {run.status !== "completed" && run.status !== "failed" && (
+        {!terminal && (
           <button class="btn btn-sm btn-error btn-outline" onClick={cancel}>
             Cancel
           </button>
         )}
       </div>
 
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div class="lg:col-span-2">
-          <StepTimeline run={run} />
-        </div>
-        <div class="space-y-4">
-          <MetaCard run={run} />
-          <InputOutputCard run={run} />
-        </div>
-      </div>
+      {/* Main two-column layout */}
+      <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px] gap-4">
+        <StepTimeline run={run} selectedStep={selectedStep} onSelectStep={setSelectedStep} />
 
-      <StepList steps={run.steps} />
-    </div>
-  );
-}
-
-function MetaCard({ run }: { run: RunDto }) {
-  return (
-    <div class="card bg-base-100 shadow">
-      <div class="card-body p-4">
-        <h3 class="card-title text-base">Details</h3>
-        <dl class="text-sm grid grid-cols-[auto,1fr] gap-x-3 gap-y-1">
-          <dt class="text-base-content/60">ID</dt>
-          <dd class="font-mono text-xs break-all">{run.workflowId}</dd>
-          <dt class="text-base-content/60">Name</dt>
-          <dd>{run.workflowName}</dd>
-          {run.workflowType && (
-            <>
-              <dt class="text-base-content/60">Type</dt>
-              <dd>{run.workflowType}</dd>
-            </>
-          )}
-          {run.namespace && (
-            <>
-              <dt class="text-base-content/60">Namespace</dt>
-              <dd>{run.namespace}</dd>
-            </>
-          )}
-          <dt class="text-base-content/60">Run</dt>
-          <dd>#{run.run}</dd>
-          <dt class="text-base-content/60">Created</dt>
-          <dd>{formatRelative(run.createdAt)}</dd>
-          {run.startedAt && (
-            <>
-              <dt class="text-base-content/60">Started</dt>
-              <dd>{formatRelative(run.startedAt)}</dd>
-            </>
-          )}
-          {run.completedAt && (
-            <>
-              <dt class="text-base-content/60">Completed</dt>
-              <dd>{formatRelative(run.completedAt)}</dd>
-            </>
-          )}
-        </dl>
+        <div class="card bg-base-100 shadow self-start">
+          <div class="card-body p-0">
+            <div class="tabs tabs-lifted px-2 pt-2">
+              <a
+                class={`tab tab-sm ${tab === "overview" ? "tab-active" : ""}`}
+                onClick={() => setTab("overview")}
+              >
+                Overview
+              </a>
+              <a
+                class={`tab tab-sm ${tab === "step" ? "tab-active" : ""} ${!selected ? "opacity-40" : ""}`}
+                onClick={() => selected && setTab("step")}
+              >
+                Step
+              </a>
+              <a
+                class={`tab tab-sm ${tab === "payload" ? "tab-active" : ""}`}
+                onClick={() => setTab("payload")}
+              >
+                Payload
+              </a>
+            </div>
+            <div class="p-4">
+              {tab === "overview" && <OverviewTab run={run} />}
+              {tab === "step" && selected && <StepTab step={selected} />}
+              {tab === "step" && !selected && (
+                <div class="text-base-content/50 text-sm py-6 text-center">
+                  Click a step in the timeline to inspect
+                </div>
+              )}
+              {tab === "payload" && <PayloadTab run={run} />}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
 }
 
-function InputOutputCard({ run }: { run: RunDto }) {
+function OverviewTab({ run }: { run: RunDto }) {
   return (
-    <div class="card bg-base-100 shadow">
-      <div class="card-body p-4 space-y-2">
+    <dl class="text-sm grid grid-cols-[auto,1fr] gap-x-3 gap-y-1">
+      <dt class="text-base-content/60">ID</dt>
+      <dd class="font-mono text-sm break-all">{run.workflowId}</dd>
+      <dt class="text-base-content/60">Name</dt>
+      <dd>{run.workflowName}</dd>
+      {run.workflowType && (
+        <>
+          <dt class="text-base-content/60">Type</dt>
+          <dd>{run.workflowType}</dd>
+        </>
+      )}
+      {run.namespace && (
+        <>
+          <dt class="text-base-content/60">Namespace</dt>
+          <dd>{run.namespace}</dd>
+        </>
+      )}
+      <dt class="text-base-content/60">Run</dt>
+      <dd>#{run.run}</dd>
+      <dt class="text-base-content/60">Created</dt>
+      <dd>{formatRelative(run.createdAt)}</dd>
+      {run.startedAt && (
+        <>
+          <dt class="text-base-content/60">Started</dt>
+          <dd>{formatRelative(run.startedAt)}</dd>
+        </>
+      )}
+      {run.completedAt && (
+        <>
+          <dt class="text-base-content/60">Completed</dt>
+          <dd>{formatRelative(run.completedAt)}</dd>
+        </>
+      )}
+    </dl>
+  );
+}
+
+function StepTab({ step }: { step: StepDto }) {
+  const v = STEP_STATUS_VISUAL[step.status];
+  return (
+    <div class="space-y-3 text-sm">
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="font-mono text-sm bg-base-200 px-1.5 py-0.5 rounded">{step.stepName}</span>
+        <StepStatusBadge status={step.status} />
+      </div>
+      <dl class="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-sm">
+        <dt class="text-base-content/60">Type</dt>
+        <dd>{step.stepType}</dd>
+        <dt class="text-base-content/60">Status</dt>
+        <dd class={v.textClass}>{v.label}</dd>
+        <dt class="text-base-content/60">Attempt</dt>
+        <dd>{step.attempt}</dd>
+        <dt class="text-base-content/60">Duration</dt>
+        <dd>{formatDuration(step.durationMs)}</dd>
+        {step.startedAt && (
+          <>
+            <dt class="text-base-content/60">Started</dt>
+            <dd>{formatRelative(step.startedAt)}</dd>
+          </>
+        )}
+        {step.completedAt && (
+          <>
+            <dt class="text-base-content/60">Completed</dt>
+            <dd>{formatRelative(step.completedAt)}</dd>
+          </>
+        )}
+        {step.dependsOn.length > 0 && (
+          <>
+            <dt class="text-base-content/60">Depends on</dt>
+            <dd class="font-mono text-sm">{step.dependsOn.join(", ")}</dd>
+          </>
+        )}
+      </dl>
+      {step.result !== undefined && step.result !== null && (
         <div>
-          <h4 class="text-xs font-semibold text-base-content/60 uppercase tracking-wide mb-1">
-            Input
+          <h4 class="text-xs font-semibold text-base-content/50 uppercase tracking-wide mb-1">
+            Result
           </h4>
-          <pre class="bg-base-200 p-2 rounded text-xs overflow-x-auto">
-            {JSON.stringify(run.input, null, 2)}
+          <pre class="bg-base-200 p-2 rounded text-sm overflow-x-auto max-h-60">
+            {JSON.stringify(step.result, null, 2)}
           </pre>
         </div>
-        {run.result !== undefined && run.result !== null && (
-          <div>
-            <h4 class="text-xs font-semibold text-base-content/60 uppercase tracking-wide mb-1">
-              Result
-            </h4>
-            <pre class="bg-base-200 p-2 rounded text-xs overflow-x-auto">
-              {JSON.stringify(run.result, null, 2)}
-            </pre>
-          </div>
-        )}
-        {run.error && (
-          <div>
-            <h4 class="text-xs font-semibold text-error uppercase tracking-wide mb-1">Error</h4>
-            <pre class="bg-error/10 p-2 rounded text-xs overflow-x-auto text-error">
-              {run.error}
-            </pre>
-          </div>
-        )}
+      )}
+      {step.error && (
+        <div>
+          <h4 class="text-xs font-semibold text-error uppercase tracking-wide mb-1">Error</h4>
+          <pre class="bg-error/10 p-2 rounded text-sm overflow-x-auto text-error max-h-60">
+            {step.error}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PayloadTab({ run }: { run: RunDto }) {
+  return (
+    <div class="space-y-3">
+      <div>
+        <h4 class="text-xs font-semibold text-base-content/50 uppercase tracking-wide mb-1">
+          Input
+        </h4>
+        <pre class="bg-base-200 p-2 rounded text-sm overflow-x-auto max-h-60">
+          {JSON.stringify(run.input, null, 2)}
+        </pre>
       </div>
+      {run.result !== undefined && run.result !== null && (
+        <div>
+          <h4 class="text-xs font-semibold text-base-content/50 uppercase tracking-wide mb-1">
+            Result
+          </h4>
+          <pre class="bg-base-200 p-2 rounded text-sm overflow-x-auto max-h-60">
+            {JSON.stringify(run.result, null, 2)}
+          </pre>
+        </div>
+      )}
+      {run.error && (
+        <div>
+          <h4 class="text-xs font-semibold text-error uppercase tracking-wide mb-1">Error</h4>
+          <pre class="bg-error/10 p-2 rounded text-sm overflow-x-auto text-error max-h-60">
+            {run.error}
+          </pre>
+        </div>
+      )}
     </div>
   );
 }

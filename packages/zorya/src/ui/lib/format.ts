@@ -1,4 +1,4 @@
-import type { WorkflowStatus, StepStatus } from "@promin/workflow";
+import type { WorkflowStatus, StepStatus, StepType } from "@promin/workflow";
 
 export function formatDuration(ms?: number): string {
   if (ms === undefined || ms === null) return "—";
@@ -21,58 +21,140 @@ export function formatRelative(iso?: string): string {
   return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
-export const statusColor: Record<WorkflowStatus, string> = {
-  pending: "badge-ghost",
-  running: "badge-info",
-  suspended: "badge-warning",
-  completed: "badge-success",
-  failed: "badge-error",
-  compensating: "badge-warning",
-};
+// ---------------------------------------------------------------------------
+// Status / step visual registries — single source of truth.
+//
+// Every component that shows a status should read from here instead of
+// hard-coding colours or icons.
+// ---------------------------------------------------------------------------
 
-export const stepStatusColor: Record<StepStatus, string> = {
-  pending: "badge-ghost",
-  running: "badge-info",
-  completed: "badge-success",
-  failed: "badge-error",
-  skipped: "badge-ghost",
-  sleeping: "badge-warning",
-  waiting_for_signal: "badge-warning",
-  compensated: "badge-success",
-  compensation_failed: "badge-error",
-};
-
-export const stepBarColor: Record<StepStatus, string> = {
-  pending: "bg-base-content/20",
-  running: "bg-info",
-  completed: "bg-success",
-  failed: "bg-error",
-  skipped: "bg-base-content/20",
-  sleeping: "bg-warning",
-  waiting_for_signal: "bg-warning",
-  compensated: "bg-success",
-  compensation_failed: "bg-error",
-};
-
-export function statusIcon(status: WorkflowStatus | StepStatus): string {
-  switch (status) {
-    case "completed":
-    case "compensated":
-      return "✓";
-    case "failed":
-    case "compensation_failed":
-      return "✕";
-    case "running":
-      return "↻";
-    case "suspended":
-    case "sleeping":
-    case "waiting_for_signal":
-      return "⏸";
-    case "pending":
-      return "·";
-    case "skipped":
-      return "↷";
-    default:
-      return "·";
-  }
+export interface StatusVisual {
+  /** Short glyph shown inside badges or next to rows. */
+  icon: string;
+  /** DaisyUI badge class. */
+  badgeClass: string;
+  /** Tailwind bg class for Gantt bar / dots. */
+  barClass: string;
+  /** Tailwind text class for inline text. */
+  textClass: string;
+  /** Human-readable label for chips/filters. */
+  label: string;
 }
+
+export const WORKFLOW_STATUS_VISUAL: Record<WorkflowStatus, StatusVisual> = {
+  pending: {
+    icon: "·",
+    badgeClass: "badge-ghost",
+    barClass: "bg-base-content/20",
+    textClass: "text-base-content/60",
+    label: "Queued",
+  },
+  running: {
+    icon: "↻",
+    badgeClass: "badge-info",
+    barClass: "bg-info",
+    textClass: "text-info",
+    label: "Executing",
+  },
+  suspended: {
+    icon: "⏸",
+    badgeClass: "badge-warning",
+    barClass: "bg-warning",
+    textClass: "text-warning",
+    label: "Suspended",
+  },
+  completed: {
+    icon: "✓",
+    badgeClass: "badge-success",
+    barClass: "bg-success",
+    textClass: "text-success",
+    label: "Completed",
+  },
+  failed: {
+    icon: "✕",
+    badgeClass: "badge-error",
+    barClass: "bg-error",
+    textClass: "text-error",
+    label: "Failed",
+  },
+  compensating: {
+    icon: "↺",
+    badgeClass: "badge-warning",
+    barClass: "bg-warning",
+    textClass: "text-warning",
+    label: "Compensating",
+  },
+};
+
+export const STEP_STATUS_VISUAL: Record<StepStatus, StatusVisual> = {
+  pending: {
+    icon: "·",
+    badgeClass: "badge-ghost",
+    barClass: "bg-base-content/20",
+    textClass: "text-base-content/60",
+    label: "Queued",
+  },
+  running: {
+    icon: "↻",
+    badgeClass: "badge-info",
+    barClass: "bg-info",
+    textClass: "text-info",
+    label: "Running",
+  },
+  completed: {
+    icon: "✓",
+    badgeClass: "badge-success",
+    barClass: "bg-success",
+    textClass: "text-success",
+    label: "Completed",
+  },
+  failed: {
+    icon: "✕",
+    badgeClass: "badge-error",
+    barClass: "bg-error",
+    textClass: "text-error",
+    label: "Failed",
+  },
+  skipped: {
+    icon: "↷",
+    badgeClass: "badge-ghost",
+    barClass: "bg-base-content/20",
+    textClass: "text-base-content/50",
+    label: "Skipped",
+  },
+  sleeping: {
+    icon: "⏸",
+    badgeClass: "badge-warning",
+    barClass: "bg-warning",
+    textClass: "text-warning",
+    label: "Sleeping",
+  },
+  waiting_for_signal: {
+    icon: "⏳",
+    badgeClass: "badge-warning",
+    barClass: "bg-warning",
+    textClass: "text-warning",
+    label: "Waiting",
+  },
+  compensated: {
+    icon: "↺",
+    badgeClass: "badge-success",
+    barClass: "bg-success",
+    textClass: "text-success",
+    label: "Compensated",
+  },
+  compensation_failed: {
+    icon: "✕",
+    badgeClass: "badge-error",
+    barClass: "bg-error",
+    textClass: "text-error",
+    label: "Comp. failed",
+  },
+};
+
+export const STEP_TYPE_ICON: Record<StepType, string> = {
+  single: "▣",
+  map: "⋮⋮",
+  sleep: "⏱",
+  signal: "⚑",
+};

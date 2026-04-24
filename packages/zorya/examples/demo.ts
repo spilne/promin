@@ -40,6 +40,7 @@ async function seed() {
     durationMs: 80,
     startedAt: new Date(start.getTime() + 400),
   });
+  await storage.completeWorkflow("wf-demo-1", { ok: true, orderId: 42 });
 
   // Running workflow.
   await storage.createWorkflow({

@@ -21,7 +21,7 @@ export function WorkerGrid() {
   const offline = workers.length - online;
 
   return (
-    <div class="p-4 max-w-7xl mx-auto space-y-4">
+    <div class="anim-page p-4 max-w-7xl mx-auto space-y-4">
       <div class="flex items-center gap-2">
         <h2 class="text-xl font-semibold">Workers</h2>
         <span class="text-base-content/60">
@@ -56,7 +56,7 @@ function WorkerCard({ worker }: { worker: WorkerDto }) {
           <div class="flex-1" />
           {worker.queue && <span class="badge badge-ghost badge-sm">{worker.queue}</span>}
         </div>
-        <dl class="text-xs text-base-content/70 mt-2 grid grid-cols-2 gap-y-1">
+        <dl class="text-sm text-base-content/70 mt-2 grid grid-cols-2 gap-y-1">
           <dt>Active</dt>
           <dd class="font-mono text-right">{worker.activeTasks}</dd>
           <dt>Done today</dt>

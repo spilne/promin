@@ -25,20 +25,20 @@ export function StatsBar() {
     <div class="stats stats-horizontal bg-base-300 shadow w-full">
       {stats.map((s) => (
         <div class="stat">
-          <div class="stat-title text-xs">{s.label}</div>
+          <div class="stat-title text-sm">{s.label}</div>
           <div class={`stat-value text-2xl ${s.color}`}>{s.value}</div>
         </div>
       ))}
       <div class="stat">
-        <div class="stat-title text-xs">Avg</div>
+        <div class="stat-title text-sm">Avg</div>
         <div class="stat-value text-2xl">{formatDuration(data.avgDurationMs)}</div>
       </div>
       <div class="stat">
-        <div class="stat-title text-xs">p95</div>
+        <div class="stat-title text-sm">p95</div>
         <div class="stat-value text-2xl">{formatDuration(data.p95DurationMs)}</div>
       </div>
       <div class="stat">
-        <div class="stat-title text-xs">p99</div>
+        <div class="stat-title text-sm">p99</div>
         <div class="stat-value text-2xl">{formatDuration(data.p99DurationMs)}</div>
       </div>
     </div>
