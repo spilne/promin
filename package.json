@@ -24,6 +24,8 @@
     "bench:all": "bun run bench:stream && bun run bench:pipeline && bun run bench:dataframe && bun run bench:topology && bun run bench:http && bun run bench:workflow && bun run bench",
     "zorya": "bun --conditions=@promin/source run packages/zorya/scripts/dev.ts",
     "zorya:build": "bun --conditions=@promin/source run packages/zorya/scripts/build-ui.ts",
+    "zorya:server": "bun --conditions=@promin/source run packages/zorya/scripts/dev-server.ts",
+    "zorya:worker": "bun --conditions=@promin/source run packages/zorya/examples/split/worker.ts",
     "docs": "bun run --filter @promin/docs build",
     "docs:dev": "bun run --filter @promin/docs dev",
     "docs:serve": "bunx serve .target/docs -p 4002",
