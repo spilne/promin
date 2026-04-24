@@ -2,12 +2,29 @@ import { useFetch } from "../../hooks/use-fetch.ts";
 import { api } from "../../api/client.ts";
 import type { WorkerDto } from "../../../server/api-types.ts";
 import { formatRelative } from "../../lib/format.ts";
+import { Skeleton } from "../ui/skeleton.tsx";
 
 export function WorkerGrid() {
   const { data, loading, error } = useFetch(() => api.listWorkers(), [], 5000);
 
   if (loading && !data) {
-    return <div class="p-4 max-w-7xl mx-auto text-base-content/60">Loading workers…</div>;
+    return (
+      <div class="anim-page p-4 max-w-7xl mx-auto space-y-4">
+        <h2 class="text-xl font-semibold">Workers</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          {Array.from({ length: 3 }).map(() => (
+            <div class="card bg-base-100 shadow">
+              <div class="card-body p-4 space-y-2">
+                <Skeleton w="w-32" h="h-4" />
+                <Skeleton w="w-24" h="h-3" />
+                <Skeleton w="w-full" h="h-3" />
+                <Skeleton w="w-full" h="h-3" />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
   }
   if (error) {
     return (

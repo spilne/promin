@@ -46,8 +46,19 @@ function renderRoute(route: string, navigate: (p: string) => void) {
   }
   return (
     <RunList
-      initialName={params.get("name") ?? ""}
+      queryParams={params}
       onOpen={(id) => navigate(`/runs/${encodeURIComponent(id)}`)}
+      onQueryChange={(qp) => {
+        // Replace hash without adding a history entry so rapid typing doesn't
+        // pollute back-button history.
+        const qs = qp.toString();
+        const next = qs ? `/?${qs}` : "/";
+        const current = locationToRoute();
+        if (next === current) return;
+        history.replaceState(null, "", `#${next}`);
+        // replaceState doesn't fire hashchange, so notify listeners manually.
+        window.dispatchEvent(new HashChangeEvent("hashchange"));
+      }}
     />
   );
 }

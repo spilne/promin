@@ -4,6 +4,7 @@ import { api } from "../../api/client.ts";
 import type { ScheduleDto } from "../../../server/routes/schedules.ts";
 import { formatDuration, formatRelative } from "../../lib/format.ts";
 import { CreateScheduleModal } from "./create-schedule-modal.tsx";
+import { SkeletonRows } from "../ui/skeleton.tsx";
 
 interface ScheduleListProps {
   onNavigate: (path: string) => void;
@@ -11,11 +12,37 @@ interface ScheduleListProps {
 
 export function ScheduleList({ onNavigate }: ScheduleListProps) {
   const [showCreate, setShowCreate] = useState(false);
+  const [editing, setEditing] = useState<ScheduleDto | undefined>(undefined);
   const { data, loading, error, refresh } = useFetch(() => api.listSchedules(), [], 10_000);
 
   if (loading && !data) {
     return (
-      <div class="anim-page p-4 max-w-7xl mx-auto text-base-content/60">Loading schedules…</div>
+      <div class="anim-page p-4 max-w-7xl mx-auto space-y-4">
+        <div>
+          <h2 class="text-xl font-semibold">Schedules</h2>
+          <p class="text-xs text-base-content/50">Loading…</p>
+        </div>
+        <div class="card bg-base-100 shadow overflow-hidden">
+          <table class="table">
+            <thead>
+              <tr class="bg-base-200 text-xs uppercase tracking-wider text-base-content/50">
+                <th>ID</th>
+                <th>Name</th>
+                <th>Workflow</th>
+                <th>Trigger</th>
+                <th>TZ</th>
+                <th>Last fire</th>
+                <th class="text-right">Ticks</th>
+                <th>Status</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              <SkeletonRows rows={6} cols={9} />
+            </tbody>
+          </table>
+        </div>
+      </div>
     );
   }
   if (error) {
@@ -142,6 +169,13 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
                         <div class="flex gap-1 justify-end">
                           <button
                             class="btn btn-sm btn-ghost"
+                            onClick={() => setEditing(s)}
+                            title="Edit"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            class="btn btn-sm btn-ghost"
                             onClick={() => togglePause(s)}
                             title={s.enabled ? "Pause" : "Resume"}
                           >
@@ -170,6 +204,16 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
           onClose={() => setShowCreate(false)}
           onCreated={() => {
             setShowCreate(false);
+            refresh();
+          }}
+        />
+      )}
+      {editing && (
+        <CreateScheduleModal
+          editing={editing}
+          onClose={() => setEditing(undefined)}
+          onCreated={() => {
+            setEditing(undefined);
             refresh();
           }}
         />

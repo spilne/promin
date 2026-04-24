@@ -1,15 +1,32 @@
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api } from "../../api/client.ts";
 import { formatDuration } from "../../lib/format.ts";
+import { Skeleton } from "../ui/skeleton.tsx";
+
+const SKELETON_TITLES = [
+  "Total",
+  "Completed",
+  "Running",
+  "Failed",
+  "Suspended",
+  "Avg",
+  "p95",
+  "p99",
+];
 
 export function StatsBar() {
   const { data } = useFetch(() => api.getMetrics(), [], 5000);
   if (!data) {
     return (
       <div class="stats stats-horizontal bg-base-300 shadow w-full">
-        <div class="stat">
-          <div class="stat-title">Loading…</div>
-        </div>
+        {SKELETON_TITLES.map((t) => (
+          <div class="stat">
+            <div class="stat-title text-sm">{t}</div>
+            <div class="pt-1">
+              <Skeleton w="w-14" h="h-7" />
+            </div>
+          </div>
+        ))}
       </div>
     );
   }

@@ -3,6 +3,7 @@ import { api } from "../../api/client.ts";
 import { useSse } from "../../hooks/use-sse.ts";
 import type { RunDto, RunEvent, StepDto } from "../../../server/api-types.ts";
 import { StatusBadge, StepStatusBadge } from "../ui/status-badge.tsx";
+import { Skeleton } from "../ui/skeleton.tsx";
 import { StepTimeline } from "./step-timeline.tsx";
 import { formatDuration, formatRelative, STEP_STATUS_VISUAL } from "../../lib/format.ts";
 
@@ -83,7 +84,7 @@ export function RunDetail({ id, onBack }: RunDetailProps) {
     );
   }
   if (!run) {
-    return <div class="p-4 max-w-7xl mx-auto text-base-content/60">Loading run…</div>;
+    return <RunDetailSkeleton onBack={onBack} />;
   }
 
   const totalMs = run.completedAt
@@ -284,6 +285,49 @@ function PayloadTab({ run }: { run: RunDto }) {
           </pre>
         </div>
       )}
+    </div>
+  );
+}
+
+function RunDetailSkeleton({ onBack }: { onBack: () => void }) {
+  return (
+    <div class="anim-page p-4 max-w-[1400px] mx-auto space-y-4">
+      <div class="flex items-center gap-3">
+        <button class="btn btn-sm btn-ghost" onClick={onBack}>
+          ← Runs
+        </button>
+        <div class="text-base-content/40">/</div>
+        <Skeleton w="w-32" h="h-5" />
+        <Skeleton w="w-48" h="h-4" />
+        <Skeleton w="w-20" h="h-5" />
+      </div>
+      <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px] gap-4">
+        <div class="card bg-base-100 shadow">
+          <div class="card-body p-4 space-y-3">
+            <Skeleton w="w-40" h="h-5" />
+            <Skeleton w="w-full" h="h-4" />
+            <div class="space-y-2 pt-2">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <div class="flex items-center gap-2">
+                  <Skeleton w="w-48" h="h-4" />
+                  <Skeleton
+                    w={i === 0 ? "w-24" : i === 1 ? "w-48" : i === 2 ? "w-32" : "w-40"}
+                    h="h-5"
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div class="card bg-base-100 shadow self-start">
+          <div class="card-body p-4 space-y-2">
+            <Skeleton w="w-24" h="h-5" />
+            {Array.from({ length: 6 }).map(() => (
+              <Skeleton w="w-full" h="h-3" />
+            ))}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

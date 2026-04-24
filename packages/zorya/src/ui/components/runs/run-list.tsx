@@ -1,15 +1,19 @@
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api } from "../../api/client.ts";
 import type { WorkflowStatus } from "@promin/workflow";
 import type { RunListQuery } from "../../../server/api-types.ts";
 import { StatsBar } from "./stats-bar.tsx";
 import { StatusBadge } from "../ui/status-badge.tsx";
+import { SkeletonRows } from "../ui/skeleton.tsx";
 import { formatDuration, formatRelative, WORKFLOW_STATUS_VISUAL } from "../../lib/format.ts";
 
 interface RunListProps {
   onOpen: (id: string) => void;
-  initialName?: string;
+  /** Filter state from the URL. Source of truth — changes here re-render. */
+  queryParams?: URLSearchParams;
+  /** Emit filter changes back to the URL hash. */
+  onQueryChange?: (params: URLSearchParams) => void;
 }
 
 const STATUS_FILTERS: Array<WorkflowStatus | "all"> = [
@@ -21,18 +25,50 @@ const STATUS_FILTERS: Array<WorkflowStatus | "all"> = [
   "failed",
 ];
 
-export function RunList({ onOpen, initialName = "" }: RunListProps) {
+function isWorkflowStatus(s: string): s is WorkflowStatus {
+  return STATUS_FILTERS.includes(s as WorkflowStatus | "all") && s !== "all";
+}
+
+export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
+  const initialName = queryParams?.get("name") ?? "";
+  const initialStatusRaw = queryParams?.get("status") ?? "all";
+  const initialStatus: WorkflowStatus | "all" = isWorkflowStatus(initialStatusRaw)
+    ? initialStatusRaw
+    : "all";
+  const initialPage = Math.max(1, Number.parseInt(queryParams?.get("page") ?? "1", 10) || 1);
+
   const [name, setName] = useState(initialName);
-  const [status, setStatus] = useState<WorkflowStatus | "all">("all");
+  const [status, setStatus] = useState<WorkflowStatus | "all">(initialStatus);
+  const [page, setPage] = useState(initialPage);
+
+  const PAGE_SIZE = 25;
+
+  // Changing filters resets to page 1.
+  useEffect(() => {
+    setPage(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name, status]);
+
+  // Sync local state back to URL so filters survive refresh / share links.
+  useEffect(() => {
+    if (!onQueryChange) return;
+    const qp = new URLSearchParams();
+    if (name) qp.set("name", name);
+    if (status !== "all") qp.set("status", status);
+    if (page > 1) qp.set("page", String(page));
+    onQueryChange(qp);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name, status, page]);
 
   const query: RunListQuery = {
     name: name || undefined,
     status: status === "all" ? undefined : status,
-    limit: 100,
+    limit: PAGE_SIZE,
+    offset: (page - 1) * PAGE_SIZE,
   };
   const { data, loading, error, refresh } = useFetch(
     () => api.listRuns(query),
-    [name, status],
+    [name, status, page],
     5000,
   );
 
@@ -113,13 +149,7 @@ export function RunList({ onOpen, initialName = "" }: RunListProps) {
               </tr>
             </thead>
             <tbody>
-              {loading && !data && (
-                <tr>
-                  <td colSpan={6} class="text-center py-8 text-base-content/50">
-                    Loading…
-                  </td>
-                </tr>
-              )}
+              {loading && !data && <SkeletonRows rows={10} cols={6} />}
               {data && data.runs.length === 0 && !loading && (
                 <tr>
                   <td colSpan={6} class="text-center py-12">
@@ -141,6 +171,38 @@ export function RunList({ onOpen, initialName = "" }: RunListProps) {
               ))}
             </tbody>
           </table>
+        </div>
+
+        {/* Pagination */}
+        <div class="flex items-center justify-between px-4 py-2 border-t border-base-content/10 text-sm">
+          <div class="text-base-content/60">
+            {data && data.runs.length > 0 ? (
+              <>
+                Page {page} ·{" "}
+                <span class="font-mono">
+                  {(page - 1) * PAGE_SIZE + 1}–{(page - 1) * PAGE_SIZE + data.runs.length}
+                </span>
+              </>
+            ) : (
+              "—"
+            )}
+          </div>
+          <div class="flex gap-1">
+            <button
+              class="btn btn-sm btn-ghost"
+              disabled={page <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+            >
+              ← Prev
+            </button>
+            <button
+              class="btn btn-sm btn-ghost"
+              disabled={!data || data.runs.length < PAGE_SIZE}
+              onClick={() => setPage((p) => p + 1)}
+            >
+              Next →
+            </button>
+          </div>
         </div>
       </div>
     </div>

@@ -1,9 +1,12 @@
 import { useEffect, useState } from "preact/hooks";
 import { api } from "../../api/client.ts";
+import type { ScheduleDto } from "../../../server/routes/schedules.ts";
 
 interface CreateScheduleModalProps {
   onClose: () => void;
   onCreated: () => void;
+  /** If provided, modal opens in edit mode pre-filled with this schedule. */
+  editing?: ScheduleDto;
 }
 
 type TriggerKind = "cron" | "interval";
@@ -23,16 +26,25 @@ const INTERVAL_PRESETS: Array<{ label: string; ms: number }> = [
   { label: "Every 1h", ms: 60 * 60_000 },
 ];
 
-export function CreateScheduleModal({ onClose, onCreated }: CreateScheduleModalProps) {
-  const [id, setId] = useState("");
-  const [name, setName] = useState("");
-  const [workflowName, setWorkflowName] = useState("");
+export function CreateScheduleModal({ onClose, onCreated, editing }: CreateScheduleModalProps) {
+  const isEdit = !!editing;
+  const existingInput = editing?.metadata?.["input"];
+
+  const [id, setId] = useState(editing?.id ?? "");
+  const [name, setName] = useState(editing?.name ?? "");
+  const [workflowName, setWorkflowName] = useState(
+    (editing?.metadata?.["workflowName"] as string | undefined) ?? "",
+  );
   const [workflowNames, setWorkflowNames] = useState<string[]>([]);
-  const [kind, setKind] = useState<TriggerKind>("cron");
-  const [cron, setCron] = useState("0 * * * *");
-  const [intervalMs, setIntervalMs] = useState(60 * 60_000);
-  const [timezone, setTimezone] = useState("UTC");
-  const [inputJson, setInputJson] = useState("");
+  const [kind, setKind] = useState<TriggerKind>(
+    editing?.intervalMs !== undefined ? "interval" : "cron",
+  );
+  const [cron, setCron] = useState(editing?.cron ?? "0 * * * *");
+  const [intervalMs, setIntervalMs] = useState(editing?.intervalMs ?? 60 * 60_000);
+  const [timezone, setTimezone] = useState(editing?.timezone ?? "UTC");
+  const [inputJson, setInputJson] = useState(
+    existingInput !== undefined ? JSON.stringify(existingInput, null, 2) : "",
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
 
@@ -62,6 +74,9 @@ export function CreateScheduleModal({ onClose, onCreated }: CreateScheduleModalP
     }
     setSubmitting(true);
     try {
+      // Edit is modeled as "delete + recreate" against the InMemorySchedulerStorage
+      // upsert semantics. Since the server POST uses upsertSchedule, it's
+      // effectively overwrite-if-exists. We just never change the id on edit.
       await api.createSchedule({
         id: id.trim(),
         name: name.trim() || undefined,
@@ -70,7 +85,7 @@ export function CreateScheduleModal({ onClose, onCreated }: CreateScheduleModalP
         cron: kind === "cron" ? cron : undefined,
         intervalMs: kind === "interval" ? intervalMs : undefined,
         input,
-        enabled: true,
+        enabled: editing?.enabled ?? true,
       });
       onCreated();
     } catch (e) {
@@ -83,7 +98,9 @@ export function CreateScheduleModal({ onClose, onCreated }: CreateScheduleModalP
   return (
     <dialog open class="modal modal-open">
       <div class="modal-box anim-pop max-w-xl">
-        <h3 class="font-semibold text-lg mb-3">New schedule</h3>
+        <h3 class="font-semibold text-lg mb-3">
+          {isEdit ? `Edit schedule ${editing?.id}` : "New schedule"}
+        </h3>
 
         <div class="grid grid-cols-2 gap-3">
           <label class="form-control">
@@ -95,6 +112,7 @@ export function CreateScheduleModal({ onClose, onCreated }: CreateScheduleModalP
               placeholder="my-schedule"
               value={id}
               onInput={(e) => setId((e.target as HTMLInputElement).value)}
+              disabled={isEdit}
             />
           </label>
 
@@ -230,7 +248,7 @@ export function CreateScheduleModal({ onClose, onCreated }: CreateScheduleModalP
             onClick={submit}
             disabled={!canSubmit || submitting}
           >
-            {submitting ? "Creating…" : "Create"}
+            {submitting ? (isEdit ? "Saving…" : "Creating…") : isEdit ? "Save changes" : "Create"}
           </button>
         </div>
       </div>

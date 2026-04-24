@@ -15,14 +15,13 @@ async function sleep(ms: number): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
 }
 
-function jitter(baseMs: number, spreadMs: number): number {
-  return baseMs + Math.floor(Math.random() * spreadMs);
+function delay(minMs: number, maxMs: number): number {
+  return minMs + Math.floor(Math.random() * (maxMs - minMs));
 }
 
 export const paymentWorkflow = workflow<PaymentInput>({ name: "payment" })
   .stepAsync("authorize", async ({ input }) => {
-    await sleep(jitter(120, 300));
-    // ~15% authorization failure rate.
+    await sleep(delay(5_000, 20_000));
     if (Math.random() < 0.15) {
       throw new Error(`Auth declined for amount ${input.amount}`);
     }
@@ -33,11 +32,11 @@ export const paymentWorkflow = workflow<PaymentInput>({ name: "payment" })
     };
   })
   .stepAsync("capture", async ({ prev }) => {
-    await sleep(jitter(100, 250));
+    await sleep(delay(4_000, 15_000));
     return { captureId: `cap-${Math.floor(Math.random() * 1_000_000)}`, authId: prev.authId };
   })
   .stepAsync("ledger-entry", async ({ prev }) => {
-    await sleep(jitter(60, 180));
+    await sleep(delay(2_000, 8_000));
     return { ledgerId: `lg-${Math.floor(Math.random() * 1_000_000)}`, captureId: prev.captureId };
   })
   .build();
