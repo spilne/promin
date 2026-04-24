@@ -480,9 +480,9 @@ export class Terminal implements AgentUIRenderer {
    * Rendering uses DEC cursor save/restore (ESC 7 / ESC 8) so the prompt
    * cursor position is preserved regardless of how many items are drawn.
    */
-  async showInlineMenu(items: string[]): Promise<string | null> {
+  async showInlineMenu(items: string[], values?: string[]): Promise<string | null> {
     if (items.length === 0) return null;
-    if (items.length === 1) return items[0]!;
+    if (items.length === 1) return (values ?? items)[0]!;
 
     const MAX_VISIBLE = 10;
     let cursor = 0;
@@ -539,12 +539,18 @@ export class Terminal implements AgentUIRenderer {
         draw();
       } else if (key === "\r" || key === "\n") {
         erase();
-        return items[cursor] ?? null;
+        return (values ?? items)[cursor] ?? null;
       } else {
         erase();
         if (key === "\x03") {
           process.stdout.write("\n");
           process.exit(0);
+        }
+        // Replay printable chars back to readline so they aren't swallowed.
+        // By this point readKey has already restored stdin listeners.
+        const cp = key.charCodeAt(0);
+        if ((key.length === 1 && cp >= 0x20 && cp <= 0x7e) || cp >= 0x80) {
+          this._rl.write(key);
         }
         return null;
       }

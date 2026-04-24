@@ -57,6 +57,7 @@ export {
   createSearchMemoryTool,
   createSaveMemoryTool,
   createMemoryTools,
+  createMemoryTool,
 } from "./tools/memory-tools.ts";
 export type { MemoryToolConfig } from "./tools/memory-tools.ts";
 
@@ -85,6 +86,9 @@ export type { AgentToolFactoryConfig } from "./tools/agent-tool-factory.ts";
 
 export { createChatGptAgentTool } from "./tools/chatgpt-agent-tool.ts";
 export type { ChatGptAgentToolConfig } from "./tools/chatgpt-agent-tool.ts";
+
+export { createFetchUrlTool, createWebSearchTool, fetchUrl, webSearch } from "./tools/web-tools.ts";
+export type { WebToolsConfig } from "./tools/web-tools.ts";
 
 export {
   InMemorySecretStore,

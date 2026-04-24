@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { InMemoryMemoryStore } from "../../lib/memory-store.ts";
-import { createMemoryTool } from "../console-tools.ts";
+import { createMemoryTool } from "../../lib/tools/memory-tools.ts";
 
 function makeStore() {
   return new InMemoryMemoryStore();

@@ -102,15 +102,15 @@ export class TerminalIO {
 
       if (s.includes("\x1b[200~")) {
         inPaste = true;
-        // eslint-disable-next-line no-control-regex
-        s = s.replace(/\u001b\[200~/g, "");
+        s = s.replace(/\x1b\[200~/g, "");
       }
+      // Replace newlines before checking for the end marker so that start + end
+      // in the same data chunk (short pastes) still gets newlines collapsed.
+      if (inPaste) s = s.replace(/[\r\n]/g, " ");
       if (s.includes("\x1b[201~")) {
         inPaste = false;
-        // eslint-disable-next-line no-control-regex
-        s = s.replace(/\u001b\[201~/g, "");
+        s = s.replace(/\x1b\[201~/g, "");
       }
-      if (inPaste) s = s.replace(/[\r\n]/g, " ");
 
       if (!s) return;
       const buf = Buffer.from(s);

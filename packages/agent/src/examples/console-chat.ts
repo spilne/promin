@@ -8,22 +8,9 @@
  *   SESSION_TOKEN_BUDGET=100000 ...         (session token cap; blocks new turns when exhausted)
  *   TOOL_AUTO_APPROVE=true ...              (skip approval prompts; same as /approve-all)
  *
- * Commands:
- *   /history                  — conversation messages
- *   /steps                    — workflow step tree
- *   /state                    — agent lifecycle state machine
- *   /tools                    — loaded tools
- *   /memories [query]         — search memories (omit query to list all)
- *   /remember <text>          — save a memory directly
- *   /schedules                — list active schedules
- *   /cancel-schedule <id>     — immediately cancel a schedule (bypasses agent)
- *   /pause-schedule <id>      — pause a schedule
- *   /approve-all              — toggle auto-approve for all tool calls
- *   exit                      — quit
+ * Type /help for commands.
  */
 
-import { createInterface } from "node:readline";
-import { readdir } from "node:fs/promises";
 import {
   stateMachine,
   InMemoryStateMachineStorage,
@@ -35,7 +22,7 @@ import { anthropic } from "../lib/adapters/anthropic.ts";
 import { agentLoop } from "../lib/agent-loop.ts";
 import { InMemoryMemoryStore } from "../lib/memory-store.ts";
 import { CompositeSecretStore, EnvSecretStore, InMemorySecretStore } from "../lib/secret-store.ts";
-import { Terminal } from "./common/terminal.ts";
+import { ChatTerminal } from "./common/chat-terminal.ts";
 import { ConsoleRunner } from "./common/console-runner.ts";
 import { UsageTracker, fmtN } from "./console-usage.ts";
 import { InMemorySessionLogger } from "../lib/session-logger.ts";
@@ -47,7 +34,10 @@ import {
   buildStepsTree,
   buildMemories,
   buildSchedules,
+  buildHelp,
+  buildEventLog,
 } from "./console-panes.ts";
+import { executeDirectCall, dispatchCommand, type ReplCommand } from "./console-repl.ts";
 import type { AgentSession } from "../lib/agent-loop.ts";
 
 const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -57,77 +47,135 @@ if (!apiKey) {
 }
 
 const workspace = process.env.AGENT_WORKSPACE ?? process.cwd();
+const autoApproveRef = { value: process.env.TOOL_AUTO_APPROVE === "true" };
 
-// ---- slash-command completions ----
-const SLASH_COMPLETIONS = [
-  "/help",
-  "/history",
-  "/clear",
-  "/steps",
-  "/state",
-  "/tools",
-  "/memories",
-  "/remember",
-  "/schedules",
-  "/approve-all",
-  "/cancel-schedule",
-  "/pause-schedule",
+// ---- REPL commands (single source of truth for completions + /help) ----
+const COMMANDS: ReplCommand[] = [
+  {
+    cmd: "/history",
+    desc: "conversation messages (full session truth)",
+    handle: async () => {
+      await term.showPane("history", buildHistory(session));
+    },
+  },
+  {
+    cmd: "/clear",
+    desc: "start a new conversation (memories persist)",
+    handle: async () => {
+      await session.close();
+      session = await resetSession(`session-${++sessionIdSeq}`);
+      term.printAbove(
+        "\x1b[2mConversation cleared — new session started. Memories persist.\x1b[0m",
+      );
+    },
+  },
+  {
+    cmd: "/steps",
+    desc: "workflow step tree",
+    handle: async () => {
+      await term.showInteractiveTree(
+        "steps",
+        await buildStepsTree(storage, runner, "console-agent"),
+      );
+    },
+  },
+  {
+    cmd: "/state",
+    desc: "agent lifecycle state machine",
+    handle: async () => {
+      await term.showPane("state", await buildAgentState(agentMachine, currentSessionId));
+    },
+  },
+  {
+    cmd: "/tools",
+    desc: "loaded tools",
+    handle: async () => {
+      await term.showPane(
+        "tools",
+        Object.keys(registry.getTools()).map((n) => `  ${n}`),
+      );
+    },
+  },
+  {
+    cmd: "/memories",
+    args: "[query]",
+    desc: "search memories (omit query to list all)",
+    handle: async (input) => {
+      const q = input.slice("/memories".length).trim();
+      await term.showPane(
+        `memories${q ? ` · "${q}"` : ""}`,
+        await buildMemories(memoryStore, q || undefined),
+      );
+    },
+  },
+  {
+    cmd: "/remember",
+    args: "<text>",
+    desc: "save a memory directly",
+    handle: async (input) => {
+      const text = input.slice("/remember ".length).trim();
+      if (text) {
+        const id = await memoryStore.save({ content: text });
+        console.log(`\n\x1b[2mSaved ${id.slice(0, 8)}: "${text}"\x1b[0m\n`);
+      }
+    },
+  },
+  {
+    cmd: "/schedules",
+    desc: "list active schedules",
+    handle: async () => {
+      await term.showPane("schedules", buildSchedules(scheduler));
+    },
+  },
+  {
+    cmd: "/cancel-schedule",
+    args: "<id>",
+    desc: "immediately cancel a schedule",
+    handle: (input) => {
+      const id = input.slice("/cancel-schedule ".length).trim();
+      scheduler.unregister(id);
+      activeTicks.delete(id);
+      console.log(`\n\x1b[2mCancelled schedule "${id}"\x1b[0m\n`);
+    },
+  },
+  {
+    cmd: "/pause-schedule",
+    args: "<id>",
+    desc: "pause a schedule",
+    handle: (input) => {
+      const id = input.slice("/pause-schedule ".length).trim();
+      scheduler.pause(id);
+      console.log(`\n\x1b[2mPaused schedule "${id}"\x1b[0m\n`);
+    },
+  },
+  {
+    cmd: "/approve-all",
+    desc: () => `toggle auto-approve (currently: ${autoApproveRef.value ? "ON" : "OFF"})`,
+    handle: () => {
+      autoApproveRef.value = !autoApproveRef.value;
+      console.log(`\n\x1b[2mAuto-approve: ${autoApproveRef.value ? "ON" : "OFF"}\x1b[0m\n`);
+    },
+  },
+  {
+    cmd: "/log",
+    desc: "session event log",
+    handle: async () => {
+      const lines = buildEventLog(sessionLogger.events());
+      await term.showPane("log", lines.length ? lines : ["  No events recorded yet."]);
+    },
+  },
+  {
+    cmd: "/help",
+    desc: "show this help",
+    handle: async () => {
+      await term.showPane("help", buildHelp(COMMANDS, registry.getTools()));
+    },
+  },
 ];
 
-// ---- @-file: list workspace files matching a prefix ----
-async function listWorkspaceFiles(ws: string, prefix: string, limit = 20): Promise<string[]> {
-  try {
-    const all = (await readdir(ws, { recursive: true })) as string[];
-    const skip = (f: string) =>
-      f.split("/").some((p) => p.startsWith(".")) ||
-      f.includes("node_modules") ||
-      f.includes("/dist/");
-    return all.filter((f) => !skip(f) && (!prefix || f.startsWith(prefix))).slice(0, limit);
-  } catch {
-    return [];
-  }
-}
-
-// ---- async dropdown completer ----
-// term is assigned immediately after createInterface — no Tab can fire before then.
-let term!: Terminal;
-
-type CompleterCb = (err: Error | null, result: [string[], string]) => void;
-
-function makeCompleterEntry(line: string, cb: CompleterCb): void {
-  (async (): Promise<[string[], string]> => {
-    // @-file fuzzy match
-    const atMatch = line.match(/@(\S*)$/);
-    if (atMatch) {
-      const files = await listWorkspaceFiles(workspace, atMatch[1]);
-      if (files.length === 0) return [[], line];
-      const selected = await term.showInlineMenu(files.map((f) => `@${f}`));
-      if (!selected) return [[], line];
-      return [[line.slice(0, line.length - atMatch[0].length) + selected], line];
-    }
-    // slash-command dropdown
-    if (line.startsWith("/")) {
-      const hits = SLASH_COMPLETIONS.filter((c) => c.startsWith(line));
-      if (hits.length === 0) return [[], line];
-      const selected = await term.showInlineMenu(hits);
-      if (!selected) return [[], line];
-      return [[selected], line];
-    }
-    return [[], line];
-  })().then(
-    (r) => cb(null, r),
-    (e) => cb(e instanceof Error ? e : new Error(String(e)), [[], line]),
-  );
-}
-
 // ---- terminal ----
-const rl = createInterface({
-  input: process.stdin,
-  output: process.stdout,
-  historySize: 100,
-  completer: makeCompleterEntry,
-});
-term = new Terminal(rl);
+const chatTerm = new ChatTerminal({ commands: COMMANDS, workspace });
+const { term, rl } = chatTerm;
 
 // ---- infrastructure ----
 const memoryStore = new InMemoryMemoryStore();
@@ -149,7 +197,6 @@ const consoleRunner = new ConsoleRunner(term, usage);
 // ---- tools ----
 const sessionRef: { current: AgentSession | undefined } = { current: undefined };
 const sessionIdRef: { current: string } = { current: "session" };
-const autoApproveRef = { value: process.env.TOOL_AUTO_APPROVE === "true" };
 const sessionLogger = new InMemorySessionLogger();
 
 const { registry, scheduler, activeTicks } = await createToolRegistry({
@@ -166,6 +213,7 @@ const { registry, scheduler, activeTicks } = await createToolRegistry({
   autoApproveRef,
   logger: sessionLogger,
 });
+chatTerm.setRegistry(registry);
 
 // ---- agent lifecycle state machine ----
 type AgentStates = {
@@ -317,98 +365,13 @@ function prompt() {
         return rl.close();
       }
 
-      // ---- display commands ----
-      if (input === "/help") {
-        await term.showPane("help", [
-          "  /history                  — conversation messages (full session truth)",
-          "  /clear                    — start a new conversation (memories persist)",
-          "  /steps                    — workflow step tree",
-          "  /state                    — agent lifecycle state machine",
-          "  /tools                    — loaded tools",
-          "  /memories [query]         — search memories (omit query to list all)",
-          "  /remember <text>          — save a memory directly",
-          "  /schedules                — list active schedules",
-          "  /cancel-schedule <id>     — immediately cancel a schedule",
-          "  /pause-schedule <id>      — pause a schedule",
-          `  /approve-all              — toggle auto-approve (currently: ${autoApproveRef.value ? "ON" : "OFF"})`,
-          "  /help                     — show this help",
-          "  exit                      — quit",
-          "",
-          "  Multi-line input: end a line with \\ to continue on the next line.",
-          "  Ctrl+C during a turn: interrupt (background run continues).",
-          "  Ctrl+C at prompt: exit.",
-          "  Approval prompt: answer 'always' to enable auto-approve for the session.",
-        ]);
-        return prompt();
-      }
-      if (input === "/clear") {
-        await session.close();
-        session = await resetSession(`session-${++sessionIdSeq}`);
-        term.printAbove(
-          "\x1b[2mConversation cleared — new session started. Memories persist.\x1b[0m",
-        );
-        return prompt();
-      }
-      if (input === "/history") {
-        await term.showPane("history", buildHistory(session));
-        return prompt();
-      }
-      if (input === "/steps") {
-        await term.showInteractiveTree(
-          "steps",
-          await buildStepsTree(storage, runner, "console-agent"),
-        );
-        return prompt();
-      }
-      if (input === "/state") {
-        await term.showPane("state", await buildAgentState(agentMachine, currentSessionId));
-        return prompt();
-      }
-      if (input === "/tools") {
-        await term.showPane(
-          "tools",
-          Object.keys(registry.getTools()).map((n) => `  ${n}`),
-        );
-        return prompt();
-      }
-      if (input === "/schedules") {
-        await term.showPane("schedules", buildSchedules(scheduler));
-        return prompt();
-      }
-      if (input.startsWith("/memories")) {
-        const q = input.slice("/memories".length).trim();
-        await term.showPane(
-          `memories${q ? ` · "${q}"` : ""}`,
-          await buildMemories(memoryStore, q || undefined),
-        );
-        return prompt();
-      }
-      if (input === "/approve-all") {
-        autoApproveRef.value = !autoApproveRef.value;
-        console.log(`\n\x1b[2mAuto-approve: ${autoApproveRef.value ? "ON" : "OFF"}\x1b[0m\n`);
-        return prompt();
-      }
+      if (await dispatchCommand(COMMANDS, input)) return prompt();
 
-      // ---- action commands ----
-      if (input.startsWith("/remember ")) {
-        const text = input.slice("/remember ".length).trim();
-        if (text) {
-          const id = await memoryStore.save({ content: text });
-          console.log(`\n\x1b[2mSaved ${id.slice(0, 8)}: "${text}"\x1b[0m\n`);
-        }
-        return prompt();
-      }
-      if (input.startsWith("/cancel-schedule ")) {
-        const id = input.slice("/cancel-schedule ".length).trim();
-        scheduler.unregister(id);
-        activeTicks.delete(id);
-        console.log(`\n\x1b[2mCancelled schedule "${id}"\x1b[0m\n`);
-        return prompt();
-      }
-      if (input.startsWith("/pause-schedule ")) {
-        const id = input.slice("/pause-schedule ".length).trim();
-        scheduler.pause(id);
-        console.log(`\n\x1b[2mPaused schedule "${id}"\x1b[0m\n`);
+      // ---- :tool direct-call ----
+      const directCall = await executeDirectCall(input, registry);
+      if (directCall !== null) {
+        if (directCall.ok) await term.showPane(directCall.title, directCall.lines);
+        else console.log(`\n\x1b[31m${directCall.error}\x1b[0m\n`);
         return prompt();
       }
 

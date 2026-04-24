@@ -3,6 +3,51 @@ import type { MemoryStore } from "../lib/memory-store.ts";
 import type { TreeNode } from "./common/terminal.ts";
 import type { InMemoryWorkflowStorage, InMemoryScheduler, WorkflowRunner } from "@promin/workflow";
 
+export interface CommandDef {
+  cmd: string;
+  args?: string;
+  desc: string | (() => string);
+}
+
+export function buildHelp(
+  commands: CommandDef[],
+  tools: Record<string, { description: string }>,
+): string[] {
+  const CMD_COL = 26;
+  const TOOL_COL = 24;
+  const lines: string[] = [];
+
+  for (const c of commands) {
+    const label = c.args ? `${c.cmd} ${c.args}` : c.cmd;
+    const d = typeof c.desc === "function" ? c.desc() : c.desc;
+    lines.push(`  ${label.padEnd(CMD_COL)}— ${d}`);
+  }
+  lines.push(`  ${"exit".padEnd(CMD_COL)}— quit`);
+
+  const toolEntries = Object.entries(tools);
+  if (toolEntries.length > 0) {
+    lines.push(
+      "",
+      `  ${":<tool> [json]".padEnd(CMD_COL)}— call tool directly (: to autocomplete)`,
+      "",
+    );
+    for (const [name, def] of toolEntries) {
+      const desc = def.description.split("\n")[0] ?? "";
+      lines.push(`  :${name.padEnd(TOOL_COL)} ${desc}`);
+    }
+  }
+
+  lines.push(
+    "",
+    "  Multi-line input: end a line with \\ to continue on the next line.",
+    "  Ctrl+C during a turn: interrupt (background run continues).",
+    "  Ctrl+C at prompt: exit.",
+    "  Approval prompt: answer 'always' to enable auto-approve for the session.",
+  );
+
+  return lines;
+}
+
 export const WORKFLOW_ICON: Record<string, string> = {
   completed: "✓",
   failed: "✗",
@@ -138,4 +183,30 @@ export function buildSchedules(scheduler: InMemoryScheduler): string[] {
   });
   lines.push("", "\x1b[2m/cancel-schedule <id>   /pause-schedule <id>\x1b[0m");
   return lines;
+}
+
+export function buildEventLog(
+  events: Array<{ type: string; ts: number; [key: string]: unknown }>,
+  limit?: number,
+): string[] {
+  if (events.length === 0) return [];
+  const slice = limit ? events.slice(-limit) : [...events];
+  return slice.reverse().map((e) => {
+    const t = new Date(e.ts).toLocaleTimeString();
+    const rest = { ...e } as Record<string, unknown>;
+    delete rest.type;
+    delete rest.ts;
+    const detail = Object.entries(rest)
+      .map(([k, v]) => {
+        if (k === "task" || k === "answer") {
+          const s = String(v);
+          return `${k}=${s.length > 60 ? `${s.slice(0, 57)}…` : s}`;
+        }
+        if (k === "input" && typeof v === "object" && v !== null)
+          return `input=${JSON.stringify(v).slice(0, 40)}`;
+        return `${k}=${JSON.stringify(v)}`;
+      })
+      .join("  ");
+    return `  [${t}] ${e.type}  ${detail}`;
+  });
 }

@@ -23,55 +23,20 @@
  * Ctrl+C at the prompt twice exits.
  */
 
-import { createInterface } from "node:readline";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
-import { z } from "zod";
 import {
   anthropic,
   createAgentTown,
   InMemoryMemoryStore,
   InMemorySessionLogger,
-  tool,
+  fetchUrl,
+  webSearch,
 } from "../lib/index.ts";
-import { abbrevInput } from "./console-spinner.ts";
-import { Terminal } from "./common/terminal.ts";
+import { ChatTerminal } from "./common/chat-terminal.ts";
 import { ConsoleRunner } from "./common/console-runner.ts";
 import { UsageTracker } from "./console-usage.ts";
-import { buildHistory, buildStepsTree } from "./console-panes.ts";
-
-// ---- tools ----
-
-const FETCH_TIMEOUT_MS = 15_000;
-
-const fetchUrl = tool({
-  name: "fetchUrl",
-  description: "Fetch the text content of a URL.",
-  parameters: z.object({ url: z.string().url() }),
-  execute: async ({ url }) => {
-    const resp = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-    return resp.text();
-  },
-});
-
-const webSearch = tool({
-  name: "webSearch",
-  description: "Search the web using DuckDuckGo and return results.",
-  parameters: z.object({ query: z.string() }),
-  execute: async ({ query }) => {
-    const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
-    const resp = await fetch(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-    const data = (await resp.json()) as Record<string, unknown>;
-    const topics = (data.RelatedTopics as { Text?: string }[] | undefined) ?? [];
-    const results = [
-      data.AbstractText && `**Summary:** ${data.AbstractText}`,
-      ...topics
-        .slice(0, 5)
-        .map((t) => t.Text)
-        .filter(Boolean),
-    ].filter(Boolean);
-    return results.length ? results.join("\n\n") : "No results found.";
-  },
-});
+import { buildHistory, buildStepsTree, buildHelp, buildEventLog } from "./console-panes.ts";
+import { dispatchCommand, type ReplCommand } from "./console-repl.ts";
 
 // ---- setup ----
 
@@ -81,7 +46,83 @@ if (!apiKey) {
   process.exit(1);
 }
 
-const autoApproveEnv = process.env.TOOL_AUTO_APPROVE === "true";
+let autoApprove = process.env.TOOL_AUTO_APPROVE === "true";
+
+const COMMANDS: ReplCommand[] = [
+  {
+    cmd: "/history",
+    desc: "director conversation history",
+    handle: async () => {
+      const mayorSession = await town.getMayorSession();
+      await term.showPane("director history", buildHistory(mayorSession));
+    },
+  },
+  {
+    cmd: "/steps",
+    desc: "director workflow step tree",
+    handle: async () => {
+      await term.showInteractiveTree(
+        "steps",
+        await buildStepsTree(storage, runner, "town-director"),
+      );
+    },
+  },
+  {
+    cmd: "/tools",
+    desc: "agents and their tools",
+    handle: async () => {
+      await term.showPane("tools", [
+        "  director    sendMessage, readInbox, memory, searchSharedMemory, saveSharedMemory",
+        "  researcher  webSearch, fetchUrl, sendMessage, memory",
+        "  analyst     sendMessage, memory",
+        "  factChecker webSearch, sendMessage, memory",
+        "  writer      sendMessage, memory",
+      ]);
+    },
+  },
+  {
+    cmd: "/log",
+    args: "[agent]",
+    desc: "session event log (all agents or one)",
+    handle: async (input) => {
+      const agentArg = input.slice("/log".length).trim() as AgentName | "";
+      const targets: AgentName[] =
+        agentArg && agentArg in loggers ? [agentArg as AgentName] : [...agentNames];
+      const lines: string[] = [];
+      for (const name of targets) {
+        const events = loggers[name].events();
+        if (events.length === 0) continue;
+        lines.push(`\x1b[1m${name}\x1b[0m  (${events.length} events)`);
+        lines.push(...buildEventLog(events, 30));
+        lines.push("");
+      }
+      if (lines.length === 0) lines.push("  No events recorded yet.");
+      await term.showPane(`log${agentArg ? ` · ${agentArg}` : ""}`, lines);
+    },
+  },
+  {
+    cmd: "/approve-all",
+    desc: () => `toggle auto-approve (currently: ${autoApprove ? "ON" : "OFF"})`,
+    handle: () => {
+      autoApprove = !autoApprove;
+      term.printAbove(`\x1b[2mAuto-approve: ${autoApprove ? "ON" : "OFF"}\x1b[0m`);
+    },
+  },
+  {
+    cmd: "/help",
+    desc: "show this list",
+    handle: async () => {
+      await term.showPane("help", [
+        ...buildHelp(COMMANDS, {}),
+        "",
+        "  Agents: director, researcher, analyst, factChecker, writer",
+        "  Ctrl+C during a turn: interrupt (session recovers quickly).",
+        "  Ctrl+C at prompt twice: exit.",
+        "  Tool approval: y=yes  a=always  N=no",
+      ]);
+    },
+  },
+];
 
 const agentNames = ["director", "researcher", "analyst", "factChecker", "writer"] as const;
 type AgentName = (typeof agentNames)[number];
@@ -96,12 +137,8 @@ const usage = new UsageTracker();
 const claude = usage.withTracking(anthropic("claude-sonnet-4-6", { apiKey }), "claude-sonnet-4-6");
 
 // ---- terminal ----
-const rl = createInterface({ input: process.stdin, output: process.stdout, historySize: 100 });
-const term = new Terminal(rl);
+const { term, rl } = new ChatTerminal({ commands: COMMANDS });
 const consoleRunner = new ConsoleRunner(term, usage);
-
-// ---- approval state ----
-let autoApprove = autoApproveEnv;
 
 const town = createAgentTown({
   runner,
@@ -252,91 +289,7 @@ function prompt(): void {
       return;
     }
 
-    // ---- slash commands ----
-    if (input === "/help") {
-      await term.showPane("help", [
-        "  /history          — director conversation history",
-        "  /steps            — director workflow step tree",
-        "  /tools            — agents and their tools",
-        "  /log [agent]      — session event log (all agents or one)",
-        `  /approve-all      — toggle auto-approve (currently: ${autoApprove ? "ON" : "OFF"})`,
-        "  /help             — show this list",
-        "  exit              — quit",
-        "",
-        "  Agents: director, researcher, analyst, factChecker, writer",
-        "  Ctrl+C during a turn: interrupt (session recovers quickly).",
-        "  Ctrl+C at prompt twice: exit.",
-        "  Tool approval: y=yes  a=always  N=no",
-      ]);
-      return prompt();
-    }
-
-    if (input === "/approve-all") {
-      autoApprove = !autoApprove;
-      term.printAbove(`\x1b[2mAuto-approve: ${autoApprove ? "ON" : "OFF"}\x1b[0m`);
-      return prompt();
-    }
-
-    if (input === "/history") {
-      const mayorSession = await town.getMayorSession();
-      await term.showPane("director history", buildHistory(mayorSession));
-      return prompt();
-    }
-
-    if (input === "/steps") {
-      await term.showInteractiveTree(
-        "director steps",
-        await buildStepsTree(storage, runner, "town-director"),
-      );
-      return prompt();
-    }
-
-    if (input === "/tools") {
-      const lines: string[] = [
-        "  director    sendMessage, readInbox, memory, searchSharedMemory, saveSharedMemory",
-        "  researcher  webSearch, fetchUrl, sendMessage, memory",
-        "  analyst     sendMessage, memory",
-        "  factChecker webSearch, sendMessage, memory",
-        "  writer      sendMessage, memory",
-      ];
-      await term.showPane("tools", lines);
-      return prompt();
-    }
-
-    if (input.startsWith("/log")) {
-      const agentArg = input.slice("/log".length).trim() as AgentName | "";
-      const targets: AgentName[] =
-        agentArg && agentArg in loggers ? [agentArg as AgentName] : [...agentNames];
-      const lines: string[] = [];
-      for (const name of targets) {
-        const events = loggers[name].events();
-        if (events.length === 0) continue;
-        lines.push(`\x1b[1m${name}\x1b[0m  (${events.length} events)`);
-        for (const e of events.slice(-30).reverse()) {
-          const t = new Date(e.ts).toLocaleTimeString();
-          const rest = { ...e } as Record<string, unknown>;
-          delete rest.type;
-          delete rest.ts;
-          const detail = Object.entries(rest)
-            .map(([k, v]) => {
-              if (k === "task" || k === "answer") {
-                const s = String(v);
-                return `${k}=${s.length > 60 ? `${s.slice(0, 57)}…` : s}`;
-              }
-              if (k === "input" && typeof v === "object" && v !== null) {
-                return `input=${abbrevInput(v as Record<string, unknown>) || JSON.stringify(v).slice(0, 40)}`;
-              }
-              return `${k}=${JSON.stringify(v)}`;
-            })
-            .join("  ");
-          lines.push(`  [${t}] ${e.type}  ${detail}`);
-        }
-        lines.push("");
-      }
-      if (lines.length === 0) lines.push("  No events recorded yet.");
-      await term.showPane(`log${agentArg ? ` · ${agentArg}` : ""}`, lines);
-      return prompt();
-    }
+    if (await dispatchCommand(COMMANDS, input)) return prompt();
 
     // ---- normal turn ----
     const { aborted, error } = await consoleRunner.runTurn((signal) => town.stream(input, signal), {
