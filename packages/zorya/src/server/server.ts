@@ -46,6 +46,7 @@ import {
   rerunRun,
 } from "./routes/run-extras.ts";
 import { getSparklines, getWorkflowGrid } from "./routes/grid.ts";
+import { getWorkflowDef, listWorkflowDefs } from "./routes/workflow-defs.ts";
 
 export interface ZoryaServerConfig extends AuthConfig {
   storage: WorkflowStorage;
@@ -64,6 +65,13 @@ export interface ZoryaServerConfig extends AuthConfig {
    * it the UI still works, it just can't render planned steps.
    */
   workflows?: Readonly<Record<string, Workflow<unknown, unknown>>>;
+  /**
+   * Returns a sample/default input for a workflow by name. Used by the UI
+   * to populate the trigger form with plausible values (so users can tweak
+   * fields instead of typing raw JSON from scratch). Return `undefined`
+   * for workflows with no default.
+   */
+  sampleInput?: (workflowName: string) => unknown;
   /**
    * Optional re-run hook. When present, `POST /api/runs/:id/rerun` calls
    * this after `startFreshRun` so the caller can actually drive the
@@ -121,7 +129,15 @@ export class ZoryaServer {
       .post("/api/runs/:id/mark-failed", markRunFailed(config.storage))
       .post("/api/runs/:id/rerun", rerunRun(config.storage, config.rerun))
       .get("/api/workflows/sparklines", getSparklines(config.storage))
+      .get(
+        "/api/workflows/definitions",
+        listWorkflowDefs({ workflows: config.workflows, sampleInput: config.sampleInput }),
+      )
       .get("/api/workflows/:name/grid", getWorkflowGrid(config.storage))
+      .get(
+        "/api/workflows/:name/definition",
+        getWorkflowDef({ workflows: config.workflows, sampleInput: config.sampleInput }),
+      )
       .post("/api/runs/trigger/:name", triggerRun(deps))
       .post("/api/runs/:id/cancel", cancelRun(deps))
       .post("/api/runs/:id/signal", sendSignal(deps))

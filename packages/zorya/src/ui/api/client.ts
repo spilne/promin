@@ -14,6 +14,7 @@ import type {
   ChildrenResponse,
 } from "../../server/routes/run-extras.ts";
 import type { GridResponse, SparklinesResponse } from "../../server/routes/grid.ts";
+import type { WorkflowDefDto, WorkflowDefsResponse } from "../../server/routes/workflow-defs.ts";
 
 const BASE = ""; // served from same origin
 
@@ -105,6 +106,22 @@ export const api = {
   },
   getSparklines(limit = 14): Promise<SparklinesResponse> {
     return req(`/api/workflows/sparklines?limit=${limit}`);
+  },
+  listWorkflowDefs(): Promise<WorkflowDefsResponse> {
+    return req(`/api/workflows/definitions`);
+  },
+  getWorkflowDef(name: string): Promise<WorkflowDefDto> {
+    return req(`/api/workflows/${encodeURIComponent(name)}/definition`);
+  },
+  triggerWorkflow(
+    name: string,
+    body: { input?: unknown; workflowId?: string; namespace?: string },
+  ): Promise<{ workflowId: string }> {
+    return req(`/api/runs/trigger/${encodeURIComponent(name)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
   },
   listWorkflowNames(): Promise<{ names: string[]; types?: string[]; namespaces?: string[] }> {
     return req(`/api/workflows`);

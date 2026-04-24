@@ -4,6 +4,7 @@ import { RunList } from "./components/runs/run-list.tsx";
 import { RunDetail } from "./components/runs/run-detail.tsx";
 import { WorkerGrid } from "./components/workers/worker-grid.tsx";
 import { ScheduleList } from "./components/schedules/schedule-list.tsx";
+import { WorkflowList } from "./components/workflows/workflow-list.tsx";
 
 export function App() {
   const [route, setRoute] = useState(locationToRoute());
@@ -39,6 +40,14 @@ function renderRoute(route: string, navigate: (p: string) => void) {
   }
   if (path === "/schedules") {
     return <ScheduleList onNavigate={navigate} />;
+  }
+  if (path === "/workflows") {
+    return (
+      <WorkflowList
+        onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)}
+        onOpenWorkflow={(name) => navigate(`/?name=${encodeURIComponent(name)}`)}
+      />
+    );
   }
   const runMatch = /^\/runs\/([^/]+)$/.exec(path ?? "");
   if (runMatch) {

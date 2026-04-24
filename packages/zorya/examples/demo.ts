@@ -351,6 +351,9 @@ const server = new ZoryaServer({
   storage,
   scheduler: schedulerStorage,
   workflows: workflowsByName,
+  // Feeds the "Trigger workflow" form on the Workflows page with plausible
+  // defaults so users can tweak fields instead of writing raw JSON.
+  sampleInput: (name) => inputFor(name),
   uiDir,
   trigger: (name, input) => triggerRun(name, input),
   rerun: async (workflowId) => {

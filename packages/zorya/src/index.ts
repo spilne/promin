@@ -25,6 +25,11 @@ export type {
   ChildrenResponse,
 } from "./server/routes/run-extras.ts";
 export type { GridRunDto, GridResponse, SparklinesResponse } from "./server/routes/grid.ts";
+export type {
+  WorkflowStepDefDto,
+  WorkflowDefDto,
+  WorkflowDefsResponse,
+} from "./server/routes/workflow-defs.ts";
 
 // Wire format
 export type {
