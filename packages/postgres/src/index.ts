@@ -75,3 +75,9 @@ export { createTopologyStateTable, topologyState } from "./lib/pg-state-schema.t
 
 // Schema utilities
 export { ensureTable } from "./lib/schema-utils.ts";
+
+// Concurrency primitives
+export { PgRateLimiter, type PgRateLimiterConfig } from "./lib/pg-rate-limiter.ts";
+export { PgThrottle, type PgThrottleConfig } from "./lib/pg-throttle.ts";
+export { PgSingleflight, type PgSingleflightConfig } from "./lib/pg-singleflight.ts";
+export { PgRef, type PgRefConfig } from "./lib/pg-ref.ts";
