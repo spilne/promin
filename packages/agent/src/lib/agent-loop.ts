@@ -715,6 +715,8 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               // Update messages snapshot here so messages() is consistent immediately
               // after send() / stream() returns, not only after after-turn-N completes.
               state.latestMessages = messages;
+              // Capture abort state before deleting the signal from the map.
+              const wasAborted = pendingSignals.get(turn)?.aborted ?? false;
               pendingResponses.get(turn)?.resolve(answer);
               pendingResponses.delete(turn);
               pendingStreams.get(turn)?.close();
@@ -722,13 +724,21 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               pendingSignals.delete(turn);
               const durationMs = turnStarts.has(turn) ? Date.now() - turnStarts.get(turn)! : 0;
               turnStarts.delete(turn);
-              sessionLogger?.emit({
-                type: "turn.end",
-                turn,
-                answer,
-                durationMs,
-                tokens: { inputTokens: turnInputTokens, outputTokens: turnOutputTokens },
-              });
+              if (wasAborted) {
+                sessionLogger?.emit({
+                  type: "turn.aborted",
+                  turn,
+                  reason: sessionAc.signal.aborted ? "close" : "signal",
+                });
+              } else {
+                sessionLogger?.emit({
+                  type: "turn.end",
+                  turn,
+                  answer,
+                  durationMs,
+                  tokens: { inputTokens: turnInputTokens, outputTokens: turnOutputTokens },
+                });
+              }
               return answer;
             });
 
@@ -942,13 +952,6 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
 
             try {
               for await (const chunk of chunkQueue) yield chunk;
-              if (combinedSignal.aborted && !runError) {
-                sessionLogger?.emit({
-                  type: "turn.aborted",
-                  turn,
-                  reason: sessionAc.signal.aborted ? "close" : "signal",
-                });
-              }
               if (runError) throw runError;
             } finally {
               pendingStreams.delete(turn);

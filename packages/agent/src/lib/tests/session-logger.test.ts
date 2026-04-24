@@ -425,4 +425,32 @@ describe("agentLoop — session event log", () => {
     expect(session.eventLog()).toEqual(logger.events());
     expect(session.eventLog().length).toBeGreaterThan(0);
   });
+
+  it("aborted stream emits turn.aborted instead of turn.end", async () => {
+    const logger = new InMemorySessionLogger();
+    const session = await makeSession({
+      name: "stream-abort",
+      llm: {
+        chat: async (params) => {
+          if (params.signal?.aborted)
+            throw Object.assign(new Error("aborted"), { name: "AbortError" });
+          return { content: "reply", finishReason: "stop" as const };
+        },
+      },
+      logger,
+    });
+
+    const ac = new AbortController();
+    ac.abort();
+    for await (const _ of session.stream("go", ac.signal)) {
+      /* drain */
+    }
+    session.close();
+
+    const events = logger.events();
+    expect(events.some((e) => e.type === "turn.aborted")).toBe(true);
+    expect(events.some((e) => e.type === "turn.end")).toBe(false);
+    const aborted = events.find((e) => e.type === "turn.aborted") as { reason: string } | undefined;
+    expect(aborted!.reason).toBe("signal");
+  });
 });
