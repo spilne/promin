@@ -5,6 +5,7 @@ import { RunDetail } from "./components/runs/run-detail.tsx";
 import { WorkerGrid } from "./components/workers/worker-grid.tsx";
 import { ScheduleList } from "./components/schedules/schedule-list.tsx";
 import { WorkflowList } from "./components/workflows/workflow-list.tsx";
+import { WorkflowDetail } from "./components/workflows/workflow-detail.tsx";
 import { DialogHost, ToastHost } from "./components/ui/dialog-host.tsx";
 
 export function App() {
@@ -48,7 +49,18 @@ function renderRoute(route: string, navigate: (p: string) => void) {
     return (
       <WorkflowList
         onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)}
-        onOpenWorkflow={(name) => navigate(`/?name=${encodeURIComponent(name)}`)}
+        onOpenWorkflow={(name) => navigate(`/workflows/${encodeURIComponent(name)}`)}
+        onOpenWorkflowRuns={(name) => navigate(`/?name=${encodeURIComponent(name)}`)}
+      />
+    );
+  }
+  const workflowMatch = /^\/workflows\/([^/]+)$/.exec(path ?? "");
+  if (workflowMatch) {
+    return (
+      <WorkflowDetail
+        name={decodeURIComponent(workflowMatch[1]!)}
+        onBack={() => navigate("/workflows")}
+        onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)}
       />
     );
   }

@@ -10,14 +10,17 @@ import { TriggerModal } from "./trigger-modal.tsx";
 
 interface WorkflowListProps {
   onOpenRun: (id: string) => void;
+  /** Navigate to the workflow-detail page (DAG, sample input, recent runs). */
   onOpenWorkflow: (name: string) => void;
+  /** Navigate to the runs list pre-filtered by this workflow name. */
+  onOpenWorkflowRuns?: (name: string) => void;
 }
 
 /**
  * Directory of every registered workflow definition. Shows type, step
  * count, recent activity sparkline, and a [Trigger] action per row.
  */
-export function WorkflowList({ onOpenRun, onOpenWorkflow }: WorkflowListProps) {
+export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: WorkflowListProps) {
   const { data, loading, error, refresh } = useFetch(() => api.listWorkflowDefs(), [], 30_000);
   const { data: sparklines } = useFetch<SparklinesResponse>(() => api.getSparklines(14), [], 5000);
   const [triggering, setTriggering] = useState<WorkflowDefDto | undefined>(undefined);
@@ -82,12 +85,21 @@ export function WorkflowList({ onOpenRun, onOpenWorkflow }: WorkflowListProps) {
                   </td>
                   <td class="text-right">
                     <div class="flex gap-1 justify-end">
+                      {onOpenWorkflowRuns && (
+                        <button
+                          class="btn btn-sm btn-ghost"
+                          onClick={() => onOpenWorkflowRuns(w.name)}
+                          title="Jump to the runs list filtered by this workflow"
+                        >
+                          Runs
+                        </button>
+                      )}
                       <button
                         class="btn btn-sm btn-ghost"
                         onClick={() => onOpenWorkflow(w.name)}
-                        title="View runs"
+                        title="Inspect DAG and recent runs"
                       >
-                        Runs
+                        View
                       </button>
                       <button class="btn btn-sm btn-primary" onClick={() => setTriggering(w)}>
                         Trigger
