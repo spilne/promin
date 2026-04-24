@@ -99,6 +99,17 @@ export function cancelRun(deps: RunRoutesDeps) {
   };
 }
 
+export function listWorkflowNames(deps: RunRoutesDeps) {
+  return async (): Promise<Response> => {
+    // Pull a wide page of recent workflows and distinct their names. Good
+    // enough for "populate a dropdown"; a real backend should expose a
+    // dedicated distinct-name query.
+    const rows = await deps.storage.listWorkflows({ limit: 1000 });
+    const names = Array.from(new Set(rows.map((r) => r.workflowName))).sort();
+    return json(200, { names });
+  };
+}
+
 export function sendSignal(deps: RunRoutesDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;

@@ -6,6 +6,7 @@ import type {
   WorkersResponse,
   SignalRequest,
 } from "../../server/api-types.ts";
+import type { SchedulesResponse, ScheduleDto } from "../../server/routes/schedules.ts";
 
 const BASE = ""; // served from same origin
 
@@ -62,5 +63,38 @@ export const api = {
   },
   eventsUrl(id: string): string {
     return `${BASE}/api/runs/${encodeURIComponent(id)}/events`;
+  },
+  listWorkflowNames(): Promise<{ names: string[] }> {
+    return req(`/api/workflows`);
+  },
+  listSchedules(): Promise<SchedulesResponse & { configured?: boolean }> {
+    return req(`/api/schedules`);
+  },
+  createSchedule(body: {
+    id: string;
+    name?: string;
+    cron?: string;
+    intervalMs?: number;
+    rrule?: string;
+    timezone?: string;
+    enabled?: boolean;
+    workflowName?: string;
+    input?: unknown;
+  }): Promise<ScheduleDto> {
+    return req(`/api/schedules`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  patchSchedule(id: string, body: { enabled?: boolean }): Promise<ScheduleDto> {
+    return req(`/api/schedules/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  deleteSchedule(id: string): Promise<{ ok: boolean }> {
+    return req(`/api/schedules/${encodeURIComponent(id)}`, { method: "DELETE" });
   },
 };

@@ -9,6 +9,7 @@ import { formatDuration, formatRelative, WORKFLOW_STATUS_VISUAL } from "../../li
 
 interface RunListProps {
   onOpen: (id: string) => void;
+  initialName?: string;
 }
 
 const STATUS_FILTERS: Array<WorkflowStatus | "all"> = [
@@ -20,8 +21,8 @@ const STATUS_FILTERS: Array<WorkflowStatus | "all"> = [
   "failed",
 ];
 
-export function RunList({ onOpen }: RunListProps) {
-  const [name, setName] = useState("");
+export function RunList({ onOpen, initialName = "" }: RunListProps) {
+  const [name, setName] = useState(initialName);
   const [status, setStatus] = useState<WorkflowStatus | "all">("all");
 
   const query: RunListQuery = {

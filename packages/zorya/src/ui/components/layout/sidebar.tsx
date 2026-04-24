@@ -14,13 +14,13 @@ const SECTIONS: Array<{ title?: string; items: NavItem[] }> = [
   {
     items: [
       { path: "/", label: "Runs", icon: "▦" },
+      { path: "/schedules", label: "Schedules", icon: "⏱" },
       { path: "/workers", label: "Workers", icon: "◉" },
     ],
   },
   {
     title: "Coming soon",
     items: [
-      { path: "/schedules", label: "Schedules", icon: "⏱", disabled: true },
       { path: "/deployments", label: "Deployments", icon: "☁", disabled: true },
       { path: "/alerts", label: "Alerts", icon: "⚠", disabled: true },
     ],

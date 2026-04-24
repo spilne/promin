@@ -9,6 +9,7 @@ export { runToDto, runToSummaryDto, stepToDto } from "./server/serialize.ts";
 export { StorageMetricsProvider, type MetricsProvider } from "./server/routes/metrics.ts";
 export { emptyWorkersProvider, type WorkersProvider } from "./server/routes/workers.ts";
 export type { RunTrigger } from "./server/routes/runs.ts";
+export type { ScheduleDto, SchedulesResponse } from "./server/routes/schedules.ts";
 
 // Wire format
 export type {

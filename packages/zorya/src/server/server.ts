@@ -13,7 +13,7 @@
 // ```
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage } from "@promin/workflow";
+import type { WorkflowStorage, SchedulerStorage } from "@promin/workflow";
 import { Auth, type AuthConfig } from "./auth.ts";
 import { Router, jsonError } from "./router.ts";
 import { RunEventBus } from "./run-event-bus.ts";
@@ -21,6 +21,7 @@ import {
   cancelRun,
   getRun,
   listRuns,
+  listWorkflowNames,
   sendSignal,
   triggerRun,
   type RunTrigger,
@@ -28,6 +29,13 @@ import {
 import { streamRunEvents } from "./routes/sse.ts";
 import { getMetrics, StorageMetricsProvider, type MetricsProvider } from "./routes/metrics.ts";
 import { emptyWorkersProvider, listWorkers, type WorkersProvider } from "./routes/workers.ts";
+import {
+  createSchedule,
+  deleteSchedule,
+  getSchedule,
+  listSchedules,
+  patchSchedule,
+} from "./routes/schedules.ts";
 
 export interface ZoryaServerConfig extends AuthConfig {
   storage: WorkflowStorage;
@@ -37,6 +45,8 @@ export interface ZoryaServerConfig extends AuthConfig {
   metrics?: MetricsProvider;
   /** Plug in a worker registry. When omitted, /api/workers returns []. */
   workers?: WorkersProvider;
+  /** Plug in a scheduler storage. When omitted, /api/schedules returns a stub. */
+  scheduler?: SchedulerStorage;
   /** Directory with compiled dashboard assets (index.html, app.js, app.css). */
   uiDir?: string;
   /** SSE watcher poll interval. Default 1000ms. */
@@ -73,6 +83,7 @@ export class ZoryaServer {
           }),
       )
       .get("/api/runs", listRuns(deps))
+      .get("/api/workflows", listWorkflowNames(deps))
       .get("/api/runs/:id", getRun(deps))
       .post("/api/runs/trigger/:name", triggerRun(deps))
       .post("/api/runs/:id/cancel", cancelRun(deps))
@@ -87,6 +98,26 @@ export class ZoryaServer {
       )
       .get("/api/workers", listWorkers(workers))
       .get("/api/metrics", getMetrics(metrics));
+
+    if (config.scheduler) {
+      const sch = config.scheduler;
+      this.router
+        .get("/api/schedules", listSchedules(sch))
+        .post("/api/schedules", createSchedule(sch))
+        .get("/api/schedules/:id", getSchedule(sch))
+        .patch("/api/schedules/:id", patchSchedule(sch))
+        .delete("/api/schedules/:id", deleteSchedule(sch));
+    } else {
+      // Stub response so the UI can tell "scheduler not configured" from
+      // "scheduler configured but empty".
+      this.router.get(
+        "/api/schedules",
+        () =>
+          new Response(JSON.stringify({ schedules: [], total: 0, configured: false }), {
+            headers: { "content-type": "application/json" },
+          }),
+      );
+    }
 
     if (config.uiDir) {
       this.router.setStatic(this.buildStaticHandler(config.uiDir));

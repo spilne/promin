@@ -4,11 +4,12 @@
 //   bun run packages/zorya/examples/demo.ts
 // ---------------------------------------------------------------------------
 
-import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { InMemoryWorkflowStorage, InMemorySchedulerStorage } from "@promin/workflow";
 import { ZoryaServer } from "../src/index.ts";
 import path from "node:path";
 
 const storage = new InMemoryWorkflowStorage();
+const schedulerStorage = new InMemorySchedulerStorage();
 
 async function seed() {
   // Completed order workflow with a couple of finished steps.
@@ -79,6 +80,54 @@ async function seed() {
     durationMs: 500,
     startedAt: new Date(Date.now() - 3000),
   });
+
+  // Schedules — all linked to the seeded workflow names (order, payment) so
+  // clicking through from the Schedules page lands on real runs.
+  await schedulerStorage.upsertSchedule({
+    id: "daily-orders-batch",
+    name: "Daily orders batch",
+    cron: "0 9 * * *",
+    timezone: "America/Edmonton",
+    enabled: true,
+    metadata: { workflowName: "order", input: { source: "daily-batch" } },
+  });
+  await schedulerStorage.upsertSchedule({
+    id: "hourly-order-sync",
+    name: "Hourly order sync",
+    cron: "0 * * * *",
+    timezone: "UTC",
+    enabled: true,
+    overlapPolicy: "skip",
+    metadata: { workflowName: "order", input: { source: "hourly-sync" } },
+  });
+  await schedulerStorage.upsertSchedule({
+    id: "payment-retry-every-15m",
+    name: "Payment retry sweep",
+    intervalMs: 15 * 60 * 1000,
+    enabled: true,
+    jitterMs: 30_000,
+    metadata: { workflowName: "payment", input: { mode: "retry" } },
+  });
+  await schedulerStorage.upsertSchedule({
+    id: "weekly-payment-audit",
+    name: "Weekly payment audit (paused)",
+    cron: "0 2 * * 1",
+    timezone: "UTC",
+    enabled: false,
+    metadata: { workflowName: "payment", input: { mode: "audit" } },
+  });
+  // Record some fake fire history so the UI has something to show.
+  await schedulerStorage.recordFire("hourly-order-sync", new Date(Date.now() - 45 * 60 * 1000), 12);
+  await schedulerStorage.recordFire(
+    "payment-retry-every-15m",
+    new Date(Date.now() - 3 * 60 * 1000),
+    287,
+  );
+  await schedulerStorage.recordFire(
+    "daily-orders-batch",
+    new Date(Date.now() - 18 * 60 * 60 * 1000),
+    42,
+  );
 }
 
 await seed();
@@ -87,6 +136,7 @@ const uiDir = path.join(import.meta.dir, "..", "dist", "public");
 
 const server = new ZoryaServer({
   storage,
+  scheduler: schedulerStorage,
   uiDir,
   // Example workers provider so the Workers tab has data.
   workers: {

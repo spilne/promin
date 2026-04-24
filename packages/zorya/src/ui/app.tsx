@@ -3,6 +3,7 @@ import { Sidebar } from "./components/layout/sidebar.tsx";
 import { RunList } from "./components/runs/run-list.tsx";
 import { RunDetail } from "./components/runs/run-detail.tsx";
 import { WorkerGrid } from "./components/workers/worker-grid.tsx";
+import { ScheduleList } from "./components/schedules/schedule-list.tsx";
 
 export function App() {
   const [route, setRoute] = useState(locationToRoute());
@@ -31,12 +32,22 @@ function locationToRoute(): string {
 }
 
 function renderRoute(route: string, navigate: (p: string) => void) {
-  if (route === "/workers") {
+  const [path, query] = route.split("?");
+  const params = new URLSearchParams(query ?? "");
+  if (path === "/workers") {
     return <WorkerGrid />;
   }
-  const runMatch = /^\/runs\/([^/]+)$/.exec(route);
+  if (path === "/schedules") {
+    return <ScheduleList onNavigate={navigate} />;
+  }
+  const runMatch = /^\/runs\/([^/]+)$/.exec(path ?? "");
   if (runMatch) {
     return <RunDetail id={decodeURIComponent(runMatch[1]!)} onBack={() => navigate("/")} />;
   }
-  return <RunList onOpen={(id) => navigate(`/runs/${encodeURIComponent(id)}`)} />;
+  return (
+    <RunList
+      initialName={params.get("name") ?? ""}
+      onOpen={(id) => navigate(`/runs/${encodeURIComponent(id)}`)}
+    />
+  );
 }
