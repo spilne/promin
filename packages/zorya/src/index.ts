@@ -15,6 +15,12 @@ export {
   type ScanOptions,
   type ScanResult,
 } from "./server/workflow-registry.ts";
+export {
+  InMemoryWorkflowAdvertisementRegistry,
+  type WorkflowAdvertisementRegistry,
+  type AdvertisedWorkflow,
+  type AdvertisementEntry,
+} from "./server/workflow-advertisements.ts";
 export type {
   SignalDto,
   SignalHistoryResponse,

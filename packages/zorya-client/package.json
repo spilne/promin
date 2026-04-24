@@ -1,0 +1,61 @@
+{
+  "name": "@promin/zorya-client",
+  "version": "0.1.0",
+  "description": "Zorya client SDK — connect worker processes + admin tools to a remote Zorya server.",
+  "keywords": [
+    "client",
+    "sdk",
+    "worker",
+    "workflow",
+    "zorya"
+  ],
+  "homepage": "https://github.com/spilne/promin/tree/main/packages/zorya-client",
+  "bugs": {
+    "url": "https://github.com/spilne/promin/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spilne/promin.git",
+    "directory": "packages/zorya-client"
+  },
+  "files": [
+    "dist",
+    "package.json"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "@promin/source": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@promin/core": "workspace:*",
+    "@promin/workflow": "workspace:*",
+    "@promin/workflow-remote": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:"
+  },
+  "nx": {
+    "targets": {
+      "typecheck": {},
+      "test": {},
+      "lint": {},
+      "format": {},
+      "format-check": {},
+      "ci": {},
+      "publish": {}
+    }
+  }
+}

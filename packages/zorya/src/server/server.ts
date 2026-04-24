@@ -13,9 +13,25 @@
 // ```
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage, SchedulerStorage, Workflow } from "@promin/workflow";
+import type {
+  WorkflowStorage,
+  SchedulerStorage,
+  StepQueue,
+  Workflow,
+  WorkerRegistry,
+} from "@promin/workflow";
+import { createWorkerApiHandler, createWorkflowStorageHandler } from "@promin/workflow-remote";
 import { Auth, type AuthConfig } from "./auth.ts";
 import { Router, jsonError } from "./router.ts";
+import {
+  InMemoryWorkflowAdvertisementRegistry,
+  type WorkflowAdvertisementRegistry,
+} from "./workflow-advertisements.ts";
+import {
+  listAdvertisements,
+  removeAdvertisements,
+  upsertAdvertisements,
+} from "./routes/advertisements.ts";
 import { RunEventBus } from "./run-event-bus.ts";
 import {
   cancelRun,
@@ -83,6 +99,23 @@ export interface ZoryaServerConfig extends AuthConfig {
   uiDir?: string;
   /** SSE watcher poll interval. Default 1000ms. */
   sseIntervalMs?: number;
+  /**
+   * Enables the remote worker protocol. When provided, the server mounts:
+   *
+   *   POST /rpc/storage            — createWorkflowStorageHandler
+   *   POST /rpc/worker             — createWorkerApiHandler (steps + workers)
+   *   POST /api/advertisements     — workers register their workflow defs
+   *   DELETE /api/advertisements/:workerId
+   *   GET  /api/advertisements     — debugging
+   *
+   * And the Workflows page starts pulling from the advertisement registry
+   * in addition to the static `workflows` config.
+   */
+  workerProtocol?: {
+    stepQueue: StepQueue;
+    workerRegistry?: WorkerRegistry;
+    advertisements?: WorkflowAdvertisementRegistry;
+  };
 }
 
 export interface ListenOptions {
@@ -110,6 +143,12 @@ export class ZoryaServer {
       workflows: config.workflows,
     };
 
+    // Auto-create an in-memory advertisement registry when the worker
+    // protocol is on but no registry is passed — that's the common case.
+    const advertisements: WorkflowAdvertisementRegistry | undefined = config.workerProtocol
+      ? (config.workerProtocol.advertisements ?? new InMemoryWorkflowAdvertisementRegistry())
+      : undefined;
+
     this.router = new Router()
       .get(
         "/api/health",
@@ -131,12 +170,20 @@ export class ZoryaServer {
       .get("/api/workflows/sparklines", getSparklines(config.storage))
       .get(
         "/api/workflows/definitions",
-        listWorkflowDefs({ workflows: config.workflows, sampleInput: config.sampleInput }),
+        listWorkflowDefs({
+          workflows: config.workflows,
+          sampleInput: config.sampleInput,
+          advertisements,
+        }),
       )
       .get("/api/workflows/:name/grid", getWorkflowGrid(config.storage))
       .get(
         "/api/workflows/:name/definition",
-        getWorkflowDef({ workflows: config.workflows, sampleInput: config.sampleInput }),
+        getWorkflowDef({
+          workflows: config.workflows,
+          sampleInput: config.sampleInput,
+          advertisements,
+        }),
       )
       .post("/api/runs/trigger/:name", triggerRun(deps))
       .post("/api/runs/:id/cancel", cancelRun(deps))
@@ -170,6 +217,28 @@ export class ZoryaServer {
             headers: { "content-type": "application/json" },
           }),
       );
+    }
+
+    if (config.workerProtocol) {
+      const { stepQueue, workerRegistry } = config.workerProtocol;
+      const storageHandler = createWorkflowStorageHandler(config.storage);
+      const workerHandler = createWorkerApiHandler({
+        stepQueue,
+        storage: config.storage,
+        workerRegistry,
+      });
+      // Mount as catch-all handlers: RPC body is the source of truth, path
+      // is just a mount point. Keep paths stable so client SDKs don't need
+      // configuration.
+      this.router.post("/rpc/storage", (req) => storageHandler(req));
+      this.router.post("/rpc/worker", (req) => workerHandler(req));
+
+      if (advertisements) {
+        this.router
+          .post("/api/advertisements", upsertAdvertisements(advertisements))
+          .delete("/api/advertisements/:workerId", removeAdvertisements(advertisements))
+          .get("/api/advertisements", listAdvertisements(advertisements));
+      }
     }
 
     if (config.uiDir) {

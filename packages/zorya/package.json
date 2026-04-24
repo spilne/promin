@@ -47,10 +47,12 @@
   },
   "dependencies": {
     "@promin/core": "workspace:*",
-    "@promin/workflow": "workspace:*"
+    "@promin/workflow": "workspace:*",
+    "@promin/workflow-remote": "workspace:*"
   },
   "devDependencies": {
     "@promin/sqlite": "workspace:*",
+    "@promin/zorya-client": "workspace:*",
     "@types/bun": "catalog:",
     "daisyui": "^4.12.14",
     "happy-dom": "^20.9.0",

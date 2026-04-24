@@ -10,13 +10,24 @@ import { LosslessJsonCodec } from "@promin/core";
 
 /** Every method a worker can call over HTTP. */
 export type WorkerMethod =
+  // StepQueue — task lifecycle
   | "claim"
   | "complete"
   | "fail"
   | "heartbeat"
   | "requeueStuck"
+  // WorkflowStorage — result/failure shortcuts (used by cross-language
+  // workers that don't also speak the storage wire)
   | "saveStepResult"
-  | "saveStepFailure";
+  | "saveStepFailure"
+  // WorkerRegistry — worker-level liveness. `heartbeat` above is the
+  // task-level heartbeat; `heartbeatWorker` keeps the registry entry alive.
+  | "registerWorker"
+  | "heartbeatWorker"
+  | "drainWorker"
+  | "deregisterWorker"
+  | "listWorkers"
+  | "detectDeadWorkers";
 
 export interface WorkerRpcRequest {
   readonly method: WorkerMethod;
