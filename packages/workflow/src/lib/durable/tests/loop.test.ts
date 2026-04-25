@@ -242,29 +242,52 @@ describe("dowhile / dountil", () => {
     });
   });
 
-  describe("durable iteration", () => {
-    it("journals each iteration (step row shows completed journal entries)", async () => {
+  describe("per-iteration step rows", () => {
+    it("saves a step row per iteration (named <name>.iter.<n>)", async () => {
       const storage = new InMemoryWorkflowStorage();
       const runner = createWorkflowRunner({ storage });
 
-      const wf = workflow<number>({ name: "w-journal" })
+      const wf = workflow<number>({ name: "w-iter-rows" })
         .dowhile(
-          "steps",
+          "loop",
           (_ctx, iter) => iter,
           (result) => result < 2,
         )
         .build();
 
-      await runner.run({ workflow: wf, workflowId: "w-journal-1", input: 0 });
+      await runner.run({ workflow: wf, workflowId: "w-iter-rows-1", input: 0 });
 
-      const state = await storage.loadWorkflow("w-journal-1");
+      const state = await storage.loadWorkflow("w-iter-rows-1");
       expect(state?.status).toBe("completed");
-      expect(state?.steps["steps"]?.status).toBe("completed");
+      expect(state?.steps["loop"]?.status).toBe("completed");
+      expect(state?.steps["loop.iter.0"]?.status).toBe("completed");
+      expect(state?.steps["loop.iter.1"]?.status).toBe("completed");
+      expect(state?.steps["loop.iter.2"]?.status).toBe("completed");
+      // loop exits at iter 2 since condition (result < 2) becomes false
+      // after the iter-2 body returns 2.
+      expect(state?.steps["loop.iter.3"]).toBeUndefined();
+    });
 
-      // Verify journal entries were recorded for each iteration.
-      const journal = await storage.loadJournal("w-journal-1", "steps");
-      const iterEntries = journal.filter((e) => e.activityName.startsWith("iter-"));
-      expect(iterEntries.length).toBe(3); // iter-0, iter-1, iter-2
+    it("per-iteration rows carry duration and timestamps", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      const runner = createWorkflowRunner({ storage });
+
+      const wf = workflow<number>({ name: "w-iter-meta" })
+        .dowhile(
+          "loop",
+          (_ctx, iter) => iter,
+          (result) => result < 1,
+        )
+        .build();
+
+      await runner.run({ workflow: wf, workflowId: "w-iter-meta-1", input: 0 });
+
+      const state = await storage.loadWorkflow("w-iter-meta-1");
+      const iter0 = state?.steps["loop.iter.0"];
+      expect(iter0).toBeDefined();
+      expect(iter0?.startedAt).toBeInstanceOf(Date);
+      expect(iter0?.completedAt).toBeInstanceOf(Date);
+      expect(typeof iter0?.durationMs).toBe("number");
     });
   });
 });

@@ -30,6 +30,7 @@ import {
 import type { Workflow } from "./durable-pipeline.ts";
 import {
   AmbiguousActivityOutcome,
+  LoopLimitExceededError,
   RetryableError,
   TerminalError,
   WorkflowSuspendedError,
@@ -268,6 +269,58 @@ export interface JournaledContext<Input, Prev> {
     workflow: Workflow<unknown, Output>,
     options?: { readonly input?: unknown; readonly workflowId?: string },
   ): Generator<ActivityYield, Output, Output>;
+
+  /**
+   * Iterate `fn` as a sequence of journaled activities until `condition`
+   * returns `false`. Each iteration lands in the activity journal as its
+   * own entry (named `"${name}-iter-${n}"`), so a worker crash resumes at
+   * the next un-journaled iteration rather than restarting from zero.
+   *
+   * Use inside a `.journaled()` body when the iteration is tight and
+   * in-process — polling an external system, accumulating until a
+   * threshold, retrying a lightweight check. For iteration over real work
+   * that should distribute across workers, use the builder-level
+   * `.dowhile()` / `.dountil()` which create DAG-visible step rows per
+   * iteration.
+   *
+   * Body always runs at least once. Exits when `condition(result, iter)`
+   * returns `false` or when `maxIterations` (default 100) is exceeded —
+   * overflow raises `LoopLimitExceededError`.
+   *
+   * ```ts
+   * const final = yield* ctx.dowhile(
+   *   "poll",
+   *   async (iter) => await checkStatus(input.id),
+   *   (status) => status === "pending",
+   * );
+   * ```
+   */
+  dowhile<T>(
+    name: string,
+    fn: (iter: number) => T | Promise<T>,
+    condition: (result: T, iter: number) => boolean,
+    options?: { readonly maxIterations?: number },
+  ): Generator<ActivityYield, T, unknown>;
+
+  /**
+   * Inverse polarity of `ctx.dowhile` — iterate `fn` until `condition`
+   * returns `true`. Body always runs at least once. See `ctx.dowhile` for
+   * journaling / max-iteration / use-case notes.
+   *
+   * ```ts
+   * const final = yield* ctx.dountil(
+   *   "drain",
+   *   () => pullBatch(100),
+   *   (batch) => batch.length === 0,
+   * );
+   * ```
+   */
+  dountil<T>(
+    name: string,
+    fn: (iter: number) => T | Promise<T>,
+    condition: (result: T, iter: number) => boolean,
+    options?: { readonly maxIterations?: number },
+  ): Generator<ActivityYield, T, unknown>;
 }
 
 /** The body function passed to `.journaled()`. */
@@ -1096,6 +1149,54 @@ function makeCtx<Input, Prev>(params: {
     }
   }
 
+  // Journaled-activity loop. Each iteration yields through `ctx.activity`
+  // so it lands in the journal as its own entry; the generator delegates
+  // each yield to the outer driver, preserving the single-shot per-yield
+  // contract the engine expects.
+  function* dowhileImpl<T>(
+    name: string,
+    fn: (iter: number) => T | Promise<T>,
+    condition: (result: T, iter: number) => boolean,
+    options?: { readonly maxIterations?: number },
+  ): Generator<ActivityYield, T, unknown> {
+    const max = options?.maxIterations ?? 100;
+    if (max < 1) {
+      throw new LoopLimitExceededError({
+        workflowId,
+        stepName,
+        maxIterations: max,
+        message: `ctx.dowhile("${name}"): maxIterations must be >= 1`,
+      });
+    }
+    let result: T = undefined as unknown as T;
+    let iter = 0;
+    while (true) {
+      if (iter >= max) {
+        throw new LoopLimitExceededError({
+          workflowId,
+          stepName,
+          maxIterations: max,
+          message: `ctx.dowhile("${name}") exceeded ${max} iterations without converging`,
+        });
+      }
+      const currentIter = iter;
+      result = yield* activity<T>(`${name}-iter-${currentIter}`, () => fn(currentIter));
+      iter++;
+      if (!condition(result, currentIter)) break;
+    }
+    return result;
+  }
+
+  // `dountil(cond) ≡ dowhile(!cond)` — no need for a parallel loop body.
+  function dountilImpl<T>(
+    name: string,
+    fn: (iter: number) => T | Promise<T>,
+    condition: (result: T, iter: number) => boolean,
+    options?: { readonly maxIterations?: number },
+  ): Generator<ActivityYield, T, unknown> {
+    return dowhileImpl(name, fn, (r, i) => !condition(r, i), options);
+  }
+
   const ctx: JournaledContext<Input, Prev> = {
     input,
     prev,
@@ -1107,6 +1208,8 @@ function makeCtx<Input, Prev>(params: {
     patched,
     parallel,
     child: childImpl,
+    dowhile: dowhileImpl,
+    dountil: dountilImpl,
   };
   return { ctx, unwind };
 }

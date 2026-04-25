@@ -29,6 +29,8 @@ import {
   type WorkflowStorage,
   type FenceGuard,
 } from "./workflow-storage.ts";
+import { createWorkflowEventStream } from "./workflow-event-stream.ts";
+import type { StepState } from "./workflow-state.ts";
 import { computeReadySet, type DagNode } from "./workflow-dag.ts";
 import type { FailedWorkflowRecord, WorkflowState, WorkflowRunEvent } from "./workflow-state.ts";
 import {
@@ -214,13 +216,16 @@ export interface WorkflowRunner {
    * (`workflow-completed`, `workflow-failed`, `workflow-tripwire`) or when
    * the supplied `AbortSignal` fires.
    *
-   * Requires the configured storage to implement `subscribeToWorkflow`
-   * (InMemoryWorkflowStorage does; Postgres will wire `pg_notify` — until
-   * then throws at call time to surface the capability gap clearly).
+   * Works against every storage. When the configured storage implements
+   * `subscribeToWorkflow` (InMemoryWorkflowStorage today; Postgres via
+   * `pg_notify` later) the runner uses the native push path; otherwise it
+   * falls back to polling `loadWorkflow` on `pollIntervalMs` (default
+   * 500ms) and synthesizing events from the step-state diff. User code
+   * doesn't need to branch on the backend.
    */
   subscribe(
     workflowId: string,
-    options?: { signal?: AbortSignal },
+    options?: { signal?: AbortSignal; pollIntervalMs?: number },
   ): AsyncIterable<WorkflowRunEvent>;
   /**
    * Snapshot of a workflow's current status: active step, suspended reason,
@@ -383,16 +388,121 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
 
   subscribe(
     workflowId: string,
-    options?: { signal?: AbortSignal },
+    options?: { signal?: AbortSignal; pollIntervalMs?: number },
   ): AsyncIterable<WorkflowRunEvent> {
-    if (!isSubscribableStorage(this.storage)) {
-      throw new Error(
-        `WorkflowRunner.subscribe requires a storage that implements ` +
-          `subscribeToWorkflow. The configured storage does not support it. ` +
-          `Use InMemoryWorkflowStorage or another backend with subscription support.`,
-      );
+    // Fast path: storage has native push support (EventBus / pg_notify).
+    if (isSubscribableStorage(this.storage)) {
+      return this.storage.subscribeToWorkflow(workflowId, options);
     }
-    return this.storage.subscribeToWorkflow(workflowId, options);
+    // Fallback: poll loadWorkflow, diff step-state map, synthesize events.
+    // Works against any storage so user code doesn't have to branch on the
+    // backend. Default cadence 500ms is a reasonable tradeoff between
+    // perceived latency and read load — callers can dial it via
+    // `pollIntervalMs`.
+    return this._pollSubscribe(workflowId, options);
+  }
+
+  private _pollSubscribe(
+    workflowId: string,
+    options?: { signal?: AbortSignal; pollIntervalMs?: number },
+  ): AsyncIterable<WorkflowRunEvent> {
+    const storage = this.storage;
+    const clock = this.clock;
+    const pollMs = options?.pollIntervalMs ?? 500;
+
+    return createWorkflowEventStream((producer) => {
+      let stopped = false;
+      let prevSteps: Record<string, StepState> = {};
+      let prevStatus: string | null = null;
+
+      const stop = (): void => {
+        stopped = true;
+        producer.end();
+      };
+      const onAbort = (): void => stop();
+      options?.signal?.addEventListener("abort", onAbort, { once: true });
+
+      const tick = async (): Promise<void> => {
+        while (!stopped && !producer.done) {
+          let state;
+          try {
+            state = await storage.loadWorkflow(workflowId);
+          } catch {
+            // Transient storage error — keep polling; the workflow may still
+            // materialize. Swallowing here keeps the stream alive in face
+            // of network blips on remote storages.
+            await new Promise<void>((r) => clock.setTimeout(() => r(), pollMs));
+            continue;
+          }
+          if (state) {
+            // Emit step transitions vs the last observed snapshot. Using
+            // completedAt as the event timestamp so the ordering is stable
+            // across polls; falls back to now when a storage omits it.
+            for (const [stepName, step] of Object.entries(state.steps)) {
+              const before = prevSteps[stepName];
+              if (step.status === "completed" && (!before || before.status !== "completed")) {
+                producer.push({
+                  type: "step-completed",
+                  stepName,
+                  result: step.result,
+                  durationMs: step.durationMs ?? 0,
+                  at: step.completedAt ?? clock.now(),
+                });
+              } else if (step.status === "failed" && (!before || before.status !== "failed")) {
+                producer.push({
+                  type: "step-failed",
+                  stepName,
+                  error: step.error ?? "",
+                  at: step.completedAt ?? clock.now(),
+                });
+              }
+            }
+            // Workflow-terminal transitions close the stream.
+            if (state.status !== prevStatus) {
+              if (state.status === "completed") {
+                producer.push({
+                  type: "workflow-completed",
+                  result: state.result,
+                  at: state.completedAt ?? clock.now(),
+                });
+                stop();
+                return;
+              } else if (state.status === "failed") {
+                producer.push({
+                  type: "workflow-failed",
+                  error: state.error ?? "",
+                  at: state.completedAt ?? clock.now(),
+                });
+                stop();
+                return;
+              } else if (state.status === "tripwire") {
+                const fired = Object.values(state.steps).find(
+                  (s) =>
+                    (s.metadata as { tripwireFired?: boolean } | undefined)?.tripwireFired === true,
+                );
+                producer.push({
+                  type: "workflow-tripwire",
+                  stepName: fired?.stepName ?? "unknown",
+                  reason: state.tripwire,
+                  at: state.completedAt ?? clock.now(),
+                });
+                stop();
+                return;
+              }
+            }
+            prevSteps = state.steps;
+            prevStatus = state.status;
+          }
+          await new Promise<void>((r) => clock.setTimeout(() => r(), pollMs));
+        }
+      };
+      void tick();
+
+      return () => {
+        stopped = true;
+        options?.signal?.removeEventListener("abort", onAbort);
+      };
+    });
   }
 
   async getStatus(

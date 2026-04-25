@@ -174,10 +174,44 @@ describe("subscribe — run-scoped event stream", () => {
     expect(events[events.length - 1]!.type).toBe("workflow-completed");
   });
 
-  it("runner throws when storage does not support subscribe", () => {
+  it("falls back to polling when storage has no native subscribe", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    // Shadow the native push path so the runner picks the polling branch.
+    (storage as unknown as { subscribeToWorkflow: unknown }).subscribeToWorkflow = undefined;
+    const runner = createWorkflowRunner({ storage });
+
+    const wf = workflow<number>({ name: "sub-poll" })
+      .step("a", ({ input }) => Pipeline.succeed(input + 1))
+      .step("b", ({ prev }) => Pipeline.succeed(prev * 2))
+      .build();
+
+    // Fast poll so the test finishes quickly but still goes through the
+    // polling code path.
+    const eventsP = collect(runner.subscribe("sub-poll-1", { pollIntervalMs: 20 }));
+    await runner.run({ workflow: wf, workflowId: "sub-poll-1", input: 5 });
+    const events = await eventsP;
+
+    // Polling diffs snapshots so all transitions must still surface — the
+    // exact ordering between step-completed and workflow-completed depends
+    // on whether they land in the same tick, but every terminal run ends
+    // with the workflow-completed event.
+    expect(events.map((e) => e.type)).toContain("step-completed");
+    expect(events[events.length - 1]!.type).toBe("workflow-completed");
+  });
+
+  it("polling fallback surfaces workflow-failed", async () => {
     const storage = new InMemoryWorkflowStorage();
     (storage as unknown as { subscribeToWorkflow: unknown }).subscribeToWorkflow = undefined;
     const runner = createWorkflowRunner({ storage });
-    expect(() => runner.subscribe("nope")).toThrow(/subscribeToWorkflow/);
+
+    const wf = workflow<number>({ name: "sub-poll-fail" })
+      .step("boom", () => Pipeline.fail(new StepBoom({ message: "x" })))
+      .build();
+
+    const eventsP = collect(runner.subscribe("sub-poll-fail-1", { pollIntervalMs: 20 }));
+    await runner.runSafe({ workflow: wf, workflowId: "sub-poll-fail-1", input: 0 });
+    const events = await eventsP;
+
+    expect(events[events.length - 1]!.type).toBe("workflow-failed");
   });
 });

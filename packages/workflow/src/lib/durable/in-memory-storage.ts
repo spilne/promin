@@ -18,6 +18,7 @@ import type {
   FenceGuard,
   FenceToken,
 } from "./workflow-storage.ts";
+import { createWorkflowEventStream } from "./workflow-event-stream.ts";
 import type {
   ActivityJournalStorage,
   JournaledSuspendStorage,
@@ -541,77 +542,30 @@ export class InMemoryWorkflowStorage
     workflowId: string,
     options?: { signal?: AbortSignal },
   ): AsyncIterable<WorkflowRunEvent> {
-    // Each subscription owns a queue of buffered events plus a FIFO of
-    // pending resolvers. Callers that issue multiple `next()` in flight
-    // (common when racing or pre-priming) each get their own resolver —
-    // a single waiter slot would drop all but the last.
-    const queue: WorkflowRunEvent[] = [];
-    const waiters: Array<(value: WorkflowRunEvent | null) => void> = [];
-    let done = false;
+    return createWorkflowEventStream((producer) => {
+      // Adapter: storage's internal subscriber set uses `(event|null) =>
+      // void` so `null` signals terminal. The shared stream's producer has
+      // separate `push` / `end` methods — adapt both shapes here.
+      const adapt = (event: WorkflowRunEvent | null): void => {
+        if (event === null) producer.end();
+        else producer.push(event);
+      };
+      const subs = this.subscribers.get(workflowId) ?? new Set();
+      subs.add(adapt);
+      this.subscribers.set(workflowId, subs);
 
-    const push = (event: WorkflowRunEvent | null): void => {
-      if (done) return;
-      if (event === null) {
-        done = true;
-        // Drain every pending waiter with done-signal.
-        const pending = waiters.splice(0);
-        for (const w of pending) w(null);
-        return;
-      }
-      const w = waiters.shift();
-      if (w) w(event);
-      else queue.push(event);
-    };
+      const onAbort = (): void => producer.end();
+      options?.signal?.addEventListener("abort", onAbort, { once: true });
 
-    const subs = this.subscribers.get(workflowId) ?? new Set();
-    subs.add(push);
-    this.subscribers.set(workflowId, subs);
-
-    const removeSelf = (): void => {
-      const cur = this.subscribers.get(workflowId);
-      if (cur) {
-        cur.delete(push);
-        if (cur.size === 0) this.subscribers.delete(workflowId);
-      }
-    };
-
-    const onAbort = (): void => push(null);
-    options?.signal?.addEventListener("abort", onAbort, { once: true });
-
-    return {
-      [Symbol.asyncIterator](): AsyncIterator<WorkflowRunEvent> {
-        return {
-          async next(): Promise<IteratorResult<WorkflowRunEvent>> {
-            if (queue.length > 0) {
-              return { value: queue.shift()!, done: false };
-            }
-            if (done) {
-              removeSelf();
-              options?.signal?.removeEventListener("abort", onAbort);
-              return { value: undefined, done: true };
-            }
-            const val = await new Promise<WorkflowRunEvent | null>((resolve) => {
-              waiters.push(resolve);
-            });
-            if (val === null) {
-              removeSelf();
-              options?.signal?.removeEventListener("abort", onAbort);
-              return { value: undefined, done: true };
-            }
-            return { value: val, done: false };
-          },
-          async return(): Promise<IteratorResult<WorkflowRunEvent>> {
-            done = true;
-            // Resolve any pending waiters so hanging `.next()` calls settle.
-            const pending = waiters.splice(0);
-            for (const w of pending) w(null);
-            removeSelf();
-            options?.signal?.removeEventListener("abort", onAbort);
-            return { value: undefined, done: true };
-          },
-        };
-      },
-    };
+      return () => {
+        const cur = this.subscribers.get(workflowId);
+        if (cur) {
+          cur.delete(adapt);
+          if (cur.size === 0) this.subscribers.delete(workflowId);
+        }
+        options?.signal?.removeEventListener("abort", onAbort);
+      };
+    });
   }
 
   async deliverSignal(workflowId: string, signalName: string, payload: unknown): Promise<void> {
