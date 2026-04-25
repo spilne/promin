@@ -272,6 +272,20 @@ export const api = {
       },
     );
   },
+  compactAgentThread(
+    id: string,
+    threadId: string,
+    body: { namespaceId: string; resourceId?: string; keepRecent?: number },
+  ): Promise<{ episode: { id: string; summary: string; salience: number } }> {
+    return req(
+      `/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/compact`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+  },
   sendAgentThreadMessage(
     id: string,
     threadId: string,

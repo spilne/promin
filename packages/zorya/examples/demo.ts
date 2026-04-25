@@ -958,6 +958,18 @@ const server = new ZoryaServer({
           keepRecent: 6,
           mode: "background",
         },
+        // Auto-fire distillThread once a thread reaches a sensible
+        // "this conversation has substance" length. Blocking mode
+        // here so concurrent turns can't both fire while the first
+        // distill's LLM call is still in flight (the consolidator's
+        // idempotency check is a non-atomic list-then-write — under
+        // background mode two near-simultaneous turns might each see
+        // "no episode yet" and both write). Distill runs rarely, so
+        // adding the LLM round-trip to the triggering turn is fine.
+        autoDistill: {
+          messageThreshold: 6,
+          mode: "blocking",
+        },
         // Consume the rollups + facts compactThread / distillThread
         // write. maxEpisodeTokens > 0 means future turns under the
         // same (namespace, resource) see the gist injected into the

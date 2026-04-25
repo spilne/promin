@@ -20,7 +20,7 @@ import type { MemoryStore } from "../memory/types.ts";
 // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
 import type { AgentTool } from "../tool.ts";
 import type { Consolidator } from "../memory/consolidator.ts";
-import type { AutoCompactConfig } from "../agent/local-agent.ts";
+import type { AutoCompactConfig, AutoDistillConfig } from "../agent/local-agent.ts";
 import type { TokenBudget } from "../memory/types.ts";
 import type { LocalAgentBackend, RegisteredAgent } from "./types.ts";
 
@@ -70,6 +70,13 @@ export interface ResolveLocalAgentDeps {
    */
   readonly autoCompact?: AutoCompactConfig | false;
   /**
+   * Auto-distillation config — fires `distillThread` after each thread
+   * turn when the configured rule trips. Writes a ResourceEpisode +
+   * dedup'd resource facts so future threads under the same
+   * `(namespace, resource)` see the gist.
+   */
+  readonly autoDistill?: AutoDistillConfig | false;
+  /**
    * Token budget governing `resolveContext`-driven prompt assembly per
    * turn. Set `maxEpisodeTokens > 0` to consume the rollups
    * compactThread / distillThread write so future turns benefit from
@@ -111,6 +118,7 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
     consolidator: deps.consolidator,
     consolidatorLlm: deps.consolidatorLlm,
     autoCompact: deps.autoCompact,
+    autoDistill: deps.autoDistill,
     contextBudget: deps.contextBudget,
   };
 

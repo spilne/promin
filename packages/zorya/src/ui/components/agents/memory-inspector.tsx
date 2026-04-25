@@ -191,20 +191,36 @@ export function MemoryInspector({
               }}
             />
             {currentThread && (
-              <DistillButton
-                agentId={agentId}
-                threadId={currentThread}
-                namespaceId={namespaceId}
-                resourceId={resourceId}
-                onDone={() => {
-                  // Refetch the snapshot so Resource → Facts/Episodes
-                  // shows the freshly written rows.
-                  memoryApi
-                    .inspect({ namespaceId, resourceId, threadId: currentThread })
-                    .then(setData)
-                    .catch(() => {});
-                }}
-              />
+              <>
+                <CompactButton
+                  agentId={agentId}
+                  threadId={currentThread}
+                  namespaceId={namespaceId}
+                  resourceId={resourceId}
+                  onDone={() => {
+                    // Refetch the snapshot so Thread → Episodes shows
+                    // the freshly written rollup.
+                    memoryApi
+                      .inspect({ namespaceId, resourceId, threadId: currentThread })
+                      .then(setData)
+                      .catch(() => {});
+                  }}
+                />
+                <DistillButton
+                  agentId={agentId}
+                  threadId={currentThread}
+                  namespaceId={namespaceId}
+                  resourceId={resourceId}
+                  onDone={() => {
+                    // Refetch the snapshot so Resource → Facts/Episodes
+                    // shows the freshly written rows.
+                    memoryApi
+                      .inspect({ namespaceId, resourceId, threadId: currentThread })
+                      .then(setData)
+                      .catch(() => {});
+                  }}
+                />
+              </>
             )}
           </div>
         )}
@@ -508,6 +524,50 @@ function comboOptions(
     out.push({ value: currentThread, label: currentThread });
   }
   return out;
+}
+
+function CompactButton({
+  agentId,
+  threadId,
+  namespaceId,
+  resourceId,
+  onDone,
+}: {
+  agentId: string;
+  threadId: string;
+  namespaceId: string;
+  resourceId: string;
+  onDone: () => void;
+}) {
+  const [pending, setPending] = useState(false);
+  const compact = async () => {
+    if (pending) return;
+    setPending(true);
+    try {
+      const res = await api.compactAgentThread(agentId, threadId, {
+        namespaceId,
+        resourceId,
+        // No keepRecent override — let the host's default kick in.
+      });
+      const sal = res.episode.salience.toFixed(2);
+      toast(`Compacted (salience ${sal})`, { variant: "success" });
+      onDone();
+    } catch (e) {
+      toast(`Compact failed: ${e instanceof Error ? e.message : String(e)}`, { variant: "error" });
+    } finally {
+      setPending(false);
+    }
+  };
+  return (
+    <button
+      class="btn btn-xs btn-ghost"
+      onClick={compact}
+      disabled={pending}
+      title="Roll up the oldest portion of this thread into a ThreadEpisode (frees message budget; gist survives)"
+    >
+      {pending ? "Compacting…" : "↧ Compact"}
+    </button>
+  );
 }
 
 function DistillButton({

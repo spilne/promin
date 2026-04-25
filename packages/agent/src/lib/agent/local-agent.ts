@@ -135,6 +135,31 @@ export interface LocalAgentConfig<TOutput = any> {
    */
   readonly autoCompact?: AutoCompactConfig | false;
   /**
+   * Auto-fire `distillThread` after each thread turn whose configured
+   * rule trips. Writes a `ResourceEpisode` (and dedup'd resource-scope
+   * facts) so future threads under the same `(namespace, resource)`
+   * see this thread's gist via `resolveContext`'s episode-injection
+   * budget.
+   *
+   * Default: `false` (off). Distillation is the cross-thread side of
+   * memory consolidation — different from auto-compact (in-thread
+   * rollup). Common shapes:
+   *
+   *     // distill once when a thread reaches a sensible "done" length
+   *     autoDistill: { messageThreshold: 6 }
+   *
+   *     // distill every 10 turns, replacing the previous summary
+   *     autoDistill: {
+   *       when: ({ turnsSinceLastDistill }) => turnsSinceLastDistill >= 10,
+   *       force: true,
+   *     }
+   *
+   * Idle-based and cron-based triggers (e.g. "distill when this thread
+   * has been silent for 10 minutes") aren't covered here — they need
+   * scheduling outside the agent process. This is the per-turn hook.
+   */
+  readonly autoDistill?: AutoDistillConfig | false;
+  /**
    * Token budget governing how `MemoryStore.resolveContext` assembles
    * each turn's prompt + message tail. When unset, defaults to a
    * permissive budget (16k message tokens, 0 episode tokens — episodes
@@ -238,6 +263,73 @@ export interface AutoCompactSignals {
   readonly threadKey: ThreadKey;
 }
 
+export interface AutoDistillConfig {
+  /**
+   * Built-in count gate: fire when the thread's persisted message
+   * count reaches this number. Combined with `force: false` (the
+   * default), this means "distill once when the thread reaches N
+   * messages" — the consolidator's idempotency dedupes subsequent
+   * triggers on the same thread.
+   *
+   * Common values: 6 (after a couple of turns, the conversation has
+   * enough substance to be worth a cross-thread summary), 20 (only
+   * substantial threads).
+   */
+  readonly messageThreshold?: number;
+  /**
+   * Custom predicate. Mirrors `AutoCompactConfig.when`. When set,
+   * REPLACES `messageThreshold`. Use for compound rules like "every
+   * N turns, re-distill" (pair with `force: true`):
+   *
+   *     when: ({ turnsSinceLastDistill }) => turnsSinceLastDistill >= 10,
+   *     force: true,
+   *
+   * Or "the user said something goodbye-y":
+   *
+   *     when: ({ lastUserMessage }) =>
+   *       /^(thanks|bye|goodbye|see ya)\b/i.test(lastUserMessage ?? ""),
+   */
+  readonly when?: (signals: AutoDistillSignals) => boolean;
+  /**
+   * Re-distill even when an episode for this thread already exists.
+   * Default `false` (idempotent — first qualifying turn writes one
+   * episode; subsequent turns are no-ops). Set `true` for "every N
+   * turns" patterns where you want each pass to capture the latest
+   * additions.
+   */
+  readonly force?: boolean;
+  /**
+   * Execution mode (same semantics as `AutoCompactConfig.mode`):
+   *   - `"background"` (default) — fire-and-forget after the turn resolves
+   *   - `"blocking"` — await before resolving the turn
+   */
+  readonly mode?: "background" | "blocking";
+}
+
+/** State the auto-distill predicate sees. */
+export interface AutoDistillSignals {
+  /** Total persisted message count for this thread. */
+  readonly totalCount: number;
+  /**
+   * Number of NEW messages since the most recent
+   * resource-scope episode whose `sourceThreadId` is this thread.
+   * Equals `totalCount` when never distilled.
+   */
+  readonly turnsSinceLastDistill: number;
+  /**
+   * `createdAt` of the most recent distill episode for this thread
+   * (0 if none).
+   */
+  readonly lastDistilledAt: number;
+  /**
+   * Trimmed string content of the thread's most recent user message,
+   * or `undefined` when the latest message isn't a user turn.
+   * Useful for goodbye-detection heuristics.
+   */
+  readonly lastUserMessage?: string;
+  readonly threadKey: ThreadKey;
+}
+
 export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput> {
   private readonly config: LocalAgentConfig<TOutput>;
 
@@ -337,6 +429,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       memory: this.config.memory,
       created,
       autoCompact: this.config.autoCompact === false ? undefined : this.config.autoCompact,
+      autoDistill: this.config.autoDistill === false ? undefined : this.config.autoDistill,
       consolidator: () => this.resolveConsolidator(),
       contextBudget: this.config.contextBudget,
     });
@@ -498,6 +591,8 @@ interface LocalAgentThreadDeps {
   readonly created: boolean;
   /** Auto-compaction config inherited from `LocalAgentConfig.autoCompact`. */
   readonly autoCompact?: AutoCompactConfig;
+  /** Auto-distillation config inherited from `LocalAgentConfig.autoDistill`. */
+  readonly autoDistill?: AutoDistillConfig;
   /** Lazy accessor — same Consolidator the agent uses for manual calls. */
   readonly consolidator?: () => Consolidator;
   /** Token budget for resolveContext. Default DEFAULT_CONTEXT_BUDGET. */
@@ -672,6 +767,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       }
       await this.deps.memory.appendMessages(this.deps.key, newTail);
       await this.maybeAutoCompact();
+      await this.maybeAutoDistill();
     } else {
       this.inMemoryMessages.push(...newTail);
     }
@@ -751,6 +847,79 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     }
     // else: fire-and-forget; the run's promise carries no value the
     // turn cares about, errors are already logged above.
+  }
+
+  /**
+   * Auto-distillation trigger. Symmetric with maybeAutoCompact:
+   * computes signals (totalCount, turnsSinceLastDistill, lastDistilledAt,
+   * lastUserMessage), runs the configured rule, dispatches to the
+   * Consolidator. Idempotency is on the consolidator side — a second
+   * fire on the same thread without `force: true` returns the existing
+   * episode without re-running the LLM.
+   */
+  private async maybeAutoDistill(): Promise<void> {
+    const cfg = this.deps.autoDistill;
+    if (!cfg || !this.deps.memory || !this.deps.consolidator) return;
+    if (cfg.messageThreshold === undefined && !cfg.when) return;
+    // Distillation writes a ResourceEpisode — only meaningful when a
+    // resourceId is bound. Without one, silently skip.
+    if (!this.deps.key.resourceId) return;
+
+    const messages = await this.deps.memory.getMessages(this.deps.key, { order: "asc" });
+    const resourceKey = {
+      namespaceId: this.deps.key.namespaceId,
+      resourceId: this.deps.key.resourceId,
+    };
+    const resourceEpisodes = await this.deps.memory
+      .listResourceEpisodes(resourceKey, { order: "createdDesc" })
+      .catch(() => []);
+    const lastDistill = resourceEpisodes.find(
+      (e) =>
+        e.sourceThreadId === this.deps.key.threadId &&
+        (e.metadata as { kind?: unknown } | null)?.kind === "distill",
+    );
+    const lastDistilledSeq = lastDistill?.sourceMessageRange?.toSeq ?? 0;
+    const lastDistilledAt = lastDistill?.createdAt ?? 0;
+    const turnsSinceLastDistill = messages.filter((m) => m.seq > lastDistilledSeq).length;
+
+    // Walk back from the end to find the most recent USER message —
+    // after persistTurn the assistant turn (and any tool messages)
+    // are at the tail; the user's input sits before them.
+    let lastUserMessage: string | undefined;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]!;
+      if (m.role === "user" && typeof m.content === "string") {
+        lastUserMessage = m.content.trim();
+        break;
+      }
+    }
+
+    const signals: AutoDistillSignals = {
+      totalCount: messages.length,
+      turnsSinceLastDistill,
+      lastDistilledAt,
+      lastUserMessage,
+      threadKey: this.deps.key,
+    };
+
+    const fire = cfg.when
+      ? cfg.when(signals)
+      : cfg.messageThreshold !== undefined && messages.length >= cfg.messageThreshold;
+    if (!fire) return;
+
+    const consolidator = this.deps.consolidator();
+    const run = consolidator
+      .distillThread(this.deps.key, { force: cfg.force ?? false })
+      .catch((err) => {
+        console.warn(
+          `[LocalAgent] autoDistill failed for thread ${this.deps.key.threadId}:`,
+          err instanceof Error ? err.message : err,
+        );
+      });
+
+    if ((cfg.mode ?? "background") === "blocking") {
+      await run;
+    }
   }
 
   async messages(range?: MessageRange): Promise<Message[]> {
