@@ -79,12 +79,13 @@ export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
       ? "vertical"
       : "horizontal";
 
-  // Diagnostic log — leave on while the DAG-flap bug is still in flight.
-  // Prefixed for grep-ability in the browser console; remove once the
-  // root cause is confirmed to be measurement timing alone.
+  // Diagnostic log — opt in via `window.__DAG_DEBUG = true` in the
+  // console. Was load-bearing while tracking down the SSE-replaces-
+  // dependsOn regression; left in place so the next time the DAG view
+  // misbehaves we don't have to redo the instrumentation.
   if (
     typeof console !== "undefined" &&
-    (window as { __DAG_DEBUG?: boolean }).__DAG_DEBUG !== false
+    (window as { __DAG_DEBUG?: boolean }).__DAG_DEBUG === true
   ) {
     console.log("[dag] render", {
       steps: run.steps.length,

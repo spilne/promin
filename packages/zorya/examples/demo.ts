@@ -16,6 +16,8 @@
 
 import {
   InMemorySchedulerStorage,
+  InMemoryStepQueue,
+  InMemoryWorkerRegistry,
   createWorkflowRunner,
   createSleepScanner,
   completeSignal,
@@ -53,6 +55,57 @@ db.exec("PRAGMA foreign_keys = ON");
 const storage = SqliteWorkflowStorage.make({ db });
 const schedulerStorage = new InMemorySchedulerStorage();
 const runner = createWorkflowRunner({ storage });
+
+// ---------------------------------------------------------------------------
+// Workers — register two mock workers so the dashboard's Workers page has
+// something to display. The demo runs every workflow in-process via
+// `runner.run` (no actual task dispatch over a queue), so these workers
+// don't claim any work; they just heartbeat and show up in the registry.
+// To see real worker behavior (capability claims, run distribution, dead
+// detection on stop), run the split example in `examples/split/`.
+
+const workerRegistry = new InMemoryWorkerRegistry();
+const MOCK_WORKERS = [
+  {
+    workerId: "demo-worker-eu-1",
+    capabilities: ["any"],
+    concurrency: 4,
+    metadata: {
+      hostname: "eu-1.demo.local",
+      runtime: "bun",
+      region: "eu-west",
+    },
+  },
+  {
+    workerId: "demo-worker-us-2",
+    capabilities: ["video", "etl"],
+    concurrency: 2,
+    metadata: {
+      hostname: "us-2.demo.local",
+      runtime: "bun",
+      region: "us-east",
+    },
+  },
+] as const;
+
+for (const w of MOCK_WORKERS) {
+  await workerRegistry.register({
+    workerId: w.workerId,
+    capabilities: w.capabilities,
+    concurrency: w.concurrency,
+    metadata: w.metadata,
+  });
+}
+// Heartbeat each mock worker so detectDead() doesn't tip them into the
+// "dead" bucket. 5s cadence stays well below typical 30s timeouts and
+// keeps the lastHeartbeat field visibly fresh in the dashboard.
+const heartbeatHandle = setInterval(() => {
+  for (const w of MOCK_WORKERS) {
+    void workerRegistry.heartbeat(w.workerId);
+  }
+}, 5_000);
+process.on("SIGINT", () => clearInterval(heartbeatHandle));
+process.on("SIGTERM", () => clearInterval(heartbeatHandle));
 
 // Registry so trigger-by-name works.
 // Auto-discover workflows by scanning ./workflows. Every .ts module under
@@ -113,11 +166,25 @@ function nextId(name: string): string {
 async function triggerRun(
   name: string,
   input: unknown,
-  opts: { workflowId?: string } = {},
+  opts: { workflowId?: string; namespace?: string } = {},
 ): Promise<{ workflowId: string }> {
   const wf = workflowsByName[name];
   if (!wf) throw new Error(`Unknown workflow: ${name}`);
   const workflowId = opts.workflowId ?? nextId(name);
+  // Pre-create the row with the requested namespace so it sticks. The
+  // runner's own internal createWorkflow inside run() is idempotent — it
+  // sees the existing row and resumes against it instead of overwriting.
+  // Without this hop the namespace would always be null because runner.run
+  // doesn't take a namespace param.
+  if (opts.namespace) {
+    await storage.createWorkflow({
+      workflowId,
+      workflowName: name,
+      input,
+      namespace: opts.namespace,
+      version: wf.version,
+    });
+  }
   // Fire-and-forget: we don't await run() so the server responds immediately.
   runner.run({ workflow: wf, workflowId, input }).catch(() => {
     // Failures are stored as workflow.failed state; swallow here so the
@@ -140,8 +207,15 @@ async function seedInitialRuns() {
     console.log("[zorya] storage already has runs — skipping initial seed");
     return;
   }
+  // Seed every workflow once so the dashboard has data on first load,
+  // and rotate through a few namespaces so the sidebar's namespace
+  // switcher actually has alternates (it would otherwise only see
+  // `default`/null on every row).
+  const namespaces = ["tenant-a", "tenant-b", undefined];
+  let i = 0;
   for (const name of Object.keys(workflowsByName)) {
-    await triggerRun(name, inputFor(name));
+    const namespace = namespaces[i++ % namespaces.length];
+    await triggerRun(name, inputFor(name), { namespace });
   }
 }
 
@@ -149,12 +223,15 @@ async function seedInitialRuns() {
 // Schedules — seed + lightweight poll-based firing
 
 async function seedSchedules() {
+  // Pin some schedules to specific namespaces so the runs they produce
+  // populate tenant-a / tenant-b consistently — gives the namespace
+  // switcher in the sidebar live, scheduled traffic to filter on.
   await schedulerStorage.upsertSchedule({
     id: "orders-every-15s",
     name: "Orders every 15s",
     intervalMs: 15_000,
     enabled: true,
-    metadata: { workflowName: "order" },
+    metadata: { workflowName: "order", namespace: "tenant-a" },
   });
   await schedulerStorage.upsertSchedule({
     id: "payments-every-30s",
@@ -162,21 +239,21 @@ async function seedSchedules() {
     intervalMs: 30_000,
     enabled: true,
     jitterMs: 2_000,
-    metadata: { workflowName: "payment" },
+    metadata: { workflowName: "payment", namespace: "tenant-a" },
   });
   await schedulerStorage.upsertSchedule({
     id: "video-transcodes-every-45s",
     name: "Video transcodes every 45s",
     intervalMs: 45_000,
     enabled: true,
-    metadata: { workflowName: "video-transcode" },
+    metadata: { workflowName: "video-transcode", namespace: "tenant-b" },
   });
   await schedulerStorage.upsertSchedule({
     id: "onboarding-every-60s",
     name: "Onboarding every 60s",
     intervalMs: 60_000,
     enabled: true,
-    metadata: { workflowName: "onboarding" },
+    metadata: { workflowName: "onboarding", namespace: "tenant-b" },
   });
   await schedulerStorage.upsertSchedule({
     id: "etl-hourly",
@@ -191,7 +268,7 @@ async function seedSchedules() {
     name: "Order fulfillment saga every 40s",
     intervalMs: 40_000,
     enabled: true,
-    metadata: { workflowName: "order-fulfillment" },
+    metadata: { workflowName: "order-fulfillment", namespace: "tenant-a" },
   });
   await schedulerStorage.upsertSchedule({
     id: "batch-every-50s",
@@ -306,7 +383,12 @@ async function startScheduleFirer() {
           // same generator as ad-hoc runs.
           const explicit = s.metadata?.["input"];
           const input = explicit === undefined ? inputFor(wfName) : explicit;
-          await triggerRun(wfName, input);
+          // Schedules can pin a namespace via metadata so all their fires
+          // land in the same tenant. Falls through to undefined when the
+          // schedule didn't set one — same as a global / cross-tenant
+          // schedule.
+          const namespace = s.metadata?.["namespace"] as string | undefined;
+          await triggerRun(wfName, input, { namespace });
         }
         await schedulerStorage.recordFire(s.id, now);
         const after = computeNextScheduleRun(s, now);
@@ -370,7 +452,13 @@ const server = new ZoryaServer({
   // defaults so users can tweak fields instead of writing raw JSON.
   sampleInput: (name) => inputFor(name),
   uiDir,
-  trigger: (name, input) => triggerRun(name, input),
+  // Workers page reads from the registry. The demo mocks two entries
+  // above; `stepQueue` is structurally required by the workerProtocol
+  // type but unused at runtime here because we keep the explicit
+  // `trigger` callback below — that path runs workflows in-process via
+  // the runner, never actually enqueues to the step queue.
+  workerProtocol: { stepQueue: new InMemoryStepQueue(), workerRegistry },
+  trigger: (name, input, opts) => triggerRun(name, input, { namespace: opts?.namespace }),
   rerun: async (workflowId) => {
     // After startFreshRun the row is reset; we still need to drive the
     // workflow again. Look up the name from storage, find its definition,
@@ -381,18 +469,9 @@ const server = new ZoryaServer({
     if (!def) return;
     runner.run({ workflow: def, workflowId, input: state.input }).catch(() => {});
   },
-  workers: {
-    listWorkers: async () => [
-      {
-        workerId: "worker-demo",
-        status: "online",
-        queue: "default",
-        activeTasks: 0,
-        completedToday: 0,
-        lastHeartbeatAt: new Date().toISOString(),
-      },
-    ],
-  },
+  // No explicit `workers` provider — the server falls through to
+  // RegistryBackedWorkersProvider over `workerProtocol.workerRegistry`,
+  // which surfaces the two mock workers we registered above.
 });
 
 const port = Number(process.env.PORT ?? 4100);
