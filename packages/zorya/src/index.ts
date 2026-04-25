@@ -27,6 +27,13 @@ export {
   type WorkflowStartRecord,
   type WorkerWorkflowSpec,
 } from "./server/workflow-starts.ts";
+export {
+  RunsService,
+  TriggerService,
+  mergePlannedSteps,
+  type RunsServiceDeps,
+  type TriggerServiceDeps,
+} from "./server/services/index.ts";
 export type {
   SignalDto,
   SignalHistoryResponse,

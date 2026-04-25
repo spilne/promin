@@ -28,6 +28,7 @@ import {
   type WorkflowAdvertisementRegistry,
 } from "./workflow-advertisements.ts";
 import { InMemoryWorkflowStartQueue, type WorkflowStartQueue } from "./workflow-starts.ts";
+import { TriggerService } from "./services/trigger-service.ts";
 import {
   listAdvertisements,
   removeAdvertisements,
@@ -188,41 +189,12 @@ export class ZoryaServer {
       ? (config.workerProtocol.workflowStarts ?? new InMemoryWorkflowStartQueue())
       : undefined;
 
-    // Auto-trigger fn for split mode: caller didn't supply `trigger`, but
-    // the worker protocol is on so we can hand starts off to workers.
+    // Auto-trigger for split mode: caller didn't supply `trigger`, but the
+    // worker protocol is on so we can hand starts off to workers.
     const trigger =
       config.trigger ??
       (workflowStarts
-        ? async (
-            name: string,
-            input: unknown,
-            options?: {
-              workflowId?: string;
-              workflowType?: string;
-              namespace?: string;
-              metadata?: Record<string, unknown>;
-              version?: string;
-            },
-          ) => {
-            const workflowId = options?.workflowId ?? crypto.randomUUID();
-            await config.storage.createWorkflow({
-              workflowId,
-              workflowName: name,
-              input,
-              workflowType: options?.workflowType,
-              namespace: options?.namespace,
-              metadata: options?.metadata,
-              version: options?.version,
-            });
-            await workflowStarts.enqueue({
-              workflowId,
-              workflowName: name,
-              input,
-              metadata: options?.metadata,
-              version: options?.version,
-            });
-            return { workflowId };
-          }
+        ? new TriggerService({ storage: config.storage, workflowStarts }).trigger
         : undefined);
 
     const deps = {
