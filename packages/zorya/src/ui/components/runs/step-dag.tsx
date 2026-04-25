@@ -6,7 +6,7 @@
 // Nodes are colored by their executed status (planned = dashed).
 // ---------------------------------------------------------------------------
 
-import { useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { RunDto, StepDto } from "../../../server/api-types.ts";
 import { STEP_STATUS_VISUAL, STEP_TYPE_ICON, effectiveStepStatus } from "../../lib/format.ts";
 import type { ExtendedStepStatus } from "../../../server/api-types.ts";
@@ -23,6 +23,11 @@ const COL_GAP = 90;
 const ROW_GAP = 20;
 const PADDING = 24;
 const STRIPE_W = 4;
+// Container can be a few pixels narrower than the horizontal layout (e.g.
+// scrollbar, padding rounding) without it being worth flipping to a
+// taller vertical layout. Empirically 24px swallows the common cases
+// without letting a real overflow slip through.
+const ORIENTATION_HYSTERESIS_PX = 24;
 
 type Orientation = "horizontal" | "vertical";
 
@@ -36,27 +41,41 @@ interface LaidOutNode {
 
 export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [containerW, setContainerW] = useState<number>(0);
+  // `null` = not yet measured (don't pick an orientation). Once a real
+  // width arrives the value is a positive number. Mid-flap rendering (the
+  // first paint with containerW=0 then the post-effect with the real
+  // width) was visible to users as the diagram briefly flipping
+  // horizontal → vertical → horizontal.
+  const [containerW, setContainerW] = useState<number | null>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+    // Synchronously measure before paint, so the first painted frame is
+    // already in the correct orientation.
+    setContainerW(el.clientWidth || null);
     const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) setContainerW(entry.contentRect.width);
+      for (const entry of entries) {
+        if (entry.contentRect.width > 0) setContainerW(entry.contentRect.width);
+      }
     });
     observer.observe(el);
-    setContainerW(el.clientWidth);
     return () => observer.disconnect();
   }, []);
 
   const horizontal = useMemo(() => layout(run.steps, "horizontal"), [run.steps]);
   const vertical = useMemo(() => layout(run.steps, "vertical"), [run.steps]);
 
-  // Default to horizontal; flip to vertical only when the horizontal layout
-  // overflows the container AND the vertical one fits better. This handles
-  // narrow viewports + deep DAGs without making short DAGs tall for no reason.
+  // Default to horizontal. Switch to vertical only after we've actually
+  // measured the container AND the horizontal layout overflows by more
+  // than ORIENTATION_HYSTERESIS_PX so a 1-pixel overshoot doesn't flap
+  // the layout when the container is right at the boundary. Holding the
+  // initial render in horizontal also matches the most common case
+  // (most users have wide enough panels for a 3-step DAG).
   const orientation: Orientation =
-    containerW > 0 && horizontal.width > containerW && vertical.width <= horizontal.width
+    containerW != null &&
+    horizontal.width > containerW + ORIENTATION_HYSTERESIS_PX &&
+    vertical.width <= horizontal.width
       ? "vertical"
       : "horizontal";
 
