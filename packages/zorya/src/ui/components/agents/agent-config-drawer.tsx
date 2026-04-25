@@ -1,17 +1,16 @@
 // ---------------------------------------------------------------------------
 // Agent config drawer — read-only view of the registered recipe.
 //
-// Shows what's stored in the AgentRegistry for this agent: model, system
-// prompt, tool list, metadata (description / capabilities / tags),
-// timestamps, and any extra knobs in `backend.extra`. All fields are
-// rendered with an explicit "Read-only" framing — editing lands when the
-// Agent Designer (promin-gsze) ships.
+// Shows what's stored in the AgentRegistry for this agent: identity
+// (id / version / timestamps / description), model, system prompt, tool
+// list, metadata (capabilities / tags), recipe-level runtime knobs
+// (autoCompact / autoDistill / contextBudget — when the recipe overrides
+// the host's defaults), and any free-form `backend.extra`.
 //
-// Runtime config (autoCompact / autoDistill / contextBudget) is NOT in the
-// recipe — it lives in the host's resolver — so this drawer doesn't show
-// it. The header notes that distinction so an operator looking for "why
-// does this thread auto-compact at message 12?" knows where to look
-// (host code, not the recipe).
+// Runtime knobs that live ONLY on the host's resolver (`when` predicates,
+// estimate callbacks, the consolidator factory) aren't visible here —
+// they're closures, not JSON-serialisable, and don't make sense on the
+// per-recipe surface. The merge happens inside resolveLocalAgent.
 // ---------------------------------------------------------------------------
 
 import { useEffect } from "preact/hooks";
@@ -46,8 +45,8 @@ export function AgentConfigDrawer({ agent, onClose }: Props) {
             <div class="text-xs text-base-content/50 uppercase tracking-wider">Agent config</div>
             <div class="font-mono text-sm truncate">{agent?.id ?? "…"}</div>
             <div class="text-[10px] text-base-content/40 mt-0.5">
-              Read-only recipe. Runtime knobs (auto-compact, context budget) live in the
-              host'&apos;s resolver, not here.
+              Read-only recipe. Recipe values override host defaults; unset fields inherit from the
+              host's resolver.
             </div>
           </div>
           <button
