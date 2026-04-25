@@ -30,7 +30,12 @@ export interface AgentResult {
   output?: unknown;
   messages: Message[];
   steps: number;
-  usage?: { inputTokens: number; outputTokens: number };
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+  };
 }
 
 export interface StepContext {
@@ -242,6 +247,8 @@ export function agentAction(
 
       let totalInputTokens = 0;
       let totalOutputTokens = 0;
+      let totalCacheReadTokens = 0;
+      let totalCacheWriteTokens = 0;
       let structuredOutput: unknown;
 
       function* maybeSaveMemory(answer: string) {
@@ -299,6 +306,8 @@ export function agentAction(
         if (response.usage) {
           totalInputTokens += response.usage.inputTokens;
           totalOutputTokens += response.usage.outputTokens;
+          totalCacheReadTokens += response.usage.cacheReadTokens ?? 0;
+          totalCacheWriteTokens += response.usage.cacheWriteTokens ?? 0;
         }
 
         // Intercept _respond tool call for structured output
@@ -321,7 +330,12 @@ export function agentAction(
               turn: 0,
               answer,
               durationMs: Date.now() - startMs,
-              tokens: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
+              tokens: {
+                inputTokens: totalInputTokens,
+                outputTokens: totalOutputTokens,
+                cacheReadTokens: totalCacheReadTokens,
+                cacheWriteTokens: totalCacheWriteTokens,
+              },
             });
             return buildResult(
               answer,
@@ -329,6 +343,8 @@ export function agentAction(
               step + 1,
               totalInputTokens,
               totalOutputTokens,
+              totalCacheReadTokens,
+              totalCacheWriteTokens,
               structuredOutput,
             );
           }
@@ -351,9 +367,22 @@ export function agentAction(
               turn: 0,
               answer,
               durationMs: Date.now() - startMs,
-              tokens: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
+              tokens: {
+                inputTokens: totalInputTokens,
+                outputTokens: totalOutputTokens,
+                cacheReadTokens: totalCacheReadTokens,
+                cacheWriteTokens: totalCacheWriteTokens,
+              },
             });
-            return buildResult(answer, messages, step + 1, totalInputTokens, totalOutputTokens);
+            return buildResult(
+              answer,
+              messages,
+              step + 1,
+              totalInputTokens,
+              totalOutputTokens,
+              totalCacheReadTokens,
+              totalCacheWriteTokens,
+            );
           }
         }
 
@@ -369,9 +398,22 @@ export function agentAction(
             turn: 0,
             answer,
             durationMs: Date.now() - startMs,
-            tokens: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
+            tokens: {
+              inputTokens: totalInputTokens,
+              outputTokens: totalOutputTokens,
+              cacheReadTokens: totalCacheReadTokens,
+              cacheWriteTokens: totalCacheWriteTokens,
+            },
           });
-          return buildResult(answer, messages, step + 1, totalInputTokens, totalOutputTokens);
+          return buildResult(
+            answer,
+            messages,
+            step + 1,
+            totalInputTokens,
+            totalOutputTokens,
+            totalCacheReadTokens,
+            totalCacheWriteTokens,
+          );
         }
 
         const toolResultMsgs: ToolResultMessage[] = [];
@@ -474,13 +516,23 @@ function buildResult(
   steps: number,
   inputTokens: number,
   outputTokens: number,
+  cacheReadTokens: number,
+  cacheWriteTokens: number,
   output?: unknown,
 ): AgentResult {
+  const hasUsage = inputTokens > 0 || outputTokens > 0;
   return {
     answer,
     ...(output !== undefined ? { output } : {}),
     messages,
     steps,
-    usage: inputTokens > 0 || outputTokens > 0 ? { inputTokens, outputTokens } : undefined,
+    usage: hasUsage
+      ? {
+          inputTokens,
+          outputTokens,
+          ...(cacheReadTokens > 0 ? { cacheReadTokens } : {}),
+          ...(cacheWriteTokens > 0 ? { cacheWriteTokens } : {}),
+        }
+      : undefined,
   };
 }

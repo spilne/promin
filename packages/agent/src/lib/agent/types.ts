@@ -77,6 +77,19 @@ export interface ToolResult {
 export interface UsageStats {
   readonly inputTokens: number;
   readonly outputTokens: number;
+  /**
+   * Tokens served from the provider's prompt cache. Populated when the
+   * underlying LLMProvider reports it (the Anthropic adapter does;
+   * other adapters fall back to undefined / 0). Useful as observability:
+   * a non-zero value means the system + tool prefix from a previous
+   * turn was still warm.
+   */
+  readonly cacheReadTokens?: number;
+  /**
+   * Tokens written into the provider's prompt cache on this turn — i.e.
+   * the cache miss prefix the provider just stored for next time.
+   */
+  readonly cacheWriteTokens?: number;
 }
 
 export type FinishReason = "stop" | "tool_use" | "length" | "max_steps" | "cancelled" | "error";

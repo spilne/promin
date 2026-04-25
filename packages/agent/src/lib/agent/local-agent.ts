@@ -662,19 +662,19 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       });
     }
 
-    // resolveContext-driven prompt assembly: cascade-merged system
-    // prompt + trimmed message tail. The systemPrompt fed to
-    // agentAction this turn is per-turn (includes the resolved cascade);
-    // the underlying loopConfig's static systemPrompt is preserved for
-    // composition.
-    const { systemPrompt: turnSystemPrompt, messages: history } = await this.loadContext();
-    const seed: Message[] = [...history];
+    // resolveContext-driven prompt assembly. The persona (agent's static
+    // prompt) goes through agentAction's config.systemPrompt — that puts
+    // it at messages[0]. The cascade (cascade-resolved memory) goes in
+    // FRONT of the seed as a second system message. Two distinct system
+    // blocks → two cache breakpoints at the Anthropic adapter, so the
+    // persona prefix stays cached when the cascade changes mid-session.
+    const { persona, cascade, messages: history } = await this.loadContext();
+    const seed: Message[] = [];
+    if (cascade) seed.push({ role: "system", content: cascade });
+    seed.push(...history);
     if (input.messages) seed.push(...input.messages);
 
-    const actionConfig = toActionConfig(
-      { ...this.deps.loopConfig, systemPrompt: turnSystemPrompt },
-      bus,
-    );
+    const actionConfig = toActionConfig({ ...this.deps.loopConfig, systemPrompt: persona }, bus);
     const wf = (agentAction as (cfg: AgentActionConfig<TOutput>) => ReturnType<typeof agentAction>)(
       actionConfig as AgentActionConfig<TOutput>,
     );
@@ -689,7 +689,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       })
       .then(async (raw) => {
         const r = raw as AgentResult;
-        await this.persistTurn(seedLen, !!turnSystemPrompt, r);
+        await this.persistTurn(seedLen, !!persona, r);
         return r;
       });
 
@@ -697,22 +697,33 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
   }
 
   /**
-   * Load the thread's prompt-ready view via `MemoryStore.resolveContext`:
-   * the agent's static system prompt merged with the cascade-resolved
-   * one (namespace + resource + thread rules / facts / working memory /
-   * episodes), plus the trimmed message tail.
+   * Load the thread's prompt-ready view via `MemoryStore.resolveContext`.
+   * Returns the agent's static persona prompt and the cascade-resolved
+   * prompt as SEPARATE strings — keeps them in distinct system blocks
+   * downstream so each gets its own prompt-cache breakpoint at the
+   * adapter layer.
+   *
+   * Why two blocks instead of one merged string:
+   *   - the persona is always stable across a session
+   *   - the cascade changes when memory.set / distillThread / facts edit
+   *     mid-conversation
+   *   - a single merged block invalidates the entire cached prefix on
+   *     any cascade change — you pay the full input-token price to
+   *     re-cache the persona too. Two blocks let Anthropic's caching
+   *     hit on the persona prefix even when the cascade changed.
    *
    * In-memory fallback (no `MemoryStore`) returns the raw message
-   * buffer with the agent's static prompt — no cascade.
+   * buffer with no cascade.
    */
-  private async loadContext(): Promise<{ systemPrompt: string | undefined; messages: Message[] }> {
-    const staticPrompt = this.deps.loopConfig.systemPrompt;
+  private async loadContext(): Promise<{
+    persona: string | undefined;
+    cascade: string | undefined;
+    messages: Message[];
+  }> {
+    const persona = this.deps.loopConfig.systemPrompt?.trim() || undefined;
 
     if (!this.deps.memory) {
-      return {
-        systemPrompt: staticPrompt,
-        messages: [...this.inMemoryMessages],
-      };
+      return { persona, cascade: undefined, messages: [...this.inMemoryMessages] };
     }
 
     const budget = this.deps.contextBudget ?? DEFAULT_CONTEXT_BUDGET;
@@ -721,18 +732,27 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       resolved = await this.deps.memory.resolveContext(this.deps.key, budget);
     } catch {
       // Thread row may not exist yet on a fresh send — fall back to
-      // raw messages so the first turn still runs cleanly. The next
-      // turn (after persistTurn creates the thread) gets the cascade.
+      // raw messages so the first turn still runs cleanly.
       const stored = await this.deps.memory.getMessages(this.deps.key).catch(() => []);
       return {
-        systemPrompt: staticPrompt,
+        persona,
+        cascade: undefined,
         messages: stored.map((m) => stripStorageMeta(m)),
       };
     }
 
-    const merged = mergeSystemPrompts(staticPrompt, resolved.systemPrompt);
+    // resolveContext always emits the cache-boundary marker, even when
+    // every layer is empty. Treat "boundary marker only" as no cascade
+    // — there's no point emitting a system block that contains only
+    // the marker, and skipping it lets the persona stand alone.
+    const cascadeRaw = resolved.systemPrompt.trim();
+    const cascade =
+      cascadeRaw.length > 0 && cascadeRaw !== "<!-- promin:cache-boundary -->"
+        ? cascadeRaw
+        : undefined;
     return {
-      systemPrompt: merged,
+      persona,
+      cascade,
       messages: resolved.messages.map((m) => stripStorageMeta(m)),
     };
   }
@@ -1026,10 +1046,7 @@ function recordEvent(capture: RunCapture, e: SessionEvent): void {
       const step: Step = { type: "llm", index: capture.steps.length, durationMs: e.durationMs };
       capture.steps.push(step);
       if (e.tokens) {
-        capture.usage = {
-          inputTokens: capture.usage.inputTokens + e.tokens.inputTokens,
-          outputTokens: capture.usage.outputTokens + e.tokens.outputTokens,
-        };
+        capture.usage = sumUsage(capture.usage, e.tokens);
       }
       capture.events.push({ type: "step-end", step });
       break;
@@ -1045,10 +1062,7 @@ function recordEvent(capture: RunCapture, e: SessionEvent): void {
       capture.finishReason = "max_steps";
       break;
     case "turn.end":
-      capture.usage = {
-        inputTokens: capture.usage.inputTokens + e.tokens.inputTokens,
-        outputTokens: capture.usage.outputTokens + e.tokens.outputTokens,
-      };
+      capture.usage = sumUsage(capture.usage, e.tokens);
       if (capture.finishReason === null) capture.finishReason = "stop";
       capture.events.push({ type: "finish", reason: capture.finishReason, usage: capture.usage });
       break;
@@ -1085,6 +1099,8 @@ function resolvedOutput<TOutput>(
   const usage: UsageStats = {
     inputTokens: result.usage?.inputTokens ?? 0,
     outputTokens: result.usage?.outputTokens ?? 0,
+    cacheReadTokens: result.usage?.cacheReadTokens,
+    cacheWriteTokens: result.usage?.cacheWriteTokens,
   };
   return {
     textStream: emptyAsyncIterable<string>(),
@@ -1120,6 +1136,8 @@ function liveOutput<TOutput>(
     usage: settled.then((r) => ({
       inputTokens: r.usage?.inputTokens ?? 0,
       outputTokens: r.usage?.outputTokens ?? 0,
+      cacheReadTokens: r.usage?.cacheReadTokens,
+      cacheWriteTokens: r.usage?.cacheWriteTokens,
     })),
     finishReason: settled.then(() => deriveFinishReason(capture)),
     messages: settled.then((r) => [...r.messages]),
@@ -1194,23 +1212,33 @@ function estimateTokens(m: { content?: string | null }): number {
 }
 
 /**
- * Combine the agent's static system prompt with the cascade-resolved
- * one from `MemoryStore.resolveContext`. Static prompt comes FIRST so
- * the agent's persona / instructions sit above tenant-scoped content,
- * and so prompt caching can include the (always-stable) static portion
- * in its cached prefix.
- *
- * Returns `undefined` only when both inputs are empty — `agentAction`
- * treats `undefined` as "no system prompt at all" rather than an empty
- * string with a header.
+ * Add the per-call usage delta into a running total. Cache fields are
+ * optional on each delta; when undefined we leave the running cache
+ * total unchanged. We intentionally don't promote the running total's
+ * undefined to 0 — observability code can distinguish "no cache info"
+ * (undefined) from "cache reported zero" (0).
  */
-function mergeSystemPrompts(staticPrompt: string | undefined, cascade: string): string | undefined {
-  const a = staticPrompt?.trim() ?? "";
-  const b = cascade.trim();
-  if (!a && !b) return undefined;
-  if (!a) return b;
-  if (!b) return a;
-  return `${a}\n\n${b}`;
+function sumUsage(
+  total: UsageStats,
+  delta: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+  },
+): UsageStats {
+  return {
+    inputTokens: total.inputTokens + delta.inputTokens,
+    outputTokens: total.outputTokens + delta.outputTokens,
+    cacheReadTokens:
+      delta.cacheReadTokens !== undefined
+        ? (total.cacheReadTokens ?? 0) + delta.cacheReadTokens
+        : total.cacheReadTokens,
+    cacheWriteTokens:
+      delta.cacheWriteTokens !== undefined
+        ? (total.cacheWriteTokens ?? 0) + delta.cacheWriteTokens
+        : total.cacheWriteTokens,
+  };
 }
 
 function stripStorageMeta(m: Message & { seq?: number; createdAt?: number }): Message {

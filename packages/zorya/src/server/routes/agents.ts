@@ -60,7 +60,12 @@ export interface ThreadMessagesResponse {
 export interface InvokeResponse {
   text: string;
   finishReason: string;
-  usage: { inputTokens: number; outputTokens: number };
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+  };
 }
 
 export interface ThreadInvokeResponse extends InvokeResponse {

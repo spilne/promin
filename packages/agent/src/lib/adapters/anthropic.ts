@@ -294,24 +294,38 @@ async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncIterable<SSEEve
 }
 
 /**
- * Collect all system messages into Anthropic system blocks.
- * The last block gets cache_control so the entire system prefix —
- * including memory injections, tool listings, compaction summaries, etc. —
- * is cached as one unit across turns.
+ * Collect system messages into Anthropic system blocks.
  *
- * Previously this used `.find()` which silently dropped all system messages
- * after the first one (memory injections, tool descriptions, etc. were lost).
+ * Caching strategy: place a `cache_control` breakpoint on BOTH the first
+ * and the last system block (when there are multiple). With two markers,
+ * Anthropic caches two prefixes — one ending at the first block (typically
+ * the always-stable agent persona) and one ending at the last block
+ * (the full prefix including volatile cascade content). When the cascade
+ * changes mid-conversation, we still hit cache on the persona prefix
+ * instead of paying full token price.
+ *
+ * One block? Just mark it once. Anthropic's 4-breakpoint limit easily
+ * accommodates persona + cascade + optional namespace/resource splits.
+ *
+ * Previously this used `.find()` which silently dropped all system
+ * messages after the first one — fixed; now all blocks survive.
  */
 function extractSystemBlocks(messages: Message[]): AnthropicContentBlock[] {
   const systemMessages = messages.filter((m) => m.role === "system");
   if (systemMessages.length === 0) return [];
+  const last = systemMessages.length - 1;
 
-  return systemMessages.map((m, i) => ({
-    type: "text",
-    text: m.content,
-    // Cache on the last block so the whole prefix is one cache entry.
-    ...(i === systemMessages.length - 1 ? { cache_control: { type: "ephemeral" as const } } : {}),
-  }));
+  return systemMessages.map((m, i) => {
+    const cacheBoundary =
+      i === last || (systemMessages.length > 1 && i === 0)
+        ? { cache_control: { type: "ephemeral" as const } }
+        : {};
+    return {
+      type: "text" as const,
+      text: m.content,
+      ...cacheBoundary,
+    };
+  });
 }
 
 function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {

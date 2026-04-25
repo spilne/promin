@@ -1,4 +1,9 @@
-export type LogUsage = { inputTokens: number; outputTokens: number };
+export type LogUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+};
 
 type SessionEventBody =
   | { type: "turn.start"; turn: number; task: string }

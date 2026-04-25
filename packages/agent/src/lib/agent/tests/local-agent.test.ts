@@ -765,15 +765,22 @@ describe("LocalAgent — autoDistill", () => {
 });
 
 describe("LocalAgent — resolveContext-driven prompt assembly", () => {
-  // LLM that records the system prompt + messages it received, so
-  // tests can assert on what actually got fed to the model.
+  // LLM that records all system blocks (in order) + non-system messages
+  // it received, so tests can assert on what actually got fed to the
+  // model. With the per-block prompt-cache split, persona and cascade
+  // arrive as TWO separate system messages.
   function spyLLM(reply = "ok") {
-    const seen: Array<{ system?: string; messages: Message[] }> = [];
+    const seen: Array<{ systems: string[]; messages: Message[] }> = [];
     const llm: LLMProvider = {
       chat: async (params) => {
-        const sys = params.messages.find((m) => m.role === "system");
+        const systems = params.messages
+          .filter(
+            (m): m is Message & { content: string } =>
+              m.role === "system" && typeof m.content === "string",
+          )
+          .map((m) => m.content);
         seen.push({
-          system: sys && typeof sys.content === "string" ? sys.content : undefined,
+          systems,
           messages: params.messages.filter((m) => m.role !== "system"),
         });
         return { content: reply, finishReason: "stop" };
@@ -811,14 +818,17 @@ describe("LocalAgent — resolveContext-driven prompt assembly", () => {
     ).text;
 
     expect(seen.length).toBe(1);
-    const sys = seen[0]!.system ?? "";
-    // Static persona FIRST, then the cascade.
-    expect(sys.indexOf("You are claude-bot")).toBeLessThan(sys.indexOf("Namespace Rules"));
-    // Cascade picked up everything we seeded.
-    expect(sys).toContain("Be polite to all customers.");
-    expect(sys).toContain("Resource Working Memory");
-    expect(sys).toContain("alice prefers terse replies");
-    expect(sys).toContain("is in EU");
+    const systems = seen[0]!.systems;
+    // Two system blocks: persona first, cascade second. Splitting them
+    // is the prompt-cache prerequisite — Anthropic adapter marks both
+    // first and last with cache_control so the persona prefix stays
+    // cached across cascade changes.
+    expect(systems.length).toBe(2);
+    expect(systems[0]).toContain("You are claude-bot");
+    expect(systems[1]).toContain("Be polite to all customers.");
+    expect(systems[1]).toContain("Resource Working Memory");
+    expect(systems[1]).toContain("alice prefers terse replies");
+    expect(systems[1]).toContain("is in EU");
   });
 
   it("trims message tail to fit `contextBudget.maxMessageTokens`", async () => {
@@ -887,11 +897,11 @@ describe("LocalAgent — resolveContext-driven prompt assembly", () => {
       await t.send({ task: "remind me what we picked" })
     ).text;
 
-    const sys = seen[0]!.system ?? "";
-    // Episode rendered into the cascade.
-    expect(sys).toContain("Recent Episodes");
-    expect(sys).toContain("saga patterns");
-    expect(sys).toContain("Postgres for audit log");
+    // Episode rendered into the cascade (the second system block).
+    const cascade = seen[0]!.systems.join("\n\n");
+    expect(cascade).toContain("Recent Episodes");
+    expect(cascade).toContain("saga patterns");
+    expect(cascade).toContain("Postgres for audit log");
   });
 
   it("first turn (no thread row yet) doesn't fail when resolveContext can't resolve", async () => {
@@ -912,9 +922,10 @@ describe("LocalAgent — resolveContext-driven prompt assembly", () => {
       await t.send({ task: "hello" })
     ).text;
 
-    // Static system prompt makes it through; we just don't get a
-    // cascade for the first turn.
-    expect(seen[0]!.system).toContain("static rules");
+    // Static system prompt makes it through (one block — cascade is
+    // empty on a brand-new thread, so no second block emitted).
+    expect(seen[0]!.systems.length).toBe(1);
+    expect(seen[0]!.systems[0]).toContain("static rules");
   });
 });
 

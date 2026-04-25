@@ -286,6 +286,12 @@ interface PendingAssistant {
   text: string;
   done: boolean;
   error?: string;
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+  };
 }
 
 function ChatPane({
@@ -363,8 +369,8 @@ function ChatPane({
         onDelta: (delta) => {
           setPending((p) => (p ? { ...p, text: p.text + delta } : p));
         },
-        onFinish: () => {
-          setPending((p) => (p ? { ...p, done: true } : p));
+        onFinish: (info) => {
+          setPending((p) => (p ? { ...p, done: true, usage: info.usage } : p));
         },
         onError: (msg) => {
           setPending((p) => (p ? { ...p, error: msg, done: true } : p));
@@ -391,7 +397,12 @@ function ChatPane({
   };
 
   return (
-    <section class="card bg-base-100 shadow flex flex-col min-h-0">
+    // Fade + slight upward slide on every (agent / thread / tenant) swap.
+    // The component is keyed on those upstream so React fully remounts on
+    // switch — applying `anim-thread-swap` here means each remount replays
+    // the animation. Without it, the new pane snaps in instantly which
+    // feels jarring when scrolling through threads.
+    <section class="card bg-base-100 shadow flex flex-col min-h-0 anim-thread-swap">
       <div class="px-3 py-2 border-b border-base-content/10 flex items-center justify-between gap-2">
         <span class="font-mono text-sm truncate" title={threadId}>
           {threadId}
@@ -434,7 +445,14 @@ function ChatPane({
             the refreshed persisted history. */}
         {pendingUser && <UserBubble content={pendingUser} />}
 
-        {pending && <PendingBubble text={pending.text} done={pending.done} error={pending.error} />}
+        {pending && (
+          <PendingBubble
+            text={pending.text}
+            done={pending.done}
+            error={pending.error}
+            usage={pending.usage}
+          />
+        )}
       </div>
 
       <div class="border-t border-base-content/10 px-3 py-2 flex gap-2">
@@ -605,7 +623,17 @@ function formatJson(value: unknown): string {
   }
 }
 
-function PendingBubble({ text, done, error }: { text: string; done: boolean; error?: string }) {
+function PendingBubble({
+  text,
+  done,
+  error,
+  usage,
+}: {
+  text: string;
+  done: boolean;
+  error?: string;
+  usage?: PendingAssistant["usage"];
+}) {
   return (
     <div class="chat chat-start">
       <div class="chat-header text-xs text-base-content/50">
@@ -616,6 +644,29 @@ function PendingBubble({ text, done, error }: { text: string; done: boolean; err
         {!done && <span class="ml-1 opacity-50 animate-pulse">▍</span>}
       </div>
       {error && <div class="chat-footer text-error text-xs mt-1">{error}</div>}
+      {usage && <UsageFooter usage={usage} />}
+    </div>
+  );
+}
+
+/**
+ * Tokens-and-cache footer rendered under an assistant bubble. The cache
+ * fields surface prompt-cache observability — non-zero `cacheRead` means
+ * the system + tools prefix from a prior turn was still warm at the
+ * provider; non-zero `cacheWrite` means we just stored it for next time.
+ */
+function UsageFooter({ usage }: { usage: NonNullable<PendingAssistant["usage"]> }) {
+  const cacheParts: string[] = [];
+  if (usage.cacheReadTokens !== undefined && usage.cacheReadTokens > 0) {
+    cacheParts.push(`cache read ${usage.cacheReadTokens.toLocaleString()}`);
+  }
+  if (usage.cacheWriteTokens !== undefined && usage.cacheWriteTokens > 0) {
+    cacheParts.push(`cache write ${usage.cacheWriteTokens.toLocaleString()}`);
+  }
+  return (
+    <div class="chat-footer text-[10px] text-base-content/50 mt-1 font-mono">
+      ↘ {usage.inputTokens.toLocaleString()} in · {usage.outputTokens.toLocaleString()} out
+      {cacheParts.length > 0 && <span class="text-success">{` · ${cacheParts.join(" · ")}`}</span>}
     </div>
   );
 }
