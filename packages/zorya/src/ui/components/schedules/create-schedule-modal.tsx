@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { api } from "../../api/client.ts";
 import type { ScheduleDto } from "../../../server/routes/schedules.ts";
+import { Combobox } from "../ui/combobox.tsx";
 
 interface CreateScheduleModalProps {
   onClose: () => void;
@@ -133,16 +134,13 @@ export function CreateScheduleModal({ onClose, onCreated, editing }: CreateSched
               <span class="label-text text-sm">Workflow</span>
             </div>
             <div class="flex gap-2">
-              <select
-                class="select select-bordered select-sm flex-1"
+              <Combobox
+                class="flex-1"
                 value={workflowName}
-                onChange={(e) => setWorkflowName((e.target as HTMLSelectElement).value)}
-              >
-                {workflowNames.length === 0 && <option value="">No workflows found</option>}
-                {workflowNames.map((n) => (
-                  <option value={n}>{n}</option>
-                ))}
-              </select>
+                onChange={setWorkflowName}
+                placeholder={workflowNames.length === 0 ? "No workflows found" : "Pick a workflow"}
+                options={workflowNames.map((n) => ({ value: n }))}
+              />
               <input
                 class="input input-bordered input-sm w-48"
                 placeholder="or type name"
@@ -186,19 +184,20 @@ export function CreateScheduleModal({ onClose, onCreated, editing }: CreateSched
                     </button>
                   ))}
                 </div>
-                <select
-                  class="select select-bordered select-sm w-full"
+                <Combobox
+                  class="w-full"
                   value={timezone}
-                  onChange={(e) => setTimezone((e.target as HTMLSelectElement).value)}
-                >
-                  <option value="UTC">UTC</option>
-                  <option value="America/Edmonton">America/Edmonton</option>
-                  <option value="America/New_York">America/New_York</option>
-                  <option value="America/Los_Angeles">America/Los_Angeles</option>
-                  <option value="Europe/London">Europe/London</option>
-                  <option value="Europe/Berlin">Europe/Berlin</option>
-                  <option value="Asia/Tokyo">Asia/Tokyo</option>
-                </select>
+                  onChange={setTimezone}
+                  options={[
+                    { value: "UTC" },
+                    { value: "America/Edmonton" },
+                    { value: "America/New_York" },
+                    { value: "America/Los_Angeles" },
+                    { value: "Europe/London" },
+                    { value: "Europe/Berlin" },
+                    { value: "Asia/Tokyo" },
+                  ]}
+                />
               </div>
             ) : (
               <div class="space-y-2">

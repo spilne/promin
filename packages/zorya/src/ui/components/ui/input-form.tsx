@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { useMemo, useState } from "preact/hooks";
+import { Combobox } from "./combobox.tsx";
 
 type FieldKind = "string" | "number" | "boolean" | "json";
 
@@ -94,14 +95,13 @@ export function InputForm({ sample, onChange }: InputFormProps) {
 function renderField(f: FieldDef, value: string, onInput: (v: string) => void) {
   if (f.kind === "boolean") {
     return (
-      <select
-        class="select select-bordered select-sm w-full"
+      <Combobox
+        class="w-full"
         value={value}
-        onChange={(e) => onInput((e.target as HTMLSelectElement).value)}
-      >
-        <option value="true">true</option>
-        <option value="false">false</option>
-      </select>
+        onChange={onInput}
+        searchable={false}
+        options={[{ value: "true" }, { value: "false" }]}
+      />
     );
   }
   if (f.kind === "json") {

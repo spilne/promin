@@ -7,6 +7,7 @@ import { StatsBar } from "./stats-bar.tsx";
 import { StatusBadge } from "../ui/status-badge.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { Sparkline } from "../ui/sparkline.tsx";
+import { Combobox } from "../ui/combobox.tsx";
 import type { SparklinesResponse } from "../../../server/routes/grid.ts";
 import { formatDuration, formatRelative, WORKFLOW_STATUS_VISUAL } from "../../lib/format.ts";
 
@@ -165,39 +166,33 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
           })}
         </div>
         <div class="h-5 w-px bg-base-content/20 mx-1" />
-        <select
-          class="select select-bordered select-sm w-40"
+        <Combobox
+          class="w-40"
           value={name}
-          onChange={(e) => setName((e.target as HTMLSelectElement).value)}
-        >
-          <option value="">All names</option>
-          {meta.names.map((n) => (
-            <option value={n}>{n}</option>
-          ))}
-        </select>
+          onChange={setName}
+          placeholder="All names"
+          options={[{ value: "", label: "All names" }, ...meta.names.map((n) => ({ value: n }))]}
+        />
         {meta.types.length > 0 && (
-          <select
-            class="select select-bordered select-sm w-40"
+          <Combobox
+            class="w-40"
             value={type}
-            onChange={(e) => setType((e.target as HTMLSelectElement).value)}
-          >
-            <option value="">All types</option>
-            {meta.types.map((t) => (
-              <option value={t}>{t}</option>
-            ))}
-          </select>
+            onChange={setType}
+            placeholder="All types"
+            options={[{ value: "", label: "All types" }, ...meta.types.map((t) => ({ value: t }))]}
+          />
         )}
         {meta.namespaces.length > 0 && (
-          <select
-            class="select select-bordered select-sm w-40"
+          <Combobox
+            class="w-40"
             value={namespace}
-            onChange={(e) => setNamespace((e.target as HTMLSelectElement).value)}
-          >
-            <option value="">All namespaces</option>
-            {meta.namespaces.map((n) => (
-              <option value={n}>{n}</option>
-            ))}
-          </select>
+            onChange={setNamespace}
+            placeholder="All namespaces"
+            options={[
+              { value: "", label: "All namespaces" },
+              ...meta.namespaces.map((n) => ({ value: n })),
+            ]}
+          />
         )}
         <input
           class="input input-bordered input-sm w-28 font-mono"

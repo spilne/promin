@@ -2,6 +2,7 @@ import { useState } from "preact/hooks";
 import { api } from "../../api/client.ts";
 import type { WorkflowDefDto } from "../../../server/routes/workflow-defs.ts";
 import { InputForm } from "../ui/input-form.tsx";
+import { Combobox } from "../ui/combobox.tsx";
 
 interface TriggerModalProps {
   def: WorkflowDefDto;
@@ -94,15 +95,13 @@ export function TriggerModal({ def, onClose, onTriggered }: TriggerModalProps) {
               <div class="label pb-0.5">
                 <span class="label-text text-sm">Version</span>
               </div>
-              <select
-                class="select select-bordered select-sm w-full font-mono"
+              <Combobox
+                class="w-full"
                 value={version ?? ""}
-                onChange={(e) => setVersion((e.target as HTMLSelectElement).value)}
-              >
-                {versions.map((v) => (
-                  <option value={v}>v{v}</option>
-                ))}
-              </select>
+                onChange={setVersion}
+                placeholder="Select version"
+                options={versions.map((v) => ({ value: v, label: `v${v}` }))}
+              />
             </label>
           )}
 
