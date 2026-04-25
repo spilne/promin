@@ -119,6 +119,45 @@ export interface SignalState {
 }
 
 // ---------------------------------------------------------------------------
+// Run-scoped workflow events
+// ---------------------------------------------------------------------------
+
+/**
+ * Event emitted by `WorkflowStorage.subscribeToWorkflow()` for a specific
+ * workflow run. Subscribers receive these as they happen so UIs / CLIs can
+ * stream live progress without polling `loadWorkflow`.
+ *
+ * Emission points:
+ *   - `saveStepResult` → `step-completed`
+ *   - `saveStepFailure` → `step-failed`
+ *   - `completeWorkflow` → `workflow-completed` (terminal — stream closes)
+ *   - `failWorkflow` → `workflow-failed` (terminal — stream closes)
+ *   - `tripwireWorkflow` → `workflow-tripwire` (terminal — stream closes)
+ */
+export type WorkflowRunEvent =
+  | {
+      readonly type: "step-completed";
+      readonly stepName: string;
+      readonly result: unknown;
+      readonly durationMs: number;
+      readonly at: Date;
+    }
+  | {
+      readonly type: "step-failed";
+      readonly stepName: string;
+      readonly error: string;
+      readonly at: Date;
+    }
+  | { readonly type: "workflow-completed"; readonly result: unknown; readonly at: Date }
+  | { readonly type: "workflow-failed"; readonly error: string; readonly at: Date }
+  | {
+      readonly type: "workflow-tripwire";
+      readonly stepName: string;
+      readonly reason: unknown;
+      readonly at: Date;
+    };
+
+// ---------------------------------------------------------------------------
 // Step attempt history
 // ---------------------------------------------------------------------------
 

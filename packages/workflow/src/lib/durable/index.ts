@@ -24,10 +24,12 @@ export {
   type WorkflowStorage,
   type StepAttemptStorage,
   type TripwireCapableStorage,
+  type SubscribableStorage,
   type FenceGuard,
   type FenceToken,
   isStepAttemptStorage,
   isTripwireCapableStorage,
+  isSubscribableStorage,
 } from "./workflow-storage.ts";
 export {
   type WorkflowState,
@@ -42,6 +44,7 @@ export {
   type StepAttemptRecord,
   type StepAttemptType,
   type FailedWorkflowRecord,
+  type WorkflowRunEvent,
 } from "./workflow-state.ts";
 export { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
 export {

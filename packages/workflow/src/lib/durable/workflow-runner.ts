@@ -24,12 +24,13 @@ import type {
 import type { WorkflowHooks, IdempotencyConfig } from "./durable-pipeline.ts";
 import {
   isStepAttemptStorage,
+  isSubscribableStorage,
   isTripwireCapableStorage,
   type WorkflowStorage,
   type FenceGuard,
 } from "./workflow-storage.ts";
 import { computeReadySet, type DagNode } from "./workflow-dag.ts";
-import type { FailedWorkflowRecord, WorkflowState } from "./workflow-state.ts";
+import type { FailedWorkflowRecord, WorkflowState, WorkflowRunEvent } from "./workflow-state.ts";
 import {
   StepError,
   WorkflowError,
@@ -207,6 +208,21 @@ export interface WorkflowRunner {
     readonly input: unknown;
   }): Promise<WorkflowHandle<unknown>>;
   /**
+   * Subscribe to live step/workflow-lifecycle events for a single run.
+   * Returns an async iterable that yields every `WorkflowRunEvent` as it
+   * happens and closes on the first terminal event
+   * (`workflow-completed`, `workflow-failed`, `workflow-tripwire`) or when
+   * the supplied `AbortSignal` fires.
+   *
+   * Requires the configured storage to implement `subscribeToWorkflow`
+   * (InMemoryWorkflowStorage does; Postgres will wire `pg_notify` — until
+   * then throws at call time to surface the capability gap clearly).
+   */
+  subscribe(
+    workflowId: string,
+    options?: { signal?: AbortSignal },
+  ): AsyncIterable<WorkflowRunEvent>;
+  /**
    * Snapshot of a workflow's current status: active step, suspended reason,
    * per-step summary, timestamps. Returns `null` when the workflow doesn't
    * exist in storage. Intended for status endpoints / dashboards.
@@ -363,6 +379,20 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
         throw new Error(`Workflow ${workflowId} did not complete within ${timeoutMs}ms`);
       },
     };
+  }
+
+  subscribe(
+    workflowId: string,
+    options?: { signal?: AbortSignal },
+  ): AsyncIterable<WorkflowRunEvent> {
+    if (!isSubscribableStorage(this.storage)) {
+      throw new Error(
+        `WorkflowRunner.subscribe requires a storage that implements ` +
+          `subscribeToWorkflow. The configured storage does not support it. ` +
+          `Use InMemoryWorkflowStorage or another backend with subscription support.`,
+      );
+    }
+    return this.storage.subscribeToWorkflow(workflowId, options);
   }
 
   async getStatus(

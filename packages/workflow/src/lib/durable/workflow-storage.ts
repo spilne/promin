@@ -6,6 +6,7 @@ import type {
   WorkflowState,
   WorkflowStatus,
   WorkflowRunSummary,
+  WorkflowRunEvent,
   SignalState,
   StepAttemptRecord,
 } from "./workflow-state.ts";
@@ -188,6 +189,26 @@ export interface WorkflowStorage {
     guard?: FenceGuard,
   ): Promise<void>;
 
+  /**
+   * Subscribe to step/workflow-lifecycle events for a single workflow run.
+   * Returns an async iterable; the stream closes on the first terminal
+   * event (`workflow-completed`, `workflow-failed`, `workflow-tripwire`) or
+   * when the caller aborts via `options.signal`.
+   *
+   * Optional. Storages that don't implement this don't support live
+   * subscriptions — callers must fall back to polling `loadWorkflow`.
+   * Backends typically implement this by tapping the same code paths that
+   * write the state transitions (in-memory: an in-process EventBus;
+   * Postgres: `pg_notify` on relevant tables).
+   *
+   * Subscribers that attach before the workflow starts receive every event;
+   * subscribers that attach mid-execution receive from-now onwards.
+   */
+  subscribeToWorkflow?(
+    workflowId: string,
+    options?: { signal?: AbortSignal },
+  ): AsyncIterable<WorkflowRunEvent>;
+
   /** Deliver a signal to a workflow. */
   deliverSignal(workflowId: string, signalName: string, payload: unknown): Promise<void>;
 
@@ -364,4 +385,15 @@ export function isTripwireCapableStorage(
   storage: WorkflowStorage,
 ): storage is TripwireCapableStorage {
   return "tripwireWorkflow" in storage && typeof (storage as any).tripwireWorkflow === "function";
+}
+
+/** Storage with `subscribeToWorkflow` — supports live per-run event streams. */
+export type SubscribableStorage = WorkflowStorage &
+  Required<Pick<WorkflowStorage, "subscribeToWorkflow">>;
+
+/** Runtime check for whether a storage implementation supports run subscriptions. */
+export function isSubscribableStorage(storage: WorkflowStorage): storage is SubscribableStorage {
+  return (
+    "subscribeToWorkflow" in storage && typeof (storage as any).subscribeToWorkflow === "function"
+  );
 }

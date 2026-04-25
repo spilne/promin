@@ -27,6 +27,7 @@ import type {
   WorkflowState,
   WorkflowStatus,
   WorkflowRunSummary,
+  WorkflowRunEvent,
   StepState,
   StepTaskState,
   SignalState,
@@ -79,6 +80,15 @@ export class InMemoryWorkflowStorage
   private runHistory = new Map<string, WorkflowRunSummary[]>();
   /** Activity journal keyed by `${workflowId}::${stepName}` → ordered entries. */
   private journal = new Map<string, JournalEntry[]>();
+  /**
+   * Per-workflow event subscribers. Each active call to `subscribeToWorkflow`
+   * registers a push function keyed by workflowId; the mutating storage
+   * methods fan out to every registered sub. Passing `null` signals
+   * terminal — the iterator resolves `{ done: true }` and the sub is
+   * removed. Fresh map on every workflowId so one subscriber's terminal
+   * doesn't starve another subscriber attached to a different run.
+   */
+  private subscribers = new Map<string, Set<(event: WorkflowRunEvent | null) => void>>();
   private readonly namespace: string | null;
   /**
    * Time source. Every timestamp + lock-expiry check routes through here
@@ -95,6 +105,24 @@ export class InMemoryWorkflowStorage
 
   private resolveNamespace(workflowNamespace?: string): string | undefined {
     return workflowNamespace ?? this.namespace ?? undefined;
+  }
+
+  /**
+   * Fan an event out to every subscriber for this workflow. `terminal`
+   * indicates the run is ending — after delivering the event, each sub is
+   * signalled done (null) and the subscriber set is cleared. Called
+   * synchronously from the save/fail/complete/tripwire methods so
+   * subscribers observe events in the same order as the underlying state
+   * transitions.
+   */
+  private emitEvent(workflowId: string, event: WorkflowRunEvent, terminal: boolean): void {
+    const subs = this.subscribers.get(workflowId);
+    if (!subs || subs.size === 0) return;
+    for (const push of subs) {
+      push(event);
+      if (terminal) push(null);
+    }
+    if (terminal) this.subscribers.delete(workflowId);
   }
 
   private toState(wf: MutableWorkflow): WorkflowState {
@@ -256,6 +284,17 @@ export class InMemoryWorkflowStorage
       tasks: existing?.tasks,
     });
     wf.updatedAt = now;
+    this.emitEvent(
+      params.workflowId,
+      {
+        type: "step-completed",
+        stepName: params.stepName,
+        result: params.result,
+        durationMs: params.durationMs,
+        at: now,
+      },
+      false,
+    );
   }
 
   async batchSaveStepResults(
@@ -308,6 +347,16 @@ export class InMemoryWorkflowStorage
       attempt: (existing?.attempt ?? 0) + 1,
       tasks: existing?.tasks,
     });
+    this.emitEvent(
+      params.workflowId,
+      {
+        type: "step-failed",
+        stepName: params.stepName,
+        error: params.error,
+        at: now,
+      },
+      false,
+    );
     wf.updatedAt = now;
   }
 
@@ -408,6 +457,7 @@ export class InMemoryWorkflowStorage
     wf.result = result;
     wf.completedAt = now;
     wf.updatedAt = now;
+    this.emitEvent(workflowId, { type: "workflow-completed", result, at: now }, true);
   }
 
   async failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void> {
@@ -419,6 +469,7 @@ export class InMemoryWorkflowStorage
     wf.error = error;
     wf.completedAt = now;
     wf.updatedAt = now;
+    this.emitEvent(workflowId, { type: "workflow-failed", error, at: now }, true);
   }
 
   async tripwireWorkflow(workflowId: string, reason: unknown, guard?: FenceGuard): Promise<void> {
@@ -430,6 +481,20 @@ export class InMemoryWorkflowStorage
     wf.tripwire = reason;
     wf.completedAt = now;
     wf.updatedAt = now;
+    // Locate the firing step (runner writes tripwireFired metadata on it).
+    const firedStep = [...wf.steps.values()].find(
+      (s) => (s.metadata as { tripwireFired?: boolean } | undefined)?.tripwireFired === true,
+    );
+    this.emitEvent(
+      workflowId,
+      {
+        type: "workflow-tripwire",
+        stepName: firedStep?.stepName ?? "unknown",
+        reason,
+        at: now,
+      },
+      true,
+    );
   }
 
   async suspendWorkflow(
@@ -455,6 +520,98 @@ export class InMemoryWorkflowStorage
     } as StepState);
     wf.status = "suspended";
     wf.updatedAt = now;
+  }
+
+  /**
+   * Stream step/workflow-lifecycle events for a single run. Returns an
+   * async iterable closed by any terminal event or by the supplied
+   * `AbortSignal`. Each call registers its own push function — multiple
+   * concurrent subscribers to the same workflowId each see every event.
+   * Subscribers started after the run has already terminated receive
+   * immediate end-of-stream.
+   *
+   * Implementation uses a single-producer, single-consumer queue per
+   * subscriber: events arrive synchronously from storage mutators and the
+   * iterator drains them asynchronously. Overlap between production and
+   * consumption is handled by a waiter slot — if the consumer is idle when
+   * a new event arrives, the resolver fires directly; otherwise the event
+   * sits in the queue until the next `next()`.
+   */
+  subscribeToWorkflow(
+    workflowId: string,
+    options?: { signal?: AbortSignal },
+  ): AsyncIterable<WorkflowRunEvent> {
+    // Each subscription owns a queue of buffered events plus a FIFO of
+    // pending resolvers. Callers that issue multiple `next()` in flight
+    // (common when racing or pre-priming) each get their own resolver —
+    // a single waiter slot would drop all but the last.
+    const queue: WorkflowRunEvent[] = [];
+    const waiters: Array<(value: WorkflowRunEvent | null) => void> = [];
+    let done = false;
+
+    const push = (event: WorkflowRunEvent | null): void => {
+      if (done) return;
+      if (event === null) {
+        done = true;
+        // Drain every pending waiter with done-signal.
+        const pending = waiters.splice(0);
+        for (const w of pending) w(null);
+        return;
+      }
+      const w = waiters.shift();
+      if (w) w(event);
+      else queue.push(event);
+    };
+
+    const subs = this.subscribers.get(workflowId) ?? new Set();
+    subs.add(push);
+    this.subscribers.set(workflowId, subs);
+
+    const removeSelf = (): void => {
+      const cur = this.subscribers.get(workflowId);
+      if (cur) {
+        cur.delete(push);
+        if (cur.size === 0) this.subscribers.delete(workflowId);
+      }
+    };
+
+    const onAbort = (): void => push(null);
+    options?.signal?.addEventListener("abort", onAbort, { once: true });
+
+    return {
+      [Symbol.asyncIterator](): AsyncIterator<WorkflowRunEvent> {
+        return {
+          async next(): Promise<IteratorResult<WorkflowRunEvent>> {
+            if (queue.length > 0) {
+              return { value: queue.shift()!, done: false };
+            }
+            if (done) {
+              removeSelf();
+              options?.signal?.removeEventListener("abort", onAbort);
+              return { value: undefined, done: true };
+            }
+            const val = await new Promise<WorkflowRunEvent | null>((resolve) => {
+              waiters.push(resolve);
+            });
+            if (val === null) {
+              removeSelf();
+              options?.signal?.removeEventListener("abort", onAbort);
+              return { value: undefined, done: true };
+            }
+            return { value: val, done: false };
+          },
+          async return(): Promise<IteratorResult<WorkflowRunEvent>> {
+            done = true;
+            // Resolve any pending waiters so hanging `.next()` calls settle.
+            const pending = waiters.splice(0);
+            for (const w of pending) w(null);
+            removeSelf();
+            options?.signal?.removeEventListener("abort", onAbort);
+            return { value: undefined, done: true };
+          },
+        };
+      },
+    };
   }
 
   async deliverSignal(workflowId: string, signalName: string, payload: unknown): Promise<void> {
