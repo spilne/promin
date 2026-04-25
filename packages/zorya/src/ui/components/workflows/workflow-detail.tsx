@@ -95,10 +95,6 @@ export function WorkflowDetail({ name, onBack, onOpenRun }: WorkflowDetailProps)
         </button>
       </div>
 
-      {/* Duration history chart — operator's first stop when checking for
-          degradation of the whole workflow or a specific step. */}
-      <HistoryChart name={name} onOpenRun={onOpenRun} />
-
       <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_380px] gap-4">
         {/* DAG */}
         <StepDag run={syntheticRun} />
@@ -147,6 +143,11 @@ export function WorkflowDetail({ name, onBack, onOpenRun }: WorkflowDetailProps)
           <RecentRunsCard runs={runsList?.runs ?? []} onOpenRun={onOpenRun} />
         </div>
       </div>
+
+      {/* Duration history chart — sits at the bottom so operators see the DAG
+          and recent runs first, then scroll down to eyeball degradation
+          trends across many runs. */}
+      <HistoryChart name={name} onOpenRun={onOpenRun} />
 
       {triggering && (
         <TriggerModal
