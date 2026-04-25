@@ -282,6 +282,51 @@ export class SqliteWorkflowStorage
       .map((r) => this._rowToState(r));
   }
 
+  async distinctWorkflowNames(params?: { namespace?: string }): Promise<string[]> {
+    const rows = params?.namespace
+      ? this.db
+          .query<{ workflow_name: string }>(
+            `SELECT DISTINCT workflow_name FROM ${this._t} WHERE namespace = ? ORDER BY workflow_name ASC`,
+          )
+          .all(params.namespace)
+      : this.db
+          .query<{ workflow_name: string }>(
+            `SELECT DISTINCT workflow_name FROM ${this._t} ORDER BY workflow_name ASC`,
+          )
+          .all();
+    return rows.map((r) => r.workflow_name);
+  }
+
+  async distinctWorkflowTypes(params?: { namespace?: string }): Promise<string[]> {
+    const rows = params?.namespace
+      ? this.db
+          .query<{ workflow_type: string }>(
+            `SELECT DISTINCT workflow_type FROM ${this._t}
+             WHERE workflow_type IS NOT NULL AND namespace = ?
+             ORDER BY workflow_type ASC`,
+          )
+          .all(params.namespace)
+      : this.db
+          .query<{ workflow_type: string }>(
+            `SELECT DISTINCT workflow_type FROM ${this._t}
+             WHERE workflow_type IS NOT NULL
+             ORDER BY workflow_type ASC`,
+          )
+          .all();
+    return rows.map((r) => r.workflow_type);
+  }
+
+  async distinctNamespaces(): Promise<string[]> {
+    const rows = this.db
+      .query<{ namespace: string }>(
+        `SELECT DISTINCT namespace FROM ${this._t}
+         WHERE namespace IS NOT NULL
+         ORDER BY namespace ASC`,
+      )
+      .all();
+    return rows.map((r) => r.namespace);
+  }
+
   async cancelWorkflow(
     workflowId: string,
     options?: { cascade?: boolean },

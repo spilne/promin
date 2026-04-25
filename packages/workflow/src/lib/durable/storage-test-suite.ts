@@ -453,6 +453,131 @@ export function storageTestSuite(
     });
 
     // -------------------------------------------------------------------
+    // distinctWorkflowNames / distinctWorkflowTypes / distinctNamespaces
+    // -------------------------------------------------------------------
+
+    describe("distinct values", () => {
+      it("returns distinct workflow names sorted alphabetically", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "dn-1", workflowName: "alpha", input: {} });
+        await s.createWorkflow({ workflowId: "dn-2", workflowName: "alpha", input: {} });
+        await s.createWorkflow({ workflowId: "dn-3", workflowName: "beta", input: {} });
+        await s.createWorkflow({ workflowId: "dn-4", workflowName: "gamma", input: {} });
+
+        const names = await s.distinctWorkflowNames();
+        expect(names).toEqual(["alpha", "beta", "gamma"]);
+      });
+
+      it("returns distinct workflow types, excluding undefined, sorted", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "dt-1",
+          workflowName: "wf",
+          input: {},
+          workflowType: "ingest",
+        });
+        await s.createWorkflow({
+          workflowId: "dt-2",
+          workflowName: "wf",
+          input: {},
+          workflowType: "ingest",
+        });
+        await s.createWorkflow({
+          workflowId: "dt-3",
+          workflowName: "wf",
+          input: {},
+          workflowType: "report",
+        });
+        await s.createWorkflow({ workflowId: "dt-4", workflowName: "wf", input: {} });
+
+        const types = await s.distinctWorkflowTypes();
+        expect(types).toEqual(["ingest", "report"]);
+      });
+
+      it("returns distinct namespaces, excluding undefined, sorted", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "dns-1",
+          workflowName: "wf",
+          input: {},
+          namespace: "team-a",
+        });
+        await s.createWorkflow({
+          workflowId: "dns-2",
+          workflowName: "wf",
+          input: {},
+          namespace: "team-a",
+        });
+        await s.createWorkflow({
+          workflowId: "dns-3",
+          workflowName: "wf",
+          input: {},
+          namespace: "team-b",
+        });
+        await s.createWorkflow({ workflowId: "dns-4", workflowName: "wf", input: {} });
+
+        const namespaces = await s.distinctNamespaces();
+        expect(namespaces).toEqual(["team-a", "team-b"]);
+      });
+
+      it("scopes distinct names by namespace when provided", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "dn-ns-1",
+          workflowName: "alpha",
+          input: {},
+          namespace: "team-a",
+        });
+        await s.createWorkflow({
+          workflowId: "dn-ns-2",
+          workflowName: "beta",
+          input: {},
+          namespace: "team-a",
+        });
+        await s.createWorkflow({
+          workflowId: "dn-ns-3",
+          workflowName: "gamma",
+          input: {},
+          namespace: "team-b",
+        });
+
+        const teamA = await s.distinctWorkflowNames({ namespace: "team-a" });
+        expect(teamA).toEqual(["alpha", "beta"]);
+
+        const teamB = await s.distinctWorkflowNames({ namespace: "team-b" });
+        expect(teamB).toEqual(["gamma"]);
+      });
+
+      it("scopes distinct types by namespace when provided", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "dt-ns-1",
+          workflowName: "wf",
+          input: {},
+          namespace: "team-a",
+          workflowType: "ingest",
+        });
+        await s.createWorkflow({
+          workflowId: "dt-ns-2",
+          workflowName: "wf",
+          input: {},
+          namespace: "team-b",
+          workflowType: "report",
+        });
+
+        expect(await s.distinctWorkflowTypes({ namespace: "team-a" })).toEqual(["ingest"]);
+        expect(await s.distinctWorkflowTypes({ namespace: "team-b" })).toEqual(["report"]);
+      });
+
+      it("returns empty arrays when storage has no workflows", async () => {
+        const s = await getStorage();
+        expect(await s.distinctWorkflowNames()).toEqual([]);
+        expect(await s.distinctWorkflowTypes()).toEqual([]);
+        expect(await s.distinctNamespaces()).toEqual([]);
+      });
+    });
+
+    // -------------------------------------------------------------------
     // cancelWorkflow
     // -------------------------------------------------------------------
 

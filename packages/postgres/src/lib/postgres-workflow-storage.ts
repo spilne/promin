@@ -244,6 +244,43 @@ export class PostgresWorkflowStorage
     return rows.map((row: any) => this.rowToWorkflowState(row, []));
   }
 
+  async distinctWorkflowNames(params?: { namespace?: string }): Promise<string[]> {
+    const ns = params?.namespace ?? this.config.namespace;
+    const query = this.db
+      .selectDistinct({ workflowName: workflows.workflowName })
+      .from(workflows)
+      .$dynamic();
+    if (ns) query.where(eq(workflows.namespace, ns));
+    query.orderBy(workflows.workflowName);
+    const rows = await query;
+    return rows.map((r) => r.workflowName);
+  }
+
+  async distinctWorkflowTypes(params?: { namespace?: string }): Promise<string[]> {
+    const ns = params?.namespace ?? this.config.namespace;
+    const query = this.db
+      .selectDistinct({ workflowType: workflows.workflowType })
+      .from(workflows)
+      .$dynamic();
+    if (ns) {
+      query.where(and(eq(workflows.namespace, ns), sql`${workflows.workflowType} IS NOT NULL`));
+    } else {
+      query.where(sql`${workflows.workflowType} IS NOT NULL`);
+    }
+    query.orderBy(workflows.workflowType);
+    const rows = await query;
+    return rows.map((r) => r.workflowType!).filter((t): t is string => t != null);
+  }
+
+  async distinctNamespaces(): Promise<string[]> {
+    const rows = await this.db
+      .selectDistinct({ namespace: workflows.namespace })
+      .from(workflows)
+      .where(sql`${workflows.namespace} IS NOT NULL`)
+      .orderBy(workflows.namespace);
+    return rows.map((r) => r.namespace!).filter((n): n is string => n != null);
+  }
+
   async cancelWorkflow(
     workflowId: string,
     _options?: { cascade?: boolean },

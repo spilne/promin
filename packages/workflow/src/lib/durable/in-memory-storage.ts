@@ -187,6 +187,34 @@ export class InMemoryWorkflowStorage
     return results;
   }
 
+  async distinctWorkflowNames(params?: { namespace?: string }): Promise<string[]> {
+    const ns = params?.namespace ?? this.namespace;
+    const seen = new Set<string>();
+    for (const wf of this.workflows.values()) {
+      if (ns && wf.namespace !== ns) continue;
+      seen.add(wf.workflowName);
+    }
+    return [...seen].sort();
+  }
+
+  async distinctWorkflowTypes(params?: { namespace?: string }): Promise<string[]> {
+    const ns = params?.namespace ?? this.namespace;
+    const seen = new Set<string>();
+    for (const wf of this.workflows.values()) {
+      if (ns && wf.namespace !== ns) continue;
+      if (wf.workflowType) seen.add(wf.workflowType);
+    }
+    return [...seen].sort();
+  }
+
+  async distinctNamespaces(): Promise<string[]> {
+    const seen = new Set<string>();
+    for (const wf of this.workflows.values()) {
+      if (wf.namespace) seen.add(wf.namespace);
+    }
+    return [...seen].sort();
+  }
+
   async cancelWorkflow(
     workflowId: string,
     options?: { cascade?: boolean },

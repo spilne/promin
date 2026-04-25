@@ -52,6 +52,26 @@ export interface WorkflowStorage {
     offset?: number;
   }): Promise<WorkflowState[]>;
 
+  /**
+   * Distinct workflow names ever observed in storage, optionally scoped to
+   * a namespace. Returned alphabetically sorted. Used by dashboard filter
+   * dropdowns so a workflow that hasn't run recently still appears.
+   */
+  distinctWorkflowNames(params?: { namespace?: string }): Promise<string[]>;
+
+  /**
+   * Distinct workflow types ever observed in storage, optionally scoped to
+   * a namespace. Returned alphabetically sorted; null/undefined types are
+   * excluded.
+   */
+  distinctWorkflowTypes(params?: { namespace?: string }): Promise<string[]>;
+
+  /**
+   * Distinct namespaces ever observed in storage. Returned alphabetically
+   * sorted; null/undefined namespaces are excluded.
+   */
+  distinctNamespaces(): Promise<string[]>;
+
   /** Cancel a running or suspended workflow. With cascade, also cancels children. */
   cancelWorkflow(
     workflowId: string,

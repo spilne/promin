@@ -130,8 +130,13 @@ export const api = {
       body: JSON.stringify(body),
     });
   },
-  listWorkflowNames(): Promise<{ names: string[]; types?: string[]; namespaces?: string[] }> {
-    return req(`/api/workflows`);
+  listWorkflowNames(
+    params: { namespace?: string } = {},
+  ): Promise<{ names: string[]; types?: string[]; namespaces?: string[] }> {
+    const qp = new URLSearchParams();
+    if (params.namespace) qp.set("namespace", params.namespace);
+    const qs = qp.toString();
+    return req(`/api/workflows${qs ? `?${qs}` : ""}`);
   },
   listSchedules(
     params: { namespace?: string } = {},

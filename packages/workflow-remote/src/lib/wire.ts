@@ -15,6 +15,9 @@ import { LosslessJsonCodec } from "@promin/core";
 export type StorageMethod =
   | "loadWorkflow"
   | "listWorkflows"
+  | "distinctWorkflowNames"
+  | "distinctWorkflowTypes"
+  | "distinctNamespaces"
   | "cancelWorkflow"
   | "createWorkflow"
   | "saveStepResult"

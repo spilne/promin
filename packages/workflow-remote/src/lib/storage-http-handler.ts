@@ -35,6 +35,9 @@ export function createWorkflowStorageHandler(
   const dispatchers: Record<StorageMethod, (params: any) => Promise<unknown>> = {
     loadWorkflow: (p) => storage.loadWorkflow(p.workflowId),
     listWorkflows: (p) => storage.listWorkflows(p),
+    distinctWorkflowNames: (p) => storage.distinctWorkflowNames(p),
+    distinctWorkflowTypes: (p) => storage.distinctWorkflowTypes(p),
+    distinctNamespaces: () => storage.distinctNamespaces(),
     cancelWorkflow: (p) => storage.cancelWorkflow(p.workflowId, p.options, p.guard),
     createWorkflow: (p) => storage.createWorkflow(p),
     saveStepResult: (p) => storage.saveStepResult(p, p.guard),

@@ -63,12 +63,12 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
 
   useEffect(() => {
     api
-      .listWorkflowNames()
+      .listWorkflowNames({ namespace: namespace || undefined })
       .then((r) =>
         setMeta({ names: r.names, types: r.types ?? [], namespaces: r.namespaces ?? [] }),
       )
       .catch(() => {});
-  }, []);
+  }, [namespace]);
 
   // Refresh sparklines alongside the main fetch so rows and sparkbars stay
   // in step as new runs arrive.

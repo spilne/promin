@@ -69,22 +69,24 @@ export class RunsService {
   }
 
   /**
-   * Distinct names / types / namespaces from the most recent ~1000 runs.
-   * Used to populate the dashboard's filter dropdowns.
+   * Distinct names / types / namespaces ever observed. Powers the
+   * dashboard's filter dropdowns. Backed by storage-side `SELECT DISTINCT`
+   * (or equivalent) so values that haven't run recently still appear.
+   *
+   * `namespace`, when provided, scopes the names + types to that namespace
+   * (the global namespace dropdown stays unscoped).
    */
-  async listNames(): Promise<{
+  async listNames(params?: { namespace?: string }): Promise<{
     names: string[];
     types?: string[];
     namespaces?: string[];
   }> {
-    const rows = await this.deps.storage.listWorkflows({ limit: 1000 });
-    const names = Array.from(new Set(rows.map((r) => r.workflowName))).sort();
-    const types = Array.from(
-      new Set(rows.map((r) => r.workflowType).filter((t): t is string => !!t)),
-    ).sort();
-    const namespaces = Array.from(
-      new Set(rows.map((r) => r.namespace).filter((n): n is string => !!n)),
-    ).sort();
+    const ns = params?.namespace;
+    const [names, types, namespaces] = await Promise.all([
+      this.deps.storage.distinctWorkflowNames({ namespace: ns }),
+      this.deps.storage.distinctWorkflowTypes({ namespace: ns }),
+      this.deps.storage.distinctNamespaces(),
+    ]);
     return {
       names,
       types: types.length > 0 ? types : undefined,

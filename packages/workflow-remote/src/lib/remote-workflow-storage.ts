@@ -116,6 +116,18 @@ export class RemoteWorkflowStorage implements WorkflowStorage, JournaledSuspendS
     return this.call("listWorkflows", params ?? {});
   }
 
+  distinctWorkflowNames(params?: { namespace?: string }): Promise<string[]> {
+    return this.call("distinctWorkflowNames", params ?? {});
+  }
+
+  distinctWorkflowTypes(params?: { namespace?: string }): Promise<string[]> {
+    return this.call("distinctWorkflowTypes", params ?? {});
+  }
+
+  distinctNamespaces(): Promise<string[]> {
+    return this.call("distinctNamespaces", {});
+  }
+
   cancelWorkflow(
     workflowId: string,
     options?: { cascade?: boolean },

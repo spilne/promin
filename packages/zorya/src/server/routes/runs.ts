@@ -122,7 +122,11 @@ export function cancelRun(deps: RunRoutesDeps) {
 
 export function listWorkflowNames(deps: RunRoutesDeps) {
   const service = makeService(deps);
-  return async (): Promise<Response> => json(200, await service.listNames());
+  return async (req: Request): Promise<Response> => {
+    const url = new URL(req.url);
+    const namespace = url.searchParams.get("namespace") ?? undefined;
+    return json(200, await service.listNames({ namespace }));
+  };
 }
 
 export function sendSignal(deps: RunRoutesDeps) {

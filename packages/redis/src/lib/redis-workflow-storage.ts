@@ -231,6 +231,26 @@ export class RedisWorkflowStorage
     return `${this.prefix}:idx:completed`;
   }
 
+  // Distinct-value indexes — maintained on createWorkflow so the dashboard
+  // dropdowns see every value ever observed, not just rows still in cache.
+  // Per-namespace variants are populated only when the workflow row carries
+  // a namespace; the global ("all") variant is always populated.
+  private get distinctNamesKey(): string {
+    return `${this.prefix}:idx:distinct:names`;
+  }
+  private get distinctTypesKey(): string {
+    return `${this.prefix}:idx:distinct:types`;
+  }
+  private get distinctNamespacesKey(): string {
+    return `${this.prefix}:idx:distinct:namespaces`;
+  }
+  private distinctNamespaceNamesKey(ns: string): string {
+    return `${this.prefix}:idx:distinct:names:ns:${ns}`;
+  }
+  private distinctNamespaceTypesKey(ns: string): string {
+    return `${this.prefix}:idx:distinct:types:ns:${ns}`;
+  }
+
   // -- Journal key helpers --------------------------------------------------
 
   /** Per-workflow set of step names that have journal entries (for purge/ttl). */
@@ -450,7 +470,38 @@ export class RedisWorkflowStorage
     await this.redis.hset(this.wfKey(params.workflowId), fields);
     await this.redis.sadd(this.statusIndexKey("pending"), params.workflowId);
     await this.redis.sadd(this.nameIndexKey(params.workflowName), params.workflowId);
+
+    // Distinct-value indexes — record every name/type/namespace ever seen
+    // so the dashboard dropdowns stay correct even after rows are purged.
+    await this.redis.sadd(this.distinctNamesKey, params.workflowName);
+    if (params.workflowType) await this.redis.sadd(this.distinctTypesKey, params.workflowType);
+    if (ns) {
+      await this.redis.sadd(this.distinctNamespacesKey, ns);
+      await this.redis.sadd(this.distinctNamespaceNamesKey(ns), params.workflowName);
+      if (params.workflowType) {
+        await this.redis.sadd(this.distinctNamespaceTypesKey(ns), params.workflowType);
+      }
+    }
     return { created: true };
+  }
+
+  async distinctWorkflowNames(params?: { namespace?: string }): Promise<string[]> {
+    const ns = params?.namespace ?? this.namespace;
+    const key = ns ? this.distinctNamespaceNamesKey(ns) : this.distinctNamesKey;
+    const members = await this.redis.smembers(key);
+    return members.sort();
+  }
+
+  async distinctWorkflowTypes(params?: { namespace?: string }): Promise<string[]> {
+    const ns = params?.namespace ?? this.namespace;
+    const key = ns ? this.distinctNamespaceTypesKey(ns) : this.distinctTypesKey;
+    const members = await this.redis.smembers(key);
+    return members.sort();
+  }
+
+  async distinctNamespaces(): Promise<string[]> {
+    const members = await this.redis.smembers(this.distinctNamespacesKey);
+    return members.sort();
   }
 
   async loadWorkflow(workflowId: string): Promise<WorkflowState | null> {
