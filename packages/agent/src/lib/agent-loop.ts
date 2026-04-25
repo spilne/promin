@@ -26,7 +26,8 @@ import {
   resolveTools,
   searchRelevantMemories,
 } from "./agent-shared.ts";
-import type { SessionLogger } from "./session-logger.ts";
+import type { SessionLogger, SessionEvent } from "./session-logger.ts";
+import { SessionEventBus } from "./session-logger.ts";
 import { compact, RECAP_SUMMARY_PROMPT } from "./agent-loop-compaction.ts";
 import type { CompactionConfig } from "./agent-loop-compaction.ts";
 
@@ -315,6 +316,22 @@ export interface AgentSession {
    */
   eventLog(): import("./session-logger.ts").SessionEvent[];
   /**
+   * Subscribe to live session events. The observer fires for every event the
+   * agent emits — turn lifecycle, tool start / end, approval requests, and
+   * (when streaming) `token.delta` + `tool.progress` events. Returns an
+   * unsubscribe function.
+   *
+   * Subscribers attach at any time (idle, mid-stream, between turns) and
+   * receive only events from the moment they subscribe; no replay buffer.
+   * For event history, use `eventLog()`.
+   *
+   * Used by cross-process forwarders (e.g. the WS relay that ships agent
+   * events from a Zorya worker to the dashboard). One observer fault is
+   * isolated — a throwing subscriber is removed silently and does not
+   * affect the agent loop or its peers.
+   */
+  subscribe(observer: (event: SessionEvent) => void): () => void;
+  /**
    * Compact the conversation history right now, between turns.
    * The compacted messages are applied at the start of the next turn via the
    * task signal (so they are journaled and survive replay).
@@ -474,7 +491,16 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
       const activityStorage = runner.storage as unknown as ActivityJournalStorage;
 
       const clock = config.clock ?? SystemClock;
+      // Multi-subscriber event bus. The legacy `config.logger` (if provided)
+      // is wired in as one subscriber so existing `session.eventLog()` callers
+      // keep working unchanged. New subscribers attach via `session.subscribe`
+      // — used by cross-process forwarders (the WS relay in promin-o8dj /
+      // promin-yxxk) and any other live observer.
+      const eventBus = new SessionEventBus();
       const sessionLogger = config.logger ?? null;
+      if (sessionLogger) {
+        eventBus.subscribe((event) => sessionLogger.emit(event));
+      }
       // Turn start times flow through the journal (activity return value) so
       // they survive worker restarts mid-turn. Before, this Map was populated
       // inside `lc-${turn}-message`; on crash recovery the activity replayed
@@ -566,7 +592,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
             const turnStartTime = yield* ctx.activity(`lc-${turn}-message`, async () => {
               transitionLifecycle("message", "thinking", { turns: turn, turn, task });
               const startedAt = Date.now();
-              sessionLogger?.emit({ type: "turn.start", turn, task });
+              eventBus.emit({ type: "turn.start", turn, task });
               return startedAt;
             });
             turnStarts.set(turn, turnStartTime);
@@ -608,12 +634,20 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                   rateLimiter: config.rateLimiter,
                   processors: config.processors,
                   processorCtx: { step, turn, workflowId: ctx.workflowId },
-                  onChunk: chunkQueue ? (delta) => chunkQueue.push(delta) : undefined,
+                  // Tee the LLM stream into both the chunk queue (for
+                  // session.stream()'s AsyncIterable<string>) AND the event
+                  // bus as token.delta events (for cross-process forwarders).
+                  // The bus marks token.delta as transient by default so the
+                  // logger ring buffer doesn't fill up with chat noise.
+                  onChunk: (delta) => {
+                    if (chunkQueue) chunkQueue.push(delta);
+                    eventBus.emit({ type: "token.delta", turn, delta });
+                  },
                   onThinking: thinkingCb,
                   thinkingBudgetTokens: config.thinkingBudgetTokens,
                   signal: pendingSignals.get(turn),
                 });
-                sessionLogger?.emit({
+                eventBus.emit({
                   type: "llm.call",
                   turn,
                   step,
@@ -643,7 +677,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                       recapPrompt,
                     );
                     const afterRecap = nonSystemMsgs(r.messages).length;
-                    sessionLogger?.emit({
+                    eventBus.emit({
                       type: "compact",
                       turn,
                       reason: "token_limit",
@@ -705,14 +739,14 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                   !shouldAutoApprove(config.autoApprove, call, toolDef)
                 ) {
                   const logRequested = () =>
-                    sessionLogger?.emit({
+                    eventBus.emit({
                       type: "approval.requested",
                       turn,
                       toolCallId: call.id,
                       toolName: call.name,
                     });
                   const logDecision = (approved: boolean) =>
-                    sessionLogger?.emit({
+                    eventBus.emit({
                       type: "approval.decision",
                       turn,
                       toolCallId: call.id,
@@ -759,7 +793,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                 const results = yield* ctx.parallel(
                   toExecute.map(({ call, toolDef }) =>
                     ctx.activity(`tool-${call.name}-${turn}-${step}-${call.id}`, async () => {
-                      sessionLogger?.emit({
+                      eventBus.emit({
                         type: "tool.start",
                         turn,
                         step,
@@ -773,7 +807,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                       const failed =
                         isParseError || result.content.startsWith("Tool execution failed");
                       if (isParseError) {
-                        sessionLogger?.emit({
+                        eventBus.emit({
                           type: "tool.parse_error",
                           turn,
                           step,
@@ -781,7 +815,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                           error: result.content,
                         });
                       }
-                      sessionLogger?.emit({
+                      eventBus.emit({
                         type: "tool.end",
                         turn,
                         step,
@@ -808,7 +842,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               // (consecutive user-role messages in Anthropic's format).
               answer = "(step limit reached)";
               messages = [...messages, { role: "assistant", content: answer }];
-              sessionLogger?.emit({ type: "step_limit.hit", turn, maxSteps: maxStepsPerTurn });
+              eventBus.emit({ type: "step_limit.hit", turn, maxSteps: maxStepsPerTurn });
             }
 
             yield* ctx.activity(`emit-${turn}`, async () => {
@@ -825,13 +859,13 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               const durationMs = turnStarts.has(turn) ? Date.now() - turnStarts.get(turn)! : 0;
               turnStarts.delete(turn);
               if (wasAborted) {
-                sessionLogger?.emit({
+                eventBus.emit({
                   type: "turn.aborted",
                   turn,
                   reason: sessionAc.signal.aborted ? "close" : "signal",
                 });
               } else {
-                sessionLogger?.emit({
+                eventBus.emit({
                   type: "turn.end",
                   turn,
                   answer,
@@ -869,7 +903,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                   config.compactionLlm ?? config.llm,
                 );
                 const afterCompact = nonSystemMsgs(r.messages).length;
-                sessionLogger?.emit({
+                eventBus.emit({
                   type: "compact",
                   turn,
                   reason: "message_count",
@@ -1144,6 +1178,10 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
 
         eventLog() {
           return sessionLogger?.events() ?? [];
+        },
+
+        subscribe(observer: (event: SessionEvent) => void): () => void {
+          return eventBus.subscribe(observer);
         },
 
         async compact(cfg?: { keepMessages?: number }): Promise<CompactResult> {
