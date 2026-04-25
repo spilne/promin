@@ -1,3 +1,4 @@
+import type * as preact from "preact";
 import { useEffect, useRef, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api } from "../../api/client.ts";
@@ -392,9 +393,7 @@ function ChatPane({
           </div>
         )}
 
-        {messages.map((m, i) => (
-          <MessageBubble key={i} message={m} />
-        ))}
+        {renderConversation(messages)}
 
         {pending && <PendingBubble text={pending.text} done={pending.done} error={pending.error} />}
 
@@ -432,38 +431,141 @@ function ChatPane({
   );
 }
 
-function MessageBubble({ message }: { message: Message }) {
-  if (message.role === "system") return null;
-  if (message.role === "tool") {
-    return (
-      <div class="text-xs font-mono text-base-content/60 bg-base-200 rounded p-2">
-        <span class="text-warning">tool result</span> {message.content}
-      </div>
-    );
+// Walks the persisted message history and emits a flat list of bubbles +
+// inline tool events. Mirrors the Claude.ai / OpenAI pattern: pure tool-
+// call assistant messages don't get a chat bubble — they render as a
+// compact "Used X tool" pill paired with the matching tool-result message,
+// expandable on click. Assistant messages that DO carry text still render
+// as a normal bubble; their tool calls (if any) follow as inline events.
+function renderConversation(messages: ReadonlyArray<Message>): preact.JSX.Element[] {
+  // Index tool results by toolCallId so we can fold each one into its
+  // matching call instead of leaking a bare "tool result …" row.
+  const resultsByCallId = new Map<string, string>();
+  for (const m of messages) {
+    if (m.role === "tool") resultsByCallId.set(m.toolCallId, m.content);
   }
-  const isUser = message.role === "user";
-  const content = message.role === "assistant" ? (message.content ?? "") : message.content;
-  const toolCalls = message.role === "assistant" ? (message.toolCalls ?? []) : [];
 
+  const out: preact.JSX.Element[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i]!;
+    if (m.role === "system" || m.role === "tool") continue;
+    if (m.role === "user") {
+      out.push(<UserBubble key={`u-${i}`} content={m.content} />);
+      continue;
+    }
+    // assistant
+    const text = (m.content ?? "").trim();
+    const toolCalls = m.toolCalls ?? [];
+    if (text) {
+      out.push(<AssistantBubble key={`a-${i}`} text={text} />);
+    }
+    for (let j = 0; j < toolCalls.length; j++) {
+      const call = toolCalls[j]!;
+      out.push(
+        <ToolEvent
+          key={`t-${i}-${j}`}
+          name={call.name}
+          input={call.input}
+          result={resultsByCallId.get(call.id)}
+        />,
+      );
+    }
+  }
+  return out;
+}
+
+function UserBubble({ content }: { content: string }) {
   return (
-    <div class={`chat ${isUser ? "chat-end" : "chat-start"}`}>
-      <div class="chat-header text-xs text-base-content/50">{isUser ? "you" : "assistant"}</div>
-      <div
-        class={`chat-bubble whitespace-pre-wrap break-words ${isUser ? "chat-bubble-primary" : ""}`}
-      >
-        {content || (toolCalls.length > 0 ? <em class="opacity-60">(tool call only)</em> : "")}
-      </div>
-      {toolCalls.length > 0 && (
-        <div class="chat-footer mt-1 space-y-1">
-          {toolCalls.map((c) => (
-            <div class="text-[10px] font-mono text-base-content/60 bg-base-300 px-2 py-1 rounded inline-block">
-              → {c.name}({JSON.stringify(c.input).slice(0, 120)})
-            </div>
-          ))}
-        </div>
-      )}
+    <div class="chat chat-end">
+      <div class="chat-header text-xs text-base-content/50">you</div>
+      <div class="chat-bubble chat-bubble-primary whitespace-pre-wrap break-words">{content}</div>
     </div>
   );
+}
+
+function AssistantBubble({ text }: { text: string }) {
+  return (
+    <div class="chat chat-start">
+      <div class="chat-header text-xs text-base-content/50">assistant</div>
+      <div class="chat-bubble whitespace-pre-wrap break-words">{text}</div>
+    </div>
+  );
+}
+
+function ToolEvent({
+  name,
+  input,
+  result,
+}: {
+  name: string;
+  input: unknown;
+  result: string | undefined;
+}) {
+  const [open, setOpen] = useState(false);
+  const summary = compactInput(input);
+  const status = result === undefined ? "running" : "done";
+  return (
+    <details
+      class="bg-base-200/60 border border-base-content/10 rounded-md text-xs"
+      open={open}
+      onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+    >
+      <summary class="cursor-pointer select-none px-3 py-1.5 list-none flex items-center gap-2">
+        <span
+          class={`inline-block w-1.5 h-1.5 rounded-full ${
+            status === "running" ? "bg-warning animate-pulse" : "bg-success"
+          }`}
+        />
+        <span class="text-base-content/60">Used</span>
+        <span class="font-mono text-base-content/80">{name}</span>
+        {summary && (
+          <span class="text-base-content/40 font-mono truncate max-w-[40ch]">{summary}</span>
+        )}
+        <span class="ml-auto text-base-content/40">{open ? "−" : "+"}</span>
+      </summary>
+      <div class="border-t border-base-content/10 px-3 py-2 space-y-2">
+        <div>
+          <div class="text-[10px] uppercase tracking-wider text-base-content/40 mb-1">Input</div>
+          <pre class="bg-base-300/60 rounded p-2 text-[11px] font-mono whitespace-pre-wrap break-words">
+            {formatJson(input)}
+          </pre>
+        </div>
+        <div>
+          <div class="text-[10px] uppercase tracking-wider text-base-content/40 mb-1">Output</div>
+          <pre class="bg-base-300/60 rounded p-2 text-[11px] font-mono whitespace-pre-wrap break-words">
+            {result === undefined ? <em class="opacity-60">(running…)</em> : formatJson(result)}
+          </pre>
+        </div>
+      </div>
+    </details>
+  );
+}
+
+function compactInput(input: unknown): string {
+  try {
+    const json = JSON.stringify(input);
+    if (!json) return "";
+    return json.length > 60 ? `${json.slice(0, 57)}…` : json;
+  } catch {
+    return "";
+  }
+}
+
+function formatJson(value: unknown): string {
+  if (typeof value === "string") {
+    // Tool results arrive as strings — try to pretty-print JSON, fall back
+    // to the raw string when it isn't structured.
+    try {
+      return JSON.stringify(JSON.parse(value), null, 2);
+    } catch {
+      return value;
+    }
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 function PendingBubble({ text, done, error }: { text: string; done: boolean; error?: string }) {
