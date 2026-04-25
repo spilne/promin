@@ -406,6 +406,29 @@ export const memoryApi = {
     if (params.threadId) qp.set("threadId", params.threadId);
     return req<MemoryInspectResponse>(`/api/memory/inspect?${qp}`);
   },
+  patchNamespace(
+    namespaceId: string,
+    patch: { staticRules?: string | null; workingMemory?: string | null },
+  ): Promise<{ row: unknown }> {
+    return req(`/api/memory/namespace/${encodeURIComponent(namespaceId)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+  },
+  addNamespaceFact(namespaceId: string, text: string): Promise<{ fact: unknown }> {
+    return req(`/api/memory/namespace/${encodeURIComponent(namespaceId)}/facts`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+  },
+  deleteNamespaceFact(namespaceId: string, factId: string): Promise<{ ok: true }> {
+    return req(
+      `/api/memory/namespace/${encodeURIComponent(namespaceId)}/facts/${encodeURIComponent(factId)}`,
+      { method: "DELETE" },
+    );
+  },
 };
 
 function parseSseFrame(frame: string): { event: string; data: string } | null {

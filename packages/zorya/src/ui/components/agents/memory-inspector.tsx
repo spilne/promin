@@ -249,7 +249,17 @@ export function MemoryInspector({
           )}
           {error && <div class="alert alert-error text-xs">{error}</div>}
           {data && tab === "prompt" && <PromptTab data={data} />}
-          {data && tab === "namespace" && <NamespaceTab data={data} />}
+          {data && tab === "namespace" && (
+            <NamespaceTab
+              data={data}
+              refresh={() => {
+                memoryApi
+                  .inspect({ namespaceId, resourceId, threadId: currentThread })
+                  .then(setData)
+                  .catch(() => {});
+              }}
+            />
+          )}
           {data && tab === "resource" && <ResourceTab data={data} />}
           {data && tab === "thread" && <ThreadTab data={data} />}
         </div>
@@ -284,20 +294,22 @@ function PromptTab({ data }: { data: MemoryInspectResponse }) {
   );
 }
 
-function NamespaceTab({ data }: { data: MemoryInspectResponse }) {
+function NamespaceTab({ data, refresh }: { data: MemoryInspectResponse; refresh: () => void }) {
   const ns = data.namespace;
   return (
     <section class="space-y-4">
       <ScopeHeader
         title={`namespace: ${data.namespaceId}`}
         row={ns.row}
-        emptyHint="Namespace row not yet created — appears after the first agent invocation in this tenant."
+        emptyHint="Namespace row not yet created — saving rules, working memory, or a fact will create it."
       />
-      <RulesAndWorking
+      <NamespaceRulesAndWorking
+        namespaceId={data.namespaceId}
         rules={ns.row?.staticRules ?? null}
         working={ns.row?.workingMemory ?? null}
+        refresh={refresh}
       />
-      <FactList facts={ns.facts} scope="namespace" />
+      <NamespaceFactList namespaceId={data.namespaceId} facts={ns.facts} refresh={refresh} />
       <EpisodeList episodes={ns.episodes} scope="namespace" />
     </section>
   );
@@ -389,6 +401,223 @@ function RulesAndWorking({ rules, working }: { rules: string | null; working: st
           {working ?? <em class="opacity-60">(empty)</em>}
         </pre>
       </div>
+    </div>
+  );
+}
+
+// Editable variant for the namespace tab. Static rules + working memory
+// are upserted via PATCH /api/memory/namespace/:id; the operator gates a
+// section into edit mode with the pencil button so accidental keystrokes
+// in the read-only view never overwrite a row.
+function NamespaceRulesAndWorking({
+  namespaceId,
+  rules,
+  working,
+  refresh,
+}: {
+  namespaceId: string;
+  rules: string | null;
+  working: string | null;
+  refresh: () => void;
+}) {
+  return (
+    <div class="grid grid-cols-1 gap-3">
+      <EditableMarkdownField
+        label="Static rules"
+        value={rules}
+        placeholder="Org-wide policy that should appear in every agent's prompt under this namespace. Markdown ok."
+        onSave={async (next) => {
+          await memoryApi.patchNamespace(namespaceId, { staticRules: next });
+          refresh();
+        }}
+      />
+      <EditableMarkdownField
+        label="Working memory"
+        value={working}
+        placeholder="Live org-wide scratchpad. Higher signal than static rules; expected to evolve."
+        onSave={async (next) => {
+          await memoryApi.patchNamespace(namespaceId, { workingMemory: next });
+          refresh();
+        }}
+      />
+    </div>
+  );
+}
+
+function EditableMarkdownField({
+  label,
+  value,
+  placeholder,
+  onSave,
+}: {
+  label: string;
+  value: string | null;
+  placeholder: string;
+  onSave: (next: string | null) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value ?? "");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Sync draft when the underlying value updates (e.g. another tab edited it).
+  useEffect(() => {
+    if (!editing) setDraft(value ?? "");
+  }, [value, editing]);
+
+  if (!editing) {
+    return (
+      <div>
+        <div class="flex items-center justify-between mb-1">
+          <SectionLabel>{label}</SectionLabel>
+          <button
+            class="btn btn-xs btn-ghost"
+            onClick={() => {
+              setDraft(value ?? "");
+              setErr(null);
+              setEditing(true);
+            }}
+            title="Edit"
+          >
+            ✎ Edit
+          </button>
+        </div>
+        <pre class="bg-base-200 p-2 rounded text-xs whitespace-pre-wrap break-words font-mono leading-relaxed max-h-40 overflow-y-auto">
+          {value ?? <em class="opacity-60">(empty)</em>}
+        </pre>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <SectionLabel>{label}</SectionLabel>
+      <textarea
+        class="textarea textarea-bordered textarea-sm w-full font-mono text-xs leading-relaxed"
+        rows={6}
+        value={draft}
+        placeholder={placeholder}
+        onInput={(e) => setDraft((e.target as HTMLTextAreaElement).value)}
+        disabled={saving}
+      />
+      {err && <div class="alert alert-error alert-sm text-xs mt-1">{err}</div>}
+      <div class="flex gap-2 mt-2 justify-end">
+        <button
+          class="btn btn-xs btn-ghost"
+          disabled={saving}
+          onClick={() => {
+            setEditing(false);
+            setErr(null);
+          }}
+        >
+          Cancel
+        </button>
+        <button
+          class="btn btn-xs btn-primary"
+          disabled={saving}
+          onClick={async () => {
+            setSaving(true);
+            setErr(null);
+            try {
+              const trimmed = draft.trim();
+              await onSave(trimmed.length === 0 ? null : draft);
+              setEditing(false);
+            } catch (e) {
+              setErr(e instanceof Error ? e.message : String(e));
+            } finally {
+              setSaving(false);
+            }
+          }}
+        >
+          {saving ? "Saving…" : "Save"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function NamespaceFactList({
+  namespaceId,
+  facts,
+  refresh,
+}: {
+  namespaceId: string;
+  facts: Fact[];
+  refresh: () => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function add() {
+    const text = draft.trim();
+    if (!text) return;
+    setAdding(true);
+    setErr(null);
+    try {
+      await memoryApi.addNamespaceFact(namespaceId, text);
+      setDraft("");
+      refresh();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  async function remove(factId: string) {
+    try {
+      await memoryApi.deleteNamespaceFact(namespaceId, factId);
+      refresh();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  return (
+    <div>
+      <SectionLabel>
+        Facts <span class="text-base-content/40 font-mono">[namespace]</span>
+      </SectionLabel>
+      {facts.length === 0 ? (
+        <div class="text-xs text-base-content/40 italic mb-2">(no facts)</div>
+      ) : (
+        <ol class="space-y-1 list-decimal list-inside mb-2">
+          {facts.map((f) => (
+            <li class="text-xs leading-relaxed flex items-start gap-2 group">
+              <span class="flex-1 text-base-content/80">{f.text}</span>
+              <span class="text-[10px] text-base-content/40 font-mono shrink-0">
+                {formatRelative(new Date(f.createdAt).toISOString())}
+              </span>
+              <button
+                class="opacity-0 group-hover:opacity-100 transition-opacity text-error/80 hover:text-error text-xs shrink-0"
+                onClick={() => remove(f.id)}
+                title="Remove fact"
+                aria-label="Remove fact"
+              >
+                ✕
+              </button>
+            </li>
+          ))}
+        </ol>
+      )}
+      <div class="flex gap-2">
+        <input
+          type="text"
+          class="input input-bordered input-xs flex-1 font-mono"
+          placeholder="Add a namespace-wide fact (one short statement)…"
+          value={draft}
+          onInput={(e) => setDraft((e.target as HTMLInputElement).value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && draft.trim()) void add();
+          }}
+          disabled={adding}
+        />
+        <button class="btn btn-xs btn-primary" onClick={add} disabled={adding || !draft.trim()}>
+          {adding ? "…" : "Add"}
+        </button>
+      </div>
+      {err && <div class="alert alert-error alert-sm text-xs mt-1">{err}</div>}
     </div>
   );
 }

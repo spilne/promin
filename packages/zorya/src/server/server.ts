@@ -101,7 +101,13 @@ import {
   streamThreadMessage,
   type AgentGatewayDeps,
 } from "./routes/agents.ts";
-import { inspectMemory, type MemoryInspectorDeps } from "./routes/memory.ts";
+import {
+  addNamespaceFact,
+  deleteNamespaceFact,
+  inspectMemory,
+  patchNamespace,
+  type MemoryInspectorDeps,
+} from "./routes/memory.ts";
 
 export interface ZoryaServerConfig extends AuthConfig {
   storage: WorkflowStorage;
@@ -552,7 +558,12 @@ export class ZoryaServer {
     }
 
     if (config.memoryInspector) {
-      this.router.get("/api/memory/inspect", inspectMemory(config.memoryInspector));
+      const mem = config.memoryInspector;
+      this.router
+        .get("/api/memory/inspect", inspectMemory(mem))
+        .patch("/api/memory/namespace/:namespaceId", patchNamespace(mem))
+        .post("/api/memory/namespace/:namespaceId/facts", addNamespaceFact(mem))
+        .delete("/api/memory/namespace/:namespaceId/facts/:factId", deleteNamespaceFact(mem));
     }
 
     if (config.scheduler) {

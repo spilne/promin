@@ -98,3 +98,93 @@ describe("memory inspector — /api/memory/inspect", () => {
     expect(body.resolved.messageCount).toBe(2);
   });
 });
+
+describe("namespace mutations — operator-only writes", () => {
+  it("PATCH /api/memory/namespace/:id upserts staticRules + workingMemory", async () => {
+    const memory = new InMemoryMemoryStore();
+    const server = makeServer(memory);
+    const res = await server.handle(
+      new Request("http://test/api/memory/namespace/acme", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          staticRules: "be polite",
+          workingMemory: "shipping v0.5 this week",
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const row = await memory.getNamespace("acme");
+    expect(row?.staticRules).toBe("be polite");
+    expect(row?.workingMemory).toBe("shipping v0.5 this week");
+  });
+
+  it("PATCH preserves omitted fields — sending only staticRules does not clear workingMemory", async () => {
+    const memory = new InMemoryMemoryStore();
+    await memory.upsertNamespace("acme", { workingMemory: "in flight" });
+    const server = makeServer(memory);
+    const res = await server.handle(
+      new Request("http://test/api/memory/namespace/acme", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ staticRules: "new rule" }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const row = await memory.getNamespace("acme");
+    expect(row?.staticRules).toBe("new rule");
+    expect(row?.workingMemory).toBe("in flight");
+  });
+
+  it("PATCH 400s on empty body", async () => {
+    const server = makeServer(new InMemoryMemoryStore());
+    const res = await server.handle(
+      new Request("http://test/api/memory/namespace/acme", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("POST /facts appends and the next inspect lists it", async () => {
+    const memory = new InMemoryMemoryStore();
+    const server = makeServer(memory);
+    const res = await server.handle(
+      new Request("http://test/api/memory/namespace/acme/facts", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "company name is Acme" }),
+      }),
+    );
+    expect(res.status).toBe(201);
+    const facts = await memory.listNamespaceFacts("acme");
+    expect(facts.map((f) => f.text)).toEqual(["company name is Acme"]);
+  });
+
+  it("POST /facts 400s on missing text", async () => {
+    const server = makeServer(new InMemoryMemoryStore());
+    const res = await server.handle(
+      new Request("http://test/api/memory/namespace/acme/facts", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "   " }),
+      }),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("DELETE /facts/:factId removes the fact", async () => {
+    const memory = new InMemoryMemoryStore();
+    const fact = await memory.appendNamespaceFact("acme", "transient");
+    const server = makeServer(memory);
+    const res = await server.handle(
+      new Request(`http://test/api/memory/namespace/acme/facts/${encodeURIComponent(fact.id)}`, {
+        method: "DELETE",
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(await memory.listNamespaceFacts("acme")).toEqual([]);
+  });
+});

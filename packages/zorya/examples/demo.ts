@@ -51,7 +51,11 @@ import {
   scanWorkflowsFolder,
   startAgentsScanLoop,
 } from "../src/index.ts";
-import { searchKnowledgeTool, getDocumentTool } from "./kb/org-knowledge-base.ts";
+import {
+  ORG_KNOWLEDGE_BASE,
+  searchKnowledgeTool,
+  getDocumentTool,
+} from "./kb/org-knowledge-base.ts";
 import path from "node:path";
 import { mkdirSync } from "node:fs";
 
@@ -511,6 +515,39 @@ function filterAgentsByCapability(agents: ReadonlyArray<RegisterAgentInput>): Re
   return agents.filter((a) => !liveOnlyAgentIds.has(a.id) || haveAnthropicKey);
 }
 
+// Demo tenants. Mirrors the UI default in agent-detail.tsx.
+const DEMO_NAMESPACE = "acme";
+const SEED_FACT_PREFIX = "Org doc available:";
+
+// Seed namespace memory with KB metadata so any agent in the "acme"
+// tenant has cross-cutting awareness of the org docs without having to
+// call searchKnowledge first. Idempotent: re-running the demo skips
+// when seed facts already exist (we look for the SEED_FACT_PREFIX).
+async function seedNamespaceMemory() {
+  const existing = await memoryStore.listNamespaceFacts(DEMO_NAMESPACE);
+  if (existing.some((f) => f.text.startsWith(SEED_FACT_PREFIX))) {
+    return;
+  }
+  await memoryStore.upsertNamespace(DEMO_NAMESPACE, {
+    staticRules:
+      "This is the Acme org tenant. Agents here can rely on facts under namespace scope as " +
+      "company-wide policy, including the catalogue of internal documents listed below.",
+    workingMemory:
+      "Demo seed. Edit me from the memory inspector — every agent in this namespace will see " +
+      "your changes on the next turn.",
+  });
+  for (const [id, doc] of ORG_KNOWLEDGE_BASE) {
+    const tags = doc.tags.join(", ");
+    await memoryStore.appendNamespaceFact(
+      DEMO_NAMESPACE,
+      `${SEED_FACT_PREFIX} ${id} — ${doc.title} (${tags})`,
+    );
+  }
+  console.log(
+    `[zorya] seeded namespace memory for "${DEMO_NAMESPACE}" with ${ORG_KNOWLEDGE_BASE.size} KB doc facts`,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Workers — register two mock workers so the dashboard's Workers page has
 // something to display. The demo runs every workflow in-process via
@@ -941,6 +978,7 @@ async function resumeOrphanedRuns() {
 
 await seedSchedules();
 await seedAgents();
+await seedNamespaceMemory();
 void startApprovalAutoSignaler();
 void resumeOrphanedRuns();
 

@@ -1,8 +1,11 @@
 // ---------------------------------------------------------------------------
-// Memory inspector — read-only snapshot of a thread's memory cascade.
+// Memory inspector — snapshot + targeted edits over a thread's memory cascade.
 //
-// Route:
-//   GET /api/memory/inspect?namespaceId=&resourceId=&threadId=
+// Routes:
+//   GET    /api/memory/inspect?namespaceId=&resourceId=&threadId=
+//   PATCH  /api/memory/namespace/:namespaceId          { staticRules?, workingMemory? }
+//   POST   /api/memory/namespace/:namespaceId/facts    { text }
+//   DELETE /api/memory/namespace/:namespaceId/facts/:factId
 //
 // The operator's debugging question is "what does the model actually see?"
 // The answer needs four things in one round-trip:
@@ -17,9 +20,10 @@
 // layer in. `threadId` opts the thread layer in (and unlocks resolveContext
 // since the cascade is thread-rooted).
 //
-// CRUD / audit / GDPR bulk-delete / retrieval attribution are intentionally
-// out of scope — they belong to the larger promin-w7tc spec which assumes a
-// permission gradient + audit log infra that isn't in place yet.
+// Namespace mutations are operator-only — the agent-side memory tool does
+// not expose namespace writes. Episodes stay read-only here because they're
+// LLM-generated artefacts of distillation; hand-writing them would defeat
+// the consolidator's salience scoring.
 // ---------------------------------------------------------------------------
 
 import type {
@@ -173,6 +177,71 @@ async function loadThreadSnapshot(
     store.getMessages(key, { order: "asc" }).catch(() => []),
   ]);
   return { row, facts, episodes, messages };
+}
+
+// ---------------------------------------------------------------------------
+// Namespace mutations — operator-only writes. The agent-side memory tool
+// stops at thread + resource scope; namespace is policy that lives above
+// individual user state, so it gets a separate gate.
+// ---------------------------------------------------------------------------
+
+export function patchNamespace(deps: MemoryInspectorDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const namespaceId = params.namespaceId;
+    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    const body = (await req.json().catch(() => null)) as {
+      staticRules?: string | null;
+      workingMemory?: string | null;
+    } | null;
+    if (!body) return jsonError(400, "invalid_body");
+
+    // Pass through only the fields the caller actually set, so omitting
+    // workingMemory in the payload doesn't accidentally clear it.
+    const patch: { staticRules?: string | null; workingMemory?: string | null } = {};
+    if ("staticRules" in body) patch.staticRules = body.staticRules ?? null;
+    if ("workingMemory" in body) patch.workingMemory = body.workingMemory ?? null;
+    if (Object.keys(patch).length === 0) return jsonError(400, "empty_patch");
+
+    try {
+      const row = await deps.memory.upsertNamespace(namespaceId, patch);
+      return json(200, { row });
+    } catch (err) {
+      return jsonError(500, "patch_failed", err instanceof Error ? err.message : String(err));
+    }
+  };
+}
+
+export function addNamespaceFact(deps: MemoryInspectorDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const namespaceId = params.namespaceId;
+    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    const body = (await req.json().catch(() => null)) as { text?: unknown } | null;
+    const text = typeof body?.text === "string" ? body.text.trim() : "";
+    if (!text) return jsonError(400, "missing_text");
+
+    try {
+      const fact = await deps.memory.appendNamespaceFact(namespaceId, text);
+      return json(201, { fact });
+    } catch (err) {
+      return jsonError(500, "add_failed", err instanceof Error ? err.message : String(err));
+    }
+  };
+}
+
+export function deleteNamespaceFact(deps: MemoryInspectorDeps) {
+  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
+    const namespaceId = params.namespaceId;
+    const factId = params.factId;
+    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    if (!factId) return jsonError(400, "missing_factId");
+
+    try {
+      await deps.memory.deleteNamespaceFact(namespaceId, factId);
+      return json(200, { ok: true });
+    } catch (err) {
+      return jsonError(500, "delete_failed", err instanceof Error ? err.message : String(err));
+    }
+  };
 }
 
 async function loadResolvedSummary(
