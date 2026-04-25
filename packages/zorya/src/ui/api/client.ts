@@ -6,7 +6,12 @@ import type {
   WorkersResponse,
   SignalRequest,
 } from "../../server/api-types.ts";
-import type { SchedulesResponse, ScheduleDto } from "../../server/routes/schedules.ts";
+import type {
+  SchedulesResponse,
+  ScheduleDto,
+  ScheduleHistoryResponse,
+  ScheduleUpcomingResponse,
+} from "../../server/routes/schedules.ts";
 import type {
   SignalHistoryResponse,
   AttemptsResponse,
@@ -20,6 +25,13 @@ import type {
   SparklinesResponse,
 } from "../../server/routes/grid.ts";
 import type { WorkflowDefDto, WorkflowDefsResponse } from "../../server/routes/workflow-defs.ts";
+import type {
+  AgentsListResponse,
+  AgentThreadsResponse,
+  RegisteredAgent,
+  ThreadInvokeResponse,
+  ThreadMessagesResponse,
+} from "../../server/routes/agents.ts";
 
 const BASE = ""; // served from same origin
 
@@ -188,4 +200,168 @@ export const api = {
   deleteSchedule(id: string): Promise<{ ok: boolean }> {
     return req(`/api/schedules/${encodeURIComponent(id)}`, { method: "DELETE" });
   },
+  emitSchedule(id: string): Promise<{ ok: boolean }> {
+    return req(`/api/schedules/${encodeURIComponent(id)}/emit`, { method: "POST" });
+  },
+  getSchedule(id: string): Promise<ScheduleDto> {
+    return req(`/api/schedules/${encodeURIComponent(id)}`);
+  },
+  getScheduleHistory(
+    id: string,
+    params: { limit?: number; offset?: number } = {},
+  ): Promise<ScheduleHistoryResponse> {
+    const qp = new URLSearchParams();
+    if (params.limit !== undefined) qp.set("limit", String(params.limit));
+    if (params.offset !== undefined) qp.set("offset", String(params.offset));
+    const qs = qp.toString();
+    return req(`/api/schedules/${encodeURIComponent(id)}/history${qs ? `?${qs}` : ""}`);
+  },
+  getScheduleUpcoming(
+    id: string,
+    params: { count?: number } = {},
+  ): Promise<ScheduleUpcomingResponse> {
+    const qp = new URLSearchParams();
+    if (params.count !== undefined) qp.set("count", String(params.count));
+    const qs = qp.toString();
+    return req(`/api/schedules/${encodeURIComponent(id)}/upcoming${qs ? `?${qs}` : ""}`);
+  },
+
+  // ---------------------------------------------------------------------
+  // Agents — registry browsing + chat console
+  // ---------------------------------------------------------------------
+  listAgents(): Promise<AgentsListResponse> {
+    return req<AgentsListResponse>(`/api/agents`);
+  },
+  getAgent(id: string): Promise<RegisteredAgent> {
+    return req<RegisteredAgent>(`/api/agents/${encodeURIComponent(id)}`);
+  },
+  listAgentThreads(
+    id: string,
+    params: { namespaceId: string; resourceId?: string; limit?: number },
+  ): Promise<AgentThreadsResponse> {
+    const qp = new URLSearchParams({ namespaceId: params.namespaceId });
+    if (params.resourceId) qp.set("resourceId", params.resourceId);
+    if (params.limit !== undefined) qp.set("limit", String(params.limit));
+    return req<AgentThreadsResponse>(`/api/agents/${encodeURIComponent(id)}/threads?${qp}`);
+  },
+  listAgentThreadMessages(
+    id: string,
+    threadId: string,
+    params: { namespaceId: string; resourceId?: string; limit?: number },
+  ): Promise<ThreadMessagesResponse> {
+    const qp = new URLSearchParams({ namespaceId: params.namespaceId });
+    if (params.resourceId) qp.set("resourceId", params.resourceId);
+    if (params.limit !== undefined) qp.set("limit", String(params.limit));
+    return req<ThreadMessagesResponse>(
+      `/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/messages?${qp}`,
+    );
+  },
+  sendAgentThreadMessage(
+    id: string,
+    threadId: string,
+    body: { task: string; namespaceId: string; resourceId?: string },
+  ): Promise<ThreadInvokeResponse> {
+    return req<ThreadInvokeResponse>(
+      `/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+  },
+  /**
+   * POST /api/agents/:id/threads/:threadId/stream — SSE streaming turn.
+   *
+   * EventSource doesn't support POST or custom headers (auth), so this uses
+   * fetch + manual SSE parsing — same pattern ChatGPT/Claude.ai use.
+   * `onDelta` fires per text chunk; `onFinish` once at completion.
+   * Returns an AbortController so callers can cancel mid-stream.
+   */
+  streamAgentThread(
+    id: string,
+    threadId: string,
+    body: { task: string; namespaceId: string; resourceId?: string },
+    handlers: {
+      onThread?: (info: { threadId: string; isNew: boolean }) => void;
+      onDelta: (delta: string) => void;
+      onFinish?: (info: {
+        text: string;
+        finishReason: string;
+        usage: { inputTokens: number; outputTokens: number };
+      }) => void;
+      onError?: (message: string) => void;
+    },
+  ): { abort: () => void; done: Promise<void> } {
+    const ctrl = new AbortController();
+    const url = `${BASE}/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/stream`;
+
+    const done = (async () => {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "text/event-stream",
+            ...authHeader(),
+          },
+          body: JSON.stringify(body),
+          signal: ctrl.signal,
+        });
+        if (!res.ok || !res.body) {
+          handlers.onError?.(`HTTP ${res.status}`);
+          return;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { value, done: streamDone } = await reader.read();
+          if (streamDone) break;
+          buffer += decoder.decode(value, { stream: true });
+          // SSE frames are separated by a blank line. Process whole frames
+          // and keep any trailing partial frame in the buffer.
+          let sepIndex: number;
+          while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
+            const frame = buffer.slice(0, sepIndex);
+            buffer = buffer.slice(sepIndex + 2);
+            const parsed = parseSseFrame(frame);
+            if (!parsed) continue;
+            const { event, data } = parsed;
+            try {
+              const payload = JSON.parse(data);
+              if (event === "thread") {
+                handlers.onThread?.(payload);
+              } else if (event === "finish") {
+                handlers.onFinish?.(payload);
+              } else if (event === "error") {
+                handlers.onError?.(String(payload?.message ?? "stream error"));
+              } else if (typeof payload?.delta === "string") {
+                handlers.onDelta(payload.delta);
+              }
+            } catch {
+              // Skip malformed frames.
+            }
+          }
+        }
+      } catch (e) {
+        if ((e as Error).name === "AbortError") return;
+        handlers.onError?.((e as Error).message);
+      }
+    })();
+
+    return { abort: () => ctrl.abort(), done };
+  },
 };
+
+function parseSseFrame(frame: string): { event: string; data: string } | null {
+  let event = "message";
+  const dataLines: string[] = [];
+  for (const line of frame.split("\n")) {
+    if (line.startsWith(":")) continue; // comment
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
+  }
+  if (dataLines.length === 0) return null;
+  return { event, data: dataLines.join("\n") };
+}

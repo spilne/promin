@@ -91,6 +91,7 @@ import { getWorkflowDef, listWorkflowDefs } from "./routes/workflow-defs.ts";
 import {
   getAgent,
   invokeAgent,
+  listAgentThreads,
   listAgents,
   listThreadMessages,
   sendThreadMessage,
@@ -532,6 +533,7 @@ export class ZoryaServer {
         .get("/api/agents/:id", getAgent(agentDeps))
         .post("/api/agents/:id/invoke", invokeAgent(agentDeps))
         .post("/api/agents/:id/stream", streamAgent(agentDeps))
+        .get("/api/agents/:id/threads", listAgentThreads(agentDeps))
         .post("/api/agents/:id/threads/:threadId", sendThreadMessage(agentDeps))
         .post("/api/agents/:id/threads/:threadId/stream", streamThreadMessage(agentDeps))
         .get("/api/agents/:id/threads/:threadId/messages", listThreadMessages(agentDeps));

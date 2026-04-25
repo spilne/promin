@@ -4,8 +4,11 @@ import { RunList } from "./components/runs/run-list.tsx";
 import { RunDetail } from "./components/runs/run-detail.tsx";
 import { WorkerGrid } from "./components/workers/worker-grid.tsx";
 import { ScheduleList } from "./components/schedules/schedule-list.tsx";
+import { ScheduleDetail } from "./components/schedules/schedule-detail.tsx";
 import { WorkflowList } from "./components/workflows/workflow-list.tsx";
 import { WorkflowDetail } from "./components/workflows/workflow-detail.tsx";
+import { AgentList } from "./components/agents/agent-list.tsx";
+import { AgentDetail } from "./components/agents/agent-detail.tsx";
 import { DialogHost, ToastHost } from "./components/ui/dialog-host.tsx";
 
 export function App() {
@@ -54,6 +57,25 @@ function renderRoute(route: string, navigate: (p: string) => void) {
   }
   if (path === "/schedules") {
     return <ScheduleList onNavigate={navigate} />;
+  }
+  const scheduleMatch = /^\/schedules\/([^/]+)$/.exec(path ?? "");
+  if (scheduleMatch) {
+    return (
+      <ScheduleDetail
+        id={decodeURIComponent(scheduleMatch[1]!)}
+        onBack={() => navigate("/schedules")}
+        onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)}
+      />
+    );
+  }
+  if (path === "/agents") {
+    return <AgentList onOpen={(id) => navigate(`/agents/${encodeURIComponent(id)}`)} />;
+  }
+  const agentMatch = /^\/agents\/([^/]+)$/.exec(path ?? "");
+  if (agentMatch) {
+    return (
+      <AgentDetail id={decodeURIComponent(agentMatch[1]!)} onBack={() => navigate("/agents")} />
+    );
   }
   if (path === "/workflows") {
     return (

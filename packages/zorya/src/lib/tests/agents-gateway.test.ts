@@ -229,4 +229,41 @@ describe("agent gateway — threads", () => {
     );
     expect(res.status).toBe(404);
   });
+
+  it("GET /api/agents/:id/threads lists threads for a tenant", async () => {
+    const { server } = await bootGateway({
+      responses: [
+        { content: "r1", finishReason: "stop" },
+        { content: "r2", finishReason: "stop" },
+      ],
+    });
+    // Seed two threads under (acme, alice).
+    for (const tid of ["t-a", "t-b"]) {
+      await server.handle(
+        new Request(`http://test/api/agents/support/threads/${tid}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ task: "hi", namespaceId: "acme", resourceId: "alice" }),
+        }),
+      );
+    }
+    const res = await server.handle(
+      new Request("http://test/api/agents/support/threads?namespaceId=acme&resourceId=alice", {
+        method: "GET",
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { threads: Array<{ id: string; messageCount: number }> };
+    const ids = body.threads.map((t) => t.id).sort();
+    expect(ids).toEqual(["t-a", "t-b"]);
+    for (const t of body.threads) expect(t.messageCount).toBeGreaterThan(0);
+  });
+
+  it("GET /api/agents/:id/threads requires namespaceId", async () => {
+    const { server } = await bootGateway();
+    const res = await server.handle(
+      new Request("http://test/api/agents/support/threads", { method: "GET" }),
+    );
+    expect(res.status).toBe(400);
+  });
 });

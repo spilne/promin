@@ -36,6 +36,8 @@ import {
 import { echoLLM, mockLLM } from "@promin/agent/testing";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import type { LLMProvider } from "@promin/agent";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { ZoryaServer } from "../src/index.ts";
 
 // ---------------------------------------------------------------------------
@@ -149,8 +151,14 @@ async function main() {
 
   const llms = buildLlmMap();
 
+  // Serve the bundled dashboard when it has been built. Falls back to "no
+  // UI" so the gateway curl examples still work without a build step.
+  const uiDir = path.resolve(import.meta.dir, "../dist/public");
+  const haveUi = existsSync(path.join(uiDir, "index.html"));
+
   const server = new ZoryaServer({
     storage,
+    uiDir: haveUi ? uiDir : undefined,
     agents: {
       registry,
       resolve: (recipe) =>
@@ -176,12 +184,22 @@ async function main() {
 
 Running on http://${host}:${actualPort}
 
+${
+  haveUi
+    ? `Open the dashboard:
+  http://${host}:${actualPort}/#/agents
+  → Agents tab lists the three recipes; click into one to chat.`
+    : `Dashboard NOT served (build first):
+  bun nx run @promin/zorya:build-ui
+  Then re-run this demo to get the UI at http://${host}:${actualPort}/#/agents.`
+}
+
 Registered agents:
   - echo-bot      friendly echo, no tools
   - support-bot   3-turn canned support flow
   - research-bot  echo with research-style framing
 
-Try:
+Or try the HTTP gateway directly:
 
   # List agents
   curl http://${host}:${actualPort}/api/agents | jq

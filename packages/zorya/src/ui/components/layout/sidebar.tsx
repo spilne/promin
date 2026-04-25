@@ -19,6 +19,7 @@ const SECTIONS: Array<{ title?: string; items: NavItem[] }> = [
       { path: "/", label: "Runs", icon: "▦" },
       { path: "/workflows", label: "Workflows", icon: "◈" },
       { path: "/schedules", label: "Schedules", icon: "⏱" },
+      { path: "/agents", label: "Agents", icon: "✦" },
       { path: "/workers", label: "Workers", icon: "◉" },
     ],
   },

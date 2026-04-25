@@ -9,6 +9,7 @@
 //   POST /api/agents/:id/stream               — one-shot, SSE response
 //   POST /api/agents/:id/threads/:threadId    — conversational turn (one-shot per call)
 //   POST /api/agents/:id/threads/:threadId/stream — conversational, SSE
+//   GET  /api/agents/:id/threads              — list threads (requires namespaceId query)
 //   GET  /api/agents/:id/threads/:threadId/messages — read message history
 //
 // Tenant binding:
@@ -24,8 +25,48 @@
 //   For LocalAgent backends, that's `(r) => resolveLocalAgent(r, deps)`.
 // ---------------------------------------------------------------------------
 
-import type { Agent, AgentRegistry, RegisteredAgent } from "@promin/agent";
+import type {
+  Agent,
+  AgentRegistry,
+  AgentThreadSummary,
+  Message,
+  RegisteredAgent,
+} from "@promin/agent";
 import { json, jsonError, readJson } from "../router.ts";
+
+// ---------------------------------------------------------------------------
+// Response DTOs — UI imports these for typing API responses. Re-export the
+// underlying agent types so the UI bundle doesn't import @promin/agent
+// directly (keeps the import surface narrow and matches schedules.ts).
+// `ThreadSummary` here is the agent-facing shape (with `id`), not the
+// memory-store shape (which uses `threadId`).
+// ---------------------------------------------------------------------------
+
+export type { AgentThreadSummary as ThreadSummary, RegisteredAgent, Message } from "@promin/agent";
+
+export interface AgentsListResponse {
+  agents: RegisteredAgent[];
+}
+
+export interface AgentThreadsResponse {
+  threads: AgentThreadSummary[];
+}
+
+export interface ThreadMessagesResponse {
+  threadId: string;
+  messages: Message[];
+}
+
+export interface InvokeResponse {
+  text: string;
+  finishReason: string;
+  usage: { inputTokens: number; outputTokens: number };
+}
+
+export interface ThreadInvokeResponse extends InvokeResponse {
+  threadId: string;
+  isNew: boolean;
+}
 
 export interface AgentGatewayDeps {
   readonly registry: AgentRegistry;
@@ -301,6 +342,37 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
         connection: "keep-alive",
       },
     });
+  };
+}
+
+export function listAgentThreads(deps: AgentGatewayDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const id = params.id;
+    if (!id) return jsonError(400, "missing_id");
+
+    const url = new URL(req.url);
+    const namespaceId = url.searchParams.get("namespaceId") ?? undefined;
+    const resourceId = url.searchParams.get("resourceId") ?? undefined;
+    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+
+    const recipe = await deps.registry.get(id);
+    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+
+    let agent: Agent;
+    try {
+      agent = deps.resolve(recipe).bind({ namespaceId, resourceId });
+    } catch (err) {
+      return jsonError(500, "resolve_failed", asMessage(err));
+    }
+
+    try {
+      const limit = parseIntParam(url.searchParams.get("limit"));
+      const cursor = url.searchParams.get("cursor") ?? undefined;
+      const threads = await agent.listThreads({ resourceId, limit, cursor });
+      return json(200, { threads });
+    } catch (err) {
+      return jsonError(500, "list_threads_failed", asMessage(err));
+    }
   };
 }
 
