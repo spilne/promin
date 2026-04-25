@@ -146,6 +146,8 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
         }}
       />
 
+      <SearchBar onOpen={onOpen} onSetName={(v) => setName(v)} />
+
       {/* Filter bar (chip-style) */}
       <div class="flex items-center gap-2 flex-wrap">
         <div class="join">
@@ -307,6 +309,60 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Search input that resolves an exact workflow id first, then falls back to
+ * filtering the list by workflow name. Submit on Enter or via the button.
+ */
+function SearchBar({
+  onOpen,
+  onSetName,
+}: {
+  onOpen: (id: string) => void;
+  onSetName: (name: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [hint, setHint] = useState<string | undefined>(undefined);
+
+  const submit = async () => {
+    const q = query.trim();
+    if (!q) return;
+    setBusy(true);
+    setHint(undefined);
+    try {
+      const run = await api.getRun(q).catch(() => undefined);
+      if (run) {
+        onOpen(q);
+        setQuery("");
+        return;
+      }
+      onSetName(q);
+      setHint(`No run with id "${q}" — filtered by name instead.`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div class="flex items-center gap-2">
+      <input
+        class="input input-bordered input-sm w-full max-w-md font-mono"
+        placeholder="Search by workflow id, then name…"
+        value={query}
+        disabled={busy}
+        onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") void submit();
+        }}
+      />
+      <button class="btn btn-sm btn-primary" onClick={submit} disabled={busy || !query.trim()}>
+        {busy ? "…" : "Search"}
+      </button>
+      {hint && <span class="text-xs text-base-content/60">{hint}</span>}
     </div>
   );
 }
