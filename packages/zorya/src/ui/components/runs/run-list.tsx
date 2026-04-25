@@ -150,7 +150,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
       <SearchBar onOpen={onOpen} onSetName={(v) => setName(v)} />
 
       {/* Filter bar (chip-style) */}
-      <div class="flex items-center gap-2 flex-wrap">
+      <div class="flex items-center gap-2 flex-wrap justify-end">
         <div class="join">
           {STATUS_FILTERS.map((s) => {
             const active = status === s;
@@ -343,7 +343,8 @@ function SearchBar({
   };
 
   return (
-    <div class="flex items-center gap-2">
+    <div class="flex items-center gap-2 justify-end">
+      {hint && <span class="text-xs text-base-content/60">{hint}</span>}
       <input
         class="input input-bordered input-sm w-full max-w-md font-mono"
         placeholder="Search by workflow id, then name…"
@@ -357,7 +358,6 @@ function SearchBar({
       <button class="btn btn-sm btn-primary" onClick={submit} disabled={busy || !query.trim()}>
         {busy ? "…" : "Search"}
       </button>
-      {hint && <span class="text-xs text-base-content/60">{hint}</span>}
     </div>
   );
 }

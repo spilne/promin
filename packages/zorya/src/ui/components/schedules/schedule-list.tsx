@@ -152,7 +152,7 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
       )}
 
       {configured && schedules.length > 0 && (
-        <div class="flex items-center gap-2 flex-wrap">
+        <div class="flex items-center gap-2 flex-wrap justify-end">
           <div class="join">
             {STATUS_FILTERS.map((f) => (
               <button

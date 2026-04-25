@@ -65,12 +65,14 @@ export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: 
         </button>
       </div>
 
-      <input
-        class="input input-bordered input-sm w-full max-w-md font-mono"
-        placeholder="Search by name, type, version…"
-        value={query}
-        onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
-      />
+      <div class="flex justify-end">
+        <input
+          class="input input-bordered input-sm w-full max-w-md font-mono"
+          placeholder="Search by name, type, version…"
+          value={query}
+          onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
+        />
+      </div>
 
       {error && <div class="alert alert-error text-sm">{error.message}</div>}
 
