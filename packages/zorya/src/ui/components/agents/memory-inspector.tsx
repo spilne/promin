@@ -1,55 +1,102 @@
 // ---------------------------------------------------------------------------
-// Memory inspector drawer — read-only snapshot of the three-scope cascade
-// for a given (namespaceId, resourceId?, threadId) tuple.
+// Memory explorer drawer — read-only browser over the three-scope cascade
+// (namespace → resource → thread) for the current tenant.
+//
+// Launched from an agent's chat header (the `⌬ Memory` button), but the
+// drawer is decoupled from the chat: switching the inspected thread here
+// doesn't change which thread the chat is composing into. Scope picker
+// + thread picker live inside the drawer so an operator can browse
+// across the whole (namespace, resource) without leaving.
 //
 // Tabs:
-//   Prompt    — what the model actually sees (resolveContext output).
-//               Often the only tab the operator opens.
+//   Prompt    — resolveContext() output. What the model actually sees.
 //   Namespace — tenant-wide static rules + facts + episodes.
-//   Resource  — per-user static rules + facts + episodes (when resourceId set).
-//   Thread    — per-thread working memory + facts + episodes + message history.
+//   Resource  — per-user static rules + facts + episodes.
+//   Thread    — per-thread working memory + facts + episodes + messages.
 //
-// Backed by GET /api/memory/inspect — single round-trip per open.
+// Backed by GET /api/memory/inspect (one round-trip per scope change) and
+// GET /api/agents/:id/threads (one round-trip per drawer open + after
+// each thread switch).
 // ---------------------------------------------------------------------------
 
-import { useEffect, useState } from "preact/hooks";
-import { memoryApi } from "../../api/client.ts";
+import { useEffect, useMemo, useState } from "preact/hooks";
+import { api, memoryApi } from "../../api/client.ts";
 import type {
   EpisodicRecord,
   Fact,
   MemoryInspectResponse,
   StoredMessage,
 } from "../../../server/routes/memory.ts";
+import type { ThreadSummary } from "../../../server/routes/agents.ts";
 import { Skeleton } from "../ui/skeleton.tsx";
 import { JsonBlock } from "../ui/json-block.tsx";
 import { formatRelative } from "../../lib/format.ts";
 
 interface Props {
+  agentId: string;
   namespaceId: string;
   resourceId?: string;
-  threadId?: string;
+  /** Initial thread to inspect. Internal state takes over after first render. */
+  initialThreadId?: string;
   onClose: () => void;
 }
 
 type Tab = "prompt" | "namespace" | "resource" | "thread";
 
-export function MemoryInspector({ namespaceId, resourceId, threadId, onClose }: Props) {
+const NO_THREAD = "__none__";
+
+export function MemoryInspector({
+  agentId,
+  namespaceId,
+  resourceId,
+  initialThreadId,
+  onClose,
+}: Props) {
   const [data, setData] = useState<MemoryInspectResponse | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
-  const [tab, setTab] = useState<Tab>(threadId ? "prompt" : "namespace");
+  const [currentThread, setCurrentThread] = useState<string | undefined>(initialThreadId);
+  const [tab, setTab] = useState<Tab>(initialThreadId ? "prompt" : "namespace");
+  const [fullscreen, setFullscreen] = useState(false);
+  const [threads, setThreads] = useState<ThreadSummary[]>([]);
 
+  // Inspect snapshot — refetched whenever the inspected scope changes.
   useEffect(() => {
     let cancelled = false;
     setData(undefined);
     setError(undefined);
     memoryApi
-      .inspect({ namespaceId, resourceId, threadId })
+      .inspect({ namespaceId, resourceId, threadId: currentThread })
       .then((r) => !cancelled && setData(r))
       .catch((e) => !cancelled && setError(e instanceof Error ? e.message : String(e)));
     return () => {
       cancelled = true;
     };
-  }, [namespaceId, resourceId, threadId]);
+  }, [namespaceId, resourceId, currentThread]);
+
+  // Thread list for the picker — only available when both namespace and
+  // resource are set (the gateway route requires both).
+  useEffect(() => {
+    if (!resourceId) {
+      setThreads([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .listAgentThreads(agentId, { namespaceId, resourceId, limit: 100 })
+      .then((r) => !cancelled && setThreads(r.threads))
+      .catch(() => !cancelled && setThreads([]));
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId, namespaceId, resourceId]);
+
+  // If the operator clicks into the Thread tab and there's no current
+  // thread, hop to a sensible default (the most recent thread).
+  useEffect(() => {
+    if ((tab === "thread" || tab === "prompt") && !currentThread && threads.length > 0) {
+      setCurrentThread(threads[0]!.id);
+    }
+  }, [tab, currentThread, threads]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -60,42 +107,80 @@ export function MemoryInspector({ namespaceId, resourceId, threadId, onClose }: 
   // Tabs the snapshot has data for. We always show namespace; resource and
   // thread surface only when their scope is in the request.
   const tabs: Array<{ id: Tab; label: string; show: boolean }> = [
-    { id: "prompt", label: "Prompt", show: !!threadId },
+    { id: "prompt", label: "Prompt", show: !!currentThread },
     { id: "namespace", label: "Namespace", show: true },
     { id: "resource", label: "Resource", show: !!resourceId },
-    { id: "thread", label: "Thread", show: !!threadId },
+    { id: "thread", label: "Thread", show: !!currentThread },
   ];
   const visibleTabs = tabs.filter((t) => t.show);
+
+  // Sort threads newest-first for the picker so recent activity is on top.
+  const sortedThreads = useMemo(
+    () => [...threads].sort((a, b) => b.lastActiveAt - a.lastActiveAt),
+    [threads],
+  );
 
   return (
     <>
       <div class="fixed inset-0 bg-black/40 z-30 anim-backdrop-in" onClick={onClose} aria-hidden />
       <aside
-        class="fixed top-0 right-0 h-screen w-full max-w-2xl bg-base-100 shadow-2xl
-               z-40 flex flex-col anim-drawer-in"
+        class={`fixed top-0 right-0 h-screen bg-base-100 shadow-2xl z-40 flex flex-col anim-drawer-in transition-[max-width] duration-150 ${
+          fullscreen ? "w-screen max-w-none" : "w-full max-w-2xl"
+        }`}
         role="dialog"
-        aria-label="Memory inspector"
+        aria-label="Memory explorer"
       >
         <header class="flex items-start justify-between gap-2 p-4 border-b border-base-300">
-          <div class="min-w-0">
-            <div class="text-xs text-base-content/50 uppercase tracking-wider">
-              Memory inspector
-            </div>
+          <div class="min-w-0 flex-1">
+            <div class="text-xs text-base-content/50 uppercase tracking-wider">Memory explorer</div>
             <div class="font-mono text-sm truncate">
               {namespaceId}
               {resourceId && <span class="text-base-content/50"> · {resourceId}</span>}
-              {threadId && <span class="text-base-content/50"> · {threadId}</span>}
+              {currentThread && <span class="text-base-content/50"> · {currentThread}</span>}
             </div>
           </div>
-          <button
-            class="btn btn-sm btn-ghost"
-            onClick={onClose}
-            aria-label="Close"
-            title="Close (Esc)"
-          >
-            ✕
-          </button>
+          <div class="flex gap-1 shrink-0">
+            <button
+              class="btn btn-sm btn-ghost"
+              onClick={() => setFullscreen((v) => !v)}
+              aria-label={fullscreen ? "Exit fullscreen" : "Fullscreen"}
+              title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
+            >
+              {fullscreen ? "⤡" : "⤢"}
+            </button>
+            <button
+              class="btn btn-sm btn-ghost"
+              onClick={onClose}
+              aria-label="Close"
+              title="Close (Esc)"
+            >
+              ✕
+            </button>
+          </div>
         </header>
+
+        {resourceId && (
+          <div class="px-4 py-2 border-b border-base-300 flex items-center gap-2 text-xs">
+            <span class="text-base-content/60">Thread</span>
+            <select
+              class="select select-bordered select-xs flex-1 font-mono"
+              value={currentThread ?? NO_THREAD}
+              onChange={(e) => {
+                const v = (e.target as HTMLSelectElement).value;
+                setCurrentThread(v === NO_THREAD ? undefined : v);
+              }}
+            >
+              <option value={NO_THREAD}>(none — namespace + resource only)</option>
+              {sortedThreads.map((t) => (
+                <option value={t.id}>
+                  {t.id} · {t.messageCount} msg ·{" "}
+                  {formatRelative(new Date(t.lastActiveAt).toISOString())}
+                </option>
+              ))}
+            </select>
+            <span class="text-base-content/40 font-mono">{sortedThreads.length} total</span>
+          </div>
+        )}
 
         <div class="px-4 pt-3 border-b border-base-300">
           <div role="tablist" class="tabs tabs-bordered">

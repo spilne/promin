@@ -126,7 +126,7 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
                   Pick a thread from the sidebar or start a new one to begin chatting.
                 </p>
                 <button class="btn btn-xs btn-ghost mt-3" onClick={() => setInspectorOpen(true)}>
-                  Inspect tenant memory →
+                  Browse tenant memory →
                 </button>
               </div>
             </div>
@@ -136,9 +136,10 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
 
       {inspectorOpen && (
         <MemoryInspector
+          agentId={id}
           namespaceId={tenant.namespaceId}
           resourceId={tenant.resourceId || undefined}
-          threadId={activeThread ?? undefined}
+          initialThreadId={activeThread ?? undefined}
           onClose={() => setInspectorOpen(false)}
         />
       )}
@@ -385,9 +386,9 @@ function ChatPane({
           <button
             class="btn btn-xs btn-ghost"
             onClick={onInspect}
-            title="Inspect resolved system prompt + memory cascade"
+            title="Browse memory: resolved prompt, namespace/resource/thread cascade, switch threads"
           >
-            ⌬ Inspect
+            ⌬ Memory
           </button>
           <button class="btn btn-xs btn-ghost" onClick={() => refreshMessages()} title="Refresh">
             ↻
