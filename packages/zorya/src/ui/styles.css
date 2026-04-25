@@ -134,19 +134,6 @@
   }
 }
 
-/* View Transitions — Chrome / Edge / Safari render a free cross-fade
-   between routes when `document.startViewTransition` runs in app.tsx's
-   hashchange handler. Slow the default 250ms swap to 200ms with the
-   same easing the in-page anim-fade-in uses, so route swaps and tab
-   swaps feel like the same family of transition. Firefox ignores
-   these rules (no view-transition support) and falls back to the
-   straight Preact re-render. */
-::view-transition-old(root),
-::view-transition-new(root) {
-  animation-duration: 200ms;
-  animation-timing-function: cubic-bezier(0.2, 0.7, 0.2, 1);
-}
-
 /* Custom: Gantt bar hatching for sleeping / waiting steps */
 .gantt-hatched {
   background-image: repeating-linear-gradient(
