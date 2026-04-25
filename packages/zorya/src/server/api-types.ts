@@ -137,6 +137,37 @@ export interface WorkerDto {
   completedToday: number;
   /** ISO timestamp of last heartbeat. */
   lastHeartbeatAt?: string;
+  // Richer fields populated when the worker protocol is wired. Stay
+  // optional so the existing mock WorkersProvider still satisfies the type.
+  capabilities?: readonly string[];
+  /** Names of workflows this worker advertised on register. */
+  workflowNames?: readonly string[];
+  workflowVersions?: readonly string[];
+  concurrency?: number;
+  version?: string;
+  hostname?: string;
+  runtime?: string;
+  /** ISO timestamp of when the worker process started. */
+  startedAt?: string;
+  /** Runs currently executing on this worker. */
+  activeRuns?: ReadonlyArray<{
+    workflowId: string;
+    workflowName: string;
+    /** ISO timestamp. */
+    startedAt: string;
+  }>;
+  completedCount?: number;
+  failedCount?: number;
+  /** Last ~20 terminal runs this worker executed. */
+  recentRuns?: ReadonlyArray<{
+    workflowId: string;
+    workflowName: string;
+    status: "completed" | "failed";
+    durationMs: number;
+    /** ISO timestamp. */
+    at: string;
+  }>;
+  namespaces?: readonly string[];
 }
 
 export interface WorkersResponse {

@@ -72,6 +72,19 @@ export class ZoryaWorker {
   private heartbeatHandle?: ReturnType<typeof setInterval>;
   private sleepScanner?: SleepScanner;
   private started = false;
+  // Activity tracked so the dashboard can show what each worker is doing.
+  private readonly activeRuns = new Map<string, { workflowName: string; startedAt: number }>();
+  private completedCount = 0;
+  private failedCount = 0;
+  /** Last terminal run outcomes — bounded ring buffer fed into metadata. */
+  private readonly recentRuns: Array<{
+    workflowId: string;
+    workflowName: string;
+    status: "completed" | "failed";
+    durationMs: number;
+    at: string;
+  }> = [];
+  private readonly RECENT_RUNS_CAP = 20;
 
   constructor(config: ZoryaWorkerConfig) {
     this.config = config;
@@ -95,9 +108,19 @@ export class ZoryaWorker {
 
     const hbMs = this.config.heartbeatIntervalMs ?? 5_000;
     this.heartbeatHandle = setInterval(() => {
-      this.client.workerRegistry.heartbeat(this.workerId).catch(() => {
-        // Transient errors: worker stays up and retries next interval.
-      });
+      // Re-register rather than plain heartbeat so activity counters +
+      // active-run list refresh on every tick. register() is idempotent
+      // at the storage level; it replaces the entry.
+      this.client.workerRegistry
+        .register({
+          workerId: this.workerId,
+          capabilities: this.config.capabilities ?? [],
+          concurrency: this.config.concurrency ?? 10,
+          metadata: this.buildMetadata(),
+        })
+        .catch(() => {
+          // Transient errors: worker stays up and retries next interval.
+        });
     }, hbMs);
 
     if (this.config.resumeSuspendedRuns !== false) {
@@ -137,6 +160,18 @@ export class ZoryaWorker {
       concurrency: cfg.concurrency ?? 10,
       startedAt: new Date().toISOString(),
       runtime: detectRuntime(),
+      // Live activity counters — refreshed on every register() call from
+      // the heartbeat tick. Gives the dashboard "what is this worker doing
+      // right now" without attributing runs to workers in storage.
+      activeRuns: [...this.activeRuns.entries()].map(([id, rec]) => ({
+        workflowId: id,
+        workflowName: rec.workflowName,
+        startedAt: new Date(rec.startedAt).toISOString(),
+      })),
+      activeCount: this.activeRuns.size,
+      completedCount: this.completedCount,
+      failedCount: this.failedCount,
+      recentRuns: [...this.recentRuns],
     };
     if (typeof process !== "undefined" && typeof process.pid === "number") {
       auto.pid = process.pid;
@@ -151,11 +186,11 @@ export class ZoryaWorker {
 
   /**
    * Run one workflow instance using this worker's runner. Storage writes
-   * go over the wire so server dashboards see progress live. Returns the
-   * terminal workflow result (or rejects on failure, same semantics as
-   * `runner.run`).
+   * go over the wire so server dashboards see progress live. Tracks the
+   * run in `activeRuns` so the dashboard's Workers page shows what each
+   * worker is doing right now.
    */
-  run(params: {
+  async run(params: {
     workflow: string | Workflow<unknown, unknown>;
     workflowId?: string;
     input?: unknown;
@@ -163,10 +198,41 @@ export class ZoryaWorker {
     const def =
       typeof params.workflow === "string" ? this.byName.get(params.workflow) : params.workflow;
     if (!def) {
-      return Promise.reject(new Error(`Unknown workflow "${String(params.workflow)}"`));
+      throw new Error(`Unknown workflow "${String(params.workflow)}"`);
     }
     const id = params.workflowId ?? `${def.name}-${Date.now().toString(36)}-${randomSuffix()}`;
-    return this.runner.run({ workflow: def, workflowId: id, input: params.input });
+    this.activeRuns.set(id, { workflowName: def.name, startedAt: Date.now() });
+    const startedAt = Date.now();
+    try {
+      const result = await this.runner.run({ workflow: def, workflowId: id, input: params.input });
+      this.completedCount += 1;
+      this.recordRecent(id, def.name, "completed", Date.now() - startedAt);
+      return result;
+    } catch (err) {
+      this.failedCount += 1;
+      this.recordRecent(id, def.name, "failed", Date.now() - startedAt);
+      throw err;
+    } finally {
+      this.activeRuns.delete(id);
+    }
+  }
+
+  private recordRecent(
+    workflowId: string,
+    workflowName: string,
+    status: "completed" | "failed",
+    durationMs: number,
+  ): void {
+    this.recentRuns.unshift({
+      workflowId,
+      workflowName,
+      status,
+      durationMs,
+      at: new Date().toISOString(),
+    });
+    if (this.recentRuns.length > this.RECENT_RUNS_CAP) {
+      this.recentRuns.length = this.RECENT_RUNS_CAP;
+    }
   }
 }
 

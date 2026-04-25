@@ -40,7 +40,7 @@ function renderRoute(route: string, navigate: (p: string) => void) {
   const [path, query] = route.split("?");
   const params = new URLSearchParams(query ?? "");
   if (path === "/workers") {
-    return <WorkerGrid />;
+    return <WorkerGrid onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)} />;
   }
   if (path === "/schedules") {
     return <ScheduleList onNavigate={navigate} />;

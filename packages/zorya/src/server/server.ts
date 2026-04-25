@@ -44,7 +44,12 @@ import {
 } from "./routes/runs.ts";
 import { streamRunEvents } from "./routes/sse.ts";
 import { getMetrics, StorageMetricsProvider, type MetricsProvider } from "./routes/metrics.ts";
-import { emptyWorkersProvider, listWorkers, type WorkersProvider } from "./routes/workers.ts";
+import {
+  RegistryBackedWorkersProvider,
+  emptyWorkersProvider,
+  listWorkers,
+  type WorkersProvider,
+} from "./routes/workers.ts";
 import {
   createSchedule,
   deleteSchedule,
@@ -147,7 +152,14 @@ export class ZoryaServer {
     this.bus = new RunEventBus();
 
     const metrics = config.metrics ?? new StorageMetricsProvider(config.storage);
-    const workers = config.workers ?? emptyWorkersProvider;
+    // Prefer an explicit workers provider; otherwise derive one from the
+    // worker protocol's registry so the dashboard auto-populates without
+    // extra config. Only falls back to empty when neither is available.
+    const workers =
+      config.workers ??
+      (config.workerProtocol?.workerRegistry
+        ? new RegistryBackedWorkersProvider(config.workerProtocol.workerRegistry)
+        : emptyWorkersProvider);
     const deps = {
       storage: config.storage,
       trigger: config.trigger,
