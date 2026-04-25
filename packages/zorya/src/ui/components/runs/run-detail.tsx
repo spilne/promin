@@ -370,17 +370,43 @@ function RunDetailSkeleton({ onBack }: { onBack: () => void }) {
 }
 
 function applyEvent(prev: RunDto | undefined, ev: RunEvent): RunDto | undefined {
-  if (ev.type === "snapshot") return ev.run;
+  if (ev.type === "snapshot") return prev ? mergeSnapshot(prev, ev.run) : ev.run;
   if (!prev) return prev;
   if (ev.type === "status") return { ...prev, status: ev.status };
   if (ev.type === "step") return { ...prev, steps: mergeStep(prev.steps, ev.stepName, ev.step) };
   return prev;
 }
 
+/**
+ * The initial fetch goes through `RunsService.get`, which runs
+ * `mergePlannedSteps` server-side and fills `dependsOn` from the workflow
+ * definition. SSE snapshots / step events come straight from
+ * `runToDto`/`stepToDto` and don't get that treatment — `dependsOn`
+ * arrives as `[]`. If we just took the event payload at face value we'd
+ * lose the DAG edges, and the StepDag layout collapses to a vertical
+ * strip with no arrows. Preserve any dependsOn we already knew about.
+ */
+function mergeSnapshot(prev: RunDto, next: RunDto): RunDto {
+  const prevByName = new Map(prev.steps.map((s) => [s.stepName, s]));
+  const steps = next.steps.map((s) => {
+    const before = prevByName.get(s.stepName);
+    if (before && s.dependsOn.length === 0 && before.dependsOn.length > 0) {
+      return { ...s, dependsOn: before.dependsOn };
+    }
+    return s;
+  });
+  return { ...next, steps };
+}
+
 function mergeStep(steps: StepDto[], name: string, next: StepDto): StepDto[] {
   const idx = steps.findIndex((s) => s.stepName === name);
   if (idx === -1) return [...steps, next];
+  const prev = steps[idx]!;
+  const merged: StepDto =
+    next.dependsOn.length === 0 && prev.dependsOn.length > 0
+      ? { ...next, dependsOn: prev.dependsOn }
+      : next;
   const copy = steps.slice();
-  copy[idx] = next;
+  copy[idx] = merged;
   return copy;
 }
