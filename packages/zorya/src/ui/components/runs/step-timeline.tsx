@@ -105,55 +105,64 @@ export function StepTimeline({ run, selectedStep, onSelectStep }: StepTimelinePr
           <Legend />
         </div>
 
-        {/* Column header + time axis. Mirror the row's `px-1` so STEP /
-            DURATION line up with the data below; without it the headers
-            sit 4px to the left of every value. The extra bottom padding
-            gives breathing room before the first row. */}
-        <div class="flex items-center gap-2 px-1 text-xs text-base-content/50 border-b border-base-content/10 pb-5">
-          <div class="w-72 shrink-0 text-center">STEP</div>
-          <div class="w-20 shrink-0 text-center">DURATION</div>
-          <div class="relative flex-1 h-5">
-            {ticks.map((t) => (
-              <div
-                class="absolute top-0 h-full"
-                style={{ left: `${(t.displayMs / axis.totalDisplay) * 100}%` }}
-              >
-                <div class="w-px h-2 bg-base-content/20" />
-                <div class="-translate-x-1/2 mt-0.5">{formatDuration(t.realMs)}</div>
-              </div>
-            ))}
-            {/* Compression band + the real elapsed duration as a label
-                above the sliver — without it, the user can't tell whether
-                the gap was 5s or 10 days. The label is allowed to overflow
-                the band's tiny visual width via whitespace-nowrap; the tick
-                filter has already cleared this region of natural ticks so
-                there's nothing to collide with. */}
-            {axis.segments
-              .filter((s) => s.compressed)
-              .map((s) => {
-                const leftPct = (s.displayStart / axis.totalDisplay) * 100;
-                const widthPct = ((s.displayEnd - s.displayStart) / axis.totalDisplay) * 100;
-                const real = formatDuration(s.realEnd - s.realStart);
-                return (
-                  <>
-                    <div
-                      class="absolute top-0 h-full bg-warning/15 border-x border-dashed border-warning/50"
-                      style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
-                      title={`Compressed range — ${real} of idle time`}
-                    />
-                    <div
-                      class="absolute top-0 text-[10px] text-warning font-mono whitespace-nowrap pointer-events-none leading-none"
-                      style={{
-                        left: `${leftPct + widthPct / 2}%`,
-                        transform: "translateX(-50%)",
-                      }}
-                      title={`${real} elapsed`}
-                    >
-                      ⇥ {real}
-                    </div>
-                  </>
-                );
-              })}
+        {/* Header. Top sub-row labels every column (STEP / DURATION /
+            TIMELINE); bottom sub-row holds the time-axis ticks + the
+            compression bands beneath the TIMELINE label only. Mirroring
+            the row's `px-1` keeps the data below vertically aligned with
+            the headers above. */}
+        <div class="px-1 text-xs text-base-content/50 border-b border-base-content/10 pb-3">
+          <div class="flex items-center gap-2">
+            <div class="w-72 shrink-0 text-center">STEP</div>
+            <div class="w-20 shrink-0 text-center">DURATION</div>
+            <div class="flex-1 text-center">TIMELINE</div>
+          </div>
+          <div class="flex items-end gap-2 pt-2">
+            <div class="w-72 shrink-0" />
+            <div class="w-20 shrink-0" />
+            <div class="relative flex-1 h-5">
+              {ticks.map((t) => (
+                <div
+                  class="absolute top-0 h-full"
+                  style={{ left: `${(t.displayMs / axis.totalDisplay) * 100}%` }}
+                >
+                  <div class="w-px h-2 bg-base-content/20" />
+                  <div class="-translate-x-1/2 mt-0.5">{formatDuration(t.realMs)}</div>
+                </div>
+              ))}
+              {/* Compression band + the real elapsed duration as a label
+                  above the sliver — without it, the user can't tell
+                  whether the gap was 5s or 10 days. The label is allowed
+                  to overflow the band's tiny visual width via
+                  whitespace-nowrap; the tick filter has already cleared
+                  this region of natural ticks so there's nothing to
+                  collide with. */}
+              {axis.segments
+                .filter((s) => s.compressed)
+                .map((s) => {
+                  const leftPct = (s.displayStart / axis.totalDisplay) * 100;
+                  const widthPct = ((s.displayEnd - s.displayStart) / axis.totalDisplay) * 100;
+                  const real = formatDuration(s.realEnd - s.realStart);
+                  return (
+                    <>
+                      <div
+                        class="absolute top-0 h-full bg-warning/15 border-x border-dashed border-warning/50"
+                        style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                        title={`Compressed range — ${real} of idle time`}
+                      />
+                      <div
+                        class="absolute top-0 text-[10px] text-warning font-mono whitespace-nowrap pointer-events-none leading-none"
+                        style={{
+                          left: `${leftPct + widthPct / 2}%`,
+                          transform: "translateX(-50%)",
+                        }}
+                        title={`${real} elapsed`}
+                      >
+                        ⇥ {real}
+                      </div>
+                    </>
+                  );
+                })}
+            </div>
           </div>
         </div>
 
