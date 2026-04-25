@@ -29,6 +29,24 @@ export const CLAUDE_BOT: RegisterAgentInput = {
       "  3. Don't save trivia, jokes, or anything that will go stale. Only save what would be useful to know on a future visit.\n\n" +
       "Call any tool whenever it would give a better answer than guessing. If asked what model you are, answer truthfully: claude-sonnet-4-6 via the Anthropic Messages API.",
     tools: ["weather", "currentTime", "calculate", "listWorkflows"],
+    // Recipe-level runtime knobs. The demo's resolver also supplies
+    // host-level defaults for mock agents; for claude-bot we lock in
+    // tighter Sonnet-appropriate numbers right on the recipe so the
+    // settings travel with the agent.
+    autoCompact: {
+      contextLimit: 200_000,
+      compressAt: 0.7,
+      keepRecent: 8,
+      mode: "background",
+    },
+    autoDistill: {
+      messageThreshold: 6,
+      mode: "blocking",
+    },
+    contextBudget: {
+      maxMessageTokens: 64_000,
+      maxEpisodeTokens: 8_000,
+    },
   },
   metadata: {
     description:

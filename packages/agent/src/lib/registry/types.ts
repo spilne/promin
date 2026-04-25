@@ -64,8 +64,53 @@ export interface LocalAgentBackend {
   readonly maxStepsPerTurn?: number;
   /** Max user turns per session before the loop terminates. */
   readonly maxTurns?: number;
+  /**
+   * Recipe-level auto-compaction config. JSON-serialisable subset of
+   * the runtime `AutoCompactConfig` (no `when` predicate — closures
+   * don't survive registry persistence). When set, OVERRIDES the host's
+   * resolver-supplied default. Set to `false` to explicitly disable
+   * for this recipe even if the host enables it globally. Leave
+   * unset to inherit the host's setting.
+   */
+  readonly autoCompact?: AutoCompactRecipe | false;
+  /** Recipe-level auto-distillation config. Same merge semantics as `autoCompact`. */
+  readonly autoDistill?: AutoDistillRecipe | false;
+  /**
+   * Recipe-level token budget for `MemoryStore.resolveContext`. When
+   * set, overrides the host default. JSON-serialisable subset (the
+   * `estimate` / `estimateEpisode` callbacks are runtime-only and stay
+   * host-supplied).
+   */
+  readonly contextBudget?: ContextBudgetRecipe;
   /** Free-form extension knobs the resolver may consume. */
   readonly extra?: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Recipe-level subset of `AutoCompactConfig`. Numeric thresholds + mode
+ * persist on the recipe; the predicate-based `when` escape hatch is
+ * runtime-only (host can layer it via `resolveLocalAgent.deps.autoCompact.when`).
+ */
+export interface AutoCompactRecipe {
+  readonly messageThreshold?: number;
+  readonly tokenThreshold?: number;
+  readonly contextLimit?: number;
+  readonly compressAt?: number;
+  readonly keepRecent?: number;
+  readonly mode?: "background" | "blocking";
+}
+
+/** Recipe-level subset of `AutoDistillConfig`. */
+export interface AutoDistillRecipe {
+  readonly messageThreshold?: number;
+  readonly force?: boolean;
+  readonly mode?: "background" | "blocking";
+}
+
+/** Recipe-level subset of `TokenBudget`. */
+export interface ContextBudgetRecipe {
+  readonly maxMessageTokens: number;
+  readonly maxEpisodeTokens?: number;
 }
 
 /**

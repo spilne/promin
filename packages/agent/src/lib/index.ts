@@ -128,6 +128,9 @@ export type {
   LocalAgentBackend,
   AgentMetadata,
   ListAgentsParams,
+  AutoCompactRecipe,
+  AutoDistillRecipe,
+  ContextBudgetRecipe,
 } from "./registry/types.ts";
 export { DEFAULT_AGENT_VERSION, DEFAULT_AGENT_METADATA } from "./registry/types.ts";
 export { InMemoryAgentRegistry } from "./registry/in-memory-agent-registry.ts";

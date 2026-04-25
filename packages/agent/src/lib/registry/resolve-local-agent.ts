@@ -22,7 +22,13 @@ import type { AgentTool } from "../tool.ts";
 import type { Consolidator } from "../memory/consolidator.ts";
 import type { AutoCompactConfig, AutoDistillConfig } from "../agent/local-agent.ts";
 import type { TokenBudget } from "../memory/types.ts";
-import type { LocalAgentBackend, RegisteredAgent } from "./types.ts";
+import type {
+  AutoCompactRecipe,
+  AutoDistillRecipe,
+  ContextBudgetRecipe,
+  LocalAgentBackend,
+  RegisteredAgent,
+} from "./types.ts";
 
 /** Caller-supplied runtime injectables. */
 export interface ResolveLocalAgentDeps {
@@ -102,6 +108,14 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
   const tools = pickTools(backend.tools, deps.tools, deps.onUnknownTool ?? "throw");
   const llm = deps.llm(backend.model.provider, backend.model.id);
 
+  // Merge runtime config: recipe wins, host's deps fall back. The recipe
+  // carries JSON-serialisable subsets; the host's deps may carry richer
+  // shapes (e.g. AutoCompactConfig.when predicate). When the recipe
+  // explicitly says `false`, that overrides the host completely.
+  const autoCompact = mergeAutoCompact(backend.autoCompact, deps.autoCompact);
+  const autoDistill = mergeAutoDistill(backend.autoDistill, deps.autoDistill);
+  const contextBudget = mergeContextBudget(backend.contextBudget, deps.contextBudget);
+
   const config: LocalAgentConfig = {
     agent: {
       name: agent.id,
@@ -117,9 +131,9 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
     resourceId: deps.resourceId,
     consolidator: deps.consolidator,
     consolidatorLlm: deps.consolidatorLlm,
-    autoCompact: deps.autoCompact,
-    autoDistill: deps.autoDistill,
-    contextBudget: deps.contextBudget,
+    autoCompact,
+    autoDistill,
+    contextBudget,
   };
 
   return new LocalAgent(config);
@@ -146,4 +160,47 @@ function pickTools(
     out[name] = tool;
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Merge helpers — recipe wins, host's deps are fallback.
+//
+// Convention: recipe `false` is "explicitly off, override host"; recipe
+// `undefined` means "inherit host"; recipe object means "use these
+// numeric fields, but the host's `when` predicate (if any) carries
+// through so power users can compose recipe knobs with custom logic".
+// ---------------------------------------------------------------------------
+
+function mergeAutoCompact(
+  recipe: AutoCompactRecipe | false | undefined,
+  host: AutoCompactConfig | false | undefined,
+): AutoCompactConfig | false | undefined {
+  if (recipe === false) return false;
+  if (recipe === undefined) return host;
+  if (host === false || host === undefined) return recipe;
+  // Both present — recipe wins on numeric fields, host's `when`
+  // predicate carries through for callers that want a numeric gate
+  // PLUS a closure (predicate ORs against the threshold check).
+  return { ...host, ...recipe };
+}
+
+function mergeAutoDistill(
+  recipe: AutoDistillRecipe | false | undefined,
+  host: AutoDistillConfig | false | undefined,
+): AutoDistillConfig | false | undefined {
+  if (recipe === false) return false;
+  if (recipe === undefined) return host;
+  if (host === false || host === undefined) return recipe;
+  return { ...host, ...recipe };
+}
+
+function mergeContextBudget(
+  recipe: ContextBudgetRecipe | undefined,
+  host: TokenBudget | undefined,
+): TokenBudget | undefined {
+  if (recipe === undefined) return host;
+  if (host === undefined) return recipe;
+  // Recipe wins on the numeric fields; host's `estimate` callbacks
+  // (closures) carry through.
+  return { ...host, ...recipe };
 }

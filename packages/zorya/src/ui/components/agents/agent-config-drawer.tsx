@@ -186,19 +186,51 @@ function RecipeBody({ agent }: { agent: RegisteredAgent }) {
         )}
       </Section>
 
+      {local &&
+        (local.autoCompact !== undefined ||
+          local.autoDistill !== undefined ||
+          local.contextBudget !== undefined) && (
+          <Section label="Runtime knobs (recipe overrides)">
+            {local.autoCompact !== undefined && (
+              <KV
+                k="autoCompact"
+                v={
+                  local.autoCompact === false ? (
+                    <span class="text-base-content/50 italic">false (explicitly off)</span>
+                  ) : (
+                    <JsonBlock value={local.autoCompact} maxH="max-h-32" />
+                  )
+                }
+              />
+            )}
+            {local.autoDistill !== undefined && (
+              <KV
+                k="autoDistill"
+                v={
+                  local.autoDistill === false ? (
+                    <span class="text-base-content/50 italic">false (explicitly off)</span>
+                  ) : (
+                    <JsonBlock value={local.autoDistill} maxH="max-h-32" />
+                  )
+                }
+              />
+            )}
+            {local.contextBudget !== undefined && (
+              <KV k="contextBudget" v={<JsonBlock value={local.contextBudget} maxH="max-h-32" />} />
+            )}
+            <div class="text-[10px] text-base-content/40 mt-2">
+              Recipe values override the host's defaults. Fields the recipe doesn't set inherit from
+              the host's resolver. The <code class="bg-base-300 px-1 rounded">when</code> predicate
+              (closure-based) is host-only and not editable from a recipe.
+            </div>
+          </Section>
+        )}
+
       {local && local.extra && Object.keys(local.extra).length > 0 && (
         <Section label="Extra (backend.extra)">
           <JsonBlock value={local.extra} maxH="max-h-60" />
         </Section>
       )}
-
-      <div class="alert alert-info text-xs">
-        <span>
-          Editing lands with the Agent Designer (promin-gsze). For now, change the recipe via{" "}
-          <code class="bg-base-300 px-1 rounded">examples/agents/*.ts</code> or{" "}
-          <code class="bg-base-300 px-1 rounded">agentRegistry.register(...)</code>.
-        </span>
-      </div>
     </>
   );
 }

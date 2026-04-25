@@ -128,6 +128,90 @@ describe("resolveLocalAgent", () => {
     expect(observedTools).toEqual([]); // silently dropped
   });
 
+  it("recipe-level autoCompact / autoDistill / contextBudget override host defaults", async () => {
+    const row: RegisteredAgent = {
+      ...baseRow(),
+      backend: {
+        ...baseRow().backend,
+        autoCompact: { messageThreshold: 99, mode: "blocking" },
+        autoDistill: { messageThreshold: 7 },
+        contextBudget: { maxMessageTokens: 4_000, maxEpisodeTokens: 1_000 },
+      } as RegisteredAgent["backend"],
+    };
+    const agent = resolveLocalAgent(row, {
+      runner: makeRunner(),
+      llm: () => mockLLM([]),
+      tools: { search: searchTool },
+      namespaceId: "acme",
+      // Host defaults — should be OVERRIDDEN by the recipe's values.
+      autoCompact: { messageThreshold: 1, mode: "background" },
+      autoDistill: { messageThreshold: 1 },
+      contextBudget: { maxMessageTokens: 100 },
+    });
+    // Inspect the underlying config the agent was built with.
+    const cfg = (agent as unknown as { config: Record<string, unknown> }).config;
+    expect((cfg.autoCompact as Record<string, unknown>).messageThreshold).toBe(99);
+    expect((cfg.autoCompact as Record<string, unknown>).mode).toBe("blocking");
+    expect((cfg.autoDistill as Record<string, unknown>).messageThreshold).toBe(7);
+    expect((cfg.contextBudget as Record<string, unknown>).maxMessageTokens).toBe(4_000);
+    expect((cfg.contextBudget as Record<string, unknown>).maxEpisodeTokens).toBe(1_000);
+  });
+
+  it("recipe-level autoCompact: false explicitly disables even when host enables", async () => {
+    const row: RegisteredAgent = {
+      ...baseRow(),
+      backend: {
+        ...baseRow().backend,
+        autoCompact: false,
+      } as RegisteredAgent["backend"],
+    };
+    const agent = resolveLocalAgent(row, {
+      runner: makeRunner(),
+      llm: () => mockLLM([]),
+      tools: { search: searchTool },
+      namespaceId: "acme",
+      autoCompact: { messageThreshold: 4, mode: "background" }, // host enables
+    });
+    const cfg = (agent as unknown as { config: Record<string, unknown> }).config;
+    expect(cfg.autoCompact).toBe(false);
+  });
+
+  it("recipe inherits host's autoCompact when recipe leaves it unset", async () => {
+    const row = baseRow(); // no autoCompact on the recipe
+    const agent = resolveLocalAgent(row, {
+      runner: makeRunner(),
+      llm: () => mockLLM([]),
+      tools: { search: searchTool },
+      namespaceId: "acme",
+      autoCompact: { messageThreshold: 12 },
+    });
+    const cfg = (agent as unknown as { config: Record<string, unknown> }).config;
+    expect((cfg.autoCompact as Record<string, unknown>).messageThreshold).toBe(12);
+  });
+
+  it("host's `when` predicate carries through when recipe sets numeric thresholds", async () => {
+    const row: RegisteredAgent = {
+      ...baseRow(),
+      backend: {
+        ...baseRow().backend,
+        autoCompact: { messageThreshold: 50 }, // recipe numeric only
+      } as RegisteredAgent["backend"],
+    };
+    const hostWhen = () => false;
+    const agent = resolveLocalAgent(row, {
+      runner: makeRunner(),
+      llm: () => mockLLM([]),
+      tools: { search: searchTool },
+      namespaceId: "acme",
+      autoCompact: { when: hostWhen, messageThreshold: 1 }, // host: closure + low threshold
+    });
+    const cfg = (agent as unknown as { config: Record<string, unknown> }).config;
+    const ac = cfg.autoCompact as { messageThreshold?: number; when?: unknown };
+    // Recipe wins on the numeric field; host's `when` carries through.
+    expect(ac.messageThreshold).toBe(50);
+    expect(ac.when).toBe(hostWhen);
+  });
+
   it("rejects non-local backends", () => {
     const row = baseRow();
     // biome-ignore lint/suspicious/noExplicitAny: forging a future backend type
