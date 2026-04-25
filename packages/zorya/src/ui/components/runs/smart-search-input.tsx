@@ -109,10 +109,10 @@ export function SmartSearchInput({
   }
 
   function handleKeyDown(e: JSX.TargetedKeyboardEvent<HTMLInputElement>) {
-    // Tab always autocompletes to the highlighted suggestion. Enter submits
-    // the current text — never auto-applies a suggestion the user didn't
-    // ask for, since pressing Enter to commit an explicit value (e.g. "web"
-    // when the suggestion list contains "webhook") is a common case.
+    // Standard search-bar pattern: Enter and Tab both apply the highlighted
+    // suggestion while the dropdown is open. To submit raw text instead
+    // (e.g. `type:web` literally when "webhook" is in the list), press Esc
+    // first to dismiss the dropdown, then Enter.
     if (dropdownVisible) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -124,7 +124,7 @@ export function SmartSearchInput({
         setHighlight((h) => Math.max(h - 1, 0));
         return;
       }
-      if (e.key === "Tab") {
+      if (e.key === "Enter" || e.key === "Tab") {
         e.preventDefault();
         applySuggestion(suggestions[highlight]!);
         return;
