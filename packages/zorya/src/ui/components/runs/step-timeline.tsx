@@ -514,7 +514,13 @@ function buildTimeAxis(steps: StepDto[], origin: number, endMs: number): TimeAxi
   let workActive = 0;
   let waitActive = 0;
   let cursor = origin;
-  const isIdle = () => workActive === 0 && waitActive > 0;
+  // Idle = no work step actively running. Includes both "wait step is
+  // burning the clock" AND "completely empty stretch" — the latter shows
+  // up when a journaled step's startedAt got rewritten by a signal-arrival
+  // replay, leaving the original wait period unrepresented in the data.
+  // Either way the gap should collapse so a 10-day approval pause doesn't
+  // dominate the timeline.
+  const isIdle = () => workActive === 0;
 
   for (const e of events) {
     if (e.t > cursor) {
@@ -535,6 +541,11 @@ function buildTimeAxis(steps: StepDto[], origin: number, endMs: number): TimeAxi
       compressed: isIdle() && endMs - cursor >= COMPRESS_MIN_REAL_MS,
     });
   }
+  // `waitActive` is no longer load-bearing for the compression decision
+  // (we widened to "no work" above), but we keep it computed because the
+  // delta records also drive the per-step `isWaitLike` hatching. Reference
+  // it once so the linter doesn't flag the unused tracker.
+  void waitActive;
 
   // Fallback for empty / single-segment cases — keep linear mapping.
   if (raw.length === 0) {
