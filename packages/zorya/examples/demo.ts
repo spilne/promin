@@ -15,7 +15,6 @@
 // ---------------------------------------------------------------------------
 
 import {
-  InMemorySchedulerStorage,
   InMemoryStepQueue,
   InMemoryWorkerRegistry,
   createWorkflowRunner,
@@ -24,7 +23,14 @@ import {
   isJournaledSuspendStorage,
   type Workflow,
 } from "@promin/workflow";
-import { SqliteWorkflowStorage } from "@promin/sqlite";
+import {
+  SqliteWorkflowStorage,
+  SqliteSchedulerStorage,
+  SqliteAgentRegistry,
+  SqliteMemoryStore,
+} from "@promin/sqlite";
+import { resolveLocalAgent, type LLMProvider, type RegisterAgentInput } from "@promin/agent";
+import { echoLLM } from "@promin/agent/testing";
 import { Database } from "bun:sqlite";
 import { ZoryaServer, scanWorkflowsFolder } from "../src/index.ts";
 import path from "node:path";
@@ -50,8 +56,118 @@ db.exec("PRAGMA journal_mode = WAL");
 db.exec("PRAGMA foreign_keys = ON");
 
 const storage = SqliteWorkflowStorage.make({ db });
-const schedulerStorage = new InMemorySchedulerStorage();
+// Persistent scheduler state — `lastFiredAt`, `tickCount`, `nextRun`, and
+// leader locks all live on disk in the same db as workflow runs, so a
+// server restart resumes schedules from where they left off instead of
+// starting fresh on every boot.
+const schedulerStorage = SqliteSchedulerStorage.make({ db });
 const runner = createWorkflowRunner({ storage });
+
+// Agent registry + memory store share the same db. Persists registered
+// recipes, threads, messages, and per-scope memory across restarts so
+// chats in the dashboard's Agents tab survive hot-reloads of the demo.
+const agentRegistry = SqliteAgentRegistry.make({ db });
+const memoryStore = SqliteMemoryStore.make({ db });
+
+// ---------------------------------------------------------------------------
+// Agents — register three sample chat agents (echo, support, research) so
+// the dashboard's Agents tab has something to invoke. All run against
+// deterministic in-process LLM stand-ins (no API keys), so the demo works
+// offline. Agents are tenant-agnostic templates; tenant binding happens
+// per-request via `agent.bind()` inside the gateway.
+
+const SAMPLE_AGENTS: RegisterAgentInput[] = [
+  {
+    id: "echo-bot",
+    backend: {
+      type: "local",
+      model: { provider: "mock", id: "echo-v1" },
+      systemPrompt:
+        "You are a friendly echo bot for Acme support. Repeat what the user said with a short acknowledgement.",
+      tools: [],
+    },
+    metadata: {
+      description: "Echoes user messages with a friendly tone.",
+      capabilities: ["chat"],
+      tags: ["demo", "stable"],
+    },
+  },
+  {
+    id: "support-bot",
+    backend: {
+      type: "local",
+      model: { provider: "mock", id: "support-v1" },
+      systemPrompt:
+        "You are Acme's customer support assistant. Triage issues, gather details, and resolve common problems.",
+      tools: [],
+    },
+    metadata: {
+      description: "Customer support triage agent.",
+      capabilities: ["chat", "triage"],
+      tags: ["demo", "beta"],
+    },
+  },
+  {
+    id: "research-bot",
+    backend: {
+      type: "local",
+      model: { provider: "mock", id: "research-v1" },
+      systemPrompt:
+        "You are a research assistant. Synthesize information from past conversations and surface relevant context.",
+      tools: [],
+    },
+    metadata: {
+      description: "Cross-thread research agent with semantic recall.",
+      capabilities: ["chat", "research"],
+      tags: ["demo", "experimental"],
+    },
+  },
+];
+
+// `support-bot` rotates through canned replies so multiple turns in a
+// thread don't all return the same line. Other bots use templated echo.
+function roundRobinLLM(replies: ReadonlyArray<string>): LLMProvider {
+  let i = 0;
+  return {
+    chat: async () => {
+      const content = replies[i % replies.length]!;
+      i += 1;
+      return {
+        content,
+        finishReason: "stop" as const,
+        usage: { inputTokens: 24, outputTokens: 18 },
+      };
+    },
+  };
+}
+
+// Stable per-agent provider — built once, shared across requests so
+// per-LLM cycle state (round-robin index, echo turn counter) survives.
+const agentLlms: Record<string, LLMProvider> = {
+  "echo-bot": echoLLM({ template: "echo-bot says: I heard '{task}' (turn #{n})" }),
+  "support-bot": roundRobinLLM([
+    "Thanks for reaching out. Could you tell me what error message you're seeing?",
+    "Got it. Can you confirm whether this happens on every request or just some?",
+    "Looks like a known caching issue. Try clearing your cookies for our domain — that resolves it for ~80% of cases.",
+  ]),
+  "research-bot": echoLLM({
+    template:
+      "Researching '{task}'... summary (turn #{n}): I found 3 relevant past discussions on this topic.",
+  }),
+};
+
+async function seedAgents() {
+  // Skip when the persistent registry already has rows — keep operator-
+  // edited recipes from the previous boot. Mirrors the workflow seed
+  // policy ("storage already has runs — skipping initial seed").
+  const existing = await agentRegistry.list({ limit: 1 });
+  if (existing.length > 0) {
+    console.log("[zorya] agent registry already seeded — skipping");
+    return;
+  }
+  for (const recipe of SAMPLE_AGENTS) await agentRegistry.register(recipe);
+  console.log(`[zorya] registered ${SAMPLE_AGENTS.length} sample agents`);
+}
 
 // ---------------------------------------------------------------------------
 // Workers — register two mock workers so the dashboard's Workers page has
@@ -174,24 +290,47 @@ function nextId(name: string): string {
 async function triggerRun(
   name: string,
   input: unknown,
-  opts: { workflowId?: string; namespace?: string } = {},
+  opts: {
+    workflowId?: string;
+    namespace?: string;
+    metadata?: Record<string, unknown>;
+    runSource?: import("@promin/workflow").RunSource;
+    runSourceId?: string;
+  } = {},
 ): Promise<{ workflowId: string }> {
   const wf = workflowsByName[name];
   if (!wf) throw new Error(`Unknown workflow: ${name}`);
   const workflowId = opts.workflowId ?? nextId(name);
-  // Pre-create the row with the requested namespace so it sticks. The
-  // runner's own internal createWorkflow inside run() is idempotent — it
-  // sees the existing row and resumes against it instead of overwriting.
-  // Without this hop the namespace would always be null because runner.run
-  // doesn't take a namespace param.
-  if (opts.namespace) {
-    await storage.createWorkflow({
+  // Pre-create the row whenever the caller wants namespace, metadata, OR
+  // runSource to stick. `runner.run`'s internal createWorkflow is
+  // idempotent — it sees the existing row and resumes instead of
+  // overwriting — so pre-creation is the seam where these typed fields
+  // land. Without this, scheduler-fired runs would lose their runSource
+  // link and the dashboard's "filter by source" would return nothing.
+  if (opts.namespace || opts.metadata || opts.runSource) {
+    const result = await storage.createWorkflow({
       workflowId,
       workflowName: name,
       input,
       namespace: opts.namespace,
+      metadata: opts.metadata,
+      runSource: opts.runSource,
+      runSourceId: opts.runSourceId,
       version: wf.version,
     });
+    // Existing row hit. Two cases:
+    //  - Same boot, idempotent retry of the same fire — leave it; runner
+    //    will resume against the existing state.
+    //  - Cross-boot collision: the deterministic workflowId (e.g.
+    //    `${scheduleId}.${tickNumber}`) repeats after the scheduler's
+    //    tickCount resets. The previous run's terminal `startedAt` /
+    //    `completedAt` would otherwise pollute lag/duration math for THIS
+    //    fire. Reset via `startFreshRun` — bumps the run counter, archives
+    //    prior steps, clears the timestamps so the fresh run reports its
+    //    own latency.
+    if (!result.created && isTerminal(result.existing.status)) {
+      await storage.startFreshRun(workflowId);
+    }
   }
   // Fire-and-forget: we don't await run() so the server responds immediately.
   runner.run({ workflow: wf, workflowId, input }).catch(() => {
@@ -199,6 +338,10 @@ async function triggerRun(
     // background loop keeps running.
   });
   return { workflowId };
+}
+
+function isTerminal(status: string): boolean {
+  return status === "completed" || status === "failed" || status === "tripwire";
 }
 
 // ---------------------------------------------------------------------------
@@ -322,14 +465,22 @@ async function seedSchedules() {
     metadata: { workflowName: "payment", input: { mode: "audit" } },
   });
 
-  // Seed nextRun for every enabled schedule so the embedded SchedulerLoop
-  // picks them up on its first poll. `upsertSchedule` alone doesn't write
-  // nextRun — DurableScheduler.registerAsync would, but the demo manages
-  // schedules through the storage directly.
+  // Kickstart schedules that have never fired so the embedded
+  // SchedulerLoop picks them up on its first poll. `upsertSchedule` alone
+  // doesn't write `nextRun` — DurableScheduler.registerAsync would, but
+  // the demo manages schedules through the storage directly.
+  //
+  // Only kickstart when `lastFired` is null. With persistent storage that
+  // means "schedule has never run" — i.e. first boot or a brand-new
+  // schedule was added. On subsequent restarts the existing nextRun
+  // (committed by the previous boot's last poll) is honored, so schedules
+  // resume from where they left off instead of re-firing immediately.
   const all = await schedulerStorage.listSchedules({ limit: 500 });
   const now = new Date();
   for (const s of all) {
     if (s.enabled === false) continue;
+    const state = await schedulerStorage.loadScheduleState(s.id);
+    if (state?.lastFired) continue;
     await schedulerStorage.setNextRun(s.id, now);
   }
 }
@@ -418,6 +569,7 @@ async function resumeOrphanedRuns() {
 // Boot
 
 await seedSchedules();
+await seedAgents();
 void startApprovalAutoSignaler();
 void resumeOrphanedRuns();
 
@@ -440,6 +592,20 @@ const server = new ZoryaServer({
   storage,
   scheduler: schedulerStorage,
   workflows: workflowsByName,
+  // Agent gateway — exposes /api/agents/* and powers the Agents tab. The
+  // resolver materialises a `LocalAgent` per request from the recipe in
+  // the registry, sharing the per-agent LLM map so cycle state persists
+  // across calls. Tools default to {} for now — no tool catalogue.
+  agents: {
+    registry: agentRegistry,
+    resolve: (recipe) =>
+      resolveLocalAgent(recipe, {
+        runner,
+        memory: memoryStore,
+        llm: () => agentLlms[recipe.id] ?? echoLLM(),
+        tools: {},
+      }),
+  },
   // Feeds the "Trigger workflow" form on the Workflows page with plausible
   // defaults so users can tweak fields instead of writing raw JSON.
   sampleInput: (name) => inputFor(name),
@@ -462,9 +628,22 @@ const server = new ZoryaServer({
   },
   // Forward workflowId so the embedded SchedulerLoop's deterministic
   // `${scheduleId}.${tickNumber}` lands on storage — keeps repeat ticks
-  // idempotent (createWorkflow is no-op on a known id).
+  // idempotent (createWorkflow is no-op on a known id). Schedules without
+  // a `metadata.input` arrive here with `input === undefined`; synthesise
+  // one from `inputFor(name)` so SQLite's NOT NULL constraint on the
+  // `input` column doesn't reject the row (silent dispatch failure that
+  // looks like "the scheduler ticked but no run appeared").
   trigger: (name, input, opts) =>
-    triggerRun(name, input, { namespace: opts?.namespace, workflowId: opts?.workflowId }),
+    triggerRun(name, input === undefined ? inputFor(name) : input, {
+      namespace: opts?.namespace,
+      workflowId: opts?.workflowId,
+      metadata: opts?.metadata,
+      // Forward the typed source link (`schedule` + scheduleId, `manual`,
+      // …) so the dashboard's "filter by source" works without parsing
+      // workflow ids or chasing metadata keys.
+      runSource: opts?.runSource,
+      runSourceId: opts?.runSourceId,
+    }),
   rerun: async (workflowId) => {
     // After startFreshRun the row is reset; we still need to drive the
     // workflow again. Look up the name from storage, find its definition,
@@ -484,5 +663,26 @@ const port = Number(process.env.PORT ?? 4100);
 const { port: actualPort, hostname } = server.listen({ port });
 const host = hostname === "0.0.0.0" ? "localhost" : hostname;
 console.log(`Zorya demo server on http://${host}:${actualPort}`);
-console.log(`  - Storage: sqlite (${dbPath})`);
-console.log(`  - Traffic comes only from schedules — pause one to stop its runs`);
+console.log(`  - Storage:      sqlite (${dbPath})`);
+console.log(`  - Workflows:    ${Object.keys(workflowsByName).length} discovered`);
+console.log(`  - Agents:       ${SAMPLE_AGENTS.map((a) => a.id).join(", ")}`);
+console.log(`  - Dashboard:    http://${host}:${actualPort}/`);
+console.log(`  - Agents tab:   http://${host}:${actualPort}/#/agents`);
+console.log(`  - Traffic comes from schedules — pause one to stop its runs`);
+
+// Graceful shutdown. Registering ANY `process.on("SIGINT")` handler in Bun
+// overrides the default exit-on-Ctrl+C — the heartbeat-cleanup handlers
+// above kept the process alive, so the listening socket stayed bound and
+// the next boot hit EADDRINUSE. We now stop the server (releases the port
+// and tears down the coordinator + scheduler loops) and exit explicitly.
+const shutdown = (signal: string) => {
+  console.log(`\n[zorya] ${signal} received — shutting down`);
+  try {
+    server.stop();
+  } catch (e) {
+    console.error("[zorya] server.stop failed:", e);
+  }
+  process.exit(0);
+};
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
