@@ -17,7 +17,7 @@ export function WorkerGrid({ onOpenRun }: WorkerGridProps = {}) {
         <h2 class="text-xl font-semibold">Workers</h2>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           {Array.from({ length: 2 }).map(() => (
-            <div class="card bg-base-200 border border-base-content/10 shadow-sm">
+            <div class="card bg-base-300 border border-base-content/15 shadow-sm">
               <div class="card-body p-4 space-y-2">
                 <Skeleton w="w-32" h="h-4" />
                 <Skeleton w="w-24" h="h-3" />
@@ -51,7 +51,7 @@ export function WorkerGrid({ onOpenRun }: WorkerGridProps = {}) {
       </div>
 
       {workers.length === 0 && (
-        <div class="card bg-base-200 border border-base-content/10 shadow-sm">
+        <div class="card bg-base-300 border border-base-content/15 shadow-sm">
           <div class="card-body py-8 text-center text-base-content/50">No workers registered</div>
         </div>
       )}
@@ -77,23 +77,44 @@ function WorkerCard({
   const labelEntries = Object.entries(labels);
 
   return (
-    <div class="card bg-base-200 border border-base-content/10 shadow-sm hover:shadow-md hover:border-base-content/20 transition-shadow">
+    <div class="card bg-base-300 border border-base-content/15 shadow-sm hover:shadow-md hover:border-base-content/20 transition-shadow">
       <div class="card-body p-4 space-y-3">
-        {/* Header */}
+        {/* Header — identity row.
+            Worker ID is the primary identifier (larger, semibold). Runtime
+            + version pair into a small accented badge cluster on the right,
+            visually distinct from the ID. Hostname moves to a sub-line so
+            it stops competing with the ID for attention. */}
         <div class="flex items-center gap-2 flex-wrap">
-          <span class={`w-2.5 h-2.5 rounded-full ${online ? "bg-success" : "bg-error"}`} />
-          <span class="font-mono text-sm truncate" title={worker.workerId}>
+          <span class={`w-2.5 h-2.5 rounded-full shrink-0 ${online ? "bg-success" : "bg-error"}`} />
+          <span class="font-mono text-base font-semibold truncate" title={worker.workerId}>
             {worker.workerId}
           </span>
-          {worker.version && (
-            <span class="badge badge-sm badge-ghost font-mono">v{worker.version}</span>
-          )}
-          {worker.runtime && <span class="badge badge-sm badge-ghost">{worker.runtime}</span>}
           <div class="flex-1" />
-          {worker.hostname && (
-            <span class="text-xs text-base-content/60 font-mono">{worker.hostname}</span>
+          {worker.runtime && (
+            <span
+              class="badge badge-sm badge-info badge-outline font-mono"
+              title={`Runtime: ${worker.runtime}`}
+            >
+              {worker.runtime}
+            </span>
+          )}
+          {worker.version && (
+            <span
+              class="badge badge-sm badge-ghost font-mono"
+              title={`Worker version: ${worker.version}`}
+            >
+              v{worker.version}
+            </span>
           )}
         </div>
+        {worker.hostname && (
+          <div class="-mt-1 flex items-center gap-1.5 text-xs text-base-content/60 font-mono">
+            <span class="opacity-60">🖥</span>
+            <span class="truncate" title={worker.hostname}>
+              {worker.hostname}
+            </span>
+          </div>
+        )}
 
         {/* Stats row */}
         <div class="grid grid-cols-4 gap-1 text-center">
@@ -107,23 +128,26 @@ function WorkerCard({
           <Stat label="Concurrency" value={worker.concurrency ?? "—"} />
         </div>
 
-        {/* Capabilities + workflows + labels */}
+        {/* Categories. Each row's badges share a color so users can scan
+            "what does this worker offer?" at a glance instead of decoding
+            uniform-grey pills. Outline variant keeps the surface dark
+            (badge-soft would compete with the card body color). */}
         <div class="space-y-1 text-xs">
           {worker.capabilities && worker.capabilities.length > 0 && (
-            <TagRow label="Capabilities" tags={worker.capabilities} />
+            <TagRow label="Capabilities" tags={worker.capabilities} variant="primary" />
           )}
           {worker.workflowNames && worker.workflowNames.length > 0 && (
-            <TagRow label="Workflows" tags={worker.workflowNames} />
+            <TagRow label="Workflows" tags={worker.workflowNames} variant="success" />
           )}
           {worker.namespaces && worker.namespaces.length > 0 && (
-            <TagRow label="Namespaces" tags={worker.namespaces} />
+            <TagRow label="Namespaces" tags={worker.namespaces} variant="warning" />
           )}
           {labelEntries.length > 0 && (
             <div class="flex items-start gap-2">
               <span class="text-base-content/50 w-24 shrink-0">Labels</span>
               <div class="flex flex-wrap gap-1">
                 {labelEntries.map(([k, v]) => (
-                  <span class="badge badge-sm badge-ghost font-mono">
+                  <span class="badge badge-sm badge-accent badge-outline font-mono">
                     {k}={v}
                   </span>
                 ))}
@@ -149,7 +173,7 @@ function WorkerCard({
             <div class="space-y-0.5">
               {worker.activeRuns.map((r) => (
                 <button
-                  class="w-full flex items-center gap-2 p-1 hover:bg-base-300 rounded text-left text-xs"
+                  class="w-full flex items-center gap-2 p-1 hover:bg-base-100 rounded text-left text-xs"
                   onClick={() => onOpenRun?.(r.workflowId)}
                   disabled={!onOpenRun}
                 >
@@ -174,7 +198,7 @@ function WorkerCard({
             <div class="space-y-0.5 max-h-32 overflow-y-auto">
               {worker.recentRuns.slice(0, 10).map((r) => (
                 <button
-                  class="w-full flex items-center gap-2 p-1 hover:bg-base-300 rounded text-left text-xs"
+                  class="w-full flex items-center gap-2 p-1 hover:bg-base-100 rounded text-left text-xs"
                   onClick={() => onOpenRun?.(r.workflowId)}
                   disabled={!onOpenRun}
                 >
@@ -207,20 +231,32 @@ function Stat({
   valueClass?: string;
 }) {
   return (
-    <div class="bg-base-300 rounded p-1.5">
+    <div class="bg-base-100 border border-base-content/10 rounded p-1.5">
       <div class="text-[10px] uppercase tracking-wider text-base-content/50">{label}</div>
       <div class={`text-lg font-mono ${valueClass ?? ""}`}>{value}</div>
     </div>
   );
 }
 
-function TagRow({ label, tags }: { label: string; tags: readonly string[] }) {
+function TagRow({
+  label,
+  tags,
+  variant = "ghost",
+}: {
+  label: string;
+  tags: readonly string[];
+  /** DaisyUI badge color variant (without the `badge-` prefix). Default ghost. */
+  variant?: "ghost" | "primary" | "success" | "warning" | "info" | "accent";
+}) {
+  // Outline ensures legibility against the bg-base-200 card surface; solid
+  // badges look mushy at this size on dark backgrounds.
+  const badgeClass = variant === "ghost" ? "badge-ghost" : `badge-${variant} badge-outline`;
   return (
     <div class="flex items-start gap-2">
       <span class="text-base-content/50 w-24 shrink-0">{label}</span>
       <div class="flex flex-wrap gap-1">
         {tags.map((t) => (
-          <span class="badge badge-sm badge-ghost font-mono">{t}</span>
+          <span class={`badge badge-sm font-mono ${badgeClass}`}>{t}</span>
         ))}
       </div>
     </div>

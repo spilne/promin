@@ -73,7 +73,10 @@ const MOCK_WORKERS = [
     metadata: {
       hostname: "eu-1.demo.local",
       runtime: "bun",
-      region: "eu-west",
+      version: "0.4.2",
+      // Custom tags go under `labels` so the dashboard can render them
+      // as a distinct category (versus capabilities / workflows / namespaces).
+      labels: { region: "eu-west", env: "demo" },
     },
   },
   {
@@ -83,7 +86,8 @@ const MOCK_WORKERS = [
     metadata: {
       hostname: "us-2.demo.local",
       runtime: "bun",
-      region: "us-east",
+      version: "0.4.2",
+      labels: { region: "us-east", env: "demo" },
     },
   },
 ] as const;
