@@ -29,15 +29,22 @@ import { SqliteWorkflowStorage } from "@promin/sqlite";
 import { Database } from "bun:sqlite";
 import { ZoryaServer, scanWorkflowsFolder } from "../src/index.ts";
 import path from "node:path";
+import { mkdirSync } from "node:fs";
 
 // ---------------------------------------------------------------------------
 // Storage + runner
 //
-// `ZORYA_DB` overrides the sqlite path. Default: `:memory:` so repeated runs
-// start clean. Set to a file path to persist across restarts:
-//   ZORYA_DB=./zorya.db bun run zorya
+// Defaults to a persistent file under ./target so runs, schedules, and
+// advertised workflows survive server restarts (and the dev hot-reload
+// loop, which restarts the subprocess on .ts changes). Override with:
+//   ZORYA_DB=:memory:        bun run zorya     # fresh on every boot
+//   ZORYA_DB=./somewhere.db  bun run zorya     # custom path
 
-const dbPath = process.env.ZORYA_DB ?? ":memory:";
+const dbPath = process.env.ZORYA_DB ?? "./target/zorya.db";
+if (dbPath !== ":memory:") {
+  // mkdir -p the parent so first-time runs don't crash on a missing dir.
+  mkdirSync(path.dirname(dbPath), { recursive: true });
+}
 const db = new Database(dbPath);
 // Turn on WAL + foreign keys for file-backed DBs. No-op for :memory:.
 db.exec("PRAGMA journal_mode = WAL");
@@ -125,6 +132,14 @@ async function triggerRun(
 // its runs (no hidden random loop).
 
 async function seedInitialRuns() {
+  // Skip when the persistent DB already has runs — keep accumulated
+  // history intact across restarts. Schedules still fire on their own
+  // cadence so the dashboard stays animated.
+  const existing = await storage.listWorkflows({ limit: 1 });
+  if (existing.length > 0) {
+    console.log("[zorya] storage already has runs — skipping initial seed");
+    return;
+  }
   for (const name of Object.keys(workflowsByName)) {
     await triggerRun(name, inputFor(name));
   }
