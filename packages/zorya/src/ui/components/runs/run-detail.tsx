@@ -295,7 +295,7 @@ export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }:
           />
         )}
 
-        <div class="card bg-base-100 shadow">
+        <div class="card bg-base-100 shadow border border-base-content/15">
           <div class="card-body p-0">
             <Tabs tabs={tabs} active={tab} onChange={setTab} class="px-2 pt-2" />
             <div class="p-4">
