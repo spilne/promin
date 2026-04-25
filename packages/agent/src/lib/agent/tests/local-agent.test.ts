@@ -503,6 +503,43 @@ describe("LocalAgent — autoCompact", () => {
     expect(compacts.length).toBe(1);
   });
 
+  it("`contextLimit` + `compressAt` compute the effective token gate (mirrors agentLoop convention)", async () => {
+    const { runner } = makeRunner();
+    const memory = new InMemoryMemoryStore();
+    // Big assistant message — ~500 estimated tokens per turn.
+    const heavyLLM: LLMProvider = {
+      chat: async () => ({
+        content: "x".repeat(2000),
+        finishReason: "stop",
+      }),
+    };
+    const agent = new LocalAgent({
+      agent: { name: "verbose", llm: heavyLLM },
+      runner,
+      memory,
+      namespaceId: "acme",
+      consolidatorLlm: envelopeLLM(),
+      // contextLimit 200 * compressAt 0.5 = effective 100 token gate.
+      // One turn (~500 tokens) clearly crosses it.
+      autoCompact: {
+        contextLimit: 200,
+        compressAt: 0.5,
+        keepRecent: 1,
+        mode: "blocking",
+      },
+    });
+    const t = await agent.thread("auto-ctx");
+    await driveTurns(t, 1);
+
+    const episodes = await memory.listThreadEpisodes({
+      namespaceId: "acme",
+      resourceId: undefined,
+      threadId: "auto-ctx",
+    });
+    const compacts = episodes.filter((e) => (e.metadata as { kind?: unknown }).kind === "compact");
+    expect(compacts.length).toBe(1);
+  });
+
   it("`when` predicate replaces the threshold check", async () => {
     const { runner } = makeRunner();
     const memory = new InMemoryMemoryStore();

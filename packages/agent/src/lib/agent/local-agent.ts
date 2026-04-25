@@ -146,8 +146,29 @@ export interface AutoCompactConfig {
    * matching the `resolveContext` default estimator. More accurate
    * than `messageThreshold` when message lengths vary widely (one
    * giant tool result can blow context even at low message counts).
+   *
+   * Often more ergonomic to express via `contextLimit` + `compressAt`
+   * below — that way you don't have to recompute the threshold when
+   * you swap chat models.
    */
   readonly tokenThreshold?: number;
+  /**
+   * Model context window in tokens. When combined with `compressAt`,
+   * the effective token gate becomes `contextLimit * compressAt`.
+   * Mirrors the same-named field on `agentLoop`'s `ContextConfig` so
+   * operators familiar with the loop pattern recognise the knob.
+   *
+   * Examples: 200_000 for current Anthropic models. Wins over
+   * `tokenThreshold` when both are set.
+   */
+  readonly contextLimit?: number;
+  /**
+   * Fraction of `contextLimit` at which to compact. Default 0.70 —
+   * leaves the model 30% headroom for the assistant's reply.
+   * Same default and meaning as `agent-loop.ContextConfig.compressAt`.
+   * Ignored when `contextLimit` isn't set.
+   */
+  readonly compressAt?: number;
   /**
    * Custom predicate. Mirrors `RetryPolicy.when` from `@promin/core`:
    * receives a signals envelope and returns `true` to fire on this
@@ -583,7 +604,12 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
   private async maybeAutoCompact(): Promise<void> {
     const cfg = this.deps.autoCompact;
     if (!cfg || !this.deps.memory || !this.deps.consolidator) return;
-    if (cfg.messageThreshold === undefined && cfg.tokenThreshold === undefined && !cfg.when) {
+    if (
+      cfg.messageThreshold === undefined &&
+      cfg.tokenThreshold === undefined &&
+      cfg.contextLimit === undefined &&
+      !cfg.when
+    ) {
       return; // nothing to gate on
     }
 
@@ -610,10 +636,17 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       threadKey: this.deps.key,
     };
 
+    // Effective token gate: contextLimit * compressAt wins when set,
+    // else tokenThreshold. Matches agent-loop's `compressAt` convention.
+    const effectiveTokenThreshold =
+      cfg.contextLimit !== undefined
+        ? cfg.contextLimit * (cfg.compressAt ?? 0.7)
+        : cfg.tokenThreshold;
+
     const fire = cfg.when
       ? cfg.when(signals)
       : (cfg.messageThreshold !== undefined && uncompacted.length > cfg.messageThreshold) ||
-        (cfg.tokenThreshold !== undefined && uncompactedTokens > cfg.tokenThreshold);
+        (effectiveTokenThreshold !== undefined && uncompactedTokens > effectiveTokenThreshold);
     if (!fire) return;
 
     const consolidator = this.deps.consolidator();
