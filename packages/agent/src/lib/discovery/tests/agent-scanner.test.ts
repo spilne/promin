@@ -15,7 +15,8 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdir, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { AgentScanner, applyDiscoveredAgents } from "../agent-scanner.ts";
+import { FakeClock } from "@promin/core";
+import { AgentScanner, applyDiscoveredAgents, startAgentScanLoop } from "../agent-scanner.ts";
 import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
 
 const FIXTURE_ROOT = join(tmpdir(), `agent-scanner-${process.pid}-${Date.now()}`);
@@ -128,5 +129,112 @@ describe("applyDiscoveredAgents", () => {
     const result = await applyDiscoveredAgents(registry, agents, { sync: true });
     expect(result.deleted).toContain("stale-agent");
     expect(await registry.get("stale-agent")).toBeNull();
+  });
+});
+
+describe("startAgentScanLoop", () => {
+  it("registers a recipe added between ticks (hot-reload)", async () => {
+    const root = join(tmpdir(), `agent-scan-loop-add-${process.pid}-${Date.now()}`);
+    await mkdir(root, { recursive: true });
+    try {
+      const registry = new InMemoryAgentRegistry();
+      const clock = FakeClock.create(0);
+      const loop = startAgentScanLoop({ registry, root, intervalMs: 1_000, clock });
+
+      // First tick: empty folder.
+      const t1 = await loop.tick();
+      expect(t1.added).toEqual([]);
+      expect(await registry.list()).toEqual([]);
+
+      // Drop a recipe in and tick again.
+      await writeFile(
+        join(root, "support.ts"),
+        `export const s = { id: "support", backend: { type: "local", model: { provider: "anthropic", id: "x" }, systemPrompt: null, tools: [] } };`,
+      );
+      const t2 = await loop.tick();
+      expect(t2.added).toEqual(["support"]);
+      expect((await registry.get("support"))?.id).toBe("support");
+      loop.stop();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("sync removes a recipe whose file was deleted", async () => {
+    const root = join(tmpdir(), `agent-scan-loop-del-${process.pid}-${Date.now()}`);
+    await mkdir(root, { recursive: true });
+    const recipePath = join(root, "live.ts");
+    await writeFile(
+      recipePath,
+      `export const a = { id: "live-only", backend: { type: "local", model: { provider: "anthropic", id: "x" }, systemPrompt: null, tools: [] } };`,
+    );
+    try {
+      const registry = new InMemoryAgentRegistry();
+      const clock = FakeClock.create(0);
+      const loop = startAgentScanLoop({
+        registry,
+        root,
+        intervalMs: 1_000,
+        sync: true,
+        clock,
+      });
+      const t1 = await loop.tick();
+      expect(t1.added).toEqual(["live-only"]);
+
+      await rm(recipePath);
+      const t2 = await loop.tick();
+      expect(t2.deleted).toContain("live-only");
+      expect(await registry.get("live-only")).toBeNull();
+      loop.stop();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("filters discovered agents through filterAgents", async () => {
+    const root = join(tmpdir(), `agent-scan-loop-filter-${process.pid}-${Date.now()}`);
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      join(root, "a.ts"),
+      `export const a = { id: "keep-me", backend: { type: "local", model: { provider: "anthropic", id: "x" }, systemPrompt: null, tools: [] } };
+       export const b = { id: "drop-me", backend: { type: "local", model: { provider: "anthropic", id: "y" }, systemPrompt: null, tools: [] } };`,
+    );
+    try {
+      const registry = new InMemoryAgentRegistry();
+      const clock = FakeClock.create(0);
+      const loop = startAgentScanLoop({
+        registry,
+        root,
+        intervalMs: 1_000,
+        clock,
+        filterAgents: (agents) => agents.filter((a) => a.id === "keep-me"),
+      });
+      const t = await loop.tick();
+      expect(t.added).toEqual(["keep-me"]);
+      expect(await registry.get("drop-me")).toBeNull();
+      loop.stop();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("coalesces overlapping ticks", async () => {
+    const root = join(tmpdir(), `agent-scan-loop-coalesce-${process.pid}-${Date.now()}`);
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      join(root, "x.ts"),
+      `export const x = { id: "x", backend: { type: "local", model: { provider: "anthropic", id: "x" }, systemPrompt: null, tools: [] } };`,
+    );
+    try {
+      const registry = new InMemoryAgentRegistry();
+      const clock = FakeClock.create(0);
+      const loop = startAgentScanLoop({ registry, root, intervalMs: 1_000, clock });
+      // Two parallel ticks should resolve to the same in-flight scan.
+      const [a, b] = await Promise.all([loop.tick(), loop.tick()]);
+      expect(a).toBe(b);
+      loop.stop();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

@@ -139,12 +139,19 @@ export { resolveLocalAgent } from "./registry/resolve-local-agent.ts";
 export type { ResolveLocalAgentDeps } from "./registry/resolve-local-agent.ts";
 
 // Discovery — auto-scan agent recipes from a folder + reconcile into a registry.
-export { AgentScanner, applyDiscoveredAgents } from "./discovery/agent-scanner.ts";
+export {
+  AgentScanner,
+  applyDiscoveredAgents,
+  startAgentScanLoop,
+} from "./discovery/agent-scanner.ts";
 export type {
   AgentScannerOptions,
   AgentScanResult,
   ApplyDiscoveredAgentsOptions,
   ApplyDiscoveredAgentsResult,
+  AgentScanLoopOptions,
+  AgentScanLoopTick,
+  AgentScanLoopHandle,
 } from "./discovery/agent-scanner.ts";
 
 export { tool } from "./tool.ts";

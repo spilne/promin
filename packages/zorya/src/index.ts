@@ -17,6 +17,7 @@ export {
 } from "./server/workflow-registry.ts";
 export {
   scanAgentsFolder,
+  startAgentsScanLoop,
   type AgentScanOptions,
   type AgentScanFolderResult,
 } from "./server/agent-registry.ts";

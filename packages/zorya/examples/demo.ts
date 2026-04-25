@@ -40,11 +40,18 @@ import {
   type LLMProvider,
   type LLMResponse,
   type LLMStreamChunk,
+  type RegisterAgentInput,
 } from "@promin/agent";
 import { echoLLM } from "@promin/agent/testing";
 import { z } from "zod";
 import { Database } from "bun:sqlite";
-import { ZoryaServer, scanAgentsFolder, scanWorkflowsFolder } from "../src/index.ts";
+import {
+  ZoryaServer,
+  scanAgentsFolder,
+  scanWorkflowsFolder,
+  startAgentsScanLoop,
+} from "../src/index.ts";
+import { searchKnowledgeTool, getDocumentTool } from "./kb/org-knowledge-base.ts";
 import path from "node:path";
 import { mkdirSync } from "node:fs";
 
@@ -101,7 +108,7 @@ for (const w of rawAgentScan.warnings) console.warn(`[zorya] ${w}`);
 // Recipes that need a live API key get filtered out when the key is
 // missing, so the dashboard only surfaces agents that actually work.
 const haveAnthropicKey = !!process.env["ANTHROPIC_API_KEY"];
-const liveOnlyAgentIds = new Set<string>(["claude-bot"]);
+const liveOnlyAgentIds = new Set<string>(["claude-bot", "knowledge-bot"]);
 if (!haveAnthropicKey) {
   console.warn(
     "[zorya] ANTHROPIC_API_KEY not set — skipping live agents: " + [...liveOnlyAgentIds].join(", "),
@@ -109,7 +116,12 @@ if (!haveAnthropicKey) {
 }
 const agentScan = {
   ...rawAgentScan,
-  agents: rawAgentScan.agents.filter((a) => !liveOnlyAgentIds.has(a.id) || haveAnthropicKey),
+  // Reuse the runtime predicate so boot-time and tick-time filtering
+  // stay in lockstep — a recipe surfaced at boot will never disappear
+  // on the next scan because of a mismatched gate.
+  agents: rawAgentScan.agents.filter(
+    (a) => filterAgentsByCapability([a as RegisterAgentInput]).length > 0,
+  ),
 };
 
 // `support-bot` rotates through canned replies so multiple turns in a
@@ -386,6 +398,14 @@ const agentTools: Record<string, Record<string, AgentTool<unknown, unknown>>> = 
     // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
     listWorkflows: listWorkflowsTool as AgentTool<any, any>,
   },
+  // Retrieval-augmented chat: searchKnowledge + getDocument over a small
+  // in-memory org KB. The recipe lives at ./agents/knowledge-bot.ts.
+  "knowledge-bot": {
+    // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
+    searchKnowledge: searchKnowledgeTool as AgentTool<any, any>,
+    // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
+    getDocument: getDocumentTool as AgentTool<any, any>,
+  },
 };
 
 // Per-agent LLM map — keyed by recipe id. Built once at boot. A discovered
@@ -428,10 +448,15 @@ const agentLlms: Record<string, LLMProvider> = {
       },
     }),
   ),
-  // Live LLM — bound only when the key is present. Anthropic's adapter
+  // Live LLMs — bound only when the key is present. Anthropic's adapter
   // streams natively with real network latency, so we DON'T wrap it in
   // naturalLLM (that would pile fake delays on top of real ones).
-  ...(haveAnthropicKey ? { "claude-bot": anthropic("claude-sonnet-4-6") } : {}),
+  ...(haveAnthropicKey
+    ? {
+        "claude-bot": anthropic("claude-sonnet-4-6"),
+        "knowledge-bot": anthropic("claude-sonnet-4-6"),
+      }
+    : {}),
 };
 
 const KNOWN_CITIES = [
@@ -477,6 +502,13 @@ async function seedAgents() {
     console.log(`[zorya] registered new agents: ${result.added.join(", ")}`);
   }
   console.log(`[zorya] upserted ${result.upserted.length} agent recipe(s)`);
+}
+
+// Capability filter — applied to every scan tick, not just boot. Mirrors
+// the filter we run in `agentScan` above so a recipe added at runtime
+// gets the same liveOnly gating without restarting.
+function filterAgentsByCapability(agents: ReadonlyArray<RegisterAgentInput>): RegisterAgentInput[] {
+  return agents.filter((a) => !liveOnlyAgentIds.has(a.id) || haveAnthropicKey);
 }
 
 // ---------------------------------------------------------------------------
@@ -911,6 +943,26 @@ await seedSchedules();
 await seedAgents();
 void startApprovalAutoSignaler();
 void resumeOrphanedRuns();
+
+// Hot-reload: poll the agents folder so new/edited recipe files land
+// in the registry without a server restart. mtime-aware import busts
+// ESM's module cache when a file changes; capability filter mirrors
+// the boot-time gating so live-only recipes don't surface mid-run if
+// the key isn't set.
+const agentScanLoop = startAgentsScanLoop({
+  registry: agentRegistry,
+  root: agentScanRoot,
+  intervalMs: 5_000,
+  filterAgents: filterAgentsByCapability,
+  onTick: (tick) => {
+    if (tick.added.length > 0) {
+      console.log(`[zorya] hot-reload: registered new agents: ${tick.added.join(", ")}`);
+    }
+    for (const w of tick.warnings) console.warn(`[zorya] agent-scan: ${w}`);
+  },
+});
+process.on("SIGTERM", () => agentScanLoop.stop());
+process.on("SIGINT", () => agentScanLoop.stop());
 
 // Wake suspended workflows whose sleep has expired or whose signal was
 // delivered. Without this, runs that entered ctx.sleep / ctx.signal never

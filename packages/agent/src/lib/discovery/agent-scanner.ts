@@ -12,9 +12,10 @@
 // default, opt-in `sync` mode to delete entries not in the scan.
 // ---------------------------------------------------------------------------
 
-import { readdir } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { type Clock, SystemClock } from "@promin/core";
 import type { AgentRegistry, RegisterAgentInput } from "../registry/types.ts";
 
 export interface AgentScannerOptions {
@@ -26,6 +27,13 @@ export interface AgentScannerOptions {
   readonly filter?: (absPath: string) => boolean;
   /** Per-discovery callback — fires once per detected agent. */
   readonly onAgent?: (agent: RegisterAgentInput, sourcePath: string) => void;
+  /**
+   * Append `?v=<mtimeMs>` to each `import()` URL so edits to a recipe
+   * file produce a fresh module instance instead of a cached one. Off
+   * by default (one-shot scans don't need it). The scan loop below
+   * turns this on automatically.
+   */
+  readonly cacheBust?: boolean;
 }
 
 export interface AgentScanResult {
@@ -42,12 +50,14 @@ export class AgentScanner {
   private readonly maxDepth: number;
   private readonly filter: (absPath: string) => boolean;
   private readonly onAgent?: AgentScannerOptions["onAgent"];
+  private readonly cacheBust: boolean;
 
   constructor(options: AgentScannerOptions = {}) {
     this.extensions = options.extensions ?? DEFAULT_EXTENSIONS;
     this.maxDepth = options.maxDepth ?? 10;
     this.filter = options.filter ?? (() => true);
     this.onAgent = options.onAgent;
+    this.cacheBust = options.cacheBust ?? false;
   }
 
   /** One-shot helper for callers that don't want to hold an instance. */
@@ -109,8 +119,22 @@ export class AgentScanner {
     warnings: string[],
   ): Promise<void> {
     let mod: Record<string, unknown>;
+    let url = pathToFileURL(absPath).href;
+    if (this.cacheBust) {
+      // Stat for mtime so edits → unique URL → fresh module. Falls back
+      // to Date.now() if the stat fails (e.g. file just deleted between
+      // walk and import); we'd rather over-import than crash the loop.
+      let mtimeMs: number;
+      try {
+        const st = await stat(absPath);
+        mtimeMs = st.mtimeMs;
+      } catch {
+        mtimeMs = Date.now();
+      }
+      url = `${url}?v=${mtimeMs}`;
+    }
     try {
-      mod = (await import(pathToFileURL(absPath).href)) as Record<string, unknown>;
+      mod = (await import(url)) as Record<string, unknown>;
     } catch (err) {
       warnings.push(`failed to import ${absPath}: ${asMessage(err)}`);
       return;
@@ -215,4 +239,105 @@ export async function applyDiscoveredAgents(
 
 function asMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+// ---------------------------------------------------------------------------
+// Periodic scan loop — auto-discovers and reconciles agents on a tick.
+// Use this in dev/demo hosts to get hot-reload behaviour: drop a new
+// recipe under the scan root, edit an existing one, and the registry
+// catches up on the next interval. The loop runs `cacheBust: true` so
+// edits to existing files actually re-import.
+// ---------------------------------------------------------------------------
+
+export interface AgentScanLoopOptions {
+  readonly registry: AgentRegistry;
+  readonly root: string;
+  /** Poll interval in ms. Default: `5_000`. */
+  readonly intervalMs?: number;
+  /** Pass through to `applyDiscoveredAgents` — sweeps removed files. Default: `false`. */
+  readonly sync?: boolean;
+  /** Pass through to `applyDiscoveredAgents`. */
+  readonly idPrefix?: string;
+  /** Filter scan results before applying (e.g. drop live-only recipes when key missing). */
+  readonly filterAgents?: (agents: ReadonlyArray<RegisterAgentInput>) => RegisterAgentInput[];
+  /** Fired after each tick. Surfaces deltas + warnings to the host. */
+  readonly onTick?: (event: AgentScanLoopTick) => void;
+  /** Time source. Default: `SystemClock`. Tests pass `FakeClock`. */
+  readonly clock?: Clock;
+  /** Forwarded to the underlying scanner. `cacheBust` defaults to `true` for the loop. */
+  readonly scanner?: Omit<AgentScannerOptions, "cacheBust" | "onAgent">;
+}
+
+export interface AgentScanLoopTick {
+  readonly added: string[];
+  readonly upserted: string[];
+  readonly deleted: string[];
+  readonly warnings: string[];
+  readonly durationMs: number;
+}
+
+export interface AgentScanLoopHandle {
+  /** Stop polling. Idempotent. */
+  stop(): void;
+  /** Run one scan immediately. Resolves with the tick result. */
+  tick(): Promise<AgentScanLoopTick>;
+}
+
+export function startAgentScanLoop(options: AgentScanLoopOptions): AgentScanLoopHandle {
+  const clock = options.clock ?? SystemClock;
+  const intervalMs = options.intervalMs ?? 5_000;
+  const scanner = new AgentScanner({
+    ...options.scanner,
+    cacheBust: true,
+  });
+
+  let inFlight: Promise<AgentScanLoopTick> | null = null;
+  let stopped = false;
+
+  async function runOnce(): Promise<AgentScanLoopTick> {
+    const start = clock.currentTimeMs();
+    const scan = await scanner.scan(options.root);
+    const filtered = options.filterAgents ? options.filterAgents(scan.agents) : scan.agents;
+    const apply = await applyDiscoveredAgents(options.registry, filtered, {
+      sync: options.sync ?? false,
+      ...(options.idPrefix !== undefined ? { idPrefix: options.idPrefix } : {}),
+    });
+    const tick: AgentScanLoopTick = {
+      added: apply.added,
+      upserted: apply.upserted,
+      deleted: apply.deleted,
+      warnings: scan.warnings,
+      durationMs: clock.currentTimeMs() - start,
+    };
+    options.onTick?.(tick);
+    return tick;
+  }
+
+  async function tickGuarded(): Promise<AgentScanLoopTick> {
+    // Coalesce overlapping ticks. If the previous scan is still in
+    // flight when the timer fires (slow filesystem, many agents),
+    // return that promise instead of starting a parallel scan — two
+    // concurrent applyDiscoveredAgents racing for the same registry
+    // row would just produce duplicate work.
+    if (inFlight) return inFlight;
+    const p = runOnce().finally(() => {
+      inFlight = null;
+    });
+    inFlight = p;
+    return p;
+  }
+
+  const handle = clock.setInterval(() => {
+    if (stopped) return;
+    void tickGuarded();
+  }, intervalMs);
+
+  return {
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      handle.clear();
+    },
+    tick: tickGuarded,
+  };
 }
