@@ -206,7 +206,10 @@ function StepRow({
   const widthPct = Math.max(0.5, ((endDisplay - startDisplay) / axis.totalDisplay) * 100);
   const renderStatus = effectiveStepStatus(step);
   const v = STEP_STATUS_VISUAL[renderStatus];
-  const isHatched = step.status === "sleeping" || step.status === "waiting_for_signal";
+  // Hatch wait-like steps even after they complete — a journaled step that
+  // spent 10s in ctx.signal should keep reading as "this was a wait" once
+  // resolved, otherwise the chart loses the audit trail.
+  const isHatched = isWaitLike(step);
   const retried = step.attempt > 1;
 
   const tooltip = [
@@ -367,19 +370,42 @@ function toMs(iso: string): number {
 }
 
 /**
- * Absolute-timestamp version of `stepEndMs`. Bar-position math now goes
- * through `axis.realToDisplay`, which expects absolute ms — keeping the
- * relative variant around for legacy callers would be a footgun.
+ * Absolute-timestamp end of a step's visible bar. Uses the LATER of
+ * `startedAt + durationMs` and `completedAt`: journaled steps with
+ * internal `ctx.sleep` / `ctx.signal` have a `durationMs` that only
+ * counts user-code time (often 0ms), but their wall-clock span runs from
+ * startedAt to completedAt. Without taking the max, those steps render
+ * as a 0-width bar pinned to their start.
  */
 function stepEndAbs(step: StepDto, origin: number): number {
-  if (step.startedAt && step.durationMs !== undefined) {
-    return toMs(step.startedAt) + step.durationMs;
-  }
-  if (step.completedAt) return toMs(step.completedAt);
-  if (step.status === "pending") {
-    return step.startedAt ? toMs(step.startedAt) : origin;
-  }
+  const startMs = step.startedAt ? toMs(step.startedAt) : null;
+  const completedMs = step.completedAt ? toMs(step.completedAt) : null;
+  const durationEnd =
+    startMs !== null && step.durationMs !== undefined ? startMs + step.durationMs : null;
+
+  if (durationEnd !== null && completedMs !== null) return Math.max(durationEnd, completedMs);
+  if (completedMs !== null) return completedMs;
+  if (durationEnd !== null) return durationEnd;
+  if (step.status === "pending") return startMs ?? origin;
   return Date.now();
+}
+
+/**
+ * True when the step's wall-clock span was dominated by waiting rather
+ * than CPU work. Catches both live-active waits (`sleeping`,
+ * `waiting_for_signal`) and post-completion "was waiting" cases — a
+ * journaled step with `durationMs=0ms` and a 10s span is functionally a
+ * wait, even though its current status is `completed`. The 5-second
+ * floor avoids classifying every short sleep as a wait worth hiding.
+ */
+function isWaitLike(step: StepDto): boolean {
+  if (step.status === "sleeping" || step.status === "waiting_for_signal") return true;
+  if (step.startedAt && step.completedAt && step.durationMs !== undefined) {
+    const realSpan = toMs(step.completedAt) - toMs(step.startedAt);
+    const idle = realSpan - step.durationMs;
+    if (idle >= COMPRESS_MIN_REAL_MS) return true;
+  }
+  return false;
 }
 
 function sortByStart(a: StepDto, b: StepDto): number {
@@ -407,7 +433,7 @@ function sortByStart(a: StepDto, b: StepDto): number {
 // compressed segments naturally shrink without per-step special-casing.
 // ---------------------------------------------------------------------------
 
-const COMPRESS_MIN_REAL_MS = 60_000; // skip compression below 1 minute idle
+const COMPRESS_MIN_REAL_MS = 5_000; // skip compression below 5 seconds idle
 const COMPRESS_DISPLAY_FRACTION = 0.07; // each compressed seg ≈ 7% of natural total
 
 interface AxisSegment {
@@ -428,16 +454,19 @@ function buildTimeAxis(steps: StepDto[], origin: number, endMs: number): TimeAxi
   const totalReal = Math.max(1, endMs - origin);
 
   // Event sweep: track active counts of work vs wait steps so we can spot
-  // "all-idle" stretches even when concurrent waits overlap.
+  // "all-idle" stretches even when concurrent waits overlap. `isWaitLike`
+  // also catches journaled steps that have completed but spent most of
+  // their wall-clock time inside ctx.sleep / ctx.signal — pre-fix those
+  // showed status="completed" and counted as work, defeating compression.
   type Delta = { wait: number; work: number };
   const events: Array<{ t: number; delta: Delta }> = [];
   for (const s of steps) {
     if (!s.startedAt) continue;
     const start = toMs(s.startedAt);
     const end = stepEndAbs(s, origin);
-    const isWait = s.status === "sleeping" || s.status === "waiting_for_signal";
-    events.push({ t: start, delta: { wait: isWait ? 1 : 0, work: isWait ? 0 : 1 } });
-    events.push({ t: end, delta: { wait: isWait ? -1 : 0, work: isWait ? 0 : -1 } });
+    const wait = isWaitLike(s);
+    events.push({ t: start, delta: { wait: wait ? 1 : 0, work: wait ? 0 : 1 } });
+    events.push({ t: end, delta: { wait: wait ? -1 : 0, work: wait ? 0 : -1 } });
   }
   events.sort((a, b) => a.t - b.t);
 
