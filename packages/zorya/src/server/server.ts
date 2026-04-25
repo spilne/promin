@@ -32,6 +32,8 @@ import {
 import { InMemoryWorkflowStartQueue, type WorkflowStartQueue } from "./workflow-starts.ts";
 import { TriggerService } from "./services/trigger-service.ts";
 import { CoordinatedTriggerService } from "./services/coordinated-trigger-service.ts";
+import { SchedulerLoop } from "./services/scheduler-loop.ts";
+import type { ScheduleTick, DurableScheduleConfig } from "@promin/workflow";
 import {
   listAdvertisements,
   removeAdvertisements,
@@ -183,6 +185,71 @@ export interface ZoryaServerConfig extends AuthConfig {
      */
     workerTimeoutMs?: number;
   };
+  /**
+   * Run the DurableScheduler tick loop inside this server. The "type" of
+   * scheduler is implicit in the `scheduler` SchedulerStorage instance you
+   * pass at the top level — Postgres / Redis / in-memory all work
+   * transparently because the loop only uses the portable
+   * `SchedulerStorage` interface.
+   *
+   * Horizontal scaling: every tick begins with `tryAcquireLeader` against
+   * the configured storage. Postgres uses `pg_try_advisory_lock`, Redis
+   * uses `SET NX PX`; both ensure at most one Zorya instance fires a tick
+   * per `(namespace)`. The deterministic workflowId
+   * `${scheduleId}.${tickNumber}` adds a belt-and-suspenders guarantee:
+   * even if a brief leader-transition race produces two ticks, the second
+   * dispatch is a no-op because `createWorkflow` is idempotent on
+   * workflowId.
+   *
+   * In-memory storage is single-process — running multiple Zorya
+   * instances against the same in-memory storage is impossible by
+   * construction (no shared state).
+   *
+   * Without `scheduling.enabled`, ZoryaServer keeps the existing CRUD
+   * routes for `/api/schedules` but doesn't tick anything — the operator
+   * runs `DurableScheduler` externally if they want firing.
+   */
+  scheduling?: {
+    enabled: boolean;
+    /** Poll cadence in ms. Default: 1000. */
+    pollIntervalMs?: number;
+    /**
+     * Leader-lock TTL in ms. Default: 3 × pollIntervalMs. Lower = faster
+     * fail-over after a leader crash; higher = tolerates longer poll
+     * cycles without losing leadership.
+     */
+    leaderLockTtlMs?: number;
+    /**
+     * Restrict the loop to a single schedule namespace. Different
+     * namespaces have independent leader locks, so two Zorya instances
+     * can each be leader for a different namespace.
+     */
+    namespace?: string;
+    /**
+     * Stable instance id used by leader election. Default: random UUID
+     * generated per server boot.
+     */
+    instanceId?: string;
+    /**
+     * Hash partitioning across multiple Zorya instances. Combined with
+     * leader election lets you scale beyond one tick-firing instance per
+     * namespace by sharding by schedule id. Two instances with
+     * `{ index: 0, count: 2 }` and `{ index: 1, count: 2 }` each get one
+     * shard.
+     */
+    partition?: { index: number; count: number };
+    /** Max schedules per poll. Default: 100. */
+    batchSize?: number;
+    /**
+     * Custom dispatch callback. Receives the fired tick + the schedule
+     * config that produced it. Return a Promise. When omitted the loop
+     * routes through the configured `trigger` (which is the
+     * coordinator-trigger when `coordination.enabled`, the workflow-start
+     * trigger otherwise) using `metadata.workflowName` + `metadata.input`
+     * from the schedule config.
+     */
+    fire?: (tick: ScheduleTick, schedule: DurableScheduleConfig) => Promise<void>;
+  };
 }
 
 export interface ListenOptions {
@@ -198,6 +265,11 @@ export class ZoryaServer {
    * through the HTTP trigger endpoint.
    */
   readonly coordinator?: WorkflowCoordinator;
+  /**
+   * Embedded scheduler tick loop when `config.scheduling.enabled` is
+   * true. Public so tests can drive single ticks via `tickOnce()`.
+   */
+  readonly schedulerLoop?: SchedulerLoop;
   private readonly auth: Auth;
   /** Separate auth for worker-protocol endpoints. Open when no keys set. */
   private readonly workerAuth: Auth;
@@ -283,6 +355,32 @@ export class ZoryaServer {
               advertisements,
             }).trigger
           : undefined);
+
+    if (config.scheduling?.enabled) {
+      if (!config.scheduler) {
+        throw new Error(
+          "ZoryaServer: scheduling.enabled requires `scheduler: SchedulerStorage` " +
+            "(pass an InMemory / Postgres / Redis SchedulerStorage instance)",
+        );
+      }
+      if (!config.scheduling.fire && !trigger) {
+        throw new Error(
+          "ZoryaServer: scheduling.enabled needs either a `scheduling.fire` callback " +
+            "or a configured trigger (via `trigger`, `coordination.enabled`, or `workerProtocol`)",
+        );
+      }
+      this.schedulerLoop = new SchedulerLoop({
+        storage: config.scheduler,
+        trigger,
+        fire: config.scheduling.fire,
+        instanceId: config.scheduling.instanceId,
+        pollIntervalMs: config.scheduling.pollIntervalMs,
+        leaderLockTtlMs: config.scheduling.leaderLockTtlMs,
+        namespace: config.scheduling.namespace,
+        partition: config.scheduling.partition,
+        batchSize: config.scheduling.batchSize,
+      });
+    }
 
     const deps = {
       storage: config.storage,
@@ -437,6 +535,7 @@ export class ZoryaServer {
     const resolvedHost = typeof srv.hostname === "string" ? srv.hostname : hostname;
     this.server = { stop: () => srv.stop(), port: resolvedPort, hostname: resolvedHost };
     this.startCoordinator();
+    this.startScheduler();
     return {
       port: resolvedPort,
       hostname: resolvedHost,
@@ -459,12 +558,24 @@ export class ZoryaServer {
     this.coordinatorLoop = this.coordinator.start().catch(() => {});
   }
 
+  /**
+   * Start the embedded scheduler tick loop. Called from `listen()` and
+   * exposed for tests that drive the server through `handle()` without
+   * binding a port.
+   */
+  startScheduler(): void {
+    this.schedulerLoop?.start();
+  }
+
   stop(): void {
     this.server?.stop();
     this.server = undefined;
     if (this.coordinator) {
       void this.coordinator.stop();
       this.coordinatorLoop = undefined;
+    }
+    if (this.schedulerLoop) {
+      void this.schedulerLoop.stop();
     }
   }
 
