@@ -37,11 +37,35 @@ export interface FenceGuard {
   readonly fenceToken?: FenceToken;
 }
 
+/**
+ * Sortable columns on `WorkflowStorage.listWorkflows`. `duration` is
+ * computed as `completedAt - createdAt` and sorts NULL-last for runs that
+ * haven't finished yet.
+ */
+export type WorkflowOrderBy =
+  | "createdAt"
+  | "startedAt"
+  | "completedAt"
+  | "duration"
+  | "status"
+  | "name";
+
 export interface WorkflowStorage {
   /** Load the full workflow state. Returns null if workflow doesn't exist. */
   loadWorkflow(workflowId: string): Promise<WorkflowState | null>;
 
-  /** List workflows, optionally filtered by status, name, type, or namespace. */
+  /**
+   * List workflows, optionally filtered by status, name, type, or namespace.
+   *
+   * `orderBy` defaults to `createdAt`, `orderDir` defaults to `desc`. Sort
+   * fields with NULL values (e.g. `startedAt` on a still-pending row,
+   * `duration` on a still-running row) sort last regardless of direction
+   * so the most-relevant rows surface first in both views.
+   *
+   * `status` orders by the underlying enum/id ordering — not alphabetical —
+   * to keep the cost a single column read across backends. Callers that
+   * need alphabetical can sort the returned page client-side.
+   */
   listWorkflows(params?: {
     status?: WorkflowStatus;
     name?: string;
@@ -50,6 +74,8 @@ export interface WorkflowStorage {
     namespace?: string;
     limit?: number;
     offset?: number;
+    orderBy?: WorkflowOrderBy;
+    orderDir?: "asc" | "desc";
   }): Promise<WorkflowState[]>;
 
   /**

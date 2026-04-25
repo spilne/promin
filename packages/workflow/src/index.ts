@@ -19,6 +19,7 @@ export {
   type WorkflowStorage,
   type FenceGuard,
   type FenceToken,
+  type WorkflowOrderBy,
   type WorkflowState,
   type WorkflowRunSummary,
   type StepState,

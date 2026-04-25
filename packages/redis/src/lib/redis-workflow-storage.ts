@@ -15,6 +15,7 @@ import type {
   JournaledSuspendStorage,
   JournalEntry,
   FenceGuard,
+  WorkflowOrderBy,
 } from "@promin/workflow";
 import type {
   WorkflowState,
@@ -518,6 +519,8 @@ export class RedisWorkflowStorage
     namespace?: string;
     limit?: number;
     offset?: number;
+    orderBy?: WorkflowOrderBy;
+    orderDir?: "asc" | "desc";
   }): Promise<WorkflowState[]> {
     // Collect candidate ID sets based on filters
     const indexKeys: string[] = [];
@@ -552,33 +555,27 @@ export class RedisWorkflowStorage
     }
 
     const ns = params?.namespace ?? this.namespace;
-    const offset = params?.offset ?? 0;
-    const limit = params?.limit ?? Infinity;
 
-    // Load and filter each candidate
-    const results: WorkflowState[] = [];
-    let skipped = 0;
-
+    // Load + apply filters not covered by indexes (namespace, type, parentId).
+    // We need the full filtered set in memory before sorting + paginating;
+    // streaming-with-early-exit doesn't compose with order-by.
+    const all: WorkflowState[] = [];
     for (const id of candidateIds) {
-      if (results.length >= limit) break;
-
       const raw = await this.redis.hgetall(this.wfKey(id));
       if (!raw || !raw.id) continue;
-
-      // Apply filters not covered by indexes
       if (ns && raw.namespace !== ns) continue;
       if (params?.type && raw.workflowType !== params.type) continue;
       if (params?.parentId && raw.parentWorkflowId !== params.parentId) continue;
-
-      if (skipped < offset) {
-        skipped++;
-        continue;
-      }
-
-      results.push(await this.assembleWorkflow(raw));
+      all.push(await this.assembleWorkflow(raw));
     }
 
-    return results;
+    const orderBy = params?.orderBy ?? "createdAt";
+    const orderDir = params?.orderDir ?? "desc";
+    all.sort(makeWorkflowStateComparator(orderBy, orderDir));
+
+    const offset = params?.offset ?? 0;
+    const limit = params?.limit ?? all.length;
+    return all.slice(offset, offset + limit);
   }
 
   async cancelWorkflow(
@@ -1715,6 +1712,48 @@ export class RedisWorkflowStorage
       wakeAt,
       createdAt: this.parseDate(hash.createdAt!),
     };
+  }
+}
+
+/**
+ * Comparator factory for sortable `listWorkflows` columns. NULL values
+ * always sort last so still-running rows (no `startedAt` / `completedAt` /
+ * `duration`) don't push real data off the first page in either direction.
+ */
+function makeWorkflowStateComparator(
+  orderBy: WorkflowOrderBy,
+  dir: "asc" | "desc",
+): (a: WorkflowState, b: WorkflowState) => number {
+  const sign = dir === "asc" ? 1 : -1;
+  return (a, b) => {
+    const av = workflowStateSortKey(a, orderBy);
+    const bv = workflowStateSortKey(b, orderBy);
+    if (av === undefined && bv === undefined) return 0;
+    if (av === undefined) return 1;
+    if (bv === undefined) return -1;
+    if (av < bv) return -1 * sign;
+    if (av > bv) return 1 * sign;
+    return 0;
+  };
+}
+
+function workflowStateSortKey(
+  wf: WorkflowState,
+  orderBy: WorkflowOrderBy,
+): number | string | undefined {
+  switch (orderBy) {
+    case "createdAt":
+      return wf.createdAt.getTime();
+    case "startedAt":
+      return wf.startedAt?.getTime();
+    case "completedAt":
+      return wf.completedAt?.getTime();
+    case "duration":
+      return wf.completedAt ? wf.completedAt.getTime() - wf.createdAt.getTime() : undefined;
+    case "status":
+      return wf.status;
+    case "name":
+      return wf.workflowName;
   }
 }
 

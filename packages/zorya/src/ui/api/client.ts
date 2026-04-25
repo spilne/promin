@@ -47,10 +47,15 @@ export class ApiError extends Error {
 
 export const api = {
   listRuns(q: RunListQuery = {}): Promise<RunListResponse> {
+    const { orderBy, orderDir, ...rest } = q;
     const params = new URLSearchParams();
-    for (const [k, v] of Object.entries(q)) {
+    for (const [k, v] of Object.entries(rest)) {
       if (v !== undefined && v !== null && v !== "") params.set(k, String(v));
     }
+    // Server reads `?sort=col:dir` (single param) so the URL stays compact
+    // and cycle/clear semantics are atomic. Encode both halves only when
+    // a column is explicitly chosen — server defaults to createdAt:desc.
+    if (orderBy) params.set("sort", `${orderBy}:${orderDir ?? "desc"}`);
     const qs = params.toString();
     return req<RunListResponse>(`/api/runs${qs ? `?${qs}` : ""}`);
   },

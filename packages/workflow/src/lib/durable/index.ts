@@ -27,6 +27,7 @@ export {
   type SubscribableStorage,
   type FenceGuard,
   type FenceToken,
+  type WorkflowOrderBy,
   isStepAttemptStorage,
   isTripwireCapableStorage,
   isSubscribableStorage,

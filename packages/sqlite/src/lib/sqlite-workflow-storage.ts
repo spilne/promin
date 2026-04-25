@@ -3,6 +3,7 @@ import {
   type WorkflowStorage,
   type FenceToken,
   type FenceGuard,
+  type WorkflowOrderBy,
 } from "@promin/workflow";
 import type {
   WorkflowState,
@@ -240,6 +241,8 @@ export class SqliteWorkflowStorage
     namespace?: string;
     limit?: number;
     offset?: number;
+    orderBy?: WorkflowOrderBy;
+    orderDir?: "asc" | "desc";
   }): Promise<WorkflowState[]> {
     const conditions: string[] = [];
     const args: unknown[] = [];
@@ -266,7 +269,8 @@ export class SqliteWorkflowStorage
     }
 
     const where = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
-    let sql = `SELECT * FROM ${this._t}${where} ORDER BY created_at ASC`;
+    const orderClause = sqliteOrderByClause(params?.orderBy, params?.orderDir);
+    let sql = `SELECT * FROM ${this._t}${where} ORDER BY ${orderClause}`;
     if (params?.limit != null) {
       sql += ` LIMIT ?`;
       args.push(params.limit);
@@ -1124,6 +1128,31 @@ interface JournalRow {
   exit: string | null;
   wake_at: number | null;
   created_at: number;
+}
+
+/**
+ * Build the ORDER BY clause for `listWorkflows`. NULL values always sort
+ * last so still-running rows (no `started_at` / `completed_at` /
+ * `duration`) don't push real data off the first page in either direction.
+ * Default: `created_at DESC`, matching the prior behavior.
+ */
+function sqliteOrderByClause(orderBy?: WorkflowOrderBy, orderDir?: "asc" | "desc"): string {
+  const dir = orderDir === "asc" ? "ASC" : "DESC";
+  switch (orderBy) {
+    case "startedAt":
+      return `started_at IS NULL, started_at ${dir}`;
+    case "completedAt":
+      return `completed_at IS NULL, completed_at ${dir}`;
+    case "duration":
+      return `completed_at IS NULL, (completed_at - created_at) ${dir}`;
+    case "status":
+      return `status ${dir}`;
+    case "name":
+      return `workflow_name ${dir}`;
+    case "createdAt":
+    default:
+      return `created_at ${dir}`;
+  }
 }
 
 /** Revive date strings in JSON-parsed StepState objects (JSON.parse gives strings, not Dates). */

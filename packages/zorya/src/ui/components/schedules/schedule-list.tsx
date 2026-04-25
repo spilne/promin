@@ -11,6 +11,8 @@ import { Pagination } from "../ui/pagination.tsx";
 
 const PAGE_SIZE = 20;
 type StatusFilter = "all" | "enabled" | "paused";
+type ScheduleSortCol = "name" | "lastFire" | "nextFire" | "tickCount" | "status";
+type ScheduleSortState = { col: ScheduleSortCol; dir: "asc" | "desc" } | null;
 const STATUS_FILTERS: ReadonlyArray<{ id: StatusFilter; label: string }> = [
   { id: "all", label: "All" },
   { id: "enabled", label: "Enabled" },
@@ -33,6 +35,7 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [page, setPage] = useState(1);
+  const [sort, setSort] = useState<ScheduleSortState>(null);
 
   const filtered = useMemo(() => {
     const all = data?.schedules ?? [];
@@ -47,10 +50,35 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
     });
   }, [data, query, statusFilter]);
 
+  const sorted = useMemo(() => {
+    if (!sort) return filtered;
+    const sign = sort.dir === "asc" ? 1 : -1;
+    const copy = [...filtered];
+    copy.sort((a, b) => {
+      const av = scheduleSortKey(a, sort.col);
+      const bv = scheduleSortKey(b, sort.col);
+      if (av === undefined && bv === undefined) return 0;
+      if (av === undefined) return 1;
+      if (bv === undefined) return -1;
+      if (av < bv) return -1 * sign;
+      if (av > bv) return 1 * sign;
+      return 0;
+    });
+    return copy;
+  }, [filtered, sort]);
+
   const paged = useMemo(
-    () => filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
-    [filtered, page],
+    () => sorted.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
+    [sorted, page],
   );
+
+  function cycleSort(col: ScheduleSortCol) {
+    setSort((cur) => {
+      if (!cur || cur.col !== col) return { col, dir: "asc" };
+      if (cur.dir === "asc") return { col, dir: "desc" };
+      return null;
+    });
+  }
 
   useEffect(() => {
     setPage(1);
@@ -214,14 +242,20 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
               <thead>
                 <tr class="bg-base-200 text-xs uppercase tracking-wider text-base-content/50">
                   <th>ID</th>
-                  <th>Name</th>
+                  <SortableTh col="name" label="Name" sort={sort} onClick={cycleSort} />
                   <th>Workflow</th>
                   <th>Trigger</th>
                   <th>TZ</th>
-                  <th>Last fire</th>
-                  <th>Next fire</th>
-                  <th class="text-right">Ticks</th>
-                  <th>Status</th>
+                  <SortableTh col="lastFire" label="Last fire" sort={sort} onClick={cycleSort} />
+                  <SortableTh col="nextFire" label="Next fire" sort={sort} onClick={cycleSort} />
+                  <SortableTh
+                    col="tickCount"
+                    label="Ticks"
+                    sort={sort}
+                    onClick={cycleSort}
+                    align="right"
+                  />
+                  <SortableTh col="status" label="Status" sort={sort} onClick={cycleSort} />
                   <th />
                 </tr>
               </thead>
@@ -336,4 +370,49 @@ function triggerLabel(s: ScheduleDto): string {
   if (s.rrule) return `RRULE ${s.rrule.slice(0, 40)}${s.rrule.length > 40 ? "…" : ""}`;
   if (s.intervalMs !== undefined) return `every ${formatDuration(s.intervalMs)}`;
   return "—";
+}
+
+function scheduleSortKey(s: ScheduleDto, col: ScheduleSortCol): number | string | undefined {
+  switch (col) {
+    case "name":
+      return s.name ?? s.id;
+    case "lastFire":
+      return s.lastFiredAt ? new Date(s.lastFiredAt).getTime() : undefined;
+    case "nextFire":
+      return s.enabled && s.nextRunAt ? new Date(s.nextRunAt).getTime() : undefined;
+    case "tickCount":
+      return s.tickCount ?? 0;
+    case "status":
+      return s.enabled ? "enabled" : "paused";
+  }
+}
+
+function SortableTh({
+  col,
+  label,
+  sort,
+  onClick,
+  align,
+}: {
+  col: ScheduleSortCol;
+  label: string;
+  sort: ScheduleSortState;
+  onClick: (col: ScheduleSortCol) => void;
+  align?: "right";
+}) {
+  const active = sort?.col === col;
+  const indicator = active ? (sort!.dir === "asc" ? "▲" : "▼") : "↕";
+  return (
+    <th
+      class={`cursor-pointer select-none hover:text-base-content ${
+        align === "right" ? "text-right" : ""
+      }`}
+      onClick={() => onClick(col)}
+    >
+      <span class="inline-flex items-center gap-1">
+        {label}
+        <span class={`text-[0.6rem] ${active ? "opacity-100" : "opacity-20"}`}>{indicator}</span>
+      </span>
+    </th>
+  );
 }

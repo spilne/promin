@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { useNamespace } from "../../hooks/use-namespace.ts";
 import { api } from "../../api/client.ts";
-import type { WorkflowStatus } from "@promin/workflow";
+import type { WorkflowOrderBy, WorkflowStatus } from "@promin/workflow";
 import type { RunListQuery } from "../../../server/api-types.ts";
 import { StatsBar } from "./stats-bar.tsx";
 import { StatusBadge } from "../ui/status-badge.tsx";
@@ -49,12 +49,16 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
   const initialPage = Math.max(1, Number.parseInt(queryParams?.get("page") ?? "1", 10) || 1);
 
   const initialVersion = queryParams?.get("version") ?? "";
+  const initialSort = parseSortParam(queryParams?.get("sort"));
 
   const [name, setName] = useState(initialName);
   const [type, setType] = useState(initialType);
   const [status, setStatus] = useState<WorkflowStatus | "all">(initialStatus);
   const [version, setVersion] = useState(initialVersion);
   const [page, setPage] = useState(initialPage);
+  const [sort, setSort] = useState<{ orderBy: WorkflowOrderBy; orderDir: "asc" | "desc" } | null>(
+    initialSort,
+  );
   const [meta, setMeta] = useState<NamesAndTypes>({ names: [], types: [], namespaces: [] });
   // Namespace is a global scope set via the sidebar switcher. Pages observe
   // it and include in their API fetches.
@@ -112,9 +116,10 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
     if (status !== "all") qp.set("status", status);
     if (version) qp.set("version", version);
     if (page > 1) qp.set("page", String(page));
+    if (sort) qp.set("sort", `${sort.orderBy}:${sort.orderDir}`);
     onQueryChange(qp);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, type, status, version, page]);
+  }, [name, type, status, version, page, sort]);
 
   const query: RunListQuery = {
     name: name || undefined,
@@ -124,12 +129,27 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
     version: version || undefined,
     limit: PAGE_SIZE,
     offset: (page - 1) * PAGE_SIZE,
+    orderBy: sort?.orderBy,
+    orderDir: sort?.orderDir,
   };
   const { data, loading, error, refresh } = useFetch(
     () => api.listRuns(query),
-    [name, type, namespace, status, version, page],
+    [name, type, namespace, status, version, page, sort?.orderBy, sort?.orderDir],
     5000,
   );
+
+  /**
+   * Click cycle for a header: unsorted → desc → asc → unsorted (back to
+   * server default = createdAt desc). Per-column so clicking a different
+   * column starts at desc immediately.
+   */
+  function cycleSort(col: WorkflowOrderBy) {
+    setSort((cur) => {
+      if (!cur || cur.orderBy !== col) return { orderBy: col, orderDir: "desc" };
+      if (cur.orderDir === "desc") return { orderBy: col, orderDir: "asc" };
+      return null;
+    });
+  }
 
   return (
     <div class="anim-page p-4 max-w-[1400px] mx-auto space-y-4">
@@ -218,13 +238,13 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
             <thead>
               <tr class="bg-base-200 text-xs uppercase tracking-wider text-base-content/50">
                 <th>ID</th>
-                <th>Name</th>
+                <SortableTh col="name" label="Name" sort={sort} onClick={cycleSort} />
                 <th>Recent</th>
                 <th>Type</th>
                 <th>Namespace</th>
-                <th>Status</th>
-                <th>Started</th>
-                <th>Duration</th>
+                <SortableTh col="status" label="Status" sort={sort} onClick={cycleSort} />
+                <SortableTh col="createdAt" label="Started" sort={sort} onClick={cycleSort} />
+                <SortableTh col="duration" label="Duration" sort={sort} onClick={cycleSort} />
               </tr>
             </thead>
             <tbody>
@@ -296,6 +316,61 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
       </div>
     </div>
   );
+}
+
+function SortableTh({
+  col,
+  label,
+  sort,
+  onClick,
+}: {
+  col: WorkflowOrderBy;
+  label: string;
+  sort: { orderBy: WorkflowOrderBy; orderDir: "asc" | "desc" } | null;
+  onClick: (col: WorkflowOrderBy) => void;
+}) {
+  const active = sort?.orderBy === col;
+  const indicator = active ? (sort!.orderDir === "asc" ? "▲" : "▼") : "";
+  return (
+    <th
+      class="cursor-pointer select-none hover:text-base-content"
+      onClick={() => onClick(col)}
+      title={
+        active
+          ? sort!.orderDir === "desc"
+            ? `Sorted ${label} descending. Click to reverse.`
+            : `Sorted ${label} ascending. Click to clear.`
+          : `Click to sort by ${label}.`
+      }
+    >
+      <span class="inline-flex items-center gap-1">
+        {label}
+        <span class={`text-[0.6rem] ${active ? "opacity-100" : "opacity-20"}`}>
+          {indicator || "↕"}
+        </span>
+      </span>
+    </th>
+  );
+}
+
+const VALID_ORDER_BY: ReadonlyArray<WorkflowOrderBy> = [
+  "createdAt",
+  "startedAt",
+  "completedAt",
+  "duration",
+  "status",
+  "name",
+];
+
+function parseSortParam(
+  raw: string | null | undefined,
+): { orderBy: WorkflowOrderBy; orderDir: "asc" | "desc" } | null {
+  if (!raw) return null;
+  const [col, dir] = raw.split(":");
+  const orderBy = VALID_ORDER_BY.find((c) => c === col);
+  if (!orderBy) return null;
+  const orderDir: "asc" | "desc" = dir === "asc" ? "asc" : "desc";
+  return { orderBy, orderDir };
 }
 
 /**

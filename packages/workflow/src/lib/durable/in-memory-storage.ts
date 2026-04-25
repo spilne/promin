@@ -17,6 +17,7 @@ import type {
   StepAttemptStorage,
   FenceGuard,
   FenceToken,
+  WorkflowOrderBy,
 } from "./workflow-storage.ts";
 import { createWorkflowEventStream } from "./workflow-event-stream.ts";
 import type {
@@ -36,6 +37,50 @@ import type {
 } from "./workflow-state.ts";
 import { FenceTokenMismatchError } from "./durable-pipeline-error.ts";
 import { SystemClock, type Clock } from "@promin/core";
+
+/**
+ * Comparator factory for sortable `listWorkflows` columns. NULL/undefined
+ * values always sort last (regardless of direction) so still-running rows
+ * with no `startedAt` / no `completedAt` / no `duration` don't push real
+ * data off the first page. Status sorts on the lookup name alphabetically
+ * to match how Postgres exposes it.
+ */
+function makeWorkflowComparator(
+  orderBy: WorkflowOrderBy,
+  dir: "asc" | "desc",
+): (a: MutableWorkflow, b: MutableWorkflow) => number {
+  const sign = dir === "asc" ? 1 : -1;
+  return (a, b) => {
+    const av = workflowSortKey(a, orderBy);
+    const bv = workflowSortKey(b, orderBy);
+    if (av === undefined && bv === undefined) return 0;
+    if (av === undefined) return 1;
+    if (bv === undefined) return -1;
+    if (av < bv) return -1 * sign;
+    if (av > bv) return 1 * sign;
+    return 0;
+  };
+}
+
+function workflowSortKey(
+  wf: MutableWorkflow,
+  orderBy: WorkflowOrderBy,
+): number | string | undefined {
+  switch (orderBy) {
+    case "createdAt":
+      return wf.createdAt.getTime();
+    case "startedAt":
+      return wf.startedAt?.getTime();
+    case "completedAt":
+      return wf.completedAt?.getTime();
+    case "duration":
+      return wf.completedAt ? wf.completedAt.getTime() - wf.createdAt.getTime() : undefined;
+    case "status":
+      return wf.status;
+    case "name":
+      return wf.workflowName;
+  }
+}
 
 /** Mutable internal workflow state — avoids spread-copy on every mutation. */
 interface MutableWorkflow {
@@ -164,27 +209,32 @@ export class InMemoryWorkflowStorage
     namespace?: string;
     limit?: number;
     offset?: number;
+    orderBy?: WorkflowOrderBy;
+    orderDir?: "asc" | "desc";
   }): Promise<WorkflowState[]> {
     const ns = params?.namespace ?? this.namespace;
-    const results: WorkflowState[] = [];
-    let skipped = 0;
-    const offset = params?.offset ?? 0;
-    const limit = params?.limit ?? Infinity;
 
+    // Filter pass first — sort needs the full filtered set before we can
+    // apply offset/limit, so we can't short-circuit inside the loop the way
+    // unordered scans did.
+    const filtered: MutableWorkflow[] = [];
     for (const wf of this.workflows.values()) {
       if (ns && wf.namespace !== ns) continue;
       if (params?.status && wf.status !== params.status) continue;
       if (params?.name && wf.workflowName !== params.name) continue;
       if (params?.type && wf.workflowType !== params.type) continue;
       if (params?.parentId && wf.parentWorkflowId !== params.parentId) continue;
-      if (skipped < offset) {
-        skipped++;
-        continue;
-      }
-      if (results.length >= limit) break;
-      results.push(this.toState(wf));
+      filtered.push(wf);
     }
-    return results;
+
+    const orderBy = params?.orderBy ?? "createdAt";
+    const orderDir = params?.orderDir ?? "desc";
+    filtered.sort(makeWorkflowComparator(orderBy, orderDir));
+
+    const offset = params?.offset ?? 0;
+    const limit = params?.limit ?? Infinity;
+    const page = filtered.slice(offset, offset + limit);
+    return page.map((wf) => this.toState(wf));
   }
 
   async distinctWorkflowNames(params?: { namespace?: string }): Promise<string[]> {

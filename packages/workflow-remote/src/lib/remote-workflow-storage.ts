@@ -13,6 +13,7 @@ import type {
   WorkflowStorage,
   WorkflowState,
   WorkflowStatus,
+  WorkflowOrderBy,
   WorkflowRunSummary,
   SignalState,
   FenceGuard,
@@ -112,6 +113,8 @@ export class RemoteWorkflowStorage implements WorkflowStorage, JournaledSuspendS
     namespace?: string;
     limit?: number;
     offset?: number;
+    orderBy?: WorkflowOrderBy;
+    orderDir?: "asc" | "desc";
   }): Promise<WorkflowState[]> {
     return this.call("listWorkflows", params ?? {});
   }

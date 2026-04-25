@@ -11,6 +11,9 @@ import { TriggerModal } from "./trigger-modal.tsx";
 
 const PAGE_SIZE = 20;
 
+type WorkflowSortCol = "name" | "type" | "version" | "steps";
+type SortState = { col: WorkflowSortCol; dir: "asc" | "desc" } | null;
+
 interface WorkflowListProps {
   onOpenRun: (id: string) => void;
   /** Navigate to the workflow-detail page (DAG, sample input, recent runs). */
@@ -29,6 +32,7 @@ export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: 
   const [triggering, setTriggering] = useState<WorkflowDefDto | undefined>(undefined);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
+  const [sort, setSort] = useState<SortState>(null);
 
   const filtered = useMemo(() => {
     const all = data?.workflows ?? [];
@@ -40,10 +44,35 @@ export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: 
     });
   }, [data, query]);
 
+  const sorted = useMemo(() => {
+    if (!sort) return filtered;
+    const sign = sort.dir === "asc" ? 1 : -1;
+    const copy = [...filtered];
+    copy.sort((a, b) => {
+      const av = workflowSortKey(a, sort.col);
+      const bv = workflowSortKey(b, sort.col);
+      if (av === undefined && bv === undefined) return 0;
+      if (av === undefined) return 1;
+      if (bv === undefined) return -1;
+      if (av < bv) return -1 * sign;
+      if (av > bv) return 1 * sign;
+      return 0;
+    });
+    return copy;
+  }, [filtered, sort]);
+
   const paged = useMemo(
-    () => filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
-    [filtered, page],
+    () => sorted.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
+    [sorted, page],
   );
+
+  function cycleSort(col: WorkflowSortCol) {
+    setSort((cur) => {
+      if (!cur || cur.col !== col) return { col, dir: "asc" };
+      if (cur.dir === "asc") return { col, dir: "desc" };
+      return null;
+    });
+  }
 
   // Reset to page 1 whenever the search narrows the list.
   useEffect(() => {
@@ -81,10 +110,10 @@ export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: 
           <table class="table">
             <thead>
               <tr class="bg-base-200 text-xs uppercase tracking-wider text-base-content/50">
-                <th>Name</th>
-                <th>Type</th>
-                <th>Version</th>
-                <th>Steps</th>
+                <SortableTh col="name" label="Name" sort={sort} onClick={cycleSort} />
+                <SortableTh col="type" label="Type" sort={sort} onClick={cycleSort} />
+                <SortableTh col="version" label="Version" sort={sort} onClick={cycleSort} />
+                <SortableTh col="steps" label="Steps" sort={sort} onClick={cycleSort} />
                 <th>Recent</th>
                 <th />
               </tr>
@@ -178,5 +207,41 @@ export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: 
         />
       )}
     </div>
+  );
+}
+
+function workflowSortKey(w: WorkflowDefDto, col: WorkflowSortCol): number | string | undefined {
+  switch (col) {
+    case "name":
+      return w.name;
+    case "type":
+      return w.type ?? undefined;
+    case "version":
+      return w.version ?? undefined;
+    case "steps":
+      return w.steps.length;
+  }
+}
+
+function SortableTh({
+  col,
+  label,
+  sort,
+  onClick,
+}: {
+  col: WorkflowSortCol;
+  label: string;
+  sort: SortState;
+  onClick: (col: WorkflowSortCol) => void;
+}) {
+  const active = sort?.col === col;
+  const indicator = active ? (sort!.dir === "asc" ? "▲" : "▼") : "↕";
+  return (
+    <th class="cursor-pointer select-none hover:text-base-content" onClick={() => onClick(col)}>
+      <span class="inline-flex items-center gap-1">
+        {label}
+        <span class={`text-[0.6rem] ${active ? "opacity-100" : "opacity-20"}`}>{indicator}</span>
+      </span>
+    </th>
   );
 }

@@ -2,13 +2,14 @@
 // PostgresWorkflowStorage — production-grade WorkflowStorage backed by Postgres
 // ---------------------------------------------------------------------------
 
-import { eq, and, sql, desc, inArray, gte, lt } from "drizzle-orm";
+import { eq, and, sql, desc, asc, inArray, gte, lt } from "drizzle-orm";
 import type {
   WorkflowStorage,
   StepAttemptStorage,
   WorkflowState,
   WorkflowRunSummary,
   WorkflowStatus,
+  WorkflowOrderBy,
   StepStatus,
   StepType,
   StepState,
@@ -223,6 +224,8 @@ export class PostgresWorkflowStorage
     namespace?: string;
     limit?: number;
     offset?: number;
+    orderBy?: WorkflowOrderBy;
+    orderDir?: "asc" | "desc";
   }): Promise<WorkflowState[]> {
     const conditions = [];
     // Scope to constructor namespace if set and no explicit namespace filter
@@ -236,7 +239,7 @@ export class PostgresWorkflowStorage
     const query = this.db.select().from(workflows).$dynamic();
     if (conditions.length > 0)
       query.where(conditions.length === 1 ? conditions[0] : and(...conditions));
-    query.orderBy(desc(workflows.createdAt));
+    query.orderBy(postgresOrderByClause(params?.orderBy, params?.orderDir));
     if (params?.limit) query.limit(params.limit);
     if (params?.offset) query.offset(params.offset);
 
@@ -1279,6 +1282,34 @@ export class PostgresWorkflowStorage
       )
       .limit(1);
     return row ? rowToJournalEntry(row) : null;
+  }
+}
+
+/**
+ * Build the ORDER BY expression for `listWorkflows`. NULL values always
+ * sort last so still-running rows (no `started_at` / `completed_at` /
+ * `duration`) don't push real data off the first page in either direction.
+ * `status` orders by status_id (the integer enum) — alphabetizing requires
+ * a join with the lookup table, and the cost isn't justified for a
+ * dropdown-driven sort. Default: `created_at DESC`.
+ */
+function postgresOrderByClause(orderBy?: WorkflowOrderBy, orderDir?: "asc" | "desc") {
+  const direction = orderDir === "asc" ? sql.raw("ASC") : sql.raw("DESC");
+  const nullsLast = sql.raw("NULLS LAST");
+  switch (orderBy) {
+    case "startedAt":
+      return sql`${workflows.startedAt} ${direction} ${nullsLast}`;
+    case "completedAt":
+      return sql`${workflows.completedAt} ${direction} ${nullsLast}`;
+    case "duration":
+      return sql`(${workflows.completedAt} - ${workflows.createdAt}) ${direction} ${nullsLast}`;
+    case "status":
+      return orderDir === "asc" ? asc(workflows.statusId) : desc(workflows.statusId);
+    case "name":
+      return orderDir === "asc" ? asc(workflows.workflowName) : desc(workflows.workflowName);
+    case "createdAt":
+    default:
+      return orderDir === "asc" ? asc(workflows.createdAt) : desc(workflows.createdAt);
   }
 }
 

@@ -6,7 +6,7 @@
 // and `../services/trigger-service.ts`.
 // ---------------------------------------------------------------------------
 
-import type { Workflow, WorkflowStatus, WorkflowStorage } from "@promin/workflow";
+import type { Workflow, WorkflowOrderBy, WorkflowStatus, WorkflowStorage } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 import type {
   RunListQuery,
@@ -54,6 +54,7 @@ export function listRuns(deps: RunRoutesDeps) {
   const service = makeService(deps);
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
+    const sort = parseSortParam(url.searchParams.get("sort"));
     const q: RunListQuery = {
       status: (url.searchParams.get("status") as WorkflowStatus | null) ?? undefined,
       name: url.searchParams.get("name") ?? undefined,
@@ -62,6 +63,8 @@ export function listRuns(deps: RunRoutesDeps) {
       version: url.searchParams.get("version") ?? undefined,
       limit: parseIntParam(url.searchParams.get("limit")) ?? 50,
       offset: parseIntParam(url.searchParams.get("offset")) ?? 0,
+      orderBy: sort?.orderBy,
+      orderDir: sort?.orderDir,
     };
     return json(200, await service.list(q));
   };
@@ -148,4 +151,28 @@ function parseIntParam(s: string | null): number | undefined {
   if (s === null) return undefined;
   const n = Number.parseInt(s, 10);
   return Number.isFinite(n) ? n : undefined;
+}
+
+const VALID_ORDER_BY: ReadonlyArray<WorkflowOrderBy> = [
+  "createdAt",
+  "startedAt",
+  "completedAt",
+  "duration",
+  "status",
+  "name",
+];
+
+/**
+ * Parse `?sort=createdAt:desc`. Bad / unknown columns silently fall back to
+ * defaults — keeps the URL forgiving when users edit it by hand.
+ */
+function parseSortParam(
+  raw: string | null,
+): { orderBy?: WorkflowOrderBy; orderDir?: "asc" | "desc" } | undefined {
+  if (!raw) return undefined;
+  const [col, dir] = raw.split(":");
+  const orderBy = VALID_ORDER_BY.find((c) => c === col);
+  if (!orderBy) return undefined;
+  const orderDir = dir === "asc" ? "asc" : dir === "desc" ? "desc" : undefined;
+  return { orderBy, orderDir };
 }

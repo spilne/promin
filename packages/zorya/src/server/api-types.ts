@@ -6,7 +6,7 @@
 // format.
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStatus, StepStatus, StepType } from "@promin/workflow";
+import type { WorkflowStatus, WorkflowOrderBy, StepStatus, StepType } from "@promin/workflow";
 
 export interface StepTaskDto {
   taskIndex: number;
@@ -121,6 +121,10 @@ export interface RunListQuery {
   version?: string;
   limit?: number;
   offset?: number;
+  /** Server-side sort column. Default: `createdAt`. */
+  orderBy?: WorkflowOrderBy;
+  /** Sort direction. Default: `desc`. */
+  orderDir?: "asc" | "desc";
 }
 
 export interface MetricsDto {

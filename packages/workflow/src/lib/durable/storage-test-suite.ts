@@ -450,6 +450,102 @@ export function storageTestSuite(
         const page = await s.listWorkflows({ limit: 2 });
         expect(page.length).toBeLessThanOrEqual(2);
       });
+
+      it("default order is createdAt desc — newest first", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "ord-default-1", workflowName: "t", input: {} });
+        await new Promise((r) => setTimeout(r, 10));
+        await s.createWorkflow({ workflowId: "ord-default-2", workflowName: "t", input: {} });
+        await new Promise((r) => setTimeout(r, 10));
+        await s.createWorkflow({ workflowId: "ord-default-3", workflowName: "t", input: {} });
+
+        const rows = await s.listWorkflows({ name: "t" });
+        const ids = rows.map((r) => r.workflowId);
+        expect(ids).toEqual(["ord-default-3", "ord-default-2", "ord-default-1"]);
+      });
+
+      it("orderBy=name asc returns alphabetical order", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "ord-name-1", workflowName: "gamma", input: {} });
+        await s.createWorkflow({ workflowId: "ord-name-2", workflowName: "alpha", input: {} });
+        await s.createWorkflow({ workflowId: "ord-name-3", workflowName: "beta", input: {} });
+
+        const rows = await s.listWorkflows({ orderBy: "name", orderDir: "asc" });
+        expect(rows.map((r) => r.workflowName)).toEqual(["alpha", "beta", "gamma"]);
+      });
+
+      it("orderBy=duration sorts NULL (still-running) last in both directions", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "ord-dur-running", workflowName: "dur", input: {} });
+        await s.createWorkflow({ workflowId: "ord-dur-fast", workflowName: "dur", input: {} });
+        await new Promise((r) => setTimeout(r, 30));
+        await s.completeWorkflow("ord-dur-fast", "ok");
+        await s.createWorkflow({ workflowId: "ord-dur-slow", workflowName: "dur", input: {} });
+        await new Promise((r) => setTimeout(r, 60));
+        await s.completeWorkflow("ord-dur-slow", "ok");
+
+        const ascRows = await s.listWorkflows({
+          name: "dur",
+          orderBy: "duration",
+          orderDir: "asc",
+        });
+        const ascIds = ascRows.map((r) => r.workflowId);
+        // Running row sorts last regardless of direction.
+        expect(ascIds[ascIds.length - 1]).toBe("ord-dur-running");
+        // Among completed: shorter duration first when asc.
+        const completedAsc = ascIds.filter((id) => id !== "ord-dur-running");
+        expect(completedAsc).toEqual(["ord-dur-fast", "ord-dur-slow"]);
+
+        const descRows = await s.listWorkflows({
+          name: "dur",
+          orderBy: "duration",
+          orderDir: "desc",
+        });
+        const descIds = descRows.map((r) => r.workflowId);
+        expect(descIds[descIds.length - 1]).toBe("ord-dur-running");
+        const completedDesc = descIds.filter((id) => id !== "ord-dur-running");
+        expect(completedDesc).toEqual(["ord-dur-slow", "ord-dur-fast"]);
+      });
+
+      it("orderBy=startedAt sorts NULL (pending) last in both directions", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "ord-st-pending", workflowName: "st", input: {} });
+        await s.createWorkflow({ workflowId: "ord-st-started", workflowName: "st", input: {} });
+        await s.saveStepResult({
+          workflowId: "ord-st-started",
+          stepName: "go",
+          result: "ok",
+          durationMs: 1,
+          startedAt: new Date(),
+        });
+
+        const asc = await s.listWorkflows({ name: "st", orderBy: "startedAt", orderDir: "asc" });
+        expect(asc.map((r) => r.workflowId)).toEqual(["ord-st-started", "ord-st-pending"]);
+
+        const desc = await s.listWorkflows({ name: "st", orderBy: "startedAt", orderDir: "desc" });
+        expect(desc.map((r) => r.workflowId)).toEqual(["ord-st-started", "ord-st-pending"]);
+      });
+
+      it("orderBy + limit + offset compose for paginated sorted results", async () => {
+        const s = await getStorage();
+        for (const n of ["delta", "alpha", "echo", "beta", "charlie"]) {
+          await s.createWorkflow({ workflowId: `ord-pg-${n}`, workflowName: n, input: {} });
+        }
+        const page1 = await s.listWorkflows({
+          orderBy: "name",
+          orderDir: "asc",
+          limit: 2,
+          offset: 0,
+        });
+        const page2 = await s.listWorkflows({
+          orderBy: "name",
+          orderDir: "asc",
+          limit: 2,
+          offset: 2,
+        });
+        expect(page1.map((r) => r.workflowName)).toEqual(["alpha", "beta"]);
+        expect(page2.map((r) => r.workflowName)).toEqual(["charlie", "delta"]);
+      });
     });
 
     // -------------------------------------------------------------------
