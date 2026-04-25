@@ -228,12 +228,23 @@ export function StepTimeline({ run, selectedStep, onSelectStep }: StepTimelinePr
                 />
                 {showJournal &&
                   journal.map((entry, i) => {
-                    // Sequential model: each activity starts when the
-                    // previous one finished (or at the parent step's
-                    // startedAt for the first entry). Holds for plain
-                    // journaled bodies; ctx.parallel branches will need
-                    // branchPath grouping later.
-                    const prevEnd = i === 0 ? stepStartAbs : toMs(journal[i - 1]!.createdAt);
+                    // Sequential model: each entry's start = previous
+                    // entry's createdAt (when it completed). For the
+                    // first entry we'd LIKE to use the parent step's
+                    // startedAt — gives the activity a realistic
+                    // duration in the common case — but if the step was
+                    // retried, parent.startedAt is the latest attempt's
+                    // start while the journal still holds entries from
+                    // earlier attempts. Without the MIN guard we'd
+                    // produce negative bars like "fetch-sources -6384ms".
+                    // Clamping to entry.createdAt collapses the retried
+                    // case to an instant pip; non-retry runs keep the
+                    // real duration.
+                    const entryEndAbs = toMs(entry.createdAt);
+                    const prevEnd =
+                      i === 0
+                        ? Math.min(stepStartAbs, entryEndAbs)
+                        : toMs(journal[i - 1]!.createdAt);
                     return (
                       <ActivityRow
                         entry={entry}
