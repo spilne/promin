@@ -6,8 +6,10 @@
 // Nodes are colored by their executed status (planned = dashed).
 // ---------------------------------------------------------------------------
 
-import { useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { RunDto, StepDto } from "../../../server/api-types.ts";
+import type { JournalEntryDto } from "../../../server/routes/run-extras.ts";
+import { api } from "../../api/client.ts";
 import { STEP_STATUS_VISUAL, STEP_TYPE_ICON, effectiveStepStatus } from "../../lib/format.ts";
 import type { ExtendedStepStatus } from "../../../server/api-types.ts";
 
@@ -63,8 +65,44 @@ export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
     return () => observer.disconnect();
   }, []);
 
-  const horizontal = useMemo(() => layout(run.steps, "horizontal"), [run.steps]);
-  const vertical = useMemo(() => layout(run.steps, "vertical"), [run.steps]);
+  // Fetch activity-journal entries for every non-planned step so we can
+  // expand `.journaled()` steps into per-activity sub-nodes. Same shape as
+  // the timeline's bulk fetch — keeps request count proportional to the
+  // workflow's step count, not the user's interaction.
+  const [journalsByStep, setJournalsByStep] = useState<Record<string, JournalEntryDto[]>>({});
+  useEffect(() => {
+    let cancelled = false;
+    const stepNames = run.steps.filter((s) => !s.isPlanned && s.startedAt).map((s) => s.stepName);
+    if (stepNames.length === 0) return;
+    Promise.all(
+      stepNames.map((stepName) =>
+        api
+          .getRunStepJournal(run.workflowId, stepName)
+          .then((r) => ({ stepName, entries: r.supported ? r.entries : [] }))
+          .catch(() => ({ stepName, entries: [] as JournalEntryDto[] })),
+      ),
+    ).then((rows) => {
+      if (cancelled) return;
+      const map: Record<string, JournalEntryDto[]> = {};
+      for (const r of rows) if (r.entries.length > 0) map[r.stepName] = r.entries;
+      setJournalsByStep(map);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [run.workflowId, run.steps.map((s) => s.stepName).join("|")]);
+
+  // Expand journaled steps into a chain of activity nodes — the parent
+  // keeps its place in the original DAG; each activity becomes a synthetic
+  // step whose `dependsOn` chains it sequentially after the parent. The
+  // post-parent steps still depend on the original parent, so the chain
+  // hangs off as a sub-graph rather than rerouting the main flow.
+  const expandedSteps = useMemo(
+    () => expandJournaledSteps(run.steps, journalsByStep),
+    [run.steps, journalsByStep],
+  );
+  const horizontal = useMemo(() => layout(expandedSteps, "horizontal"), [expandedSteps]);
+  const vertical = useMemo(() => layout(expandedSteps, "vertical"), [expandedSteps]);
 
   // Default to horizontal. Switch to vertical only after we've actually
   // measured the container AND the horizontal layout overflows by more
@@ -244,7 +282,10 @@ function NodeRect({
       >
         {step.stepType.toUpperCase()} {STEP_TYPE_ICON[step.stepType]}
       </text>
-      {/* Step name */}
+      {/* Step name. Synthetic activity nodes carry their human-readable
+          label on `metadata.journalActivityName`; without this fallback
+          they'd display the namespaced internal name like
+          `research::fetch-sources::0`. */}
       <text
         x={STRIPE_W + 16}
         y={NODE_H / 2 + 9}
@@ -252,7 +293,10 @@ function NodeRect({
         font-family="ui-sans-serif, system-ui"
         font-size={13}
       >
-        {truncate(step.stepName, 22)}
+        {truncate(
+          (step.metadata?.["journalActivityName"] as string | undefined) ?? step.stepName,
+          22,
+        )}
       </text>
       {/* Status line at the bottom right */}
       <g transform={`translate(${NODE_W - 8} ${NODE_H - 8})`}>
@@ -290,6 +334,74 @@ function classForStatusStrip(status: ExtendedStepStatus): string {
     default:
       return "fill-base-content/30";
   }
+}
+
+// ---------------------------------------------------------------------------
+// Journal expansion — turn each journaled step's activity entries into
+// synthetic StepDto children, chained sequentially after the parent.
+// ---------------------------------------------------------------------------
+
+/**
+ * Sequential expansion: activity[0] depends on the parent journaled step,
+ * activity[i] depends on activity[i-1]. Synthetic step names use a
+ * `parent::activityName::index` namespace so two journaled steps can
+ * reuse the same activityName without colliding. Down-stream user steps
+ * still depend on the original parent — the activity chain is a side
+ * branch off the parent, not a rewiring of the main DAG.
+ */
+function expandJournaledSteps(
+  steps: ReadonlyArray<StepDto>,
+  journalsByStep: Record<string, JournalEntryDto[]>,
+): StepDto[] {
+  const out: StepDto[] = [];
+  for (const s of steps) {
+    out.push(s);
+    const journal = journalsByStep[s.stepName];
+    if (!journal || journal.length === 0) continue;
+    let prevSyntheticName = s.stepName;
+    for (const entry of journal) {
+      const syntheticName = `${s.stepName}::${entry.activityName}::${entry.activityIndex}`;
+      out.push(activityToStepDto(entry, syntheticName, prevSyntheticName, s.run));
+      prevSyntheticName = syntheticName;
+    }
+  }
+  return out;
+}
+
+function activityToStepDto(
+  entry: JournalEntryDto,
+  syntheticName: string,
+  parentName: string,
+  run: number,
+): StepDto {
+  const isFailure = entry.exit?.tag === "Failure";
+  const isPending = entry.phase === "pending";
+  // Map journal step type → workflow StepType so the existing icon /
+  // color machinery (sleep, signal) lights up correctly. "activity" /
+  // "compensation" / "child" all fall through to `single`.
+  const stepType: StepDto["stepType"] =
+    entry.stepType === "sleep" ? "sleep" : entry.stepType === "signal" ? "signal" : "single";
+  return {
+    stepName: syntheticName,
+    run,
+    status: isPending
+      ? entry.stepType === "sleep"
+        ? "sleeping"
+        : entry.stepType === "signal"
+          ? "waiting_for_signal"
+          : "running"
+      : isFailure
+        ? "failed"
+        : "completed",
+    stepType,
+    dependsOn: [parentName],
+    result: entry.exit?.tag === "Success" ? entry.exit.value : undefined,
+    error: entry.exit?.tag === "Failure" ? entry.exit.error : undefined,
+    completedAt: entry.phase === "completed" ? entry.createdAt : undefined,
+    wakeAt: entry.wakeAt,
+    attempt: 1,
+    metadata: { journalActivityName: entry.activityName, branchPath: entry.branchPath },
+  };
 }
 
 // ---------------------------------------------------------------------------

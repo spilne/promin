@@ -1,5 +1,7 @@
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import type { RunDto, StepDto } from "../../../server/api-types.ts";
+import type { JournalEntryDto } from "../../../server/routes/run-extras.ts";
+import { api } from "../../api/client.ts";
 import {
   effectiveStepStatus,
   formatDuration,
@@ -26,6 +28,39 @@ interface StepTimelineProps {
  */
 export function StepTimeline({ run, selectedStep, onSelectStep }: StepTimelineProps) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // Journal entries per step name. The Step tab fetches these per-click,
+  // but the timeline needs them up front to render the activity-level
+  // sub-rows under each journaled step. One bulk fetch per step keeps the
+  // request count proportional to the workflow shape, not the user's
+  // click pattern.
+  const [journalsByStep, setJournalsByStep] = useState<Record<string, JournalEntryDto[]>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    const stepNames = run.steps.filter((s) => !s.isPlanned && s.startedAt).map((s) => s.stepName);
+    if (stepNames.length === 0) return;
+    Promise.all(
+      stepNames.map((stepName) =>
+        api
+          .getRunStepJournal(run.workflowId, stepName)
+          .then((r) => ({ stepName, entries: r.supported ? r.entries : [] }))
+          .catch(() => ({ stepName, entries: [] as JournalEntryDto[] })),
+      ),
+    ).then((rows) => {
+      if (cancelled) return;
+      const map: Record<string, JournalEntryDto[]> = {};
+      for (const r of rows) {
+        if (r.entries.length > 0) map[r.stepName] = r.entries;
+      }
+      setJournalsByStep(map);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // run.workflowId + step name set is stable for a given run; refetch when
+    // the step list grows (new step persisted) so newly-arrived journaled
+    // steps pick up their entries.
+  }, [run.workflowId, run.steps.map((s) => s.stepName).join("|")]);
   // Origin = earliest of workflow.startedAt and any step startedAt. Covers clock
   // skew and demo data where step timestamps precede workflow.startedAt.
   const wfStart = toMs(run.startedAt ?? run.createdAt);
@@ -166,23 +201,51 @@ export function StepTimeline({ run, selectedStep, onSelectStep }: StepTimelinePr
           </div>
         </div>
 
-        {/* Rows */}
+        {/* Rows. Each step row is rendered first; if it has journal
+            entries (a `.journaled()` step that's executed), each
+            ctx.activity / ctx.sleep / ctx.signal checkpoint is rendered
+            beneath as a virtual sub-row at depth+1 so the user can see
+            the activity-level flow without leaving the timeline. */}
         <div class="space-y-0.5 pt-3">
           {visibleRows.map((row) => {
             const step = byName.get(row.name);
             if (!step) return null;
+            const journal = journalsByStep[row.name] ?? [];
+            const showJournal = journal.length > 0 && !collapsed.has(row.name);
+            const stepStartAbs = step.startedAt ? toMs(step.startedAt) : origin;
             return (
-              <StepRow
-                step={step}
-                depth={row.depth}
-                hasChildren={row.hasChildren}
-                isCollapsed={collapsed.has(row.name)}
-                onToggle={() => toggle(row.name)}
-                origin={origin}
-                axis={axis}
-                isSelected={selectedStep === row.name}
-                onSelect={() => onSelectStep?.(selectedStep === row.name ? undefined : row.name)}
-              />
+              <>
+                <StepRow
+                  step={step}
+                  depth={row.depth}
+                  hasChildren={row.hasChildren || journal.length > 0}
+                  isCollapsed={collapsed.has(row.name)}
+                  onToggle={() => toggle(row.name)}
+                  origin={origin}
+                  axis={axis}
+                  isSelected={selectedStep === row.name}
+                  onSelect={() => onSelectStep?.(selectedStep === row.name ? undefined : row.name)}
+                />
+                {showJournal &&
+                  journal.map((entry, i) => {
+                    // Sequential model: each activity starts when the
+                    // previous one finished (or at the parent step's
+                    // startedAt for the first entry). Holds for plain
+                    // journaled bodies; ctx.parallel branches will need
+                    // branchPath grouping later.
+                    const prevEnd = i === 0 ? stepStartAbs : toMs(journal[i - 1]!.createdAt);
+                    return (
+                      <ActivityRow
+                        entry={entry}
+                        parentStepName={row.name}
+                        depth={row.depth + 1}
+                        prevEndAbs={prevEnd}
+                        origin={origin}
+                        axis={axis}
+                      />
+                    );
+                  })}
+              </>
             );
           })}
         </div>
@@ -351,6 +414,108 @@ function StepRow({
             ↻{step.attempt}
           </span>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One journal entry rendered as a virtual sub-row under its parent
+ * journaled step. Bars are shorter and fainter than full step bars so the
+ * outer step still reads as the dominant row. We only have `createdAt`
+ * (when the entry completed) and an optional `wakeAt` (sleep/signal); the
+ * activity's "start" is inferred as the previous entry's `createdAt`
+ * (sequential) or the parent step's `startedAt` for the first entry.
+ */
+function ActivityRow({
+  entry,
+  parentStepName,
+  depth,
+  prevEndAbs,
+  origin,
+  axis,
+}: {
+  entry: JournalEntryDto;
+  parentStepName: string;
+  depth: number;
+  prevEndAbs: number;
+  origin: number;
+  axis: TimeAxis;
+}) {
+  const startAbs = prevEndAbs;
+  const endAbs =
+    entry.phase === "pending"
+      ? entry.wakeAt
+        ? toMs(entry.wakeAt)
+        : Date.now()
+      : toMs(entry.createdAt);
+  const startDisplay = axis.realToDisplay(Math.max(origin, startAbs));
+  const endDisplay = axis.realToDisplay(Math.max(origin, endAbs));
+  const leftPct = (startDisplay / axis.totalDisplay) * 100;
+  const widthPct = Math.max(0.5, ((endDisplay - startDisplay) / axis.totalDisplay) * 100);
+
+  const isFailure = entry.exit?.tag === "Failure";
+  const isPending = entry.phase === "pending";
+  const isWait = entry.stepType === "sleep" || entry.stepType === "signal";
+  // Color palette: success → muted accent, failed → error tint, pending →
+  // warning. Wait entries get the same hatched pattern as wait-like
+  // steps for visual consistency.
+  const barColor = isFailure
+    ? "bg-error/70"
+    : isPending
+      ? "bg-warning/60"
+      : isWait
+        ? "bg-warning/50"
+        : "bg-base-content/40";
+  const icon =
+    entry.stepType === "sleep"
+      ? "💤"
+      : entry.stepType === "signal"
+        ? "📡"
+        : entry.stepType === "compensation"
+          ? "↩"
+          : entry.stepType === "child"
+            ? "↗"
+            : "•";
+  const realDuration = endAbs - startAbs;
+
+  const tooltip = [
+    `${entry.activityName} (${entry.stepType})`,
+    entry.phase === "completed" ? `duration ${formatDuration(realDuration)}` : "",
+    entry.phase === "pending" && entry.wakeAt ? `wake ${formatRelative(entry.wakeAt)}` : "",
+    isFailure && entry.exit?.tag === "Failure" ? `error: ${entry.exit.error}` : "",
+    `parent step: ${parentStepName}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <div class="flex items-center gap-2 h-7 px-1 rounded text-xs opacity-90">
+      <div
+        class="w-72 shrink-0 flex items-center gap-1 min-w-0"
+        style={{ paddingLeft: `${depth * 16 + 4}px` }}
+      >
+        {/* Activity rows are leaves under their parent step — no chevron,
+            but reserve the same indent so names align with step rows. */}
+        <span class="w-4 shrink-0" />
+        <span class="shrink-0 text-base-content/60">{icon}</span>
+        <span class="truncate text-xs font-mono text-base-content/70" title={entry.activityName}>
+          {entry.activityName}
+        </span>
+        {entry.branchPath && (
+          <span class="badge badge-xs badge-ghost font-mono shrink-0">br:{entry.branchPath}</span>
+        )}
+      </div>
+      <div class="w-20 shrink-0 text-center font-mono text-[10px] text-base-content/50">
+        {entry.phase === "pending" ? "…" : formatDuration(realDuration)}
+      </div>
+      <div class="relative flex-1 h-full" title={tooltip}>
+        <div
+          class={`gantt-bar absolute top-1.5 bottom-1.5 rounded ${barColor} ${
+            isWait ? "gantt-hatched" : ""
+          }`}
+          style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+        />
       </div>
     </div>
   );
