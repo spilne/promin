@@ -49,7 +49,8 @@
     "@promin/agent": "workspace:*",
     "@promin/core": "workspace:*",
     "@promin/workflow": "workspace:*",
-    "@promin/workflow-remote": "workspace:*"
+    "@promin/workflow-remote": "workspace:*",
+    "marked": "^18.0.2"
   },
   "devDependencies": {
     "@promin/sqlite": "workspace:*",

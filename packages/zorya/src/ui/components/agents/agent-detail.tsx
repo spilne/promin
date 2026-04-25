@@ -7,6 +7,7 @@ import { Page } from "../ui/page.tsx";
 import { Skeleton } from "../ui/skeleton.tsx";
 import { formatRelative } from "../../lib/format.ts";
 import { toast } from "../../lib/dialogs.ts";
+import { Markdown } from "../../lib/markdown.tsx";
 import { MemoryInspector } from "./memory-inspector.tsx";
 
 interface AgentDetailProps {
@@ -487,7 +488,9 @@ function AssistantBubble({ text }: { text: string }) {
   return (
     <div class="chat chat-start">
       <div class="chat-header text-xs text-base-content/50">assistant</div>
-      <div class="chat-bubble whitespace-pre-wrap break-words">{text}</div>
+      <div class="chat-bubble break-words">
+        <Markdown text={text} />
+      </div>
     </div>
   );
 }
@@ -574,8 +577,8 @@ function PendingBubble({ text, done, error }: { text: string; done: boolean; err
       <div class="chat-header text-xs text-base-content/50">
         assistant {!done && <span class="opacity-60">· streaming…</span>}
       </div>
-      <div class="chat-bubble whitespace-pre-wrap break-words">
-        {text || <span class="opacity-50">…</span>}
+      <div class="chat-bubble break-words">
+        {text ? <Markdown text={text} /> : <span class="opacity-50">…</span>}
         {!done && <span class="ml-1 opacity-50 animate-pulse">▍</span>}
       </div>
       {error && <div class="chat-footer text-error text-xs mt-1">{error}</div>}
