@@ -109,7 +109,7 @@ export function StepTimeline({ run, selectedStep, onSelectStep }: StepTimelinePr
             DURATION line up with the data below; without it the headers
             sit 4px to the left of every value. The extra bottom padding
             gives breathing room before the first row. */}
-        <div class="flex items-center gap-2 px-1 text-xs text-base-content/50 border-b border-base-content/10 pb-3">
+        <div class="flex items-center gap-2 px-1 text-xs text-base-content/50 border-b border-base-content/10 pb-5">
           <div class="w-72 shrink-0 text-center">STEP</div>
           <div class="w-20 shrink-0 text-center">DURATION</div>
           <div class="relative flex-1 h-5">
@@ -158,7 +158,7 @@ export function StepTimeline({ run, selectedStep, onSelectStep }: StepTimelinePr
         </div>
 
         {/* Rows */}
-        <div class="space-y-0.5 pt-1">
+        <div class="space-y-0.5 pt-3">
           {visibleRows.map((row) => {
             const step = byName.get(row.name);
             if (!step) return null;
