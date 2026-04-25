@@ -1386,17 +1386,56 @@ export async function executeWorkflowDag(
             raw = raw.handleError((err) => fallbackFn(err));
           }
 
-          // Map to step result
-          return raw.map((result) => {
-            const encoded = stepDef.codec.encode(result);
-            return {
-              name: stepDef.name,
-              result: encoded,
-              metadata: metadataRef.current,
-              durationMs: clock.currentTimeMs() - startTime,
-              startedAt,
-            };
-          });
+          // Map to step result + eager save. Without flatMap-ing the
+          // save into the pipeline, the legacy path has the same wave-
+          // tail lag the executor path used to: `Pipeline.all` waits
+          // for every parallel step, then a post-wave for-loop saves
+          // them serially. Pulling the save into the per-step
+          // pipeline collapses the lag the same way the executor path
+          // does — completedAt becomes truthful per step.
+          return raw
+            .map((result) => {
+              const encoded = stepDef.codec.encode(result);
+              return {
+                name: stepDef.name,
+                result: encoded,
+                metadata: metadataRef.current,
+                durationMs: clock.currentTimeMs() - startTime,
+                startedAt,
+              };
+            })
+            .flatMap((stepResult) =>
+              Pipeline.fromPromise(async () => {
+                await ctx.storage.saveStepResult(
+                  {
+                    workflowId,
+                    stepName: stepResult.name,
+                    result: stepResult.result,
+                    metadata: stepResult.metadata,
+                    durationMs: stepResult.durationMs,
+                    startedAt: stepResult.startedAt,
+                  },
+                  ctx.guard,
+                );
+                if (isStepAttemptStorage(ctx.storage)) {
+                  await ctx.storage.saveStepAttempt(
+                    {
+                      workflowId,
+                      stepName: stepResult.name,
+                      attempt: params.stepAttempts.get(stepResult.name) ?? 1,
+                      type: "execution",
+                      status: "completed",
+                      result: stepResult.result,
+                      durationMs: stepResult.durationMs,
+                      startedAt: stepResult.startedAt,
+                      completedAt: clock.now(),
+                    },
+                    ctx.guard,
+                  );
+                }
+                return { ...stepResult, storageAlreadyCheckpointed: true };
+              }),
+            );
         }),
       );
 
