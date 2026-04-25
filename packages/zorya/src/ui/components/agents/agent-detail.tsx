@@ -303,20 +303,41 @@ function ChatPane({
   const messages = (messagesResp?.messages ?? []) as Message[];
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<PendingAssistant | null>(null);
+  // Optimistic user-message bubble — rendered the moment the user hits
+  // Send, BEFORE the gateway has persisted it. Cleared as soon as the
+  // refreshed history shows the same content as the last user message
+  // (see useEffect below). This makes the UI feel responsive even
+  // though the SSE round-trip takes a beat.
+  const [pendingUser, setPendingUser] = useState<string | null>(null);
   const abortRef = useRef<{ abort: () => void } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll on new messages or pending updates.
+  // Drop the optimistic user bubble once the persisted history contains
+  // the same text — keeps a brief render window where both would show
+  // and produce a duplicate.
+  useEffect(() => {
+    if (!pendingUser) return;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m?.role !== "user") continue;
+      if (m.content === pendingUser) setPendingUser(null);
+      return;
+    }
+  }, [messages, pendingUser]);
+
+  // Auto-scroll on new messages or pending updates (including the
+  // optimistic user bubble).
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [messages.length, pending?.text, pending?.done]);
+  }, [messages.length, pending?.text, pending?.done, pendingUser]);
 
   const send = () => {
     const task = draft.trim();
     if (!task || pending) return;
     setDraft("");
+    setPendingUser(task);
     setPending({ text: "", done: false });
 
     const stream = api.streamAgentThread(
@@ -340,7 +361,9 @@ function ChatPane({
     stream.done.then(() => {
       refreshMessages();
       onTurnComplete();
-      // Clear pending after the persisted history catches up.
+      // Clear pending after the persisted history catches up. The
+      // useEffect above will drop pendingUser independently once the
+      // refresh's data lands.
       setTimeout(() => setPending(null), 250);
     });
   };
@@ -349,15 +372,8 @@ function ChatPane({
     abortRef.current?.abort();
     abortRef.current = null;
     setPending(null);
+    setPendingUser(null);
   };
-
-  // Build the rendered list: persisted history first, then optional pending.
-  const userJustSent =
-    pending && messages.length > 0 && messages[messages.length - 1]?.role === "user"
-      ? null
-      : pending && draft === ""
-        ? null
-        : null;
 
   return (
     <section class="card bg-base-100 shadow flex flex-col min-h-0">
@@ -396,11 +412,14 @@ function ChatPane({
 
         {renderConversation(messages)}
 
-        {pending && <PendingBubble text={pending.text} done={pending.done} error={pending.error} />}
+        {/* Optimistic echo of the user's most recent send — appears
+            instantly so the UI feels responsive while the gateway
+            persists the message and starts the LLM. Removed by the
+            useEffect above as soon as the same content shows up in
+            the refreshed persisted history. */}
+        {pendingUser && <UserBubble content={pendingUser} />}
 
-        {/* Suppress unused-var warning while keeping the variable for future
-            "echoed user message" fast-path support. */}
-        {userJustSent}
+        {pending && <PendingBubble text={pending.text} done={pending.done} error={pending.error} />}
       </div>
 
       <div class="border-t border-base-content/10 px-3 py-2 flex gap-2">
