@@ -220,11 +220,29 @@ export interface ZoryaServerConfig extends AuthConfig {
      */
     leaderLockTtlMs?: number;
     /**
-     * Restrict the loop to a single schedule namespace. Different
-     * namespaces have independent leader locks, so two Zorya instances
-     * can each be leader for a different namespace.
+     * Restrict the loop to a single schedule namespace. `undefined`
+     * polls only the GLOBAL namespace (schedules with no `namespace`
+     * field set). Different namespaces have independent leader locks,
+     * so two Zorya instances can each be leader for a different
+     * namespace.
+     *
+     * Mutually exclusive with `namespaces`. To poll across multiple
+     * (or all) namespaces from one Zorya instance, set `namespaces`.
      */
     namespace?: string;
+    /**
+     * Multi-namespace mode for serving many tenants from one Zorya.
+     *
+     * - `"all"` — every namespace with at least one due schedule on
+     *   each tick. Idle namespaces cost zero RPCs (the cross-namespace
+     *   `findDueAcross` only returns rows that are actually due).
+     * - `string[]` — restrict to a specific tenant set. Pass `""` /
+     *   `undefined` element to also include the global namespace.
+     *
+     * Each namespace acquires its own leader lock, so noisy or slow
+     * tenants can't block others. Mutually exclusive with `namespace`.
+     */
+    namespaces?: "all" | readonly (string | undefined)[];
     /**
      * Stable instance id used by leader election. Default: random UUID
      * generated per server boot.
@@ -240,6 +258,12 @@ export interface ZoryaServerConfig extends AuthConfig {
     partition?: { index: number; count: number };
     /** Max schedules per poll. Default: 100. */
     batchSize?: number;
+    /**
+     * Max concurrent dispatches per tick. Equivalent to
+     * `scheduler.stream().pipe(parMapAsync(N))` from the standalone
+     * scheduler. Default: 10.
+     */
+    dispatchConcurrency?: number;
     /**
      * Custom dispatch callback. Receives the fired tick + the schedule
      * config that produced it. Return a Promise. When omitted the loop
@@ -377,8 +401,10 @@ export class ZoryaServer {
         pollIntervalMs: config.scheduling.pollIntervalMs,
         leaderLockTtlMs: config.scheduling.leaderLockTtlMs,
         namespace: config.scheduling.namespace,
+        namespaces: config.scheduling.namespaces,
         partition: config.scheduling.partition,
         batchSize: config.scheduling.batchSize,
+        dispatchConcurrency: config.scheduling.dispatchConcurrency,
       });
     }
 

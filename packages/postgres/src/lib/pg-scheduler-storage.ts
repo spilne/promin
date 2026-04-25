@@ -275,6 +275,36 @@ export class PgSchedulerStorage implements SchedulerStorage {
     );
     return result?.acquired === true;
   }
+
+  async findDueAcross(params: {
+    now: Date;
+    limit: number;
+    namespaces?: readonly (string | undefined)[];
+  }): Promise<readonly { id: string; namespace?: string }[]> {
+    // Single index scan over (namespace, next_run). The namespace filter,
+    // when supplied, becomes an IN list (with optional NULL for global).
+    const filters: SQL[] = [
+      isNotNull(durableSchedules.nextRun),
+      lte(durableSchedules.nextRun, params.now),
+    ];
+    if (params.namespaces) {
+      const named = params.namespaces.filter((n): n is string => n !== undefined);
+      const includeGlobal = params.namespaces.some((n) => n === undefined);
+      const branches: SQL[] = [];
+      if (named.length > 0) branches.push(inArray(durableSchedules.namespace, named));
+      if (includeGlobal) branches.push(sql`${durableSchedules.namespace} IS NULL`);
+      // Empty list (no global, no named) — match nothing.
+      if (branches.length === 0) return [];
+      filters.push(branches.length === 1 ? branches[0]! : sql`(${branches[0]} OR ${branches[1]})`);
+    }
+    const rows = await this.db
+      .select({ id: durableSchedules.id, namespace: durableSchedules.namespace })
+      .from(durableSchedules)
+      .where(and(...filters))
+      .orderBy(asc(durableSchedules.nextRun))
+      .limit(params.limit);
+    return rows.map((r) => ({ id: r.id, namespace: r.namespace ?? undefined }));
+  }
 }
 
 // ---------------------------------------------------------------------------

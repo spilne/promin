@@ -44,10 +44,38 @@ export interface SchedulerLoopConfig {
   pollIntervalMs?: number;
   /** Leader-lock TTL. Default: 3 × pollIntervalMs. */
   leaderLockTtlMs?: number;
-  /** Scope this loop to a single namespace. Default: undefined (global). */
+  /**
+   * Scope this loop to a single namespace. Default: undefined (poll the
+   * GLOBAL namespace only — schedules with no `namespace` field set).
+   *
+   * Mutually exclusive with `namespaces`. To poll across more than one
+   * namespace from the same Zorya instance, set `namespaces` instead.
+   */
   namespace?: string;
+  /**
+   * Multi-namespace mode. Each namespace gets its own leader lock, and
+   * the loop runs per-namespace ticks in parallel within a single poll
+   * cycle. Lets one Zorya cover every tenant without creating a single
+   * global contention point.
+   *
+   * - `"all"` — call `storage.listNamespaces()` on every poll to discover
+   *   tenants dynamically. New namespaces appear without a config change.
+   * - `string[]` — explicit list (use `""` or `undefined` element to
+   *   include the global namespace). Avoids the `listNamespaces` round
+   *   trip when you already know the set.
+   *
+   * Mutually exclusive with `namespace`.
+   */
+  namespaces?: "all" | readonly (string | undefined)[];
   /** Max schedules per poll. Default: 100. */
   batchSize?: number;
+  /**
+   * Max concurrent dispatches per tick. Equivalent to
+   * `scheduler.stream().pipe(parMapAsync(N))` from the standalone
+   * scheduler — caps fan-out so a 100-schedule wakeup doesn't slam the
+   * trigger / coordinator with 100 simultaneous calls. Default: 10.
+   */
+  dispatchConcurrency?: number;
   /**
    * Hash partitioning so multiple Zorya instances can share work across
    * different schedule subsets while leader election still gates each
@@ -64,12 +92,17 @@ export class SchedulerLoop {
   private readonly pollIntervalMs: number;
   private readonly leaderLockTtlMs: number;
   private readonly namespace?: string;
+  private readonly namespacesMode?: "all" | readonly (string | undefined)[];
   private readonly batchSize: number;
+  private readonly dispatchConcurrency: number;
   private readonly partition?: { index: number; count: number };
   private running = false;
   private loopPromise?: Promise<void>;
 
   constructor(config: SchedulerLoopConfig) {
+    if (config.namespace !== undefined && config.namespaces !== undefined) {
+      throw new Error("SchedulerLoop: pass either `namespace` or `namespaces`, not both");
+    }
     this.storage = config.storage;
     this.trigger = config.trigger;
     this.fireOverride = config.fire;
@@ -77,7 +110,9 @@ export class SchedulerLoop {
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
     this.leaderLockTtlMs = config.leaderLockTtlMs ?? this.pollIntervalMs * 3;
     this.namespace = config.namespace;
+    this.namespacesMode = config.namespaces;
     this.batchSize = config.batchSize ?? 100;
+    this.dispatchConcurrency = config.dispatchConcurrency ?? 10;
     if (config.partition) {
       const { index, count } = config.partition;
       if (count < 1 || index < 0 || index >= count) {
@@ -101,12 +136,29 @@ export class SchedulerLoop {
 
   /**
    * Drive one tick of the loop synchronously and return the ticks that
-   * fired. Exposed for tests so they don't have to wait on real timers.
+   * fired (across every namespace handled this cycle). Exposed for tests
+   * so they don't have to wait on real timers.
+   *
+   * Single-namespace mode (`namespace?: string`, default global) keeps
+   * the original two-step contract: acquireLeader → findDue → process.
+   *
+   * Multi-namespace mode (`namespaces: "all" | string[]`) collapses idle
+   * tenants to zero RPCs: one cross-namespace `findDueAcross` returns
+   * only the namespaces with work, and the per-namespace leader lock +
+   * commit only runs for those. 1000 tenants with 5 active ticks per
+   * cycle costs O(active_namespaces) RPCs, not O(total_namespaces).
    */
   async tickOnce(): Promise<ScheduleTick[]> {
+    if (this.namespacesMode !== undefined) {
+      return await this.tickAcrossNamespaces();
+    }
+    return await this.tickSingleNamespace(this.namespace);
+  }
+
+  private async tickSingleNamespace(namespace: string | undefined): Promise<ScheduleTick[]> {
     const isLeader = await this.storage.tryAcquireLeader({
       instanceId: this.instanceId,
-      namespace: this.namespace,
+      namespace,
       ttlMs: this.leaderLockTtlMs,
     });
     if (!isLeader) return [];
@@ -114,12 +166,65 @@ export class SchedulerLoop {
     const dueIds = await this.storage.findDue({
       now: new Date(),
       limit: this.batchSize,
-      namespace: this.namespace,
+      namespace,
     });
-    const targetIds = dueIds.filter((id) => {
-      if (!this.partition) return true;
-      return hashCode(id) % this.partition.count === this.partition.index;
+    return await this.processDueIds(dueIds);
+  }
+
+  private async tickAcrossNamespaces(): Promise<ScheduleTick[]> {
+    const filter = this.namespacesMode === "all" ? undefined : this.namespacesMode;
+    // ONE call returns every due row + its namespace, regardless of
+    // whether 0 or 10000 tenants are configured. Empty namespaces never
+    // appear here so they cost nothing.
+    const due = await this.storage.findDueAcross({
+      now: new Date(),
+      limit: this.batchSize,
+      namespaces: filter,
     });
+    if (due.length === 0) return [];
+
+    // Group by namespace so each tenant's leader lock + commit happens
+    // independently. A slow / contested namespace can't block the others.
+    const byNamespace = new Map<string | undefined, string[]>();
+    for (const row of due) {
+      if (this.partition && hashCode(row.id) % this.partition.count !== this.partition.index) {
+        continue;
+      }
+      const list = byNamespace.get(row.namespace) ?? [];
+      list.push(row.id);
+      byNamespace.set(row.namespace, list);
+    }
+    if (byNamespace.size === 0) return [];
+
+    // Run per-namespace processing in parallel. tryAcquireLeader is
+    // per-namespace, so one Zorya can be leader for many namespaces at
+    // once without coupling them.
+    const perNamespace = await Promise.all(
+      [...byNamespace.entries()].map(async ([namespace, ids]) => {
+        const isLeader = await this.storage.tryAcquireLeader({
+          instanceId: this.instanceId,
+          namespace,
+          ttlMs: this.leaderLockTtlMs,
+        });
+        if (!isLeader) return [] as ScheduleTick[];
+        return await this.processDueIds(ids);
+      }),
+    );
+    return perNamespace.flat();
+  }
+
+  /**
+   * Shared post-findDue path: load configs/states, compute ticks,
+   * commitPoll, dispatch.
+   */
+  private async processDueIds(dueIds: readonly string[]): Promise<ScheduleTick[]> {
+    const targetIds = this.namespacesMode
+      ? // Cross-namespace path already partition-filtered upstream.
+        [...dueIds]
+      : dueIds.filter((id) => {
+          if (!this.partition) return true;
+          return hashCode(id) % this.partition.count === this.partition.index;
+        });
     if (targetIds.length === 0) return [];
 
     const [configs, states] = await Promise.all([
@@ -156,18 +261,30 @@ export class SchedulerLoop {
 
     if (updates.length > 0) await this.storage.commitPoll(updates);
 
-    // Dispatch each tick. Failures are isolated per-tick so one bad
-    // schedule doesn't stall the whole batch.
-    for (const tick of ticks) {
-      const config = configs.get(tick.scheduleId);
-      if (!config) continue;
-      try {
-        await this.dispatch(tick, config);
-      } catch {
-        // Caller-supplied trigger / fire writes its own logs; swallowing
-        // here keeps the loop alive for other schedules.
-      }
-    }
+    // Bounded-parallel dispatch — same shape as
+    // `scheduler.stream().parMapAsync(dispatchConcurrency)`. A pool of N
+    // workers each pulls the next tick off a shared cursor until the
+    // batch is drained. Caps fan-out so a wakeup of 100 schedules
+    // doesn't slam the trigger / coordinator with 100 simultaneous
+    // calls. Failures are isolated per-tick so one bad schedule doesn't
+    // stall its peers.
+    let cursor = 0;
+    const workerCount = Math.max(1, Math.min(this.dispatchConcurrency, ticks.length));
+    await Promise.all(
+      Array.from({ length: workerCount }, async () => {
+        while (cursor < ticks.length) {
+          const i = cursor++;
+          const tick = ticks[i]!;
+          const config = configs.get(tick.scheduleId);
+          if (!config) continue;
+          try {
+            await this.dispatch(tick, config);
+          } catch {
+            // Caller-supplied trigger / fire writes its own logs.
+          }
+        }
+      }),
+    );
 
     return ticks;
   }

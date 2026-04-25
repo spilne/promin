@@ -212,6 +212,203 @@ describe("ZoryaServer scheduling — embedded SchedulerLoop", () => {
         }),
     ).toThrow(/fire|trigger/);
   });
+
+  it("namespaces: 'all' fires schedules across every namespace in one tick", async () => {
+    const scheduler = new InMemorySchedulerStorage();
+    const fired: Array<{ id: string; ns: string | undefined }> = [];
+
+    const server = new ZoryaServer({
+      storage: new InMemoryWorkflowStorage(),
+      scheduler,
+      scheduling: {
+        enabled: true,
+        pollIntervalMs: 50,
+        leaderLockTtlMs: 1_000,
+        namespaces: "all",
+        fire: async (tick, sched) => {
+          fired.push({ id: tick.scheduleId, ns: sched.namespace });
+        },
+      },
+    });
+
+    // Three tenants + one global schedule, all due immediately.
+    const seed = async (id: string, namespace: string | undefined) => {
+      await scheduler.upsertSchedule({
+        id,
+        namespace,
+        intervalMs: 60_000,
+        enabled: true,
+        startAt: new Date(Date.now() - 1_000),
+        metadata: {},
+      });
+      await scheduler.setNextRun(id, new Date(Date.now() - 100));
+    };
+    await seed("tenant-a-job", "tenant-a");
+    await seed("tenant-b-job", "tenant-b");
+    await seed("tenant-c-job", "tenant-c");
+    await seed("global-job", undefined);
+
+    await server.schedulerLoop!.tickOnce();
+
+    const namespacesFired = new Set(fired.map((f) => f.ns));
+    expect(namespacesFired.has("tenant-a")).toBe(true);
+    expect(namespacesFired.has("tenant-b")).toBe(true);
+    expect(namespacesFired.has("tenant-c")).toBe(true);
+    expect(namespacesFired.has(undefined)).toBe(true);
+
+    server.stop();
+  });
+
+  it("idle namespaces cost zero leader-lock RPCs (1000-tenant scaling proof)", async () => {
+    // Wraps an InMemorySchedulerStorage and counts every method call so the
+    // test can prove findDueAcross + per-active-namespace dispatch is the
+    // scaling shape, not per-namespace fan-out.
+    const inner = new InMemorySchedulerStorage();
+    const calls = { tryAcquireLeader: 0, findDue: 0, findDueAcross: 0, commitPoll: 0 };
+    const counting = new Proxy(inner, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof value !== "function") return value;
+        const name = prop as string;
+        return (...args: unknown[]) => {
+          if (name in calls) (calls as Record<string, number>)[name]++;
+          return (value as (...args: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    }) as unknown as typeof inner;
+
+    const fired: string[] = [];
+    const server = new ZoryaServer({
+      storage: new InMemoryWorkflowStorage(),
+      scheduler: counting,
+      scheduling: {
+        enabled: true,
+        pollIntervalMs: 50,
+        leaderLockTtlMs: 1_000,
+        namespaces: "all",
+        fire: async (tick) => {
+          fired.push(tick.scheduleId);
+        },
+      },
+    });
+
+    // Seed 1000 idle tenants (no due schedules).
+    for (let i = 0; i < 1000; i++) {
+      await inner.upsertSchedule({
+        id: `tenant-${i}-job`,
+        namespace: `tenant-${i}`,
+        intervalMs: 60_000,
+        enabled: true,
+        // startAt in the future so nothing is due.
+        startAt: new Date(Date.now() + 60_000),
+        metadata: {},
+      });
+      // Deliberately leave nextRun unset (the in-memory backend only
+      // counts schedules with a nextRun in due-tracking).
+    }
+
+    // Plus 3 active tenants with due schedules.
+    const seedActive = async (id: string, ns: string) => {
+      await inner.upsertSchedule({
+        id,
+        namespace: ns,
+        intervalMs: 60_000,
+        enabled: true,
+        startAt: new Date(Date.now() - 1_000),
+        metadata: {},
+      });
+      await inner.setNextRun(id, new Date(Date.now() - 100));
+    };
+    await seedActive("hot-1", "hot-tenant-a");
+    await seedActive("hot-2", "hot-tenant-b");
+    await seedActive("hot-3", "hot-tenant-c");
+
+    // Reset counters after seeding.
+    calls.tryAcquireLeader = 0;
+    calls.findDue = 0;
+    calls.findDueAcross = 0;
+    calls.commitPoll = 0;
+
+    await server.schedulerLoop!.tickOnce();
+
+    // Findings: 1 cross-namespace findDueAcross + 1 leader-lock per
+    // ACTIVE namespace (3) + 1 commit per active namespace.
+    expect(calls.findDueAcross).toBe(1);
+    expect(calls.findDue).toBe(0); // multi-namespace mode skips per-ns findDue
+    expect(calls.tryAcquireLeader).toBe(3); // only the 3 active tenants
+    expect(calls.commitPoll).toBe(3);
+    expect(fired.length).toBe(3);
+
+    server.stop();
+  });
+
+  it("dispatchConcurrency caps per-tick fan-out", async () => {
+    const scheduler = new InMemorySchedulerStorage();
+    let inFlight = 0;
+    let peakInFlight = 0;
+    const release: Array<() => void> = [];
+
+    const server = new ZoryaServer({
+      storage: new InMemoryWorkflowStorage(),
+      scheduler,
+      scheduling: {
+        enabled: true,
+        pollIntervalMs: 50,
+        leaderLockTtlMs: 1_000,
+        dispatchConcurrency: 3,
+        fire: async () => {
+          inFlight++;
+          peakInFlight = Math.max(peakInFlight, inFlight);
+          await new Promise<void>((r) => release.push(r));
+          inFlight--;
+        },
+      },
+    });
+
+    // Twelve schedules due simultaneously.
+    for (let i = 0; i < 12; i++) {
+      await scheduler.upsertSchedule({
+        id: `job-${i}`,
+        intervalMs: 60_000,
+        enabled: true,
+        startAt: new Date(Date.now() - 1_000),
+        metadata: {},
+      });
+      await scheduler.setNextRun(`job-${i}`, new Date(Date.now() - 100));
+    }
+
+    // Kick off the tick; release dispatchers in a loop so the pool drains.
+    const tickPromise = server.schedulerLoop!.tickOnce();
+    // Give the pool a moment to ramp up to its concurrency cap.
+    await new Promise<void>((r) => setTimeout(r, 25));
+    while (release.length > 0 || inFlight > 0) {
+      release.shift()?.();
+      await new Promise<void>((r) => setTimeout(r, 1));
+    }
+    await tickPromise;
+
+    // With dispatchConcurrency=3, no more than 3 ticks ever run in parallel.
+    expect(peakInFlight).toBeLessThanOrEqual(3);
+    expect(peakInFlight).toBeGreaterThanOrEqual(2); // proof of actual parallelism
+
+    server.stop();
+  });
+
+  it("rejects passing both `namespace` and `namespaces` simultaneously", () => {
+    expect(
+      () =>
+        new ZoryaServer({
+          storage: new InMemoryWorkflowStorage(),
+          scheduler: new InMemorySchedulerStorage(),
+          scheduling: {
+            enabled: true,
+            namespace: "tenant-a",
+            namespaces: "all",
+            fire: async () => {},
+          },
+        }),
+    ).toThrow(/namespace|namespaces/);
+  });
 });
 
 function server_stop(s: ZoryaServer): void {

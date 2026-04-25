@@ -181,4 +181,23 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     });
     return true;
   }
+
+  async findDueAcross(params: {
+    now: Date;
+    limit: number;
+    namespaces?: readonly (string | undefined)[];
+  }): Promise<readonly { id: string; namespace?: string }[]> {
+    const nowMs = params.now.getTime();
+    const filter = params.namespaces ? new Set(params.namespaces) : undefined;
+    const due: { id: string; namespace?: string; nextRun: number }[] = [];
+    for (const [id, ts] of this.nextRun) {
+      if (ts > nowMs) continue;
+      const cfg = this.schedules.get(id);
+      if (!cfg) continue;
+      if (filter && !filter.has(cfg.namespace)) continue;
+      due.push({ id, namespace: cfg.namespace, nextRun: ts });
+    }
+    due.sort((a, b) => a.nextRun - b.nextRun);
+    return due.slice(0, params.limit).map(({ id, namespace }) => ({ id, namespace }));
+  }
 }

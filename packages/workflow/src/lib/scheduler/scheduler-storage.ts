@@ -114,4 +114,25 @@ export interface SchedulerStorage {
     namespace?: string;
     ttlMs: number;
   }): Promise<boolean>;
+
+  /**
+   * Cross-namespace `findDue`: returns due schedules along with their
+   * namespace, with no per-namespace filter. Used by the embedded
+   * scheduler tick loop's multi-namespace mode so a single Zorya
+   * instance can cover N tenants without paying O(N) idle RPCs per
+   * poll — empty namespaces never appear here, so they cost nothing.
+   *
+   * Postgres collapses to one `SELECT id, namespace ... WHERE next_run
+   * <= $1 LIMIT $2` against the existing `(namespace, next_run)` index.
+   * Redis SCANs the per-namespace due ZSETs and unions the results.
+   * In-memory iterates the nextRun map.
+   *
+   * Pass `namespaces` to restrict to a specific subset (filter happens
+   * server-side / in-storage so the limit is honored after the filter).
+   */
+  findDueAcross(params: {
+    now: Date;
+    limit: number;
+    namespaces?: readonly (string | undefined)[];
+  }): Promise<readonly { id: string; namespace?: string }[]>;
 }
