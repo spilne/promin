@@ -16,6 +16,13 @@ import {
   hasAnyFilter,
   type ParsedSearchQuery,
 } from "../../lib/smart-search.ts";
+import { SmartSearchInput } from "./smart-search-input.tsx";
+
+interface SuggestionPools {
+  name: string[];
+  type: string[];
+  namespace: string[];
+}
 
 interface RunListProps {
   onOpen: (id: string) => void;
@@ -67,6 +74,31 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
   // it and include in their API fetches.
   const [namespace] = useNamespace();
   const [sparklines, setSparklines] = useState<SparklinesResponse>({});
+  // Suggestion pool for the smart-search dropdown — every distinct
+  // name/type/namespace ever observed. Fetched once per namespace change.
+  const [pools, setPools] = useState<SuggestionPools>({
+    name: [],
+    type: [],
+    namespace: [],
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .listWorkflowNames({ namespace: namespace || undefined })
+      .then((r) => {
+        if (cancelled) return;
+        setPools({
+          name: r.names ?? [],
+          type: r.types ?? [],
+          namespace: r.namespaces ?? [],
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [namespace]);
 
   // Refresh sparklines alongside the main fetch so rows and sparkbars stay
   // in step as new runs arrive.
@@ -246,47 +278,35 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
 
       {/* Smart search row: one input handles id, name, type, version,
           namespace, and metadata via `field:value` / `key=value` syntax;
-          bare text falls back to id-or-name lookup on submit. The Clear
-          button sits to the right of the (fixed-width) input so it can
-          fade in/out without shifting the input's position. */}
+          bare text falls back to id-or-name lookup on submit. Inline
+          suggestions fire while the cursor is inside a name:/type:/
+          namespace: clause. */}
       <div class="flex items-start gap-2">
         <div class="flex-1 min-w-0">
-          <div class="relative">
-            <input
-              class="input input-bordered input-sm w-full font-mono pr-10"
-              placeholder='Search id, or "name:foo type:bar version:v2 userId=u_42"'
-              value={searchInput}
-              title={
-                "One field replaces id/name/type/version/namespace/metadata.\n" +
-                "Examples:\n" +
-                "  wf-abc123                        — find run by id (jumps if exact)\n" +
-                "  onboarding                       — name shortcut\n" +
-                "  name:onboarding type:webhook     — structured field filter\n" +
-                'name:"my workflow" version:v2     — quote values with spaces\n' +
-                "  userId=u_42 retries=3 dryRun=true — metadata (JSON values parse)\n" +
-                "Press Enter to apply."
-              }
-              onInput={(e) => setSearchInput((e.target as HTMLInputElement).value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void submitSearch();
-              }}
-              onBlur={() => {
-                if (searchInput !== appliedSearch) void submitSearch();
-              }}
-            />
-            {searchInput && (
-              <button
-                class="btn btn-xs btn-ghost btn-circle absolute right-1 top-1/2 -translate-y-1/2"
-                aria-label="Clear search input"
-                onClick={() => {
-                  setSearchInput("");
-                  setAppliedSearch("");
-                }}
-              >
-                ×
-              </button>
-            )}
-          </div>
+          <SmartSearchInput
+            value={searchInput}
+            onChange={setSearchInput}
+            onSubmit={() => void submitSearch()}
+            onBlurCommit={() => {
+              if (searchInput !== appliedSearch) void submitSearch();
+            }}
+            pools={pools}
+            placeholder='Search id, or "name:foo type:bar version:v2 userId=u_42"'
+            title={
+              "One field replaces id/name/type/version/namespace/metadata.\n" +
+              "Examples:\n" +
+              "  wf-abc123                        — find run by id (jumps if exact)\n" +
+              "  onboarding                       — name shortcut\n" +
+              "  name:onboarding type:webhook     — structured field filter\n" +
+              'name:"my workflow" version:v2     — quote values with spaces\n' +
+              "  userId=u_42 retries=3 dryRun=true — metadata (JSON values parse)\n" +
+              "Tab / Enter to accept a suggestion · Press Enter to apply."
+            }
+            onClearInput={() => {
+              setSearchInput("");
+              setAppliedSearch("");
+            }}
+          />
           {/* Parsed-clause chips — click the × to drop a single filter. */}
           {hasAnyFilter(parsedSearch) && (
             <div class="flex items-center gap-1 flex-wrap mt-2">
