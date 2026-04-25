@@ -122,20 +122,38 @@ export function StepTimeline({ run, selectedStep, onSelectStep }: StepTimelinePr
                 <div class="-translate-x-1/2 mt-0.5">{formatDuration(t.realMs)}</div>
               </div>
             ))}
-            {/* Visual zigzag at each compression boundary so users can see
-                where time was skipped. */}
+            {/* Compression band + the real elapsed duration as a label
+                above the sliver — without it, the user can't tell whether
+                the gap was 5s or 10 days. The label is allowed to overflow
+                the band's tiny visual width via whitespace-nowrap; the tick
+                filter has already cleared this region of natural ticks so
+                there's nothing to collide with. */}
             {axis.segments
               .filter((s) => s.compressed)
-              .map((s) => (
-                <div
-                  class="absolute top-0 h-full bg-warning/10 border-x border-dashed border-warning/40"
-                  style={{
-                    left: `${(s.displayStart / axis.totalDisplay) * 100}%`,
-                    width: `${((s.displayEnd - s.displayStart) / axis.totalDisplay) * 100}%`,
-                  }}
-                  title={`Compressed range — ${formatDuration(s.realEnd - s.realStart)} of idle time`}
-                />
-              ))}
+              .map((s) => {
+                const leftPct = (s.displayStart / axis.totalDisplay) * 100;
+                const widthPct = ((s.displayEnd - s.displayStart) / axis.totalDisplay) * 100;
+                const real = formatDuration(s.realEnd - s.realStart);
+                return (
+                  <>
+                    <div
+                      class="absolute top-0 h-full bg-warning/15 border-x border-dashed border-warning/50"
+                      style={{ left: `${leftPct}%`, width: `${widthPct}%` }}
+                      title={`Compressed range — ${real} of idle time`}
+                    />
+                    <div
+                      class="absolute top-0 text-[10px] text-warning font-mono whitespace-nowrap pointer-events-none leading-none"
+                      style={{
+                        left: `${leftPct + widthPct / 2}%`,
+                        transform: "translateX(-50%)",
+                      }}
+                      title={`${real} elapsed`}
+                    >
+                      ⇥ {real}
+                    </div>
+                  </>
+                );
+              })}
           </div>
         </div>
 
@@ -594,10 +612,13 @@ function buildTimeAxis(steps: StepDto[], origin: number, endMs: number): TimeAxi
 
 /**
  * Build evenly-spaced ticks against the *natural* portion of the axis, then
- * project them through `realToDisplay`. Ticks that would land inside a
- * compressed segment are dropped — labelling the squashed range with
- * "10d / 11d / 12d" would just visually fight the compression we just put
- * in. The compression band itself carries an explanatory hover label.
+ * project them through `realToDisplay`. Round-interval ticks that fall
+ * inside a compressed segment are dropped (labelling the squashed range
+ * with "10d / 11d / 12d" would fight the compression). To keep the
+ * post-gap timeline labelled, we also emit a tick at the END of every
+ * compressed segment so the user sees the "resume time" right after the
+ * sliver — without it, after a long approval wait the only label is "0s"
+ * at the far left.
  */
 function buildAxisTicks(axis: TimeAxis): Array<{ realMs: number; displayMs: number }> {
   if (axis.segments.length === 0 || axis.totalDisplay <= 0) return [];
@@ -614,13 +635,30 @@ function buildAxisTicks(axis: TimeAxis): Array<{ realMs: number; displayMs: numb
   const step = stepNice * magnitude;
 
   const ticks: Array<{ realMs: number; displayMs: number }> = [];
+  const seen = new Set<number>();
+  const push = (realMs: number) => {
+    if (seen.has(realMs)) return;
+    seen.add(realMs);
+    ticks.push({ realMs, displayMs: axis.realToDisplay(origin + realMs) });
+  };
+
   for (let t = 0; t <= totalMs; t += step) {
     const abs = origin + t;
     const inCompressed = axis.segments.some(
       (s) => s.compressed && abs > s.realStart && abs < s.realEnd,
     );
     if (inCompressed) continue;
-    ticks.push({ realMs: t, displayMs: axis.realToDisplay(abs) });
+    push(t);
   }
+
+  // Resume-tick after every compressed segment. Picks the segment's end
+  // (i.e. the start of the next natural region) so the user sees real time
+  // continuing at the right edge of the sliver.
+  for (const seg of axis.segments) {
+    if (!seg.compressed) continue;
+    push(seg.realEnd - origin);
+  }
+
+  ticks.sort((a, b) => a.displayMs - b.displayMs);
   return ticks;
 }
