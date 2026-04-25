@@ -97,7 +97,7 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
           <div class="flex items-center gap-3">
             {agent && <AgentMetaBadges agent={agent} />}
             <button
-              class="btn btn-sm btn-square btn-ghost text-lg"
+              class="btn btn-md btn-square btn-ghost text-2xl"
               onClick={() => setConfigOpen(true)}
               aria-label="Agent config"
               title="View this agent's recipe — system prompt, tools, model, metadata"
