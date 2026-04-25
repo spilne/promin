@@ -130,8 +130,10 @@ function WorkerCard({
       {/* Categories. Each row's badges share a color so users can scan
             "what does this worker offer?" at a glance instead of decoding
             uniform-grey pills. Outline variant keeps the surface dark
-            (badge-soft would compete with the card body color). */}
-      <div class="space-y-1 text-xs">
+            (badge-soft would compete with the card body color).
+            `space-y-2` keeps badge rows from sitting on top of each other
+            — `space-y-1` was too tight given the badge height. */}
+      <div class="space-y-2 text-xs">
         {worker.capabilities && worker.capabilities.length > 0 && (
           <TagRow label="Capabilities" tags={worker.capabilities} variant="primary" />
         )}
