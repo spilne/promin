@@ -321,6 +321,44 @@ export interface JournaledContext<Input, Prev> {
     condition: (result: T, iter: number) => boolean,
     options?: { readonly maxIterations?: number },
   ): Generator<ActivityYield, T, unknown>;
+
+  /**
+   * Bind a record of activity functions into a typed proxy where each
+   * method is journal-recorded under its property key. Sugar over the
+   * 2-arg `ctx.activity(name, fn)` form — same semantics, less ceremony:
+   *
+   * ```ts
+   * .journaled("checkout", function*(ctx) {
+   *   const { validate, charge, ship } = ctx.proxy({ validate, charge, ship });
+   *   const order = yield* validate(ctx.input.orderId);
+   *   const tx    = yield* charge(order);
+   *   return yield* ship(tx);
+   * });
+   * ```
+   *
+   * Each proxied call expands to `ctx.activity(<key>, () => fn(...args))`,
+   * so the journal name is the property key (not `"anonymous"`), and
+   * replay-determinism rules apply unchanged. Use `optionsByName` to
+   * forward per-activity `ActivityOptions` (retry / codec / idempotent /
+   * compensate); `defaultOptions` applies to every key that doesn't have
+   * its own entry.
+   *
+   * Composes with the existing 2-arg / 3-arg `ctx.activity` form — the
+   * proxy doesn't replace it, it just removes the closure boilerplate
+   * for static activity sets. For dynamic names or 3-arg payload hashing,
+   * keep using `ctx.activity` directly.
+   */
+  proxy<Acts extends Record<string, (...args: any[]) => any>>(
+    activities: Acts,
+    options?: {
+      readonly defaultOptions?: ActivityOptions<unknown>;
+      readonly optionsByName?: { readonly [K in keyof Acts]?: ActivityOptions<unknown> };
+    },
+  ): {
+    readonly [K in keyof Acts]: (
+      ...args: Parameters<Acts[K]>
+    ) => Generator<ActivityYield, Awaited<ReturnType<Acts[K]>>, unknown>;
+  };
 }
 
 /** The body function passed to `.journaled()`. */
@@ -1202,6 +1240,37 @@ function makeCtx<Input, Prev>(params: {
     return dowhileImpl(name, fn, (r, i) => !condition(r, i), options);
   }
 
+  function proxyImpl<Acts extends Record<string, (...args: any[]) => any>>(
+    activities: Acts,
+    options?: {
+      readonly defaultOptions?: ActivityOptions<unknown>;
+      readonly optionsByName?: { readonly [K in keyof Acts]?: ActivityOptions<unknown> };
+    },
+  ): {
+    readonly [K in keyof Acts]: (
+      ...args: Parameters<Acts[K]>
+    ) => Generator<ActivityYield, Awaited<ReturnType<Acts[K]>>, unknown>;
+  } {
+    const out: Record<string, (...args: unknown[]) => Generator<ActivityYield, unknown, unknown>> =
+      {};
+    for (const key of Object.keys(activities)) {
+      const fn = activities[key as keyof Acts];
+      const perKey = options?.optionsByName?.[key as keyof Acts];
+      const merged = perKey ?? options?.defaultOptions;
+      out[key] = (...args: unknown[]) =>
+        // Proxy methods are static activities — closure over `args` keeps
+        // input capture local to this call, matching the 2-arg
+        // `ctx.activity(name, fn)` form. Names are taken from the property
+        // key (not from `fn.name`, which is mangled by bundlers).
+        activity(key, () => fn(...args), merged as ActivityOptions<unknown> | undefined);
+    }
+    return out as {
+      readonly [K in keyof Acts]: (
+        ...args: Parameters<Acts[K]>
+      ) => Generator<ActivityYield, Awaited<ReturnType<Acts[K]>>, unknown>;
+    };
+  }
+
   const ctx: JournaledContext<Input, Prev> = {
     input,
     prev,
@@ -1215,6 +1284,7 @@ function makeCtx<Input, Prev>(params: {
     child: childImpl,
     dowhile: dowhileImpl,
     dountil: dountilImpl,
+    proxy: proxyImpl,
   };
   return { ctx, unwind };
 }
