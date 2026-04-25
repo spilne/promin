@@ -601,6 +601,160 @@ describe("LocalAgent — autoCompact", () => {
   });
 });
 
+describe("LocalAgent — resolveContext-driven prompt assembly", () => {
+  // LLM that records the system prompt + messages it received, so
+  // tests can assert on what actually got fed to the model.
+  function spyLLM(reply = "ok") {
+    const seen: Array<{ system?: string; messages: Message[] }> = [];
+    const llm: LLMProvider = {
+      chat: async (params) => {
+        const sys = params.messages.find((m) => m.role === "system");
+        seen.push({
+          system: sys && typeof sys.content === "string" ? sys.content : undefined,
+          messages: params.messages.filter((m) => m.role !== "system"),
+        });
+        return { content: reply, finishReason: "stop" };
+      },
+    };
+    return { llm, seen };
+  }
+
+  it("merges static systemPrompt with the cascade-resolved one (static first, cascade follows)", async () => {
+    const { runner } = makeRunner();
+    const memory = new InMemoryMemoryStore();
+    // Seed namespace + resource layers BEFORE the first turn.
+    await memory.upsertNamespace("acme", { staticRules: "Be polite to all customers." });
+    await memory.upsertResource(
+      { namespaceId: "acme", resourceId: "alice" },
+      { workingMemory: "alice prefers terse replies" },
+    );
+    await memory.appendResourceFact({ namespaceId: "acme", resourceId: "alice" }, "is in EU");
+
+    const { llm, seen } = spyLLM("hello");
+    const agent = new LocalAgent({
+      agent: {
+        name: "support",
+        llm,
+        systemPrompt: "You are claude-bot, a helpful assistant.",
+      },
+      runner,
+      memory,
+      namespaceId: "acme",
+      resourceId: "alice",
+    });
+    const t = await agent.thread("greet-1");
+    await (
+      await t.send({ task: "hi" })
+    ).text;
+
+    expect(seen.length).toBe(1);
+    const sys = seen[0]!.system ?? "";
+    // Static persona FIRST, then the cascade.
+    expect(sys.indexOf("You are claude-bot")).toBeLessThan(sys.indexOf("Namespace Rules"));
+    // Cascade picked up everything we seeded.
+    expect(sys).toContain("Be polite to all customers.");
+    expect(sys).toContain("Resource Working Memory");
+    expect(sys).toContain("alice prefers terse replies");
+    expect(sys).toContain("is in EU");
+  });
+
+  it("trims message tail to fit `contextBudget.maxMessageTokens`", async () => {
+    const { runner } = makeRunner();
+    const memory = new InMemoryMemoryStore();
+    // Pre-seed a long history (≥10 turns of ~20 chars each ≈ 100 tokens
+    // total). Set a tiny budget so most of it is trimmed.
+    for (let i = 0; i < 10; i++) {
+      await memory.appendMessages(
+        { namespaceId: "acme", resourceId: "alice", threadId: "long-thread" },
+        [
+          { role: "user", content: `q${i}.${"x".repeat(40)}` }, // ~10+ tokens
+          { role: "assistant", content: `a${i}.${"x".repeat(40)}` },
+        ],
+      );
+    }
+
+    const { llm, seen } = spyLLM("ok");
+    const agent = new LocalAgent({
+      agent: { name: "trimmer", llm, systemPrompt: "stay concise" },
+      runner,
+      memory,
+      namespaceId: "acme",
+      resourceId: "alice",
+      contextBudget: { maxMessageTokens: 30 }, // tight: only ~3 messages fit
+    });
+    const t = await agent.thread("long-thread");
+    await (
+      await t.send({ task: "follow-up" })
+    ).text;
+
+    // Persisted: 20 prior + 1 user task = 21. After trimming to 30
+    // tokens, only the latest few survive. The follow-up's user
+    // message is appended to the seeded tail BEFORE the call so it's
+    // included; assert that significantly fewer than 21 messages
+    // reach the LLM.
+    expect(seen[0]!.messages.length).toBeLessThan(10);
+    expect(seen[0]!.messages.length).toBeGreaterThan(0);
+  });
+
+  it("injects resource episodes when `maxEpisodeTokens > 0` (rollups become visible to next turn)", async () => {
+    const { runner } = makeRunner();
+    const memory = new InMemoryMemoryStore();
+    // Operator distilled an earlier thread → a ResourceEpisode lives at
+    // resource scope. Without `maxEpisodeTokens` it stays disk-only.
+    await memory.appendResourceEpisode(
+      { namespaceId: "acme", resourceId: "alice" },
+      {
+        summary: "User Anton previously asked about saga patterns; resolved with Postgres choice.",
+        outcome: "Postgres for audit log",
+        salience: 0.8,
+      },
+    );
+
+    const { llm, seen } = spyLLM("ack");
+    const agent = new LocalAgent({
+      agent: { name: "recall-bot", llm, systemPrompt: "be helpful" },
+      runner,
+      memory,
+      namespaceId: "acme",
+      resourceId: "alice",
+      contextBudget: { maxMessageTokens: 16_000, maxEpisodeTokens: 2_000 },
+    });
+    const t = await agent.thread("new-thread");
+    await (
+      await t.send({ task: "remind me what we picked" })
+    ).text;
+
+    const sys = seen[0]!.system ?? "";
+    // Episode rendered into the cascade.
+    expect(sys).toContain("Recent Episodes");
+    expect(sys).toContain("saga patterns");
+    expect(sys).toContain("Postgres for audit log");
+  });
+
+  it("first turn (no thread row yet) doesn't fail when resolveContext can't resolve", async () => {
+    const { runner } = makeRunner();
+    const memory = new InMemoryMemoryStore();
+    const { llm, seen } = spyLLM("hi");
+    const agent = new LocalAgent({
+      agent: { name: "fresh", llm, systemPrompt: "static rules" },
+      runner,
+      memory,
+      namespaceId: "acme",
+      resourceId: "alice",
+    });
+    // First send — thread row doesn't exist yet. loadContext should
+    // gracefully fall back to raw messages + the static prompt.
+    const t = await agent.thread("brand-new");
+    await (
+      await t.send({ task: "hello" })
+    ).text;
+
+    // Static system prompt makes it through; we just don't get a
+    // cascade for the first turn.
+    expect(seen[0]!.system).toContain("static rules");
+  });
+});
+
 describe("LocalAgent — threads (without MemoryStore)", () => {
   it("returns a thread that does not persist (in-memory session only)", async () => {
     const { runner } = makeRunner();

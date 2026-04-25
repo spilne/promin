@@ -91,10 +91,16 @@ export interface MemoryInspectResponse {
   readonly resolved: ResolvedContextSummary | null;
 }
 
-// Default budget used by `resolveContext` for inspection. Generous enough
-// to see most thread tails; the inspector is a debugging tool, not a
-// runtime cost-sensitive path.
-const DEFAULT_INSPECT_BUDGET = { maxMessageTokens: 16_000 };
+// Default budget used by `resolveContext` for inspection. The inspector
+// is a debugging tool — its job is to show the operator what an agent
+// turn WOULD see. Both numbers are generous so the rendered prompt
+// matches what a real cross-thread recall would produce; episodes are
+// rendered (maxEpisodeTokens > 0) so the operator can verify
+// distillThread-written rollups actually flow into the cascade.
+const DEFAULT_INSPECT_BUDGET = {
+  maxMessageTokens: 16_000,
+  maxEpisodeTokens: 8_000,
+};
 
 export function inspectMemory(deps: MemoryInspectorDeps) {
   return async (req: Request): Promise<Response> => {

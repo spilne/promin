@@ -36,7 +36,14 @@ import { agentAction, type AgentActionConfig, type AgentResult } from "../agent-
 import { agentLoop, type AgentLoopConfig } from "../agent-loop.ts";
 import type { Message, ToolCall } from "../message.ts";
 import { SessionEventBus, type SessionEvent } from "../session-logger.ts";
-import type { EpisodicRecord, MemoryStore, ThreadKey, ThreadRow } from "../memory/types.ts";
+import type {
+  EpisodicRecord,
+  MemoryStore,
+  ResolvedContext,
+  ThreadKey,
+  ThreadRow,
+  TokenBudget,
+} from "../memory/types.ts";
 import {
   DefaultConsolidator,
   type CompactThreadOptions,
@@ -123,12 +130,25 @@ export interface LocalAgentConfig<TOutput = any> {
    * Defaults to `false` (off). Set `{ threshold: 30 }` for a sensible
    * starting point — start compacting once a thread has ~30 messages.
    *
-   * Phase-1 only: writes the episode but doesn't yet feed it back into
-   * resolveContext (see promin-37qn). So in this commit auto-compact
-   * is observable in the inspector but doesn't yet free token budget
-   * for the next turn.
+   * The episodes auto-compact writes are consumed by `resolveContext`
+   * on subsequent turns — see `contextBudget` below.
    */
   readonly autoCompact?: AutoCompactConfig | false;
+  /**
+   * Token budget governing how `MemoryStore.resolveContext` assembles
+   * each turn's prompt + message tail. When unset, defaults to a
+   * permissive budget (16k message tokens, 0 episode tokens — episodes
+   * stay disk-only unless explicitly enabled).
+   *
+   * Set `maxEpisodeTokens > 0` to consume rollups written by
+   * `compactThread` / `distillThread`. Set `maxMessageTokens` lower
+   * than the model's context window minus output budget to leave room
+   * for the assistant's reply.
+   *
+   * Ignored when `memory` is unset — in-memory threads use the raw
+   * message buffer with no cascade.
+   */
+  readonly contextBudget?: TokenBudget;
 }
 
 export interface AutoCompactConfig {
@@ -318,6 +338,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       created,
       autoCompact: this.config.autoCompact === false ? undefined : this.config.autoCompact,
       consolidator: () => this.resolveConsolidator(),
+      contextBudget: this.config.contextBudget,
     });
   }
 
@@ -479,7 +500,24 @@ interface LocalAgentThreadDeps {
   readonly autoCompact?: AutoCompactConfig;
   /** Lazy accessor — same Consolidator the agent uses for manual calls. */
   readonly consolidator?: () => Consolidator;
+  /** Token budget for resolveContext. Default DEFAULT_CONTEXT_BUDGET. */
+  readonly contextBudget?: TokenBudget;
 }
+
+/**
+ * Default budget when LocalAgentConfig.contextBudget is unset:
+ *
+ *   - `maxMessageTokens: 16_000` — fits comfortably under any modern
+ *     chat model's context window even after the system prompt + tools.
+ *     Long threads get trimmed from the oldest end.
+ *   - `maxEpisodeTokens: 0` — episodes stay disk-only by default. Set
+ *     a positive value (e.g. 2_000) to inject resource-scope rollups
+ *     into the system prompt so future turns see compacted gist.
+ */
+const DEFAULT_CONTEXT_BUDGET: TokenBudget = {
+  maxMessageTokens: 16_000,
+  maxEpisodeTokens: 0,
+};
 
 class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOutput> {
   readonly id: string;
@@ -529,11 +567,19 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       });
     }
 
-    const history = await this.loadHistory();
+    // resolveContext-driven prompt assembly: cascade-merged system
+    // prompt + trimmed message tail. The systemPrompt fed to
+    // agentAction this turn is per-turn (includes the resolved cascade);
+    // the underlying loopConfig's static systemPrompt is preserved for
+    // composition.
+    const { systemPrompt: turnSystemPrompt, messages: history } = await this.loadContext();
     const seed: Message[] = [...history];
     if (input.messages) seed.push(...input.messages);
 
-    const actionConfig = toActionConfig(this.deps.loopConfig, bus);
+    const actionConfig = toActionConfig(
+      { ...this.deps.loopConfig, systemPrompt: turnSystemPrompt },
+      bus,
+    );
     const wf = (agentAction as (cfg: AgentActionConfig<TOutput>) => ReturnType<typeof agentAction>)(
       actionConfig as AgentActionConfig<TOutput>,
     );
@@ -548,20 +594,52 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       })
       .then(async (raw) => {
         const r = raw as AgentResult;
-        await this.persistTurn(seedLen, r);
+        await this.persistTurn(seedLen, !!turnSystemPrompt, r);
         return r;
       });
 
     return { promise, capture };
   }
 
-  /** Load the thread's conversation history from MemoryStore (or in-memory fallback). */
-  private async loadHistory(): Promise<Message[]> {
-    if (this.deps.memory) {
-      const stored = await this.deps.memory.getMessages(this.deps.key);
-      return stored.map((m) => stripStorageMeta(m));
+  /**
+   * Load the thread's prompt-ready view via `MemoryStore.resolveContext`:
+   * the agent's static system prompt merged with the cascade-resolved
+   * one (namespace + resource + thread rules / facts / working memory /
+   * episodes), plus the trimmed message tail.
+   *
+   * In-memory fallback (no `MemoryStore`) returns the raw message
+   * buffer with the agent's static prompt — no cascade.
+   */
+  private async loadContext(): Promise<{ systemPrompt: string | undefined; messages: Message[] }> {
+    const staticPrompt = this.deps.loopConfig.systemPrompt;
+
+    if (!this.deps.memory) {
+      return {
+        systemPrompt: staticPrompt,
+        messages: [...this.inMemoryMessages],
+      };
     }
-    return [...this.inMemoryMessages];
+
+    const budget = this.deps.contextBudget ?? DEFAULT_CONTEXT_BUDGET;
+    let resolved: ResolvedContext;
+    try {
+      resolved = await this.deps.memory.resolveContext(this.deps.key, budget);
+    } catch {
+      // Thread row may not exist yet on a fresh send — fall back to
+      // raw messages so the first turn still runs cleanly. The next
+      // turn (after persistTurn creates the thread) gets the cascade.
+      const stored = await this.deps.memory.getMessages(this.deps.key).catch(() => []);
+      return {
+        systemPrompt: staticPrompt,
+        messages: stored.map((m) => stripStorageMeta(m)),
+      };
+    }
+
+    const merged = mergeSystemPrompts(staticPrompt, resolved.systemPrompt);
+    return {
+      systemPrompt: merged,
+      messages: resolved.messages.map((m) => stripStorageMeta(m)),
+    };
   }
 
   /**
@@ -574,9 +652,16 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
    * already includes the user message + assistant response (and any tool
    * messages in between).
    */
-  private async persistTurn(seedLen: number, result: AgentResult): Promise<void> {
-    const hasSystem = Boolean(this.deps.loopConfig.systemPrompt);
-    const skip = seedLen + (hasSystem ? 1 : 0);
+  private async persistTurn(
+    seedLen: number,
+    turnHadSystemPrompt: boolean,
+    result: AgentResult,
+  ): Promise<void> {
+    // Use the per-turn flag, not the static loopConfig.systemPrompt:
+    // resolveContext can produce a non-empty cascade even when the
+    // agent's static prompt is unset. Slicing on the static field
+    // would mis-attribute the cascade as the first user message.
+    const skip = seedLen + (turnHadSystemPrompt ? 1 : 0);
     const newTail = result.messages.slice(skip).filter((m) => m.role !== "system");
 
     if (newTail.length === 0) return;
@@ -937,6 +1022,26 @@ function applyRange(messages: ReadonlyArray<Message>, range?: MessageRange): Mes
 function estimateTokens(m: { content?: string | null }): number {
   const len = typeof m.content === "string" ? m.content.length : 0;
   return Math.ceil(len / 4);
+}
+
+/**
+ * Combine the agent's static system prompt with the cascade-resolved
+ * one from `MemoryStore.resolveContext`. Static prompt comes FIRST so
+ * the agent's persona / instructions sit above tenant-scoped content,
+ * and so prompt caching can include the (always-stable) static portion
+ * in its cached prefix.
+ *
+ * Returns `undefined` only when both inputs are empty — `agentAction`
+ * treats `undefined` as "no system prompt at all" rather than an empty
+ * string with a header.
+ */
+function mergeSystemPrompts(staticPrompt: string | undefined, cascade: string): string | undefined {
+  const a = staticPrompt?.trim() ?? "";
+  const b = cascade.trim();
+  if (!a && !b) return undefined;
+  if (!a) return b;
+  if (!b) return a;
+  return `${a}\n\n${b}`;
 }
 
 function stripStorageMeta(m: Message & { seq?: number; createdAt?: number }): Message {

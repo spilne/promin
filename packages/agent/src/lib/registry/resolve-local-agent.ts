@@ -21,6 +21,7 @@ import type { MemoryStore } from "../memory/types.ts";
 import type { AgentTool } from "../tool.ts";
 import type { Consolidator } from "../memory/consolidator.ts";
 import type { AutoCompactConfig } from "../agent/local-agent.ts";
+import type { TokenBudget } from "../memory/types.ts";
 import type { LocalAgentBackend, RegisteredAgent } from "./types.ts";
 
 /** Caller-supplied runtime injectables. */
@@ -68,6 +69,13 @@ export interface ResolveLocalAgentDeps {
    * to keep compaction manual-only via `agent.compactThread()`.
    */
   readonly autoCompact?: AutoCompactConfig | false;
+  /**
+   * Token budget governing `resolveContext`-driven prompt assembly per
+   * turn. Set `maxEpisodeTokens > 0` to consume the rollups
+   * compactThread / distillThread write so future turns benefit from
+   * the trimmed gist instead of seeing the full raw history.
+   */
+  readonly contextBudget?: TokenBudget;
 }
 
 /**
@@ -103,6 +111,7 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
     consolidator: deps.consolidator,
     consolidatorLlm: deps.consolidatorLlm,
     autoCompact: deps.autoCompact,
+    contextBudget: deps.contextBudget,
   };
 
   return new LocalAgent(config);

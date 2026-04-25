@@ -958,6 +958,14 @@ const server = new ZoryaServer({
           keepRecent: 6,
           mode: "background",
         },
+        // Consume the rollups + facts compactThread / distillThread
+        // write. maxEpisodeTokens > 0 means future turns under the
+        // same (namespace, resource) see the gist injected into the
+        // system prompt — the cross-thread memory loop end-to-end.
+        contextBudget: {
+          maxMessageTokens: 32_000,
+          maxEpisodeTokens: 4_000,
+        },
       }),
   },
   // Same store the resolver uses, so the inspector reads the live cascade.
