@@ -328,13 +328,8 @@ async function startApprovalAutoSignaler(): Promise<void> {
     for (const r of runs) {
       if (delivered.has(r.workflowId)) continue;
       // Only deliver to runs whose review step is waiting for a signal.
-      // Engine currently stores "waiting_signal" (bug: should be
-      // "waiting_for_signal" per the type declaration) — check both so
-      // this demo keeps working after the upstream fix.
       const waiting = Object.values(r.steps).some(
-        (s) =>
-          s.stepName === "review" &&
-          (s.status === "waiting_for_signal" || (s.status as string) === "waiting_signal"),
+        (s) => s.stepName === "review" && s.status === "waiting_for_signal",
       );
       if (!waiting) continue;
       const approved = Math.random() < 0.5;

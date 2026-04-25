@@ -870,7 +870,7 @@ function makeCtx<Input, Prev>(params: {
       }
       if (workflowStorage) {
         await workflowStorage.suspendWorkflow(workflowId, stepName, {
-          status: "waiting_signal",
+          status: "waiting_for_signal",
           signalName,
         });
       }

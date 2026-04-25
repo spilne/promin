@@ -127,14 +127,9 @@ export function SignalModal({ run, onClose, onSent }: SignalModalProps) {
 }
 
 function findWaitingStep(run: RunDto): StepDto | undefined {
-  // Engine currently stores "waiting_signal" (bug: declared type is
-  // "waiting_for_signal"). Match both so the prefill keeps working
-  // after the upstream fix.
-  return run.steps.find(
-    (s) =>
-      s.signalName !== undefined &&
-      (s.status === "waiting_for_signal" || (s.status as string) === "waiting_signal"),
-  );
+  // Engine writes status="waiting_for_signal" (matching the declared
+  // StepStatus union — promin-1hzk fixed the prior typo).
+  return run.steps.find((s) => s.signalName !== undefined && s.status === "waiting_for_signal");
 }
 
 /**
