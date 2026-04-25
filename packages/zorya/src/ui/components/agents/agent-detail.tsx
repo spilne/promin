@@ -9,6 +9,7 @@ import { formatRelative } from "../../lib/format.ts";
 import { toast } from "../../lib/dialogs.ts";
 import { Markdown } from "../../lib/markdown.tsx";
 import { MemoryInspector } from "./memory-inspector.tsx";
+import { AgentConfigDrawer } from "./agent-config-drawer.tsx";
 
 interface AgentDetailProps {
   id: string;
@@ -51,6 +52,7 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
     localStorage.getItem(`${ACTIVE_THREAD_KEY}:${id}`),
   );
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [configOpen, setConfigOpen] = useState(false);
 
   // Persist tenant + active thread.
   useEffect(() => saveTenant(tenant), [tenant]);
@@ -92,7 +94,16 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
               )}
             </div>
           </div>
-          {agent && <AgentMetaBadges agent={agent} />}
+          <div class="flex items-center gap-3">
+            {agent && <AgentMetaBadges agent={agent} />}
+            <button
+              class="btn btn-xs btn-ghost"
+              onClick={() => setConfigOpen(true)}
+              title="View this agent's recipe — system prompt, tools, model, metadata"
+            >
+              ⚙ Config
+            </button>
+          </div>
         </div>
 
         <TenantBar tenant={tenant} onChange={setTenant} />
@@ -143,6 +154,8 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
           onClose={() => setInspectorOpen(false)}
         />
       )}
+
+      {configOpen && <AgentConfigDrawer agent={agent} onClose={() => setConfigOpen(false)} />}
     </Page>
   );
 }
