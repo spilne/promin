@@ -163,4 +163,71 @@ describe("ctx.proxy()", () => {
     const out = await runner.run({ workflow: wf, workflowId: "opts-1", input: 41 });
     expect(out).toBe(42);
   });
+
+  it("optionsByName forwards a per-key compensate that fires on a later failure", async () => {
+    // `compensate` is the most observable per-activity option: the
+    // callback only runs if a LATER activity in the same journaled body
+    // throws, so the assertion proves both that the option arrived AND
+    // that it was attached to the correct key.
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+
+    const compensated: string[] = [];
+
+    const wf = workflow<{ id: number }>({ name: "compensable" })
+      .journaled("main", function* (ctx) {
+        const acts = ctx.proxy(
+          {
+            create: async (id: number) => ({ id, ok: true }),
+            boom: async () => {
+              throw new Error("kaboom");
+            },
+          },
+          {
+            optionsByName: {
+              create: {
+                compensate: (result) => {
+                  const r = result as { id: number };
+                  compensated.push(`create:${r.id}`);
+                },
+              },
+            },
+          },
+        );
+        const created = yield* acts.create(ctx.input.id);
+        yield* acts.boom();
+        return created;
+      })
+      .build();
+
+    await expect(
+      runner.run({ workflow: wf, workflowId: "comp-1", input: { id: 42 } }),
+    ).rejects.toThrow();
+
+    expect(compensated).toEqual(["create:42"]);
+  });
+
+  it("try/catch inside the body catches a proxied activity failure", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+
+    const wf = workflow<number>({ name: "catch-proxy" })
+      .journaled("main", function* (ctx) {
+        const acts = ctx.proxy({
+          bad: async () => {
+            throw new Error("planned");
+          },
+        });
+        try {
+          yield* acts.bad();
+          return "unreached";
+        } catch (e) {
+          return `caught: ${(e as Error).message}`;
+        }
+      })
+      .build();
+
+    const out = await runner.run({ workflow: wf, workflowId: "cp-1", input: 0 });
+    expect(out).toBe("caught: planned");
+  });
 });

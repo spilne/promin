@@ -16,7 +16,10 @@ import { InMemoryWorkflowStorage, workflow } from "@promin/workflow";
 import { createWorkflowStorageHandler } from "@promin/workflow-remote";
 import { ZoryaClient } from "../zorya-client.ts";
 
-function mountTestServer(storage: InMemoryWorkflowStorage) {
+function mountTestServer(
+  storage: InMemoryWorkflowStorage,
+  options: { autoComplete?: boolean } = { autoComplete: true },
+) {
   const storageHandler = createWorkflowStorageHandler(storage);
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
@@ -33,9 +36,6 @@ function mountTestServer(storage: InMemoryWorkflowStorage) {
       };
       const name = decodeURIComponent(url.pathname.replace("/api/runs/trigger/", ""));
       const workflowId = body.workflowId ?? `wf_${Math.random().toString(36).slice(2, 10)}`;
-      // Synthesize a completed workflow row so handle.result() returns
-      // immediately. Mirrors what a real worker would do — just inlined
-      // for test ergonomics.
       await storage.createWorkflow({
         workflowId,
         workflowName: name,
@@ -44,7 +44,13 @@ function mountTestServer(storage: InMemoryWorkflowStorage) {
         input: body.input,
         version: body.version,
       });
-      await storage.completeWorkflow(workflowId, { ok: true, echoed: body.input });
+      // autoComplete=true mirrors what a real worker would do (workflow
+      // arrives terminal). autoComplete=false leaves the row in `pending`
+      // so cancel/signal/events tests can act on a non-terminal workflow
+      // before driving it to completion themselves.
+      if (options.autoComplete !== false) {
+        await storage.completeWorkflow(workflowId, { ok: true, echoed: body.input });
+      }
       return new Response(JSON.stringify({ workflowId }), {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -121,5 +127,60 @@ describe("ZoryaClient.triggerWorkflow — back-compat", () => {
       workflowId: "wf-legacy-1",
     });
     expect(out).toEqual({ workflowId: "wf-legacy-1" });
+  });
+});
+
+// Round-trip the rest of the WorkflowHandle surface through the wire. The
+// `autoComplete: false` mount keeps the workflow row pending so cancel /
+// signal / events have a non-terminal workflow to act on.
+describe("ZoryaClient handle — signal / cancel / events over the wire", () => {
+  it("handle.signal() lands as a SignalState in storage.loadSignals", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const fetch = mountTestServer(storage, { autoComplete: false });
+    const client = new ZoryaClient({ url: "http://test.local", fetch });
+
+    const handle = await client.startByName("approve", { workflowId: "wf-sig-1" });
+    await handle.signal("approval", { approved: true });
+
+    const signals = await storage.loadSignals("wf-sig-1");
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.signalName).toBe("approval");
+    expect(signals[0]?.payload).toEqual({ approved: true });
+  });
+
+  it("handle.cancel() flips the workflow to failed via storage.cancelWorkflow", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const fetch = mountTestServer(storage, { autoComplete: false });
+    const client = new ZoryaClient({ url: "http://test.local", fetch });
+
+    const handle = await client.startByName("cancellable", { workflowId: "wf-cancel-1" });
+    await handle.cancel("user requested");
+
+    const state = await storage.loadWorkflow("wf-cancel-1");
+    expect(state?.status).toBe("failed");
+    expect(state?.error).toBe("Cancelled");
+  });
+
+  it("handle.events() yields workflow-completed when the row transitions to completed", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const fetch = mountTestServer(storage, { autoComplete: false });
+    const client = new ZoryaClient({ url: "http://test.local", fetch });
+
+    const handle = await client.startByName("evented", { workflowId: "wf-events-1" });
+
+    // Drive the row to completed in the background — the polling subscribe
+    // (RemoteWorkflowStorage has no native push) sees the diff and yields
+    // workflow-completed before the iterator's break.
+    setTimeout(() => {
+      void storage.completeWorkflow("wf-events-1", { done: true });
+    }, 30);
+
+    const seen: string[] = [];
+    for await (const ev of handle.events({ pollIntervalMs: 20 })) {
+      seen.push(ev.type);
+      if (ev.type === "workflow-completed") break;
+    }
+
+    expect(seen[seen.length - 1]).toBe("workflow-completed");
   });
 });
