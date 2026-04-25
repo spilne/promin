@@ -204,11 +204,11 @@ export interface WorkflowRunner {
    * `WorkflowLockError` if a run is already active; `"join"` returns a handle
    * to the running workflow without starting a second execution.
    */
-  start(params: {
-    readonly workflow: Workflow<unknown, unknown>;
+  start<Input = unknown, Output = unknown>(params: {
+    readonly workflow: Workflow<Input, Output>;
     readonly workflowId: string;
-    readonly input: unknown;
-  }): Promise<WorkflowHandle<unknown>>;
+    readonly input: Input;
+  }): Promise<WorkflowHandle<Output>>;
   /**
    * Subscribe to live step/workflow-lifecycle events for a single run.
    * Returns an async iterable that yields every `WorkflowRunEvent` as it
@@ -316,11 +316,11 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     }
   }
 
-  async start(params: {
-    readonly workflow: Workflow<unknown, unknown>;
+  async start<Input = unknown, Output = unknown>(params: {
+    readonly workflow: Workflow<Input, Output>;
     readonly workflowId: string;
-    readonly input: unknown;
-  }): Promise<WorkflowHandle<unknown>> {
+    readonly input: Input;
+  }): Promise<WorkflowHandle<Output>> {
     const storage = this.storage;
     const { workflow, workflowId, input } = params;
 
@@ -348,10 +348,19 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     }
 
     const clock = this.clock;
+    const self = this;
     return {
       workflowId,
-      status: (p) => this.getStatus(workflowId, p),
+      status: (p) => self.getStatus(workflowId, p) as Promise<WorkflowStatusInfo<Output> | null>,
       signal: (signalName, payload) => storage.deliverSignal(workflowId, signalName, payload),
+      cancel: (_reason) => {
+        // `reason` is reserved for future use — when storage.cancelWorkflow
+        // grows a reason field it'll thread through here without breaking
+        // existing callers. Today we just invoke cancellation; the caller's
+        // reason is observable via their own logs / audit trail.
+        return storage.cancelWorkflow(workflowId);
+      },
+      events: (opts) => self.subscribe(workflowId, opts),
       result: async (p) => {
         const intervalMs = p?.intervalMs ?? 1_000;
         const timeoutMs = p?.timeoutMs ?? 60_000;
@@ -359,7 +368,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
 
         while (clock.currentTimeMs() < deadline) {
           const state = await storage.loadWorkflow(workflowId);
-          if (state?.status === "completed") return state.result;
+          if (state?.status === "completed") return state.result as Output;
           if (state?.status === "failed") {
             throw new Error(state.error ?? `Workflow ${workflowId} failed`);
           }

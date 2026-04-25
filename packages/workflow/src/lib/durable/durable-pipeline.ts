@@ -198,6 +198,25 @@ export interface WorkflowHandle<Output> {
 
   /** Wait for the workflow to complete. Resumes suspended workflows on each poll. */
   result(params?: { intervalMs?: number; timeoutMs?: number }): Promise<Output>;
+
+  /**
+   * Cancel the workflow. Marks it `failed` with the given reason and skips
+   * any in-flight steps. Idempotent — cancelling an already-terminal
+   * workflow is a no-op (matches storage.cancelWorkflow semantics).
+   */
+  cancel(reason?: string): Promise<void>;
+
+  /**
+   * Subscribe to live step / lifecycle events for this workflow. Closes on
+   * the first terminal event (`workflow-completed`, `workflow-failed`,
+   * `workflow-tripwire`) or when `options.signal` fires. Delegates to
+   * `runner.subscribe(workflowId, options)` — uses the storage's native
+   * push path when available, falls back to polling otherwise.
+   */
+  events(options?: {
+    signal?: AbortSignal;
+    pollIntervalMs?: number;
+  }): AsyncIterable<import("./workflow-state.ts").WorkflowRunEvent>;
 }
 
 export interface WorkflowStatusInfo<Output> {
