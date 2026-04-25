@@ -46,6 +46,7 @@ export {
   GuardError,
   WorkflowTripwireError,
   TripwireStorageMissingError,
+  LoopLimitExceededError,
   MatchError,
   type MatchParams,
   topologicalSort,

@@ -156,3 +156,17 @@ export class TripwireStorageMissingError extends Data.TaggedError("TripwireStora
   readonly stepName: string;
   readonly message: string;
 }> {}
+
+/**
+ * A `.dowhile()` / `.dountil()` loop exceeded its configured maximum
+ * iteration count without the exit condition being satisfied. Default cap
+ * is 100 iterations; override with the `maxIterations` option. Thrown as a
+ * step failure so the surrounding workflow retry / compensation policy
+ * applies.
+ */
+export class LoopLimitExceededError extends Data.TaggedError("LoopLimitExceededError")<{
+  readonly workflowId: string;
+  readonly stepName: string;
+  readonly maxIterations: number;
+  readonly message: string;
+}> {}

@@ -20,6 +20,8 @@ import {
   runJournaledStep,
   JournalStorageMissingError,
   type JournaledStepBody,
+  type JournaledContext,
+  type ActivityYield,
 } from "./journaled-step.ts";
 import { Pipeline, type TaggedError } from "@promin/core";
 import type { RetryPolicy } from "@promin/core";
@@ -37,6 +39,7 @@ import {
   WorkflowSuspendedError,
   WorkflowTimeoutError,
   GuardError,
+  LoopLimitExceededError,
 } from "./durable-pipeline-error.ts";
 
 // ---------------------------------------------------------------------------
@@ -65,6 +68,18 @@ export interface MapStepContext<Input> {
   readonly workflowId: string;
   readonly taskIndex: number;
   readonly attempt: number;
+}
+
+/** Options for `.dowhile()` / `.dountil()` loops. */
+export interface LoopOptions<T> {
+  /**
+   * Safety cap on the number of iterations. When the loop runs this many
+   * times without the exit condition being satisfied, the loop step fails
+   * with `LoopLimitExceededError`. Default: 100.
+   */
+  readonly maxIterations?: number;
+  /** Override the codec used for the loop's iteration results. */
+  readonly codec?: Codec<T>;
 }
 
 /** Extract the success type from a parallel branch function. */
@@ -953,6 +968,157 @@ export class WorkflowBuilder<
     };
 
     return this._derive([...this._steps, stepDef], name) as any;
+  }
+
+  // ---------------------------------------------------------------------------
+  // dowhile / dountil — durable iteration loops
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Run `body` repeatedly while `condition(result, iter)` stays `true`.
+   * Classic do-while: body always executes at least once, then the condition
+   * is checked against the result.
+   *
+   * Durable: each iteration is checkpointed via the activity journal, so a
+   * worker crash mid-loop resumes at the current iteration rather than
+   * restarting from zero. Requires a storage that implements
+   * `ActivityJournalStorage` (InMemoryWorkflowStorage, PostgresWorkflowStorage).
+   *
+   * ```typescript
+   * workflow({ name: "wait-ready", storage })
+   *   .dowhile(
+   *     "poll-external",
+   *     (ctx, iter) => checkStatus(ctx.prev.jobId),
+   *     (status) => status !== "ready",
+   *     { maxIterations: 60 },
+   *   )
+   * ```
+   *
+   * The loop's output is the result of the final iteration and becomes `prev`
+   * for the next step.
+   */
+  dowhile<Name extends string, T>(
+    name: Name,
+    body: (ctx: StepContext<Input, Current>, iter: number) => T | Promise<T>,
+    condition: (result: T, iter: number) => boolean,
+    options?: LoopOptions<T>,
+  ): WorkflowBuilder<Input, Steps & Record<Name, T>, T, Error | LoopLimitExceededError> {
+    return this._buildLoop(name, body, condition, options, "while");
+  }
+
+  /**
+   * Run `body` repeatedly until `condition(result, iter)` becomes `true`.
+   * Inverse polarity of `.dowhile()` — continues while the condition is
+   * `false`. Body always runs at least once.
+   *
+   * Durable: iterations are journaled. See `.dowhile()` for storage
+   * requirements and semantics.
+   *
+   * ```typescript
+   * workflow({ name: "drain", storage })
+   *   .dountil(
+   *     "drain-queue",
+   *     () => queue.pullBatch(100),
+   *     (batch) => batch.length === 0,
+   *   )
+   * ```
+   */
+  dountil<Name extends string, T>(
+    name: Name,
+    body: (ctx: StepContext<Input, Current>, iter: number) => T | Promise<T>,
+    condition: (result: T, iter: number) => boolean,
+    options?: LoopOptions<T>,
+  ): WorkflowBuilder<Input, Steps & Record<Name, T>, T, Error | LoopLimitExceededError> {
+    return this._buildLoop(name, body, condition, options, "until");
+  }
+
+  private _buildLoop<Name extends string, T>(
+    name: Name,
+    body: (ctx: StepContext<Input, Current>, iter: number) => T | Promise<T>,
+    condition: (result: T, iter: number) => boolean,
+    options: LoopOptions<T> | undefined,
+    polarity: "while" | "until",
+  ): WorkflowBuilder<Input, Steps & Record<Name, T>, T, Error | LoopLimitExceededError> {
+    const maxIterations = options?.maxIterations ?? 100;
+    if (maxIterations < 1) {
+      throw new WorkflowError({
+        workflowId: "",
+        message: `.${polarity === "while" ? "dowhile" : "dountil"}("${name}", ...): maxIterations must be >= 1`,
+      });
+    }
+
+    // Reuse the journaled step machinery: each iteration lands as its own
+    // activity row ("iter-0", "iter-1", ...) so a crashed worker resumes at
+    // the next un-journaled iteration. The body runs inline within the
+    // journaled step's single queue entry — iterations don't distribute.
+    const loopBody = function* (
+      ctx: JournaledContext<unknown, unknown>,
+    ): Generator<ActivityYield, T, any> {
+      const stepCtx: StepContext<unknown, unknown> = {
+        input: ctx.input,
+        prev: ctx.prev,
+        workflowId: ctx.workflowId,
+        attempt: 1,
+      };
+      let result: T = undefined as unknown as T;
+      let iter = 0;
+      // `do ... while` keeps the polarity intent explicit: we always run
+      // the body once, then decide based on polarity whether to continue.
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        if (iter >= maxIterations) {
+          throw new LoopLimitExceededError({
+            workflowId: ctx.workflowId,
+            stepName: name,
+            maxIterations,
+            message: `Loop "${name}" exceeded ${maxIterations} iterations without converging`,
+          });
+        }
+        const iterLabel = `iter-${iter}`;
+        // Capture iter so each closure sees the right number; the journal
+        // uses the activity name (iterLabel) as the dedup key, so replay
+        // finds each iteration at its correct index.
+        const currentIter = iter;
+        result = yield* ctx.activity<T>(iterLabel, () =>
+          body(stepCtx as StepContext<Input, Current>, currentIter),
+        );
+        iter++;
+        const condValue = condition(result, currentIter);
+        const shouldExit = polarity === "while" ? !condValue : condValue;
+        if (shouldExit) break;
+      }
+      return result;
+    };
+
+    // Build the step via .journaled, then wrap the last step's execute to
+    // convert any thrown error from the generator body into a TYPED pipeline
+    // failure. Without this, a body `throw new LoopLimitExceededError(...)`
+    // reaches Pipeline.fromPromise, which wraps via Effect.promise — and
+    // Effect.promise surfaces rejections as defects (Die), not typed
+    // failures. Defects skip the runner's saveStepFailure path, so the
+    // workflow would stay "pending" on overflow. Catching here converts the
+    // defect back to a typed failure so the normal error flow applies.
+    const nextBuilder = this.journaled(name, loopBody as JournaledStepBody<Input, Current, T>, {
+      codec: options?.codec as Codec<T> | undefined,
+    });
+    const steps = (nextBuilder as WorkflowBuilder<Input, any, any, any>)._steps;
+    const lastStep = steps[steps.length - 1]!;
+    const originalExecute = lastStep.execute;
+    const wrappedStep: StepDefinition = {
+      ...lastStep,
+      execute: (execParams) => {
+        const raw = originalExecute(execParams);
+        return Pipeline.from(
+          raw.effect.pipe(Effect.catchAllDefect((defect) => Effect.fail(defect as TaggedError))),
+        ) as Pipeline<unknown, TaggedError>;
+      },
+    };
+    return this._derive([...steps.slice(0, -1), wrappedStep], name) as unknown as WorkflowBuilder<
+      Input,
+      Steps & Record<Name, T>,
+      T,
+      Error | LoopLimitExceededError
+    >;
   }
 
   // ---------------------------------------------------------------------------

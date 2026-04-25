@@ -65,6 +65,7 @@ export {
   GuardError,
   WorkflowTripwireError,
   TripwireStorageMissingError,
+  LoopLimitExceededError,
 } from "./durable-pipeline-error.ts";
 export { topologicalSort, computeReadySet, type DagNode } from "./workflow-dag.ts";
 export {
