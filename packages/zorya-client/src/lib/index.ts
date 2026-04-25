@@ -1,5 +1,6 @@
 export { ZoryaClient, type ZoryaClientConfig } from "./zorya-client.ts";
 export { ZoryaWorker, type ZoryaWorkerConfig } from "./worker.ts";
+export { ZoryaRunner, type ZoryaRunnerConfig, type ZoryaRunOptions } from "./zorya-runner.ts";
 export {
   WorkerControlSocket,
   type WorkerControlSocketConfig,

@@ -5,34 +5,30 @@
 //   # terminal 1: bun run packages/zorya/examples/demo.ts
 //   # terminal 2: bun --conditions=@promin/source run packages/zorya/examples/user-app.ts
 //
-// What this shows (the two patterns you actually want):
+// Two patterns shown, both useful, both backed by Zorya's storage + dashboard:
 //
-// PATTERN A — Trigger an EXISTING workflow that runs somewhere else.
-//   You don't host the workflow code; you just want Zorya to run it and
-//   give you the result back. Comment out PATTERN B and run this against
-//   a workflow that already exists in the demo (e.g. "order").
+// PATTERN A — Trigger an EXISTING workflow that lives in another process
+//   (e.g. the demo's "order" workflow). Use `client.startByName(...)` and
+//   `handle.result()` to fire-and-await. Your app doesn't host the
+//   workflow code; Zorya routes the run to whichever worker advertises it.
 //
-// PATTERN B — Define a workflow IN your app, host the worker IN your
-//   process, and call it like a regular async function. The workflow
-//   code runs locally; storage + journaling go through Zorya so you get
-//   durability + the dashboard for free. This is the Temporal-app shape.
+// PATTERN B — Run YOUR workflow as a regular async function from app code.
+//   `ZoryaRunner` executes the workflow IN your process, persisting every
+//   state transition + activity-journal entry to Zorya over the wire.
+//   No queue, no advertisement, no risk of accidentally claiming someone
+//   else's runs — you only run what you call. Same dashboard visibility.
 //
-// In both, the app does:
-//   1. await client.start(...) → WorkflowHandle
-//   2. await handle.result()    → resolved Output
-//   3. branch business logic on the result
+// (The third pattern, `ZoryaWorker`, is the right choice when the workflow
+//  uses `ctx.sleep` and must resume after this process exits, or when you
+//  want the dashboard's Trigger button to dispatch into your process.
+//  See examples/split/worker.ts.)
 // ---------------------------------------------------------------------------
 
 import { workflow } from "@promin/workflow";
-import { ZoryaClient, ZoryaWorker } from "@promin/zorya-client";
+import { ZoryaClient, ZoryaRunner } from "@promin/zorya-client";
 
 // ---------------------------------------------------------------------------
-// PATTERN B — define + host + run a workflow in this same process.
-//
-// `verifyOrder` is a regular workflow. The two `.stepAsync` calls run
-// sequentially with their results journaled to Zorya (so a crash mid-
-// run resumes without losing work). The whole thing is just a normal
-// JS function tree — no SDK ceremony, just `.build()`.
+// PATTERN B — define a workflow inline. Just JS; .build() snapshots the DAG.
 
 const verifyOrder = workflow<{ orderId: number; amountCents: number }>({
   name: "verify-order",
@@ -55,30 +51,26 @@ const verifyOrder = workflow<{ orderId: number; amountCents: number }>({
   .build();
 
 // ---------------------------------------------------------------------------
-// Boot — point at the running Zorya, host the workflow, advertise it.
+// Boot — point at the running Zorya. ZoryaRunner is the local-runner-with-
+// remote-storage variant: workflow runs HERE, Zorya stores everything.
 
 const url = process.env["ZORYA_URL"] ?? "http://localhost:4100";
 const client = new ZoryaClient({ url, apiKey: process.env["ZORYA_API_KEY"] });
-const worker = new ZoryaWorker({ client, workflows: [verifyOrder] });
-await worker.start();
+const runner = new ZoryaRunner({ client });
 
-console.log(`[app] connected to ${url} — worker ${worker.workerId}`);
+console.log(`[app] connected to ${url}`);
 
 // ---------------------------------------------------------------------------
-// PATTERN B — call the workflow from regular app code, branch on its
-// result. Imagine this is the body of an HTTP handler or queue consumer.
+// Pattern B in action — call the workflow like a normal async function.
 
 async function processOrder(orderId: number, amountCents: number): Promise<void> {
   console.log(`[app] processing order ${orderId} ($${(amountCents / 100).toFixed(2)})…`);
 
-  // .start() returns a WorkflowHandle<Output>; .result() awaits the
-  // run's terminal status and resolves to the Output of the LAST step.
-  const handle = await client.start(verifyOrder, {
-    input: { orderId, amountCents },
-  });
-  const result = await handle.result();
+  // The whole workflow runs in this process. Storage RPCs hit Zorya so
+  // the dashboard shows the run with full step DAG. Output is typed
+  // off `verifyOrder`'s last step.
+  const result = await runner.run(verifyOrder, { orderId, amountCents });
 
-  // Application code branches on the durable workflow's output.
   if (!result.valid) {
     console.log(`[app]  → order ${orderId}: REJECTED (invalid)`);
     return;
@@ -91,22 +83,23 @@ async function processOrder(orderId: number, amountCents: number): Promise<void>
 }
 
 // ---------------------------------------------------------------------------
-// PATTERN A — trigger an EXISTING workflow that's hosted elsewhere
-// (like "order", which the demo registers in-process). Same shape:
-// `startByName` + `.result()`. Returns `unknown` since we don't have
-// the workflow's static type at this site.
+// Pattern A — trigger an EXISTING workflow that's hosted by the demo
+// process (the "order" workflow scanned out of examples/workflows/).
+// `startByName` enqueues a start; the workflow runs THERE, not here.
 
 async function callExistingDemoWorkflow(): Promise<void> {
-  console.log(`[app] triggering "order" (hosted by the demo, not this process)…`);
+  console.log(`[app] triggering "order" (hosted by the demo)…`);
   const handle = await client.startByName("order", {
     input: { orderId: 999, customer: "user-app" },
   });
+  // .result() awaits the run's terminal status. The demo's "order"
+  // workflow has random 2-20s sleeps, so this can take a while.
   const result = await handle.result().catch((e) => ({ error: String(e) }));
   console.log(`[app]  → order completed:`, result);
 }
 
 // ---------------------------------------------------------------------------
-// Drive some realistic traffic: a few in-house verifications, then one
+// Drive realistic traffic: a few in-process verifications, then one
 // remote-workflow call. All of these show up in the Zorya dashboard
 // under Runs, with their full step DAG + per-step status.
 
@@ -124,12 +117,4 @@ for (const [id, cents] of orders) {
 
 await callExistingDemoWorkflow();
 
-console.log(`\n[app] done driving traffic. Worker is still up — Ctrl+C to disconnect.`);
-
-const shutdown = async (sig: string) => {
-  console.log(`[app] ${sig} — disconnecting…`);
-  await worker.stop().catch(() => {});
-  process.exit(0);
-};
-process.on("SIGINT", () => void shutdown("SIGINT"));
-process.on("SIGTERM", () => void shutdown("SIGTERM"));
+console.log(`\n[app] done. Exiting — runner has no background loops to stop.`);
