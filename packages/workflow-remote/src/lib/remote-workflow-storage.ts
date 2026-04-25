@@ -16,6 +16,8 @@ import type {
   WorkflowRunSummary,
   SignalState,
   FenceGuard,
+  JournalEntry,
+  JournaledSuspendStorage,
 } from "@promin/workflow";
 import { WIRE_CODEC, type RpcResponse, type StorageMethod } from "./wire.ts";
 
@@ -38,7 +40,7 @@ export interface RemoteWorkflowStorageConfig {
   readonly headers?: Record<string, string>;
 }
 
-export class RemoteWorkflowStorage implements WorkflowStorage {
+export class RemoteWorkflowStorage implements WorkflowStorage, JournaledSuspendStorage {
   private readonly url: string;
   private readonly fetch: FetchLike;
   private readonly headers: Record<string, string>;
@@ -267,5 +269,72 @@ export class RemoteWorkflowStorage implements WorkflowStorage {
     params: { olderThanMs: number; limit: number } | { from: Date; to: Date; limit: number },
   ): Promise<number> {
     return this.call("purgeCompleted", params);
+  }
+
+  // -------------------------------------------------------------------------
+  // ActivityJournalStorage / JournaledSuspendStorage. Forwarded over the wire
+  // so .journaled() workflows (with ctx.activity / ctx.sleep / ctx.signal)
+  // can run against a remote storage. The runtime detects support via
+  // function-presence checks (`isActivityJournalStorage`, `isJournaledSuspendStorage`),
+  // so wiring these methods is enough — no extra plumbing on the engine side.
+  // -------------------------------------------------------------------------
+
+  loadJournal(workflowId: string, stepName: string): Promise<JournalEntry[]> {
+    return this.call("loadJournal", { workflowId, stepName });
+  }
+
+  appendEntry(params: {
+    readonly workflowId: string;
+    readonly stepName: string;
+    readonly activityIndex: number;
+    readonly branchPath?: string;
+    readonly activityName: string;
+    readonly payloadHash?: string;
+    readonly exit: NonNullable<JournalEntry["exit"]>;
+  }): Promise<void> {
+    return this.call("appendEntry", params);
+  }
+
+  appendPendingEntry(params: {
+    readonly workflowId: string;
+    readonly stepName: string;
+    readonly activityIndex: number;
+    readonly branchPath?: string;
+    readonly activityName: string;
+    readonly payloadHash?: string;
+    readonly stepType: "sleep" | "signal" | "activity" | "compensation" | "child";
+    readonly wakeAt?: Date;
+  }): Promise<void> {
+    return this.call("appendPendingEntry", params);
+  }
+
+  completePendingEntry(params: {
+    readonly workflowId: string;
+    readonly stepName: string;
+    readonly activityIndex: number;
+    readonly branchPath?: string;
+    readonly exit: NonNullable<JournalEntry["exit"]>;
+  }): Promise<void> {
+    return this.call("completePendingEntry", params);
+  }
+
+  findDueSleeps(params: { now: Date; limit: number }): Promise<
+    Array<{
+      workflowId: string;
+      stepName: string;
+      activityIndex: number;
+      branchPath: string;
+      wakeAt: Date;
+    }>
+  > {
+    return this.call("findDueSleeps", params);
+  }
+
+  findPendingSignal(params: {
+    workflowId: string;
+    stepName: string;
+    signalName: string;
+  }): Promise<JournalEntry | null> {
+    return this.call("findPendingSignal", params);
   }
 }

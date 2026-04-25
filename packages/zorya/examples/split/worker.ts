@@ -76,15 +76,10 @@ const flakyWorkflow = workflow<FlakyInput>({ name: "flaky-retry-demo", type: "de
 // ---------------------------------------------------------------------------
 // Journaled-step demo. Inside the generator body, each `yield* ctx.activity`
 // is recorded in the activity journal — on resume after a crash, completed
-// activities replay from the journal instead of re-running.
-//
-// NOTE: triggering this in split mode currently fails because
-// RemoteWorkflowStorage doesn't yet proxy ActivityJournalStorage
-// (loadJournal / appendEntry / appendPendingEntry / ...) over the wire.
-// To run journaled workflows split-mode, that protocol layer needs to be
-// added in @promin/workflow-remote. In single-process mode (worker uses
-// SqliteWorkflowStorage / InMemoryWorkflowStorage / PostgresWorkflowStorage
-// directly) the same workflow runs as written.
+// activities replay from the journal instead of re-running. ctx.sleep is
+// journaled too, so a sleeping run survives a worker restart. Works
+// end-to-end over the remote wire (RemoteWorkflowStorage proxies the
+// ActivityJournalStorage / JournaledSuspendStorage methods).
 // ---------------------------------------------------------------------------
 
 interface ResearchInput {
@@ -114,7 +109,7 @@ const researchWorkflow = workflow<ResearchInput>({ name: "journaled-research", t
     }
 
     // ctx.sleep is journaled too — survives worker restarts.
-    yield* ctx.sleep("settle", 500);
+    yield* ctx.sleep(500);
 
     const report = yield* ctx.activity("compose-report", async () => {
       await sleep(400);

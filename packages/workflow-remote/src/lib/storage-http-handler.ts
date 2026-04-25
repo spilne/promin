@@ -12,7 +12,12 @@
 // put it in front of this handler.
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage } from "@promin/workflow";
+import type {
+  WorkflowStorage,
+  ActivityJournalStorage,
+  JournaledSuspendStorage,
+} from "@promin/workflow";
+import { isActivityJournalStorage, isJournaledSuspendStorage } from "@promin/workflow";
 import { WIRE_CODEC, type RpcRequest, type RpcResponse, type StorageMethod } from "./wire.ts";
 
 /**
@@ -59,6 +64,14 @@ export function createWorkflowStorageHandler(
     startFreshRun: (p) => storage.startFreshRun(p.workflowId),
     loadRunHistory: (p) => storage.loadRunHistory(p.workflowId, p.params),
     purgeCompleted: (p) => storage.purgeCompleted(p),
+    // -- Journal methods. Feature-detected so backends without journal
+    // support surface a clear error instead of silently dropping calls.
+    loadJournal: (p) => requireJournal(storage).loadJournal(p.workflowId, p.stepName),
+    appendEntry: (p) => requireJournal(storage).appendEntry(p),
+    appendPendingEntry: (p) => requireSuspend(storage).appendPendingEntry(p),
+    completePendingEntry: (p) => requireSuspend(storage).completePendingEntry(p),
+    findDueSleeps: (p) => requireSuspend(storage).findDueSleeps(p),
+    findPendingSignal: (p) => requireSuspend(storage).findPendingSignal(p),
   };
 
   return async (req) => {
@@ -122,4 +135,22 @@ function jsonResponse(body: RpcResponse, status: number): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+function requireJournal(storage: WorkflowStorage): ActivityJournalStorage {
+  if (!isActivityJournalStorage(storage)) {
+    throw new Error(
+      "storage does not implement ActivityJournalStorage — .journaled() steps are unsupported on this backend",
+    );
+  }
+  return storage;
+}
+
+function requireSuspend(storage: WorkflowStorage): JournaledSuspendStorage {
+  if (!isActivityJournalStorage(storage) || !isJournaledSuspendStorage(storage)) {
+    throw new Error(
+      "storage does not implement JournaledSuspendStorage — ctx.sleep / ctx.signal in journaled steps are unsupported on this backend",
+    );
+  }
+  return storage;
 }

@@ -34,7 +34,16 @@ export type StorageMethod =
   | "heartbeat"
   | "startFreshRun"
   | "loadRunHistory"
-  | "purgeCompleted";
+  | "purgeCompleted"
+  // ActivityJournalStorage / JournaledSuspendStorage — forwarded only when
+  // the underlying storage implements them. Lets `.journaled()` workflows
+  // (with ctx.activity / ctx.sleep / ctx.signal) run over the wire.
+  | "loadJournal"
+  | "appendEntry"
+  | "appendPendingEntry"
+  | "completePendingEntry"
+  | "findDueSleeps"
+  | "findPendingSignal";
 
 export interface RpcRequest {
   readonly method: StorageMethod;
