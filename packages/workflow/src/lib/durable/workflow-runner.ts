@@ -22,7 +22,12 @@ import type {
   WorkflowStatusInfo,
 } from "./durable-pipeline.ts";
 import type { WorkflowHooks, IdempotencyConfig } from "./durable-pipeline.ts";
-import { isStepAttemptStorage, type WorkflowStorage, type FenceGuard } from "./workflow-storage.ts";
+import {
+  isStepAttemptStorage,
+  isTripwireCapableStorage,
+  type WorkflowStorage,
+  type FenceGuard,
+} from "./workflow-storage.ts";
 import { computeReadySet, type DagNode } from "./workflow-dag.ts";
 import type { FailedWorkflowRecord, WorkflowState } from "./workflow-state.ts";
 import {
@@ -32,6 +37,8 @@ import {
   WorkflowVersionMismatchError,
   StepTimeoutError,
   WorkflowLockError,
+  WorkflowTripwireError,
+  TripwireStorageMissingError,
 } from "./durable-pipeline-error.ts";
 import { withLock } from "./with-lock.ts";
 import { topologicalSort } from "./workflow-dag.ts";
@@ -102,6 +109,8 @@ export type WorkflowRunSafeError =
   | WorkflowTimeoutError
   | StepTimeoutError
   | WorkflowDeadlineError
+  | WorkflowTripwireError
+  | TripwireStorageMissingError
   | TaggedError;
 
 /**
@@ -333,6 +342,22 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
           if (state?.status === "failed") {
             throw new Error(state.error ?? `Workflow ${workflowId} failed`);
           }
+          if (state?.status === "tripwire") {
+            // Look up which step fired. Tripwire steps record
+            // `metadata.tripwireFired = true` on their step row at save
+            // time; find that row to report the step name in the error.
+            const firedStep = Object.values(state.steps).find(
+              (s) =>
+                s.metadata !== undefined &&
+                (s.metadata as { tripwireFired?: boolean }).tripwireFired === true,
+            );
+            throw new WorkflowTripwireError({
+              workflowId,
+              stepName: firedStep?.stepName ?? "unknown",
+              reason: state.tripwire,
+              message: `Workflow "${workflowId}" ended via tripwire`,
+            });
+          }
           await new Promise((r) => clock.setTimeout(() => r(undefined), intervalMs));
         }
         throw new Error(`Workflow ${workflowId} did not complete within ${timeoutMs}ms`);
@@ -377,6 +402,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       state: state.status === "compensating" ? "failed" : state.status,
       result: state.status === "completed" ? state.result : undefined,
       error: state.error,
+      tripwire: state.status === "tripwire" ? state.tripwire : undefined,
       currentStep,
       suspendedReason,
       steps,
@@ -685,6 +711,40 @@ export async function runWorkflowOrchestration(
           return finalResult;
         }
 
+        // Tripwire — intentional early exit. Skip compensation + DLQ since
+        // this is not a failure. Mark the workflow with `status: "tripwire"`
+        // and throw a typed error carrying the reason so callers using
+        // `run()` can `instanceof`-check it; `runSafe()` surfaces it as
+        // `{ data: null, error }`.
+        if ("tripwire" in dagResult) {
+          const stepName = dagResult.stepName;
+          const reason = dagResult.reason;
+          if (!isTripwireCapableStorage(ctx.storage)) {
+            throw new TripwireStorageMissingError({
+              workflowId,
+              stepName,
+              message:
+                `Tripwire step "${stepName}" fired but the configured ` +
+                `WorkflowStorage does not implement tripwireWorkflow. Use a ` +
+                `storage backend that supports tripwire (InMemory, Postgres) ` +
+                `or remove the .tripwire() step.`,
+            });
+          }
+          await ctx.storage.tripwireWorkflow(workflowId, reason, guard);
+          await ctx.hooks?.onWorkflowTripwire?.({
+            workflowId,
+            stepName,
+            reason,
+            durationMs: clock.currentTimeMs() - workflowStartTime,
+          });
+          throw new WorkflowTripwireError({
+            workflowId,
+            stepName,
+            reason,
+            message: `Workflow "${workflowId}" ended via tripwire at step "${stepName}"`,
+          });
+        }
+
         // DAG failed — suspension errors always propagate immediately
         if (dagResult.suspension) {
           throw dagResult.error;
@@ -825,7 +885,9 @@ export async function executeWorkflowDag(
     deadlineMs?: number;
   },
 ): Promise<
-  { success: true; result: unknown } | { success: false; error: unknown; suspension: boolean }
+  | { success: true; result: unknown }
+  | { success: false; error: unknown; suspension: boolean }
+  | { success: false; tripwire: true; stepName: string; reason: unknown }
 > {
   const { workflowId, input, dagNodes, state } = params;
   const clock = ctx.clock ?? SystemClock;
@@ -1194,6 +1256,7 @@ export async function executeWorkflowDag(
     // form; storage keeps that shape. Downstream steps and the
     // onStepComplete hook see the round-tripped decoded form so fresh-run
     // and replay paths are identical.
+    let tripwireFire: { stepName: string; reason: unknown } | null = null;
     for (const stepResult of batchResults!) {
       const { name, result, durationMs, startedAt } = stepResult;
       const metadata = "metadata" in stepResult ? stepResult.metadata : undefined;
@@ -1243,6 +1306,26 @@ export async function executeWorkflowDag(
       results[name] = decoded;
       completed.add(name);
       running.delete(name);
+
+      // Tripwire detection: a `.tripwire()` step signals termination by
+      // writing `{ tripwireFired: true, reason }` to its metadata. Captured
+      // here after save so the step row shows `status: completed` with the
+      // reason as its result — ops can still query the step history.
+      // Breaks out of DAG execution after the batch settles.
+      if (
+        stepDef?.kind === "tripwire" &&
+        metadata &&
+        (metadata as { tripwireFired?: boolean }).tripwireFired === true
+      ) {
+        tripwireFire = {
+          stepName: name,
+          reason: (metadata as { reason: unknown }).reason,
+        };
+      }
+    }
+
+    if (tripwireFire) {
+      return { success: false, tripwire: true, ...tripwireFire };
     }
 
     // Check workflow-level deadline after steps complete

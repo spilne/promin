@@ -167,6 +167,19 @@ export interface WorkflowStorage {
   /** Mark the entire workflow as failed. */
   failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void>;
 
+  /**
+   * Mark the entire workflow as ended by a tripwire — an intentional early
+   * exit distinct from `failed`. `reason` is the opaque payload returned by
+   * the firing `.tripwire()` step's `reason(prev)`; backends persist it
+   * verbatim alongside `status = "tripwire"` so callers can inspect why.
+   *
+   * Optional. Storages that don't implement this don't support the
+   * `.tripwire()` builder primitive — the runner raises
+   * `TripwireStorageMissingError` at the fire site rather than silently
+   * falling back to `failed`.
+   */
+  tripwireWorkflow?(workflowId: string, reason: unknown, guard?: FenceGuard): Promise<void>;
+
   /** Suspend the workflow (sleeping or waiting for signal). */
   suspendWorkflow(
     workflowId: string,
@@ -337,4 +350,18 @@ export function isStepAttemptStorage(
   storage: WorkflowStorage,
 ): storage is WorkflowStorage & StepAttemptStorage {
   return "saveStepAttempt" in storage && typeof (storage as any).saveStepAttempt === "function";
+}
+
+/**
+ * Storage with tripwire support — the optional `tripwireWorkflow` method
+ * is present. Use the type guard to narrow before calling from the runner.
+ */
+export type TripwireCapableStorage = WorkflowStorage &
+  Required<Pick<WorkflowStorage, "tripwireWorkflow">>;
+
+/** Runtime check for whether a storage implementation supports tripwire termination. */
+export function isTripwireCapableStorage(
+  storage: WorkflowStorage,
+): storage is TripwireCapableStorage {
+  return "tripwireWorkflow" in storage && typeof (storage as any).tripwireWorkflow === "function";
 }

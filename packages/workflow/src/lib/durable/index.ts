@@ -23,9 +23,11 @@ export {
 export {
   type WorkflowStorage,
   type StepAttemptStorage,
+  type TripwireCapableStorage,
   type FenceGuard,
   type FenceToken,
   isStepAttemptStorage,
+  isTripwireCapableStorage,
 } from "./workflow-storage.ts";
 export {
   type WorkflowState,
@@ -61,6 +63,8 @@ export {
   WorkflowVersionMismatchError,
   FenceTokenMismatchError,
   GuardError,
+  WorkflowTripwireError,
+  TripwireStorageMissingError,
 } from "./durable-pipeline-error.ts";
 export { topologicalSort, computeReadySet, type DagNode } from "./workflow-dag.ts";
 export {

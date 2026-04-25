@@ -168,9 +168,14 @@ export interface WorkflowHandle<Output> {
 }
 
 export interface WorkflowStatusInfo<Output> {
-  readonly state: "pending" | "running" | "completed" | "failed" | "suspended";
+  readonly state: "pending" | "running" | "completed" | "failed" | "suspended" | "tripwire";
   readonly result?: Output;
   readonly error?: string;
+  /**
+   * Structured tripwire reason — present only when `state === "tripwire"`.
+   * Opaque payload returned by the firing `.tripwire()` step's `reason(prev)`.
+   */
+  readonly tripwire?: unknown;
   /** Which step is currently active or blocked. */
   readonly currentStep?: string;
   /** Why the workflow is suspended (if applicable). */
@@ -207,6 +212,17 @@ export interface WorkflowHooks {
   onWorkflowFailure?: (params: {
     workflowId: string;
     error: string;
+    durationMs: number;
+  }) => void | Promise<void>;
+  /**
+   * Fired when a `.tripwire()` step terminates the workflow. Not a failure —
+   * intentional short-circuit with a structured reason. `stepName` names the
+   * tripwire step; `reason` is the opaque payload it returned.
+   */
+  onWorkflowTripwire?: (params: {
+    workflowId: string;
+    stepName: string;
+    reason: unknown;
     durationMs: number;
   }) => void | Promise<void>;
 }
@@ -471,7 +487,8 @@ export type StepKind =
   | "sleep"
   | "signal"
   | "journaled"
-  | "guard";
+  | "guard"
+  | "tripwire";
 
 export interface StepDefinition {
   readonly name: string;
@@ -851,6 +868,74 @@ export class WorkflowBuilder<
             message: options?.failureMessage ?? `Guard "${name}" failed`,
           }),
         );
+      },
+    };
+
+    return this._derive([...this._steps, stepDef], name) as any;
+  }
+
+  // ---------------------------------------------------------------------------
+  // tripwire — short-circuit early exit with a structured reason
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Add a tripwire step — a predicate that ends the workflow early with a
+   * structured outcome when it fires. Not a failure; an intentional short
+   * circuit. When `when(prev)` returns `false`, the step passes `prev`
+   * through unchanged and execution continues. When it returns `true`, the
+   * runner stops the DAG, persists the reason, and marks the workflow with
+   * `status: "tripwire"`.
+   *
+   * Use for business short-circuits that are not errors: a fraud check that
+   * decides the transaction is fraudulent, a validation step that finds
+   * nothing to do, a rate-limit decision to drop the request. Callers
+   * inspect the outcome via `handle.status()` (reads `tripwire` from state)
+   * or via `WorkflowTripwireError` thrown from `run()`.
+   *
+   * ```typescript
+   * workflow({ name: "charge", storage })
+   *   .step("load", ({ input }) => Pipeline.succeed(input))
+   *   .tripwire("fraud-check", {
+   *     when: (order) => order.riskScore > 0.9,
+   *     reason: (order) => ({ code: "fraud", score: order.riskScore }),
+   *   })
+   *   .step("charge", (ctx) => chargeCard(ctx.prev))
+   * ```
+   *
+   * Requires the configured `WorkflowStorage` to implement
+   * `tripwireWorkflow`. The runner raises `TripwireStorageMissingError`
+   * at the fire site for storages that don't support it, rather than
+   * silently falling back to `failed`.
+   */
+  tripwire<Name extends string>(
+    name: Name,
+    params: {
+      when: (prev: Current) => boolean;
+      reason: (prev: Current) => unknown;
+    },
+    options?: StepOptions<Current>,
+  ): WorkflowBuilder<Input, Steps & Record<Name, Current>, Current, Error> {
+    this._validateName(name);
+
+    const dependsOn = this._lastStepName ? [this._lastStepName] : [];
+    const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
+
+    const stepDef: StepDefinition = {
+      name,
+      dependsOn,
+      kind: "tripwire",
+      codec,
+      execute: (execParams) => {
+        const prevStepName = dependsOn[0];
+        const prev = prevStepName != null ? execParams.results[prevStepName] : execParams.input;
+        if (params.when(prev as Current)) {
+          const reason = params.reason(prev as Current);
+          // Signal the runner: workflow should terminate with tripwire status.
+          // Runner reads this off `metadataRef.current` after execute returns.
+          execParams.metadataRef.current = { tripwireFired: true, reason };
+          return Pipeline.succeed(reason);
+        }
+        return Pipeline.succeed(prev);
       },
     };
 

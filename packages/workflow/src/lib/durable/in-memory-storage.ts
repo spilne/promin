@@ -48,6 +48,7 @@ interface MutableWorkflow {
   input: unknown;
   result?: unknown;
   error?: string;
+  tripwire?: unknown;
   metadata?: Record<string, unknown>;
   steps: Map<string, StepState>;
   createdAt: Date;
@@ -111,6 +112,7 @@ export class InMemoryWorkflowStorage
       input: wf.input,
       result: wf.result,
       error: wf.error,
+      tripwire: wf.tripwire,
       metadata: wf.metadata,
       steps,
       createdAt: wf.createdAt,
@@ -419,6 +421,17 @@ export class InMemoryWorkflowStorage
     wf.updatedAt = now;
   }
 
+  async tripwireWorkflow(workflowId: string, reason: unknown, guard?: FenceGuard): Promise<void> {
+    this.checkFence(workflowId, guard);
+    const wf = this.workflows.get(workflowId);
+    if (!wf) return;
+    const now = this.clock.now();
+    wf.status = "tripwire";
+    wf.tripwire = reason;
+    wf.completedAt = now;
+    wf.updatedAt = now;
+  }
+
   async suspendWorkflow(
     workflowId: string,
     stepName: string,
@@ -557,6 +570,7 @@ export class InMemoryWorkflowStorage
       status: wf.status,
       result: wf.result,
       error: wf.error,
+      tripwire: wf.tripwire,
       steps,
       createdAt: wf.createdAt,
       startedAt: wf.startedAt,
@@ -568,6 +582,7 @@ export class InMemoryWorkflowStorage
     wf.status = "pending";
     wf.result = undefined;
     wf.error = undefined;
+    wf.tripwire = undefined;
     wf.startedAt = undefined;
     wf.completedAt = undefined;
     wf.steps = new Map();
@@ -593,6 +608,7 @@ export class InMemoryWorkflowStorage
         status: wf.status,
         result: wf.result,
         error: wf.error,
+        tripwire: wf.tripwire,
         steps: currentSteps,
         createdAt: wf.createdAt,
         startedAt: wf.startedAt,

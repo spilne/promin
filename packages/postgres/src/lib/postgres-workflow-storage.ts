@@ -139,6 +139,7 @@ export class PostgresWorkflowStorage
       input: row.input,
       result: row.result ?? undefined,
       error: row.error ?? undefined,
+      tripwire: row.tripwire ?? undefined,
       metadata: row.metadata ?? undefined,
       steps: stepMap,
       createdAt: row.createdAt,
@@ -603,6 +604,20 @@ export class PostgresWorkflowStorage
       .where(eq(workflows.workflowId, workflowId));
   }
 
+  async tripwireWorkflow(workflowId: string, reason: unknown, guard?: FenceGuard): Promise<void> {
+    await this.checkFence(workflowId, guard);
+    const now = this.config.clock.now();
+    await this.db
+      .update(workflows)
+      .set({
+        statusId: WorkflowStatusIds.id.tripwire,
+        tripwire: reason,
+        completedAt: now,
+        updatedAt: now,
+      })
+      .where(eq(workflows.workflowId, workflowId));
+  }
+
   async suspendWorkflow(
     workflowId: string,
     stepName: string,
@@ -845,6 +860,7 @@ export class PostgresWorkflowStorage
       statusId: number;
       result: unknown;
       error: string | null;
+      tripwire?: unknown;
       createdAt: Date;
       startedAt: Date | null;
       completedAt: Date | null;
@@ -858,6 +874,7 @@ export class PostgresWorkflowStorage
         statusId: wfRow.statusId,
         result: wfRow.result,
         error: wfRow.error,
+        tripwire: wfRow.tripwire ?? undefined,
         createdAt: wfRow.createdAt,
         startedAt: wfRow.startedAt,
         completedAt: wfRow.completedAt,
@@ -899,6 +916,7 @@ export class PostgresWorkflowStorage
       status: WorkflowStatusIds.toName(meta.statusId),
       result: meta.result ?? undefined,
       error: meta.error ?? undefined,
+      tripwire: meta.tripwire,
       steps: stepsByRun.get(meta.run) ?? {},
       createdAt: meta.createdAt,
       startedAt: meta.startedAt ?? undefined,
@@ -926,7 +944,7 @@ export class PostgresWorkflowStorage
       .from(workflows)
       .where(
         and(
-          sql`${workflows.statusId} IN (${WorkflowStatusIds.id.completed}, ${WorkflowStatusIds.id.failed})`,
+          sql`${workflows.statusId} IN (${WorkflowStatusIds.id.completed}, ${WorkflowStatusIds.id.failed}, ${WorkflowStatusIds.id.tripwire})`,
           gte(workflows.completedAt, from),
           lt(workflows.completedAt, to),
         ),

@@ -129,3 +129,30 @@ export class RetryableError extends Data.TaggedError("RetryableError")<{
   readonly message: string;
   readonly cause?: unknown;
 }> {}
+
+/**
+ * A `.tripwire()` step fired — the workflow ended early with a structured
+ * reason. Not a failure; an intentional short-circuit. `reason` carries the
+ * payload returned by the tripwire step's `reason(prev)` function.
+ *
+ * Thrown from `run()` so callers who want typed access to the reason can
+ * check `error instanceof WorkflowTripwireError`. Callers that prefer a
+ * non-throwing interface use `runSafe()` and inspect `.error`.
+ */
+export class WorkflowTripwireError extends Data.TaggedError("WorkflowTripwireError")<{
+  readonly workflowId: string;
+  readonly stepName: string;
+  readonly reason: unknown;
+  readonly message: string;
+}> {}
+
+/**
+ * A `.tripwire()` step fired but the configured `WorkflowStorage` does not
+ * implement `tripwireWorkflow`. Surfaces the capability gap at the fire
+ * site instead of silently corrupting state or falling back to `failed`.
+ */
+export class TripwireStorageMissingError extends Data.TaggedError("TripwireStorageMissingError")<{
+  readonly workflowId: string;
+  readonly stepName: string;
+  readonly message: string;
+}> {}

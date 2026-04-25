@@ -8,7 +8,8 @@ export type WorkflowStatus =
   | "completed"
   | "failed"
   | "suspended"
-  | "compensating";
+  | "compensating"
+  | "tripwire";
 
 export type CompensationStatus = "none" | "compensating" | "compensated" | "partial";
 
@@ -37,6 +38,12 @@ export interface WorkflowState<Input = unknown, Result = unknown> {
   readonly input: Input;
   readonly result?: Result;
   readonly error?: string;
+  /**
+   * Structured reason attached when the workflow ended via a `.tripwire()`
+   * step. Present only when `status === "tripwire"`. Opaque payload — the
+   * shape is whatever the tripwire step's `reason(prev)` returned.
+   */
+  readonly tripwire?: unknown;
   readonly metadata?: Record<string, unknown>;
   readonly steps: Record<string, StepState>;
   readonly workflowAttempt?: number;
@@ -54,6 +61,8 @@ export interface WorkflowRunSummary {
   readonly status: WorkflowStatus;
   readonly result?: unknown;
   readonly error?: string;
+  /** Tripwire reason — present only when `status === "tripwire"`. */
+  readonly tripwire?: unknown;
   readonly steps: Record<string, StepState>;
   readonly createdAt: Date;
   readonly startedAt?: Date;

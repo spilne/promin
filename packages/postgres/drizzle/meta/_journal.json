@@ -169,6 +169,13 @@
       "when": 1743400023000,
       "tag": "0023_stepqueue_heartbeat",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1743400024000,
+      "tag": "0024_workflow_tripwire",
+      "breakpoints": true
     }
   ]
 }

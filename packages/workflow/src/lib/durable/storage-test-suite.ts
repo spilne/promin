@@ -401,6 +401,20 @@ export function storageTestSuite(
         expect(state!.status).toBe("failed");
         expect(state!.error).toBe("total failure");
       });
+
+      it("tripwires a workflow with a structured reason", async () => {
+        const s = await getStorage();
+        if (typeof s.tripwireWorkflow !== "function") return;
+        await s.createWorkflow({ workflowId: "trip-1", workflowName: "test", input: {} });
+        await s.tripwireWorkflow("trip-1", { code: "fraud", score: 0.97 });
+
+        const state = await s.loadWorkflow("trip-1");
+        expect(state!.status).toBe("tripwire");
+        expect(state!.tripwire).toEqual({ code: "fraud", score: 0.97 });
+        expect(state!.completedAt).toBeInstanceOf(Date);
+        // Tripwire is distinct from failed — error field stays unset.
+        expect(state!.error).toBeUndefined();
+      });
     });
 
     // -------------------------------------------------------------------

@@ -61,6 +61,9 @@ export const workflows = pgTable(
     metadata: jsonb("metadata"),
     result: jsonb("result"),
     error: text("error"),
+    // Structured reason attached when the workflow ended via a `.tripwire()`
+    // step. Present only for `status_id = tripwire (6)`; null otherwise.
+    tripwire: jsonb("tripwire"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
