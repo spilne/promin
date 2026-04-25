@@ -237,11 +237,20 @@ async function seedSchedules() {
   // Pin some schedules to specific namespaces so the runs they produce
   // populate tenant-a / tenant-b consistently — gives the namespace
   // switcher in the sidebar live, scheduled traffic to filter on.
+  // Schedules carry the namespace BOTH on the top-level field (so the
+  // dashboard's tenant switcher filters them via storage.listSchedules)
+  // AND in metadata.namespace (so the demo's firer hands it to
+  // triggerRun, which pre-creates the resulting workflow row in that
+  // namespace). They're conceptually the same axis — the demo just has
+  // to write it twice because schedule.namespace is what scheduler
+  // storage queries on, while metadata.namespace is the input the
+  // demo's firer reads.
   await schedulerStorage.upsertSchedule({
     id: "orders-every-15s",
     name: "Orders every 15s",
     intervalMs: 15_000,
     enabled: true,
+    namespace: "tenant-a",
     metadata: { workflowName: "order", namespace: "tenant-a" },
   });
   await schedulerStorage.upsertSchedule({
@@ -250,6 +259,7 @@ async function seedSchedules() {
     intervalMs: 30_000,
     enabled: true,
     jitterMs: 2_000,
+    namespace: "tenant-a",
     metadata: { workflowName: "payment", namespace: "tenant-a" },
   });
   await schedulerStorage.upsertSchedule({
@@ -257,6 +267,7 @@ async function seedSchedules() {
     name: "Video transcodes every 45s",
     intervalMs: 45_000,
     enabled: true,
+    namespace: "tenant-b",
     metadata: { workflowName: "video-transcode", namespace: "tenant-b" },
   });
   await schedulerStorage.upsertSchedule({
@@ -264,6 +275,7 @@ async function seedSchedules() {
     name: "Onboarding every 60s",
     intervalMs: 60_000,
     enabled: true,
+    namespace: "tenant-b",
     metadata: { workflowName: "onboarding", namespace: "tenant-b" },
   });
   await schedulerStorage.upsertSchedule({
@@ -279,6 +291,7 @@ async function seedSchedules() {
     name: "Order fulfillment saga every 40s",
     intervalMs: 40_000,
     enabled: true,
+    namespace: "tenant-a",
     metadata: { workflowName: "order-fulfillment", namespace: "tenant-a" },
   });
   await schedulerStorage.upsertSchedule({
@@ -300,6 +313,7 @@ async function seedSchedules() {
     name: "Research (journaled multi-activity) every 90s",
     intervalMs: 90_000,
     enabled: true,
+    namespace: "tenant-b",
     metadata: { workflowName: "research", namespace: "tenant-b" },
   });
   await schedulerStorage.upsertSchedule({
