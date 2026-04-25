@@ -250,13 +250,141 @@ function hashString(s: string): number {
   return h;
 }
 
+// `currentTime` — exercises a tool with optional input. Uses Intl so any
+// IANA timezone string works ("America/New_York", "Europe/Kyiv", etc.).
+const currentTimeTool: AgentTool<
+  { timezone?: string },
+  { iso: string; formatted: string; timezone: string }
+> = tool({
+  name: "currentTime",
+  description:
+    "Get the current date and time, optionally in a specific IANA timezone (e.g. 'America/New_York'). Defaults to UTC.",
+  parameters: z.object({
+    timezone: z
+      .string()
+      .optional()
+      .describe("IANA timezone like 'America/New_York' or 'Europe/Kyiv'. Defaults to UTC."),
+  }),
+  execute: async ({ timezone }) => {
+    const tz = timezone && timezone.length > 0 ? timezone : "UTC";
+    const now = new Date();
+    let formatted: string;
+    try {
+      formatted = new Intl.DateTimeFormat("en-US", {
+        timeZone: tz,
+        dateStyle: "full",
+        timeStyle: "long",
+      }).format(now);
+    } catch {
+      // Invalid timezone — fall back to UTC and tell the model.
+      formatted = `${now.toISOString()} (invalid timezone ${tz}, used UTC)`;
+    }
+    return { iso: now.toISOString(), formatted, timezone: tz };
+  },
+});
+
+// `calculate` — single-op arithmetic. Avoids `eval` / Function() so the
+// demo doesn't hand the model a remote-code-execution surface.
+const calculateTool: AgentTool<
+  { a: number; b: number; op: "add" | "subtract" | "multiply" | "divide" },
+  { result: number }
+> = tool({
+  name: "calculate",
+  description:
+    "Compute a single arithmetic operation on two numbers. Use multiple calls for compound expressions.",
+  parameters: z.object({
+    a: z.number(),
+    b: z.number(),
+    op: z.enum(["add", "subtract", "multiply", "divide"]),
+  }),
+  execute: async ({ a, b, op }) => {
+    switch (op) {
+      case "add":
+        return { result: a + b };
+      case "subtract":
+        return { result: a - b };
+      case "multiply":
+        return { result: a * b };
+      case "divide":
+        if (b === 0) throw new Error("division by zero");
+        return { result: a / b };
+    }
+  },
+});
+
+// `listWorkflows` — pokes into the demo's actual workflow storage so a
+// live agent can answer "what's running on this server right now?". The
+// tool closes over the outer `storage` and `workflowsByName` so it sees
+// the same view as the dashboard.
+const listWorkflowsTool: AgentTool<
+  { limit?: number },
+  {
+    workflows: Array<{ name: string; recentRuns: number; lastStatus: string | null }>;
+  }
+> = tool({
+  name: "listWorkflows",
+  description:
+    "List the workflow definitions registered on this Zorya server, with a count of recent runs and the most recent status per workflow.",
+  parameters: z.object({
+    limit: z
+      .number()
+      .int()
+      .positive()
+      .max(100)
+      .optional()
+      .describe("Max workflows to return. Default 25."),
+  }),
+  execute: async ({ limit = 25 }) => {
+    const allRuns = await storage.listWorkflows({ limit: 500 });
+    const byName = new Map<string, { count: number; lastStatus: string | null; lastAt: number }>();
+    for (const run of allRuns) {
+      const entry = byName.get(run.workflowName) ?? { count: 0, lastStatus: null, lastAt: 0 };
+      entry.count += 1;
+      const startedAt =
+        typeof run.startedAt === "number"
+          ? run.startedAt
+          : run.startedAt
+            ? new Date(run.startedAt).getTime()
+            : 0;
+      if (startedAt > entry.lastAt) {
+        entry.lastAt = startedAt;
+        entry.lastStatus = run.status;
+      }
+      byName.set(run.workflowName, entry);
+    }
+    const workflows = Object.keys(workflowsByName)
+      .slice(0, limit)
+      .map((name) => {
+        const stats = byName.get(name);
+        return {
+          name,
+          recentRuns: stats?.count ?? 0,
+          lastStatus: stats?.lastStatus ?? null,
+        };
+      });
+    return { workflows };
+  },
+});
+
 const agentTools: Record<string, Record<string, AgentTool<unknown, unknown>>> = {
   // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
   "weather-bot": { weather: weatherTool as AgentTool<any, any> },
-  // Live Claude shares the same weather tool — proves the adapter wires
-  // tool definitions + tool_use blocks correctly with a real model.
-  // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
-  "claude-bot": { weather: weatherTool as AgentTool<any, any> },
+  // Live Claude gets the full kit — exercises a single-input tool
+  // (weather), an optional-input tool (currentTime), an enum-typed tool
+  // (calculate), and a tool that pokes at real server state
+  // (listWorkflows). Together they prove the adapter wires tool
+  // definitions, tool_use blocks, and tool_result blocks correctly with
+  // a real model.
+  "claude-bot": {
+    // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
+    weather: weatherTool as AgentTool<any, any>,
+    // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
+    currentTime: currentTimeTool as AgentTool<any, any>,
+    // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
+    calculate: calculateTool as AgentTool<any, any>,
+    // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
+    listWorkflows: listWorkflowsTool as AgentTool<any, any>,
+  },
 };
 
 // Per-agent LLM map — keyed by recipe id. Built once at boot. A discovered
