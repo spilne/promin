@@ -208,8 +208,22 @@ export class DefaultConsolidator implements Consolidator {
     // Persist any explicit personal facts as resource-scope facts so the
     // hot-path injection picks them up immediately. Episodes also get
     // injected (when budget allows) but facts are smaller and always-on.
-    for (const text of distilled.facts) {
-      await this.store.appendResourceFact(resourceKey, text);
+    //
+    // Dedup against existing facts — re-distilling a thread (or distilling
+    // after the model already wrote the same fact via the memory tool)
+    // would otherwise produce visible duplicates in resolveContext output.
+    // Compare on a normalized form (lowercase, trimmed, trailing
+    // punctuation stripped) so "User's name is Anton" and "User's name is
+    // Anton." don't both make it through.
+    if (distilled.facts.length > 0) {
+      const existing = await this.store.listResourceFacts(resourceKey);
+      const seen = new Set(existing.map((f) => normalizeFact(f.text)));
+      for (const text of distilled.facts) {
+        const norm = normalizeFact(text);
+        if (norm.length === 0 || seen.has(norm)) continue;
+        await this.store.appendResourceFact(resourceKey, text);
+        seen.add(norm);
+      }
     }
 
     const fromSeq = messages[0]!.seq;
@@ -373,4 +387,23 @@ function clamp01(n: number): number {
   if (n < 0) return 0;
   if (n > 1) return 1;
   return n;
+}
+
+function normalizeFact(text: string): string {
+  return (
+    text
+      .toLowerCase()
+      .trim()
+      // Drop possessive markers FIRST so "user's name" → "user name"
+      // (matching the same fact phrased without the possessive).
+      // Order matters — generic apostrophe-stripping below would turn
+      // "user's" into "users" and break the match against "user".
+      .replace(/['`’‘]s\b/g, "")
+      // Strip stray apostrophes / smart quotes left over from above.
+      .replace(/['`’‘]/g, "")
+      // Strip trailing punctuation so "Anton" / "Anton." dedupe.
+      .replace(/[.!?]+$/, "")
+      // Collapse internal whitespace.
+      .replace(/\s+/g, " ")
+  );
 }

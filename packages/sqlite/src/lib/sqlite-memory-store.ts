@@ -477,6 +477,13 @@ export class SqliteMemoryStore implements MemoryStore {
       where.push("resource_id = ?");
       args.push(params.resourceId);
     }
+    if (params.q && params.q.trim().length > 0) {
+      // Case-insensitive substring on thread_id. SQLite's LIKE is
+      // case-insensitive on ASCII by default; lower() the pattern + the
+      // column for safety against non-ASCII threadIds.
+      where.push("LOWER(thread_id) LIKE ?");
+      args.push(`%${params.q.trim().toLowerCase()}%`);
+    }
     const rows = this.db
       .query<DbThreadRow>(`SELECT * FROM ${this.prefix}_thread WHERE ${where.join(" AND ")}`)
       .all(...args);

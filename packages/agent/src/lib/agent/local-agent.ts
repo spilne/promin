@@ -301,6 +301,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       namespaceId,
       resourceId: params?.resourceId ?? this.config.resourceId,
       metadataFilter: params?.metadataFilter,
+      q: params?.q,
       limit: params?.limit,
       cursor: params?.cursor,
       order: params?.order,

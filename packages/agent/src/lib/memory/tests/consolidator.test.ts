@@ -63,6 +63,41 @@ describe("DefaultConsolidator", () => {
     expect(resourceEps[0]!.id).toBe(ep.id);
   });
 
+  it("dedupes facts across re-distillation even when the LLM rephrases (apostrophe / casing / trailing punctuation)", async () => {
+    const store = new InMemoryMemoryStore();
+    const key = { namespaceId: "acme", resourceId: "alice", threadId: "t1" };
+    await store.appendMessages(key, [
+      { role: "user", content: "Hi I'm Anton" },
+      { role: "assistant", content: "Nice to meet you Anton" },
+    ]);
+
+    // First distill emits "User name is Anton"; second emits the same
+    // fact with an apostrophe + trailing period. Without normalization
+    // both would land in the resource layer.
+    const llmRun1 = fixedLLM({
+      summary: "introduction",
+      outcome: null,
+      salience: 0.8,
+      facts: ["User name is Anton"],
+    });
+    const llmRun2 = fixedLLM({
+      summary: "introduction",
+      outcome: null,
+      salience: 0.8,
+      facts: ["User's name is Anton."],
+    });
+
+    const consolidator1 = new DefaultConsolidator({ store, llm: llmRun1 });
+    await consolidator1.distillThread(key);
+
+    const consolidator2 = new DefaultConsolidator({ store, llm: llmRun2 });
+    await consolidator2.distillThread(key, { force: true });
+
+    const facts = await store.listResourceFacts({ namespaceId: "acme", resourceId: "alice" });
+    expect(facts).toHaveLength(1);
+    expect(facts[0]!.text).toBe("User name is Anton");
+  });
+
   it("distillThread is idempotent on the same thread (no force)", async () => {
     const store = new InMemoryMemoryStore();
     const key = { namespaceId: "acme", resourceId: "alice", threadId: "t1" };

@@ -368,7 +368,8 @@ export function listAgentThreads(deps: AgentGatewayDeps) {
     try {
       const limit = parseIntParam(url.searchParams.get("limit"));
       const cursor = url.searchParams.get("cursor") ?? undefined;
-      const threads = await agent.listThreads({ resourceId, limit, cursor });
+      const q = url.searchParams.get("q") ?? undefined;
+      const threads = await agent.listThreads({ resourceId, limit, cursor, q });
       return json(200, { threads });
     } catch (err) {
       return jsonError(500, "list_threads_failed", asMessage(err));

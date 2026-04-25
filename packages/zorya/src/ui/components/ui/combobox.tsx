@@ -18,12 +18,25 @@ export interface ComboboxOption {
 interface ComboboxProps {
   value: string;
   onChange: (value: string) => void;
+  /**
+   * Static option list. When `loadOptions` is also provided it acts as
+   * the initial / "fallback" set shown before any async load resolves
+   * (useful so the trigger label can still render the selected value).
+   */
   options: ReadonlyArray<ComboboxOption>;
+  /**
+   * Async loader. When set, the panel calls this on open + on each
+   * keystroke (debounced) and shows the returned options instead of
+   * filtering `options` client-side. Backend search.
+   */
+  loadOptions?: (query: string) => Promise<ReadonlyArray<ComboboxOption>>;
+  /** Debounce window for `loadOptions` (ms). Default 200. */
+  loadDebounceMs?: number;
   /** Placeholder when value is empty. */
   placeholder?: string;
   /**
    * Show search input above the options. Default: auto-on when options
-   * count exceeds 6.
+   * count exceeds 6 OR `loadOptions` is supplied.
    */
   searchable?: boolean;
   /** Width / sizing class (passed through). */
@@ -36,6 +49,8 @@ export function Combobox({
   value,
   onChange,
   options,
+  loadOptions,
+  loadDebounceMs = 200,
   placeholder = "Select…",
   searchable,
   class: klass = "w-40",
@@ -45,14 +60,45 @@ export function Combobox({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(0);
+  const [loaded, setLoaded] = useState<ReadonlyArray<ComboboxOption>>(options);
+  const [loading, setLoading] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
+  // Token guards stale async results — only the latest load is allowed
+  // to update state. Prevents a slow earlier query from flashing back
+  // after a faster later query has already resolved.
+  const loadTokenRef = useRef(0);
 
-  const showSearch = searchable ?? options.length > 6;
+  const showSearch = searchable ?? (options.length > 6 || !!loadOptions);
   const sizeClass = size === "xs" ? "input-xs h-7" : size === "md" ? "input-md" : "input-sm";
 
-  // Filter options by case-insensitive substring on label OR hint.
+  // Async loading path: fire on open and on every query change (debounced).
+  useEffect(() => {
+    if (!loadOptions || !open) return;
+    const myToken = ++loadTokenRef.current;
+    setLoading(true);
+    const handle = setTimeout(async () => {
+      try {
+        const result = await loadOptions(query);
+        if (loadTokenRef.current === myToken) {
+          setLoaded(result);
+          setLoading(false);
+        }
+      } catch {
+        if (loadTokenRef.current === myToken) {
+          setLoaded([]);
+          setLoading(false);
+        }
+      }
+    }, loadDebounceMs);
+    return () => clearTimeout(handle);
+  }, [loadOptions, open, query, loadDebounceMs]);
+
+  // Resolved options shown in the panel:
+  //   - async mode: whatever the loader returned for the current query
+  //   - static mode: the prop list filtered by the typed query
   const filtered = useMemo(() => {
+    if (loadOptions) return loaded;
     const q = query.trim().toLowerCase();
     if (!q) return options;
     return options.filter((o) => {
@@ -60,7 +106,7 @@ export function Combobox({
       const hint = o.hint?.toLowerCase() ?? "";
       return label.includes(q) || hint.includes(q);
     });
-  }, [options, query]);
+  }, [options, query, loadOptions, loaded]);
 
   // Selected label — shown on the trigger when closed.
   const selected = options.find((o) => o.value === value);
@@ -157,7 +203,10 @@ export function Combobox({
             </div>
           )}
           <ul class="max-h-64 overflow-y-auto py-1">
-            {filtered.length === 0 && (
+            {loading && filtered.length === 0 && (
+              <li class="px-3 py-2 text-xs text-base-content/50 italic">Loading…</li>
+            )}
+            {!loading && filtered.length === 0 && (
               <li class="px-3 py-2 text-xs text-base-content/50 italic">No matches</li>
             )}
             {filtered.map((opt, i) => {

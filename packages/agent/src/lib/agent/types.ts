@@ -127,6 +127,8 @@ export interface ThreadOptions {
 export interface ListThreadsParams {
   readonly resourceId?: string;
   readonly metadataFilter?: Readonly<Record<string, unknown>>;
+  /** Case-insensitive substring match on thread id. Pushed to storage. */
+  readonly q?: string;
   readonly limit?: number;
   readonly cursor?: string;
   readonly order?: "lastActiveDesc" | "createdAsc" | "createdDesc";

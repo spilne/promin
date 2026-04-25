@@ -236,6 +236,13 @@ export interface ListThreadsParams {
    * on the thread's metadata with an equal value.
    */
   readonly metadataFilter?: Readonly<Record<string, unknown>>;
+  /**
+   * Case-insensitive substring match on `threadId`. Implementations
+   * SHOULD push this to the storage layer (SQL LIKE, FTS, etc.) rather
+   * than filtering after the fact, so dropdown searches scale beyond
+   * the page-size hint.
+   */
+  readonly q?: string;
   readonly limit?: number;
   /** Opaque continuation token returned from a prior page. */
   readonly cursor?: string;

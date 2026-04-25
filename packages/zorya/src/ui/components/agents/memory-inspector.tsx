@@ -21,6 +21,7 @@
 
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { api, memoryApi } from "../../api/client.ts";
+import { Combobox, type ComboboxOption } from "../ui/combobox.tsx";
 import type {
   EpisodicRecord,
   Fact,
@@ -162,22 +163,33 @@ export function MemoryInspector({
         {resourceId && (
           <div class="px-4 py-2 border-b border-base-300 flex items-center gap-2 text-xs">
             <span class="text-base-content/60">Thread</span>
-            <select
-              class="select select-bordered select-xs flex-1 font-mono"
+            <Combobox
+              class="flex-1 font-mono"
+              size="xs"
+              placeholder="(none — namespace + resource only)"
               value={currentThread ?? NO_THREAD}
-              onChange={(e) => {
-                const v = (e.target as HTMLSelectElement).value;
-                setCurrentThread(v === NO_THREAD ? undefined : v);
+              onChange={(v) => setCurrentThread(v === NO_THREAD ? undefined : v)}
+              // Initial / fallback option list — keeps the trigger label
+              // populated for whatever thread is currently selected even
+              // before the async loader has a chance to populate the panel.
+              options={comboOptions(currentThread, sortedThreads)}
+              // Backend search — fires on open and per keystroke
+              // (debounced inside Combobox). The route filters via
+              // SQL LIKE on thread_id, so this scales beyond the page-
+              // size hint.
+              loadOptions={async (q) => {
+                const res = await api.listAgentThreads(agentId, {
+                  namespaceId,
+                  resourceId,
+                  q,
+                  limit: 100,
+                });
+                return [
+                  { value: NO_THREAD, label: "(none — namespace + resource only)" },
+                  ...res.threads.map((t) => threadOption(t)),
+                ];
               }}
-            >
-              <option value={NO_THREAD}>(none — namespace + resource only)</option>
-              {sortedThreads.map((t) => (
-                <option value={t.id}>
-                  {t.id} · {t.messageCount} msg ·{" "}
-                  {formatRelative(new Date(t.lastActiveAt).toISOString())}
-                </option>
-              ))}
-            </select>
+            />
             {currentThread && (
               <DistillButton
                 agentId={agentId}
@@ -194,7 +206,6 @@ export function MemoryInspector({
                 }}
               />
             )}
-            <span class="text-base-content/40 font-mono">{sortedThreads.length} total</span>
           </div>
         )}
 
@@ -473,6 +484,31 @@ function SectionLabel({ children }: { children: preact.ComponentChildren }) {
 
 import type * as preact from "preact";
 import { toast } from "../../lib/dialogs.ts";
+
+function threadOption(t: ThreadSummary): ComboboxOption {
+  return {
+    value: t.id,
+    label: t.id,
+    hint: `${t.messageCount} msg · ${formatRelative(new Date(t.lastActiveAt).toISOString())}`,
+  };
+}
+
+/**
+ * Static fallback list shown by Combobox until the async loader resolves.
+ * Includes the "no thread" sentinel + the currently-selected thread (if
+ * any) so the trigger label always has something to render.
+ */
+function comboOptions(
+  currentThread: string | undefined,
+  threads: ReadonlyArray<ThreadSummary>,
+): ComboboxOption[] {
+  const out: ComboboxOption[] = [{ value: NO_THREAD, label: "(none — namespace + resource only)" }];
+  for (const t of threads) out.push(threadOption(t));
+  if (currentThread && !threads.some((t) => t.id === currentThread)) {
+    out.push({ value: currentThread, label: currentThread });
+  }
+  return out;
+}
 
 function DistillButton({
   agentId,

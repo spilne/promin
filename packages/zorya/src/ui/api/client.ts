@@ -238,11 +238,12 @@ export const api = {
   },
   listAgentThreads(
     id: string,
-    params: { namespaceId: string; resourceId?: string; limit?: number },
+    params: { namespaceId: string; resourceId?: string; limit?: number; q?: string },
   ): Promise<AgentThreadsResponse> {
     const qp = new URLSearchParams({ namespaceId: params.namespaceId });
     if (params.resourceId) qp.set("resourceId", params.resourceId);
     if (params.limit !== undefined) qp.set("limit", String(params.limit));
+    if (params.q && params.q.length > 0) qp.set("q", params.q);
     return req<AgentThreadsResponse>(`/api/agents/${encodeURIComponent(id)}/threads?${qp}`);
   },
   listAgentThreadMessages(

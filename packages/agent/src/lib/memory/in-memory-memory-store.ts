@@ -273,8 +273,10 @@ export class InMemoryMemoryStore implements MemoryStore {
     const all = Array.from(this.threads.values()).filter(
       (t) => t.namespaceId === params.namespaceId,
     );
+    const q = params.q?.trim().toLowerCase();
     const filtered = all.filter((t) => {
       if (params.resourceId !== undefined && t.resourceId !== params.resourceId) return false;
+      if (q && !t.threadId.toLowerCase().includes(q)) return false;
       if (params.metadataFilter) {
         for (const [k, v] of Object.entries(params.metadataFilter)) {
           if (t.metadata[k] !== v) return false;
