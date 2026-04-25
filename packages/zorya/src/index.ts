@@ -16,6 +16,11 @@ export {
   type ScanResult,
 } from "./server/workflow-registry.ts";
 export {
+  scanAgentsFolder,
+  type AgentScanOptions,
+  type AgentScanFolderResult,
+} from "./server/agent-registry.ts";
+export {
   InMemoryWorkflowAdvertisementRegistry,
   type WorkflowAdvertisementRegistry,
   type AdvertisedWorkflow,

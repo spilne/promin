@@ -29,10 +29,10 @@ import {
   SqliteAgentRegistry,
   SqliteMemoryStore,
 } from "@promin/sqlite";
-import { resolveLocalAgent, type LLMProvider, type RegisterAgentInput } from "@promin/agent";
+import { applyDiscoveredAgents, resolveLocalAgent, type LLMProvider } from "@promin/agent";
 import { echoLLM } from "@promin/agent/testing";
 import { Database } from "bun:sqlite";
-import { ZoryaServer, scanWorkflowsFolder } from "../src/index.ts";
+import { ZoryaServer, scanAgentsFolder, scanWorkflowsFolder } from "../src/index.ts";
 import path from "node:path";
 import { mkdirSync } from "node:fs";
 
@@ -70,59 +70,21 @@ const agentRegistry = SqliteAgentRegistry.make({ db });
 const memoryStore = SqliteMemoryStore.make({ db });
 
 // ---------------------------------------------------------------------------
-// Agents — register three sample chat agents (echo, support, research) so
-// the dashboard's Agents tab has something to invoke. All run against
-// deterministic in-process LLM stand-ins (no API keys), so the demo works
-// offline. Agents are tenant-agnostic templates; tenant binding happens
-// per-request via `agent.bind()` inside the gateway.
+// Agents — auto-discovered from ./agents (mirrors the workflow scanner).
+// Each .ts module exporting a `RegisterAgentInput` object gets registered
+// under its `id`. Add a new file and restart — no edits here required.
+//
+// LLM providers stay configured here because they hold runtime state
+// (round-robin index, echo turn counter) that should survive across
+// requests but not across processes — they're deliberately not part of
+// the JSON-serializable recipe shape on disk.
 
-const SAMPLE_AGENTS: RegisterAgentInput[] = [
-  {
-    id: "echo-bot",
-    backend: {
-      type: "local",
-      model: { provider: "mock", id: "echo-v1" },
-      systemPrompt:
-        "You are a friendly echo bot for Acme support. Repeat what the user said with a short acknowledgement.",
-      tools: [],
-    },
-    metadata: {
-      description: "Echoes user messages with a friendly tone.",
-      capabilities: ["chat"],
-      tags: ["demo", "stable"],
-    },
-  },
-  {
-    id: "support-bot",
-    backend: {
-      type: "local",
-      model: { provider: "mock", id: "support-v1" },
-      systemPrompt:
-        "You are Acme's customer support assistant. Triage issues, gather details, and resolve common problems.",
-      tools: [],
-    },
-    metadata: {
-      description: "Customer support triage agent.",
-      capabilities: ["chat", "triage"],
-      tags: ["demo", "beta"],
-    },
-  },
-  {
-    id: "research-bot",
-    backend: {
-      type: "local",
-      model: { provider: "mock", id: "research-v1" },
-      systemPrompt:
-        "You are a research assistant. Synthesize information from past conversations and surface relevant context.",
-      tools: [],
-    },
-    metadata: {
-      description: "Cross-thread research agent with semantic recall.",
-      capabilities: ["chat", "research"],
-      tags: ["demo", "experimental"],
-    },
-  },
-];
+const agentScanRoot = path.join(import.meta.dir, "agents");
+const agentScan = await scanAgentsFolder(agentScanRoot, {
+  onAgent: (agent, src) =>
+    console.log(`[zorya] discovered agent ${agent.id} (${path.relative(agentScanRoot, src)})`),
+});
+for (const w of agentScan.warnings) console.warn(`[zorya] ${w}`);
 
 // `support-bot` rotates through canned replies so multiple turns in a
 // thread don't all return the same line. Other bots use templated echo.
@@ -141,8 +103,10 @@ function roundRobinLLM(replies: ReadonlyArray<string>): LLMProvider {
   };
 }
 
-// Stable per-agent provider — built once, shared across requests so
-// per-LLM cycle state (round-robin index, echo turn counter) survives.
+// Per-agent LLM map — keyed by recipe id. Built once at boot. A discovered
+// agent without an entry here falls through to a default `echoLLM` in the
+// resolver, so adding a new agent file under `./agents` works without a
+// code change here unless you need a custom provider.
 const agentLlms: Record<string, LLMProvider> = {
   "echo-bot": echoLLM({ template: "echo-bot says: I heard '{task}' (turn #{n})" }),
   "support-bot": roundRobinLLM([
@@ -157,16 +121,18 @@ const agentLlms: Record<string, LLMProvider> = {
 };
 
 async function seedAgents() {
-  // Skip when the persistent registry already has rows — keep operator-
-  // edited recipes from the previous boot. Mirrors the workflow seed
-  // policy ("storage already has runs — skipping initial seed").
-  const existing = await agentRegistry.list({ limit: 1 });
-  if (existing.length > 0) {
-    console.log("[zorya] agent registry already seeded — skipping");
+  if (agentScan.agents.length === 0) {
+    console.log(`[zorya] no agents discovered under ${agentScanRoot}`);
     return;
   }
-  for (const recipe of SAMPLE_AGENTS) await agentRegistry.register(recipe);
-  console.log(`[zorya] registered ${SAMPLE_AGENTS.length} sample agents`);
+  // Upsert by default — keeps operator-edited rows from boot N when
+  // recipe code changes for boot N+1. Pass `sync: true` if you want the
+  // filesystem to be authoritative (deletes registry rows not in scan).
+  const result = await applyDiscoveredAgents(agentRegistry, agentScan.agents);
+  if (result.added.length > 0) {
+    console.log(`[zorya] registered new agents: ${result.added.join(", ")}`);
+  }
+  console.log(`[zorya] upserted ${result.upserted.length} agent recipe(s)`);
 }
 
 // ---------------------------------------------------------------------------
@@ -667,7 +633,7 @@ const host = hostname === "0.0.0.0" ? "localhost" : hostname;
 console.log(`Zorya demo server on http://${host}:${actualPort}`);
 console.log(`  - Storage:      sqlite (${dbPath})`);
 console.log(`  - Workflows:    ${Object.keys(workflowsByName).length} discovered`);
-console.log(`  - Agents:       ${SAMPLE_AGENTS.map((a) => a.id).join(", ")}`);
+console.log(`  - Agents:       ${agentScan.agents.map((a) => a.id).join(", ") || "(none)"}`);
 console.log(`  - Dashboard:    http://${host}:${actualPort}/`);
 console.log(`  - Agents tab:   http://${host}:${actualPort}/#/agents`);
 console.log(`  - Traffic comes from schedules — pause one to stop its runs`);
