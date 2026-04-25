@@ -29,8 +29,18 @@ import {
   SqliteAgentRegistry,
   SqliteMemoryStore,
 } from "@promin/sqlite";
-import { applyDiscoveredAgents, resolveLocalAgent, type LLMProvider } from "@promin/agent";
+import {
+  applyDiscoveredAgents,
+  resolveLocalAgent,
+  tool,
+  type AgentTool,
+  type LLMChatParams,
+  type LLMProvider,
+  type LLMResponse,
+  type LLMStreamChunk,
+} from "@promin/agent";
 import { echoLLM } from "@promin/agent/testing";
+import { z } from "zod";
 import { Database } from "bun:sqlite";
 import { ZoryaServer, scanAgentsFolder, scanWorkflowsFolder } from "../src/index.ts";
 import path from "node:path";
@@ -103,22 +113,192 @@ function roundRobinLLM(replies: ReadonlyArray<string>): LLMProvider {
   };
 }
 
+// Two-phase mock — turn 1 emits a tool call, turn 2 (after the tool result
+// arrives in the message history) returns a final answer. Detection is
+// "did the previous message come from a tool?" so a single instance handles
+// any number of conversational turns.
+function toolCallingMockLLM(opts: {
+  toolName: string;
+  pickInput: (lastUser: string) => unknown;
+  finalAnswer: (toolResult: string) => string;
+}): LLMProvider {
+  let callCounter = 0;
+  return {
+    chat: async (params: LLMChatParams): Promise<LLMResponse> => {
+      const last = params.messages.at(-1);
+      if (last?.role === "tool") {
+        return {
+          content: opts.finalAnswer(last.content),
+          finishReason: "stop",
+          usage: { inputTokens: 32, outputTokens: 24 },
+        };
+      }
+      callCounter += 1;
+      const lastUser = lastUserText(params);
+      return {
+        content: null,
+        toolCalls: [
+          {
+            id: `tc-${callCounter}`,
+            name: opts.toolName,
+            input: opts.pickInput(lastUser) as Record<string, unknown>,
+          },
+        ],
+        finishReason: "tool_calls",
+        usage: { inputTokens: 28, outputTokens: 12 },
+      };
+    },
+  };
+}
+
+function lastUserText(params: LLMChatParams): string {
+  for (let i = params.messages.length - 1; i >= 0; i--) {
+    const m = params.messages[i]!;
+    if (m.role === "user" && typeof m.content === "string") return m.content;
+  }
+  return "";
+}
+
+// Wrap any provider with realistic latency: a "thinking" pause before the
+// reply starts, then chunked deltas during the stream so the UI sees a
+// natural typing cadence instead of a blob landing in one frame. Falls
+// back to chat()-only consumers cleanly — the wrapper still applies the
+// pre-delay there so non-streaming routes feel paced too.
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const randInRange = ([lo, hi]: readonly [number, number]) =>
+  Math.floor(lo + Math.random() * (hi - lo));
+
+interface NaturalLLMOptions {
+  /** Pre-response thinking delay range, in ms. Default `[300, 800]`. */
+  preDelayMs?: readonly [number, number];
+  /** Per-chunk delay range during streaming, in ms. Default `[20, 60]`. */
+  chunkDelayMs?: readonly [number, number];
+  /** Approximate characters per streamed chunk. Default `5`. */
+  chunkSize?: number;
+}
+
+function naturalLLM(provider: LLMProvider, opts: NaturalLLMOptions = {}): LLMProvider {
+  const preDelay = opts.preDelayMs ?? ([300, 800] as const);
+  const chunkDelay = opts.chunkDelayMs ?? ([20, 60] as const);
+  const chunkSize = opts.chunkSize ?? 5;
+  return {
+    chat: async (params: LLMChatParams): Promise<LLMResponse> => {
+      await sleep(randInRange(preDelay));
+      return provider.chat(params);
+    },
+    chatStream: async function* (params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
+      await sleep(randInRange(preDelay));
+      // Re-use chat() so the underlying provider's per-call state (round-
+      // robin index, tool-call counter) advances exactly once per turn,
+      // regardless of which path the gateway takes.
+      const r = await provider.chat(params);
+      const text = r.content ?? "";
+      for (let i = 0; i < text.length; i += chunkSize) {
+        await sleep(randInRange(chunkDelay));
+        yield { delta: text.slice(i, i + chunkSize) };
+      }
+      yield {
+        delta: "",
+        finishReason: r.finishReason,
+        toolCalls: r.toolCalls,
+        usage: r.usage,
+        thinkingBlocks: r.thinkingBlocks,
+      };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Tools — wired into the resolver per agent. Keyed by recipe id; an agent
+// without an entry gets an empty tool kit. Each tool's `name` here must
+// match a name listed in the recipe's `backend.tools`.
+
+const weatherTool: AgentTool<{ city: string }, { tempF: number; conditions: string }> = tool({
+  name: "weather",
+  description: "Look up the current weather for a city.",
+  parameters: z.object({ city: z.string().min(1) }),
+  execute: async ({ city }) => {
+    // Stubbed lookup — deterministic values per city so the demo doesn't
+    // need a real API.
+    const conditions = ["sunny", "cloudy", "rainy", "windy"];
+    const idx = Math.abs(hashString(city)) % conditions.length;
+    return {
+      tempF: 60 + (Math.abs(hashString(city)) % 25),
+      conditions: conditions[idx]!,
+    };
+  },
+});
+
+function hashString(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return h;
+}
+
+const agentTools: Record<string, Record<string, AgentTool<unknown, unknown>>> = {
+  // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
+  "weather-bot": { weather: weatherTool as AgentTool<any, any> },
+};
+
 // Per-agent LLM map — keyed by recipe id. Built once at boot. A discovered
 // agent without an entry here falls through to a default `echoLLM` in the
 // resolver, so adding a new agent file under `./agents` works without a
-// code change here unless you need a custom provider.
+// code change here unless you need a custom provider. Every entry is
+// wrapped with `naturalLLM` so the dashboard sees realistic latency +
+// streaming cadence instead of a blob arriving in one frame.
 const agentLlms: Record<string, LLMProvider> = {
-  "echo-bot": echoLLM({ template: "echo-bot says: I heard '{task}' (turn #{n})" }),
-  "support-bot": roundRobinLLM([
-    "Thanks for reaching out. Could you tell me what error message you're seeing?",
-    "Got it. Can you confirm whether this happens on every request or just some?",
-    "Looks like a known caching issue. Try clearing your cookies for our domain — that resolves it for ~80% of cases.",
-  ]),
-  "research-bot": echoLLM({
-    template:
-      "Researching '{task}'... summary (turn #{n}): I found 3 relevant past discussions on this topic.",
-  }),
+  "echo-bot": naturalLLM(echoLLM({ template: "echo-bot says: I heard '{task}' (turn #{n})" })),
+  "support-bot": naturalLLM(
+    roundRobinLLM([
+      "Thanks for reaching out. Could you tell me what error message you're seeing?",
+      "Got it. Can you confirm whether this happens on every request or just some?",
+      "Looks like a known caching issue. Try clearing your cookies for our domain — that resolves it for ~80% of cases.",
+    ]),
+  ),
+  "research-bot": naturalLLM(
+    echoLLM({
+      template:
+        "Researching '{task}'... summary (turn #{n}): I found 3 relevant past discussions on this topic.",
+    }),
+  ),
+  "weather-bot": naturalLLM(
+    toolCallingMockLLM({
+      toolName: "weather",
+      // Naive city extraction from the user's question. Falls back to a
+      // default so the demo never produces a malformed tool input.
+      pickInput: (text) => ({ city: pickCityFromText(text) }),
+      finalAnswer: (toolResult) => {
+        try {
+          const parsed = JSON.parse(toolResult) as { tempF?: number; conditions?: string };
+          if (typeof parsed.tempF === "number" && parsed.conditions) {
+            return `It's ${parsed.conditions} and ${parsed.tempF}°F right now.`;
+          }
+        } catch {
+          // tool output not JSON — fall through
+        }
+        return `Got it: ${toolResult}`;
+      },
+    }),
+  ),
 };
+
+const KNOWN_CITIES = [
+  "berlin",
+  "paris",
+  "london",
+  "new york",
+  "tokyo",
+  "san francisco",
+  "kyiv",
+  "lisbon",
+];
+function pickCityFromText(text: string): string {
+  const lower = text.toLowerCase();
+  for (const c of KNOWN_CITIES) {
+    if (lower.includes(c)) return c.replace(/\b\w/g, (ch) => ch.toUpperCase());
+  }
+  return "Berlin";
+}
 
 async function seedAgents() {
   if (agentScan.agents.length === 0) {
@@ -568,8 +748,8 @@ const server = new ZoryaServer({
       resolveLocalAgent(recipe, {
         runner,
         memory: memoryStore,
-        llm: () => agentLlms[recipe.id] ?? echoLLM(),
-        tools: {},
+        llm: () => agentLlms[recipe.id] ?? naturalLLM(echoLLM()),
+        tools: agentTools[recipe.id] ?? {},
       }),
   },
   // Same store the resolver uses, so the inspector reads the live cascade.
