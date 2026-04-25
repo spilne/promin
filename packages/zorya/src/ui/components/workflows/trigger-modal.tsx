@@ -28,6 +28,11 @@ export function TriggerModal({ def, onClose, onTriggered }: TriggerModalProps) {
   const [workflowId, setWorkflowId] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
+  const versions = def.versions ?? (def.version ? [def.version] : []);
+  const showVersion = versions.length > 1;
+  const [version, setVersion] = useState<string | undefined>(
+    showVersion ? (def.version ?? versions[0]) : undefined,
+  );
 
   const submit = async () => {
     setError(undefined);
@@ -55,6 +60,7 @@ export function TriggerModal({ def, onClose, onTriggered }: TriggerModalProps) {
       const res = await api.triggerWorkflow(def.name, {
         input,
         workflowId: workflowId.trim() || undefined,
+        version: showVersion ? version : undefined,
       });
       onTriggered(res.workflowId);
     } catch (e) {
@@ -82,6 +88,23 @@ export function TriggerModal({ def, onClose, onTriggered }: TriggerModalProps) {
               onInput={(e) => setWorkflowId((e.target as HTMLInputElement).value)}
             />
           </label>
+
+          {showVersion && (
+            <label class="form-control">
+              <div class="label pb-0.5">
+                <span class="label-text text-sm">Version</span>
+              </div>
+              <select
+                class="select select-bordered select-sm w-full font-mono"
+                value={version ?? ""}
+                onChange={(e) => setVersion((e.target as HTMLSelectElement).value)}
+              >
+                {versions.map((v) => (
+                  <option value={v}>v{v}</option>
+                ))}
+              </select>
+            </label>
+          )}
 
           <div>
             <div class="flex items-center mb-1">

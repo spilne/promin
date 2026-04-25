@@ -97,6 +97,7 @@ export interface RunSummaryDto {
   workflowType?: string;
   namespace?: string;
   status: WorkflowStatus;
+  version?: string;
   run: number;
   createdAt: string;
   startedAt?: string;
@@ -116,6 +117,8 @@ export interface RunListQuery {
   name?: string;
   type?: string;
   namespace?: string;
+  /** Workflow version. Filtered post-fetch — uses with `name` for accuracy. */
+  version?: string;
   limit?: number;
   offset?: number;
 }
@@ -181,6 +184,12 @@ export interface TriggerRunRequest {
   metadata?: Record<string, unknown>;
   /** Explicit id. Defaults to a generated UUID. */
   workflowId?: string;
+  /**
+   * Workflow version this run should execute under. Recorded on the
+   * storage row and routed to a worker advertising that version. Defaults
+   * to whatever version a connected worker advertises.
+   */
+  version?: string;
 }
 
 export interface TriggerRunResponse {

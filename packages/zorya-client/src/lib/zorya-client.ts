@@ -122,12 +122,13 @@ export class ZoryaClient {
   }
 
   /**
-   * Claim pending workflow-start requests for the given workflow names.
-   * Workers call this in a poll loop so dashboard-triggered runs get
-   * dispatched in split mode.
+   * Claim pending workflow-start requests the worker can serve. Pass
+   * `workflowSpecs` listing the (name, versions) tuples the worker
+   * advertises; the server only hands back starts whose name matches and
+   * whose pinned version (if any) is in the worker's set.
    */
   async claimWorkflowStarts(params: {
-    workflowNames: readonly string[];
+    workflowSpecs: ReadonlyArray<{ name: string; versions: readonly string[] }>;
     workerId?: string;
     limit?: number;
   }): Promise<ReadonlyArray<WorkflowStartClaim>> {
@@ -135,7 +136,10 @@ export class ZoryaClient {
       method: "POST",
       headers: this.headers,
       body: JSON.stringify({
-        workflowNames: [...params.workflowNames],
+        workflowSpecs: params.workflowSpecs.map((s) => ({
+          name: s.name,
+          versions: [...s.versions],
+        })),
         workerId: params.workerId,
         limit: params.limit ?? 10,
       }),
@@ -164,5 +168,6 @@ export interface WorkflowStartClaim {
   readonly workflowName: string;
   readonly input: unknown;
   readonly metadata?: Record<string, unknown>;
+  readonly version?: string;
   readonly enqueuedAt: number;
 }

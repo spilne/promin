@@ -73,6 +73,62 @@ const flakyWorkflow = workflow<FlakyInput>({ name: "flaky-retry-demo", type: "de
   )
   .build();
 
+// ---------------------------------------------------------------------------
+// Journaled-step demo. Inside the generator body, each `yield* ctx.activity`
+// is recorded in the activity journal — on resume after a crash, completed
+// activities replay from the journal instead of re-running.
+//
+// NOTE: triggering this in split mode currently fails because
+// RemoteWorkflowStorage doesn't yet proxy ActivityJournalStorage
+// (loadJournal / appendEntry / appendPendingEntry / ...) over the wire.
+// To run journaled workflows split-mode, that protocol layer needs to be
+// added in @promin/workflow-remote. In single-process mode (worker uses
+// SqliteWorkflowStorage / InMemoryWorkflowStorage / PostgresWorkflowStorage
+// directly) the same workflow runs as written.
+// ---------------------------------------------------------------------------
+
+interface ResearchInput {
+  topic?: string;
+}
+
+const researchWorkflow = workflow<ResearchInput>({ name: "journaled-research", type: "demo" })
+  .journaled("research", function* (ctx, input) {
+    const topic = input.topic ?? "workflows";
+
+    const sources = yield* ctx.activity("fetch-sources", async () => {
+      await sleep(400);
+      return [
+        { id: 1, url: `https://example.com/${topic}/intro` },
+        { id: 2, url: `https://example.com/${topic}/deep-dive` },
+        { id: 3, url: `https://example.com/${topic}/comparisons` },
+      ];
+    });
+
+    const summaries: Array<{ id: number; words: number }> = [];
+    for (const src of sources) {
+      const summary = yield* ctx.activity(`analyze-${src.id}`, async () => {
+        await sleep(300 + Math.floor(Math.random() * 700));
+        return { id: src.id, words: 50 + Math.floor(Math.random() * 200) };
+      });
+      summaries.push(summary);
+    }
+
+    // ctx.sleep is journaled too — survives worker restarts.
+    yield* ctx.sleep("settle", 500);
+
+    const report = yield* ctx.activity("compose-report", async () => {
+      await sleep(400);
+      return {
+        topic,
+        totalWords: summaries.reduce((s, x) => s + x.words, 0),
+        sourceCount: summaries.length,
+      };
+    });
+
+    return report;
+  })
+  .build();
+
 const url = process.env.ZORYA_URL ?? "http://localhost:4100";
 const apiKey = process.env.ZORYA_API_KEY;
 
@@ -82,6 +138,7 @@ const workflows = [
   helloWorkflow,
   fanOutWorkflow,
   flakyWorkflow,
+  researchWorkflow,
   orderWorkflow,
   paymentWorkflow,
   onboardingWorkflow,
@@ -100,6 +157,8 @@ function sampleInputFor(name: string): unknown {
       return { items: ["alpha", "bravo", "charlie", "delta"] };
     case "flaky-retry-demo":
       return { failUntilAttempt: 2 };
+    case "journaled-research":
+      return { topic: "durable-execution" };
     case "order":
       return { orderId: 1, customer: "cust-0" };
     case "payment":

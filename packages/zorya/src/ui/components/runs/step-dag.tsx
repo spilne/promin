@@ -98,11 +98,11 @@ export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
                 viewBox="0 0 10 10"
                 refX={9}
                 refY={5}
-                markerWidth={6}
-                markerHeight={6}
+                markerWidth={7}
+                markerHeight={7}
                 orient="auto"
               >
-                <path d="M0,0 L10,5 L0,10 Z" class="fill-base-content/60" />
+                <path d="M0,0 L10,5 L0,10 Z" class="fill-base-content/80" />
               </marker>
             </defs>
 
@@ -112,8 +112,8 @@ export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
                 key={`e-${i}`}
                 d={edgePath(e.from, e.to, orientation)}
                 fill="none"
-                stroke-width={2}
-                class="stroke-base-content/40"
+                stroke-width={2.5}
+                class="stroke-base-content/60"
                 marker-end="url(#dag-arrow)"
               />
             ))}
@@ -154,12 +154,15 @@ function NodeRect({
   // than SVG fill attributes with CSS variables — latter don't resolve across
   // all browsers when referenced via hsl(var(--x)).
   const stripClass = classForStatusStrip(renderStatus);
-  const cardFillClass = isPlanned ? "fill-base-200/30" : "fill-base-200";
+  // Lighter card fill + brighter border so nodes read clearly against the
+  // dark base-100 page background. base-300 is the highest of the dark
+  // surface tokens, base-content/40 gives a visible (but not loud) edge.
+  const cardFillClass = isPlanned ? "fill-base-300/40" : "fill-base-300";
   const borderClass = isSelected
     ? "stroke-primary"
     : isPlanned
-      ? "stroke-base-content/20"
-      : "stroke-base-content/15";
+      ? "stroke-base-content/30"
+      : "stroke-base-content/40";
 
   return (
     <g transform={`translate(${node.x} ${node.y})`} onClick={onSelect} class="cursor-pointer">
@@ -169,7 +172,7 @@ function NodeRect({
         height={NODE_H}
         rx={8}
         class={`${cardFillClass} ${borderClass} transition-all`}
-        stroke-width={isSelected ? 2 : 1}
+        stroke-width={isSelected ? 2 : 1.5}
         stroke-dasharray={isPlanned ? "4 3" : undefined}
       />
       {/* Status stripe on the left */}

@@ -47,10 +47,13 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
     : "all";
   const initialPage = Math.max(1, Number.parseInt(queryParams?.get("page") ?? "1", 10) || 1);
 
+  const initialVersion = queryParams?.get("version") ?? "";
+
   const [name, setName] = useState(initialName);
   const [type, setType] = useState(initialType);
   const [namespace, setNamespace] = useState(initialNamespace);
   const [status, setStatus] = useState<WorkflowStatus | "all">(initialStatus);
+  const [version, setVersion] = useState(initialVersion);
   const [page, setPage] = useState(initialPage);
   const [meta, setMeta] = useState<NamesAndTypes>({ names: [], types: [], namespaces: [] });
   const [sparklines, setSparklines] = useState<SparklinesResponse>({});
@@ -93,7 +96,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
     }
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, type, namespace, status]);
+  }, [name, type, namespace, status, version]);
 
   // Sync local state back to URL so filters survive refresh / share links.
   useEffect(() => {
@@ -103,22 +106,24 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
     if (type) qp.set("type", type);
     if (namespace) qp.set("namespace", namespace);
     if (status !== "all") qp.set("status", status);
+    if (version) qp.set("version", version);
     if (page > 1) qp.set("page", String(page));
     onQueryChange(qp);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, type, namespace, status, page]);
+  }, [name, type, namespace, status, version, page]);
 
   const query: RunListQuery = {
     name: name || undefined,
     type: type || undefined,
     namespace: namespace || undefined,
     status: status === "all" ? undefined : status,
+    version: version || undefined,
     limit: PAGE_SIZE,
     offset: (page - 1) * PAGE_SIZE,
   };
   const { data, loading, error, refresh } = useFetch(
     () => api.listRuns(query),
-    [name, type, namespace, status, page],
+    [name, type, namespace, status, version, page],
     5000,
   );
 
@@ -192,7 +197,13 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
             ))}
           </select>
         )}
-        {(name || type || namespace || status !== "all") && (
+        <input
+          class="input input-bordered input-sm w-28 font-mono"
+          placeholder="version"
+          value={version}
+          onInput={(e) => setVersion((e.target as HTMLInputElement).value)}
+        />
+        {(name || type || namespace || status !== "all" || version) && (
           <button
             class="btn btn-sm btn-ghost"
             onClick={() => {
@@ -200,6 +211,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
               setType("");
               setNamespace("");
               setStatus("all");
+              setVersion("");
             }}
           >
             Clear

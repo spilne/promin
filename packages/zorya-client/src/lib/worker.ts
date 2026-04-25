@@ -82,7 +82,18 @@ export class ZoryaWorker {
   readonly client: ZoryaClient;
   readonly runner: WorkflowRunner;
   private readonly config: ZoryaWorkerConfig;
+  /** name → primary Workflow (the one passed in `config.workflows`). */
   private readonly byName: Map<string, Workflow<unknown, unknown>>;
+  /**
+   * name → (version → Workflow). Includes each primary def's
+   * previousVersions. The `versionless` sentinel covers defs built
+   * without an explicit `version` (the runtime treats those as
+   * "no version mismatch check" rather than version "1").
+   */
+  private readonly byNameAndVersion: Map<
+    string,
+    Map<string | typeof VERSIONLESS, Workflow<unknown, unknown>>
+  >;
   private heartbeatHandle?: ReturnType<typeof setInterval>;
   private startsPollHandle?: ReturnType<typeof setInterval>;
   private sleepScanner?: SleepScanner;
@@ -106,6 +117,7 @@ export class ZoryaWorker {
     this.client = config.client;
     this.workerId = config.workerId ?? crypto.randomUUID();
     this.byName = new Map(config.workflows.map((w) => [w.name, w]));
+    this.byNameAndVersion = buildVersionIndex(config.workflows);
     this.runner = createWorkflowRunner({ storage: config.client.storage });
   }
 
@@ -166,18 +178,18 @@ export class ZoryaWorker {
    * failure — the storage row carries the actual outcome).
    */
   private async drainPendingStarts(limit: number): Promise<void> {
-    const workflowNames = [...this.byName.keys()];
-    if (workflowNames.length === 0) return;
+    const specs = this.workflowSpecs();
+    if (specs.length === 0) return;
     const claims = await this.client.claimWorkflowStarts({
-      workflowNames,
+      workflowSpecs: specs,
       workerId: this.workerId,
       limit,
     });
     for (const claim of claims) {
-      const def = this.byName.get(claim.workflowName);
+      const def = this.resolveWorkflow(claim.workflowName, claim.version);
       if (!def) {
-        // Shouldn't happen: server filtered by our advertised names. Ack
-        // anyway so it doesn't loop forever.
+        // Server thought we could serve this name+version but our local
+        // index disagrees. Ack so we don't loop, but don't pretend we ran.
         await this.client.completeWorkflowStart(claim.id).catch(() => {});
         continue;
       }
@@ -190,6 +202,46 @@ export class ZoryaWorker {
           void this.client.completeWorkflowStart(claim.id).catch(() => {});
         });
     }
+  }
+
+  /**
+   * (name, versions) tuples this worker advertises for the claim filter.
+   * A workflow that was built without an explicit `version` advertises
+   * `versions: []` — the runtime skips the version-mismatch check for
+   * those, so they can run any pinned-version start.
+   */
+  private workflowSpecs(): Array<{ name: string; versions: readonly string[] }> {
+    const out: Array<{ name: string; versions: readonly string[] }> = [];
+    for (const [name, byVersion] of this.byNameAndVersion) {
+      const explicit: string[] = [];
+      let hasVersionless = false;
+      for (const key of byVersion.keys()) {
+        if (key === VERSIONLESS) hasVersionless = true;
+        else explicit.push(key);
+      }
+      // Versionless trumps explicit versions: the worker has a def that
+      // skips the version check entirely, so the queue can hand it any
+      // version-pinned start without mismatch.
+      out.push({ name, versions: hasVersionless ? [] : explicit });
+    }
+    return out;
+  }
+
+  /**
+   * Pick the right Workflow def for a claim. Prefer an exact version match;
+   * fall back to a versionless def, then the primary registration.
+   */
+  private resolveWorkflow(
+    name: string,
+    version: string | undefined,
+  ): Workflow<unknown, unknown> | undefined {
+    const byVersion = this.byNameAndVersion.get(name);
+    if (!byVersion) return undefined;
+    if (version) {
+      const exact = byVersion.get(version);
+      if (exact) return exact;
+    }
+    return byVersion.get(VERSIONLESS) ?? this.byName.get(name);
   }
 
   async stop(): Promise<void> {
@@ -298,6 +350,42 @@ export class ZoryaWorker {
 
 function randomSuffix(): string {
   return Math.random().toString(36).slice(2, 8);
+}
+
+/**
+ * Sentinel for workflows built without an explicit `version`. The runtime
+ * doesn't substitute a default — it simply skips the version-mismatch
+ * check — so we keep these in their own bucket rather than pretending
+ * they're version "1".
+ */
+const VERSIONLESS = Symbol("versionless");
+
+/**
+ * Walk every advertised workflow + its previousVersions and build a
+ * `name → version → def` lookup.
+ */
+function buildVersionIndex(
+  workflows: ReadonlyArray<Workflow<unknown, unknown>>,
+): Map<string, Map<string | typeof VERSIONLESS, Workflow<unknown, unknown>>> {
+  const out = new Map<string, Map<string | typeof VERSIONLESS, Workflow<unknown, unknown>>>();
+  const add = (def: Workflow<unknown, unknown>) => {
+    let inner = out.get(def.name);
+    if (!inner) {
+      inner = new Map();
+      out.set(def.name, inner);
+    }
+    inner.set(def.version ?? VERSIONLESS, def);
+  };
+  for (const wf of workflows) {
+    add(wf);
+    // previousVersions live on `_definition` (runtime internals), not on
+    // the public Workflow shape — that's where the runner reads them too.
+    const prev = wf._definition.previousVersions;
+    if (prev) {
+      for (const p of prev) add(p);
+    }
+  }
+  return out;
 }
 
 function detectRuntime(): string {

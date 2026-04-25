@@ -14,6 +14,14 @@ import type {
   TriggerRunRequest,
   TriggerRunResponse,
 } from "../api-types.ts";
+import type { WorkflowAdvertisementRegistry } from "../workflow-advertisements.ts";
+
+/** Minimal step-shape used by mergePlannedSteps — same fields on Workflow.dag.steps and AdvertisedWorkflow.steps. */
+interface StepDefLike {
+  readonly name: string;
+  readonly kind: string;
+  readonly dependsOn: readonly string[];
+}
 
 export interface RunTrigger {
   (
@@ -24,6 +32,8 @@ export interface RunTrigger {
       workflowType?: string;
       namespace?: string;
       metadata?: Record<string, unknown>;
+      /** Workflow version to record on the run + route to. */
+      version?: string;
     },
   ): Promise<{ workflowId: string }>;
 }
@@ -34,21 +44,35 @@ export interface RunRoutesDeps {
   trigger?: RunTrigger;
   /** Registry of workflow definitions, used to augment /api/runs/:id with planned steps. */
   workflows?: Readonly<Record<string, Workflow<unknown, unknown>>>;
+  /**
+   * Worker-advertised step defs. Used as a fallback when a workflow isn't
+   * statically registered (i.e. split mode where workers own the code) so
+   * graph edges can still render.
+   */
+  advertisements?: WorkflowAdvertisementRegistry;
 }
 
 export function listRuns(deps: RunRoutesDeps) {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
+    const version = url.searchParams.get("version") ?? undefined;
+    const limit = parseIntParam(url.searchParams.get("limit")) ?? 50;
+    const offset = parseIntParam(url.searchParams.get("offset")) ?? 0;
     const q: RunListQuery = {
       status: (url.searchParams.get("status") as WorkflowStatus | null) ?? undefined,
       name: url.searchParams.get("name") ?? undefined,
       type: url.searchParams.get("type") ?? undefined,
       namespace: url.searchParams.get("namespace") ?? undefined,
-      limit: parseIntParam(url.searchParams.get("limit")) ?? 50,
-      offset: parseIntParam(url.searchParams.get("offset")) ?? 0,
+      version,
+      limit,
+      offset,
     };
-    const rows = await deps.storage.listWorkflows(q);
-    const response: RunListResponse = { runs: rows.map(runToSummaryDto) };
+    // Storage doesn't filter by version yet; over-fetch when the filter is
+    // active and trim in JS so paginated views return roughly `limit` rows.
+    const fetchLimit = version ? Math.min(limit * 5, 500) : limit;
+    const rows = await deps.storage.listWorkflows({ ...q, limit: fetchLimit });
+    const filtered = version ? rows.filter((r) => r.version === version) : rows;
+    const response: RunListResponse = { runs: filtered.slice(0, limit).map(runToSummaryDto) };
     return json(200, response);
   };
 }
@@ -60,28 +84,51 @@ export function getRun(deps: RunRoutesDeps) {
     const state = await deps.storage.loadWorkflow(id);
     if (!state) return jsonError(404, "not_found");
     const dto = runToDto(state);
-    const def = deps.workflows?.[state.workflowName];
-    if (def) {
-      dto.steps = mergePlannedSteps(dto, def);
+    const stepDefs = await resolveStepDefs(deps, state.workflowName);
+    if (stepDefs.length > 0) {
+      dto.steps = mergePlannedSteps(dto, stepDefs);
     }
     return json(200, dto);
   };
 }
 
 /**
+ * Resolve a workflow's step definitions from the in-process registry first,
+ * falling back to worker advertisements. Empty array if nothing knows about
+ * the workflow.
+ */
+async function resolveStepDefs(deps: RunRoutesDeps, name: string): Promise<readonly StepDefLike[]> {
+  const def = deps.workflows?.[name];
+  if (def) return def.dag.steps;
+  if (deps.advertisements) {
+    const distinct = await deps.advertisements.distinct();
+    const adv = distinct.find((a) => a.name === name);
+    if (adv) return adv.steps;
+  }
+  return [];
+}
+
+/**
  * Merge the workflow definition's static step list with the executed-step
  * DTOs so the UI can render not-yet-executed steps in the timeline. Executed
- * steps are kept as-is; definition steps missing from the executed set are
- * appended with `isPlanned: true` + status "pending".
+ * steps inherit `dependsOn` from the def when storage didn't persist it
+ * (most backends only set dependsOn at insert time and saveStepResult /
+ * saveStepFailure default it to []), so the run-detail Graph view shows
+ * edges instead of disconnected nodes.
  */
-function mergePlannedSteps(dto: RunDto, wf: Workflow<unknown, unknown>): StepDto[] {
+function mergePlannedSteps(dto: RunDto, stepDefs: readonly StepDefLike[]): StepDto[] {
   const executedByName = new Map(dto.steps.map((s) => [s.stepName, s]));
   const out: StepDto[] = [];
   const seen = new Set<string>();
 
-  for (const defStep of wf.dag.steps) {
+  for (const defStep of stepDefs) {
     const executed = executedByName.get(defStep.name);
     if (executed) {
+      // Storage's executed rows often have dependsOn=[]; fill from the def
+      // so graph edges render.
+      if (executed.dependsOn.length === 0 && defStep.dependsOn.length > 0) {
+        executed.dependsOn = [...defStep.dependsOn];
+      }
       out.push(executed);
     } else {
       out.push({
@@ -122,6 +169,7 @@ export function triggerRun(deps: RunRoutesDeps) {
         workflowType: body.workflowType,
         namespace: body.namespace,
         metadata: body.metadata,
+        version: body.version,
       });
       const response: TriggerRunResponse = { workflowId: result.workflowId };
       return json(200, response);

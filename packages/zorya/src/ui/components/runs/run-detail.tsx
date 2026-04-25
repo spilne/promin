@@ -277,7 +277,10 @@ export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }:
         </div>
       </div>
 
-      <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_380px] gap-4">
+      {/* Step view at full width, tabs panel directly below. Stacks
+          vertically so the graph gets the whole row and the tabs don't
+          fight for horizontal space. */}
+      <div class="space-y-4">
         {stepView === "timeline" && (
           <StepTimeline run={run} selectedStep={selectedStep} onSelectStep={setSelectedStep} />
         )}
@@ -292,7 +295,7 @@ export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }:
           />
         )}
 
-        <div class="card bg-base-100 shadow self-start">
+        <div class="card bg-base-100 shadow">
           <div class="card-body p-0">
             <Tabs tabs={tabs} active={tab} onChange={setTab} class="px-2 pt-2" />
             <div class="p-4">

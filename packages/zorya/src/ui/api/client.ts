@@ -115,7 +115,7 @@ export const api = {
   },
   triggerWorkflow(
     name: string,
-    body: { input?: unknown; workflowId?: string; namespace?: string },
+    body: { input?: unknown; workflowId?: string; namespace?: string; version?: string },
   ): Promise<{ workflowId: string }> {
     return req(`/api/runs/trigger/${encodeURIComponent(name)}`, {
       method: "POST",

@@ -99,6 +99,7 @@ export function runToSummaryDto(w: WorkflowState): RunSummaryDto {
     workflowType: w.workflowType,
     namespace: w.namespace,
     status: w.status,
+    version: w.version,
     run: w.run,
     createdAt: w.createdAt.toISOString(),
     startedAt: iso(w.startedAt),

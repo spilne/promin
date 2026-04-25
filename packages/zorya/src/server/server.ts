@@ -201,6 +201,7 @@ export class ZoryaServer {
               workflowType?: string;
               namespace?: string;
               metadata?: Record<string, unknown>;
+              version?: string;
             },
           ) => {
             const workflowId = options?.workflowId ?? crypto.randomUUID();
@@ -211,12 +212,14 @@ export class ZoryaServer {
               workflowType: options?.workflowType,
               namespace: options?.namespace,
               metadata: options?.metadata,
+              version: options?.version,
             });
             await workflowStarts.enqueue({
               workflowId,
               workflowName: name,
               input,
               metadata: options?.metadata,
+              version: options?.version,
             });
             return { workflowId };
           }
@@ -226,6 +229,7 @@ export class ZoryaServer {
       storage: config.storage,
       trigger,
       workflows: config.workflows,
+      advertisements,
     };
 
     this.router = new Router()

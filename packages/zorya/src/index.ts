@@ -25,6 +25,7 @@ export {
   InMemoryWorkflowStartQueue,
   type WorkflowStartQueue,
   type WorkflowStartRecord,
+  type WorkerWorkflowSpec,
 } from "./server/workflow-starts.ts";
 export type {
   SignalDto,

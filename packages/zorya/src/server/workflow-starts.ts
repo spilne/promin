@@ -18,6 +18,8 @@ export interface WorkflowStartRecord {
   readonly workflowName: string;
   readonly input: unknown;
   readonly metadata?: Record<string, unknown>;
+  /** Workflow version requested at trigger time, if any. */
+  readonly version?: string;
   /** Epoch ms. */
   readonly enqueuedAt: number;
   /** Epoch ms. Set when a worker claims the record. */
@@ -26,20 +28,29 @@ export interface WorkflowStartRecord {
   readonly claimedBy?: string;
 }
 
+/** Per-name set of versions a worker can run. */
+export interface WorkerWorkflowSpec {
+  readonly name: string;
+  /** Versions the worker can serve. Empty means "any version". */
+  readonly versions: readonly string[];
+}
+
 export interface WorkflowStartQueue {
   enqueue(params: {
     workflowId: string;
     workflowName: string;
     input: unknown;
     metadata?: Record<string, unknown>;
+    version?: string;
   }): Promise<{ id: string }>;
   /**
-   * Claim up to `limit` pending starts whose `workflowName` is in
-   * `workflowNames`. Records become invisible to subsequent claims until
-   * `complete` is called or the claim times out (`reclaimAfterMs`).
+   * Claim up to `limit` pending starts the worker can run. A start matches
+   * a spec when the names match AND (the start has no version, the spec
+   * advertises no specific versions, or the start's version is in the
+   * spec's version set).
    */
   claim(params: {
-    workflowNames: readonly string[];
+    workflowSpecs: readonly WorkerWorkflowSpec[];
     workerId?: string;
     limit: number;
   }): Promise<WorkflowStartRecord[]>;
@@ -61,6 +72,7 @@ export class InMemoryWorkflowStartQueue implements WorkflowStartQueue {
     workflowName: string;
     input: unknown;
     metadata?: Record<string, unknown>;
+    version?: string;
   }): Promise<{ id: string }> {
     const id = `start-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     this.pending.push({
@@ -69,22 +81,32 @@ export class InMemoryWorkflowStartQueue implements WorkflowStartQueue {
       workflowName: params.workflowName,
       input: params.input,
       metadata: params.metadata,
+      version: params.version,
       enqueuedAt: Date.now(),
     });
     return { id };
   }
 
   async claim(params: {
-    workflowNames: readonly string[];
+    workflowSpecs: readonly WorkerWorkflowSpec[];
     workerId?: string;
     limit: number;
   }): Promise<WorkflowStartRecord[]> {
     this.reclaimStale();
-    const accept = new Set(params.workflowNames);
+    const specByName = new Map<string, WorkerWorkflowSpec>();
+    for (const spec of params.workflowSpecs) specByName.set(spec.name, spec);
     const claimed: WorkflowStartRecord[] = [];
     for (let i = 0; i < this.pending.length && claimed.length < params.limit; ) {
       const rec = this.pending[i]!;
-      if (!accept.has(rec.workflowName)) {
+      const spec = specByName.get(rec.workflowName);
+      if (!spec) {
+        i += 1;
+        continue;
+      }
+      // A version-pinned start only matches a worker that advertises that
+      // exact version. Versionless starts go to anyone advertising the
+      // workflow name.
+      if (rec.version && spec.versions.length > 0 && !spec.versions.includes(rec.version)) {
         i += 1;
         continue;
       }

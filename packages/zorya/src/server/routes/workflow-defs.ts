@@ -17,7 +17,14 @@ export interface WorkflowStepDefDto {
 export interface WorkflowDefDto {
   name: string;
   type?: string;
+  /** Primary version (the one the dashboard renders the DAG for). */
   version?: string;
+  /**
+   * Every distinct version known for this workflow — primary plus any
+   * other versions advertised by connected workers. Used by the trigger
+   * modal to let users pick which version to run.
+   */
+  versions?: readonly string[];
   steps: WorkflowStepDefDto[];
   /** Example input shape, used to auto-build trigger forms. Optional. */
   sampleInput?: unknown;
@@ -75,6 +82,24 @@ export function listWorkflowDefs(deps: WorkflowDefsDeps) {
           })),
           sampleInput: adv.sampleInput,
         });
+      }
+      // Annotate every dto with the full set of advertised versions seen
+      // for that name across all connected workers. Lets the trigger
+      // modal offer a version dropdown.
+      const versionsByName = new Map<string, Set<string>>();
+      for (const adv of distinct) {
+        if (!adv.version) continue;
+        let set = versionsByName.get(adv.name);
+        if (!set) {
+          set = new Set();
+          versionsByName.set(adv.name, set);
+        }
+        set.add(adv.version);
+      }
+      for (const dto of byName.values()) {
+        const set = versionsByName.get(dto.name) ?? new Set<string>();
+        if (dto.version) set.add(dto.version);
+        if (set.size > 0) dto.versions = [...set].sort();
       }
     }
     const dtos = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
