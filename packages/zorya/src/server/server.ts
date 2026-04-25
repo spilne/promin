@@ -73,7 +73,7 @@ import {
   markRunSuccess,
   rerunRun,
 } from "./routes/run-extras.ts";
-import { getSparklines, getWorkflowGrid } from "./routes/grid.ts";
+import { getSparklines, getWorkflowGrid, getWorkflowHistory } from "./routes/grid.ts";
 import { getWorkflowDef, listWorkflowDefs } from "./routes/workflow-defs.ts";
 
 export interface ZoryaServerConfig extends AuthConfig {
@@ -190,11 +190,17 @@ export class ZoryaServer {
       : undefined;
 
     // Auto-trigger for split mode: caller didn't supply `trigger`, but the
-    // worker protocol is on so we can hand starts off to workers.
+    // worker protocol is on so we can hand starts off to workers. Passing
+    // advertisements lets the service default the version when the caller
+    // doesn't specify one — avoids version-mismatch on versioned workflows.
     const trigger =
       config.trigger ??
       (workflowStarts
-        ? new TriggerService({ storage: config.storage, workflowStarts }).trigger
+        ? new TriggerService({
+            storage: config.storage,
+            workflowStarts,
+            advertisements,
+          }).trigger
         : undefined);
 
     const deps = {
@@ -232,6 +238,7 @@ export class ZoryaServer {
         }),
       )
       .get("/api/workflows/:name/grid", getWorkflowGrid(config.storage))
+      .get("/api/workflows/:name/history", getWorkflowHistory(config.storage))
       .get(
         "/api/workflows/:name/definition",
         getWorkflowDef({

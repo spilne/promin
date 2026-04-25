@@ -69,9 +69,22 @@ export class ZoryaClient {
     workflows: ReadonlyArray<Workflow<unknown, unknown>>,
     sampleInput?: (workflowName: string) => unknown,
   ): Promise<void> {
-    const body = {
-      workerId,
-      workflows: workflows.map((wf) => ({
+    // Advertise the primary definition for each workflow plus every
+    // previousVersions entry the worker can still serve. Without this the
+    // dashboard only sees the active version and the trigger modal's
+    // version dropdown is missing the old ones.
+    const entries: Array<{
+      name: string;
+      version?: string;
+      steps: Array<{ name: string; kind: string; dependsOn: string[] }>;
+      sampleInput?: unknown;
+    }> = [];
+    const seen = new Set<string>();
+    const add = (wf: Workflow<unknown, unknown>) => {
+      const key = `${wf.name}@${wf.version ?? ""}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      entries.push({
         name: wf.name,
         version: wf.version,
         steps: wf.dag.steps.map((s) => ({
@@ -80,8 +93,13 @@ export class ZoryaClient {
           dependsOn: [...s.dependsOn],
         })),
         sampleInput: sampleInput?.(wf.name),
-      })),
+      });
     };
+    for (const wf of workflows) {
+      add(wf);
+      for (const prev of wf._definition.previousVersions ?? []) add(prev);
+    }
+    const body = { workerId, workflows: entries };
     const req = new Request(`${this.url}/api/advertisements`, {
       method: "POST",
       headers: this.headers,

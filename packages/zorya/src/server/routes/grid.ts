@@ -99,6 +99,78 @@ export function getWorkflowGrid(storage: WorkflowStorage) {
   };
 }
 
+export interface HistoryRunDto {
+  workflowId: string;
+  status: WorkflowStatus;
+  version?: string;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  /** completedAt - startedAt in ms, when terminal. Undefined for in-flight or failed-before-start. */
+  totalMs?: number;
+  /** stepName → { durationMs, status, attempt }. Only executed steps. */
+  steps: Record<string, { durationMs?: number; status: StepStatus; attempt: number }>;
+}
+
+export interface HistoryResponse {
+  runs: HistoryRunDto[];
+  /** Union of step names seen across the returned runs, in DAG order. */
+  stepNames: string[];
+}
+
+/**
+ * GET /api/workflows/:name/history?limit=50
+ *
+ * Per-run totals + per-step durations for the most recent runs of a
+ * workflow, oldest-first. Feeds the workflow-detail bar chart so operators
+ * can eyeball duration trends and spot degradation in individual steps.
+ */
+export function getWorkflowHistory(storage: WorkflowStorage) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const name = params.name;
+    if (!name) return jsonError(400, "missing_name");
+    const url = new URL(req.url);
+    const limit = Math.max(
+      1,
+      Math.min(200, Number.parseInt(url.searchParams.get("limit") ?? "50", 10) || 50),
+    );
+    // Storage returns newest-first; the chart wants oldest on the left.
+    const rows = (await storage.listWorkflows({ name, limit })).slice().reverse();
+
+    const seenStepNames: string[] = [];
+    const seen = new Set<string>();
+    const runs: HistoryRunDto[] = rows.map((w) => {
+      const steps: HistoryRunDto["steps"] = {};
+      for (const [stepName, s] of Object.entries(w.steps)) {
+        if (!seen.has(stepName)) {
+          seen.add(stepName);
+          seenStepNames.push(stepName);
+        }
+        steps[stepName] = {
+          durationMs: s.durationMs,
+          status: s.status,
+          attempt: s.attempt,
+        };
+      }
+      const totalMs =
+        w.startedAt && w.completedAt ? w.completedAt.getTime() - w.startedAt.getTime() : undefined;
+      return {
+        workflowId: w.workflowId,
+        status: w.status,
+        version: w.version,
+        createdAt: w.createdAt.toISOString(),
+        startedAt: w.startedAt?.toISOString(),
+        completedAt: w.completedAt?.toISOString(),
+        totalMs,
+        steps,
+      };
+    });
+
+    const response: HistoryResponse = { runs, stepNames: seenStepNames };
+    return json(200, response);
+  };
+}
+
 export function getSparklines(storage: WorkflowStorage) {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);

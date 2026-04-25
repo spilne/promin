@@ -29,10 +29,38 @@ interface HelloInput {
   name?: string;
 }
 
-const helloWorkflow = workflow<HelloInput>({ name: "hello-world", type: "demo" })
+// Historical v1 — kept here so runs created under version "1" can still
+// resume / re-run after v2 ships. Declared first so v2 below can reference
+// it in previousVersions.
+const helloWorkflowV1 = workflow<HelloInput>({
+  name: "hello-world",
+  type: "demo",
+  version: "1",
+})
   .stepAsync("greet", async ({ input }) => {
     await sleep(500);
     return { message: `Hello, ${input.name ?? "world"}!` };
+  })
+  .build();
+
+// v2 — adds a second "farewell" step and bumps the version. onVersionMismatch:
+// "drain" lets in-flight v1 runs finish on the old code while new triggers
+// run the updated two-step shape, which is what the Workflows page version
+// dropdown + the trigger modal's version picker surface.
+const helloWorkflow = workflow<HelloInput>({
+  name: "hello-world",
+  type: "demo",
+  version: "2",
+  onVersionMismatch: "drain",
+  previousVersions: [helloWorkflowV1],
+})
+  .stepAsync("greet", async ({ input }) => {
+    await sleep(500);
+    return { message: `Hello, ${input.name ?? "world"}!` };
+  })
+  .stepAsync("farewell", async ({ prev }) => {
+    await sleep(300);
+    return { ...prev, farewell: `Bye, ${prev.message.replace("Hello, ", "").replace("!", "")}.` };
   })
   .build();
 
@@ -184,6 +212,14 @@ const worker = new ZoryaWorker({
 });
 
 await worker.start();
+
+// Seed one run in a non-default namespace so the sidebar namespace
+// switcher has something to filter to. Fire-and-forget; the worker picks
+// it up on the next poll cycle.
+void client
+  .triggerWorkflow("order", { input: { orderId: 999 }, namespace: "tenant-a" })
+  .catch(() => {});
+
 console.log(`Worker ${worker.workerId} connected to ${url}`);
 console.log(`  Advertised ${workflows.length} workflows:`);
 for (const wf of workflows) {

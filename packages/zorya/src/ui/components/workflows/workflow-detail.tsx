@@ -18,6 +18,7 @@ import { StatusBadge } from "../ui/status-badge.tsx";
 import { EmptyState } from "../ui/empty-state.tsx";
 import { Skeleton } from "../ui/skeleton.tsx";
 import { TriggerModal } from "./trigger-modal.tsx";
+import { HistoryChart } from "./history-chart.tsx";
 import { STEP_TYPE_ICON, formatDuration, formatRelative } from "../../lib/format.ts";
 
 interface WorkflowDetailProps {
@@ -93,6 +94,10 @@ export function WorkflowDetail({ name, onBack, onOpenRun }: WorkflowDetailProps)
           Trigger
         </button>
       </div>
+
+      {/* Duration history chart — operator's first stop when checking for
+          degradation of the whole workflow or a specific step. */}
+      <HistoryChart name={name} onOpenRun={onOpenRun} />
 
       <div class="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_380px] gap-4">
         {/* DAG */}

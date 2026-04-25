@@ -13,7 +13,11 @@ import type {
   RunHistoryResponse,
   ChildrenResponse,
 } from "../../server/routes/run-extras.ts";
-import type { GridResponse, SparklinesResponse } from "../../server/routes/grid.ts";
+import type {
+  GridResponse,
+  HistoryResponse,
+  SparklinesResponse,
+} from "../../server/routes/grid.ts";
 import type { WorkflowDefDto, WorkflowDefsResponse } from "../../server/routes/workflow-defs.ts";
 
 const BASE = ""; // served from same origin
@@ -103,6 +107,9 @@ export const api = {
   },
   getWorkflowGrid(name: string, limit = 25): Promise<GridResponse> {
     return req(`/api/workflows/${encodeURIComponent(name)}/grid?limit=${limit}`);
+  },
+  getWorkflowHistory(name: string, limit = 50): Promise<HistoryResponse> {
+    return req(`/api/workflows/${encodeURIComponent(name)}/history?limit=${limit}`);
   },
   getSparklines(limit = 14): Promise<SparklinesResponse> {
     return req(`/api/workflows/sparklines?limit=${limit}`);
