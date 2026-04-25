@@ -943,6 +943,10 @@ const server = new ZoryaServer({
         memory: memoryStore,
         llm: () => agentLlms[recipe.id] ?? naturalLLM(echoLLM()),
         tools: agentTools[recipe.id] ?? {},
+        // Distillation is summarisation work — use Haiku when we have a
+        // real key (cheaper / faster than Sonnet), fall back to the
+        // chat LLM for mock agents (echoLLM round-trip is free anyway).
+        consolidatorLlm: haveAnthropicKey ? anthropic("claude-haiku-4-5-20251001") : undefined,
       }),
   },
   // Same store the resolver uses, so the inspector reads the live cascade.

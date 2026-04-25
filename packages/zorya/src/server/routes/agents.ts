@@ -15,7 +15,7 @@
 // Tenant binding:
 //   Every invocation requires `namespaceId` in the body. `resourceId` is
 //   optional — when set, the resource layer participates in the memory
-//   cascade. Both are passed through `agent.bind()` per request, so the
+//   cascade. Both are passed through `agent.withScope()` per request, so the
 //   resolved agent template is shared across requests but each call sees
 //   its own tenant scope.
 //
@@ -72,8 +72,8 @@ export interface AgentGatewayDeps {
   readonly registry: AgentRegistry;
   /**
    * Materialize a live `Agent` from a registered recipe. The gateway calls
-   * this per request, then `.bind()` for tenancy. The result is unbound —
-   * the gateway handles tenant binding itself.
+   * this per request, then `.withScope()` for tenancy. The result is unscoped —
+   * the gateway handles tenant scoping itself.
    */
   readonly resolve: (recipe: RegisteredAgent) => Agent;
 }
@@ -151,7 +151,7 @@ export function invokeAgent(deps: AgentGatewayDeps) {
 
     let agent: Agent;
     try {
-      agent = deps.resolve(recipe).bind({
+      agent = deps.resolve(recipe).withScope({
         namespaceId: parsed.namespaceId,
         resourceId: parsed.resourceId,
       });
@@ -186,7 +186,7 @@ export function streamAgent(deps: AgentGatewayDeps) {
 
     let agent: Agent;
     try {
-      agent = deps.resolve(recipe).bind({
+      agent = deps.resolve(recipe).withScope({
         namespaceId: parsed.namespaceId,
         resourceId: parsed.resourceId,
       });
@@ -252,7 +252,7 @@ export function sendThreadMessage(deps: AgentGatewayDeps) {
 
     let agent: Agent;
     try {
-      agent = deps.resolve(recipe).bind({
+      agent = deps.resolve(recipe).withScope({
         namespaceId: parsed.namespaceId,
         resourceId: parsed.resourceId,
       });
@@ -292,7 +292,7 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
 
     let agent: Agent;
     try {
-      agent = deps.resolve(recipe).bind({
+      agent = deps.resolve(recipe).withScope({
         namespaceId: parsed.namespaceId,
         resourceId: parsed.resourceId,
       });
@@ -360,7 +360,7 @@ export function listAgentThreads(deps: AgentGatewayDeps) {
 
     let agent: Agent;
     try {
-      agent = deps.resolve(recipe).bind({ namespaceId, resourceId });
+      agent = deps.resolve(recipe).withScope({ namespaceId, resourceId });
     } catch (err) {
       return jsonError(500, "resolve_failed", asMessage(err));
     }
@@ -393,7 +393,7 @@ export function listThreadMessages(deps: AgentGatewayDeps) {
 
     let agent: Agent;
     try {
-      agent = deps.resolve(recipe).bind({ namespaceId, resourceId });
+      agent = deps.resolve(recipe).withScope({ namespaceId, resourceId });
     } catch (err) {
       return jsonError(500, "resolve_failed", asMessage(err));
     }
@@ -407,6 +407,81 @@ export function listThreadMessages(deps: AgentGatewayDeps) {
       return json(200, { threadId: thread.id, messages });
     } catch (err) {
       return jsonError(404, "thread_not_found", asMessage(err));
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Memory consolidation — delegates to the agent's Consolidator.
+// ---------------------------------------------------------------------------
+
+interface ConsolidateRequest {
+  readonly namespaceId?: unknown;
+  readonly resourceId?: unknown;
+  readonly force?: unknown;
+}
+
+export function distillThread(deps: AgentGatewayDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const id = params.id;
+    const threadId = params.threadId;
+    if (!id) return jsonError(400, "missing_id");
+    if (!threadId) return jsonError(400, "missing_threadId");
+
+    const body = await readJson<ConsolidateRequest>(req);
+    const namespaceId = typeof body?.namespaceId === "string" ? body.namespaceId : undefined;
+    const resourceId = typeof body?.resourceId === "string" ? body.resourceId : undefined;
+    const force = body?.force === true;
+    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    if (!resourceId) return jsonError(400, "missing_resourceId");
+
+    const recipe = await deps.registry.get(id);
+    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+
+    let agent: Agent;
+    try {
+      agent = deps.resolve(recipe).withScope({ namespaceId, resourceId });
+    } catch (err) {
+      return jsonError(500, "resolve_failed", asMessage(err));
+    }
+
+    try {
+      const episode = await agent.distillThread(threadId, { force });
+      return json(200, { episode });
+    } catch (err) {
+      return jsonError(500, "distill_failed", asMessage(err));
+    }
+  };
+}
+
+export function compactThread(deps: AgentGatewayDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const id = params.id;
+    const threadId = params.threadId;
+    if (!id) return jsonError(400, "missing_id");
+    if (!threadId) return jsonError(400, "missing_threadId");
+
+    const body = await readJson<ConsolidateRequest & { keepRecent?: unknown }>(req);
+    const namespaceId = typeof body?.namespaceId === "string" ? body.namespaceId : undefined;
+    const resourceId = typeof body?.resourceId === "string" ? body.resourceId : undefined;
+    const keepRecent = typeof body?.keepRecent === "number" ? body.keepRecent : undefined;
+    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+
+    const recipe = await deps.registry.get(id);
+    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+
+    let agent: Agent;
+    try {
+      agent = deps.resolve(recipe).withScope({ namespaceId, resourceId });
+    } catch (err) {
+      return jsonError(500, "resolve_failed", asMessage(err));
+    }
+
+    try {
+      const episode = await agent.compactThread(threadId, { keepRecent });
+      return json(200, { episode });
+    } catch (err) {
+      return jsonError(500, "compact_failed", asMessage(err));
     }
   };
 }

@@ -178,6 +178,22 @@ export function MemoryInspector({
                 </option>
               ))}
             </select>
+            {currentThread && (
+              <DistillButton
+                agentId={agentId}
+                threadId={currentThread}
+                namespaceId={namespaceId}
+                resourceId={resourceId}
+                onDone={() => {
+                  // Refetch the snapshot so Resource → Facts/Episodes
+                  // shows the freshly written rows.
+                  memoryApi
+                    .inspect({ namespaceId, resourceId, threadId: currentThread })
+                    .then(setData)
+                    .catch(() => {});
+                }}
+              />
+            )}
             <span class="text-base-content/40 font-mono">{sortedThreads.length} total</span>
           </div>
         )}
@@ -456,3 +472,48 @@ function SectionLabel({ children }: { children: preact.ComponentChildren }) {
 }
 
 import type * as preact from "preact";
+import { toast } from "../../lib/dialogs.ts";
+
+function DistillButton({
+  agentId,
+  threadId,
+  namespaceId,
+  resourceId,
+  onDone,
+}: {
+  agentId: string;
+  threadId: string;
+  namespaceId: string;
+  resourceId: string;
+  onDone: () => void;
+}) {
+  const [pending, setPending] = useState(false);
+  const distill = async () => {
+    if (pending) return;
+    setPending(true);
+    try {
+      const res = await api.distillAgentThread(agentId, threadId, {
+        namespaceId,
+        resourceId,
+        force: true,
+      });
+      const sal = res.episode.salience.toFixed(2);
+      toast(`Distilled (salience ${sal})`, { variant: "success" });
+      onDone();
+    } catch (e) {
+      toast(`Distill failed: ${e instanceof Error ? e.message : String(e)}`, { variant: "error" });
+    } finally {
+      setPending(false);
+    }
+  };
+  return (
+    <button
+      class="btn btn-xs btn-primary"
+      onClick={distill}
+      disabled={pending}
+      title="Summarise this thread into a resource-scope episode + facts so future threads pick it up"
+    >
+      {pending ? "Distilling…" : "↯ Distill"}
+    </button>
+  );
+}

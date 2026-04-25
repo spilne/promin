@@ -332,7 +332,7 @@ describe("LocalAgent — bind() multi-tenant pattern", () => {
       // no namespaceId / resourceId — tenant binding happens per-request
     });
 
-    const acmeAlice = template.bind({ namespaceId: "acme", resourceId: "alice" });
+    const acmeAlice = template.withScope({ namespaceId: "acme", resourceId: "alice" });
     const t = await acmeAlice.thread("alice-default");
     await t.send({ task: "hi" });
 

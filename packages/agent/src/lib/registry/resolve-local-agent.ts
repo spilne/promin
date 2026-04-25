@@ -19,6 +19,7 @@ import type { LLMProvider } from "../llm-provider.ts";
 import type { MemoryStore } from "../memory/types.ts";
 // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
 import type { AgentTool } from "../tool.ts";
+import type { Consolidator } from "../memory/consolidator.ts";
 import type { LocalAgentBackend, RegisteredAgent } from "./types.ts";
 
 /** Caller-supplied runtime injectables. */
@@ -49,6 +50,17 @@ export interface ResolveLocalAgentDeps {
    * recipe pins forward-looking tool names that the deployment doesn't have yet.
    */
   readonly onUnknownTool?: "throw" | "skip";
+  /**
+   * Plug in a custom Consolidator for `compactThread` / `distillThread`.
+   * When omitted, LocalAgent auto-builds a `DefaultConsolidator` (using
+   * `consolidatorLlm` below or the chat LLM as a fallback).
+   */
+  readonly consolidator?: Consolidator;
+  /**
+   * LLM used by the auto-built consolidator. Distillation is summarisation
+   * — usually fine to use a cheaper model than the chat LLM.
+   */
+  readonly consolidatorLlm?: LLMProvider;
 }
 
 /**
@@ -81,6 +93,8 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
     memory: deps.memory,
     namespaceId: deps.namespaceId,
     resourceId: deps.resourceId,
+    consolidator: deps.consolidator,
+    consolidatorLlm: deps.consolidatorLlm,
   };
 
   return new LocalAgent(config);

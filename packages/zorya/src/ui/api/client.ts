@@ -257,6 +257,20 @@ export const api = {
       `/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/messages?${qp}`,
     );
   },
+  distillAgentThread(
+    id: string,
+    threadId: string,
+    body: { namespaceId: string; resourceId: string; force?: boolean },
+  ): Promise<{ episode: { id: string; summary: string; salience: number } }> {
+    return req(
+      `/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/distill`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+  },
   sendAgentThreadMessage(
     id: string,
     threadId: string,

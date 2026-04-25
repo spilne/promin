@@ -56,6 +56,16 @@ export type {
 } from "./memory/types.ts";
 export { isSemanticRecall, PROMPT_CACHE_BOUNDARY } from "./memory/types.ts";
 
+export { DefaultConsolidator } from "./memory/consolidator.ts";
+export type {
+  Consolidator,
+  CompactThreadOptions,
+  DistillThreadOptions,
+  DistillResourceOptions,
+  ConsolidationSignals,
+  DefaultConsolidatorConfig,
+} from "./memory/consolidator.ts";
+
 export { InMemoryMemoryStore } from "./memory/in-memory-memory-store.ts";
 export type { InMemoryMemoryStoreConfig } from "./memory/in-memory-memory-store.ts";
 

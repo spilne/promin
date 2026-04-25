@@ -36,7 +36,13 @@ import { agentAction, type AgentActionConfig, type AgentResult } from "../agent-
 import { agentLoop, type AgentLoopConfig } from "../agent-loop.ts";
 import type { Message, ToolCall } from "../message.ts";
 import { SessionEventBus, type SessionEvent } from "../session-logger.ts";
-import type { MemoryStore, ThreadKey, ThreadRow } from "../memory/types.ts";
+import type { EpisodicRecord, MemoryStore, ThreadKey, ThreadRow } from "../memory/types.ts";
+import {
+  DefaultConsolidator,
+  type CompactThreadOptions,
+  type Consolidator,
+  type DistillThreadOptions,
+} from "../memory/consolidator.ts";
 import { createLayeredMemoryTool } from "../tools/layered-memory-tools.ts";
 import type {
   Agent,
@@ -68,9 +74,9 @@ export interface LocalAgentConfig<TOutput = any> {
   /**
    * Default tenant key. Optional — multi-tenant gateways leave this unset and
    * pass `namespaceId` per call (`agent.thread(id, { namespaceId })`,
-   * `agent.invoke(input, { namespaceId })`) or via `agent.bind({ namespaceId })`.
+   * `agent.invoke(input, { namespaceId })`) or via `agent.withScope({ namespaceId })`.
    * When `memory` is configured, a `namespaceId` MUST resolve at call time
-   * (either from this default, from `bind()`, or from per-call opts).
+   * (either from this default, from `withScope()`, or from per-call opts).
    */
   readonly namespaceId?: string;
   /** Default user / persona key. Per-thread override via `ThreadOptions`. */
@@ -91,6 +97,24 @@ export interface LocalAgentConfig<TOutput = any> {
    * they're stateless by design.
    */
   readonly autoMemoryTool?: boolean;
+  /**
+   * Memory consolidator backing `compactThread` / `distillThread`.
+   * Optional — when omitted AND `memory` is provided, LocalAgent auto-
+   * builds a `DefaultConsolidator` over this agent's `memory` and the
+   * LLM picked from `consolidatorLlm ?? agent.llm`. Pass your own to
+   * override the prompt / salience / embeddings, or to plug in a
+   * non-LLM implementation.
+   */
+  readonly consolidator?: Consolidator;
+  /**
+   * LLM used by the auto-built `DefaultConsolidator` for distillation
+   * and compaction. Distillation is summarisation work — usually fine
+   * to use a cheaper / faster model than the chat path. Common pattern:
+   * `agent.llm = anthropic("claude-sonnet-4-6")` for chat,
+   * `consolidatorLlm = anthropic("claude-haiku-4-5-20251001")` for
+   * distillation. Ignored when `consolidator` is supplied directly.
+   */
+  readonly consolidatorLlm?: import("../llm-provider.ts").LLMProvider;
 }
 
 export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput> {
@@ -122,13 +146,13 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
    *
    *     const supportBot = new LocalAgent({ agent, runner, memory });  // template
    *     // per request
-   *     const scoped = supportBot.bind({ namespaceId: tenant.id, resourceId: user.id });
+   *     const scoped = supportBot.withScope({ namespaceId: tenant.id, resourceId: user.id });
    *     const t = await scoped.thread(threadId);
    *
-   * `bind()` is cheap — just constructs a new `LocalAgent` carrying the same
+   * `withScope()` is cheap — just constructs a new `LocalAgent` carrying the same
    * underlying config plus the new defaults.
    */
-  bind(scope: { namespaceId?: string; resourceId?: string }): LocalAgent<TOutput> {
+  withScope(scope: { namespaceId?: string; resourceId?: string }): LocalAgent<TOutput> {
     return new LocalAgent<TOutput>({
       ...this.config,
       namespaceId: scope.namespaceId ?? this.config.namespaceId,
@@ -147,7 +171,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     if (!namespaceId) {
       throw new Error(
         "LocalAgent.thread: no namespaceId resolved. Pass it on construction, " +
-          "via .bind({ namespaceId }), or in ThreadOptions.",
+          "via .withScope({ namespaceId }), or in ThreadOptions.",
       );
     }
     const key: ThreadKey = { namespaceId, resourceId, threadId };
@@ -213,12 +237,64 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     return { ...(userTools ?? {}), memory: memoryTool };
   }
 
+  /**
+   * Resolve the consolidator: caller-supplied wins; fall back to a
+   * lazily-built DefaultConsolidator over this agent's memory + LLM.
+   * Memoised so subsequent calls reuse the same instance (so an
+   * implementation that holds an internal cache stays warm).
+   */
+  private _consolidator?: Consolidator;
+  private resolveConsolidator(): Consolidator {
+    if (this._consolidator) return this._consolidator;
+    if (this.config.consolidator) {
+      this._consolidator = this.config.consolidator;
+      return this._consolidator;
+    }
+    if (!this.config.memory) {
+      throw new Error(
+        "LocalAgent.{compact,distill}Thread: no MemoryStore configured. Pass `memory` (and optionally `consolidator`) in LocalAgentConfig.",
+      );
+    }
+    this._consolidator = new DefaultConsolidator({
+      store: this.config.memory,
+      // Prefer the explicit distill model when set — distillation is
+      // summarisation work, often cheaper to run with a faster/smaller
+      // model than the chat path.
+      llm: this.config.consolidatorLlm ?? this.config.agent.llm,
+    });
+    return this._consolidator;
+  }
+
+  async compactThread(threadId: string, opts?: CompactThreadOptions): Promise<EpisodicRecord> {
+    const key = this.threadKeyFor(threadId);
+    return this.resolveConsolidator().compactThread(key, opts);
+  }
+
+  async distillThread(threadId: string, opts?: DistillThreadOptions): Promise<EpisodicRecord> {
+    const key = this.threadKeyFor(threadId);
+    return this.resolveConsolidator().distillThread(key, opts);
+  }
+
+  private threadKeyFor(threadId: string): ThreadKey {
+    const namespaceId = this.config.namespaceId;
+    if (!namespaceId) {
+      throw new Error(
+        "LocalAgent.{compact,distill}Thread: no namespaceId resolved. Call .withScope({ namespaceId, resourceId? }) first.",
+      );
+    }
+    return {
+      namespaceId,
+      resourceId: this.config.resourceId,
+      threadId,
+    };
+  }
+
   async listThreads(params?: ListThreadsParams): Promise<ThreadSummary[]> {
     if (!this.config.memory) return [];
     const namespaceId = this.config.namespaceId;
     if (!namespaceId) {
       throw new Error(
-        "LocalAgent.listThreads: no namespaceId resolved. Call .bind({ namespaceId }) first.",
+        "LocalAgent.listThreads: no namespaceId resolved. Call .withScope({ namespaceId }) first.",
       );
     }
     const summaries = await this.config.memory.listThreads({

@@ -24,6 +24,8 @@
 // ---------------------------------------------------------------------------
 
 import type { Message, ToolCall } from "../message.ts";
+import type { CompactThreadOptions, DistillThreadOptions } from "../memory/consolidator.ts";
+import type { EpisodicRecord } from "../memory/types.ts";
 
 /** Streaming + resolved view of one agent run. */
 export interface AgentRunOutput<Output = unknown> {
@@ -164,13 +166,34 @@ export interface Agent<Input = AgentInput, Output = unknown> {
   /** List threads visible to this agent (optionally filtered by resource). */
   listThreads(params?: ListThreadsParams): Promise<ThreadSummary[]>;
   /**
+   * Roll up the oldest portion of a thread into a `ThreadEpisode`,
+   * freeing message budget while keeping the gist queryable. Backends
+   * without a consolidator should throw a clear error.
+   */
+  compactThread(threadId: string, opts?: CompactThreadOptions): Promise<EpisodicRecord>;
+  /**
+   * Distill a thread into a single `ResourceEpisode` so future threads
+   * under the same `(namespaceId, resourceId)` pick up the gist via
+   * `resolveContext`'s episode-injection budget. Backends without a
+   * consolidator should throw a clear error.
+   */
+  distillThread(threadId: string, opts?: DistillThreadOptions): Promise<EpisodicRecord>;
+  /**
    * Return a tenant-bound view of this agent. Multi-tenant gateways call
-   * this per request: `agent.bind({ namespaceId, resourceId }).invoke(...)`.
+   * this per request: `agent.withScope({ namespaceId, resourceId }).invoke(...)`.
    * The original agent is not mutated. Backends without persistent state
    * may return `this` unchanged.
    */
-  bind(scope: AgentScope): Agent<Input, Output>;
+  withScope(scope: AgentScope): Agent<Input, Output>;
 }
+
+/** Re-exported here so callers that depend on `Agent` get the option types alongside. */
+export type {
+  CompactThreadOptions,
+  DistillThreadOptions,
+  Consolidator,
+} from "../memory/consolidator.ts";
+export type { EpisodicRecord } from "../memory/types.ts";
 
 /** Tenant binding for `Agent.bind()`. */
 export interface AgentScope {

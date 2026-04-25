@@ -89,6 +89,8 @@ import {
 import { getSparklines, getWorkflowGrid, getWorkflowHistory } from "./routes/grid.ts";
 import { getWorkflowDef, listWorkflowDefs } from "./routes/workflow-defs.ts";
 import {
+  compactThread,
+  distillThread,
   getAgent,
   invokeAgent,
   listAgentThreads,
@@ -242,7 +244,7 @@ export interface ZoryaServerConfig extends AuthConfig {
    * `registry` stores the recipes; `resolve` materializes a live `Agent`
    * from a recipe (typically `(r) => resolveLocalAgent(r, deps)` for
    * LocalAgent backends). Tenant binding is handled per request inside
-   * the routes via `agent.bind({ namespaceId, resourceId })`.
+   * the routes via `agent.withScope({ namespaceId, resourceId })`.
    */
   agents?: AgentGatewayDeps;
   /**
@@ -544,7 +546,9 @@ export class ZoryaServer {
         .get("/api/agents/:id/threads", listAgentThreads(agentDeps))
         .post("/api/agents/:id/threads/:threadId", sendThreadMessage(agentDeps))
         .post("/api/agents/:id/threads/:threadId/stream", streamThreadMessage(agentDeps))
-        .get("/api/agents/:id/threads/:threadId/messages", listThreadMessages(agentDeps));
+        .get("/api/agents/:id/threads/:threadId/messages", listThreadMessages(agentDeps))
+        .post("/api/agents/:id/threads/:threadId/distill", distillThread(agentDeps))
+        .post("/api/agents/:id/threads/:threadId/compact", compactThread(agentDeps));
     }
 
     if (config.memoryInspector) {
