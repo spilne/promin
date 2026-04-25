@@ -128,13 +128,21 @@ export interface SignalState {
  * stream live progress without polling `loadWorkflow`.
  *
  * Emission points:
+ *   - `notifyStepStarted` → `step-started` (runner calls this before each
+ *     local step body runs; storages without the method emit nothing for
+ *     this event)
  *   - `saveStepResult` → `step-completed`
  *   - `saveStepFailure` → `step-failed`
  *   - `completeWorkflow` → `workflow-completed` (terminal — stream closes)
  *   - `failWorkflow` → `workflow-failed` (terminal — stream closes)
  *   - `tripwireWorkflow` → `workflow-tripwire` (terminal — stream closes)
+ *
+ * The runner's polling fallback (used when the storage lacks native push)
+ * can only synthesize completion events from step-row transitions, so
+ * `step-started` is only observable on the push path.
  */
 export type WorkflowRunEvent =
+  | { readonly type: "step-started"; readonly stepName: string; readonly at: Date }
   | {
       readonly type: "step-completed";
       readonly stepName: string;

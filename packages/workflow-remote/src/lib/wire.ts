@@ -24,6 +24,7 @@ export type StorageMethod =
   | "saveTaskFailure"
   | "completeWorkflow"
   | "failWorkflow"
+  | "tripwireWorkflow"
   | "suspendWorkflow"
   | "deliverSignal"
   | "loadSignals"

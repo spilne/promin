@@ -190,6 +190,15 @@ export interface WorkflowStorage {
   ): Promise<void>;
 
   /**
+   * Notify subscribers that a step is about to execute. Fired by the
+   * runner before each local step body runs so subscribers can observe
+   * `step-started` events. Optional — storages without subscription
+   * support or without this method are skipped silently by the runner.
+   * Persists nothing; this is purely an event-bus hook.
+   */
+  notifyStepStarted?(workflowId: string, stepName: string): Promise<void> | void;
+
+  /**
    * Subscribe to step/workflow-lifecycle events for a single workflow run.
    * Returns an async iterable; the stream closes on the first terminal
    * event (`workflow-completed`, `workflow-failed`, `workflow-tripwire`) or

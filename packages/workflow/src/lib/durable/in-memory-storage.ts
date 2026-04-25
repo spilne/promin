@@ -523,6 +523,14 @@ export class InMemoryWorkflowStorage
     wf.updatedAt = now;
   }
 
+  notifyStepStarted(workflowId: string, stepName: string): void {
+    // Event-bus only — no persistence. The runner calls this before each
+    // local step body runs; here we fan out `step-started` to any active
+    // subscribers for this workflowId. Storages without subscribers or
+    // without this method entirely silently drop the signal.
+    this.emitEvent(workflowId, { type: "step-started", stepName, at: this.clock.now() }, false);
+  }
+
   /**
    * Stream step/workflow-lifecycle events for a single run. Returns an
    * async iterable closed by any terminal event or by the supplied

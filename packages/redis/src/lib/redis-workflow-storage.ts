@@ -366,6 +366,7 @@ export class RedisWorkflowStorage
       input: JSON.parse(raw.input),
       result: raw.result ? JSON.parse(raw.result) : undefined,
       error: raw.error || undefined,
+      tripwire: raw.tripwire ? JSON.parse(raw.tripwire) : undefined,
       metadata: raw.metadata ? JSON.parse(raw.metadata) : undefined,
       steps,
       createdAt: this.parseDate(raw.createdAt),
@@ -918,6 +919,29 @@ export class RedisWorkflowStorage
     }
   }
 
+  async tripwireWorkflow(workflowId: string, reason: unknown, guard?: FenceGuard): Promise<void> {
+    await this.checkFence(workflowId, guard);
+    const raw = await this.redis.hgetall(this.wfKey(workflowId));
+    if (!raw || !raw.id) return;
+
+    const now = this.clock.now();
+    const oldStatus = raw.status;
+
+    await this.redis.hset(this.wfKey(workflowId), {
+      status: "tripwire",
+      tripwire: JSON.stringify(reason),
+      completedAt: this.serializeDate(now),
+      updatedAt: this.serializeDate(now),
+    });
+
+    await this.moveStatusIndex(workflowId, oldStatus, "tripwire");
+    await this.redis.zadd(this.completedIndexKey, now.getTime(), workflowId);
+
+    if (this.completedTtlMs) {
+      await this.applyTtl(workflowId, Number(raw.run));
+    }
+  }
+
   private async applyTtl(workflowId: string, run: number): Promise<void> {
     if (!this.completedTtlMs) return;
     const ttl = this.completedTtlMs;
@@ -1138,6 +1162,7 @@ export class RedisWorkflowStorage
       status: raw.status as WorkflowStatus,
       result: raw.result ? JSON.parse(raw.result) : undefined,
       error: raw.error || undefined,
+      tripwire: raw.tripwire ? JSON.parse(raw.tripwire) : undefined,
       steps,
       createdAt: this.parseDate(raw.createdAt),
       startedAt: raw.startedAt ? this.parseDate(raw.startedAt) : undefined,
@@ -1171,7 +1196,14 @@ export class RedisWorkflowStorage
     });
 
     // Remove optional fields from completed run
-    await this.redis.hdel(this.wfKey(workflowId), "result", "error", "startedAt", "completedAt");
+    await this.redis.hdel(
+      this.wfKey(workflowId),
+      "result",
+      "error",
+      "tripwire",
+      "startedAt",
+      "completedAt",
+    );
 
     await this.moveStatusIndex(workflowId, oldStatus, "pending");
 
@@ -1199,6 +1231,7 @@ export class RedisWorkflowStorage
       status: raw.status as WorkflowStatus,
       result: raw.result ? JSON.parse(raw.result) : undefined,
       error: raw.error || undefined,
+      tripwire: raw.tripwire ? JSON.parse(raw.tripwire) : undefined,
       steps: currentSteps,
       createdAt: this.parseDate(raw.createdAt),
       startedAt: raw.startedAt ? this.parseDate(raw.startedAt) : undefined,

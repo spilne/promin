@@ -39,6 +39,15 @@ export function createWorkflowStorageHandler(
     saveTaskFailure: (p) => storage.saveTaskFailure(p, p.guard),
     completeWorkflow: (p) => storage.completeWorkflow(p.workflowId, p.result, p.guard),
     failWorkflow: (p) => storage.failWorkflow(p.workflowId, p.error, p.guard),
+    tripwireWorkflow: async (p) => {
+      // Forwarded only if the underlying storage implements it. The client
+      // calling this op against a non-tripwire-capable storage surfaces a
+      // clear 4xx-style error rather than a silent miss.
+      if (!storage.tripwireWorkflow) {
+        throw new Error("storage does not implement tripwireWorkflow");
+      }
+      await storage.tripwireWorkflow(p.workflowId, p.reason, p.guard);
+    },
     suspendWorkflow: (p) =>
       storage.suspendWorkflow(p.workflowId, p.stepName, p.stepUpdate, p.guard),
     deliverSignal: (p) => storage.deliverSignal(p.workflowId, p.signalName, p.payload),

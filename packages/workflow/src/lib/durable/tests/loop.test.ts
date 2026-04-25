@@ -268,6 +268,53 @@ describe("dowhile / dountil", () => {
       expect(state?.steps["loop.iter.3"]).toBeUndefined();
     });
 
+    it("resumes from the first missing iter row on restart", async () => {
+      // Simulate a crash mid-loop by pre-seeding completed iter rows in
+      // storage before running the workflow. The loop should replay them
+      // (body never runs for those iters) and resume from iter-2.
+      const storage = new InMemoryWorkflowStorage();
+      await storage.createWorkflow({
+        workflowId: "w-resume-1",
+        workflowName: "w-resume",
+        input: 0,
+      });
+      const now = new Date(0);
+      await storage.saveStepResult({
+        workflowId: "w-resume-1",
+        stepName: "loop.iter.0",
+        result: 0,
+        durationMs: 1,
+        startedAt: now,
+      });
+      await storage.saveStepResult({
+        workflowId: "w-resume-1",
+        stepName: "loop.iter.1",
+        result: 1,
+        durationMs: 1,
+        startedAt: now,
+      });
+
+      let bodyRuns = 0;
+      const runner = createWorkflowRunner({ storage });
+      const wf = workflow<number>({ name: "w-resume" })
+        .dowhile(
+          "loop",
+          (_ctx, iter) => {
+            bodyRuns++;
+            return iter;
+          },
+          (result) => result < 3,
+        )
+        .build();
+
+      const result = await runner.run({ workflow: wf, workflowId: "w-resume-1", input: 0 });
+
+      // iters 0 and 1 were pre-seeded; the body should only run for iters
+      // 2 and 3, at which point condition(3, 3) is false → exit.
+      expect(bodyRuns).toBe(2);
+      expect(result).toBe(3);
+    });
+
     it("per-iteration rows carry duration and timestamps", async () => {
       const storage = new InMemoryWorkflowStorage();
       const runner = createWorkflowRunner({ storage });

@@ -1180,7 +1180,12 @@ function makeCtx<Input, Prev>(params: {
         });
       }
       const currentIter = iter;
-      result = yield* activity<T>(`${name}-iter-${currentIter}`, () => fn(currentIter));
+      const iterGen = activity(`${name}-iter-${currentIter}`, () => fn(currentIter)) as Generator<
+        ActivityYield,
+        T,
+        unknown
+      >;
+      result = yield* iterGen;
       iter++;
       if (!condition(result, currentIter)) break;
     }

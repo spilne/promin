@@ -12,7 +12,7 @@
 
 import { Effect } from "effect";
 import { Pipeline, type Sinkable, type TaggedError } from "@promin/core";
-import { LosslessJsonCodec, SystemClock, type Clock } from "@promin/core";
+import { SystemClock, type Clock } from "@promin/core";
 import type {
   Workflow,
   CompensateConfig,
@@ -1036,14 +1036,17 @@ export async function executeWorkflowDag(
   // Load previously completed step results. The stored shape is always the
   // codec's encoded form (written by saveStepResult above), so we decode
   // through the step's codec here so downstream steps see the same shape
-  // they would on a fresh run.
+  // they would on a fresh run. Skip step rows that aren't declared in the
+  // DAG — e.g., synthetic `<loop>.iter.<n>` rows written by `.dowhile()`,
+  // or orphans from a prior version's topology. Those rows stay in
+  // storage for observability but must not count as DAG progress, or the
+  // `completed.size < ctx.steps.length` gate would skip the real step.
   if (state) {
     for (const [stepName, stepState] of Object.entries(state.steps)) {
-      if (stepState.status === "completed") {
-        const stepDef = ctx.steps.find((s) => s.name === stepName);
-        const codec = stepDef?.codec ?? LosslessJsonCodec;
-        results[stepName] = codec.decode(stepState.result);
-      }
+      if (stepState.status !== "completed") continue;
+      const stepDef = ctx.steps.find((s) => s.name === stepName);
+      if (!stepDef) continue;
+      results[stepName] = stepDef.codec.decode(stepState.result);
     }
   }
 
@@ -1150,6 +1153,22 @@ export async function executeWorkflowDag(
 
     // Execute local ready steps in parallel, with per-step retry and failure handling
     const readySteps = localReady.map((name) => ctx.steps.find((s) => s.name === name)!);
+
+    // Emit `step-started` events to any subscribers before kicking the
+    // batch off. Storages without the optional hook are silently skipped —
+    // polling-only callers don't see step-started (no reliable signal
+    // from snapshot diffs).
+    if (typeof ctx.storage.notifyStepStarted === "function") {
+      for (const stepDef of readySteps) {
+        // Swallow errors from the notify path — subscription is advisory,
+        // not load-bearing. A broken event bus must not fail a workflow.
+        try {
+          await ctx.storage.notifyStepStarted(workflowId, stepDef.name);
+        } catch {
+          // ignore
+        }
+      }
+    }
 
     // Per-parallel-batch audit metadata map. `.match()` writes its chosen
     // case here via metadataRef; the failure path reads it back by step

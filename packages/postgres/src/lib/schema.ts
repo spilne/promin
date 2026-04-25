@@ -87,6 +87,9 @@ export const workflowRuns = pgTable(
     statusId: integer("status_id").notNull(),
     result: jsonb("result"),
     error: text("error"),
+    // Tripwire reason preserved from the archived run. Null unless the
+    // archived run ended via .tripwire().
+    tripwire: jsonb("tripwire"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),

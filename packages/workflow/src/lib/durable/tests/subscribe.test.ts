@@ -22,6 +22,30 @@ async function collect(
 }
 
 describe("subscribe — run-scoped event stream", () => {
+  it("emits step-started before each step body runs", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+
+    const wf = workflow<number>({ name: "sub-started" })
+      .step("a", ({ input }) => Pipeline.succeed(input + 1))
+      .step("b", ({ prev }) => Pipeline.succeed(prev * 2))
+      .build();
+
+    const eventsP = collect(runner.subscribe("sub-started-1"));
+    await runner.run({ workflow: wf, workflowId: "sub-started-1", input: 5 });
+    const events = await eventsP;
+
+    const started = events.filter(
+      (e): e is Extract<WorkflowRunEvent, { type: "step-started" }> => e.type === "step-started",
+    );
+    expect(started.map((e) => e.stepName)).toEqual(["a", "b"]);
+    // step-started must precede step-completed for the same step.
+    const aStart = events.findIndex((e) => e.type === "step-started" && e.stepName === "a");
+    const aDone = events.findIndex((e) => e.type === "step-completed" && e.stepName === "a");
+    expect(aStart).toBeGreaterThanOrEqual(0);
+    expect(aDone).toBeGreaterThan(aStart);
+  });
+
   it("emits step-completed and workflow-completed events for a successful run", async () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
@@ -37,7 +61,14 @@ describe("subscribe — run-scoped event stream", () => {
     const events = await eventsP;
 
     const types = events.map((e) => e.type);
-    expect(types).toEqual(["step-completed", "step-completed", "workflow-completed"]);
+    // With step-started firing, each step contributes started + completed.
+    expect(types).toEqual([
+      "step-started",
+      "step-completed",
+      "step-started",
+      "step-completed",
+      "workflow-completed",
+    ]);
 
     const stepEvents = events.filter(
       (e): e is Extract<WorkflowRunEvent, { type: "step-completed" }> =>
@@ -104,16 +135,22 @@ describe("subscribe — run-scoped event stream", () => {
     const it = runner.subscribe("sub-close-1")[Symbol.asyncIterator]();
     const p1 = it.next();
     const p2 = it.next();
+    const p3 = it.next();
 
     await runner.run({ workflow: wf, workflowId: "sub-close-1", input: 1 });
 
+    // Single step produces three events: step-started, step-completed,
+    // workflow-completed. All three in-flight next() calls resolve with
+    // their event; the fourth sees done=true.
     const r1 = await p1;
     const r2 = await p2;
+    const r3 = await p3;
     expect(r1.done).toBe(false);
     expect(r2.done).toBe(false);
+    expect(r3.done).toBe(false);
 
-    const r3 = await it.next();
-    expect(r3.done).toBe(true);
+    const r4 = await it.next();
+    expect(r4.done).toBe(true);
   });
 
   it("multiple concurrent subscribers each see every event", async () => {
@@ -131,8 +168,9 @@ describe("subscribe — run-scoped event stream", () => {
     await runner.run({ workflow: wf, workflowId: "sub-multi-1", input: 10 });
 
     const [evA, evB] = await Promise.all([a, b]);
-    expect(evA.length).toBe(3); // two step-completed + workflow-completed
-    expect(evB.length).toBe(3);
+    // Two steps × (started + completed) + workflow-completed = 5.
+    expect(evA.length).toBe(5);
+    expect(evB.length).toBe(5);
     expect(evA.map((e) => e.type)).toEqual(evB.map((e) => e.type));
   });
 

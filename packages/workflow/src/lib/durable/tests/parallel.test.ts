@@ -14,7 +14,7 @@ describe("parallel", () => {
 
     const wf = workflow<{ userId: string }>({ name: "par-basic" })
       .step("load", ({ input }) => Pipeline.succeed(input))
-      .parallel("enrich", {
+      .parallelSteps("enrich", {
         user: ({ prev }) => Pipeline.succeed({ name: `U:${prev.userId}` }),
         perms: ({ prev }) => Pipeline.succeed({ roles: [`R:${prev.userId}`] }),
       })
@@ -37,7 +37,7 @@ describe("parallel", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<{ a: number; b: number }>({ name: "par-first" })
-      .parallel("ops", {
+      .parallelSteps("ops", {
         sum: ({ input }) => Pipeline.succeed(input.a + input.b),
         prod: ({ input }) => Pipeline.succeed(input.a * input.b),
       })
@@ -58,7 +58,7 @@ describe("parallel", () => {
 
     const wf = workflow<number>({ name: "par-persist" })
       .step("in", ({ input }) => Pipeline.succeed(input))
-      .parallel("fork", {
+      .parallelSteps("fork", {
         x: ({ prev }) => Pipeline.succeed(prev * 10),
         y: ({ prev }) => Pipeline.succeed(prev * 100),
       })
@@ -78,7 +78,7 @@ describe("parallel", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<string>({ name: "par-join-result" })
-      .parallel("f", {
+      .parallelSteps("f", {
         upper: ({ input }) => Pipeline.succeed(input.toUpperCase()),
         len: ({ input }) => Pipeline.succeed(input.length),
       })
@@ -95,7 +95,7 @@ describe("parallel", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "par-3" })
-      .parallel("triple", {
+      .parallelSteps("triple", {
         a: ({ input }) => Pipeline.succeed(input + 1),
         b: ({ input }) => Pipeline.succeed(input + 2),
         c: ({ input }) => Pipeline.succeed(input + 3),
@@ -111,7 +111,7 @@ describe("parallel", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "par-fail" })
-      .parallel("fork", {
+      .parallelSteps("fork", {
         ok: ({ input }) => Pipeline.succeed(input),
         bad: () => Pipeline.fail(new BranchFailed({ message: "boom" })),
       })
@@ -130,16 +130,16 @@ describe("parallel", () => {
   });
 
   it("rejects empty branches object", () => {
-    expect(() => workflow<number>({ name: "par-empty" }).parallel("empty", {}).build()).toThrow(
-      /at least one branch/,
-    );
+    expect(() =>
+      workflow<number>({ name: "par-empty" }).parallelSteps("empty", {}).build(),
+    ).toThrow(/at least one branch/);
   });
 
   it("rejects duplicate block name", () => {
     expect(() =>
       workflow<number>({ name: "par-dup" })
         .step("foo", ({ input }) => Pipeline.succeed(input))
-        .parallel("foo", {
+        .parallelSteps("foo", {
           a: ({ prev }) => Pipeline.succeed(prev),
         })
         .build(),
@@ -150,7 +150,7 @@ describe("parallel", () => {
     expect(() =>
       workflow<number>({ name: "par-col" })
         .step("fork.a", ({ input }) => Pipeline.succeed(input))
-        .parallel("fork", {
+        .parallelSteps("fork", {
           a: ({ prev }) => Pipeline.succeed(prev),
         })
         .build(),
@@ -162,7 +162,7 @@ describe("parallel", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "par-chain" })
-      .parallel("split", {
+      .parallelSteps("split", {
         dbl: ({ input }) => Pipeline.succeed(input * 2),
         trp: ({ input }) => Pipeline.succeed(input * 3),
       })
@@ -181,7 +181,7 @@ describe("parallel", () => {
   it("DAG exports branches and join node", () => {
     const wf = workflow<number>({ name: "par-dag" })
       .step("start", ({ input }) => Pipeline.succeed(input))
-      .parallel("fork", {
+      .parallelSteps("fork", {
         left: ({ prev }) => Pipeline.succeed(prev + 1),
         right: ({ prev }) => Pipeline.succeed(prev + 2),
       })
@@ -206,7 +206,7 @@ describe("parallel", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "par-concurrent" })
-      .parallel("sleep", {
+      .parallelSteps("sleep", {
         a: () =>
           Pipeline.fromPromise(async () => {
             await new Promise((r) => setTimeout(r, 40));

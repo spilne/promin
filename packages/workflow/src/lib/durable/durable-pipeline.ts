@@ -20,8 +20,6 @@ import {
   runJournaledStep,
   JournalStorageMissingError,
   type JournaledStepBody,
-  type JournaledContext,
-  type ActivityYield,
 } from "./journaled-step.ts";
 import { Pipeline, type TaggedError } from "@promin/core";
 import type { RetryPolicy } from "@promin/core";
@@ -80,6 +78,14 @@ export interface LoopOptions<T> {
   readonly maxIterations?: number;
   /** Override the codec used for the loop's iteration results. */
   readonly codec?: Codec<T>;
+  /** Per-step timeout applied to the outer loop (not per-iteration). */
+  readonly timeoutMs?: number;
+  /** Retry policy applied to the outer loop step (not per-iteration). */
+  readonly retry?: RetryPolicy<TaggedError>;
+  /** Capabilities required by the loop step (forwarded when dispatched). */
+  readonly needs?: readonly string[];
+  /** Dispatch priority for the loop step. */
+  readonly priority?: number;
 }
 
 /** Extract the success type from a parallel branch function. */
@@ -1003,12 +1009,11 @@ export class WorkflowBuilder<
    * queue entry, no per-iter step rows), use `ctx.dowhile` inside a
    * `.journaled()` body instead.
    *
-   * **Durability note:** iterations save their own completion rows but
-   * the loop's orchestration state (the iteration counter) is not
-   * crash-recoverable at this level — a worker restart mid-loop replays
-   * the loop step from iter 0 after saving the last completed row is
-   * observed. For crash-safe iteration inside a single logical step,
-   * use `ctx.dowhile` which journals each iteration.
+   * **Crash recovery:** iteration step rows double as a durability
+   * checkpoint. On restart, the loop replays completed `<name>.iter.<n>`
+   * rows in order, re-evaluating the condition against each persisted
+   * result, and resumes from the first missing iteration. Already-run
+   * iterations are never re-executed.
    */
   dowhile<Name extends string, T>(
     name: Name,
@@ -1100,6 +1105,28 @@ export class WorkflowBuilder<
             try: async (): Promise<T> => {
               let result: T = undefined as unknown as T;
               let iter = 0;
+
+              // Crash resume: look for completed `<name>.iter.<n>` rows
+              // in storage and replay loop state from them. Walk
+              // iter=0,1,2,... decoding each persisted result,
+              // re-evaluating the condition, and resuming from the first
+              // missing iteration. Cheap (O(iters) reads) and avoids
+              // re-running already-completed iterations on restart.
+              const state = await storage.loadWorkflow(execParams.workflowId);
+              if (state) {
+                while (iter < maxIterations) {
+                  const replayName = `${name}.iter.${iter}`;
+                  const row = state.steps[replayName];
+                  if (!row || row.status !== "completed") break;
+                  result = iterCodec.decode(row.result) as T;
+                  iter++;
+                  // If the replayed condition would have exited here, the
+                  // previous run already decided to stop — return without
+                  // touching storage or the body.
+                  if (!condition(result, iter - 1)) return result;
+                }
+              }
+
               while (true) {
                 if (iter >= maxIterations) {
                   throw new LoopLimitExceededError({
@@ -1182,14 +1209,20 @@ export class WorkflowBuilder<
   }
 
   // ---------------------------------------------------------------------------
-  // parallel — fluent fork/join over multiple named branches
+  // parallelSteps — fluent fork/join over multiple named DAG steps
   // ---------------------------------------------------------------------------
 
   /**
-   * Add a parallel block — forks from the current head into N branches that
-   * run concurrently as distinct DAG steps (each distributable to workers
-   * and retriable independently), then joins them into a keyed record that
-   * downstream steps consume via `prev`.
+   * Add a parallel-steps block — forks from the current head into N
+   * branches that run concurrently as **distinct DAG steps** (each
+   * distributable to workers and retriable independently), then joins them
+   * into a keyed record that downstream steps consume via `prev`.
+   *
+   * Named `parallelSteps` rather than `parallel` to disambiguate from
+   * `ctx.parallel()` on `JournaledContext`, which fans out **activities
+   * in-process** inside a single journaled step. This one operates at the
+   * DAG level — each branch is a separate queue entry that can land on a
+   * different worker.
    *
    * Follows the house style from `.branch()` and `.match()`: the outer
    * block takes a `name`; branch labels are keys in a record rather than
@@ -1200,7 +1233,7 @@ export class WorkflowBuilder<
    * ```typescript
    * workflow({ name: "signup", storage })
    *   .step("load", ({ input }) => Pipeline.succeed(input))
-   *   .parallel("enrich", {
+   *   .parallelSteps("enrich", {
    *     user: ({ prev }) => Pipeline.fromPromise(() => fetchUser(prev)),
    *     perms: ({ prev }) => Pipeline.fromPromise(() => fetchPerms(prev)),
    *   })
@@ -1212,7 +1245,7 @@ export class WorkflowBuilder<
    * failure (remaining branches' results are not preserved; compensation
    * cascades via the usual saga path).
    */
-  parallel<
+  parallelSteps<
     Name extends string,
     Branches extends Record<
       string,
@@ -1233,7 +1266,7 @@ export class WorkflowBuilder<
     if (branchKeys.length === 0) {
       throw new WorkflowError({
         workflowId: "",
-        message: `.parallel("${name}", ...) requires at least one branch`,
+        message: `.parallelSteps("${name}", ...) requires at least one branch`,
       });
     }
 

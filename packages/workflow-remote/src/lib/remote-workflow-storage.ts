@@ -209,6 +209,10 @@ export class RemoteWorkflowStorage implements WorkflowStorage {
     return this.call("failWorkflow", { workflowId, error, guard });
   }
 
+  tripwireWorkflow(workflowId: string, reason: unknown, guard?: FenceGuard): Promise<void> {
+    return this.call("tripwireWorkflow", { workflowId, reason, guard });
+  }
+
   suspendWorkflow(
     workflowId: string,
     stepName: string,
