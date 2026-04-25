@@ -52,18 +52,21 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
     : "all";
   const initialPage = Math.max(1, Number.parseInt(queryParams?.get("page") ?? "1", 10) || 1);
   const initialSort = parseSortParam(queryParams?.get("sort"));
-  // The smart-search input is the single source of truth for name / type /
-  // version / namespace / metadata / id / freeText filters. We accept either
-  // the unified `?q=` form or the legacy per-field params (`?name=`, etc.)
-  // so old bookmarks keep working.
+  // The chip row is the canonical filter state — once a clause submits it
+  // moves out of the input and into `appliedFilters`. The input is just an
+  // edit buffer for the *next* clause. We accept either the unified `?q=`
+  // form or the legacy per-field params (`?name=`, etc.) so old bookmarks
+  // keep working.
   const initialQueryText = queryParams?.get("q") ?? buildQueryFromLegacyParams(queryParams);
-
-  const [searchInput, setSearchInput] = useState(initialQueryText);
-  const [appliedSearch, setAppliedSearch] = useState(initialQueryText);
-  const parsedSearch = useMemo<ParsedSearchQuery>(
-    () => parseSearchQuery(appliedSearch),
-    [appliedSearch],
+  const initialFilters = useMemo<ParsedSearchQuery>(
+    () => promoteFreeText(parseSearchQuery(initialQueryText)),
+    // initialQueryText is computed once at mount; no need to retrigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
   );
+
+  const [searchInput, setSearchInput] = useState("");
+  const [appliedFilters, setAppliedFilters] = useState<ParsedSearchQuery>(initialFilters);
 
   const [status, setStatus] = useState<WorkflowStatus | "all">(initialStatus);
   const [page, setPage] = useState(initialPage);
@@ -129,34 +132,30 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
     }
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appliedSearch, status, namespace]);
+  }, [appliedFilters, status, namespace]);
 
   // Sync local state back to URL so filters survive refresh / share links.
   // Namespace is NOT on the URL — it lives in the global sidebar switcher
   // (localStorage-backed) so it persists across pages and refreshes.
+  const appliedQueryText = useMemo(() => serializeQuery(appliedFilters), [appliedFilters]);
   useEffect(() => {
     if (!onQueryChange) return;
     const qp = new URLSearchParams();
-    if (appliedSearch) qp.set("q", appliedSearch);
+    if (appliedQueryText) qp.set("q", appliedQueryText);
     if (status !== "all") qp.set("status", status);
     if (page > 1) qp.set("page", String(page));
     if (sort) qp.set("sort", `${sort.orderBy}:${sort.orderDir}`);
     onQueryChange(qp);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appliedSearch, status, page, sort]);
-
-  // freeText (bare tokens with no `field:` or `key=` prefix) is treated as a
-  // name shortcut — `name:` always wins when both are present, so power users
-  // can type explicit field syntax without losing the bare-text affordance.
-  const effectiveName = parsedSearch.name ?? parsedSearch.freeText;
+  }, [appliedQueryText, status, page, sort]);
 
   const query: RunListQuery = {
-    name: effectiveName || undefined,
-    type: parsedSearch.type || undefined,
-    namespace: parsedSearch.namespace || namespace || undefined,
+    name: appliedFilters.name || undefined,
+    type: appliedFilters.type || undefined,
+    namespace: appliedFilters.namespace || namespace || undefined,
     status: status === "all" ? undefined : status,
-    version: parsedSearch.version || undefined,
-    metadata: parsedSearch.metadata,
+    version: appliedFilters.version || undefined,
+    metadata: appliedFilters.metadata,
     limit: PAGE_SIZE,
     offset: (page - 1) * PAGE_SIZE,
     orderBy: sort?.orderBy,
@@ -164,7 +163,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
   };
   const { data, loading, error, refresh } = useFetch(
     () => api.listRuns(query),
-    [appliedSearch, namespace, status, page, sort?.orderBy, sort?.orderDir],
+    [appliedQueryText, namespace, status, page, sort?.orderBy, sort?.orderDir],
     5000,
   );
 
@@ -182,18 +181,18 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
   }
 
   /**
-   * Commit the current input as the active filter set. When the input is
-   * pure free text (no `field:` / `key=` clauses), try to resolve it as a
-   * workflow id first — that preserves the original SearchBar's "type an
-   * id, jump straight to the run" affordance now that the dedicated bar is
-   * gone.
+   * Commit the input as additional filter clauses. The text moves out of
+   * the input and into `appliedFilters` (chips); the input clears so the
+   * user can immediately start the next clause without backspacing.
+   *
+   * Pure-free-text input gets one extra affordance: try to resolve it as a
+   * workflow id first and jump straight to the run if found, preserving
+   * the original SearchBar's behavior. If lookup fails it's promoted to a
+   * `name` chip on commit.
    */
   async function submitSearch() {
     const text = searchInput.trim();
-    if (!text) {
-      setAppliedSearch("");
-      return;
-    }
+    if (!text) return;
     const parsed = parseSearchQuery(text);
     const onlyFreeText =
       !!parsed.freeText &&
@@ -207,36 +206,39 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
       const run = await api.getRun(parsed.freeText!).catch(() => undefined);
       if (run) {
         onOpen(parsed.freeText!);
+        setSearchInput("");
         return;
       }
     }
-    setAppliedSearch(text);
+    setAppliedFilters((prev) => mergeFilters(prev, parsed));
+    setSearchInput("");
   }
 
   function clearAllFilters() {
     setSearchInput("");
-    setAppliedSearch("");
+    setAppliedFilters({});
     setStatus("all");
   }
 
   /**
-   * Drop a single parsed clause and re-commit. Editing the chip preview
-   * should feel as immediate as clicking the row's "X" — no Enter required.
+   * Drop a single chip from the active filter set. Doesn't touch the
+   * input's edit buffer — the chip area and the input are independent
+   * concerns under the new model.
    */
   function removeClause(field: keyof ParsedSearchQuery, metadataKey?: string) {
-    const next: ParsedSearchQuery = { ...parsedSearch };
-    if (field === "metadata" && metadataKey && next.metadata) {
-      const { [metadataKey]: _drop, ...rest } = next.metadata;
-      next.metadata = Object.keys(rest).length > 0 ? rest : undefined;
-    } else {
-      delete next[field];
-    }
-    const text = serializeQuery(next);
-    setSearchInput(text);
-    setAppliedSearch(text);
+    setAppliedFilters((prev) => {
+      const next: ParsedSearchQuery = { ...prev };
+      if (field === "metadata" && metadataKey && next.metadata) {
+        const { [metadataKey]: _drop, ...rest } = next.metadata;
+        next.metadata = Object.keys(rest).length > 0 ? rest : undefined;
+      } else {
+        delete next[field];
+      }
+      return next;
+    });
   }
 
-  const hasFilters = hasAnyFilter(parsedSearch) || status !== "all";
+  const hasFilters = hasAnyFilter(appliedFilters) || status !== "all" || searchInput.trim() !== "";
 
   return (
     <div class="anim-page p-4 max-w-[1400px] mx-auto space-y-4">
@@ -288,10 +290,14 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
             onChange={setSearchInput}
             onSubmit={() => void submitSearch()}
             onBlurCommit={() => {
-              if (searchInput !== appliedSearch) void submitSearch();
+              if (searchInput.trim() !== "") void submitSearch();
             }}
             pools={pools}
-            placeholder='Search id, or "name:foo type:bar version:v2 userId=u_42"'
+            placeholder={
+              hasAnyFilter(appliedFilters)
+                ? "Add another clause… (Enter to apply)"
+                : 'Search id, or "name:foo type:bar version:v2 userId=u_42"'
+            }
             title={
               "One field replaces id/name/type/version/namespace/metadata.\n" +
               "Examples:\n" +
@@ -302,32 +308,28 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
               "  userId=u_42 retries=3 dryRun=true — metadata (JSON values parse)\n" +
               "Tab / Enter to accept a suggestion · Press Enter to apply."
             }
-            onClearInput={() => {
-              setSearchInput("");
-              setAppliedSearch("");
-            }}
+            onClearInput={() => setSearchInput("")}
           />
-          {/* Parsed-clause chips — click the × to drop a single filter. */}
-          {hasAnyFilter(parsedSearch) && (
+          {/* Active filter chips — click the × to drop one. Sourced from
+              `appliedFilters`, not the input, so chips are the canonical
+              representation once the user commits. */}
+          {hasAnyFilter(appliedFilters) && (
             <div class="flex items-center gap-1 flex-wrap mt-2">
               {(["name", "type", "version", "namespace", "id"] as const).map((f) =>
-                parsedSearch[f] ? (
-                  <FilterChip label={`${f}: ${parsedSearch[f]}`} onRemove={() => removeClause(f)} />
+                appliedFilters[f] ? (
+                  <FilterChip
+                    label={`${f}: ${appliedFilters[f]}`}
+                    onRemove={() => removeClause(f)}
+                  />
                 ) : null,
               )}
-              {parsedSearch.metadata &&
-                Object.entries(parsedSearch.metadata).map(([k, v]) => (
+              {appliedFilters.metadata &&
+                Object.entries(appliedFilters.metadata).map(([k, v]) => (
                   <FilterChip
                     label={`${k}=${typeof v === "string" ? v : JSON.stringify(v)}`}
                     onRemove={() => removeClause("metadata", k)}
                   />
                 ))}
-              {parsedSearch.freeText && !parsedSearch.name && (
-                <FilterChip
-                  label={`name: ${parsedSearch.freeText}`}
-                  onRemove={() => removeClause("freeText")}
-                />
-              )}
             </div>
           )}
         </div>
@@ -473,6 +475,43 @@ const VALID_ORDER_BY: ReadonlyArray<WorkflowOrderBy> = [
   "status",
   "name",
 ];
+
+/**
+ * Fold the next clause-set into the previous one. Per-field next-wins for
+ * scalars; metadata merges by key so successive `userId=u_42` then
+ * `priority=high` keeps both. `freeText` is promoted to `name` after merge
+ * via `promoteFreeText` so the chip row only ever shows scoped clauses.
+ */
+function mergeFilters(prev: ParsedSearchQuery, next: ParsedSearchQuery): ParsedSearchQuery {
+  const merged: ParsedSearchQuery = {
+    name: next.name ?? prev.name,
+    type: next.type ?? prev.type,
+    version: next.version ?? prev.version,
+    namespace: next.namespace ?? prev.namespace,
+    id: next.id ?? prev.id,
+    freeText: next.freeText ?? prev.freeText,
+  };
+  const meta = { ...(prev.metadata ?? {}), ...(next.metadata ?? {}) };
+  if (Object.keys(meta).length > 0) merged.metadata = meta;
+  return promoteFreeText(merged);
+}
+
+/**
+ * Treat unscoped text as a `name` shortcut once the user commits — the
+ * chip row is more readable as `name: foo` than `(free text)`. Only
+ * promotes when there's no explicit `name` already.
+ */
+function promoteFreeText(q: ParsedSearchQuery): ParsedSearchQuery {
+  if (!q.freeText) return q;
+  if (q.name) {
+    // An explicit name beats the bare token — drop free text entirely so we
+    // don't carry stale state through the URL.
+    const { freeText: _drop, ...rest } = q;
+    return rest;
+  }
+  const { freeText, ...rest } = q;
+  return { ...rest, name: freeText };
+}
 
 function parseSortParam(
   raw: string | null | undefined,
