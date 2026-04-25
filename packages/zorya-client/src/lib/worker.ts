@@ -61,6 +61,20 @@ export interface ZoryaWorkerConfig {
    * inside journaled steps actually resumes.
    */
   resumeSuspendedRuns?: boolean;
+  /**
+   * When true (default), the worker polls the server for pending
+   * workflow-start requests (e.g. dashboard "Trigger" button) and runs
+   * any whose workflowName is in this worker's advertised list. Disable
+   * for workers that should never act on dashboard-issued starts.
+   */
+  pollWorkflowStarts?:
+    | boolean
+    | {
+        /** Poll interval in ms. Default 1_000. */
+        intervalMs?: number;
+        /** Max claims per poll. Default 10. */
+        limit?: number;
+      };
 }
 
 export class ZoryaWorker {
@@ -70,6 +84,7 @@ export class ZoryaWorker {
   private readonly config: ZoryaWorkerConfig;
   private readonly byName: Map<string, Workflow<unknown, unknown>>;
   private heartbeatHandle?: ReturnType<typeof setInterval>;
+  private startsPollHandle?: ReturnType<typeof setInterval>;
   private sleepScanner?: SleepScanner;
   private started = false;
   // Activity tracked so the dashboard can show what each worker is doing.
@@ -132,6 +147,49 @@ export class ZoryaWorker {
       });
       void this.sleepScanner.start();
     }
+
+    const poll = this.config.pollWorkflowStarts;
+    if (poll !== false) {
+      const intervalMs = (typeof poll === "object" && poll?.intervalMs) || 1_000;
+      const limit = (typeof poll === "object" && poll?.limit) || 10;
+      this.startsPollHandle = setInterval(() => {
+        void this.drainPendingStarts(limit).catch(() => {
+          // Transient — next tick retries.
+        });
+      }, intervalMs);
+    }
+  }
+
+  /**
+   * Claim any pending workflow-starts the server has queued for workflows
+   * we advertise, run them, and ack each on completion (success or
+   * failure — the storage row carries the actual outcome).
+   */
+  private async drainPendingStarts(limit: number): Promise<void> {
+    const workflowNames = [...this.byName.keys()];
+    if (workflowNames.length === 0) return;
+    const claims = await this.client.claimWorkflowStarts({
+      workflowNames,
+      workerId: this.workerId,
+      limit,
+    });
+    for (const claim of claims) {
+      const def = this.byName.get(claim.workflowName);
+      if (!def) {
+        // Shouldn't happen: server filtered by our advertised names. Ack
+        // anyway so it doesn't loop forever.
+        await this.client.completeWorkflowStart(claim.id).catch(() => {});
+        continue;
+      }
+      // Fire-and-forget: don't block the poll loop on a long workflow.
+      void this.run({ workflow: def, workflowId: claim.workflowId, input: claim.input })
+        .catch(() => {
+          // Failure is recorded in storage by the runner.
+        })
+        .finally(() => {
+          void this.client.completeWorkflowStart(claim.id).catch(() => {});
+        });
+    }
   }
 
   async stop(): Promise<void> {
@@ -139,6 +197,8 @@ export class ZoryaWorker {
     this.started = false;
     if (this.heartbeatHandle !== undefined) clearInterval(this.heartbeatHandle);
     this.heartbeatHandle = undefined;
+    if (this.startsPollHandle !== undefined) clearInterval(this.startsPollHandle);
+    this.startsPollHandle = undefined;
     await this.sleepScanner?.stop();
     await this.client.workerRegistry.deregister(this.workerId).catch(() => {});
     await this.client.unadvertise(this.workerId).catch(() => {});

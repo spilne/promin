@@ -21,6 +21,11 @@ export {
   type AdvertisedWorkflow,
   type AdvertisementEntry,
 } from "./server/workflow-advertisements.ts";
+export {
+  InMemoryWorkflowStartQueue,
+  type WorkflowStartQueue,
+  type WorkflowStartRecord,
+} from "./server/workflow-starts.ts";
 export type {
   SignalDto,
   SignalHistoryResponse,

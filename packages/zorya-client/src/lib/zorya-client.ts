@@ -120,4 +120,49 @@ export class ZoryaClient {
     if (!res.ok) throw new Error(`triggerWorkflow failed: ${res.status} ${text}`);
     return JSON.parse(text) as { workflowId: string };
   }
+
+  /**
+   * Claim pending workflow-start requests for the given workflow names.
+   * Workers call this in a poll loop so dashboard-triggered runs get
+   * dispatched in split mode.
+   */
+  async claimWorkflowStarts(params: {
+    workflowNames: readonly string[];
+    workerId?: string;
+    limit?: number;
+  }): Promise<ReadonlyArray<WorkflowStartClaim>> {
+    const req = new Request(`${this.url}/api/worker-protocol/claim-starts`, {
+      method: "POST",
+      headers: this.headers,
+      body: JSON.stringify({
+        workflowNames: [...params.workflowNames],
+        workerId: params.workerId,
+        limit: params.limit ?? 10,
+      }),
+    });
+    const res = await this.fetch(req);
+    const text = await res.text();
+    if (!res.ok) throw new Error(`claimWorkflowStarts failed: ${res.status} ${text}`);
+    const body = JSON.parse(text) as { starts?: WorkflowStartClaim[] };
+    return body.starts ?? [];
+  }
+
+  /** Mark a claimed workflow-start as done. */
+  async completeWorkflowStart(id: string): Promise<void> {
+    const req = new Request(
+      `${this.url}/api/worker-protocol/complete-start/${encodeURIComponent(id)}`,
+      { method: "POST", headers: this.headers },
+    );
+    const res = await this.fetch(req);
+    if (!res.ok) throw new Error(`completeWorkflowStart failed: ${res.status}`);
+  }
+}
+
+export interface WorkflowStartClaim {
+  readonly id: string;
+  readonly workflowId: string;
+  readonly workflowName: string;
+  readonly input: unknown;
+  readonly metadata?: Record<string, unknown>;
+  readonly enqueuedAt: number;
 }

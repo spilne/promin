@@ -27,11 +27,17 @@ import {
   InMemoryWorkflowAdvertisementRegistry,
   type WorkflowAdvertisementRegistry,
 } from "./workflow-advertisements.ts";
+import { InMemoryWorkflowStartQueue, type WorkflowStartQueue } from "./workflow-starts.ts";
 import {
   listAdvertisements,
   removeAdvertisements,
   upsertAdvertisements,
 } from "./routes/advertisements.ts";
+import {
+  claimWorkflowStarts,
+  completeWorkflowStart,
+  listWorkflowStarts,
+} from "./routes/workflow-starts.ts";
 import { RunEventBus } from "./run-event-bus.ts";
 import {
   cancelRun,
@@ -121,6 +127,14 @@ export interface ZoryaServerConfig extends AuthConfig {
     workerRegistry?: WorkerRegistry;
     advertisements?: WorkflowAdvertisementRegistry;
     /**
+     * Pending workflow-start queue. When configured (or auto-created),
+     * the dashboard's `POST /api/runs/trigger/:name` endpoint enqueues
+     * a start that connected workers poll and execute. Lets the dashboard
+     * trigger button work in split mode without requiring a server-side
+     * trigger fn.
+     */
+    workflowStarts?: WorkflowStartQueue;
+    /**
      * API keys required on /rpc/storage, /rpc/worker, and
      * /api/advertisements. When omitted, the worker surface is open —
      * safe behind a private network, risky on a public one. Kept
@@ -160,17 +174,59 @@ export class ZoryaServer {
       (config.workerProtocol?.workerRegistry
         ? new RegistryBackedWorkersProvider(config.workerProtocol.workerRegistry)
         : emptyWorkersProvider);
-    const deps = {
-      storage: config.storage,
-      trigger: config.trigger,
-      workflows: config.workflows,
-    };
-
     // Auto-create an in-memory advertisement registry when the worker
     // protocol is on but no registry is passed — that's the common case.
     const advertisements: WorkflowAdvertisementRegistry | undefined = config.workerProtocol
       ? (config.workerProtocol.advertisements ?? new InMemoryWorkflowAdvertisementRegistry())
       : undefined;
+
+    // Same idea for the workflow-start queue. When the worker protocol is
+    // on we auto-create an in-memory queue so the dashboard's trigger
+    // button works out of the box: the auto-trigger pre-creates a pending
+    // workflow row and enqueues a start that connected workers poll.
+    const workflowStarts: WorkflowStartQueue | undefined = config.workerProtocol
+      ? (config.workerProtocol.workflowStarts ?? new InMemoryWorkflowStartQueue())
+      : undefined;
+
+    // Auto-trigger fn for split mode: caller didn't supply `trigger`, but
+    // the worker protocol is on so we can hand starts off to workers.
+    const trigger =
+      config.trigger ??
+      (workflowStarts
+        ? async (
+            name: string,
+            input: unknown,
+            options?: {
+              workflowId?: string;
+              workflowType?: string;
+              namespace?: string;
+              metadata?: Record<string, unknown>;
+            },
+          ) => {
+            const workflowId = options?.workflowId ?? crypto.randomUUID();
+            await config.storage.createWorkflow({
+              workflowId,
+              workflowName: name,
+              input,
+              workflowType: options?.workflowType,
+              namespace: options?.namespace,
+              metadata: options?.metadata,
+            });
+            await workflowStarts.enqueue({
+              workflowId,
+              workflowName: name,
+              input,
+              metadata: options?.metadata,
+            });
+            return { workflowId };
+          }
+        : undefined);
+
+    const deps = {
+      storage: config.storage,
+      trigger,
+      workflows: config.workflows,
+    };
 
     this.router = new Router()
       .get(
@@ -262,6 +318,13 @@ export class ZoryaServer {
           .delete("/api/advertisements/:workerId", removeAdvertisements(advertisements))
           .get("/api/advertisements", listAdvertisements(advertisements));
       }
+
+      if (workflowStarts) {
+        this.router
+          .post("/api/worker-protocol/claim-starts", claimWorkflowStarts(workflowStarts))
+          .post("/api/worker-protocol/complete-start/:id", completeWorkflowStart(workflowStarts))
+          .get("/api/worker-protocol/starts", listWorkflowStarts(workflowStarts));
+      }
     }
 
     if (config.uiDir) {
@@ -274,9 +337,13 @@ export class ZoryaServer {
     const url = new URL(req.url);
     const path = url.pathname;
 
-    // Worker-protocol surface has its own keyset. /api/advertisements lives
-    // under /api/ so strip it from the dashboard-auth branch too.
-    const isWorkerPath = path.startsWith("/rpc/") || path.startsWith("/api/advertisements");
+    // Worker-protocol surface has its own keyset. /api/advertisements and
+    // /api/worker-protocol/* live under /api/ so strip them from the
+    // dashboard-auth branch too.
+    const isWorkerPath =
+      path.startsWith("/rpc/") ||
+      path.startsWith("/api/advertisements") ||
+      path.startsWith("/api/worker-protocol/");
 
     if (isWorkerPath) {
       if (!this.workerAuth.check(req)) return jsonError(401, "unauthorized_worker");

@@ -6,6 +6,7 @@
 //   bun run packages/zorya/examples/split/worker.ts
 // ---------------------------------------------------------------------------
 
+import { workflow } from "@promin/workflow";
 import { ZoryaClient, ZoryaWorker } from "@promin/zorya-client";
 import { orderWorkflow } from "../workflows/order.ts";
 import { paymentWorkflow } from "../workflows/payment.ts";
@@ -16,12 +17,71 @@ import { orderFulfillmentWorkflow } from "../workflows/order-fulfillment.ts";
 import { batchProcessWorkflow } from "../workflows/batch-process.ts";
 import { approvalFlowWorkflow } from "../workflows/approval-flow.ts";
 
+// ---------------------------------------------------------------------------
+// Self-contained workflows defined inline in the worker process. They show
+// up on the server via `advertise()` so you can trigger them from the
+// dashboard Workflows page (or POST /api/runs/trigger/:name).
+// ---------------------------------------------------------------------------
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+interface HelloInput {
+  name?: string;
+}
+
+const helloWorkflow = workflow<HelloInput>({ name: "hello-world", type: "demo" })
+  .stepAsync("greet", async ({ input }) => {
+    await sleep(500);
+    return { message: `Hello, ${input.name ?? "world"}!` };
+  })
+  .build();
+
+interface FanOutInput {
+  items?: string[];
+}
+
+const fanOutWorkflow = workflow<FanOutInput>({ name: "fan-out-demo", type: "demo" })
+  .stepAsync("collect", async ({ input }) => {
+    await sleep(200);
+    return input.items ?? ["alpha", "bravo", "charlie"];
+  })
+  .mapOverAsync("process-item", { array: "collect", concurrency: 2 }, async (item: string) => {
+    await sleep(500 + Math.floor(Math.random() * 1500));
+    return { item, upper: item.toUpperCase() };
+  })
+  .stepAsync("summarise", async ({ prev }) => {
+    return { processed: prev.length, words: prev.map((r) => r.upper) };
+  })
+  .build();
+
+interface FlakyInput {
+  failUntilAttempt?: number;
+}
+
+const flakyWorkflow = workflow<FlakyInput>({ name: "flaky-retry-demo", type: "demo" })
+  .stepAsync(
+    "maybe-fail",
+    async ({ input, attempt }) => {
+      await sleep(300);
+      const threshold = input.failUntilAttempt ?? 2;
+      if (attempt < threshold) {
+        throw new Error(`Attempt ${attempt} — not yet (needs ${threshold})`);
+      }
+      return { attempt, ok: true };
+    },
+    { retry: { maxRetries: 3, baseDelayMs: 500 } },
+  )
+  .build();
+
 const url = process.env.ZORYA_URL ?? "http://localhost:4100";
 const apiKey = process.env.ZORYA_API_KEY;
 
 const client = new ZoryaClient({ url, apiKey });
 
 const workflows = [
+  helloWorkflow,
+  fanOutWorkflow,
+  flakyWorkflow,
   orderWorkflow,
   paymentWorkflow,
   onboardingWorkflow,
@@ -34,6 +94,12 @@ const workflows = [
 
 function sampleInputFor(name: string): unknown {
   switch (name) {
+    case "hello-world":
+      return { name: "dashboard" };
+    case "fan-out-demo":
+      return { items: ["alpha", "bravo", "charlie", "delta"] };
+    case "flaky-retry-demo":
+      return { failUntilAttempt: 2 };
     case "order":
       return { orderId: 1, customer: "cust-0" };
     case "payment":
@@ -65,20 +131,27 @@ const worker = new ZoryaWorker({
 
 await worker.start();
 console.log(`Worker ${worker.workerId} connected to ${url}`);
-console.log(`  Advertised ${workflows.length} workflows`);
-console.log(`  Kick off a run:`);
-console.log(`    await worker.run({ workflow: 'order', input: { orderId: 42 } })`);
+console.log(`  Advertised ${workflows.length} workflows:`);
+for (const wf of workflows) {
+  console.log(`    - ${wf.name}`);
+}
+console.log(`  Trigger manually from the dashboard → Workflows page, or:`);
+console.log(
+  `    curl -X POST ${url}/api/runs/trigger/hello-world \\\n      -H 'content-type: application/json' \\\n      -d '{"input":{"name":"curl"}}'`,
+);
 
-// Keep the process alive + optionally run one demo workflow on startup
-// so the dashboard has activity without needing manual triggers.
-if (process.env.DEMO_RUN !== "false") {
+// Auto-fire loop is opt-in (DEMO_RUN=true) so the worker stays idle until
+// manually triggered — handy when inspecting a single run in the dashboard.
+if (process.env.DEMO_RUN === "true") {
   setInterval(() => {
     const pick = workflows[Math.floor(Math.random() * workflows.length)]!;
     void worker.run({ workflow: pick, input: sampleInputFor(pick.name) }).catch(() => {
       // Per-run failures are recorded in storage — stay up and keep ticking.
     });
   }, 5_000);
-  console.log(`  - Firing one random workflow every 5s (set DEMO_RUN=false to disable)`);
+  console.log(`  - Auto-firing one random workflow every 5s (DEMO_RUN=true)`);
+} else {
+  console.log(`  - Idle (set DEMO_RUN=true to auto-fire one random workflow every 5s)`);
 }
 
 // Graceful shutdown so the worker unregisters itself.
