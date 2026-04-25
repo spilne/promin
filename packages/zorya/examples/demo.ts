@@ -21,12 +21,9 @@ import {
   createWorkflowRunner,
   createSleepScanner,
   completeSignal,
-  computeNextRun,
   isJournaledSuspendStorage,
   type Workflow,
-  type DurableScheduleConfig,
 } from "@promin/workflow";
-import type { Clock } from "@promin/core";
 import { SqliteWorkflowStorage } from "@promin/sqlite";
 import { Database } from "bun:sqlite";
 import { ZoryaServer, scanWorkflowsFolder } from "../src/index.ts";
@@ -324,6 +321,17 @@ async function seedSchedules() {
     enabled: false,
     metadata: { workflowName: "payment", input: { mode: "audit" } },
   });
+
+  // Seed nextRun for every enabled schedule so the embedded SchedulerLoop
+  // picks them up on its first poll. `upsertSchedule` alone doesn't write
+  // nextRun — DurableScheduler.registerAsync would, but the demo manages
+  // schedules through the storage directly.
+  const all = await schedulerStorage.listSchedules({ limit: 500 });
+  const now = new Date();
+  for (const s of all) {
+    if (s.enabled === false) continue;
+    await schedulerStorage.setNextRun(s.id, now);
+  }
 }
 
 /**
@@ -406,84 +414,10 @@ async function resumeOrphanedRuns() {
   }
 }
 
-/**
- * Minimal schedule firing loop. Every second, scans for schedules whose
- * next run is <= now and fires them. Not as sophisticated as the real
- * DurableScheduler (no jitter handling, no catch-up, no overlap policy),
- * but enough to show live activity on the Schedules page.
- */
-async function startScheduleFirer() {
-  const lastNextRunById = new Map<string, Date | null>();
-
-  const tick = async () => {
-    const all = await schedulerStorage.listSchedules({ limit: 500 });
-    const now = new Date();
-    for (const s of all) {
-      if (!s.enabled) continue;
-      const state = await schedulerStorage.loadScheduleState(s.id);
-      const lastFired = state?.lastFired ?? null;
-      let next = lastNextRunById.get(s.id) ?? null;
-      if (next === null) {
-        // First tick for this schedule in this process — fire immediately so
-        // the UI shows activity, then schedule the next run from now.
-        if (!lastFired) {
-          next = now;
-        } else {
-          next = computeNextScheduleRun(s, lastFired);
-        }
-        lastNextRunById.set(s.id, next);
-      }
-      if (next && next.getTime() <= now.getTime()) {
-        const wfName = (s.metadata?.["workflowName"] as string | undefined) ?? undefined;
-        if (wfName && workflowsByName[wfName]) {
-          // Prefer explicit metadata.input, otherwise synthesise one using the
-          // same generator as ad-hoc runs.
-          const explicit = s.metadata?.["input"];
-          const input = explicit === undefined ? inputFor(wfName) : explicit;
-          // Schedules can pin a namespace via metadata so all their fires
-          // land in the same tenant. Falls through to undefined when the
-          // schedule didn't set one — same as a global / cross-tenant
-          // schedule.
-          const namespace = s.metadata?.["namespace"] as string | undefined;
-          await triggerRun(wfName, input, { namespace });
-        }
-        await schedulerStorage.recordFire(s.id, now);
-        const after = computeNextScheduleRun(s, now);
-        lastNextRunById.set(s.id, after);
-      }
-    }
-  };
-
-  setInterval(() => void tick(), 1_000);
-  void tick();
-}
-
-function computeNextScheduleRun(s: DurableScheduleConfig, from: Date): Date | null {
-  // computeNextRun takes a Clock (not a Date); fake one anchored at `from`.
-  const fakeClock: Clock = {
-    currentTimeMs: () => from.getTime(),
-    now: () => new Date(from.getTime()),
-    setTimeout: (fn, ms) => {
-      const h = setTimeout(fn, ms);
-      return { clear: () => clearTimeout(h) };
-    },
-    setInterval: (fn, ms) => {
-      const h = setInterval(fn, ms);
-      return { clear: () => clearInterval(h) };
-    },
-  };
-  try {
-    return computeNextRun(s, fakeClock);
-  } catch {
-    return null;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Boot
 
 await seedSchedules();
-void startScheduleFirer();
 void startApprovalAutoSignaler();
 void resumeOrphanedRuns();
 
@@ -516,7 +450,21 @@ const server = new ZoryaServer({
   // `trigger` callback below — that path runs workflows in-process via
   // the runner, never actually enqueues to the step queue.
   workerProtocol: { stepQueue: new InMemoryStepQueue(), workerRegistry },
-  trigger: (name, input, opts) => triggerRun(name, input, { namespace: opts?.namespace }),
+  // Embedded scheduler tick loop — `namespaces: "all"` polls every tenant
+  // (the seed mixes "tenant-a", "tenant-b", and the global namespace).
+  // `dispatchConcurrency: 5` caps the per-tick fan-out so a wakeup of
+  // many simultaneous schedules doesn't slam the trigger.
+  scheduling: {
+    enabled: true,
+    namespaces: "all",
+    pollIntervalMs: 1_000,
+    dispatchConcurrency: 5,
+  },
+  // Forward workflowId so the embedded SchedulerLoop's deterministic
+  // `${scheduleId}.${tickNumber}` lands on storage — keeps repeat ticks
+  // idempotent (createWorkflow is no-op on a known id).
+  trigger: (name, input, opts) =>
+    triggerRun(name, input, { namespace: opts?.namespace, workflowId: opts?.workflowId }),
   rerun: async (workflowId) => {
     // After startFreshRun the row is reset; we still need to drive the
     // workflow again. Look up the name from storage, find its definition,
