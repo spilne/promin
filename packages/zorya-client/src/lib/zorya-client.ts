@@ -5,7 +5,15 @@
 // definitions to the server on connect.
 // ---------------------------------------------------------------------------
 
-import type { Workflow, WorkflowStorage, StepQueue, WorkerRegistry } from "@promin/workflow";
+import type {
+  Workflow,
+  WorkflowStorage,
+  StepQueue,
+  WorkerRegistry,
+  WorkflowHandle,
+  WorkflowRunner,
+} from "@promin/workflow";
+import { createWorkflowRunner } from "@promin/workflow";
 import {
   RemoteStepQueue,
   RemoteWorkerRegistry,
@@ -33,6 +41,10 @@ export class ZoryaClient {
   readonly workerRegistry: WorkerRegistry;
   private readonly fetch: FetchLike;
   private readonly headers: Record<string, string>;
+  // Built lazily on first start() / startByName() call. The runner is just
+  // a thin wrapper around storage for handle construction — no orchestration
+  // happens client-side; the server's worker fleet runs the workflow.
+  private _runner?: WorkflowRunner;
 
   constructor(config: ZoryaClientConfig) {
     const base = config.url.replace(/\/$/, "");
@@ -123,10 +135,93 @@ export class ZoryaClient {
     }
   }
 
-  /** Trigger a workflow run through the server's trigger endpoint. */
+  private get runner(): WorkflowRunner {
+    if (!this._runner) {
+      this._runner = createWorkflowRunner({ storage: this.storage });
+    }
+    return this._runner;
+  }
+
+  /**
+   * Trigger a workflow run by name and return a typed `WorkflowHandle`.
+   *
+   * Prefer this overload when the caller has the `Workflow<I, O>` definition
+   * imported — TypeScript checks `params.input` against the workflow's
+   * declared `Input` and threads the `Output` generic into `handle.result()`.
+   *
+   * Routing on the server is by `name` (and optionally `version`); the
+   * imported definition is used purely for type information, so it doesn't
+   * have to be the exact instance the worker is running, only structurally
+   * compatible.
+   */
+  async start<Input, Output>(
+    workflow: Workflow<Input, Output>,
+    params: {
+      input: Input;
+      workflowId?: string;
+      namespace?: string;
+      version?: string;
+      metadata?: Record<string, unknown>;
+    },
+  ): Promise<WorkflowHandle<Output>> {
+    const { workflowId } = await this._postTrigger(workflow.name, {
+      input: params.input,
+      workflowId: params.workflowId,
+      namespace: params.namespace,
+      version: params.version ?? workflow.version,
+      metadata: params.metadata,
+    });
+    return this.runner.handle<Output>(workflowId);
+  }
+
+  /**
+   * Trigger a workflow run by name without compile-time type info. Returns
+   * an untyped handle (`WorkflowHandle<unknown>`). Used by the dashboard's
+   * trigger modal and other dynamic-dispatch callers that don't have the
+   * workflow definition on hand.
+   */
+  async startByName(
+    name: string,
+    params: {
+      input?: unknown;
+      workflowId?: string;
+      namespace?: string;
+      version?: string;
+      metadata?: Record<string, unknown>;
+    } = {},
+  ): Promise<WorkflowHandle<unknown>> {
+    const { workflowId } = await this._postTrigger(name, params);
+    return this.runner.handle<unknown>(workflowId);
+  }
+
+  /**
+   * @deprecated Prefer {@link start} (typed) or {@link startByName} (untyped)
+   * — both return a `WorkflowHandle` with `result()`, `signal()`, `cancel()`,
+   * and `events()` methods. This method is kept for back-compat with callers
+   * that only need the workflowId for fire-and-forget triggers.
+   */
   async triggerWorkflow(
     name: string,
-    body: { input?: unknown; workflowId?: string; namespace?: string } = {},
+    body: {
+      input?: unknown;
+      workflowId?: string;
+      namespace?: string;
+      version?: string;
+      metadata?: Record<string, unknown>;
+    } = {},
+  ): Promise<{ workflowId: string }> {
+    return this._postTrigger(name, body);
+  }
+
+  private async _postTrigger(
+    name: string,
+    body: {
+      input?: unknown;
+      workflowId?: string;
+      namespace?: string;
+      version?: string;
+      metadata?: Record<string, unknown>;
+    },
   ): Promise<{ workflowId: string }> {
     const req = new Request(`${this.url}/api/runs/trigger/${encodeURIComponent(name)}`, {
       method: "POST",

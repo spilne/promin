@@ -32,6 +32,8 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
+      "@promin/source": "./src/index.ts",
+      "import": "./dist/index.js",
       "default": "./dist/index.js"
     }
   },

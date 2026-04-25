@@ -210,6 +210,17 @@ export interface WorkflowRunner {
     readonly input: Input;
   }): Promise<WorkflowHandle<Output>>;
   /**
+   * Build a `WorkflowHandle` for a workflow that is *already running* — does
+   * not enqueue or start anything. Useful when execution lives elsewhere
+   * (a remote worker fleet, a separate coordinator process) and the caller
+   * just wants to observe / signal / cancel a known `workflowId`.
+   *
+   * The returned handle is functionally identical to the one returned by
+   * `start()`: same `status` / `signal` / `result` / `cancel` / `events`
+   * surface, same polling/subscribe semantics under the hood.
+   */
+  handle<Output = unknown>(workflowId: string): WorkflowHandle<Output>;
+  /**
    * Subscribe to live step/workflow-lifecycle events for a single run.
    * Returns an async iterable that yields every `WorkflowRunEvent` as it
    * happens and closes on the first terminal event
@@ -347,6 +358,11 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       await new Promise((r) => setTimeout(r, 0));
     }
 
+    return this.handle<Output>(workflowId);
+  }
+
+  handle<Output = unknown>(workflowId: string): WorkflowHandle<Output> {
+    const storage = this.storage;
     const clock = this.clock;
     const self = this;
     return {
