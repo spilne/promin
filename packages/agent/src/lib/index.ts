@@ -66,6 +66,23 @@ export type {
   DefaultConsolidatorConfig,
 } from "./memory/consolidator.ts";
 
+export {
+  CompactionStrategy,
+  between,
+  days,
+  eq,
+  gt,
+  gte,
+  hours,
+  lt,
+  lte,
+  minutes,
+  olderThan,
+  seconds,
+  within,
+} from "./memory/compaction-strategy.ts";
+export type { NumberComparator, TimeComparator } from "./memory/compaction-strategy.ts";
+
 export { InMemoryMemoryStore } from "./memory/in-memory-memory-store.ts";
 export type { InMemoryMemoryStoreConfig } from "./memory/in-memory-memory-store.ts";
 
