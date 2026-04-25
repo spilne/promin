@@ -91,7 +91,7 @@ export function StepGrid({ workflowName, currentWorkflowId, onOpenRun }: StepGri
         </div>
 
         <div class="overflow-auto">
-          <table class="border-separate border-spacing-0">
+          <table class="border-separate border-spacing-[3px]">
             <thead>
               <tr>
                 <th class="text-xs text-base-content/50 font-normal text-left pr-3 sticky left-0 bg-base-100">
@@ -102,12 +102,12 @@ export function StepGrid({ workflowName, currentWorkflowId, onOpenRun }: StepGri
                   const active = r.workflowId === currentWorkflowId;
                   return (
                     <th
-                      class={`p-0 align-bottom ${active ? "bg-primary/20" : ""}`}
+                      class="p-0 align-bottom"
                       style={{ width: CELL_W, minWidth: CELL_W }}
                       title={`${r.workflowId} · ${v.label} · ${formatRelative(r.createdAt)}`}
                     >
                       <button
-                        class={`w-full h-6 transition-opacity ${v.barClass} hover:opacity-80 ${
+                        class={`w-full h-6 rounded-sm transition-opacity ${v.barClass} hover:opacity-80 ${
                           active ? "ring-2 ring-primary" : ""
                         }`}
                         onClick={() => onOpenRun(r.workflowId)}
@@ -155,7 +155,7 @@ function GridCell({
   if (!status) {
     return (
       <td class="p-0" style={{ width: 20, minWidth: 20 }} title={`${stepName} · not present`}>
-        <div class="h-5 bg-base-200/40" />
+        <div class="h-5 rounded-sm bg-base-200/40" />
       </td>
     );
   }
@@ -167,7 +167,7 @@ function GridCell({
       title={`${stepName} · ${v.label} · ${run.workflowId}`}
     >
       <button
-        class={`w-full h-5 transition-opacity ${v.barClass} hover:opacity-80`}
+        class={`w-full h-5 rounded-sm transition-opacity ${v.barClass} hover:opacity-80`}
         onClick={() => onOpen(run.workflowId)}
       />
     </td>

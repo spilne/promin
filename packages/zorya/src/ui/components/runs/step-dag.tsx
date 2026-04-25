@@ -6,7 +6,7 @@
 // Nodes are colored by their executed status (planned = dashed).
 // ---------------------------------------------------------------------------
 
-import { useMemo } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { RunDto, StepDto } from "../../../server/api-types.ts";
 import { STEP_STATUS_VISUAL, STEP_TYPE_ICON, effectiveStepStatus } from "../../lib/format.ts";
 import type { ExtendedStepStatus } from "../../../server/api-types.ts";
@@ -24,6 +24,8 @@ const ROW_GAP = 20;
 const PADDING = 24;
 const STRIPE_W = 4;
 
+type Orientation = "horizontal" | "vertical";
+
 interface LaidOutNode {
   step: StepDto;
   rank: number;
@@ -33,7 +35,32 @@ interface LaidOutNode {
 }
 
 export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
-  const { nodes, edges, width, height } = useMemo(() => layout(run.steps), [run.steps]);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [containerW, setContainerW] = useState<number>(0);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) setContainerW(entry.contentRect.width);
+    });
+    observer.observe(el);
+    setContainerW(el.clientWidth);
+    return () => observer.disconnect();
+  }, []);
+
+  const horizontal = useMemo(() => layout(run.steps, "horizontal"), [run.steps]);
+  const vertical = useMemo(() => layout(run.steps, "vertical"), [run.steps]);
+
+  // Default to horizontal; flip to vertical only when the horizontal layout
+  // overflows the container AND the vertical one fits better. This handles
+  // narrow viewports + deep DAGs without making short DAGs tall for no reason.
+  const orientation: Orientation =
+    containerW > 0 && horizontal.width > containerW && vertical.width <= horizontal.width
+      ? "vertical"
+      : "horizontal";
+
+  const { nodes, edges, width, height } = orientation === "vertical" ? vertical : horizontal;
 
   if (run.steps.length === 0) {
     return (
@@ -53,9 +80,12 @@ export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
           <h3 class="card-title text-base">Graph</h3>
           <span class="text-sm text-base-content/60">
             {run.steps.length} {run.steps.length === 1 ? "step" : "steps"}
+            {orientation === "vertical" && (
+              <span class="ml-2 badge badge-xs badge-ghost">vertical layout</span>
+            )}
           </span>
         </div>
-        <div class="overflow-auto">
+        <div ref={containerRef} class="overflow-auto">
           <svg
             width={width}
             height={height}
@@ -80,7 +110,7 @@ export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
             {edges.map((e, i) => (
               <path
                 key={`e-${i}`}
-                d={edgePath(e.from, e.to)}
+                d={edgePath(e.from, e.to, orientation)}
                 fill="none"
                 stroke-width={2}
                 class="stroke-base-content/40"
@@ -214,7 +244,10 @@ function classForStatusStrip(status: ExtendedStepStatus): string {
 // Layout
 // ---------------------------------------------------------------------------
 
-function layout(steps: StepDto[]): {
+function layout(
+  steps: StepDto[],
+  orientation: Orientation,
+): {
   nodes: LaidOutNode[];
   edges: Array<{ from: LaidOutNode; to: LaidOutNode }>;
   width: number;
@@ -255,22 +288,32 @@ function layout(steps: StepDto[]): {
   const maxRank = Math.max(0, ...rank.values());
   const maxRows = Math.max(0, ...Array.from(byRank.values(), (l) => l.length));
 
+  // Horizontal: rank → x, row-within-rank → y.
+  // Vertical: rank → y, row-within-rank → x. (Swap the two axes.)
+  const horizontal = orientation === "horizontal";
+  const rankStep = horizontal ? NODE_W + COL_GAP : NODE_H + COL_GAP;
+  const rowStep = horizontal ? NODE_H + ROW_GAP : NODE_W + ROW_GAP;
+  const rankSize = horizontal ? NODE_W : NODE_H;
+  const rowSize = horizontal ? NODE_H : NODE_W;
+
   const nodes: LaidOutNode[] = [];
   const nodeByName = new Map<string, LaidOutNode>();
   for (let r = 0; r <= maxRank; r++) {
     const list = byRank.get(r) ?? [];
-    // Vertically centre each column so the diagram is balanced.
-    const colHeight = list.length * (NODE_H + ROW_GAP) - ROW_GAP;
-    const totalHeight = maxRows * (NODE_H + ROW_GAP) - ROW_GAP;
-    const yOffset = (totalHeight - colHeight) / 2;
+    // Centre each rank's row band so the diagram is balanced.
+    const bandLen = list.length * rowStep - ROW_GAP;
+    const totalBand = maxRows * rowStep - ROW_GAP;
+    const offset = (totalBand - bandLen) / 2;
     for (let i = 0; i < list.length; i++) {
       const s = list[i]!;
+      const rankCoord = PADDING + r * rankStep;
+      const rowCoord = PADDING + offset + i * rowStep;
       const n: LaidOutNode = {
         step: s,
         rank: r,
         row: i,
-        x: PADDING + r * (NODE_W + COL_GAP),
-        y: PADDING + yOffset + i * (NODE_H + ROW_GAP),
+        x: horizontal ? rankCoord : rowCoord,
+        y: horizontal ? rowCoord : rankCoord,
       };
       nodes.push(n);
       nodeByName.set(s.stepName, n);
@@ -287,18 +330,35 @@ function layout(steps: StepDto[]): {
     }
   }
 
-  const width = PADDING * 2 + (maxRank + 1) * NODE_W + maxRank * COL_GAP;
-  const height = PADDING * 2 + maxRows * (NODE_H + ROW_GAP) - ROW_GAP;
+  const width =
+    PADDING * 2 +
+    (horizontal
+      ? (maxRank + 1) * rankSize + maxRank * COL_GAP
+      : maxRows * rowSize + (maxRows - 1) * ROW_GAP);
+  const height =
+    PADDING * 2 +
+    (horizontal
+      ? maxRows * rowSize + (maxRows - 1) * ROW_GAP
+      : (maxRank + 1) * rankSize + maxRank * COL_GAP);
   return { nodes, edges, width, height };
 }
 
-function edgePath(from: LaidOutNode, to: LaidOutNode): string {
-  const x1 = from.x + NODE_W;
-  const y1 = from.y + NODE_H / 2;
-  const x2 = to.x;
-  const y2 = to.y + NODE_H / 2;
-  const midX = (x1 + x2) / 2;
-  return `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2 - 4} ${y2}`;
+function edgePath(from: LaidOutNode, to: LaidOutNode, orientation: Orientation): string {
+  if (orientation === "horizontal") {
+    const x1 = from.x + NODE_W;
+    const y1 = from.y + NODE_H / 2;
+    const x2 = to.x;
+    const y2 = to.y + NODE_H / 2;
+    const midX = (x1 + x2) / 2;
+    return `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2 - 4} ${y2}`;
+  }
+  // Vertical: edge from bottom-of-from to top-of-to.
+  const x1 = from.x + NODE_W / 2;
+  const y1 = from.y + NODE_H;
+  const x2 = to.x + NODE_W / 2;
+  const y2 = to.y;
+  const midY = (y1 + y2) / 2;
+  return `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2 - 4}`;
 }
 
 function truncate(s: string, n: number): string {
