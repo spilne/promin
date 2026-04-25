@@ -407,8 +407,14 @@ function StepRow({
           <div class="absolute inset-y-1 left-0 right-0 border border-dashed border-base-content/20 rounded" />
         ) : (
           <>
+            {/* Wait-like bars get the warning palette regardless of
+                status, matching the "waiting" entry in the legend +
+                the warning compression band on the time axis. Without
+                this override a completed signal-wait would render
+                green like any other completed step, washing out the
+                "this was a wait" semantic. */}
             <div
-              class={`gantt-bar absolute top-1 bottom-1 rounded ${v.barClass} ${isHatched ? "gantt-hatched" : ""} ${retried ? "ring-1 ring-warning/70" : ""}`}
+              class={`gantt-bar absolute top-1 bottom-1 rounded ${waitLike ? "bg-warning" : v.barClass} ${isHatched ? "gantt-hatched" : ""} ${retried ? "ring-1 ring-warning/70" : ""}`}
               style={{
                 left: `${leftPct}%`,
                 width: `${widthPct}%`,
