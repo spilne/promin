@@ -1,4 +1,4 @@
-import { useState } from "preact/hooks";
+import { useEffect, useMemo, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api } from "../../api/client.ts";
 import type { WorkflowDefDto } from "../../../server/routes/workflow-defs.ts";
@@ -6,7 +6,10 @@ import type { SparklinesResponse } from "../../../server/routes/grid.ts";
 import { Sparkline } from "../ui/sparkline.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { EmptyState } from "../ui/empty-state.tsx";
+import { Pagination } from "../ui/pagination.tsx";
 import { TriggerModal } from "./trigger-modal.tsx";
+
+const PAGE_SIZE = 20;
 
 interface WorkflowListProps {
   onOpenRun: (id: string) => void;
@@ -24,6 +27,28 @@ export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: 
   const { data, loading, error, refresh } = useFetch(() => api.listWorkflowDefs(), [], 30_000);
   const { data: sparklines } = useFetch<SparklinesResponse>(() => api.getSparklines(14), [], 5000);
   const [triggering, setTriggering] = useState<WorkflowDefDto | undefined>(undefined);
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+
+  const filtered = useMemo(() => {
+    const all = data?.workflows ?? [];
+    const q = query.trim().toLowerCase();
+    if (!q) return all;
+    return all.filter((w) => {
+      const fields = [w.name, w.type ?? "", w.version ?? "", ...(w.versions ?? [])];
+      return fields.some((f) => f.toLowerCase().includes(q));
+    });
+  }, [data, query]);
+
+  const paged = useMemo(
+    () => filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
+    [filtered, page],
+  );
+
+  // Reset to page 1 whenever the search narrows the list.
+  useEffect(() => {
+    setPage(1);
+  }, [query]);
 
   return (
     <div class="anim-page p-4 max-w-[1400px] mx-auto space-y-4">
@@ -39,6 +64,13 @@ export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: 
           Refresh
         </button>
       </div>
+
+      <input
+        class="input input-bordered input-sm w-full max-w-md font-mono"
+        placeholder="Search by name, type, version…"
+        value={query}
+        onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
+      />
 
       {error && <div class="alert alert-error text-sm">{error.message}</div>}
 
@@ -67,7 +99,17 @@ export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: 
                   </td>
                 </tr>
               )}
-              {data?.workflows.map((w) => (
+              {data && filtered.length === 0 && data.workflows.length > 0 && (
+                <tr>
+                  <td colSpan={6}>
+                    <EmptyState
+                      message="No workflows match the search."
+                      hint="Clear the search to see them all."
+                    />
+                  </td>
+                </tr>
+              )}
+              {paged.map((w) => (
                 <tr class="hover:bg-base-200">
                   <td>
                     <button
@@ -112,6 +154,16 @@ export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: 
           </table>
         </div>
       </div>
+
+      {filtered.length > 0 && (
+        <Pagination
+          page={page}
+          pageSize={PAGE_SIZE}
+          total={filtered.length}
+          onChange={setPage}
+          itemsLabel="workflows"
+        />
+      )}
 
       {triggering && (
         <TriggerModal

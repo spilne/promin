@@ -1,4 +1,4 @@
-import { useState } from "preact/hooks";
+import { useEffect, useMemo, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api } from "../../api/client.ts";
 import type { ScheduleDto } from "../../../server/routes/schedules.ts";
@@ -6,6 +6,15 @@ import { formatCountdown, formatDuration, formatRelative } from "../../lib/forma
 import { confirm, toast } from "../../lib/dialogs.ts";
 import { CreateScheduleModal } from "./create-schedule-modal.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
+import { Pagination } from "../ui/pagination.tsx";
+
+const PAGE_SIZE = 20;
+type StatusFilter = "all" | "enabled" | "paused";
+const STATUS_FILTERS: ReadonlyArray<{ id: StatusFilter; label: string }> = [
+  { id: "all", label: "All" },
+  { id: "enabled", label: "Enabled" },
+  { id: "paused", label: "Paused" },
+];
 
 interface ScheduleListProps {
   onNavigate: (path: string) => void;
@@ -15,6 +24,31 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
   const [showCreate, setShowCreate] = useState(false);
   const [editing, setEditing] = useState<ScheduleDto | undefined>(undefined);
   const { data, loading, error, refresh } = useFetch(() => api.listSchedules(), [], 10_000);
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [page, setPage] = useState(1);
+
+  const filtered = useMemo(() => {
+    const all = data?.schedules ?? [];
+    const q = query.trim().toLowerCase();
+    return all.filter((s) => {
+      if (statusFilter === "enabled" && !s.enabled) return false;
+      if (statusFilter === "paused" && s.enabled) return false;
+      if (!q) return true;
+      const wfName = (s.metadata?.["workflowName"] as string | undefined) ?? "";
+      const fields = [s.id, s.name ?? "", wfName, s.cron ?? "", s.rrule ?? ""];
+      return fields.some((f) => f.toLowerCase().includes(q));
+    });
+  }, [data, query, statusFilter]);
+
+  const paged = useMemo(
+    () => filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
+    [filtered, page],
+  );
+
+  useEffect(() => {
+    setPage(1);
+  }, [query, statusFilter]);
 
   if (loading && !data) {
     return (
@@ -117,6 +151,40 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
         </div>
       )}
 
+      {configured && schedules.length > 0 && (
+        <div class="flex items-center gap-2 flex-wrap">
+          <div class="join">
+            {STATUS_FILTERS.map((f) => (
+              <button
+                class={`btn btn-sm join-item ${
+                  statusFilter === f.id ? "btn-primary" : "btn-ghost"
+                }`}
+                onClick={() => setStatusFilter(f.id)}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+          <input
+            class="input input-bordered input-sm w-full max-w-md font-mono"
+            placeholder="Search by id, name, workflow, cron…"
+            value={query}
+            onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
+          />
+          {(query || statusFilter !== "all") && (
+            <button
+              class="btn btn-sm btn-ghost"
+              onClick={() => {
+                setQuery("");
+                setStatusFilter("all");
+              }}
+            >
+              Clear
+            </button>
+          )}
+        </div>
+      )}
+
       {configured && schedules.length === 0 && (
         <div class="card bg-base-100 shadow">
           <div class="card-body py-8 text-center text-base-content/50">
@@ -125,7 +193,15 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
         </div>
       )}
 
-      {schedules.length > 0 && (
+      {schedules.length > 0 && filtered.length === 0 && (
+        <div class="card bg-base-100 shadow">
+          <div class="card-body py-8 text-center text-base-content/50">
+            No schedules match the current filters.
+          </div>
+        </div>
+      )}
+
+      {filtered.length > 0 && (
         <div class="card bg-base-100 shadow overflow-hidden">
           <div class="overflow-x-auto">
             <table class="table">
@@ -144,7 +220,7 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
                 </tr>
               </thead>
               <tbody>
-                {schedules.map((s) => {
+                {paged.map((s) => {
                   const wfName = (s.metadata?.["workflowName"] as string | undefined) ?? undefined;
                   return (
                     <tr class="hover:bg-base-200">
@@ -214,6 +290,16 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
             </table>
           </div>
         </div>
+      )}
+
+      {filtered.length > 0 && (
+        <Pagination
+          page={page}
+          pageSize={PAGE_SIZE}
+          total={filtered.length}
+          onChange={setPage}
+          itemsLabel="schedules"
+        />
       )}
 
       {showCreate && (
