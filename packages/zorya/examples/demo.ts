@@ -30,6 +30,7 @@ import {
   SqliteMemoryStore,
 } from "@promin/sqlite";
 import {
+  anthropic,
   applyDiscoveredAgents,
   resolveLocalAgent,
   tool,
@@ -90,11 +91,25 @@ const memoryStore = SqliteMemoryStore.make({ db });
 // the JSON-serializable recipe shape on disk.
 
 const agentScanRoot = path.join(import.meta.dir, "agents");
-const agentScan = await scanAgentsFolder(agentScanRoot, {
+const rawAgentScan = await scanAgentsFolder(agentScanRoot, {
   onAgent: (agent, src) =>
     console.log(`[zorya] discovered agent ${agent.id} (${path.relative(agentScanRoot, src)})`),
 });
-for (const w of agentScan.warnings) console.warn(`[zorya] ${w}`);
+for (const w of rawAgentScan.warnings) console.warn(`[zorya] ${w}`);
+
+// Recipes that need a live API key get filtered out when the key is
+// missing, so the dashboard only surfaces agents that actually work.
+const haveAnthropicKey = !!process.env["ANTHROPIC_API_KEY"];
+const liveOnlyAgentIds = new Set<string>(["claude-bot"]);
+if (!haveAnthropicKey) {
+  console.warn(
+    "[zorya] ANTHROPIC_API_KEY not set — skipping live agents: " + [...liveOnlyAgentIds].join(", "),
+  );
+}
+const agentScan = {
+  ...rawAgentScan,
+  agents: rawAgentScan.agents.filter((a) => !liveOnlyAgentIds.has(a.id) || haveAnthropicKey),
+};
 
 // `support-bot` rotates through canned replies so multiple turns in a
 // thread don't all return the same line. Other bots use templated echo.
@@ -238,6 +253,10 @@ function hashString(s: string): number {
 const agentTools: Record<string, Record<string, AgentTool<unknown, unknown>>> = {
   // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
   "weather-bot": { weather: weatherTool as AgentTool<any, any> },
+  // Live Claude shares the same weather tool — proves the adapter wires
+  // tool definitions + tool_use blocks correctly with a real model.
+  // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
+  "claude-bot": { weather: weatherTool as AgentTool<any, any> },
 };
 
 // Per-agent LLM map — keyed by recipe id. Built once at boot. A discovered
@@ -280,6 +299,10 @@ const agentLlms: Record<string, LLMProvider> = {
       },
     }),
   ),
+  // Live LLM — bound only when the key is present. Anthropic's adapter
+  // streams natively with real network latency, so we DON'T wrap it in
+  // naturalLLM (that would pile fake delays on top of real ones).
+  ...(haveAnthropicKey ? { "claude-bot": anthropic("claude-sonnet-4-6") } : {}),
 };
 
 const KNOWN_CITIES = [
@@ -301,6 +324,18 @@ function pickCityFromText(text: string): string {
 }
 
 async function seedAgents() {
+  // Drop stale live-only rows from a previous boot when their capability
+  // (e.g. ANTHROPIC_API_KEY) is no longer present, so the dashboard
+  // doesn't surface agents that would fail at invoke time.
+  for (const id of liveOnlyAgentIds) {
+    if (!haveAnthropicKey) {
+      const existing = await agentRegistry.get(id);
+      if (existing) {
+        await agentRegistry.unregister(id);
+        console.log(`[zorya] unregistered stale ${id} (key missing)`);
+      }
+    }
+  }
   if (agentScan.agents.length === 0) {
     console.log(`[zorya] no agents discovered under ${agentScanRoot}`);
     return;
