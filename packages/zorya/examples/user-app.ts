@@ -17,6 +17,13 @@
 //   state transition + activity-journal entry to Zorya over the wire.
 //   No queue, no advertisement, no risk of accidentally claiming someone
 //   else's runs — you only run what you call. Same dashboard visibility.
+//   Two flavors shown:
+//     • `verifyOrder`    — simple `.stepAsync().stepAsync()` chain.
+//     • `researchTopic`  — single `.journaled` step with multiple
+//                          `yield* ctx.activity(...)` calls. Each
+//                          activity result is journaled, so a crash
+//                          mid-step replays completed activities from
+//                          storage instead of re-running them.
 //
 // (The third pattern, `ZoryaWorker`, is the right choice when the workflow
 //  uses `ctx.sleep` and must resume after this process exits, or when you
@@ -47,6 +54,61 @@ const verifyOrder = workflow<{ orderId: number; amountCents: number }>({
     // are flagged as suspicious; risky+invalid are auto-rejected.
     const risky = input.amountCents > 100_000 || input.orderId % 2 === 0;
     return { ...prev, risky, riskScore: risky ? 85 : 12 };
+  })
+  .build();
+
+// ---------------------------------------------------------------------------
+// PATTERN B (journaled variant) — multiple `yield* ctx.activity(...)` calls
+// inside a single generator step. Each activity is recorded in the journal
+// before its result is returned, so a crash mid-step replays the completed
+// activities from the journal instead of re-running their side effects.
+// Same wire as the regular steps above — RemoteWorkflowStorage proxies the
+// journal-write/journal-read methods, so journaling works end-to-end with
+// the runner pattern.
+
+const researchTopic = workflow<{ topic: string }>({
+  name: "research-topic",
+  type: "app",
+})
+  .journaled("research", function* (ctx, input) {
+    // Activity #1 — fetch a list of source URLs. Result is journaled
+    // under key "fetch-sources"; on resume after a crash, this returns
+    // the prior result without re-running the (potentially expensive)
+    // network call.
+    const sources = yield* ctx.activity("fetch-sources", async () => {
+      await new Promise((r) => setTimeout(r, 200));
+      return [
+        { id: 1, url: `https://example.com/${input.topic}/intro` },
+        { id: 2, url: `https://example.com/${input.topic}/deep-dive` },
+        { id: 3, url: `https://example.com/${input.topic}/comparisons` },
+      ];
+    });
+
+    // Activity #2 (loop) — fan out per source. Each iteration journals
+    // under a unique key (`analyze-1`, `analyze-2`, ...). A crash after
+    // analyzing 2 of 3 resumes from analysis-3, the prior two replay
+    // from the journal.
+    const summaries: Array<{ id: number; words: number }> = [];
+    for (const src of sources) {
+      const summary = yield* ctx.activity(`analyze-${src.id}`, async () => {
+        await new Promise((r) => setTimeout(r, 100 + Math.floor(Math.random() * 200)));
+        return { id: src.id, words: 50 + Math.floor(Math.random() * 200) };
+      });
+      summaries.push(summary);
+    }
+
+    // Activity #3 — compose the final report. Reads in-memory state
+    // (`summaries` accumulated above), writes its result via the journal.
+    const report = yield* ctx.activity("compose-report", async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      return {
+        topic: input.topic,
+        sourceCount: summaries.length,
+        totalWords: summaries.reduce((s, x) => s + x.words, 0),
+      };
+    });
+
+    return report;
   })
   .build();
 
@@ -83,6 +145,19 @@ async function processOrder(orderId: number, amountCents: number): Promise<void>
 }
 
 // ---------------------------------------------------------------------------
+// Pattern B (journaled) in action — same `runner.run(...)` shape, but the
+// workflow is a single .journaled step doing multiple ctx.activity calls.
+// Output type is the generator's return type.
+
+async function researchAndPrint(topic: string): Promise<void> {
+  console.log(`[app] researching "${topic}"…`);
+  const report = await runner.run(researchTopic, { topic });
+  console.log(
+    `[app]  → "${report.topic}": ${report.sourceCount} sources, ${report.totalWords} total words`,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Pattern A — trigger an EXISTING workflow that's hosted by the demo
 // process (the "order" workflow scanned out of examples/workflows/).
 // `startByName` enqueues a start; the workflow runs THERE, not here.
@@ -113,6 +188,11 @@ const orders: Array<[number, number]> = [
 
 for (const [id, cents] of orders) {
   await processOrder(id, cents);
+}
+
+// Drive the journaled workflow with a couple topics.
+for (const topic of ["durable-execution", "saga-patterns"]) {
+  await researchAndPrint(topic);
 }
 
 await callExistingDemoWorkflow();
