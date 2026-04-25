@@ -23,6 +23,7 @@ import {
   isJournaledSuspendStorage,
   type Workflow,
 } from "@promin/workflow";
+import { InMemoryWorkflowStartQueue } from "../src/index.ts";
 import {
   SqliteWorkflowStorage,
   SqliteSchedulerStorage,
@@ -596,6 +597,13 @@ function nextId(name: string): string {
   return `${name}-${Date.now().toString(36)}-${idCounter}`;
 }
 
+// Shared workflow-start queue. The demo's trigger callback enqueues here
+// for any workflow it doesn't host in-process — connected external
+// workers (from `examples/external-worker.ts` or any `ZoryaWorker`) poll
+// this queue and execute the run in their own process. Same instance is
+// passed to ZoryaServer's workerProtocol below.
+const workflowStarts = new InMemoryWorkflowStartQueue();
+
 async function triggerRun(
   name: string,
   input: unknown,
@@ -608,8 +616,30 @@ async function triggerRun(
   } = {},
 ): Promise<{ workflowId: string }> {
   const wf = workflowsByName[name];
-  if (!wf) throw new Error(`Unknown workflow: ${name}`);
   const workflowId = opts.workflowId ?? nextId(name);
+
+  // Unknown to the in-process registry — must be a workflow advertised
+  // by an external worker. Pre-create the storage row so /api/runs
+  // shows it, then enqueue a start record. The first connected worker
+  // that advertises this name will claim it and run it locally.
+  if (!wf) {
+    await storage.createWorkflow({
+      workflowId,
+      workflowName: name,
+      input,
+      namespace: opts.namespace,
+      metadata: opts.metadata,
+      runSource: opts.runSource,
+      runSourceId: opts.runSourceId,
+    });
+    await workflowStarts.enqueue({
+      workflowId,
+      workflowName: name,
+      input,
+      metadata: opts.metadata,
+    });
+    return { workflowId };
+  }
   // Pre-create the row whenever the caller wants namespace, metadata, OR
   // runSource to stick. `runner.run`'s internal createWorkflow is
   // idempotent — it sees the existing row and resumes instead of
@@ -926,7 +956,16 @@ const server = new ZoryaServer({
   // type but unused at runtime here because we keep the explicit
   // `trigger` callback below — that path runs workflows in-process via
   // the runner, never actually enqueues to the step queue.
-  workerProtocol: { stepQueue: new InMemoryStepQueue(), workerRegistry },
+  // workflowStarts (shared with the trigger callback above) lets external
+  // workers — anything connecting via ZoryaClient/ZoryaWorker — pull
+  // triggered runs and execute them locally. The dashboard's "Trigger"
+  // button works for both in-process and external workflows: the demo
+  // tries the local runner first, falls back to enqueue.
+  workerProtocol: {
+    stepQueue: new InMemoryStepQueue(),
+    workerRegistry,
+    workflowStarts,
+  },
   // Embedded scheduler tick loop — `namespaces: "all"` polls every tenant
   // (the seed mixes "tenant-a", "tenant-b", and the global namespace).
   // `dispatchConcurrency: 5` caps the per-tick fan-out so a wakeup of
@@ -975,11 +1014,19 @@ const { port: actualPort, hostname } = server.listen({ port });
 const host = hostname === "0.0.0.0" ? "localhost" : hostname;
 console.log(`Zorya demo server on http://${host}:${actualPort}`);
 console.log(`  - Storage:      sqlite (${dbPath})`);
-console.log(`  - Workflows:    ${Object.keys(workflowsByName).length} discovered`);
+console.log(`  - Workflows:    ${Object.keys(workflowsByName).length} discovered (in-process)`);
 console.log(`  - Agents:       ${agentScan.agents.map((a) => a.id).join(", ") || "(none)"}`);
 console.log(`  - Dashboard:    http://${host}:${actualPort}/`);
 console.log(`  - Agents tab:   http://${host}:${actualPort}/#/agents`);
 console.log(`  - Traffic comes from schedules — pause one to stop its runs`);
+console.log(``);
+console.log(`  Run YOUR app against this Zorya (Temporal-style) — see examples/user-app.ts:`);
+console.log(
+  `    ZORYA_URL=http://${host}:${actualPort} \\\n` +
+    `      bun --conditions=@promin/source run packages/zorya/examples/user-app.ts`,
+);
+console.log(`  Defines a workflow inline, hosts the worker, calls it like a regular async fn,`);
+console.log(`  branches business logic on the result. Storage + dashboard for free.`);
 
 // Graceful shutdown. Registering ANY `process.on("SIGINT")` handler in Bun
 // overrides the default exit-on-Ctrl+C — the heartbeat-cleanup handlers
