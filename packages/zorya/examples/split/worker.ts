@@ -214,10 +214,15 @@ const worker = new ZoryaWorker({
 await worker.start();
 
 // Seed one run in a non-default namespace so the sidebar namespace
-// switcher has something to filter to. Fire-and-forget; the worker picks
-// it up on the next poll cycle.
+// switcher has something to filter to. Uses a stable workflowId so
+// re-running the worker against the same persistent db doesn't create
+// a new seed every boot (createWorkflow is idempotent on workflowId).
 void client
-  .triggerWorkflow("order", { input: { orderId: 999 }, namespace: "tenant-a" })
+  .triggerWorkflow("order", {
+    input: { orderId: 999 },
+    namespace: "tenant-a",
+    workflowId: "seed-tenant-a-order",
+  })
   .catch(() => {});
 
 console.log(`Worker ${worker.workerId} connected to ${url}`);

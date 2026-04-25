@@ -11,8 +11,15 @@ import { SqliteWorkflowStorage } from "@promin/sqlite";
 import { Database } from "bun:sqlite";
 import { ZoryaServer, InMemoryWorkflowAdvertisementRegistry } from "../../src/index.ts";
 import path from "node:path";
+import { mkdirSync } from "node:fs";
 
-const dbPath = process.env.ZORYA_DB ?? ":memory:";
+// Default to a persistent file under ./target so the seeded `tenant-a`
+// namespace run, advertised workflow versions, and run history all survive
+// server restarts. Override with ZORYA_DB=:memory: or a custom path.
+const dbPath = process.env.ZORYA_DB ?? "./target/zorya.db";
+if (dbPath !== ":memory:") {
+  mkdirSync(path.dirname(dbPath), { recursive: true });
+}
 const db = new Database(dbPath);
 db.exec("PRAGMA journal_mode = WAL");
 db.exec("PRAGMA foreign_keys = ON");
