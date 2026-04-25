@@ -947,6 +947,17 @@ const server = new ZoryaServer({
         // real key (cheaper / faster than Sonnet), fall back to the
         // chat LLM for mock agents (echoLLM round-trip is free anyway).
         consolidatorLlm: haveAnthropicKey ? anthropic("claude-haiku-4-5-20251001") : undefined,
+        // Auto-fire compactThread after each thread turn once the
+        // uncompacted backlog crosses either gate. Demo numbers — low
+        // enough that you'll see a rollup episode appear in the
+        // inspector after a handful of chat turns. `background` mode
+        // keeps the user-visible turn snappy.
+        autoCompact: {
+          messageThreshold: 12,
+          tokenThreshold: 4_000,
+          keepRecent: 6,
+          mode: "background",
+        },
       }),
   },
   // Same store the resolver uses, so the inspector reads the live cascade.

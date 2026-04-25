@@ -398,6 +398,172 @@ describe("LocalAgent — thread.isNew (continuation vs new)", () => {
   });
 });
 
+describe("LocalAgent — autoCompact", () => {
+  // Returns ONE chat response per call; reused for the chat path.
+  function chattyLLM(): LLMProvider {
+    let i = 0;
+    return {
+      chat: async () => ({
+        content: `reply #${++i}`,
+        finishReason: "stop" as const,
+        usage: { inputTokens: 10, outputTokens: 5 },
+      }),
+    };
+  }
+  // Always returns the distill envelope. Used by the auto-built
+  // DefaultConsolidator.
+  function envelopeLLM(): LLMProvider {
+    return {
+      chat: async () => ({
+        content: JSON.stringify({
+          summary: "compacted by test",
+          outcome: null,
+          salience: 0.4,
+          facts: [],
+        }),
+        finishReason: "stop",
+      }),
+    };
+  }
+
+  // Drive N user turns through the same thread. Each turn writes
+  // [user, assistant] = 2 messages, so after N turns the thread has
+  // ~2N persisted messages.
+  async function driveTurns(thread: Awaited<ReturnType<LocalAgent["thread"]>>, n: number) {
+    for (let i = 0; i < n; i++) {
+      const out = await thread.send({ task: `turn ${i}` });
+      await out.text; // ensure persistTurn ran
+    }
+  }
+
+  it("messageThreshold fires compactThread once when uncompacted count crosses; subsequent under-threshold turns don't re-fire", async () => {
+    const { runner } = makeRunner();
+    const memory = new InMemoryMemoryStore();
+    const agent = new LocalAgent({
+      agent: { name: "support", llm: chattyLLM() },
+      runner,
+      memory,
+      namespaceId: "acme",
+      consolidatorLlm: envelopeLLM(),
+      autoCompact: { messageThreshold: 4, keepRecent: 2, mode: "blocking" },
+    });
+    const t = await agent.thread("auto-1");
+
+    // Sequence (messageThreshold=4, keepRecent=2):
+    //   Turn 1: 2 msgs. uncompacted=2. 2 > 4? no.
+    //   Turn 2: 4 msgs. uncompacted=4. 4 > 4? no.
+    //   Turn 3: 6 msgs. uncompacted=6. FIRE. lastCompactedSeq = 6-2 = 4.
+    //   Turn 4: 8 msgs. uncompacted=8-4=4. 4 > 4? no.   ← this is the
+    //                                                    "doesn't re-fire" assertion.
+    await driveTurns(t, 4);
+
+    const episodes = await memory.listThreadEpisodes({
+      namespaceId: "acme",
+      resourceId: undefined,
+      threadId: "auto-1",
+    });
+    const compactEpisodes = episodes.filter(
+      (e) => (e.metadata as { kind?: unknown }).kind === "compact",
+    );
+    expect(compactEpisodes.length).toBe(1);
+    expect(compactEpisodes[0]!.summary).toBe("compacted by test");
+    expect(compactEpisodes[0]!.sourceMessageRange?.toSeq).toBe(4);
+  });
+
+  it("tokenThreshold fires when char-budget crosses even at low message counts", async () => {
+    const { runner } = makeRunner();
+    const memory = new InMemoryMemoryStore();
+    // LLM that emits a LARGE assistant message — one turn is enough
+    // to blow a small token budget.
+    const heavyLLM: LLMProvider = {
+      chat: async () => ({
+        content: "x".repeat(2000), // ~500 tokens via chars/4
+        finishReason: "stop",
+      }),
+    };
+    const agent = new LocalAgent({
+      agent: { name: "verbose", llm: heavyLLM },
+      runner,
+      memory,
+      namespaceId: "acme",
+      consolidatorLlm: envelopeLLM(),
+      autoCompact: { tokenThreshold: 200, keepRecent: 1, mode: "blocking" },
+    });
+    const t = await agent.thread("auto-token");
+    // ONE turn only — proves the token gate fires at low message
+    // count when individual messages are large.
+    await driveTurns(t, 1);
+
+    const episodes = await memory.listThreadEpisodes({
+      namespaceId: "acme",
+      resourceId: undefined,
+      threadId: "auto-token",
+    });
+    const compacts = episodes.filter((e) => (e.metadata as { kind?: unknown }).kind === "compact");
+    expect(compacts.length).toBe(1);
+  });
+
+  it("`when` predicate replaces the threshold check", async () => {
+    const { runner } = makeRunner();
+    const memory = new InMemoryMemoryStore();
+    const seenSignals: number[] = [];
+    const agent = new LocalAgent({
+      agent: { name: "predicate", llm: chattyLLM() },
+      runner,
+      memory,
+      namespaceId: "acme",
+      consolidatorLlm: envelopeLLM(),
+      autoCompact: {
+        // Numeric thresholds present, but `when` should override them.
+        messageThreshold: 100,
+        when: ({ uncompactedCount }) => {
+          seenSignals.push(uncompactedCount);
+          return uncompactedCount >= 4;
+        },
+        keepRecent: 1,
+        mode: "blocking",
+      },
+    });
+    const t = await agent.thread("auto-pred");
+    await driveTurns(t, 3);
+
+    expect(seenSignals.length).toBe(3); // predicate consulted on every turn
+    const episodes = await memory.listThreadEpisodes({
+      namespaceId: "acme",
+      resourceId: undefined,
+      threadId: "auto-pred",
+    });
+    expect(
+      episodes.filter((e) => (e.metadata as { kind?: unknown }).kind === "compact"),
+    ).toHaveLength(1);
+  });
+
+  it("does nothing when autoCompact is unset", async () => {
+    const { runner } = makeRunner();
+    const memory = new InMemoryMemoryStore();
+    const agent = new LocalAgent({
+      agent: { name: "no-auto", llm: chattyLLM() },
+      runner,
+      memory,
+      namespaceId: "acme",
+      consolidatorLlm: envelopeLLM(),
+      // autoCompact: undefined ← off
+    });
+    const t = await agent.thread("auto-off");
+    for (let i = 0; i < 5; i++) {
+      await (
+        await t.send({ task: `t${i}` })
+      ).text;
+    }
+    const episodes = await memory.listThreadEpisodes({
+      namespaceId: "acme",
+      resourceId: undefined,
+      threadId: "auto-off",
+    });
+    expect(episodes).toHaveLength(0);
+  });
+});
+
 describe("LocalAgent — threads (without MemoryStore)", () => {
   it("returns a thread that does not persist (in-memory session only)", async () => {
     const { runner } = makeRunner();

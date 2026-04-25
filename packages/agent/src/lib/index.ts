@@ -72,6 +72,9 @@ export type { InMemoryMemoryStoreConfig } from "./memory/in-memory-memory-store.
 export { resolveContext } from "./memory/resolve-context.ts";
 export type { ResolveContextInput } from "./memory/resolve-context.ts";
 
+// Auto-compaction config — exposed alongside Consolidator for demos that wire it.
+export type { AutoCompactConfig, AutoCompactSignals } from "./agent/local-agent.ts";
+
 // Universal Agent interface + LocalAgent backend.
 export type {
   Agent,

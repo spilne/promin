@@ -115,6 +115,86 @@ export interface LocalAgentConfig<TOutput = any> {
    * distillation. Ignored when `consolidator` is supplied directly.
    */
   readonly consolidatorLlm?: import("../llm-provider.ts").LLMProvider;
+  /**
+   * Auto-fire `compactThread` after each thread turn whose persisted
+   * message count crosses `threshold`. Writes a `ThreadEpisode` covering
+   * the trimmed range; the raw messages stay on disk for replay.
+   *
+   * Defaults to `false` (off). Set `{ threshold: 30 }` for a sensible
+   * starting point — start compacting once a thread has ~30 messages.
+   *
+   * Phase-1 only: writes the episode but doesn't yet feed it back into
+   * resolveContext (see promin-37qn). So in this commit auto-compact
+   * is observable in the inspector but doesn't yet free token budget
+   * for the next turn.
+   */
+  readonly autoCompact?: AutoCompactConfig | false;
+}
+
+export interface AutoCompactConfig {
+  /**
+   * Built-in count gate: fire when the count of UNCOMPACTED messages —
+   * those with seq higher than the most recent compaction episode's
+   * toSeq — exceeds this number. Tracks "since last compact" so the
+   * trigger doesn't re-fire every turn once the thread is past the
+   * threshold.
+   */
+  readonly messageThreshold?: number;
+  /**
+   * Built-in token gate: fire when uncompacted-message tokens exceed
+   * this number. Tokens are estimated as `chars/4` over `content`,
+   * matching the `resolveContext` default estimator. More accurate
+   * than `messageThreshold` when message lengths vary widely (one
+   * giant tool result can blow context even at low message counts).
+   */
+  readonly tokenThreshold?: number;
+  /**
+   * Custom predicate. Mirrors `RetryPolicy.when` from `@promin/core`:
+   * receives a signals envelope and returns `true` to fire on this
+   * turn. When set, REPLACES both built-in thresholds. Use this for
+   * compound rules.
+   *
+   * Examples:
+   *
+   *     // count + cooldown — don't compact more than once a minute
+   *     when: ({ uncompactedCount, lastCompactedAt }) =>
+   *       uncompactedCount > 30 &&
+   *       Date.now() - lastCompactedAt > 60_000
+   *
+   *     // token gate with thread-id allowlist
+   *     when: ({ uncompactedTokens, threadKey }) =>
+   *       uncompactedTokens > 8_000 &&
+   *       threadKey.threadId.startsWith("lr-")
+   */
+  readonly when?: (signals: AutoCompactSignals) => boolean;
+  /** Newest messages to leave unsummarised. Default 10. */
+  readonly keepRecent?: number;
+  /**
+   * Execution mode:
+   *   - `"background"` (default) — fire-and-forget AFTER the turn
+   *     resolves. The caller never waits for the compact LLM call.
+   *     Errors are logged but not surfaced.
+   *   - `"blocking"` — await the compact before the turn resolves.
+   *     Caller pays the compactionLlm round-trip on every triggered
+   *     turn. Use only when a downstream caller expects the episode
+   *     to exist before moving on.
+   */
+  readonly mode?: "background" | "blocking";
+}
+
+/** State the auto-compact predicate sees. */
+export interface AutoCompactSignals {
+  /** Total persisted message count for this thread. */
+  readonly totalCount: number;
+  /** Count of messages with seq > most recent compact episode's toSeq. */
+  readonly uncompactedCount: number;
+  /** Estimated token count over all persisted messages (chars/4). */
+  readonly totalTokens: number;
+  /** Estimated token count over uncompacted messages (chars/4). */
+  readonly uncompactedTokens: number;
+  /** `createdAt` of the most recent compact episode (0 if none). */
+  readonly lastCompactedAt: number;
+  readonly threadKey: ThreadKey;
 }
 
 export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput> {
@@ -215,6 +295,8 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       runner: this.config.runner,
       memory: this.config.memory,
       created,
+      autoCompact: this.config.autoCompact === false ? undefined : this.config.autoCompact,
+      consolidator: () => this.resolveConsolidator(),
     });
   }
 
@@ -372,6 +454,10 @@ interface LocalAgentThreadDeps {
   readonly runner: WorkflowRunner;
   readonly memory?: MemoryStore;
   readonly created: boolean;
+  /** Auto-compaction config inherited from `LocalAgentConfig.autoCompact`. */
+  readonly autoCompact?: AutoCompactConfig;
+  /** Lazy accessor — same Consolidator the agent uses for manual calls. */
+  readonly consolidator?: () => Consolidator;
 }
 
 class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOutput> {
@@ -479,9 +565,74 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
         await this.deps.memory.createThread(this.deps.key);
       }
       await this.deps.memory.appendMessages(this.deps.key, newTail);
+      await this.maybeAutoCompact();
     } else {
       this.inMemoryMessages.push(...newTail);
     }
+  }
+
+  /**
+   * Auto-compaction trigger. Reads the persisted state, computes signals
+   * (uncompacted-since-last-compact counts in messages and tokens),
+   * checks whether the configured rule fires, and dispatches the
+   * compactThread call in either background or blocking mode.
+   *
+   * Phase 1 only writes the episode; resolveContext consumption of
+   * those episodes lands in promin-37qn.
+   */
+  private async maybeAutoCompact(): Promise<void> {
+    const cfg = this.deps.autoCompact;
+    if (!cfg || !this.deps.memory || !this.deps.consolidator) return;
+    if (cfg.messageThreshold === undefined && cfg.tokenThreshold === undefined && !cfg.when) {
+      return; // nothing to gate on
+    }
+
+    const messages = await this.deps.memory.getMessages(this.deps.key, { order: "asc" });
+    const episodes = await this.deps.memory
+      .listThreadEpisodes(this.deps.key, { order: "createdDesc" })
+      .catch(() => []);
+    const lastCompact = episodes.find(
+      (e) => (e.metadata as { kind?: unknown } | null)?.kind === "compact",
+    );
+    const lastCompactedSeq = lastCompact?.sourceMessageRange?.toSeq ?? 0;
+    const lastCompactedAt = lastCompact?.createdAt ?? 0;
+
+    const uncompacted = messages.filter((m) => m.seq > lastCompactedSeq);
+    const totalTokens = messages.reduce((s, m) => s + estimateTokens(m), 0);
+    const uncompactedTokens = uncompacted.reduce((s, m) => s + estimateTokens(m), 0);
+
+    const signals: AutoCompactSignals = {
+      totalCount: messages.length,
+      uncompactedCount: uncompacted.length,
+      totalTokens,
+      uncompactedTokens,
+      lastCompactedAt,
+      threadKey: this.deps.key,
+    };
+
+    const fire = cfg.when
+      ? cfg.when(signals)
+      : (cfg.messageThreshold !== undefined && uncompacted.length > cfg.messageThreshold) ||
+        (cfg.tokenThreshold !== undefined && uncompactedTokens > cfg.tokenThreshold);
+    if (!fire) return;
+
+    const consolidator = this.deps.consolidator();
+    const opts = { keepRecent: cfg.keepRecent ?? 10 };
+    const run = consolidator.compactThread(this.deps.key, opts).catch((err) => {
+      // Don't propagate — auto-compact is best-effort. Log so operators
+      // can spot a misconfigured consolidator (missing key, malformed
+      // LLM output, etc.) without breaking the user-visible turn.
+      console.warn(
+        `[LocalAgent] autoCompact failed for thread ${this.deps.key.threadId}:`,
+        err instanceof Error ? err.message : err,
+      );
+    });
+
+    if ((cfg.mode ?? "background") === "blocking") {
+      await run;
+    }
+    // else: fire-and-forget; the run's promise carries no value the
+    // turn cares about, errors are already logged above.
   }
 
   async messages(range?: MessageRange): Promise<Message[]> {
@@ -742,6 +893,17 @@ function applyRange(messages: ReadonlyArray<Message>, range?: MessageRange): Mes
   if (range.order === "desc") out = out.reverse();
   if (range.limit !== undefined) out = out.slice(0, range.limit);
   return out;
+}
+
+/**
+ * chars/4 token estimator — same heuristic resolveContext's default
+ * uses. Matches the worst-case "ASCII text" approximation that's good
+ * enough for compaction-trigger decisions; an over-estimate is fine
+ * (we'd compact slightly early).
+ */
+function estimateTokens(m: { content?: string | null }): number {
+  const len = typeof m.content === "string" ? m.content.length : 0;
+  return Math.ceil(len / 4);
 }
 
 function stripStorageMeta(m: Message & { seq?: number; createdAt?: number }): Message {

@@ -20,6 +20,7 @@ import type { MemoryStore } from "../memory/types.ts";
 // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
 import type { AgentTool } from "../tool.ts";
 import type { Consolidator } from "../memory/consolidator.ts";
+import type { AutoCompactConfig } from "../agent/local-agent.ts";
 import type { LocalAgentBackend, RegisteredAgent } from "./types.ts";
 
 /** Caller-supplied runtime injectables. */
@@ -61,6 +62,12 @@ export interface ResolveLocalAgentDeps {
    * — usually fine to use a cheaper model than the chat LLM.
    */
   readonly consolidatorLlm?: LLMProvider;
+  /**
+   * Auto-compaction config — fires `compactThread` after each thread
+   * turn when the configured rule trips. Set to `false` (or leave unset)
+   * to keep compaction manual-only via `agent.compactThread()`.
+   */
+  readonly autoCompact?: AutoCompactConfig | false;
 }
 
 /**
@@ -95,6 +102,7 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
     resourceId: deps.resourceId,
     consolidator: deps.consolidator,
     consolidatorLlm: deps.consolidatorLlm,
+    autoCompact: deps.autoCompact,
   };
 
   return new LocalAgent(config);
