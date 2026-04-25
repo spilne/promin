@@ -105,11 +105,11 @@ export function StepTimeline({ run, selectedStep, onSelectStep }: StepTimelinePr
           <Legend />
         </div>
 
-        {/* Column header + time axis. STEP / DURATION are horizontally
-            centered so they align with the body content (which uses an
-            indent + flex layout that's not strictly left-justified). The
-            extra bottom padding gives breathing room before the first row. */}
-        <div class="flex items-center gap-2 text-xs text-base-content/50 border-b border-base-content/10 pb-3">
+        {/* Column header + time axis. Mirror the row's `px-1` so STEP /
+            DURATION line up with the data below; without it the headers
+            sit 4px to the left of every value. The extra bottom padding
+            gives breathing room before the first row. */}
+        <div class="flex items-center gap-2 px-1 text-xs text-base-content/50 border-b border-base-content/10 pb-3">
           <div class="w-72 shrink-0 text-center">STEP</div>
           <div class="w-20 shrink-0 text-center">DURATION</div>
           <div class="relative flex-1 h-5">
