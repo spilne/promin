@@ -108,6 +108,15 @@ import {
   patchNamespace,
   type MemoryInspectorDeps,
 } from "./routes/memory.ts";
+import {
+  deleteAgentIdentity,
+  getAgentIdentity,
+  listAgentIdentities,
+  listIdentitiesAcrossAgents,
+  resolveAgentIdentity,
+  updateAgentIdentity,
+  type IdentityDeps,
+} from "./routes/identities.ts";
 
 export interface ZoryaServerConfig extends AuthConfig {
   storage: WorkflowStorage;
@@ -260,6 +269,13 @@ export interface ZoryaServerConfig extends AuthConfig {
    * Pass the same `MemoryStore` instance the agent resolver uses.
    */
   memoryInspector?: MemoryInspectorDeps;
+  /**
+   * Optional agent-identity wiring. When provided, the server mounts the
+   * `/api/agents/:id/identities` and `/api/identities` routes. The registry
+   * is the index of long-lived (agent, namespace, user) tuples; the memory
+   * store is needed so DELETE can cascade through the resource scope.
+   */
+  identities?: IdentityDeps;
   scheduling?: {
     enabled: boolean;
     /** Poll cadence in ms. Default: 1000. */
@@ -564,6 +580,17 @@ export class ZoryaServer {
         .patch("/api/memory/namespace/:namespaceId", patchNamespace(mem))
         .post("/api/memory/namespace/:namespaceId/facts", addNamespaceFact(mem))
         .delete("/api/memory/namespace/:namespaceId/facts/:factId", deleteNamespaceFact(mem));
+    }
+
+    if (config.identities) {
+      const idDeps = config.identities;
+      this.router
+        .get("/api/agents/:id/identities", listAgentIdentities(idDeps))
+        .post("/api/agents/:id/identities", resolveAgentIdentity(idDeps))
+        .get("/api/agents/:id/identities/:identityId", getAgentIdentity(idDeps))
+        .patch("/api/agents/:id/identities/:identityId", updateAgentIdentity(idDeps))
+        .delete("/api/agents/:id/identities/:identityId", deleteAgentIdentity(idDeps))
+        .get("/api/identities", listIdentitiesAcrossAgents(idDeps));
     }
 
     if (config.scheduler) {

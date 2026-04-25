@@ -138,6 +138,22 @@ export type { InMemoryAgentRegistryConfig } from "./registry/in-memory-agent-reg
 export { resolveLocalAgent } from "./registry/resolve-local-agent.ts";
 export type { ResolveLocalAgentDeps } from "./registry/resolve-local-agent.ts";
 
+// Identity — long-lived agent instances keyed by (registeredAgentId, namespace, userId).
+// Identity is metadata + a deterministic id; the actual chat state stays in
+// MemoryStore under `resourceId = identity.id`. See packages/agent/src/lib/identity/types.ts.
+export { composeAgentIdentityId } from "./identity/types.ts";
+export type {
+  AgentIdentity,
+  AgentIdentityRegistry,
+  CreateAgentIdentityInput,
+  ListAgentIdentitiesParams,
+  UpdateAgentIdentityPatch,
+} from "./identity/types.ts";
+export { InMemoryAgentIdentityRegistry } from "./identity/in-memory-agent-identity-registry.ts";
+export type { InMemoryAgentIdentityRegistryConfig } from "./identity/in-memory-agent-identity-registry.ts";
+export { wipeAgentIdentity } from "./identity/wipe.ts";
+export type { WipeAgentIdentityResult } from "./identity/wipe.ts";
+
 // Discovery — auto-scan agent recipes from a folder + reconcile into a registry.
 export {
   AgentScanner,
