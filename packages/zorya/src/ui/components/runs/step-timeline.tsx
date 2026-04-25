@@ -218,9 +218,17 @@ function StepRow({
           .map(([k, val]) => `${k}=${typeof val === "string" ? val : JSON.stringify(val)}`)
           .join(", ")
       : undefined;
+  // Wall-clock span — what users actually want to see for a wait step,
+  // since durationMs only counts CPU work and reads as "0ms" for an
+  // approval that took 10 days.
+  const wallClockMs = endAbs - startAbs;
+  const waitLike = isWaitLike(step);
   const tooltip = [
     `${step.stepName} (${v.label})`,
     step.durationMs !== undefined ? `duration ${formatDuration(step.durationMs)}` : "",
+    waitLike && wallClockMs > (step.durationMs ?? 0)
+      ? `wall-clock ${formatDuration(wallClockMs)}`
+      : "",
     step.attempt > 1 ? `attempt ${step.attempt}` : "",
     step.startedAt ? `started ${formatRelative(step.startedAt)}` : "",
     metadataSummary ? `metadata: ${metadataSummary}` : "",
@@ -265,9 +273,21 @@ function StepRow({
         )}
       </div>
 
-      {/* Duration */}
-      <div class="w-20 shrink-0 text-right pr-2 font-mono text-xs text-base-content/70">
-        {isPlanned ? "—" : formatDuration(step.durationMs)}
+      {/* Duration — for wait-like steps, prefer the wall-clock span over
+          durationMs (which only counts CPU work and reads "0ms" for an
+          approval that took 10 days). */}
+      <div class="w-20 shrink-0 text-center font-mono text-xs text-base-content/70">
+        {isPlanned ? (
+          "—"
+        ) : waitLike && wallClockMs > (step.durationMs ?? 0) ? (
+          <span
+            title={`Wall-clock ${formatDuration(wallClockMs)} (CPU ${formatDuration(step.durationMs)})`}
+          >
+            {formatDuration(wallClockMs)}
+          </span>
+        ) : (
+          formatDuration(step.durationMs)
+        )}
       </div>
 
       {/* Bar */}
@@ -279,12 +299,21 @@ function StepRow({
           <div class="absolute inset-y-1 left-0 right-0 border border-dashed border-base-content/20 rounded" />
         ) : (
           <div
-            class={`gantt-bar absolute top-1 bottom-1 rounded ${v.barClass} ${isHatched ? "gantt-hatched" : ""} ${retried ? "ring-1 ring-warning/70" : ""}`}
+            class={`gantt-bar absolute top-1 bottom-1 rounded flex items-center justify-center overflow-hidden ${v.barClass} ${isHatched ? "gantt-hatched" : ""} ${retried ? "ring-1 ring-warning/70" : ""}`}
             style={{
               left: `${leftPct}%`,
               width: `${widthPct}%`,
             }}
-          />
+          >
+            {/* Render the wall-clock duration inside compressed wait bars so
+                a 20-second pause and a 20-day pause stay distinguishable
+                even though both occupy the same tiny ~2.5% slice. */}
+            {waitLike && wallClockMs >= COMPRESS_MIN_REAL_MS && (
+              <span class="text-[10px] font-bold text-base-100 leading-none px-1 whitespace-nowrap">
+                {formatDuration(wallClockMs)}
+              </span>
+            )}
+          </div>
         )}
         {retried && (
           <span
@@ -441,7 +470,11 @@ function sortByStart(a: StepDto, b: StepDto): number {
 // ---------------------------------------------------------------------------
 
 const COMPRESS_MIN_REAL_MS = 5_000; // skip compression below 5 seconds idle
-const COMPRESS_DISPLAY_FRACTION = 0.07; // each compressed seg ≈ 7% of natural total
+// Each compressed range collapses to a tiny fixed slice — small enough that
+// 20 seconds and 20 days of approval wait look about the same on screen,
+// but big enough to remain interactable. The duration is rendered inside
+// the bar so the real time isn't lost, only the proportional area.
+const COMPRESS_DISPLAY_FRACTION = 0.025;
 
 interface AxisSegment {
   realStart: number;
