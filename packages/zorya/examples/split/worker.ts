@@ -16,6 +16,15 @@ import { videoTranscodeWorkflow } from "../workflows/video-transcode.ts";
 import { orderFulfillmentWorkflow } from "../workflows/order-fulfillment.ts";
 import { batchProcessWorkflow } from "../workflows/batch-process.ts";
 import { approvalFlowWorkflow } from "../workflows/approval-flow.ts";
+// Nested-workflows demo. The parent (`orderPipelineWorkflow`) calls each
+// child via `.subworkflow()`. We advertise both the parent and the children
+// so a child can be re-run / inspected on its own from the dashboard.
+import {
+  orderPipelineWorkflow,
+  reserveInventoryWorkflow,
+  chargeCardWorkflow,
+  shipLabelWorkflow,
+} from "../workflows/order-pipeline.ts";
 
 // ---------------------------------------------------------------------------
 // Self-contained workflows defined inline in the worker process. They show
@@ -170,6 +179,10 @@ const workflows = [
   orderFulfillmentWorkflow,
   batchProcessWorkflow,
   approvalFlowWorkflow,
+  orderPipelineWorkflow,
+  reserveInventoryWorkflow,
+  chargeCardWorkflow,
+  shipLabelWorkflow,
 ] as const;
 
 function sampleInputFor(name: string): unknown {
@@ -198,6 +211,14 @@ function sampleInputFor(name: string): unknown {
       return { itemCount: 6 };
     case "approval-flow":
       return { requestId: 1 };
+    case "order-pipeline":
+      return { orderId: 42, customer: "demo-cust", amountCents: 2599 };
+    case "reserve-inventory":
+      return { orderId: 42 };
+    case "charge-card":
+      return { orderId: 42, customer: "demo-cust", amountCents: 2599 };
+    case "ship-label":
+      return { orderId: 42, customer: "demo-cust" };
     default:
       return {};
   }
