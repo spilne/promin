@@ -8,15 +8,14 @@ import { StatsBar } from "./stats-bar.tsx";
 import { StatusBadge } from "../ui/status-badge.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { Sparkline } from "../ui/sparkline.tsx";
-import { Combobox } from "../ui/combobox.tsx";
 import type { SparklinesResponse } from "../../../server/routes/grid.ts";
 import { formatDuration, formatRelative, WORKFLOW_STATUS_VISUAL } from "../../lib/format.ts";
-
-interface NamesAndTypes {
-  names: string[];
-  types: string[];
-  namespaces: string[];
-}
+import {
+  parseSearchQuery,
+  serializeQuery,
+  hasAnyFilter,
+  type ParsedSearchQuery,
+} from "../../lib/smart-search.ts";
 
 interface RunListProps {
   onOpen: (id: string) => void;
@@ -40,45 +39,34 @@ function isWorkflowStatus(s: string): s is WorkflowStatus {
 }
 
 export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
-  const initialName = queryParams?.get("name") ?? "";
-  const initialType = queryParams?.get("type") ?? "";
   const initialStatusRaw = queryParams?.get("status") ?? "all";
   const initialStatus: WorkflowStatus | "all" = isWorkflowStatus(initialStatusRaw)
     ? initialStatusRaw
     : "all";
   const initialPage = Math.max(1, Number.parseInt(queryParams?.get("page") ?? "1", 10) || 1);
-
-  const initialVersion = queryParams?.get("version") ?? "";
   const initialSort = parseSortParam(queryParams?.get("sort"));
-  const initialMetadata = queryParams?.get("metadata") ?? "";
+  // The smart-search input is the single source of truth for name / type /
+  // version / namespace / metadata / id / freeText filters. We accept either
+  // the unified `?q=` form or the legacy per-field params (`?name=`, etc.)
+  // so old bookmarks keep working.
+  const initialQueryText = queryParams?.get("q") ?? buildQueryFromLegacyParams(queryParams);
 
-  const [name, setName] = useState(initialName);
-  const [type, setType] = useState(initialType);
+  const [searchInput, setSearchInput] = useState(initialQueryText);
+  const [appliedSearch, setAppliedSearch] = useState(initialQueryText);
+  const parsedSearch = useMemo<ParsedSearchQuery>(
+    () => parseSearchQuery(appliedSearch),
+    [appliedSearch],
+  );
+
   const [status, setStatus] = useState<WorkflowStatus | "all">(initialStatus);
-  const [version, setVersion] = useState(initialVersion);
   const [page, setPage] = useState(initialPage);
   const [sort, setSort] = useState<{ orderBy: WorkflowOrderBy; orderDir: "asc" | "desc" } | null>(
     initialSort,
   );
-  // Raw "k=v, k2=v2" input — parsed on submit so a partial keystroke doesn't
-  // refire the runs query while the user is still typing.
-  const [metadataDraft, setMetadataDraft] = useState(initialMetadata);
-  const [metadataApplied, setMetadataApplied] = useState(initialMetadata);
-  const metadataParsed = useMemo(() => parseMetadataInput(metadataApplied), [metadataApplied]);
-  const [meta, setMeta] = useState<NamesAndTypes>({ names: [], types: [], namespaces: [] });
   // Namespace is a global scope set via the sidebar switcher. Pages observe
   // it and include in their API fetches.
   const [namespace] = useNamespace();
   const [sparklines, setSparklines] = useState<SparklinesResponse>({});
-
-  useEffect(() => {
-    api
-      .listWorkflowNames({ namespace: namespace || undefined })
-      .then((r) =>
-        setMeta({ names: r.names, types: r.types ?? [], namespaces: r.namespaces ?? [] }),
-      )
-      .catch(() => {});
-  }, [namespace]);
 
   // Refresh sparklines alongside the main fetch so rows and sparkbars stay
   // in step as new runs arrive.
@@ -109,7 +97,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
     }
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, type, status, version, namespace, metadataApplied]);
+  }, [appliedSearch, status, namespace]);
 
   // Sync local state back to URL so filters survive refresh / share links.
   // Namespace is NOT on the URL — it lives in the global sidebar switcher
@@ -117,24 +105,26 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
   useEffect(() => {
     if (!onQueryChange) return;
     const qp = new URLSearchParams();
-    if (name) qp.set("name", name);
-    if (type) qp.set("type", type);
+    if (appliedSearch) qp.set("q", appliedSearch);
     if (status !== "all") qp.set("status", status);
-    if (version) qp.set("version", version);
     if (page > 1) qp.set("page", String(page));
     if (sort) qp.set("sort", `${sort.orderBy}:${sort.orderDir}`);
-    if (metadataApplied) qp.set("metadata", metadataApplied);
     onQueryChange(qp);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, type, status, version, page, sort, metadataApplied]);
+  }, [appliedSearch, status, page, sort]);
+
+  // freeText (bare tokens with no `field:` or `key=` prefix) is treated as a
+  // name shortcut — `name:` always wins when both are present, so power users
+  // can type explicit field syntax without losing the bare-text affordance.
+  const effectiveName = parsedSearch.name ?? parsedSearch.freeText;
 
   const query: RunListQuery = {
-    name: name || undefined,
-    type: type || undefined,
-    namespace: namespace || undefined,
+    name: effectiveName || undefined,
+    type: parsedSearch.type || undefined,
+    namespace: parsedSearch.namespace || namespace || undefined,
     status: status === "all" ? undefined : status,
-    version: version || undefined,
-    metadata: metadataParsed ?? undefined,
+    version: parsedSearch.version || undefined,
+    metadata: parsedSearch.metadata,
     limit: PAGE_SIZE,
     offset: (page - 1) * PAGE_SIZE,
     orderBy: sort?.orderBy,
@@ -142,7 +132,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
   };
   const { data, loading, error, refresh } = useFetch(
     () => api.listRuns(query),
-    [name, type, namespace, status, version, page, sort?.orderBy, sort?.orderDir, metadataApplied],
+    [appliedSearch, namespace, status, page, sort?.orderBy, sort?.orderDir],
     5000,
   );
 
@@ -158,6 +148,63 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
       return null;
     });
   }
+
+  /**
+   * Commit the current input as the active filter set. When the input is
+   * pure free text (no `field:` / `key=` clauses), try to resolve it as a
+   * workflow id first — that preserves the original SearchBar's "type an
+   * id, jump straight to the run" affordance now that the dedicated bar is
+   * gone.
+   */
+  async function submitSearch() {
+    const text = searchInput.trim();
+    if (!text) {
+      setAppliedSearch("");
+      return;
+    }
+    const parsed = parseSearchQuery(text);
+    const onlyFreeText =
+      !!parsed.freeText &&
+      !parsed.name &&
+      !parsed.type &&
+      !parsed.version &&
+      !parsed.namespace &&
+      !parsed.id &&
+      !parsed.metadata;
+    if (onlyFreeText) {
+      const run = await api.getRun(parsed.freeText!).catch(() => undefined);
+      if (run) {
+        onOpen(parsed.freeText!);
+        return;
+      }
+    }
+    setAppliedSearch(text);
+  }
+
+  function clearAllFilters() {
+    setSearchInput("");
+    setAppliedSearch("");
+    setStatus("all");
+  }
+
+  /**
+   * Drop a single parsed clause and re-commit. Editing the chip preview
+   * should feel as immediate as clicking the row's "X" — no Enter required.
+   */
+  function removeClause(field: keyof ParsedSearchQuery, metadataKey?: string) {
+    const next: ParsedSearchQuery = { ...parsedSearch };
+    if (field === "metadata" && metadataKey && next.metadata) {
+      const { [metadataKey]: _drop, ...rest } = next.metadata;
+      next.metadata = Object.keys(rest).length > 0 ? rest : undefined;
+    } else {
+      delete next[field];
+    }
+    const text = serializeQuery(next);
+    setSearchInput(text);
+    setAppliedSearch(text);
+  }
+
+  const hasFilters = hasAnyFilter(parsedSearch) || status !== "all";
 
   return (
     <div class="anim-page p-4 max-w-[1400px] mx-auto space-y-4">
@@ -178,10 +225,9 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
         }}
       />
 
-      <SearchBar onOpen={onOpen} onSetName={(v) => setName(v)} />
-
-      {/* Filter bar (chip-style) */}
-      <div class="flex items-center gap-2 flex-wrap justify-end">
+      {/* Status quick-pick chips. Independent toggle row above the smart
+          search so the most-common filter stays a single click away. */}
+      <div class="flex items-center gap-2 justify-end">
         <div class="join">
           {STATUS_FILTERS.map((s) => {
             const active = status === s;
@@ -196,70 +242,80 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
             );
           })}
         </div>
-        <div class="h-5 w-px bg-base-content/20 mx-1" />
-        <Combobox
-          class="w-40"
-          value={name}
-          onChange={setName}
-          placeholder="All names"
-          options={[{ value: "", label: "All names" }, ...meta.names.map((n) => ({ value: n }))]}
-        />
-        {meta.types.length > 0 && (
-          <Combobox
-            class="w-40"
-            value={type}
-            onChange={setType}
-            placeholder="All types"
-            options={[{ value: "", label: "All types" }, ...meta.types.map((t) => ({ value: t }))]}
-          />
+      </div>
+
+      {/* Smart search row: one input handles id, name, type, version,
+          namespace, and metadata via `field:value` / `key=value` syntax;
+          bare text falls back to id-or-name lookup on submit. The Clear
+          button sits to the right of the (fixed-width) input so it can
+          fade in/out without shifting the input's position. */}
+      <div class="flex items-start gap-2">
+        <div class="flex-1 min-w-0">
+          <div class="relative">
+            <input
+              class="input input-bordered input-sm w-full font-mono pr-10"
+              placeholder='Search id, or "name:foo type:bar version:v2 userId=u_42"'
+              value={searchInput}
+              title={
+                "One field replaces id/name/type/version/namespace/metadata.\n" +
+                "Examples:\n" +
+                "  wf-abc123                        — find run by id (jumps if exact)\n" +
+                "  onboarding                       — name shortcut\n" +
+                "  name:onboarding type:webhook     — structured field filter\n" +
+                'name:"my workflow" version:v2     — quote values with spaces\n' +
+                "  userId=u_42 retries=3 dryRun=true — metadata (JSON values parse)\n" +
+                "Press Enter to apply."
+              }
+              onInput={(e) => setSearchInput((e.target as HTMLInputElement).value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void submitSearch();
+              }}
+              onBlur={() => {
+                if (searchInput !== appliedSearch) void submitSearch();
+              }}
+            />
+            {searchInput && (
+              <button
+                class="btn btn-xs btn-ghost btn-circle absolute right-1 top-1/2 -translate-y-1/2"
+                aria-label="Clear search input"
+                onClick={() => {
+                  setSearchInput("");
+                  setAppliedSearch("");
+                }}
+              >
+                ×
+              </button>
+            )}
+          </div>
+          {/* Parsed-clause chips — click the × to drop a single filter. */}
+          {hasAnyFilter(parsedSearch) && (
+            <div class="flex items-center gap-1 flex-wrap mt-2">
+              {(["name", "type", "version", "namespace", "id"] as const).map((f) =>
+                parsedSearch[f] ? (
+                  <FilterChip label={`${f}: ${parsedSearch[f]}`} onRemove={() => removeClause(f)} />
+                ) : null,
+              )}
+              {parsedSearch.metadata &&
+                Object.entries(parsedSearch.metadata).map(([k, v]) => (
+                  <FilterChip
+                    label={`${k}=${typeof v === "string" ? v : JSON.stringify(v)}`}
+                    onRemove={() => removeClause("metadata", k)}
+                  />
+                ))}
+              {parsedSearch.freeText && !parsedSearch.name && (
+                <FilterChip
+                  label={`name: ${parsedSearch.freeText}`}
+                  onRemove={() => removeClause("freeText")}
+                />
+              )}
+            </div>
+          )}
+        </div>
+        {hasFilters && (
+          <button class="btn btn-sm btn-ghost anim-fade-in" onClick={clearAllFilters}>
+            Clear
+          </button>
         )}
-        <input
-          class="input input-bordered input-sm w-28 font-mono"
-          placeholder="version"
-          value={version}
-          onInput={(e) => setVersion((e.target as HTMLInputElement).value)}
-        />
-        <input
-          class={`input input-bordered input-sm w-72 font-mono ${
-            metadataDraft && !metadataParsed && metadataApplied === metadataDraft
-              ? "input-warning"
-              : ""
-          }`}
-          placeholder="search attrs (key=value, …)"
-          value={metadataDraft}
-          title={
-            "Filter by workflow metadata. Format: key=value, key2=value2.\n" +
-            "Values that look like JSON (quoted strings, numbers, true/false/null) parse accordingly;\n" +
-            "everything else is matched as a string. Press Enter to apply."
-          }
-          onInput={(e) => setMetadataDraft((e.target as HTMLInputElement).value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") setMetadataApplied(metadataDraft);
-          }}
-          onBlur={() => setMetadataApplied(metadataDraft)}
-        />
-        {/* Always rendered so adding the first filter doesn't push the row
-            left when "Clear" appears. Fades in/out via opacity + visibility
-            transition; pointer-events disabled while idle. */}
-        <button
-          class={`btn btn-sm btn-ghost transition-opacity duration-150 ${
-            name || type || status !== "all" || version || metadataApplied
-              ? "opacity-100"
-              : "opacity-0 pointer-events-none"
-          }`}
-          aria-hidden={!(name || type || status !== "all" || version || metadataApplied)}
-          tabIndex={name || type || status !== "all" || version || metadataApplied ? 0 : -1}
-          onClick={() => {
-            setName("");
-            setType("");
-            setStatus("all");
-            setVersion("");
-            setMetadataDraft("");
-            setMetadataApplied("");
-          }}
-        >
-          Clear
-        </button>
       </div>
 
       {error && (
@@ -398,37 +454,6 @@ const VALID_ORDER_BY: ReadonlyArray<WorkflowOrderBy> = [
   "name",
 ];
 
-/**
- * Parse `key=value, key2=value2` into a metadata object. Returns null if
- * the input is empty or doesn't yield at least one valid key/value pair.
- * Values try `JSON.parse` first (so quoted strings, numbers, booleans, and
- * `null` all work) and fall back to the raw string when that fails — so
- * `userId=u_42` doesn't require quotes.
- */
-function parseMetadataInput(raw: string): Record<string, unknown> | null {
-  const text = raw.trim();
-  if (!text) return null;
-  const out: Record<string, unknown> = {};
-  for (const pair of text.split(",")) {
-    const trimmed = pair.trim();
-    if (!trimmed) continue;
-    const eq = trimmed.indexOf("=");
-    if (eq <= 0) return null;
-    const key = trimmed.slice(0, eq).trim();
-    const rawValue = trimmed.slice(eq + 1).trim();
-    if (!key) return null;
-    let value: unknown = rawValue;
-    try {
-      value = JSON.parse(rawValue);
-    } catch {
-      // Plain string fallback.
-    }
-    out[key] = value;
-  }
-  if (Object.keys(out).length === 0) return null;
-  return out;
-}
-
 function parseSortParam(
   raw: string | null | undefined,
 ): { orderBy: WorkflowOrderBy; orderDir: "asc" | "desc" } | null {
@@ -441,55 +466,59 @@ function parseSortParam(
 }
 
 /**
- * Search input that resolves an exact workflow id first, then falls back to
- * filtering the list by workflow name. Submit on Enter or via the button.
+ * Backwards-compat: rebuild the smart-search text from the legacy
+ * per-field URL params (`?name=`, `?type=`, `?version=`, `?metadata=`) so
+ * old bookmarks land on the right filters even though the UI no longer
+ * writes them. Returns "" when no legacy params are present.
  */
-function SearchBar({
-  onOpen,
-  onSetName,
-}: {
-  onOpen: (id: string) => void;
-  onSetName: (name: string) => void;
-}) {
-  const [query, setQuery] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [hint, setHint] = useState<string | undefined>(undefined);
-
-  const submit = async () => {
-    const q = query.trim();
-    if (!q) return;
-    setBusy(true);
-    setHint(undefined);
+function buildQueryFromLegacyParams(qp: URLSearchParams | undefined): string {
+  if (!qp) return "";
+  const parts: string[] = [];
+  for (const f of ["name", "type", "version", "namespace"] as const) {
+    const v = qp.get(f);
+    if (v) parts.push(quoteIfNeeded(`${f}:${v}`, v));
+  }
+  const metadataRaw = qp.get("metadata");
+  if (metadataRaw) {
     try {
-      const run = await api.getRun(q).catch(() => undefined);
-      if (run) {
-        onOpen(q);
-        setQuery("");
-        return;
+      const obj = JSON.parse(metadataRaw);
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+        for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+          const s = typeof v === "string" ? v : JSON.stringify(v);
+          parts.push(quoteIfNeeded(`${k}=${s}`, s));
+        }
       }
-      onSetName(q);
-      setHint(`No run with id "${q}" — filtered by name instead.`);
-    } finally {
-      setBusy(false);
+    } catch {
+      // Drop malformed metadata silently — same forgiveness as the route.
     }
-  };
+  }
+  return parts.join(" ");
+}
 
+function quoteIfNeeded(token: string, value: string): string {
+  if (!/[\s"]/.test(value)) return token;
+  // Replace the unquoted value with a quoted version, preserving the
+  // `field:` or `key=` prefix.
+  const sep =
+    token.indexOf(":") >= 0 && (token.indexOf("=") < 0 || token.indexOf(":") < token.indexOf("="))
+      ? ":"
+      : "=";
+  const sepIdx = token.indexOf(sep);
+  const prefix = token.slice(0, sepIdx + 1);
+  return `${prefix}"${value.replace(/"/g, '\\"')}"`;
+}
+
+function FilterChip({ label, onRemove }: { label: string; onRemove: () => void }) {
   return (
-    <div class="flex items-center gap-2 justify-end">
-      {hint && <span class="text-xs text-base-content/60">{hint}</span>}
-      <input
-        class="input input-bordered input-sm w-full max-w-md font-mono"
-        placeholder="Search by workflow id, then name…"
-        value={query}
-        disabled={busy}
-        onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") void submit();
-        }}
-      />
-      <button class="btn btn-sm btn-primary" onClick={submit} disabled={busy || !query.trim()}>
-        {busy ? "…" : "Search"}
+    <span class="badge badge-sm badge-outline gap-1 font-mono anim-fade-in">
+      {label}
+      <button
+        class="text-base-content/60 hover:text-error leading-none"
+        aria-label={`Remove ${label}`}
+        onClick={onRemove}
+      >
+        ×
       </button>
-    </div>
+    </span>
   );
 }
