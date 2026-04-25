@@ -1190,6 +1190,21 @@ export async function executeWorkflowDag(
     if (ctx.stepExecutor) {
       // Executor path — delegates step body to the pluggable executor.
       // skipWhen and attempt tracking remain the runner's responsibility.
+      //
+      // Eager save: each step's `saveStepResult` (+ optional
+      // `saveStepAttempt`) fires inside its own async closure, the moment
+      // the body resolves, instead of being deferred to a post-wave
+      // serial loop. Three benefits over the old "wait for the slowest in
+      // the wave, then sequentially save" pattern:
+      //   - `completedAt` reflects real wall-clock completion (the
+      //     timeline used to draw a wide gap between work-end and save
+      //     because the slowest sibling stalled the loop).
+      //   - Concurrent writes against storage instead of N sequential
+      //     awaits (every backend handles per-step row isolation).
+      //   - Partial-wave failures persist more progress: if A throws
+      //     while B already finished, B's save lands; on resume B is
+      //     `completed` and gets skipped instead of re-run.
+      // Skipped steps still don't persist (today's behavior preserved).
       try {
         batchResults = await Promise.all(
           readySteps.map(async (stepDef): Promise<LocalStepResult> => {
@@ -1226,12 +1241,48 @@ export async function executeWorkflowDag(
             if (!res.ok) {
               throw new StepError({ workflowId, stepName: stepDef.name, message: res.error });
             }
+            const durationMs = clock.currentTimeMs() - startTime;
+
+            // Eager save fires here unless the executor already wrote the
+            // step row (Postgres step-queue / coordinator path sets
+            // `storageAlreadyCheckpointed`). Returns the same shape as
+            // before with that flag set so the post-wave loop knows to
+            // skip its (now redundant) save.
+            if (!res.storageAlreadyCheckpointed) {
+              await ctx.storage.saveStepResult(
+                {
+                  workflowId,
+                  stepName: stepDef.name,
+                  result: res.result,
+                  metadata: res.metadata,
+                  durationMs,
+                  startedAt,
+                },
+                ctx.guard,
+              );
+              if (isStepAttemptStorage(ctx.storage)) {
+                await ctx.storage.saveStepAttempt(
+                  {
+                    workflowId,
+                    stepName: stepDef.name,
+                    attempt: currentAttempt,
+                    type: "execution",
+                    status: "completed",
+                    result: res.result,
+                    durationMs,
+                    startedAt,
+                    completedAt: clock.now(),
+                  },
+                  ctx.guard,
+                );
+              }
+            }
             return {
               name: stepDef.name,
               result: res.result,
               metadata: res.metadata,
-              storageAlreadyCheckpointed: res.storageAlreadyCheckpointed,
-              durationMs: clock.currentTimeMs() - startTime,
+              storageAlreadyCheckpointed: true,
+              durationMs,
               startedAt,
             };
           }),
