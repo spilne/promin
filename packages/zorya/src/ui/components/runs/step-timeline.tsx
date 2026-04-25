@@ -406,24 +406,28 @@ function StepRow({
           // in the DAG but hasn't executed yet.
           <div class="absolute inset-y-1 left-0 right-0 border border-dashed border-base-content/20 rounded" />
         ) : (
-          <div
-            class={`gantt-bar absolute top-1 bottom-1 rounded flex items-center justify-center overflow-hidden ${v.barClass} ${isHatched ? "gantt-hatched" : ""} ${retried ? "ring-1 ring-warning/70" : ""}`}
-            style={{
-              left: `${leftPct}%`,
-              width: `${widthPct}%`,
-            }}
-          >
-            {/* Inline duration on every bar. Wait-like (compressed) bars
-                show wall-clock so a 20-second pause and a 20-day pause
-                stay distinguishable inside identical-width slivers; work
-                bars show their CPU duration. `overflow-hidden` on the
-                parent clips the text on narrow bars — the DURATION
-                column on the left + the hover tooltip carry the same
-                value, so a clipped label isn't a loss of info. */}
-            <span class="text-[10px] font-medium text-base-100 leading-none px-1 whitespace-nowrap">
+          <>
+            <div
+              class={`gantt-bar absolute top-1 bottom-1 rounded ${v.barClass} ${isHatched ? "gantt-hatched" : ""} ${retried ? "ring-1 ring-warning/70" : ""}`}
+              style={{
+                left: `${leftPct}%`,
+                width: `${widthPct}%`,
+              }}
+            />
+            {/* Duration label sits just past the bar's right edge so it
+                stays readable on bars too thin to fit the text inside.
+                Wait-like (compressed) bars show wall-clock; work bars
+                show CPU duration. Aligned to the bar's end via `left:
+                (leftPct + widthPct)%` + a small inset so it doesn't
+                kiss the bar; vertically centered via top-1/bottom-1
+                bracketing the same height as the bar. */}
+            <span
+              class="absolute top-1 bottom-1 flex items-center text-[10px] font-medium text-base-content/80 leading-none whitespace-nowrap pointer-events-none pl-1"
+              style={{ left: `${leftPct + widthPct}%` }}
+            >
               {formatDuration(waitLike ? wallClockMs : step.durationMs)}
             </span>
-          </div>
+          </>
         )}
         {retried && (
           <span
