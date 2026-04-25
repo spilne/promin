@@ -451,17 +451,35 @@ export function storageTestSuite(
         expect(page.length).toBeLessThanOrEqual(2);
       });
 
-      it("default order is createdAt desc — newest first", async () => {
+      it("default order is startedAt desc, NULLS LAST — most-recently-started first, pending last", async () => {
         const s = await getStorage();
+        // Three workflows created in order; first two get a step (which
+        // marks them running and sets startedAt). Third stays pending.
         await s.createWorkflow({ workflowId: "ord-default-1", workflowName: "t", input: {} });
+        await s.saveStepResult({
+          workflowId: "ord-default-1",
+          stepName: "go",
+          result: "ok",
+          durationMs: 1,
+          startedAt: new Date(),
+        });
         await new Promise((r) => setTimeout(r, 10));
         await s.createWorkflow({ workflowId: "ord-default-2", workflowName: "t", input: {} });
-        await new Promise((r) => setTimeout(r, 10));
+        await s.saveStepResult({
+          workflowId: "ord-default-2",
+          stepName: "go",
+          result: "ok",
+          durationMs: 1,
+          startedAt: new Date(),
+        });
         await s.createWorkflow({ workflowId: "ord-default-3", workflowName: "t", input: {} });
 
         const rows = await s.listWorkflows({ name: "t" });
         const ids = rows.map((r) => r.workflowId);
-        expect(ids).toEqual(["ord-default-3", "ord-default-2", "ord-default-1"]);
+        // 2 started after 1, both before 3 (which never started).
+        expect(ids[0]).toBe("ord-default-2");
+        expect(ids[1]).toBe("ord-default-1");
+        expect(ids[2]).toBe("ord-default-3");
       });
 
       it("orderBy=name asc returns alphabetical order", async () => {
@@ -545,6 +563,133 @@ export function storageTestSuite(
         });
         expect(page1.map((r) => r.workflowName)).toEqual(["alpha", "beta"]);
         expect(page2.map((r) => r.workflowName)).toEqual(["charlie", "delta"]);
+      });
+
+      it("filters by a single metadata key/value pair", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "md-1",
+          workflowName: "meta",
+          input: {},
+          metadata: { userId: "u_42" },
+        });
+        await s.createWorkflow({
+          workflowId: "md-2",
+          workflowName: "meta",
+          input: {},
+          metadata: { userId: "u_99" },
+        });
+        await s.createWorkflow({ workflowId: "md-3", workflowName: "meta", input: {} });
+
+        const hits = await s.listWorkflows({ metadata: { userId: "u_42" } });
+        expect(hits.map((r) => r.workflowId)).toEqual(["md-1"]);
+      });
+
+      it("filters by multiple metadata pairs (AND semantics)", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "md-and-1",
+          workflowName: "meta",
+          input: {},
+          metadata: { userId: "u_42", priority: "high" },
+        });
+        await s.createWorkflow({
+          workflowId: "md-and-2",
+          workflowName: "meta",
+          input: {},
+          metadata: { userId: "u_42", priority: "low" },
+        });
+
+        const hits = await s.listWorkflows({
+          metadata: { userId: "u_42", priority: "high" },
+        });
+        expect(hits.map((r) => r.workflowId)).toEqual(["md-and-1"]);
+      });
+
+      it("returns empty when no workflow matches the metadata filter", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "md-none",
+          workflowName: "meta",
+          input: {},
+          metadata: { userId: "u_42" },
+        });
+        const hits = await s.listWorkflows({ metadata: { userId: "u_999" } });
+        expect(hits).toEqual([]);
+      });
+
+      it("workflows without metadata are excluded from metadata queries", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "md-empty", workflowName: "meta", input: {} });
+        const hits = await s.listWorkflows({ metadata: { userId: "u_42" } });
+        expect(hits).toEqual([]);
+      });
+
+      it("composes metadata filter with status filter", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "md-c-1",
+          workflowName: "meta",
+          input: {},
+          metadata: { region: "us-east" },
+        });
+        await s.completeWorkflow("md-c-1", "ok");
+        await s.createWorkflow({
+          workflowId: "md-c-2",
+          workflowName: "meta",
+          input: {},
+          metadata: { region: "us-east" },
+        });
+
+        const hits = await s.listWorkflows({
+          metadata: { region: "us-east" },
+          status: "completed",
+        });
+        expect(hits.map((r) => r.workflowId)).toEqual(["md-c-1"]);
+      });
+
+      it("filters by numeric and boolean metadata values", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "md-num-1",
+          workflowName: "m",
+          input: {},
+          metadata: { retries: 3, dryRun: true },
+        });
+        await s.createWorkflow({
+          workflowId: "md-num-2",
+          workflowName: "m",
+          input: {},
+          metadata: { retries: 5, dryRun: false },
+        });
+
+        expect(
+          (await s.listWorkflows({ metadata: { retries: 3 } })).map((r) => r.workflowId),
+        ).toEqual(["md-num-1"]);
+        expect(
+          (await s.listWorkflows({ metadata: { dryRun: true } })).map((r) => r.workflowId),
+        ).toEqual(["md-num-1"]);
+      });
+
+      it("filters by nested object metadata values (deep equality)", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "md-nest-1",
+          workflowName: "m",
+          input: {},
+          metadata: { actor: { id: "u_1", role: "admin" } },
+        });
+        await s.createWorkflow({
+          workflowId: "md-nest-2",
+          workflowName: "m",
+          input: {},
+          metadata: { actor: { id: "u_1", role: "guest" } },
+        });
+
+        const hits = await s.listWorkflows({
+          metadata: { actor: { id: "u_1", role: "admin" } },
+        });
+        expect(hits.map((r) => r.workflowId)).toEqual(["md-nest-1"]);
       });
     });
 

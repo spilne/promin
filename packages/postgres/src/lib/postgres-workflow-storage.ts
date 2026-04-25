@@ -222,6 +222,7 @@ export class PostgresWorkflowStorage
     name?: string;
     type?: string;
     namespace?: string;
+    metadata?: Record<string, unknown>;
     limit?: number;
     offset?: number;
     orderBy?: WorkflowOrderBy;
@@ -235,6 +236,14 @@ export class PostgresWorkflowStorage
       conditions.push(eq(workflows.statusId, WorkflowStatusIds.toId(params.status)));
     if (params?.name) conditions.push(eq(workflows.workflowName, params.name));
     if (params?.type) conditions.push(eq(workflows.workflowType, params.type));
+    // jsonb `@>` containment: rows where `metadata` contains every supplied
+    // key/value pair. A GIN index on `metadata` (`USING GIN (metadata)`) or
+    // an expression index (`((metadata->>'<key>'))`) makes this index-driven
+    // — the storage doesn't ship one by default; users opt in based on
+    // their query patterns.
+    if (params?.metadata && Object.keys(params.metadata).length > 0) {
+      conditions.push(sql`${workflows.metadata} @> ${JSON.stringify(params.metadata)}::jsonb`);
+    }
 
     const query = this.db.select().from(workflows).$dynamic();
     if (conditions.length > 0)
@@ -1291,14 +1300,16 @@ export class PostgresWorkflowStorage
  * `duration`) don't push real data off the first page in either direction.
  * `status` orders by status_id (the integer enum) — alphabetizing requires
  * a join with the lookup table, and the cost isn't justified for a
- * dropdown-driven sort. Default: `created_at DESC`.
+ * dropdown-driven sort. Default: `started_at DESC NULLS LAST` so dashboards
+ * lead with the most-recently-started run; pending rows that haven't
+ * picked up a worker yet fall to the bottom.
  */
 function postgresOrderByClause(orderBy?: WorkflowOrderBy, orderDir?: "asc" | "desc") {
   const direction = orderDir === "asc" ? sql.raw("ASC") : sql.raw("DESC");
   const nullsLast = sql.raw("NULLS LAST");
   switch (orderBy) {
-    case "startedAt":
-      return sql`${workflows.startedAt} ${direction} ${nullsLast}`;
+    case "createdAt":
+      return orderDir === "asc" ? asc(workflows.createdAt) : desc(workflows.createdAt);
     case "completedAt":
       return sql`${workflows.completedAt} ${direction} ${nullsLast}`;
     case "duration":
@@ -1307,9 +1318,9 @@ function postgresOrderByClause(orderBy?: WorkflowOrderBy, orderDir?: "asc" | "de
       return orderDir === "asc" ? asc(workflows.statusId) : desc(workflows.statusId);
     case "name":
       return orderDir === "asc" ? asc(workflows.workflowName) : desc(workflows.workflowName);
-    case "createdAt":
+    case "startedAt":
     default:
-      return orderDir === "asc" ? asc(workflows.createdAt) : desc(workflows.createdAt);
+      return sql`${workflows.startedAt} ${direction} ${nullsLast}`;
   }
 }
 

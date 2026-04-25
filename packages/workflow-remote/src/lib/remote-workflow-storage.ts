@@ -111,6 +111,7 @@ export class RemoteWorkflowStorage implements WorkflowStorage, JournaledSuspendS
     type?: string;
     parentId?: string;
     namespace?: string;
+    metadata?: Record<string, unknown>;
     limit?: number;
     offset?: number;
     orderBy?: WorkflowOrderBy;

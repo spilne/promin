@@ -119,6 +119,12 @@ export interface RunListQuery {
   namespace?: string;
   /** Workflow version. Filtered post-fetch — uses with `name` for accuracy. */
   version?: string;
+  /**
+   * Search-attributes filter. JSON-encoded `Record<string, unknown>` on the
+   * URL (`?metadata=%7B%22userId%22%3A%22u_42%22%7D`) so nested values can
+   * round-trip. Server forwards to `WorkflowStorage.listWorkflows({ metadata })`.
+   */
+  metadata?: Record<string, unknown>;
   limit?: number;
   offset?: number;
   /** Server-side sort column. Default: `createdAt`. */

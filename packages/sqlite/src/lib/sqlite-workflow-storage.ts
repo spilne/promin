@@ -1,5 +1,6 @@
 import {
   FenceTokenMismatchError,
+  workflowMetadataMatches,
   type WorkflowStorage,
   type FenceToken,
   type FenceGuard,
@@ -239,6 +240,7 @@ export class SqliteWorkflowStorage
     type?: string;
     parentId?: string;
     namespace?: string;
+    metadata?: Record<string, unknown>;
     limit?: number;
     offset?: number;
     orderBy?: WorkflowOrderBy;
@@ -268,22 +270,57 @@ export class SqliteWorkflowStorage
       args.push(params.namespace);
     }
 
+    // Metadata filter: push primitive equality checks down via json_extract
+    // so the SQL still does the work for the common case (key=value). Object
+    // / array values fall through to JS post-filter — SQLite's JSON1
+    // doesn't have a containment operator and rolling our own JSON-equality
+    // SQL would be slower than just loading + comparing.
+    const metadataFilter = params?.metadata;
+    let needsPostFilter = false;
+    if (metadataFilter) {
+      for (const [k, v] of Object.entries(metadataFilter)) {
+        if (v === null || ["string", "number", "boolean"].includes(typeof v)) {
+          conditions.push(`json_extract(metadata, ?) = ?`);
+          // SQLite returns booleans as 0/1 from json_extract — match that.
+          const sqlValue = typeof v === "boolean" ? (v ? 1 : 0) : v;
+          args.push(jsonPathFor(k), sqlValue);
+        } else {
+          needsPostFilter = true;
+        }
+      }
+    }
+
     const where = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
     const orderClause = sqliteOrderByClause(params?.orderBy, params?.orderDir);
     let sql = `SELECT * FROM ${this._t}${where} ORDER BY ${orderClause}`;
-    if (params?.limit != null) {
-      sql += ` LIMIT ?`;
-      args.push(params.limit);
-    }
-    if (params?.offset != null) {
-      sql += ` OFFSET ?`;
-      args.push(params.offset);
+
+    // When the metadata filter has object/array values, do the LIMIT/OFFSET
+    // in JS after post-filtering. The SQL pre-filter still cuts the row set
+    // down using the primitive checks; we just can't trust pagination until
+    // the JS pass narrows it further.
+    if (!needsPostFilter) {
+      if (params?.limit != null) {
+        sql += ` LIMIT ?`;
+        args.push(params.limit);
+      }
+      if (params?.offset != null) {
+        sql += ` OFFSET ?`;
+        args.push(params.offset);
+      }
     }
 
-    return this.db
+    let rows = this.db
       .query<WfRow>(sql)
       .all(...args)
       .map((r) => this._rowToState(r));
+
+    if (needsPostFilter && metadataFilter) {
+      rows = rows.filter((r) => workflowMetadataMatches(r.metadata, metadataFilter));
+      const offset = params?.offset ?? 0;
+      const limit = params?.limit ?? rows.length;
+      rows = rows.slice(offset, offset + limit);
+    }
+    return rows;
   }
 
   async distinctWorkflowNames(params?: { namespace?: string }): Promise<string[]> {
@@ -1131,16 +1168,29 @@ interface JournalRow {
 }
 
 /**
+ * Build a SQLite JSON path for a metadata key. Bare alphanumeric / underscore
+ * keys take the dot form `$.foo`; anything else (dots, dashes, spaces, quotes)
+ * uses the bracket-quoted form `$."key"` with embedded quotes doubled, which is
+ * SQLite JSON1's escape convention.
+ */
+function jsonPathFor(key: string): string {
+  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return `$.${key}`;
+  return `$."${key.replace(/"/g, '""')}"`;
+}
+
+/**
  * Build the ORDER BY clause for `listWorkflows`. NULL values always sort
  * last so still-running rows (no `started_at` / `completed_at` /
  * `duration`) don't push real data off the first page in either direction.
- * Default: `created_at DESC`, matching the prior behavior.
+ * Default: `started_at DESC NULLS LAST` so dashboards lead with the most-
+ * recently-started run; pending rows that haven't picked up a worker yet
+ * fall to the bottom.
  */
 function sqliteOrderByClause(orderBy?: WorkflowOrderBy, orderDir?: "asc" | "desc"): string {
   const dir = orderDir === "asc" ? "ASC" : "DESC";
   switch (orderBy) {
-    case "startedAt":
-      return `started_at IS NULL, started_at ${dir}`;
+    case "createdAt":
+      return `created_at ${dir}`;
     case "completedAt":
       return `completed_at IS NULL, completed_at ${dir}`;
     case "duration":
@@ -1149,9 +1199,9 @@ function sqliteOrderByClause(orderBy?: WorkflowOrderBy, orderDir?: "asc" | "desc
       return `status ${dir}`;
     case "name":
       return `workflow_name ${dir}`;
-    case "createdAt":
+    case "startedAt":
     default:
-      return `created_at ${dir}`;
+      return `started_at IS NULL, started_at ${dir}`;
   }
 }
 

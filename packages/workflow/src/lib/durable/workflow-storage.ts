@@ -57,10 +57,13 @@ export interface WorkflowStorage {
   /**
    * List workflows, optionally filtered by status, name, type, or namespace.
    *
-   * `orderBy` defaults to `createdAt`, `orderDir` defaults to `desc`. Sort
-   * fields with NULL values (e.g. `startedAt` on a still-pending row,
-   * `duration` on a still-running row) sort last regardless of direction
-   * so the most-relevant rows surface first in both views.
+   * `orderBy` defaults to `startedAt`, `orderDir` defaults to `desc` —
+   * the most-recently-started run is what dashboards usually want, even
+   * when some pending runs were created later but haven't picked up a
+   * worker yet. Sort fields with NULL values (e.g. `startedAt` on a
+   * still-pending row, `duration` on a still-running row) sort last
+   * regardless of direction so the most-relevant rows surface first in
+   * both views.
    *
    * `status` orders by the underlying enum/id ordering — not alphabetical —
    * to keep the cost a single column read across backends. Callers that
@@ -72,6 +75,14 @@ export interface WorkflowStorage {
     type?: string;
     parentId?: string;
     namespace?: string;
+    /**
+     * Filter by metadata key/value pairs. A row matches when its metadata
+     * contains every supplied key with a deep-equal value. Backends with
+     * native JSON support (Postgres `@>`) push the filter to the database;
+     * others apply it after loading. Index strategy is the user's call —
+     * Postgres ships with no metadata index by default.
+     */
+    metadata?: Record<string, unknown>;
     limit?: number;
     offset?: number;
     orderBy?: WorkflowOrderBy;
@@ -353,6 +364,49 @@ export interface WorkflowStorage {
   purgeCompleted(
     params: { olderThanMs: number; limit: number } | { from: Date; to: Date; limit: number },
   ): Promise<number>;
+}
+
+/**
+ * Deep-equality predicate matching Postgres jsonb `@>` containment for the
+ * `listWorkflows({ metadata })` filter. Returns true when, for every key/
+ * value pair in `filter`, `actual?.[key]` deep-equals the filter value.
+ * Missing or undefined `actual` matches an empty filter only.
+ */
+export function workflowMetadataMatches(
+  actual: Record<string, unknown> | undefined | null,
+  filter: Record<string, unknown>,
+): boolean {
+  const keys = Object.keys(filter);
+  if (keys.length === 0) return true;
+  if (!actual) return false;
+  for (const k of keys) {
+    if (!deepEqual(actual[k], filter[k])) return false;
+  }
+  return true;
+}
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b) return false;
+  if (a === null || b === null) return false;
+  if (typeof a !== "object") return false;
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (!deepEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  if (Array.isArray(b)) return false;
+  const ar = a as Record<string, unknown>;
+  const br = b as Record<string, unknown>;
+  const ak = Object.keys(ar);
+  const bk = Object.keys(br);
+  if (ak.length !== bk.length) return false;
+  for (const k of ak) {
+    if (!deepEqual(ar[k], br[k])) return false;
+  }
+  return true;
 }
 
 /**

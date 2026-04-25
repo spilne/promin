@@ -61,6 +61,7 @@ export function listRuns(deps: RunRoutesDeps) {
       type: url.searchParams.get("type") ?? undefined,
       namespace: url.searchParams.get("namespace") ?? undefined,
       version: url.searchParams.get("version") ?? undefined,
+      metadata: parseMetadataParam(url.searchParams.get("metadata")),
       limit: parseIntParam(url.searchParams.get("limit")) ?? 50,
       offset: parseIntParam(url.searchParams.get("offset")) ?? 0,
       orderBy: sort?.orderBy,
@@ -161,6 +162,21 @@ const VALID_ORDER_BY: ReadonlyArray<WorkflowOrderBy> = [
   "status",
   "name",
 ];
+
+/**
+ * Parse `?metadata=<json>`. Returns undefined for missing / malformed input
+ * or non-object payloads — the URL stays forgiving when hand-edited.
+ */
+function parseMetadataParam(raw: string | null): Record<string, unknown> | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Parse `?sort=createdAt:desc`. Bad / unknown columns silently fall back to

@@ -19,6 +19,7 @@ import type {
   FenceToken,
   WorkflowOrderBy,
 } from "./workflow-storage.ts";
+import { workflowMetadataMatches } from "./workflow-storage.ts";
 import { createWorkflowEventStream } from "./workflow-event-stream.ts";
 import type {
   ActivityJournalStorage,
@@ -207,12 +208,14 @@ export class InMemoryWorkflowStorage
     type?: string;
     parentId?: string;
     namespace?: string;
+    metadata?: Record<string, unknown>;
     limit?: number;
     offset?: number;
     orderBy?: WorkflowOrderBy;
     orderDir?: "asc" | "desc";
   }): Promise<WorkflowState[]> {
     const ns = params?.namespace ?? this.namespace;
+    const metadataFilter = params?.metadata;
 
     // Filter pass first — sort needs the full filtered set before we can
     // apply offset/limit, so we can't short-circuit inside the loop the way
@@ -224,10 +227,11 @@ export class InMemoryWorkflowStorage
       if (params?.name && wf.workflowName !== params.name) continue;
       if (params?.type && wf.workflowType !== params.type) continue;
       if (params?.parentId && wf.parentWorkflowId !== params.parentId) continue;
+      if (metadataFilter && !workflowMetadataMatches(wf.metadata, metadataFilter)) continue;
       filtered.push(wf);
     }
 
-    const orderBy = params?.orderBy ?? "createdAt";
+    const orderBy = params?.orderBy ?? "startedAt";
     const orderDir = params?.orderDir ?? "desc";
     filtered.sort(makeWorkflowComparator(orderBy, orderDir));
 

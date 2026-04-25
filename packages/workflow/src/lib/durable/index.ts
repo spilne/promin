@@ -28,6 +28,7 @@ export {
   type FenceGuard,
   type FenceToken,
   type WorkflowOrderBy,
+  workflowMetadataMatches,
   isStepAttemptStorage,
   isTripwireCapableStorage,
   isSubscribableStorage,

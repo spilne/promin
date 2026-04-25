@@ -47,7 +47,7 @@ export class ApiError extends Error {
 
 export const api = {
   listRuns(q: RunListQuery = {}): Promise<RunListResponse> {
-    const { orderBy, orderDir, ...rest } = q;
+    const { orderBy, orderDir, metadata, ...rest } = q;
     const params = new URLSearchParams();
     for (const [k, v] of Object.entries(rest)) {
       if (v !== undefined && v !== null && v !== "") params.set(k, String(v));
@@ -56,6 +56,12 @@ export const api = {
     // and cycle/clear semantics are atomic. Encode both halves only when
     // a column is explicitly chosen — server defaults to createdAt:desc.
     if (orderBy) params.set("sort", `${orderBy}:${orderDir ?? "desc"}`);
+    // Metadata travels as a single JSON-encoded param so nested values can
+    // round-trip (URLSearchParams would flatten an object via String() to
+    // "[object Object]").
+    if (metadata && Object.keys(metadata).length > 0) {
+      params.set("metadata", JSON.stringify(metadata));
+    }
     const qs = params.toString();
     return req<RunListResponse>(`/api/runs${qs ? `?${qs}` : ""}`);
   },

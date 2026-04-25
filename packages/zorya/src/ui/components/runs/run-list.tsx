@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { useNamespace } from "../../hooks/use-namespace.ts";
 import { api } from "../../api/client.ts";
@@ -50,6 +50,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
 
   const initialVersion = queryParams?.get("version") ?? "";
   const initialSort = parseSortParam(queryParams?.get("sort"));
+  const initialMetadata = queryParams?.get("metadata") ?? "";
 
   const [name, setName] = useState(initialName);
   const [type, setType] = useState(initialType);
@@ -59,6 +60,11 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
   const [sort, setSort] = useState<{ orderBy: WorkflowOrderBy; orderDir: "asc" | "desc" } | null>(
     initialSort,
   );
+  // Raw "k=v, k2=v2" input — parsed on submit so a partial keystroke doesn't
+  // refire the runs query while the user is still typing.
+  const [metadataDraft, setMetadataDraft] = useState(initialMetadata);
+  const [metadataApplied, setMetadataApplied] = useState(initialMetadata);
+  const metadataParsed = useMemo(() => parseMetadataInput(metadataApplied), [metadataApplied]);
   const [meta, setMeta] = useState<NamesAndTypes>({ names: [], types: [], namespaces: [] });
   // Namespace is a global scope set via the sidebar switcher. Pages observe
   // it and include in their API fetches.
@@ -103,7 +109,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
     }
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, type, status, version, namespace]);
+  }, [name, type, status, version, namespace, metadataApplied]);
 
   // Sync local state back to URL so filters survive refresh / share links.
   // Namespace is NOT on the URL — it lives in the global sidebar switcher
@@ -117,9 +123,10 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
     if (version) qp.set("version", version);
     if (page > 1) qp.set("page", String(page));
     if (sort) qp.set("sort", `${sort.orderBy}:${sort.orderDir}`);
+    if (metadataApplied) qp.set("metadata", metadataApplied);
     onQueryChange(qp);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, type, status, version, page, sort]);
+  }, [name, type, status, version, page, sort, metadataApplied]);
 
   const query: RunListQuery = {
     name: name || undefined,
@@ -127,6 +134,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
     namespace: namespace || undefined,
     status: status === "all" ? undefined : status,
     version: version || undefined,
+    metadata: metadataParsed ?? undefined,
     limit: PAGE_SIZE,
     offset: (page - 1) * PAGE_SIZE,
     orderBy: sort?.orderBy,
@@ -134,7 +142,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
   };
   const { data, loading, error, refresh } = useFetch(
     () => api.listRuns(query),
-    [name, type, namespace, status, version, page, sort?.orderBy, sort?.orderDir],
+    [name, type, namespace, status, version, page, sort?.orderBy, sort?.orderDir, metadataApplied],
     5000,
   );
 
@@ -211,19 +219,47 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
           value={version}
           onInput={(e) => setVersion((e.target as HTMLInputElement).value)}
         />
-        {(name || type || status !== "all" || version) && (
-          <button
-            class="btn btn-sm btn-ghost"
-            onClick={() => {
-              setName("");
-              setType("");
-              setStatus("all");
-              setVersion("");
-            }}
-          >
-            Clear
-          </button>
-        )}
+        <input
+          class={`input input-bordered input-sm w-72 font-mono ${
+            metadataDraft && !metadataParsed && metadataApplied === metadataDraft
+              ? "input-warning"
+              : ""
+          }`}
+          placeholder="search attrs (key=value, …)"
+          value={metadataDraft}
+          title={
+            "Filter by workflow metadata. Format: key=value, key2=value2.\n" +
+            "Values that look like JSON (quoted strings, numbers, true/false/null) parse accordingly;\n" +
+            "everything else is matched as a string. Press Enter to apply."
+          }
+          onInput={(e) => setMetadataDraft((e.target as HTMLInputElement).value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") setMetadataApplied(metadataDraft);
+          }}
+          onBlur={() => setMetadataApplied(metadataDraft)}
+        />
+        {/* Always rendered so adding the first filter doesn't push the row
+            left when "Clear" appears. Fades in/out via opacity + visibility
+            transition; pointer-events disabled while idle. */}
+        <button
+          class={`btn btn-sm btn-ghost transition-opacity duration-150 ${
+            name || type || status !== "all" || version || metadataApplied
+              ? "opacity-100"
+              : "opacity-0 pointer-events-none"
+          }`}
+          aria-hidden={!(name || type || status !== "all" || version || metadataApplied)}
+          tabIndex={name || type || status !== "all" || version || metadataApplied ? 0 : -1}
+          onClick={() => {
+            setName("");
+            setType("");
+            setStatus("all");
+            setVersion("");
+            setMetadataDraft("");
+            setMetadataApplied("");
+          }}
+        >
+          Clear
+        </button>
       </div>
 
       {error && (
@@ -361,6 +397,37 @@ const VALID_ORDER_BY: ReadonlyArray<WorkflowOrderBy> = [
   "status",
   "name",
 ];
+
+/**
+ * Parse `key=value, key2=value2` into a metadata object. Returns null if
+ * the input is empty or doesn't yield at least one valid key/value pair.
+ * Values try `JSON.parse` first (so quoted strings, numbers, booleans, and
+ * `null` all work) and fall back to the raw string when that fails — so
+ * `userId=u_42` doesn't require quotes.
+ */
+function parseMetadataInput(raw: string): Record<string, unknown> | null {
+  const text = raw.trim();
+  if (!text) return null;
+  const out: Record<string, unknown> = {};
+  for (const pair of text.split(",")) {
+    const trimmed = pair.trim();
+    if (!trimmed) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0) return null;
+    const key = trimmed.slice(0, eq).trim();
+    const rawValue = trimmed.slice(eq + 1).trim();
+    if (!key) return null;
+    let value: unknown = rawValue;
+    try {
+      value = JSON.parse(rawValue);
+    } catch {
+      // Plain string fallback.
+    }
+    out[key] = value;
+  }
+  if (Object.keys(out).length === 0) return null;
+  return out;
+}
 
 function parseSortParam(
   raw: string | null | undefined,

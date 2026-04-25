@@ -26,7 +26,7 @@ import type {
   SignalState,
   StepAttemptRecord,
 } from "@promin/workflow";
-import { FenceTokenMismatchError } from "@promin/workflow";
+import { FenceTokenMismatchError, workflowMetadataMatches } from "@promin/workflow";
 import type { RedisClient } from "./redis-client.ts";
 import { SystemClock, type Clock } from "@promin/core";
 
@@ -517,6 +517,7 @@ export class RedisWorkflowStorage
     type?: string;
     parentId?: string;
     namespace?: string;
+    metadata?: Record<string, unknown>;
     limit?: number;
     offset?: number;
     orderBy?: WorkflowOrderBy;
@@ -555,10 +556,11 @@ export class RedisWorkflowStorage
     }
 
     const ns = params?.namespace ?? this.namespace;
+    const metadataFilter = params?.metadata;
 
-    // Load + apply filters not covered by indexes (namespace, type, parentId).
-    // We need the full filtered set in memory before sorting + paginating;
-    // streaming-with-early-exit doesn't compose with order-by.
+    // Load + apply filters not covered by indexes (namespace, type, parentId,
+    // metadata). We need the full filtered set in memory before sorting +
+    // paginating; streaming-with-early-exit doesn't compose with order-by.
     const all: WorkflowState[] = [];
     for (const id of candidateIds) {
       const raw = await this.redis.hgetall(this.wfKey(id));
@@ -566,10 +568,12 @@ export class RedisWorkflowStorage
       if (ns && raw.namespace !== ns) continue;
       if (params?.type && raw.workflowType !== params.type) continue;
       if (params?.parentId && raw.parentWorkflowId !== params.parentId) continue;
-      all.push(await this.assembleWorkflow(raw));
+      const wf = await this.assembleWorkflow(raw);
+      if (metadataFilter && !workflowMetadataMatches(wf.metadata, metadataFilter)) continue;
+      all.push(wf);
     }
 
-    const orderBy = params?.orderBy ?? "createdAt";
+    const orderBy = params?.orderBy ?? "startedAt";
     const orderDir = params?.orderDir ?? "desc";
     all.sort(makeWorkflowStateComparator(orderBy, orderDir));
 

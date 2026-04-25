@@ -20,6 +20,7 @@ export {
   type FenceGuard,
   type FenceToken,
   type WorkflowOrderBy,
+  workflowMetadataMatches,
   type WorkflowState,
   type WorkflowRunSummary,
   type StepState,

@@ -205,17 +205,21 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
             value={query}
             onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
           />
-          {(query || statusFilter !== "all") && (
-            <button
-              class="btn btn-sm btn-ghost"
-              onClick={() => {
-                setQuery("");
-                setStatusFilter("all");
-              }}
-            >
-              Clear
-            </button>
-          )}
+          {/* Always rendered so adding the first filter doesn't push the
+              row left when "Clear" appears — fades via opacity transition. */}
+          <button
+            class={`btn btn-sm btn-ghost transition-opacity duration-150 ${
+              query || statusFilter !== "all" ? "opacity-100" : "opacity-0 pointer-events-none"
+            }`}
+            aria-hidden={!(query || statusFilter !== "all")}
+            tabIndex={query || statusFilter !== "all" ? 0 : -1}
+            onClick={() => {
+              setQuery("");
+              setStatusFilter("all");
+            }}
+          >
+            Clear
+          </button>
         </div>
       )}
 
