@@ -67,6 +67,18 @@ export interface MapStepContext<Input> {
   readonly attempt: number;
 }
 
+/** Extract the success type from a parallel branch function. */
+export type BranchOutput<B> = B extends (ctx: any) => Pipeline<infer T, any> ? T : never;
+
+/** Union of all branch error types — flows into the builder's typed Error channel. */
+export type BranchError<Branches extends Record<string, unknown>> = {
+  [K in keyof Branches]: Branches[K] extends (ctx: any) => Pipeline<any, infer E>
+    ? E extends TaggedError
+      ? E
+      : never
+    : never;
+}[keyof Branches];
+
 // ---------------------------------------------------------------------------
 // Idempotency config
 // ---------------------------------------------------------------------------
@@ -488,7 +500,8 @@ export type StepKind =
   | "signal"
   | "journaled"
   | "guard"
-  | "tripwire";
+  | "tripwire"
+  | "parallel";
 
 export interface StepDefinition {
   readonly name: string;
@@ -940,6 +953,143 @@ export class WorkflowBuilder<
     };
 
     return this._derive([...this._steps, stepDef], name) as any;
+  }
+
+  // ---------------------------------------------------------------------------
+  // parallel — fluent fork/join over multiple named branches
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Add a parallel block — forks from the current head into N branches that
+   * run concurrently as distinct DAG steps (each distributable to workers
+   * and retriable independently), then joins them into a keyed record that
+   * downstream steps consume via `prev`.
+   *
+   * Follows the house style from `.branch()` and `.match()`: the outer
+   * block takes a `name`; branch labels are keys in a record rather than
+   * top-level step names. Each branch becomes a physical step named
+   * `"<block-name>.<label>"` in storage and the step queue, so branch
+   * names scoped under the block don't collide with unrelated siblings.
+   *
+   * ```typescript
+   * workflow({ name: "signup", storage })
+   *   .step("load", ({ input }) => Pipeline.succeed(input))
+   *   .parallel("enrich", {
+   *     user: ({ prev }) => Pipeline.fromPromise(() => fetchUser(prev)),
+   *     perms: ({ prev }) => Pipeline.fromPromise(() => fetchPerms(prev)),
+   *   })
+   *   .step("join", ({ prev }) => Pipeline.succeed({ ...prev.user, ...prev.perms }))
+   * ```
+   *
+   * Semantics match the existing DAG executor: branches run concurrently
+   * within a ready-set batch and the block fails on the first branch
+   * failure (remaining branches' results are not preserved; compensation
+   * cascades via the usual saga path).
+   */
+  parallel<
+    Name extends string,
+    Branches extends Record<
+      string,
+      (ctx: StepContext<Input, Current>) => Pipeline<unknown, TaggedError>
+    >,
+  >(
+    name: Name,
+    branches: Branches,
+    options?: StepOptions<{ [K in keyof Branches]: BranchOutput<Branches[K]> }>,
+  ): WorkflowBuilder<
+    Input,
+    Steps & Record<Name, { [K in keyof Branches]: BranchOutput<Branches[K]> }>,
+    { [K in keyof Branches]: BranchOutput<Branches[K]> },
+    Error | BranchError<Branches>
+  > {
+    this._validateName(name);
+    const branchKeys = Object.keys(branches);
+    if (branchKeys.length === 0) {
+      throw new WorkflowError({
+        workflowId: "",
+        message: `.parallel("${name}", ...) requires at least one branch`,
+      });
+    }
+
+    const parentStep = this._lastStepName;
+    const parentDepends = parentStep ? [parentStep] : [];
+    const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
+    const workflowName = this._name;
+
+    // One StepDefinition per branch. Scoped names (block.branch) keep the
+    // label record free for TypeScript while the physical queue rows stay
+    // globally unique per workflow.
+    const takenNames = new Set(this._steps.map((s) => s.name));
+    takenNames.add(name);
+    const branchSteps: StepDefinition[] = [];
+    const scopedNames: string[] = [];
+
+    for (const key of branchKeys) {
+      const scopedName = `${name}.${key}`;
+      if (takenNames.has(scopedName)) {
+        throw new WorkflowError({
+          workflowId: "",
+          message: `Duplicate step name: "${scopedName}"`,
+        });
+      }
+      takenNames.add(scopedName);
+      scopedNames.push(scopedName);
+
+      const branchFn = branches[key] as (
+        ctx: StepContext<Input, Current>,
+      ) => Pipeline<unknown, TaggedError>;
+
+      branchSteps.push({
+        name: scopedName,
+        dependsOn: parentDepends,
+        kind: "normal",
+        codec,
+        timeoutMs: options?.timeoutMs,
+        retry: options?.retry as RetryPolicy<TaggedError> | undefined,
+        onFailure: options?.onFailure as StepFailureStrategy<unknown> | undefined,
+        needs: options?.needs,
+        priority: options?.priority,
+        execute: (execParams) => {
+          const prevName = parentDepends[0];
+          const prev = prevName != null ? execParams.results[prevName] : execParams.input;
+          const ctx: StepContext<unknown, unknown> = {
+            input: execParams.input,
+            prev,
+            workflowId: execParams.workflowId,
+            attempt: execParams.attemptRef.current,
+          };
+          const cacheOption = options?.cache;
+          if (!cacheOption) return branchFn(ctx as StepContext<Input, Current>);
+          return wrapWithStepCache(
+            cacheOption,
+            ctx as StepContext<unknown, unknown>,
+            () => branchFn(ctx as StepContext<Input, Current>),
+            cacheOption.namespace ?? workflowName,
+          );
+        },
+      });
+    }
+
+    // Synthetic join. Kind "parallel" marks it for visualization; its
+    // body is a zero-effort assembler that reads the branch results and
+    // shapes them into { [label]: result } using the original (unscoped)
+    // keys. Inherits the default codec so downstream consumers see the
+    // normal round-tripped shape.
+    const joinStepDef: StepDefinition = {
+      name,
+      dependsOn: scopedNames,
+      kind: "parallel",
+      codec,
+      execute: (execParams) => {
+        const out: Record<string, unknown> = {};
+        for (let i = 0; i < branchKeys.length; i++) {
+          out[branchKeys[i]!] = execParams.results[scopedNames[i]!];
+        }
+        return Pipeline.succeed(out);
+      },
+    };
+
+    return this._derive([...this._steps, ...branchSteps, joinStepDef], name) as any;
   }
 
   // ---------------------------------------------------------------------------
