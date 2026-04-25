@@ -4,99 +4,20 @@ import { InMemoryWorkerRegistry } from "../worker-registry.ts";
 import { InMemoryStepQueue } from "../in-memory-step-queue.ts";
 import { MapStepRegistry } from "../step-registry.ts";
 import { createWorker } from "../worker.ts";
+import { workerRegistryConformance } from "../worker-registry-conformance.ts";
 
 // ---------------------------------------------------------------------------
-// WorkerRegistry basics
+// WorkerRegistry semantics — conformance suite
+//
+// The basics moved to worker-registry-conformance.ts so InMemory + Postgres
+// (and any future backend) run the same test matrix. This file keeps the
+// InMemory-specific integration tests that exercise the worker lifecycle
+// alongside a real worker.
 // ---------------------------------------------------------------------------
 
-describe("Worker registry — track which workers are online and what they handle", () => {
-  it("new worker registers with its queues and concurrency limit", async () => {
-    const registry = new InMemoryWorkerRegistry();
-
-    await registry.register({
-      workerId: "w-1",
-      capabilities: ["default"],
-      concurrency: 5,
-      metadata: { hostname: "node-1" },
-    });
-
-    const workers = await registry.list();
-    expect(workers).toHaveLength(1);
-    expect(workers[0]!.workerId).toBe("w-1");
-    expect(workers[0]!.status).toBe("active");
-    expect(workers[0]!.capabilities).toEqual(["default"]);
-    expect(workers[0]!.concurrency).toBe(5);
-  });
-
-  it("heartbeat proves the worker is still alive — timestamp advances", async () => {
-    const registry = new InMemoryWorkerRegistry();
-    await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
-
-    const before = (await registry.list())[0]!.lastHeartbeat;
-    await new Promise((r) => setTimeout(r, 50));
-    await registry.heartbeat("w-1");
-    const after = (await registry.list())[0]!.lastHeartbeat;
-
-    expect(after.getTime()).toBeGreaterThan(before.getTime());
-  });
-
-  it("graceful shutdown — mark worker as draining before stopping", async () => {
-    const registry = new InMemoryWorkerRegistry();
-    await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
-
-    await registry.drain("w-1");
-
-    const workers = await registry.list({ status: "draining" });
-    expect(workers).toHaveLength(1);
-  });
-
-  it("worker shuts down cleanly — removed from the registry", async () => {
-    const registry = new InMemoryWorkerRegistry();
-    await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
-    await registry.deregister("w-1");
-
-    const workers = await registry.list();
-    expect(workers).toHaveLength(0);
-  });
-
-  it("worker stopped heartbeating — detected as dead after timeout", async () => {
-    const registry = new InMemoryWorkerRegistry();
-    await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
-
-    // Wait for heartbeat to go stale
-    await new Promise((r) => setTimeout(r, 100));
-
-    const dead = await registry.detectDead(50); // 50ms timeout
-    expect(dead).toHaveLength(1);
-    expect(dead[0]!.workerId).toBe("w-1");
-    expect(dead[0]!.status).toBe("dead");
-
-    // Listed as dead
-    const deadList = await registry.list({ status: "dead" });
-    expect(deadList).toHaveLength(1);
-  });
-
-  it("healthy worker with recent heartbeat is not flagged as dead", async () => {
-    const registry = new InMemoryWorkerRegistry();
-    await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
-
-    const dead = await registry.detectDead(60_000); // 60s timeout — far in the future
-    expect(dead).toHaveLength(0);
-  });
-
-  it("list only active or only draining workers — ops dashboard filtering", async () => {
-    const registry = new InMemoryWorkerRegistry();
-    await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
-    await registry.register({ workerId: "w-2", capabilities: ["gpu"], concurrency: 2 });
-    await registry.drain("w-2");
-
-    const active = await registry.list({ status: "active" });
-    expect(active).toHaveLength(1);
-    expect(active[0]!.workerId).toBe("w-1");
-
-    const draining = await registry.list({ status: "draining" });
-    expect(draining).toHaveLength(1);
-    expect(draining[0]!.workerId).toBe("w-2");
+describe("InMemoryWorkerRegistry — conformance", () => {
+  workerRegistryConformance({
+    factory: async () => new InMemoryWorkerRegistry(),
   });
 });
 

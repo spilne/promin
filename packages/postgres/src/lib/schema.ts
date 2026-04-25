@@ -292,6 +292,35 @@ export const workflowRegistry = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Worker registry — persisted view of active workers across the fleet so a
+// horizontally-scaled Zorya (or any other observer) sees the same worker
+// set from every instance. Workers heartbeat into the same table; readers
+// (ops dashboards, capability-based dispatchers) query it. InMemory version
+// stays available for single-process deployments.
+// ---------------------------------------------------------------------------
+
+export const workerRegistry = pgTable(
+  "wf_worker_registry",
+  {
+    workerId: text("worker_id").primaryKey(),
+    status: text("status").notNull().default("active"), // active | draining | dead
+    capabilities: text("capabilities").array().notNull().default([]),
+    concurrency: integer("concurrency").notNull().default(1),
+    metadata: jsonb("metadata"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Hot path: detectDead scans stale heartbeats among non-dead rows.
+    index("wf_worker_registry_heartbeat_idx").on(t.lastHeartbeatAt),
+    // Capability-aware lookups ('which workers can do summarize?').
+    index("wf_worker_registry_caps_idx").using("gin", t.capabilities),
+    // Status-filtered list() queries.
+    index("wf_worker_registry_status_idx").on(t.status),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // State machine tables
 // ---------------------------------------------------------------------------
 

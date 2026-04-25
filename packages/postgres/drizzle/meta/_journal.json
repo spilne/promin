@@ -176,6 +176,13 @@
       "when": 1743400024000,
       "tag": "0024_workflow_tripwire",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1743400025000,
+      "tag": "0025_worker_registry",
+      "breakpoints": true
     }
   ]
 }
