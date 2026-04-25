@@ -12,7 +12,27 @@ export function App() {
   const [route, setRoute] = useState(locationToRoute());
 
   useEffect(() => {
-    const onHash = () => setRoute(locationToRoute());
+    const onHash = () => {
+      const next = locationToRoute();
+      // View Transitions API gives a free cross-fade between routes on
+      // Chrome / Edge / Safari; Firefox falls through to the
+      // straight-state-update branch. Wrapping setState in
+      // `startViewTransition` snapshots the current DOM, applies the
+      // update, then animates the diff. Preact's render cycle is
+      // microtask-async, so we await a frame to make sure the new tree
+      // is committed before the transition swaps.
+      const doc = document as Document & {
+        startViewTransition?: (cb: () => Promise<void> | void) => unknown;
+      };
+      if (typeof doc.startViewTransition === "function") {
+        doc.startViewTransition(async () => {
+          setRoute(next);
+          await new Promise((r) => requestAnimationFrame(() => r(null)));
+        });
+      } else {
+        setRoute(next);
+      }
+    };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);

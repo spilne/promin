@@ -280,26 +280,35 @@ export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }:
 
       {/* Step view at full width, tabs panel directly below. Stacks
           vertically so the graph gets the whole row and the tabs don't
-          fight for horizontal space. */}
+          fight for horizontal space.
+          The keyed wrapper around each swap-able subtree forces a
+          remount on stepView / tab / selectedStep change so the
+          `.anim-fade-in` keyframe re-fires — gives a smooth swap
+          instead of an instant jump. */}
       <div class="space-y-4">
-        {stepView === "timeline" && (
-          <StepTimeline run={run} selectedStep={selectedStep} onSelectStep={setSelectedStep} />
-        )}
-        {stepView === "graph" && (
-          <StepDag run={run} selectedStep={selectedStep} onSelectStep={setSelectedStep} />
-        )}
-        {stepView === "grid" && (
-          <StepGrid
-            workflowName={run.workflowName}
-            currentWorkflowId={run.workflowId}
-            onOpenRun={(id) => onOpenRun?.(id)}
-          />
-        )}
+        <div key={`view-${stepView}`} class="anim-fade-in">
+          {stepView === "timeline" && (
+            <StepTimeline run={run} selectedStep={selectedStep} onSelectStep={setSelectedStep} />
+          )}
+          {stepView === "graph" && (
+            <StepDag run={run} selectedStep={selectedStep} onSelectStep={setSelectedStep} />
+          )}
+          {stepView === "grid" && (
+            <StepGrid
+              workflowName={run.workflowName}
+              currentWorkflowId={run.workflowId}
+              onOpenRun={(id) => onOpenRun?.(id)}
+            />
+          )}
+        </div>
 
         <div class="card bg-base-100 shadow border border-base-content/15">
           <div class="card-body p-0">
             <Tabs tabs={tabs} active={tab} onChange={setTab} class="px-2 pt-2" />
-            <div class="p-4">
+            <div
+              class="p-4 anim-fade-in"
+              key={`tab-${tab}-${tab === "step" ? (selected?.stepName ?? "none") : ""}`}
+            >
               {tab === "overview" && <OverviewTab run={run} onOpenRun={onOpenRun} />}
               {tab === "step" && selected && <StepTab runId={id} step={selected} />}
               {tab === "step" && !selected && (
