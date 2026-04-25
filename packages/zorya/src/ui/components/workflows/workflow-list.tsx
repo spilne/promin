@@ -9,6 +9,7 @@ import { SkeletonRows } from "../ui/skeleton.tsx";
 import { EmptyState } from "../ui/empty-state.tsx";
 import { Pagination } from "../ui/pagination.tsx";
 import { TriggerModal } from "./trigger-modal.tsx";
+import { Page } from "../ui/page.tsx";
 
 const PAGE_SIZE = 20;
 
@@ -101,7 +102,7 @@ export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: 
   }, [query]);
 
   return (
-    <div class="anim-page pt-8 px-4 pb-4 max-w-[1400px] mx-auto space-y-4">
+    <Page>
       <div class="flex items-end justify-between">
         <div>
           <h2 class="text-xl font-semibold">Workflows</h2>
@@ -253,7 +254,7 @@ export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: 
           }}
         />
       )}
-    </div>
+    </Page>
   );
 }
 

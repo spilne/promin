@@ -17,6 +17,7 @@ import {
   type ParsedSearchQuery,
 } from "../../lib/smart-search.ts";
 import { SmartSearchInput } from "./smart-search-input.tsx";
+import { Page } from "../ui/page.tsx";
 
 interface SuggestionPools {
   name: string[];
@@ -241,7 +242,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
   const hasFilters = hasAnyFilter(appliedFilters) || status !== "all" || searchInput.trim() !== "";
 
   return (
-    <div class="anim-page pt-8 px-4 pb-4 max-w-[1400px] mx-auto space-y-4">
+    <Page>
       <div class="flex items-end justify-between">
         <div>
           <h2 class="text-xl font-semibold">Runs</h2>
@@ -428,7 +429,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
           </div>
         </div>
       </div>
-    </div>
+    </Page>
   );
 }
 

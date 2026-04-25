@@ -3,6 +3,8 @@ import { api } from "../../api/client.ts";
 import type { WorkerDto } from "../../../server/api-types.ts";
 import { formatDuration, formatRelative } from "../../lib/format.ts";
 import { Skeleton } from "../ui/skeleton.tsx";
+import { Page } from "../ui/page.tsx";
+import { Card } from "../ui/card.tsx";
 
 interface WorkerGridProps {
   onOpenRun?: (id: string) => void;
@@ -13,27 +15,25 @@ export function WorkerGrid({ onOpenRun }: WorkerGridProps = {}) {
 
   if (loading && !data) {
     return (
-      <div class="anim-page pt-8 px-4 pb-4 max-w-7xl mx-auto space-y-4">
+      <Page>
         <h2 class="text-xl font-semibold">Workers</h2>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           {Array.from({ length: 2 }).map(() => (
-            <div class="card bg-base-300 border border-base-content/15 shadow-sm">
-              <div class="card-body p-4 space-y-2">
-                <Skeleton w="w-32" h="h-4" />
-                <Skeleton w="w-24" h="h-3" />
-                <Skeleton w="w-full" h="h-3" />
-              </div>
-            </div>
+            <Card bodyClassName="space-y-2">
+              <Skeleton w="w-32" h="h-4" />
+              <Skeleton w="w-24" h="h-3" />
+              <Skeleton w="w-full" h="h-3" />
+            </Card>
           ))}
         </div>
-      </div>
+      </Page>
     );
   }
   if (error) {
     return (
-      <div class="p-4 max-w-7xl mx-auto">
+      <Page space="none">
         <div class="alert alert-error">{error.message}</div>
-      </div>
+      </Page>
     );
   }
   const workers = data?.workers ?? [];
@@ -41,7 +41,7 @@ export function WorkerGrid({ onOpenRun }: WorkerGridProps = {}) {
   const offline = workers.length - online;
 
   return (
-    <div class="anim-page pt-8 px-4 pb-4 max-w-7xl mx-auto space-y-4">
+    <Page>
       <div class="flex items-center gap-2">
         <h2 class="text-xl font-semibold">Workers</h2>
         <span class="text-base-content/60">
@@ -51,9 +51,9 @@ export function WorkerGrid({ onOpenRun }: WorkerGridProps = {}) {
       </div>
 
       {workers.length === 0 && (
-        <div class="card bg-base-300 border border-base-content/15 shadow-sm">
-          <div class="card-body py-8 text-center text-base-content/50">No workers registered</div>
-        </div>
+        <Card bodyClassName="py-8 text-center text-base-content/50" padding="none">
+          No workers registered
+        </Card>
       )}
 
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -61,7 +61,7 @@ export function WorkerGrid({ onOpenRun }: WorkerGridProps = {}) {
           <WorkerCard worker={w} onOpenRun={onOpenRun} />
         ))}
       </div>
-    </div>
+    </Page>
   );
 }
 
@@ -77,147 +77,145 @@ function WorkerCard({
   const labelEntries = Object.entries(labels);
 
   return (
-    <div class="card bg-base-300 border border-base-content/15 shadow-sm hover:shadow-md hover:border-base-content/20 transition-shadow">
-      <div class="card-body p-4 space-y-3">
-        {/* Header — identity row.
+    <Card hover bodyClassName="space-y-3">
+      {/* Header — identity row.
             Worker ID is the primary identifier (larger, semibold). Runtime
             + version pair into a small accented badge cluster on the right,
             visually distinct from the ID. Hostname moves to a sub-line so
             it stops competing with the ID for attention. */}
-        <div class="flex items-center gap-2 flex-wrap">
-          <span class={`w-2.5 h-2.5 rounded-full shrink-0 ${online ? "bg-success" : "bg-error"}`} />
-          <span class="font-mono text-base font-semibold truncate" title={worker.workerId}>
-            {worker.workerId}
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class={`w-2.5 h-2.5 rounded-full shrink-0 ${online ? "bg-success" : "bg-error"}`} />
+        <span class="font-mono text-base font-semibold truncate" title={worker.workerId}>
+          {worker.workerId}
+        </span>
+        <div class="flex-1" />
+        {worker.runtime && (
+          <span
+            class="badge badge-sm badge-info badge-outline font-mono"
+            title={`Runtime: ${worker.runtime}`}
+          >
+            {worker.runtime}
           </span>
-          <div class="flex-1" />
-          {worker.runtime && (
-            <span
-              class="badge badge-sm badge-info badge-outline font-mono"
-              title={`Runtime: ${worker.runtime}`}
-            >
-              {worker.runtime}
-            </span>
-          )}
-          {worker.version && (
-            <span
-              class="badge badge-sm badge-ghost font-mono"
-              title={`Worker version: ${worker.version}`}
-            >
-              v{worker.version}
-            </span>
-          )}
-        </div>
-        {worker.hostname && (
-          <div class="-mt-1 flex items-center gap-1.5 text-xs text-base-content/60 font-mono">
-            <span class="opacity-60">🖥</span>
-            <span class="truncate" title={worker.hostname}>
-              {worker.hostname}
-            </span>
-          </div>
         )}
-
-        {/* Stats row */}
-        <div class="grid grid-cols-4 gap-1 text-center">
-          <Stat label="Active" value={worker.activeTasks} />
-          <Stat label="Done" value={worker.completedCount ?? worker.completedToday} />
-          <Stat
-            label="Failed"
-            value={worker.failedCount ?? 0}
-            valueClass={worker.failedCount ? "text-error" : ""}
-          />
-          <Stat label="Concurrency" value={worker.concurrency ?? "—"} />
+        {worker.version && (
+          <span
+            class="badge badge-sm badge-ghost font-mono"
+            title={`Worker version: ${worker.version}`}
+          >
+            v{worker.version}
+          </span>
+        )}
+      </div>
+      {worker.hostname && (
+        <div class="-mt-1 flex items-center gap-1.5 text-xs text-base-content/60 font-mono">
+          <span class="opacity-60">🖥</span>
+          <span class="truncate" title={worker.hostname}>
+            {worker.hostname}
+          </span>
         </div>
+      )}
 
-        {/* Categories. Each row's badges share a color so users can scan
+      {/* Stats row */}
+      <div class="grid grid-cols-4 gap-1 text-center">
+        <Stat label="Active" value={worker.activeTasks} />
+        <Stat label="Done" value={worker.completedCount ?? worker.completedToday} />
+        <Stat
+          label="Failed"
+          value={worker.failedCount ?? 0}
+          valueClass={worker.failedCount ? "text-error" : ""}
+        />
+        <Stat label="Concurrency" value={worker.concurrency ?? "—"} />
+      </div>
+
+      {/* Categories. Each row's badges share a color so users can scan
             "what does this worker offer?" at a glance instead of decoding
             uniform-grey pills. Outline variant keeps the surface dark
             (badge-soft would compete with the card body color). */}
-        <div class="space-y-1 text-xs">
-          {worker.capabilities && worker.capabilities.length > 0 && (
-            <TagRow label="Capabilities" tags={worker.capabilities} variant="primary" />
-          )}
-          {worker.workflowNames && worker.workflowNames.length > 0 && (
-            <TagRow label="Workflows" tags={worker.workflowNames} variant="success" />
-          )}
-          {worker.namespaces && worker.namespaces.length > 0 && (
-            <TagRow label="Namespaces" tags={worker.namespaces} variant="warning" />
-          )}
-          {labelEntries.length > 0 && (
-            <div class="flex items-start gap-2">
-              <span class="text-base-content/50 w-24 shrink-0">Labels</span>
-              <div class="flex flex-wrap gap-1">
-                {labelEntries.map(([k, v]) => (
-                  <span class="badge badge-sm badge-accent badge-outline font-mono">
-                    {k}={v}
-                  </span>
-                ))}
-              </div>
+      <div class="space-y-1 text-xs">
+        {worker.capabilities && worker.capabilities.length > 0 && (
+          <TagRow label="Capabilities" tags={worker.capabilities} variant="primary" />
+        )}
+        {worker.workflowNames && worker.workflowNames.length > 0 && (
+          <TagRow label="Workflows" tags={worker.workflowNames} variant="success" />
+        )}
+        {worker.namespaces && worker.namespaces.length > 0 && (
+          <TagRow label="Namespaces" tags={worker.namespaces} variant="warning" />
+        )}
+        {labelEntries.length > 0 && (
+          <div class="flex items-start gap-2">
+            <span class="text-base-content/50 w-24 shrink-0">Labels</span>
+            <div class="flex flex-wrap gap-1">
+              {labelEntries.map(([k, v]) => (
+                <span class="badge badge-sm badge-accent badge-outline font-mono">
+                  {k}={v}
+                </span>
+              ))}
             </div>
-          )}
-          <div class="flex items-start gap-2 text-base-content/50">
-            <span class="w-24 shrink-0">Since</span>
-            <span>{formatRelative(worker.startedAt)}</span>
           </div>
-          <div class="flex items-start gap-2 text-base-content/50">
-            <span class="w-24 shrink-0">Last seen</span>
-            <span>{formatRelative(worker.lastHeartbeatAt)}</span>
+        )}
+        <div class="flex items-start gap-2 text-base-content/50">
+          <span class="w-24 shrink-0">Since</span>
+          <span>{formatRelative(worker.startedAt)}</span>
+        </div>
+        <div class="flex items-start gap-2 text-base-content/50">
+          <span class="w-24 shrink-0">Last seen</span>
+          <span>{formatRelative(worker.lastHeartbeatAt)}</span>
+        </div>
+      </div>
+
+      {/* Active runs */}
+      {worker.activeRuns && worker.activeRuns.length > 0 && (
+        <div class="space-y-1">
+          <div class="text-xs font-semibold text-base-content/50 uppercase tracking-wide">
+            Active runs
+          </div>
+          <div class="space-y-0.5">
+            {worker.activeRuns.map((r) => (
+              <button
+                class="w-full flex items-center gap-2 p-1 hover:bg-base-100 rounded text-left text-xs"
+                onClick={() => onOpenRun?.(r.workflowId)}
+                disabled={!onOpenRun}
+              >
+                <span class="w-2 h-2 rounded-full bg-info animate-pulse" />
+                <span class="font-mono truncate flex-1" title={r.workflowId}>
+                  {r.workflowId}
+                </span>
+                <span class="text-base-content/60">{r.workflowName}</span>
+                <span class="text-base-content/50">{formatRelative(r.startedAt)}</span>
+              </button>
+            ))}
           </div>
         </div>
+      )}
 
-        {/* Active runs */}
-        {worker.activeRuns && worker.activeRuns.length > 0 && (
-          <div class="space-y-1">
-            <div class="text-xs font-semibold text-base-content/50 uppercase tracking-wide">
-              Active runs
-            </div>
-            <div class="space-y-0.5">
-              {worker.activeRuns.map((r) => (
-                <button
-                  class="w-full flex items-center gap-2 p-1 hover:bg-base-100 rounded text-left text-xs"
-                  onClick={() => onOpenRun?.(r.workflowId)}
-                  disabled={!onOpenRun}
-                >
-                  <span class="w-2 h-2 rounded-full bg-info animate-pulse" />
-                  <span class="font-mono truncate flex-1" title={r.workflowId}>
-                    {r.workflowId}
-                  </span>
-                  <span class="text-base-content/60">{r.workflowName}</span>
-                  <span class="text-base-content/50">{formatRelative(r.startedAt)}</span>
-                </button>
-              ))}
-            </div>
+      {/* Recent runs */}
+      {worker.recentRuns && worker.recentRuns.length > 0 && (
+        <div class="space-y-1">
+          <div class="text-xs font-semibold text-base-content/50 uppercase tracking-wide">
+            Recent
           </div>
-        )}
-
-        {/* Recent runs */}
-        {worker.recentRuns && worker.recentRuns.length > 0 && (
-          <div class="space-y-1">
-            <div class="text-xs font-semibold text-base-content/50 uppercase tracking-wide">
-              Recent
-            </div>
-            <div class="space-y-0.5 max-h-32 overflow-y-auto">
-              {worker.recentRuns.slice(0, 10).map((r) => (
-                <button
-                  class="w-full flex items-center gap-2 p-1 hover:bg-base-100 rounded text-left text-xs"
-                  onClick={() => onOpenRun?.(r.workflowId)}
-                  disabled={!onOpenRun}
-                >
-                  <span
-                    class={`w-2 h-2 rounded-full ${r.status === "completed" ? "bg-success" : "bg-error"}`}
-                  />
-                  <span class="font-mono truncate flex-1" title={r.workflowId}>
-                    {r.workflowId}
-                  </span>
-                  <span class="text-base-content/60">{r.workflowName}</span>
-                  <span class="text-base-content/50 font-mono">{formatDuration(r.durationMs)}</span>
-                  <span class="text-base-content/50">{formatRelative(r.at)}</span>
-                </button>
-              ))}
-            </div>
+          <div class="space-y-0.5 max-h-32 overflow-y-auto">
+            {worker.recentRuns.slice(0, 10).map((r) => (
+              <button
+                class="w-full flex items-center gap-2 p-1 hover:bg-base-100 rounded text-left text-xs"
+                onClick={() => onOpenRun?.(r.workflowId)}
+                disabled={!onOpenRun}
+              >
+                <span
+                  class={`w-2 h-2 rounded-full ${r.status === "completed" ? "bg-success" : "bg-error"}`}
+                />
+                <span class="font-mono truncate flex-1" title={r.workflowId}>
+                  {r.workflowId}
+                </span>
+                <span class="text-base-content/60">{r.workflowName}</span>
+                <span class="text-base-content/50 font-mono">{formatDuration(r.durationMs)}</span>
+                <span class="text-base-content/50">{formatRelative(r.at)}</span>
+              </button>
+            ))}
           </div>
-        )}
-      </div>
-    </div>
+        </div>
+      )}
+    </Card>
   );
 }
 

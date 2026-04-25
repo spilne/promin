@@ -18,6 +18,7 @@ import { CalendarTab } from "./tabs/calendar-tab.tsx";
 import { SignalModal } from "./signal-modal.tsx";
 import { formatDuration } from "../../lib/format.ts";
 import { confirm, prompt, toast } from "../../lib/dialogs.ts";
+import { Page } from "../ui/page.tsx";
 
 interface RunDetailProps {
   id: string;
@@ -205,7 +206,7 @@ export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }:
   ];
 
   return (
-    <div class="anim-page pt-8 px-4 pb-4 max-w-[1400px] mx-auto space-y-4">
+    <Page>
       <div class="flex items-center gap-3 flex-wrap">
         <button class="btn btn-sm btn-ghost" onClick={onBack}>
           ← Runs
@@ -323,13 +324,13 @@ export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }:
           onSent={() => setSignalOpen(false)}
         />
       )}
-    </div>
+    </Page>
   );
 }
 
 function RunDetailSkeleton({ onBack }: { onBack: () => void }) {
   return (
-    <div class="anim-page pt-8 px-4 pb-4 max-w-[1400px] mx-auto space-y-4">
+    <Page>
       <div class="flex items-center gap-3">
         <button class="btn btn-sm btn-ghost" onClick={onBack}>
           ← Runs
@@ -365,7 +366,7 @@ function RunDetailSkeleton({ onBack }: { onBack: () => void }) {
           </div>
         </div>
       </div>
-    </div>
+    </Page>
   );
 }
 

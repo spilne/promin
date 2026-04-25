@@ -8,6 +8,7 @@ import { confirm, toast } from "../../lib/dialogs.ts";
 import { CreateScheduleModal } from "./create-schedule-modal.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { Pagination } from "../ui/pagination.tsx";
+import { Page } from "../ui/page.tsx";
 
 const PAGE_SIZE = 20;
 type StatusFilter = "all" | "enabled" | "paused";
@@ -86,7 +87,7 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
 
   if (loading && !data) {
     return (
-      <div class="anim-page pt-8 px-4 pb-4 max-w-7xl mx-auto space-y-4">
+      <Page>
         <div>
           <h2 class="text-xl font-semibold">Schedules</h2>
           <p class="text-xs text-base-content/50">Loading…</p>
@@ -111,14 +112,14 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
             </tbody>
           </table>
         </div>
-      </div>
+      </Page>
     );
   }
   if (error) {
     return (
-      <div class="anim-page pt-8 px-4 pb-4 max-w-7xl mx-auto">
+      <Page space="none">
         <div class="alert alert-error">{error.message}</div>
-      </div>
+      </Page>
     );
   }
 
@@ -153,7 +154,7 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
   };
 
   return (
-    <div class="anim-page pt-8 px-4 pb-4 max-w-7xl mx-auto space-y-4">
+    <Page>
       <div class="flex items-end justify-between">
         <div>
           <h2 class="text-xl font-semibold">Schedules</h2>
@@ -365,7 +366,7 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
           }}
         />
       )}
-    </div>
+    </Page>
   );
 }
 

@@ -70,6 +70,19 @@
   .anim-fade-in {
     animation: fade-in 140ms cubic-bezier(0.2, 0.7, 0.2, 1);
   }
+
+  /* Card surface — lighter than DaisyUI's `bg-base-300` so cards pop
+     against the page bg without bumping into either of the inner-tile
+     surface colors (base-100 / base-200). DaisyUI doesn't ship a
+     base-400; mix base-300 with a few percent white in OKLCH so it
+     respects the active theme. Hover variant `.surface-card-hover`
+     is applied alongside for the brightening on pointer-over. */
+  .surface-card {
+    background-color: color-mix(in oklch, var(--color-base-300) 88%, white 12%);
+  }
+  .surface-card-hover:hover {
+    background-color: color-mix(in oklch, var(--color-base-300) 80%, white 20%);
+  }
   @keyframes fade-in {
     from {
       opacity: 0;

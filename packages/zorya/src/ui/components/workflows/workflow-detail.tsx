@@ -20,6 +20,7 @@ import { Skeleton } from "../ui/skeleton.tsx";
 import { TriggerModal } from "./trigger-modal.tsx";
 import { HistoryChart } from "./history-chart.tsx";
 import { STEP_TYPE_ICON, formatDuration, formatRelative } from "../../lib/format.ts";
+import { Page } from "../ui/page.tsx";
 
 interface WorkflowDetailProps {
   name: string;
@@ -75,7 +76,7 @@ export function WorkflowDetail({ name, onBack, onOpenRun }: WorkflowDetailProps)
   const sparkline = runsList?.runs.map((r) => ({ status: r.status, createdAt: r.createdAt })) ?? [];
 
   return (
-    <div class="anim-page pt-8 px-4 pb-4 max-w-[1400px] mx-auto space-y-4">
+    <Page>
       {/* Header */}
       <div class="flex items-center gap-3 flex-wrap">
         <button class="btn btn-sm btn-ghost" onClick={onBack}>
@@ -159,7 +160,7 @@ export function WorkflowDetail({ name, onBack, onOpenRun }: WorkflowDetailProps)
           }}
         />
       )}
-    </div>
+    </Page>
   );
 }
 
@@ -209,7 +210,7 @@ function RecentRunsCard({
 
 function WorkflowDetailSkeleton({ onBack }: { onBack: () => void }) {
   return (
-    <div class="anim-page pt-8 px-4 pb-4 max-w-[1400px] mx-auto space-y-4">
+    <Page>
       <div class="flex items-center gap-3">
         <button class="btn btn-sm btn-ghost" onClick={onBack}>
           ← Workflows
@@ -233,7 +234,7 @@ function WorkflowDetailSkeleton({ onBack }: { onBack: () => void }) {
           </div>
         </div>
       </div>
-    </div>
+    </Page>
   );
 }
 
