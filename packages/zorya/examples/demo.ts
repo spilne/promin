@@ -152,6 +152,13 @@ function inputFor(name: string): unknown {
         requestId: Math.floor(Math.random() * 10_000),
         requester: `user-${Math.floor(Math.random() * 100)}`,
       };
+    case "research":
+      return {
+        topic: ["durable-execution", "distributed-systems", "saga-patterns", "event-sourcing"][
+          Math.floor(Math.random() * 4)
+        ],
+        sourceCount: 3 + Math.floor(Math.random() * 3),
+      };
     default:
       return {};
   }
@@ -283,6 +290,13 @@ async function seedSchedules() {
     intervalMs: 75_000,
     enabled: true,
     metadata: { workflowName: "approval-flow" },
+  });
+  await schedulerStorage.upsertSchedule({
+    id: "research-every-90s",
+    name: "Research (journaled multi-activity) every 90s",
+    intervalMs: 90_000,
+    enabled: true,
+    metadata: { workflowName: "research", namespace: "tenant-b" },
   });
   await schedulerStorage.upsertSchedule({
     id: "weekly-payment-audit",
