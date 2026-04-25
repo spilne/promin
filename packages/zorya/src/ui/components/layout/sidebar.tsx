@@ -1,4 +1,5 @@
 import { prompt } from "../../lib/dialogs.ts";
+import { NamespaceSwitcher } from "./namespace-switcher.tsx";
 
 interface SidebarProps {
   route: string;
@@ -32,11 +33,13 @@ const SECTIONS: Array<{ title?: string; items: NavItem[] }> = [
 
 export function Sidebar({ route, onNavigate }: SidebarProps) {
   return (
-    <aside class="w-52 shrink-0 border-r border-base-content/10 bg-base-300 flex flex-col">
+    <aside class="w-56 shrink-0 border-r border-base-content/10 bg-base-300 flex flex-col">
       <div class="px-4 py-4 flex items-center gap-2 border-b border-base-content/10">
         <span class="text-primary text-xl">⚡</span>
         <span class="font-semibold tracking-tight text-lg">Zorya</span>
       </div>
+
+      <NamespaceSwitcher />
 
       <nav class="flex-1 py-3 space-y-4 overflow-y-auto">
         {SECTIONS.map((section) => (

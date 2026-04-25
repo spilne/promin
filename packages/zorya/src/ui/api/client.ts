@@ -126,8 +126,13 @@ export const api = {
   listWorkflowNames(): Promise<{ names: string[]; types?: string[]; namespaces?: string[] }> {
     return req(`/api/workflows`);
   },
-  listSchedules(): Promise<SchedulesResponse & { configured?: boolean }> {
-    return req(`/api/schedules`);
+  listSchedules(
+    params: { namespace?: string } = {},
+  ): Promise<SchedulesResponse & { configured?: boolean }> {
+    const qp = new URLSearchParams();
+    if (params.namespace) qp.set("namespace", params.namespace);
+    const qs = qp.toString();
+    return req(`/api/schedules${qs ? `?${qs}` : ""}`);
   },
   createSchedule(body: {
     id: string;

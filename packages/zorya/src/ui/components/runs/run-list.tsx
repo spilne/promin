@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
+import { useNamespace } from "../../hooks/use-namespace.ts";
 import { api } from "../../api/client.ts";
 import type { WorkflowStatus } from "@promin/workflow";
 import type { RunListQuery } from "../../../server/api-types.ts";
@@ -41,7 +42,6 @@ function isWorkflowStatus(s: string): s is WorkflowStatus {
 export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
   const initialName = queryParams?.get("name") ?? "";
   const initialType = queryParams?.get("type") ?? "";
-  const initialNamespace = queryParams?.get("namespace") ?? "";
   const initialStatusRaw = queryParams?.get("status") ?? "all";
   const initialStatus: WorkflowStatus | "all" = isWorkflowStatus(initialStatusRaw)
     ? initialStatusRaw
@@ -52,11 +52,13 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
 
   const [name, setName] = useState(initialName);
   const [type, setType] = useState(initialType);
-  const [namespace, setNamespace] = useState(initialNamespace);
   const [status, setStatus] = useState<WorkflowStatus | "all">(initialStatus);
   const [version, setVersion] = useState(initialVersion);
   const [page, setPage] = useState(initialPage);
   const [meta, setMeta] = useState<NamesAndTypes>({ names: [], types: [], namespaces: [] });
+  // Namespace is a global scope set via the sidebar switcher. Pages observe
+  // it and include in their API fetches.
+  const [namespace] = useNamespace();
   const [sparklines, setSparklines] = useState<SparklinesResponse>({});
 
   useEffect(() => {
@@ -97,21 +99,22 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
     }
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, type, namespace, status, version]);
+  }, [name, type, status, version, namespace]);
 
   // Sync local state back to URL so filters survive refresh / share links.
+  // Namespace is NOT on the URL — it lives in the global sidebar switcher
+  // (localStorage-backed) so it persists across pages and refreshes.
   useEffect(() => {
     if (!onQueryChange) return;
     const qp = new URLSearchParams();
     if (name) qp.set("name", name);
     if (type) qp.set("type", type);
-    if (namespace) qp.set("namespace", namespace);
     if (status !== "all") qp.set("status", status);
     if (version) qp.set("version", version);
     if (page > 1) qp.set("page", String(page));
     onQueryChange(qp);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, type, namespace, status, version, page]);
+  }, [name, type, status, version, page]);
 
   const query: RunListQuery = {
     name: name || undefined,
@@ -182,31 +185,18 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
             options={[{ value: "", label: "All types" }, ...meta.types.map((t) => ({ value: t }))]}
           />
         )}
-        {meta.namespaces.length > 0 && (
-          <Combobox
-            class="w-40"
-            value={namespace}
-            onChange={setNamespace}
-            placeholder="All namespaces"
-            options={[
-              { value: "", label: "All namespaces" },
-              ...meta.namespaces.map((n) => ({ value: n })),
-            ]}
-          />
-        )}
         <input
           class="input input-bordered input-sm w-28 font-mono"
           placeholder="version"
           value={version}
           onInput={(e) => setVersion((e.target as HTMLInputElement).value)}
         />
-        {(name || type || namespace || status !== "all" || version) && (
+        {(name || type || status !== "all" || version) && (
           <button
             class="btn btn-sm btn-ghost"
             onClick={() => {
               setName("");
               setType("");
-              setNamespace("");
               setStatus("all");
               setVersion("");
             }}

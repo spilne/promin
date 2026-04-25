@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
+import { useNamespace } from "../../hooks/use-namespace.ts";
 import { api } from "../../api/client.ts";
 import type { ScheduleDto } from "../../../server/routes/schedules.ts";
 import { formatCountdown, formatDuration, formatRelative } from "../../lib/format.ts";
@@ -23,7 +24,12 @@ interface ScheduleListProps {
 export function ScheduleList({ onNavigate }: ScheduleListProps) {
   const [showCreate, setShowCreate] = useState(false);
   const [editing, setEditing] = useState<ScheduleDto | undefined>(undefined);
-  const { data, loading, error, refresh } = useFetch(() => api.listSchedules(), [], 10_000);
+  const [namespace] = useNamespace();
+  const { data, loading, error, refresh } = useFetch(
+    () => api.listSchedules({ namespace: namespace || undefined }),
+    [namespace],
+    10_000,
+  );
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [page, setPage] = useState(1);
