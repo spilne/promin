@@ -1349,7 +1349,17 @@ export async function executeWorkflowDag(
         }),
       );
 
-      const { data, error } = await pipeline.runSafe();
+      // `catchAll: true` converts Effect defects (including rejections
+      // from `Pipeline.fromPromise` → `Effect.promise`) into typed errors
+      // that runSafe returns through the `error` channel. Without it, any
+      // user step that throws synchronously — common with `.stepAsync()`
+      // or user code that builds its own `Pipeline.fromPromise(...)` —
+      // escapes `runSafe` unobserved, skips the `saveStepFailure` path
+      // below, and leaves the workflow stuck in `pending`. See
+      // promin-4ace. The extra `catchAll` changes what classes of error
+      // reach `batchError` but not what the downstream code does with it:
+      // the fallback branch already handles arbitrary Error instances.
+      const { data, error } = await pipeline.runSafe({ catchAll: true });
       batchResults = data as LocalStepResult[] | null;
       batchError = error ?? null;
     }
