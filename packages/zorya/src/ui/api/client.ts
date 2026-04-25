@@ -12,6 +12,7 @@ import type {
   AttemptsResponse,
   RunHistoryResponse,
   ChildrenResponse,
+  StepJournalResponse,
 } from "../../server/routes/run-extras.ts";
 import type {
   GridResponse,
@@ -102,6 +103,9 @@ export const api = {
   },
   getRunChildren(id: string): Promise<ChildrenResponse> {
     return req(`/api/runs/${encodeURIComponent(id)}/children`);
+  },
+  getRunStepJournal(id: string, stepName: string): Promise<StepJournalResponse> {
+    return req(`/api/runs/${encodeURIComponent(id)}/journal/${encodeURIComponent(stepName)}`);
   },
   markRunSuccess(id: string): Promise<{ ok: boolean }> {
     return req(`/api/runs/${encodeURIComponent(id)}/mark-success`, { method: "POST" });

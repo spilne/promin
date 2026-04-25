@@ -9,8 +9,9 @@ import type {
   SignalState,
   StepAttemptRecord,
   WorkflowRunSummary,
+  JournalEntry,
 } from "@promin/workflow";
-import { isStepAttemptStorage } from "@promin/workflow";
+import { isStepAttemptStorage, isActivityJournalStorage } from "@promin/workflow";
 import { json, jsonError } from "../router.ts";
 import { runToSummaryDto } from "../serialize.ts";
 import type { RunSummaryDto } from "../api-types.ts";
@@ -67,6 +68,27 @@ export interface RunHistoryResponse {
 
 export interface ChildrenResponse {
   children: RunSummaryDto[];
+}
+
+export interface JournalEntryDto {
+  activityIndex: number;
+  branchPath: string;
+  activityName: string;
+  stepType: "activity" | "sleep" | "signal" | "compensation" | "child";
+  phase: "pending" | "completed";
+  payloadHash?: string;
+  /** Tagged exit payload — `Success.value` is whatever the activity returned, `Failure.error` is the message string. */
+  exit?: { tag: "Success"; value: unknown } | { tag: "Failure"; error: string };
+  /** ISO timestamp — present on `sleep` entries. */
+  wakeAt?: string;
+  /** ISO timestamp. */
+  createdAt: string;
+}
+
+export interface StepJournalResponse {
+  /** False when the storage backend doesn't implement ActivityJournalStorage. */
+  supported: boolean;
+  entries: JournalEntryDto[];
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +177,47 @@ export function getRunChildren(storage: WorkflowStorage) {
     const rows = await storage.listWorkflows({ parentId: id, limit: 200 });
     const response: ChildrenResponse = { children: rows.map(runToSummaryDto) };
     return json(200, response);
+  };
+}
+
+/**
+ * Journal entries for one journaled step. The DAG view + workflow steps
+ * collapse a `.journaled()` block into a single node, but the run's
+ * actual execution had multiple `ctx.activity` / `ctx.sleep` checkpoints
+ * — this endpoint surfaces them so the run-detail UI can list each one
+ * with its result. Degrades gracefully when the storage backend doesn't
+ * implement ActivityJournalStorage (returns supported=false).
+ */
+export function getRunStepJournal(storage: WorkflowStorage) {
+  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
+    const id = params.id;
+    const stepName = params.stepName;
+    if (!id) return jsonError(400, "missing_id");
+    if (!stepName) return jsonError(400, "missing_step_name");
+    if (!isActivityJournalStorage(storage)) {
+      const response: StepJournalResponse = { supported: false, entries: [] };
+      return json(200, response);
+    }
+    const entries = await storage.loadJournal(id, stepName);
+    const response: StepJournalResponse = {
+      supported: true,
+      entries: entries.map(journalEntryToDto),
+    };
+    return json(200, response);
+  };
+}
+
+function journalEntryToDto(e: JournalEntry): JournalEntryDto {
+  return {
+    activityIndex: e.activityIndex,
+    branchPath: e.branchPath,
+    activityName: e.activityName,
+    stepType: e.stepType ?? "activity",
+    phase: e.phase ?? "completed",
+    payloadHash: e.payloadHash,
+    exit: e.exit,
+    wakeAt: e.wakeAt?.toISOString(),
+    createdAt: e.createdAt.toISOString(),
   };
 }
 

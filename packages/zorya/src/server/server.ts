@@ -69,6 +69,7 @@ import {
   getRunChildren,
   getRunHistory,
   getRunSignals,
+  getRunStepJournal,
   markRunFailed,
   markRunSuccess,
   rerunRun,
@@ -225,6 +226,7 @@ export class ZoryaServer {
       .get("/api/runs/:id/attempts", getRunAttempts(config.storage))
       .get("/api/runs/:id/history", getRunHistory(config.storage))
       .get("/api/runs/:id/children", getRunChildren(config.storage))
+      .get("/api/runs/:id/journal/:stepName", getRunStepJournal(config.storage))
       .post("/api/runs/:id/mark-success", markRunSuccess(config.storage))
       .post("/api/runs/:id/mark-failed", markRunFailed(config.storage))
       .post("/api/runs/:id/rerun", rerunRun(config.storage, config.rerun))

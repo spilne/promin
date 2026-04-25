@@ -1,6 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
 import type { StepDto, StepTaskDto } from "../../../../server/api-types.ts";
-import type { AttemptDto } from "../../../../server/routes/run-extras.ts";
+import type { AttemptDto, JournalEntryDto } from "../../../../server/routes/run-extras.ts";
 import { api } from "../../../api/client.ts";
 import { DataList } from "../../ui/data-list.tsx";
 import { Section } from "../../ui/section.tsx";
@@ -100,6 +100,117 @@ export function StepTab({ runId, step }: StepTabProps) {
       {step.tasks && step.tasks.length > 0 && <TasksSection tasks={step.tasks} />}
 
       {!isPlanned && <AttemptsSection runId={runId} stepName={step.stepName} />}
+      {/* Journal entries — only renders when there are any. Workflow-level
+          StepType doesn't expose a "journal" kind, so we can't gate on
+          that; the call is cheap and the component returns null when
+          there's nothing to show. */}
+      {!isPlanned && <JournalSection runId={runId} stepName={step.stepName} />}
+    </div>
+  );
+}
+
+/**
+ * Renders the activity-journal entries for a `.journaled()` step. The
+ * outer step shows up as a single node in the DAG / row in the timeline,
+ * but its real execution is the chain of `ctx.activity` / `ctx.sleep` /
+ * `ctx.signal` checkpoints persisted in the journal — listing them here
+ * is the only way to see what actually ran.
+ */
+function JournalSection({ runId, stepName }: { runId: string; stepName: string }) {
+  const [data, setData] = useState<{ supported: boolean; entries: JournalEntryDto[] } | undefined>(
+    undefined,
+  );
+  const [error, setError] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getRunStepJournal(runId, stepName)
+      .then((r) => !cancelled && setData(r))
+      .catch((e) => !cancelled && setError(String(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [runId, stepName]);
+
+  if (error) {
+    return (
+      <Section title="Journal">
+        <div class="alert alert-error text-sm">{error}</div>
+      </Section>
+    );
+  }
+  // Loading: render nothing rather than a flashing placeholder; most steps
+  // aren't journaled and would never show entries anyway, so a loading
+  // line for every step would be noise.
+  if (!data) return null;
+  // Hide the section entirely when the backend doesn't support journals
+  // OR there are no entries — only journaled steps surface this section,
+  // and only after they've actually run.
+  if (!data.supported || data.entries.length === 0) return null;
+
+  return (
+    <Section title={`Journal (${data.entries.length})`}>
+      <div class="space-y-1">
+        {data.entries.map((e) => (
+          <JournalRow entry={e} />
+        ))}
+      </div>
+    </Section>
+  );
+}
+
+function JournalRow({ entry }: { entry: JournalEntryDto }) {
+  const isFailure = entry.exit?.tag === "Failure";
+  const stepTypeLabel =
+    entry.stepType === "sleep"
+      ? "💤 sleep"
+      : entry.stepType === "signal"
+        ? "📡 signal"
+        : entry.stepType === "compensation"
+          ? "↩ comp"
+          : entry.stepType === "child"
+            ? "↗ child"
+            : "● activity";
+  const phaseClass =
+    entry.phase === "pending" ? "badge-warning" : isFailure ? "badge-error" : "badge-success";
+  return (
+    <div class={`rounded p-2 text-sm ${isFailure ? "bg-error/10" : "bg-base-200"}`}>
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="font-mono text-xs text-base-content/50">#{entry.activityIndex}</span>
+        {entry.branchPath && (
+          <span class="badge badge-xs badge-ghost font-mono">br:{entry.branchPath}</span>
+        )}
+        <span class="text-xs text-base-content/60">{stepTypeLabel}</span>
+        <span class="font-mono text-sm">{entry.activityName}</span>
+        <span class={`badge badge-sm ${phaseClass}`}>
+          {entry.phase}
+          {isFailure ? " · failed" : ""}
+        </span>
+        {entry.payloadHash && (
+          <span
+            class="badge badge-xs badge-ghost font-mono"
+            title={`Payload fingerprint ${entry.payloadHash}`}
+          >
+            #{entry.payloadHash.slice(0, 8)}
+          </span>
+        )}
+        {entry.wakeAt && (
+          <span class="text-xs text-base-content/60">wake {formatRelative(entry.wakeAt)}</span>
+        )}
+        <div class="flex-1" />
+        <span class="text-xs text-base-content/50">{formatRelative(entry.createdAt)}</span>
+      </div>
+      {entry.exit?.tag === "Success" &&
+        entry.exit.value !== undefined &&
+        entry.exit.value !== null && (
+          <div class="mt-1">
+            <JsonBlock value={entry.exit.value} maxH="max-h-32" />
+          </div>
+        )}
+      {entry.exit?.tag === "Failure" && (
+        <div class="mt-1 text-xs text-error break-words">{entry.exit.error}</div>
+      )}
     </div>
   );
 }
