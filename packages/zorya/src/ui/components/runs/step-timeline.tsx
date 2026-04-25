@@ -53,6 +53,11 @@ export function StepTimeline({ run, selectedStep, onSelectStep }: StepTimelinePr
   const tree = buildTree(run.steps);
   const visibleRows = flatten(tree, collapsed);
 
+  // Piecewise time axis: ranges where only wait/signal steps are active get
+  // compressed so a 10-day approval pause doesn't crush the actual work
+  // bars to a single pixel. Returns absolute-real-ms → display-ms mapping.
+  const axis = buildTimeAxis(run.steps, origin, endMs);
+
   const toggle = (name: string) => {
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -73,7 +78,11 @@ export function StepTimeline({ run, selectedStep, onSelectStep }: StepTimelinePr
     );
   }
 
-  const ticks = buildTicks(totalMs);
+  // Build ticks against the compressed axis so labels in still-natural
+  // regions stay readable; ticks that would land in a compressed region get
+  // filtered out (their labels would overlap the squashed segment anyway).
+  const ticks = buildAxisTicks(axis);
+  const hasCompression = axis.segments.some((s) => s.compressed);
 
   return (
     <div class="card bg-base-100 shadow">
@@ -84,26 +93,54 @@ export function StepTimeline({ run, selectedStep, onSelectStep }: StepTimelinePr
           <span class="text-sm text-base-content/40">
             · {run.steps.length} {run.steps.length === 1 ? "step" : "steps"}
           </span>
+          {hasCompression && (
+            <span
+              class="text-xs text-warning/80 font-medium"
+              title="Idle wait/sleep ranges have been collapsed to keep work steps readable. Bar widths are not to scale across the breaks."
+            >
+              · time-compressed
+            </span>
+          )}
           <div class="flex-1" />
           <Legend />
         </div>
 
-        {/* Column header + time axis */}
-        <div class="flex items-center gap-2 text-xs text-base-content/50 border-b border-base-content/10 pb-1">
-          <div class="w-72 shrink-0">STEP</div>
-          <div class="w-20 shrink-0 text-right pr-2">DURATION</div>
+        {/* Column header + time axis. STEP / DURATION are horizontally
+            centered so they align with the body content (which uses an
+            indent + flex layout that's not strictly left-justified). The
+            extra bottom padding gives breathing room before the first row. */}
+        <div class="flex items-center gap-2 text-xs text-base-content/50 border-b border-base-content/10 pb-3">
+          <div class="w-72 shrink-0 text-center">STEP</div>
+          <div class="w-20 shrink-0 text-center">DURATION</div>
           <div class="relative flex-1 h-5">
             {ticks.map((t) => (
-              <div class="absolute top-0 h-full" style={{ left: `${(t / totalMs) * 100}%` }}>
+              <div
+                class="absolute top-0 h-full"
+                style={{ left: `${(t.displayMs / axis.totalDisplay) * 100}%` }}
+              >
                 <div class="w-px h-2 bg-base-content/20" />
-                <div class="-translate-x-1/2 mt-0.5">{formatDuration(t)}</div>
+                <div class="-translate-x-1/2 mt-0.5">{formatDuration(t.realMs)}</div>
               </div>
             ))}
+            {/* Visual zigzag at each compression boundary so users can see
+                where time was skipped. */}
+            {axis.segments
+              .filter((s) => s.compressed)
+              .map((s) => (
+                <div
+                  class="absolute top-0 h-full bg-warning/10 border-x border-dashed border-warning/40"
+                  style={{
+                    left: `${(s.displayStart / axis.totalDisplay) * 100}%`,
+                    width: `${((s.displayEnd - s.displayStart) / axis.totalDisplay) * 100}%`,
+                  }}
+                  title={`Compressed range — ${formatDuration(s.realEnd - s.realStart)} of idle time`}
+                />
+              ))}
           </div>
         </div>
 
         {/* Rows */}
-        <div class="space-y-0.5">
+        <div class="space-y-0.5 pt-1">
           {visibleRows.map((row) => {
             const step = byName.get(row.name);
             if (!step) return null;
@@ -115,7 +152,7 @@ export function StepTimeline({ run, selectedStep, onSelectStep }: StepTimelinePr
                 isCollapsed={collapsed.has(row.name)}
                 onToggle={() => toggle(row.name)}
                 origin={origin}
-                totalMs={totalMs}
+                axis={axis}
                 isSelected={selectedStep === row.name}
                 onSelect={() => onSelectStep?.(selectedStep === row.name ? undefined : row.name)}
               />
@@ -142,7 +179,7 @@ interface StepRowProps {
   isCollapsed: boolean;
   onToggle: () => void;
   origin: number;
-  totalMs: number;
+  axis: TimeAxis;
   isSelected: boolean;
   onSelect: () => void;
 }
@@ -154,17 +191,19 @@ function StepRow({
   isCollapsed,
   onToggle,
   origin,
-  totalMs,
+  axis,
   isSelected,
   onSelect,
 }: StepRowProps) {
-  const start = step.startedAt ? toMs(step.startedAt) - origin : 0;
-  // Prefer startedAt + durationMs (actual execution window) over completedAt
-  // (persistence timestamp, which can be identical for batch-saved steps).
-  const end = stepEndMs(step, origin);
-  const width = Math.max(2, end - start);
-  const leftPct = (Math.max(0, start) / totalMs) * 100;
-  const widthPct = Math.max(0.5, (width / totalMs) * 100);
+  // Map absolute step start/end through the (possibly compressed) axis.
+  // Bars in compressed segments naturally shrink without us doing any
+  // per-step special-casing here.
+  const startAbs = step.startedAt ? toMs(step.startedAt) : origin;
+  const endAbs = stepEndAbs(step, origin);
+  const startDisplay = axis.realToDisplay(startAbs);
+  const endDisplay = axis.realToDisplay(endAbs);
+  const leftPct = (startDisplay / axis.totalDisplay) * 100;
+  const widthPct = Math.max(0.5, ((endDisplay - startDisplay) / axis.totalDisplay) * 100);
   const renderStatus = effectiveStepStatus(step);
   const v = STEP_STATUS_VISUAL[renderStatus];
   const isHatched = step.status === "sleeping" || step.status === "waiting_for_signal";
@@ -327,17 +366,20 @@ function toMs(iso: string): number {
   return new Date(iso).getTime();
 }
 
-function stepEndMs(step: StepDto, origin: number): number {
-  // Actual execution end = startedAt + durationMs. Fall back to completedAt
-  // or "now" (for still-running steps) when duration isn't known.
+/**
+ * Absolute-timestamp version of `stepEndMs`. Bar-position math now goes
+ * through `axis.realToDisplay`, which expects absolute ms — keeping the
+ * relative variant around for legacy callers would be a footgun.
+ */
+function stepEndAbs(step: StepDto, origin: number): number {
   if (step.startedAt && step.durationMs !== undefined) {
-    return toMs(step.startedAt) + step.durationMs - origin;
+    return toMs(step.startedAt) + step.durationMs;
   }
-  if (step.completedAt) return toMs(step.completedAt) - origin;
+  if (step.completedAt) return toMs(step.completedAt);
   if (step.status === "pending") {
-    return step.startedAt ? toMs(step.startedAt) - origin : 0;
+    return step.startedAt ? toMs(step.startedAt) : origin;
   }
-  return Date.now() - origin;
+  return Date.now();
 }
 
 function sortByStart(a: StepDto, b: StepDto): number {
@@ -346,14 +388,159 @@ function sortByStart(a: StepDto, b: StepDto): number {
   return ax - bx;
 }
 
-function buildTicks(totalMs: number): number[] {
+// ---------------------------------------------------------------------------
+// Piecewise time axis — keeps wait/sleep idle ranges from crushing the
+// timeline.
+//
+// Strategy:
+//   1. Sweep step start/end events to find ranges where ONLY wait-class
+//      steps (sleeping / waiting_for_signal) are active. Those ranges are
+//      candidates for compression.
+//   2. Compress only when the candidate range is at least
+//      COMPRESS_MIN_REAL_MS long — short sleeps don't need to be hidden.
+//   3. Each compressed range gets a fixed display slice
+//      (COMPRESS_DISPLAY_FRACTION × naturally-displayed total), so an idle
+//      week and an idle minute take roughly the same on-screen width while
+//      the actual work bars stay 1:1.
+//
+// The returned `realToDisplay` mapping is piecewise linear; bars in
+// compressed segments naturally shrink without per-step special-casing.
+// ---------------------------------------------------------------------------
+
+const COMPRESS_MIN_REAL_MS = 60_000; // skip compression below 1 minute idle
+const COMPRESS_DISPLAY_FRACTION = 0.07; // each compressed seg ≈ 7% of natural total
+
+interface AxisSegment {
+  realStart: number;
+  realEnd: number;
+  displayStart: number;
+  displayEnd: number;
+  compressed: boolean;
+}
+
+interface TimeAxis {
+  segments: AxisSegment[];
+  totalDisplay: number;
+  realToDisplay(t: number): number;
+}
+
+function buildTimeAxis(steps: StepDto[], origin: number, endMs: number): TimeAxis {
+  const totalReal = Math.max(1, endMs - origin);
+
+  // Event sweep: track active counts of work vs wait steps so we can spot
+  // "all-idle" stretches even when concurrent waits overlap.
+  type Delta = { wait: number; work: number };
+  const events: Array<{ t: number; delta: Delta }> = [];
+  for (const s of steps) {
+    if (!s.startedAt) continue;
+    const start = toMs(s.startedAt);
+    const end = stepEndAbs(s, origin);
+    const isWait = s.status === "sleeping" || s.status === "waiting_for_signal";
+    events.push({ t: start, delta: { wait: isWait ? 1 : 0, work: isWait ? 0 : 1 } });
+    events.push({ t: end, delta: { wait: isWait ? -1 : 0, work: isWait ? 0 : -1 } });
+  }
+  events.sort((a, b) => a.t - b.t);
+
+  const raw: Array<{ realStart: number; realEnd: number; compressed: boolean }> = [];
+  let workActive = 0;
+  let waitActive = 0;
+  let cursor = origin;
+  const isIdle = () => workActive === 0 && waitActive > 0;
+
+  for (const e of events) {
+    if (e.t > cursor) {
+      raw.push({
+        realStart: cursor,
+        realEnd: e.t,
+        compressed: isIdle() && e.t - cursor >= COMPRESS_MIN_REAL_MS,
+      });
+      cursor = e.t;
+    }
+    waitActive += e.delta.wait;
+    workActive += e.delta.work;
+  }
+  if (endMs > cursor) {
+    raw.push({
+      realStart: cursor,
+      realEnd: endMs,
+      compressed: isIdle() && endMs - cursor >= COMPRESS_MIN_REAL_MS,
+    });
+  }
+
+  // Fallback for empty / single-segment cases — keep linear mapping.
+  if (raw.length === 0) {
+    raw.push({ realStart: origin, realEnd: endMs, compressed: false });
+  }
+
+  const naturalTotal = raw
+    .filter((s) => !s.compressed)
+    .reduce((acc, s) => acc + (s.realEnd - s.realStart), 0);
+  // When the whole timeline is wait (no work yet — pending approval as the
+  // first step), there's nothing to compare against; just go linear.
+  const useLinear = naturalTotal <= 0;
+  const compressedDisplay = useLinear ? 0 : Math.max(1, naturalTotal * COMPRESS_DISPLAY_FRACTION);
+
+  let displayCursor = 0;
+  const segments: AxisSegment[] = raw.map((r) => {
+    const real = r.realEnd - r.realStart;
+    const display = useLinear || !r.compressed ? real : compressedDisplay;
+    const seg: AxisSegment = {
+      realStart: r.realStart,
+      realEnd: r.realEnd,
+      displayStart: displayCursor,
+      displayEnd: displayCursor + display,
+      compressed: r.compressed && !useLinear,
+    };
+    displayCursor += display;
+    return seg;
+  });
+  const totalDisplay = displayCursor || totalReal;
+
+  function realToDisplay(t: number): number {
+    if (t <= origin) return 0;
+    if (t >= endMs) return totalDisplay;
+    for (const seg of segments) {
+      if (t <= seg.realEnd) {
+        const denom = Math.max(1, seg.realEnd - seg.realStart);
+        const frac = (t - seg.realStart) / denom;
+        return seg.displayStart + (seg.displayEnd - seg.displayStart) * frac;
+      }
+    }
+    return totalDisplay;
+  }
+
+  return { segments, totalDisplay, realToDisplay };
+}
+
+/**
+ * Build evenly-spaced ticks against the *natural* portion of the axis, then
+ * project them through `realToDisplay`. Ticks that would land inside a
+ * compressed segment are dropped — labelling the squashed range with
+ * "10d / 11d / 12d" would just visually fight the compression we just put
+ * in. The compression band itself carries an explanatory hover label.
+ */
+function buildAxisTicks(axis: TimeAxis): Array<{ realMs: number; displayMs: number }> {
+  if (axis.segments.length === 0 || axis.totalDisplay <= 0) return [];
+  const origin = axis.segments[0]!.realStart;
+  const endMs = axis.segments[axis.segments.length - 1]!.realEnd;
+  const totalMs = endMs - origin;
+  if (totalMs <= 0) return [];
+
   const target = 5;
   const rawStep = totalMs / target;
   const magnitude = Math.pow(10, Math.floor(Math.log10(Math.max(1, rawStep))));
   const normalized = rawStep / magnitude;
   const stepNice = normalized < 1.5 ? 1 : normalized < 3 ? 2 : normalized < 7 ? 5 : 10;
   const step = stepNice * magnitude;
-  const ticks: number[] = [];
-  for (let t = 0; t <= totalMs; t += step) ticks.push(t);
+
+  const ticks: Array<{ realMs: number; displayMs: number }> = [];
+  for (let t = 0; t <= totalMs; t += step) {
+    const abs = origin + t;
+    const inCompressed = axis.segments.some(
+      (s) => s.compressed && abs > s.realStart && abs < s.realEnd,
+    );
+    if (inCompressed) continue;
+    ticks.push({ realMs: t, displayMs: axis.realToDisplay(abs) });
+  }
   return ticks;
 }
