@@ -413,14 +413,16 @@ function StepRow({
               width: `${widthPct}%`,
             }}
           >
-            {/* Render the wall-clock duration inside compressed wait bars so
-                a 20-second pause and a 20-day pause stay distinguishable
-                even though both occupy the same tiny ~2.5% slice. */}
-            {waitLike && wallClockMs >= COMPRESS_MIN_REAL_MS && (
-              <span class="text-[10px] font-bold text-base-100 leading-none px-1 whitespace-nowrap">
-                {formatDuration(wallClockMs)}
-              </span>
-            )}
+            {/* Inline duration on every bar. Wait-like (compressed) bars
+                show wall-clock so a 20-second pause and a 20-day pause
+                stay distinguishable inside identical-width slivers; work
+                bars show their CPU duration. `overflow-hidden` on the
+                parent clips the text on narrow bars — the DURATION
+                column on the left + the hover tooltip carry the same
+                value, so a clipped label isn't a loss of info. */}
+            <span class="text-[10px] font-medium text-base-100 leading-none px-1 whitespace-nowrap">
+              {formatDuration(waitLike ? wallClockMs : step.durationMs)}
+            </span>
           </div>
         )}
         {retried && (
