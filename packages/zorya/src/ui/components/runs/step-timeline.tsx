@@ -212,11 +212,18 @@ function StepRow({
   const isHatched = isWaitLike(step);
   const retried = step.attempt > 1;
 
+  const metadataSummary =
+    step.metadata && Object.keys(step.metadata).length > 0
+      ? Object.entries(step.metadata)
+          .map(([k, val]) => `${k}=${typeof val === "string" ? val : JSON.stringify(val)}`)
+          .join(", ")
+      : undefined;
   const tooltip = [
     `${step.stepName} (${v.label})`,
     step.durationMs !== undefined ? `duration ${formatDuration(step.durationMs)}` : "",
     step.attempt > 1 ? `attempt ${step.attempt}` : "",
     step.startedAt ? `started ${formatRelative(step.startedAt)}` : "",
+    metadataSummary ? `metadata: ${metadataSummary}` : "",
   ]
     .filter(Boolean)
     .join(" · ");

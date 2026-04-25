@@ -18,6 +18,11 @@ export function PayloadTab({ run }: { run: RunDto }) {
           <JsonBlock value={run.error} variant="error" />
         </Section>
       )}
+      {run.metadata && Object.keys(run.metadata).length > 0 && (
+        <Section title="Metadata">
+          <JsonBlock value={run.metadata} />
+        </Section>
+      )}
     </div>
   );
 }
