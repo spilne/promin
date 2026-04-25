@@ -6,6 +6,7 @@ import { Page } from "../ui/page.tsx";
 import { Skeleton } from "../ui/skeleton.tsx";
 import { formatRelative } from "../../lib/format.ts";
 import { toast } from "../../lib/dialogs.ts";
+import { MemoryInspector } from "./memory-inspector.tsx";
 
 interface AgentDetailProps {
   id: string;
@@ -47,6 +48,7 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
   const [activeThread, setActiveThread] = useState<string | null>(() =>
     localStorage.getItem(`${ACTIVE_THREAD_KEY}:${id}`),
   );
+  const [inspectorOpen, setInspectorOpen] = useState(false);
 
   // Persist tenant + active thread.
   useEffect(() => saveTenant(tenant), [tenant]);
@@ -112,6 +114,7 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
               threadId={activeThread}
               tenant={tenant}
               onTurnComplete={refreshThreads}
+              onInspect={() => setInspectorOpen(true)}
             />
           ) : (
             <div class="card bg-base-100 shadow flex items-center justify-center text-center text-base-content/50 p-8">
@@ -120,11 +123,23 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
                 <p class="text-sm">
                   Pick a thread from the sidebar or start a new one to begin chatting.
                 </p>
+                <button class="btn btn-xs btn-ghost mt-3" onClick={() => setInspectorOpen(true)}>
+                  Inspect tenant memory →
+                </button>
               </div>
             </div>
           )}
         </div>
       </div>
+
+      {inspectorOpen && (
+        <MemoryInspector
+          namespaceId={tenant.namespaceId}
+          resourceId={tenant.resourceId || undefined}
+          threadId={activeThread ?? undefined}
+          onClose={() => setInspectorOpen(false)}
+        />
+      )}
     </Page>
   );
 }
@@ -261,11 +276,13 @@ function ChatPane({
   threadId,
   tenant,
   onTurnComplete,
+  onInspect,
 }: {
   agentId: string;
   threadId: string;
   tenant: Tenant;
   onTurnComplete: () => void;
+  onInspect: () => void;
 }) {
   const {
     data: messagesResp,
@@ -342,13 +359,22 @@ function ChatPane({
 
   return (
     <section class="card bg-base-100 shadow flex flex-col min-h-0">
-      <div class="px-3 py-2 border-b border-base-content/10 flex items-center justify-between">
+      <div class="px-3 py-2 border-b border-base-content/10 flex items-center justify-between gap-2">
         <span class="font-mono text-sm truncate" title={threadId}>
           {threadId}
         </span>
-        <button class="btn btn-xs btn-ghost" onClick={() => refreshMessages()}>
-          ↻
-        </button>
+        <div class="flex gap-1 shrink-0">
+          <button
+            class="btn btn-xs btn-ghost"
+            onClick={onInspect}
+            title="Inspect resolved system prompt + memory cascade"
+          >
+            ⌬ Inspect
+          </button>
+          <button class="btn btn-xs btn-ghost" onClick={() => refreshMessages()} title="Refresh">
+            ↻
+          </button>
+        </div>
       </div>
 
       <div ref={scrollRef} class="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-[40vh]">

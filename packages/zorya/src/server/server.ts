@@ -99,6 +99,7 @@ import {
   streamThreadMessage,
   type AgentGatewayDeps,
 } from "./routes/agents.ts";
+import { inspectMemory, type MemoryInspectorDeps } from "./routes/memory.ts";
 
 export interface ZoryaServerConfig extends AuthConfig {
   storage: WorkflowStorage;
@@ -244,6 +245,13 @@ export interface ZoryaServerConfig extends AuthConfig {
    * the routes via `agent.bind({ namespaceId, resourceId })`.
    */
   agents?: AgentGatewayDeps;
+  /**
+   * Optional memory-inspection wiring. When provided, the server mounts
+   * `GET /api/memory/inspect` — a read-only snapshot of the three-scope
+   * cascade (namespace + resource + thread) for operator debugging.
+   * Pass the same `MemoryStore` instance the agent resolver uses.
+   */
+  memoryInspector?: MemoryInspectorDeps;
   scheduling?: {
     enabled: boolean;
     /** Poll cadence in ms. Default: 1000. */
@@ -537,6 +545,10 @@ export class ZoryaServer {
         .post("/api/agents/:id/threads/:threadId", sendThreadMessage(agentDeps))
         .post("/api/agents/:id/threads/:threadId/stream", streamThreadMessage(agentDeps))
         .get("/api/agents/:id/threads/:threadId/messages", listThreadMessages(agentDeps));
+    }
+
+    if (config.memoryInspector) {
+      this.router.get("/api/memory/inspect", inspectMemory(config.memoryInspector));
     }
 
     if (config.scheduler) {

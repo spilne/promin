@@ -32,6 +32,7 @@ import type {
   ThreadInvokeResponse,
   ThreadMessagesResponse,
 } from "../../server/routes/agents.ts";
+import type { MemoryInspectResponse } from "../../server/routes/memory.ts";
 
 const BASE = ""; // served from same origin
 
@@ -351,6 +352,25 @@ export const api = {
     })();
 
     return { abort: () => ctrl.abort(), done };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Memory inspector — read-only snapshot of the three-scope cascade.
+// Lives outside the `api` object literal because it was added after the
+// agent block was sealed by the SSE helpers below; same `req` / authHeader
+// helpers used inside the literal.
+// ---------------------------------------------------------------------------
+export const memoryApi = {
+  inspect(params: {
+    namespaceId: string;
+    resourceId?: string;
+    threadId?: string;
+  }): Promise<MemoryInspectResponse> {
+    const qp = new URLSearchParams({ namespaceId: params.namespaceId });
+    if (params.resourceId) qp.set("resourceId", params.resourceId);
+    if (params.threadId) qp.set("threadId", params.threadId);
+    return req<MemoryInspectResponse>(`/api/memory/inspect?${qp}`);
   },
 };
 

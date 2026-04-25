@@ -1,0 +1,373 @@
+// ---------------------------------------------------------------------------
+// Memory inspector drawer — read-only snapshot of the three-scope cascade
+// for a given (namespaceId, resourceId?, threadId) tuple.
+//
+// Tabs:
+//   Prompt    — what the model actually sees (resolveContext output).
+//               Often the only tab the operator opens.
+//   Namespace — tenant-wide static rules + facts + episodes.
+//   Resource  — per-user static rules + facts + episodes (when resourceId set).
+//   Thread    — per-thread working memory + facts + episodes + message history.
+//
+// Backed by GET /api/memory/inspect — single round-trip per open.
+// ---------------------------------------------------------------------------
+
+import { useEffect, useState } from "preact/hooks";
+import { memoryApi } from "../../api/client.ts";
+import type {
+  EpisodicRecord,
+  Fact,
+  MemoryInspectResponse,
+  StoredMessage,
+} from "../../../server/routes/memory.ts";
+import { Skeleton } from "../ui/skeleton.tsx";
+import { JsonBlock } from "../ui/json-block.tsx";
+import { formatRelative } from "../../lib/format.ts";
+
+interface Props {
+  namespaceId: string;
+  resourceId?: string;
+  threadId?: string;
+  onClose: () => void;
+}
+
+type Tab = "prompt" | "namespace" | "resource" | "thread";
+
+export function MemoryInspector({ namespaceId, resourceId, threadId, onClose }: Props) {
+  const [data, setData] = useState<MemoryInspectResponse | undefined>(undefined);
+  const [error, setError] = useState<string | undefined>(undefined);
+  const [tab, setTab] = useState<Tab>(threadId ? "prompt" : "namespace");
+
+  useEffect(() => {
+    let cancelled = false;
+    setData(undefined);
+    setError(undefined);
+    memoryApi
+      .inspect({ namespaceId, resourceId, threadId })
+      .then((r) => !cancelled && setData(r))
+      .catch((e) => !cancelled && setError(e instanceof Error ? e.message : String(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [namespaceId, resourceId, threadId]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // Tabs the snapshot has data for. We always show namespace; resource and
+  // thread surface only when their scope is in the request.
+  const tabs: Array<{ id: Tab; label: string; show: boolean }> = [
+    { id: "prompt", label: "Prompt", show: !!threadId },
+    { id: "namespace", label: "Namespace", show: true },
+    { id: "resource", label: "Resource", show: !!resourceId },
+    { id: "thread", label: "Thread", show: !!threadId },
+  ];
+  const visibleTabs = tabs.filter((t) => t.show);
+
+  return (
+    <>
+      <div class="fixed inset-0 bg-black/40 z-30 anim-backdrop-in" onClick={onClose} aria-hidden />
+      <aside
+        class="fixed top-0 right-0 h-screen w-full max-w-2xl bg-base-100 shadow-2xl
+               z-40 flex flex-col anim-drawer-in"
+        role="dialog"
+        aria-label="Memory inspector"
+      >
+        <header class="flex items-start justify-between gap-2 p-4 border-b border-base-300">
+          <div class="min-w-0">
+            <div class="text-xs text-base-content/50 uppercase tracking-wider">
+              Memory inspector
+            </div>
+            <div class="font-mono text-sm truncate">
+              {namespaceId}
+              {resourceId && <span class="text-base-content/50"> · {resourceId}</span>}
+              {threadId && <span class="text-base-content/50"> · {threadId}</span>}
+            </div>
+          </div>
+          <button
+            class="btn btn-sm btn-ghost"
+            onClick={onClose}
+            aria-label="Close"
+            title="Close (Esc)"
+          >
+            ✕
+          </button>
+        </header>
+
+        <div class="px-4 pt-3 border-b border-base-300">
+          <div role="tablist" class="tabs tabs-bordered">
+            {visibleTabs.map((t) => (
+              <button
+                role="tab"
+                class={`tab ${tab === t.id ? "tab-active" : ""}`}
+                onClick={() => setTab(t.id)}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div class="flex-1 overflow-y-auto p-4 space-y-4">
+          {!data && !error && (
+            <>
+              <Skeleton w="w-full" h="h-4" />
+              <Skeleton w="w-3/4" h="h-4" />
+              <Skeleton w="w-1/2" h="h-4" />
+            </>
+          )}
+          {error && <div class="alert alert-error text-xs">{error}</div>}
+          {data && tab === "prompt" && <PromptTab data={data} />}
+          {data && tab === "namespace" && <NamespaceTab data={data} />}
+          {data && tab === "resource" && <ResourceTab data={data} />}
+          {data && tab === "thread" && <ThreadTab data={data} />}
+        </div>
+      </aside>
+    </>
+  );
+}
+
+function PromptTab({ data }: { data: MemoryInspectResponse }) {
+  if (!data.resolved) {
+    return (
+      <div class="text-sm text-base-content/60">
+        No thread selected — open a thread in the chat console first to see the resolved system
+        prompt.
+      </div>
+    );
+  }
+  return (
+    <section class="space-y-3">
+      <div>
+        <SectionLabel>Resolved system prompt</SectionLabel>
+        <p class="text-xs text-base-content/60 mb-2">
+          What the LLM sees after the cascade collapses (namespace → resource → thread). Trimmed
+          message tail: {data.resolved.messageCount} message
+          {data.resolved.messageCount === 1 ? "" : "s"}.
+        </p>
+        <pre class="bg-base-200 p-3 rounded text-xs whitespace-pre-wrap break-words font-mono leading-relaxed max-h-[60vh] overflow-y-auto">
+          {data.resolved.systemPrompt || <em class="opacity-60">(empty)</em>}
+        </pre>
+      </div>
+    </section>
+  );
+}
+
+function NamespaceTab({ data }: { data: MemoryInspectResponse }) {
+  const ns = data.namespace;
+  return (
+    <section class="space-y-4">
+      <ScopeHeader
+        title={`namespace: ${data.namespaceId}`}
+        row={ns.row}
+        emptyHint="Namespace row not yet created — appears after the first agent invocation in this tenant."
+      />
+      <RulesAndWorking
+        rules={ns.row?.staticRules ?? null}
+        working={ns.row?.workingMemory ?? null}
+      />
+      <FactList facts={ns.facts} scope="namespace" />
+      <EpisodeList episodes={ns.episodes} scope="namespace" />
+    </section>
+  );
+}
+
+function ResourceTab({ data }: { data: MemoryInspectResponse }) {
+  if (!data.resource) return <div class="text-sm text-base-content/60">No resource scope.</div>;
+  const r = data.resource;
+  return (
+    <section class="space-y-4">
+      <ScopeHeader
+        title={`resource: ${data.resourceId ?? "?"}`}
+        row={r.row}
+        emptyHint="Resource row not yet created — appears after the first agent invocation for this user."
+      />
+      <RulesAndWorking rules={r.row?.staticRules ?? null} working={r.row?.workingMemory ?? null} />
+      <FactList facts={r.facts} scope="resource" />
+      <EpisodeList episodes={r.episodes} scope="resource" />
+    </section>
+  );
+}
+
+function ThreadTab({ data }: { data: MemoryInspectResponse }) {
+  if (!data.thread) return <div class="text-sm text-base-content/60">No thread scope.</div>;
+  const t = data.thread;
+  return (
+    <section class="space-y-4">
+      <ScopeHeader
+        title={`thread: ${data.threadId ?? "?"}`}
+        row={t.row}
+        emptyHint="Thread row not yet created."
+      />
+      {/* Threads don't carry static rules — only working memory. */}
+      <div>
+        <SectionLabel>Working memory</SectionLabel>
+        <pre class="bg-base-200 p-2 rounded text-xs whitespace-pre-wrap break-words font-mono leading-relaxed max-h-40 overflow-y-auto">
+          {t.row?.workingMemory ?? <em class="opacity-60">(empty)</em>}
+        </pre>
+      </div>
+      <FactList facts={t.facts} scope="thread" />
+      <EpisodeList episodes={t.episodes} scope="thread" />
+      <MessageList messages={t.messages} />
+    </section>
+  );
+}
+
+function ScopeHeader({
+  title,
+  row,
+  emptyHint,
+}: {
+  title: string;
+  row: { inheritFromParent?: boolean; createdAt?: number; updatedAt?: number } | null;
+  emptyHint: string;
+}) {
+  return (
+    <div class="flex items-start justify-between gap-3">
+      <div class="font-mono text-sm">{title}</div>
+      {row ? (
+        <div class="flex flex-col items-end gap-1 text-[10px] text-base-content/60">
+          <span class="font-mono">
+            inherit: {row.inheritFromParent === false ? "false (cut)" : "true"}
+          </span>
+          {row.updatedAt !== undefined && (
+            <span>updated {formatRelative(new Date(row.updatedAt).toISOString())}</span>
+          )}
+        </div>
+      ) : (
+        <span class="text-[10px] text-base-content/50 italic max-w-[60%] text-right">
+          {emptyHint}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function RulesAndWorking({ rules, working }: { rules: string | null; working: string | null }) {
+  return (
+    <div class="grid grid-cols-1 gap-3">
+      <div>
+        <SectionLabel>Static rules</SectionLabel>
+        <pre class="bg-base-200 p-2 rounded text-xs whitespace-pre-wrap break-words font-mono leading-relaxed max-h-40 overflow-y-auto">
+          {rules ?? <em class="opacity-60">(empty)</em>}
+        </pre>
+      </div>
+      <div>
+        <SectionLabel>Working memory</SectionLabel>
+        <pre class="bg-base-200 p-2 rounded text-xs whitespace-pre-wrap break-words font-mono leading-relaxed max-h-40 overflow-y-auto">
+          {working ?? <em class="opacity-60">(empty)</em>}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+function FactList({ facts, scope }: { facts: Fact[]; scope: string }) {
+  return (
+    <div>
+      <SectionLabel>
+        Facts <span class="text-base-content/40 font-mono">[{scope}]</span>
+      </SectionLabel>
+      {facts.length === 0 ? (
+        <div class="text-xs text-base-content/40 italic">(no facts)</div>
+      ) : (
+        <ol class="space-y-1 list-decimal list-inside">
+          {facts.map((f) => (
+            <li class="text-xs leading-relaxed">
+              <span class="text-base-content/80">{f.text}</span>
+              <span class="text-[10px] text-base-content/40 ml-2 font-mono">
+                {formatRelative(new Date(f.createdAt).toISOString())}
+              </span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+function EpisodeList({ episodes, scope }: { episodes: EpisodicRecord[]; scope: string }) {
+  return (
+    <div>
+      <SectionLabel>
+        Episodes <span class="text-base-content/40 font-mono">[{scope}]</span>
+      </SectionLabel>
+      {episodes.length === 0 ? (
+        <div class="text-xs text-base-content/40 italic">(no episodes)</div>
+      ) : (
+        <ul class="space-y-2">
+          {episodes.map((e) => (
+            <li class="bg-base-200 p-2 rounded text-xs">
+              <div class="flex items-center justify-between mb-1">
+                <span class="font-mono text-[10px] text-base-content/50">
+                  salience {e.salience.toFixed(2)} ·{" "}
+                  {formatRelative(new Date(e.createdAt).toISOString())}
+                </span>
+                {e.outcome && (
+                  <span class="badge badge-xs badge-ghost truncate max-w-[40%]" title={e.outcome}>
+                    {e.outcome}
+                  </span>
+                )}
+              </div>
+              <div class="whitespace-pre-wrap leading-relaxed">{e.summary}</div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function MessageList({ messages }: { messages: StoredMessage[] }) {
+  return (
+    <div>
+      <SectionLabel>
+        Messages <span class="text-base-content/40 font-mono">[{messages.length}]</span>
+      </SectionLabel>
+      {messages.length === 0 ? (
+        <div class="text-xs text-base-content/40 italic">(empty thread)</div>
+      ) : (
+        <ul class="space-y-1">
+          {messages.map((m) => (
+            <li class="text-xs">
+              <span class="font-mono text-[10px] text-base-content/50 mr-2">#{m.seq}</span>
+              <span class="badge badge-xs badge-ghost mr-2">{m.role}</span>
+              <span class="whitespace-pre-wrap break-words">{renderMessageContent(m)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function renderMessageContent(m: StoredMessage): preact.JSX.Element | string {
+  if (m.role === "tool") return `tool result for ${m.toolCallId}: ${m.content}`;
+  if (m.role === "assistant") {
+    const text = m.content ?? "";
+    const tools = m.toolCalls ?? [];
+    if (tools.length === 0) return text;
+    return (
+      <span>
+        {text}
+        {tools.length > 0 && (
+          <span class="block mt-1">
+            <JsonBlock value={tools} maxH="max-h-32" />
+          </span>
+        )}
+      </span>
+    );
+  }
+  return m.content;
+}
+
+function SectionLabel({ children }: { children: preact.ComponentChildren }) {
+  return (
+    <div class="text-[10px] uppercase tracking-wider text-base-content/50 mb-1">{children}</div>
+  );
+}
+
+import type * as preact from "preact";

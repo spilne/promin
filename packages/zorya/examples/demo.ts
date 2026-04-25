@@ -606,6 +606,8 @@ const server = new ZoryaServer({
         tools: {},
       }),
   },
+  // Same store the resolver uses, so the inspector reads the live cascade.
+  memoryInspector: { memory: memoryStore },
   // Feeds the "Trigger workflow" form on the Workflows page with plausible
   // defaults so users can tweak fields instead of writing raw JSON.
   sampleInput: (name) => inputFor(name),
