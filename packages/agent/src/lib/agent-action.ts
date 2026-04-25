@@ -17,6 +17,7 @@ import {
   resolveTools,
   searchRelevantMemories,
 } from "./agent-shared.ts";
+import type { SessionEventBus } from "./session-logger.ts";
 
 export interface AgentInput {
   task: string;
@@ -129,6 +130,28 @@ export interface AgentActionConfig<TOutput = any> {
    * only; reconstruct full transcripts from the journaled response.
    */
   onChunk?: (delta: string) => void;
+  /**
+   * Multi-subscriber event bus. When provided, the agent emits structured
+   * events (turn / llm.call / tool.start / tool.end / token.delta /
+   * tool.progress / step_limit.hit) onto the bus as it runs. Multiple
+   * subscribers can attach via bus.subscribe() — useful for cross-process
+   * forwarders (e.g. WS relay shipping events from a Zorya worker to the
+   * dashboard) plus in-process loggers / metrics simultaneously.
+   *
+   * The legacy onChunk / onToolCall / onToolResult callbacks still fire
+   * when set; the bus is additive. Pass `new SessionEventBus()` from
+   * `@promin/agent` and subscribe to it before calling
+   * `runner.run({ workflow: agentAction({ bus, ... }), ... })`.
+   *
+   * agentAction is single-task / single-turn so all events carry turn=0.
+   *
+   * @replay
+   * The journaled body re-runs from the journal on worker restart, but
+   * activities are SKIPPED (their results come from the journal). The
+   * bus does NOT re-emit lifecycle events on replay — only the first
+   * execution emits.
+   */
+  bus?: SessionEventBus;
 }
 
 export class MaxStepsError extends Error {
@@ -182,8 +205,12 @@ export function agentAction(
 ): Workflow<AgentInput, AgentResult> {
   const maxSteps = config.maxSteps ?? 20;
 
+  const bus = config.bus;
+
   return workflow<AgentInput>({ name: config.name })
     .journaled("agent", function* (ctx, input) {
+      bus?.emit({ type: "turn.start", turn: 0, task: input.task });
+      const startMs = Date.now();
       let messages: Message[] = [
         ...(config.systemPrompt ? [{ role: "system" as const, content: config.systemPrompt }] : []),
         ...(input.messages ?? []),
@@ -243,17 +270,31 @@ export function agentAction(
           });
         }
 
-        const response = yield* ctx.activity(`think-${step}`, () =>
-          runLlmCall({
+        const response = yield* ctx.activity(`think-${step}`, async () => {
+          const llmStart = Date.now();
+          // Tee tokens to both the legacy onChunk callback (back-compat)
+          // and the bus as token.delta events (transient — never journaled).
+          const result = await runLlmCall({
             llm: config.llm,
             messages,
             tools: toolDefs.length > 0 ? toolDefs : undefined,
             rateLimiter: config.rateLimiter,
             processors: config.processors,
             processorCtx: { step, turn: 0, workflowId: ctx.workflowId },
-            onChunk: config.onChunk,
-          }),
-        );
+            onChunk: (delta) => {
+              config.onChunk?.(delta);
+              bus?.emit({ type: "token.delta", turn: 0, delta });
+            },
+          });
+          bus?.emit({
+            type: "llm.call",
+            turn: 0,
+            step,
+            durationMs: Date.now() - llmStart,
+            tokens: result.usage,
+          });
+          return result;
+        });
 
         if (response.usage) {
           totalInputTokens += response.usage.inputTokens;
@@ -275,6 +316,13 @@ export function agentAction(
               { role: "assistant" as const, content: null, toolCalls: response.toolCalls },
             ];
             yield* maybeSaveMemory(answer);
+            bus?.emit({
+              type: "turn.end",
+              turn: 0,
+              answer,
+              durationMs: Date.now() - startMs,
+              tokens: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
+            });
             return buildResult(
               answer,
               messages,
@@ -298,6 +346,13 @@ export function agentAction(
           if (decision && !decision.continue) {
             const answer = response.content ?? "";
             yield* maybeSaveMemory(answer);
+            bus?.emit({
+              type: "turn.end",
+              turn: 0,
+              answer,
+              durationMs: Date.now() - startMs,
+              tokens: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
+            });
             return buildResult(answer, messages, step + 1, totalInputTokens, totalOutputTokens);
           }
         }
@@ -309,6 +364,13 @@ export function agentAction(
         ) {
           const answer = response.content ?? "";
           yield* maybeSaveMemory(answer);
+          bus?.emit({
+            type: "turn.end",
+            turn: 0,
+            answer,
+            durationMs: Date.now() - startMs,
+            tokens: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens },
+          });
           return buildResult(answer, messages, step + 1, totalInputTokens, totalOutputTokens);
         }
 
@@ -331,11 +393,23 @@ export function agentAction(
           }
 
           if (toolDef.requireApproval && !shouldAutoApprove(config.autoApprove, call, toolDef)) {
+            bus?.emit({
+              type: "approval.requested",
+              turn: 0,
+              toolCallId: call.id,
+              toolName: call.name,
+            });
             const decision: ApprovalDecision = config.onApprovalRequired
               ? yield* ctx.activity(`approval-${call.name}-${step}-${call.id}`, () =>
                   config.onApprovalRequired!(call),
                 )
               : yield* ctx.signal<ApprovalDecision>(`approve:${call.id}`);
+            bus?.emit({
+              type: "approval.decision",
+              turn: 0,
+              toolCallId: call.id,
+              approved: decision.approved,
+            });
             if (!decision.approved) {
               toolResultMsgs.push({
                 role: "tool",
@@ -353,9 +427,33 @@ export function agentAction(
         if (toExecute.length > 0) {
           const results = yield* ctx.parallel(
             toExecute.map(({ call, toolDef }) =>
-              ctx.activity(`tool-${call.name}-${step}-${call.id}`, () =>
-                executeToolCall(call, toolDef, config.onToolResult),
-              ),
+              ctx.activity(`tool-${call.name}-${step}-${call.id}`, async () => {
+                bus?.emit({
+                  type: "tool.start",
+                  turn: 0,
+                  step,
+                  name: call.name,
+                  input: call.input,
+                });
+                const toolStart = Date.now();
+                let failed = false;
+                try {
+                  const out = await executeToolCall(call, toolDef, config.onToolResult);
+                  return out;
+                } catch (err) {
+                  failed = true;
+                  throw err;
+                } finally {
+                  bus?.emit({
+                    type: "tool.end",
+                    turn: 0,
+                    step,
+                    name: call.name,
+                    durationMs: Date.now() - toolStart,
+                    failed,
+                  });
+                }
+              }),
             ),
           );
           toolResultMsgs.push(...results);
@@ -364,6 +462,7 @@ export function agentAction(
         messages = [...messages, ...toolResultMsgs];
       }
 
+      bus?.emit({ type: "step_limit.hit", turn: 0, maxSteps });
       throw new MaxStepsError(maxSteps);
     })
     .build();
