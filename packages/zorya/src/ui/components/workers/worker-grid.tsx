@@ -17,7 +17,7 @@ export function WorkerGrid({ onOpenRun }: WorkerGridProps = {}) {
         <h2 class="text-xl font-semibold">Workers</h2>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           {Array.from({ length: 2 }).map(() => (
-            <div class="card bg-base-100 shadow">
+            <div class="card bg-base-200 border border-base-content/10 shadow-sm">
               <div class="card-body p-4 space-y-2">
                 <Skeleton w="w-32" h="h-4" />
                 <Skeleton w="w-24" h="h-3" />
@@ -51,7 +51,7 @@ export function WorkerGrid({ onOpenRun }: WorkerGridProps = {}) {
       </div>
 
       {workers.length === 0 && (
-        <div class="card bg-base-100 shadow">
+        <div class="card bg-base-200 border border-base-content/10 shadow-sm">
           <div class="card-body py-8 text-center text-base-content/50">No workers registered</div>
         </div>
       )}
@@ -77,7 +77,7 @@ function WorkerCard({
   const labelEntries = Object.entries(labels);
 
   return (
-    <div class="card bg-base-100 shadow">
+    <div class="card bg-base-200 border border-base-content/10 shadow-sm hover:shadow-md hover:border-base-content/20 transition-shadow">
       <div class="card-body p-4 space-y-3">
         {/* Header */}
         <div class="flex items-center gap-2 flex-wrap">
@@ -149,7 +149,7 @@ function WorkerCard({
             <div class="space-y-0.5">
               {worker.activeRuns.map((r) => (
                 <button
-                  class="w-full flex items-center gap-2 p-1 hover:bg-base-200 rounded text-left text-xs"
+                  class="w-full flex items-center gap-2 p-1 hover:bg-base-300 rounded text-left text-xs"
                   onClick={() => onOpenRun?.(r.workflowId)}
                   disabled={!onOpenRun}
                 >
@@ -174,7 +174,7 @@ function WorkerCard({
             <div class="space-y-0.5 max-h-32 overflow-y-auto">
               {worker.recentRuns.slice(0, 10).map((r) => (
                 <button
-                  class="w-full flex items-center gap-2 p-1 hover:bg-base-200 rounded text-left text-xs"
+                  class="w-full flex items-center gap-2 p-1 hover:bg-base-300 rounded text-left text-xs"
                   onClick={() => onOpenRun?.(r.workflowId)}
                   disabled={!onOpenRun}
                 >
@@ -207,7 +207,7 @@ function Stat({
   valueClass?: string;
 }) {
   return (
-    <div class="bg-base-200 rounded p-1.5">
+    <div class="bg-base-300 rounded p-1.5">
       <div class="text-[10px] uppercase tracking-wider text-base-content/50">{label}</div>
       <div class={`text-lg font-mono ${valueClass ?? ""}`}>{value}</div>
     </div>

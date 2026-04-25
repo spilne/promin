@@ -364,6 +364,36 @@ async function startApprovalAutoSignaler(): Promise<void> {
 }
 
 /**
+ * Resume runs that were left in `pending` or `running` from a previous
+ * server session. The demo drives execution in-process (no coordinator),
+ * so when the bun --hot subprocess hot-replaces or the user kills the
+ * server, every in-flight `runner.run()` promise dies with it. The rows
+ * stay in storage with their last-observed status; without this sweep
+ * they sit there forever.
+ *
+ * Recovery: re-call `runner.run` for each. The runner is idempotent on
+ * (workflowId, input) — it loads the existing row, replays journal
+ * entries for any journaled steps, and continues from the next pending
+ * step. Stale runs from yesterday will resume now and complete with
+ * a fresh end-time, which is fine for a demo but obviously the wrong
+ * policy for production (you'd want a stale-cutoff + auto-fail).
+ */
+async function resumeOrphanedRuns() {
+  const candidates = await storage.listWorkflows({ status: "pending", limit: 500 });
+  const running = await storage.listWorkflows({ status: "running", limit: 500 });
+  const all = [...candidates, ...running];
+  if (all.length === 0) return;
+  console.log(`[zorya] resuming ${all.length} orphaned run(s) from prior session`);
+  for (const state of all) {
+    const def = workflowsByName[state.workflowName];
+    if (!def) continue; // workflow registry may have changed since the row was created
+    runner.run({ workflow: def, workflowId: state.workflowId, input: state.input }).catch(() => {
+      // Recovery best-effort; failures land in storage as workflow.failed.
+    });
+  }
+}
+
+/**
  * Minimal schedule firing loop. Every second, scans for schedules whose
  * next run is <= now and fires them. Not as sophisticated as the real
  * DurableScheduler (no jitter handling, no catch-up, no overlap policy),
@@ -442,6 +472,7 @@ function computeNextScheduleRun(s: DurableScheduleConfig, from: Date): Date | nu
 await seedSchedules();
 void startScheduleFirer();
 void startApprovalAutoSignaler();
+void resumeOrphanedRuns();
 
 // Wake suspended workflows whose sleep has expired or whose signal was
 // delivered. Without this, runs that entered ctx.sleep / ctx.signal never
