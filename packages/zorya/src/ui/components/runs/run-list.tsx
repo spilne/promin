@@ -241,7 +241,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
   const hasFilters = hasAnyFilter(appliedFilters) || status !== "all" || searchInput.trim() !== "";
 
   return (
-    <div class="anim-page p-4 max-w-[1400px] mx-auto space-y-4">
+    <div class="anim-page pt-8 px-4 pb-4 max-w-[1400px] mx-auto space-y-4">
       <div class="flex items-end justify-between">
         <div>
           <h2 class="text-xl font-semibold">Runs</h2>

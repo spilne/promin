@@ -86,7 +86,7 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
 
   if (loading && !data) {
     return (
-      <div class="anim-page p-4 max-w-7xl mx-auto space-y-4">
+      <div class="anim-page pt-8 px-4 pb-4 max-w-7xl mx-auto space-y-4">
         <div>
           <h2 class="text-xl font-semibold">Schedules</h2>
           <p class="text-xs text-base-content/50">Loading…</p>
@@ -116,7 +116,7 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
   }
   if (error) {
     return (
-      <div class="anim-page p-4 max-w-7xl mx-auto">
+      <div class="anim-page pt-8 px-4 pb-4 max-w-7xl mx-auto">
         <div class="alert alert-error">{error.message}</div>
       </div>
     );
@@ -153,7 +153,7 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
   };
 
   return (
-    <div class="anim-page p-4 max-w-7xl mx-auto space-y-4">
+    <div class="anim-page pt-8 px-4 pb-4 max-w-7xl mx-auto space-y-4">
       <div class="flex items-end justify-between">
         <div>
           <h2 class="text-xl font-semibold">Schedules</h2>

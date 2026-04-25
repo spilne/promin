@@ -101,7 +101,7 @@ export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: 
   }, [query]);
 
   return (
-    <div class="anim-page p-4 max-w-[1400px] mx-auto space-y-4">
+    <div class="anim-page pt-8 px-4 pb-4 max-w-[1400px] mx-auto space-y-4">
       <div class="flex items-end justify-between">
         <div>
           <h2 class="text-xl font-semibold">Workflows</h2>

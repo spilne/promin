@@ -75,7 +75,7 @@ export function WorkflowDetail({ name, onBack, onOpenRun }: WorkflowDetailProps)
   const sparkline = runsList?.runs.map((r) => ({ status: r.status, createdAt: r.createdAt })) ?? [];
 
   return (
-    <div class="anim-page p-4 max-w-[1400px] mx-auto space-y-4">
+    <div class="anim-page pt-8 px-4 pb-4 max-w-[1400px] mx-auto space-y-4">
       {/* Header */}
       <div class="flex items-center gap-3 flex-wrap">
         <button class="btn btn-sm btn-ghost" onClick={onBack}>
@@ -209,7 +209,7 @@ function RecentRunsCard({
 
 function WorkflowDetailSkeleton({ onBack }: { onBack: () => void }) {
   return (
-    <div class="anim-page p-4 max-w-[1400px] mx-auto space-y-4">
+    <div class="anim-page pt-8 px-4 pb-4 max-w-[1400px] mx-auto space-y-4">
       <div class="flex items-center gap-3">
         <button class="btn btn-sm btn-ghost" onClick={onBack}>
           ← Workflows

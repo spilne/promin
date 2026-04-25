@@ -13,7 +13,7 @@ export function WorkerGrid({ onOpenRun }: WorkerGridProps = {}) {
 
   if (loading && !data) {
     return (
-      <div class="anim-page p-4 max-w-7xl mx-auto space-y-4">
+      <div class="anim-page pt-8 px-4 pb-4 max-w-7xl mx-auto space-y-4">
         <h2 class="text-xl font-semibold">Workers</h2>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           {Array.from({ length: 2 }).map(() => (
@@ -41,7 +41,7 @@ export function WorkerGrid({ onOpenRun }: WorkerGridProps = {}) {
   const offline = workers.length - online;
 
   return (
-    <div class="anim-page p-4 max-w-7xl mx-auto space-y-4">
+    <div class="anim-page pt-8 px-4 pb-4 max-w-7xl mx-auto space-y-4">
       <div class="flex items-center gap-2">
         <h2 class="text-xl font-semibold">Workers</h2>
         <span class="text-base-content/60">
