@@ -651,20 +651,23 @@ function stepEndAbs(step: StepDto, origin: number): number {
 }
 
 /**
- * True when the step's wall-clock span was dominated by waiting rather
- * than CPU work. Catches both live-active waits (`sleeping`,
- * `waiting_for_signal`) and post-completion "was waiting" cases — a
- * journaled step with `durationMs=0ms` and a 10s span is functionally a
- * wait, even though its current status is `completed`. The 5-second
- * floor avoids classifying every short sleep as a wait worth hiding.
+ * True when the step is currently in (or was natively typed as) a wait
+ * state — sleep / signal status, or a stepType the engine declares as
+ * a wait (`sleep` / `signal`). Used both to color the bar warning and
+ * to label it with wall-clock duration.
+ *
+ * We DON'T infer wait-ness from `realSpan - durationMs >= 5s` anymore:
+ * regular single steps frequently see 10–20s of persistence-batch lag
+ * between `startedAt + durationMs` and `completedAt`, which the old
+ * heuristic mis-classified as a wait. The compression sweep
+ * (`buildTimeAxis`) detects long idle gaps independently from this
+ * predicate, so dropping the heuristic doesn't break it — empty
+ * stretches between work bars still collapse via the workActive=0
+ * check there.
  */
 function isWaitLike(step: StepDto): boolean {
   if (step.status === "sleeping" || step.status === "waiting_for_signal") return true;
-  if (step.startedAt && step.completedAt && step.durationMs !== undefined) {
-    const realSpan = toMs(step.completedAt) - toMs(step.startedAt);
-    const idle = realSpan - step.durationMs;
-    if (idle >= COMPRESS_MIN_REAL_MS) return true;
-  }
+  if (step.stepType === "sleep" || step.stepType === "signal") return true;
   return false;
 }
 
