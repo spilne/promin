@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
+import { useNamespace } from "../../hooks/use-namespace.ts";
 import { api } from "../../api/client.ts";
 import type { WorkflowDefDto } from "../../../server/routes/workflow-defs.ts";
 import type { SparklinesResponse } from "../../../server/routes/grid.ts";
@@ -27,22 +28,42 @@ interface WorkflowListProps {
  * count, recent activity sparkline, and a [Trigger] action per row.
  */
 export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: WorkflowListProps) {
+  const [namespace] = useNamespace();
   const { data, loading, error, refresh } = useFetch(() => api.listWorkflowDefs(), [], 30_000);
   const { data: sparklines } = useFetch<SparklinesResponse>(() => api.getSparklines(14), [], 5000);
+  // Names of workflows that have run in the currently-selected namespace.
+  // Used to filter the registry view so users see only the workflows
+  // relevant to their tenant. When namespace is unset the filter is
+  // skipped — the registry is the union of all definitions.
+  const { data: runNamesInNs } = useFetch(
+    () => api.listWorkflowNames({ namespace: namespace || undefined }),
+    [namespace],
+    30_000,
+  );
   const [triggering, setTriggering] = useState<WorkflowDefDto | undefined>(undefined);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [sort, setSort] = useState<SortState>(null);
+  // Opt out of the namespace filter — workflow defs are not themselves
+  // namespaced, so this lets the user see "everything that could be
+  // triggered into this tenant" rather than just "everything that has
+  // already run here".
+  const [showAll, setShowAll] = useState(false);
 
   const filtered = useMemo(() => {
     const all = data?.workflows ?? [];
     const q = query.trim().toLowerCase();
-    if (!q) return all;
+    const namesInNs = namespace && !showAll ? new Set(runNamesInNs?.names ?? []) : null;
     return all.filter((w) => {
+      if (namesInNs && !namesInNs.has(w.name)) return false;
+      if (!q) return true;
       const fields = [w.name, w.type ?? "", w.version ?? "", ...(w.versions ?? [])];
       return fields.some((f) => f.toLowerCase().includes(q));
     });
-  }, [data, query]);
+  }, [data, query, namespace, runNamesInNs, showAll]);
+
+  const totalDefs = data?.workflows.length ?? 0;
+  const hiddenByNamespace = namespace && !showAll ? totalDefs - filtered.length : 0;
 
   const sorted = useMemo(() => {
     if (!sort) return filtered;
@@ -85,7 +106,22 @@ export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: 
         <div>
           <h2 class="text-xl font-semibold">Workflows</h2>
           <p class="text-xs text-base-content/50">
-            {data ? `${data.workflows.length} registered` : "Loading…"}
+            {data ? (
+              <>
+                {totalDefs} registered
+                {namespace && !showAll && hiddenByNamespace > 0 ? (
+                  <>
+                    {" · "}
+                    <span class="text-warning/80">
+                      filtered to <span class="font-mono">{namespace}</span> ({hiddenByNamespace}{" "}
+                      hidden)
+                    </span>
+                  </>
+                ) : null}
+              </>
+            ) : (
+              "Loading…"
+            )}
           </p>
         </div>
         <button class="btn btn-sm btn-ghost gap-1" onClick={() => refresh()}>
@@ -94,7 +130,18 @@ export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: 
         </button>
       </div>
 
-      <div class="flex justify-end">
+      <div class="flex items-center justify-end gap-2">
+        {namespace && (
+          <label class="text-xs text-base-content/60 flex items-center gap-1 cursor-pointer">
+            <input
+              type="checkbox"
+              class="checkbox checkbox-xs"
+              checked={showAll}
+              onChange={(e) => setShowAll((e.target as HTMLInputElement).checked)}
+            />
+            Show all (ignore namespace filter)
+          </label>
+        )}
         <input
           class="input input-bordered input-sm w-full max-w-md font-mono"
           placeholder="Search by name, type, version…"
