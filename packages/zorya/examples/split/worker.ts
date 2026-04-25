@@ -227,8 +227,38 @@ void client
 
 console.log(`Worker ${worker.workerId} connected to ${url}`);
 console.log(`  Advertised ${workflows.length} workflows:`);
-for (const wf of workflows) {
-  console.log(`    - ${wf.name}`);
+{
+  // Pull internals via the documented `_definition` field (marked @internal
+  // in the public API, but stable for examples). Type / previousVersions
+  // aren't on the public Workflow shape.
+  type WfDef = { type?: string; previousVersions?: ReadonlyArray<unknown> };
+  const rows = workflows.map((wf) => {
+    const def = (wf as unknown as { _definition: WfDef })._definition ?? {};
+    const prev = def.previousVersions?.length ?? 0;
+    const versionLabel = wf.version ? `v${wf.version}${prev > 0 ? ` (←${prev})` : ""}` : "—";
+    return {
+      name: wf.name,
+      type: def.type ?? "—",
+      version: versionLabel,
+      steps: wf.dag.steps.length,
+    };
+  });
+  const w = (key: keyof (typeof rows)[number]) =>
+    Math.max(key.length, ...rows.map((r) => String(r[key]).length));
+  const widths = { name: w("name"), type: w("type"), version: w("version") };
+  const header =
+    `    ${"NAME".padEnd(widths.name)}  ` +
+    `${"TYPE".padEnd(widths.type)}  ` +
+    `${"VERSION".padEnd(widths.version)}  STEPS`;
+  console.log(header);
+  console.log(`    ${"─".repeat(header.length - 4)}`);
+  for (const r of rows) {
+    console.log(
+      `    ${r.name.padEnd(widths.name)}  ` +
+        `${r.type.padEnd(widths.type)}  ` +
+        `${r.version.padEnd(widths.version)}  ${r.steps}`,
+    );
+  }
 }
 console.log(`  Trigger manually from the dashboard → Workflows page, or:`);
 console.log(
