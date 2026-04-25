@@ -184,6 +184,7 @@ export {
   type CoordinatorConfig,
   DefaultCoordinator,
   createCoordinator,
+  buildStubWorkflow,
   type WorkflowWorker,
   type WorkerConfig,
   type WorkerInfo,

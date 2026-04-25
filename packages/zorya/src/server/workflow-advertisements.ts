@@ -13,7 +13,19 @@
 export interface AdvertisedWorkflow {
   name: string;
   version?: string;
-  steps: ReadonlyArray<{ name: string; kind: string; dependsOn: readonly string[] }>;
+  steps: ReadonlyArray<{
+    name: string;
+    kind: string;
+    dependsOn: readonly string[];
+    /**
+     * Capabilities this step requires. Forwarded by step-mode workers so
+     * the coordinator can route the dispatched task to a worker that
+     * actually advertises the matching capabilities.
+     */
+    needs?: readonly string[];
+    /** Dispatch priority — higher runs first (queue-level default: 5). */
+    priority?: number;
+  }>;
   sampleInput?: unknown;
 }
 

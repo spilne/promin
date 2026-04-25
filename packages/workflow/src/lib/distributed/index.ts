@@ -14,6 +14,7 @@ export {
   type CoordinatorConfig,
   DefaultCoordinator,
   createCoordinator,
+  buildStubWorkflow,
 } from "./coordinator.ts";
 export {
   type WorkflowWorker,

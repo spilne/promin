@@ -267,11 +267,14 @@ export class DefaultCoordinator implements WorkflowCoordinator {
 }
 
 /**
- * Build a minimal Workflow stub from a persisted DAG for crash recovery.
- * Step execute functions are unreachable — the coordinator delegates all
- * step bodies to StepQueueExecutor, which enqueues + polls storage.
+ * Build a minimal Workflow stub from a persisted DAG. Step `execute`
+ * functions are unreachable — the coordinator delegates all step bodies
+ * to `StepQueueExecutor`, which enqueues + polls storage. Used internally
+ * for crash recovery and exposed publicly so server-side trigger handlers
+ * can `coordinator.submit({ workflow: stub, ... })` without holding the
+ * full workflow definition (the workers do).
  */
-function buildStubWorkflow(
+export function buildStubWorkflow(
   dag: WorkflowDAG,
   name: string,
   version?: string,

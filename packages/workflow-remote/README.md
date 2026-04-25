@@ -78,6 +78,8 @@ The runner publishes `step-started` events via the optional `notifyStepStarted(w
 
 `enqueue` is a coordinator concern — workers never enqueue, that's what schedule-the-next-step does on the server side. `RemoteStepQueue` only exposes the worker subset of `StepQueue` (`claim`, `complete`, `fail`, `heartbeat`, `requeueStuck`) and throws on `enqueue`. If you need to push a task from a remote process, route the request through your coordinator instead of bypassing it.
 
+In `coordination: { enabled: true }` mode (`@promin/zorya`), the server-side coordinator owns enqueue: trigger requests land on `/api/runs/trigger/:name`, the `CoordinatedTriggerService` builds a stub workflow from the worker advertisement, and `coordinator.submit(...)` enqueues the ready set to the local `StepQueue`. Step-mode workers (`ZoryaWorker({ mode: "step" })`) then claim individual tasks via the existing worker wire.
+
 ### `metrics` is not on the worker wire
 
 The worker RPC carries only the methods workers actually call. `StepQueue.metrics` is a coordinator/observability call — read it server-side against the underlying queue, or expose it via your own admin endpoint.

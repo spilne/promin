@@ -19,7 +19,9 @@ import type {
   StepQueue,
   Workflow,
   WorkerRegistry,
+  WorkflowCoordinator,
 } from "@promin/workflow";
+import { createCoordinator } from "@promin/workflow";
 import { createWorkerApiHandler, createWorkflowStorageHandler } from "@promin/workflow-remote";
 import { Auth, type AuthConfig } from "./auth.ts";
 import { Router, jsonError } from "./router.ts";
@@ -29,6 +31,7 @@ import {
 } from "./workflow-advertisements.ts";
 import { InMemoryWorkflowStartQueue, type WorkflowStartQueue } from "./workflow-starts.ts";
 import { TriggerService } from "./services/trigger-service.ts";
+import { CoordinatedTriggerService } from "./services/coordinated-trigger-service.ts";
 import {
   listAdvertisements,
   removeAdvertisements,
@@ -145,6 +148,41 @@ export interface ZoryaServerConfig extends AuthConfig {
      */
     apiKeys?: ReadonlyArray<string>;
   };
+  /**
+   * Enable Temporal-style coordinator-driven step dispatch. When set, the
+   * server runs a `WorkflowCoordinator` that owns the workflow state
+   * machine and enqueues ready steps to `workerProtocol.stepQueue`.
+   * Workers in `mode: 'step'` claim individual steps and execute them
+   * locally, writing results back through storage + step-queue endpoints
+   * the server already exposes.
+   *
+   * Implies replacing the default trigger flow: `/api/runs/trigger/:name`
+   * routes through the coordinator instead of the workflow-start queue,
+   * so workflow-mode workers won't pick triggered runs up. Mix-and-match
+   * is a future refinement.
+   *
+   * Requires `workerProtocol.stepQueue` and at least one connected worker
+   * advertising the target workflow.
+   */
+  coordination?: {
+    enabled: boolean;
+    /**
+     * Coordinator's own polling cadence (leader election + dead-worker
+     * sweep). Default: 1000ms.
+     */
+    pollIntervalMs?: number;
+    /**
+     * StepQueueExecutor poll cadence — how often the coordinator's
+     * runner checks storage for a step's terminal status after enqueuing
+     * it to the queue. Default: 500ms.
+     */
+    stepPollIntervalMs?: number;
+    /**
+     * Worker dead-timeout — tasks claimed by a worker silent for this
+     * long are re-enqueued. Default: 30000ms.
+     */
+    workerTimeoutMs?: number;
+  };
 }
 
 export interface ListenOptions {
@@ -154,12 +192,20 @@ export interface ListenOptions {
 
 export class ZoryaServer {
   readonly config: Required<Pick<ZoryaServerConfig, "storage">> & ZoryaServerConfig;
+  /**
+   * Coordinator instance when `config.coordination.enabled` is true.
+   * Public so embedders / tests can `submit()` directly without going
+   * through the HTTP trigger endpoint.
+   */
+  readonly coordinator?: WorkflowCoordinator;
   private readonly auth: Auth;
   /** Separate auth for worker-protocol endpoints. Open when no keys set. */
   private readonly workerAuth: Auth;
   private readonly bus: RunEventBus;
   private readonly router: Router;
   private server?: { stop(): void; port: number; hostname: string };
+  /** Background coordinator loop — kicked off in `listen()`, stopped in `stop()`. */
+  private coordinatorLoop?: Promise<void>;
 
   constructor(config: ZoryaServerConfig) {
     this.config = config;
@@ -186,23 +232,57 @@ export class ZoryaServer {
     // on we auto-create an in-memory queue so the dashboard's trigger
     // button works out of the box: the auto-trigger pre-creates a pending
     // workflow row and enqueues a start that connected workers poll.
-    const workflowStarts: WorkflowStartQueue | undefined = config.workerProtocol
-      ? (config.workerProtocol.workflowStarts ?? new InMemoryWorkflowStartQueue())
-      : undefined;
+    // Skipped under coordination — the coordinator owns the workflow row
+    // and dispatches steps directly, so a workflow-start queue would just
+    // sit empty.
+    const coordEnabled = config.coordination?.enabled === true;
+    const workflowStarts: WorkflowStartQueue | undefined =
+      config.workerProtocol && !coordEnabled
+        ? (config.workerProtocol.workflowStarts ?? new InMemoryWorkflowStartQueue())
+        : undefined;
 
-    // Auto-trigger for split mode: caller didn't supply `trigger`, but the
-    // worker protocol is on so we can hand starts off to workers. Passing
-    // advertisements lets the service default the version when the caller
-    // doesn't specify one — avoids version-mismatch on versioned workflows.
+    // Wire the coordinator first so the trigger fallback below can route
+    // through it. Requires the worker protocol's stepQueue — without a
+    // queue the coordinator can't dispatch anything.
+    if (coordEnabled) {
+      if (!config.workerProtocol?.stepQueue) {
+        throw new Error("ZoryaServer: coordination.enabled requires workerProtocol.stepQueue");
+      }
+      if (!advertisements) {
+        throw new Error(
+          "ZoryaServer: coordination.enabled requires workerProtocol.advertisements " +
+            "(auto-created when workerProtocol is set; explicit registry must include it)",
+        );
+      }
+      this.coordinator = createCoordinator({
+        storage: config.storage,
+        stepQueue: config.workerProtocol.stepQueue,
+        workerRegistry: config.workerProtocol.workerRegistry,
+        pollIntervalMs: config.coordination?.pollIntervalMs,
+        stepPollIntervalMs: config.coordination?.stepPollIntervalMs,
+        workerTimeoutMs: config.coordination?.workerTimeoutMs,
+      });
+    }
+
+    // Auto-trigger:
+    //  - coordination on:    CoordinatedTriggerService → coordinator.submit
+    //  - coordination off:   TriggerService → workflow-start queue
+    //  - explicit `trigger`: always wins
     const trigger =
       config.trigger ??
-      (workflowStarts
-        ? new TriggerService({
+      (this.coordinator && advertisements
+        ? new CoordinatedTriggerService({
             storage: config.storage,
-            workflowStarts,
+            coordinator: this.coordinator,
             advertisements,
           }).trigger
-        : undefined);
+        : workflowStarts
+          ? new TriggerService({
+              storage: config.storage,
+              workflowStarts,
+              advertisements,
+            }).trigger
+          : undefined);
 
     const deps = {
       storage: config.storage,
@@ -356,12 +436,36 @@ export class ZoryaServer {
     const resolvedPort = typeof srv.port === "number" ? srv.port : port;
     const resolvedHost = typeof srv.hostname === "string" ? srv.hostname : hostname;
     this.server = { stop: () => srv.stop(), port: resolvedPort, hostname: resolvedHost };
-    return { port: resolvedPort, hostname: resolvedHost, stop: () => srv.stop() };
+    this.startCoordinator();
+    return {
+      port: resolvedPort,
+      hostname: resolvedHost,
+      stop: () => {
+        this.stop();
+      },
+    };
+  }
+
+  /**
+   * Start the coordinator's leader / dead-worker loop. Called from
+   * `listen()` and exposed for tests that drive the server through
+   * `handle()` without binding a port.
+   */
+  startCoordinator(): void {
+    if (!this.coordinator || this.coordinatorLoop) return;
+    // Failures inside the coordinator's own loop write to its own logs;
+    // we only swallow here so a transient error doesn't surface as an
+    // unhandled rejection on the server's lifecycle.
+    this.coordinatorLoop = this.coordinator.start().catch(() => {});
   }
 
   stop(): void {
     this.server?.stop();
     this.server = undefined;
+    if (this.coordinator) {
+      void this.coordinator.stop();
+      this.coordinatorLoop = undefined;
+    }
   }
 
   private buildStaticHandler(dir: string) {

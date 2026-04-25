@@ -88,7 +88,13 @@ export class ZoryaClient {
     const entries: Array<{
       name: string;
       version?: string;
-      steps: Array<{ name: string; kind: string; dependsOn: string[] }>;
+      steps: Array<{
+        name: string;
+        kind: string;
+        dependsOn: string[];
+        needs?: string[];
+        priority?: number;
+      }>;
       sampleInput?: unknown;
     }> = [];
     const seen = new Set<string>();
@@ -99,10 +105,16 @@ export class ZoryaClient {
       entries.push({
         name: wf.name,
         version: wf.version,
+        // Forward `needs` / `priority` so the server can build a faithful
+        // stub workflow when running coordinator-driven step dispatch —
+        // without these the coordinator can't route dispatched tasks to
+        // capability-matched workers.
         steps: wf.dag.steps.map((s) => ({
           name: s.name,
           kind: s.kind,
           dependsOn: [...s.dependsOn],
+          needs: s.needs ? [...s.needs] : undefined,
+          priority: s.priority,
         })),
         sampleInput: sampleInput?.(wf.name),
       });

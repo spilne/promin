@@ -16,7 +16,10 @@
 import {
   createSleepScanner,
   createWorkflowRunner,
+  InProcessStepExecutor,
+  type FairnessPolicy,
   type SleepScanner,
+  type StepTask,
   type Workflow,
   type WorkflowRunner,
 } from "@promin/workflow";
@@ -75,6 +78,36 @@ export interface ZoryaWorkerConfig {
         /** Max claims per poll. Default 10. */
         limit?: number;
       };
+  /**
+   * Dispatch mode:
+   * - `"workflow"` (default) — claim whole workflow runs from the server's
+   *   workflow-start queue and execute the entire orchestration locally.
+   *   Pairs with a server in default (non-coordinator) mode.
+   * - `"step"` — claim individual step tasks from the server's step queue
+   *   and execute one step body per claim. Pairs with a server running
+   *   `coordination: { enabled: true }`. The coordinator owns the workflow
+   *   state machine and dispatches ready steps; this worker only runs the
+   *   step bodies it claims.
+   *
+   * Step-mode workers do NOT poll the workflow-start queue and do NOT run
+   * the SleepScanner — both are coordinator-side concerns. Mix-and-match
+   * (workflow-mode + step-mode workers against the same server) is not
+   * supported in v1: the trigger flow chooses one path.
+   */
+  mode?: "workflow" | "step";
+  /**
+   * Step-mode poll cadence + claim batch.
+   */
+  stepPolling?: {
+    /** Poll interval when no tasks available. Default 250ms. */
+    intervalMs?: number;
+    /** Max claims per poll. Default 5. */
+    limit?: number;
+    /** Heartbeat cadence per running step. Default 5_000ms. */
+    heartbeatMs?: number;
+    /** Fairness policy passed to `stepQueue.claim`. Default `"strict-priority"`. */
+    fairness?: FairnessPolicy;
+  };
 }
 
 export class ZoryaWorker {
@@ -96,8 +129,11 @@ export class ZoryaWorker {
   >;
   private heartbeatHandle?: ReturnType<typeof setInterval>;
   private startsPollHandle?: ReturnType<typeof setInterval>;
+  private stepPollHandle?: ReturnType<typeof setInterval>;
   private sleepScanner?: SleepScanner;
   private started = false;
+  /** taskId → cleanup for an in-flight step heartbeat timer. */
+  private readonly inFlightSteps = new Map<string, () => void>();
   // Activity tracked so the dashboard can show what each worker is doing.
   private readonly activeRuns = new Map<string, { workflowName: string; startedAt: number }>();
   private completedCount = 0;
@@ -150,7 +186,12 @@ export class ZoryaWorker {
         });
     }, hbMs);
 
-    if (this.config.resumeSuspendedRuns !== false) {
+    const stepMode = this.config.mode === "step";
+
+    // SleepScanner is a workflow-mode concern: in step-mode the coordinator
+    // owns workflow-level orchestration so the worker shouldn't be poking
+    // the same storage with a competing scanner.
+    if (!stepMode && this.config.resumeSuspendedRuns !== false) {
       this.sleepScanner = createSleepScanner({
         storage: this.client.storage,
         runner: this.runner,
@@ -160,15 +201,26 @@ export class ZoryaWorker {
       void this.sleepScanner.start();
     }
 
-    const poll = this.config.pollWorkflowStarts;
-    if (poll !== false) {
-      const intervalMs = (typeof poll === "object" && poll?.intervalMs) || 1_000;
-      const limit = (typeof poll === "object" && poll?.limit) || 10;
-      this.startsPollHandle = setInterval(() => {
-        void this.drainPendingStarts(limit).catch(() => {
+    if (stepMode) {
+      const cfg = this.config.stepPolling ?? {};
+      const intervalMs = cfg.intervalMs ?? 250;
+      const limit = cfg.limit ?? 5;
+      this.stepPollHandle = setInterval(() => {
+        void this.drainPendingStepTasks(limit).catch(() => {
           // Transient — next tick retries.
         });
       }, intervalMs);
+    } else {
+      const poll = this.config.pollWorkflowStarts;
+      if (poll !== false) {
+        const intervalMs = (typeof poll === "object" && poll?.intervalMs) || 1_000;
+        const limit = (typeof poll === "object" && poll?.limit) || 10;
+        this.startsPollHandle = setInterval(() => {
+          void this.drainPendingStarts(limit).catch(() => {
+            // Transient — next tick retries.
+          });
+        }, intervalMs);
+      }
     }
   }
 
@@ -251,9 +303,153 @@ export class ZoryaWorker {
     this.heartbeatHandle = undefined;
     if (this.startsPollHandle !== undefined) clearInterval(this.startsPollHandle);
     this.startsPollHandle = undefined;
+    if (this.stepPollHandle !== undefined) clearInterval(this.stepPollHandle);
+    this.stepPollHandle = undefined;
+    for (const cleanup of this.inFlightSteps.values()) cleanup();
+    this.inFlightSteps.clear();
     await this.sleepScanner?.stop();
     await this.client.workerRegistry.deregister(this.workerId).catch(() => {});
     await this.client.unadvertise(this.workerId).catch(() => {});
+  }
+
+  /**
+   * Claim individual step tasks from the server's step queue and execute
+   * them locally. Used in `mode: "step"` against a server running with
+   * `coordination: { enabled: true }`.
+   */
+  private async drainPendingStepTasks(limit: number): Promise<void> {
+    const fairness = this.config.stepPolling?.fairness ?? "strict-priority";
+    const tasks = await this.client.stepQueue.claim({
+      capabilities: this.config.capabilities ?? [],
+      limit,
+      fairness,
+      filter: (t) => this.canHandleStep(t),
+    });
+    for (const task of tasks) {
+      void this.executeStepTask(task).catch(() => {
+        // Failure already written to storage + queue inside executeStepTask;
+        // swallowing here keeps the poll loop alive on transient post-fail
+        // errors (RPC blip while writing the failure outcome itself).
+      });
+    }
+  }
+
+  private canHandleStep(task: StepTask): boolean {
+    // StepTask doesn't carry workflowName, so we filter by step-name
+    // presence across every advertised workflow. Capability subset matching
+    // happens server-side via `stepQueue.claim`.
+    return this.findWorkflowForStep(task) !== undefined;
+  }
+
+  private async executeStepTask(task: StepTask): Promise<void> {
+    const def = this.findWorkflowForStep(task);
+    if (!def) {
+      const error = `No advertised workflow contains step "${task.stepName}" on worker ${this.workerId}`;
+      await this.failStepTask(task, error, 0);
+      return;
+    }
+
+    const heartbeatMs = this.config.stepPolling?.heartbeatMs ?? 5_000;
+    const heartbeat = setInterval(() => {
+      void this.client.stepQueue.heartbeat({ taskId: task.id }).catch(() => {});
+    }, heartbeatMs);
+    const cleanup = () => clearInterval(heartbeat);
+    this.inFlightSteps.set(task.id, cleanup);
+
+    const startedAt = new Date();
+    const startMs = Date.now();
+    try {
+      const executor = new InProcessStepExecutor(def, { storage: this.client.storage });
+      const stepDef = def._definition.steps.find((s) => s.name === task.stepName)!;
+      const result = await executor.executeStep({
+        workflowId: task.workflowId,
+        stepName: task.stepName,
+        input: task.input,
+        prevResults: task.prevResults,
+        attempt: task.attempt,
+        needs: stepDef.needs ?? task.needs,
+        priority: stepDef.priority ?? task.priority,
+        version: def.version,
+      });
+      const durationMs = Date.now() - startMs;
+
+      if (result.ok) {
+        // Write the encoded result to storage first so the coordinator's
+        // poll on workflow state sees the step terminal before the queue
+        // task is acknowledged. The runner also expects encoded values
+        // in storage and decodes them when building prevResults for the
+        // next step.
+        await this.client.storage.saveStepResult({
+          workflowId: task.workflowId,
+          stepName: task.stepName,
+          result: result.result,
+          durationMs,
+          startedAt,
+          metadata: result.metadata,
+        });
+        await this.client.stepQueue.complete({
+          taskId: task.id,
+          result: result.result,
+          durationMs,
+        });
+      } else {
+        await this.failStepTask(task, result.error, durationMs, startedAt);
+      }
+    } catch (err) {
+      const durationMs = Date.now() - startMs;
+      const tag = (err as { _tag?: string } | undefined)?._tag;
+      if (tag === "WorkflowSuspendedError") {
+        // Journaled step suspended (sleep / signal). The journal entry was
+        // already written to storage by `runJournaledStep`; don't fail or
+        // complete the queue task — let its lease expire so it gets
+        // requeued when the journal entry resumes. The coordinator's
+        // SleepScanner-equivalent (or signal delivery) will trigger the
+        // resume.
+        return;
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      await this.failStepTask(task, msg, durationMs, startedAt);
+    } finally {
+      cleanup();
+      this.inFlightSteps.delete(task.id);
+    }
+  }
+
+  private findWorkflowForStep(task: StepTask): Workflow<unknown, unknown> | undefined {
+    // Prefer an exact-version match across all advertised defs that
+    // contain this step name; fall back to versionless / primary.
+    for (const [, byVersion] of this.byNameAndVersion) {
+      if (task.version) {
+        const exact = byVersion.get(task.version);
+        if (exact && exact._definition.steps.some((s) => s.name === task.stepName)) return exact;
+      }
+      const versionless = byVersion.get(VERSIONLESS);
+      if (versionless && versionless._definition.steps.some((s) => s.name === task.stepName)) {
+        return versionless;
+      }
+    }
+    for (const wf of this.byName.values()) {
+      if (wf._definition.steps.some((s) => s.name === task.stepName)) return wf;
+    }
+    return undefined;
+  }
+
+  private async failStepTask(
+    task: StepTask,
+    error: string,
+    durationMs: number,
+    startedAt: Date = new Date(),
+  ): Promise<void> {
+    await this.client.storage
+      .saveStepFailure({
+        workflowId: task.workflowId,
+        stepName: task.stepName,
+        error,
+        durationMs,
+        startedAt,
+      })
+      .catch(() => {});
+    await this.client.stepQueue.fail({ taskId: task.id, error, durationMs }).catch(() => {});
   }
 
   /**
