@@ -414,19 +414,21 @@ function StepRow({
                 width: `${widthPct}%`,
               }}
             />
-            {/* Duration label sits just past the bar's right edge so it
-                stays readable on bars too thin to fit the text inside.
-                Wait-like (compressed) bars show wall-clock; work bars
-                show CPU duration. Aligned to the bar's end via `left:
-                (leftPct + widthPct)%` + a small inset so it doesn't
-                kiss the bar; vertically centered via top-1/bottom-1
-                bracketing the same height as the bar. */}
-            <span
-              class="absolute top-1 bottom-1 flex items-center text-[10px] font-medium text-base-content/80 leading-none whitespace-nowrap pointer-events-none pl-1"
-              style={{ left: `${leftPct + widthPct}%` }}
-            >
-              {formatDuration(waitLike ? wallClockMs : step.durationMs)}
-            </span>
+            {/* Inline duration ONLY on wait-like (compressed) bars — 5s
+                and 5d both render at the same compressed width, so the
+                bar alone can't tell them apart. Work bars rely on the
+                DURATION column to the left, which already carries the
+                value; double-stamping every bar reads as noisy. Label
+                sits just past the bar's right edge so a thin sliver
+                doesn't clip it. */}
+            {waitLike && (
+              <span
+                class="absolute top-1 bottom-1 flex items-center text-[10px] font-medium text-warning leading-none whitespace-nowrap pointer-events-none pl-1"
+                style={{ left: `${leftPct + widthPct}%` }}
+              >
+                {formatDuration(wallClockMs)}
+              </span>
+            )}
           </>
         )}
         {retried && (
