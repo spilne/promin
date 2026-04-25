@@ -79,6 +79,23 @@ export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
       ? "vertical"
       : "horizontal";
 
+  // Diagnostic log — leave on while the DAG-flap bug is still in flight.
+  // Prefixed for grep-ability in the browser console; remove once the
+  // root cause is confirmed to be measurement timing alone.
+  if (
+    typeof console !== "undefined" &&
+    (window as { __DAG_DEBUG?: boolean }).__DAG_DEBUG !== false
+  ) {
+    console.log("[dag] render", {
+      steps: run.steps.length,
+      containerW,
+      horizontalWidth: horizontal.width,
+      verticalWidth: vertical.width,
+      orientation,
+      edges: orientation === "vertical" ? vertical.edges.length : horizontal.edges.length,
+    });
+  }
+
   const { nodes, edges, width, height } = orientation === "vertical" ? vertical : horizontal;
 
   if (run.steps.length === 0) {
@@ -112,6 +129,14 @@ export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
             class="block mx-auto"
           >
             <defs>
+              {/*
+                The marker's arrow head uses a hard-coded fill rather than
+                a Tailwind utility — `class="fill-base-content/80"` here
+                expands to a CSS variable (`hsl(var(--bc) / 0.8)`) that
+                isn't always resolved on the very first paint. The result
+                was edge paths drawn but tiny invisible arrowheads, which
+                read as "no arrows" until a refresh primed the CSS cache.
+              */}
               <marker
                 id="dag-arrow"
                 viewBox="0 0 10 10"
@@ -121,21 +146,25 @@ export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
                 markerHeight={7}
                 orient="auto"
               >
-                <path d="M0,0 L10,5 L0,10 Z" class="fill-base-content/80" />
+                <path d="M0,0 L10,5 L0,10 Z" fill="currentColor" />
               </marker>
             </defs>
 
-            {/* Edges */}
-            {edges.map((e, i) => (
-              <path
-                key={`e-${i}`}
-                d={edgePath(e.from, e.to, orientation)}
-                fill="none"
-                stroke-width={2.5}
-                class="stroke-base-content/60"
-                marker-end="url(#dag-arrow)"
-              />
-            ))}
+            {/* Edges. The wrapping <g> sets `currentColor` for the
+                marker's arrowhead; same color flows into the path's
+                stroke too via inheritance — keeps the heads + lines
+                visually unified. */}
+            <g class="text-base-content/60" stroke="currentColor">
+              {edges.map((e, i) => (
+                <path
+                  key={`e-${i}`}
+                  d={edgePath(e.from, e.to, orientation)}
+                  fill="none"
+                  stroke-width={2.5}
+                  marker-end="url(#dag-arrow)"
+                />
+              ))}
+            </g>
 
             {/* Nodes */}
             {nodes.map((n) => (
