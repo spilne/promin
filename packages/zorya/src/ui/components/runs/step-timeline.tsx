@@ -261,11 +261,14 @@ export function StepTimeline({ run, selectedStep, onSelectStep }: StepTimelinePr
           })}
         </div>
 
-        {/* Keyboard cheatsheet */}
-        <div class="flex gap-4 text-xs text-base-content/40 pt-2 border-t border-base-content/10">
-          <kbd class="kbd kbd-xs">click</kbd>
+        {/* Keyboard cheatsheet. Uses the same kbd-sm "keycap" visual the
+            row chevron renders so users learn the visual vocabulary
+            once. Both got bumped from kbd-xs → kbd-sm — the previous
+            size was hard to read at a glance. */}
+        <div class="flex gap-4 items-center text-sm text-base-content/50 pt-2 border-t border-base-content/10">
+          <kbd class="kbd kbd-sm">click</kbd>
           <span>Select step</span>
-          <kbd class="kbd kbd-xs">▸</kbd>
+          <kbd class="kbd kbd-sm text-base">▸</kbd>
           <span>Expand / collapse</span>
         </div>
       </div>
@@ -345,23 +348,27 @@ function StepRow({
       } ${isPlanned ? "opacity-60" : ""}`}
       onClick={onSelect}
     >
-      {/* Step name + indentation + chevron */}
+      {/* Step name + indentation + chevron. The chevron uses the same
+          kbd-sm "keycap" visual the cheatsheet at the bottom of the
+          card describes — consistent visual vocabulary, plus the bigger
+          target makes the click affordance obvious. */}
       <div
-        class="w-72 shrink-0 flex items-center gap-1 min-w-0"
+        class="w-72 shrink-0 flex items-center gap-1.5 min-w-0"
         style={{ paddingLeft: `${depth * 16}px` }}
       >
         {hasChildren ? (
           <button
-            class="w-4 shrink-0 text-base-content/50 hover:text-base-content text-sm"
+            class="kbd kbd-sm shrink-0 text-base"
             onClick={(e) => {
               e.stopPropagation();
               onToggle();
             }}
+            title={isCollapsed ? "Expand" : "Collapse"}
           >
             {isCollapsed ? "▸" : "▾"}
           </button>
         ) : (
-          <span class="w-4 shrink-0" />
+          <span class="w-6 shrink-0" />
         )}
         <span class={`shrink-0 text-sm ${v.textClass}`} title={`${step.stepType} · ${v.label}`}>
           {STEP_TYPE_ICON[step.stepType]}
