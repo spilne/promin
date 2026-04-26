@@ -85,6 +85,11 @@ export interface AgentTownConfig {
   /**
    * Fires whenever a daemon agent starts or finishes a turn.
    * Use this to update a spinner or status line in the UI.
+   *
+   * @replay
+   * NOT journaled — fires from the in-process daemon driver, not from
+   * inside any agent's workflow body. UI-only signal; not durable across
+   * worker restarts.
    */
   onAgentActivity?: (event: { agent: string; state: "thinking" | "idle" }) => void;
   /**

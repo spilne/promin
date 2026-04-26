@@ -50,18 +50,32 @@ export interface HooksConfig {
   /**
    * Runs before the LLM think loop for each turn.
    * Return an updated message list to inject extra context, or void to leave unchanged.
-   * Runs as a journaled activity — crash-safe, skipped on replay.
+   *
+   * @replay
+   * Runs inside a journaled activity. On worker-restart replay the hook is
+   * SKIPPED — the journaled return value (the modified messages) is used
+   * directly. Hook side effects (metrics, external calls, audit writes)
+   * do NOT re-fire on replay. Keep it pure, or move side effects to
+   * persistent storage that's read independently.
    */
   beforeTurn?: (params: HooksTurnParams) => Promise<Message[] | void>;
   /**
    * Runs after the answer is emitted for each turn.
-   * Runs as a journaled activity — crash-safe, skipped on replay.
+   *
+   * @replay
+   * Runs inside a journaled activity — SKIPPED on replay. Same caveats as
+   * `beforeTurn`: pure transformations only; durable side-effects belong
+   * outside (memory store, durable approval inbox, etc.).
    */
   afterTurn?: (params: HooksAfterTurnParams) => Promise<void>;
   /**
    * Fires when no send() arrives within idleTimeoutMs after the previous turn ended.
-   * Not journaled — runs outside the workflow via a clock timer.
    * Receives the actual elapsed idle time in milliseconds.
+   *
+   * @replay
+   * NOT journaled — driven by a clock timer outside the workflow. Will
+   * NOT fire automatically after a worker restart (timer state is lost).
+   * If you need durable idle detection, schedule via the workflow scheduler.
    */
   onIdle?: (idleMs: number) => Promise<void>;
   /**
@@ -71,17 +85,30 @@ export interface HooksConfig {
   idleTimeoutMs?: number;
   /**
    * Runs when session.close() is called.
-   * Not journaled — use for cleanup, flushing buffers, or final memory writes.
+   *
+   * @replay
+   * NOT journaled and NOT replayed. Suitable for in-process cleanup
+   * (closing buffers, flushing logs). Failures here do not affect the
+   * workflow state.
    */
   onClose?: () => Promise<void>;
   /**
    * Called when a tool with `requireApproval: true` needs user approval.
    * Return `{ approved: true }` to allow execution, or `{ approved: false, reason? }` to reject.
    *
-   * When set, the workflow does NOT suspend — the decision is awaited inline inside a journaled
-   * activity, so it is skipped on replay. This is simpler than the `session.approve()` /
-   * `session.reject()` signal path; use it when the approval UI lives in the same process (e.g. a
-   * terminal REPL). Falls back to the signal-based path when omitted.
+   * When set, the workflow does NOT suspend — the decision is awaited inline. This is simpler
+   * than the `session.approve()` / `session.reject()` signal path; use it when the approval UI
+   * lives in the same process (e.g. a terminal REPL). Falls back to the signal-based path when
+   * omitted.
+   *
+   * @replay
+   * The decision is awaited inside a journaled activity, so the journaled
+   * approve/reject result IS durable. But the CALLBACK ITSELF is skipped
+   * on replay — any side effects (audit-log write, Slack notification,
+   * rate-limit counter) do NOT re-fire on replay. For durable audit
+   * trails of who approved what, use the persistent approval-storage
+   * primitive (promin-2nh2 — under construction) which records decisions
+   * outside the activity and survives replay correctly.
    */
   onApprovalRequired?: (call: ToolCall) => Promise<{ approved: boolean; reason?: string }>;
 }
@@ -173,12 +200,19 @@ export interface AgentLoopConfig {
   /**
    * Called on every agent lifecycle transition across all sessions created by this loop.
    * Fires from inside a journaled activity — async return values are awaited in the
-   * background (errors are logged, never thrown into the workflow).
+   * background.
    *
-   * **At-most-once semantics:** because the activity is skipped on journal replay (e.g.
-   * after a server restart), the callback does NOT re-fire for historical turns.
-   * Use it for observability — driving an external state machine, websocket push, etc.
-   * Do not rely on it for durable side-effects.
+   * @replay
+   * The activity is SKIPPED on journal replay (e.g. after server restart),
+   * so the callback does NOT re-fire for historical turns.
+   *
+   * @errors
+   * **Errors are logged via console.error and SWALLOWED.** This hook is
+   * advisory observability — it MUST NOT be load-bearing for correctness.
+   * Failed external state-machine writes will not abort the turn or propagate.
+   * If you need correctness-tied lifecycle effects, drive them from the
+   * persistent storage transitions (workflow row status, step rows) rather
+   * than this callback.
    */
   onLifecycle?: (event: AgentLifecycleEvent) => void | Promise<void>;
   /**

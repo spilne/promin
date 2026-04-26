@@ -70,8 +70,14 @@ export interface AgentActionConfig<TOutput = any> {
   autoApprove?: AutoApprove;
   /**
    * Async callback invoked when a tool with `requireApproval: true` needs a decision.
-   * Wraps the call in an activity so it is journaled (skipped on replay).
    * When omitted, approval falls back to `ctx.signal("approve:<id>")`.
+   *
+   * @replay
+   * The decision is awaited inside a journaled activity — the approve/reject
+   * RESULT survives replay. The CALLBACK ITSELF is skipped on replay, so
+   * side effects (audit logs, notifications) do NOT re-fire. For durable
+   * audit trails, use the persistent approval-storage primitive
+   * (promin-2nh2) instead of relying on side effects in this callback.
    */
   onApprovalRequired?: (call: ToolCall) => Promise<ApprovalDecision>;
   maxSteps?: number;
@@ -86,10 +92,42 @@ export interface AgentActionConfig<TOutput = any> {
    */
   outputSchema?: z.ZodType<TOutput>;
   processors?: ProcessorsConfig;
+  /**
+   * Per-step callback. Return `{ continue: false }` to abort the agent's
+   * step loop early; return `{ continue: true, feedback: '…' }` to inject
+   * a system message before the next think.
+   *
+   * @replay
+   * Runs inside a journaled activity — SKIPPED on replay. The decision
+   * to continue/stop survives via the journaled result, but any side
+   * effects in the callback body do NOT re-fire.
+   */
   onStep?: (ctx: StepContext) => { continue: boolean; feedback?: string } | void;
+  /**
+   * Fires when the LLM emits a tool call.
+   *
+   * @replay
+   * Runs inside the journaled think activity — SKIPPED on replay. Use for
+   * UI updates and progress logging only.
+   */
   onToolCall?: (call: ToolCall) => void;
+  /**
+   * Fires after a tool produces output.
+   *
+   * @replay
+   * Runs inside the journaled tool-execute activity — SKIPPED on replay.
+   * Same UI-only constraint as `onToolCall`.
+   */
   onToolResult?: (call: ToolCall, output: unknown) => void;
-  /** Called with each text delta as the LLM streams its response. Requires the provider to support chatStream. */
+  /**
+   * Called with each text delta as the LLM streams its response. Requires the provider to
+   * support chatStream.
+   *
+   * @replay
+   * Streams are not re-emitted on replay — the journaled think activity
+   * returns the complete response without re-streaming. Use for live UI
+   * only; reconstruct full transcripts from the journaled response.
+   */
   onChunk?: (delta: string) => void;
 }
 
