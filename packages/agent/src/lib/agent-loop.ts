@@ -912,10 +912,34 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
       // object (e.g. server restart with persistent storage) doesn't re-deliver
       // task-0. Count completed emit-N activities — each represents one done turn.
       const pastEntries = await activityStorage.loadJournal(sessionId, "conversation");
-      state.turn = pastEntries.reduce((max, e) => {
+      const reconstructedTurn = pastEntries.reduce((max, e) => {
         const m = e.activityName.match(/^emit-(\d+)$/);
         return m && e.exit?.tag === "Success" ? Math.max(max, Number(m[1]) + 1) : max;
       }, 0);
+
+      // Sanity check: the reconstructed counter must be at least as high
+      // as the highest task-N signal that was DELIVERED (we count those by
+      // looking at activity names matching lc-N-message — the very first
+      // activity each turn). If the journal is missing emit entries that
+      // logically must exist (because lc-N-message is present), we'd
+      // re-deliver task-N and clobber prior turns. This usually only fires
+      // on a custom storage backend that didn't round-trip exit.tag, or
+      // on a corrupted journal.
+      const maxStartedTurn = pastEntries.reduce((max, e) => {
+        const m = e.activityName.match(/^lc-(\d+)-message$/);
+        return m && e.exit?.tag === "Success" ? Math.max(max, Number(m[1]) + 1) : max;
+      }, 0);
+      if (reconstructedTurn < maxStartedTurn) {
+        throw new Error(
+          `Turn counter reconstruction mismatch on session "${sessionId}": ` +
+            `journal reports ${reconstructedTurn} completed turn(s) but at least ` +
+            `${maxStartedTurn} turn(s) were started (lc-${maxStartedTurn - 1}-message ` +
+            `is present without a matching emit-${maxStartedTurn - 1}). This implies ` +
+            `the storage backend lost emit-N exit metadata, or the journal is corrupt. ` +
+            `Refusing to proceed to avoid duplicate turn delivery.`,
+        );
+      }
+      state.turn = reconstructedTurn;
 
       // Holds compacted messages to inject on the next deliverAndRun call.
       let _pendingCompact: Message[] | null = null;
