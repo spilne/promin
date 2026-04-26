@@ -25,7 +25,7 @@ export type {
   CompactResult,
 } from "./agent-loop.ts";
 
-export { InMemorySessionLogger } from "./session-logger.ts";
+export { InMemorySessionLogger, SessionEventBus } from "./session-logger.ts";
 export type { SessionLogger, SessionEvent, LogUsage } from "./session-logger.ts";
 
 export { InMemoryMemoryStore } from "./memory-store.ts";

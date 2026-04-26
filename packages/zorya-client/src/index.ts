@@ -7,3 +7,4 @@ export {
   type ServerToWorker,
   type WorkerToServer,
 } from "./lib/index.ts";
+export { runAgentTask, type RunAgentTaskParams } from "./lib/index.ts";

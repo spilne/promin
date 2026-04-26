@@ -7,3 +7,4 @@ export {
   type ServerToWorker,
   type WorkerToServer,
 } from "./worker-control-socket.ts";
+export { runAgentTask, type RunAgentTaskParams } from "./agent-task.ts";
