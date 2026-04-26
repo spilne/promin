@@ -40,6 +40,7 @@ export {
   StorageError,
   WorkflowLockError,
   WorkflowSuspendedError,
+  WorkflowContinueAsNewError,
   WorkflowTimeoutError,
   StepTimeoutError,
   WorkflowDeadlineError,

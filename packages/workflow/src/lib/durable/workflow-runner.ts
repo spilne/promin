@@ -46,7 +46,11 @@ import {
 import { withLock } from "./with-lock.ts";
 import { topologicalSort } from "./workflow-dag.ts";
 import type { RetryPolicy } from "@promin/core";
-import type { WorkflowSuspendedError, WorkflowTimeoutError } from "./durable-pipeline-error.ts";
+import {
+  WorkflowContinueAsNewError,
+  type WorkflowSuspendedError,
+  type WorkflowTimeoutError,
+} from "./durable-pipeline-error.ts";
 import type {
   IWorkflowVersionRegistry,
   WorkflowVersionRegistry,
@@ -688,6 +692,38 @@ export async function runWorkflowOrchestration(
   ctx: WorkflowOrchestrationContext,
   params: { workflowId: string; input: unknown; force?: boolean },
 ): Promise<unknown> {
+  // Continue-as-new wrapper: catch WorkflowContinueAsNewError thrown out
+  // of withLock, archive the current run via startFreshRun, then re-run
+  // under the same workflowId with the carried input. Hard cap at 1024
+  // chained continue-as-new calls to catch infinite loops in user code
+  // (matches Temporal's safety belt).
+  let currentInput = params.input;
+  for (let chain = 0; chain < 1024; chain++) {
+    try {
+      return await runOneOrchestrationCycle(ctx, {
+        workflowId: params.workflowId,
+        input: currentInput,
+        force: chain > 0 ? true : params.force,
+      });
+    } catch (err) {
+      if (err instanceof WorkflowContinueAsNewError) {
+        await ctx.storage.startFreshRun(params.workflowId);
+        currentInput = err.nextInput;
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error(
+    `Workflow "${params.workflowId}" exceeded continue-as-new chain limit (1024). ` +
+      `Likely an infinite continue-as-new loop in the workflow body.`,
+  );
+}
+
+async function runOneOrchestrationCycle(
+  ctx: WorkflowOrchestrationContext,
+  params: { workflowId: string; input: unknown; force?: boolean },
+): Promise<unknown> {
   const { workflowId, input, force } = params;
   const clock = ctx.clock ?? SystemClock;
   const workflowStartTime = clock.currentTimeMs();
@@ -910,8 +946,15 @@ export async function runWorkflowOrchestration(
           });
         }
 
-        // DAG failed — suspension errors always propagate immediately
+        // DAG failed — suspension errors always propagate immediately.
+        // Continue-as-new is also a clean unwind (no compensation, no
+        // failure recording) — throw it out of withLock so the lock is
+        // released by withLock's finally, then the outer wrapper catches
+        // it and recurses with the carried input under the same workflowId.
         if (dagResult.suspension) {
+          throw dagResult.error;
+        }
+        if ("continueAsNew" in dagResult && dagResult.continueAsNew) {
           throw dagResult.error;
         }
 
@@ -1051,7 +1094,7 @@ export async function executeWorkflowDag(
   },
 ): Promise<
   | { success: true; result: unknown }
-  | { success: false; error: unknown; suspension: boolean }
+  | { success: false; error: unknown; suspension: boolean; continueAsNew?: boolean }
   | { success: false; tripwire: true; stepName: string; reason: unknown }
 > {
   const { workflowId, input, dagNodes, state } = params;
@@ -1485,6 +1528,13 @@ export async function executeWorkflowDag(
       // Suspension errors propagate without failing the workflow
       if (tag === "WorkflowSuspendedError") {
         return { success: false, error: batchError, suspension: true };
+      }
+
+      // Continue-as-new requests also unwind cleanly — no compensation,
+      // no failure recording. The orchestration wrapper catches the
+      // thrown error and chains a fresh run.
+      if (tag === "WorkflowContinueAsNewError") {
+        return { success: false, error: batchError, suspension: false, continueAsNew: true };
       }
 
       // Record step failure

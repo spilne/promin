@@ -788,6 +788,15 @@ export class InMemoryWorkflowStorage
     wf.completedAt = undefined;
     wf.steps = new Map();
     wf.updatedAt = this.clock.now();
+    // Clear activity journal entries — a fresh run must re-execute all
+    // activities from scratch, otherwise replay reads stale entries from
+    // the prior run and never re-fires the side effects. Required for
+    // continue-as-new and any other rerun path that should re-execute
+    // from zero.
+    const journalPrefix = `${workflowId}::`;
+    for (const key of this.journal.keys()) {
+      if (key.startsWith(journalPrefix)) this.journal.delete(key);
+    }
     return wf.run;
   }
 

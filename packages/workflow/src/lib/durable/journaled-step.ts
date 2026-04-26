@@ -33,6 +33,7 @@ import {
   LoopLimitExceededError,
   RetryableError,
   TerminalError,
+  WorkflowContinueAsNewError,
   WorkflowSuspendedError,
 } from "./durable-pipeline-error.ts";
 import {
@@ -321,6 +322,39 @@ export interface JournaledContext<Input, Prev> {
     condition: (result: T, iter: number) => boolean,
     options?: { readonly maxIterations?: number },
   ): Generator<ActivityYield, T, unknown>;
+
+  /**
+   * Terminate the current execution and start a fresh run under the same
+   * workflowId with new input. Mirrors Temporal's `continueAsNew`. The
+   * pattern for long-running workflows that would otherwise accumulate
+   * unbounded journal entries — the canonical example is a workflow that
+   * loops forever processing batches.
+   *
+   * ```ts
+   * .journaled("batch-loop", function* (ctx) {
+   *   const batch = yield* ctx.activity("fetch", () => api.fetch(ctx.input.batchId));
+   *   yield* ctx.activity("process", () => api.process(batch));
+   *   ctx.continueAsNew({ batchId: ctx.input.batchId + 1 });
+   * });
+   * ```
+   *
+   * Semantics:
+   * - Throws `WorkflowContinueAsNewError` to unwind the body.
+   * - The runner catches it, calls `storage.startFreshRun(workflowId)` to
+   *   archive the current run + reset state, then runs the workflow again
+   *   under the same workflowId with `nextInput`.
+   * - **Compensations do NOT run.** Continue-as-new is a clean restart,
+   *   not a failure — the activities that already succeeded stay
+   *   succeeded in the run history.
+   * - Replay-safe: a worker restart that resumes a workflow whose journal
+   *   ends in continueAsNew picks up the LATEST run, not the prior chain
+   *   link (`startFreshRun` already archives the journal under the old
+   *   run number).
+   *
+   * Returns `never` because control unwinds — the call site is the last
+   * thing the body executes.
+   */
+  continueAsNew(nextInput: unknown): never;
 
   /**
    * Bind a record of activity functions into a typed proxy where each
@@ -1285,6 +1319,13 @@ function makeCtx<Input, Prev>(params: {
     dowhile: dowhileImpl,
     dountil: dountilImpl,
     proxy: proxyImpl,
+    continueAsNew: (nextInput: unknown): never => {
+      throw new WorkflowContinueAsNewError({
+        workflowId,
+        nextInput,
+        message: `Workflow "${workflowId}" requested continue-as-new`,
+      });
+    },
   };
   return { ctx, unwind };
 }
