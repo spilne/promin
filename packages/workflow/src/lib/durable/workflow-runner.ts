@@ -225,6 +225,29 @@ export interface WorkflowRunner {
    */
   handle<Output = unknown>(workflowId: string): WorkflowHandle<Output>;
   /**
+   * Rewind a workflow to `fromStep` and continue executing. Resets that
+   * step + everything downstream of it (transitively in the DAG) back to
+   * pending; preserves all upstream completed step results so they are
+   * not re-executed. Used as a debugging primitive for incident response:
+   *
+   *   "Step 47 failed because of a bad payload. Patch the payload, reset
+   *    to step 47, and let the workflow continue from there."
+   *
+   * Requires the configured storage to implement `resetSteps`. Throws a
+   * clear error if not. Throws `StepNotFoundError` if `fromStep` isn't
+   * a step on the workflow's DAG.
+   *
+   * NOT a control-flow primitive — meant for one-off debugging /
+   * recovery, not for normal application logic. For programmatic restart,
+   * use `ctx.continueAsNew` (clean restart with fresh history) or
+   * `runner.run` with `force: true` (full re-execute).
+   */
+  resume<Input = unknown, Output = unknown>(params: {
+    readonly workflow: Workflow<Input, Output>;
+    readonly workflowId: string;
+    readonly fromStep: string;
+  }): Promise<Output>;
+  /**
    * Subscribe to live step/workflow-lifecycle events for a single run.
    * Returns an async iterable that yields every `WorkflowRunEvent` as it
    * happens and closes on the first terminal event
@@ -363,6 +386,68 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     }
 
     return this.handle<Output>(workflowId);
+  }
+
+  async resume<Input = unknown, Output = unknown>(params: {
+    readonly workflow: Workflow<Input, Output>;
+    readonly workflowId: string;
+    readonly fromStep: string;
+  }): Promise<Output> {
+    const { workflow, workflowId, fromStep } = params;
+    const storage = this.storage;
+
+    if (typeof storage.resetSteps !== "function") {
+      throw new Error(
+        `WorkflowRunner.resume requires storage that implements resetSteps. ` +
+          `Got ${storage.constructor.name}. (InMemoryWorkflowStorage supports it; ` +
+          `Postgres / SQLite / Remote backends are tracked separately.)`,
+      );
+    }
+
+    const state = await storage.loadWorkflow(workflowId);
+    if (!state) {
+      throw new Error(`Cannot resume workflow "${workflowId}" — not found in storage.`);
+    }
+
+    // Validate fromStep exists on the DAG. Step-name lookup is on the
+    // workflow's _definition (storage doesn't know topology).
+    const def = workflow._definition;
+    const fromStepDef = def.steps.find((s) => s.name === fromStep);
+    if (!fromStepDef) {
+      const known = def.steps.map((s) => s.name).join(", ");
+      throw new Error(
+        `Cannot resume "${workflowId}" — step "${fromStep}" not found on workflow ` +
+          `"${workflow.name}". Known steps: ${known}.`,
+      );
+    }
+
+    // Walk the DAG to compute the downstream set: every step whose
+    // `dependsOn` reaches fromStep transitively. Reset the union of
+    // {fromStep, downstream} so the runner re-executes from there.
+    const downstream = new Set<string>([fromStep]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const step of def.steps) {
+        if (downstream.has(step.name)) continue;
+        if (step.dependsOn.some((dep) => downstream.has(dep))) {
+          downstream.add(step.name);
+          grew = true;
+        }
+      }
+    }
+
+    await storage.resetSteps(workflowId, [...downstream]);
+
+    // Re-run with `force: true` so idempotency caching doesn't
+    // short-circuit "already completed" — we just reverted the terminal
+    // status so it shouldn't trip, but `force` makes that explicit.
+    return (await this.run({
+      workflow,
+      workflowId,
+      input: state.input as Input,
+      force: true,
+    })) as Output;
   }
 
   handle<Output = unknown>(workflowId: string): WorkflowHandle<Output> {

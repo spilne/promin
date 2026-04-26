@@ -800,6 +800,35 @@ export class InMemoryWorkflowStorage
     return wf.run;
   }
 
+  async resetSteps(workflowId: string, stepNames: readonly string[]): Promise<void> {
+    const wf = this.workflows.get(workflowId);
+    if (!wf) throw new Error(`Workflow ${workflowId} not found`);
+    if (stepNames.length === 0) return;
+
+    // Drop the listed steps from the workflow's step map. The DAG executor
+    // re-creates them on the next run() — we don't keep "pending" stubs
+    // because the running flag is implicit (a step is pending iff it's
+    // not in `wf.steps`). This matches how brand-new workflows look.
+    for (const name of stepNames) {
+      wf.steps.delete(name);
+      // Clear journal entries for the step. Journaled bodies key by
+      // (workflowId, stepName) so we delete the matching journal Map slot.
+      this.journal.delete(this.journalKey(workflowId, name));
+    }
+
+    // Flip the workflow back into a runnable state. Terminal statuses
+    // (completed / failed / tripwire) become "running" so the runner
+    // picks it up; suspended / running stay as-is.
+    if (wf.status === "completed" || wf.status === "failed" || wf.status === "tripwire") {
+      wf.status = "running";
+      wf.result = undefined;
+      wf.error = undefined;
+      wf.tripwire = undefined;
+      wf.completedAt = undefined;
+    }
+    wf.updatedAt = this.clock.now();
+  }
+
   async loadRunHistory(
     workflowId: string,
     params?: { limit?: number; offset?: number },

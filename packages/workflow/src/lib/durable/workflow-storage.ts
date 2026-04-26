@@ -344,6 +344,27 @@ export interface WorkflowStorage {
   startFreshRun(workflowId: string): Promise<number>;
 
   /**
+   * Reset specific step rows back to `pending`, clearing their result /
+   * error / completedAt. Also clears any journal entries for those steps
+   * so journaled bodies re-execute from zero. The workflow's overall
+   * status flips back to `running` so the runner picks it up.
+   *
+   * Used by `WorkflowRunner.resume(workflowId, fromStep)` for the
+   * "rewind to step N and continue" debugging primitive — storage is the
+   * primitive, runner walks the DAG to compute the downstream set.
+   *
+   * Optional: backends opt in by implementing it. The runner type-guards
+   * at first use and throws a clear error if the configured storage
+   * doesn't support reset. Steps not present on the workflow row are
+   * silently skipped (idempotent on missing names).
+   *
+   * @param workflowId — the workflow whose steps to reset.
+   * @param stepNames — explicit set to reset (caller computes downstream
+   *   from the DAG; storage doesn't know topology).
+   */
+  resetSteps?(workflowId: string, stepNames: readonly string[]): Promise<void>;
+
+  /**
    * Load run history for a workflow — all runs with their step results.
    * Ordered by run number descending (newest first).
    */
