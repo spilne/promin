@@ -142,6 +142,20 @@ export class ZoryaWorker {
    * subclassing the worker.
    */
   readonly control?: WorkerControlSocket;
+  /**
+   * Active agent streams hosted on this worker. Keyed by workflowId. The
+   * value is a subscribe function — the WS relay calls it to fan events
+   * out as `frame { streamId, payload }`. Populated by AgentWorker
+   * (promin-eg0d) before agent execution begins; cleared on completion.
+   *
+   * Protocol: handler is called with an observer; returns an unsubscribe
+   * function. Lets multiple browser tabs subscribe to the same workflow
+   * without each one running its own agent — the worker fans the bus
+   * across N WS frames keyed by streamId.
+   */
+  readonly streams = new Map<string, (observer: (event: unknown) => void) => () => void>();
+  /** streamId → unsubscribe handle for an active server-pushed agent stream. */
+  private readonly activeStreams = new Map<string, () => void>();
   private readonly config: ZoryaWorkerConfig;
   /** name → primary Workflow (the one passed in `config.workflows`). */
   private readonly byName: Map<string, Workflow<unknown, unknown>>;
@@ -193,7 +207,62 @@ export class ZoryaWorker {
         reconnectDelayMs: csCfg.reconnectDelayMs,
         maxReconnectDelayMs: csCfg.maxReconnectDelayMs,
       });
+      // Bind the agent-stream wire — the server's AgentStreamHub broadcasts
+      // these commands when a dashboard SSE client subscribes / unsubscribes.
+      // Workers that aren't hosting the workflow ignore the start command
+      // (no streams entry); the one that is begins forwarding frames.
+      this.control.onCommand("agent-stream-start", (args) => {
+        const { streamId, workflowId } = args as { streamId: string; workflowId: string };
+        const subscribe = this.streams.get(workflowId);
+        if (!subscribe) return { hosted: false };
+        // Replace any prior subscription on the same streamId so reconnecting
+        // dashboard tabs stay clean. Realistically only happens if start
+        // arrives twice — defensive.
+        this.activeStreams.get(streamId)?.();
+        const unsub = subscribe((event) => {
+          this.control?.sendFrame(streamId, event);
+        });
+        this.activeStreams.set(streamId, unsub);
+        return { hosted: true };
+      });
+      this.control.onCommand("agent-stream-stop", (args) => {
+        const { streamId } = args as { streamId: string };
+        const unsub = this.activeStreams.get(streamId);
+        if (unsub) {
+          unsub();
+          this.activeStreams.delete(streamId);
+        }
+        return { ok: true };
+      });
     }
+  }
+
+  /**
+   * Register a live event stream for a workflow this worker is hosting.
+   * The `subscribe` fn binds an observer to the underlying source (e.g. an
+   * agent's SessionEventBus) and returns an unsubscribe function. Used by
+   * AgentWorker (promin-eg0d) at agent-task start; unregistered on
+   * completion via the returned cleanup.
+   */
+  registerStream(
+    workflowId: string,
+    subscribe: (observer: (event: unknown) => void) => () => void,
+  ): () => void {
+    this.streams.set(workflowId, subscribe);
+    return () => {
+      if (this.streams.get(workflowId) === subscribe) this.streams.delete(workflowId);
+      // Tear down any active server-pushed stream that was bound to this
+      // workflowId — the SSE clients will reconnect / replay if the
+      // workflow comes back.
+      for (const [streamId, unsub] of this.activeStreams) {
+        // We can't tell from here which streamId belongs to this
+        // workflowId without a reverse index — for v1 it's fine to
+        // leave them; the next agent-stream-stop from the server cleans
+        // up. Adding a reverse index when this becomes a hot path.
+        void streamId;
+        void unsub;
+      }
+    };
   }
 
   async start(): Promise<void> {

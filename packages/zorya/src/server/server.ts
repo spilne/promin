@@ -56,6 +56,8 @@ import {
   type RunTrigger,
 } from "./routes/runs.ts";
 import { streamRunEvents } from "./routes/sse.ts";
+import { streamAgentEvents } from "./routes/agent-stream.ts";
+import { AgentStreamHub } from "./services/agent-stream-hub.ts";
 import { getMetrics, StorageMetricsProvider, type MetricsProvider } from "./routes/metrics.ts";
 import {
   RegistryBackedWorkersProvider,
@@ -303,6 +305,13 @@ export class ZoryaServer {
    * tickets (promin-o8dj, promin-i0wi, promin-eg0d) wire onto this.
    */
   readonly workerWs: WorkerWebSocketServer;
+  /**
+   * Bridges WS frames from workers to SSE clients on `/api/runs/:id/agent-stream`.
+   * Always present — the SSE route is mounted unconditionally; it only
+   * delivers events when at least one worker hosting that workflow is
+   * connected over the WS and a SessionEventBus is registered there.
+   */
+  readonly agentStreamHub: AgentStreamHub;
   private readonly auth: Auth;
   /** Separate auth for worker-protocol endpoints. Open when no keys set. */
   private readonly workerAuth: Auth;
@@ -323,6 +332,7 @@ export class ZoryaServer {
     this.workerWs = new WorkerWebSocketServer({
       authorize: (req) => this.workerAuth.check(req),
     });
+    this.agentStreamHub = new AgentStreamHub(this.workerWs);
 
     const metrics = config.metrics ?? new StorageMetricsProvider(config.storage);
     // Prefer an explicit workers provider; otherwise derive one from the
@@ -479,6 +489,7 @@ export class ZoryaServer {
           pollIntervalMs: config.sseIntervalMs,
         }),
       )
+      .get("/api/runs/:id/agent-stream", streamAgentEvents(this.agentStreamHub))
       .get("/api/workers", listWorkers(workers))
       .get("/api/metrics", getMetrics(metrics));
 
@@ -588,6 +599,7 @@ export class ZoryaServer {
     const resolvedHost = typeof srv.hostname === "string" ? srv.hostname : hostname;
     this.server = { stop: () => srv.stop(), port: resolvedPort, hostname: resolvedHost };
     this.workerWs.start();
+    this.agentStreamHub.start();
     this.startCoordinator();
     this.startScheduler();
     return {
@@ -631,6 +643,7 @@ export class ZoryaServer {
     if (this.schedulerLoop) {
       void this.schedulerLoop.stop();
     }
+    this.agentStreamHub.stop();
     this.workerWs.stop();
   }
 
