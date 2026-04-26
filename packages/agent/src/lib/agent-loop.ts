@@ -1023,6 +1023,13 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
           const answerPromise = new Promise<string>((resolve, reject) =>
             pendingResponses.set(turn, { resolve, reject }),
           );
+          // Pre-attach a no-op catch so that if close() rejects this promise
+          // while state.closed has already flipped (and we therefore skip
+          // awaiting it below), the rejection isn't reported as an
+          // unhandled rejection. Adding .catch() to a Promise returns a
+          // new derived promise — `await answerPromise` later still sees
+          // the original rejection.
+          answerPromise.catch(() => {});
 
           try {
             state.inDelivery = true;
