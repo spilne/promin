@@ -4,10 +4,10 @@
 // the remote wire.
 //
 // This is the "workflow worker" shape — each assignment drives the whole
-// workflow orchestration in the worker's own process (Temporal's workflow-
-// worker model). Storage is remote so the server dashboard always sees
-// current state, but step bodies execute with access to the worker's local
-// runtime (native libs, filesystem, secrets, etc.).
+// workflow orchestration in the worker's own process. Storage is remote
+// so the server dashboard always sees current state, but step bodies
+// execute with access to the worker's local runtime (native libs,
+// filesystem, secrets, etc.).
 //
 // Task-level step dispatch (server pushes individual steps to workers) is a
 // future layer on top — see promin-32k2.
@@ -16,7 +16,10 @@
 import {
   createSleepScanner,
   createWorkflowRunner,
+  hasQueryHandlers,
   InProcessStepExecutor,
+  invokeQueryHandler,
+  listQueryHandlers,
   type FairnessPolicy,
   type SleepScanner,
   type StepTask,
@@ -233,6 +236,33 @@ export class ZoryaWorker {
           this.activeStreams.delete(streamId);
         }
         return { ok: true };
+      });
+      // Query handlers — looks up an in-memory query handler registered
+      // by the workflow body via ctx.setQueryHandler. Replies with
+      // { hosted: false } when this worker isn't running the workflow,
+      // so the server's broadcast-and-pick-first pattern finds the
+      // hosting worker. NoHandlerForQuery / WorkflowNotRunning surface
+      // as { ok: false, error } via the standard reply path.
+      this.control.onCommand("query", async (args) => {
+        const {
+          workflowId,
+          name,
+          args: queryArgs,
+        } = args as {
+          workflowId: string;
+          name: string;
+          args?: unknown;
+        };
+        if (!hasQueryHandlers(workflowId)) {
+          return { hosted: false };
+        }
+        const result = await invokeQueryHandler(workflowId, name, queryArgs);
+        return { hosted: true, result };
+      });
+      this.control.onCommand("query-list", (args) => {
+        const { workflowId } = args as { workflowId: string };
+        if (!hasQueryHandlers(workflowId)) return { hosted: false };
+        return { hosted: true, handlers: listQueryHandlers(workflowId) };
       });
     }
   }

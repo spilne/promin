@@ -116,6 +116,12 @@ export {
   type ActivityYield,
   type ActivityOptions,
 } from "./journaled-step.ts";
+export {
+  invokeQueryHandler,
+  hasQueryHandlers,
+  listQueryHandlers,
+  clearQueryHandlers,
+} from "./query-registry.ts";
 
 // Visual editor schema — serializable DAG representation for authoring UIs
 export {

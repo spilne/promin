@@ -51,6 +51,7 @@ import {
   type WorkflowSuspendedError,
   type WorkflowTimeoutError,
 } from "./durable-pipeline-error.ts";
+import { clearQueryHandlers } from "./query-registry.ts";
 import type {
   IWorkflowVersionRegistry,
   WorkflowVersionRegistry,
@@ -780,25 +781,40 @@ export async function runWorkflowOrchestration(
   // Continue-as-new wrapper: catch WorkflowContinueAsNewError thrown out
   // of withLock, archive the current run via startFreshRun, then re-run
   // under the same workflowId with the carried input. Hard cap at 1024
-  // chained continue-as-new calls to catch infinite loops in user code
-  // (matches Temporal's safety belt).
+  // chained continue-as-new calls to catch infinite loops in user code.
+  //
+  // Query-handler lifecycle: clear ONLY on terminal exit (success or
+  // non-suspension failure). Suspension means "still hosting, just
+  // paused" — the next resume re-runs the body and replay re-registers
+  // handlers, so we want them to survive the wait. Skipping the clear
+  // on WorkflowSuspendedError keeps handlers alive across signal /
+  // sleep waits.
   let currentInput = params.input;
   for (let chain = 0; chain < 1024; chain++) {
     try {
-      return await runOneOrchestrationCycle(ctx, {
+      const result = await runOneOrchestrationCycle(ctx, {
         workflowId: params.workflowId,
         input: currentInput,
         force: chain > 0 ? true : params.force,
       });
+      clearQueryHandlers(params.workflowId);
+      return result;
     } catch (err) {
       if (err instanceof WorkflowContinueAsNewError) {
         await ctx.storage.startFreshRun(params.workflowId);
+        clearQueryHandlers(params.workflowId);
         currentInput = err.nextInput;
         continue;
+      }
+      // Suspension — keep handlers alive. Other errors are terminal.
+      const tag = (err as { _tag?: string } | undefined)?._tag;
+      if (tag !== "WorkflowSuspendedError") {
+        clearQueryHandlers(params.workflowId);
       }
       throw err;
     }
   }
+  clearQueryHandlers(params.workflowId);
   throw new Error(
     `Workflow "${params.workflowId}" exceeded continue-as-new chain limit (1024). ` +
       `Likely an infinite continue-as-new loop in the workflow body.`,

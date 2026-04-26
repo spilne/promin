@@ -82,6 +82,10 @@ export {
   runJournaledStep,
   completeSignal,
   completeDueSleeps,
+  invokeQueryHandler,
+  hasQueryHandlers,
+  listQueryHandlers,
+  clearQueryHandlers,
   JournalNonDeterminismError,
   JournalStorageMissingError,
   type JournaledContext,
@@ -219,3 +223,18 @@ export {
   compileSqlProject,
   type SqlCompilerConfig,
 } from "./lib/sql-models/index.ts";
+
+// Filesystem-based discovery — share a single configured scanner across
+// the dashboard server and any worker / agent process that also imports
+// workflow definitions from disk.
+export {
+  WorkflowScanner,
+  ScheduleScanner,
+  applyDiscoveredSchedules,
+  type WorkflowScannerOptions,
+  type WorkflowScanResult,
+  type ScheduleScannerOptions,
+  type ScheduleScanResult,
+  type ApplyDiscoveredSchedulesOptions,
+  type ApplyDiscoveredSchedulesResult,
+} from "./lib/discovery/index.ts";

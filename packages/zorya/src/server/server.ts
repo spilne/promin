@@ -58,6 +58,7 @@ import {
 import { streamRunEvents } from "./routes/sse.ts";
 import { streamAgentEvents } from "./routes/agent-stream.ts";
 import { AgentStreamHub } from "./services/agent-stream-hub.ts";
+import { queryRun } from "./routes/query.ts";
 import { getMetrics, StorageMetricsProvider, type MetricsProvider } from "./routes/metrics.ts";
 import {
   RegistryBackedWorkersProvider,
@@ -490,6 +491,7 @@ export class ZoryaServer {
         }),
       )
       .get("/api/runs/:id/agent-stream", streamAgentEvents(this.agentStreamHub))
+      .post("/api/runs/:id/query", queryRun(this.workerWs))
       .get("/api/workers", listWorkers(workers))
       .get("/api/metrics", getMetrics(metrics));
 

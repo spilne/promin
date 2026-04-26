@@ -42,6 +42,7 @@ import {
   nextPathInScope,
   type ActivityScope,
 } from "./journaled-body-scope.ts";
+import { registerQueryHandler } from "./query-registry.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
 
 // ---------------------------------------------------------------------------
@@ -325,7 +326,7 @@ export interface JournaledContext<Input, Prev> {
 
   /**
    * Terminate the current execution and start a fresh run under the same
-   * workflowId with new input. Mirrors Temporal's `continueAsNew`. The
+   * workflowId with new input. The
    * pattern for long-running workflows that would otherwise accumulate
    * unbounded journal entries — the canonical example is a workflow that
    * loops forever processing batches.
@@ -355,6 +356,36 @@ export interface JournaledContext<Input, Prev> {
    * thing the body executes.
    */
   continueAsNew(nextInput: unknown): never;
+
+  /**
+   * Register a query handler — a read of in-memory workflow state for
+   * external callers (dashboard, ops tooling). They invoke
+   * `handle.query(name, args?)` to get a snapshot without hitting
+   * durable storage.
+   *
+   * ```ts
+   * .journaled("checkout", function* (ctx) {
+   *   let status = "pending";
+   *   ctx.setQueryHandler("status", () => status);
+   *   status = yield* ctx.activity("validate", () => api.validate(ctx.input.orderId));
+   *   status = yield* ctx.activity("charge", () => api.charge(...));
+   *   return { ok: true };
+   * });
+   * ```
+   *
+   * Semantics:
+   * - Handlers are scoped per-`(workflowId, name)`. Re-registering the
+   *   same name in the same body replaces the prior handler.
+   * - **Not journaled.** Calling `setQueryHandler` writes to in-memory
+   *   state on the running worker. On replay (worker restart) the body
+   *   re-registers as it re-runs; queries against a stopped run return
+   *   `WorkflowNotRunningError`.
+   * - The handler is called outside the journaled body's generator
+   *   context — must NOT yield activities or call `ctx.*` (treat it as
+   *   a pure read of closure-captured state).
+   * - Return value must be JSON-safe — sent back over the wire.
+   */
+  setQueryHandler<R>(name: string, handler: (args?: unknown) => R | Promise<R>): void;
 
   /**
    * Bind a record of activity functions into a typed proxy where each
@@ -1319,6 +1350,13 @@ function makeCtx<Input, Prev>(params: {
     dowhile: dowhileImpl,
     dountil: dountilImpl,
     proxy: proxyImpl,
+    setQueryHandler: <R>(name: string, handler: (args?: unknown) => R | Promise<R>): void => {
+      // Process-local registry — query handlers close over the body's
+      // in-memory state, so they're inherently per-process. The worker
+      // control socket reads from the same registry to answer queries
+      // routed in from the server.
+      registerQueryHandler(workflowId, name, handler as (args?: unknown) => unknown);
+    },
     continueAsNew: (nextInput: unknown): never => {
       throw new WorkflowContinueAsNewError({
         workflowId,

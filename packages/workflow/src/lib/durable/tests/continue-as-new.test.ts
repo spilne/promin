@@ -1,8 +1,8 @@
 // ---------------------------------------------------------------------------
 // ctx.continueAsNew — clean restart of the same workflowId with new input.
 //
-// Mirrors Temporal's continue-as-new pattern. Used by long-running
-// workflows that would otherwise grow the journal without bound — typical
+// Used by long-running workflows that would otherwise grow the journal
+// without bound — typical
 // example: a workflow that processes a stream of batches and re-enters
 // itself with the next batch id after each iteration.
 //
