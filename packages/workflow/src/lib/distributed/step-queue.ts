@@ -30,6 +30,11 @@ export interface StepTask {
    * versions they support. Undefined for unversioned workflows.
    */
   readonly version?: string;
+  /**
+   * Search-attribute payload set at enqueue time. See `enqueue` for the
+   * convention. Round-trips unchanged; never read by the platform.
+   */
+  readonly metadata?: Record<string, unknown>;
 }
 
 /**
@@ -80,6 +85,19 @@ export interface StepQueue {
      * can filter by supported versions during rolling deploys.
      */
     version?: string;
+    /**
+     * Arbitrary search-attribute payload — mirrors `wf_workflows.metadata`.
+     * The platform never reads keys here for control flow; it's a generic
+     * place for callers (agents, scheduling, custom workloads) to attach
+     * scope / labels / tags / experiment IDs that downstream observability
+     * + queries can filter by. Conventions (documented, not enforced):
+     *   `metadata.userId`     — end-user actor (agent dispatch sets this)
+     *   `metadata.subject`    — generic actor when not a user
+     *   `metadata.tags`       — string[] for free-form labeling
+     *   `metadata.experiment` — A/B / rollout flag
+     * Round-trips through `claim` unchanged.
+     */
+    metadata?: Record<string, unknown>;
   }): Promise<string>;
 
   /**

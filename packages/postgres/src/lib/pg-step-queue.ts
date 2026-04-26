@@ -80,12 +80,14 @@ export class PgStepQueue implements StepQueue {
     priority?: number;
     namespace?: string;
     version?: string;
+    metadata?: Record<string, unknown>;
   }): Promise<string> {
     const ns = params.namespace ?? this.namespace;
     const priority = params.priority ?? 5;
     const needs = params.needs ?? [];
     const inputJson = params.input === undefined ? null : JSON.stringify(params.input);
     const prevResultsJson = JSON.stringify(params.prevResults);
+    const metadataJson = params.metadata === undefined ? null : JSON.stringify(params.metadata);
     // Raw SQL literal for text[] — drizzle's binder doesn't handle JS
     // arrays cleanly for this column type. Step names / capability names
     // come from code (readonly string[] on the interface), so the literal
@@ -98,7 +100,7 @@ export class PgStepQueue implements StepQueue {
     // callers always get an id back.
     const result = await this.db.execute(sql`
       INSERT INTO wf_step_queue (
-        workflow_id, step_name, namespace, needs, priority, input, prev_results, version
+        workflow_id, step_name, namespace, needs, priority, input, prev_results, version, metadata
       )
       VALUES (
         ${params.workflowId},
@@ -108,7 +110,8 @@ export class PgStepQueue implements StepQueue {
         ${priority},
         ${inputJson}::jsonb,
         ${prevResultsJson}::jsonb,
-        ${params.version ?? null}
+        ${params.version ?? null},
+        ${metadataJson}::jsonb
       )
       ON CONFLICT (workflow_id, step_name) WHERE status IN ('pending', 'running')
       DO UPDATE SET workflow_id = wf_step_queue.workflow_id
@@ -175,7 +178,7 @@ export class PgStepQueue implements StepQueue {
               LIMIT ${limit}
               FOR UPDATE SKIP LOCKED
             )
-            RETURNING id, workflow_id, step_name, needs, priority, input, prev_results, attempt, status, created_at, version
+            RETURNING id, workflow_id, step_name, needs, priority, input, prev_results, attempt, status, created_at, version, metadata
           `
         : sql`
             UPDATE wf_step_queue
@@ -189,7 +192,7 @@ export class PgStepQueue implements StepQueue {
               LIMIT ${limit}
               FOR UPDATE SKIP LOCKED
             )
-            RETURNING id, workflow_id, step_name, needs, priority, input, prev_results, attempt, status, created_at, version
+            RETURNING id, workflow_id, step_name, needs, priority, input, prev_results, attempt, status, created_at, version, metadata
           `;
 
     const rows = await execRaw(this.db, claimSql);
@@ -207,6 +210,7 @@ export class PgStepQueue implements StepQueue {
         status: "running" as const,
         createdAt: r.created_at instanceof Date ? r.created_at : new Date(r.created_at),
         version: r.version ?? undefined,
+        metadata: (r.metadata as Record<string, unknown> | null) ?? undefined,
       }))
       .sort((a, b) => b.priority - a.priority || a.createdAt.getTime() - b.createdAt.getTime());
 

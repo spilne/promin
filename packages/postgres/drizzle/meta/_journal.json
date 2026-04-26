@@ -183,6 +183,13 @@
       "when": 1743400025000,
       "tag": "0025_worker_registry",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1743400026000,
+      "tag": "0026_stepqueue_metadata",
+      "breakpoints": true
     }
   ]
 }

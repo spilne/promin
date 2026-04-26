@@ -197,6 +197,10 @@ export const stepQueue = pgTable(
     completedAt: timestamp("completed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     version: text("version"),
+    // Search-attribute payload — parity with wf_workflows.metadata. Never
+    // read by the platform for control flow; consumer-namespaced. No GIN
+    // index added speculatively; lift to one when a query path becomes hot.
+    metadata: jsonb("metadata"),
   },
   (t) => [
     index("wf_step_queue_dequeue_idx").on(t.status, t.priority, t.createdAt),

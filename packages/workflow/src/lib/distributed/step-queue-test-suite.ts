@@ -576,5 +576,59 @@ export function stepQueueTestSuite(factory: () => StepQueue | Promise<StepQueue>
         expect(task!.version).toBeUndefined();
       });
     });
+
+    describe("metadata search attributes", () => {
+      it("round-trips arbitrary metadata through enqueue → claim", async () => {
+        const q = await getQueue();
+        const meta = {
+          userId: "user-42",
+          tags: ["urgent", "experiment-A"],
+          experiment: "ramp-7",
+          customField: { nested: { value: 1 } },
+        };
+        await q.enqueue({
+          workflowId: "m-1",
+          stepName: "s",
+          input: {},
+          prevResults: {},
+          metadata: meta,
+        });
+
+        const [task] = await q.claim({ limit: 1 });
+        expect(task).toBeDefined();
+        expect(task!.metadata).toEqual(meta);
+      });
+
+      it("tasks without metadata have undefined metadata (backward compat)", async () => {
+        const q = await getQueue();
+        await q.enqueue({ workflowId: "no-meta", stepName: "s", input: {}, prevResults: {} });
+
+        const [task] = await q.claim({ limit: 1 });
+        expect(task).toBeDefined();
+        expect(task!.metadata).toBeUndefined();
+      });
+
+      it("metadata coexists with namespace + version + needs (no field collision)", async () => {
+        const q = await getQueue();
+        await q.enqueue({
+          workflowId: "all-fields",
+          stepName: "s",
+          input: { x: 1 },
+          prevResults: {},
+          namespace: "tenant-a",
+          version: "2",
+          needs: ["gpu"],
+          priority: 7,
+          metadata: { userId: "u-9" },
+        });
+
+        const [task] = await q.claim({ limit: 1, capabilities: ["gpu"] });
+        expect(task).toBeDefined();
+        expect(task!.version).toBe("2");
+        expect(task!.priority).toBe(7);
+        expect([...task!.needs]).toEqual(["gpu"]);
+        expect(task!.metadata).toEqual({ userId: "u-9" });
+      });
+    });
   });
 }

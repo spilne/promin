@@ -52,6 +52,7 @@ export class InMemoryStepQueue implements StepQueue {
     priority?: number;
     namespace?: string;
     version?: string;
+    metadata?: Record<string, unknown>;
   }): Promise<string> {
     const key = this.activeKey(params.namespace, params.workflowId, params.stepName);
     const existing = this.activeByKey.get(key);
@@ -71,6 +72,7 @@ export class InMemoryStepQueue implements StepQueue {
       createdAt: this.clock.now(),
       version: params.version,
       namespace: params.namespace,
+      metadata: params.metadata,
     });
     this.activeByKey.set(key, id);
     return id;
