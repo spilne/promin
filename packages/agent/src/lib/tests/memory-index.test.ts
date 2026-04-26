@@ -1,11 +1,11 @@
 import { describe, it, expect } from "bun:test";
-import { InMemoryMemoryStore } from "../memory-store.ts";
-import type { EmbeddingProvider } from "../memory-store.ts";
+import { InMemoryMemoryIndex } from "../memory-index.ts";
+import type { EmbeddingProvider } from "../memory-index.ts";
 
-describe("InMemoryMemoryStore", () => {
+describe("InMemoryMemoryIndex", () => {
   describe("save / list", () => {
     it("returns saved entries via list, most recent first", async () => {
-      const store = new InMemoryMemoryStore();
+      const store = new InMemoryMemoryIndex();
       await store.save({ content: "first" });
       await store.save({ content: "second" });
       await store.save({ content: "third" });
@@ -15,7 +15,7 @@ describe("InMemoryMemoryStore", () => {
     });
 
     it("list respects limit", async () => {
-      const store = new InMemoryMemoryStore();
+      const store = new InMemoryMemoryIndex();
       for (let i = 0; i < 5; i++) await store.save({ content: `entry-${i}` });
 
       const entries = await store.list(3);
@@ -23,14 +23,14 @@ describe("InMemoryMemoryStore", () => {
     });
 
     it("save returns a unique id each time", async () => {
-      const store = new InMemoryMemoryStore();
+      const store = new InMemoryMemoryIndex();
       const id1 = await store.save({ content: "a" });
       const id2 = await store.save({ content: "b" });
       expect(id1).not.toBe(id2);
     });
 
     it("persists metadata", async () => {
-      const store = new InMemoryMemoryStore();
+      const store = new InMemoryMemoryIndex();
       await store.save({ content: "fact", metadata: { sessionId: "s1", turn: 3 } });
 
       const [entry] = await store.list();
@@ -40,7 +40,7 @@ describe("InMemoryMemoryStore", () => {
 
   describe("delete", () => {
     it("removes the entry", async () => {
-      const store = new InMemoryMemoryStore();
+      const store = new InMemoryMemoryIndex();
       const id = await store.save({ content: "to delete" });
       await store.delete(id);
 
@@ -49,7 +49,7 @@ describe("InMemoryMemoryStore", () => {
     });
 
     it("is a no-op for unknown ids", async () => {
-      const store = new InMemoryMemoryStore();
+      const store = new InMemoryMemoryIndex();
       await store.save({ content: "keep" });
       await store.delete("nonexistent");
 
@@ -59,7 +59,7 @@ describe("InMemoryMemoryStore", () => {
 
   describe("keyword search (no embeddings)", () => {
     it("returns matching entries ranked by overlap", async () => {
-      const store = new InMemoryMemoryStore();
+      const store = new InMemoryMemoryIndex();
       await store.save({ content: "the user prefers dark mode in their editor" });
       await store.save({ content: "the user likes TypeScript and Bun runtime" });
       await store.save({ content: "completely unrelated content about cooking" });
@@ -69,7 +69,7 @@ describe("InMemoryMemoryStore", () => {
     });
 
     it("excludes entries with zero keyword overlap", async () => {
-      const store = new InMemoryMemoryStore();
+      const store = new InMemoryMemoryIndex();
       await store.save({ content: "quantum physics" });
       await store.save({ content: "cooking recipes" });
 
@@ -78,7 +78,7 @@ describe("InMemoryMemoryStore", () => {
     });
 
     it("respects limit", async () => {
-      const store = new InMemoryMemoryStore();
+      const store = new InMemoryMemoryIndex();
       for (let i = 0; i < 10; i++) {
         await store.save({ content: `workflow step execution engine result ${i}` });
       }
@@ -87,7 +87,7 @@ describe("InMemoryMemoryStore", () => {
     });
 
     it("returns empty array when store is empty", async () => {
-      const store = new InMemoryMemoryStore();
+      const store = new InMemoryMemoryIndex();
       expect(await store.search("anything")).toEqual([]);
     });
   });
@@ -111,7 +111,7 @@ describe("InMemoryMemoryStore", () => {
         fruits: [0.7, 0.7, 0],
       });
 
-      const store = new InMemoryMemoryStore({ embeddings });
+      const store = new InMemoryMemoryIndex({ embeddings });
       await store.save({ content: "I like apples" });
       await store.save({ content: "I like bananas" });
 
@@ -122,7 +122,7 @@ describe("InMemoryMemoryStore", () => {
 
     it("returns all results when all have zero similarity", async () => {
       const embeddings: EmbeddingProvider = { embed: async () => [0, 0, 0] };
-      const store = new InMemoryMemoryStore({ embeddings });
+      const store = new InMemoryMemoryIndex({ embeddings });
       await store.save({ content: "entry one" });
       await store.save({ content: "entry two" });
 

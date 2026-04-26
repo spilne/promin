@@ -12,7 +12,7 @@ import type {
 import type { ThinkingBlock } from "./message.ts";
 import type { ProcessorsConfig, ProcessorContext } from "./processors.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
-import type { MemoryStore, MemoryScope } from "./memory-store.ts";
+import type { MemoryIndex, MemoryScope } from "./memory-index.ts";
 
 // ---- message utilities ----
 
@@ -27,7 +27,7 @@ export function nonSystemMsgs(messages: Message[]): Message[] {
 // ---- tool resolution ----
 
 export interface MemoryInjectionConfig {
-  store: MemoryStore;
+  store: MemoryIndex;
   scope?: MemoryScope;
   injectLimit?: number;
   searchQuery?: string;

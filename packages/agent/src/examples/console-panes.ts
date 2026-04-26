@@ -1,5 +1,5 @@
 import type { AgentSession } from "../lib/agent-loop.ts";
-import type { MemoryStore } from "../lib/memory-store.ts";
+import type { MemoryIndex } from "../lib/memory-index.ts";
 import type { TreeNode } from "../lib/terminal/terminal.ts";
 import type { InMemoryWorkflowStorage, InMemoryScheduler, WorkflowRunner } from "@promin/workflow";
 
@@ -160,7 +160,7 @@ export async function buildStepsTree(
   );
 }
 
-export async function buildMemories(store: MemoryStore, query?: string): Promise<string[]> {
+export async function buildMemories(store: MemoryIndex, query?: string): Promise<string[]> {
   const entries = query ? await store.search(query, 10) : await store.list(50);
   if (!entries.length) return [query ? `(no memories matching "${query}")` : "(no memories yet)"];
   return entries.map(

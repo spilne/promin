@@ -1,4 +1,4 @@
-import type { EmbeddingProvider } from "../memory-store.ts";
+import type { EmbeddingProvider } from "../memory-index.ts";
 
 export interface VoyageEmbeddingOptions {
   apiKey?: string;

@@ -19,7 +19,7 @@ export interface EmbeddingProvider {
   embed(text: string): Promise<number[]>;
 }
 
-export interface MemoryStore {
+export interface MemoryIndex {
   save(
     entry: { content: string; metadata?: Record<string, unknown> },
     scope?: MemoryScope,
@@ -83,7 +83,7 @@ function scopeMatches(
   return true;
 }
 
-// ---- InMemoryMemoryStore ----
+// ---- InMemoryMemoryIndex ----
 
 interface StoredEntry {
   entry: MemoryEntry;
@@ -91,7 +91,7 @@ interface StoredEntry {
   scope?: MemoryScope;
 }
 
-export interface InMemoryMemoryStoreConfig {
+export interface InMemoryMemoryIndexConfig {
   /**
    * Optional embedding provider for semantic search.
    * Without one, falls back to keyword overlap scoring.
@@ -100,20 +100,20 @@ export interface InMemoryMemoryStoreConfig {
 }
 
 /**
- * In-process `MemoryStore` backed by a plain array.
+ * In-process `MemoryIndex` backed by a plain array.
  *
  * Search uses cosine similarity when an `EmbeddingProvider` is configured, or
  * falls back to keyword-overlap scoring. Scoped via `MemoryScope` so the same
  * store can serve multiple users or sessions without cross-contamination.
  *
  * Drop-in for production stores (Postgres vector store, Pinecone, etc.) — they
- * all implement the same `MemoryStore` interface.
+ * all implement the same `MemoryIndex` interface.
  */
-export class InMemoryMemoryStore implements MemoryStore {
+export class InMemoryMemoryIndex implements MemoryIndex {
   private readonly entries: StoredEntry[] = [];
   private readonly embeddings?: EmbeddingProvider;
 
-  constructor(config: InMemoryMemoryStoreConfig = {}) {
+  constructor(config: InMemoryMemoryIndexConfig = {}) {
     this.embeddings = config.embeddings;
   }
 

@@ -4,10 +4,10 @@ import {
   createSaveMemoryTool,
   createMemoryTools,
 } from "../tools/memory-tools.ts";
-import { InMemoryMemoryStore } from "../memory-store.ts";
+import { InMemoryMemoryIndex } from "../memory-index.ts";
 
 function makeStore() {
-  return new InMemoryMemoryStore();
+  return new InMemoryMemoryIndex();
 }
 
 describe("createSaveMemoryTool", () => {

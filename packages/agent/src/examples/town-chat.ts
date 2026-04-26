@@ -27,7 +27,7 @@ import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow"
 import {
   anthropic,
   createAgentTown,
-  InMemoryMemoryStore,
+  InMemoryMemoryIndex,
   InMemorySessionLogger,
   fetchUrl,
   webSearch,
@@ -143,7 +143,7 @@ const consoleRunner = new ConsoleRunner(term, usage);
 const town = createAgentTown({
   runner,
   mayor: "director",
-  sharedMemory: new InMemoryMemoryStore(),
+  sharedMemory: new InMemoryMemoryIndex(),
 
   onAgentActivity: (() => {
     const active = new Set<string>();
@@ -188,7 +188,7 @@ const town = createAgentTown({
   agents: {
     director: {
       llm: claude,
-      memory: new InMemoryMemoryStore(),
+      memory: new InMemoryMemoryIndex(),
       logger: loggers.director,
       prompt: [
         "You are the director of a research town. Coordinate specialist agents to answer questions.",
@@ -210,7 +210,7 @@ const town = createAgentTown({
 
     researcher: {
       llm: claude,
-      memory: new InMemoryMemoryStore(),
+      memory: new InMemoryMemoryIndex(),
       logger: loggers.researcher,
       tools: { fetchUrl, webSearch },
       requireApprovalForAllTools: true,
@@ -224,7 +224,7 @@ const town = createAgentTown({
 
     analyst: {
       llm: claude,
-      memory: new InMemoryMemoryStore(),
+      memory: new InMemoryMemoryIndex(),
       logger: loggers.analyst,
       prompt: [
         "You are an analyst. You receive research tasks from the director.",
@@ -236,7 +236,7 @@ const town = createAgentTown({
 
     factChecker: {
       llm: claude,
-      memory: new InMemoryMemoryStore(),
+      memory: new InMemoryMemoryIndex(),
       logger: loggers.factChecker,
       tools: { webSearch },
       requireApprovalForAllTools: true,
@@ -250,7 +250,7 @@ const town = createAgentTown({
 
     writer: {
       llm: claude,
-      memory: new InMemoryMemoryStore(),
+      memory: new InMemoryMemoryIndex(),
       logger: loggers.writer,
       prompt: [
         "You are a writer. You receive a question, research findings, analysis, and a fact-check from the director.",

@@ -17,7 +17,7 @@ import { createMemoryTool } from "../lib/tools/memory-tools.ts";
 import { createFileToolRegistry } from "../lib/tool-registry.ts";
 import { InMemoryScheduler, isActivityJournalStorage } from "@promin/workflow";
 import type { WorkflowRunner } from "@promin/workflow";
-import type { MemoryStore } from "../lib/memory-store.ts";
+import type { MemoryIndex } from "../lib/memory-index.ts";
 import type { ToolRegistry } from "../lib/tool-registry.ts";
 import type { AgentTool } from "../lib/tool.ts";
 import type { LLMProvider } from "../lib/llm-provider.ts";
@@ -29,7 +29,7 @@ import { z } from "zod";
 
 export interface ToolDeps {
   workspace: string;
-  memoryStore: MemoryStore;
+  memoryIndex: MemoryIndex;
   /** Shared secret store — checked env-first via CompositeSecretStore. */
   secrets: SecretStore;
   apiKey: string;
@@ -203,7 +203,7 @@ export function createSessionDebugTool(
 export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
   const {
     workspace,
-    memoryStore,
+    memoryIndex,
     secrets,
     apiKey,
     ask,
@@ -329,7 +329,7 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
       allowedCommands: ["bun", "git", "ls", "cat", "find", "grep", "npm", "npx"],
     }),
 
-    memory: createMemoryTool(memoryStore),
+    memory: createMemoryTool(memoryIndex),
 
     sessionDebug: createSessionDebugTool(sessionRef, sessionIdRef, runner, logger),
 
@@ -369,7 +369,7 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
       cwd: workspace,
       allowedCommands: ["bun", "git", "ls", "cat", "find", "grep", "npm", "npx"],
     }),
-    memory: createMemoryTool(memoryStore),
+    memory: createMemoryTool(memoryIndex),
     chatGPT: chatGptOneShotTool,
   };
 

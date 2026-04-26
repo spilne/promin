@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { agentAction } from "../agent-action.ts";
-import { InMemoryMemoryStore } from "../memory-store.ts";
+import { InMemoryMemoryIndex } from "../memory-index.ts";
 import type { LLMResponse } from "../llm-provider.ts";
 
 function mockLLM(responses: LLMResponse[]) {
@@ -27,7 +27,7 @@ async function runAction(
 
 describe("agentAction memory", () => {
   it("injects memories into system prompt before thinking", async () => {
-    const store = new InMemoryMemoryStore();
+    const store = new InMemoryMemoryIndex();
     await store.save({ content: "user prefers bullet lists" });
 
     let seenMessages: unknown[] = [];
@@ -53,7 +53,7 @@ describe("agentAction memory", () => {
   });
 
   it("skips memory injection when store is empty", async () => {
-    const store = new InMemoryMemoryStore();
+    const store = new InMemoryMemoryIndex();
     let callCount = 0;
 
     const action = agentAction({
@@ -72,7 +72,7 @@ describe("agentAction memory", () => {
   });
 
   it("uses task text as default search query", async () => {
-    const store = new InMemoryMemoryStore();
+    const store = new InMemoryMemoryIndex();
     await store.save({ content: "typescript is statically typed" });
 
     let seenMessages: unknown[] = [];
@@ -98,7 +98,7 @@ describe("agentAction memory", () => {
   });
 
   it("saves final answer to memory when saveOnComplete is true", async () => {
-    const store = new InMemoryMemoryStore();
+    const store = new InMemoryMemoryIndex();
 
     const action = agentAction({
       name: "save-test",
@@ -113,7 +113,7 @@ describe("agentAction memory", () => {
   });
 
   it("does not save when saveOnComplete is false", async () => {
-    const store = new InMemoryMemoryStore();
+    const store = new InMemoryMemoryIndex();
 
     const action = agentAction({
       name: "no-save-test",
@@ -127,7 +127,7 @@ describe("agentAction memory", () => {
   });
 
   it("does not save by default (saveOnComplete defaults to false)", async () => {
-    const store = new InMemoryMemoryStore();
+    const store = new InMemoryMemoryIndex();
 
     const action = agentAction({
       name: "default-save-test",
@@ -141,7 +141,7 @@ describe("agentAction memory", () => {
   });
 
   it("memory injection uses custom searchQuery when provided", async () => {
-    const store = new InMemoryMemoryStore();
+    const store = new InMemoryMemoryIndex();
     await store.save({ content: "user is an expert in Rust" });
 
     let seenMessages: unknown[] = [];

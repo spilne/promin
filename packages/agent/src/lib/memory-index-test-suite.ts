@@ -1,20 +1,20 @@
 // ---------------------------------------------------------------------------
-// Portable MemoryStore test suite
+// Portable MemoryIndex test suite
 //
 // Usage:
-//   import { memoryStoreTestSuite } from "@promin/agent/testing";
-//   memoryStoreTestSuite(() => new InMemoryMemoryStore());
+//   import { memoryIndexTestSuite } from "@promin/agent/testing";
+//   memoryIndexTestSuite(() => new InMemoryMemoryIndex());
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import type { MemoryStore } from "./memory-store.ts";
+import type { MemoryIndex } from "./memory-index.ts";
 
-export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<MemoryStore>) {
-  async function make(): Promise<MemoryStore> {
+export function memoryIndexTestSuite(factory: () => MemoryIndex | Promise<MemoryIndex>) {
+  async function make(): Promise<MemoryIndex> {
     return factory();
   }
 
-  describe("MemoryStore conformance", () => {
+  describe("MemoryIndex conformance", () => {
     // -------------------------------------------------------------------
     // save + list
     // -------------------------------------------------------------------

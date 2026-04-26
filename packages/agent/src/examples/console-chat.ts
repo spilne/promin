@@ -20,7 +20,7 @@ import {
 import { PipelineRateLimiter } from "@promin/core";
 import { anthropic } from "../lib/adapters/anthropic.ts";
 import { agentLoop } from "../lib/agent-loop.ts";
-import { InMemoryMemoryStore } from "../lib/memory-store.ts";
+import { InMemoryMemoryIndex } from "../lib/memory-index.ts";
 import { CompositeSecretStore, EnvSecretStore, InMemorySecretStore } from "../lib/secret-store.ts";
 import { ChatTerminal } from "../lib/terminal/chat-terminal.ts";
 import { ConsoleRunner } from "../lib/terminal/console-runner.ts";
@@ -104,7 +104,7 @@ const COMMANDS: ReplCommand[] = [
       const q = input.slice("/memories".length).trim();
       await term.showPane(
         `memories${q ? ` · "${q}"` : ""}`,
-        await buildMemories(memoryStore, q || undefined),
+        await buildMemories(memoryIndex, q || undefined),
       );
     },
   },
@@ -115,7 +115,7 @@ const COMMANDS: ReplCommand[] = [
     handle: async (input) => {
       const text = input.slice("/remember ".length).trim();
       if (text) {
-        const id = await memoryStore.save({ content: text });
+        const id = await memoryIndex.save({ content: text });
         console.log(`\n\x1b[2mSaved ${id.slice(0, 8)}: "${text}"\x1b[0m\n`);
       }
     },
@@ -198,7 +198,7 @@ const chatTerm = new ChatTerminal({ commands: COMMANDS, workspace });
 const { term, rl } = chatTerm;
 
 // ---- infrastructure ----
-const memoryStore = new InMemoryMemoryStore();
+const memoryIndex = new InMemoryMemoryIndex();
 // Env vars checked first; user-provided secrets (via requireSecret or key prompts) go to in-memory.
 const secrets = new CompositeSecretStore([new EnvSecretStore(), new InMemorySecretStore()]);
 const storage = new InMemoryWorkflowStorage();
@@ -221,7 +221,7 @@ const sessionLogger = new InMemorySessionLogger();
 
 const { registry, scheduler, activeTicks } = await createToolRegistry({
   workspace,
-  memoryStore,
+  memoryIndex,
   secrets,
   apiKey,
   ask: (q) => term.ask(q),
@@ -289,7 +289,7 @@ const loop = agentLoop({
   toolRegistry: spinner.withStatusTracking(registry),
   rateLimiter,
   systemPrompt: SYSTEM_PROMPT,
-  memory: { store: memoryStore },
+  memory: { store: memoryIndex },
   hooks: {
     onApprovalRequired: async (call) => {
       if (autoApproveRef.value) return { approved: true };

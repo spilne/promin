@@ -28,8 +28,86 @@ export type {
 export { InMemorySessionLogger, SessionEventBus } from "./session-logger.ts";
 export type { SessionLogger, SessionEvent, LogUsage } from "./session-logger.ts";
 
-export { InMemoryMemoryStore } from "./memory-store.ts";
-export type { MemoryStore, MemoryEntry, MemoryScope, EmbeddingProvider } from "./memory-store.ts";
+export { InMemoryMemoryIndex } from "./memory-index.ts";
+export type { MemoryIndex, MemoryEntry, MemoryScope, EmbeddingProvider } from "./memory-index.ts";
+
+export type {
+  MemoryStore,
+  Fact,
+  EpisodicRecord,
+  EpisodeInput,
+  EpisodeListParams,
+  StoredMessage,
+  ScopedKey,
+  ThreadKey,
+  NamespaceRow,
+  ResourceRow,
+  ThreadRow,
+  ThreadSummary,
+  ThreadInit,
+  NamespacePatch,
+  ResourcePatch,
+  ListThreadsParams,
+  MessageRange,
+  TokenBudget,
+  ResolvedContext,
+  RecallHit,
+  SemanticRecall,
+} from "./memory/types.ts";
+export { isSemanticRecall, PROMPT_CACHE_BOUNDARY } from "./memory/types.ts";
+
+export { InMemoryMemoryStore } from "./memory/in-memory-memory-store.ts";
+export type { InMemoryMemoryStoreConfig } from "./memory/in-memory-memory-store.ts";
+
+export { resolveContext } from "./memory/resolve-context.ts";
+export type { ResolveContextInput } from "./memory/resolve-context.ts";
+
+// Universal Agent interface + LocalAgent backend.
+export type {
+  Agent,
+  AgentInput as AgentInterfaceInput,
+  AgentThread,
+  AgentRunOutput,
+  AgentEvent,
+  AgentInvokeOpts,
+  ThreadOptions,
+  ListThreadsParams as AgentListThreadsParams,
+  ThreadSummary as AgentThreadSummary,
+  MessageRange as AgentMessageRange,
+  Step,
+  ToolResult,
+  UsageStats,
+  FinishReason,
+  AgentScope,
+} from "./agent/types.ts";
+
+export { LocalAgent } from "./agent/local-agent.ts";
+export type { LocalAgentConfig } from "./agent/local-agent.ts";
+
+// AgentRegistry — versioned recipe store.
+export type {
+  AgentRegistry,
+  RegisteredAgent,
+  RegisterAgentInput,
+  AgentBackend,
+  LocalAgentBackend,
+  AgentMetadata,
+  ListAgentsParams,
+} from "./registry/types.ts";
+export { DEFAULT_AGENT_VERSION, DEFAULT_AGENT_METADATA } from "./registry/types.ts";
+export { InMemoryAgentRegistry } from "./registry/in-memory-agent-registry.ts";
+export type { InMemoryAgentRegistryConfig } from "./registry/in-memory-agent-registry.ts";
+export { resolveLocalAgent } from "./registry/resolve-local-agent.ts";
+export type { ResolveLocalAgentDeps } from "./registry/resolve-local-agent.ts";
+
+// Discovery — auto-scan agent recipes from a folder + reconcile into a registry.
+export { AgentScanner, applyDiscoveredAgents } from "./discovery/agent-scanner.ts";
+export type {
+  AgentScannerOptions,
+  AgentScanResult,
+  ApplyDiscoveredAgentsOptions,
+  ApplyDiscoveredAgentsResult,
+} from "./discovery/agent-scanner.ts";
 
 export { tool } from "./tool.ts";
 export type { AgentTool, ApprovalDecision, AutoApprove } from "./tool.ts";
@@ -61,6 +139,9 @@ export {
   createMemoryTool,
 } from "./tools/memory-tools.ts";
 export type { MemoryToolConfig } from "./tools/memory-tools.ts";
+
+export { createLayeredMemoryTool } from "./tools/layered-memory-tools.ts";
+export type { LayeredMemoryToolConfig } from "./tools/layered-memory-tools.ts";
 
 export { createLlmTool } from "./tools/llm-tool.ts";
 export type { LlmToolConfig } from "./tools/llm-tool.ts";

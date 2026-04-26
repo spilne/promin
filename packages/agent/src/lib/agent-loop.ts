@@ -16,7 +16,7 @@ import type { AgentTool, AutoApprove, ApprovalDecision } from "./tool.ts";
 import { shouldAutoApprove } from "./tool.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
 import { buildToolDefs } from "./tool-registry.ts";
-import type { MemoryStore, MemoryScope } from "./memory-store.ts";
+import type { MemoryIndex, MemoryScope } from "./memory-index.ts";
 import type { ProcessorsConfig } from "./processors.ts";
 import type { Message, AssistantMessage, ToolResultMessage, ToolCall } from "./message.ts";
 import {
@@ -151,7 +151,7 @@ export interface ContextConfig {
 }
 
 export interface MemoryConfig {
-  store: MemoryStore;
+  store: MemoryIndex;
   /**
    * Scope for all read and write operations on this store.
    * Omit for the global namespace (same as pre-scoping behaviour).
@@ -458,7 +458,7 @@ interface SessionState {
  *   llm: anthropic("claude-sonnet-4-6", { apiKey }),
  *   tools: { search: webSearchTool },
  *   systemPrompt: "You are a helpful assistant.",
- *   memory: { store: memoryStore },
+ *   memory: { store: memoryIndex },
  * });
  *
  * const session = await loop.session({ runner, sessionId: "s1" });

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { createAgentTown } from "../agent-town.ts";
-import { InMemoryMemoryStore } from "../memory-store.ts";
+import { InMemoryMemoryIndex } from "../memory-index.ts";
 import type { LLMProvider, LLMResponse, LLMChatParams } from "../llm-provider.ts";
 
 function mockLLM(responses: LLMResponse[]): LLMProvider {
@@ -147,7 +147,7 @@ describe("createAgentTown — messaging", () => {
 
 describe("createAgentTown — private memory", () => {
   it("injects saveMemory/searchMemory when agent.memory is provided", async () => {
-    const store = new InMemoryMemoryStore();
+    const store = new InMemoryMemoryIndex();
     let toolResult = "";
 
     const town = createAgentTown({
@@ -186,8 +186,8 @@ describe("createAgentTown — private memory", () => {
   });
 
   it("private memory is isolated per agent", async () => {
-    const coordStore = new InMemoryMemoryStore();
-    const workerStore = new InMemoryMemoryStore();
+    const coordStore = new InMemoryMemoryIndex();
+    const workerStore = new InMemoryMemoryIndex();
     let resolveWorkerDone!: () => void;
     const workerDone = new Promise<void>((r) => (resolveWorkerDone = r));
 
@@ -248,7 +248,7 @@ describe("createAgentTown — private memory", () => {
 
 describe("createAgentTown — shared memory", () => {
   it("injects saveSharedMemory/searchSharedMemory when sharedMemory is provided", async () => {
-    const shared = new InMemoryMemoryStore();
+    const shared = new InMemoryMemoryIndex();
     let toolResult = "";
 
     const town = createAgentTown({
@@ -287,7 +287,7 @@ describe("createAgentTown — shared memory", () => {
   });
 
   it("shared memory is readable by all agents", async () => {
-    const shared = new InMemoryMemoryStore();
+    const shared = new InMemoryMemoryIndex();
     await shared.save({ content: "global fact" });
 
     let workerSearchResult = "";
@@ -350,8 +350,8 @@ describe("createAgentTown — shared memory", () => {
   });
 
   it("private memory is not exposed in shared memory", async () => {
-    const shared = new InMemoryMemoryStore();
-    const coordPrivate = new InMemoryMemoryStore();
+    const shared = new InMemoryMemoryIndex();
+    const coordPrivate = new InMemoryMemoryIndex();
     await coordPrivate.save({ content: "coord private" });
 
     const town = createAgentTown({

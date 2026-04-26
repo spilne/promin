@@ -1,10 +1,10 @@
 import { z } from "zod";
 import { tool } from "../tool.ts";
 import { multiTool, command } from "../multi-tool.ts";
-import type { MemoryStore, MemoryScope } from "../memory-store.ts";
+import type { MemoryIndex, MemoryScope } from "../memory-index.ts";
 
 export interface MemoryToolConfig {
-  store: MemoryStore;
+  store: MemoryIndex;
   /** Scope applied to all read and write operations. */
   scope?: MemoryScope;
 }
@@ -55,7 +55,7 @@ export function createSaveMemoryTool(config: MemoryToolConfig) {
  * Convenience bundle — returns both tools for spreading into an agent's tool map.
  *
  * Usage:
- *   const memory = new InMemoryMemoryStore();
+ *   const memory = new InMemoryMemoryIndex();
  *   agentLoop({
  *     tools: { ...createMemoryTools({ store: memory }) },
  *     memory: { store: memory },
@@ -80,7 +80,7 @@ function fmtAge(d: Date): string {
  * A single multiTool that bundles memory search, list, save, update, and delete
  * into one tool call so agents need only one tool slot for memory management.
  */
-export function createMemoryTool(store: MemoryStore) {
+export function createMemoryTool(store: MemoryIndex) {
   return multiTool({
     name: "memory",
     description: "Read and write long-term memory that persists across sessions.",

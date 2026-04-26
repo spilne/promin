@@ -7,7 +7,7 @@ import type { LLMProvider } from "./llm-provider.ts";
 import type { AgentTool } from "./tool.ts";
 import type { AgentSession, HooksConfig } from "./agent-loop.ts";
 import type { ToolCall } from "./message.ts";
-import type { MemoryStore } from "./memory-store.ts";
+import type { MemoryIndex } from "./memory-index.ts";
 import type { SessionLogger } from "./session-logger.ts";
 
 // ---- AsyncQueue ----
@@ -56,7 +56,7 @@ export interface AgentDefinition {
   /** System prompt for this agent. The town injects peer awareness on top. */
   prompt: string;
   /** Private memory store. Injects searchMemory / saveMemory tools scoped to this agent. */
-  memory?: MemoryStore;
+  memory?: MemoryIndex;
   /** Per-agent hooks (beforeTurn, afterTurn, onApprovalRequired, etc.). */
   hooks?: HooksConfig;
   /**
@@ -74,7 +74,7 @@ export interface AgentTownConfig {
   mayor: string;
   agents: Record<string, AgentDefinition>;
   /** Shared memory visible to all agents via searchSharedMemory / saveSharedMemory. */
-  sharedMemory?: MemoryStore;
+  sharedMemory?: MemoryIndex;
   /**
    * Maximum milliseconds a daemon agent's turn may run before it is force-timed-out.
    * When a turn exceeds this limit the sender receives an error reply so their

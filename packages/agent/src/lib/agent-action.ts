@@ -8,7 +8,7 @@ import { shouldAutoApprove } from "./tool.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
 import { buildToolDefs } from "./tool-registry.ts";
 import { zodToJsonSchema } from "./zod-to-json-schema.ts";
-import type { MemoryStore, MemoryScope } from "./memory-store.ts";
+import type { MemoryIndex, MemoryScope } from "./memory-index.ts";
 import type { ProcessorsConfig } from "./processors.ts";
 import type { Message, AssistantMessage, ToolResultMessage, ToolCall } from "./message.ts";
 import {
@@ -40,7 +40,7 @@ export interface StepContext {
 }
 
 export interface AgentActionMemoryConfig {
-  store: MemoryStore;
+  store: MemoryIndex;
   /**
    * Scope for all read and write operations on this store.
    * Omit for the global namespace (same as pre-scoping behaviour).

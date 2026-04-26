@@ -1,9 +1,9 @@
 import { describe, it, expect } from "bun:test";
-import { InMemoryMemoryStore } from "../memory-store.ts";
+import { InMemoryMemoryIndex } from "../memory-index.ts";
 
-describe("MemoryStore scoping", () => {
+describe("MemoryIndex scoping", () => {
   it("unscoped save is only visible in unscoped search", async () => {
-    const store = new InMemoryMemoryStore();
+    const store = new InMemoryMemoryIndex();
     await store.save({ content: "global fact" });
 
     const global = await store.list();
@@ -14,7 +14,7 @@ describe("MemoryStore scoping", () => {
   });
 
   it("scoped save is only visible when searching with matching scope", async () => {
-    const store = new InMemoryMemoryStore();
+    const store = new InMemoryMemoryIndex();
     await store.save({ content: "user1 fact" }, { namespaceId: "user1" });
 
     const forUser1 = await store.list(undefined, { namespaceId: "user1" });
@@ -27,7 +27,7 @@ describe("MemoryStore scoping", () => {
   });
 
   it("two users cannot see each other's memories", async () => {
-    const store = new InMemoryMemoryStore();
+    const store = new InMemoryMemoryIndex();
     await store.save({ content: "alice memory" }, { namespaceId: "alice" });
     await store.save({ content: "bob memory" }, { namespaceId: "bob" });
 
@@ -41,7 +41,7 @@ describe("MemoryStore scoping", () => {
   });
 
   it("sessionId scoping isolates sessions within a user", async () => {
-    const store = new InMemoryMemoryStore();
+    const store = new InMemoryMemoryIndex();
     await store.save({ content: "session1 memory" }, { namespaceId: "user1", sessionId: "s1" });
     await store.save({ content: "session2 memory" }, { namespaceId: "user1", sessionId: "s2" });
 
@@ -58,7 +58,7 @@ describe("MemoryStore scoping", () => {
   });
 
   it("search respects scope", async () => {
-    const store = new InMemoryMemoryStore();
+    const store = new InMemoryMemoryIndex();
     await store.save({ content: "typescript rocks" }, { namespaceId: "user1" });
     await store.save({ content: "typescript rules" }, { namespaceId: "user2" });
 
@@ -72,7 +72,7 @@ describe("MemoryStore scoping", () => {
   });
 
   it("omitting scope behaves identically to before scoping", async () => {
-    const store = new InMemoryMemoryStore();
+    const store = new InMemoryMemoryIndex();
     await store.save({ content: "plain memory" });
     await store.save({ content: "scoped memory" }, { namespaceId: "user1" });
 
@@ -83,7 +83,7 @@ describe("MemoryStore scoping", () => {
   });
 
   it("delete removes entry regardless of scope", async () => {
-    const store = new InMemoryMemoryStore();
+    const store = new InMemoryMemoryIndex();
     const id = await store.save({ content: "to delete" }, { namespaceId: "user1" });
 
     await store.delete(id);

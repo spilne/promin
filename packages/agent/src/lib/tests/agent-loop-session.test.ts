@@ -3,7 +3,7 @@ import { z } from "zod";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { agentLoop } from "../agent-loop.ts";
 import { tool } from "../tool.ts";
-import { InMemoryMemoryStore } from "../memory-store.ts";
+import { InMemoryMemoryIndex } from "../memory-index.ts";
 import type { LLMProvider, LLMResponse } from "../llm-provider.ts";
 
 function mockLLM(responses: LLMResponse[]): LLMProvider {
@@ -277,7 +277,7 @@ describe("agentLoop session", () => {
 
   describe("memory integration", () => {
     it("injects memories from store at session start", async () => {
-      const store = new InMemoryMemoryStore();
+      const store = new InMemoryMemoryIndex();
       await store.save({ content: "user prefers concise answers" });
 
       let firstCallMessages: unknown[] = [];
@@ -303,7 +303,7 @@ describe("agentLoop session", () => {
     });
 
     it("skips memory injection when store is empty", async () => {
-      const store = new InMemoryMemoryStore();
+      const store = new InMemoryMemoryIndex();
       let callCount = 0;
 
       const session = await makeSession({
@@ -324,7 +324,7 @@ describe("agentLoop session", () => {
     });
 
     it("saves compaction summary to memory store", async () => {
-      const store = new InMemoryMemoryStore();
+      const store = new InMemoryMemoryIndex();
 
       const session = await makeSession({
         name: "memory-save-test",
@@ -351,7 +351,7 @@ describe("agentLoop session", () => {
     });
 
     it("does not save when saveOnCompact is false", async () => {
-      const store = new InMemoryMemoryStore();
+      const store = new InMemoryMemoryIndex();
 
       const session = await makeSession({
         name: "no-save-test",
@@ -385,7 +385,7 @@ describe("agentLoop session", () => {
       name: string;
       mainTokens: number;
       compactionCalls: string[];
-      store?: InMemoryMemoryStore;
+      store?: InMemoryMemoryIndex;
       saveOnCompact?: boolean;
     }) {
       const { name, mainTokens, compactionCalls } = opts;
@@ -476,7 +476,7 @@ describe("agentLoop session", () => {
     });
 
     it("saves recap summary to memory store when saveOnCompact is true", async () => {
-      const store = new InMemoryMemoryStore();
+      const store = new InMemoryMemoryIndex();
       const compactionCalls: string[] = [];
       const session = await makeRecapSession({
         name: "recap-memory",
@@ -498,7 +498,7 @@ describe("agentLoop session", () => {
     });
 
     it("does not save to memory when saveOnCompact is false", async () => {
-      const store = new InMemoryMemoryStore();
+      const store = new InMemoryMemoryIndex();
       const compactionCalls: string[] = [];
       const session = await makeRecapSession({
         name: "recap-no-save",
