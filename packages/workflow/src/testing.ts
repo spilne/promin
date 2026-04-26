@@ -5,3 +5,4 @@ export {
   schedulerTestSuite,
   type SchedulerTestHarness,
 } from "./lib/scheduler/scheduler-test-suite.ts";
+export { schedulerStorageTestSuite } from "./lib/scheduler/scheduler-storage-test-suite.ts";
