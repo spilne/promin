@@ -441,7 +441,14 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
 
       const clock = config.clock ?? SystemClock;
       const sessionLogger = config.logger ?? null;
-      // Tracks when each turn started (used to compute turn.end durationMs).
+      // Turn start times flow through the journal (activity return value) so
+      // they survive worker restarts mid-turn. Before, this Map was populated
+      // inside `lc-${turn}-message`; on crash recovery the activity replayed
+      // from the journal without re-running the Map.set, and the later
+      // `emit-${turn}` activity found the Map empty and logged durationMs: 0.
+      // Now the start time is returned from the lc activity (journaled) and
+      // read from that journaled value inside emit. Map stays for in-process
+      // lookup; populated from the activity's return value, not a side effect.
       const turnStarts = new Map<number, number>();
       // Aborted by close() to cancel any in-flight LLM fetch.
       const sessionAc = new AbortController();
@@ -518,11 +525,17 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
             }>(`task-${turn}`);
             // Apply manually-triggered compaction (delivered via the task signal so it is journaled).
             if (compactedMessages !== undefined) messages = compactedMessages;
-            yield* ctx.activity(`lc-${turn}-message`, async () => {
+            // Journal the turn start time so replay preserves it. The
+            // return value is what's durable; the Map.set is an in-process
+            // optimization that repopulates from the journaled value on
+            // both fresh run and replay.
+            const turnStartTime = yield* ctx.activity(`lc-${turn}-message`, async () => {
               transitionLifecycle("message", "thinking", { turns: turn, turn, task });
-              turnStarts.set(turn, Date.now());
+              const startedAt = Date.now();
               sessionLogger?.emit({ type: "turn.start", turn, task });
+              return startedAt;
             });
+            turnStarts.set(turn, turnStartTime);
             messages = [...messages, { role: "user", content: task }];
 
             // beforeTurn hook — can inject additional context into the message list

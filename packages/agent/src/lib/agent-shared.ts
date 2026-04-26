@@ -39,6 +39,16 @@ export function resolveTools(config: {
   tools?: Record<string, AgentTool<any, any>>;
   // biome-ignore lint/suspicious/noExplicitAny: tool registry uses runtime Zod validation
 }): Record<string, AgentTool<any, any>> {
+  // Reject ambiguous config: specifying both sources silently shadowed the
+  // inline `tools` map before, which turned "why isn't my tool firing?"
+  // into a debugging session. Force the caller to pick one source.
+  if (config.toolRegistry && config.tools) {
+    throw new Error(
+      "Agent config cannot specify both 'toolRegistry' and 'tools'. " +
+        "Pick one source: either register all tools in the registry, " +
+        "or pass them all inline via 'tools'.",
+    );
+  }
   return config.toolRegistry?.getTools() ?? config.tools ?? {};
 }
 
