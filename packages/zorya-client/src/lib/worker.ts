@@ -24,6 +24,7 @@ import {
   type WorkflowRunner,
 } from "@promin/workflow";
 import type { ZoryaClient } from "./zorya-client.ts";
+import { WorkerControlSocket } from "./worker-control-socket.ts";
 
 export interface ZoryaWorkerConfig {
   client: ZoryaClient;
@@ -108,12 +109,39 @@ export interface ZoryaWorkerConfig {
     /** Fairness policy passed to `stepQueue.claim`. Default `"strict-priority"`. */
     fairness?: FairnessPolicy;
   };
+  /**
+   * Opt in to the persistent worker → server WebSocket. When enabled the
+   * worker keeps a long-lived connection to `${url}/ws/worker` and exposes
+   * `worker.control` for downstream features:
+   *   - agent event streaming (promin-o8dj)
+   *   - workflow query handlers (promin-i0wi)
+   *   - server-pushed step dispatch (future)
+   *
+   * Defaults to `false` for back-compat — workers that don't need any of
+   * those features stay HTTP-only. Set to `true` once the server has been
+   * upgraded with the matching `/ws/worker` endpoint (Zorya 0.5+).
+   */
+  controlSocket?:
+    | boolean
+    | {
+        /** Initial reconnect delay. Default 250ms. */
+        reconnectDelayMs?: number;
+        /** Max reconnect delay. Default 30_000ms. */
+        maxReconnectDelayMs?: number;
+      };
 }
 
 export class ZoryaWorker {
   readonly workerId: string;
   readonly client: ZoryaClient;
   readonly runner: WorkflowRunner;
+  /**
+   * Persistent WS to the Zorya server. Defined when `config.controlSocket`
+   * is truthy. Public so feature integrations (agent streaming, query
+   * handlers) can register command handlers + send frames without
+   * subclassing the worker.
+   */
+  readonly control?: WorkerControlSocket;
   private readonly config: ZoryaWorkerConfig;
   /** name → primary Workflow (the one passed in `config.workflows`). */
   private readonly byName: Map<string, Workflow<unknown, unknown>>;
@@ -155,11 +183,27 @@ export class ZoryaWorker {
     this.byName = new Map(config.workflows.map((w) => [w.name, w]));
     this.byNameAndVersion = buildVersionIndex(config.workflows);
     this.runner = createWorkflowRunner({ storage: config.client.storage });
+    if (config.controlSocket) {
+      const csCfg = typeof config.controlSocket === "object" ? config.controlSocket : {};
+      this.control = new WorkerControlSocket({
+        url: this.client.url,
+        workerId: this.workerId,
+        capabilities: this.config.capabilities,
+        apiKey: this.client.apiKey,
+        reconnectDelayMs: csCfg.reconnectDelayMs,
+        maxReconnectDelayMs: csCfg.maxReconnectDelayMs,
+      });
+    }
   }
 
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
+
+    // Open the persistent control socket first so any feature wiring done
+    // before start() (a downstream caller registering a command handler)
+    // is in place when the server's first ping arrives.
+    this.control?.start();
 
     await this.client.advertise(this.workerId, this.config.workflows, this.config.sampleInput);
     await this.client.workerRegistry.register({
@@ -308,6 +352,7 @@ export class ZoryaWorker {
     for (const cleanup of this.inFlightSteps.values()) cleanup();
     this.inFlightSteps.clear();
     await this.sleepScanner?.stop();
+    await this.control?.stop();
     await this.client.workerRegistry.deregister(this.workerId).catch(() => {});
     await this.client.unadvertise(this.workerId).catch(() => {});
   }

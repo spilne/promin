@@ -36,6 +36,12 @@ export interface ZoryaClientConfig {
 
 export class ZoryaClient {
   readonly url: string;
+  /**
+   * Bearer token used for HTTP-RPC and the persistent WS upgrade. Public
+   * so peers (e.g. `WorkerControlSocket`) can authenticate against the
+   * same key without re-passing it through every layer.
+   */
+  readonly apiKey?: string;
   readonly storage: WorkflowStorage;
   readonly stepQueue: StepQueue;
   readonly workerRegistry: WorkerRegistry;
@@ -49,6 +55,7 @@ export class ZoryaClient {
   constructor(config: ZoryaClientConfig) {
     const base = config.url.replace(/\/$/, "");
     this.url = base;
+    this.apiKey = config.apiKey;
     this.fetch = config.fetch ?? ((req) => globalThis.fetch(req));
     this.headers = {
       "content-type": "application/json",

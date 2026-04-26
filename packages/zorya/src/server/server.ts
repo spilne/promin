@@ -33,6 +33,7 @@ import { InMemoryWorkflowStartQueue, type WorkflowStartQueue } from "./workflow-
 import { TriggerService } from "./services/trigger-service.ts";
 import { CoordinatedTriggerService } from "./services/coordinated-trigger-service.ts";
 import { SchedulerLoop } from "./services/scheduler-loop.ts";
+import { WorkerWebSocketServer } from "./services/worker-ws-server.ts";
 import type { ScheduleTick, DurableScheduleConfig } from "@promin/workflow";
 import {
   listAdvertisements,
@@ -294,6 +295,14 @@ export class ZoryaServer {
    * true. Public so tests can drive single ticks via `tickOnce()`.
    */
   readonly schedulerLoop?: SchedulerLoop;
+  /**
+   * Persistent worker → server WebSocket multiplexer. Always present —
+   * workers in step / agent mode connect on `/ws/worker` to receive
+   * server-pushed commands (query handlers, agent stream start/stop) and
+   * push frames back (token deltas, structured events). The downstream
+   * tickets (promin-o8dj, promin-i0wi, promin-eg0d) wire onto this.
+   */
+  readonly workerWs: WorkerWebSocketServer;
   private readonly auth: Auth;
   /** Separate auth for worker-protocol endpoints. Open when no keys set. */
   private readonly workerAuth: Auth;
@@ -308,6 +317,12 @@ export class ZoryaServer {
     this.auth = new Auth(config);
     this.workerAuth = new Auth({ apiKeys: config.workerProtocol?.apiKeys });
     this.bus = new RunEventBus();
+    // Worker control socket — upgraded from /ws/worker. Auth gates the
+    // upgrade with the same workerAuth keys so the same ENV the worker
+    // already uses for /rpc/* applies.
+    this.workerWs = new WorkerWebSocketServer({
+      authorize: (req) => this.workerAuth.check(req),
+    });
 
     const metrics = config.metrics ?? new StorageMetricsProvider(config.storage);
     // Prefer an explicit workers provider; otherwise derive one from the
@@ -552,14 +567,27 @@ export class ZoryaServer {
     if (!BunGlobal) {
       throw new Error("ZoryaServer.listen requires Bun runtime");
     }
+    const wsHandlers = this.workerWs.websocketHandlers();
     const srv = BunGlobal.serve({
       port,
       hostname,
-      fetch: (req) => handle(req),
+      fetch: (req, server) => {
+        // WebSocket upgrade goes first — Bun's `server.upgrade(req)`
+        // returns true on success, in which case fetch must return
+        // undefined. The helper returns a Response (with 401 / 400) when
+        // auth or protocol fails, or undefined on a successful upgrade.
+        const upgradeResult = this.workerWs.upgradeIfWorkerWs(req, server);
+        if (upgradeResult !== undefined) return upgradeResult;
+        const url = new URL(req.url);
+        if (url.pathname === "/ws/worker") return undefined;
+        return handle(req);
+      },
+      websocket: wsHandlers,
     });
     const resolvedPort = typeof srv.port === "number" ? srv.port : port;
     const resolvedHost = typeof srv.hostname === "string" ? srv.hostname : hostname;
     this.server = { stop: () => srv.stop(), port: resolvedPort, hostname: resolvedHost };
+    this.workerWs.start();
     this.startCoordinator();
     this.startScheduler();
     return {
@@ -603,6 +631,7 @@ export class ZoryaServer {
     if (this.schedulerLoop) {
       void this.schedulerLoop.stop();
     }
+    this.workerWs.stop();
   }
 
   private buildStaticHandler(dir: string) {
