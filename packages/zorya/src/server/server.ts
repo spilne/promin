@@ -69,7 +69,10 @@ import {
 import {
   createSchedule,
   deleteSchedule,
+  emitScheduleNow,
   getSchedule,
+  getScheduleHistory,
+  getScheduleUpcoming,
   listSchedules,
   patchSchedule,
 } from "./routes/schedules.ts";
@@ -85,6 +88,16 @@ import {
 } from "./routes/run-extras.ts";
 import { getSparklines, getWorkflowGrid, getWorkflowHistory } from "./routes/grid.ts";
 import { getWorkflowDef, listWorkflowDefs } from "./routes/workflow-defs.ts";
+import {
+  getAgent,
+  invokeAgent,
+  listAgents,
+  listThreadMessages,
+  sendThreadMessage,
+  streamAgent,
+  streamThreadMessage,
+  type AgentGatewayDeps,
+} from "./routes/agents.ts";
 
 export interface ZoryaServerConfig extends AuthConfig {
   storage: WorkflowStorage;
@@ -213,6 +226,23 @@ export interface ZoryaServerConfig extends AuthConfig {
    * routes for `/api/schedules` but doesn't tick anything — the operator
    * runs `DurableScheduler` externally if they want firing.
    */
+  /**
+   * Optional agent gateway. When set, mounts:
+   *
+   *   GET  /api/agents
+   *   GET  /api/agents/:id
+   *   POST /api/agents/:id/invoke
+   *   POST /api/agents/:id/stream                 (SSE)
+   *   POST /api/agents/:id/threads/:threadId
+   *   POST /api/agents/:id/threads/:threadId/stream  (SSE)
+   *   GET  /api/agents/:id/threads/:threadId/messages
+   *
+   * `registry` stores the recipes; `resolve` materializes a live `Agent`
+   * from a recipe (typically `(r) => resolveLocalAgent(r, deps)` for
+   * LocalAgent backends). Tenant binding is handled per request inside
+   * the routes via `agent.bind({ namespaceId, resourceId })`.
+   */
+  agents?: AgentGatewayDeps;
   scheduling?: {
     enabled: boolean;
     /** Poll cadence in ms. Default: 1000. */
@@ -495,6 +525,18 @@ export class ZoryaServer {
       .get("/api/workers", listWorkers(workers))
       .get("/api/metrics", getMetrics(metrics));
 
+    if (config.agents) {
+      const agentDeps = config.agents;
+      this.router
+        .get("/api/agents", listAgents(agentDeps))
+        .get("/api/agents/:id", getAgent(agentDeps))
+        .post("/api/agents/:id/invoke", invokeAgent(agentDeps))
+        .post("/api/agents/:id/stream", streamAgent(agentDeps))
+        .post("/api/agents/:id/threads/:threadId", sendThreadMessage(agentDeps))
+        .post("/api/agents/:id/threads/:threadId/stream", streamThreadMessage(agentDeps))
+        .get("/api/agents/:id/threads/:threadId/messages", listThreadMessages(agentDeps));
+    }
+
     if (config.scheduler) {
       const sch = config.scheduler;
       this.router
@@ -502,7 +544,13 @@ export class ZoryaServer {
         .post("/api/schedules", createSchedule(sch))
         .get("/api/schedules/:id", getSchedule(sch))
         .patch("/api/schedules/:id", patchSchedule(sch))
-        .delete("/api/schedules/:id", deleteSchedule(sch));
+        .delete("/api/schedules/:id", deleteSchedule(sch))
+        .get("/api/schedules/:id/history", getScheduleHistory(sch, config.storage))
+        .get("/api/schedules/:id/upcoming", getScheduleUpcoming(sch))
+        .post(
+          "/api/schedules/:id/emit",
+          emitScheduleNow(sch, this.schedulerLoop?.fireOnce.bind(this.schedulerLoop)),
+        );
     } else {
       // Stub response so the UI can tell "scheduler not configured" from
       // "scheduler configured but empty".

@@ -46,6 +46,7 @@
     "demo": "bun --conditions=@promin/source scripts/dev.ts"
   },
   "dependencies": {
+    "@promin/agent": "workspace:*",
     "@promin/core": "workspace:*",
     "@promin/workflow": "workspace:*",
     "@promin/workflow-remote": "workspace:*"
