@@ -21,12 +21,12 @@ describe("SqliteAgentIdentityRegistry", () => {
     const a = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     const b = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     expect(b.id).toBe(a.id);
     expect(b.createdAt).toBe(a.createdAt);
@@ -37,13 +37,13 @@ describe("SqliteAgentIdentityRegistry", () => {
     const id = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     expect(id.id).toBe(
       composeAgentIdentityId({
         namespaceId: "acme",
         registeredAgentId: "writer",
-        userId: "alice",
+        ownerId: "alice",
       }),
     );
   });
@@ -53,12 +53,12 @@ describe("SqliteAgentIdentityRegistry", () => {
     const acme = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     const globex = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "globex",
-      userId: "alice",
+      ownerId: "alice",
     });
     expect(acme.id).not.toBe(globex.id);
     const list = await registry.list();
@@ -70,13 +70,13 @@ describe("SqliteAgentIdentityRegistry", () => {
     await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     await new Promise((r) => setTimeout(r, 5));
     const second = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "bob",
+      ownerId: "bob",
     });
     await new Promise((r) => setTimeout(r, 5));
     await registry.touch(second.id);
@@ -90,7 +90,7 @@ describe("SqliteAgentIdentityRegistry", () => {
     const created = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     const updated = await registry.update(created.id, {
       displayName: "Alice's writer",
@@ -108,7 +108,7 @@ describe("SqliteAgentIdentityRegistry", () => {
     const created = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     await registry.delete(created.id);
     expect(await registry.get(created.id)).toBeNull();
@@ -123,7 +123,7 @@ describe("SqliteAgentIdentityRegistry — persistence", () => {
     const created = await r1.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
       displayName: "alice's writer",
       metadata: { color: "blue" },
     });
@@ -138,7 +138,7 @@ describe("SqliteAgentIdentityRegistry — persistence", () => {
     const same = await r2.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     expect(same.id).toBe(created.id);
     expect(same.createdAt).toBe(created.createdAt);
@@ -152,7 +152,7 @@ describe("wipeAgentIdentity over SqliteAgentIdentityRegistry", () => {
     const identity = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     await memory.upsertResource(
       { namespaceId: "acme", resourceId: identity.id },

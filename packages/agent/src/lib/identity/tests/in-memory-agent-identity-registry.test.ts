@@ -1,9 +1,9 @@
 // ---------------------------------------------------------------------------
 // `InMemoryAgentIdentityRegistry` — pins the registry contract:
-//   - resolveOrCreate is idempotent for same (registeredAgentId, namespace, userId)
+//   - resolveOrCreate is idempotent for same (registeredAgentId, namespace, ownerId)
 //   - distinct triples produce distinct identities
 //   - id format is deterministic (composeAgentIdentityId)
-//   - list() filters by namespace / userId / registeredAgentId
+//   - list() filters by namespace / ownerId / registeredAgentId
 //   - touch updates lastActiveAt without mutating other fields
 //   - update patches displayName / metadata
 //   - delete is idempotent
@@ -26,13 +26,13 @@ describe("InMemoryAgentIdentityRegistry", () => {
     const first = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     clock.advance(50);
     const second = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     expect(second).toEqual(first);
     // Subsequent resolves do not bump createdAt or lastActiveAt — that's `touch`.
@@ -45,17 +45,17 @@ describe("InMemoryAgentIdentityRegistry", () => {
     const writerForAlice = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     const writerForBob = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "bob",
+      ownerId: "bob",
     });
     const reviewerForAlice = await registry.resolveOrCreate({
       registeredAgentId: "reviewer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     expect(new Set([writerForAlice.id, writerForBob.id, reviewerForAlice.id]).size).toBe(3);
   });
@@ -65,13 +65,13 @@ describe("InMemoryAgentIdentityRegistry", () => {
     const id = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     expect(id.id).toBe(
       composeAgentIdentityId({
         namespaceId: "acme",
         registeredAgentId: "writer",
-        userId: "alice",
+        ownerId: "alice",
       }),
     );
   });
@@ -79,37 +79,37 @@ describe("InMemoryAgentIdentityRegistry", () => {
   it("validates non-empty inputs", async () => {
     const registry = new InMemoryAgentIdentityRegistry();
     expect(
-      registry.resolveOrCreate({ registeredAgentId: "", namespaceId: "acme", userId: "alice" }),
+      registry.resolveOrCreate({ registeredAgentId: "", namespaceId: "acme", ownerId: "alice" }),
     ).rejects.toThrow();
     expect(
-      registry.resolveOrCreate({ registeredAgentId: "writer", namespaceId: "", userId: "alice" }),
+      registry.resolveOrCreate({ registeredAgentId: "writer", namespaceId: "", ownerId: "alice" }),
     ).rejects.toThrow();
     expect(
-      registry.resolveOrCreate({ registeredAgentId: "writer", namespaceId: "acme", userId: "" }),
+      registry.resolveOrCreate({ registeredAgentId: "writer", namespaceId: "acme", ownerId: "" }),
     ).rejects.toThrow();
   });
 
-  it("list filters by namespaceId, userId, and registeredAgentId", async () => {
+  it("list filters by namespaceId, ownerId, and registeredAgentId", async () => {
     const registry = new InMemoryAgentIdentityRegistry();
     await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "bob",
+      ownerId: "bob",
     });
     await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "globex",
-      userId: "alice",
+      ownerId: "alice",
     });
     await registry.resolveOrCreate({
       registeredAgentId: "reviewer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
 
     const acmeOnly = await registry.list({ namespaceId: "acme" });
@@ -117,7 +117,7 @@ describe("InMemoryAgentIdentityRegistry", () => {
       ["acme::reviewer::alice", "acme::writer::alice", "acme::writer::bob"].sort(),
     );
 
-    const aliceInAcme = await registry.list({ namespaceId: "acme", userId: "alice" });
+    const aliceInAcme = await registry.list({ namespaceId: "acme", ownerId: "alice" });
     expect(aliceInAcme.map((r) => r.id).sort()).toEqual(
       ["acme::reviewer::alice", "acme::writer::alice"].sort(),
     );
@@ -132,13 +132,13 @@ describe("InMemoryAgentIdentityRegistry", () => {
     const a = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     clock.advance(100);
     const b = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "bob",
+      ownerId: "bob",
     });
     // alice's identity is older but we'll touch it last
     clock.advance(100);
@@ -155,14 +155,14 @@ describe("InMemoryAgentIdentityRegistry", () => {
     const created = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     clock.advance(500);
     await registry.touch(created.id);
     const after = await registry.get(created.id);
     expect(after?.lastActiveAt).toBe(1_500);
     expect(after?.createdAt).toBe(1_000);
-    expect(after?.userId).toBe("alice");
+    expect(after?.ownerId).toBe("alice");
   });
 
   it("update patches displayName + metadata", async () => {
@@ -170,7 +170,7 @@ describe("InMemoryAgentIdentityRegistry", () => {
     const created = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     const updated = await registry.update(created.id, {
       displayName: "Alice's writing buddy",
@@ -185,7 +185,7 @@ describe("InMemoryAgentIdentityRegistry", () => {
     const created = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     await registry.delete(created.id);
     expect(await registry.get(created.id)).toBeNull();
@@ -201,7 +201,7 @@ describe("wipeAgentIdentity — cascades through MemoryStore", () => {
     const identity = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
 
     // Stand up state under resourceId = identity.id, mirroring what an

@@ -5,7 +5,7 @@
 // Pins:
 //   - POST resolveOrCreate is idempotent
 //   - distinct triples produce distinct ids
-//   - GET list filters by namespaceId / userId
+//   - GET list filters by namespaceId / ownerId
 //   - GET single 404s when the identity belongs to a different agent
 //   - PATCH updates displayName / metadata; 404 on unknown id
 //   - DELETE cascades to memory (working memory cleared, threads gone)
@@ -34,13 +34,13 @@ describe("POST /api/agents/:id/identities — resolveOrCreate", () => {
       new Request("http://test/api/agents/writer/identities", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ namespaceId: "acme", userId: "alice" }),
+        body: JSON.stringify({ namespaceId: "acme", ownerId: "alice" }),
       }),
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { identity: { id: string; userId: string } };
+    const body = (await res.json()) as { identity: { id: string; ownerId: string } };
     expect(body.identity.id).toBe("acme::writer::alice");
-    expect(body.identity.userId).toBe("alice");
+    expect(body.identity.ownerId).toBe("alice");
   });
 
   it("is idempotent for the same triple", async () => {
@@ -53,20 +53,20 @@ describe("POST /api/agents/:id/identities — resolveOrCreate", () => {
           body: JSON.stringify(b),
         }),
       );
-    const a = await (await post({ namespaceId: "acme", userId: "alice" })).json();
-    const b = await (await post({ namespaceId: "acme", userId: "alice" })).json();
+    const a = await (await post({ namespaceId: "acme", ownerId: "alice" })).json();
+    const b = await (await post({ namespaceId: "acme", ownerId: "alice" })).json();
     expect((a as { identity: { id: string } }).identity.id).toBe(
       (b as { identity: { id: string } }).identity.id,
     );
   });
 
-  it("400s on missing namespaceId or userId", async () => {
+  it("400s on missing namespaceId or ownerId", async () => {
     const { server } = makeServer();
     const a = await server.handle(
       new Request("http://test/api/agents/writer/identities", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ userId: "alice" }),
+        body: JSON.stringify({ ownerId: "alice" }),
       }),
     );
     expect(a.status).toBe(400);
@@ -87,42 +87,42 @@ describe("GET /api/agents/:id/identities — list", () => {
     await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "bob",
+      ownerId: "bob",
     });
     await registry.resolveOrCreate({
       registeredAgentId: "reviewer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
 
     const res = await server.handle(new Request("http://test/api/agents/writer/identities"));
-    const body = (await res.json()) as { identities: Array<{ userId: string }> };
-    expect(body.identities.map((i) => i.userId).sort()).toEqual(["alice", "bob"]);
+    const body = (await res.json()) as { identities: Array<{ ownerId: string }> };
+    expect(body.identities.map((i) => i.ownerId).sort()).toEqual(["alice", "bob"]);
   });
 
-  it("supports ?userId filter", async () => {
+  it("supports ?ownerId filter", async () => {
     const { server, registry } = makeServer();
     await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "bob",
+      ownerId: "bob",
     });
     const res = await server.handle(
-      new Request("http://test/api/agents/writer/identities?userId=alice"),
+      new Request("http://test/api/agents/writer/identities?ownerId=alice"),
     );
-    const body = (await res.json()) as { identities: Array<{ userId: string }> };
+    const body = (await res.json()) as { identities: Array<{ ownerId: string }> };
     expect(body.identities).toHaveLength(1);
-    expect(body.identities[0]!.userId).toBe("alice");
+    expect(body.identities[0]!.ownerId).toBe("alice");
   });
 });
 
@@ -133,7 +133,7 @@ describe("GET /api/agents/:id/identities/:identityId — single", () => {
       await registry.resolveOrCreate({
         registeredAgentId: "writer",
         namespaceId: "acme",
-        userId: "alice",
+        ownerId: "alice",
       })
     ).id;
     const res = await server.handle(
@@ -148,7 +148,7 @@ describe("GET /api/agents/:id/identities/:identityId — single", () => {
       await registry.resolveOrCreate({
         registeredAgentId: "writer",
         namespaceId: "acme",
-        userId: "alice",
+        ownerId: "alice",
       })
     ).id;
     const res = await server.handle(
@@ -165,7 +165,7 @@ describe("PATCH /api/agents/:id/identities/:identityId — update", () => {
       await registry.resolveOrCreate({
         registeredAgentId: "writer",
         namespaceId: "acme",
-        userId: "alice",
+        ownerId: "alice",
       })
     ).id;
     const res = await server.handle(
@@ -201,7 +201,7 @@ describe("PATCH /api/agents/:id/identities/:identityId — update", () => {
       await registry.resolveOrCreate({
         registeredAgentId: "writer",
         namespaceId: "acme",
-        userId: "alice",
+        ownerId: "alice",
       })
     ).id;
     const res = await server.handle(
@@ -221,7 +221,7 @@ describe("DELETE /api/agents/:id/identities/:identityId — cascading wipe", () 
     const identity = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     // Stand up some state under resourceId = identity.id.
     await memory.upsertResource(
@@ -261,21 +261,21 @@ describe("GET /api/identities — cross-agent list", () => {
     await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     await registry.resolveOrCreate({
       registeredAgentId: "reviewer",
       namespaceId: "acme",
-      userId: "alice",
+      ownerId: "alice",
     });
     await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "globex",
-      userId: "alice",
+      ownerId: "alice",
     });
 
     const res = await server.handle(
-      new Request("http://test/api/identities?namespaceId=acme&userId=alice"),
+      new Request("http://test/api/identities?namespaceId=acme&ownerId=alice"),
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { identities: Array<{ registeredAgentId: string }> };

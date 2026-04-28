@@ -1,7 +1,11 @@
 // ---------------------------------------------------------------------------
-// AgentIdentity — a stable per-(agent, tenant, user) record that turns
+// AgentIdentity — a stable per-(agent, tenant, owner) record that turns
 // "an agent" from a per-request session into a long-lived instance with
 // memory across all invocations.
+//
+// `ownerId` is intentionally generic — it can be a human user, a team, a
+// project, a device, or any other addressable entity the caller's system
+// recognises. The registry treats it as an opaque non-empty string.
 //
 //
 // The problem
@@ -27,13 +31,13 @@
 //       id: "acme::writer::alice",        // deterministic, used as resourceId
 //       registeredAgentId: "writer",      // which recipe
 //       namespaceId: "acme",              // which tenant
-//       userId: "alice",                  // which end-user
+//       ownerId: "alice",                 // for whom (user, team, project, ...)
 //       displayName: string | null,
 //       metadata: {},
 //       createdAt, lastActiveAt
 //     }
 //
-// `id` is just `${namespaceId}::${registeredAgentId}::${userId}` (see
+// `id` is just `${namespaceId}::${registeredAgentId}::${ownerId}` (see
 // `composeAgentIdentityId`). Deterministic — you can compute it from the
 // inputs without round-tripping through the registry.
 //
@@ -49,7 +53,7 @@
 //
 // The existing MemoryStore cascade reads/writes against that resourceId.
 // So:
-//   - working memory at (acme, acme::writer::alice) is private to the
+//   - working memory at (acme, acme::writer::alice) is private to
 //     alice's writer
 //   - facts at (acme, acme::writer::alice) are private to alice's writer
 //   - (acme, acme::reviewer::alice) is a different row → reviewer can't
@@ -84,7 +88,7 @@
 //     const identity = await registry.resolveOrCreate({
 //       registeredAgentId: "writer",
 //       namespaceId: "acme",
-//       userId: "alice",
+//       ownerId: "alice",
 //     });
 //
 //     // 2. Invoke the agent using identity.id as resourceId
@@ -100,10 +104,10 @@
 // Why a separate registry instead of just using resourceId
 // --------------------------------------------------------
 // The memory store doesn't know which resourceIds map to which agents
-// or which user owns them. The identity registry adds:
+// or which owner they belong to. The identity registry adds:
 //
-//   - enumeration ("list all identities for alice across agents")
-//   - reverse lookup ("what user owns this resourceId?")
+//   - enumeration ("list all identities for owner alice across agents")
+//   - reverse lookup ("what owner does this resourceId belong to?")
 //   - displayName + metadata (UI affordances that don't fit in memory)
 //   - lastActiveAt (sorting / staleness without scanning messages)
 //   - cascading wipe (delete row + clear matching resource scope in one call)
@@ -119,19 +123,19 @@
 // accepts any string as `resourceId`; the registry just gives you the
 // agent-centric flavour with bookkeeping. Pick per call:
 //
-//   resourceId: "alice"                  → user-centric (shared)
+//   resourceId: "alice"                  → owner-centric (shared)
 //   ----------------------------------------------------------------------
 //   alice has ONE working memory + facts row in the namespace. Every agent
 //   she talks to reads and writes the same row. If the writer learns
 //   "alice prefers terse", the reviewer sees it on its next turn. Good
-//   when the org wants a single shared mental model of the user.
+//   when the org wants a single shared mental model of the owner.
 //
 //   resourceId: identity.id              → agent-centric (isolated)
 //   ----------------------------------------------------------------------
-//   alice has a separate working memory + facts row per (agent, user)
+//   alice has a separate working memory + facts row per (agent, owner)
 //   pair. The writer's scratchpad is invisible to the reviewer. Good
 //   when each agent has its own job and shouldn't pollute its peers'
-//   context — or when the user wants to keep multiple long-lived
+//   context — or when the owner wants to keep multiple long-lived
 //   instances of the same agent that drift independently.
 //
 // Both can coexist in one deployment. A "shared org memory of alice" can
@@ -144,24 +148,25 @@
 
 export interface AgentIdentity {
   /**
-   * Stable opaque id. Convention: `${namespaceId}::${registeredAgentId}::${userId}`
+   * Stable opaque id. Convention: `${namespaceId}::${registeredAgentId}::${ownerId}`
    * (see `composeAgentIdentityId`) so the id is deterministic from the
    * create input — but treat it as opaque, since alternative
    * implementations may pick different formats.
    *
    * Used as `resourceId` when invoking the agent so the memory cascade
-   * scopes working memory + facts + episodes per-(agent, user).
+   * scopes working memory + facts + episodes per-(agent, owner).
    */
   readonly id: string;
   readonly registeredAgentId: string;
   readonly namespaceId: string;
   /**
-   * External user identifier — whatever the caller's auth system uses.
-   * Treated as opaque by the registry (no shape constraints beyond
-   * non-empty string).
+   * External owner identifier — the entity this agent instance is for.
+   * Can be a user, team, project, device, or any other addressable
+   * entity. Treated as opaque by the registry (no shape constraints
+   * beyond non-empty string).
    */
-  readonly userId: string;
-  /** Optional human-friendly label. UI can fall back to `${registeredAgentId} for ${userId}`. */
+  readonly ownerId: string;
+  /** Optional human-friendly label. UI can fall back to `${registeredAgentId} for ${ownerId}`. */
   readonly displayName: string | null;
   readonly metadata: Readonly<Record<string, unknown>>;
   readonly createdAt: number;
@@ -171,14 +176,14 @@ export interface AgentIdentity {
 export interface CreateAgentIdentityInput {
   readonly registeredAgentId: string;
   readonly namespaceId: string;
-  readonly userId: string;
+  readonly ownerId: string;
   readonly displayName?: string | null;
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
 export interface ListAgentIdentitiesParams {
   readonly namespaceId?: string;
-  readonly userId?: string;
+  readonly ownerId?: string;
   readonly registeredAgentId?: string;
   readonly limit?: number;
   /** Defaults to "lastActiveDesc". */
@@ -191,7 +196,7 @@ export interface UpdateAgentIdentityPatch {
 }
 
 /**
- * Index of long-lived agent instances, keyed by (registeredAgentId, namespaceId, userId).
+ * Index of long-lived agent instances, keyed by (registeredAgentId, namespaceId, ownerId).
  *
  * Implementations: `InMemoryAgentIdentityRegistry` (reference) and
  * `SqliteAgentIdentityRegistry` (persistent). Both must pass the shared
@@ -223,12 +228,12 @@ export interface AgentIdentityRegistry {
 }
 
 /**
- * Compose a deterministic identity id from (namespaceId, registeredAgentId, userId).
+ * Compose a deterministic identity id from (namespaceId, registeredAgentId, ownerId).
  * Exported so callers that don't want to round-trip through the registry
  * (e.g. when invoking an agent for the first time) can compute the id
  * themselves and pass it directly as `resourceId`.
  *
- * Namespace is part of the id so two tenants with the same userId for
+ * Namespace is part of the id so two tenants with the same ownerId for
  * the same agent recipe don't collide on the registry row — multi-tenant
  * is the default, not an opt-in.
  *
@@ -238,7 +243,7 @@ export interface AgentIdentityRegistry {
 export function composeAgentIdentityId(input: {
   readonly namespaceId: string;
   readonly registeredAgentId: string;
-  readonly userId: string;
+  readonly ownerId: string;
 }): string {
-  return `${input.namespaceId}::${input.registeredAgentId}::${input.userId}`;
+  return `${input.namespaceId}::${input.registeredAgentId}::${input.ownerId}`;
 }

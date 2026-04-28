@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // `SqliteAgentIdentityRegistry` — persistent `AgentIdentityRegistry`. The
-// id is composite-keyed on (namespace_id, registered_agent_id, user_id),
+// id is composite-keyed on (namespace_id, registered_agent_id, owner_id),
 // stored as the deterministic `composeAgentIdentityId` slug for fast
 // point lookups.
 //
@@ -10,7 +10,7 @@
 //     id                  TEXT PRIMARY KEY,
 //     registered_agent_id TEXT NOT NULL,
 //     namespace_id        TEXT NOT NULL,
-//     user_id             TEXT NOT NULL,
+//     owner_id            TEXT NOT NULL,
 //     display_name        TEXT,
 //     metadata            TEXT NOT NULL,    -- JSON blob
 //     created_at          INTEGER NOT NULL,
@@ -40,7 +40,7 @@ interface Row {
   id: string;
   registered_agent_id: string;
   namespace_id: string;
-  user_id: string;
+  owner_id: string;
   display_name: string | null;
   metadata: string;
   created_at: number;
@@ -69,7 +69,7 @@ export class SqliteAgentIdentityRegistry implements AgentIdentityRegistry {
         id                  TEXT PRIMARY KEY,
         registered_agent_id TEXT NOT NULL,
         namespace_id        TEXT NOT NULL,
-        user_id             TEXT NOT NULL,
+        owner_id            TEXT NOT NULL,
         display_name        TEXT,
         metadata            TEXT NOT NULL,
         created_at          INTEGER NOT NULL,
@@ -77,7 +77,7 @@ export class SqliteAgentIdentityRegistry implements AgentIdentityRegistry {
       )
     `);
     this.db.run(
-      `CREATE INDEX IF NOT EXISTS ${this.table}_ns_user ON ${this.table} (namespace_id, user_id)`,
+      `CREATE INDEX IF NOT EXISTS ${this.table}_ns_owner ON ${this.table} (namespace_id, owner_id)`,
     );
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${this.table}_agent ON ${this.table} (registered_agent_id)`,
@@ -90,7 +90,7 @@ export class SqliteAgentIdentityRegistry implements AgentIdentityRegistry {
   async resolveOrCreate(input: CreateAgentIdentityInput): Promise<AgentIdentity> {
     validateNonEmpty("registeredAgentId", input.registeredAgentId);
     validateNonEmpty("namespaceId", input.namespaceId);
-    validateNonEmpty("userId", input.userId);
+    validateNonEmpty("ownerId", input.ownerId);
     const id = composeAgentIdentityId(input);
     const existing = await this.get(id);
     if (existing) return existing;
@@ -100,7 +100,7 @@ export class SqliteAgentIdentityRegistry implements AgentIdentityRegistry {
     this.db
       .query(
         `INSERT INTO ${this.table}
-           (id, registered_agent_id, namespace_id, user_id, display_name, metadata, created_at, last_active_at)
+           (id, registered_agent_id, namespace_id, owner_id, display_name, metadata, created_at, last_active_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO NOTHING`,
       )
@@ -108,7 +108,7 @@ export class SqliteAgentIdentityRegistry implements AgentIdentityRegistry {
         id,
         input.registeredAgentId,
         input.namespaceId,
-        input.userId,
+        input.ownerId,
         input.displayName ?? null,
         metadata,
         now,
@@ -135,9 +135,9 @@ export class SqliteAgentIdentityRegistry implements AgentIdentityRegistry {
       where.push("namespace_id = ?");
       args.push(params.namespaceId);
     }
-    if (params.userId !== undefined) {
-      where.push("user_id = ?");
-      args.push(params.userId);
+    if (params.ownerId !== undefined) {
+      where.push("owner_id = ?");
+      args.push(params.ownerId);
     }
     if (params.registeredAgentId !== undefined) {
       where.push("registered_agent_id = ?");
@@ -210,7 +210,7 @@ function rowToIdentity(row: Row): AgentIdentity {
     id: row.id,
     registeredAgentId: row.registered_agent_id,
     namespaceId: row.namespace_id,
-    userId: row.user_id,
+    ownerId: row.owner_id,
     displayName: row.display_name,
     metadata,
     createdAt: row.created_at,

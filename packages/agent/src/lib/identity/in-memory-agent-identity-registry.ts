@@ -34,7 +34,7 @@ export class InMemoryAgentIdentityRegistry implements AgentIdentityRegistry {
   async resolveOrCreate(input: CreateAgentIdentityInput): Promise<AgentIdentity> {
     validateNonEmpty("registeredAgentId", input.registeredAgentId);
     validateNonEmpty("namespaceId", input.namespaceId);
-    validateNonEmpty("userId", input.userId);
+    validateNonEmpty("ownerId", input.ownerId);
     const id = composeAgentIdentityId(input);
     const existing = this.rows.get(id);
     if (existing) return existing;
@@ -44,9 +44,9 @@ export class InMemoryAgentIdentityRegistry implements AgentIdentityRegistry {
       id,
       registeredAgentId: input.registeredAgentId,
       namespaceId: input.namespaceId,
-      userId: input.userId,
+      ownerId: input.ownerId,
       displayName: input.displayName ?? null,
-      metadata: { ...(input.metadata ?? {}) },
+      metadata: { ...input.metadata },
       createdAt: now,
       lastActiveAt: now,
     };
@@ -61,7 +61,7 @@ export class InMemoryAgentIdentityRegistry implements AgentIdentityRegistry {
   async list(params: ListAgentIdentitiesParams = {}): Promise<AgentIdentity[]> {
     const filtered = Array.from(this.rows.values()).filter((row) => {
       if (params.namespaceId !== undefined && row.namespaceId !== params.namespaceId) return false;
-      if (params.userId !== undefined && row.userId !== params.userId) return false;
+      if (params.ownerId !== undefined && row.ownerId !== params.ownerId) return false;
       if (
         params.registeredAgentId !== undefined &&
         row.registeredAgentId !== params.registeredAgentId

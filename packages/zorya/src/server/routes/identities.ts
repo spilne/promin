@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Agent identity routes — long-lived per-(agent, namespace, user) records.
+// Agent identity routes — long-lived per-(agent, namespace, owner) records.
 //
 // Routes:
 //   GET    /api/agents/:id/identities                       — list identities for this agent
@@ -7,7 +7,10 @@
 //   GET    /api/agents/:id/identities/:identityId           — get one
 //   PATCH  /api/agents/:id/identities/:identityId           — update displayName / metadata
 //   DELETE /api/agents/:id/identities/:identityId           — wipe (cascades to memory)
-//   GET    /api/identities?namespaceId=&userId=             — cross-agent list
+//   GET    /api/identities?namespaceId=&ownerId=            — cross-agent list
+//
+// `ownerId` is the entity an identity belongs to — a user, team, project,
+// device, or any other addressable principal. Treated as opaque.
 //
 // Identity is metadata + a deterministic id; the actual chat state
 // (working memory, facts, episodes, threads, messages) lives in the
@@ -31,7 +34,7 @@ export interface IdentityDeps {
 
 interface ResolveBody {
   readonly namespaceId?: unknown;
-  readonly userId?: unknown;
+  readonly ownerId?: unknown;
   readonly displayName?: unknown;
   readonly metadata?: unknown;
 }
@@ -47,13 +50,13 @@ export function listAgentIdentities(deps: IdentityDeps) {
     if (!registeredAgentId) return jsonError(400, "missing_agent_id");
     const url = new URL(req.url);
     const namespaceId = url.searchParams.get("namespaceId") ?? undefined;
-    const userId = url.searchParams.get("userId") ?? undefined;
+    const ownerId = url.searchParams.get("ownerId") ?? undefined;
     const limit = parseLimit(url.searchParams.get("limit"));
     try {
       const list = await deps.registry.list({
         registeredAgentId,
         ...(namespaceId !== undefined ? { namespaceId } : {}),
-        ...(userId !== undefined ? { userId } : {}),
+        ...(ownerId !== undefined ? { ownerId } : {}),
         ...(limit !== undefined ? { limit } : {}),
       });
       return json(200, { identities: list.map(serialize) });
@@ -72,14 +75,14 @@ export function resolveAgentIdentity(deps: IdentityDeps) {
     if (typeof body.namespaceId !== "string" || body.namespaceId.length === 0) {
       return jsonError(400, "missing_namespaceId");
     }
-    if (typeof body.userId !== "string" || body.userId.length === 0) {
-      return jsonError(400, "missing_userId");
+    if (typeof body.ownerId !== "string" || body.ownerId.length === 0) {
+      return jsonError(400, "missing_ownerId");
     }
     try {
       const identity = await deps.registry.resolveOrCreate({
         registeredAgentId,
         namespaceId: body.namespaceId,
-        userId: body.userId,
+        ownerId: body.ownerId,
         displayName: typeof body.displayName === "string" ? body.displayName : null,
         metadata:
           body.metadata !== undefined && typeof body.metadata === "object" && body.metadata !== null
@@ -169,12 +172,12 @@ export function listIdentitiesAcrossAgents(deps: IdentityDeps) {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const namespaceId = url.searchParams.get("namespaceId") ?? undefined;
-    const userId = url.searchParams.get("userId") ?? undefined;
+    const ownerId = url.searchParams.get("ownerId") ?? undefined;
     const limit = parseLimit(url.searchParams.get("limit"));
     try {
       const list = await deps.registry.list({
         ...(namespaceId !== undefined ? { namespaceId } : {}),
-        ...(userId !== undefined ? { userId } : {}),
+        ...(ownerId !== undefined ? { ownerId } : {}),
         ...(limit !== undefined ? { limit } : {}),
       });
       return json(200, { identities: list.map(serialize) });
@@ -198,7 +201,7 @@ function serialize(identity: AgentIdentity): {
   id: string;
   registeredAgentId: string;
   namespaceId: string;
-  userId: string;
+  ownerId: string;
   displayName: string | null;
   metadata: Record<string, unknown>;
   createdAt: number;
@@ -208,7 +211,7 @@ function serialize(identity: AgentIdentity): {
     id: identity.id,
     registeredAgentId: identity.registeredAgentId,
     namespaceId: identity.namespaceId,
-    userId: identity.userId,
+    ownerId: identity.ownerId,
     displayName: identity.displayName,
     metadata: { ...identity.metadata },
     createdAt: identity.createdAt,
