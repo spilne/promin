@@ -9,6 +9,7 @@ import { WorkflowList } from "./components/workflows/workflow-list.tsx";
 import { WorkflowDetail } from "./components/workflows/workflow-detail.tsx";
 import { AgentList } from "./components/agents/agent-list.tsx";
 import { AgentDetail } from "./components/agents/agent-detail.tsx";
+import { InstanceList } from "./components/agents/instance-list.tsx";
 import { DialogHost, ToastHost } from "./components/ui/dialog-host.tsx";
 
 export function App() {
@@ -70,6 +71,9 @@ function renderRoute(route: string, navigate: (p: string) => void) {
   }
   if (path === "/agents") {
     return <AgentList onOpen={(id) => navigate(`/agents/${encodeURIComponent(id)}`)} />;
+  }
+  if (path === "/instances") {
+    return <InstanceList onOpenAgent={(id) => navigate(`/agents/${encodeURIComponent(id)}`)} />;
   }
   const agentMatch = /^\/agents\/([^/]+)$/.exec(path ?? "");
   if (agentMatch) {

@@ -431,6 +431,77 @@ export const memoryApi = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// Agent instances — long-lived per-(agent, namespace, owner) records.
+// `ownerId` is opaque (user, team, project, device, ...).
+// ---------------------------------------------------------------------------
+
+export interface AgentInstanceDto {
+  id: string;
+  registeredAgentId: string;
+  namespaceId: string;
+  ownerId: string;
+  displayName: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: number;
+}
+
+export const instancesApi = {
+  list(
+    params: {
+      namespaceId?: string;
+      ownerId?: string;
+      limit?: number;
+    } = {},
+  ): Promise<{ instances: AgentInstanceDto[] }> {
+    const qp = new URLSearchParams();
+    if (params.namespaceId) qp.set("namespaceId", params.namespaceId);
+    if (params.ownerId) qp.set("ownerId", params.ownerId);
+    if (params.limit !== undefined) qp.set("limit", String(params.limit));
+    const qs = qp.toString();
+    return req(`/api/instances${qs ? `?${qs}` : ""}`);
+  },
+  listForAgent(
+    agentId: string,
+    params: { namespaceId?: string; ownerId?: string; limit?: number } = {},
+  ): Promise<{ instances: AgentInstanceDto[] }> {
+    const qp = new URLSearchParams();
+    if (params.namespaceId) qp.set("namespaceId", params.namespaceId);
+    if (params.ownerId) qp.set("ownerId", params.ownerId);
+    if (params.limit !== undefined) qp.set("limit", String(params.limit));
+    const qs = qp.toString();
+    return req(`/api/agents/${encodeURIComponent(agentId)}/instances${qs ? `?${qs}` : ""}`);
+  },
+  rename(
+    agentId: string,
+    instanceId: string,
+    displayName: string | null,
+  ): Promise<{ instance: AgentInstanceDto }> {
+    return req(
+      `/api/agents/${encodeURIComponent(agentId)}/instances/${encodeURIComponent(instanceId)}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ displayName }),
+      },
+    );
+  },
+  wipe(
+    agentId: string,
+    instanceId: string,
+  ): Promise<{
+    instanceId: string;
+    threadsDeleted: number;
+    factsDeleted: number;
+    episodesDeleted: number;
+  }> {
+    return req(
+      `/api/agents/${encodeURIComponent(agentId)}/instances/${encodeURIComponent(instanceId)}`,
+      { method: "DELETE" },
+    );
+  },
+};
+
 function parseSseFrame(frame: string): { event: string; data: string } | null {
   let event = "message";
   const dataLines: string[] = [];
