@@ -20,6 +20,12 @@
 // counterpart: schedules live in SchedulerStorage, survive restart,
 // and dispatch via the host's scheduler-loop.
 //
+// Talks to a `SchedulerClient` (interface in `./scheduler-client.ts`) —
+// `inProcessSchedulerClient` for demos / single-process REPLs, or
+// `httpSchedulerClient` for agents running outside the server process.
+// The tool never touches `SchedulerStorage` directly so server-side
+// details stay on the server.
+//
 // What the tool DOES NOT do
 // -------------------------
 // It writes schedule rows. It does NOT dispatch them — that's the
@@ -40,29 +46,24 @@
 // Every schedule is stamped with the caller's (namespaceId, resourceId,
 // threadId, agentId) in `metadata`. `list` and `cancel` filter by
 // thread so one tenant can't see / cancel another's schedules even if
-// they guess the schedule id.
+// they guess the schedule id. The cap check below also relies on the
+// client filtering correctly — wire `inProcessSchedulerClient` /
+// `httpSchedulerClient` with the same scope as the tool.
 // ---------------------------------------------------------------------------
 
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { tool } from "../tool.ts";
 import type { AgentTool } from "../tool.ts";
-import type { DurableScheduleConfig, SchedulerStorage } from "@promin/workflow";
+import type { SchedulerClient } from "./scheduler-client.ts";
 
 export interface DurableSchedulerToolDeps {
-  readonly storage: SchedulerStorage;
   /**
-   * Caller scope. The tool stamps every schedule with this so listing
-   * + cancellation can filter by thread; the firing dispatch hook
-   * reads metadata to re-enter the agent for the same scope.
+   * Backend-agnostic scheduler view. The client carries the caller scope
+   * (namespace, resource, thread, agentId) — the tool reads it to stamp
+   * metadata, default fields, and apply per-thread caps.
    */
-  readonly scope: {
-    readonly namespaceId: string;
-    readonly resourceId?: string;
-    readonly threadId?: string;
-    /** Recipe id of the agent that's calling this tool. */
-    readonly agentId: string;
-  };
+  readonly client: SchedulerClient;
   /**
    * Override id generation. Default: `${threadId ?? agentId}-${uuid()}`
    * so ids are roughly thread-scoped + globally unique.
@@ -153,9 +154,9 @@ export function createDurableSchedulerTool(
   deps: DurableSchedulerToolDeps,
 ): AgentTool<SchedulerInput, Output> {
   const maxPerThread = deps.maxPerThread ?? DEFAULT_MAX_PER_THREAD;
+  const scope = deps.client.scope;
   const generateId =
-    deps.generateId ??
-    (() => `${deps.scope.threadId ?? deps.scope.agentId}-${randomUUID().slice(0, 8)}`);
+    deps.generateId ?? (() => `${scope.threadId ?? scope.agentId}-${randomUUID().slice(0, 8)}`);
 
   return tool({
     name: "scheduler",
@@ -193,51 +194,50 @@ async function handleCreate(
     };
   }
 
+  const scope = deps.client.scope;
+
   // Cap check — count this thread's existing agent-created schedules.
-  if (deps.scope.threadId) {
-    const existing = await deps.storage.listSchedules({
-      namespace: deps.scope.namespaceId,
-      limit: 1000,
-    });
-    const ours = existing.filter((s) => s.metadata?.threadId === deps.scope.threadId);
-    if (ours.length >= maxPerThread) {
+  // Relies on the client filtering by scope (it does — both
+  // inProcessSchedulerClient and httpSchedulerClient honour threadId).
+  if (scope.threadId) {
+    const ours = await deps.client.list();
+    const agentOwned = ours.filter((s) => s.metadata?.agentTrigger === true);
+    if (agentOwned.length >= maxPerThread) {
       return {
         ok: false,
-        error: `you already have ${ours.length} schedules in this thread (cap ${maxPerThread}). Cancel one first.`,
+        error: `you already have ${agentOwned.length} schedules in this thread (cap ${maxPerThread}). Cancel one first.`,
       };
     }
   }
 
   const id = generateId();
-  const targetAgentId = input.agentId ?? deps.scope.agentId;
+  const targetAgentId = input.agentId ?? scope.agentId;
 
-  const config: DurableScheduleConfig = {
+  const metadata: Record<string, unknown> = {
+    // Dispatch contract — read by the host's scheduler-loop fireOverride.
+    agentTrigger: true,
+    agentId: targetAgentId,
+    task: input.task,
+    // Routing — the firing invocation runs against this scope.
+    namespaceId: scope.namespaceId,
+    ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
+    ...(scope.threadId !== undefined && { threadId: scope.threadId }),
+    // Provenance — the agent that created this schedule (may differ
+    // from agentId if the agent scheduled a peer to fire).
+    createdByAgent: scope.agentId,
+  };
+
+  await deps.client.create({
     id,
     ...(input.name !== undefined && { name: input.name }),
-    namespace: deps.scope.namespaceId,
     ...(input.cron !== undefined && { cron: input.cron }),
     ...(input.intervalMs !== undefined && { intervalMs: input.intervalMs }),
     ...(input.rrule !== undefined && { rrule: input.rrule }),
     ...(input.timezone !== undefined && { timezone: input.timezone }),
     ...(input.startAt !== undefined && { startAt: new Date(input.startAt) }),
     ...(input.endAt !== undefined && { endAt: new Date(input.endAt) }),
-    enabled: true,
-    metadata: {
-      // Dispatch contract — read by the host's scheduler-loop fireOverride.
-      agentTrigger: true,
-      agentId: targetAgentId,
-      task: input.task,
-      // Routing — the firing invocation runs against this scope.
-      namespaceId: deps.scope.namespaceId,
-      ...(deps.scope.resourceId !== undefined && { resourceId: deps.scope.resourceId }),
-      ...(deps.scope.threadId !== undefined && { threadId: deps.scope.threadId }),
-      // Provenance — the agent that created this schedule (may differ
-      // from agentId if the agent scheduled a peer to fire).
-      createdByAgent: deps.scope.agentId,
-    },
-  };
-
-  await deps.storage.upsertSchedule(config);
+    metadata,
+  });
 
   const schedule: CreateOk["schedule"] = { task: input.task, agentId: targetAgentId };
   if (input.cron !== undefined) schedule.cron = input.cron;
@@ -247,28 +247,19 @@ async function handleCreate(
 }
 
 async function handleList(deps: DurableSchedulerToolDeps): Promise<ListOk> {
-  const all = await deps.storage.listSchedules({
-    namespace: deps.scope.namespaceId,
-    limit: 1000,
-  });
-  const ours = all.filter((s) => {
-    if (!s.metadata?.agentTrigger) return false;
-    if (deps.scope.threadId !== undefined && s.metadata.threadId !== deps.scope.threadId) {
-      return false;
-    }
-    return true;
-  });
+  const all = await deps.client.list();
+  const ours = all.filter((s) => s.metadata?.agentTrigger === true);
   return {
     ok: true,
     schedules: ours.map((s) => ({
       id: s.id,
-      name: s.name ?? null,
+      name: s.name,
       task: typeof s.metadata?.task === "string" ? s.metadata.task : "?",
       agentId: typeof s.metadata?.agentId === "string" ? s.metadata.agentId : "?",
-      enabled: s.enabled !== false,
-      cron: s.cron ?? null,
-      intervalMs: s.intervalMs ?? null,
-      rrule: s.rrule ?? null,
+      enabled: s.enabled,
+      cron: s.cron,
+      intervalMs: s.intervalMs,
+      rrule: s.rrule,
     })),
   };
 }
@@ -277,16 +268,9 @@ async function handleCancel(
   input: z.infer<typeof CANCEL_SCHEMA>,
   deps: DurableSchedulerToolDeps,
 ): Promise<{ ok: true } | ToolError> {
-  const found = await deps.storage.loadSchedule(input.id);
-  if (!found) {
-    return { ok: false, error: `no schedule with id "${input.id}"` };
-  }
-  // Ownership check — caller can only cancel schedules from their own
-  // thread. Defends against the LLM hallucinating ids that belong to
-  // another tenant's row.
-  if (deps.scope.threadId !== undefined && found.metadata?.threadId !== deps.scope.threadId) {
-    return { ok: false, error: `schedule "${input.id}" doesn't belong to this thread` };
-  }
-  await deps.storage.deleteSchedule(input.id);
-  return { ok: true };
+  // The client enforces scope ownership + returns a typed error when
+  // the id doesn't belong to this scope (or doesn't exist).
+  const result = await deps.client.cancel(input.id);
+  if (result.ok) return { ok: true };
+  return { ok: false, error: result.error };
 }

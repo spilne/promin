@@ -15,6 +15,7 @@ import { InMemorySchedulerStorage } from "@promin/workflow";
 import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
 import { createDurableSchedulerTool } from "../durable-scheduler-tool.ts";
 import { dispatchAgentSchedule, isAgentSchedule } from "../dispatch-agent-schedule.ts";
+import { inProcessSchedulerClient } from "../scheduler-client.ts";
 import type { Agent, AgentInput, AgentRunOutput } from "../../agent/types.ts";
 
 const SCOPE = {
@@ -24,10 +25,14 @@ const SCOPE = {
   agentId: "writer",
 } as const;
 
+function clientFor(storage: InMemorySchedulerStorage) {
+  return inProcessSchedulerClient({ storage, scope: SCOPE });
+}
+
 describe("createDurableSchedulerTool — create", () => {
   it("writes a schedule with agent-trigger metadata + scope routing", async () => {
     const storage = new InMemorySchedulerStorage();
-    const tool = createDurableSchedulerTool({ storage, scope: SCOPE });
+    const tool = createDurableSchedulerTool({ client: clientFor(storage) });
 
     const result = await tool.execute({
       command: "create",
@@ -57,7 +62,7 @@ describe("createDurableSchedulerTool — create", () => {
 
   it("agentId override targets a peer instead of self", async () => {
     const storage = new InMemorySchedulerStorage();
-    const tool = createDurableSchedulerTool({ storage, scope: SCOPE });
+    const tool = createDurableSchedulerTool({ client: clientFor(storage) });
 
     const result = await tool.execute({
       command: "create",
@@ -75,8 +80,7 @@ describe("createDurableSchedulerTool — create", () => {
 
   it("rejects when no trigger is set", async () => {
     const tool = createDurableSchedulerTool({
-      storage: new InMemorySchedulerStorage(),
-      scope: SCOPE,
+      client: clientFor(new InMemorySchedulerStorage()),
     });
     const result = await tool.execute({ command: "create", task: "x" });
     expect(result.ok).toBe(false);
@@ -85,8 +89,7 @@ describe("createDurableSchedulerTool — create", () => {
 
   it("rejects when multiple triggers are set", async () => {
     const tool = createDurableSchedulerTool({
-      storage: new InMemorySchedulerStorage(),
-      scope: SCOPE,
+      client: clientFor(new InMemorySchedulerStorage()),
     });
     const result = await tool.execute({
       command: "create",
@@ -101,8 +104,7 @@ describe("createDurableSchedulerTool — create", () => {
   it("enforces the per-thread cap", async () => {
     const storage = new InMemorySchedulerStorage();
     const tool = createDurableSchedulerTool({
-      storage,
-      scope: SCOPE,
+      client: clientFor(storage),
       maxPerThread: 2,
     });
     await tool.execute({ command: "create", task: "a", cron: "* * * * *" });
@@ -138,7 +140,7 @@ describe("createDurableSchedulerTool — list / cancel", () => {
       metadata: { workflowName: "x" },
     });
     // This thread's
-    const tool = createDurableSchedulerTool({ storage, scope: SCOPE });
+    const tool = createDurableSchedulerTool({ client: clientFor(storage) });
     const created = await tool.execute({ command: "create", task: "ours", cron: "* * * * *" });
     if (!created.ok || !("id" in created)) throw new Error("expected create ok");
 
@@ -151,7 +153,7 @@ describe("createDurableSchedulerTool — list / cancel", () => {
 
   it("cancel deletes the row", async () => {
     const storage = new InMemorySchedulerStorage();
-    const tool = createDurableSchedulerTool({ storage, scope: SCOPE });
+    const tool = createDurableSchedulerTool({ client: clientFor(storage) });
     const created = await tool.execute({ command: "create", task: "x", cron: "* * * * *" });
     if (!created.ok || !("id" in created)) throw new Error("expected create ok");
 
@@ -175,7 +177,7 @@ describe("createDurableSchedulerTool — list / cancel", () => {
       },
     });
 
-    const tool = createDurableSchedulerTool({ storage, scope: SCOPE });
+    const tool = createDurableSchedulerTool({ client: clientFor(storage) });
     const result = await tool.execute({ command: "cancel", id: "their-schedule" });
     expect(result.ok).toBe(false);
     if ("error" in result) expect(result.error).toMatch(/doesn't belong/);
@@ -184,8 +186,7 @@ describe("createDurableSchedulerTool — list / cancel", () => {
 
   it("cancel returns error for unknown id", async () => {
     const tool = createDurableSchedulerTool({
-      storage: new InMemorySchedulerStorage(),
-      scope: SCOPE,
+      client: clientFor(new InMemorySchedulerStorage()),
     });
     const result = await tool.execute({ command: "cancel", id: "ghost" });
     expect(result.ok).toBe(false);

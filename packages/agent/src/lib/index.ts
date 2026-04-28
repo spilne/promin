@@ -247,6 +247,15 @@ export type { LayeredMemoryToolConfig } from "./tools/layered-memory-tools.ts";
 // dispatchAgentSchedule helper for the host's scheduler-loop fireOverride.
 export { createDurableSchedulerTool } from "./tools/durable-scheduler-tool.ts";
 export type { DurableSchedulerToolDeps } from "./tools/durable-scheduler-tool.ts";
+export { inProcessSchedulerClient, httpSchedulerClient } from "./tools/scheduler-client.ts";
+export type {
+  SchedulerClient,
+  SchedulerClientScope,
+  SchedulerCreateInput,
+  SchedulerSummary,
+  InProcessSchedulerClientConfig,
+  HttpSchedulerClientConfig,
+} from "./tools/scheduler-client.ts";
 export { dispatchAgentSchedule, isAgentSchedule } from "./tools/dispatch-agent-schedule.ts";
 export type {
   AgentScheduleMetadata,
