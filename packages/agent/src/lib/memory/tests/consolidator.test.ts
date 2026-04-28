@@ -224,4 +224,157 @@ describe("DefaultConsolidator", () => {
     // threads etc. Just check it stays low.
     expect(ep.salience).toBeLessThan(0.3);
   });
+
+  describe("maxResourceFacts retention cap", () => {
+    async function setupResourceWithFacts(count: number) {
+      const store = new InMemoryMemoryStore();
+      const resourceKey = { namespaceId: "acme", resourceId: "alice" };
+      for (let i = 0; i < count; i++) {
+        await store.appendResourceFact(resourceKey, `fact ${i}`);
+        // Tiny delay so createdAt timestamps are distinct (in-memory store
+        // uses Date.now()) — eviction order is by createdAt asc.
+        await new Promise((r) => setTimeout(r, 1));
+      }
+      return { store, resourceKey };
+    }
+
+    it("evicts oldest facts when distilling pushes count over the cap", async () => {
+      const { store } = await setupResourceWithFacts(5);
+      const threadKey = { namespaceId: "acme", resourceId: "alice", threadId: "t1" };
+      await store.appendMessages(threadKey, [
+        { role: "user", content: "I have a new fact" },
+        { role: "assistant", content: "noted" },
+      ]);
+
+      const consolidator = new DefaultConsolidator({
+        store,
+        maxResourceFacts: 3,
+        llm: fixedLLM({
+          summary: "introduced new facts",
+          outcome: null,
+          salience: 0.5,
+          facts: ["new fact A", "new fact B"],
+        }),
+      });
+
+      await consolidator.distillThread(threadKey);
+
+      const after = await store.listResourceFacts({ namespaceId: "acme", resourceId: "alice" });
+      // 5 existing + 2 new = 7, capped to 3 → keep the 3 most recent.
+      expect(after.map((f) => f.text)).toEqual(["fact 4", "new fact A", "new fact B"]);
+    });
+
+    it("doesn't evict newly-appended facts in the same call (current turn wins)", async () => {
+      const { store } = await setupResourceWithFacts(2);
+      const threadKey = { namespaceId: "acme", resourceId: "alice", threadId: "t1" };
+      await store.appendMessages(threadKey, [
+        { role: "user", content: "lots of new" },
+        { role: "assistant", content: "ok" },
+      ]);
+
+      const consolidator = new DefaultConsolidator({
+        store,
+        maxResourceFacts: 3,
+        llm: fixedLLM({
+          summary: "many facts",
+          outcome: null,
+          salience: 0.5,
+          facts: ["new A", "new B", "new C"],
+        }),
+      });
+
+      await consolidator.distillThread(threadKey);
+      const after = await store.listResourceFacts({ namespaceId: "acme", resourceId: "alice" });
+      // 2 existing + 3 new = 5, capped to 3 → both existing evicted, all 3 new kept.
+      expect(after.map((f) => f.text)).toEqual(["new A", "new B", "new C"]);
+    });
+
+    it("is a no-op when count stays at or below the cap", async () => {
+      const { store } = await setupResourceWithFacts(1);
+      const threadKey = { namespaceId: "acme", resourceId: "alice", threadId: "t1" };
+      await store.appendMessages(threadKey, [
+        { role: "user", content: "small update" },
+        { role: "assistant", content: "ok" },
+      ]);
+
+      const consolidator = new DefaultConsolidator({
+        store,
+        maxResourceFacts: 5,
+        llm: fixedLLM({
+          summary: "minor",
+          outcome: null,
+          salience: 0.5,
+          facts: ["new one"],
+        }),
+      });
+
+      await consolidator.distillThread(threadKey);
+      const after = await store.listResourceFacts({ namespaceId: "acme", resourceId: "alice" });
+      expect(after.map((f) => f.text)).toEqual(["fact 0", "new one"]);
+    });
+
+    it("retention cap doesn't leak across resources", async () => {
+      const store = new InMemoryMemoryStore();
+      // Stand up two resources, each at the cap.
+      for (const owner of ["alice", "bob"]) {
+        for (let i = 0; i < 3; i++) {
+          await store.appendResourceFact(
+            { namespaceId: "acme", resourceId: owner },
+            `${owner}-fact-${i}`,
+          );
+        }
+      }
+      const threadKey = { namespaceId: "acme", resourceId: "alice", threadId: "t1" };
+      await store.appendMessages(threadKey, [
+        { role: "user", content: "alice update" },
+        { role: "assistant", content: "ok" },
+      ]);
+
+      const consolidator = new DefaultConsolidator({
+        store,
+        maxResourceFacts: 3,
+        llm: fixedLLM({
+          summary: "alice's update",
+          outcome: null,
+          salience: 0.5,
+          facts: ["alice-new"],
+        }),
+      });
+      await consolidator.distillThread(threadKey);
+
+      // Alice over-cap → eviction.
+      const aliceFacts = await store.listResourceFacts({
+        namespaceId: "acme",
+        resourceId: "alice",
+      });
+      expect(aliceFacts.map((f) => f.text)).toEqual(["alice-fact-1", "alice-fact-2", "alice-new"]);
+      // Bob untouched — different resource.
+      const bobFacts = await store.listResourceFacts({ namespaceId: "acme", resourceId: "bob" });
+      expect(bobFacts).toHaveLength(3);
+      expect(bobFacts.map((f) => f.text)).toEqual(["bob-fact-0", "bob-fact-1", "bob-fact-2"]);
+    });
+
+    it("cap is unbounded when maxResourceFacts is unset", async () => {
+      const { store } = await setupResourceWithFacts(50);
+      const threadKey = { namespaceId: "acme", resourceId: "alice", threadId: "t1" };
+      await store.appendMessages(threadKey, [
+        { role: "user", content: "yet another" },
+        { role: "assistant", content: "ok" },
+      ]);
+
+      const consolidator = new DefaultConsolidator({
+        store,
+        // maxResourceFacts NOT set
+        llm: fixedLLM({
+          summary: "another",
+          outcome: null,
+          salience: 0.5,
+          facts: ["new fact"],
+        }),
+      });
+      await consolidator.distillThread(threadKey);
+      const after = await store.listResourceFacts({ namespaceId: "acme", resourceId: "alice" });
+      expect(after).toHaveLength(51);
+    });
+  });
 });

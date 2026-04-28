@@ -122,6 +122,19 @@ export interface DefaultConsolidatorConfig {
   readonly defaultKeepRecent?: number;
   /** Min messages a thread must have before `distillThread` runs. Default 2. */
   readonly minDistillMessages?: number;
+  /**
+   * Cap on resource-scope facts per `(namespaceId, resourceId)`. When
+   * `distillThread` writes new facts, the oldest are evicted until the
+   * row count is at or below this number. Unset means unbounded —
+   * facts grow forever, which works for short-lived sessions but bloats
+   * the resolveContext prompt over time. A small cap (10–20) is
+   * usually right: if a fact matters across sessions it'll get
+   * re-extracted when the model encounters it again.
+   *
+   * Eviction is oldest-first by `createdAt`. `appendResourceFact`
+   * results from the current call are never evicted in the same call.
+   */
+  readonly maxResourceFacts?: number;
 }
 
 const DEFAULT_DISTILL_PROMPT = `You are a memory consolidation assistant. You will be shown a chat thread between a user and an agent. Produce a JSON envelope summarising the conversation in a way that would help the SAME user pick up later in a NEW thread.
@@ -151,6 +164,7 @@ export class DefaultConsolidator implements Consolidator {
   private readonly salienceFn: (signals: ConsolidationSignals) => number;
   private readonly defaultKeepRecent: number;
   private readonly minDistillMessages: number;
+  private readonly maxResourceFacts?: number;
 
   constructor(config: DefaultConsolidatorConfig) {
     this.store = config.store;
@@ -160,6 +174,7 @@ export class DefaultConsolidator implements Consolidator {
     this.salienceFn = config.salienceFn ?? defaultSalience;
     this.defaultKeepRecent = config.defaultKeepRecent ?? 10;
     this.minDistillMessages = config.minDistillMessages ?? 2;
+    if (config.maxResourceFacts !== undefined) this.maxResourceFacts = config.maxResourceFacts;
   }
 
   async compactThread(key: ThreadKey, opts: CompactThreadOptions = {}): Promise<EpisodicRecord> {
@@ -218,11 +233,29 @@ export class DefaultConsolidator implements Consolidator {
     if (distilled.facts.length > 0) {
       const existing = await this.store.listResourceFacts(resourceKey);
       const seen = new Set(existing.map((f) => normalizeFact(f.text)));
+      let appended = 0;
       for (const text of distilled.facts) {
         const norm = normalizeFact(text);
         if (norm.length === 0 || seen.has(norm)) continue;
         await this.store.appendResourceFact(resourceKey, text);
         seen.add(norm);
+        appended += 1;
+      }
+      // Apply retention cap after appending. Re-list so the order is the
+      // store's authoritative view (createdAt asc per the contract). Drop
+      // the oldest until we're under the cap. Newly appended facts will
+      // be at the end of the list — they survive eviction in the same
+      // pass, which is what we want (current turn's signal beats stale
+      // history).
+      if (this.maxResourceFacts !== undefined && appended > 0) {
+        const all = await this.store.listResourceFacts(resourceKey);
+        const overflow = all.length - this.maxResourceFacts;
+        if (overflow > 0) {
+          const toEvict = all.slice(0, overflow);
+          for (const f of toEvict) {
+            await this.store.deleteResourceFact(resourceKey, f.id);
+          }
+        }
       }
     }
 
