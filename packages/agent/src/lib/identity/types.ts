@@ -111,6 +111,35 @@
 // Without it, callers would have to scan threads to enumerate identities,
 // which doesn't scale. With it, the registry is a thin index over the
 // memory store.
+//
+//
+// This is opt-in — both models are first-class
+// --------------------------------------------
+// Identity is one valid memory model, not the only one. The agent runtime
+// accepts any string as `resourceId`; the registry just gives you the
+// agent-centric flavour with bookkeeping. Pick per call:
+//
+//   resourceId: "alice"                  → user-centric (shared)
+//   ----------------------------------------------------------------------
+//   alice has ONE working memory + facts row in the namespace. Every agent
+//   she talks to reads and writes the same row. If the writer learns
+//   "alice prefers terse", the reviewer sees it on its next turn. Good
+//   when the org wants a single shared mental model of the user.
+//
+//   resourceId: identity.id              → agent-centric (isolated)
+//   ----------------------------------------------------------------------
+//   alice has a separate working memory + facts row per (agent, user)
+//   pair. The writer's scratchpad is invisible to the reviewer. Good
+//   when each agent has its own job and shouldn't pollute its peers'
+//   context — or when the user wants to keep multiple long-lived
+//   instances of the same agent that drift independently.
+//
+// Both can coexist in one deployment. A "shared org memory of alice" can
+// live at resourceId="alice" while specialised long-lived instances live
+// at composed identity ids. Namespace scope already gives you a third
+// tier above all of this (org-wide policy + facts that flow into every
+// turn regardless of resource). See `packages/agent/src/lib/memory/types.ts`
+// for the cascade.
 // ---------------------------------------------------------------------------
 
 export interface AgentIdentity {
