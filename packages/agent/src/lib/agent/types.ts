@@ -286,6 +286,29 @@ export interface AgentThread<Input = AgentInput, Output = unknown> {
   /** One conversational turn, streaming. Returns immediately. */
   stream(input: Input, opts?: AgentInvokeOpts): AgentRunOutput<Output>;
 
+  /**
+   * Resolve a tool-call approval that suspended this thread. Finds the
+   * suspended workflow waiting on `approve:<callId>`, delivers the
+   * decision to its journal, and continues the turn. Returns the
+   * resumed turn's `AgentRunOutput` like `send`.
+   *
+   * Backends may throw when:
+   *   - no suspended workflow matches the (thread, callId) pair
+   *   - the storage doesn't support journaled signal delivery
+   *   - the approval was already resolved by a concurrent caller
+   */
+  resume?(
+    callId: string,
+    decision: { approved: boolean; reason?: string },
+    opts?: AgentInvokeOpts,
+  ): Promise<AgentRunOutput<Output>>;
+  /** Streaming variant of `resume`. */
+  resumeStream?(
+    callId: string,
+    decision: { approved: boolean; reason?: string },
+    opts?: AgentInvokeOpts,
+  ): AgentRunOutput<Output>;
+
   /** Read the persisted message history (paginated). */
   messages(range?: MessageRange): Promise<Message[]>;
 

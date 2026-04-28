@@ -29,10 +29,12 @@ import type {
   Agent,
   AgentInstanceRegistry,
   AgentRegistry,
+  AgentRunOutput,
   AgentThreadSummary,
   Message,
   RegisteredAgent,
 } from "@promin/agent";
+import { WorkflowSuspendedError } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 
 // ---------------------------------------------------------------------------
@@ -378,50 +380,221 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
 
     const thread = await agent.thread(threadId);
     const out = thread.stream({ task: parsed.task });
+    const threadMeta = {
+      threadId: thread.id,
+      isNew: thread.isNew,
+      ...(scope.instanceId !== undefined && { instanceId: scope.instanceId }),
+    };
+    return streamAgentRunResponse(out, threadMeta);
+  };
+}
 
-    const stream = new ReadableStream<Uint8Array>({
-      async start(controller) {
-        const enc = new TextEncoder();
-        const threadEvent: Record<string, unknown> = {
-          threadId: thread.id,
-          isNew: thread.isNew,
-        };
-        if (scope.instanceId !== undefined) threadEvent.instanceId = scope.instanceId;
-        controller.enqueue(enc.encode(`event: thread\ndata: ${JSON.stringify(threadEvent)}\n\n`));
+/**
+ * Continue a turn that suspended on `approve:<callId>`. Body shape:
+ *   { toolCallId: string, approved: boolean, reason?: string }
+ *
+ * Resumes via `LocalAgentThread.resume` (or any backend that exposes it),
+ * then streams the resumed turn's events back in the same SSE shape as
+ * the user-task stream — so the chat client can splice the resumed
+ * deltas into the same conversation panel.
+ */
+export function streamThreadApproval(deps: AgentGatewayDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const id = params.id;
+    const threadId = params.threadId;
+    if (!id) return jsonError(400, "missing_id");
+    if (!threadId) return jsonError(400, "missing_threadId");
+
+    const recipe = await deps.registry.get(id);
+    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+
+    const body = await readJson<ApprovalRequest>(req);
+    const parsed = parseApprovalBody(body);
+    if ("error" in parsed) return jsonError(400, parsed.error);
+
+    const scope = await resolveScope(deps, id, {
+      task: "_resume",
+      namespaceId: parsed.namespaceId,
+      ...(parsed.resourceId !== undefined && { resourceId: parsed.resourceId }),
+      ...(parsed.ownerId !== undefined && { ownerId: parsed.ownerId }),
+    });
+    if ("error" in scope) return jsonError(400, scope.error);
+
+    let agent: Agent;
+    try {
+      agent = deps.resolve(recipe).withScope({
+        namespaceId: parsed.namespaceId,
+        resourceId: scope.resourceId,
+      });
+    } catch (err) {
+      return jsonError(500, "resolve_failed", asMessage(err));
+    }
+
+    const thread = await agent.thread(threadId);
+    if (!thread.resumeStream) {
+      return jsonError(
+        500,
+        "resume_unsupported",
+        "This agent backend doesn't support approval resume.",
+      );
+    }
+    let out: AgentRunOutput;
+    try {
+      out = thread.resumeStream(parsed.toolCallId, {
+        approved: parsed.approved,
+        ...(parsed.reason !== undefined && { reason: parsed.reason }),
+      });
+    } catch (err) {
+      return jsonError(404, "resume_failed", asMessage(err));
+    }
+
+    const threadMeta = {
+      threadId: thread.id,
+      isNew: thread.isNew,
+      ...(scope.instanceId !== undefined && { instanceId: scope.instanceId }),
+    };
+    return streamAgentRunResponse(out, threadMeta);
+  };
+}
+
+interface ApprovalRequest {
+  readonly toolCallId?: unknown;
+  readonly approved?: unknown;
+  readonly reason?: unknown;
+  readonly namespaceId?: unknown;
+  readonly resourceId?: unknown;
+  readonly ownerId?: unknown;
+}
+
+interface ParsedApproval {
+  readonly toolCallId: string;
+  readonly approved: boolean;
+  readonly reason?: string;
+  readonly namespaceId: string;
+  readonly resourceId?: string;
+  readonly ownerId?: string;
+}
+
+function parseApprovalBody(body: ApprovalRequest | null): ParsedApproval | { error: string } {
+  if (!body) return { error: "missing_body" };
+  if (typeof body.toolCallId !== "string" || body.toolCallId.length === 0) {
+    return { error: "missing_toolCallId" };
+  }
+  if (typeof body.approved !== "boolean") return { error: "missing_approved" };
+  if (typeof body.namespaceId !== "string" || body.namespaceId.length === 0) {
+    return { error: "missing_namespaceId" };
+  }
+  const reason = typeof body.reason === "string" ? body.reason : undefined;
+  const resourceId =
+    typeof body.resourceId === "string" && body.resourceId.length > 0 ? body.resourceId : undefined;
+  const ownerId =
+    typeof body.ownerId === "string" && body.ownerId.length > 0 ? body.ownerId : undefined;
+  if (resourceId !== undefined && ownerId !== undefined) {
+    return { error: "conflicting_identity" };
+  }
+  return {
+    toolCallId: body.toolCallId,
+    approved: body.approved,
+    namespaceId: body.namespaceId,
+    ...(reason !== undefined && { reason }),
+    ...(resourceId !== undefined && { resourceId }),
+    ...(ownerId !== undefined && { ownerId }),
+  };
+}
+
+/**
+ * Shared SSE writer for thread.stream / thread.resumeStream — fans the
+ * agent's `fullStream` into typed SSE events so the client sees text
+ * deltas, approval requests, and finish/suspend signals in one channel.
+ *
+ * Suspension semantics: when the workflow suspends on an approval gate
+ * the underlying `out.text` promise rejects with `WorkflowSuspendedError`.
+ * The `approval-requested` event already fired through `fullStream`, so
+ * we map the rejection to a clean `event: suspended` and let the client
+ * react (render the approval banner). Any other error becomes
+ * `event: error`.
+ */
+function streamAgentRunResponse(
+  out: AgentRunOutput,
+  threadMeta: Record<string, unknown>,
+): Response {
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const enc = new TextEncoder();
+      const send = (event: string | null, data: unknown) => {
+        const prefix = event ? `event: ${event}\n` : "";
         try {
-          for await (const delta of out.textStream) {
-            controller.enqueue(enc.encode(`data: ${JSON.stringify({ delta })}\n\n`));
+          controller.enqueue(enc.encode(`${prefix}data: ${JSON.stringify(data)}\n\n`));
+        } catch {
+          // Controller already closed — best-effort.
+        }
+      };
+
+      send("thread", threadMeta);
+
+      let suspended: { toolCallId: string; toolName: string } | null = null;
+      try {
+        for await (const event of out.fullStream) {
+          switch (event.type) {
+            case "text-delta":
+              send(null, { delta: event.delta });
+              break;
+            case "approval-requested":
+              suspended = { toolCallId: event.toolCallId, toolName: event.toolName };
+              send("approval-requested", suspended);
+              break;
+            case "finish":
+              // `finish` lands when the workflow runs to completion.
+              // We surface usage + reason in the dedicated `finish`
+              // SSE event after the loop in case downstream code needs
+              // post-loop work; nothing to do here.
+              break;
+            case "error":
+              send("error", { message: event.error.message });
+              break;
+            default:
+              break;
           }
+        }
+        // No suspension — workflow completed normally.
+        if (!suspended) {
           const text = await out.text;
           const finishReason = await out.finishReason;
           const usage = await out.usage;
-          const finishPayload: Record<string, unknown> = { text, finishReason, usage };
-          if (scope.instanceId !== undefined) finishPayload.instanceId = scope.instanceId;
-          controller.enqueue(
-            enc.encode(`event: finish\ndata: ${JSON.stringify(finishPayload)}\n\n`),
-          );
-        } catch (err) {
-          controller.enqueue(
-            enc.encode(`event: error\ndata: ${JSON.stringify({ message: asMessage(err) })}\n\n`),
-          );
-        } finally {
-          controller.close();
+          send("finish", { ...threadMeta, text, finishReason, usage });
+        } else {
+          // The workflow suspended at the approval gate. The runner
+          // rejects out.text with WorkflowSuspendedError — swallow it,
+          // signal the suspension cleanly so the client renders the
+          // banner instead of an error.
+          out.text.catch(() => {});
+          send("suspended", { ...threadMeta, ...suspended });
         }
-      },
-      cancel: async () => {
-        await out.cancel().catch(() => {});
-      },
-    });
+      } catch (err) {
+        // Suspension shows up here too if it propagated through
+        // fullStream's settle path before we caught it.
+        if (err instanceof WorkflowSuspendedError) {
+          send("suspended", { ...threadMeta, ...(suspended ?? {}) });
+        } else {
+          send("error", { message: asMessage(err) });
+        }
+      } finally {
+        controller.close();
+      }
+    },
+    cancel: async () => {
+      await out.cancel().catch(() => {});
+    },
+  });
 
-    return new Response(stream, {
-      status: 200,
-      headers: {
-        "content-type": "text/event-stream",
-        "cache-control": "no-cache, no-transform",
-        connection: "keep-alive",
-      },
-    });
-  };
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+    },
+  });
 }
 
 export function listAgentThreads(deps: AgentGatewayDeps) {

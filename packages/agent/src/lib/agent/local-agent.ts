@@ -53,6 +53,12 @@ import {
 import { createLayeredMemoryTool } from "../tools/layered-memory-tools.ts";
 import { createCallAgentTool, createFindAgentTool } from "../network/runtime.ts";
 import { frameTask } from "./frame-task.ts";
+import {
+  completeSignal,
+  isActivityJournalStorage,
+  isJournaledSuspendStorage,
+} from "@promin/workflow";
+import type { ApprovalDecision } from "../tool.ts";
 import type {
   Agent,
   AgentEvent,
@@ -725,6 +731,155 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     const capture = makeCapture();
     const promise = this.runTurn(input, opts, capture).then(({ promise }) => promise);
     return liveOutput<TOutput>(promise, undefined, capture);
+  }
+
+  async resume(
+    callId: string,
+    decision: ApprovalDecision,
+    opts?: AgentInvokeOpts,
+  ): Promise<AgentRunOutput<TOutput>> {
+    const { promise, capture } = await this.resumeTurn(callId, decision, opts);
+    const result = await promise;
+    return resolvedOutput<TOutput>(result, capture.events);
+  }
+
+  resumeStream(
+    callId: string,
+    decision: ApprovalDecision,
+    opts?: AgentInvokeOpts,
+  ): AgentRunOutput<TOutput> {
+    const capture = makeCapture();
+    const promise = this.resumeTurn(callId, decision, opts, capture).then(({ promise }) => promise);
+    return liveOutput<TOutput>(promise, undefined, capture);
+  }
+
+  /**
+   * Continue a turn that suspended on `approve:<callId>`. Finds the
+   * suspended workflow for this thread, delivers the approval decision
+   * to its journal, then re-runs the workflow definition under the
+   * SAME workflowId — the runner replays from the journal, consumes
+   * the now-completed signal, and continues to completion (or the
+   * next suspension).
+   *
+   * The rebuilt workflow definition must be replay-equivalent to the
+   * original turn's. agent-action is deterministic on the same
+   * AgentLoopConfig, so as long as the recipe + persona haven't
+   * changed mid-turn this is safe.
+   */
+  private async resumeTurn(
+    callId: string,
+    decision: ApprovalDecision,
+    opts?: AgentInvokeOpts,
+    captureIn?: RunCapture,
+  ): Promise<{ promise: Promise<AgentResult>; capture: RunCapture }> {
+    const storage = this.deps.runner.storage;
+    if (!isActivityJournalStorage(storage) || !isJournaledSuspendStorage(storage)) {
+      throw new Error(
+        "LocalAgentThread.resume: storage doesn't support journaled signal delivery. " +
+          "Approvals require a journaled storage backend (in-memory, sqlite, postgres).",
+      );
+    }
+
+    // Find the suspended workflow for this thread waiting on approve:<callId>.
+    // Each chat turn creates its own workflow id prefixed by threadId, so we
+    // can scope the search to this thread alone.
+    const signalName = `approve:${callId}`;
+    const suspended = await storage.listWorkflows({ status: "suspended", limit: 100 });
+    const wf = suspended.find(
+      (w) =>
+        w.workflowId.startsWith(`${this.deps.key.threadId}-`) &&
+        Object.values(w.steps).some(
+          (s) => s.status === "waiting_for_signal" && s.signalName === signalName,
+        ),
+    );
+    if (!wf) {
+      throw new Error(
+        `No suspended approval "${signalName}" found for thread "${this.deps.key.threadId}".`,
+      );
+    }
+    const stepName = Object.values(wf.steps).find(
+      (s) => s.status === "waiting_for_signal" && s.signalName === signalName,
+    )!.stepName;
+
+    const capture = captureIn ?? makeCapture();
+    const bus = new SessionEventBus();
+    bus.subscribe((e) => recordEvent(capture, e));
+    if (opts?.signal) {
+      opts.signal.addEventListener("abort", () => {
+        capture.cancelled = true;
+      });
+    }
+
+    // Rebuild the workflow definition. The journal drives replay so we
+    // don't need to recompute the seed messages — the runner reads input
+    // from storage when resuming an existing workflow row.
+    const { persona } = await this.loadContext();
+    const actionConfig = toActionConfig({ ...this.deps.loopConfig, systemPrompt: persona }, bus);
+    const builtWorkflow = (
+      agentAction as (cfg: AgentActionConfig<TOutput>) => ReturnType<typeof agentAction>
+    )(actionConfig as AgentActionConfig<TOutput>);
+
+    // Deliver the signal — completes the journal entry the suspended step
+    // is waiting on. False means the entry was already completed (race
+    // with another resume call) — surface it loudly so the gateway can
+    // tell the caller their decision lost the race.
+    const delivered = await completeSignal({
+      storage,
+      workflowId: wf.workflowId,
+      stepName,
+      signalName,
+      value: decision,
+    });
+    if (!delivered) {
+      throw new Error(`Approval "${signalName}" already resolved on workflow "${wf.workflowId}".`);
+    }
+
+    // Re-run the workflow. The runner uses the `input` we pass directly
+    // (it doesn't fall back to `state.input`), so on resume we feed the
+    // ORIGINAL persisted input back in. Replay reads activities from the
+    // journal — the function-body itself is deterministic on input.
+    const persistedInput = wf.input;
+    const promise = this.deps.runner
+      .run({
+        workflow: builtWorkflow,
+        workflowId: wf.workflowId,
+        input: persistedInput,
+      })
+      .then(async (raw) => {
+        const r = raw as AgentResult;
+        await this.persistResumedTurn(!!persona, r);
+        return r;
+      });
+
+    return { promise, capture };
+  }
+
+  /**
+   * After a resumed turn completes, append any messages that aren't
+   * already in the thread's persisted history. The original `send()`
+   * call never reached `persistTurn` because the workflow suspended
+   * before the runner returned, so the entire turn — user task,
+   * tool calls, tool results, assistant response — needs to land here.
+   */
+  private async persistResumedTurn(
+    turnHadSystemPrompt: boolean,
+    result: AgentResult,
+  ): Promise<void> {
+    const persisted = (await this.loadContext()).messages;
+    const skip = (turnHadSystemPrompt ? 1 : 0) + persisted.length;
+    const newTail = result.messages.slice(skip).filter((m) => m.role !== "system");
+    if (newTail.length === 0) return;
+
+    if (this.deps.memory) {
+      if (!(await this.deps.memory.getThread(this.deps.key))) {
+        await this.deps.memory.createThread(this.deps.key);
+      }
+      await this.deps.memory.appendMessages(this.deps.key, newTail);
+      await this.maybeAutoCompact();
+      await this.maybeAutoDistill();
+    } else {
+      this.inMemoryMessages.push(...newTail);
+    }
   }
 
   /**

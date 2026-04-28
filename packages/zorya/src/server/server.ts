@@ -99,6 +99,7 @@ import {
   listThreadMessages,
   sendThreadMessage,
   streamAgent,
+  streamThreadApproval,
   streamThreadMessage,
   type AgentGatewayDeps,
 } from "./routes/agents.ts";
@@ -571,6 +572,7 @@ export class ZoryaServer {
         .get("/api/agents/:id/threads", listAgentThreads(agentDeps))
         .post("/api/agents/:id/threads/:threadId", sendThreadMessage(agentDeps))
         .post("/api/agents/:id/threads/:threadId/stream", streamThreadMessage(agentDeps))
+        .post("/api/agents/:id/threads/:threadId/approve", streamThreadApproval(agentDeps))
         .get("/api/agents/:id/threads/:threadId/messages", listThreadMessages(agentDeps))
         .post("/api/agents/:id/threads/:threadId/distill", distillThread(agentDeps))
         .post("/api/agents/:id/threads/:threadId/compact", compactThread(agentDeps));

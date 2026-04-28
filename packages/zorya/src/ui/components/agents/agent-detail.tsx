@@ -1,6 +1,7 @@
 import type * as preact from "preact";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
+import { useNamespace } from "../../hooks/use-namespace.ts";
 import { api } from "../../api/client.ts";
 import type { Message, RegisteredAgent, ThreadSummary } from "../../../server/routes/agents.ts";
 import { Page } from "../ui/page.tsx";
@@ -16,7 +17,11 @@ interface AgentDetailProps {
   onBack: () => void;
 }
 
-const TENANT_KEY = "zorya_agent_tenant";
+// Local-only persistence: only the resource (owner / user) id lives in
+// localStorage. Namespace comes from the global sidebar switcher
+// (`useNamespace`) so the entire dashboard scopes consistently and the
+// agent page doesn't fight the global selector with its own input.
+const RESOURCE_KEY = "zorya_agent_resource";
 const ACTIVE_THREAD_KEY = "zorya_agent_active_thread";
 
 interface Tenant {
@@ -24,38 +29,35 @@ interface Tenant {
   resourceId: string;
 }
 
-function loadTenant(): Tenant {
-  try {
-    const raw = localStorage.getItem(TENANT_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<Tenant>;
-      if (parsed.namespaceId) {
-        return {
-          namespaceId: parsed.namespaceId,
-          resourceId: parsed.resourceId ?? "alice",
-        };
-      }
-    }
-  } catch {
-    // fall through
-  }
-  return { namespaceId: "acme", resourceId: "alice" };
+function loadResourceId(): string {
+  return localStorage.getItem(RESOURCE_KEY) ?? "alice";
 }
 
-function saveTenant(t: Tenant) {
-  localStorage.setItem(TENANT_KEY, JSON.stringify(t));
+function saveResourceId(id: string) {
+  localStorage.setItem(RESOURCE_KEY, id);
 }
 
 export function AgentDetail({ id, onBack }: AgentDetailProps) {
-  const [tenant, setTenant] = useState<Tenant>(loadTenant);
+  // Namespace comes from the global sidebar switcher; only resourceId is
+  // page-local state. Default to "default" when no namespace is selected
+  // so the agent API still has something to scope by — same convention
+  // the rest of the dashboard uses.
+  const [globalNamespace] = useNamespace();
+  const [resourceId, setResourceId] = useState<string>(loadResourceId);
+  const tenant = useMemo<Tenant>(
+    () => ({ namespaceId: globalNamespace || "default", resourceId }),
+    [globalNamespace, resourceId],
+  );
+  const setTenant = (t: Tenant) => setResourceId(t.resourceId);
   const [activeThread, setActiveThread] = useState<string | null>(() =>
     localStorage.getItem(`${ACTIVE_THREAD_KEY}:${id}`),
   );
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
 
-  // Persist tenant + active thread.
-  useEffect(() => saveTenant(tenant), [tenant]);
+  // Persist resource id + active thread (namespace already persists in
+  // the global useNamespace store).
+  useEffect(() => saveResourceId(resourceId), [resourceId]);
   useEffect(() => {
     if (activeThread) localStorage.setItem(`${ACTIVE_THREAD_KEY}:${id}`, activeThread);
     else localStorage.removeItem(`${ACTIVE_THREAD_KEY}:${id}`);
@@ -184,16 +186,11 @@ function TenantBar({ tenant, onChange }: { tenant: Tenant; onChange: (t: Tenant)
   return (
     <div class="card bg-base-200 px-3 py-2 flex flex-row gap-3 items-center text-xs">
       <span class="text-base-content/60">Tenant scope</span>
-      <label class="flex items-center gap-1">
+      <span class="flex items-center gap-1">
         <span class="text-base-content/60">namespaceId</span>
-        <input
-          class="input input-bordered input-xs font-mono w-32"
-          value={tenant.namespaceId}
-          onInput={(e) =>
-            onChange({ ...tenant, namespaceId: (e.target as HTMLInputElement).value })
-          }
-        />
-      </label>
+        <span class="badge badge-sm badge-ghost font-mono">{tenant.namespaceId}</span>
+        <span class="text-base-content/30 text-[10px]">(sidebar)</span>
+      </span>
       <label class="flex items-center gap-1">
         <span class="text-base-content/60">resourceId</span>
         <input
@@ -330,6 +327,15 @@ function ChatPane({
   // (see useEffect below). This makes the UI feel responsive even
   // though the SSE round-trip takes a beat.
   const [pendingUser, setPendingUser] = useState<string | null>(null);
+  // Inline approval state — set when the agent suspended on a tool call
+  // that requires approval. The banner renders right inside the chat
+  // scroll area; resolving it (Approve / Reject) re-opens the SSE
+  // stream against the resume endpoint and the new deltas splice into
+  // the same `pending` bubble.
+  const [pendingApproval, setPendingApproval] = useState<{
+    toolCallId: string;
+    toolName: string;
+  } | null>(null);
   const abortRef = useRef<{ abort: () => void } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -354,6 +360,31 @@ function ChatPane({
     el.scrollTop = el.scrollHeight;
   }, [messages.length, pending?.text, pending?.done, pendingUser]);
 
+  /** Shared SSE handlers — used by both the user-task and resume streams. */
+  const streamHandlers = (): Parameters<typeof api.streamAgentThread>[3] => ({
+    onDelta: (delta) => {
+      setPending((p) => (p ? { ...p, text: p.text + delta } : p));
+    },
+    onApprovalRequested: (info) => {
+      setPendingApproval(info);
+      // Mark the assistant bubble as "done" so the typing indicator
+      // stops and the banner takes the action focus.
+      setPending((p) => (p ? { ...p, done: true } : p));
+    },
+    onSuspended: () => {
+      // Suspension confirmation — banner already rendered from the
+      // earlier `approval-requested` event, so nothing extra to do.
+    },
+    onFinish: (info) => {
+      setPending((p) => (p ? { ...p, done: true, usage: info.usage } : p));
+      setPendingApproval(null);
+    },
+    onError: (msg) => {
+      setPending((p) => (p ? { ...p, error: msg, done: true } : p));
+      toast(`Stream error: ${msg}`, { variant: "error" });
+    },
+  });
+
   const send = () => {
     const task = draft.trim();
     if (!task || pending) return;
@@ -365,18 +396,7 @@ function ChatPane({
       agentId,
       threadId,
       { task, namespaceId: tenant.namespaceId, resourceId: tenant.resourceId },
-      {
-        onDelta: (delta) => {
-          setPending((p) => (p ? { ...p, text: p.text + delta } : p));
-        },
-        onFinish: (info) => {
-          setPending((p) => (p ? { ...p, done: true, usage: info.usage } : p));
-        },
-        onError: (msg) => {
-          setPending((p) => (p ? { ...p, error: msg, done: true } : p));
-          toast(`Stream error: ${msg}`, { variant: "error" });
-        },
-      },
+      streamHandlers(),
     );
     abortRef.current = stream;
     stream.done.then(() => {
@@ -384,8 +404,41 @@ function ChatPane({
       onTurnComplete();
       // Clear pending after the persisted history catches up. The
       // useEffect above will drop pendingUser independently once the
-      // refresh's data lands.
-      setTimeout(() => setPending(null), 250);
+      // refresh's data lands. Don't clear pending while an approval
+      // banner is up — the resume stream will reuse it.
+      setTimeout(() => {
+        setPending((p) => (pendingApproval ? p : null));
+      }, 250);
+    });
+  };
+
+  const decideApproval = (approved: boolean) => {
+    if (!pendingApproval) return;
+    const { toolCallId } = pendingApproval;
+    setPendingApproval(null);
+    // Reuse the pending bubble — the resume stream will append more
+    // deltas from where it left off (typically the assistant follow-up
+    // message after the tool result).
+    setPending((p) => (p ? { ...p, done: false } : { text: "", done: false }));
+
+    const stream = api.streamThreadApproval(
+      agentId,
+      threadId,
+      {
+        toolCallId,
+        approved,
+        namespaceId: tenant.namespaceId,
+        resourceId: tenant.resourceId,
+      },
+      streamHandlers(),
+    );
+    abortRef.current = stream;
+    stream.done.then(() => {
+      refreshMessages();
+      onTurnComplete();
+      setTimeout(() => {
+        setPending((p) => (pendingApproval ? p : null));
+      }, 250);
     });
   };
 
@@ -394,6 +447,7 @@ function ChatPane({
     abortRef.current = null;
     setPending(null);
     setPendingUser(null);
+    setPendingApproval(null);
   };
 
   return (
@@ -451,6 +505,14 @@ function ChatPane({
             done={pending.done}
             error={pending.error}
             usage={pending.usage}
+          />
+        )}
+
+        {pendingApproval && (
+          <InlineApprovalBanner
+            toolName={pendingApproval.toolName}
+            onApprove={() => decideApproval(true)}
+            onReject={() => decideApproval(false)}
           />
         )}
       </div>
@@ -621,6 +683,43 @@ function formatJson(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+/**
+ * Inline approval banner — renders right inside the chat scroll area
+ * when the agent suspends on a tool call that requires approval. The
+ * user resolves it by clicking Approve / Reject; the chat panel POSTs
+ * to the resume endpoint and the resumed turn's deltas splice into
+ * the same conversation.
+ */
+function InlineApprovalBanner({
+  toolName,
+  onApprove,
+  onReject,
+}: {
+  toolName: string;
+  onApprove: () => void;
+  onReject: () => void;
+}) {
+  return (
+    <div class="alert border border-warning/40 bg-warning/10 text-sm flex items-center gap-3">
+      <span class="text-warning text-base">⚠</span>
+      <div class="flex-1">
+        <div>
+          The agent wants to call <span class="font-mono text-xs">{toolName}</span>. Approve to
+          continue.
+        </div>
+      </div>
+      <div class="flex gap-1 shrink-0">
+        <button class="btn btn-xs btn-ghost" onClick={onReject}>
+          Reject
+        </button>
+        <button class="btn btn-xs btn-primary" onClick={onApprove}>
+          Approve
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function PendingBubble({

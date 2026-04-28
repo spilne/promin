@@ -320,82 +320,122 @@ export const api = {
     id: string,
     threadId: string,
     body: { task: string; namespaceId: string; resourceId?: string },
-    handlers: {
-      onThread?: (info: { threadId: string; isNew: boolean }) => void;
-      onDelta: (delta: string) => void;
-      onFinish?: (info: {
-        text: string;
-        finishReason: string;
-        usage: {
-          inputTokens: number;
-          outputTokens: number;
-          cacheReadTokens?: number;
-          cacheWriteTokens?: number;
-        };
-      }) => void;
-      onError?: (message: string) => void;
-    },
+    handlers: AgentStreamHandlers,
   ): { abort: () => void; done: Promise<void> } {
-    const ctrl = new AbortController();
     const url = `${BASE}/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/stream`;
+    return startSseStream(url, body, handlers);
+  },
 
-    const done = (async () => {
-      try {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            accept: "text/event-stream",
-            ...authHeader(),
-          },
-          body: JSON.stringify(body),
-          signal: ctrl.signal,
-        });
-        if (!res.ok || !res.body) {
-          handlers.onError?.(`HTTP ${res.status}`);
-          return;
-        }
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        while (true) {
-          const { value, done: streamDone } = await reader.read();
-          if (streamDone) break;
-          buffer += decoder.decode(value, { stream: true });
-          // SSE frames are separated by a blank line. Process whole frames
-          // and keep any trailing partial frame in the buffer.
-          let sepIndex: number;
-          while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
-            const frame = buffer.slice(0, sepIndex);
-            buffer = buffer.slice(sepIndex + 2);
-            const parsed = parseSseFrame(frame);
-            if (!parsed) continue;
-            const { event, data } = parsed;
-            try {
-              const payload = JSON.parse(data);
-              if (event === "thread") {
-                handlers.onThread?.(payload);
-              } else if (event === "finish") {
-                handlers.onFinish?.(payload);
-              } else if (event === "error") {
-                handlers.onError?.(String(payload?.message ?? "stream error"));
-              } else if (typeof payload?.delta === "string") {
-                handlers.onDelta(payload.delta);
-              }
-            } catch {
-              // Skip malformed frames.
-            }
-          }
-        }
-      } catch (e) {
-        if ((e as Error).name === "AbortError") return;
-        handlers.onError?.((e as Error).message);
-      }
-    })();
-
-    return { abort: () => ctrl.abort(), done };
+  /**
+   * Resume a thread that suspended on an approval gate. Streams the
+   * resumed turn back over the same SSE protocol as `streamAgentThread`,
+   * so the chat panel can splice the new deltas into the same
+   * conversation.
+   */
+  streamThreadApproval(
+    id: string,
+    threadId: string,
+    body: {
+      toolCallId: string;
+      approved: boolean;
+      reason?: string;
+      namespaceId: string;
+      resourceId?: string;
+    },
+    handlers: AgentStreamHandlers,
+  ): { abort: () => void; done: Promise<void> } {
+    const url = `${BASE}/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/approve`;
+    return startSseStream(url, body, handlers);
   },
 };
+
+export interface AgentStreamHandlers {
+  onThread?: (info: { threadId: string; isNew: boolean; instanceId?: string }) => void;
+  onDelta: (delta: string) => void;
+  /** Workflow suspended on an approval gate — banner should render. */
+  onApprovalRequested?: (info: { toolCallId: string; toolName: string }) => void;
+  /** Convenience: equivalent to `onSuspended` but typed for the resume side. */
+  onSuspended?: (info: { toolCallId?: string; toolName?: string }) => void;
+  onFinish?: (info: {
+    text: string;
+    finishReason: string;
+    usage: {
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+    };
+  }) => void;
+  onError?: (message: string) => void;
+}
+
+function startSseStream<TBody>(
+  url: string,
+  body: TBody,
+  handlers: AgentStreamHandlers,
+): { abort: () => void; done: Promise<void> } {
+  const ctrl = new AbortController();
+
+  const done = (async () => {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "text/event-stream",
+          ...authHeader(),
+        },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+      });
+      if (!res.ok || !res.body) {
+        handlers.onError?.(`HTTP ${res.status}`);
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done: streamDone } = await reader.read();
+        if (streamDone) break;
+        buffer += decoder.decode(value, { stream: true });
+        // SSE frames are separated by a blank line. Process whole frames
+        // and keep any trailing partial frame in the buffer.
+        let sepIndex: number;
+        while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, sepIndex);
+          buffer = buffer.slice(sepIndex + 2);
+          const parsed = parseSseFrame(frame);
+          if (!parsed) continue;
+          const { event, data } = parsed;
+          try {
+            const payload = JSON.parse(data);
+            if (event === "thread") {
+              handlers.onThread?.(payload);
+            } else if (event === "finish") {
+              handlers.onFinish?.(payload);
+            } else if (event === "error") {
+              handlers.onError?.(String(payload?.message ?? "stream error"));
+            } else if (event === "approval-requested") {
+              handlers.onApprovalRequested?.(payload);
+            } else if (event === "suspended") {
+              handlers.onSuspended?.(payload);
+            } else if (typeof payload?.delta === "string") {
+              handlers.onDelta(payload.delta);
+            }
+          } catch {
+            // Skip malformed frames.
+          }
+        }
+      }
+    } catch (e) {
+      if ((e as Error).name === "AbortError") return;
+      handlers.onError?.((e as Error).message);
+    }
+  })();
+
+  return { abort: () => ctrl.abort(), done };
+}
 
 // ---------------------------------------------------------------------------
 // Memory inspector — read-only snapshot of the three-scope cascade.
