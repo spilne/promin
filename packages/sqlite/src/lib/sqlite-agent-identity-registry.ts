@@ -64,23 +64,6 @@ export class SqliteAgentIdentityRegistry implements AgentIdentityRegistry {
   }
 
   private _setup(): void {
-    // Migrate from the pre-rename schema (user_id → owner_id). The rename
-    // is a one-shot — once a fresh column exists we leave it alone, and a
-    // brand-new install (table doesn't exist yet) reports zero columns
-    // here and skips the migration entirely.
-    const cols = this.db.query<{ name: string }>(`PRAGMA table_info(${this.table})`).all();
-    if (cols.length > 0) {
-      const hasUserId = cols.some((c) => c.name === "user_id");
-      const hasOwnerId = cols.some((c) => c.name === "owner_id");
-      if (hasUserId && !hasOwnerId) {
-        // Drop the old index first — RENAME COLUMN auto-rewrites the
-        // index expression, but the index name itself is wrong now. We
-        // recreate it under the new name below.
-        this.db.run(`DROP INDEX IF EXISTS ${this.table}_ns_user`);
-        this.db.run(`ALTER TABLE ${this.table} RENAME COLUMN user_id TO owner_id`);
-      }
-    }
-
     this.db.run(`
       CREATE TABLE IF NOT EXISTS ${this.table} (
         id                  TEXT PRIMARY KEY,
