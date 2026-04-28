@@ -139,3 +139,77 @@ describe("turn durationMs — journaled start time", () => {
     await session.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// promin-b3bu — onApprovalRequired hook side effects don't re-fire on replay
+//
+// Mechanism: the hook runs inside `ctx.activity(approval-${callId}, ...)`,
+// so the journaled return value (the ApprovalDecision) is what hydrates on
+// replay — the hook callback itself is skipped. That's the right behavior
+// for replay safety (no double-prompting the user after a crash) but a
+// foot-gun for callers who put audit-log writes / Slack notifications /
+// rate-limit counter bumps inside the hook expecting them to fire on
+// every run.
+//
+// We can't simulate a true mid-workflow crash from a unit test, but we
+// CAN pin the mechanism — assert the approval is journaled with the
+// decision as its return value. If that property holds, replay safety
+// follows from the journaled-activity contract.
+// ---------------------------------------------------------------------------
+
+describe("onApprovalRequired hook — journaled-activity contract", () => {
+  it("approval-${callId} activity journals the decision; hook fires once on first run", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+
+    let hookCallCount = 0;
+    const dangerousTool = tool({
+      name: "danger",
+      description: "Dangerous op that needs approval.",
+      parameters: z.object({}).strict(),
+      requireApproval: true,
+      execute: async () => "did the thing",
+    });
+
+    const session = await agentLoop({
+      llm: mockLLM([
+        {
+          content: null,
+          finishReason: "tool_use",
+          toolCalls: [{ id: "call-1", name: "danger", input: {} }],
+        },
+        { content: "all clear", finishReason: "stop" },
+      ]),
+      tools: { danger: dangerousTool },
+      hooks: {
+        onApprovalRequired: async (_call) => {
+          hookCallCount += 1;
+          // A real hook might log, audit, ping Slack here. The point of
+          // the test: that side effect must not re-fire on replay; only
+          // the returned decision is durable.
+          return { approved: true };
+        },
+      },
+    }).session({ runner, sessionId: "approval-replay" });
+
+    await session.send("do the dangerous thing");
+    await session.close();
+
+    // First-run invariant: the hook fired exactly once.
+    expect(hookCallCount).toBe(1);
+
+    // Mechanism invariant: the decision is in the activity journal under
+    // approval-${callId}, with the hook's return value journaled. Future
+    // replay reads the journaled value and skips the hook entirely.
+    const journal = await storage.loadJournal("approval-replay", "conversation");
+    const approval = journal.find((e) => e.activityName === "approval-call-1");
+    expect(approval).toBeDefined();
+    expect(approval!.exit?.tag).toBe("Success");
+    const decision = (approval!.exit as { tag: "Success"; value: unknown }).value;
+    expect(decision).toMatchObject({ approved: true });
+    // Documents the contract: anything stateful the hook does (audit
+    // writes, Slack pings) is the hook's responsibility to make
+    // idempotent — for durable audit trails use ApprovalStorage,
+    // which records decisions outside the activity boundary.
+  });
+});
