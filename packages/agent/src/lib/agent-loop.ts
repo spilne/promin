@@ -216,6 +216,31 @@ export interface AgentLoopConfig {
    */
   compactionLlm?: LLMProvider;
   /**
+   * Optional telemetry sink. When set, every LLM call and tool
+   * invocation records counters / histograms. Defaults to no-op when
+   * unset — instrumentation cost is zero. See `metrics/types.ts` for
+   * the metric catalog.
+   */
+  metrics?: import("./metrics/types.ts").AgentMetrics;
+  /**
+   * Per-model USD rates (loaded from config — hardcoded prices go
+   * stale fast). When set together with `metrics`, llm.cost.usd is
+   * emitted per call.
+   */
+  costs?: import("./metrics/types.ts").ModelCostRegistry;
+  /**
+   * Provider id used for metric labels (e.g. "anthropic"). Required
+   * when `metrics` is set so metrics aren't unlabeled.
+   */
+  llmProvider?: string;
+  /**
+   * Model id used for metric labels (e.g. "claude-sonnet-4-6"). Required
+   * when `metrics` is set so metrics aren't unlabeled.
+   */
+  llmModel?: string;
+  /** Extra labels appended to every metric (e.g. agent id, mode). */
+  metricLabels?: Readonly<Record<string, string>>;
+  /**
    * Called on every agent lifecycle transition across all sessions created by this loop.
    * Fires from inside a journaled activity — async return values are awaited in the
    * background.
@@ -697,6 +722,11 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                   rateLimiter: config.rateLimiter,
                   processors: config.processors,
                   processorCtx: { step, turn, workflowId: ctx.workflowId },
+                  ...(config.metrics && { metrics: config.metrics }),
+                  ...(config.costs && { costs: config.costs }),
+                  ...(config.llmProvider && { provider: config.llmProvider }),
+                  ...(config.llmModel && { model: config.llmModel }),
+                  ...(config.metricLabels && { metricLabels: config.metricLabels }),
                   // Tee the LLM stream into both the chunk queue (for
                   // session.stream()'s AsyncIterable<string>) AND the event
                   // bus as token.delta events (for cross-process forwarders).

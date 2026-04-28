@@ -11,6 +11,7 @@ import type {
 } from "./llm-provider.ts";
 import type { ThinkingBlock } from "./message.ts";
 import type { ProcessorsConfig, ProcessorContext } from "./processors.ts";
+import { recordChat } from "./metrics/instrument.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
 import type { MemoryIndex, MemoryScope } from "./memory-index.ts";
 
@@ -147,6 +148,19 @@ export interface RunLlmCallParams {
   /** Token budget for extended thinking. Forwarded to the LLM as-is. */
   thinkingBudgetTokens?: number;
   signal?: AbortSignal;
+  /**
+   * Optional telemetry sink. When set, records llm.calls / llm.tokens.*
+   * / llm.latency.ms / llm.cost.usd per call. Defaults to no-op.
+   */
+  metrics?: import("./metrics/types.ts").AgentMetrics;
+  /** Per-model USD rates. Required for llm.cost.usd to be emitted. */
+  costs?: import("./metrics/types.ts").ModelCostRegistry;
+  /** Provider id for metric labels (e.g. "anthropic"). Required when `metrics` is set. */
+  provider?: string;
+  /** Model id for metric labels (e.g. "claude-sonnet-4-6"). Required when `metrics` is set. */
+  model?: string;
+  /** Extra labels appended to every metric (e.g. agent id). */
+  metricLabels?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -165,7 +179,13 @@ export async function runLlmCall({
   onThinking,
   thinkingBudgetTokens,
   signal,
+  metrics,
+  costs,
+  provider,
+  model,
+  metricLabels,
 }: RunLlmCallParams): Promise<LLMResponse> {
+  const callStart = metrics ? Date.now() : 0;
   const processedMessages = processors?.beforeLLM
     ? await processors.beforeLLM(messages, processorCtx)
     : messages;
@@ -221,5 +241,22 @@ export async function runLlmCall({
     throw err;
   }
 
-  return processors?.afterLLM ? await processors.afterLLM(raw, processorCtx) : raw;
+  const finalResponse = processors?.afterLLM ? await processors.afterLLM(raw, processorCtx) : raw;
+
+  // Per-call instrumentation. Skip when metrics is unset, or when the
+  // host didn't bother to label the call (provider/model unknown — we
+  // don't want unlabeled metrics polluting Prometheus dashboards).
+  if (metrics && provider && model) {
+    recordChat({
+      metrics,
+      ...(costs && { costs }),
+      provider,
+      model,
+      response: finalResponse,
+      durationMs: Date.now() - callStart,
+      ...(metricLabels && { extraLabels: metricLabels }),
+    });
+  }
+
+  return finalResponse;
 }

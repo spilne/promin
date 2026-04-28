@@ -138,6 +138,26 @@ export type { InMemoryAgentRegistryConfig } from "./registry/in-memory-agent-reg
 export { resolveLocalAgent } from "./registry/resolve-local-agent.ts";
 export type { ResolveLocalAgentDeps } from "./registry/resolve-local-agent.ts";
 
+// Metrics — pluggable telemetry sink (Counter / Histogram). Default
+// no-op so instrumentation has zero cost when unconfigured. Hosts wire
+// Prometheus / OTel adapters; tests use InMemoryAgentMetrics.
+export {
+  NoopAgentMetrics,
+  InMemoryAgentMetrics,
+  staticCostRegistry,
+  computeCallCostUsd,
+} from "./metrics/types.ts";
+export type {
+  AgentMetrics,
+  Counter,
+  Histogram,
+  MetricLabels,
+  ModelCostRates,
+  ModelCostRegistry,
+} from "./metrics/types.ts";
+export { recordChat, recordTool, recordApproval } from "./metrics/instrument.ts";
+export type { RecordChatArgs, RecordToolArgs } from "./metrics/instrument.ts";
+
 // Network — peer discovery + delegation (findAgent, callAgent). Opt-in
 // per recipe via `backend.network`. See packages/agent/src/lib/network/types.ts.
 export {
