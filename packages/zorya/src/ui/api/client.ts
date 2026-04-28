@@ -33,6 +33,7 @@ import type {
   ThreadMessagesResponse,
 } from "../../server/routes/agents.ts";
 import type { MemoryInspectResponse } from "../../server/routes/memory.ts";
+import type { ApprovalsResponse } from "../../server/routes/approvals.ts";
 
 const BASE = ""; // served from same origin
 
@@ -165,6 +166,13 @@ export const api = {
     if (params.namespace) qp.set("namespace", params.namespace);
     const qs = qp.toString();
     return req(`/api/workflows${qs ? `?${qs}` : ""}`);
+  },
+  listApprovals(params: { namespace?: string; limit?: number } = {}): Promise<ApprovalsResponse> {
+    const qp = new URLSearchParams();
+    if (params.namespace) qp.set("namespace", params.namespace);
+    if (params.limit !== undefined) qp.set("limit", String(params.limit));
+    const qs = qp.toString();
+    return req(`/api/approvals${qs ? `?${qs}` : ""}`);
   },
   listSchedules(
     params: { namespace?: string } = {},

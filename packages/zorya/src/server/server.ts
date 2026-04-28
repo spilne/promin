@@ -86,6 +86,7 @@ import {
   markRunSuccess,
   rerunRun,
 } from "./routes/run-extras.ts";
+import { listApprovals } from "./routes/approvals.ts";
 import { getSparklines, getWorkflowGrid, getWorkflowHistory } from "./routes/grid.ts";
 import { getWorkflowDef, listWorkflowDefs } from "./routes/workflow-defs.ts";
 import {
@@ -521,6 +522,7 @@ export class ZoryaServer {
       .get("/api/runs/:id/history", getRunHistory(config.storage))
       .get("/api/runs/:id/children", getRunChildren(config.storage))
       .get("/api/runs/:id/journal/:stepName", getRunStepJournal(config.storage))
+      .get("/api/approvals", listApprovals(config.storage))
       .post("/api/runs/:id/mark-success", markRunSuccess(config.storage))
       .post("/api/runs/:id/mark-failed", markRunFailed(config.storage))
       .post("/api/runs/:id/rerun", rerunRun(config.storage, config.rerun))
