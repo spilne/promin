@@ -901,11 +901,16 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                     );
                     logDecision(decision.approved);
                   } else {
+                    // Activity result is journaled — listPendingApprovals
+                    // reads `{ toolName, toolInput }` from the matching
+                    // `lc-*-approval-<callId>-start` step to surface the
+                    // pending request without re-running anything.
                     yield* ctx.activity(`lc-${turn}-approval-${call.id}-start`, async () => {
                       transitionLifecycle("approval-required", "waiting_approval", {
                         toolCallId: call.id,
                       });
                       logRequested();
+                      return { toolName: call.name, toolInput: call.input };
                     });
                     decision = yield* ctx.signal<ApprovalDecision>(`approve:${call.id}`);
                     yield* ctx.activity(`lc-${turn}-approval-${call.id}-end`, async () => {

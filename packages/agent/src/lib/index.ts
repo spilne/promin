@@ -245,6 +245,12 @@ export type { LayeredMemoryToolConfig } from "./tools/layered-memory-tools.ts";
 // Durable scheduler tool — agents create cron / interval schedules that
 // re-fire the agent (or a peer) when they trigger. Pairs with the
 // dispatchAgentSchedule helper for the host's scheduler-loop fireOverride.
+export { listPendingApprovals } from "./approvals/list-pending-approvals.ts";
+export type {
+  PendingApproval,
+  ListPendingApprovalsParams,
+} from "./approvals/list-pending-approvals.ts";
+
 export { createDurableSchedulerTool } from "./tools/durable-scheduler-tool.ts";
 export type { DurableSchedulerToolDeps } from "./tools/durable-scheduler-tool.ts";
 export { inProcessSchedulerClient, httpSchedulerClient } from "./tools/scheduler-client.ts";
