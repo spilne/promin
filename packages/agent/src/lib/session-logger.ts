@@ -65,6 +65,21 @@ type SessionEventBody =
       toolCallId: string;
       name: string;
       payload: unknown;
+    }
+  | {
+      /**
+       * Idle keepalive emitted while a turn is in flight but no other
+       * event has fired for `heartbeatMs` (default 15s). Lets HTTP /
+       * SSE consumers distinguish "agent is thinking, hold the
+       * connection" from "agent crashed silently" — long extended-
+       * thinking turns can otherwise go quiet for 30s+ and trip
+       * proxy idle timeouts.
+       *
+       * Always `transient: true` — never journaled, never replayed.
+       * Cancellation + completion stop the heartbeat automatically.
+       */
+      type: "heartbeat";
+      turn: number;
     };
 
 /**

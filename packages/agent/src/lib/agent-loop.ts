@@ -241,6 +241,18 @@ export interface AgentLoopConfig {
   /** Extra labels appended to every metric (e.g. agent id, mode). */
   metricLabels?: Readonly<Record<string, string>>;
   /**
+   * Idle keepalive interval in ms. While a turn is in flight, if no
+   * event fires for `heartbeatMs`, a `heartbeat` event is emitted to
+   * the bus. Lets HTTP / SSE consumers tell "still thinking" from
+   * "connection died" — long extended-thinking turns can otherwise go
+   * silent for 30s+ and trip proxy idle timeouts.
+   *
+   * Default: 15_000. Set to 0 to disable. Heartbeat is transient (not
+   * journaled / replayed); subscribers that don't care can ignore the
+   * type.
+   */
+  heartbeatMs?: number;
+  /**
    * Called on every agent lifecycle transition across all sessions created by this loop.
    * Fires from inside a journaled activity — async return values are awaited in the
    * background.
@@ -593,6 +605,38 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
       const turnStarts = new Map<number, number>();
       // Aborted by close() to cancel any in-flight LLM fetch.
       const sessionAc = new AbortController();
+
+      // Heartbeat pump — emits a `heartbeat` event when the bus has been
+      // idle for `heartbeatMs` while a turn is in flight. Subscribers
+      // (SSE forwarder, tests) get a keepalive so they can distinguish
+      // "still thinking" from "connection died". Heartbeats are
+      // transient — never journaled, no replay impact.
+      const heartbeatMs = config.heartbeatMs ?? 15_000;
+      let lastEventAt = clock.currentTimeMs();
+      let heartbeatTimer: TimerHandle | null = null;
+      let heartbeatTurn: number | null = null;
+      eventBus.subscribe((ev) => {
+        // Don't reset the idle clock for our OWN heartbeat — otherwise
+        // a single heartbeat would gate every subsequent one.
+        if (ev.type !== "heartbeat") lastEventAt = clock.currentTimeMs();
+      });
+      const startHeartbeat = (turn: number): void => {
+        if (heartbeatMs <= 0) return;
+        if (heartbeatTimer) heartbeatTimer.clear();
+        heartbeatTurn = turn;
+        lastEventAt = clock.currentTimeMs();
+        heartbeatTimer = clock.setInterval(() => {
+          if (heartbeatTurn !== turn) return;
+          if (clock.currentTimeMs() - lastEventAt >= heartbeatMs) {
+            eventBus.emit({ type: "heartbeat", turn });
+          }
+        }, heartbeatMs);
+      };
+      const stopHeartbeat = (): void => {
+        if (heartbeatTimer) heartbeatTimer.clear();
+        heartbeatTimer = null;
+        heartbeatTurn = null;
+      };
       const pendingResponses = new Map<
         number,
         { resolve: (answer: string) => void; reject: (err: Error) => void }
@@ -677,6 +721,9 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               return startedAt;
             });
             turnStarts.set(turn, turnStartTime);
+            // Start the idle keepalive — runs outside any activity so
+            // it's a pure side-effect for live observers, never journaled.
+            startHeartbeat(turn);
             messages = [...messages, { role: "user", content: task }];
 
             // beforeTurn hook — can inject additional context into the message list
@@ -939,6 +986,9 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
             }
 
             yield* ctx.activity(`emit-${turn}`, async () => {
+              // Stop the idle heartbeat — turn is settling. Done outside
+              // a journaled write since it's a pure live-side-effect.
+              stopHeartbeat();
               // Update messages snapshot here so messages() is consistent immediately
               // after send() / stream() returns, not only after after-turn-N completes.
               state.latestMessages = messages;
@@ -1304,6 +1354,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
           state.closed = true;
           state.idleTimer?.clear();
           state.idleTimer = null;
+          stopHeartbeat();
           // Cancel any in-flight LLM fetch so runSafe returns promptly.
           sessionAc.abort();
           // Unblock callers awaiting send() or the answerPromise inside stream().
