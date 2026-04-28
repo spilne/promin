@@ -138,21 +138,22 @@ export type { InMemoryAgentRegistryConfig } from "./registry/in-memory-agent-reg
 export { resolveLocalAgent } from "./registry/resolve-local-agent.ts";
 export type { ResolveLocalAgentDeps } from "./registry/resolve-local-agent.ts";
 
-// Identity — long-lived agent instances keyed by (registeredAgentId, namespace, userId).
-// Identity is metadata + a deterministic id; the actual chat state stays in
-// MemoryStore under `resourceId = identity.id`. See packages/agent/src/lib/identity/types.ts.
-export { composeAgentIdentityId } from "./identity/types.ts";
+// Instance — long-lived agent instances keyed by (registeredAgentId, namespace, ownerId).
+// Class/instance: RegisteredAgent is the recipe, AgentInstance is the live
+// thing with its own state. The actual chat state stays in MemoryStore under
+// `resourceId = instance.id`. See packages/agent/src/lib/instance/types.ts.
+export { composeAgentInstanceId } from "./instance/types.ts";
 export type {
-  AgentIdentity,
-  AgentIdentityRegistry,
-  CreateAgentIdentityInput,
-  ListAgentIdentitiesParams,
-  UpdateAgentIdentityPatch,
-} from "./identity/types.ts";
-export { InMemoryAgentIdentityRegistry } from "./identity/in-memory-agent-identity-registry.ts";
-export type { InMemoryAgentIdentityRegistryConfig } from "./identity/in-memory-agent-identity-registry.ts";
-export { wipeAgentIdentity } from "./identity/wipe.ts";
-export type { WipeAgentIdentityResult } from "./identity/wipe.ts";
+  AgentInstance,
+  AgentInstanceRegistry,
+  CreateAgentInstanceInput,
+  ListAgentInstancesParams,
+  UpdateAgentInstancePatch,
+} from "./instance/types.ts";
+export { InMemoryAgentInstanceRegistry } from "./instance/in-memory-agent-instance-registry.ts";
+export type { InMemoryAgentInstanceRegistryConfig } from "./instance/in-memory-agent-instance-registry.ts";
+export { wipeAgentInstance } from "./instance/wipe.ts";
+export type { WipeAgentInstanceResult } from "./instance/wipe.ts";
 
 // Discovery — auto-scan agent recipes from a folder + reconcile into a registry.
 export {

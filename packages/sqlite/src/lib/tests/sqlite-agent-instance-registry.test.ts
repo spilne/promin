@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// `SqliteAgentIdentityRegistry` — pins the same contract as the in-memory
+// `SqliteAgentInstanceRegistry` — pins the same contract as the in-memory
 // reference plus persistence-across-instances. The shared conformance
 // suite hasn't been factored out yet (mirrors the AgentRegistry pattern
 // that was retrofitted later); when it is, this file becomes a one-liner
@@ -8,14 +8,14 @@
 
 import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { composeAgentIdentityId, InMemoryMemoryStore, wipeAgentIdentity } from "@promin/agent";
-import { SqliteAgentIdentityRegistry } from "../sqlite-agent-identity-registry.ts";
+import { composeAgentInstanceId, InMemoryMemoryStore, wipeAgentInstance } from "@promin/agent";
+import { SqliteAgentInstanceRegistry } from "../sqlite-agent-instance-registry.ts";
 
 function makeRegistry() {
-  return SqliteAgentIdentityRegistry.make({ db: new Database(":memory:") });
+  return SqliteAgentInstanceRegistry.make({ db: new Database(":memory:") });
 }
 
-describe("SqliteAgentIdentityRegistry", () => {
+describe("SqliteAgentInstanceRegistry", () => {
   it("resolveOrCreate is idempotent", async () => {
     const registry = makeRegistry();
     const a = await registry.resolveOrCreate({
@@ -40,7 +40,7 @@ describe("SqliteAgentIdentityRegistry", () => {
       ownerId: "alice",
     });
     expect(id.id).toBe(
-      composeAgentIdentityId({
+      composeAgentInstanceId({
         namespaceId: "acme",
         registeredAgentId: "writer",
         ownerId: "alice",
@@ -48,7 +48,7 @@ describe("SqliteAgentIdentityRegistry", () => {
     );
   });
 
-  it("isolates identities across namespaces", async () => {
+  it("isolates instances across namespaces", async () => {
     const registry = makeRegistry();
     const acme = await registry.resolveOrCreate({
       registeredAgentId: "writer",
@@ -65,24 +65,23 @@ describe("SqliteAgentIdentityRegistry", () => {
     expect(list).toHaveLength(2);
   });
 
-  it("list filters and orders by lastActiveDesc", async () => {
+  it("list orders by createdDesc by default", async () => {
     const registry = makeRegistry();
-    await registry.resolveOrCreate({
+    const a = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
       ownerId: "alice",
     });
     await new Promise((r) => setTimeout(r, 5));
-    const second = await registry.resolveOrCreate({
+    const b = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
       ownerId: "bob",
     });
-    await new Promise((r) => setTimeout(r, 5));
-    await registry.touch(second.id);
 
     const list = await registry.list({ namespaceId: "acme" });
-    expect(list[0]!.id).toBe(second.id);
+    expect(list[0]!.id).toBe(b.id);
+    expect(list[1]!.id).toBe(a.id);
   });
 
   it("update patches displayName + metadata", async () => {
@@ -116,10 +115,10 @@ describe("SqliteAgentIdentityRegistry", () => {
   });
 });
 
-describe("SqliteAgentIdentityRegistry — persistence", () => {
-  it("identities survive across instances sharing one db (acceptance criterion #2)", async () => {
+describe("SqliteAgentInstanceRegistry — persistence", () => {
+  it("instances survive across registry instances sharing one db", async () => {
     const db = new Database(":memory:");
-    const r1 = SqliteAgentIdentityRegistry.make({ db });
+    const r1 = SqliteAgentInstanceRegistry.make({ db });
     const created = await r1.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
@@ -128,7 +127,7 @@ describe("SqliteAgentIdentityRegistry — persistence", () => {
       metadata: { color: "blue" },
     });
 
-    const r2 = SqliteAgentIdentityRegistry.make({ db });
+    const r2 = SqliteAgentInstanceRegistry.make({ db });
     const got = await r2.get(created.id);
     expect(got).not.toBeNull();
     expect(got?.displayName).toBe("alice's writer");
@@ -145,33 +144,33 @@ describe("SqliteAgentIdentityRegistry — persistence", () => {
   });
 });
 
-describe("wipeAgentIdentity over SqliteAgentIdentityRegistry", () => {
+describe("wipeAgentInstance over SqliteAgentInstanceRegistry", () => {
   it("removes the row + clears resource memory", async () => {
     const registry = makeRegistry();
     const memory = new InMemoryMemoryStore();
-    const identity = await registry.resolveOrCreate({
+    const instance = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
       ownerId: "alice",
     });
     await memory.upsertResource(
-      { namespaceId: "acme", resourceId: identity.id },
+      { namespaceId: "acme", resourceId: instance.id },
       { workingMemory: "draft" },
     );
     await memory.createThread({
       namespaceId: "acme",
-      resourceId: identity.id,
+      resourceId: instance.id,
       threadId: "t1",
     });
 
-    const result = await wipeAgentIdentity({
+    const result = await wipeAgentInstance({
       registry,
       memory,
-      identityId: identity.id,
+      instanceId: instance.id,
     });
     expect(result.threadsDeleted).toBe(1);
-    expect(await registry.get(identity.id)).toBeNull();
-    const row = await memory.getResource({ namespaceId: "acme", resourceId: identity.id });
+    expect(await registry.get(instance.id)).toBeNull();
+    const row = await memory.getResource({ namespaceId: "acme", resourceId: instance.id });
     expect(row?.workingMemory).toBeNull();
   });
 });

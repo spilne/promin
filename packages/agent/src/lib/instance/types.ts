@@ -1,7 +1,13 @@
 // ---------------------------------------------------------------------------
-// AgentIdentity — a stable per-(agent, tenant, owner) record that turns
-// "an agent" from a per-request session into a long-lived instance with
-// memory across all invocations.
+// AgentInstance — a long-lived per-(agent, tenant, owner) instance of an
+// agent recipe. Class/instance, where `RegisteredAgent` is the class and
+// `AgentInstance` is the live thing with its own state.
+//
+//     RegisteredAgent (recipe)         AgentInstance (live)
+//     ----------------                 -------------------
+//     id: "writer"                     id: "acme::writer::alice"
+//     model, systemPrompt, tools       ownerId: "alice"
+//     metadata.capabilities            displayName, metadata
 //
 // `ownerId` is intentionally generic — it can be a human user, a team, a
 // project, a device, or any other addressable entity the caller's system
@@ -10,7 +16,7 @@
 //
 // The problem
 // -----------
-// Without identity, an HTTP caller invokes an agent like this:
+// Without instances, an HTTP caller invokes an agent like this:
 //
 //     POST /api/agents/writer/invoke
 //       body: { task, namespaceId: "acme", resourceId: "alice" }
@@ -27,28 +33,28 @@
 //
 // The shape
 // ---------
-//     AgentIdentity = {
+//     AgentInstance = {
 //       id: "acme::writer::alice",        // deterministic, used as resourceId
 //       registeredAgentId: "writer",      // which recipe
 //       namespaceId: "acme",              // which tenant
 //       ownerId: "alice",                 // for whom (user, team, project, ...)
 //       displayName: string | null,
 //       metadata: {},
-//       createdAt, lastActiveAt
+//       createdAt
 //     }
 //
 // `id` is just `${namespaceId}::${registeredAgentId}::${ownerId}` (see
-// `composeAgentIdentityId`). Deterministic — you can compute it from the
+// `composeAgentInstanceId`). Deterministic — you can compute it from the
 // inputs without round-tripping through the registry.
 //
 //
 // The trick: id is reused as resourceId
 // -------------------------------------
-// This is the whole mechanism. When the agent is invoked, `identity.id`
+// This is the whole mechanism. When the agent is invoked, `instance.id`
 // is passed as `resourceId`:
 //
 //     namespaceId: "acme"
-//     resourceId:  "acme::writer::alice"   ← identity.id
+//     resourceId:  "acme::writer::alice"   ← instance.id
 //     threadId:    "t-2026-04-27-abc"
 //
 // The existing MemoryStore cascade reads/writes against that resourceId.
@@ -59,18 +65,18 @@
 //   - (acme, acme::reviewer::alice) is a different row → reviewer can't
 //     see writer's notes
 //
-// No new memory tier. The identity is metadata + a clever resourceId
+// No new memory tier. The instance is metadata + a clever resourceId
 // convention, nothing more.
 //
 //
 // Two layers
 // ----------
 //     ┌────────────────────────────────────────┐
-//     │  AgentIdentityRegistry                  │  ← thin index
+//     │  AgentInstanceRegistry                  │  ← thin index
 //     │  - who has what agent                   │
-//     │  - displayName, lastActiveAt, metadata  │
+//     │  - displayName, metadata                │
 //     └────────────────────────────────────────┘
-//                       │ identity.id used as
+//                       │ instance.id used as
 //                       ▼ resourceId
 //     ┌────────────────────────────────────────┐
 //     │  MemoryStore                            │  ← does the heavy lifting
@@ -85,43 +91,39 @@
 // Lifecycle
 // ---------
 //     // 1. Resolve-or-create (idempotent — same triple = same row)
-//     const identity = await registry.resolveOrCreate({
+//     const instance = await registry.resolveOrCreate({
 //       registeredAgentId: "writer",
 //       namespaceId: "acme",
 //       ownerId: "alice",
 //     });
 //
-//     // 2. Invoke the agent using identity.id as resourceId
-//     await agent.run({ namespaceId, resourceId: identity.id, threadId, task });
+//     // 2. Invoke the agent using instance.id as resourceId
+//     await agent.run({ namespaceId, resourceId: instance.id, threadId, task });
 //
-//     // 3. Touch lastActiveAt so list() ordering reflects real activity
-//     await registry.touch(identity.id);
-//
-//     // 4. Wipe everything (registry row + resource memory + threads)
-//     await wipeAgentIdentity({ registry, memory, identityId: identity.id });
+//     // 3. Wipe everything (registry row + resource memory + threads)
+//     await wipeAgentInstance({ registry, memory, instanceId: instance.id });
 //
 //
 // Why a separate registry instead of just using resourceId
 // --------------------------------------------------------
 // The memory store doesn't know which resourceIds map to which agents
-// or which owner they belong to. The identity registry adds:
+// or which owner they belong to. The instance registry adds:
 //
-//   - enumeration ("list all identities for owner alice across agents")
+//   - enumeration ("list all instances for owner alice across agents")
 //   - reverse lookup ("what owner does this resourceId belong to?")
 //   - displayName + metadata (UI affordances that don't fit in memory)
-//   - lastActiveAt (sorting / staleness without scanning messages)
 //   - cascading wipe (delete row + clear matching resource scope in one call)
 //
-// Without it, callers would have to scan threads to enumerate identities,
+// Without it, callers would have to scan threads to enumerate instances,
 // which doesn't scale. With it, the registry is a thin index over the
 // memory store.
 //
 //
 // This is opt-in — both models are first-class
 // --------------------------------------------
-// Identity is one valid memory model, not the only one. The agent runtime
-// accepts any string as `resourceId`; the registry just gives you the
-// agent-centric flavour with bookkeeping. Pick per call:
+// Instances are one valid memory model, not the only one. The agent
+// runtime accepts any string as `resourceId`; the registry just gives
+// you the per-(agent, owner) flavour with bookkeeping. Pick per call:
 //
 //   resourceId: "alice"                  → owner-centric (shared)
 //   ----------------------------------------------------------------------
@@ -130,7 +132,7 @@
 //   "alice prefers terse", the reviewer sees it on its next turn. Good
 //   when the org wants a single shared mental model of the owner.
 //
-//   resourceId: identity.id              → agent-centric (isolated)
+//   resourceId: instance.id              → agent-centric (isolated)
 //   ----------------------------------------------------------------------
 //   alice has a separate working memory + facts row per (agent, owner)
 //   pair. The writer's scratchpad is invisible to the reviewer. Good
@@ -140,16 +142,16 @@
 //
 // Both can coexist in one deployment. A "shared org memory of alice" can
 // live at resourceId="alice" while specialised long-lived instances live
-// at composed identity ids. Namespace scope already gives you a third
+// at composed instance ids. Namespace scope already gives you a third
 // tier above all of this (org-wide policy + facts that flow into every
 // turn regardless of resource). See `packages/agent/src/lib/memory/types.ts`
 // for the cascade.
 // ---------------------------------------------------------------------------
 
-export interface AgentIdentity {
+export interface AgentInstance {
   /**
    * Stable opaque id. Convention: `${namespaceId}::${registeredAgentId}::${ownerId}`
-   * (see `composeAgentIdentityId`) so the id is deterministic from the
+   * (see `composeAgentInstanceId`) so the id is deterministic from the
    * create input — but treat it as opaque, since alternative
    * implementations may pick different formats.
    *
@@ -170,10 +172,9 @@ export interface AgentIdentity {
   readonly displayName: string | null;
   readonly metadata: Readonly<Record<string, unknown>>;
   readonly createdAt: number;
-  readonly lastActiveAt: number;
 }
 
-export interface CreateAgentIdentityInput {
+export interface CreateAgentInstanceInput {
   readonly registeredAgentId: string;
   readonly namespaceId: string;
   readonly ownerId: string;
@@ -181,16 +182,16 @@ export interface CreateAgentIdentityInput {
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
-export interface ListAgentIdentitiesParams {
+export interface ListAgentInstancesParams {
   readonly namespaceId?: string;
   readonly ownerId?: string;
   readonly registeredAgentId?: string;
   readonly limit?: number;
-  /** Defaults to "lastActiveDesc". */
-  readonly order?: "lastActiveDesc" | "createdAsc" | "createdDesc";
+  /** Defaults to "createdDesc". */
+  readonly order?: "createdAsc" | "createdDesc";
 }
 
-export interface UpdateAgentIdentityPatch {
+export interface UpdateAgentInstancePatch {
   readonly displayName?: string | null;
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
@@ -198,37 +199,34 @@ export interface UpdateAgentIdentityPatch {
 /**
  * Index of long-lived agent instances, keyed by (registeredAgentId, namespaceId, ownerId).
  *
- * Implementations: `InMemoryAgentIdentityRegistry` (reference) and
- * `SqliteAgentIdentityRegistry` (persistent). Both must pass the shared
+ * Implementations: `InMemoryAgentInstanceRegistry` (reference) and
+ * `SqliteAgentInstanceRegistry` (persistent). Both must pass the shared
  * conformance suite.
  */
-export interface AgentIdentityRegistry {
+export interface AgentInstanceRegistry {
   /**
-   * Idempotent: returns the existing identity for the same triple, or
+   * Idempotent: returns the existing instance for the same triple, or
    * creates one. `displayName` and `metadata` from the input only apply
    * on creation — call `update` to change them later.
    */
-  resolveOrCreate(input: CreateAgentIdentityInput): Promise<AgentIdentity>;
+  resolveOrCreate(input: CreateAgentInstanceInput): Promise<AgentInstance>;
 
-  get(id: string): Promise<AgentIdentity | null>;
+  get(id: string): Promise<AgentInstance | null>;
 
-  list(params?: ListAgentIdentitiesParams): Promise<AgentIdentity[]>;
+  list(params?: ListAgentInstancesParams): Promise<AgentInstance[]>;
 
-  /** Bumps `lastActiveAt`. Called from the agent action on each successful turn. */
-  touch(id: string, lastActiveAt?: number): Promise<void>;
-
-  update(id: string, patch: UpdateAgentIdentityPatch): Promise<AgentIdentity>;
+  update(id: string, patch: UpdateAgentInstancePatch): Promise<AgentInstance>;
 
   /**
-   * Removes the identity row only. Memory under `resourceId = id` is the
-   * caller's responsibility — see `wipeAgentIdentity` for the cascading
+   * Removes the instance row only. Memory under `resourceId = id` is the
+   * caller's responsibility — see `wipeAgentInstance` for the cascading
    * helper that drops both the row and the resource-scope state.
    */
   delete(id: string): Promise<void>;
 }
 
 /**
- * Compose a deterministic identity id from (namespaceId, registeredAgentId, ownerId).
+ * Compose a deterministic instance id from (namespaceId, registeredAgentId, ownerId).
  * Exported so callers that don't want to round-trip through the registry
  * (e.g. when invoking an agent for the first time) can compute the id
  * themselves and pass it directly as `resourceId`.
@@ -240,7 +238,7 @@ export interface AgentIdentityRegistry {
  * Delimiter `::` was chosen to avoid collision with characters that
  * commonly appear in agent ids (`/`, `-`, `:`, alphanumerics).
  */
-export function composeAgentIdentityId(input: {
+export function composeAgentInstanceId(input: {
   readonly namespaceId: string;
   readonly registeredAgentId: string;
   readonly ownerId: string;

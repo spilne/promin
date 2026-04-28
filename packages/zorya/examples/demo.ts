@@ -28,7 +28,7 @@ import {
   SqliteWorkflowStorage,
   SqliteSchedulerStorage,
   SqliteAgentRegistry,
-  SqliteAgentIdentityRegistry,
+  SqliteAgentInstanceRegistry,
   SqliteMemoryStore,
 } from "@promin/sqlite";
 import {
@@ -92,10 +92,10 @@ const runner = createWorkflowRunner({ storage });
 // chats in the dashboard's Agents tab survive hot-reloads of the demo.
 const agentRegistry = SqliteAgentRegistry.make({ db });
 const memoryStore = SqliteMemoryStore.make({ db });
-// Long-lived agent identities. Persisted alongside the registry so they
+// Long-lived agent instances. Persisted alongside the registry so they
 // survive restarts; the cascade still keys memory by `resourceId =
-// identity.id`, so one identity = one per-(agent, user) memory slot.
-const identityRegistry = SqliteAgentIdentityRegistry.make({ db });
+// instance.id`, so one instance = one per-(agent, owner) memory slot.
+const instanceRegistry = SqliteAgentInstanceRegistry.make({ db });
 
 // ---------------------------------------------------------------------------
 // Agents — auto-discovered from ./agents (mirrors the workflow scanner).
@@ -1077,11 +1077,11 @@ const server = new ZoryaServer({
   },
   // Same store the resolver uses, so the inspector reads the live cascade.
   memoryInspector: { memory: memoryStore },
-  // Long-lived per-(agent, namespace, user) records. The HTTP routes
-  // mounted at /api/agents/:id/identities + /api/identities let operators
-  // enumerate, rename, and wipe identities; DELETE cascades through the
-  // memory store via wipeAgentIdentity.
-  identities: { registry: identityRegistry, memory: memoryStore },
+  // Long-lived per-(agent, namespace, owner) records. The HTTP routes
+  // mounted at /api/agents/:id/instances + /api/instances let operators
+  // enumerate, rename, and wipe instances; DELETE cascades through the
+  // memory store via wipeAgentInstance.
+  instances: { registry: instanceRegistry, memory: memoryStore },
   // Feeds the "Trigger workflow" form on the Workflows page with plausible
   // defaults so users can tweak fields instead of writing raw JSON.
   sampleInput: (name) => inputFor(name),

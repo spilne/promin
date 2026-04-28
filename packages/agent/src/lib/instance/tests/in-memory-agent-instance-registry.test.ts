@@ -1,28 +1,27 @@
 // ---------------------------------------------------------------------------
-// `InMemoryAgentIdentityRegistry` — pins the registry contract:
+// `InMemoryAgentInstanceRegistry` — pins the registry contract:
 //   - resolveOrCreate is idempotent for same (registeredAgentId, namespace, ownerId)
-//   - distinct triples produce distinct identities
-//   - id format is deterministic (composeAgentIdentityId)
+//   - distinct triples produce distinct instances
+//   - id format is deterministic (composeAgentInstanceId)
 //   - list() filters by namespace / ownerId / registeredAgentId
-//   - touch updates lastActiveAt without mutating other fields
 //   - update patches displayName / metadata
 //   - delete is idempotent
 //
-// `wipeAgentIdentity` cascades through MemoryStore — verified end-to-end
+// `wipeAgentInstance` cascades through MemoryStore — verified end-to-end
 // with InMemoryMemoryStore.
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
 import { FakeClock } from "@promin/core";
 import { InMemoryMemoryStore } from "../../memory/in-memory-memory-store.ts";
-import { composeAgentIdentityId } from "../types.ts";
-import { InMemoryAgentIdentityRegistry } from "../in-memory-agent-identity-registry.ts";
-import { wipeAgentIdentity } from "../wipe.ts";
+import { composeAgentInstanceId } from "../types.ts";
+import { InMemoryAgentInstanceRegistry } from "../in-memory-agent-instance-registry.ts";
+import { wipeAgentInstance } from "../wipe.ts";
 
-describe("InMemoryAgentIdentityRegistry", () => {
+describe("InMemoryAgentInstanceRegistry", () => {
   it("resolveOrCreate is idempotent for the same triple", async () => {
     const clock = FakeClock.create(1_000);
-    const registry = new InMemoryAgentIdentityRegistry({ clock });
+    const registry = new InMemoryAgentInstanceRegistry({ clock });
     const first = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
@@ -35,13 +34,12 @@ describe("InMemoryAgentIdentityRegistry", () => {
       ownerId: "alice",
     });
     expect(second).toEqual(first);
-    // Subsequent resolves do not bump createdAt or lastActiveAt — that's `touch`.
+    // Subsequent resolves do not bump createdAt — same row, same timestamp.
     expect(second.createdAt).toBe(1_000);
-    expect(second.lastActiveAt).toBe(1_000);
   });
 
-  it("distinct triples produce distinct identities", async () => {
-    const registry = new InMemoryAgentIdentityRegistry();
+  it("distinct triples produce distinct instances", async () => {
+    const registry = new InMemoryAgentInstanceRegistry();
     const writerForAlice = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
@@ -61,14 +59,14 @@ describe("InMemoryAgentIdentityRegistry", () => {
   });
 
   it("id format is deterministic", async () => {
-    const registry = new InMemoryAgentIdentityRegistry();
+    const registry = new InMemoryAgentInstanceRegistry();
     const id = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
       ownerId: "alice",
     });
     expect(id.id).toBe(
-      composeAgentIdentityId({
+      composeAgentInstanceId({
         namespaceId: "acme",
         registeredAgentId: "writer",
         ownerId: "alice",
@@ -77,7 +75,7 @@ describe("InMemoryAgentIdentityRegistry", () => {
   });
 
   it("validates non-empty inputs", async () => {
-    const registry = new InMemoryAgentIdentityRegistry();
+    const registry = new InMemoryAgentInstanceRegistry();
     expect(
       registry.resolveOrCreate({ registeredAgentId: "", namespaceId: "acme", ownerId: "alice" }),
     ).rejects.toThrow();
@@ -90,7 +88,7 @@ describe("InMemoryAgentIdentityRegistry", () => {
   });
 
   it("list filters by namespaceId, ownerId, and registeredAgentId", async () => {
-    const registry = new InMemoryAgentIdentityRegistry();
+    const registry = new InMemoryAgentInstanceRegistry();
     await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
@@ -126,9 +124,9 @@ describe("InMemoryAgentIdentityRegistry", () => {
     expect(writerEverywhere).toHaveLength(3);
   });
 
-  it("list orders by lastActiveDesc by default", async () => {
+  it("list orders by createdDesc by default", async () => {
     const clock = FakeClock.create(0);
-    const registry = new InMemoryAgentIdentityRegistry({ clock });
+    const registry = new InMemoryAgentInstanceRegistry({ clock });
     const a = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
@@ -140,33 +138,14 @@ describe("InMemoryAgentIdentityRegistry", () => {
       namespaceId: "acme",
       ownerId: "bob",
     });
-    // alice's identity is older but we'll touch it last
-    clock.advance(100);
-    await registry.touch(a.id);
-
     const all = await registry.list();
-    expect(all[0]!.id).toBe(a.id);
-    expect(all[1]!.id).toBe(b.id);
-  });
-
-  it("touch updates lastActiveAt without mutating other fields", async () => {
-    const clock = FakeClock.create(1_000);
-    const registry = new InMemoryAgentIdentityRegistry({ clock });
-    const created = await registry.resolveOrCreate({
-      registeredAgentId: "writer",
-      namespaceId: "acme",
-      ownerId: "alice",
-    });
-    clock.advance(500);
-    await registry.touch(created.id);
-    const after = await registry.get(created.id);
-    expect(after?.lastActiveAt).toBe(1_500);
-    expect(after?.createdAt).toBe(1_000);
-    expect(after?.ownerId).toBe("alice");
+    // Newest-first: bob (createdAt=100) before alice (createdAt=0).
+    expect(all[0]!.id).toBe(b.id);
+    expect(all[1]!.id).toBe(a.id);
   });
 
   it("update patches displayName + metadata", async () => {
-    const registry = new InMemoryAgentIdentityRegistry();
+    const registry = new InMemoryAgentInstanceRegistry();
     const created = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
@@ -181,7 +160,7 @@ describe("InMemoryAgentIdentityRegistry", () => {
   });
 
   it("delete is idempotent", async () => {
-    const registry = new InMemoryAgentIdentityRegistry();
+    const registry = new InMemoryAgentInstanceRegistry();
     const created = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
@@ -194,73 +173,73 @@ describe("InMemoryAgentIdentityRegistry", () => {
   });
 });
 
-describe("wipeAgentIdentity — cascades through MemoryStore", () => {
+describe("wipeAgentInstance — cascades through MemoryStore", () => {
   it("drops the registry row and clears resource-scope state", async () => {
-    const registry = new InMemoryAgentIdentityRegistry();
+    const registry = new InMemoryAgentInstanceRegistry();
     const memory = new InMemoryMemoryStore();
-    const identity = await registry.resolveOrCreate({
+    const instance = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
       ownerId: "alice",
     });
 
-    // Stand up state under resourceId = identity.id, mirroring what an
+    // Stand up state under resourceId = instance.id, mirroring what an
     // agent invocation would create.
     await memory.upsertResource(
-      { namespaceId: "acme", resourceId: identity.id },
+      { namespaceId: "acme", resourceId: instance.id },
       { workingMemory: "alice's writing notes" },
     );
     await memory.appendResourceFact(
-      { namespaceId: "acme", resourceId: identity.id },
+      { namespaceId: "acme", resourceId: instance.id },
       "alice prefers terse",
     );
     await memory.createThread({
       namespaceId: "acme",
-      resourceId: identity.id,
+      resourceId: instance.id,
       threadId: "t1",
     });
-    await memory.appendMessages({ namespaceId: "acme", resourceId: identity.id, threadId: "t1" }, [
+    await memory.appendMessages({ namespaceId: "acme", resourceId: instance.id, threadId: "t1" }, [
       { role: "user", content: "hi" },
     ]);
 
-    const result = await wipeAgentIdentity({
+    const result = await wipeAgentInstance({
       registry,
       memory,
-      identityId: identity.id,
+      instanceId: instance.id,
     });
 
-    expect(result.identityId).toBe(identity.id);
+    expect(result.instanceId).toBe(instance.id);
     expect(result.threadsDeleted).toBe(1);
     expect(result.factsDeleted).toBe(1);
 
     // Registry row gone.
-    expect(await registry.get(identity.id)).toBeNull();
+    expect(await registry.get(instance.id)).toBeNull();
     // Resource working memory cleared.
     const resourceRow = await memory.getResource({
       namespaceId: "acme",
-      resourceId: identity.id,
+      resourceId: instance.id,
     });
     expect(resourceRow?.workingMemory).toBeNull();
     // Threads gone.
-    expect(await memory.listThreads({ namespaceId: "acme", resourceId: identity.id })).toHaveLength(
+    expect(await memory.listThreads({ namespaceId: "acme", resourceId: instance.id })).toHaveLength(
       0,
     );
     // Facts gone.
     expect(
-      await memory.listResourceFacts({ namespaceId: "acme", resourceId: identity.id }),
+      await memory.listResourceFacts({ namespaceId: "acme", resourceId: instance.id }),
     ).toHaveLength(0);
   });
 
-  it("is a no-op for an unknown identity id", async () => {
-    const registry = new InMemoryAgentIdentityRegistry();
+  it("is a no-op for an unknown instance id", async () => {
+    const registry = new InMemoryAgentInstanceRegistry();
     const memory = new InMemoryMemoryStore();
-    const result = await wipeAgentIdentity({
+    const result = await wipeAgentInstance({
       registry,
       memory,
-      identityId: "acme::writer::ghost",
+      instanceId: "acme::writer::ghost",
     });
     expect(result).toEqual({
-      identityId: "acme::writer::ghost",
+      instanceId: "acme::writer::ghost",
       threadsDeleted: 0,
       factsDeleted: 0,
       episodesDeleted: 0,

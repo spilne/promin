@@ -1,34 +1,34 @@
 // ---------------------------------------------------------------------------
-// Agent identity routes — long-lived per-(agent, namespace, owner) records.
+// Agent instance routes — long-lived per-(agent, namespace, owner) records.
 //
 // Routes:
-//   GET    /api/agents/:id/identities                       — list identities for this agent
-//   POST   /api/agents/:id/identities                       — resolve-or-create
-//   GET    /api/agents/:id/identities/:identityId           — get one
-//   PATCH  /api/agents/:id/identities/:identityId           — update displayName / metadata
-//   DELETE /api/agents/:id/identities/:identityId           — wipe (cascades to memory)
-//   GET    /api/identities?namespaceId=&ownerId=            — cross-agent list
+//   GET    /api/agents/:id/instances                       — list instances for this agent
+//   POST   /api/agents/:id/instances                       — resolve-or-create
+//   GET    /api/agents/:id/instances/:instanceId           — get one
+//   PATCH  /api/agents/:id/instances/:instanceId           — update displayName / metadata
+//   DELETE /api/agents/:id/instances/:instanceId           — wipe (cascades to memory)
+//   GET    /api/instances?namespaceId=&ownerId=            — cross-agent list
 //
-// `ownerId` is the entity an identity belongs to — a user, team, project,
+// `ownerId` is the entity an instance belongs to — a user, team, project,
 // device, or any other addressable principal. Treated as opaque.
 //
-// Identity is metadata + a deterministic id; the actual chat state
+// Instance is metadata + a deterministic id; the actual chat state
 // (working memory, facts, episodes, threads, messages) lives in the
-// memory store under `resourceId = identity.id`. DELETE is the only
+// memory store under `resourceId = instance.id`. DELETE is the only
 // operation that crosses the boundary — it cascades through both stores
-// via `wipeAgentIdentity`.
+// via `wipeAgentInstance`.
 // ---------------------------------------------------------------------------
 
 import {
-  wipeAgentIdentity,
-  type AgentIdentity,
-  type AgentIdentityRegistry,
+  wipeAgentInstance,
+  type AgentInstance,
+  type AgentInstanceRegistry,
   type MemoryStore,
 } from "@promin/agent";
 import { json, jsonError } from "../router.ts";
 
-export interface IdentityDeps {
-  readonly registry: AgentIdentityRegistry;
+export interface InstanceDeps {
+  readonly registry: AgentInstanceRegistry;
   readonly memory: MemoryStore;
 }
 
@@ -44,7 +44,7 @@ interface UpdateBody {
   readonly metadata?: unknown;
 }
 
-export function listAgentIdentities(deps: IdentityDeps) {
+export function listAgentInstances(deps: InstanceDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const registeredAgentId = params.id;
     if (!registeredAgentId) return jsonError(400, "missing_agent_id");
@@ -59,14 +59,14 @@ export function listAgentIdentities(deps: IdentityDeps) {
         ...(ownerId !== undefined ? { ownerId } : {}),
         ...(limit !== undefined ? { limit } : {}),
       });
-      return json(200, { identities: list.map(serialize) });
+      return json(200, { instances: list.map(serialize) });
     } catch (err) {
       return jsonError(500, "list_failed", err instanceof Error ? err.message : String(err));
     }
   };
 }
 
-export function resolveAgentIdentity(deps: IdentityDeps) {
+export function resolveAgentInstance(deps: InstanceDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const registeredAgentId = params.id;
     if (!registeredAgentId) return jsonError(400, "missing_agent_id");
@@ -79,7 +79,7 @@ export function resolveAgentIdentity(deps: IdentityDeps) {
       return jsonError(400, "missing_ownerId");
     }
     try {
-      const identity = await deps.registry.resolveOrCreate({
+      const instance = await deps.registry.resolveOrCreate({
         registeredAgentId,
         namespaceId: body.namespaceId,
         ownerId: body.ownerId,
@@ -89,37 +89,37 @@ export function resolveAgentIdentity(deps: IdentityDeps) {
             ? (body.metadata as Record<string, unknown>)
             : undefined,
       });
-      return json(200, { identity: serialize(identity) });
+      return json(200, { instance: serialize(instance) });
     } catch (err) {
       return jsonError(500, "resolve_failed", err instanceof Error ? err.message : String(err));
     }
   };
 }
 
-export function getAgentIdentity(deps: IdentityDeps) {
+export function getAgentInstance(deps: InstanceDeps) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
-    const identityId = params.identityId;
-    if (!identityId) return jsonError(400, "missing_identityId");
+    const instanceId = params.instanceId;
+    if (!instanceId) return jsonError(400, "missing_instanceId");
     try {
-      const identity = await deps.registry.get(identityId);
-      if (!identity) return jsonError(404, "not_found");
-      // Defense-in-depth: callers hitting this through /api/agents/:id/identities/:identityId
-      // shouldn't see an identity from a different agent. Block the leak.
+      const instance = await deps.registry.get(instanceId);
+      if (!instance) return jsonError(404, "not_found");
+      // Defense-in-depth: callers hitting this through /api/agents/:id/instances/:instanceId
+      // shouldn't see an instance from a different agent. Block the leak.
       const expectedAgent = params.id;
-      if (expectedAgent && identity.registeredAgentId !== expectedAgent) {
+      if (expectedAgent && instance.registeredAgentId !== expectedAgent) {
         return jsonError(404, "not_found");
       }
-      return json(200, { identity: serialize(identity) });
+      return json(200, { instance: serialize(instance) });
     } catch (err) {
       return jsonError(500, "get_failed", err instanceof Error ? err.message : String(err));
     }
   };
 }
 
-export function updateAgentIdentity(deps: IdentityDeps) {
+export function updateAgentInstance(deps: InstanceDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const identityId = params.identityId;
-    if (!identityId) return jsonError(400, "missing_identityId");
+    const instanceId = params.instanceId;
+    if (!instanceId) return jsonError(400, "missing_instanceId");
     const body = (await req.json().catch(() => null)) as UpdateBody | null;
     if (!body) return jsonError(400, "invalid_body");
 
@@ -139,11 +139,11 @@ export function updateAgentIdentity(deps: IdentityDeps) {
     if (Object.keys(patch).length === 0) return jsonError(400, "empty_patch");
 
     try {
-      const updated = await deps.registry.update(identityId, patch);
-      return json(200, { identity: serialize(updated) });
+      const updated = await deps.registry.update(instanceId, patch);
+      return json(200, { instance: serialize(updated) });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      // The InMemory impl throws "AgentIdentity not found: ..." — surface
+      // The InMemory impl throws "AgentInstance not found: ..." — surface
       // that as a 404 rather than a 500.
       if (msg.toLowerCase().includes("not found")) return jsonError(404, "not_found");
       return jsonError(500, "update_failed", msg);
@@ -151,15 +151,15 @@ export function updateAgentIdentity(deps: IdentityDeps) {
   };
 }
 
-export function deleteAgentIdentity(deps: IdentityDeps) {
+export function deleteAgentInstance(deps: InstanceDeps) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
-    const identityId = params.identityId;
-    if (!identityId) return jsonError(400, "missing_identityId");
+    const instanceId = params.instanceId;
+    if (!instanceId) return jsonError(400, "missing_instanceId");
     try {
-      const result = await wipeAgentIdentity({
+      const result = await wipeAgentInstance({
         registry: deps.registry,
         memory: deps.memory,
-        identityId,
+        instanceId,
       });
       return json(200, result);
     } catch (err) {
@@ -168,7 +168,7 @@ export function deleteAgentIdentity(deps: IdentityDeps) {
   };
 }
 
-export function listIdentitiesAcrossAgents(deps: IdentityDeps) {
+export function listInstancesAcrossAgents(deps: InstanceDeps) {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const namespaceId = url.searchParams.get("namespaceId") ?? undefined;
@@ -180,7 +180,7 @@ export function listIdentitiesAcrossAgents(deps: IdentityDeps) {
         ...(ownerId !== undefined ? { ownerId } : {}),
         ...(limit !== undefined ? { limit } : {}),
       });
-      return json(200, { identities: list.map(serialize) });
+      return json(200, { instances: list.map(serialize) });
     } catch (err) {
       return jsonError(500, "list_failed", err instanceof Error ? err.message : String(err));
     }
@@ -197,7 +197,7 @@ function parseLimit(raw: string | null): number | undefined {
 // Stable serialization — keeps the wire shape independent of any extra
 // fields the registry impl might attach internally. Also allows future
 // implementations to project lazy fields without breaking clients.
-function serialize(identity: AgentIdentity): {
+function serialize(instance: AgentInstance): {
   id: string;
   registeredAgentId: string;
   namespaceId: string;
@@ -205,16 +205,14 @@ function serialize(identity: AgentIdentity): {
   displayName: string | null;
   metadata: Record<string, unknown>;
   createdAt: number;
-  lastActiveAt: number;
 } {
   return {
-    id: identity.id,
-    registeredAgentId: identity.registeredAgentId,
-    namespaceId: identity.namespaceId,
-    ownerId: identity.ownerId,
-    displayName: identity.displayName,
-    metadata: { ...identity.metadata },
-    createdAt: identity.createdAt,
-    lastActiveAt: identity.lastActiveAt,
+    id: instance.id,
+    registeredAgentId: instance.registeredAgentId,
+    namespaceId: instance.namespaceId,
+    ownerId: instance.ownerId,
+    displayName: instance.displayName,
+    metadata: { ...instance.metadata },
+    createdAt: instance.createdAt,
   };
 }

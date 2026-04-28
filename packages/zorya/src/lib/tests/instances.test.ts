@@ -1,53 +1,53 @@
 // ---------------------------------------------------------------------------
-// Identity routes — verifies the HTTP surface stays in lockstep with the
-// `AgentIdentityRegistry` contract.
+// Instance routes — verifies the HTTP surface stays in lockstep with the
+// `AgentInstanceRegistry` contract.
 //
 // Pins:
 //   - POST resolveOrCreate is idempotent
 //   - distinct triples produce distinct ids
 //   - GET list filters by namespaceId / ownerId
-//   - GET single 404s when the identity belongs to a different agent
+//   - GET single 404s when the instance belongs to a different agent
 //   - PATCH updates displayName / metadata; 404 on unknown id
 //   - DELETE cascades to memory (working memory cleared, threads gone)
-//   - cross-agent list at /api/identities returns rows from any agent
+//   - cross-agent list at /api/instances returns rows from any agent
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import { InMemoryAgentIdentityRegistry, InMemoryMemoryStore } from "@promin/agent";
+import { InMemoryAgentInstanceRegistry, InMemoryMemoryStore } from "@promin/agent";
 import { ZoryaServer } from "../../server/server.ts";
 import { InMemoryWorkflowStorage } from "@promin/workflow";
 
 function makeServer() {
-  const registry = new InMemoryAgentIdentityRegistry();
+  const registry = new InMemoryAgentInstanceRegistry();
   const memory = new InMemoryMemoryStore();
   const server = new ZoryaServer({
     storage: new InMemoryWorkflowStorage(),
-    identities: { registry, memory },
+    instances: { registry, memory },
   });
   return { server, registry, memory };
 }
 
-describe("POST /api/agents/:id/identities — resolveOrCreate", () => {
-  it("creates an identity on first call", async () => {
+describe("POST /api/agents/:id/instances — resolveOrCreate", () => {
+  it("creates an instance on first call", async () => {
     const { server } = makeServer();
     const res = await server.handle(
-      new Request("http://test/api/agents/writer/identities", {
+      new Request("http://test/api/agents/writer/instances", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ namespaceId: "acme", ownerId: "alice" }),
       }),
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { identity: { id: string; ownerId: string } };
-    expect(body.identity.id).toBe("acme::writer::alice");
-    expect(body.identity.ownerId).toBe("alice");
+    const body = (await res.json()) as { instance: { id: string; ownerId: string } };
+    expect(body.instance.id).toBe("acme::writer::alice");
+    expect(body.instance.ownerId).toBe("alice");
   });
 
   it("is idempotent for the same triple", async () => {
     const { server } = makeServer();
     const post = (b: object) =>
       server.handle(
-        new Request("http://test/api/agents/writer/identities", {
+        new Request("http://test/api/agents/writer/instances", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(b),
@@ -55,15 +55,15 @@ describe("POST /api/agents/:id/identities — resolveOrCreate", () => {
       );
     const a = await (await post({ namespaceId: "acme", ownerId: "alice" })).json();
     const b = await (await post({ namespaceId: "acme", ownerId: "alice" })).json();
-    expect((a as { identity: { id: string } }).identity.id).toBe(
-      (b as { identity: { id: string } }).identity.id,
+    expect((a as { instance: { id: string } }).instance.id).toBe(
+      (b as { instance: { id: string } }).instance.id,
     );
   });
 
   it("400s on missing namespaceId or ownerId", async () => {
     const { server } = makeServer();
     const a = await server.handle(
-      new Request("http://test/api/agents/writer/identities", {
+      new Request("http://test/api/agents/writer/instances", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ ownerId: "alice" }),
@@ -71,7 +71,7 @@ describe("POST /api/agents/:id/identities — resolveOrCreate", () => {
     );
     expect(a.status).toBe(400);
     const b = await server.handle(
-      new Request("http://test/api/agents/writer/identities", {
+      new Request("http://test/api/agents/writer/instances", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ namespaceId: "acme" }),
@@ -81,8 +81,8 @@ describe("POST /api/agents/:id/identities — resolveOrCreate", () => {
   });
 });
 
-describe("GET /api/agents/:id/identities — list", () => {
-  it("returns identities filtered to this agent", async () => {
+describe("GET /api/agents/:id/instances — list", () => {
+  it("returns instances filtered to this agent", async () => {
     const { server, registry } = makeServer();
     await registry.resolveOrCreate({
       registeredAgentId: "writer",
@@ -100,9 +100,9 @@ describe("GET /api/agents/:id/identities — list", () => {
       ownerId: "alice",
     });
 
-    const res = await server.handle(new Request("http://test/api/agents/writer/identities"));
-    const body = (await res.json()) as { identities: Array<{ ownerId: string }> };
-    expect(body.identities.map((i) => i.ownerId).sort()).toEqual(["alice", "bob"]);
+    const res = await server.handle(new Request("http://test/api/agents/writer/instances"));
+    const body = (await res.json()) as { instances: Array<{ ownerId: string }> };
+    expect(body.instances.map((i) => i.ownerId).sort()).toEqual(["alice", "bob"]);
   });
 
   it("supports ?ownerId filter", async () => {
@@ -118,16 +118,16 @@ describe("GET /api/agents/:id/identities — list", () => {
       ownerId: "bob",
     });
     const res = await server.handle(
-      new Request("http://test/api/agents/writer/identities?ownerId=alice"),
+      new Request("http://test/api/agents/writer/instances?ownerId=alice"),
     );
-    const body = (await res.json()) as { identities: Array<{ ownerId: string }> };
-    expect(body.identities).toHaveLength(1);
-    expect(body.identities[0]!.ownerId).toBe("alice");
+    const body = (await res.json()) as { instances: Array<{ ownerId: string }> };
+    expect(body.instances).toHaveLength(1);
+    expect(body.instances[0]!.ownerId).toBe("alice");
   });
 });
 
-describe("GET /api/agents/:id/identities/:identityId — single", () => {
-  it("returns the identity when ids match", async () => {
+describe("GET /api/agents/:id/instances/:instanceId — single", () => {
+  it("returns the instance when ids match", async () => {
     const { server, registry } = makeServer();
     const id = (
       await registry.resolveOrCreate({
@@ -137,12 +137,12 @@ describe("GET /api/agents/:id/identities/:identityId — single", () => {
       })
     ).id;
     const res = await server.handle(
-      new Request(`http://test/api/agents/writer/identities/${encodeURIComponent(id)}`),
+      new Request(`http://test/api/agents/writer/instances/${encodeURIComponent(id)}`),
     );
     expect(res.status).toBe(200);
   });
 
-  it("404s when the path agent doesn't match the identity's agent", async () => {
+  it("404s when the path agent doesn't match the instance's agent", async () => {
     const { server, registry } = makeServer();
     const id = (
       await registry.resolveOrCreate({
@@ -152,13 +152,13 @@ describe("GET /api/agents/:id/identities/:identityId — single", () => {
       })
     ).id;
     const res = await server.handle(
-      new Request(`http://test/api/agents/reviewer/identities/${encodeURIComponent(id)}`),
+      new Request(`http://test/api/agents/reviewer/instances/${encodeURIComponent(id)}`),
     );
     expect(res.status).toBe(404);
   });
 });
 
-describe("PATCH /api/agents/:id/identities/:identityId — update", () => {
+describe("PATCH /api/agents/:id/instances/:instanceId — update", () => {
   it("updates displayName + metadata", async () => {
     const { server, registry } = makeServer();
     const id = (
@@ -169,7 +169,7 @@ describe("PATCH /api/agents/:id/identities/:identityId — update", () => {
       })
     ).id;
     const res = await server.handle(
-      new Request(`http://test/api/agents/writer/identities/${encodeURIComponent(id)}`, {
+      new Request(`http://test/api/agents/writer/instances/${encodeURIComponent(id)}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ displayName: "Alice's writer", metadata: { color: "blue" } }),
@@ -177,16 +177,16 @@ describe("PATCH /api/agents/:id/identities/:identityId — update", () => {
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      identity: { displayName: string | null; metadata: Record<string, unknown> };
+      instance: { displayName: string | null; metadata: Record<string, unknown> };
     };
-    expect(body.identity.displayName).toBe("Alice's writer");
-    expect(body.identity.metadata).toEqual({ color: "blue" });
+    expect(body.instance.displayName).toBe("Alice's writer");
+    expect(body.instance.metadata).toEqual({ color: "blue" });
   });
 
   it("404s on unknown id", async () => {
     const { server } = makeServer();
     const res = await server.handle(
-      new Request("http://test/api/agents/writer/identities/acme::writer::ghost", {
+      new Request("http://test/api/agents/writer/instances/acme::writer::ghost", {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ displayName: "x" }),
@@ -205,7 +205,7 @@ describe("PATCH /api/agents/:id/identities/:identityId — update", () => {
       })
     ).id;
     const res = await server.handle(
-      new Request(`http://test/api/agents/writer/identities/${encodeURIComponent(id)}`, {
+      new Request(`http://test/api/agents/writer/instances/${encodeURIComponent(id)}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({}),
@@ -215,30 +215,30 @@ describe("PATCH /api/agents/:id/identities/:identityId — update", () => {
   });
 });
 
-describe("DELETE /api/agents/:id/identities/:identityId — cascading wipe", () => {
+describe("DELETE /api/agents/:id/instances/:instanceId — cascading wipe", () => {
   it("removes the row and clears resource memory", async () => {
     const { server, registry, memory } = makeServer();
-    const identity = await registry.resolveOrCreate({
+    const instance = await registry.resolveOrCreate({
       registeredAgentId: "writer",
       namespaceId: "acme",
       ownerId: "alice",
     });
-    // Stand up some state under resourceId = identity.id.
+    // Stand up some state under resourceId = instance.id.
     await memory.upsertResource(
-      { namespaceId: "acme", resourceId: identity.id },
+      { namespaceId: "acme", resourceId: instance.id },
       { workingMemory: "draft" },
     );
     await memory.createThread({
       namespaceId: "acme",
-      resourceId: identity.id,
+      resourceId: instance.id,
       threadId: "t1",
     });
-    await memory.appendMessages({ namespaceId: "acme", resourceId: identity.id, threadId: "t1" }, [
+    await memory.appendMessages({ namespaceId: "acme", resourceId: instance.id, threadId: "t1" }, [
       { role: "user", content: "hi" },
     ]);
 
     const res = await server.handle(
-      new Request(`http://test/api/agents/writer/identities/${encodeURIComponent(identity.id)}`, {
+      new Request(`http://test/api/agents/writer/instances/${encodeURIComponent(instance.id)}`, {
         method: "DELETE",
       }),
     );
@@ -246,17 +246,17 @@ describe("DELETE /api/agents/:id/identities/:identityId — cascading wipe", () 
     const body = (await res.json()) as { threadsDeleted: number };
     expect(body.threadsDeleted).toBe(1);
 
-    expect(await registry.get(identity.id)).toBeNull();
-    expect(await memory.listThreads({ namespaceId: "acme", resourceId: identity.id })).toHaveLength(
+    expect(await registry.get(instance.id)).toBeNull();
+    expect(await memory.listThreads({ namespaceId: "acme", resourceId: instance.id })).toHaveLength(
       0,
     );
-    const row = await memory.getResource({ namespaceId: "acme", resourceId: identity.id });
+    const row = await memory.getResource({ namespaceId: "acme", resourceId: instance.id });
     expect(row?.workingMemory).toBeNull();
   });
 });
 
-describe("GET /api/identities — cross-agent list", () => {
-  it("returns identities for any agent in the namespace", async () => {
+describe("GET /api/instances — cross-agent list", () => {
+  it("returns instances for any agent in the namespace", async () => {
     const { server, registry } = makeServer();
     await registry.resolveOrCreate({
       registeredAgentId: "writer",
@@ -275,10 +275,10 @@ describe("GET /api/identities — cross-agent list", () => {
     });
 
     const res = await server.handle(
-      new Request("http://test/api/identities?namespaceId=acme&ownerId=alice"),
+      new Request("http://test/api/instances?namespaceId=acme&ownerId=alice"),
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { identities: Array<{ registeredAgentId: string }> };
-    expect(body.identities.map((i) => i.registeredAgentId).sort()).toEqual(["reviewer", "writer"]);
+    const body = (await res.json()) as { instances: Array<{ registeredAgentId: string }> };
+    expect(body.instances.map((i) => i.registeredAgentId).sort()).toEqual(["reviewer", "writer"]);
   });
 });
