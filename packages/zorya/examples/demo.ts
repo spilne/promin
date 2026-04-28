@@ -34,6 +34,7 @@ import {
 import {
   anthropic,
   applyDiscoveredAgents,
+  createFileToolRegistry,
   resolveLocalAgent,
   tool,
   type AgentTool,
@@ -54,11 +55,10 @@ import {
   scanWorkflowsFolder,
   startAgentsScanLoop,
 } from "../src/index.ts";
-import {
-  ORG_KNOWLEDGE_BASE,
-  searchKnowledgeTool,
-  getDocumentTool,
-} from "./kb/org-knowledge-base.ts";
+// KB content lives at ./kb/org-knowledge-base.ts; the searchKnowledge +
+// getDocument tools that wrap it are exposed under ./tools/ for the
+// folder-scan registry.
+import { ORG_KNOWLEDGE_BASE } from "./kb/org-knowledge-base.ts";
 import path from "node:path";
 import { mkdirSync } from "node:fs";
 
@@ -248,93 +248,15 @@ function naturalLLM(provider: LLMProvider, opts: NaturalLLMOptions = {}): LLMPro
 }
 
 // ---------------------------------------------------------------------------
-// Tools — wired into the resolver per agent. Keyed by recipe id; an agent
-// without an entry gets an empty tool kit. Each tool's `name` here must
-// match a name listed in the recipe's `backend.tools`.
-
-const weatherTool: AgentTool<{ city: string }, { tempF: number; conditions: string }> = tool({
-  name: "weather",
-  description: "Look up the current weather for a city.",
-  parameters: z.object({ city: z.string().min(1) }),
-  execute: async ({ city }) => {
-    // Stubbed lookup — deterministic values per city so the demo doesn't
-    // need a real API.
-    const conditions = ["sunny", "cloudy", "rainy", "windy"];
-    const idx = Math.abs(hashString(city)) % conditions.length;
-    return {
-      tempF: 60 + (Math.abs(hashString(city)) % 25),
-      conditions: conditions[idx]!,
-    };
-  },
-});
-
-function hashString(s: string): number {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
-  return h;
-}
-
-// `currentTime` — exercises a tool with optional input. Uses Intl so any
-// IANA timezone string works ("America/New_York", "Europe/Kyiv", etc.).
-const currentTimeTool: AgentTool<
-  { timezone?: string },
-  { iso: string; formatted: string; timezone: string }
-> = tool({
-  name: "currentTime",
-  description:
-    "Get the current date and time, optionally in a specific IANA timezone (e.g. 'America/New_York'). Defaults to UTC.",
-  parameters: z.object({
-    timezone: z
-      .string()
-      .optional()
-      .describe("IANA timezone like 'America/New_York' or 'Europe/Kyiv'. Defaults to UTC."),
-  }),
-  execute: async ({ timezone }) => {
-    const tz = timezone && timezone.length > 0 ? timezone : "UTC";
-    const now = new Date();
-    let formatted: string;
-    try {
-      formatted = new Intl.DateTimeFormat("en-US", {
-        timeZone: tz,
-        dateStyle: "full",
-        timeStyle: "long",
-      }).format(now);
-    } catch {
-      // Invalid timezone — fall back to UTC and tell the model.
-      formatted = `${now.toISOString()} (invalid timezone ${tz}, used UTC)`;
-    }
-    return { iso: now.toISOString(), formatted, timezone: tz };
-  },
-});
-
-// `calculate` — single-op arithmetic. Avoids `eval` / Function() so the
-// demo doesn't hand the model a remote-code-execution surface.
-const calculateTool: AgentTool<
-  { a: number; b: number; op: "add" | "subtract" | "multiply" | "divide" },
-  { result: number }
-> = tool({
-  name: "calculate",
-  description:
-    "Compute a single arithmetic operation on two numbers. Use multiple calls for compound expressions.",
-  parameters: z.object({
-    a: z.number(),
-    b: z.number(),
-    op: z.enum(["add", "subtract", "multiply", "divide"]),
-  }),
-  execute: async ({ a, b, op }) => {
-    switch (op) {
-      case "add":
-        return { result: a + b };
-      case "subtract":
-        return { result: a - b };
-      case "multiply":
-        return { result: a * b };
-      case "divide":
-        if (b === 0) throw new Error("division by zero");
-        return { result: a / b };
-    }
-  },
-});
+// Tools — auto-discovered from ./tools/ via createFileToolRegistry. Each
+// `.ts` file in that folder exports a default tool({...}); the registry
+// scans + watches them and the resolver's pickTools narrows per recipe
+// (recipe.backend.tools list → which subset this agent gets).
+//
+// Tools that close over demo state (e.g. listWorkflows reading from
+// `storage`) stay inline — the file-scan registry can't inject demo-
+// specific deps, so host-supplied closures get merged on top of the
+// scanned set below.
 
 // `listWorkflows` — pokes into the demo's actual workflow storage so a
 // live agent can answer "what's running on this server right now?". The
@@ -390,34 +312,14 @@ const listWorkflowsTool: AgentTool<
   },
 });
 
-const agentTools: Record<string, Record<string, AgentTool<unknown, unknown>>> = {
-  // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
-  "weather-bot": { weather: weatherTool as AgentTool<any, any> },
-  // Live Claude gets the full kit — exercises a single-input tool
-  // (weather), an optional-input tool (currentTime), an enum-typed tool
-  // (calculate), and a tool that pokes at real server state
-  // (listWorkflows). Together they prove the adapter wires tool
-  // definitions, tool_use blocks, and tool_result blocks correctly with
-  // a real model.
-  "claude-bot": {
-    // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
-    weather: weatherTool as AgentTool<any, any>,
-    // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
-    currentTime: currentTimeTool as AgentTool<any, any>,
-    // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
-    calculate: calculateTool as AgentTool<any, any>,
-    // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
-    listWorkflows: listWorkflowsTool as AgentTool<any, any>,
-  },
-  // Retrieval-augmented chat: searchKnowledge + getDocument over a small
-  // in-memory org KB. The recipe lives at ./agents/knowledge-bot.ts.
-  "knowledge-bot": {
-    // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
-    searchKnowledge: searchKnowledgeTool as AgentTool<any, any>,
-    // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
-    getDocument: getDocumentTool as AgentTool<any, any>,
-  },
-};
+// Folder-scan registry: each `.ts` file under ./tools/ default-exports a
+// tool, the registry hot-reloads them on change, and the resolver's
+// pickTools narrows per recipe. host-supplied tools (closures over demo
+// state, like listWorkflows) get merged on top in resolveAgent below.
+const toolRegistry = await createFileToolRegistry({
+  dir: path.join(import.meta.dir, "tools"),
+  onLoad: (name) => console.log(`[zorya] loaded tool ${name}`),
+});
 
 // Per-agent LLM map — keyed by recipe id. Built once at boot. A discovered
 // agent without an entry here falls through to a default `echoLLM` in the
@@ -531,7 +433,10 @@ function resolveAgent(recipe: RegisteredAgent): Agent {
     runner,
     memory: memoryStore,
     llm: () => agentLlms[recipe.id] ?? naturalLLM(echoLLM()),
-    tools: agentTools[recipe.id] ?? {},
+    // Full registry of tools available; resolver's pickTools narrows by
+    // recipe.backend.tools. listWorkflows is added inline because it
+    // closes over `storage` + `workflowsByName`.
+    tools: { ...toolRegistry.getTools(), listWorkflows: listWorkflowsTool },
     // Distillation is summarisation work — use Haiku when we have a
     // real key (cheaper / faster than Sonnet), fall back to the
     // chat LLM for mock agents (echoLLM round-trip is free anyway).
