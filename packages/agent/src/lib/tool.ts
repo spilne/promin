@@ -1,15 +1,40 @@
 import type { z } from "zod";
 
 /**
- * Free-form progress sink available to long-running tools. When the
- * agent loop runs the tool, it injects a writer that turns each
- * `write(payload)` into a `tool.progress` SessionEvent labeled with
- * the current turn / step / toolCallId. Live consumers (SSE forwarders,
- * dashboards) get incremental progress without the tool having to
- * know about the event bus.
+ * Free-form progress sink for long-running tools. Without it, a tool that
+ * takes 30s emits `tool.start`, then nothing until `tool.end` — consumers
+ * see a frozen spinner. With it, the tool emits incremental payloads that
+ * surface as `tool.progress` SessionEvents (labeled with the current
+ * turn / step / toolCallId), so the UI can render "downloading… 50%".
  *
- * Tools that don't care about progress just ignore the second
- * argument — the writer is always optional and `payload` is opaque.
+ * The writer is injected by the agent loop when running through a session.
+ * Unit tests that call `tool.execute(input)` directly get `ctx === undefined`
+ * — always access via the optional chain.
+ *
+ * Example:
+ *
+ *   tool({
+ *     name: "download",
+ *     parameters: z.object({ url: z.string() }),
+ *     execute: async ({ url }, ctx) => {
+ *       ctx?.writer?.write({ phase: "connecting" });
+ *       const res = await fetch(url);
+ *       ctx?.writer?.write({ phase: "downloading", percent: 0 });
+ *       // ... emit { percent: 25 }, { percent: 50 } as bytes arrive
+ *       ctx?.writer?.write({ phase: "decoding" });
+ *       return await decode(res);
+ *     },
+ *   });
+ *
+ * `payload` is opaque — producer and consumer agree on shape. Common
+ * shapes: `{ percent: number }`, `{ phase: string }`, `{ stepName, ok }`.
+ *
+ * Sibling concern: `tool.progress` covers the "what's happening" channel.
+ * For "the result references a binary / external resource" (image, file,
+ * URL embedded in the assistant text), an artifact-marker event is the
+ * right shape — deferred until a concrete consumer needs it, since the
+ * `ArtifactRef` shape depends on whether refs are signed URLs, storage
+ * handles, blob refs, or MCP resource ids.
  */
 export interface ToolWriter {
   write(payload: unknown): void;
