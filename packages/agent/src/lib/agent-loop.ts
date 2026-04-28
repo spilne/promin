@@ -941,7 +941,20 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                         input: call.input,
                       });
                       const toolStart = Date.now();
-                      const result = await executeToolCall(call, toolDef);
+                      // Bridge tool.write(payload) into a tool.progress
+                      // event labeled with the current turn/step/callId.
+                      // Tools that don't write progress get no events;
+                      // the writer is opt-in on the tool author's side.
+                      const result = await executeToolCall(call, toolDef, undefined, (payload) =>
+                        eventBus.emit({
+                          type: "tool.progress",
+                          turn,
+                          step,
+                          toolCallId: call.id,
+                          name: call.name,
+                          payload,
+                        }),
+                      );
                       const durationMs = Date.now() - toolStart;
                       const isParseError = result.content.startsWith("Invalid input");
                       const failed =

@@ -96,6 +96,13 @@ export async function executeToolCall(
   call: ToolCall,
   toolDef: AgentTool<any, any>,
   onResult?: (call: ToolCall, output: unknown) => void,
+  /**
+   * Optional progress sink. When passed, executeToolCall builds a
+   * ToolWriter that forwards each `write(payload)` call to this
+   * callback. The agent loop wires the callback to emit a
+   * `tool.progress` SessionEvent labeled with turn / step / toolCallId.
+   */
+  onProgress?: (payload: unknown) => void,
 ): Promise<ToolResultMessage> {
   let parsed: unknown;
   try {
@@ -110,7 +117,8 @@ export async function executeToolCall(
   }
   try {
     // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
-    const output = await toolDef.execute(parsed as any);
+    const ctx = onProgress ? { writer: { write: onProgress } } : undefined;
+    const output = await toolDef.execute(parsed as any, ctx);
     onResult?.(call, output);
     let content = toolDef.toModelOutput
       ? toolDef.toModelOutput(output)

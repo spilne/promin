@@ -1,5 +1,30 @@
 import type { z } from "zod";
 
+/**
+ * Free-form progress sink available to long-running tools. When the
+ * agent loop runs the tool, it injects a writer that turns each
+ * `write(payload)` into a `tool.progress` SessionEvent labeled with
+ * the current turn / step / toolCallId. Live consumers (SSE forwarders,
+ * dashboards) get incremental progress without the tool having to
+ * know about the event bus.
+ *
+ * Tools that don't care about progress just ignore the second
+ * argument — the writer is always optional and `payload` is opaque.
+ */
+export interface ToolWriter {
+  write(payload: unknown): void;
+}
+
+/** Per-call execution context handed to `tool.execute` as an optional second arg. */
+export interface ToolExecuteContext {
+  /**
+   * Progress sink. Always present when the tool is invoked through the
+   * agent loop with an event bus; absent in unit tests that call
+   * `execute` directly. Tool authors should treat as optional via `?.`.
+   */
+  readonly writer?: ToolWriter;
+}
+
 export interface AgentTool<TInput = unknown, TOutput = unknown> {
   /** Stable identifier — used as the LLM tool name and registry key. */
   name: string;
@@ -10,7 +35,12 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
   /** Few-shot examples shown to the LLM alongside the description. */
   examples?: Array<{ input: TInput; output: string }>;
   parameters: z.ZodType<TInput>;
-  execute: (input: TInput) => Promise<TOutput>;
+  /**
+   * Run the tool. The optional `ctx` carries per-call wiring like a
+   * progress writer; tools that ignore `ctx` keep working unchanged
+   * — backwards-compat with the original single-arg signature.
+   */
+  execute: (input: TInput, ctx?: ToolExecuteContext) => Promise<TOutput>;
   requireApproval?: boolean;
   toModelOutput?: (output: TOutput) => string;
 }
