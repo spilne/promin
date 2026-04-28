@@ -242,6 +242,19 @@ export type { MemoryToolConfig } from "./tools/memory-tools.ts";
 export { createLayeredMemoryTool } from "./tools/layered-memory-tools.ts";
 export type { LayeredMemoryToolConfig } from "./tools/layered-memory-tools.ts";
 
+// Durable scheduler tool — agents create cron / interval schedules that
+// re-fire the agent (or a peer) when they trigger. Pairs with the
+// dispatchAgentSchedule helper for the host's scheduler-loop fireOverride.
+export { createDurableSchedulerTool } from "./tools/durable-scheduler-tool.ts";
+export type { DurableSchedulerToolDeps } from "./tools/durable-scheduler-tool.ts";
+export { dispatchAgentSchedule, isAgentSchedule } from "./tools/dispatch-agent-schedule.ts";
+export type {
+  AgentScheduleMetadata,
+  DispatchAgentScheduleDeps,
+  DispatchAgentScheduleResult,
+  ScheduleFireContext,
+} from "./tools/dispatch-agent-schedule.ts";
+
 export { createLlmTool } from "./tools/llm-tool.ts";
 export type { LlmToolConfig } from "./tools/llm-tool.ts";
 export type { SecretToolConfig, SetSecretToolConfig } from "./tools/secret-tools.ts";
