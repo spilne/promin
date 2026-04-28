@@ -158,6 +158,26 @@ export type {
 export { recordChat, recordTool, recordApproval } from "./metrics/instrument.ts";
 export type { RecordChatArgs, RecordToolArgs } from "./metrics/instrument.ts";
 
+// Approval — queryable inbox + audit trail for tool approvals. Side-table
+// downstream of the bus events; the workflow journal stays the source of
+// truth for replay correctness. See packages/agent/src/lib/approval/types.ts.
+export { ApprovalDecisionConflictError } from "./approval/types.ts";
+export type {
+  ApprovalRequest,
+  ApprovalStatus,
+  ApprovalStorage,
+  CreateApprovalRequestInput,
+  DecideApprovalInput,
+  ListApprovalsParams,
+} from "./approval/types.ts";
+export { InMemoryApprovalStorage } from "./approval/in-memory-approval-storage.ts";
+export type { InMemoryApprovalStorageConfig } from "./approval/in-memory-approval-storage.ts";
+export { attachApprovalStorage, requestIdFor } from "./approval/attach.ts";
+export type {
+  AttachApprovalStorageConfig,
+  AttachApprovalStorageHandle,
+} from "./approval/attach.ts";
+
 // Network — peer discovery + delegation (findAgent, callAgent). Opt-in
 // per recipe via `backend.network`. See packages/agent/src/lib/network/types.ts.
 export {
