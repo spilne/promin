@@ -332,6 +332,10 @@ export { routerLLM } from "./adapters/router-llm.ts";
 export type { LLMRoute } from "./adapters/router-llm.ts";
 
 export { fallbackLLM } from "./adapters/fallback-llm.ts";
+export { resilientLLM } from "./adapters/resilient-llm.ts";
+export type { ResilientLLMPolicy } from "./adapters/resilient-llm.ts";
+export { classifyLLMError } from "./adapters/llm-error-classification.ts";
+export type { LLMErrorClass } from "./adapters/llm-error-classification.ts";
 
 export { ollama } from "./adapters/ollama.ts";
 export type { OllamaOptions } from "./adapters/ollama.ts";
