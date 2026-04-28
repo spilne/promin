@@ -14,8 +14,13 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { InMemoryAgentRegistry, InMemoryMemoryStore, resolveLocalAgent } from "@promin/agent";
-import type { LLMProvider, LLMResponse } from "@promin/agent";
+import {
+  InMemoryAgentInstanceRegistry,
+  InMemoryAgentRegistry,
+  InMemoryMemoryStore,
+  resolveLocalAgent,
+} from "@promin/agent";
+import type { AgentInstanceRegistry, LLMProvider, LLMResponse } from "@promin/agent";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { ZoryaServer } from "../../server/server.ts";
 
@@ -30,11 +35,14 @@ function mockLLM(responses: LLMResponse[]): LLMProvider {
   };
 }
 
-async function bootGateway(opts?: { responses?: LLMResponse[] }) {
+async function bootGateway(opts?: { responses?: LLMResponse[]; withInstances?: boolean }) {
   const storage = new InMemoryWorkflowStorage();
   const runner = createWorkflowRunner({ storage });
   const memory = new InMemoryMemoryStore();
   const registry = new InMemoryAgentRegistry();
+  const instanceRegistry: AgentInstanceRegistry | undefined = opts?.withInstances
+    ? new InMemoryAgentInstanceRegistry()
+    : undefined;
 
   await registry.register({
     id: "support",
@@ -52,6 +60,7 @@ async function bootGateway(opts?: { responses?: LLMResponse[] }) {
     storage,
     agents: {
       registry,
+      ...(instanceRegistry ? { instanceRegistry } : {}),
       resolve: (recipe) =>
         resolveLocalAgent(recipe, {
           runner,
@@ -62,7 +71,7 @@ async function bootGateway(opts?: { responses?: LLMResponse[] }) {
     },
   });
 
-  return { server, storage, runner, memory, registry };
+  return { server, storage, runner, memory, registry, instanceRegistry };
 }
 
 describe("agent gateway — discovery", () => {
@@ -265,5 +274,146 @@ describe("agent gateway — threads", () => {
       new Request("http://test/api/agents/support/threads", { method: "GET" }),
     );
     expect(res.status).toBe(400);
+  });
+});
+
+describe("agent gateway — instance auto-resolve from ownerId", () => {
+  it("invoke with ownerId resolves an instance and returns its id", async () => {
+    const { server, instanceRegistry } = await bootGateway({
+      responses: [{ content: "answer", finishReason: "stop" }],
+      withInstances: true,
+    });
+    const res = await server.handle(
+      new Request("http://test/api/agents/support/invoke", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          task: "hi",
+          namespaceId: "acme",
+          ownerId: "alice",
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { instanceId?: string; text: string };
+    expect(body.instanceId).toBe("acme::support::alice");
+
+    // The registry has the row, scoped per (registeredAgentId, namespaceId, ownerId).
+    const row = await instanceRegistry!.get("acme::support::alice");
+    expect(row?.ownerId).toBe("alice");
+    expect(row?.registeredAgentId).toBe("support");
+    expect(row?.namespaceId).toBe("acme");
+  });
+
+  it("subsequent ownerId invokes reuse the same instance row", async () => {
+    const { server, instanceRegistry } = await bootGateway({
+      responses: [
+        { content: "first", finishReason: "stop" },
+        { content: "second", finishReason: "stop" },
+      ],
+      withInstances: true,
+    });
+    const post = (body: object) =>
+      server.handle(
+        new Request("http://test/api/agents/support/invoke", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+      );
+    await post({ task: "hi", namespaceId: "acme", ownerId: "alice" });
+    const before = (await instanceRegistry!.get("acme::support::alice"))!;
+    await post({ task: "hi again", namespaceId: "acme", ownerId: "alice" });
+    const after = (await instanceRegistry!.get("acme::support::alice"))!;
+    expect(after.id).toBe(before.id);
+    expect(after.createdAt).toBe(before.createdAt);
+  });
+
+  it("400 conflicting_identity when both ownerId and resourceId are sent", async () => {
+    const { server } = await bootGateway({ withInstances: true });
+    const res = await server.handle(
+      new Request("http://test/api/agents/support/invoke", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          task: "hi",
+          namespaceId: "acme",
+          ownerId: "alice",
+          resourceId: "alice",
+        }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("conflicting_identity");
+  });
+
+  it("400 ownerId_unsupported when registry isn't configured", async () => {
+    const { server } = await bootGateway(); // withInstances: false
+    const res = await server.handle(
+      new Request("http://test/api/agents/support/invoke", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          task: "hi",
+          namespaceId: "acme",
+          ownerId: "alice",
+        }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("ownerId_unsupported");
+  });
+
+  it("raw resourceId path still works (no instance row touched)", async () => {
+    const { server, instanceRegistry } = await bootGateway({
+      responses: [{ content: "ok", finishReason: "stop" }],
+      withInstances: true,
+    });
+    const res = await server.handle(
+      new Request("http://test/api/agents/support/invoke", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          task: "hi",
+          namespaceId: "acme",
+          resourceId: "alice",
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { instanceId?: string };
+    expect(body.instanceId).toBeUndefined();
+    expect(await instanceRegistry!.list()).toHaveLength(0);
+  });
+
+  it("thread send with ownerId scopes the thread to instance.id", async () => {
+    const { server, memory } = await bootGateway({
+      responses: [{ content: "first reply", finishReason: "stop" }],
+      withInstances: true,
+    });
+    const res = await server.handle(
+      new Request("http://test/api/agents/support/threads/main", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          task: "hi",
+          namespaceId: "acme",
+          ownerId: "alice",
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { threadId: string; instanceId?: string };
+    expect(body.instanceId).toBe("acme::support::alice");
+
+    // The thread is keyed under the instance id, not "alice" raw.
+    const thread = await memory.getThread({
+      namespaceId: "acme",
+      resourceId: "acme::support::alice",
+      threadId: "main",
+    });
+    expect(thread).not.toBeNull();
   });
 });

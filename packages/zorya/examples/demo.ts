@@ -1032,6 +1032,10 @@ const server = new ZoryaServer({
   // across calls. Tools default to {} for now — no tool catalogue.
   agents: {
     registry: agentRegistry,
+    // When the gateway sees `ownerId` in an invoke body, it resolves an
+    // AgentInstance via this registry and uses instance.id as resourceId.
+    // Without it, ownerId in the body is rejected as ownerId_unsupported.
+    instanceRegistry,
     resolve: (recipe) =>
       resolveLocalAgent(recipe, {
         runner,

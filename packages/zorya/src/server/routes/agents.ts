@@ -27,6 +27,7 @@
 
 import type {
   Agent,
+  AgentInstanceRegistry,
   AgentRegistry,
   AgentThreadSummary,
   Message,
@@ -66,6 +67,8 @@ export interface InvokeResponse {
     cacheReadTokens?: number;
     cacheWriteTokens?: number;
   };
+  /** Set when the gateway resolved an AgentInstance from `ownerId`. */
+  instanceId?: string;
 }
 
 export interface ThreadInvokeResponse extends InvokeResponse {
@@ -81,6 +84,17 @@ export interface AgentGatewayDeps {
    * the gateway handles tenant scoping itself.
    */
   readonly resolve: (recipe: RegisteredAgent) => Agent;
+  /**
+   * Optional. When set, callers may pass `ownerId` instead of
+   * `resourceId` in the invoke body. The gateway resolves-or-creates an
+   * AgentInstance via this registry and uses `instance.id` as the
+   * resourceId for the cascade. The response carries the resolved
+   * `instanceId` so clients can skip the lookup on subsequent calls.
+   *
+   * When unset, `ownerId` in the body is rejected — the server can't
+   * honor the implied semantics without somewhere to record the row.
+   */
+  readonly instanceRegistry?: AgentInstanceRegistry;
 }
 
 /** Body shape for invoke / stream / thread send. */
@@ -88,6 +102,7 @@ interface InvokeRequest {
   readonly task?: unknown;
   readonly namespaceId?: unknown;
   readonly resourceId?: unknown;
+  readonly ownerId?: unknown;
   readonly metadata?: unknown;
 }
 
@@ -95,6 +110,7 @@ interface ParsedInvoke {
   readonly task: string;
   readonly namespaceId: string;
   readonly resourceId?: string;
+  readonly ownerId?: string;
 }
 
 function parseInvokeBody(body: InvokeRequest | null): ParsedInvoke | { error: string } {
@@ -107,7 +123,44 @@ function parseInvokeBody(body: InvokeRequest | null): ParsedInvoke | { error: st
   }
   const resourceId =
     typeof body.resourceId === "string" && body.resourceId.length > 0 ? body.resourceId : undefined;
-  return { task: body.task, namespaceId: body.namespaceId, resourceId };
+  const ownerId =
+    typeof body.ownerId === "string" && body.ownerId.length > 0 ? body.ownerId : undefined;
+  // Conflicting identity signals — caller has to pick one model. resourceId
+  // is "use this raw scope key", ownerId is "resolve an AgentInstance and
+  // use its id as the scope key". Both at once would be ambiguous about
+  // which row the gateway should write through to.
+  if (resourceId !== undefined && ownerId !== undefined) {
+    return { error: "conflicting_identity" };
+  }
+  return { task: body.task, namespaceId: body.namespaceId, resourceId, ownerId };
+}
+
+/**
+ * Resolve the effective `resourceId` for the agent scope:
+ *   - If `parsed.ownerId` is set, look up (or create) the AgentInstance
+ *     and use `instance.id`. Fail if the gateway has no registry.
+ *   - Otherwise, pass through `parsed.resourceId` (today's behaviour).
+ *
+ * Returns either `{ resourceId, instanceId? }` for the success path or
+ * `{ error }` for the structured error.
+ */
+async function resolveScope(
+  deps: AgentGatewayDeps,
+  registeredAgentId: string,
+  parsed: ParsedInvoke,
+): Promise<{ resourceId?: string; instanceId?: string } | { error: string }> {
+  if (parsed.ownerId !== undefined) {
+    if (!deps.instanceRegistry) {
+      return { error: "ownerId_unsupported" };
+    }
+    const instance = await deps.instanceRegistry.resolveOrCreate({
+      registeredAgentId,
+      namespaceId: parsed.namespaceId,
+      ownerId: parsed.ownerId,
+    });
+    return { resourceId: instance.id, instanceId: instance.id };
+  }
+  return { resourceId: parsed.resourceId };
 }
 
 // ---------------------------------------------------------------------------
@@ -154,11 +207,14 @@ export function invokeAgent(deps: AgentGatewayDeps) {
     const parsed = parseInvokeBody(body);
     if ("error" in parsed) return jsonError(400, parsed.error);
 
+    const scope = await resolveScope(deps, id, parsed);
+    if ("error" in scope) return jsonError(400, scope.error);
+
     let agent: Agent;
     try {
       agent = deps.resolve(recipe).withScope({
         namespaceId: parsed.namespaceId,
-        resourceId: parsed.resourceId,
+        resourceId: scope.resourceId,
       });
     } catch (err) {
       return jsonError(500, "resolve_failed", asMessage(err));
@@ -166,11 +222,13 @@ export function invokeAgent(deps: AgentGatewayDeps) {
 
     try {
       const out = await agent.invoke({ task: parsed.task });
-      return json(200, {
+      const response: InvokeResponse = {
         text: await out.text,
         finishReason: await out.finishReason,
         usage: await out.usage,
-      });
+      };
+      if (scope.instanceId !== undefined) response.instanceId = scope.instanceId;
+      return json(200, response);
     } catch (err) {
       return jsonError(500, "invoke_failed", asMessage(err));
     }
@@ -189,11 +247,14 @@ export function streamAgent(deps: AgentGatewayDeps) {
     const parsed = parseInvokeBody(body);
     if ("error" in parsed) return jsonError(400, parsed.error);
 
+    const scope = await resolveScope(deps, id, parsed);
+    if ("error" in scope) return jsonError(400, scope.error);
+
     let agent: Agent;
     try {
       agent = deps.resolve(recipe).withScope({
         namespaceId: parsed.namespaceId,
-        resourceId: parsed.resourceId,
+        resourceId: scope.resourceId,
       });
     } catch (err) {
       return jsonError(500, "resolve_failed", asMessage(err));
@@ -210,8 +271,10 @@ export function streamAgent(deps: AgentGatewayDeps) {
           const text = await out.text;
           const finishReason = await out.finishReason;
           const usage = await out.usage;
+          const finishPayload: Record<string, unknown> = { text, finishReason, usage };
+          if (scope.instanceId !== undefined) finishPayload.instanceId = scope.instanceId;
           controller.enqueue(
-            enc.encode(`event: finish\ndata: ${JSON.stringify({ text, finishReason, usage })}\n\n`),
+            enc.encode(`event: finish\ndata: ${JSON.stringify(finishPayload)}\n\n`),
           );
         } catch (err) {
           controller.enqueue(
@@ -255,11 +318,14 @@ export function sendThreadMessage(deps: AgentGatewayDeps) {
     const parsed = parseInvokeBody(body);
     if ("error" in parsed) return jsonError(400, parsed.error);
 
+    const scope = await resolveScope(deps, id, parsed);
+    if ("error" in scope) return jsonError(400, scope.error);
+
     let agent: Agent;
     try {
       agent = deps.resolve(recipe).withScope({
         namespaceId: parsed.namespaceId,
-        resourceId: parsed.resourceId,
+        resourceId: scope.resourceId,
       });
     } catch (err) {
       return jsonError(500, "resolve_failed", asMessage(err));
@@ -268,13 +334,15 @@ export function sendThreadMessage(deps: AgentGatewayDeps) {
     try {
       const thread = await agent.thread(threadId);
       const out = await thread.send({ task: parsed.task });
-      return json(200, {
+      const response: ThreadInvokeResponse = {
         threadId: thread.id,
         isNew: thread.isNew,
         text: await out.text,
         finishReason: await out.finishReason,
         usage: await out.usage,
-      });
+      };
+      if (scope.instanceId !== undefined) response.instanceId = scope.instanceId;
+      return json(200, response);
     } catch (err) {
       return jsonError(500, "send_failed", asMessage(err));
     }
@@ -295,11 +363,14 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
     const parsed = parseInvokeBody(body);
     if ("error" in parsed) return jsonError(400, parsed.error);
 
+    const scope = await resolveScope(deps, id, parsed);
+    if ("error" in scope) return jsonError(400, scope.error);
+
     let agent: Agent;
     try {
       agent = deps.resolve(recipe).withScope({
         namespaceId: parsed.namespaceId,
-        resourceId: parsed.resourceId,
+        resourceId: scope.resourceId,
       });
     } catch (err) {
       return jsonError(500, "resolve_failed", asMessage(err));
@@ -311,11 +382,12 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         const enc = new TextEncoder();
-        controller.enqueue(
-          enc.encode(
-            `event: thread\ndata: ${JSON.stringify({ threadId: thread.id, isNew: thread.isNew })}\n\n`,
-          ),
-        );
+        const threadEvent: Record<string, unknown> = {
+          threadId: thread.id,
+          isNew: thread.isNew,
+        };
+        if (scope.instanceId !== undefined) threadEvent.instanceId = scope.instanceId;
+        controller.enqueue(enc.encode(`event: thread\ndata: ${JSON.stringify(threadEvent)}\n\n`));
         try {
           for await (const delta of out.textStream) {
             controller.enqueue(enc.encode(`data: ${JSON.stringify({ delta })}\n\n`));
@@ -323,8 +395,10 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
           const text = await out.text;
           const finishReason = await out.finishReason;
           const usage = await out.usage;
+          const finishPayload: Record<string, unknown> = { text, finishReason, usage };
+          if (scope.instanceId !== undefined) finishPayload.instanceId = scope.instanceId;
           controller.enqueue(
-            enc.encode(`event: finish\ndata: ${JSON.stringify({ text, finishReason, usage })}\n\n`),
+            enc.encode(`event: finish\ndata: ${JSON.stringify(finishPayload)}\n\n`),
           );
         } catch (err) {
           controller.enqueue(
