@@ -195,7 +195,8 @@ describe("createDurableSchedulerTool — list / cancel", () => {
 });
 
 describe("dispatchAgentSchedule", () => {
-  function fakeAgent(captures: Array<{ task: string; thread?: string }>): Agent {
+  type Capture = { task: string; thread?: string; source?: AgentInput["source"] };
+  function fakeAgent(captures: Capture[]): Agent {
     const noopOutput: AgentRunOutput = {
       text: Promise.resolve("ok"),
       finishReason: Promise.resolve("stop"),
@@ -209,7 +210,7 @@ describe("dispatchAgentSchedule", () => {
       // biome-ignore lint/suspicious/noExplicitAny: test stub
       withScope: () => agent as any,
       invoke: async (input: AgentInput) => {
-        captures.push({ task: input.task });
+        captures.push({ task: input.task, source: input.source });
         return noopOutput;
       },
       stream: () => noopOutput,
@@ -217,7 +218,7 @@ describe("dispatchAgentSchedule", () => {
         id,
         isNew: false,
         send: async (input: AgentInput) => {
-          captures.push({ task: input.task, thread: id });
+          captures.push({ task: input.task, thread: id, source: input.source });
           return noopOutput;
         },
         stream: () => noopOutput,
@@ -234,8 +235,8 @@ describe("dispatchAgentSchedule", () => {
     return agent;
   }
 
-  it("invokes the recipe with a [Scheduled trigger:] prefixed task on the named thread", async () => {
-    const captures: Array<{ task: string; thread?: string }> = [];
+  it("invokes the recipe with the bare task + scheduled source on the named thread", async () => {
+    const captures: Capture[] = [];
     const registry = new InMemoryAgentRegistry();
     await registry.register({
       id: "writer",
@@ -272,11 +273,16 @@ describe("dispatchAgentSchedule", () => {
     expect(result.ok).toBe(true);
     expect(captures).toHaveLength(1);
     expect(captures[0]?.thread).toBe("t1");
-    expect(captures[0]?.task).toBe("[Scheduled trigger: 2026-04-28T14:00:00.000Z] Check Twitter");
+    expect(captures[0]?.task).toBe("Check Twitter");
+    expect(captures[0]?.source).toEqual({
+      kind: "scheduled",
+      firedAt: tick.scheduledAt,
+      scheduleId: "s-1",
+    });
   });
 
   it("falls back to invoke (no thread) when threadId isn't set", async () => {
-    const captures: Array<{ task: string; thread?: string }> = [];
+    const captures: Capture[] = [];
     const registry = new InMemoryAgentRegistry();
     await registry.register({
       id: "writer",

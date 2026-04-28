@@ -52,6 +52,7 @@ import {
 } from "../memory/consolidator.ts";
 import { createLayeredMemoryTool } from "../tools/layered-memory-tools.ts";
 import { createCallAgentTool, createFindAgentTool } from "../network/runtime.ts";
+import { frameTask } from "./frame-task.ts";
 import type {
   Agent,
   AgentEvent,
@@ -655,7 +656,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       .run({
         workflow: wf,
         workflowId,
-        input: { task: input.task, messages: [...(input.messages ?? [])] },
+        input: { task: frameTask(input), messages: [...(input.messages ?? [])] },
       })
       .then((r) => r as AgentResult);
     return { promise, capture };
@@ -770,7 +771,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       .run({
         workflow: wf,
         workflowId,
-        input: { task: input.task, messages: seed },
+        input: { task: frameTask(input), messages: seed },
       })
       .then(async (raw) => {
         const r = raw as AgentResult;

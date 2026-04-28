@@ -101,6 +101,7 @@ export type {
 export type {
   Agent,
   AgentInput as AgentInterfaceInput,
+  AgentInputSource,
   AgentThread,
   AgentRunOutput,
   AgentEvent,
@@ -118,6 +119,8 @@ export type {
 
 export { LocalAgent } from "./agent/local-agent.ts";
 export type { LocalAgentConfig } from "./agent/local-agent.ts";
+
+export { frameTask } from "./agent/frame-task.ts";
 
 // AgentRegistry — versioned recipe store.
 export type {

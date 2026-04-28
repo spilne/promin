@@ -216,11 +216,52 @@ export interface AgentScope {
   readonly resourceId?: string;
 }
 
+/**
+ * What kicked off this turn. The agent loop prefixes the user message
+ * with a structured framing line so the model can adjust tone (a
+ * scheduled trigger isn't a live user typing) without callers having
+ * to mangle the task string themselves. Defaults to a plain user turn
+ * when omitted.
+ *
+ * Producers (durable scheduler, webhook ingress, peer-agent delegation)
+ * pass `source` instead of pre-pending text into `task`. The framing
+ * stays the loop's responsibility, so changes to the wording are one
+ * edit, not N caller updates.
+ */
+export type AgentInputSource =
+  | { readonly kind: "user" }
+  | {
+      readonly kind: "scheduled";
+      /** When the scheduler tick fired. */
+      readonly firedAt: Date;
+      /** Optional schedule id — useful for log correlation. */
+      readonly scheduleId?: string;
+    }
+  | {
+      readonly kind: "webhook";
+      /** When the webhook hit the gateway. */
+      readonly receivedAt: Date;
+      /** Optional source label — `"github"`, `"stripe"`, … */
+      readonly origin?: string;
+    }
+  | {
+      readonly kind: "agent";
+      /** Recipe id of the agent that delegated this task. */
+      readonly callerAgentId: string;
+    };
+
 /** Default model-facing input — most backends use this shape. */
 export interface AgentInput {
   readonly task: string;
   /** Pre-existing messages to seed the thread / one-shot run. */
   readonly messages?: ReadonlyArray<Message>;
+  /**
+   * What kicked off the turn. The loop prepends a one-line framing
+   * header to the task before sending it as a user message — read by
+   * the model so it can adapt tone (notification voice vs chat). Omit
+   * for a plain user turn (no framing).
+   */
+  readonly source?: AgentInputSource;
 }
 
 /**

@@ -21,13 +21,14 @@
 // turn — into the original thread when `threadId` is present, or as a
 // one-shot `agent.invoke` otherwise.
 //
-// Task source UX (v1)
-// -------------------
-// We wrap the task with `[Scheduled trigger: <iso>] ${task}` so the
-// model sees a clear signal that this isn't a live user typing — it
-// can adapt its tone (notification voice vs conversational). When
-// `AgentInput.source` lands as a first-class field this wrap goes
-// away in favour of the loop prepending its own framing.
+// Task source UX
+// --------------
+// The dispatcher passes `source: { kind: "scheduled", firedAt }` on
+// the AgentInput; the agent loop's framing helper prepends a
+// `[Scheduled trigger at <iso>]` header to the task before sending it
+// to the model. The header signals "this isn't a live user typing"
+// so the model can adapt tone — and the wording lives in one place
+// (frame-task.ts), not in every dispatch caller.
 // ---------------------------------------------------------------------------
 
 import type { ScheduleTick, DurableScheduleConfig } from "@promin/workflow";
@@ -117,20 +118,27 @@ export async function dispatchAgentSchedule(
     }
   }
 
-  const wrappedTask = `[Scheduled trigger: ${tick.scheduledAt.toISOString()}] ${meta.task}`;
   const agent = deps.resolve(recipe).withScope({
     namespaceId: meta.namespaceId,
     ...(meta.resourceId !== undefined && { resourceId: meta.resourceId }),
   });
+  const input = {
+    task: meta.task,
+    source: {
+      kind: "scheduled" as const,
+      firedAt: tick.scheduledAt,
+      scheduleId: tick.scheduleId,
+    },
+  };
 
   try {
     let text: string;
     if (meta.threadId) {
       const thread = await agent.thread(meta.threadId);
-      const out = await thread.send({ task: wrappedTask });
+      const out = await thread.send(input);
       text = await out.text;
     } else {
-      const out = await agent.invoke({ task: wrappedTask });
+      const out = await agent.invoke(input);
       text = await out.text;
     }
     const result = { ok: true as const, text };
