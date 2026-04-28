@@ -51,6 +51,7 @@ import {
   type DistillThreadOptions,
 } from "../memory/consolidator.ts";
 import { createLayeredMemoryTool } from "../tools/layered-memory-tools.ts";
+import { createCallAgentTool, createFindAgentTool } from "../network/runtime.ts";
 import type {
   Agent,
   AgentEvent,
@@ -174,6 +175,20 @@ export interface LocalAgentConfig<TOutput = any> {
    * message buffer with no cascade.
    */
   readonly contextBudget?: TokenBudget;
+  /**
+   * Optional agents-network wiring. When set together with a recipe-side
+   * `backend.network` declaration, `findAgent` and `callAgent` are
+   * auto-attached to every turn so the agent can discover + delegate to
+   * peers. Without it, the recipe's `network` field is ignored.
+   *
+   * The shape mirrors `NetworkRuntimeDeps` from
+   * `packages/agent/src/lib/network/runtime.ts` plus this agent's
+   * recipe (used for the policy check) — the resolver fills both in.
+   */
+  readonly network?: {
+    readonly deps: import("../network/runtime.ts").NetworkRuntimeDeps;
+    readonly recipe: import("../registry/types.ts").RegisteredAgent;
+  };
 }
 
 export interface AutoCompactConfig {
@@ -416,7 +431,11 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     // structural shape but isn't actually used for thread send/stream.
     const loopConfig: AgentLoopConfig = {
       ...this.config.agent,
-      tools: this.buildTools(key),
+      tools: this.buildTools({
+        namespaceId: key.namespaceId,
+        resourceId: key.resourceId,
+        threadId: key.threadId,
+      }),
     };
     const loop = agentLoop(loopConfig);
 
@@ -440,18 +459,73 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
    * configured and `autoMemoryTool` is not explicitly disabled. User-supplied
    * tools win on key collision (so callers can override with their own).
    */
-  private buildTools(key: ThreadKey): AgentLoopConfig["tools"] {
+  /**
+   * Build the per-turn tool kit. Used by both the conversational
+   * (`thread.send`) path with a full ThreadKey AND the one-shot
+   * (`invoke` / `stream`) path with just the scope. The memory tool
+   * attaches only when threadId is known; the network tools attach
+   * whenever the recipe opted in and a namespaceId is resolved.
+   */
+  private buildTools(scope: {
+    namespaceId?: string;
+    resourceId?: string;
+    threadId?: string;
+  }): AgentLoopConfig["tools"] {
     const userTools = this.config.agent.tools;
-    if (!this.config.memory) return userTools;
-    if (this.config.autoMemoryTool === false) return userTools;
-    if (userTools && "memory" in userTools) return userTools;
-    const memoryTool = createLayeredMemoryTool({
-      store: this.config.memory,
-      namespaceId: key.namespaceId,
-      resourceId: key.resourceId,
-      threadId: key.threadId,
-    });
-    return { ...(userTools ?? {}), memory: memoryTool };
+    let tools: AgentLoopConfig["tools"] = userTools;
+
+    // Auto-attached memory tool — needs a threadId, only the thread path
+    // has one. One-shot invoke is stateless by design.
+    if (
+      scope.threadId &&
+      scope.namespaceId &&
+      this.config.memory &&
+      this.config.autoMemoryTool !== false &&
+      !(userTools && "memory" in userTools)
+    ) {
+      const memoryTool = createLayeredMemoryTool({
+        store: this.config.memory,
+        namespaceId: scope.namespaceId,
+        resourceId: scope.resourceId,
+        threadId: scope.threadId,
+      });
+      tools = { ...tools, memory: memoryTool };
+    }
+
+    // Auto-attached network tools — recipe opt-in + host deps + a
+    // resolved namespace. Built per-turn because they close over the
+    // current scope.
+    if (this.config.network && scope.namespaceId) {
+      const recipe = this.config.network.recipe;
+      const networkRecipe = recipe.backend.type === "local" ? recipe.backend.network : undefined;
+      if (networkRecipe) {
+        const inferred = inferOwnerId(scope.resourceId);
+        const callerScope: import("../network/runtime.ts").NetworkCallerScope = {
+          namespaceId: scope.namespaceId,
+          ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
+          ...(inferred !== undefined && { ownerId: inferred }),
+        };
+        const findAgent = createFindAgentTool({
+          deps: this.config.network.deps,
+          scope: callerScope,
+          callerRecipe: recipe,
+          network: networkRecipe,
+        });
+        const callAgent = createCallAgentTool({
+          deps: this.config.network.deps,
+          scope: callerScope,
+          callerRecipe: recipe,
+          network: networkRecipe,
+        });
+        // Don't shadow user-supplied tools of the same name — host wins.
+        const merged: NonNullable<typeof tools> = { ...tools };
+        if (!("findAgent" in merged)) merged.findAgent = findAgent;
+        if (!("callAgent" in merged)) merged.callAgent = callAgent;
+        tools = merged;
+      }
+    }
+
+    return tools;
   }
 
   /**
@@ -549,7 +623,18 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     // Re-build agentAction with an injected bus when streaming. We can't
     // mutate the AgentLoopConfig that was used to build `this.loop`, so
     // one-shot uses an inline action.
-    const { agent } = this.config;
+    //
+    // Tools come from buildTools so the network tools auto-attach for
+    // one-shot invoke too — the thread path used to be the only caller.
+    // No threadId here (one-shot is stateless), so the layered memory
+    // tool stays opt-out for invoke.
+    const agent = {
+      ...this.config.agent,
+      tools: this.buildTools({
+        namespaceId: opts?.namespaceId ?? this.config.namespaceId,
+        resourceId: this.config.resourceId,
+      }),
+    };
     // Pass everything except agentLoop-specific knobs into agentAction.
     const actionConfig = toActionConfig(agent, bus);
     const wf = (agentAction as (cfg: AgentActionConfig<TOutput>) => ReturnType<typeof agentAction>)(
@@ -1244,6 +1329,20 @@ function sumUsage(
 function stripStorageMeta(m: Message & { seq?: number; createdAt?: number }): Message {
   const { seq: _seq, createdAt: _createdAt, ...rest } = m as Record<string, unknown> & Message;
   return rest as Message;
+}
+
+/**
+ * Recover the `ownerId` from a composed AgentInstance id of the form
+ * `${namespaceId}::${registeredAgentId}::${ownerId}`. Returns undefined
+ * for resourceIds that don't match the convention so `callAgent` can
+ * fall through to non-instance behaviour.
+ */
+function inferOwnerId(resourceId: string | undefined): string | undefined {
+  if (!resourceId) return undefined;
+  const parts = resourceId.split("::");
+  if (parts.length !== 3) return undefined;
+  const owner = parts[2];
+  return owner && owner.length > 0 ? owner : undefined;
 }
 
 // ---- ChunkQueue (single-consumer async queue, ported from agent-loop) ----

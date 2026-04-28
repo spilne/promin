@@ -89,6 +89,13 @@ export interface ResolveLocalAgentDeps {
    * the trimmed gist instead of seeing the full raw history.
    */
   readonly contextBudget?: TokenBudget;
+  /**
+   * Optional agents-network wiring. When set, recipes that declare
+   * `backend.network` get `findAgent` + `callAgent` auto-attached.
+   * Without it, a recipe's `network` field is ignored — the host hasn't
+   * opted into the network surface.
+   */
+  readonly network?: import("../network/runtime.ts").NetworkRuntimeDeps;
 }
 
 /**
@@ -134,6 +141,10 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
     autoCompact,
     autoDistill,
     contextBudget,
+    // Auto-attach findAgent / callAgent only when both sides opt in:
+    // the recipe declares `backend.network` AND the host wired runtime
+    // deps. Recipe alone or deps alone is a no-op.
+    ...(backend.network && deps.network ? { network: { deps: deps.network, recipe: agent } } : {}),
   };
 
   return new LocalAgent(config);

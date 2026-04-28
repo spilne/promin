@@ -138,6 +138,23 @@ export type { InMemoryAgentRegistryConfig } from "./registry/in-memory-agent-reg
 export { resolveLocalAgent } from "./registry/resolve-local-agent.ts";
 export type { ResolveLocalAgentDeps } from "./registry/resolve-local-agent.ts";
 
+// Network — peer discovery + delegation (findAgent, callAgent). Opt-in
+// per recipe via `backend.network`. See packages/agent/src/lib/network/types.ts.
+export {
+  DEFAULT_NETWORK,
+  DEFAULT_MAX_DEPTH,
+  NetworkMaxDepthError,
+  NetworkPermissionError,
+  matchesNetworkScope,
+  networksOverlap,
+  peerVisible,
+} from "./network/types.ts";
+export type { NetworkRecipe, NetworkScope, NetworkScopeObject, PeerView } from "./network/types.ts";
+export type { NetworkRuntimeDeps, NetworkCallerScope } from "./network/runtime.ts";
+export { createFindAgentTool, createCallAgentTool } from "./network/runtime.ts";
+export { currentCallContext, nextCallFrame, runInCallContext } from "./network/depth.ts";
+export type { NetworkCallContext } from "./network/depth.ts";
+
 // Instance — long-lived agent instances keyed by (registeredAgentId, namespace, ownerId).
 // Class/instance: RegisteredAgent is the recipe, AgentInstance is the live
 // thing with its own state. The actual chat state stays in MemoryStore under

@@ -41,6 +41,8 @@ import {
   type LLMProvider,
   type LLMResponse,
   type LLMStreamChunk,
+  type Agent,
+  type RegisteredAgent,
   type RegisterAgentInput,
 } from "@promin/agent";
 import { echoLLM } from "@promin/agent/testing";
@@ -518,6 +520,54 @@ async function seedAgents() {
 // gets the same liveOnly gating without restarting.
 function filterAgentsByCapability(agents: ReadonlyArray<RegisterAgentInput>): RegisterAgentInput[] {
   return agents.filter((a) => !liveOnlyAgentIds.has(a.id) || haveAnthropicKey);
+}
+
+// Materialize a recipe into a live LocalAgent. Defined as a named
+// function so the network deps can pass it back in for recursive
+// `callAgent` lookups — the closure binds whichever ref is current
+// when the tool fires.
+function resolveAgent(recipe: RegisteredAgent): Agent {
+  return resolveLocalAgent(recipe, {
+    runner,
+    memory: memoryStore,
+    llm: () => agentLlms[recipe.id] ?? naturalLLM(echoLLM()),
+    tools: agentTools[recipe.id] ?? {},
+    // Distillation is summarisation work — use Haiku when we have a
+    // real key (cheaper / faster than Sonnet), fall back to the
+    // chat LLM for mock agents (echoLLM round-trip is free anyway).
+    consolidatorLlm: haveAnthropicKey ? anthropic("claude-haiku-4-5-20251001") : undefined,
+    // Auto-fire compactThread after each thread turn once the
+    // uncompacted backlog crosses either gate. Demo numbers — low
+    // enough that you'll see a rollup episode appear in the
+    // inspector after a handful of chat turns. `background` mode
+    // keeps the user-visible turn snappy.
+    autoCompact: {
+      messageThreshold: 12,
+      tokenThreshold: 4_000,
+      keepRecent: 6,
+      mode: "background",
+    },
+    // Auto-fire distillThread once a thread reaches a sensible
+    // "this conversation has substance" length. Blocking mode
+    // here so concurrent turns can't both fire while the first
+    // distill's LLM call is still in flight.
+    autoDistill: {
+      messageThreshold: 6,
+      mode: "blocking",
+    },
+    contextBudget: {
+      maxMessageTokens: 32_000,
+      maxEpisodeTokens: 4_000,
+    },
+    // Agents-network wiring: gives recipes that declared backend.network
+    // access to findAgent + callAgent. Recursive — callees use the same
+    // resolver so the chain stays in lockstep with the host's config.
+    network: {
+      registry: agentRegistry,
+      resolve: resolveAgent,
+      instanceRegistry,
+    },
+  });
 }
 
 // Demo tenants. Mirrors the UI default in agent-detail.tsx.
@@ -1036,48 +1086,7 @@ const server = new ZoryaServer({
     // AgentInstance via this registry and uses instance.id as resourceId.
     // Without it, ownerId in the body is rejected as ownerId_unsupported.
     instanceRegistry,
-    resolve: (recipe) =>
-      resolveLocalAgent(recipe, {
-        runner,
-        memory: memoryStore,
-        llm: () => agentLlms[recipe.id] ?? naturalLLM(echoLLM()),
-        tools: agentTools[recipe.id] ?? {},
-        // Distillation is summarisation work — use Haiku when we have a
-        // real key (cheaper / faster than Sonnet), fall back to the
-        // chat LLM for mock agents (echoLLM round-trip is free anyway).
-        consolidatorLlm: haveAnthropicKey ? anthropic("claude-haiku-4-5-20251001") : undefined,
-        // Auto-fire compactThread after each thread turn once the
-        // uncompacted backlog crosses either gate. Demo numbers — low
-        // enough that you'll see a rollup episode appear in the
-        // inspector after a handful of chat turns. `background` mode
-        // keeps the user-visible turn snappy.
-        autoCompact: {
-          messageThreshold: 12,
-          tokenThreshold: 4_000,
-          keepRecent: 6,
-          mode: "background",
-        },
-        // Auto-fire distillThread once a thread reaches a sensible
-        // "this conversation has substance" length. Blocking mode
-        // here so concurrent turns can't both fire while the first
-        // distill's LLM call is still in flight (the consolidator's
-        // idempotency check is a non-atomic list-then-write — under
-        // background mode two near-simultaneous turns might each see
-        // "no episode yet" and both write). Distill runs rarely, so
-        // adding the LLM round-trip to the triggering turn is fine.
-        autoDistill: {
-          messageThreshold: 6,
-          mode: "blocking",
-        },
-        // Consume the rollups + facts compactThread / distillThread
-        // write. maxEpisodeTokens > 0 means future turns under the
-        // same (namespace, resource) see the gist injected into the
-        // system prompt — the cross-thread memory loop end-to-end.
-        contextBudget: {
-          maxMessageTokens: 32_000,
-          maxEpisodeTokens: 4_000,
-        },
-      }),
+    resolve: resolveAgent,
   },
   // Same store the resolver uses, so the inspector reads the live cascade.
   memoryInspector: { memory: memoryStore },

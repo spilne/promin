@@ -39,6 +39,15 @@ export const KNOWLEDGE_BOT: RegisterAgentInput = {
       maxMessageTokens: 64_000,
       maxEpisodeTokens: 8_000,
     },
+    // Opts into the agents network so the model can discover and delegate
+    // to peers in the same namespace. v1 policy: any peer in the default
+    // network is fair game; depth-3 cap stops runaway A→B→A chains.
+    network: {
+      networks: ["default"],
+      canDiscover: true,
+      canCall: true,
+      maxDepth: 3,
+    },
   },
   metadata: {
     description:

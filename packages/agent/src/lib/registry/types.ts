@@ -22,6 +22,8 @@
 //    per-call opts (see LocalAgent.bind).
 // ---------------------------------------------------------------------------
 
+import type { NetworkRecipe } from "../network/types.ts";
+
 /**
  * A registered agent recipe — JSON-serializable, durable, version-keyed.
  * The runtime resolves this into a live `Agent` by combining it with
@@ -82,6 +84,13 @@ export interface LocalAgentBackend {
    * host-supplied).
    */
   readonly contextBudget?: ContextBudgetRecipe;
+  /**
+   * Recipe-level opt-in to the agents network. When set, the resolver
+   * auto-attaches `findAgent` and `callAgent` tools so this agent can
+   * discover and delegate to peers in the same namespace. Leave unset
+   * to keep this agent isolated. See `packages/agent/src/lib/network/types.ts`.
+   */
+  readonly network?: NetworkRecipe;
   /** Free-form extension knobs the resolver may consume. */
   readonly extra?: Readonly<Record<string, unknown>>;
 }
