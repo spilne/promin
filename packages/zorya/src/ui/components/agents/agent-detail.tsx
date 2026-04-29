@@ -122,6 +122,7 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
               setActiveThread(threadId);
               refreshThreads();
             }}
+            onRenamed={refreshThreads}
           />
           {activeThread ? (
             <ChatPane
@@ -213,6 +214,7 @@ function ThreadSidebar({
   activeThread,
   onSelect,
   onNew,
+  onRenamed,
 }: {
   agentId: string;
   tenant: Tenant;
@@ -220,14 +222,42 @@ function ThreadSidebar({
   activeThread: string | null;
   onSelect: (id: string) => void;
   onNew: (id: string) => void;
+  onRenamed: () => void;
 }) {
   const [newId, setNewId] = useState("");
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
 
   const startNew = () => {
     const trimmed = newId.trim();
     const id = trimmed || `chat-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}`;
     setNewId("");
     onNew(id);
+  };
+
+  const beginRename = (t: ThreadSummary) => {
+    setRenamingId(t.id);
+    const current = (t.metadata?.title as string | undefined) ?? "";
+    setRenameDraft(current);
+  };
+
+  const commitRename = async (t: ThreadSummary) => {
+    const next = renameDraft.trim();
+    setRenamingId(null);
+    const current = (t.metadata?.title as string | undefined) ?? "";
+    if (next === current) return;
+    try {
+      await api.renameAgentThread(agentId, t.id, {
+        namespaceId: tenant.namespaceId,
+        resourceId: tenant.resourceId || undefined,
+        title: next || null,
+      });
+      onRenamed();
+    } catch (err) {
+      toast(`Rename failed: ${err instanceof Error ? err.message : String(err)}`, {
+        variant: "error",
+      });
+    }
   };
 
   return (
@@ -256,21 +286,78 @@ function ThreadSidebar({
             No threads for {tenant.namespaceId}/{tenant.resourceId}.
           </li>
         )}
-        {threads.map((t) => (
-          <li>
-            <a
-              class={`flex flex-col items-start gap-0 ${activeThread === t.id ? "active" : ""}`}
-              onClick={() => onSelect(t.id)}
-            >
-              <span class="font-mono text-xs truncate w-full" title={t.id}>
-                {t.id}
-              </span>
-              <span class="text-[10px] text-base-content/50">
-                {t.messageCount} msg · {formatRelative(new Date(t.lastActiveAt).toISOString())}
-              </span>
-            </a>
-          </li>
-        ))}
+        {threads.map((t) => {
+          const title = (t.metadata?.title as string | undefined) ?? "";
+          const isRenaming = renamingId === t.id;
+          return (
+            <li>
+              <div
+                class={`flex flex-col items-start gap-0 px-2 py-1 rounded cursor-pointer hover:bg-base-200 ${
+                  activeThread === t.id ? "bg-base-200" : ""
+                }`}
+                onClick={() => !isRenaming && onSelect(t.id)}
+              >
+                {isRenaming ? (
+                  // Inline rename: enter to commit, escape to cancel,
+                  // blur acts as commit too so click-away saves the edit.
+                  <input
+                    class="input input-bordered input-xs w-full"
+                    value={renameDraft}
+                    autoFocus
+                    onClick={(e) => e.stopPropagation()}
+                    onInput={(e) => setRenameDraft((e.target as HTMLInputElement).value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void commitRename(t);
+                      if (e.key === "Escape") setRenamingId(null);
+                    }}
+                    onBlur={() => void commitRename(t)}
+                    placeholder="thread title"
+                  />
+                ) : (
+                  <div class="flex items-center gap-1 w-full">
+                    <span
+                      class={`text-xs truncate flex-1 ${title ? "" : "font-mono text-base-content/70"}`}
+                      title={t.id}
+                    >
+                      {title || t.id}
+                    </span>
+                    <button
+                      class="btn btn-square btn-ghost btn-xs opacity-0 group-hover:opacity-100"
+                      style={{ opacity: 0.6 }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        beginRename(t);
+                      }}
+                      title="Rename"
+                      aria-label="Rename"
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="11"
+                        height="11"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      >
+                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                      </svg>
+                    </button>
+                  </div>
+                )}
+                {!isRenaming && (
+                  <span class="text-[10px] text-base-content/50">
+                    {title ? <span class="font-mono mr-1">{t.id}</span> : null}
+                    {t.messageCount} msg · {formatRelative(new Date(t.lastActiveAt).toISOString())}
+                  </span>
+                )}
+              </div>
+            </li>
+          );
+        })}
       </ul>
       <div class="px-3 py-1 border-t border-base-content/10 text-[10px] text-base-content/40 font-mono truncate">
         agent: {agentId}
@@ -336,6 +423,9 @@ function ChatPane({
     toolCallId: string;
     toolName: string;
   } | null>(null);
+  // Drawer for the per-thread schedule list. Lives at the ChatPane
+  // level so the Schedules button in the header can flip it.
+  const [schedulesOpen, setSchedulesOpen] = useState(false);
   const abortRef = useRef<{ abort: () => void } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -464,10 +554,17 @@ function ChatPane({
         <div class="flex gap-1 shrink-0">
           <button
             class="btn btn-xs btn-ghost"
-            onClick={onInspect}
-            title="Browse memory: resolved prompt, namespace/resource/thread cascade, switch threads"
+            onClick={() => setSchedulesOpen(true)}
+            title="Schedules created by this thread — view + cancel cron / interval triggers the agent set up"
           >
-            ⌬ Memory
+            ⏱ Schedules
+          </button>
+          <button
+            class="btn btn-xs btn-ghost"
+            onClick={onInspect}
+            title="Inspect resolved prompt, namespace/resource/thread cascade, working memory, facts, episodes"
+          >
+            ⌬ Debug
           </button>
           <button class="btn btn-xs btn-ghost" onClick={() => refreshMessages()} title="Refresh">
             ↻
@@ -542,6 +639,13 @@ function ChatPane({
           </button>
         )}
       </div>
+      {schedulesOpen && (
+        <ThreadSchedulesDrawer
+          threadId={threadId}
+          tenant={tenant}
+          onClose={() => setSchedulesOpen(false)}
+        />
+      )}
     </section>
   );
 }
@@ -683,6 +787,118 @@ function formatJson(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+/**
+ * Thread-scoped schedule list — modal drawer triggered from the ⏱
+ * Schedules button in the chat header. Lists every durable schedule
+ * the agent created in this thread and lets the user cancel any of
+ * them. Filtered client-side from the namespace-wide schedules list:
+ * `metadata.threadId === threadId` AND `metadata.agentTrigger === true`.
+ */
+function ThreadSchedulesDrawer({
+  threadId,
+  tenant,
+  onClose,
+}: {
+  threadId: string;
+  tenant: Tenant;
+  onClose: () => void;
+}) {
+  const { data, loading, error, refresh } = useFetch(
+    () => api.listSchedules({ namespace: tenant.namespaceId }),
+    [tenant.namespaceId, threadId],
+    15_000,
+  );
+
+  const schedules = useMemo(() => {
+    const all = data?.schedules ?? [];
+    return all.filter((s) => {
+      const meta = (s.metadata ?? {}) as Record<string, unknown>;
+      if (meta.agentTrigger !== true) return false;
+      if (meta.threadId !== threadId) return false;
+      return true;
+    });
+  }, [data, threadId]);
+
+  const cancel = async (id: string) => {
+    try {
+      await api.deleteSchedule(id);
+      toast(`Cancelled schedule ${id}`);
+      refresh();
+    } catch (e) {
+      toast(`Failed to cancel: ${(e as Error).message}`, { variant: "error" });
+    }
+  };
+
+  return (
+    <div class="modal modal-open" onClick={onClose}>
+      <div class="modal-box max-w-2xl" onClick={(e) => e.stopPropagation()}>
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="font-semibold text-base">Schedules in this thread</h3>
+          <button class="btn btn-xs btn-ghost" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <p class="text-xs text-base-content/50 mb-3">
+          Cron / interval / RRULE triggers the agent created in{" "}
+          <span class="font-mono">{threadId}</span>. Each fire re-invokes the agent in this thread
+          with the saved task.
+        </p>
+
+        {error && <div class="alert alert-error text-xs mb-3">{error.message}</div>}
+        {loading && !data && (
+          <div class="space-y-2">
+            <Skeleton w="w-3/4" h="h-4" />
+            <Skeleton w="w-1/2" h="h-4" />
+          </div>
+        )}
+
+        {!loading && schedules.length === 0 && (
+          <div class="text-sm text-base-content/50 py-6 text-center">
+            No schedules in this thread yet. Ask the agent to schedule something — e.g.{" "}
+            <em>"Every Monday at 9am summarise active runs"</em>.
+          </div>
+        )}
+
+        {schedules.length > 0 && (
+          <ul class="divide-y divide-base-content/10">
+            {schedules.map((s) => (
+              <li key={s.id} class="py-2 flex items-start justify-between gap-3">
+                <div class="min-w-0 flex-1">
+                  <div class="text-sm font-medium truncate" title={s.name ?? s.id}>
+                    {s.name ?? s.id}
+                  </div>
+                  <div class="text-xs text-base-content/60 break-words">
+                    {(s.metadata?.["task"] as string) ?? "—"}
+                  </div>
+                  <div class="text-[11px] text-base-content/40 font-mono mt-1">
+                    {scheduleTriggerSummary(s)} ·{" "}
+                    {s.nextRunAt ? `next ${formatRelative(s.nextRunAt)}` : "no next run"} · id:{" "}
+                    {s.id}
+                  </div>
+                </div>
+                <button
+                  class="btn btn-xs btn-ghost text-error shrink-0"
+                  onClick={() => cancel(s.id)}
+                >
+                  Cancel
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      <div class="modal-backdrop" onClick={onClose} />
+    </div>
+  );
+}
+
+function scheduleTriggerSummary(s: { cron?: string; intervalMs?: number; rrule?: string }): string {
+  if (s.cron) return `cron ${s.cron}`;
+  if (s.rrule) return `rrule ${s.rrule}`;
+  if (s.intervalMs !== undefined) return `every ${(s.intervalMs / 1000).toLocaleString()}s`;
+  return "no trigger";
 }
 
 /**
