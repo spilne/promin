@@ -6,18 +6,28 @@ import type { ScheduleDto } from "../../../server/routes/schedules.ts";
 import { formatCountdown, formatDuration, formatRelative } from "../../lib/format.ts";
 import { confirm, toast } from "../../lib/dialogs.ts";
 import { CreateScheduleModal } from "./create-schedule-modal.tsx";
+import { ScheduleDrawer } from "./schedule-drawer.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { Pagination } from "../ui/pagination.tsx";
 import { Page } from "../ui/page.tsx";
 
 const PAGE_SIZE = 20;
-type StatusFilter = "all" | "enabled" | "paused";
+type StatusFilter = "all" | "active" | "cancelled";
+type KindFilter = "all" | "workflow" | "agent";
 type ScheduleSortCol = "name" | "lastFire" | "nextFire" | "tickCount" | "status";
 type ScheduleSortState = { col: ScheduleSortCol; dir: "asc" | "desc" } | null;
+// Status maps directly onto the `enabled` flag — cancelled = enabled:false.
+// Same shape the chat drawer uses; both surfaces talk about cancelled
+// schedules in the same terms.
 const STATUS_FILTERS: ReadonlyArray<{ id: StatusFilter; label: string }> = [
   { id: "all", label: "All" },
-  { id: "enabled", label: "Enabled" },
-  { id: "paused", label: "Paused" },
+  { id: "active", label: "Active" },
+  { id: "cancelled", label: "Cancelled" },
+];
+const KIND_FILTERS: ReadonlyArray<{ id: KindFilter; label: string }> = [
+  { id: "all", label: "All kinds" },
+  { id: "workflow", label: "Workflows" },
+  { id: "agent", label: "Agents" },
 ];
 
 interface ScheduleListProps {
@@ -27,14 +37,30 @@ interface ScheduleListProps {
 export function ScheduleList({ onNavigate }: ScheduleListProps) {
   const [showCreate, setShowCreate] = useState(false);
   const [editing, setEditing] = useState<ScheduleDto | undefined>(undefined);
+  const [peeking, setPeeking] = useState<string | undefined>(undefined);
   const [namespace] = useNamespace();
+  const [kindFilter, setKindFilter] = useState<KindFilter>("all");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("active");
+  // Both filters push through to storage:
+  //  - Status: maps directly to the `enabled` query param
+  //    (`active` → enabled:true, `cancelled` → enabled:false, `all` omitted).
+  //  - Kind: `agent` becomes a `metadata: { agentTrigger: true }`
+  //    containment query; `workflow` needs a client-side post-filter
+  //    because storage containment can't express "key is absent".
+  // Defaults to `active` so cancelled rows don't crowd the operator
+  // view by default — flip the chip to surface them.
   const { data, loading, error, refresh } = useFetch(
-    () => api.listSchedules({ namespace: namespace || undefined }),
-    [namespace],
+    () =>
+      api.listSchedules({
+        namespace: namespace || undefined,
+        ...(statusFilter === "active" && { enabled: true }),
+        ...(statusFilter === "cancelled" && { enabled: false }),
+        ...(kindFilter === "agent" && { metadata: { agentTrigger: true } }),
+      }),
+    [namespace, kindFilter, statusFilter],
     10_000,
   );
   const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [page, setPage] = useState(1);
   const [sort, setSort] = useState<ScheduleSortState>(null);
 
@@ -42,14 +68,17 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
     const all = data?.schedules ?? [];
     const q = query.trim().toLowerCase();
     return all.filter((s) => {
-      if (statusFilter === "enabled" && !s.enabled) return false;
-      if (statusFilter === "paused" && s.enabled) return false;
+      // Kind filter — `agent` is a positive server-side match (already
+      // applied at fetch). `workflow` needs a client-side exclusion of
+      // agent rows because storage containment can't express "key is
+      // absent". `all` passes everything through.
+      if (kindFilter === "workflow" && s.metadata?.["agentTrigger"] === true) return false;
       if (!q) return true;
       const wfName = (s.metadata?.["workflowName"] as string | undefined) ?? "";
       const fields = [s.id, s.name ?? "", wfName, s.cron ?? "", s.rrule ?? ""];
       return fields.some((f) => f.toLowerCase().includes(q));
     });
-  }, [data, query, statusFilter]);
+  }, [data, query, kindFilter]);
 
   const sorted = useMemo(() => {
     if (!sort) return filtered;
@@ -83,7 +112,7 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
 
   useEffect(() => {
     setPage(1);
-  }, [query, statusFilter]);
+  }, [query, statusFilter, kindFilter]);
 
   if (loading && !data) {
     return (
@@ -126,11 +155,24 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
   const configured = data?.configured !== false;
   const schedules = data?.schedules ?? [];
 
+  // Soft cancel via the `enabled` flag — same primitive the chat drawer
+  // uses (`patchSchedule({ enabled: false })`). Both surfaces talk
+  // about cancelled schedules in the same terms.
   const togglePause = async (s: ScheduleDto) => {
     try {
       await api.patchSchedule(s.id, { enabled: !s.enabled });
       refresh();
-      toast(s.enabled ? "Schedule paused" : "Schedule resumed", { variant: "success" });
+      toast(s.enabled ? "Schedule cancelled" : "Schedule restored", { variant: "success" });
+    } catch (e) {
+      toast(`Failed: ${e}`, { variant: "error" });
+    }
+  };
+
+  const emitNow = async (s: ScheduleDto) => {
+    try {
+      await api.emitSchedule(s.id);
+      refresh();
+      toast(`Emitting ${s.id}…`, { variant: "success" });
     } catch (e) {
       toast(`Failed: ${e}`, { variant: "error" });
     }
@@ -186,8 +228,29 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
         </div>
       )}
 
-      {configured && schedules.length > 0 && (
+      {/* Filter row stays mounted whenever the scheduler is configured —
+          previously gated on `schedules.length > 0`, which made the chips
+          (and Clear button) disappear the moment a filter narrowed to
+          zero results, trapping the user in the empty state. */}
+      {configured && (
         <div class="flex items-center gap-2 flex-wrap justify-end">
+          <div class="join">
+            {KIND_FILTERS.map((f) => (
+              <button
+                class={`btn btn-sm join-item ${kindFilter === f.id ? "btn-primary" : "btn-ghost"}`}
+                onClick={() => setKindFilter(f.id)}
+                title={
+                  f.id === "agent"
+                    ? "Schedules created by agents (durable scheduler tool)"
+                    : f.id === "workflow"
+                      ? "Schedules that trigger a registered workflow"
+                      : "All schedule kinds"
+                }
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
           <div class="join">
             {STATUS_FILTERS.map((f) => (
               <button
@@ -210,13 +273,16 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
               row left when "Clear" appears — fades via opacity transition. */}
           <button
             class={`btn btn-sm btn-ghost transition-opacity duration-150 ${
-              query || statusFilter !== "all" ? "opacity-100" : "opacity-0 pointer-events-none"
+              query || statusFilter !== "all" || kindFilter !== "all"
+                ? "opacity-100"
+                : "opacity-0 pointer-events-none"
             }`}
-            aria-hidden={!(query || statusFilter !== "all")}
-            tabIndex={query || statusFilter !== "all" ? 0 : -1}
+            aria-hidden={!(query || statusFilter !== "all" || kindFilter !== "all")}
+            tabIndex={query || statusFilter !== "all" || kindFilter !== "all" ? 0 : -1}
             onClick={() => {
               setQuery("");
               setStatusFilter("all");
+              setKindFilter("all");
             }}
           >
             Clear
@@ -227,7 +293,11 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
       {configured && schedules.length === 0 && (
         <div class="card bg-base-100 shadow">
           <div class="card-body py-8 text-center text-base-content/50">
-            No schedules yet — click "+ New schedule" to create one.
+            {kindFilter === "all"
+              ? `No schedules yet — click "+ New schedule" to create one.`
+              : kindFilter === "agent"
+                ? "No agent schedules in this namespace. Agents create them via the durable scheduler tool from chat."
+                : "No workflow schedules in this namespace."}
           </div>
         </div>
       )}
@@ -251,8 +321,8 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
                   <th>Workflow</th>
                   <th>Trigger</th>
                   <th>TZ</th>
-                  <SortableTh col="lastFire" label="Last fire" sort={sort} onClick={cycleSort} />
-                  <SortableTh col="nextFire" label="Next fire" sort={sort} onClick={cycleSort} />
+                  <SortableTh col="lastFire" label="Last" sort={sort} onClick={cycleSort} />
+                  <SortableTh col="nextFire" label="Next" sort={sort} onClick={cycleSort} />
                   <SortableTh
                     col="tickCount"
                     label="Ticks"
@@ -269,16 +339,26 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
                   const wfName = (s.metadata?.["workflowName"] as string | undefined) ?? undefined;
                   return (
                     <tr class="hover:bg-base-200">
-                      <td class="font-mono text-sm">{s.id}</td>
+                      <td class="font-mono text-sm">
+                        {/* Clicking the id opens the full detail page. The
+                            chevron in the actions column is the quick peek
+                            (drawer with recent + upcoming). */}
+                        <button
+                          class="link link-hover font-mono"
+                          title={`Open detail page for ${s.id}`}
+                          onClick={() => onNavigate(`/schedules/${encodeURIComponent(s.id)}`)}
+                        >
+                          {s.id}
+                        </button>
+                      </td>
                       <td>{s.name ?? "—"}</td>
-                      <td>
+                      <td class="whitespace-nowrap">
                         {wfName ? (
                           <button
-                            class="btn btn-xs btn-ghost font-mono gap-1 normal-case"
+                            class="btn btn-xs btn-ghost font-mono normal-case"
                             title={`Show runs of ${wfName}`}
                             onClick={() => onNavigate(`/?name=${encodeURIComponent(wfName)}`)}
                           >
-                            <span class="text-primary">↗</span>
                             {wfName}
                           </button>
                         ) : (
@@ -293,38 +373,116 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
                           ? s.nextRunAt
                             ? formatCountdown(s.nextRunAt)
                             : "—"
-                          : "(paused)"}
+                          : "(cancelled)"}
                       </td>
                       <td class="font-mono text-sm text-right">{s.tickCount ?? 0}</td>
                       <td>
                         <span
                           class={`badge badge-sm ${s.enabled ? "badge-success" : "badge-ghost"}`}
                         >
-                          {s.enabled ? "enabled" : "paused"}
+                          {s.enabled ? "active" : "cancelled"}
                         </span>
                       </td>
                       <td class="text-right">
                         <div class="flex gap-1 justify-end">
                           <button
-                            class="btn btn-sm btn-ghost"
+                            class="btn btn-sm btn-square btn-ghost"
                             onClick={() => setEditing(s)}
                             title="Edit"
+                            aria-label="Edit"
                           >
-                            Edit
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              width="14"
+                              height="14"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              stroke-width="2"
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                            >
+                              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                            </svg>
                           </button>
                           <button
-                            class="btn btn-sm btn-ghost"
+                            class="btn btn-sm btn-square btn-ghost"
                             onClick={() => togglePause(s)}
-                            title={s.enabled ? "Pause" : "Resume"}
+                            title={s.enabled ? "Cancel" : "Restore"}
+                            aria-label={s.enabled ? "Cancel" : "Restore"}
                           >
-                            {s.enabled ? "Pause" : "Resume"}
+                            {s.enabled ? (
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                width="14"
+                                height="14"
+                                viewBox="0 0 24 24"
+                                fill="currentColor"
+                              >
+                                <rect x="6" y="5" width="4" height="14" rx="1" />
+                                <rect x="14" y="5" width="4" height="14" rx="1" />
+                              </svg>
+                            ) : (
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                width="14"
+                                height="14"
+                                viewBox="0 0 24 24"
+                                fill="currentColor"
+                              >
+                                <path d="M7 5v14l12-7z" />
+                              </svg>
+                            )}
                           </button>
                           <button
-                            class="btn btn-sm btn-ghost text-error"
+                            class="btn btn-sm btn-square btn-ghost"
+                            onClick={() => emitNow(s)}
+                            title="Emit now (fire on next poll)"
+                            aria-label="Emit now"
+                            disabled={!s.enabled}
+                          >
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              width="14"
+                              height="14"
+                              viewBox="0 0 24 24"
+                              fill="currentColor"
+                            >
+                              <path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z" />
+                            </svg>
+                          </button>
+                          <button
+                            class="btn btn-sm btn-square btn-ghost text-error"
                             onClick={() => remove(s)}
                             title="Delete"
+                            aria-label="Delete"
                           >
-                            Delete
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              width="14"
+                              height="14"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              stroke-width="2"
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                            >
+                              <polyline points="3 6 5 6 21 6" />
+                              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                              <path d="M10 11v6" />
+                              <path d="M14 11v6" />
+                              <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
+                            </svg>
+                          </button>
+                          <button
+                            class="btn btn-sm btn-square btn-ghost"
+                            onClick={() => setPeeking(s.id)}
+                            title="Peek (recent + upcoming)"
+                            aria-label="Peek"
+                          >
+                            ›
                           </button>
                         </div>
                       </td>
@@ -366,6 +524,20 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
           }}
         />
       )}
+      {peeking && (
+        <ScheduleDrawer
+          scheduleId={peeking}
+          onClose={() => setPeeking(undefined)}
+          onOpenDetail={(id) => {
+            setPeeking(undefined);
+            onNavigate(`/schedules/${encodeURIComponent(id)}`);
+          }}
+          onOpenRun={(id) => {
+            setPeeking(undefined);
+            onNavigate(`/runs/${encodeURIComponent(id)}`);
+          }}
+        />
+      )}
     </Page>
   );
 }
@@ -388,7 +560,7 @@ function scheduleSortKey(s: ScheduleDto, col: ScheduleSortCol): number | string 
     case "tickCount":
       return s.tickCount ?? 0;
     case "status":
-      return s.enabled ? "enabled" : "paused";
+      return s.enabled ? "active" : "cancelled";
   }
 }
 

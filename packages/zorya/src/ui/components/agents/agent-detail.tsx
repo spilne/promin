@@ -237,14 +237,14 @@ function ThreadSidebar({
 
   const beginRename = (t: ThreadSummary) => {
     setRenamingId(t.id);
-    const current = (t.metadata?.title as string | undefined) ?? "";
+    const current = t.title ?? "";
     setRenameDraft(current);
   };
 
   const commitRename = async (t: ThreadSummary) => {
     const next = renameDraft.trim();
     setRenamingId(null);
-    const current = (t.metadata?.title as string | undefined) ?? "";
+    const current = t.title ?? "";
     if (next === current) return;
     try {
       await api.renameAgentThread(agentId, t.id, {
@@ -287,7 +287,7 @@ function ThreadSidebar({
           </li>
         )}
         {threads.map((t) => {
-          const title = (t.metadata?.title as string | undefined) ?? "";
+          const title = t.title ?? "";
           const isRenaming = renamingId === t.id;
           return (
             <li>
@@ -805,29 +805,51 @@ function ThreadSchedulesDrawer({
   tenant: Tenant;
   onClose: () => void;
 }) {
+  // Show cancelled (disabled) schedules alongside active ones. Default
+  // off so the common case shows just the live ones; flipping the
+  // toggle widens the fetch to include `enabled: false` rows so the
+  // user can review or restore prior cancels.
+  const [showCancelled, setShowCancelled] = useState(false);
+
+  // Server-side metadata containment filter — pushed to storage so we
+  // don't fetch the full namespace just to discard everything except
+  // this thread's agent schedules. Same predicate the dispatch helper
+  // uses (`agentTrigger` + `threadId`), translated to a JSON-path query
+  // on backends with native support. `enabled` filter omitted when the
+  // user wants to see cancelled rows too.
   const { data, loading, error, refresh } = useFetch(
-    () => api.listSchedules({ namespace: tenant.namespaceId }),
-    [tenant.namespaceId, threadId],
+    () =>
+      api.listSchedules({
+        namespace: tenant.namespaceId,
+        ...(!showCancelled && { enabled: true }),
+        metadata: { agentTrigger: true, threadId },
+      }),
+    [tenant.namespaceId, threadId, showCancelled],
     15_000,
   );
 
-  const schedules = useMemo(() => {
-    const all = data?.schedules ?? [];
-    return all.filter((s) => {
-      const meta = (s.metadata ?? {}) as Record<string, unknown>;
-      if (meta.agentTrigger !== true) return false;
-      if (meta.threadId !== threadId) return false;
-      return true;
-    });
-  }, [data, threadId]);
+  const schedules = data?.schedules ?? [];
 
+  // Soft cancel — flip `enabled` to false. The schedule persists so
+  // the user can review history or restore it from the same drawer.
+  // Hard delete via `api.deleteSchedule` would erase the row and
+  // there'd be nothing to put behind a "show cancelled" filter.
   const cancel = async (id: string) => {
     try {
-      await api.deleteSchedule(id);
+      await api.patchSchedule(id, { enabled: false });
       toast(`Cancelled schedule ${id}`);
       refresh();
     } catch (e) {
       toast(`Failed to cancel: ${(e as Error).message}`, { variant: "error" });
+    }
+  };
+  const restore = async (id: string) => {
+    try {
+      await api.patchSchedule(id, { enabled: true });
+      toast(`Restored schedule ${id}`);
+      refresh();
+    } catch (e) {
+      toast(`Failed to restore: ${(e as Error).message}`, { variant: "error" });
     }
   };
 
@@ -846,6 +868,16 @@ function ThreadSchedulesDrawer({
           with the saved task.
         </p>
 
+        <label class="flex items-center gap-2 text-xs text-base-content/70 mb-3 cursor-pointer w-fit">
+          <input
+            type="checkbox"
+            class="checkbox checkbox-xs"
+            checked={showCancelled}
+            onChange={(e) => setShowCancelled((e.target as HTMLInputElement).checked)}
+          />
+          Show cancelled
+        </label>
+
         {error && <div class="alert alert-error text-xs mb-3">{error.message}</div>}
         {loading && !data && (
           <div class="space-y-2">
@@ -856,34 +888,53 @@ function ThreadSchedulesDrawer({
 
         {!loading && schedules.length === 0 && (
           <div class="text-sm text-base-content/50 py-6 text-center">
-            No schedules in this thread yet. Ask the agent to schedule something — e.g.{" "}
-            <em>"Every Monday at 9am summarise active runs"</em>.
+            {showCancelled
+              ? "No schedules in this thread."
+              : 'No active schedules. Ask the agent to schedule something — e.g. "Every Monday at 9am summarise active runs".'}
           </div>
         )}
 
         {schedules.length > 0 && (
           <ul class="divide-y divide-base-content/10">
             {schedules.map((s) => (
-              <li key={s.id} class="py-2 flex items-start justify-between gap-3">
+              <li
+                key={s.id}
+                class={`py-2 flex items-start justify-between gap-3 ${
+                  s.enabled ? "" : "opacity-60"
+                }`}
+              >
                 <div class="min-w-0 flex-1">
-                  <div class="text-sm font-medium truncate" title={s.name ?? s.id}>
-                    {s.name ?? s.id}
+                  <div class="flex items-center gap-2">
+                    <div class="text-sm font-medium truncate" title={s.name ?? s.id}>
+                      {s.name ?? s.id}
+                    </div>
+                    {!s.enabled && <span class="badge badge-xs badge-ghost">cancelled</span>}
                   </div>
                   <div class="text-xs text-base-content/60 break-words">
                     {(s.metadata?.["task"] as string) ?? "—"}
                   </div>
                   <div class="text-[11px] text-base-content/40 font-mono mt-1">
                     {scheduleTriggerSummary(s)} ·{" "}
-                    {s.nextRunAt ? `next ${formatRelative(s.nextRunAt)}` : "no next run"} · id:{" "}
-                    {s.id}
+                    {s.enabled
+                      ? s.nextRunAt
+                        ? `next ${formatRelative(s.nextRunAt)}`
+                        : "no next run"
+                      : "not firing"}{" "}
+                    · id: {s.id}
                   </div>
                 </div>
-                <button
-                  class="btn btn-xs btn-ghost text-error shrink-0"
-                  onClick={() => cancel(s.id)}
-                >
-                  Cancel
-                </button>
+                {s.enabled ? (
+                  <button
+                    class="btn btn-xs btn-ghost text-error shrink-0"
+                    onClick={() => cancel(s.id)}
+                  >
+                    Cancel
+                  </button>
+                ) : (
+                  <button class="btn btn-xs btn-ghost shrink-0" onClick={() => restore(s.id)}>
+                    Restore
+                  </button>
+                )}
               </li>
             ))}
           </ul>

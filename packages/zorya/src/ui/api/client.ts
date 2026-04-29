@@ -175,10 +175,26 @@ export const api = {
     return req(`/api/approvals${qs ? `?${qs}` : ""}`);
   },
   listSchedules(
-    params: { namespace?: string } = {},
+    params: {
+      namespace?: string;
+      /** Filter by `enabled` flag. Omit for "show both active + cancelled". */
+      enabled?: boolean;
+      /**
+       * Metadata containment filter. Server JSON-decodes and pushes to
+       * storage; nested-path lookups become indexed queries on backends
+       * with native JSON support. Common shapes:
+       *   - `{ agentTrigger: true }`              — kind = agent
+       *   - `{ agentTrigger: true, threadId: t }` — chat per-thread drawer
+       */
+      metadata?: Record<string, unknown>;
+    } = {},
   ): Promise<SchedulesResponse & { configured?: boolean }> {
     const qp = new URLSearchParams();
     if (params.namespace) qp.set("namespace", params.namespace);
+    if (params.enabled !== undefined) qp.set("enabled", String(params.enabled));
+    if (params.metadata && Object.keys(params.metadata).length > 0) {
+      qp.set("metadata", JSON.stringify(params.metadata));
+    }
     const qs = qp.toString();
     return req(`/api/schedules${qs ? `?${qs}` : ""}`);
   },
@@ -253,6 +269,17 @@ export const api = {
     if (params.limit !== undefined) qp.set("limit", String(params.limit));
     if (params.q && params.q.length > 0) qp.set("q", params.q);
     return req<AgentThreadsResponse>(`/api/agents/${encodeURIComponent(id)}/threads?${qp}`);
+  },
+  renameAgentThread(
+    id: string,
+    threadId: string,
+    body: { namespaceId: string; resourceId?: string; title: string | null },
+  ): Promise<{ threadId: string; title: string | null; metadata: Record<string, unknown> }> {
+    return req(`/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
   },
   listAgentThreadMessages(
     id: string,
