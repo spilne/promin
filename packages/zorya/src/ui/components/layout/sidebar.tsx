@@ -15,6 +15,7 @@ interface NavItem {
 
 const SECTIONS: Array<{ title?: string; items: NavItem[] }> = [
   {
+    title: "Workflows",
     items: [
       { path: "/", label: "Runs", icon: "▦" },
       { path: "/workflows", label: "Workflows", icon: "◈" },
