@@ -430,6 +430,14 @@ function computeCronDue(
     return [makeTick(config, now, jitterMs, startTickNumber)];
   }
 
+  // Fast path: no catch-up wanted — just fire the single most-recent missed
+  // tick (if any) without iterating through every skipped occurrence.
+  if (maxCatchUp === 0) {
+    const next = cron.nextRun(new Date(lastFired.getTime() + 1));
+    if (!next || next > now) return [];
+    return [makeTick(config, next, jitterMs, startTickNumber)];
+  }
+
   let cursor = new Date(lastFired.getTime() + 1);
   let tickNumber = startTickNumber;
   let catchUpCount = 0;
@@ -465,6 +473,12 @@ function computeRruleDue(
   }
 
   const after = new Date(lastFired.getTime() + 1);
+  // Fast path: no catch-up — only need the first missed occurrence.
+  if (maxCatchUp === 0) {
+    const first = rule.after(after, true);
+    if (!first || first > now) return [];
+    return [makeTick(config, first, jitterMs, startTickNumber)];
+  }
   const occurrences = rule.between(after, now, true);
   const limited = occurrences.length > maxCatchUp ? occurrences.slice(-maxCatchUp) : occurrences;
 
