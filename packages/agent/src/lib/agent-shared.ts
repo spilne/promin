@@ -103,6 +103,13 @@ export async function executeToolCall(
    * `tool.progress` SessionEvent labeled with turn / step / toolCallId.
    */
   onProgress?: (payload: unknown) => void,
+  /**
+   * Optional caller scope (namespace, resource, thread, agentId).
+   * Populated by the agent runtime per-call so scope-aware tools
+   * (durable scheduler, secrets, audit) can act on behalf of the
+   * live caller. Surfaced on `ctx.scope`.
+   */
+  scope?: import("./tool.ts").ToolScope,
 ): Promise<ToolResultMessage> {
   let parsed: unknown;
   try {
@@ -117,7 +124,13 @@ export async function executeToolCall(
   }
   try {
     // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
-    const ctx = onProgress ? { writer: { write: onProgress } } : undefined;
+    const ctx =
+      onProgress || scope
+        ? {
+            ...(onProgress && { writer: { write: onProgress } }),
+            ...(scope && { scope }),
+          }
+        : undefined;
     const output = await toolDef.execute(parsed as any, ctx);
     onResult?.(call, output);
     let content = toolDef.toModelOutput

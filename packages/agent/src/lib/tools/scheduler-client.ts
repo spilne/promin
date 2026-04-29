@@ -49,12 +49,6 @@ export interface SchedulerSummary {
 
 export interface SchedulerClient {
   /**
-   * The scope this client is bound to. The tool reads it to stamp
-   * metadata + default fields; consumers don't have to thread the
-   * scope through twice.
-   */
-  readonly scope: SchedulerClientScope;
-  /**
    * Persist a new schedule. Implementations validate ownership +
    * tenant boundary at the boundary (the in-process client trusts the
    * tool; the HTTP client gets server-side enforcement).
@@ -87,7 +81,6 @@ export interface InProcessSchedulerClientConfig {
 export function inProcessSchedulerClient(config: InProcessSchedulerClientConfig): SchedulerClient {
   const { storage, scope } = config;
   return {
-    scope,
     async create(input) {
       const dsConfig: DurableScheduleConfig = {
         id: input.id,
@@ -187,7 +180,6 @@ export function httpSchedulerClient(config: HttpSchedulerClientConfig): Schedule
   const url = (path: string): string => `${config.baseUrl.replace(/\/$/, "")}${path}`;
 
   return {
-    scope: config.scope,
     async create(input) {
       const body = {
         id: input.id,

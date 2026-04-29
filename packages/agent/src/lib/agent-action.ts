@@ -157,6 +157,13 @@ export interface AgentActionConfig<TOutput = any> {
    * execution emits.
    */
   bus?: SessionEventBus;
+  /**
+   * Caller scope (namespace, resource, thread, agentId) populated per-
+   * call by the agent runtime. Threaded into `ctx.scope` on every tool
+   * `execute` so scope-aware tools (durable scheduler, secrets) can act
+   * on behalf of the live caller.
+   */
+  scope?: import("./tool.ts").ToolScope;
 }
 
 export class MaxStepsError extends Error {
@@ -480,7 +487,13 @@ export function agentAction(
                 const toolStart = Date.now();
                 let failed = false;
                 try {
-                  const out = await executeToolCall(call, toolDef, config.onToolResult);
+                  const out = await executeToolCall(
+                    call,
+                    toolDef,
+                    config.onToolResult,
+                    undefined,
+                    config.scope,
+                  );
                   return out;
                 } catch (err) {
                   failed = true;

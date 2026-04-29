@@ -36,8 +36,20 @@ export interface SchedulerLoopConfig {
    * control.
    */
   trigger?: RunTrigger;
-  /** Optional override for tick dispatch. Wins over `trigger`. */
-  fire?: (tick: ScheduleTick, schedule: DurableScheduleConfig) => Promise<void>;
+  /**
+   * Optional dispatch hook. Inspect the tick / schedule and either
+   * handle it (return `{ handled: true }` or `void` for backward
+   * compat) or pass — return `{ handled: false }` and the loop runs
+   * its default `trigger`-based dispatch using `metadata.workflowName`.
+   *
+   * Use this to layer additional dispatch kinds (agent-targeted ticks
+   * via `dispatchAgentSchedule`, webhook ticks, etc.) without losing
+   * the workflow-name path for ordinary schedule rows.
+   */
+  fire?: (
+    tick: ScheduleTick,
+    schedule: DurableScheduleConfig,
+  ) => Promise<{ handled: boolean } | void>;
   /** Stable id used for leader election. Default: random UUID. */
   instanceId?: string;
   /** Poll interval in ms. Default: 1000. */
@@ -155,6 +167,58 @@ export class SchedulerLoop {
     return await this.tickSingleNamespace(this.namespace);
   }
 
+  /**
+   * Fire a schedule out-of-band, right now. Used by the dashboard's
+   * "emit now" button to bypass `computeDueTicks`'s interval guard
+   * (which would otherwise refuse to fire while `lastFired + intervalMs`
+   * is still in the future).
+   *
+   * Same atomic commit shape as the poll loop — `tickCount` advances,
+   * `lastFired` becomes `now`, the tick is logged, and `nextRun` slides
+   * to `now + interval` so the natural cadence resumes from the manual
+   * fire. Dispatch goes through the configured trigger / fire override
+   * exactly like a normal poll-driven fire.
+   *
+   * Returns the synthesized tick on success, or `null` if the schedule
+   * doesn't exist or is disabled.
+   */
+  async fireOnce(scheduleId: string): Promise<ScheduleTick | null> {
+    const config = await this.storage.loadSchedule(scheduleId);
+    if (!config) return null;
+    if (config.enabled === false) return null;
+
+    const state = await this.storage.loadScheduleState(scheduleId);
+    const tickNumber = state?.tickCount ?? 0;
+    const now = new Date();
+    const tick: ScheduleTick = {
+      scheduleId,
+      scheduleName: config.name,
+      scheduledAt: now,
+      firedAt: now,
+      tickNumber,
+      metadata: config.metadata,
+    };
+
+    await this.storage.commitPoll([
+      {
+        id: scheduleId,
+        firedAt: now,
+        tickIncrement: 1,
+        nextRun: computeNextRun(config),
+        ticks: [tick],
+      },
+    ]);
+
+    try {
+      await this.dispatch(tick, config);
+    } catch {
+      // Same swallow policy as the loop's dispatch — caller (route handler)
+      // already returned 200 once commitPoll succeeded; surfaced errors
+      // would only confuse the caller about the durability boundary.
+    }
+    return tick;
+  }
+
   private async tickSingleNamespace(namespace: string | undefined): Promise<ScheduleTick[]> {
     const isLeader = await this.storage.tryAcquireLeader({
       instanceId: this.instanceId,
@@ -238,6 +302,7 @@ export class SchedulerLoop {
       firedAt?: Date;
       tickIncrement?: number;
       nextRun: Date | null;
+      ticks?: readonly ScheduleTick[];
     }> = [];
 
     for (const id of targetIds) {
@@ -256,6 +321,11 @@ export class SchedulerLoop {
         firedAt: due.length > 0 ? due[due.length - 1]!.firedAt : undefined,
         tickIncrement: due.length > 0 ? due.length : undefined,
         nextRun: computeNextRun(config),
+        // Hand the individual fired ticks to commitPoll so backends with a
+        // tick log persist them in the SAME transaction as the state
+        // advance — `tickCount` and the count of logged rows can never
+        // diverge. Backends without a log silently ignore this field.
+        ticks: due.length > 0 ? due : undefined,
       });
     }
 
@@ -291,8 +361,13 @@ export class SchedulerLoop {
 
   private async dispatch(tick: ScheduleTick, schedule: DurableScheduleConfig): Promise<void> {
     if (this.fireOverride) {
-      await this.fireOverride(tick, schedule);
-      return;
+      const result = await this.fireOverride(tick, schedule);
+      // `void` keeps the old "fire fully replaces dispatch" contract.
+      // `{ handled: true }` is the explicit form. `{ handled: false }`
+      // means the override didn't claim this tick — fall through to
+      // the default trigger path.
+      const handled = result === undefined ? true : result.handled;
+      if (handled) return;
     }
     if (!this.trigger) {
       throw new Error(
@@ -321,6 +396,12 @@ export class SchedulerLoop {
       namespace: meta.namespace ?? schedule.namespace,
       workflowType: meta.workflowType,
       version: meta.version,
+      // First-class link back to the schedule. Survives across replays /
+      // retries / runner-internal createWorkflow paths because it's a
+      // typed column, not a metadata key. Metadata stays for the timestamp
+      // breakdown — `scheduledAt` vs `firedAt` is still useful info.
+      runSource: "schedule",
+      runSourceId: tick.scheduleId,
       metadata: {
         ...(schedule.metadata ?? {}),
         scheduleId: tick.scheduleId,

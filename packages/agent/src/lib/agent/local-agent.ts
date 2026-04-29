@@ -196,6 +196,15 @@ export interface LocalAgentConfig<TOutput = any> {
     readonly deps: import("../network/runtime.ts").NetworkRuntimeDeps;
     readonly recipe: import("../registry/types.ts").RegisteredAgent;
   };
+  /**
+   * Recipe id surfaced as `ctx.scope.agentId` to scope-aware tools
+   * (the durable scheduler stamps this in schedule metadata so
+   * `dispatchAgentSchedule` can look the recipe up later). Decoupled
+   * from `agent.name` because hosts often want a recipe-id namespace
+   * ("writer-v3") that's more stable than the workflow name. Defaults
+   * to `agent.name` for backward compat.
+   */
+  readonly agentId?: string;
 }
 
 export interface AutoCompactConfig {
@@ -454,6 +463,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       runner: this.config.runner,
       memory: this.config.memory,
       created,
+      agentId: this.config.agentId ?? this.config.agent.name,
       autoCompact: this.config.autoCompact === false ? undefined : this.config.autoCompact,
       autoDistill: this.config.autoDistill === false ? undefined : this.config.autoDistill,
       consolidator: () => this.resolveConsolidator(),
@@ -635,15 +645,21 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     // one-shot invoke too — the thread path used to be the only caller.
     // No threadId here (one-shot is stateless), so the layered memory
     // tool stays opt-out for invoke.
+    const namespaceId = opts?.namespaceId ?? this.config.namespaceId;
+    const resourceId = this.config.resourceId;
     const agent = {
       ...this.config.agent,
       tools: this.buildTools({
-        namespaceId: opts?.namespaceId ?? this.config.namespaceId,
-        resourceId: this.config.resourceId,
+        ...(namespaceId !== undefined && { namespaceId }),
+        ...(resourceId !== undefined && { resourceId }),
       }),
     };
     // Pass everything except agentLoop-specific knobs into agentAction.
-    const actionConfig = toActionConfig(agent, bus);
+    const actionConfig = toActionConfig(agent, bus, {
+      ...(namespaceId !== undefined && { namespaceId }),
+      ...(resourceId !== undefined && { resourceId }),
+      agentId: this.config.agentId ?? this.config.agent.name,
+    });
     const wf = (agentAction as (cfg: AgentActionConfig<TOutput>) => ReturnType<typeof agentAction>)(
       actionConfig as AgentActionConfig<TOutput>,
     );
@@ -681,6 +697,8 @@ interface LocalAgentThreadDeps {
   readonly runner: WorkflowRunner;
   readonly memory?: MemoryStore;
   readonly created: boolean;
+  /** Recipe id surfaced as `ctx.scope.agentId` to scope-aware tools. */
+  readonly agentId: string;
   /** Auto-compaction config inherited from `LocalAgentConfig.autoCompact`. */
   readonly autoCompact?: AutoCompactConfig;
   /** Auto-distillation config inherited from `LocalAgentConfig.autoDistill`. */
@@ -719,6 +737,16 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     this.id = deps.id;
     this.resourceId = deps.key.resourceId ?? null;
     this.isNew = deps.created;
+  }
+
+  /** ToolScope surfaced via `ctx.scope` to scope-aware tools per call. */
+  private toolScope(): import("../tool.ts").ToolScope {
+    return {
+      namespaceId: this.deps.key.namespaceId,
+      ...(this.deps.key.resourceId !== undefined && { resourceId: this.deps.key.resourceId }),
+      threadId: this.deps.key.threadId,
+      agentId: this.deps.agentId,
+    };
   }
 
   async send(input: AgentInput, opts?: AgentInvokeOpts): Promise<AgentRunOutput<TOutput>> {
@@ -814,7 +842,11 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     // don't need to recompute the seed messages — the runner reads input
     // from storage when resuming an existing workflow row.
     const { persona } = await this.loadContext();
-    const actionConfig = toActionConfig({ ...this.deps.loopConfig, systemPrompt: persona }, bus);
+    const actionConfig = toActionConfig(
+      { ...this.deps.loopConfig, systemPrompt: persona },
+      bus,
+      this.toolScope(),
+    );
     const builtWorkflow = (
       agentAction as (cfg: AgentActionConfig<TOutput>) => ReturnType<typeof agentAction>
     )(actionConfig as AgentActionConfig<TOutput>);
@@ -915,7 +947,11 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     seed.push(...history);
     if (input.messages) seed.push(...input.messages);
 
-    const actionConfig = toActionConfig({ ...this.deps.loopConfig, systemPrompt: persona }, bus);
+    const actionConfig = toActionConfig(
+      { ...this.deps.loopConfig, systemPrompt: persona },
+      bus,
+      this.toolScope(),
+    );
     const wf = (agentAction as (cfg: AgentActionConfig<TOutput>) => ReturnType<typeof agentAction>)(
       actionConfig as AgentActionConfig<TOutput>,
     );
@@ -1389,7 +1425,11 @@ function liveOutput<TOutput>(
 }
 
 /** Build an agentAction config from an agentLoop config. */
-function toActionConfig(loopConfig: AgentLoopConfig, bus?: SessionEventBus): AgentActionConfig {
+function toActionConfig(
+  loopConfig: AgentLoopConfig,
+  bus?: SessionEventBus,
+  scope?: import("../tool.ts").ToolScope,
+): AgentActionConfig {
   return {
     name: loopConfig.name,
     llm: loopConfig.llm,
@@ -1402,6 +1442,7 @@ function toActionConfig(loopConfig: AgentLoopConfig, bus?: SessionEventBus): Age
     clock: loopConfig.clock,
     processors: loopConfig.processors,
     bus,
+    ...(scope && { scope }),
   };
 }
 

@@ -40,6 +40,20 @@ export interface ToolWriter {
   write(payload: unknown): void;
 }
 
+/**
+ * Caller scope visible to tool execute bodies — populated by the agent
+ * runtime per-call. Lets scope-aware tools (durable scheduler, secrets,
+ * audit) act on behalf of the live caller without each tool needing
+ * its own per-call construction wrapper.
+ */
+export interface ToolScope {
+  readonly namespaceId?: string;
+  readonly resourceId?: string;
+  readonly threadId?: string;
+  /** Recipe id of the agent the tool is executing under. */
+  readonly agentId?: string;
+}
+
 /** Per-call execution context handed to `tool.execute` as an optional second arg. */
 export interface ToolExecuteContext {
   /**
@@ -48,6 +62,14 @@ export interface ToolExecuteContext {
    * `execute` directly. Tool authors should treat as optional via `?.`.
    */
   readonly writer?: ToolWriter;
+  /**
+   * Caller scope (namespace, resource, thread, agentId). Populated by
+   * the agent runtime — present when invoked through `agentAction` /
+   * `agentLoop`; absent in unit tests that call `execute` directly.
+   * Tool authors that need scope should treat it as optional and fall
+   * back to a sensible default or throw a clear error.
+   */
+  readonly scope?: ToolScope;
 }
 
 export interface AgentTool<TInput = unknown, TOutput = unknown> {

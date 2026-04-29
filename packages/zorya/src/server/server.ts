@@ -32,7 +32,7 @@ import {
 import { InMemoryWorkflowStartQueue, type WorkflowStartQueue } from "./workflow-starts.ts";
 import { TriggerService } from "./services/trigger-service.ts";
 import { CoordinatedTriggerService } from "./services/coordinated-trigger-service.ts";
-import { SchedulerLoop } from "./services/scheduler-loop.ts";
+import { SchedulerLoop, type SchedulerLoopConfig } from "./services/scheduler-loop.ts";
 import { WorkerWebSocketServer } from "./services/worker-ws-server.ts";
 import type { ScheduleTick, DurableScheduleConfig } from "@promin/workflow";
 import {
@@ -103,6 +103,7 @@ import {
   streamThreadMessage,
   type AgentGatewayDeps,
 } from "./routes/agents.ts";
+import { dispatchAgentSchedule, isAgentSchedule } from "@promin/agent";
 import {
   addNamespaceFact,
   deleteNamespaceFact,
@@ -485,10 +486,18 @@ export class ZoryaServer {
             "or a configured trigger (via `trigger`, `coordination.enabled`, or `workerProtocol`)",
         );
       }
+      // If the host configured `agents`, install an agent-aware fire
+      // override by default — agent-targeted ticks (created via the
+      // durable scheduler tool) get re-fired through `dispatchAgentSchedule`,
+      // and everything else falls through to the loop's default
+      // `metadata.workflowName` dispatch. The user's explicit
+      // `scheduling.fire` always wins; pass it to opt out.
+      const fire =
+        config.scheduling.fire ?? (config.agents ? buildAgentAwareFire(config.agents) : undefined);
       this.schedulerLoop = new SchedulerLoop({
         storage: config.scheduler,
         trigger,
-        fire: config.scheduling.fire,
+        ...(fire !== undefined && { fire }),
         instanceId: config.scheduling.instanceId,
         pollIntervalMs: config.scheduling.pollIntervalMs,
         leaderLockTtlMs: config.scheduling.leaderLockTtlMs,
@@ -770,4 +779,24 @@ export class ZoryaServer {
       return new Response("Not Found", { status: 404 });
     };
   }
+}
+
+/**
+ * Default scheduler-loop dispatch when `agents` is configured but the
+ * host didn't supply their own `scheduling.fire`. Agent-targeted ticks
+ * (`metadata.agentTrigger === true`) re-invoke the registered agent
+ * with `source: { kind: "scheduled", ... }`. Anything else falls
+ * through to the loop's default `metadata.workflowName` path.
+ */
+function buildAgentAwareFire(
+  agentDeps: AgentGatewayDeps,
+): NonNullable<SchedulerLoopConfig["fire"]> {
+  return async (tick, schedule) => {
+    if (!isAgentSchedule(schedule)) return { handled: false };
+    await dispatchAgentSchedule(tick, schedule, {
+      registry: agentDeps.registry,
+      resolve: agentDeps.resolve,
+    });
+    return { handled: true };
+  };
 }
