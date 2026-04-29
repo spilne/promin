@@ -263,14 +263,12 @@ function IdentityBar({
               onChange({ ...tenant, resourceId: (e.target as HTMLInputElement).value })
             }
           />
-          {instances.length > 0 && (
-            <button
-              class="btn btn-xs btn-ghost text-base-content/40"
-              onClick={() => setRawMode(false)}
-            >
-              instances ↗
-            </button>
-          )}
+          <button
+            class="btn btn-xs btn-ghost text-base-content/40"
+            onClick={() => setRawMode(false)}
+          >
+            instances ↗
+          </button>
         </label>
       ) : (
         <div class="flex items-center gap-1 flex-wrap">
