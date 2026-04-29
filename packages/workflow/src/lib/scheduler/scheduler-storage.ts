@@ -7,7 +7,7 @@
 // not a whole scheduler.
 // ---------------------------------------------------------------------------
 
-import type { DurableScheduleConfig } from "./types.ts";
+import type { DurableScheduleConfig, ScheduleTick } from "./types.ts";
 
 export interface SchedulerStorage {
   // -------------------------------------------------------------------------
@@ -71,6 +71,13 @@ export interface SchedulerStorage {
       firedAt?: Date;
       tickIncrement?: number;
       nextRun: Date | null;
+      /**
+       * Individual ticks fired in this poll cycle. Backends that maintain
+       * a tick log persist these IN THE SAME TRANSACTION as the state
+       * advance — so `tickCount` and the count of logged rows never
+       * diverge. Backends without a tick log silently ignore this field.
+       */
+      ticks?: readonly ScheduleTick[];
     }>,
   ): Promise<void>;
 
@@ -91,6 +98,21 @@ export interface SchedulerStorage {
   listSchedules(params?: {
     enabled?: boolean;
     namespace?: string;
+    /**
+     * Filter by metadata key/value pairs. A row matches when its metadata
+     * contains every supplied key with a deep-equal value (Postgres jsonb
+     * `@>` containment semantics — same as `WorkflowStorage.listWorkflows`).
+     *
+     * Used by the dashboard to filter agent schedules by `target.type`,
+     * `target.threadId`, etc. without scanning the full namespace
+     * client-side. Backends with native JSON support push the predicate
+     * to the database; others apply it after loading.
+     *
+     * Index strategy is per-backend — SQLite ships with no JSON index by
+     * default, so common filter paths (e.g. `metadata.target.type`) want
+     * a functional index for hot deployments.
+     */
+    metadata?: Record<string, unknown>;
     /** Default: 100. */
     limit?: number;
     /** Default: 0. */
@@ -98,7 +120,12 @@ export interface SchedulerStorage {
   }): Promise<DurableScheduleConfig[]>;
 
   /** Total count of schedules matching the filters. */
-  countSchedules(params?: { enabled?: boolean; namespace?: string }): Promise<number>;
+  countSchedules(params?: {
+    enabled?: boolean;
+    namespace?: string;
+    /** Same containment semantics as `listSchedules({ metadata })`. */
+    metadata?: Record<string, unknown>;
+  }): Promise<number>;
 
   // -------------------------------------------------------------------------
   // Leader election — only the leader emits ticks.
@@ -135,4 +162,31 @@ export interface SchedulerStorage {
     limit: number;
     namespaces?: readonly (string | undefined)[];
   }): Promise<readonly { id: string; namespace?: string }[]>;
+
+  // -------------------------------------------------------------------------
+  // Tick log — past-fire history. Optional capability: backends may declare
+  // it by implementing both `listTicks` and `countTicks`. Consumers should
+  // use `isTickLogStorage(storage)` to gate features that need it.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Paginated past-fire log for a schedule, ordered most-recent-first.
+   * Implementations populate this from `commitPoll`'s `ticks` field — the
+   * same transaction that advances `tickCount`, so the two never disagree.
+   */
+  listTicks?(params: {
+    scheduleId: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<readonly ScheduleTick[]>;
+
+  /** Total ticks logged for a schedule. Bounded by `tickCount`. */
+  countTicks?(params: { scheduleId: string }): Promise<number>;
+}
+
+/** Type guard: backend supports the optional tick-log capability. */
+export function isTickLogStorage(
+  storage: SchedulerStorage,
+): storage is SchedulerStorage & Required<Pick<SchedulerStorage, "listTicks" | "countTicks">> {
+  return typeof storage.listTicks === "function" && typeof storage.countTicks === "function";
 }

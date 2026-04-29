@@ -11,7 +11,8 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import type { SchedulerStorage } from "./scheduler-storage.ts";
+import { isTickLogStorage, type SchedulerStorage } from "./scheduler-storage.ts";
+import type { ScheduleTick } from "./types.ts";
 
 /**
  * Run the full SchedulerStorage conformance suite against any implementation.
@@ -270,6 +271,112 @@ export function schedulerStorageTestSuite(
         for (const id of page2Ids) expect(page1Ids.has(id)).toBe(false);
         expect(page1.length + page2.length).toBeGreaterThanOrEqual(6);
       });
+
+      it("metadata filter — top-level key match (containment, not strict equality)", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({
+          id: "a",
+          intervalMs: 1,
+          metadata: { kind: "alpha", extra: "ignored" },
+        });
+        await s.upsertSchedule({ id: "b", intervalMs: 1, metadata: { kind: "beta" } });
+        await s.upsertSchedule({ id: "c", intervalMs: 1, metadata: undefined });
+
+        const alphas = await s.listSchedules({ metadata: { kind: "alpha" } });
+        expect(alphas.map((r) => r.id)).toEqual(["a"]);
+        expect(await s.countSchedules({ metadata: { kind: "alpha" } })).toBe(1);
+      });
+
+      it("metadata filter — nested path match (the agent-schedule shape)", async () => {
+        // Mirrors what the durable scheduler tool stamps:
+        // metadata.target = { type: "agent", agentId, threadId, ... }.
+        // The dashboard's "kind = agent" filter / chat per-thread drawer
+        // both want this nested-path lookup to match without scanning.
+        const s = await getStorage();
+        await s.upsertSchedule({
+          id: "agent-1",
+          intervalMs: 1,
+          metadata: {
+            target: { type: "agent", agentId: "writer", threadId: "t1", task: "x" },
+          },
+        });
+        await s.upsertSchedule({
+          id: "agent-2",
+          intervalMs: 1,
+          metadata: {
+            target: { type: "agent", agentId: "writer", threadId: "t2", task: "y" },
+          },
+        });
+        await s.upsertSchedule({
+          id: "wf-1",
+          intervalMs: 1,
+          metadata: { target: { type: "workflow", name: "send-email" } },
+        });
+
+        // Filter by target.type — both agent rows, no workflow row.
+        const agents = await s.listSchedules({ metadata: { target: { type: "agent" } } });
+        expect(agents.map((r) => r.id).sort()).toEqual(["agent-1", "agent-2"]);
+
+        // Compound filter — type + threadId — narrows to one row.
+        const t1 = await s.listSchedules({
+          metadata: { target: { type: "agent", threadId: "t1" } },
+        });
+        expect(t1.map((r) => r.id)).toEqual(["agent-1"]);
+
+        expect(await s.countSchedules({ metadata: { target: { type: "agent" } } })).toBe(2);
+      });
+
+      it("metadata filter composes with namespace + enabled", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({
+          id: "x-on",
+          intervalMs: 1,
+          namespace: "x",
+          enabled: true,
+          metadata: { kind: "alpha" },
+        });
+        await s.upsertSchedule({
+          id: "x-off",
+          intervalMs: 1,
+          namespace: "x",
+          enabled: false,
+          metadata: { kind: "alpha" },
+        });
+        await s.upsertSchedule({
+          id: "y-on",
+          intervalMs: 1,
+          namespace: "y",
+          enabled: true,
+          metadata: { kind: "alpha" },
+        });
+
+        const result = await s.listSchedules({
+          namespace: "x",
+          enabled: true,
+          metadata: { kind: "alpha" },
+        });
+        expect(result.map((r) => r.id)).toEqual(["x-on"]);
+      });
+
+      it("metadata filter — extra keys in row's metadata don't break the match", async () => {
+        // Containment semantics: the filter only needs to be a SUBSET of
+        // the row's metadata. This is the key difference from strict
+        // deep-equality and is what makes nested-path filtering useful.
+        const s = await getStorage();
+        await s.upsertSchedule({
+          id: "agent-rich",
+          intervalMs: 1,
+          metadata: {
+            target: { type: "agent", agentId: "writer", threadId: "t1", task: "x" },
+            createdByAgent: "writer",
+            scheduleId: "agent-rich",
+          },
+        });
+        const matched = await s.listSchedules({
+          metadata: { target: { type: "agent" } },
+        });
+        expect(matched.map((r) => r.id)).toEqual(["agent-rich"]);
+      });
     });
 
     describe("setEnabled + deleteSchedule", () => {
@@ -333,6 +440,110 @@ export function schedulerStorageTestSuite(
         });
         expect(a).toBe(true);
         expect(b).toBe(true);
+      });
+    });
+
+    // Optional: tick log capability. Backends declare support by exposing
+    // `listTicks` + `countTicks`; the suite skips itself otherwise so a
+    // backend without the capability still passes the rest of the spec.
+    describe("tick log (when supported)", () => {
+      it("commitPoll persists ticks atomically with state advance", async () => {
+        const s = await getStorage();
+        if (!isTickLogStorage(s)) return;
+        await s.upsertSchedule({ id: "log-1", intervalMs: 1_000 });
+        const t0: ScheduleTick = {
+          scheduleId: "log-1",
+          tickNumber: 0,
+          scheduledAt: new Date(1_000_000),
+          firedAt: new Date(1_000_005),
+        };
+        const t1: ScheduleTick = {
+          scheduleId: "log-1",
+          tickNumber: 1,
+          scheduledAt: new Date(2_000_000),
+          firedAt: new Date(2_000_010),
+          metadata: { foo: "bar" },
+        };
+        await s.commitPoll([
+          {
+            id: "log-1",
+            firedAt: t1.firedAt,
+            tickIncrement: 2,
+            nextRun: new Date(3_000_000),
+            ticks: [t0, t1],
+          },
+        ]);
+        const ticks = await s.listTicks({ scheduleId: "log-1" });
+        expect(ticks.length).toBe(2);
+        // Newest-first by firedAt.
+        expect(ticks[0]?.tickNumber).toBe(1);
+        expect(ticks[1]?.tickNumber).toBe(0);
+        expect(ticks[0]?.metadata).toEqual({ foo: "bar" });
+        // tickCount and the count of logged rows match.
+        const state = await s.loadScheduleState("log-1");
+        const total = await s.countTicks({ scheduleId: "log-1" });
+        expect(state?.tickCount).toBe(2);
+        expect(total).toBe(2);
+      });
+
+      it("listTicks paginates by limit + offset", async () => {
+        const s = await getStorage();
+        if (!isTickLogStorage(s)) return;
+        await s.upsertSchedule({ id: "page", intervalMs: 1_000 });
+        const ticks: ScheduleTick[] = Array.from({ length: 25 }, (_, i) => ({
+          scheduleId: "page",
+          tickNumber: i,
+          scheduledAt: new Date(i * 1000),
+          firedAt: new Date(i * 1000 + 1),
+        }));
+        await s.commitPoll([
+          { id: "page", firedAt: ticks[24]!.firedAt, tickIncrement: 25, nextRun: null, ticks },
+        ]);
+        const page1 = await s.listTicks({ scheduleId: "page", limit: 10, offset: 0 });
+        const page2 = await s.listTicks({ scheduleId: "page", limit: 10, offset: 10 });
+        expect(page1[0]?.tickNumber).toBe(24);
+        expect(page1[9]?.tickNumber).toBe(15);
+        expect(page2[0]?.tickNumber).toBe(14);
+        expect(page2[9]?.tickNumber).toBe(5);
+        expect(await s.countTicks({ scheduleId: "page" })).toBe(25);
+      });
+
+      it("retried commitPoll doesn't double-log (PK on (scheduleId, tickNumber))", async () => {
+        const s = await getStorage();
+        if (!isTickLogStorage(s)) return;
+        await s.upsertSchedule({ id: "retry", intervalMs: 1_000 });
+        const t: ScheduleTick = {
+          scheduleId: "retry",
+          tickNumber: 0,
+          scheduledAt: new Date(1_000),
+          firedAt: new Date(1_001),
+        };
+        await s.commitPoll([
+          { id: "retry", firedAt: t.firedAt, tickIncrement: 1, nextRun: null, ticks: [t] },
+        ]);
+        // Same tick replayed (e.g., retry after a transient failure). Must
+        // be a no-op on the log even if state advances by another count.
+        await s.commitPoll([
+          { id: "retry", firedAt: t.firedAt, tickIncrement: 0, nextRun: null, ticks: [t] },
+        ]);
+        expect(await s.countTicks({ scheduleId: "retry" })).toBe(1);
+      });
+
+      it("deleteSchedule drops the tick log", async () => {
+        const s = await getStorage();
+        if (!isTickLogStorage(s)) return;
+        await s.upsertSchedule({ id: "drop", intervalMs: 1_000 });
+        const t: ScheduleTick = {
+          scheduleId: "drop",
+          tickNumber: 0,
+          scheduledAt: new Date(1_000),
+          firedAt: new Date(1_001),
+        };
+        await s.commitPoll([
+          { id: "drop", firedAt: t.firedAt, tickIncrement: 1, nextRun: null, ticks: [t] },
+        ]);
+        await s.deleteSchedule("drop");
+        expect(await s.countTicks({ scheduleId: "drop" })).toBe(0);
       });
     });
   });

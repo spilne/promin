@@ -6,8 +6,9 @@
 // All state lives in a few Maps.
 // ---------------------------------------------------------------------------
 
-import type { DurableScheduleConfig } from "./types.ts";
+import type { DurableScheduleConfig, ScheduleTick } from "./types.ts";
 import type { SchedulerStorage } from "./scheduler-storage.ts";
+import { scheduleMetadataContains } from "./metadata-filter.ts";
 
 interface ScheduleState {
   lastFired: Date | null;
@@ -26,6 +27,9 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
   private nextRun = new Map<string, number>();
   /** Per-namespace leader locks. Key = namespace ?? "__global__". */
   private leaders = new Map<string, LeaderLock>();
+  /** Per-schedule tick log. Inner array is append-order; queries reverse it
+   *  for newest-first. */
+  private ticks = new Map<string, ScheduleTick[]>();
 
   // -------------------------------------------------------------------------
   // Hot path
@@ -92,8 +96,11 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
       firedAt?: Date;
       tickIncrement?: number;
       nextRun: Date | null;
+      ticks?: readonly ScheduleTick[];
     }>,
   ): Promise<void> {
+    // Single-process JS — no transaction primitive needed; all mutations
+    // happen inside this synchronous block, which IS the atomic boundary.
     for (const u of updates) {
       if (u.firedAt !== undefined && u.tickIncrement && u.tickIncrement > 0) {
         const prev = this.state.get(u.id) ?? { lastFired: null, tickCount: 0 };
@@ -104,7 +111,36 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
       }
       if (u.nextRun === null) this.nextRun.delete(u.id);
       else this.nextRun.set(u.id, u.nextRun.getTime());
+      if (u.ticks?.length) {
+        const log = this.ticks.get(u.id) ?? [];
+        // Dedupe on (scheduleId, tickNumber) so a retried commitPoll doesn't
+        // double-log — same idempotency the SQLite PK enforces.
+        const existing = new Set(log.map((t) => t.tickNumber));
+        for (const t of u.ticks) {
+          if (!existing.has(t.tickNumber)) log.push(t);
+        }
+        this.ticks.set(u.id, log);
+      }
     }
+  }
+
+  async listTicks(params: {
+    scheduleId: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<readonly ScheduleTick[]> {
+    const log = this.ticks.get(params.scheduleId) ?? [];
+    // Newest-first by firedAt, mirroring the SQLite ordering. Stable sort
+    // keeps insertion order as the tiebreaker on identical firedAt values
+    // (catchup ticks fired in one poll all share the same wall-clock).
+    const sorted = [...log].sort((a, b) => b.firedAt.getTime() - a.firedAt.getTime());
+    const offset = params.offset ?? 0;
+    const limit = params.limit ?? sorted.length;
+    return sorted.slice(offset, offset + limit);
+  }
+
+  async countTicks(params: { scheduleId: string }): Promise<number> {
+    return this.ticks.get(params.scheduleId)?.length ?? 0;
   }
 
   // -------------------------------------------------------------------------
@@ -123,6 +159,7 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     this.schedules.delete(id);
     this.state.delete(id);
     this.nextRun.delete(id);
+    this.ticks.delete(id);
   }
 
   async setEnabled(id: string, enabled: boolean): Promise<void> {
@@ -134,22 +171,34 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
   async listSchedules(params?: {
     enabled?: boolean;
     namespace?: string;
+    metadata?: Record<string, unknown>;
     limit?: number;
     offset?: number;
   }): Promise<DurableScheduleConfig[]> {
-    let all = [...this.schedules.values()];
-    if (params?.enabled !== undefined) {
-      all = all.filter((s) => (s.enabled ?? true) === params.enabled);
-    }
-    if (params?.namespace !== undefined) {
-      all = all.filter((s) => s.namespace === params.namespace);
-    }
+    const filtered = this.applyFilters(params);
     const offset = params?.offset ?? 0;
     const limit = params?.limit ?? 100;
-    return all.slice(offset, offset + limit);
+    return filtered.slice(offset, offset + limit);
   }
 
-  async countSchedules(params?: { enabled?: boolean; namespace?: string }): Promise<number> {
+  async countSchedules(params?: {
+    enabled?: boolean;
+    namespace?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<number> {
+    return this.applyFilters(params).length;
+  }
+
+  /**
+   * Single filter pass shared by list / count so they can't drift on
+   * which predicates apply. Mirrors the workflow-storage convention:
+   * metadata containment is `actual @> filter` deep-equal per key.
+   */
+  private applyFilters(params?: {
+    enabled?: boolean;
+    namespace?: string;
+    metadata?: Record<string, unknown>;
+  }): DurableScheduleConfig[] {
     let all = [...this.schedules.values()];
     if (params?.enabled !== undefined) {
       all = all.filter((s) => (s.enabled ?? true) === params.enabled);
@@ -157,7 +206,11 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     if (params?.namespace !== undefined) {
       all = all.filter((s) => s.namespace === params.namespace);
     }
-    return all.length;
+    if (params?.metadata) {
+      const filter = params.metadata;
+      all = all.filter((s) => scheduleMetadataContains(s.metadata, filter));
+    }
+    return all;
   }
 
   // -------------------------------------------------------------------------

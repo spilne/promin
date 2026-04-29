@@ -29,6 +29,10 @@ export {
   type WorkflowStatus,
   type StepStatus,
   type StepType,
+  type RunSource,
+  RUN_SOURCE_CODES,
+  encodeRunSource,
+  decodeRunSource,
   InMemoryWorkflowStorage,
   WorkflowVersionRegistry,
   ScopedWorkflowVersionRegistry,
@@ -163,6 +167,7 @@ export {
   type ScheduleTick,
   type Scheduler,
   type SchedulerStorage,
+  isTickLogStorage,
   InMemoryScheduler,
   createScheduler,
   DurableScheduler,
@@ -172,6 +177,8 @@ export {
   computeDueTicks,
   computeNextRun,
   validateScheduleConfig,
+  scheduleMetadataContains,
+  flattenLeafPaths,
 } from "./lib/scheduler/index.ts";
 
 // Distributed workflow execution
