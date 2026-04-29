@@ -214,6 +214,15 @@ export async function applyDiscoveredAgents(
   for (const input of agents) {
     if (options.idPrefix !== undefined && !input.id.startsWith(options.idPrefix)) continue;
     const wasExisting = existingIds.has(input.id) || (await registry.get(input.id)) !== null;
+    if (input.backend.type === "local" && input.backend.requiredEnv) {
+      const missing = input.backend.requiredEnv.filter((name) => !process.env[name]);
+      if (missing.length > 0) {
+        console.warn(
+          `[agent-registry] registering "${input.id}" but required env var(s) are not set: ${missing.join(", ")}. ` +
+            "The recipe will be stored; resolveLocalAgent will throw until the vars are present.",
+        );
+      }
+    }
     await registry.register(input);
     upserted.push(input.id);
     if (!wasExisting) added.push(input.id);

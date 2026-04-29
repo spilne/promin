@@ -6,6 +6,8 @@ export interface SystemMessage {
 export interface UserMessage {
   role: "user";
   content: string;
+  /** Serialized source info stamped by the agent runtime for non-interactive triggers. */
+  metadata?: Readonly<Record<string, unknown>>;
 }
 
 export interface ToolCall {

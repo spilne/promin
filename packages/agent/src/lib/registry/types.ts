@@ -91,6 +91,14 @@ export interface LocalAgentBackend {
    * to keep this agent isolated. See `packages/agent/src/lib/network/types.ts`.
    */
   readonly network?: NetworkRecipe;
+  /**
+   * Environment variable names that must be set at resolve time.
+   * `resolveLocalAgent` throws a descriptive error when any are absent;
+   * `applyDiscoveredAgents` emits a warning when registering a recipe
+   * whose vars aren't in the current environment (but still registers —
+   * the recipe is just JSON and can be used once the vars are set).
+   */
+  readonly requiredEnv?: ReadonlyArray<string>;
   /** Free-form extension knobs the resolver may consume. */
   readonly extra?: Readonly<Record<string, unknown>>;
 }

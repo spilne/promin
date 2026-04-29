@@ -145,6 +145,8 @@ export interface ListThreadsParams {
   readonly limit?: number;
   readonly cursor?: string;
   readonly order?: "lastActiveDesc" | "createdAsc" | "createdDesc";
+  /** See `ListThreadsParams` in memory/types. Default: hide archived. */
+  readonly archived?: boolean;
 }
 
 export interface ThreadSummary {
@@ -157,6 +159,8 @@ export interface ThreadSummary {
    */
   readonly title: string | null;
   readonly metadata: Readonly<Record<string, unknown>>;
+  /** Unix ms timestamp when the thread was archived. Null means active. */
+  readonly archivedAt: number | null;
   readonly messageCount: number;
   readonly lastActiveAt: number;
   readonly createdAt: number;
@@ -332,6 +336,8 @@ export interface AgentThread<Input = AgentInput, Output = unknown> {
   title(): Promise<string | null>;
   /** Set the thread's display title. `null` clears it (UI falls back to threadId). */
   setTitle(title: string | null): Promise<void>;
+  /** Archive or restore. Pass `null` to restore (clear archivedAt). */
+  setArchived(archivedAt: number | null): Promise<void>;
 
   /** Permanently delete the thread and its messages / facts / episodes. */
   delete(): Promise<void>;

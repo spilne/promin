@@ -91,6 +91,7 @@ import { getSparklines, getWorkflowGrid, getWorkflowHistory } from "./routes/gri
 import { getWorkflowDef, listWorkflowDefs } from "./routes/workflow-defs.ts";
 import {
   compactThread,
+  archiveAgentThread,
   distillThread,
   getAgent,
   invokeAgent,
@@ -586,7 +587,8 @@ export class ZoryaServer {
         .post("/api/agents/:id/threads/:threadId/approve", streamThreadApproval(agentDeps))
         .get("/api/agents/:id/threads/:threadId/messages", listThreadMessages(agentDeps))
         .post("/api/agents/:id/threads/:threadId/distill", distillThread(agentDeps))
-        .post("/api/agents/:id/threads/:threadId/compact", compactThread(agentDeps));
+        .post("/api/agents/:id/threads/:threadId/compact", compactThread(agentDeps))
+        .post("/api/agents/:id/threads/:threadId/archive", archiveAgentThread(agentDeps));
     }
 
     if (config.memoryInspector) {

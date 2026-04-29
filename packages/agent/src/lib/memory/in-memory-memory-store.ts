@@ -258,6 +258,7 @@ export class InMemoryMemoryStore implements MemoryStore {
       workingMemory: init.workingMemory ?? null,
       inheritFromParent: init.inheritFromParent ?? true,
       metadata: init.metadata ?? {},
+      archivedAt: init.archivedAt ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -290,6 +291,11 @@ export class InMemoryMemoryStore implements MemoryStore {
           if (t.metadata[k] !== v) return false;
         }
       }
+      if (params.archived === true) {
+        if (t.archivedAt == null) return false;
+      } else if (params.archived === false || params.archived === undefined) {
+        if (t.archivedAt != null) return false;
+      }
       return true;
     });
 
@@ -308,6 +314,7 @@ export class InMemoryMemoryStore implements MemoryStore {
         // titles always go through the typed column.
         title: t.title ?? (typeof t.metadata.title === "string" ? t.metadata.title : null),
         metadata: t.metadata,
+        archivedAt: t.archivedAt,
         messageCount: this.messages.get(k)?.length ?? 0,
         lastActiveAt: this.lastActiveByThread.get(k) ?? t.updatedAt,
         createdAt: t.createdAt,
@@ -366,6 +373,15 @@ export class InMemoryMemoryStore implements MemoryStore {
     this.threads.set(this.threadK(key), {
       ...row,
       inheritFromParent: inherit,
+      updatedAt: this.now(),
+    });
+  }
+
+  async setThreadArchived(key: ThreadKey, archivedAt: number | null): Promise<void> {
+    const row = await this.requireThread(key);
+    this.threads.set(this.threadK(key), {
+      ...row,
+      archivedAt,
       updatedAt: this.now(),
     });
   }

@@ -108,6 +108,23 @@ export interface ConsolidationSignals {
 // DefaultConsolidator — LLM-driven reference impl
 // ---------------------------------------------------------------------------
 
+/**
+ * How to represent non-interactive trigger turns (scheduled, webhook,
+ * agent-delegated) in the transcript sent to the distillation LLM.
+ *
+ * - `"include"` — emit as `[scheduled-trigger] <task>` followed by normal
+ *   assistant / tool lines. Useful when you want the full conversation
+ *   verbatim.
+ * - `"reframe"` *(default)* — skip the trigger user message; emit assistant
+ *   lines in the turn as `[scheduled-result: <task>] <text>` and tool calls /
+ *   results as `[scheduled-tool-call]` / `[scheduled-tool-result]`. The
+ *   summarizer sees "what the agent did" without attributing it to the user.
+ * - `"skip"` — drop the entire trigger turn (user + assistant + tools). Good
+ *   when scheduled runs are high-frequency background noise that would dilute
+ *   the episode.
+ */
+export type TriggerTurnHandling = "include" | "reframe" | "skip";
+
 export interface DefaultConsolidatorConfig {
   readonly store: MemoryStore;
   /** Used for the distillation prompt. Often a cheaper model than the chat LLM. */
@@ -135,6 +152,11 @@ export interface DefaultConsolidatorConfig {
    * results from the current call are never evicted in the same call.
    */
   readonly maxResourceFacts?: number;
+  /**
+   * How trigger turns (scheduled, webhook, agent-delegated) appear in the
+   * compaction / distillation transcript. Default: `"reframe"`.
+   */
+  readonly triggerTurnHandling?: TriggerTurnHandling;
 }
 
 const DEFAULT_DISTILL_PROMPT = `You are a memory consolidation assistant. You will be shown a chat thread between a user and an agent. Produce a JSON envelope summarising the conversation in a way that would help the SAME user pick up later in a NEW thread.
@@ -165,6 +187,7 @@ export class DefaultConsolidator implements Consolidator {
   private readonly defaultKeepRecent: number;
   private readonly minDistillMessages: number;
   private readonly maxResourceFacts?: number;
+  private readonly triggerTurnHandling: TriggerTurnHandling;
 
   constructor(config: DefaultConsolidatorConfig) {
     this.store = config.store;
@@ -175,6 +198,7 @@ export class DefaultConsolidator implements Consolidator {
     this.defaultKeepRecent = config.defaultKeepRecent ?? 10;
     this.minDistillMessages = config.minDistillMessages ?? 2;
     if (config.maxResourceFacts !== undefined) this.maxResourceFacts = config.maxResourceFacts;
+    this.triggerTurnHandling = config.triggerTurnHandling ?? "reframe";
   }
 
   async compactThread(key: ThreadKey, opts: CompactThreadOptions = {}): Promise<EpisodicRecord> {
@@ -313,7 +337,7 @@ export class DefaultConsolidator implements Consolidator {
     facts: string[];
     embedding?: number[];
   }> {
-    const transcript = formatTranscript(messages);
+    const transcript = formatTranscript(messages, this.triggerTurnHandling);
     const llmMessages: Message[] = [
       { role: "system", content: this.distillPrompt },
       { role: "user", content: transcript },
@@ -325,7 +349,9 @@ export class DefaultConsolidator implements Consolidator {
       toolCallCount: messages.filter(
         (m) => m.role === "assistant" && (m.toolCalls ?? []).length > 0,
       ).length,
-      userMessageCount: messages.filter((m) => m.role === "user").length,
+      userMessageCount: messages.filter(
+        (m) => m.role === "user" && !(m.metadata?.source as { kind?: string } | undefined)?.kind,
+      ).length,
       hasFailures: messages.some((m) => m.role === "tool" && /error|failed/i.test(m.content)),
       modelSalience: parsed.salience,
       summary: parsed.summary,
@@ -383,20 +409,61 @@ function parseEnvelope(raw: string): ParsedEnvelope {
   return { summary, outcome, salience, facts };
 }
 
-function formatTranscript(messages: ReadonlyArray<StoredMessage>): string {
+function formatTranscript(
+  messages: ReadonlyArray<StoredMessage>,
+  triggerHandling: TriggerTurnHandling = "reframe",
+): string {
   const lines: string[] = [];
+  let inTriggerTurn = false;
+  let triggerTask = "";
+
   for (const m of messages) {
     if (m.role === "system") continue;
+
     if (m.role === "user") {
-      lines.push(`[user] ${m.content}`);
-    } else if (m.role === "assistant") {
-      const text = (m.content ?? "").trim();
-      if (text) lines.push(`[assistant] ${text}`);
-      for (const t of m.toolCalls ?? []) {
-        lines.push(`[assistant tool-call] ${t.name}(${JSON.stringify(t.input)})`);
+      const srcKind = (m.metadata?.source as { kind?: string } | undefined)?.kind;
+      if (srcKind && srcKind !== "user") {
+        const bareTask = m.content.replace(/^\[[^\]]+\]\s*/, "");
+        if (triggerHandling === "include") {
+          lines.push(`[${srcKind}-trigger] ${bareTask}`);
+          inTriggerTurn = false;
+        } else {
+          inTriggerTurn = true;
+          triggerTask = bareTask;
+        }
+      } else {
+        inTriggerTurn = false;
+        lines.push(`[user] ${m.content}`);
       }
-    } else if (m.role === "tool") {
-      lines.push(`[tool-result] ${m.content.slice(0, 240)}`);
+      continue;
+    }
+
+    if (m.role === "assistant") {
+      const text = (m.content ?? "").trim();
+      const toolCalls = m.toolCalls ?? [];
+      if (inTriggerTurn) {
+        if (triggerHandling === "skip") continue;
+        if (text) lines.push(`[scheduled-result: ${triggerTask}] ${text}`);
+        for (const t of toolCalls) {
+          lines.push(`[scheduled-tool-call] ${t.name}(${JSON.stringify(t.input)})`);
+        }
+      } else {
+        if (text) lines.push(`[assistant] ${text}`);
+        for (const t of toolCalls) {
+          lines.push(`[assistant tool-call] ${t.name}(${JSON.stringify(t.input)})`);
+        }
+      }
+      continue;
+    }
+
+    if (m.role === "tool") {
+      if (inTriggerTurn) {
+        if (triggerHandling === "skip") continue;
+        lines.push(`[scheduled-tool-result] ${m.content.slice(0, 240)}`);
+      } else {
+        lines.push(`[tool-result] ${m.content.slice(0, 240)}`);
+      }
+      continue;
     }
   }
   return lines.join("\n");

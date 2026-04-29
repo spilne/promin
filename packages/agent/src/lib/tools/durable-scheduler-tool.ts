@@ -148,6 +148,10 @@ interface ListOk {
     cron: string | null;
     intervalMs: number | null;
     rrule: string | null;
+    /** ISO timestamp of last fire. Null when never fired. */
+    lastFiredAt: string | null;
+    /** How many times this schedule has fired. */
+    tickCount: number;
   }>;
 }
 
@@ -299,6 +303,8 @@ async function handleList(client: SchedulerClient): Promise<ListOk> {
       cron: s.cron,
       intervalMs: s.intervalMs,
       rrule: s.rrule,
+      lastFiredAt: s.lastFiredAt,
+      tickCount: s.tickCount,
     })),
   };
 }

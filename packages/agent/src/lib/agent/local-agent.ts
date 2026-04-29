@@ -63,6 +63,7 @@ import type {
   Agent,
   AgentEvent,
   AgentInput,
+  AgentInputSource,
   AgentInvokeOpts,
   AgentRunOutput,
   AgentThread,
@@ -613,12 +614,14 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       limit: params?.limit,
       cursor: params?.cursor,
       order: params?.order,
+      archived: params?.archived,
     });
     return summaries.map((s) => ({
       id: s.threadId,
       resourceId: s.resourceId,
       title: s.title,
       metadata: s.metadata,
+      archivedAt: s.archivedAt,
       messageCount: s.messageCount,
       lastActiveAt: s.lastActiveAt,
       createdAt: s.createdAt,
@@ -959,6 +962,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     const workflowId = `${this.deps.key.threadId}-${randomUUID().slice(0, 8)}`;
 
     const seedLen = seed.length;
+    const source = input.source;
     const promise = this.deps.runner
       .run({
         workflow: wf,
@@ -967,7 +971,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       })
       .then(async (raw) => {
         const r = raw as AgentResult;
-        await this.persistTurn(seedLen, !!persona, r);
+        await this.persistTurn(seedLen, !!persona, r, source);
         return r;
       });
 
@@ -1049,15 +1053,30 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     seedLen: number,
     turnHadSystemPrompt: boolean,
     result: AgentResult,
+    source?: AgentInputSource,
   ): Promise<void> {
     // Use the per-turn flag, not the static loopConfig.systemPrompt:
     // resolveContext can produce a non-empty cascade even when the
     // agent's static prompt is unset. Slicing on the static field
     // would mis-attribute the cascade as the first user message.
     const skip = seedLen + (turnHadSystemPrompt ? 1 : 0);
-    const newTail = result.messages.slice(skip).filter((m) => m.role !== "system");
+    let newTail = result.messages.slice(skip).filter((m) => m.role !== "system");
 
     if (newTail.length === 0) return;
+
+    // Stamp non-interactive sources onto the first user message so the UI
+    // can render scheduled/webhook/agent triggers differently from live chat.
+    if (source && source.kind !== "user") {
+      const firstUserIdx = newTail.findIndex((m) => m.role === "user");
+      const firstUser = firstUserIdx !== -1 ? newTail[firstUserIdx] : undefined;
+      if (firstUser?.role === "user") {
+        newTail = [
+          ...newTail.slice(0, firstUserIdx),
+          { ...firstUser, metadata: { source: serializeSource(source) } },
+          ...newTail.slice(firstUserIdx + 1),
+        ];
+      }
+    }
 
     if (this.deps.memory) {
       if (!(await this.deps.memory.getThread(this.deps.key))) {
@@ -1268,6 +1287,14 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       await this.deps.memory.createThread(this.deps.key);
     }
     await this.deps.memory.setThreadTitle(this.deps.key, title);
+  }
+
+  async setArchived(archivedAt: number | null): Promise<void> {
+    if (!this.deps.memory) return;
+    if (!(await this.deps.memory.getThread(this.deps.key))) {
+      await this.deps.memory.createThread(this.deps.key);
+    }
+    await this.deps.memory.setThreadArchived(this.deps.key, archivedAt);
   }
 
   async delete(): Promise<void> {
@@ -1542,6 +1569,27 @@ function sumUsage(
         ? (total.cacheWriteTokens ?? 0) + delta.cacheWriteTokens
         : total.cacheWriteTokens,
   };
+}
+
+function serializeSource(
+  source: Exclude<AgentInputSource, { kind: "user" }>,
+): Record<string, unknown> {
+  switch (source.kind) {
+    case "scheduled":
+      return {
+        kind: "scheduled",
+        firedAt: source.firedAt.toISOString(),
+        ...(source.scheduleId !== undefined && { scheduleId: source.scheduleId }),
+      };
+    case "webhook":
+      return {
+        kind: "webhook",
+        receivedAt: source.receivedAt.toISOString(),
+        ...(source.origin !== undefined && { origin: source.origin }),
+      };
+    case "agent":
+      return { kind: "agent", callerAgentId: source.callerAgentId };
+  }
 }
 
 function stripStorageMeta(m: Message & { seq?: number; createdAt?: number }): Message {

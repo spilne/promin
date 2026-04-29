@@ -132,6 +132,10 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
               tenant={tenant}
               onTurnComplete={refreshThreads}
               onInspect={() => setInspectorOpen(true)}
+              onArchived={() => {
+                setActiveThread(null);
+                refreshThreads();
+              }}
             />
           ) : (
             <div class="card bg-base-100 shadow flex items-center justify-center text-center text-base-content/50 p-8">
@@ -384,12 +388,14 @@ function ChatPane({
   tenant,
   onTurnComplete,
   onInspect,
+  onArchived,
 }: {
   agentId: string;
   threadId: string;
   tenant: Tenant;
   onTurnComplete: () => void;
   onInspect: () => void;
+  onArchived: () => void;
 }) {
   const {
     data: messagesResp,
@@ -428,6 +434,23 @@ function ChatPane({
   const [schedulesOpen, setSchedulesOpen] = useState(false);
   const abortRef = useRef<{ abort: () => void } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Keep refs so the background poll interval can read the latest values
+  // without needing to restart the interval on every render.
+  const pendingRef = useRef(pending);
+  pendingRef.current = pending;
+  const refreshRef = useRef(refreshMessages);
+  refreshRef.current = refreshMessages;
+
+  // Background poll — picks up messages written by scheduled ticks while
+  // no user-initiated stream is open. Skips when a stream is already
+  // active so a concurrent tick can't inject messages into the middle
+  // of a live streaming turn.
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (!pendingRef.current) refreshRef.current();
+    }, 5_000);
+    return () => clearInterval(id);
+  }, []);
 
   // Drop the optimistic user bubble once the persisted history contains
   // the same text — keeps a brief render window where both would show
@@ -540,6 +563,21 @@ function ChatPane({
     setPendingApproval(null);
   };
 
+  const archiveThread = async () => {
+    try {
+      await api.archiveAgentThread(agentId, threadId, {
+        namespaceId: tenant.namespaceId,
+        resourceId: tenant.resourceId || undefined,
+        archivedAt: Date.now(),
+      });
+      onArchived();
+    } catch (err) {
+      toast(`Archive failed: ${err instanceof Error ? err.message : String(err)}`, {
+        variant: "error",
+      });
+    }
+  };
+
   return (
     // Fade + slight upward slide on every (agent / thread / tenant) swap.
     // The component is keyed on those upstream so React fully remounts on
@@ -568,6 +606,13 @@ function ChatPane({
           </button>
           <button class="btn btn-xs btn-ghost" onClick={() => refreshMessages()} title="Refresh">
             ↻
+          </button>
+          <button
+            class="btn btn-xs btn-ghost text-base-content/50 hover:text-error"
+            onClick={archiveThread}
+            title="Archive this thread — hides it from the sidebar"
+          >
+            Archive
           </button>
         </div>
       </div>
@@ -669,7 +714,15 @@ function renderConversation(messages: ReadonlyArray<Message>): preact.JSX.Elemen
     const m = messages[i]!;
     if (m.role === "system" || m.role === "tool") continue;
     if (m.role === "user") {
-      out.push(<UserBubble key={`u-${i}`} content={m.content} />);
+      const src = (m.metadata?.source ?? null) as { kind: string; [k: string]: unknown } | null;
+      if (src && src.kind !== "user") {
+        // Strip the `[Scheduled trigger …]` / `[Webhook event …]` prefix that
+        // frameTask prepended — the metadata carries the structured info.
+        const content = m.content.replace(/^\[[^\]]+\]\s*/, "");
+        out.push(<TriggerEvent key={`u-${i}`} content={content} source={src} />);
+      } else {
+        out.push(<UserBubble key={`u-${i}`} content={m.content} />);
+      }
       continue;
     }
     // assistant
@@ -698,6 +751,60 @@ function UserBubble({ content }: { content: string }) {
     <div class="chat chat-end">
       <div class="chat-header text-xs text-base-content/50">you</div>
       <div class="chat-bubble chat-bubble-primary whitespace-pre-wrap break-words">{content}</div>
+    </div>
+  );
+}
+
+function TriggerEvent({
+  content,
+  source,
+}: {
+  content: string;
+  source: { kind: string; [k: string]: unknown };
+}) {
+  const label =
+    source.kind === "scheduled"
+      ? "Scheduled trigger"
+      : source.kind === "webhook"
+        ? `Webhook${source.origin ? ` · ${source.origin}` : ""}`
+        : source.kind === "agent"
+          ? `Agent · ${source.callerAgentId}`
+          : "System trigger";
+
+  const ts =
+    typeof source.firedAt === "string"
+      ? source.firedAt
+      : typeof source.receivedAt === "string"
+        ? source.receivedAt
+        : null;
+
+  return (
+    <div class="flex justify-center my-2">
+      <div class="flex flex-col items-center gap-1 w-full max-w-xl">
+        <div class="flex items-center gap-1.5 text-xs text-base-content/50 bg-base-200 px-3 py-1 rounded-full border border-base-content/10">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="11"
+            height="11"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="12" cy="12" r="10" />
+            <polyline points="12 6 12 12 16 14" />
+          </svg>
+          <span class="font-medium">{label}</span>
+          {ts && <span class="opacity-60">· {new Date(ts).toLocaleString()}</span>}
+        </div>
+        {content && (
+          <div class="bg-base-200/60 border border-base-content/10 rounded-lg px-3 py-2 text-sm text-base-content/80 whitespace-pre-wrap break-words w-full">
+            {content}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

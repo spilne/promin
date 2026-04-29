@@ -208,11 +208,22 @@ function trimMessages(msgs: ReadonlyArray<StoredMessage>, budget: TokenBudget): 
   for (const m of msgs) total += estimate(m);
   if (total <= budget.maxMessageTokens) return msgs.slice();
 
-  // Trim from the front (oldest) until we fit.
+  // Trim whole turns from the front (oldest first). A turn spans from a
+  // `user` message up to (but not including) the next `user` message.
+  // Dropping individual messages would orphan tool_result blocks whose
+  // paired tool_use lived in the dropped assistant message, causing a
+  // 400 from the Anthropic API.
   const remaining = msgs.slice();
   while (remaining.length > 0 && total > budget.maxMessageTokens) {
-    const dropped = remaining.shift()!;
-    total -= estimate(dropped);
+    let turnEnd = remaining.length;
+    for (let i = 1; i < remaining.length; i++) {
+      if (remaining[i]!.role === "user") {
+        turnEnd = i;
+        break;
+      }
+    }
+    for (let i = 0; i < turnEnd; i++) total -= estimate(remaining[i]!);
+    remaining.splice(0, turnEnd);
   }
   return remaining;
 }

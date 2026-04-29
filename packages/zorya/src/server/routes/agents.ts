@@ -788,6 +788,56 @@ export function compactThread(deps: AgentGatewayDeps) {
 }
 
 // ---------------------------------------------------------------------------
+// Archive / unarchive a thread — sets archivedAt on the thread row so
+// the sidebar hides it from the default view without deleting it.
+// ---------------------------------------------------------------------------
+
+interface ArchiveThreadRequest {
+  readonly namespaceId?: unknown;
+  readonly resourceId?: unknown;
+  /** Unix ms timestamp to archive at, or null to restore. Defaults to Date.now() when omitted. */
+  readonly archivedAt?: unknown;
+}
+
+export function archiveAgentThread(deps: AgentGatewayDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const id = params.id;
+    const threadId = params.threadId;
+    if (!id) return jsonError(400, "missing_id");
+    if (!threadId) return jsonError(400, "missing_threadId");
+
+    const body = (await readJson<ArchiveThreadRequest>(req)) ?? {};
+    const namespaceId = typeof body.namespaceId === "string" ? body.namespaceId : undefined;
+    const resourceId = typeof body.resourceId === "string" ? body.resourceId : undefined;
+    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    const archivedAt =
+      body.archivedAt === null
+        ? null
+        : typeof body.archivedAt === "number"
+          ? body.archivedAt
+          : Date.now();
+
+    const recipe = await deps.registry.get(id);
+    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+
+    let agent: Agent;
+    try {
+      agent = deps.resolve(recipe).withScope({ namespaceId, resourceId });
+    } catch (err) {
+      return jsonError(500, "resolve_failed", asMessage(err));
+    }
+
+    try {
+      const thread = await agent.thread(threadId, { createIfMissing: false });
+      await thread.setArchived(archivedAt);
+      return json(200, { threadId: thread.id, archivedAt });
+    } catch (err) {
+      return jsonError(404, "thread_not_found", asMessage(err));
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
 
 function parseIntParam(s: string | null): number | undefined {
   if (s === null) return undefined;

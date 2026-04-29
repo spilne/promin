@@ -117,14 +117,19 @@ export class SqliteMemoryStore implements MemoryStore {
         PRIMARY KEY (namespace_id, thread_id)
       )
     `);
-    // Migrate existing tables that predate the `title` column. sqlite's
-    // ALTER TABLE ADD COLUMN IF NOT EXISTS arrived in 3.35; older dbs
-    // throw "duplicate column" — we swallow that and let any other error
-    // propagate.
-    try {
-      this.db.run(`ALTER TABLE ${p}_thread ADD COLUMN title TEXT`);
-    } catch (e) {
-      if (!String(e).includes("duplicate column")) throw e;
+    // Migrate existing tables for columns added after initial release.
+    // sqlite's ALTER TABLE ADD COLUMN IF NOT EXISTS arrived in 3.35; older
+    // dbs throw "duplicate column" — we swallow that and let any other
+    // error propagate.
+    for (const migration of [
+      `ALTER TABLE ${p}_thread ADD COLUMN title TEXT`,
+      `ALTER TABLE ${p}_thread ADD COLUMN archived_at INTEGER`,
+    ]) {
+      try {
+        this.db.run(migration);
+      } catch (e) {
+        if (!String(e).includes("duplicate column")) throw e;
+      }
     }
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${p}_thread_resource ON ${p}_thread (namespace_id, resource_id)`,
@@ -450,14 +455,15 @@ export class SqliteMemoryStore implements MemoryStore {
       workingMemory: init.workingMemory ?? null,
       inheritFromParent: init.inheritFromParent ?? true,
       metadata: init.metadata ?? {},
+      archivedAt: init.archivedAt ?? null,
       createdAt: now,
       updatedAt: now,
     };
     this.db
       .query(
         `INSERT INTO ${this.prefix}_thread
-           (namespace_id, thread_id, resource_id, title, working_memory, inherit_from_parent, metadata, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (namespace_id, thread_id, resource_id, title, working_memory, inherit_from_parent, metadata, archived_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.namespaceId,
@@ -467,6 +473,7 @@ export class SqliteMemoryStore implements MemoryStore {
         row.workingMemory,
         row.inheritFromParent ? 1 : 0,
         JSON.stringify(row.metadata),
+        row.archivedAt,
         row.createdAt,
         row.updatedAt,
       );
@@ -496,6 +503,11 @@ export class SqliteMemoryStore implements MemoryStore {
       where.push("LOWER(thread_id) LIKE ?");
       args.push(`%${params.q.trim().toLowerCase()}%`);
     }
+    if (params.archived === true) {
+      where.push("archived_at IS NOT NULL");
+    } else if (params.archived === false || params.archived === undefined) {
+      where.push("archived_at IS NULL");
+    }
     const rows = this.db
       .query<DbThreadRow>(`SELECT * FROM ${this.prefix}_thread WHERE ${where.join(" AND ")}`)
       .all(...args);
@@ -524,6 +536,7 @@ export class SqliteMemoryStore implements MemoryStore {
         threadId: r.thread_id,
         title,
         metadata,
+        archivedAt: r.archived_at ?? null,
         messageCount: count?.c ?? 0,
         lastActiveAt: lastMsg?.created_at ?? r.updated_at,
         createdAt: r.created_at,
@@ -599,6 +612,16 @@ export class SqliteMemoryStore implements MemoryStore {
          WHERE namespace_id = ? AND thread_id = ?`,
       )
       .run(inherit ? 1 : 0, this.clock(), key.namespaceId, key.threadId);
+  }
+
+  async setThreadArchived(key: ThreadKey, archivedAt: number | null): Promise<void> {
+    await this.requireThread(key);
+    this.db
+      .query(
+        `UPDATE ${this.prefix}_thread SET archived_at = ?, updated_at = ?
+         WHERE namespace_id = ? AND thread_id = ?`,
+      )
+      .run(archivedAt, this.clock(), key.namespaceId, key.threadId);
   }
 
   async appendThreadFact(key: ThreadKey, text: string): Promise<Fact> {
@@ -918,6 +941,7 @@ interface DbThreadRow {
   working_memory: string | null;
   inherit_from_parent: number;
   metadata: string | null;
+  archived_at: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -992,6 +1016,7 @@ function toThreadRow(r: DbThreadRow): ThreadRow {
     workingMemory: r.working_memory,
     inheritFromParent: r.inherit_from_parent === 1,
     metadata,
+    archivedAt: r.archived_at ?? null,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };

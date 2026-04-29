@@ -25,6 +25,7 @@ export const CLAUDE_BOT: RegisterAgentInput = {
       "  4. Each scheduled tick re-invokes you with a `[Scheduled trigger ...]` framing prefix on the user message — when you see that, you're being woken by the cron, not by a live user. Do the task, post the result, end the turn.\n\n" +
       "Call a tool whenever it would give a better answer than guessing. If asked what model you are, answer truthfully: claude-sonnet-4-6 via the Anthropic Messages API.",
     tools: ["weather", "currentTime", "calculate", "listWorkflows", "scheduler"],
+    requiredEnv: ["ANTHROPIC_API_KEY"],
     // Recipe-level runtime knobs. The demo's resolver also supplies
     // host-level defaults for mock agents; for claude-bot we lock in
     // tighter Sonnet-appropriate numbers right on the recipe so the

@@ -10,19 +10,18 @@ import { ScheduleDrawer } from "./schedule-drawer.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { Pagination } from "../ui/pagination.tsx";
 import { Page } from "../ui/page.tsx";
+import { Combobox } from "../ui/combobox.tsx";
 
 const PAGE_SIZE = 20;
-type StatusFilter = "all" | "active" | "cancelled";
+type StatusFilter = "all" | "active" | "paused";
 type KindFilter = "all" | "workflow" | "agent";
 type ScheduleSortCol = "name" | "lastFire" | "nextFire" | "tickCount" | "status";
 type ScheduleSortState = { col: ScheduleSortCol; dir: "asc" | "desc" } | null;
-// Status maps directly onto the `enabled` flag — cancelled = enabled:false.
-// Same shape the chat drawer uses; both surfaces talk about cancelled
-// schedules in the same terms.
+// Status maps directly onto the `enabled` flag — paused = enabled:false.
 const STATUS_FILTERS: ReadonlyArray<{ id: StatusFilter; label: string }> = [
   { id: "all", label: "All" },
   { id: "active", label: "Active" },
-  { id: "cancelled", label: "Cancelled" },
+  { id: "paused", label: "Paused" },
 ];
 const KIND_FILTERS: ReadonlyArray<{ id: KindFilter; label: string }> = [
   { id: "all", label: "All kinds" },
@@ -43,18 +42,18 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("active");
   // Both filters push through to storage:
   //  - Status: maps directly to the `enabled` query param
-  //    (`active` → enabled:true, `cancelled` → enabled:false, `all` omitted).
+  //    (`active` → enabled:true, `paused` → enabled:false, `all` omitted).
   //  - Kind: `agent` becomes a `metadata: { agentTrigger: true }`
   //    containment query; `workflow` needs a client-side post-filter
   //    because storage containment can't express "key is absent".
-  // Defaults to `active` so cancelled rows don't crowd the operator
+  // Defaults to `active` so paused rows don't crowd the operator
   // view by default — flip the chip to surface them.
   const { data, loading, error, refresh } = useFetch(
     () =>
       api.listSchedules({
         namespace: namespace || undefined,
         ...(statusFilter === "active" && { enabled: true }),
-        ...(statusFilter === "cancelled" && { enabled: false }),
+        ...(statusFilter === "paused" && { enabled: false }),
         ...(kindFilter === "agent" && { metadata: { agentTrigger: true } }),
       }),
     [namespace, kindFilter, statusFilter],
@@ -155,14 +154,11 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
   const configured = data?.configured !== false;
   const schedules = data?.schedules ?? [];
 
-  // Soft cancel via the `enabled` flag — same primitive the chat drawer
-  // uses (`patchSchedule({ enabled: false })`). Both surfaces talk
-  // about cancelled schedules in the same terms.
   const togglePause = async (s: ScheduleDto) => {
     try {
       await api.patchSchedule(s.id, { enabled: !s.enabled });
       refresh();
-      toast(s.enabled ? "Schedule cancelled" : "Schedule restored", { variant: "success" });
+      toast(s.enabled ? "Schedule paused" : "Schedule resumed", { variant: "success" });
     } catch (e) {
       toast(`Failed: ${e}`, { variant: "error" });
     }
@@ -234,23 +230,14 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
           zero results, trapping the user in the empty state. */}
       {configured && (
         <div class="flex items-center gap-2 flex-wrap justify-end">
-          <div class="join">
-            {KIND_FILTERS.map((f) => (
-              <button
-                class={`btn btn-sm join-item ${kindFilter === f.id ? "btn-primary" : "btn-ghost"}`}
-                onClick={() => setKindFilter(f.id)}
-                title={
-                  f.id === "agent"
-                    ? "Schedules created by agents (durable scheduler tool)"
-                    : f.id === "workflow"
-                      ? "Schedules that trigger a registered workflow"
-                      : "All schedule kinds"
-                }
-              >
-                {f.label}
-              </button>
-            ))}
-          </div>
+          <Combobox
+            value={kindFilter}
+            onChange={(v) => setKindFilter(v as KindFilter)}
+            options={KIND_FILTERS.map((f) => ({ value: f.id, label: f.label }))}
+            searchable
+            class="w-36"
+            size="sm"
+          />
           <div class="join">
             {STATUS_FILTERS.map((f) => (
               <button
@@ -373,14 +360,14 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
                           ? s.nextRunAt
                             ? formatCountdown(s.nextRunAt)
                             : "—"
-                          : "(cancelled)"}
+                          : "(paused)"}
                       </td>
                       <td class="font-mono text-sm text-right">{s.tickCount ?? 0}</td>
                       <td>
                         <span
                           class={`badge badge-sm ${s.enabled ? "badge-success" : "badge-ghost"}`}
                         >
-                          {s.enabled ? "active" : "cancelled"}
+                          {s.enabled ? "active" : "paused"}
                         </span>
                       </td>
                       <td class="text-right">
@@ -409,8 +396,8 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
                           <button
                             class="btn btn-sm btn-square btn-ghost"
                             onClick={() => togglePause(s)}
-                            title={s.enabled ? "Cancel" : "Restore"}
-                            aria-label={s.enabled ? "Cancel" : "Restore"}
+                            title={s.enabled ? "Pause" : "Resume"}
+                            aria-label={s.enabled ? "Pause" : "Resume"}
                           >
                             {s.enabled ? (
                               <svg
@@ -560,7 +547,7 @@ function scheduleSortKey(s: ScheduleDto, col: ScheduleSortCol): number | string 
     case "tickCount":
       return s.tickCount ?? 0;
     case "status":
-      return s.enabled ? "active" : "cancelled";
+      return s.enabled ? "active" : "paused";
   }
 }
 

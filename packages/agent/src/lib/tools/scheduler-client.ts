@@ -45,6 +45,10 @@ export interface SchedulerSummary {
   readonly rrule: string | null;
   readonly enabled: boolean;
   readonly metadata: Readonly<Record<string, unknown>>;
+  /** ISO timestamp of the last fire. Null when the schedule has never fired. */
+  readonly lastFiredAt: string | null;
+  /** Number of times this schedule has fired. */
+  readonly tickCount: number;
 }
 
 export interface SchedulerClient {
@@ -112,9 +116,12 @@ export function inProcessSchedulerClient(config: InProcessSchedulerClientConfig)
         namespace: scope.namespaceId,
         limit: 1000,
       });
-      return all
-        .filter((s) => belongsToScope(s, scope))
-        .map((s) => ({
+      const scoped = all.filter((s) => belongsToScope(s, scope));
+      const ids = scoped.map((s) => s.id);
+      const states = ids.length > 0 ? await storage.loadScheduleStates(ids) : new Map();
+      return scoped.map((s) => {
+        const state = states.get(s.id) ?? null;
+        return {
           id: s.id,
           name: s.name ?? null,
           cron: s.cron ?? null,
@@ -122,7 +129,10 @@ export function inProcessSchedulerClient(config: InProcessSchedulerClientConfig)
           rrule: s.rrule ?? null,
           enabled: s.enabled !== false,
           metadata: s.metadata ?? {},
-        }));
+          lastFiredAt: state?.lastFired ? state.lastFired.toISOString() : null,
+          tickCount: state?.tickCount ?? 0,
+        };
+      });
     },
 
     async cancel(id) {
@@ -174,6 +184,8 @@ interface HttpSchedulesResponse {
     rrule?: string;
     enabled?: boolean;
     metadata?: Record<string, unknown>;
+    lastFiredAt?: string;
+    tickCount?: number;
   }>;
   total: number;
 }
@@ -241,6 +253,8 @@ export function httpSchedulerClient(config: HttpSchedulerClientConfig): Schedule
           rrule: s.rrule ?? null,
           enabled: s.enabled ?? true,
           metadata: s.metadata ?? {},
+          lastFiredAt: s.lastFiredAt ?? null,
+          tickCount: s.tickCount ?? 0,
         }));
     },
 

@@ -281,6 +281,20 @@ export const api = {
       body: JSON.stringify(body),
     });
   },
+  archiveAgentThread(
+    id: string,
+    threadId: string,
+    body: { namespaceId: string; resourceId?: string; archivedAt: number | null },
+  ): Promise<{ threadId: string; archivedAt: number | null }> {
+    return req(
+      `/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/archive`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+  },
   listAgentThreadMessages(
     id: string,
     threadId: string,

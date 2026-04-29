@@ -201,6 +201,12 @@ export interface ThreadRow {
   readonly workingMemory: string | null;
   readonly inheritFromParent: boolean;
   readonly metadata: Readonly<Record<string, unknown>>;
+  /**
+   * When the thread was archived. Null means active.
+   * First-class column so the agent model can't accidentally clobber it
+   * through `setMetadata`.
+   */
+  readonly archivedAt: number | null;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -213,6 +219,8 @@ export interface ThreadSummary {
   /** See `ThreadRow.title`. UIs fall back to `threadId` when null. */
   readonly title: string | null;
   readonly metadata: Readonly<Record<string, unknown>>;
+  /** When the thread was archived. Null means active. */
+  readonly archivedAt: number | null;
   readonly messageCount: number;
   readonly lastActiveAt: number;
   readonly createdAt: number;
@@ -234,6 +242,7 @@ export interface ThreadInit {
   readonly workingMemory?: string | null;
   readonly inheritFromParent?: boolean;
   readonly metadata?: Readonly<Record<string, unknown>>;
+  readonly archivedAt?: number | null;
 }
 
 /** Filter / pagination for `listThreads`. */
@@ -258,6 +267,12 @@ export interface ListThreadsParams {
   readonly cursor?: string;
   /** Defaults to "lastActiveDesc". */
   readonly order?: "lastActiveDesc" | "createdAsc" | "createdDesc";
+  /**
+   * When `false` (default): exclude archived threads (archivedAt IS NOT NULL).
+   * When `true`: include only archived threads.
+   * When `undefined`: return all threads regardless of archive status.
+   */
+  readonly archived?: boolean;
 }
 
 /** Range for `getMessages`. Defaults to "last `limit` messages, oldest first". */
@@ -373,6 +388,8 @@ export interface MemoryStore {
   setThreadTitle(key: ThreadKey, title: string | null): Promise<void>;
   setThreadMetadata(key: ThreadKey, metadata: Readonly<Record<string, unknown>>): Promise<void>;
   setThreadInheritFromParent(key: ThreadKey, inherit: boolean): Promise<void>;
+  /** Archive or restore a thread. Pass `null` to restore (clear archivedAt). */
+  setThreadArchived(key: ThreadKey, archivedAt: number | null): Promise<void>;
   appendThreadFact(key: ThreadKey, text: string): Promise<Fact>;
   listThreadFacts(key: ThreadKey): Promise<Fact[]>;
   deleteThreadFact(key: ThreadKey, factId: string): Promise<void>;

@@ -2,6 +2,15 @@
 // Demo server — runs real workflows on an in-memory engine and serves the
 // dashboard. Run with:
 //   bun run packages/zorya/examples/demo.ts
+
+// Prepend HH:MM:SS timestamps to every console line for easier debugging.
+for (const level of ["log", "warn", "error"] as const) {
+  const orig = console[level].bind(console);
+  console[level] = (...args: unknown[]) => {
+    const t = new Date().toTimeString().slice(0, 8);
+    orig(`[${t}]`, ...args);
+  };
+}
 //
 // What's happening:
 // - DefaultWorkflowRunner drives two real workflow definitions
@@ -46,7 +55,6 @@ import {
   type LLMStreamChunk,
   type Agent,
   type RegisteredAgent,
-  type RegisterAgentInput,
 } from "@promin/agent";
 import { echoLLM } from "@promin/agent/testing";
 import { z } from "zod";
@@ -121,21 +129,7 @@ for (const w of rawAgentScan.warnings) console.warn(`[zorya] ${w}`);
 // Recipes that need a live API key get filtered out when the key is
 // missing, so the dashboard only surfaces agents that actually work.
 const haveAnthropicKey = !!process.env["ANTHROPIC_API_KEY"];
-const liveOnlyAgentIds = new Set<string>(["claude-bot", "knowledge-bot"]);
-if (!haveAnthropicKey) {
-  console.warn(
-    "[zorya] ANTHROPIC_API_KEY not set — skipping live agents: " + [...liveOnlyAgentIds].join(", "),
-  );
-}
-const agentScan = {
-  ...rawAgentScan,
-  // Reuse the runtime predicate so boot-time and tick-time filtering
-  // stay in lockstep — a recipe surfaced at boot will never disappear
-  // on the next scan because of a mismatched gate.
-  agents: rawAgentScan.agents.filter(
-    (a) => filterAgentsByCapability([a as RegisterAgentInput]).length > 0,
-  ),
-};
+const agentScan = rawAgentScan;
 
 // `support-bot` rotates through canned replies so multiple turns in a
 // thread don't all return the same line. Other bots use templated echo.
@@ -404,18 +398,6 @@ function pickCityFromText(text: string): string {
 }
 
 async function seedAgents() {
-  // Drop stale live-only rows from a previous boot when their capability
-  // (e.g. ANTHROPIC_API_KEY) is no longer present, so the dashboard
-  // doesn't surface agents that would fail at invoke time.
-  for (const id of liveOnlyAgentIds) {
-    if (!haveAnthropicKey) {
-      const existing = await agentRegistry.get(id);
-      if (existing) {
-        await agentRegistry.unregister(id);
-        console.log(`[zorya] unregistered stale ${id} (key missing)`);
-      }
-    }
-  }
   if (agentScan.agents.length === 0) {
     console.log(`[zorya] no agents discovered under ${agentScanRoot}`);
     return;
@@ -428,13 +410,6 @@ async function seedAgents() {
     console.log(`[zorya] registered new agents: ${result.added.join(", ")}`);
   }
   console.log(`[zorya] upserted ${result.upserted.length} agent recipe(s)`);
-}
-
-// Capability filter — applied to every scan tick, not just boot. Mirrors
-// the filter we run in `agentScan` above so a recipe added at runtime
-// gets the same liveOnly gating without restarting.
-function filterAgentsByCapability(agents: ReadonlyArray<RegisterAgentInput>): RegisterAgentInput[] {
-  return agents.filter((a) => !liveOnlyAgentIds.has(a.id) || haveAnthropicKey);
 }
 
 // Materialize a recipe into a live LocalAgent. Defined as a named
@@ -968,7 +943,6 @@ const agentScanLoop = startAgentsScanLoop({
   registry: agentRegistry,
   root: agentScanRoot,
   intervalMs: 5_000,
-  filterAgents: filterAgentsByCapability,
   onTick: (tick) => {
     if (tick.added.length > 0) {
       console.log(`[zorya] hot-reload: registered new agents: ${tick.added.join(", ")}`);

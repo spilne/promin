@@ -25,6 +25,7 @@ export const KNOWLEDGE_BOT: RegisterAgentInput = {
       "Tone: concise, factual, link-style citations. Avoid fluff. If the user asks something the KB " +
       "doesn't cover, admit it.",
     tools: ["searchKnowledge", "getDocument"],
+    requiredEnv: ["ANTHROPIC_API_KEY"],
     autoCompact: {
       contextLimit: 200_000,
       compressAt: 0.7,
