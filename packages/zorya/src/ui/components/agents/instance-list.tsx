@@ -68,17 +68,52 @@ export function InstanceList({ onOpenAgent }: Props) {
     <Page>
       <div class="flex items-end justify-between flex-wrap gap-2">
         <div>
-          <h2 class="text-xl font-semibold">Your agents</h2>
+          <h2 class="text-xl font-semibold">All instances</h2>
           <p class="text-xs text-base-content/50">
-            Long-lived agent instances for the selected (namespace, owner). One row per (agent,
-            owner) pair with its own working memory, facts, and threads. Switch namespace via the
-            sidebar.
+            Long-lived per-owner agent instances across all agents in this namespace.
           </p>
         </div>
         <button class="btn btn-sm btn-ghost gap-1" onClick={() => setRefreshTick((t) => t + 1)}>
           <span>↻</span>
           Refresh
         </button>
+      </div>
+
+      <div class="card bg-base-100 shadow">
+        <div class="card-body gap-3">
+          <p class="text-sm">
+            An <strong>agent instance</strong> is a long-lived relationship between one agent and
+            one owner (a user, team, or any entity you choose). Each instance gets its own isolated
+            working memory, facts, and conversation threads — separate from every other (agent,
+            owner) pair.
+          </p>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+            <div class="rounded-lg border border-base-300 px-3 py-2 space-y-1">
+              <div class="font-semibold text-base-content/70">
+                Without instances — shared memory
+              </div>
+              <div class="text-base-content/60">
+                All agents share a single memory row for the owner. If{" "}
+                <code class="bg-base-200 px-1 rounded">writer</code> learns "Alice prefers terse
+                replies", <code class="bg-base-200 px-1 rounded">reviewer</code> sees it too. Good
+                when you want a unified view of the owner across agents.
+              </div>
+            </div>
+            <div class="rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 space-y-1">
+              <div class="font-semibold text-base-content/70">With instances — isolated memory</div>
+              <div class="text-base-content/60">
+                Each (agent, owner) pair has its own memory row. Alice's{" "}
+                <code class="bg-base-200 px-1 rounded">writer</code> scratchpad is invisible to her{" "}
+                <code class="bg-base-200 px-1 rounded">reviewer</code>. Good when agents have
+                distinct jobs and shouldn't bleed context into each other.
+              </div>
+            </div>
+          </div>
+          <p class="text-xs text-base-content/50">
+            Create instances from an agent's detail page — open any agent, click{" "}
+            <strong>instances ↗</strong> in the identity bar, then <strong>+ New instance…</strong>
+          </p>
+        </div>
       </div>
 
       <div class="card bg-base-100 shadow">
