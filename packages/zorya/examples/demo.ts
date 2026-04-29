@@ -47,6 +47,7 @@ import {
   createFileToolRegistry,
   inProcessSchedulerClient,
   resolveLocalAgent,
+  resolveRemoteAgent,
   tool,
   type AgentTool,
   type LLMChatParams,
@@ -412,11 +413,12 @@ async function seedAgents() {
   console.log(`[zorya] upserted ${result.upserted.length} agent recipe(s)`);
 }
 
-// Materialize a recipe into a live LocalAgent. Defined as a named
-// function so the network deps can pass it back in for recursive
-// `callAgent` lookups — the closure binds whichever ref is current
-// when the tool fires.
+// Materialize a recipe into a live Agent. Dispatches on backend type so
+// remote recipes are proxied over HTTP without touching the local LLM/memory
+// stack. Defined as a named function so the network deps can pass it back in
+// for recursive `callAgent` lookups.
 function resolveAgent(recipe: RegisteredAgent): Agent {
+  if (recipe.backend.type === "remote") return resolveRemoteAgent(recipe);
   return resolveLocalAgent(recipe, {
     runner,
     memory: memoryStore,

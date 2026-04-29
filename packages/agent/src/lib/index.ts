@@ -140,6 +140,9 @@ export { InMemoryAgentRegistry } from "./registry/in-memory-agent-registry.ts";
 export type { InMemoryAgentRegistryConfig } from "./registry/in-memory-agent-registry.ts";
 export { resolveLocalAgent } from "./registry/resolve-local-agent.ts";
 export type { ResolveLocalAgentDeps } from "./registry/resolve-local-agent.ts";
+export { RemoteAgent } from "./registry/remote-agent.ts";
+export { resolveRemoteAgent } from "./registry/resolve-remote-agent.ts";
+export type { RemoteAgentBackend } from "./registry/types.ts";
 
 // Metrics — pluggable telemetry sink (Counter / Histogram). Default
 // no-op so instrumentation has zero cost when unconfigured. Hosts wire

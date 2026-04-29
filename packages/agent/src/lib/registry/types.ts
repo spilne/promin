@@ -48,11 +48,10 @@ export interface AgentMetadata {
 /**
  * Backend-specific recipe. Discriminated by `type`.
  *
- * Today: only `local` (LocalAgent over agentAction / agentLoop).
- * Future: `acp` (Claude Code / Codex / OpenCode / OpenClaw via ACP),
- *         `mastra` (wraps @mastra/core Agent), `http` (proxied).
+ * - `local`  — LocalAgent running in this process (agentAction / agentLoop)
+ * - `remote` — thin HTTP proxy forwarding calls to another Zorya deployment
  */
-export type AgentBackend = LocalAgentBackend;
+export type AgentBackend = LocalAgentBackend | RemoteAgentBackend;
 
 export interface LocalAgentBackend {
   readonly type: "local";
@@ -101,6 +100,32 @@ export interface LocalAgentBackend {
   readonly requiredEnv?: ReadonlyArray<string>;
   /** Free-form extension knobs the resolver may consume. */
   readonly extra?: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Remote backend — forwards all agent calls over HTTP to another Zorya
+ * deployment. The local process acts as a pure proxy: it does not run
+ * any LLM or memory store for this agent; everything lives on the remote.
+ *
+ * Use case: cross-org federation where Org A's coordinator delegates to
+ * Org B's specialist without either side leaving its own trust boundary.
+ */
+export interface RemoteAgentBackend {
+  readonly type: "remote";
+  /** Base URL of the remote Zorya server. Trailing slash is stripped. */
+  readonly endpoint: string;
+  /** Agent id as registered on the remote server. */
+  readonly remoteAgentId: string;
+  /**
+   * Auth credentials sent with every request. v1 supports bearer tokens
+   * only. Pass `undefined` for unauthenticated local dev (same origin).
+   */
+  readonly auth?: {
+    readonly kind: "bearer";
+    readonly token: string;
+  };
+  /** Per-call timeout in ms. No timeout by default. */
+  readonly timeoutMs?: number;
 }
 
 /**
