@@ -34,7 +34,9 @@ import {
 import {
   anthropic,
   applyDiscoveredAgents,
+  createDurableSchedulerTool,
   createFileToolRegistry,
+  inProcessSchedulerClient,
   resolveLocalAgent,
   tool,
   type AgentTool,
@@ -321,6 +323,17 @@ const toolRegistry = await createFileToolRegistry({
   onLoad: (name) => console.log(`[zorya] loaded tool ${name}`),
 });
 
+// Durable scheduler tool — agents call `scheduler.create(...)` to register
+// a cron / interval job that re-fires the agent with `source: scheduled`.
+// `getClient` is called per-execute with the live caller scope (read off
+// `ctx.scope` populated by the agent runtime), so each schedule row gets
+// stamped with the right (namespace, resource, thread, agentId) — no
+// LocalAgent surface needed. Pairs with `dispatchAgentSchedule` which
+// ZoryaServer auto-installs as the loop's fire override (see server.ts).
+const schedulerTool = createDurableSchedulerTool({
+  getClient: (scope) => inProcessSchedulerClient({ storage: schedulerStorage, scope }),
+});
+
 // Per-agent LLM map — keyed by recipe id. Built once at boot. A discovered
 // agent without an entry here falls through to a default `echoLLM` in the
 // resolver, so adding a new agent file under `./agents` works without a
@@ -436,7 +449,11 @@ function resolveAgent(recipe: RegisteredAgent): Agent {
     // Full registry of tools available; resolver's pickTools narrows by
     // recipe.backend.tools. listWorkflows is added inline because it
     // closes over `storage` + `workflowsByName`.
-    tools: { ...toolRegistry.getTools(), listWorkflows: listWorkflowsTool },
+    tools: {
+      ...toolRegistry.getTools(),
+      listWorkflows: listWorkflowsTool,
+      scheduler: schedulerTool,
+    },
     // Distillation is summarisation work — use Haiku when we have a
     // real key (cheaper / faster than Sonnet), fall back to the
     // chat LLM for mock agents (echoLLM round-trip is free anyway).
