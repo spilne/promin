@@ -575,6 +575,16 @@ export const instancesApi = {
       },
     );
   },
+  resolveOrCreate(
+    agentId: string,
+    body: { namespaceId: string; ownerId: string; displayName?: string },
+  ): Promise<{ instance: AgentInstanceDto }> {
+    return req(`/api/agents/${encodeURIComponent(agentId)}/instances`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
   wipe(
     agentId: string,
     instanceId: string,

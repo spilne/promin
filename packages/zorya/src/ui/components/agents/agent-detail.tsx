@@ -2,7 +2,7 @@ import type * as preact from "preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { useNamespace } from "../../hooks/use-namespace.ts";
-import { api } from "../../api/client.ts";
+import { api, instancesApi, type AgentInstanceDto } from "../../api/client.ts";
 import type { Message, RegisteredAgent, ThreadSummary } from "../../../server/routes/agents.ts";
 import { Page } from "../ui/page.tsx";
 import { Skeleton } from "../ui/skeleton.tsx";
@@ -109,7 +109,7 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
           </div>
         </div>
 
-        <TenantBar tenant={tenant} onChange={setTenant} />
+        <IdentityBar agentId={id} tenant={tenant} onChange={setTenant} />
 
         <div class="grid grid-cols-1 md:grid-cols-[260px_1fr] gap-4 min-h-[60vh]">
           <ThreadSidebar
@@ -187,26 +187,167 @@ function AgentMetaBadges({ agent }: { agent: RegisteredAgent }) {
   );
 }
 
-function TenantBar({ tenant, onChange }: { tenant: Tenant; onChange: (t: Tenant) => void }) {
+// Detects whether a resourceId was produced by composeAgentInstanceId
+// (contains "::" separator). Used to pick the initial UI mode.
+function looksLikeInstanceId(resourceId: string) {
+  return resourceId.includes("::");
+}
+
+function IdentityBar({
+  agentId,
+  tenant,
+  onChange,
+}: {
+  agentId: string;
+  tenant: Tenant;
+  onChange: (t: Tenant) => void;
+}) {
+  const [instances, setInstances] = useState<AgentInstanceDto[]>([]);
+  const [rawMode, setRawMode] = useState(() => !looksLikeInstanceId(tenant.resourceId));
+  const [showNew, setShowNew] = useState(false);
+  const [newOwner, setNewOwner] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  useEffect(() => {
+    instancesApi
+      .listForAgent(agentId, { namespaceId: tenant.namespaceId, limit: 50 })
+      .then((r) => {
+        setInstances(r.instances);
+        // Auto-switch to instance mode when the stored resourceId matches a loaded instance.
+        if (r.instances.some((i) => i.id === tenant.resourceId)) setRawMode(false);
+      })
+      .catch(() => {});
+  }, [agentId, tenant.namespaceId]);
+
+  const selectedInstance = instances.find((i) => i.id === tenant.resourceId);
+
+  const createInstance = async () => {
+    const owner = newOwner.trim();
+    if (!owner) return;
+    setCreating(true);
+    try {
+      const { instance } = await instancesApi.resolveOrCreate(agentId, {
+        namespaceId: tenant.namespaceId,
+        ownerId: owner,
+      });
+      setInstances((prev) => [...prev.filter((i) => i.id !== instance.id), instance]);
+      onChange({ ...tenant, resourceId: instance.id });
+      setShowNew(false);
+      setNewOwner("");
+      setRawMode(false);
+    } catch (err) {
+      toast(`Failed to create instance: ${err instanceof Error ? err.message : String(err)}`, {
+        variant: "error",
+      });
+    } finally {
+      setCreating(false);
+    }
+  };
+
   return (
-    <div class="card bg-base-200 px-3 py-2 flex flex-row gap-3 items-center text-xs">
+    <div class="card bg-base-200 px-3 py-2 flex flex-row gap-3 items-center text-xs flex-wrap">
       <span class="text-base-content/60">Tenant scope</span>
       <span class="flex items-center gap-1">
-        <span class="text-base-content/60">namespaceId</span>
+        <span class="text-base-content/60">namespace</span>
         <span class="badge badge-sm badge-ghost font-mono">{tenant.namespaceId}</span>
         <span class="text-base-content/30 text-[10px]">(sidebar)</span>
       </span>
-      <label class="flex items-center gap-1">
-        <span class="text-base-content/60">resourceId</span>
-        <input
-          class="input input-bordered input-xs font-mono w-32"
-          value={tenant.resourceId}
-          onInput={(e) => onChange({ ...tenant, resourceId: (e.target as HTMLInputElement).value })}
-        />
-      </label>
-      <span class="text-base-content/40 ml-auto">
-        Threads + memory cascade are scoped to this pair.
-      </span>
+
+      {rawMode ? (
+        <label class="flex items-center gap-1">
+          <span class="text-base-content/60">resourceId</span>
+          <input
+            class="input input-bordered input-xs font-mono w-36"
+            value={tenant.resourceId}
+            onInput={(e) =>
+              onChange({ ...tenant, resourceId: (e.target as HTMLInputElement).value })
+            }
+          />
+          {instances.length > 0 && (
+            <button
+              class="btn btn-xs btn-ghost text-base-content/40"
+              onClick={() => setRawMode(false)}
+            >
+              instances ↗
+            </button>
+          )}
+        </label>
+      ) : (
+        <div class="flex items-center gap-1 flex-wrap">
+          <span class="text-base-content/60">identity</span>
+          <select
+            class="select select-bordered select-xs font-mono max-w-[180px]"
+            value={tenant.resourceId}
+            onChange={(e) => {
+              const val = (e.target as HTMLSelectElement).value;
+              if (val === "__new__") {
+                setShowNew(true);
+                return;
+              }
+              onChange({ ...tenant, resourceId: val });
+            }}
+          >
+            {instances.map((i) => (
+              <option key={i.id} value={i.id}>
+                {i.displayName ?? i.ownerId}
+              </option>
+            ))}
+            {instances.length === 0 && (
+              <option value={tenant.resourceId} disabled>
+                {tenant.resourceId || "(no instances yet)"}
+              </option>
+            )}
+            <option value="__new__">+ New instance…</option>
+          </select>
+          {selectedInstance && (
+            <span class="font-mono text-[10px] text-base-content/30 truncate max-w-[160px]">
+              {selectedInstance.id}
+            </span>
+          )}
+          <button
+            class="btn btn-xs btn-ghost text-base-content/40"
+            onClick={() => setRawMode(true)}
+          >
+            raw ↗
+          </button>
+        </div>
+      )}
+
+      {showNew && (
+        <div class="flex items-center gap-1">
+          <input
+            class="input input-bordered input-xs font-mono w-28"
+            placeholder="owner id"
+            value={newOwner}
+            // eslint-disable-next-line jsx-a11y/no-autofocus
+            autoFocus
+            onInput={(e) => setNewOwner((e.target as HTMLInputElement).value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void createInstance();
+              if (e.key === "Escape") {
+                setShowNew(false);
+                setNewOwner("");
+              }
+            }}
+          />
+          <button
+            class="btn btn-xs btn-primary"
+            disabled={creating || !newOwner.trim()}
+            onClick={createInstance}
+          >
+            {creating ? "…" : "Create"}
+          </button>
+          <button
+            class="btn btn-xs btn-ghost"
+            onClick={() => {
+              setShowNew(false);
+              setNewOwner("");
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
     </div>
   );
 }
