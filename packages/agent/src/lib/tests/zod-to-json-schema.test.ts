@@ -127,31 +127,36 @@ describe("zodToJsonSchema — unions", () => {
     });
   });
 
-  it("ZodDiscriminatedUnion emits { type: object, oneOf } for Anthropic compat", () => {
+  it("ZodDiscriminatedUnion flattens to a single object — Anthropic forbids top-level oneOf", () => {
     // Regression: Zod 4 separates ZodDiscriminatedUnion from ZodUnion.
-    // The converter previously fell through to {} → Anthropic rejects
-    // the tool with 400 "input_schema.type: Field required". Top-level
-    // `type: "object"` keeps tool validators happy; per-branch oneOf
-    // preserves the discriminator info for the model.
+    // Anthropic's tool input_schema validator rejects BOTH a missing
+    // top-level `type` AND any top-level `oneOf` / `allOf` / `anyOf`
+    // ("input_schema does not support oneOf, allOf, or anyOf at the
+    // top level"). The converter flattens the union into one object:
+    // discriminator field becomes an enum over the branch literals,
+    // every other field becomes optional, and a generated description
+    // tells the model which fields go with which discriminator value.
     const schema = z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("a"), x: z.string() }),
       z.object({ kind: z.literal("b"), y: z.number() }),
     ]);
     const result = zodToJsonSchema(schema);
     expect(result["type"]).toBe("object");
-    expect(Array.isArray(result["oneOf"])).toBe(true);
-    const branches = result["oneOf"] as Array<Record<string, unknown>>;
-    expect(branches).toHaveLength(2);
-    expect(branches[0]).toMatchObject({
-      type: "object",
-      properties: { kind: { const: "a" }, x: { type: "string" } },
-      required: ["kind", "x"],
-    });
-    expect(branches[1]).toMatchObject({
-      type: "object",
-      properties: { kind: { const: "b" }, y: { type: "number" } },
-      required: ["kind", "y"],
-    });
+    expect(result).not.toHaveProperty("oneOf");
+    expect(result).not.toHaveProperty("anyOf");
+    expect(result).not.toHaveProperty("allOf");
+
+    const properties = result["properties"] as Record<string, Record<string, unknown>>;
+    // Discriminator becomes an enum over the literals.
+    expect(properties.kind).toEqual({ enum: ["a", "b"] });
+    // Branch fields land as optional top-level properties.
+    expect(properties.x).toEqual({ type: "string" });
+    expect(properties.y).toEqual({ type: "number" });
+    // Only the discriminator is required at the JSON-Schema level —
+    // per-branch requirements live in the description for the model.
+    expect(result["required"]).toEqual(["kind"]);
+    expect(typeof result["description"]).toBe("string");
+    expect(result["description"]).toContain("kind");
   });
 });
 
@@ -192,8 +197,15 @@ describe("zodToJsonSchema — Anthropic tool input_schema contract", () => {
       "object wrapped in refine (.refine())",
       z.object({ task: z.string() }).refine((v) => v.task.length > 0),
     ],
-  ])("%s emits top-level type=object", (_label, schema) => {
+  ])("%s emits top-level type=object with no oneOf/anyOf/allOf", (_label, schema) => {
     const result = zodToJsonSchema(schema);
+    // Anthropic rejects missing `type: "object"` AND any top-level
+    // `oneOf` / `anyOf` / `allOf`. Both bites have caused 400s in
+    // production; pinning both here so the next exotic Zod shape
+    // either complies or fails the build.
     expect(result["type"]).toBe("object");
+    expect(result).not.toHaveProperty("oneOf");
+    expect(result).not.toHaveProperty("anyOf");
+    expect(result).not.toHaveProperty("allOf");
   });
 });
