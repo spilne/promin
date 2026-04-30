@@ -947,8 +947,10 @@ const uiDir = process.env.ZORYA_UI_DIR ?? path.join(import.meta.dir, "..", "dist
 
 const server = new ZoryaServer({
   storage,
+  // The runner is used by recovery (resumeRecent) and as the fallback trigger
+  // for any caller that doesn't go through the explicit trigger callback below.
+  runner,
   recovery: {
-    runner,
     strategy: RecoveryStrategy.builder()
       .failStale({ olderThanMs: 60 * 60 * 1000, error: "Stale run auto-failed on restart" })
       .resumeRecent()
@@ -979,16 +981,11 @@ const server = new ZoryaServer({
   // defaults so users can tweak fields instead of writing raw JSON.
   sampleInput: (name) => inputFor(name),
   uiDir,
-  // Workers page reads from the registry. The demo mocks two entries
-  // above; `stepQueue` is structurally required by the workerProtocol
-  // type but unused at runtime here because we keep the explicit
-  // `trigger` callback below — that path runs workflows in-process via
-  // the runner, never actually enqueues to the step queue.
-  // workflowStarts (shared with the trigger callback above) lets external
-  // workers — anything connecting via ZoryaClient/ZoryaWorker — pull
-  // triggered runs and execute them locally. The dashboard's "Trigger"
-  // button works for both in-process and external workflows: the demo
-  // tries the local runner first, falls back to enqueue.
+  // Workers page reads from the registry. The demo mocks two entries above.
+  // workflowStarts lets external workers (ZoryaClient/ZoryaWorker) poll and
+  // execute triggered runs locally. The explicit `trigger` below handles both
+  // paths: known workflows run in-process via the runner, unknown ones fall
+  // back to workflowStarts for external workers.
   workerProtocol: {
     stepQueue: new InMemoryStepQueue(),
     workerRegistry,

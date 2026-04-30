@@ -132,7 +132,21 @@ export interface Logger {
 
 export interface ZoryaServerConfig extends AuthConfig {
   storage: WorkflowStorage;
-  /** Function that starts a new run by name. Required for POST /api/runs/trigger/:name. */
+  /**
+   * Workflow runner. When provided, `POST /api/runs/trigger/:name` dispatches
+   * through it automatically — no need to write a `trigger` callback.
+   * Looks up the definition in `config.workflows` first; falls back to
+   * `runner.run({ name })` (which works when the runner has a registry).
+   *
+   * Explicit `trigger` always wins if both are set.
+   */
+  runner?: WorkflowRunner;
+  /**
+   * Custom trigger callback. Overrides the auto-wired trigger from `runner`,
+   * `coordination`, and `workerProtocol`. Use this for advanced cases
+   * (pre-creating rows with namespace/runSource, falling back to a start
+   * queue for external workers, etc.).
+   */
   trigger?: RunTrigger;
   /** Custom logger. Defaults to `console`. */
   logger?: Logger;
@@ -192,7 +206,10 @@ export interface ZoryaServerConfig extends AuthConfig {
    */
   recovery?: {
     strategy: RecoveryStrategy;
-    /** Required when strategy includes `resumeRecent()`. */
+    /**
+     * Runner for `resumeRecent()`. Falls back to `config.runner` when omitted,
+     * so if you already set a top-level `runner` you don't need to repeat it here.
+     */
     runner?: WorkflowRunner;
   };
   /** Directory with compiled dashboard assets (index.html, app.js, app.css). */
@@ -498,10 +515,22 @@ export class ZoryaServer {
       });
     }
 
-    // Auto-trigger:
-    //  - coordination on:    CoordinatedTriggerService → coordinator.submit
-    //  - coordination off:   TriggerService → workflow-start queue
-    //  - explicit `trigger`: always wins
+    // Auto-trigger priority (first match wins):
+    //  1. explicit `trigger` callback
+    //  2. coordination on  → CoordinatedTriggerService (DAG from advertisements)
+    //  3. workerProtocol   → TriggerService (workflow-start queue)
+    //  4. runner           → inline dispatch via runner.runSafe + config.workflows
+    const runnerTrigger: RunTrigger | undefined = config.runner
+      ? (name, input, opts) => {
+          const workflowId = opts?.workflowId ?? crypto.randomUUID();
+          const def = config.workflows?.[name];
+          const params = def
+            ? ({ workflow: def, workflowId, input } as const)
+            : ({ name, workflowId, input } as const);
+          void config.runner!.runSafe(params);
+          return Promise.resolve({ workflowId });
+        }
+      : undefined;
     const trigger =
       config.trigger ??
       (this.coordinator && advertisements
@@ -516,7 +545,7 @@ export class ZoryaServer {
               workflowStarts,
               advertisements,
             }).trigger
-          : undefined);
+          : runnerTrigger);
 
     if (config.scheduling?.enabled) {
       if (!config.scheduler) {
@@ -809,7 +838,8 @@ export class ZoryaServer {
   startRecovery(): void {
     const { recovery } = this.config;
     if (!recovery) return;
-    const { strategy, runner } = recovery;
+    const { strategy, runner: recoveryRunner } = recovery;
+    const runner = recoveryRunner ?? this.config.runner;
     const opts = strategy._opts;
 
     void (async () => {
