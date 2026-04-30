@@ -85,12 +85,21 @@ export function schedulerStorageTestSuite(
     });
 
     describe("setNextRun + findDue", () => {
-      it("upsertSchedule seeds nextRun on insert so findDue finds it without an explicit setNextRun call", async () => {
+      it("upsertSchedule seeds nextRun on insert (enabled) so findDue finds it without an explicit setNextRun call", async () => {
         const s = await getStorage();
         await s.upsertSchedule({ id: "auto-seeded", intervalMs: 1_000 });
         // No explicit setNextRun — the storage must seed nextRun = now on INSERT.
         const due = await s.findDue({ now: new Date(), limit: 10 });
         expect(due).toContain("auto-seeded");
+      });
+
+      it("upsertSchedule does NOT seed nextRun when inserting a disabled schedule", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "paused", intervalMs: 1_000, enabled: false });
+        // Disabled insert must NOT put the schedule into due-tracking —
+        // re-enabling it later will call setNextRun explicitly.
+        const due = await s.findDue({ now: new Date(), limit: 10 });
+        expect(due).not.toContain("paused");
       });
 
       it("upsertSchedule (update) does not overwrite an existing nextRun", async () => {

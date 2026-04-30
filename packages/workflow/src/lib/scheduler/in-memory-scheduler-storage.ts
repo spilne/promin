@@ -158,7 +158,7 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     // setNextRun call. On UPDATE, leave the existing nextRun untouched —
     // the caller (registerAsync, patchSchedule) is responsible for
     // recomputing it when the trigger expression changes.
-    if (isNew && !this.nextRun.has(config.id)) {
+    if (isNew && !this.nextRun.has(config.id) && config.enabled !== false) {
       this.nextRun.set(config.id, Date.now());
     }
   }
