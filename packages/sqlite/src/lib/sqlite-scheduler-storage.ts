@@ -321,8 +321,8 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
       INSERT INTO ${this._t}
         (id, namespace, name, cron, rrule, interval_ms, timezone, enabled,
          start_at, end_at, jitter_ms, metadata, overlap_policy, max_catch_up,
-         created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         next_run, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (id) DO UPDATE SET
         namespace      = excluded.namespace,
         name           = excluded.name,
@@ -355,6 +355,8 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
         config.metadata ? JSON.stringify(config.metadata) : null,
         config.overlapPolicy ?? "allow",
         config.maxCatchUp ?? 0,
+        now, // next_run: seed to now on INSERT so findDue picks it up immediately;
+        // not included in ON CONFLICT SET so existing next_run is preserved
         now,
         now,
       );

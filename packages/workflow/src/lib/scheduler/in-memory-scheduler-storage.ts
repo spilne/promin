@@ -148,10 +148,18 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
   // -------------------------------------------------------------------------
 
   async upsertSchedule(config: DurableScheduleConfig): Promise<void> {
+    const isNew = !this.schedules.has(config.id);
     // Normalize: enabled defaults to true.
     this.schedules.set(config.id, { ...config, enabled: config.enabled !== false });
     if (!this.state.has(config.id)) {
       this.state.set(config.id, { lastFired: null, tickCount: 0 });
+    }
+    // Seed nextRun on INSERT so findDue picks it up without a separate
+    // setNextRun call. On UPDATE, leave the existing nextRun untouched —
+    // the caller (registerAsync, patchSchedule) is responsible for
+    // recomputing it when the trigger expression changes.
+    if (isNew && !this.nextRun.has(config.id)) {
+      this.nextRun.set(config.id, Date.now());
     }
   }
 

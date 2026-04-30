@@ -85,6 +85,25 @@ export function schedulerStorageTestSuite(
     });
 
     describe("setNextRun + findDue", () => {
+      it("upsertSchedule seeds nextRun on insert so findDue finds it without an explicit setNextRun call", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "auto-seeded", intervalMs: 1_000 });
+        // No explicit setNextRun — the storage must seed nextRun = now on INSERT.
+        const due = await s.findDue({ now: new Date(), limit: 10 });
+        expect(due).toContain("auto-seeded");
+      });
+
+      it("upsertSchedule (update) does not overwrite an existing nextRun", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "stable", intervalMs: 1_000 });
+        const future = new Date(Date.now() + 60_000);
+        await s.setNextRun("stable", future);
+        // Re-upsert (update path) must not reset nextRun back to now.
+        await s.upsertSchedule({ id: "stable", intervalMs: 2_000 });
+        const due = await s.findDue({ now: new Date(), limit: 10 });
+        expect(due).not.toContain("stable");
+      });
+
       it("returns due ids ordered by nextRun ASC", async () => {
         const s = await getStorage();
         await s.upsertSchedule({ id: "early", intervalMs: 1_000 });
