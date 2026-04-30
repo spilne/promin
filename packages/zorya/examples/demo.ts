@@ -4,12 +4,17 @@
 //   bun run packages/zorya/examples/demo.ts
 
 // Prepend HH:MM:SS timestamps to every console line for easier debugging.
-for (const level of ["log", "warn", "error"] as const) {
-  const orig = console[level].bind(console);
-  console[level] = (...args: unknown[]) => {
-    const t = new Date().toTimeString().slice(0, 8);
-    orig(`[${t}]`, ...args);
-  };
+// Guard against double-patching on hot-reload (Bun re-executes top-level code).
+if (!(console.log as unknown as { __ts?: boolean }).__ts) {
+  for (const level of ["log", "warn", "error"] as const) {
+    const orig = console[level].bind(console);
+    const patched = (...args: unknown[]) => {
+      const t = new Date().toTimeString().slice(0, 8);
+      orig(`[${t}]`, ...args);
+    };
+    (patched as unknown as { __ts: boolean }).__ts = true;
+    console[level] = patched;
+  }
 }
 //
 // What's happening:

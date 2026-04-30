@@ -124,10 +124,18 @@ import {
   type InstanceDeps,
 } from "./routes/instances.ts";
 
+export interface Logger {
+  log(message: string, ...args: unknown[]): void;
+  warn(message: string, ...args: unknown[]): void;
+  error(message: string, ...args: unknown[]): void;
+}
+
 export interface ZoryaServerConfig extends AuthConfig {
   storage: WorkflowStorage;
   /** Function that starts a new run by name. Required for POST /api/runs/trigger/:name. */
   trigger?: RunTrigger;
+  /** Custom logger. Defaults to `console`. */
+  logger?: Logger;
   /** Override metrics with a backend-specific provider (e.g. PgWorkflowMetrics). */
   metrics?: MetricsProvider;
   /** Plug in a worker registry. When omitted, /api/workers returns []. */
@@ -420,12 +428,14 @@ export class ZoryaServer {
   private readonly workerAuth: Auth;
   private readonly bus: RunEventBus;
   private readonly router: Router;
+  private readonly logger: Logger;
   private server?: { stop(): void; port: number; hostname: string };
   /** Background coordinator loop — kicked off in `listen()`, stopped in `stop()`. */
   private coordinatorLoop?: Promise<void>;
 
   constructor(config: ZoryaServerConfig) {
     this.config = config;
+    this.logger = config.logger ?? console;
     this.auth = new Auth(config);
     this.workerAuth = new Auth({ apiKeys: config.workerProtocol?.apiKeys });
     this.bus = new RunEventBus();
@@ -845,14 +855,14 @@ export class ZoryaServer {
           }
         }
         if (terminated > 0) {
-          console.log(`[zorya] recovery: auto-failed ${terminated} stale run(s)`);
+          this.logger.log(`[zorya] recovery: auto-failed ${terminated} stale run(s)`);
         }
       }
 
       // Resume — needs a runner + workflow definitions.
       if (opts.resumeRecent) {
         if (!runner) {
-          console.warn(
+          this.logger.warn(
             "[zorya] recovery: resumeRecent() requires a runner — pass recovery.runner to enable",
           );
           return;
@@ -885,15 +895,15 @@ export class ZoryaServer {
             offset += PAGE;
           }
         }
-        if (resumed > 0) console.log(`[zorya] recovery: resumed ${resumed} orphaned run(s)`);
+        if (resumed > 0) this.logger.log(`[zorya] recovery: resumed ${resumed} orphaned run(s)`);
         if (skipped.length > 0) {
-          console.warn(
+          this.logger.warn(
             `[zorya] recovery: skipped ${skipped.length} run(s) — no definition in config.workflows`,
           );
         }
       }
     })().catch((err) => {
-      console.error("[zorya] recovery error:", err);
+      this.logger.error("[zorya] recovery error:", err);
     });
   }
 

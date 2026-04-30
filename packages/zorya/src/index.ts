@@ -1,6 +1,11 @@
 // Public API exports
 
-export { ZoryaServer, type ZoryaServerConfig, type ListenOptions } from "./server/server.ts";
+export {
+  ZoryaServer,
+  type ZoryaServerConfig,
+  type ListenOptions,
+  type Logger,
+} from "./server/server.ts";
 export { Auth, type AuthConfig } from "./server/auth.ts";
 export { RunEventBus } from "./server/run-event-bus.ts";
 export { RunPollWatcher, isTerminalStatus } from "./server/run-poll-watcher.ts";
