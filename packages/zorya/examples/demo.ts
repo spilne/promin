@@ -27,6 +27,7 @@ import {
   InMemoryStepQueue,
   InMemoryWorkerRegistry,
   createWorkflowRunner,
+  RecoveryStrategy,
   createSleepScanner,
   completeSignal,
   isJournaledSuspendStorage,
@@ -897,48 +898,17 @@ async function startApprovalAutoSignaler(): Promise<void> {
   }, 5_000);
 }
 
-/**
- * Resume runs that were left in `pending` or `running` from a previous
- * server session. The demo drives execution in-process (no coordinator),
- * so when the bun --hot subprocess hot-replaces or the user kills the
- * server, every in-flight `runner.run()` promise dies with it. The rows
- * stay in storage with their last-observed status; without this sweep
- * they sit there forever.
- *
- * Stale policy: runs older than 1 hour are bulk-failed in a single UPDATE
- * rather than resumed — they pre-date any realistic recovery window and
- * would just consume CPU replaying cold history. Runs from the last hour
- * are resumed normally (paginated so no 500-row cap).
- */
+const _recoveryStrategy = RecoveryStrategy.builder()
+  .failStale({ olderThanMs: 60 * 60 * 1000, error: "Stale run auto-failed on restart" })
+  .resumeRecent()
+  .build();
+
 async function resumeOrphanedRuns() {
-  // Bulk-fail anything older than 1 hour. Single UPDATE — safe on large DBs.
-  const staleCount = storage.cancelStaleWorkflows({
-    olderThanMs: 60 * 60 * 1000,
-    statuses: ["pending", "running"],
-    error: "Stale run auto-failed on restart",
-  });
-  if (staleCount > 0) {
-    console.log(`[zorya] auto-failed ${staleCount} stale run(s) older than 1h`);
-  }
-
-  // Resume recent orphans (paginated — no arbitrary 500-row cap).
-  const toResume: Awaited<ReturnType<typeof storage.listWorkflows>> = [];
-  for (const status of ["pending", "running"] as const) {
-    let offset = 0;
-    while (true) {
-      const page = await storage.listWorkflows({ status, limit: 200, offset });
-      toResume.push(...page);
-      if (page.length < 200) break;
-      offset += page.length;
-    }
-  }
-
-  if (toResume.length === 0) return;
-  console.log(`[zorya] resuming ${toResume.length} orphaned run(s) from prior session`);
-  for (const state of toResume) {
-    const def = workflowsByName[state.workflowName];
-    if (!def) continue;
-    runner.run({ workflow: def, workflowId: state.workflowId, input: state.input }).catch(() => {});
+  const { terminated, resumed, skipped } = await runner.recover(_recoveryStrategy);
+  if (terminated > 0) console.log(`[zorya] auto-failed ${terminated} stale run(s) older than 1h`);
+  if (resumed > 0) console.log(`[zorya] resuming ${resumed} orphaned run(s) from prior session`);
+  if (skipped.length > 0) {
+    console.warn(`[zorya] skipped ${skipped.length} run(s) with no matching definition`);
   }
 }
 
