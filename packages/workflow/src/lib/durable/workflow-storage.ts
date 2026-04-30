@@ -76,6 +76,15 @@ export interface WorkflowStorage {
     parentId?: string;
     namespace?: string;
     /**
+     * Filter by what kicked the run off (`"schedule"`, `"manual"`, …).
+     * Stored as an integer column, so this is a single index lookup —
+     * unlike the previous `metadata.scheduleId` heuristic, which had to
+     * scan/JSON-extract.
+     */
+    runSource?: import("./workflow-state.ts").RunSource;
+    /** Optional producer id; only meaningful with `runSource`. */
+    runSourceId?: string;
+    /**
      * Filter by metadata key/value pairs. A row matches when its metadata
      * contains every supplied key with a deep-equal value. Backends with
      * native JSON support (Postgres `@>`) push the filter to the database;
@@ -126,6 +135,13 @@ export interface WorkflowStorage {
     namespace?: string;
     metadata?: Record<string, unknown>;
     version?: string;
+    /**
+     * What kicked this run off — stored as a small int column so backends
+     * can filter / sort by source efficiently. See `RunSource`.
+     */
+    runSource?: import("./workflow-state.ts").RunSource;
+    /** Producer id corresponding to `runSource` (e.g. `scheduleId`). */
+    runSourceId?: string;
   }): Promise<{ created: true } | { created: false; existing: WorkflowState }>;
 
   /** Save a completed step result. */

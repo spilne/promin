@@ -35,6 +35,7 @@ import type {
   StepTaskState,
   SignalState,
   StepAttemptRecord,
+  RunSource,
 } from "./workflow-state.ts";
 import { FenceTokenMismatchError } from "./durable-pipeline-error.ts";
 import { SystemClock, type Clock } from "@promin/core";
@@ -97,6 +98,8 @@ interface MutableWorkflow {
   result?: unknown;
   error?: string;
   tripwire?: unknown;
+  runSource?: RunSource;
+  runSourceId?: string;
   metadata?: Record<string, unknown>;
   steps: Map<string, StepState>;
   createdAt: Date;
@@ -188,6 +191,8 @@ export class InMemoryWorkflowStorage
       result: wf.result,
       error: wf.error,
       tripwire: wf.tripwire,
+      runSource: wf.runSource,
+      runSourceId: wf.runSourceId,
       metadata: wf.metadata,
       steps,
       createdAt: wf.createdAt,
@@ -208,6 +213,8 @@ export class InMemoryWorkflowStorage
     type?: string;
     parentId?: string;
     namespace?: string;
+    runSource?: RunSource;
+    runSourceId?: string;
     metadata?: Record<string, unknown>;
     limit?: number;
     offset?: number;
@@ -227,6 +234,8 @@ export class InMemoryWorkflowStorage
       if (params?.name && wf.workflowName !== params.name) continue;
       if (params?.type && wf.workflowType !== params.type) continue;
       if (params?.parentId && wf.parentWorkflowId !== params.parentId) continue;
+      if (params?.runSource !== undefined && wf.runSource !== params.runSource) continue;
+      if (params?.runSourceId !== undefined && wf.runSourceId !== params.runSourceId) continue;
       if (metadataFilter && !workflowMetadataMatches(wf.metadata, metadataFilter)) continue;
       filtered.push(wf);
     }
@@ -303,6 +312,8 @@ export class InMemoryWorkflowStorage
     namespace?: string;
     metadata?: Record<string, unknown>;
     version?: string;
+    runSource?: RunSource;
+    runSourceId?: string;
   }): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
     const existing = this.workflows.get(params.workflowId);
     if (existing) return { created: false, existing: this.toState(existing) };
@@ -319,6 +330,8 @@ export class InMemoryWorkflowStorage
       run: 1,
       input: params.input,
       metadata: params.metadata,
+      runSource: params.runSource,
+      runSourceId: params.runSourceId,
       steps: new Map(),
       createdAt: now,
       updatedAt: now,

@@ -1,10 +1,13 @@
 import {
   FenceTokenMismatchError,
   workflowMetadataMatches,
+  encodeRunSource,
+  decodeRunSource,
   type WorkflowStorage,
   type FenceToken,
   type FenceGuard,
   type WorkflowOrderBy,
+  type RunSource,
 } from "@promin/workflow";
 import type {
   WorkflowState,
@@ -84,14 +87,31 @@ export class SqliteWorkflowStorage
         error                TEXT,
         metadata             TEXT,
         steps                TEXT    NOT NULL DEFAULT '{}',
+        run_source           INTEGER,
+        run_source_id        TEXT,
         created_at           INTEGER NOT NULL,
         started_at           INTEGER,
         updated_at           INTEGER NOT NULL,
         completed_at         INTEGER
       )
     `);
+    // Migrate any existing table that predates the runSource columns.
+    // sqlite ALTER TABLE ADD COLUMN IF NOT EXISTS landed in 3.35; older
+    // dbs throw "duplicate column" — we swallow that exact failure mode
+    // and let any other error propagate.
+    for (const stmt of [
+      `ALTER TABLE ${t} ADD COLUMN run_source INTEGER`,
+      `ALTER TABLE ${t} ADD COLUMN run_source_id TEXT`,
+    ]) {
+      try {
+        this.db.run(stmt);
+      } catch (e) {
+        if (!String(e).includes("duplicate column")) throw e;
+      }
+    }
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_status ON ${t} (status)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_parent ON ${t} (parent_workflow_id)`);
+    this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_run_source ON ${t} (run_source, run_source_id)`);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS ${t}_signals (
         id          INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -201,6 +221,8 @@ export class SqliteWorkflowStorage
       result: row.result != null ? JSON.parse(row.result) : undefined,
       error: row.error ?? undefined,
       metadata: row.metadata != null ? JSON.parse(row.metadata) : undefined,
+      runSource: decodeRunSource(row.run_source),
+      runSourceId: row.run_source_id ?? undefined,
       steps: parseSteps(row.steps),
       createdAt: new Date(row.created_at),
       startedAt: row.started_at != null ? new Date(row.started_at) : undefined,
@@ -240,6 +262,8 @@ export class SqliteWorkflowStorage
     type?: string;
     parentId?: string;
     namespace?: string;
+    runSource?: RunSource;
+    runSourceId?: string;
     metadata?: Record<string, unknown>;
     limit?: number;
     offset?: number;
@@ -268,6 +292,14 @@ export class SqliteWorkflowStorage
     if (params?.namespace) {
       conditions.push(`namespace = ?`);
       args.push(params.namespace);
+    }
+    if (params?.runSource !== undefined) {
+      conditions.push(`run_source = ?`);
+      args.push(encodeRunSource(params.runSource));
+    }
+    if (params?.runSourceId !== undefined) {
+      conditions.push(`run_source_id = ?`);
+      args.push(params.runSourceId);
     }
 
     // Metadata filter: push primitive equality checks down via json_extract
@@ -404,6 +436,8 @@ export class SqliteWorkflowStorage
     namespace?: string;
     metadata?: Record<string, unknown>;
     version?: string;
+    runSource?: RunSource;
+    runSourceId?: string;
   }): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
     return this.db.transaction(
       (): { created: true } | { created: false; existing: WorkflowState } => {
@@ -417,8 +451,9 @@ export class SqliteWorkflowStorage
           .query(
             `INSERT INTO ${this._t}
            (workflow_id, workflow_name, workflow_type, parent_workflow_id, namespace, status,
-            version, run, input, metadata, steps, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'pending', ?, 1, ?, ?, '{}', ?, ?)`,
+            version, run, input, metadata, steps, run_source, run_source_id,
+            created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'pending', ?, 1, ?, ?, '{}', ?, ?, ?, ?)`,
           )
           .run(
             params.workflowId,
@@ -429,6 +464,8 @@ export class SqliteWorkflowStorage
             params.version ?? null,
             JSON.stringify(params.input),
             params.metadata != null ? JSON.stringify(params.metadata) : null,
+            encodeRunSource(params.runSource),
+            params.runSourceId ?? null,
             now,
             now,
           );
@@ -1134,6 +1171,8 @@ interface WfRow {
   error: string | null;
   metadata: string | null;
   steps: string;
+  run_source: number | null;
+  run_source_id: string | null;
   created_at: number;
   started_at: number | null;
   updated_at: number;
