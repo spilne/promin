@@ -156,12 +156,23 @@ export interface ZoryaServerConfig extends AuthConfig {
    */
   rerun?: (workflowId: string) => Promise<void>;
   /**
-   * Startup recovery. When set, `listen()` calls `runner.recover(strategy)`
-   * once on boot (fire-and-forget). The runner here is your application's
-   * runner — it lives outside the server since `ZoryaServer` has no runner
-   * of its own (workflow execution is driven by the `trigger` callback).
+   * Startup recovery. When set, `listen()` runs the strategy once on boot.
+   *
+   * Stale termination (`cancelStale` / `failStale`) only needs storage —
+   * the server runs it directly, no runner required.
+   *
+   * Resume (`resumeRecent`) needs a runner to look up definitions and
+   * re-execute — pass `runner` when your strategy includes it.
    *
    * ```ts
+   * // Cancel stale runs only — no runner needed:
+   * recovery: {
+   *   strategy: RecoveryStrategy.builder()
+   *     .failStale({ olderThanMs: 60 * 60 * 1000 })
+   *     .build(),
+   * }
+   *
+   * // Cancel stale + resume recent — runner required:
    * recovery: {
    *   runner,
    *   strategy: RecoveryStrategy.builder()
@@ -172,8 +183,9 @@ export interface ZoryaServerConfig extends AuthConfig {
    * ```
    */
   recovery?: {
-    runner: WorkflowRunner;
     strategy: RecoveryStrategy;
+    /** Required when strategy includes `resumeRecent()`. */
+    runner?: WorkflowRunner;
   };
   /** Directory with compiled dashboard assets (index.html, app.js, app.css). */
   uiDir?: string;
@@ -787,20 +799,77 @@ export class ZoryaServer {
   startRecovery(): void {
     const { recovery } = this.config;
     if (!recovery) return;
-    void recovery.runner
-      .recover(recovery.strategy)
-      .then(({ terminated, resumed, skipped }) => {
-        if (terminated > 0) console.log(`[zorya] recovery: auto-failed ${terminated} stale run(s)`);
+    const { strategy, runner } = recovery;
+    const opts = strategy._opts;
+
+    void (async () => {
+      // Stale termination — storage only, no runner needed.
+      let terminated = 0;
+      if (opts.staleThresholdMs !== undefined) {
+        const errorMsg =
+          opts.staleAction.kind === "fail"
+            ? opts.staleAction.error
+            : "Stale run cancelled on restart";
+        const s = this.config.storage as any;
+        if (typeof s.cancelStaleWorkflows === "function") {
+          terminated = s.cancelStaleWorkflows({
+            olderThanMs: opts.staleThresholdMs,
+            error: errorMsg,
+            statuses: opts.staleStatuses,
+          });
+        } else {
+          const cutoff = Date.now() - opts.staleThresholdMs;
+          for (const status of opts.staleStatuses as import("@promin/workflow").WorkflowStatus[]) {
+            while (true) {
+              const page = await this.config.storage.listWorkflows({
+                status,
+                limit: 200,
+                offset: 0,
+                orderBy: "createdAt",
+                orderDir: "asc",
+              });
+              if (page.length === 0) break;
+              let anyStale = false;
+              for (const wf of page) {
+                if (wf.createdAt.getTime() >= cutoff) break;
+                anyStale = true;
+                if (opts.staleAction.kind === "cancel") {
+                  await this.config.storage.cancelWorkflow(wf.workflowId);
+                } else {
+                  await this.config.storage.failWorkflow(wf.workflowId, opts.staleAction.error);
+                }
+                terminated++;
+              }
+              if (!anyStale) break;
+            }
+          }
+        }
+        if (terminated > 0) {
+          console.log(`[zorya] recovery: auto-failed ${terminated} stale run(s)`);
+        }
+      }
+
+      // Resume — needs a runner.
+      if (opts.resumeRecent) {
+        if (!runner) {
+          console.warn(
+            "[zorya] recovery: resumeRecent() requires a runner — pass recovery.runner to enable",
+          );
+          return;
+        }
+        const { resumed, skipped } = await runner.recover(
+          RecoveryStrategy.builder().resumeRecent({ concurrent: opts.resumeConcurrency }).build(),
+        );
         if (resumed > 0) console.log(`[zorya] recovery: resumed ${resumed} orphaned run(s)`);
         if (skipped.length > 0) {
           console.warn(
             `[zorya] recovery: skipped ${skipped.length} run(s) with no matching definition`,
           );
         }
-      })
-      .catch((err) => {
-        console.error("[zorya] recovery error:", err);
-      });
+      }
+    })().catch((err) => {
+      console.error("[zorya] recovery error:", err);
+    });
   }
 
   stop(): void {
