@@ -8,16 +8,19 @@
   "include": [],
   "references": [
     {
+      "path": "../agent"
+    },
+    {
       "path": "../workflow-remote"
     },
     {
       "path": "../zorya-client"
     },
     {
-      "path": "../sqlite"
+      "path": "../core"
     },
     {
-      "path": "../core"
+      "path": "../sqlite"
     },
     {
       "path": "../workflow"

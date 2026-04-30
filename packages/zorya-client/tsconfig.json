@@ -3,9 +3,20 @@
   "files": [],
   "include": [],
   "references": [
-    { "path": "../core" },
-    { "path": "../workflow" },
-    { "path": "../workflow-remote" },
-    { "path": "./tsconfig.lib.json" }
+    {
+      "path": "../workflow-remote"
+    },
+    {
+      "path": "../workflow"
+    },
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../agent"
+    },
+    {
+      "path": "./tsconfig.lib.json"
+    }
   ]
 }
