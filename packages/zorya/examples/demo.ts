@@ -942,11 +942,13 @@ const uiDir = process.env.ZORYA_UI_DIR ?? path.join(import.meta.dir, "..", "dist
 
 const server = new ZoryaServer({
   storage,
-  runner,
-  recovery: RecoveryStrategy.builder()
-    .failStale({ olderThanMs: 60 * 60 * 1000, error: "Stale run auto-failed on restart" })
-    .resumeRecent()
-    .build(),
+  recovery: {
+    runner,
+    strategy: RecoveryStrategy.builder()
+      .failStale({ olderThanMs: 60 * 60 * 1000, error: "Stale run auto-failed on restart" })
+      .resumeRecent()
+      .build(),
+  },
   scheduler: schedulerStorage,
   workflows: workflowsByName,
   // Agent gateway — exposes /api/agents/* and powers the Agents tab. The
