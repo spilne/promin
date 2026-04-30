@@ -3,6 +3,7 @@ import { api } from "../../api/client.ts";
 import { useSse } from "../../hooks/use-sse.ts";
 import type { RunDto, RunEvent, StepDto } from "../../../server/api-types.ts";
 import { StatusBadge } from "../ui/status-badge.tsx";
+import { RunSourceBadge } from "./run-source-badge.tsx";
 import { Skeleton } from "../ui/skeleton.tsx";
 import { Tabs, type TabDef } from "../ui/tabs.tsx";
 import { StepTimeline } from "./step-timeline.tsx";
@@ -216,6 +217,21 @@ export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }:
         {run.namespace && <span class="badge badge-sm badge-ghost font-mono">{run.namespace}</span>}
         <div class="font-mono text-sm text-base-content/60">{run.workflowId}</div>
         <StatusBadge status={run.status} size="md" />
+        {/* Source-back link: schedule-fired runs deep-link to their
+            schedule's detail page; agent-fired runs (when supported)
+            could deep-link to the agent in the same way. */}
+        <RunSourceBadge
+          source={run.runSource}
+          sourceId={run.runSourceId}
+          showId
+          onClick={
+            run.runSource === "schedule" && run.runSourceId
+              ? () => {
+                  location.hash = `/schedules/${encodeURIComponent(run.runSourceId!)}`;
+                }
+              : undefined
+          }
+        />
         <div class="text-sm text-base-content/60">{formatDuration(totalMs)} total</div>
         <div class="flex-1" />
         <button class="btn btn-sm btn-outline" onClick={openSignalModal}>

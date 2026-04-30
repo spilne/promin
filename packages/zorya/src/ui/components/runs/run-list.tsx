@@ -23,7 +23,11 @@ interface SuggestionPools {
   name: string[];
   type: string[];
   namespace: string[];
+  source: string[];
 }
+
+/** Static pool — the typed RunSource enum, not pulled from storage. */
+const RUN_SOURCE_POOL: string[] = ["schedule", "manual", "api", "webhook", "parent", "agent"];
 
 interface RunListProps {
   onOpen: (id: string) => void;
@@ -84,6 +88,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
     name: [],
     type: [],
     namespace: [],
+    source: RUN_SOURCE_POOL,
   });
 
   useEffect(() => {
@@ -96,6 +101,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
           name: r.names ?? [],
           type: r.types ?? [],
           namespace: r.namespaces ?? [],
+          source: RUN_SOURCE_POOL,
         });
       })
       .catch(() => {});
@@ -155,6 +161,8 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
     type: appliedFilters.type || undefined,
     namespace: appliedFilters.namespace || namespace || undefined,
     status: status === "all" ? undefined : status,
+    runSource: appliedFilters.source as RunListQuery["runSource"] | undefined,
+    runSourceId: appliedFilters.sourceId || undefined,
     version: appliedFilters.version || undefined,
     metadata: appliedFilters.metadata,
     limit: PAGE_SIZE,
@@ -261,7 +269,9 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
       />
 
       {/* Status quick-pick chips. Independent toggle row above the smart
-          search so the most-common filter stays a single click away. */}
+          search so the most-common filter stays a single click away.
+          Source filtering lives in the smart-search row below as
+          `source:schedule` / `sourceId:orders-every-15s` clauses. */}
       <div class="flex items-center gap-2 justify-end">
         <div class="join">
           {STATUS_FILTERS.map((s) => {
@@ -316,13 +326,14 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
               representation once the user commits. */}
           {hasAnyFilter(appliedFilters) && (
             <div class="flex items-center gap-1 flex-wrap mt-2">
-              {(["name", "type", "version", "namespace", "id"] as const).map((f) =>
-                appliedFilters[f] ? (
-                  <FilterChip
-                    label={`${f}: ${appliedFilters[f]}`}
-                    onRemove={() => removeClause(f)}
-                  />
-                ) : null,
+              {(["name", "type", "version", "namespace", "id", "source", "sourceId"] as const).map(
+                (f) =>
+                  appliedFilters[f] ? (
+                    <FilterChip
+                      label={`${f}: ${appliedFilters[f]}`}
+                      onRemove={() => removeClause(f)}
+                    />
+                  ) : null,
               )}
               {appliedFilters.metadata &&
                 Object.entries(appliedFilters.metadata).map(([k, v]) => (
@@ -389,7 +400,15 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
                   <td>
                     <StatusBadge status={r.status} />
                   </td>
-                  <td class="text-base-content/60">{formatRelative(r.createdAt)}</td>
+                  <td class="text-base-content/60" title={r.startedAt ?? r.createdAt}>
+                    {/* Prefer startedAt — the real "this run began
+                        executing" moment. Falls back to createdAt for
+                        pending runs that haven't picked up a worker yet.
+                        Same anchor the duration column uses, so "Started"
+                        and "Duration" line up across reused rows that
+                        survived a startFreshRun bump. */}
+                    {formatRelative(r.startedAt ?? r.createdAt)}
+                  </td>
                   <td class="font-mono text-sm">{formatDuration(r.totalMs)}</td>
                 </tr>
               ))}

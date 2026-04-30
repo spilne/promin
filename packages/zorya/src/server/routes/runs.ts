@@ -28,6 +28,10 @@ export interface RunTrigger {
       metadata?: Record<string, unknown>;
       /** Workflow version to record on the run + route to. */
       version?: string;
+      /** What kicked this run off (`"schedule"`, `"manual"`, …). */
+      runSource?: import("@promin/workflow").RunSource;
+      /** Producer id corresponding to `runSource` (e.g. `scheduleId`). */
+      runSourceId?: string;
     },
   ): Promise<{ workflowId: string }>;
 }
@@ -61,6 +65,9 @@ export function listRuns(deps: RunRoutesDeps) {
       type: url.searchParams.get("type") ?? undefined,
       namespace: url.searchParams.get("namespace") ?? undefined,
       version: url.searchParams.get("version") ?? undefined,
+      runSource:
+        (url.searchParams.get("runSource") as RunListQuery["runSource"] | null) ?? undefined,
+      runSourceId: url.searchParams.get("runSourceId") ?? undefined,
       metadata: parseMetadataParam(url.searchParams.get("metadata")),
       limit: parseIntParam(url.searchParams.get("limit")) ?? 50,
       offset: parseIntParam(url.searchParams.get("offset")) ?? 0,
@@ -101,6 +108,12 @@ export function triggerRun(deps: RunRoutesDeps) {
         namespace: body.namespace,
         metadata: body.metadata,
         version: body.version,
+        // Default tag for dashboard-initiated runs. Body fields can
+        // override (e.g. an API client or webhook ingestor passing through
+        // its own runSource), but the dashboard's "Trigger" button is
+        // always a manual fire from a user's POV.
+        runSource: body.runSource ?? "manual",
+        runSourceId: body.runSourceId,
       });
       const response: TriggerRunResponse = { workflowId: result.workflowId };
       return json(200, response);

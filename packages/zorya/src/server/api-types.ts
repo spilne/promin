@@ -81,6 +81,10 @@ export interface RunDto {
   steps: StepDto[];
   /** Parent workflow id, when this run was spawned by another workflow. */
   parentWorkflowId?: string;
+  /** What kicked this run off (`"schedule"`, `"manual"`, …). */
+  runSource?: import("@promin/workflow").RunSource;
+  /** Producer id corresponding to `runSource` (e.g. scheduleId). */
+  runSourceId?: string;
   /** ISO timestamp. */
   createdAt: string;
   /** ISO timestamp. */
@@ -99,6 +103,9 @@ export interface RunSummaryDto {
   status: WorkflowStatus;
   version?: string;
   run: number;
+  /** What kicked this run off — surfaces the typed source link. */
+  runSource?: import("@promin/workflow").RunSource;
+  runSourceId?: string;
   createdAt: string;
   startedAt?: string;
   completedAt?: string;
@@ -119,6 +126,10 @@ export interface RunListQuery {
   namespace?: string;
   /** Workflow version. Filtered post-fetch — uses with `name` for accuracy. */
   version?: string;
+  /** Filter by trigger source (`"schedule"`, `"manual"`, …). Single index lookup. */
+  runSource?: import("@promin/workflow").RunSource;
+  /** Producer id paired with `runSource` (e.g. scheduleId). */
+  runSourceId?: string;
   /**
    * Search-attributes filter. JSON-encoded `Record<string, unknown>` on the
    * URL (`?metadata=%7B%22userId%22%3A%22u_42%22%7D`) so nested values can
@@ -200,6 +211,14 @@ export interface TriggerRunRequest {
    * to whatever version a connected worker advertises.
    */
   version?: string;
+  /**
+   * Override the default `runSource` tag. The dashboard trigger sets
+   * `"manual"` when omitted; API clients / webhook ingestors set their
+   * own values to make the source visible in filtering and history.
+   */
+  runSource?: import("@promin/workflow").RunSource;
+  /** Producer id paired with `runSource`. */
+  runSourceId?: string;
 }
 
 export interface TriggerRunResponse {

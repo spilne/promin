@@ -20,9 +20,17 @@
 // rebuild the input string from the remaining filters.
 // ---------------------------------------------------------------------------
 
-export type SearchField = "name" | "type" | "version" | "namespace" | "id";
+export type SearchField = "name" | "type" | "version" | "namespace" | "id" | "source" | "sourceId";
 
-const SEARCH_FIELDS: ReadonlyArray<SearchField> = ["name", "type", "version", "namespace", "id"];
+const SEARCH_FIELDS: ReadonlyArray<SearchField> = [
+  "name",
+  "type",
+  "version",
+  "namespace",
+  "id",
+  "source",
+  "sourceId",
+];
 
 export interface ParsedSearchQuery {
   name?: string;
@@ -30,6 +38,14 @@ export interface ParsedSearchQuery {
   version?: string;
   namespace?: string;
   id?: string;
+  /**
+   * Trigger source — `"schedule"`, `"manual"`, `"api"`, …. Mapped to
+   * `RunListQuery.runSource` on the wire so the indexed column does the
+   * filtering.
+   */
+  source?: string;
+  /** Producer id paired with `source` (e.g. scheduleId). */
+  sourceId?: string;
   metadata?: Record<string, unknown>;
   /** Bare tokens (no `:` or `=`), joined with spaces. */
   freeText?: string;
@@ -98,6 +114,7 @@ export function serializeQuery(q: ParsedSearchQuery): string {
  */
 export function hasAnyFilter(q: ParsedSearchQuery): boolean {
   if (q.name || q.type || q.version || q.namespace || q.id || q.freeText) return true;
+  if (q.source || q.sourceId) return true;
   if (q.metadata && Object.keys(q.metadata).length > 0) return true;
   return false;
 }

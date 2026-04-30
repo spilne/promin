@@ -16,7 +16,7 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { JSX } from "preact";
 
-export type SuggestField = "name" | "type" | "namespace";
+export type SuggestField = "name" | "type" | "namespace" | "source";
 
 interface Props {
   value: string;
@@ -29,6 +29,8 @@ interface Props {
     name: ReadonlyArray<string>;
     type: ReadonlyArray<string>;
     namespace: ReadonlyArray<string>;
+    /** Trigger sources — pulled from the typed `RunSource` enum, not storage. */
+    source: ReadonlyArray<string>;
   };
   placeholder?: string;
   /** Tooltip text. */
@@ -261,7 +263,7 @@ function getActiveToken(text: string, cursor: number): ActiveToken {
 }
 
 function isSuggestField(s: string): s is SuggestField {
-  return s === "name" || s === "type" || s === "namespace";
+  return s === "name" || s === "type" || s === "namespace" || s === "source";
 }
 
 function quoteIfNeeded(s: string): string {
