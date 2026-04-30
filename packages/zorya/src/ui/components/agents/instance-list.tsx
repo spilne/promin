@@ -6,12 +6,13 @@
 //
 // Filter UX
 // ---------
-// Two text inputs (namespace + owner) drive the GET /api/instances query.
-// Both default to the demo's tenant (acme / alice) so the page is useful
-// out of the box; clearing them lists everything the server has.
+// Namespace comes from the global sidebar switcher (`useNamespace`) so the
+// whole dashboard scopes consistently. Only Owner stays on this page, since
+// it's an instance-level dimension the global selector doesn't cover.
 // ---------------------------------------------------------------------------
 
 import { useEffect, useMemo, useState } from "preact/hooks";
+import { useNamespace } from "../../hooks/use-namespace.ts";
 import { instancesApi, type AgentInstanceDto } from "../../api/client.ts";
 import { Page } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
@@ -21,11 +22,11 @@ interface Props {
   onOpenAgent: (id: string) => void;
 }
 
-const DEFAULT_NAMESPACE = "acme";
 const DEFAULT_OWNER = "alice";
 
 export function InstanceList({ onOpenAgent }: Props) {
-  const [namespaceId, setNamespaceId] = useState(DEFAULT_NAMESPACE);
+  const [globalNamespace] = useNamespace();
+  const namespaceId = globalNamespace || "default";
   const [ownerId, setOwnerId] = useState(DEFAULT_OWNER);
   const [data, setData] = useState<AgentInstanceDto[] | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
@@ -70,7 +71,8 @@ export function InstanceList({ onOpenAgent }: Props) {
           <h2 class="text-xl font-semibold">Your agents</h2>
           <p class="text-xs text-base-content/50">
             Long-lived agent instances for the selected (namespace, owner). One row per (agent,
-            owner) pair with its own working memory, facts, and threads.
+            owner) pair with its own working memory, facts, and threads. Switch namespace via the
+            sidebar.
           </p>
         </div>
         <button class="btn btn-sm btn-ghost gap-1" onClick={() => setRefreshTick((t) => t + 1)}>
@@ -81,15 +83,6 @@ export function InstanceList({ onOpenAgent }: Props) {
 
       <div class="card bg-base-100 shadow">
         <div class="card-body py-3 flex-row gap-3 items-end flex-wrap">
-          <label class="form-control flex-1 min-w-[180px]">
-            <span class="label-text text-xs">Namespace</span>
-            <input
-              class="input input-bordered input-sm font-mono"
-              value={namespaceId}
-              onInput={(e) => setNamespaceId((e.target as HTMLInputElement).value)}
-              placeholder="(any)"
-            />
-          </label>
           <label class="form-control flex-1 min-w-[180px]">
             <span class="label-text text-xs">Owner</span>
             <input
