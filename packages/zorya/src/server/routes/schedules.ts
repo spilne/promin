@@ -248,6 +248,14 @@ export function createSchedule(storage: SchedulerStorage) {
 
     try {
       await storage.upsertSchedule(config);
+      // `upsertSchedule` writes config columns only — `next_run` stays
+      // NULL on insert, which makes the row invisible to `findDue` and
+      // the SchedulerLoop never fires it. Match
+      // `DurableScheduler.registerAsync`'s pattern: seed nextRun = now
+      // so the first poll picks it up (computeDueTicks fires one boot
+      // tick at `now` when `lastFired` is null, then commitPoll advances
+      // nextRun onto the natural cron / interval cadence).
+      await storage.setNextRun(config.id, new Date());
       const state = await storage.loadScheduleState(config.id);
       return json(200, toDto(config, state));
     } catch (err) {

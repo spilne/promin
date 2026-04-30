@@ -122,6 +122,23 @@ describe("createDurableSchedulerTool — create", () => {
     expect(result.ok).toBe(false);
     if ("error" in result) expect(result.error).toMatch(/cap 2/);
   });
+
+  it("seeds nextRun so the schedule is immediately visible to findDue", async () => {
+    // Regression: agent-created schedules used to land with next_run NULL,
+    // which made them invisible to SchedulerLoop.findDue and only fired
+    // after a full server restart re-seeded them. Pin the contract that
+    // create() puts the row into due-tracking right away.
+    const storage = new InMemorySchedulerStorage();
+    const tool = toolWith(storage);
+    const result = await tool.execute({ command: "create", task: "hi", cron: "0 * * * *" }, CTX);
+    expect(result.ok).toBe(true);
+    const due = await storage.findDue({
+      now: new Date(),
+      limit: 10,
+      namespace: SCOPE.namespaceId,
+    });
+    expect(due).toContain("id" in result ? result.id : "");
+  });
 });
 
 describe("createDurableSchedulerTool — list / cancel", () => {

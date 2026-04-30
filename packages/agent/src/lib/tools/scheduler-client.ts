@@ -96,6 +96,14 @@ export function inProcessSchedulerClient(config: InProcessSchedulerClientConfig)
         metadata: input.metadata,
       };
       await storage.upsertSchedule(dsConfig);
+      // `upsertSchedule` is a low-level write that doesn't touch the
+      // due-tracking column — without an explicit `setNextRun`, the row
+      // is invisible to `findDue` and the SchedulerLoop never picks it
+      // up. Match `DurableScheduler.registerAsync`: seed nextRun = now
+      // so the first poll fires it (computeDueTicks for cron/interval
+      // with `lastFired = null` returns one boot tick at `now`, then
+      // commitPoll advances nextRun to the natural cron/interval cadence).
+      await storage.setNextRun(input.id, new Date());
       return { id: input.id };
     },
 
