@@ -15,13 +15,14 @@
 
 import type {
   WorkflowStorage,
+  WorkflowRunner,
   SchedulerStorage,
   StepQueue,
   Workflow,
   WorkerRegistry,
   WorkflowCoordinator,
 } from "@promin/workflow";
-import { createCoordinator } from "@promin/workflow";
+import { createCoordinator, RecoveryStrategy } from "@promin/workflow";
 import { createWorkerApiHandler, createWorkflowStorageHandler } from "@promin/workflow-remote";
 import { Auth, type AuthConfig } from "./auth.ts";
 import { Router, jsonError } from "./router.ts";
@@ -154,6 +155,24 @@ export interface ZoryaServerConfig extends AuthConfig {
    * executes (the storage row stays in `running`).
    */
   rerun?: (workflowId: string) => Promise<void>;
+  /**
+   * Startup recovery. When set, `listen()` (and the public `startRecovery()`)
+   * call `runner.recover(strategy)` once, fire-and-forget. Typical usage:
+   *
+   * ```ts
+   * recovery: {
+   *   runner,
+   *   strategy: RecoveryStrategy.builder()
+   *     .failStale({ olderThanMs: 60 * 60 * 1000 })
+   *     .resumeRecent()
+   *     .build(),
+   * }
+   * ```
+   */
+  recovery?: {
+    runner: WorkflowRunner;
+    strategy: RecoveryStrategy;
+  };
   /** Directory with compiled dashboard assets (index.html, app.js, app.css). */
   uiDir?: string;
   /** SSE watcher poll interval. Default 1000ms. */
@@ -726,6 +745,7 @@ export class ZoryaServer {
     this.agentStreamHub.start();
     this.startCoordinator();
     this.startScheduler();
+    this.startRecovery();
     return {
       port: resolvedPort,
       hostname: resolvedHost,
@@ -755,6 +775,30 @@ export class ZoryaServer {
    */
   startScheduler(): void {
     this.schedulerLoop?.start();
+  }
+
+  /**
+   * Run the configured recovery strategy once, fire-and-forget. Called from
+   * `listen()` and exposed for tests that drive the server through `handle()`
+   * without binding a port.
+   */
+  startRecovery(): void {
+    const { recovery } = this.config;
+    if (!recovery) return;
+    void recovery.runner
+      .recover(recovery.strategy)
+      .then(({ terminated, resumed, skipped }) => {
+        if (terminated > 0) console.log(`[zorya] recovery: auto-failed ${terminated} stale run(s)`);
+        if (resumed > 0) console.log(`[zorya] recovery: resumed ${resumed} orphaned run(s)`);
+        if (skipped.length > 0) {
+          console.warn(
+            `[zorya] recovery: skipped ${skipped.length} run(s) with no matching definition`,
+          );
+        }
+      })
+      .catch((err) => {
+        console.error("[zorya] recovery error:", err);
+      });
   }
 
   stop(): void {

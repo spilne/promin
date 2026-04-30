@@ -27,7 +27,6 @@ import {
   InMemoryStepQueue,
   InMemoryWorkerRegistry,
   createWorkflowRunner,
-  RecoveryStrategy,
   createSleepScanner,
   completeSignal,
   isJournaledSuspendStorage,
@@ -898,20 +897,6 @@ async function startApprovalAutoSignaler(): Promise<void> {
   }, 5_000);
 }
 
-const _recoveryStrategy = RecoveryStrategy.builder()
-  .failStale({ olderThanMs: 60 * 60 * 1000, error: "Stale run auto-failed on restart" })
-  .resumeRecent()
-  .build();
-
-async function resumeOrphanedRuns() {
-  const { terminated, resumed, skipped } = await runner.recover(_recoveryStrategy);
-  if (terminated > 0) console.log(`[zorya] auto-failed ${terminated} stale run(s) older than 1h`);
-  if (resumed > 0) console.log(`[zorya] resuming ${resumed} orphaned run(s) from prior session`);
-  if (skipped.length > 0) {
-    console.warn(`[zorya] skipped ${skipped.length} run(s) with no matching definition`);
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Boot
 
@@ -919,7 +904,6 @@ await seedSchedules();
 await seedAgents();
 await seedNamespaceMemory();
 void startApprovalAutoSignaler();
-void resumeOrphanedRuns();
 
 // Hot-reload: poll the agents folder so new/edited recipe files land
 // in the registry without a server restart. mtime-aware import busts
@@ -957,6 +941,13 @@ const uiDir = process.env.ZORYA_UI_DIR ?? path.join(import.meta.dir, "..", "dist
 
 const server = new ZoryaServer({
   storage,
+  recovery: {
+    runner,
+    strategy: RecoveryStrategy.builder()
+      .failStale({ olderThanMs: 60 * 60 * 1000, error: "Stale run auto-failed on restart" })
+      .resumeRecent()
+      .build(),
+  },
   scheduler: schedulerStorage,
   workflows: workflowsByName,
   // Agent gateway — exposes /api/agents/* and powers the Agents tab. The
