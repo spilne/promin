@@ -412,12 +412,12 @@ describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow
     await coordinator.submit({ workflow: wf, workflowId: "e2e-1", input: { n: 5 } });
 
     // Run both coordinator and worker
-    void coordinator.start();
+    void coordinator.startLoop();
     void worker.start();
 
     // Wait for completion
     await new Promise((r) => setTimeout(r, 500));
-    await coordinator.stop();
+    await coordinator.stopLoop();
     await worker.stop();
 
     // Verify
@@ -469,12 +469,12 @@ describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow
 
     await coordinator.submit({ workflow: wf, workflowId: "routed-1", input: { text: "hello" } });
 
-    void coordinator.start();
+    void coordinator.startLoop();
     void defaultWorker.start();
     void gpuWorker.start();
 
     await new Promise((r) => setTimeout(r, 500));
-    await coordinator.stop();
+    await coordinator.stopLoop();
     await defaultWorker.stop();
     await gpuWorker.stop();
 
@@ -515,10 +515,10 @@ describe("Coordinator registry-keyed submit — submit by name, not by object", 
     // Caller never touches `wf` — just the name.
     await coordinator.submit({ name: "named-wf", workflowId: "named-1", input: { n: 7 } });
 
-    void coordinator.start();
+    void coordinator.startLoop();
     void worker.start();
     await new Promise((r) => setTimeout(r, 400));
-    await coordinator.stop();
+    await coordinator.stopLoop();
     await worker.stop();
 
     const state = await storage.loadWorkflow("named-1");
@@ -584,10 +584,10 @@ describe("Coordinator registry-keyed submit — submit by name, not by object", 
 
     await coordinator.submit({ workflow: direct, workflowId: "mixed-1", input: 10 });
 
-    void coordinator.start();
+    void coordinator.startLoop();
     void worker.start();
     await new Promise((r) => setTimeout(r, 300));
-    await coordinator.stop();
+    await coordinator.stopLoop();
     await worker.stop();
 
     const state = await storage.loadWorkflow("mixed-1");
@@ -1060,10 +1060,10 @@ describe("Coordinator recovery — resume workflows after process restart", () =
       pollIntervalMs: 50,
     });
 
-    void coord1.start();
+    void coord1.startLoop();
     void worker.start();
     await new Promise((r) => setTimeout(r, 300));
-    await coord1.stop();
+    await coord1.stopLoop();
 
     // Verify step-1 completed
     const stateAfterStep1 = await storage.loadWorkflow("recover-1");
@@ -1073,9 +1073,9 @@ describe("Coordinator recovery — resume workflows after process restart", () =
     const coord2 = createCoordinator({ storage, stepQueue: queue, pollIntervalMs: 50 });
 
     // coord2 never saw submit() — but should recover from storage
-    void coord2.start();
+    void coord2.startLoop();
     await new Promise((r) => setTimeout(r, 500));
-    await coord2.stop();
+    await coord2.stopLoop();
     await worker.stop();
 
     // Workflow should have progressed (step-2 completed or at least enqueued)
@@ -1107,10 +1107,10 @@ describe("Coordinator recovery — resume workflows after process restart", () =
       pollIntervalMs: 50,
     });
 
-    void coord1.start();
+    void coord1.startLoop();
     void worker.start();
     await new Promise((r) => setTimeout(r, 300));
-    await coord1.stop();
+    await coord1.stopLoop();
     await worker.stop();
 
     const state = await storage.loadWorkflow("done-1");
@@ -1118,9 +1118,9 @@ describe("Coordinator recovery — resume workflows after process restart", () =
 
     // New coordinator should not pick it up
     const coord2 = createCoordinator({ storage, stepQueue: queue, pollIntervalMs: 50 });
-    void coord2.start();
+    void coord2.startLoop();
     await new Promise((r) => setTimeout(r, 200));
-    await coord2.stop();
+    await coord2.stopLoop();
 
     // Still completed — not re-processed
     const state2 = await storage.loadWorkflow("done-1");

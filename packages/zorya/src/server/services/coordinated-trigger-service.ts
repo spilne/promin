@@ -16,7 +16,7 @@
 // a DAG the coordinator can't enqueue anything.
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage, WorkflowCoordinator, WorkflowDAG } from "@promin/workflow";
+import type { WorkflowStorage, DistributedWorkflowRunner, WorkflowDAG } from "@promin/workflow";
 import { buildStubWorkflow } from "@promin/workflow";
 import type { RunTrigger } from "../routes/runs.ts";
 import type {
@@ -26,7 +26,7 @@ import type {
 
 export interface CoordinatedTriggerServiceDeps {
   storage: WorkflowStorage;
-  coordinator: WorkflowCoordinator;
+  coordinator: DistributedWorkflowRunner;
   /**
    * Worker advertisements — the source of truth for which workflows the
    * coordinator can run. Required: without an advertised DAG there's

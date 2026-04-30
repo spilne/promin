@@ -20,9 +20,9 @@ import type {
   StepQueue,
   Workflow,
   WorkerRegistry,
-  WorkflowCoordinator,
+  DistributedWorkflowRunner,
 } from "@promin/workflow";
-import { createCoordinator, RecoveryStrategy } from "@promin/workflow";
+import { createDistributedWorkflowRunner, RecoveryStrategy } from "@promin/workflow";
 import { createWorkerApiHandler, createWorkflowStorageHandler } from "@promin/workflow-remote";
 import { Auth, type AuthConfig } from "./auth.ts";
 import { Router, jsonError } from "./router.ts";
@@ -394,7 +394,7 @@ export class ZoryaServer {
    * Public so embedders / tests can `submit()` directly without going
    * through the HTTP trigger endpoint.
    */
-  readonly coordinator?: WorkflowCoordinator;
+  readonly coordinator?: DistributedWorkflowRunner;
   /**
    * Embedded scheduler tick loop when `config.scheduling.enabled` is
    * true. Public so tests can drive single ticks via `tickOnce()`.
@@ -478,7 +478,7 @@ export class ZoryaServer {
             "(auto-created when workerProtocol is set; explicit registry must include it)",
         );
       }
-      this.coordinator = createCoordinator({
+      this.coordinator = createDistributedWorkflowRunner({
         storage: config.storage,
         stepQueue: config.workerProtocol.stepQueue,
         workerRegistry: config.workerProtocol.workerRegistry,
@@ -779,7 +779,7 @@ export class ZoryaServer {
     // Failures inside the coordinator's own loop write to its own logs;
     // we only swallow here so a transient error doesn't surface as an
     // unhandled rejection on the server's lifecycle.
-    this.coordinatorLoop = this.coordinator.start().catch(() => {});
+    this.coordinatorLoop = this.coordinator.startLoop().catch(() => {});
   }
 
   /**
@@ -901,7 +901,7 @@ export class ZoryaServer {
     this.server?.stop();
     this.server = undefined;
     if (this.coordinator) {
-      void this.coordinator.stop();
+      void this.coordinator.stopLoop();
       this.coordinatorLoop = undefined;
     }
     if (this.schedulerLoop) {

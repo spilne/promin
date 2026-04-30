@@ -10,9 +10,16 @@ export {
 export { type StepQueue, type StepTask, type FairnessPolicy } from "./step-queue.ts";
 export { InMemoryStepQueue } from "./in-memory-step-queue.ts";
 export {
+  DistributedWorkflowRunner,
+  createDistributedWorkflowRunner,
+  type DistributedRunnerConfig,
+  /** @deprecated Use DistributedWorkflowRunner */
   type WorkflowCoordinator,
+  /** @deprecated Use DistributedRunnerConfig */
   type CoordinatorConfig,
+  /** @deprecated Use DistributedWorkflowRunner */
   DefaultCoordinator,
+  /** @deprecated Use createDistributedWorkflowRunner */
   createCoordinator,
   buildStubWorkflow,
 } from "./coordinator.ts";
