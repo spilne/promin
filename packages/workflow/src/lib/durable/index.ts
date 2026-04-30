@@ -83,6 +83,8 @@ export {
   DefaultWorkflowRunner,
   InProcessStepExecutor,
   createWorkflowRunner,
+  RecoveryStrategy,
+  RecoveryStrategyBuilder,
   type WorkflowRunner,
   type WorkflowRunnerConfig,
   type WorkflowRunnerRunParams,
@@ -90,6 +92,8 @@ export {
   type StepExecutor,
   type StepExecutionRequest,
   type StepExecutionResult,
+  type RecoveryResult,
+  type StaleTerminationAction,
 } from "./workflow-runner.ts";
 export { trigger, WorkflowResult } from "./workflow-trigger.ts";
 export {
