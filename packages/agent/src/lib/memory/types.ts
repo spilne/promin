@@ -191,6 +191,13 @@ export interface ThreadRow {
   readonly namespaceId: string;
   readonly resourceId: string | null;
   readonly threadId: string;
+  /**
+   * Display title for the thread. Optional; UIs fall back to `threadId`
+   * when null. First-class column (rather than a `metadata.title` key)
+   * so backends can index / search on it and `setMetadata` can't
+   * accidentally clobber it.
+   */
+  readonly title: string | null;
   readonly workingMemory: string | null;
   readonly inheritFromParent: boolean;
   readonly metadata: Readonly<Record<string, unknown>>;
@@ -203,6 +210,8 @@ export interface ThreadSummary {
   readonly namespaceId: string;
   readonly resourceId: string | null;
   readonly threadId: string;
+  /** See `ThreadRow.title`. UIs fall back to `threadId` when null. */
+  readonly title: string | null;
   readonly metadata: Readonly<Record<string, unknown>>;
   readonly messageCount: number;
   readonly lastActiveAt: number;
@@ -221,6 +230,7 @@ export interface ResourcePatch extends NamespacePatch {}
 
 export interface ThreadInit {
   readonly resourceId?: string;
+  readonly title?: string | null;
   readonly workingMemory?: string | null;
   readonly inheritFromParent?: boolean;
   readonly metadata?: Readonly<Record<string, unknown>>;
@@ -359,6 +369,8 @@ export interface MemoryStore {
   getThread(key: ThreadKey): Promise<ThreadRow | null>;
   listThreads(params: ListThreadsParams): Promise<ThreadSummary[]>;
   setThreadWorking(key: ThreadKey, content: string | null): Promise<void>;
+  /** Set the thread's display title. `null` clears it (UI falls back to threadId). */
+  setThreadTitle(key: ThreadKey, title: string | null): Promise<void>;
   setThreadMetadata(key: ThreadKey, metadata: Readonly<Record<string, unknown>>): Promise<void>;
   setThreadInheritFromParent(key: ThreadKey, inherit: boolean): Promise<void>;
   appendThreadFact(key: ThreadKey, text: string): Promise<Fact>;

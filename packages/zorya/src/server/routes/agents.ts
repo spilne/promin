@@ -665,6 +665,54 @@ export function listThreadMessages(deps: AgentGatewayDeps) {
 }
 
 // ---------------------------------------------------------------------------
+// Rename thread — stash a display title in the thread's metadata bag so
+// the dashboard can show it in place of the opaque threadId. We
+// read-modify-write the metadata so existing keys (working-memory hints,
+// app-specific tags) survive the rename.
+// ---------------------------------------------------------------------------
+
+interface RenameThreadRequest {
+  readonly namespaceId?: unknown;
+  readonly resourceId?: unknown;
+  readonly title?: unknown;
+}
+
+export function renameAgentThread(deps: AgentGatewayDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const id = params.id;
+    const threadId = params.threadId;
+    if (!id) return jsonError(400, "missing_id");
+    if (!threadId) return jsonError(400, "missing_threadId");
+
+    const body = (await readJson<RenameThreadRequest>(req)) ?? {};
+    const namespaceId = typeof body.namespaceId === "string" ? body.namespaceId : undefined;
+    const resourceId = typeof body.resourceId === "string" ? body.resourceId : undefined;
+    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    // Empty / undefined title clears the rename — back to the threadId default.
+    const title =
+      typeof body.title === "string" && body.title.trim().length > 0 ? body.title.trim() : null;
+
+    const recipe = await deps.registry.get(id);
+    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+
+    let agent: Agent;
+    try {
+      agent = deps.resolve(recipe).withScope({ namespaceId, resourceId });
+    } catch (err) {
+      return jsonError(500, "resolve_failed", asMessage(err));
+    }
+
+    try {
+      const thread = await agent.thread(threadId, { createIfMissing: false });
+      await thread.setTitle(title);
+      return json(200, { threadId: thread.id, title });
+    } catch (err) {
+      return jsonError(404, "thread_not_found", asMessage(err));
+    }
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Memory consolidation — delegates to the agent's Consolidator.
 // ---------------------------------------------------------------------------
 

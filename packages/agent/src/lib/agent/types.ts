@@ -150,6 +150,12 @@ export interface ListThreadsParams {
 export interface ThreadSummary {
   readonly id: string;
   readonly resourceId: string | null;
+  /**
+   * Display title (typed first-class field). Optional; UIs fall back to
+   * `id` when null. Read-side fallback in storage backends surfaces
+   * legacy `metadata.title` values here for backward compatibility.
+   */
+  readonly title: string | null;
   readonly metadata: Readonly<Record<string, unknown>>;
   readonly messageCount: number;
   readonly lastActiveAt: number;
@@ -317,8 +323,15 @@ export interface AgentThread<Input = AgentInput, Output = unknown> {
   /** Replace the markdown scratchpad. */
   setWorkingMemory(markdown: string | null): Promise<void>;
 
+  /** Read the persisted thread metadata bag (or `{}` when none / no store). */
+  metadata(): Promise<Readonly<Record<string, unknown>>>;
   /** Patch thread metadata. Merge semantics depend on backend. */
   setMetadata(metadata: Readonly<Record<string, unknown>>): Promise<void>;
+
+  /** Read the thread's display title (or `null` when none / no store). */
+  title(): Promise<string | null>;
+  /** Set the thread's display title. `null` clears it (UI falls back to threadId). */
+  setTitle(title: string | null): Promise<void>;
 
   /** Permanently delete the thread and its messages / facts / episodes. */
   delete(): Promise<void>;

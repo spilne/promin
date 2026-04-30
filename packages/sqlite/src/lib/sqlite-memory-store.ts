@@ -108,6 +108,7 @@ export class SqliteMemoryStore implements MemoryStore {
         namespace_id        TEXT NOT NULL,
         thread_id           TEXT NOT NULL,
         resource_id         TEXT,
+        title               TEXT,
         working_memory      TEXT,
         inherit_from_parent INTEGER NOT NULL DEFAULT 1,
         metadata            TEXT,
@@ -116,6 +117,15 @@ export class SqliteMemoryStore implements MemoryStore {
         PRIMARY KEY (namespace_id, thread_id)
       )
     `);
+    // Migrate existing tables that predate the `title` column. sqlite's
+    // ALTER TABLE ADD COLUMN IF NOT EXISTS arrived in 3.35; older dbs
+    // throw "duplicate column" — we swallow that and let any other error
+    // propagate.
+    try {
+      this.db.run(`ALTER TABLE ${p}_thread ADD COLUMN title TEXT`);
+    } catch (e) {
+      if (!String(e).includes("duplicate column")) throw e;
+    }
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${p}_thread_resource ON ${p}_thread (namespace_id, resource_id)`,
     );
@@ -436,6 +446,7 @@ export class SqliteMemoryStore implements MemoryStore {
       namespaceId: key.namespaceId,
       resourceId: key.resourceId ?? init.resourceId ?? null,
       threadId: key.threadId,
+      title: init.title ?? null,
       workingMemory: init.workingMemory ?? null,
       inheritFromParent: init.inheritFromParent ?? true,
       metadata: init.metadata ?? {},
@@ -445,13 +456,14 @@ export class SqliteMemoryStore implements MemoryStore {
     this.db
       .query(
         `INSERT INTO ${this.prefix}_thread
-           (namespace_id, thread_id, resource_id, working_memory, inherit_from_parent, metadata, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           (namespace_id, thread_id, resource_id, title, working_memory, inherit_from_parent, metadata, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.namespaceId,
         row.threadId,
         row.resourceId,
+        row.title,
         row.workingMemory,
         row.inheritFromParent ? 1 : 0,
         JSON.stringify(row.metadata),
@@ -503,11 +515,15 @@ export class SqliteMemoryStore implements MemoryStore {
            WHERE namespace_id = ? AND thread_id = ?`,
         )
         .get(r.namespace_id, r.thread_id);
+      const metadata = r.metadata ? (JSON.parse(r.metadata) as Record<string, unknown>) : {};
+      const title =
+        r.title ?? (typeof metadata.title === "string" ? (metadata.title as string) : null);
       return {
         namespaceId: r.namespace_id,
         resourceId: r.resource_id,
         threadId: r.thread_id,
-        metadata: r.metadata ? (JSON.parse(r.metadata) as Record<string, unknown>) : {},
+        title,
+        metadata,
         messageCount: count?.c ?? 0,
         lastActiveAt: lastMsg?.created_at ?? r.updated_at,
         createdAt: r.created_at,
@@ -550,6 +566,16 @@ export class SqliteMemoryStore implements MemoryStore {
          WHERE namespace_id = ? AND thread_id = ?`,
       )
       .run(content, this.clock(), key.namespaceId, key.threadId);
+  }
+
+  async setThreadTitle(key: ThreadKey, title: string | null): Promise<void> {
+    await this.requireThread(key);
+    this.db
+      .query(
+        `UPDATE ${this.prefix}_thread SET title = ?, updated_at = ?
+         WHERE namespace_id = ? AND thread_id = ?`,
+      )
+      .run(title, this.clock(), key.namespaceId, key.threadId);
   }
 
   async setThreadMetadata(
@@ -888,6 +914,7 @@ interface DbThreadRow {
   namespace_id: string;
   thread_id: string;
   resource_id: string | null;
+  title: string | null;
   working_memory: string | null;
   inherit_from_parent: number;
   metadata: string | null;
@@ -952,13 +979,19 @@ function toResourceRow(r: DbResourceRow): ResourceRow {
 }
 
 function toThreadRow(r: DbThreadRow): ThreadRow {
+  const metadata = r.metadata ? (JSON.parse(r.metadata) as Record<string, unknown>) : {};
+  // Read-side fallback for legacy rows that wrote `metadata.title` before
+  // the dedicated column existed. Newly written titles always go through
+  // the typed column.
+  const title = r.title ?? (typeof metadata.title === "string" ? (metadata.title as string) : null);
   return {
     namespaceId: r.namespace_id,
     resourceId: r.resource_id,
     threadId: r.thread_id,
+    title,
     workingMemory: r.working_memory,
     inheritFromParent: r.inherit_from_parent === 1,
-    metadata: r.metadata ? (JSON.parse(r.metadata) as Record<string, unknown>) : {},
+    metadata,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };

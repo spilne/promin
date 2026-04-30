@@ -617,6 +617,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     return summaries.map((s) => ({
       id: s.threadId,
       resourceId: s.resourceId,
+      title: s.title,
       metadata: s.metadata,
       messageCount: s.messageCount,
       lastActiveAt: s.lastActiveAt,
@@ -1241,12 +1242,32 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     await this.deps.memory.setThreadWorking(this.deps.key, markdown);
   }
 
+  async metadata(): Promise<Readonly<Record<string, unknown>>> {
+    if (!this.deps.memory) return {};
+    const row = await this.deps.memory.getThread(this.deps.key);
+    return row?.metadata ?? {};
+  }
+
   async setMetadata(metadata: Readonly<Record<string, unknown>>): Promise<void> {
     if (!this.deps.memory) return;
     if (!(await this.deps.memory.getThread(this.deps.key))) {
       await this.deps.memory.createThread(this.deps.key);
     }
     await this.deps.memory.setThreadMetadata(this.deps.key, metadata);
+  }
+
+  async title(): Promise<string | null> {
+    if (!this.deps.memory) return null;
+    const row = await this.deps.memory.getThread(this.deps.key);
+    return row?.title ?? null;
+  }
+
+  async setTitle(title: string | null): Promise<void> {
+    if (!this.deps.memory) return;
+    if (!(await this.deps.memory.getThread(this.deps.key))) {
+      await this.deps.memory.createThread(this.deps.key);
+    }
+    await this.deps.memory.setThreadTitle(this.deps.key, title);
   }
 
   async delete(): Promise<void> {

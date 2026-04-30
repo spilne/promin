@@ -254,6 +254,7 @@ export class InMemoryMemoryStore implements MemoryStore {
       namespaceId: key.namespaceId,
       resourceId: key.resourceId ?? init.resourceId ?? null,
       threadId: key.threadId,
+      title: init.title ?? null,
       workingMemory: init.workingMemory ?? null,
       inheritFromParent: init.inheritFromParent ?? true,
       metadata: init.metadata ?? {},
@@ -266,7 +267,14 @@ export class InMemoryMemoryStore implements MemoryStore {
   }
 
   async getThread(key: ThreadKey): Promise<ThreadRow | null> {
-    return this.threads.get(this.threadK(key)) ?? null;
+    const row = this.threads.get(this.threadK(key));
+    if (!row) return null;
+    // Same legacy fallback as listThreads: surface `metadata.title` as
+    // the typed `title` when the column itself is null.
+    if (row.title == null && typeof row.metadata.title === "string") {
+      return { ...row, title: row.metadata.title };
+    }
+    return row;
   }
 
   async listThreads(params: ListThreadsParams): Promise<ThreadSummary[]> {
@@ -294,6 +302,11 @@ export class InMemoryMemoryStore implements MemoryStore {
         namespaceId: t.namespaceId,
         resourceId: t.resourceId,
         threadId: t.threadId,
+        // Read-side fallback: legacy rows wrote `metadata.title` before
+        // the column existed. Surface that as `title` so the UI doesn't
+        // lose names that were set under the old contract. Newly written
+        // titles always go through the typed column.
+        title: t.title ?? (typeof t.metadata.title === "string" ? t.metadata.title : null),
         metadata: t.metadata,
         messageCount: this.messages.get(k)?.length ?? 0,
         lastActiveAt: this.lastActiveByThread.get(k) ?? t.updatedAt,
@@ -323,6 +336,15 @@ export class InMemoryMemoryStore implements MemoryStore {
     this.threads.set(this.threadK(key), {
       ...row,
       workingMemory: content,
+      updatedAt: this.now(),
+    });
+  }
+
+  async setThreadTitle(key: ThreadKey, title: string | null): Promise<void> {
+    const row = await this.requireThread(key);
+    this.threads.set(this.threadK(key), {
+      ...row,
+      title,
       updatedAt: this.now(),
     });
   }
