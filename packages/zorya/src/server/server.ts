@@ -126,6 +126,12 @@ import {
 
 export interface ZoryaServerConfig extends AuthConfig {
   storage: WorkflowStorage;
+  /**
+   * Optional workflow runner. When provided together with `recovery`, the server
+   * calls `runner.recover(strategy)` on startup. Can also be used by embedders
+   * that want direct runner access without going through the HTTP trigger path.
+   */
+  runner?: WorkflowRunner;
   /** Function that starts a new run by name. Required for POST /api/runs/trigger/:name. */
   trigger?: RunTrigger;
   /** Override metrics with a backend-specific provider (e.g. PgWorkflowMetrics). */
@@ -156,23 +162,19 @@ export interface ZoryaServerConfig extends AuthConfig {
    */
   rerun?: (workflowId: string) => Promise<void>;
   /**
-   * Startup recovery. When set, `listen()` (and the public `startRecovery()`)
-   * call `runner.recover(strategy)` once, fire-and-forget. Typical usage:
+   * Startup recovery strategy. When set, `listen()` calls
+   * `runner.recover(recovery)` once on boot (fire-and-forget).
+   * Requires `runner` to also be set on this config.
    *
    * ```ts
-   * recovery: {
-   *   runner,
-   *   strategy: RecoveryStrategy.builder()
-   *     .failStale({ olderThanMs: 60 * 60 * 1000 })
-   *     .resumeRecent()
-   *     .build(),
-   * }
+   * runner,
+   * recovery: RecoveryStrategy.builder()
+   *   .failStale({ olderThanMs: 60 * 60 * 1000 })
+   *   .resumeRecent()
+   *   .build(),
    * ```
    */
-  recovery?: {
-    runner: WorkflowRunner;
-    strategy: RecoveryStrategy;
-  };
+  recovery?: RecoveryStrategy;
   /** Directory with compiled dashboard assets (index.html, app.js, app.css). */
   uiDir?: string;
   /** SSE watcher poll interval. Default 1000ms. */
@@ -783,10 +785,14 @@ export class ZoryaServer {
    * without binding a port.
    */
   startRecovery(): void {
-    const { recovery } = this.config;
+    const { runner, recovery } = this.config;
     if (!recovery) return;
-    void recovery.runner
-      .recover(recovery.strategy)
+    if (!runner) {
+      console.warn("[zorya] recovery strategy set but no runner configured — skipping");
+      return;
+    }
+    void runner
+      .recover(recovery)
       .then(({ terminated, resumed, skipped }) => {
         if (terminated > 0) console.log(`[zorya] recovery: auto-failed ${terminated} stale run(s)`);
         if (resumed > 0) console.log(`[zorya] recovery: resumed ${resumed} orphaned run(s)`);

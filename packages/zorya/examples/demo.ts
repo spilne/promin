@@ -27,6 +27,7 @@ import {
   InMemoryStepQueue,
   InMemoryWorkerRegistry,
   createWorkflowRunner,
+  RecoveryStrategy,
   createSleepScanner,
   completeSignal,
   isJournaledSuspendStorage,
@@ -941,13 +942,11 @@ const uiDir = process.env.ZORYA_UI_DIR ?? path.join(import.meta.dir, "..", "dist
 
 const server = new ZoryaServer({
   storage,
-  recovery: {
-    runner,
-    strategy: RecoveryStrategy.builder()
-      .failStale({ olderThanMs: 60 * 60 * 1000, error: "Stale run auto-failed on restart" })
-      .resumeRecent()
-      .build(),
-  },
+  runner,
+  recovery: RecoveryStrategy.builder()
+    .failStale({ olderThanMs: 60 * 60 * 1000, error: "Stale run auto-failed on restart" })
+    .resumeRecent()
+    .build(),
   scheduler: schedulerStorage,
   workflows: workflowsByName,
   // Agent gateway — exposes /api/agents/* and powers the Agents tab. The
