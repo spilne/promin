@@ -65,6 +65,7 @@ export class SqliteStepQueue implements StepQueue {
         status         TEXT    NOT NULL DEFAULT 'pending',
         version        TEXT,
         namespace      TEXT,
+        metadata       TEXT,
         created_at     INTEGER NOT NULL,
         claimed_at     INTEGER,
         completed_at   INTEGER,
@@ -75,6 +76,15 @@ export class SqliteStepQueue implements StepQueue {
         active_key     TEXT
       )
     `);
+    // Migrate any existing table that predates the metadata column. sqlite
+    // ALTER TABLE ADD COLUMN IF NOT EXISTS arrived in 3.35; older dbs throw
+    // "duplicate column" — we swallow that exact failure mode and let any
+    // other error propagate.
+    try {
+      this.db.run(`ALTER TABLE ${t} ADD COLUMN metadata TEXT`);
+    } catch (e) {
+      if (!String(e).includes("duplicate column")) throw e;
+    }
     this.db.run(
       `CREATE UNIQUE INDEX IF NOT EXISTS ${t}_active ON ${t} (active_key) WHERE active_key IS NOT NULL`,
     );
@@ -96,6 +106,7 @@ export class SqliteStepQueue implements StepQueue {
     priority?: number;
     namespace?: string;
     version?: string;
+    metadata?: Record<string, unknown>;
   }): Promise<string> {
     const key = this._activeKey(params.namespace, params.workflowId, params.stepName);
 
@@ -110,8 +121,8 @@ export class SqliteStepQueue implements StepQueue {
         .query(
           `INSERT INTO ${this._table}
            (id, workflow_id, step_name, needs, priority, input, prev_results,
-            attempt, status, version, namespace, created_at, active_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'pending', ?, ?, ?, ?)`,
+            attempt, status, version, namespace, metadata, created_at, active_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'pending', ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -123,6 +134,7 @@ export class SqliteStepQueue implements StepQueue {
           JSON.stringify(params.prevResults),
           params.version ?? null,
           params.namespace ?? null,
+          params.metadata !== undefined ? JSON.stringify(params.metadata) : null,
           Date.now(),
           key,
         );
@@ -379,6 +391,7 @@ interface TaskRow {
   status: string;
   version: string | null;
   namespace: string | null;
+  metadata: string | null;
   created_at: number;
   claimed_at: number | null;
   completed_at: number | null;
@@ -402,6 +415,8 @@ function rowToTask(row: TaskRow): StepTask {
     status: row.status as StepTask["status"],
     createdAt: new Date(row.created_at),
     version: row.version ?? undefined,
+    metadata:
+      row.metadata != null ? (JSON.parse(row.metadata) as Record<string, unknown>) : undefined,
   };
 }
 
