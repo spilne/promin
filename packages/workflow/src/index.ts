@@ -22,6 +22,7 @@ export {
   type WorkflowOrderBy,
   workflowMetadataMatches,
   type WorkflowState,
+  type WorkflowSummary,
   type WorkflowRunSummary,
   type StepState,
   type StepTaskState,

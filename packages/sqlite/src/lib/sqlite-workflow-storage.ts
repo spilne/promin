@@ -11,6 +11,7 @@ import {
 } from "@promin/workflow";
 import type {
   WorkflowState,
+  WorkflowSummary,
   WorkflowStatus,
   WorkflowRunSummary,
   SignalState,
@@ -112,6 +113,14 @@ export class SqliteWorkflowStorage
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_status ON ${t} (status)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_parent ON ${t} (parent_workflow_id)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_run_source ON ${t} (run_source, run_source_id)`);
+    // Sort-order indexes so listWorkflows ORDER BY clauses can use index
+    // traversal instead of a full-table sort. DESC matches the default
+    // direction; SQLite uses the same index for ASC scans in reverse.
+    this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_started_at ON ${t} (started_at DESC)`);
+    this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_created_at ON ${t} (created_at DESC)`);
+    this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_completed_at ON ${t} (completed_at DESC)`);
+    // Covers SELECT DISTINCT workflow_name ORDER BY workflow_name
+    this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_name ON ${t} (workflow_name)`);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS ${t}_signals (
         id          INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -353,6 +362,198 @@ export class SqliteWorkflowStorage
       rows = rows.slice(offset, offset + limit);
     }
     return rows;
+  }
+
+  async listWorkflowSummaries(
+    params?: Parameters<WorkflowStorage["listWorkflows"]>[0],
+  ): Promise<WorkflowSummary[]> {
+    const conditions: string[] = [];
+    const args: unknown[] = [];
+
+    if (params?.status) {
+      conditions.push(`status = ?`);
+      args.push(params.status);
+    }
+    if (params?.name) {
+      conditions.push(`workflow_name = ?`);
+      args.push(params.name);
+    }
+    if (params?.type) {
+      conditions.push(`workflow_type = ?`);
+      args.push(params.type);
+    }
+    if (params?.parentId) {
+      conditions.push(`parent_workflow_id = ?`);
+      args.push(params.parentId);
+    }
+    if (params?.namespace) {
+      conditions.push(`namespace = ?`);
+      args.push(params.namespace);
+    }
+    if (params?.runSource !== undefined) {
+      conditions.push(`run_source = ?`);
+      args.push(encodeRunSource(params.runSource));
+    }
+    if (params?.runSourceId !== undefined) {
+      conditions.push(`run_source_id = ?`);
+      args.push(params.runSourceId);
+    }
+
+    const metadataFilter = params?.metadata;
+    let needsPostFilter = false;
+    if (metadataFilter) {
+      for (const [k, v] of Object.entries(metadataFilter)) {
+        if (v === null || ["string", "number", "boolean"].includes(typeof v)) {
+          conditions.push(`json_extract(metadata, ?) = ?`);
+          const sqlValue = typeof v === "boolean" ? (v ? 1 : 0) : v;
+          args.push(jsonPathFor(k), sqlValue);
+        } else {
+          needsPostFilter = true;
+        }
+      }
+    }
+
+    const where = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
+    const orderClause = sqliteOrderByClause(params?.orderBy, params?.orderDir);
+    // Lean SELECT — intentionally omits `steps`, `input`, `result`, `error`
+    // so the engine never deserialises those JSON blobs for list-view queries.
+    let sql = `SELECT workflow_id, workflow_name, workflow_type, namespace, status, version, run,
+                      metadata, run_source, run_source_id, created_at, started_at, updated_at, completed_at
+               FROM ${this._t}${where} ORDER BY ${orderClause}`;
+
+    if (!needsPostFilter) {
+      if (params?.limit != null) {
+        sql += ` LIMIT ?`;
+        args.push(params.limit);
+      }
+      if (params?.offset != null) {
+        sql += ` OFFSET ?`;
+        args.push(params.offset);
+      }
+    }
+
+    let rows = this.db
+      .query<SummaryRow>(sql)
+      .all(...args)
+      .map((r) => this._summaryRowToSummary(r));
+
+    if (needsPostFilter && metadataFilter) {
+      rows = rows.filter((r) => workflowMetadataMatches(r.metadata, metadataFilter));
+      const offset = params?.offset ?? 0;
+      const limit = params?.limit ?? rows.length;
+      rows = rows.slice(offset, offset + limit);
+    }
+    return rows;
+  }
+
+  private _summaryRowToSummary(row: SummaryRow): WorkflowSummary {
+    return {
+      workflowId: row.workflow_id,
+      workflowName: row.workflow_name,
+      workflowType: row.workflow_type ?? undefined,
+      namespace: row.namespace ?? undefined,
+      status: row.status as WorkflowStatus,
+      version: row.version ?? undefined,
+      run: row.run,
+      runSource: decodeRunSource(row.run_source),
+      runSourceId: row.run_source_id ?? undefined,
+      metadata: row.metadata != null ? JSON.parse(row.metadata) : undefined,
+      createdAt: new Date(row.created_at),
+      startedAt: row.started_at != null ? new Date(row.started_at) : undefined,
+      updatedAt: new Date(row.updated_at),
+      completedAt: row.completed_at != null ? new Date(row.completed_at) : undefined,
+    };
+  }
+
+  async countWorkflows(params?: {
+    status?: WorkflowStatus;
+    name?: string;
+    type?: string;
+    parentId?: string;
+    namespace?: string;
+    runSource?: RunSource;
+    runSourceId?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<number> {
+    const conditions: string[] = [];
+    const args: unknown[] = [];
+
+    if (params?.status) {
+      conditions.push(`status = ?`);
+      args.push(params.status);
+    }
+    if (params?.name) {
+      conditions.push(`workflow_name = ?`);
+      args.push(params.name);
+    }
+    if (params?.type) {
+      conditions.push(`workflow_type = ?`);
+      args.push(params.type);
+    }
+    if (params?.parentId) {
+      conditions.push(`parent_workflow_id = ?`);
+      args.push(params.parentId);
+    }
+    if (params?.namespace) {
+      conditions.push(`namespace = ?`);
+      args.push(params.namespace);
+    }
+    if (params?.runSource !== undefined) {
+      conditions.push(`run_source = ?`);
+      args.push(encodeRunSource(params.runSource));
+    }
+    if (params?.runSourceId !== undefined) {
+      conditions.push(`run_source_id = ?`);
+      args.push(params.runSourceId);
+    }
+    if (params?.metadata) {
+      for (const [k, v] of Object.entries(params.metadata)) {
+        if (v === null || ["string", "number", "boolean"].includes(typeof v)) {
+          conditions.push(`json_extract(metadata, ?) = ?`);
+          const sqlValue = typeof v === "boolean" ? (v ? 1 : 0) : v;
+          args.push(jsonPathFor(k), sqlValue);
+        }
+      }
+    }
+
+    const where = conditions.length > 0 ? ` WHERE ${conditions.join(" AND ")}` : "";
+    const row = this.db
+      .query<{ c: number }>(`SELECT COUNT(*) AS c FROM ${this._t}${where}`)
+      .get(...args);
+    return Number(row?.c ?? 0);
+  }
+
+  /**
+   * Bulk-fail all pending/running/suspended workflows whose `created_at` is
+   * older than `olderThanMs` milliseconds. Returns the number of rows updated.
+   * Single UPDATE statement — safe to call at startup even against large DBs.
+   */
+  cancelStaleWorkflows(params: {
+    olderThanMs: number;
+    error?: string;
+    statuses?: Array<"pending" | "running" | "suspended">;
+  }): number {
+    const cutoff = Date.now() - params.olderThanMs;
+    const statuses = params.statuses ?? ["pending", "running", "suspended"];
+    const placeholders = statuses.map(() => "?").join(", ");
+    const now = Date.now();
+    // Count first (the interface's run() returns void, not a changes count).
+    const before = this.db
+      .query<{ c: number }>(
+        `SELECT COUNT(*) AS c FROM ${this._t}
+         WHERE status IN (${placeholders}) AND created_at < ?`,
+      )
+      .get(...statuses, cutoff);
+    const count = Number(before?.c ?? 0);
+    if (count === 0) return 0;
+    this.db
+      .query(
+        `UPDATE ${this._t}
+         SET status = 'failed', error = ?, completed_at = ?, updated_at = ?
+         WHERE status IN (${placeholders}) AND created_at < ?`,
+      )
+      .run(params.error ?? "Stale run cancelled on restart", now, now, ...statuses, cutoff);
+    return count;
   }
 
   async distinctWorkflowNames(params?: { namespace?: string }): Promise<string[]> {
@@ -1179,6 +1380,24 @@ interface WfRow {
   completed_at: number | null;
 }
 
+/** Subset returned by `listWorkflowSummaries` — no blob columns. */
+interface SummaryRow {
+  workflow_id: string;
+  workflow_name: string;
+  workflow_type: string | null;
+  namespace: string | null;
+  status: string;
+  version: string | null;
+  run: number;
+  metadata: string | null;
+  run_source: number | null;
+  run_source_id: string | null;
+  created_at: number;
+  started_at: number | null;
+  updated_at: number;
+  completed_at: number | null;
+}
+
 interface RunRow {
   workflow_id: string;
   run: number;
@@ -1221,26 +1440,34 @@ function jsonPathFor(key: string): string {
  * Build the ORDER BY clause for `listWorkflows`. NULL values always sort
  * last so still-running rows (no `started_at` / `completed_at` /
  * `duration`) don't push real data off the first page in either direction.
- * Default: `started_at DESC NULLS LAST` so dashboards lead with the most-
- * recently-started run; pending rows that haven't picked up a worker yet
- * fall to the bottom.
+ *
+ * In SQLite, NULLs sort as the smallest value, which means DESC already
+ * places them last — no expression prefix needed. Bare-column expressions
+ * let the query planner use the sort-order indexes added in `_setup`.
+ * For ASC sorts we need explicit `NULLS LAST` (SQLite ≥ 3.30, shipped
+ * with Bun).
  */
 function sqliteOrderByClause(orderBy?: WorkflowOrderBy, orderDir?: "asc" | "desc"): string {
-  const dir = orderDir === "asc" ? "ASC" : "DESC";
+  const asc = orderDir === "asc";
   switch (orderBy) {
     case "createdAt":
-      return `created_at ${dir}`;
+      // created_at is NOT NULL — no null-handling needed.
+      return asc ? "created_at ASC" : "created_at DESC";
     case "completedAt":
-      return `completed_at IS NULL, completed_at ${dir}`;
+      return asc ? "completed_at ASC NULLS LAST" : "completed_at DESC";
     case "duration":
-      return `completed_at IS NULL, (completed_at - created_at) ${dir}`;
+      // Expression — no index possible, but null handling is correct:
+      // NULL result (in-flight rows) sorts last in both directions.
+      return asc
+        ? "(completed_at - created_at) ASC NULLS LAST"
+        : "(completed_at - created_at) DESC";
     case "status":
-      return `status ${dir}`;
+      return asc ? "status ASC" : "status DESC";
     case "name":
-      return `workflow_name ${dir}`;
+      return asc ? "workflow_name ASC" : "workflow_name DESC";
     case "startedAt":
     default:
-      return `started_at IS NULL, started_at ${dir}`;
+      return asc ? "started_at ASC NULLS LAST" : "started_at DESC";
   }
 }
 

@@ -2,7 +2,7 @@
 // Serialisers — WorkflowState / StepState → wire DTOs
 // ---------------------------------------------------------------------------
 
-import type { WorkflowState, StepState, StepTaskState } from "@promin/workflow";
+import type { WorkflowState, WorkflowSummary, StepState, StepTaskState } from "@promin/workflow";
 import type {
   ExtendedStepStatus,
   RunDto,
@@ -94,7 +94,7 @@ export function runToDto(w: WorkflowState): RunDto {
   };
 }
 
-export function runToSummaryDto(w: WorkflowState): RunSummaryDto {
+export function runToSummaryDto(w: WorkflowSummary): RunSummaryDto {
   // Use `startedAt` as the duration anchor when it's set — workflow rows
   // can be reused (e.g. scheduler-fired ids surviving across reboots), in
   // which case `createdAt` reflects the FIRST creation hours/days ago.
@@ -131,8 +131,8 @@ export function runToSummaryDto(w: WorkflowState): RunSummaryDto {
  * stamping for longer. Keeps the dashboard's source badge usable on a
  * mixed-vintage history without a write-side migration.
  */
-function deriveRunSource(w: WorkflowState): {
-  runSource?: WorkflowState["runSource"];
+function deriveRunSource(w: WorkflowSummary): {
+  runSource?: WorkflowSummary["runSource"];
   runSourceId?: string;
 } {
   if (w.runSource) return { runSource: w.runSource, runSourceId: w.runSourceId };

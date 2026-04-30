@@ -101,6 +101,32 @@ export interface WorkflowState<Input = unknown, Result = unknown> {
   readonly completedAt?: Date;
 }
 
+/**
+ * Lightweight workflow header returned by `listWorkflowSummaries`. Contains
+ * every field needed for list-view UIs (status badges, timing columns, filter
+ * facets) but omits the large blob fields — `steps`, `input`, `result`,
+ * `error` — so the query can skip deserialising those JSON columns entirely.
+ *
+ * Every `WorkflowState` satisfies this type, so in-memory backends can
+ * trivially implement `listWorkflowSummaries` by delegating to `listWorkflows`.
+ */
+export interface WorkflowSummary {
+  readonly workflowId: string;
+  readonly workflowName: string;
+  readonly workflowType?: string;
+  readonly namespace?: string;
+  readonly status: WorkflowStatus;
+  readonly version?: string;
+  readonly run: number;
+  readonly runSource?: RunSource;
+  readonly runSourceId?: string;
+  readonly metadata?: Record<string, unknown>;
+  readonly createdAt: Date;
+  readonly startedAt?: Date;
+  readonly updatedAt: Date;
+  readonly completedAt?: Date;
+}
+
 /** Summary of a single workflow run — used by loadRunHistory. */
 export interface WorkflowRunSummary {
   readonly run: number;

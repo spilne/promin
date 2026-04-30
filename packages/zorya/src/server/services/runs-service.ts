@@ -34,15 +34,17 @@ export class RunsService {
    * List runs with the given filters. Storage doesn't filter on `version`
    * yet, so when that filter is set we over-fetch and trim in JS to keep
    * pagination roughly correct.
+   *
+   * Uses `listWorkflowSummaries` when the storage supports it — avoids
+   * deserialising `steps`/`input`/`result` blobs that the list view doesn't need.
    */
   async list(query: RunListQuery): Promise<RunListResponse> {
     const { version, limit = 50, offset = 0, ...rest } = query;
     const fetchLimit = version ? Math.min(limit * 5, 500) : limit;
-    const rows = await this.deps.storage.listWorkflows({
-      ...rest,
-      limit: fetchLimit,
-      offset,
-    });
+    const listParams = { ...rest, limit: fetchLimit, offset };
+    const rows = this.deps.storage.listWorkflowSummaries
+      ? await this.deps.storage.listWorkflowSummaries(listParams)
+      : await this.deps.storage.listWorkflows(listParams);
     const filtered = version ? rows.filter((r) => r.version === version) : rows;
     return { runs: filtered.slice(0, limit).map(runToSummaryDto) };
   }

@@ -102,4 +102,66 @@ describe("SqliteWorkflowStorage", () => {
     expect(await s.loadSignals("purge-sqlite")).toEqual([]);
     expect(await s.loadRunHistory("purge-sqlite")).toEqual([]);
   });
+
+  it("countWorkflows returns exact counts per status", async () => {
+    const s = makeStorage();
+    await s.createWorkflow({ workflowId: "cw-1", workflowName: "wf", input: {} });
+    await s.createWorkflow({ workflowId: "cw-2", workflowName: "wf", input: {} });
+    await s.createWorkflow({ workflowId: "cw-3", workflowName: "wf", input: {} });
+    await s.completeWorkflow("cw-1", "done");
+
+    expect(await s.countWorkflows({ status: "completed" })).toBe(1);
+    expect(await s.countWorkflows({ status: "pending" })).toBe(2);
+    expect(await s.countWorkflows()).toBe(3);
+    expect(await s.countWorkflows({ name: "wf" })).toBe(3);
+    expect(await s.countWorkflows({ name: "other" })).toBe(0);
+  });
+
+  it("listWorkflowSummaries omits steps/input/result blobs", async () => {
+    const s = makeStorage();
+    await s.createWorkflow({ workflowId: "ls-1", workflowName: "wf", input: { secret: true } });
+    await s.saveStepResult({
+      workflowId: "ls-1",
+      stepName: "step1",
+      result: { big: "payload" },
+      durationMs: 10,
+      startedAt: new Date(),
+    });
+
+    const summaries = await s.listWorkflowSummaries({ name: "wf" });
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]!.workflowId).toBe("ls-1");
+    expect(summaries[0]!.status).toBe("running");
+    // steps / input / result must not be present on WorkflowSummary
+    expect("steps" in summaries[0]!).toBe(false);
+    expect("input" in summaries[0]!).toBe(false);
+    expect("result" in summaries[0]!).toBe(false);
+  });
+
+  it("cancelStaleWorkflows bulk-fails runs older than the cutoff", async () => {
+    const s = makeStorage();
+    await s.createWorkflow({ workflowId: "stale-1", workflowName: "wf", input: {} });
+    await s.createWorkflow({ workflowId: "stale-2", workflowName: "wf", input: {} });
+    await s.createWorkflow({ workflowId: "stale-3", workflowName: "wf", input: {} });
+    await s.completeWorkflow("stale-3", "done");
+
+    // Wait a tick so created_at is clearly in the past, then cancel with 0ms cutoff.
+    await new Promise((r) => setTimeout(r, 5));
+    const cancelled = s.cancelStaleWorkflows({ olderThanMs: 0, statuses: ["pending"] });
+
+    expect(cancelled).toBe(2); // stale-1 and stale-2 (not stale-3, already completed)
+    expect((await s.loadWorkflow("stale-1"))!.status).toBe("failed");
+    expect((await s.loadWorkflow("stale-2"))!.status).toBe("failed");
+    expect((await s.loadWorkflow("stale-3"))!.status).toBe("completed");
+  });
+
+  it("cancelStaleWorkflows respects the olderThanMs threshold", async () => {
+    const s = makeStorage();
+    await s.createWorkflow({ workflowId: "fresh-1", workflowName: "wf", input: {} });
+
+    // 1-hour cutoff — the row was just created so it should NOT be cancelled.
+    const cancelled = s.cancelStaleWorkflows({ olderThanMs: 60 * 60 * 1000 });
+    expect(cancelled).toBe(0);
+    expect((await s.loadWorkflow("fresh-1"))!.status).toBe("pending");
+  });
 });

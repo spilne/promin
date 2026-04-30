@@ -178,10 +178,11 @@ export function getSparklines(storage: WorkflowStorage) {
       1,
       Math.min(50, Number.parseInt(url.searchParams.get("limit") ?? "14", 10) || 14),
     );
-    // One scan, grouped client-side. Good enough for "populate sparklines on
-    // a <= 100-run first page"; a real backend should offer a dedicated
-    // "recent N per name" query.
-    const rows = await storage.listWorkflows({ limit: 500 });
+    // One scan, grouped client-side. Uses the lean summary path when the
+    // storage supports it — sparklines only need name/status/createdAt.
+    const rows = storage.listWorkflowSummaries
+      ? await storage.listWorkflowSummaries({ limit: 500 })
+      : await storage.listWorkflows({ limit: 500 });
     const bucket: Record<string, Array<{ status: WorkflowStatus; createdAt: string }>> = {};
     for (const w of rows) {
       const list = (bucket[w.workflowName] = bucket[w.workflowName] ?? []);

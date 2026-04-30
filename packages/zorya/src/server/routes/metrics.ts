@@ -26,12 +26,9 @@ const ALL_STATUSES: WorkflowStatus[] = [
 
 export class StorageMetricsProvider implements MetricsProvider {
   private readonly storage: WorkflowStorage;
-  /** Page size when scanning for metrics. Default 500. */
-  private readonly pageSize: number;
 
-  constructor(storage: WorkflowStorage, opts?: { pageSize?: number }) {
+  constructor(storage: WorkflowStorage, _opts?: { pageSize?: number }) {
     this.storage = storage;
-    this.pageSize = opts?.pageSize ?? 500;
   }
 
   async getMetrics(): Promise<MetricsDto> {
@@ -44,28 +41,41 @@ export class StorageMetricsProvider implements MetricsProvider {
       compensating: 0,
       tripwire: 0,
     };
-    const durations: number[] = [];
-    let total = 0;
 
-    let offset = 0;
-    while (true) {
-      const page = await this.storage.listWorkflows({ limit: this.pageSize, offset });
-      if (page.length === 0) break;
-      for (const w of page) {
-        total += 1;
-        byStatus[w.status] += 1;
-        if (w.completedAt) {
-          durations.push(w.completedAt.getTime() - w.createdAt.getTime());
-        }
+    if (this.storage.countWorkflows) {
+      // Fast path: one COUNT(*) query per status, each hitting the status index.
+      const counts = await Promise.all(
+        ALL_STATUSES.map((s) => this.storage.countWorkflows!({ status: s })),
+      );
+      for (let i = 0; i < ALL_STATUSES.length; i++) {
+        byStatus[ALL_STATUSES[i]] = counts[i];
       }
-      if (page.length < this.pageSize) break;
-      offset += page.length;
-      // Hard cap so we never scan unbounded storages synchronously.
-      if (offset >= 5000) break;
+    } else {
+      // Fallback: lean scan without blob columns.
+      const lister = (this.storage.listWorkflowSummaries ?? this.storage.listWorkflows).bind(
+        this.storage,
+      );
+      let offset = 0;
+      while (true) {
+        const page = await lister({ limit: 500, offset });
+        if (page.length === 0) break;
+        for (const w of page) byStatus[w.status] = (byStatus[w.status] ?? 0) + 1;
+        if (page.length < 500) break;
+        offset += page.length;
+        if (offset >= 5000) break;
+      }
     }
 
-    // Ensure every status is represented.
-    for (const s of ALL_STATUSES) if (!(s in byStatus)) byStatus[s] = 0;
+    const total = ALL_STATUSES.reduce((s, k) => s + byStatus[k], 0);
+
+    // Duration percentiles: lean scan of completed rows only, no blob columns.
+    const lister = (this.storage.listWorkflowSummaries ?? this.storage.listWorkflows).bind(
+      this.storage,
+    );
+    const completedPage = await lister({ status: "completed", limit: 2000 });
+    const durations = completedPage
+      .filter((w) => w.completedAt != null)
+      .map((w) => w.completedAt!.getTime() - w.createdAt.getTime());
 
     return {
       total,

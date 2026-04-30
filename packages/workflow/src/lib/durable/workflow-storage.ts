@@ -4,6 +4,7 @@
 
 import type {
   WorkflowState,
+  WorkflowSummary,
   WorkflowStatus,
   WorkflowRunSummary,
   WorkflowRunEvent,
@@ -97,6 +98,38 @@ export interface WorkflowStorage {
     orderBy?: WorkflowOrderBy;
     orderDir?: "asc" | "desc";
   }): Promise<WorkflowState[]>;
+
+  /**
+   * Lean variant of `listWorkflows` that skips the heavy blob columns
+   * (`steps`, `input`, `result`, `error`). Returns `WorkflowSummary` —
+   * everything dashboards need for list-view rows without deserialising
+   * step JSON on every poll.
+   *
+   * Optional — backends that don't implement this fall back to
+   * `listWorkflows`. Callers should prefer it wherever `steps`/`input`/
+   * `result` are not needed (e.g. the runs list, sparklines).
+   */
+  listWorkflowSummaries?(
+    params?: Parameters<WorkflowStorage["listWorkflows"]>[0],
+  ): Promise<WorkflowSummary[]>;
+
+  /**
+   * Count workflows matching the given filters without loading rows. Backends
+   * that support this skip all blob deserialization and return a single integer
+   * from a `SELECT COUNT(*)` (or equivalent) query.
+   *
+   * Optional — falls back to `listWorkflows` counting in JS when absent.
+   */
+  countWorkflows?(params?: {
+    status?: WorkflowStatus;
+    name?: string;
+    type?: string;
+    parentId?: string;
+    namespace?: string;
+    runSource?: import("./workflow-state.ts").RunSource;
+    runSourceId?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<number>;
 
   /**
    * Distinct workflow names ever observed in storage, optionally scoped to

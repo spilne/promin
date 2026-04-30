@@ -250,6 +250,29 @@ export class InMemoryWorkflowStorage
     return page.map((wf) => this.toState(wf));
   }
 
+  // In-memory: WorkflowState already satisfies WorkflowSummary — delegate.
+  listWorkflowSummaries: InMemoryWorkflowStorage["listWorkflows"] = this.listWorkflows.bind(this);
+
+  async countWorkflows(params?: {
+    status?: WorkflowStatus;
+    name?: string;
+    type?: string;
+    parentId?: string;
+    namespace?: string;
+  }): Promise<number> {
+    const ns = params?.namespace ?? this.namespace;
+    let count = 0;
+    for (const wf of this.workflows.values()) {
+      if (ns && wf.namespace !== ns) continue;
+      if (params?.status && wf.status !== params.status) continue;
+      if (params?.name && wf.workflowName !== params.name) continue;
+      if (params?.type && wf.workflowType !== params.type) continue;
+      if (params?.parentId && wf.parentWorkflowId !== params.parentId) continue;
+      count++;
+    }
+    return count;
+  }
+
   async distinctWorkflowNames(params?: { namespace?: string }): Promise<string[]> {
     const ns = params?.namespace ?? this.namespace;
     const seen = new Set<string>();
