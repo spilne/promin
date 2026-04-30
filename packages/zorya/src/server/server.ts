@@ -849,7 +849,7 @@ export class ZoryaServer {
         }
       }
 
-      // Resume — needs a runner.
+      // Resume — needs a runner + workflow definitions.
       if (opts.resumeRecent) {
         if (!runner) {
           console.warn(
@@ -857,13 +857,38 @@ export class ZoryaServer {
           );
           return;
         }
-        const { resumed, skipped } = await runner.recover(
-          RecoveryStrategy.builder().resumeRecent({ concurrent: opts.resumeConcurrency }).build(),
-        );
+        const workflows = this.config.workflows ?? {};
+        let resumed = 0;
+        const skipped: Array<{ workflowId: string; name: string }> = [];
+        const PAGE = 200;
+        for (const status of ["pending", "running"] as const) {
+          let offset = 0;
+          while (true) {
+            const page = await this.config.storage.listWorkflows({ status, limit: PAGE, offset });
+            if (page.length === 0) break;
+            for (let i = 0; i < page.length; i += opts.resumeConcurrency) {
+              const batch = page.slice(i, i + opts.resumeConcurrency);
+              for (const wf of batch) {
+                const def = workflows[wf.workflowName];
+                if (!def) {
+                  skipped.push({ workflowId: wf.workflowId, name: wf.workflowName });
+                  continue;
+                }
+                void runner.runSafe({ workflow: def, workflowId: wf.workflowId, input: wf.input });
+                resumed++;
+              }
+              if (i + opts.resumeConcurrency < page.length) {
+                await new Promise<void>((r) => setTimeout(r, 0));
+              }
+            }
+            if (page.length < PAGE) break;
+            offset += PAGE;
+          }
+        }
         if (resumed > 0) console.log(`[zorya] recovery: resumed ${resumed} orphaned run(s)`);
         if (skipped.length > 0) {
           console.warn(
-            `[zorya] recovery: skipped ${skipped.length} run(s) with no matching definition`,
+            `[zorya] recovery: skipped ${skipped.length} run(s) — no definition in config.workflows`,
           );
         }
       }
