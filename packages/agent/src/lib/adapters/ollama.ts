@@ -32,6 +32,15 @@ export interface OllamaOptions {
   baseURL?: string;
   temperature?: number;
   maxTokens?: number;
+  /**
+   * Context window size in tokens. Critical knob: many recent models
+   * (e.g. llama3.2:3b) ship with a 131K default that allocates a huge
+   * KV cache (>20GB) and effectively hangs the API on machines without
+   * the memory to back it. 4K–8K is plenty for chat and tool calling;
+   * crank it up only if you actually feed long histories. Defaults to
+   * 8192 — sane for chat, won't accidentally OOM.
+   */
+  numCtx?: number;
   defaultHeaders?: Record<string, string>;
 }
 
@@ -44,6 +53,8 @@ export function ollama(options: OllamaOptions): LLMProvider {
     if (temperature !== undefined) ollamaOptions.temperature = temperature;
     const maxTokens = params.maxTokens ?? options.maxTokens;
     if (maxTokens !== undefined) ollamaOptions.num_predict = maxTokens;
+    // num_ctx defaults to 8192 — see OllamaOptions.numCtx for rationale.
+    ollamaOptions.num_ctx = options.numCtx ?? 8192;
 
     return {
       model: options.model,
