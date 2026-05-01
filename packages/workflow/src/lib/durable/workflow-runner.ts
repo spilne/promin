@@ -184,6 +184,14 @@ export interface WorkflowRunnerConfig {
    * pass a `FakeClock` to advance time deterministically.
    */
   readonly clock?: Clock;
+  /**
+   * Identifier of whatever entity is running this runner — a Zorya
+   * worker, an in-process app, a script, the scheduler-loop, etc.
+   * Stamped onto every `StepAttemptRecord` so the dashboard can answer
+   * "which executor handled this step?". Optional; leave undefined and
+   * the field stays empty in the audit trail.
+   */
+  readonly executorId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -448,6 +456,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   private readonly hooks?: WorkflowHooks;
   private readonly stepExecutor?: StepExecutor;
   private readonly clock: Clock;
+  private readonly executorId?: string;
 
   constructor(config: WorkflowRunnerConfig) {
     this.storage = config.storage;
@@ -455,6 +464,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     this.hooks = config.hooks;
     this.stepExecutor = config.stepExecutor;
     this.clock = config.clock ?? SystemClock;
+    if (config.executorId !== undefined) this.executorId = config.executorId;
   }
 
   async run(params: WorkflowRunnerRunParams): Promise<unknown> {
@@ -953,6 +963,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       hooks: this.hooks ?? def.hooks,
       stepExecutor: this.stepExecutor,
       clock: this.clock,
+      ...(this.executorId !== undefined && { executorId: this.executorId }),
     };
     return runWorkflowOrchestration(ctx, {
       workflowId: params.workflowId,
@@ -1012,6 +1023,12 @@ export interface WorkflowOrchestrationContext {
    * for tests.
    */
   readonly clock?: Clock;
+  /**
+   * Identifier of the executor running this orchestration (worker id,
+   * process id, "in-process", etc.). Stamped on each StepAttemptRecord
+   * so the audit trail attributes the attempt to who actually ran it.
+   */
+  readonly executorId?: string;
 }
 
 /** Default lock TTL. Re-declared here for the runner's own withLock call. */
@@ -1242,6 +1259,7 @@ async function runOneOrchestrationCycle(
         stepExecutor: ctx.stepExecutor,
         guard,
         clock,
+        ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
       };
 
       for (let workflowAttempt = 0; workflowAttempt <= maxWorkflowRetries; workflowAttempt++) {
@@ -1345,6 +1363,7 @@ async function runOneOrchestrationCycle(
         dagNodes,
         guard,
         clock,
+        ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
       });
 
       // Fire workflow-level onComplete callback
@@ -1425,6 +1444,13 @@ export interface DagExecutionContext {
   readonly stepExecutor?: StepExecutor;
   /** Time source. Drives deadline checks, step durations, dispatch poll waits. Default: `SystemClock`. */
   readonly clock?: Clock;
+  /**
+   * Identifier of the executor running this DAG execution. Stamped on each
+   * `StepAttemptRecord` so the audit trail attributes the attempt to who
+   * actually ran it (worker id, in-process pid, etc.). Threaded down from
+   * `WorkflowOrchestrationContext.executorId`.
+   */
+  readonly executorId?: string;
 }
 
 /**
@@ -1701,6 +1727,7 @@ export async function executeWorkflowDag(
                     durationMs,
                     startedAt,
                     completedAt: clock.now(),
+                    ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
                   },
                   ctx.guard,
                 );
@@ -1858,6 +1885,7 @@ export async function executeWorkflowDag(
                       durationMs: stepResult.durationMs,
                       startedAt: stepResult.startedAt,
                       completedAt: clock.now(),
+                      ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
                     },
                     ctx.guard,
                   );
@@ -1933,6 +1961,7 @@ export async function executeWorkflowDag(
             durationMs: 0,
             startedAt: failStartedAt,
             completedAt: clock.now(),
+            ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
           },
           ctx.guard,
         );
@@ -1985,6 +2014,7 @@ export async function executeWorkflowDag(
               durationMs,
               startedAt,
               completedAt: clock.now(),
+              ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
             },
             ctx.guard,
           );
@@ -2081,11 +2111,13 @@ export async function compensateWorkflow(params: {
   guard?: FenceGuard;
   /** Time source. Drives compensation retry backoff + attempt timestamps. Default: SystemClock. */
   clock?: Clock;
+  /** Executor id stamped onto each compensation StepAttemptRecord. */
+  executorId?: string;
 }): Promise<{
   compensated: string[];
   failed: { stepName: string; error: unknown }[];
 }> {
-  const { storage, steps, compensateConfig, workflowId, input, guard } = params;
+  const { storage, steps, compensateConfig, workflowId, input, guard, executorId } = params;
   const clock = params.clock ?? SystemClock;
   const compensated: string[] = [];
   const failed: { stepName: string; error: unknown }[] = [];
@@ -2139,6 +2171,7 @@ export async function compensateWorkflow(params: {
               durationMs: clock.currentTimeMs() - compStartedAt.getTime(),
               startedAt: compStartedAt,
               completedAt: clock.now(),
+              ...(executorId !== undefined && { executorId }),
             },
             guard,
           );
@@ -2157,6 +2190,7 @@ export async function compensateWorkflow(params: {
               durationMs: clock.currentTimeMs() - compStartedAt.getTime(),
               startedAt: compStartedAt,
               completedAt: clock.now(),
+              ...(executorId !== undefined && { executorId }),
             },
             guard,
           );

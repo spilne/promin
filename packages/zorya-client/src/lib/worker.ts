@@ -199,7 +199,10 @@ export class ZoryaWorker {
     this.workerId = config.workerId ?? crypto.randomUUID();
     this.byName = new Map(config.workflows.map((w) => [w.name, w]));
     this.byNameAndVersion = buildVersionIndex(config.workflows);
-    this.runner = createWorkflowRunner({ storage: config.client.storage });
+    this.runner = createWorkflowRunner({
+      storage: config.client.storage,
+      executorId: this.workerId,
+    });
     if (config.controlSocket) {
       const csCfg = typeof config.controlSocket === "object" ? config.controlSocket : {};
       this.control = new WorkerControlSocket({

@@ -192,13 +192,24 @@ export class SqliteWorkflowStorage
         duration_ms  INTEGER NOT NULL,
         started_at   INTEGER NOT NULL,
         completed_at INTEGER NOT NULL,
-        worker_id    TEXT,
+        executor_id  TEXT,
         PRIMARY KEY (workflow_id, step_name, attempt, type)
       )
     `);
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_attempts_wfid ON ${t}_attempts (workflow_id, step_name)`,
     );
+    // Migrate older databases that had the column named `worker_id`
+    // (renamed to `executor_id` so non-worker contexts — in-process
+    // runs, scheduler-loop, scripts — can populate it too without
+    // misleading naming). SQLite RENAME COLUMN is no-op when the
+    // column doesn't exist; we swallow that exact failure.
+    try {
+      this.db.run(`ALTER TABLE ${t}_attempts RENAME COLUMN worker_id TO executor_id`);
+    } catch (e) {
+      const msg = String(e);
+      if (!msg.includes("no such column") && !msg.includes("already exists")) throw e;
+    }
     // Restore fence token counter from max stored token
     const row = this.db
       .query<{ maxToken: string | null }>(
@@ -1393,7 +1404,7 @@ export class SqliteWorkflowStorage
       .query(
         `INSERT INTO ${this._t}_attempts
            (workflow_id, step_name, attempt, type, status, result, error,
-            duration_ms, started_at, completed_at, worker_id)
+            duration_ms, started_at, completed_at, executor_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (workflow_id, step_name, attempt, type) DO UPDATE SET
            status       = excluded.status,
@@ -1402,7 +1413,7 @@ export class SqliteWorkflowStorage
            duration_ms  = excluded.duration_ms,
            started_at   = excluded.started_at,
            completed_at = excluded.completed_at,
-           worker_id    = excluded.worker_id`,
+           executor_id  = excluded.executor_id`,
       )
       .run(
         record.workflowId,
@@ -1415,7 +1426,7 @@ export class SqliteWorkflowStorage
         record.durationMs,
         record.startedAt.getTime(),
         record.completedAt.getTime(),
-        record.workerId ?? null,
+        record.executorId ?? null,
       );
   }
 
@@ -1431,7 +1442,7 @@ export class SqliteWorkflowStorage
       duration_ms: number;
       started_at: number;
       completed_at: number;
-      worker_id: string | null;
+      executor_id: string | null;
     }
     const rows = stepName
       ? this.db
@@ -1460,7 +1471,7 @@ export class SqliteWorkflowStorage
         completedAt: new Date(r.completed_at),
         ...(r.result !== null && { result: JSON.parse(r.result) as unknown }),
         ...(r.error !== null && { error: r.error }),
-        ...(r.worker_id !== null && { workerId: r.worker_id }),
+        ...(r.executor_id !== null && { executorId: r.executor_id }),
       };
       return rec;
     });

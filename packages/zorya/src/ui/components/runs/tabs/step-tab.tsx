@@ -321,8 +321,8 @@ function AttemptsSection({ runId, stepName }: { runId: string; stepName: string 
                 {a.status}
               </span>
               <span class="text-xs text-base-content/60">{formatDuration(a.durationMs)}</span>
-              {a.workerId && (
-                <span class="text-xs text-base-content/60 font-mono">on {a.workerId}</span>
+              {a.executorId && (
+                <span class="text-xs text-base-content/60 font-mono">on {a.executorId}</span>
               )}
               <div class="flex-1" />
               <span class="text-xs text-base-content/50">{formatRelative(a.startedAt)}</span>

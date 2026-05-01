@@ -39,7 +39,7 @@ export interface AttemptDto {
   startedAt: string;
   /** ISO timestamp. */
   completedAt: string;
-  workerId?: string;
+  executorId?: string;
 }
 
 export interface AttemptsResponse {
@@ -112,7 +112,7 @@ function attemptToDto(a: StepAttemptRecord): AttemptDto {
     durationMs: a.durationMs,
     startedAt: a.startedAt.toISOString(),
     completedAt: a.completedAt.toISOString(),
-    workerId: a.workerId,
+    executorId: a.executorId,
   };
 }
 

@@ -276,12 +276,14 @@ export interface StepAttemptRecord {
   readonly startedAt: Date;
   readonly completedAt: Date;
   /**
-   * ID of the worker that processed this attempt, when known. Set by the
-   * distributed worker from its own workerId. In-process runs
-   * (`wf.run(...)`) leave this undefined — there is no distinct worker.
-   * Use for operational queries like "which worker handled the failed
-   * retry of order-123's charge step?" or for per-worker error rates
+   * ID of the entity that processed this attempt — a Zorya worker, an
+   * in-process runner, an embedded test harness, etc. Generic naming so
+   * non-worker contexts (in-process `runner.run(...)`, scheduler-loop
+   * dispatch, scripted tools) can populate it too. Stamped from
+   * `WorkflowRunnerConfig.executorId` when the runner has one.
+   * Use for operational queries like "which executor handled the failed
+   * retry of order-123's charge step?" or per-executor error rates
    * across a rolling deploy.
    */
-  readonly workerId?: string;
+  readonly executorId?: string;
 }

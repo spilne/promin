@@ -259,7 +259,7 @@ export class DefaultWorker implements WorkflowWorker {
           durationMs,
           startedAt: new Date(startTime),
           completedAt: this.clock.now(),
-          workerId: this.workerId,
+          executorId: this.workerId,
         });
       }
 
@@ -374,7 +374,7 @@ export class DefaultWorker implements WorkflowWorker {
         durationMs,
         startedAt: new Date(startTime),
         completedAt: this.clock.now(),
-        workerId: this.workerId,
+        executorId: this.workerId,
       });
     }
 
