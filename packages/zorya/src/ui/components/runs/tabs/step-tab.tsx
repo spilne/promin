@@ -24,6 +24,36 @@ export function StepTab({ runId, step }: StepTabProps) {
   const v = STEP_STATUS_VISUAL[renderStatus];
   const isPlanned = step.isPlanned === true;
 
+  // Fetch attempts up here so both the top-level DataList (for the
+  // "Executor" row, which surfaces the most recent attempt's executor
+  // without forcing the user to drill into the Attempts section) and
+  // the AttemptsSection itself share one network call.
+  const [attemptsData, setAttemptsData] = useState<
+    { supported: boolean; attempts: AttemptDto[] } | undefined
+  >(undefined);
+  const [attemptsError, setAttemptsError] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    if (isPlanned) return;
+    let cancelled = false;
+    setAttemptsData(undefined);
+    setAttemptsError(undefined);
+    api
+      .getRunAttempts(runId, step.stepName)
+      .then((r) => !cancelled && setAttemptsData(r))
+      .catch((e) => !cancelled && setAttemptsError(String(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [runId, step.stepName, isPlanned]);
+
+  // Most-recent attempt for this step. Attempts are returned in attempt-asc
+  // order, so the last entry is the latest. Pull executorId off it for
+  // the DataList row.
+  const latestAttempt =
+    attemptsData?.attempts && attemptsData.attempts.length > 0
+      ? attemptsData.attempts[attemptsData.attempts.length - 1]
+      : undefined;
+
   return (
     <div class="space-y-4">
       <div class="flex items-center gap-2 flex-wrap">
@@ -38,6 +68,12 @@ export function StepTab({ runId, step }: StepTabProps) {
           { label: "Status", value: <span class={v.textClass}>{v.label}</span> },
           { label: "Attempt", value: step.attempt > 0 ? step.attempt : undefined, skipEmpty: true },
           { label: "Duration", value: formatDuration(step.durationMs) },
+          {
+            label: "Executor",
+            value: latestAttempt?.executorId,
+            skipEmpty: true,
+            valueClass: "font-mono text-xs",
+          },
           {
             label: "Started",
             value: step.startedAt && formatRelative(step.startedAt),
@@ -99,7 +135,7 @@ export function StepTab({ runId, step }: StepTabProps) {
 
       {step.tasks && step.tasks.length > 0 && <TasksSection tasks={step.tasks} />}
 
-      {!isPlanned && <AttemptsSection runId={runId} stepName={step.stepName} />}
+      {!isPlanned && <AttemptsSection data={attemptsData} error={attemptsError} />}
       {/* Journal entries — only renders when there are any. Workflow-level
           StepType doesn't expose a "journal" kind, so we can't gate on
           that; the call is cheap and the component returns null when
@@ -255,23 +291,13 @@ function TasksSection({ tasks }: { tasks: StepTaskDto[] }) {
   );
 }
 
-function AttemptsSection({ runId, stepName }: { runId: string; stepName: string }) {
-  const [data, setData] = useState<{ supported: boolean; attempts: AttemptDto[] } | undefined>(
-    undefined,
-  );
-  const [error, setError] = useState<string | undefined>(undefined);
-
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .getRunAttempts(runId, stepName)
-      .then((r) => !cancelled && setData(r))
-      .catch((e) => !cancelled && setError(String(e)));
-    return () => {
-      cancelled = true;
-    };
-  }, [runId, stepName]);
-
+function AttemptsSection({
+  data,
+  error,
+}: {
+  data: { supported: boolean; attempts: AttemptDto[] } | undefined;
+  error: string | undefined;
+}) {
   if (error) {
     return (
       <Section title="Attempts">

@@ -65,32 +65,6 @@ export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
     return () => observer.disconnect();
   }, []);
 
-  // Latest executorId per step — bulk fetch attempts for the run, pick
-  // the most recent attempt's executorId (worker id, in-process pid,
-  // etc.). Surfaces "where did this step
-  // run?" right on the graph node without forcing the user to drill in.
-  // Single request per run (not per step), sub-1ms on the SQLite path.
-  const [executorByStep, setWorkerByStep] = useState<Record<string, string>>({});
-  useEffect(() => {
-    let cancelled = false;
-    api
-      .getRunAttempts(run.workflowId)
-      .then((r) => {
-        if (cancelled) return;
-        const map: Record<string, string> = {};
-        // Last write wins — attempts arrive in some order; the API
-        // sorts by attempt asc, so iterating overwrites with the latest.
-        for (const a of r.attempts) {
-          if (a.executorId) map[a.stepName] = a.executorId;
-        }
-        setWorkerByStep(map);
-      })
-      .catch(() => setWorkerByStep({}));
-    return () => {
-      cancelled = true;
-    };
-  }, [run.workflowId]);
-
   // Fetch activity-journal entries for every non-planned step so we can
   // expand `.journaled()` steps into per-activity sub-nodes. Same shape as
   // the timeline's bulk fetch — keeps request count proportional to the
@@ -244,7 +218,6 @@ export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
                 key={n.step.stepName}
                 node={n}
                 isSelected={selectedStep === n.step.stepName}
-                executorId={executorByStep[n.step.stepName]}
                 onSelect={() =>
                   onSelectStep?.(selectedStep === n.step.stepName ? undefined : n.step.stepName)
                 }
@@ -261,12 +234,10 @@ function NodeRect({
   node,
   isSelected,
   onSelect,
-  executorId,
 }: {
   node: LaidOutNode;
   isSelected: boolean;
   onSelect: () => void;
-  executorId?: string;
 }) {
   const step = node.step;
   const renderStatus = effectiveStepStatus(step);
@@ -393,17 +364,6 @@ function NodeRect({
           {step.attempt > 1 ? ` · ×${step.attempt}` : ""}
         </text>
       </g>
-      {/* Worker chip — bottom-LEFT of the card, below the step name.
-          Surfaces "where did this step run?" without forcing a drill-in
-          to the step tab's attempts list. Truncated since worker ids are
-          UUIDs by default; full id available on hover. */}
-      {executorId && (
-        <g transform={`translate(${cardOffsetX + STRIPE_W + 16} ${NODE_H - 8})`}>
-          <text class="fill-base-content/45" font-family="ui-monospace, monospace" font-size={9}>
-            <title>{`Executed by ${executorId}`}</title>⚙ {truncate(executorId, 14)}
-          </text>
-        </g>
-      )}
     </g>
   );
 }
