@@ -300,38 +300,58 @@ function NodeRect({
         class={stripClass}
         opacity={isPlanned ? 0.35 : 1}
       />
-      {/* Step type glyph. Activities show a smaller "ACTIVITY" label;
-          journaled parents get a "▷ activities" marker so the sub-chain
-          hanging off them is visually attributed. */}
-      <text
-        x={cardOffsetX + STRIPE_W + 16}
-        y={NODE_H / 2 - 6}
-        class="fill-base-content/50"
-        font-family="ui-monospace, monospace"
-        font-size={11}
-      >
-        {isActivity
+      {/* Step type glyph. Hidden entirely for plain `single` steps —
+          that's the default kind, and labeling every node "SINGLE" was
+          pure noise. Journaled parents get "JOURNALED ◆" so the
+          sub-chain hanging off them is visually attributed.
+          map / sleep / signal still get their label since those are
+          the kinds users actually need to distinguish. */}
+      {(() => {
+        const label = isActivity
           ? "ACTIVITY •"
           : isJournaledParent
-            ? `${step.stepType.toUpperCase()} ${STEP_TYPE_ICON[step.stepType]}  ▷ activities`
-            : `${step.stepType.toUpperCase()} ${STEP_TYPE_ICON[step.stepType]}`}
-      </text>
-      {/* Step name. Synthetic activity nodes carry their human-readable
-          label on `metadata.journalActivityName`; without this fallback
-          they'd display the namespaced internal name like
+            ? "JOURNALED ◆  activities below"
+            : step.stepType === "single"
+              ? null
+              : `${step.stepType.toUpperCase()} ${STEP_TYPE_ICON[step.stepType]}`;
+        if (!label) return null;
+        return (
+          <text
+            x={cardOffsetX + STRIPE_W + 16}
+            y={NODE_H / 2 - 6}
+            class="fill-base-content/50"
+            font-family="ui-monospace, monospace"
+            font-size={11}
+          >
+            {label}
+          </text>
+        );
+      })()}
+      {/* Step name. Centered vertically when no type label appears above
+          (the common `single` case); shifted down when the type label
+          is present so they don't overlap. Synthetic activity nodes
+          carry their human-readable label on
+          `metadata.journalActivityName`; without this fallback they'd
+          display the namespaced internal name like
           `research::fetch-sources::0`. */}
-      <text
-        x={cardOffsetX + STRIPE_W + 16}
-        y={NODE_H / 2 + 9}
-        class="fill-base-content font-semibold"
-        font-family="ui-sans-serif, system-ui"
-        font-size={13}
-      >
-        {truncate(
-          (step.metadata?.["journalActivityName"] as string | undefined) ?? step.stepName,
-          22,
-        )}
-      </text>
+      {(() => {
+        const hasTypeLabel = isActivity || isJournaledParent || step.stepType !== "single";
+        const labelY = hasTypeLabel ? NODE_H / 2 + 9 : NODE_H / 2 + 4;
+        return (
+          <text
+            x={cardOffsetX + STRIPE_W + 16}
+            y={labelY}
+            class="fill-base-content font-semibold"
+            font-family="ui-sans-serif, system-ui"
+            font-size={13}
+          >
+            {truncate(
+              (step.metadata?.["journalActivityName"] as string | undefined) ?? step.stepName,
+              22,
+            )}
+          </text>
+        );
+      })()}
       {/* Status line at the bottom right */}
       <g transform={`translate(${cardOffsetX + cardWidth - 8} ${NODE_H - 8})`}>
         <text
