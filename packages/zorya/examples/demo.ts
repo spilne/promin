@@ -539,8 +539,9 @@ async function seedNamespaceMemory() {
 // something to display. The demo runs every workflow in-process via
 // `runner.run` (no actual task dispatch over a queue), so these workers
 // don't claim any work; they just heartbeat and show up in the registry.
-// To see real worker behavior (capability claims, run distribution, dead
-// detection on stop), run the split example in `examples/split/`.
+// To see a real worker join, run `examples/worker.ts` in another terminal —
+// it connects via /rpc/* and advertises workflows the in-process map
+// doesn't know about (hello-world, fan-out-demo).
 
 const workerRegistry = new InMemoryWorkerRegistry();
 const MOCK_WORKERS = [
@@ -653,7 +654,7 @@ function nextId(name: string): string {
 }
 
 // Shared workflow-start queue — used by QueuedWorkflows fallback below
-// so external workers (examples/split/worker.ts) can claim runs the
+// so external workers (examples/worker.ts) can claim runs the
 // in-process LocalWorkflows can't handle.
 const workflowStarts = new InMemoryWorkflowStartQueue();
 
@@ -866,7 +867,7 @@ void startApprovalAutoSignaler();
 const uiDir = process.env.ZORYA_UI_DIR ?? path.join(import.meta.dir, "..", "dist", "public");
 
 // The hybrid: local for in-process workflows, queued fallback for any
-// workflow only an external worker advertises (e.g. examples/split/worker.ts).
+// workflow only an external worker advertises (e.g. examples/worker.ts).
 const workflows = new LocalWorkflows({
   storage,
   runner,
@@ -955,19 +956,30 @@ const { port: actualPort, hostname } = server.listen({ port });
 const host = hostname === "0.0.0.0" ? "localhost" : hostname;
 console.log(`Zorya demo server on http://${host}:${actualPort}`);
 console.log(`  - Storage:      sqlite (${dbPath})`);
-console.log(`  - Workflows:    ${Object.keys(workflowsByName).length} discovered (in-process)`);
+console.log(`  - Workflows:    ${Object.keys(workflowsByName).length} in-process (LocalWorkflows)`);
+console.log(`                  + queued fallback for any workflow advertised by remote workers`);
 console.log(`  - Agents:       ${agentScan.agents.map((a) => a.id).join(", ") || "(none)"}`);
+console.log(`                  • local backends (echo-bot, support-bot, ollama-bot, …)`);
+console.log(`                  • remote backend (remote-bot — federation proxy)`);
 console.log(`  - Dashboard:    http://${host}:${actualPort}/`);
 console.log(`  - Agents tab:   http://${host}:${actualPort}/#/agents`);
-console.log(`  - Traffic comes from schedules — pause one to stop its runs`);
 console.log(``);
-console.log(`  Run YOUR app against this Zorya (Temporal-style) — see examples/user-app.ts:`);
+console.log(`  Two more processes round out the demo:`);
+console.log(``);
+console.log(`  1. Remote worker — joins the server, advertises workflows the in-process`);
+console.log(`     map doesn't have (hello-world, fan-out-demo). Triggers from the`);
+console.log(`     dashboard route through the QueuedWorkflows fallback to the worker.`);
 console.log(
-  `    ZORYA_URL=http://${host}:${actualPort} \\\n` +
-    `      bun --conditions=@promin/source run packages/zorya/examples/user-app.ts`,
+  `       ZORYA_URL=http://${host}:${actualPort} \\\n` +
+    `         bun --conditions=@promin/source run packages/zorya/examples/worker.ts`,
 );
-console.log(`  Defines a workflow inline, hosts the worker, calls it like a regular async fn,`);
-console.log(`  branches business logic on the result. Storage + dashboard for free.`);
+console.log(``);
+console.log(`  2. User app — runs your own workflow code in-process while writing storage`);
+console.log(`     to this server (Temporal-style). See examples/user-app.ts.`);
+console.log(
+  `       ZORYA_URL=http://${host}:${actualPort} \\\n` +
+    `         bun --conditions=@promin/source run packages/zorya/examples/user-app.ts`,
+);
 
 // Graceful shutdown. Registering ANY `process.on("SIGINT")` handler in Bun
 // overrides the default exit-on-Ctrl+C — the heartbeat-cleanup handlers
