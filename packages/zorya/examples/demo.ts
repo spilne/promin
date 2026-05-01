@@ -338,16 +338,18 @@ const schedulerTool = createDurableSchedulerTool({
 // Ollama config. Shared by `ollama-bot` (chat) and the consolidator
 // (compaction / distillation across every agent).
 //
-// `OLLAMA_MODEL`: chat default. llama3.2:3b is the smallest model in the
-// demo's needle-threading zone — it actually emits tool calls with the
-// right parameter names. Smaller models (qwen2.5:0.5b / 1.5b) either
-// invent schema fields or skip tool calls entirely.
+// `OLLAMA_MODEL`: chat default. qwen2.5:3b has the best tool-calling
+// discipline at this size — it doesn't fire tools on chitchat ("hello",
+// "are you alive?") and doesn't leak JSON tool-call shapes into the
+// content field on ambiguous prompts. llama3.2:3b is similar size but
+// less disciplined; smaller variants (0.5b / 1.5b) either invent schema
+// fields or skip tool calls entirely.
 //
 // `OLLAMA_CONSOLIDATOR_MODEL`: summarisation has no tool-call requirement
-// so we can use a tiny model and trade quality for speed. Defaults to
-// the same chat model so a single `ollama pull` is enough to boot.
+// so a tiny model trades quality for speed. Defaults to the chat model
+// so a single `ollama pull` is enough to boot.
 const OLLAMA_URL = process.env["OLLAMA_URL"] ?? "http://localhost:11434";
-const OLLAMA_MODEL = process.env["OLLAMA_MODEL"] ?? "llama3.2:3b";
+const OLLAMA_MODEL = process.env["OLLAMA_MODEL"] ?? "qwen2.5:3b";
 const OLLAMA_CONSOLIDATOR_MODEL = process.env["OLLAMA_CONSOLIDATOR_MODEL"] ?? OLLAMA_MODEL;
 
 // Per-agent LLM map — keyed by recipe id. Built once at boot. A discovered
