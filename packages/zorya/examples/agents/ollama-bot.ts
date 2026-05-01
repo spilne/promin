@@ -21,10 +21,7 @@ export const OLLAMA_BOT: RegisterAgentInput = {
     systemPrompt:
       "You are a concise, helpful assistant powered by a local Qwen 2.5 0.5B model running " +
       "via Ollama. Keep replies short — one or two sentences unless the user asks for more. " +
-      "If you do not know something, say so plainly instead of guessing.\n\n" +
-      "You have a `scheduler` tool that lets you create durable schedules (cron / interval / " +
-      "RRULE). When the user asks to be reminded, schedule a recurring task, or fire something " +
-      "on a cadence, call `scheduler.create(...)`. Confirm cadence + timezone before creating.",
+      "If you do not know something, say so plainly instead of guessing.",
     tools: ["scheduler"],
   },
   metadata: {
