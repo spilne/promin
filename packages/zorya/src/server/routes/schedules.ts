@@ -45,6 +45,16 @@ export interface ScheduleTickHistoryDto {
   workflowId: string;
   workflowName: string;
   status: string;
+  /**
+   * What kind of execution this tick produced.
+   * - `"workflow"` (default): a normal workflow run; `status` reflects the
+   *   workflow row's lifecycle.
+   * - `"agent"`: dispatched directly to an in-process agent via
+   *   `dispatchAgentSchedule`; there is no workflow row, so `status` is
+   *   `"completed"` (tick fired) and the row's lag/duration columns are
+   *   not meaningful. UI renders an agent-specific badge.
+   */
+  kind?: "workflow" | "agent";
   /** Wall-clock fire time recorded by the dispatcher (ISO). */
   firedAt?: string;
   /** Nominal scheduled time (cron / interval-derived) — may differ from firedAt under jitter. */
@@ -359,11 +369,34 @@ export function getScheduleHistory(
     // same transaction as the tickCount advance, so the history is always
     // a complete record of every fire, independent of whether the resulting
     // workflow row preserved its metadata across replays / retries.
+    // Agent schedules dispatch directly to an in-process agent and never
+    // produce a workflow row. Skip the workflow lookup entirely and report
+    // each fired tick as a completed agent execution.
+    const isAgentTrigger =
+      (config.metadata as { agentTrigger?: unknown } | undefined)?.agentTrigger === true;
+
     if (isTickLogStorage(schedulerStorage)) {
       const [ticks, total] = await Promise.all([
         schedulerStorage.listTicks({ scheduleId: id, limit, offset }),
         schedulerStorage.countTicks({ scheduleId: id }),
       ]);
+
+      if (isAgentTrigger) {
+        const history: ScheduleTickHistoryDto[] = ticks.map((t) => {
+          const wfId = `${id}.${t.tickNumber}`;
+          return {
+            tickNumber: t.tickNumber,
+            workflowId: wfId,
+            workflowName: (config.metadata?.["agentId"] as string) ?? "agent",
+            status: "completed",
+            kind: "agent",
+            firedAt: t.firedAt.toISOString(),
+            scheduledAt: t.scheduledAt.toISOString(),
+            namespace: config.namespace ?? undefined,
+          };
+        });
+        return json(200, { history, total } satisfies ScheduleHistoryResponse);
+      }
 
       // Enrich each tick with status / duration from the matching workflow
       // row, joined on the deterministic `${scheduleId}.${tickNumber}` id.
@@ -399,6 +432,7 @@ export function getScheduleHistory(
           workflowId: wfId,
           workflowName: wf?.workflowName ?? (config.metadata?.["workflowName"] as string) ?? "",
           status: wf?.status ?? "pending",
+          kind: "workflow" as const,
           firedAt: t.firedAt.toISOString(),
           scheduledAt: t.scheduledAt.toISOString(),
           startedAt: iso(wf?.startedAt),

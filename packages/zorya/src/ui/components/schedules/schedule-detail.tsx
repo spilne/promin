@@ -205,11 +205,21 @@ export function ScheduleDetail({ id, onBack, onOpenRun }: ScheduleDetailProps) {
                   <tbody>
                     {visibleHistory.map((h) => {
                       const when = h.firedAt ?? h.startedAt;
+                      const isAgent = h.kind === "agent";
                       return (
                         <tr class="hover:bg-base-200">
                           <td class="font-mono text-sm">#{h.tickNumber ?? "?"}</td>
                           <td>
-                            <StatusBadge status={h.status as WorkflowStatus} />
+                            {isAgent ? (
+                              <span
+                                class="badge badge-sm badge-info gap-1"
+                                title="Agent invocation — no workflow row was created"
+                              >
+                                <span>🤖</span>Agent fired
+                              </span>
+                            ) : (
+                              <StatusBadge status={h.status as WorkflowStatus} />
+                            )}
                           </td>
                           <td class="font-mono text-xs truncate max-w-[20rem]">{h.workflowId}</td>
                           <td class="text-sm text-base-content/60">
@@ -228,12 +238,14 @@ export function ScheduleDetail({ id, onBack, onOpenRun }: ScheduleDetailProps) {
                             {h.durationMs !== undefined ? formatDuration(h.durationMs) : "—"}
                           </td>
                           <td>
-                            <button
-                              class="btn btn-xs btn-ghost"
-                              onClick={() => onOpenRun(h.workflowId)}
-                            >
-                              Open →
-                            </button>
+                            {isAgent ? null : (
+                              <button
+                                class="btn btn-xs btn-ghost"
+                                onClick={() => onOpenRun(h.workflowId)}
+                              >
+                                Open →
+                              </button>
+                            )}
                           </td>
                         </tr>
                       );
