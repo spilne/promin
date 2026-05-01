@@ -24,12 +24,13 @@
 //
 // USER_APP=true also spawns user-app.ts as a third (one-shot) process.
 // --rebuild forces a fresh UI build even if dist/public already exists.
+//
+// UI build + watch lives in `../scripts/dev-ui.ts`, shared with `dev.ts`.
 // ---------------------------------------------------------------------------
 
-import { spawn, $ } from "bun";
+import { spawn } from "bun";
 import path from "node:path";
-import { existsSync, watch } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { ZORYA_DEV_PATHS, ensureUiBuilt, watchUi } from "../scripts/dev-ui.ts";
 
 const PORT = process.env["PORT"] ?? "4100";
 const ZORYA_URL = `http://localhost:${PORT}`;
@@ -42,12 +43,6 @@ const COLOURS = {
   app: "\x1b[33m", // yellow
   reset: "\x1b[0m",
 };
-
-const pkgRoot = path.resolve(import.meta.dir, "..");
-const indexHtml = path.join(pkgRoot, "dist", "public", "index.html");
-const reloadFile = path.join(pkgRoot, "dist", "public", ".reload-timestamp");
-const uiSrc = path.join(pkgRoot, "src", "ui");
-const buildScript = path.join(pkgRoot, "scripts", "build-ui.ts");
 
 interface Child {
   label: string;
@@ -86,15 +81,6 @@ function start(label: string, cmd: string[], env: Record<string, string>, colour
   return { label, proc };
 }
 
-async function runBuild(): Promise<void> {
-  // ZORYA_DEV_RELOAD makes build-ui.ts inject the polling client that
-  // watches the .reload-timestamp sentinel — without it the dashboard
-  // doesn't know about the rebuild and you have to hit cmd+R.
-  await $`bun ${buildScript}`.cwd(pkgRoot).env({ ...process.env, ZORYA_DEV_RELOAD: "1" });
-  // Write sentinel AFTER build (the build clears dist/public).
-  await writeFile(reloadFile, String(Date.now()));
-}
-
 async function waitForServer(url: string, timeoutMs = 30_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -125,24 +111,20 @@ async function shutdown(signal: string): Promise<void> {
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-// 1. Build the UI (or refresh sentinel if already built).
-if (FORCE_REBUILD || !existsSync(indexHtml)) {
-  console.log(`${COLOURS.build}[build]${COLOURS.reset} building UI…`);
-  await runBuild();
-  console.log(`${COLOURS.build}[build]${COLOURS.reset} UI ready at dist/public/`);
-} else {
-  console.log(
-    `${COLOURS.build}[build]${COLOURS.reset} UI cached at dist/public (pass --rebuild to force)`,
+const buildLog = (line: string) =>
+  process.stdout.write(
+    `${COLOURS.build}[build]${COLOURS.reset} ${line.replace(/^\[zorya\] /, "")}\n`,
   );
-  await writeFile(reloadFile, String(Date.now()));
-}
+
+// 1. Build the UI (or refresh sentinel if already built).
+await ensureUiBuilt({ forceRebuild: FORCE_REBUILD, log: buildLog });
 
 // 2. Start the demo server with --hot for in-place server reload.
 console.log(`[start-all] booting demo server on ${ZORYA_URL} (hot)…`);
 children.push(
   start(
     "demo",
-    ["bun", "--hot", "--conditions=@promin/source", path.join(pkgRoot, "examples", "demo.ts")],
+    ["bun", "--hot", "--conditions=@promin/source", ZORYA_DEV_PATHS.demoScript],
     { PORT, ZORYA_DEV_RELOAD: "1" },
     COLOURS.demo,
   ),
@@ -156,7 +138,7 @@ try {
   children.push(
     start(
       "worker",
-      ["bun", "--hot", "--conditions=@promin/source", path.join(pkgRoot, "examples", "worker.ts")],
+      ["bun", "--hot", "--conditions=@promin/source", ZORYA_DEV_PATHS.workerScript],
       { ZORYA_URL },
       COLOURS.worker,
     ),
@@ -167,48 +149,21 @@ try {
     children.push(
       start(
         "app",
-        ["bun", "--conditions=@promin/source", path.join(pkgRoot, "examples", "user-app.ts")],
+        ["bun", "--conditions=@promin/source", ZORYA_DEV_PATHS.userAppScript],
         { ZORYA_URL },
         COLOURS.app,
       ),
     );
   }
 
-  // 4. Watch UI source for edits and rebuild. Debounced so a burst of
-  //    saves (editor formatter, multi-file rename) collapses into one
-  //    rebuild + browser reload.
+  // 4. Watch UI source for edits and rebuild via the shared helper.
   console.log(
-    `[start-all] watching ${path.relative(process.cwd(), uiSrc)} for UI changes (Ctrl+C to stop)`,
+    `[start-all] watching ${path.relative(process.cwd(), ZORYA_DEV_PATHS.uiSrc)} for UI changes (Ctrl+C to stop)`,
   );
-  let pending: ReturnType<typeof setTimeout> | undefined;
-  let busy = false;
-  let queued = false;
-  watch(uiSrc, { recursive: true }, (_evt, filename) => {
-    if (!filename) return;
-    if (pending) clearTimeout(pending);
-    pending = setTimeout(async () => {
-      pending = undefined;
-      if (busy) {
-        queued = true;
-        return;
-      }
-      busy = true;
-      try {
-        do {
-          queued = false;
-          console.log(`${COLOURS.build}[build]${COLOURS.reset} rebuild → ${filename}`);
-          await runBuild();
-          console.log(`${COLOURS.build}[build]${COLOURS.reset} reload broadcast`);
-        } while (queued);
-      } catch (err) {
-        console.error(
-          `${COLOURS.build}[build]${COLOURS.reset} rebuild failed:`,
-          (err as Error).message,
-        );
-      } finally {
-        busy = false;
-      }
-    }, 150);
+  watchUi({
+    onRebuildStart: (filename) => buildLog(`rebuild → ${filename}`),
+    onRebuildDone: () => buildLog("reload broadcast"),
+    onRebuildError: (err) => buildLog(`rebuild failed: ${err.message}`),
   });
 
   console.log(`[start-all] all up. dashboard: ${ZORYA_URL}/`);
