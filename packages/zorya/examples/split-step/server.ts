@@ -20,7 +20,11 @@ import { SqliteWorkflowStorage } from "@promin/sqlite";
 import { Database } from "bun:sqlite";
 import path from "node:path";
 import { mkdirSync } from "node:fs";
-import { ZoryaServer, InMemoryWorkflowAdvertisementRegistry } from "../../src/index.ts";
+import {
+  ZoryaServer,
+  DistributedWorkflows,
+  InMemoryWorkflowAdvertisementRegistry,
+} from "../../src/index.ts";
 
 const dbPath = process.env.ZORYA_DB ?? "./target/zorya-step.db";
 if (dbPath !== ":memory:") {
@@ -38,11 +42,17 @@ const advertisements = new InMemoryWorkflowAdvertisementRegistry();
 
 const uiDir = path.join(import.meta.dir, "..", "..", "dist", "public");
 
-const server = new ZoryaServer({
+const workflows = new DistributedWorkflows({
   storage,
+  stepQueue,
+  workerRegistry,
+  advertisements,
+});
+
+const server = new ZoryaServer({
+  workflows,
   uiDir,
-  workerProtocol: { stepQueue, workerRegistry, advertisements },
-  coordination: { enabled: true },
+  remoteWorkers: {},
 });
 
 const port = Number(process.env.PORT ?? 4101);

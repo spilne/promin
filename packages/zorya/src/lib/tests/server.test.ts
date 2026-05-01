@@ -1,6 +1,16 @@
 import { describe, it, expect, beforeEach } from "bun:test";
-import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { ZoryaServer } from "../../server/server.ts";
+import { LocalWorkflows, QueuedWorkflows } from "../../index.ts";
+
+function makeWorkflows(storage: InMemoryWorkflowStorage) {
+  return new LocalWorkflows({
+    storage,
+    runner: createWorkflowRunner({ storage }),
+    definitions: {},
+    sleepScanIntervalMs: 0,
+  });
+}
 import type {
   RunDto,
   RunListResponse,
@@ -29,7 +39,7 @@ describe("ZoryaServer", () => {
 
   beforeEach(() => {
     storage = new InMemoryWorkflowStorage();
-    server = new ZoryaServer({ storage });
+    server = new ZoryaServer({ workflows: makeWorkflows(storage) });
   });
 
   describe("GET /api/health", () => {
@@ -92,7 +102,7 @@ describe("ZoryaServer", () => {
   });
 
   describe("POST /api/runs/trigger/:name", () => {
-    it("returns 501 when no trigger configured", async () => {
+    it("returns 400 when workflow is unknown to the configured workflows service", async () => {
       const res = await server.handle(
         new Request("http://x/api/runs/trigger/order", {
           method: "POST",
@@ -100,18 +110,23 @@ describe("ZoryaServer", () => {
           body: JSON.stringify({ input: { a: 1 } }),
         }),
       );
-      expect(res.status).toBe(501);
+      // LocalWorkflows with empty definitions throws UnknownWorkflowError
+      // which the route maps to 400 trigger_failed.
+      expect(res.status).toBe(400);
     });
 
     it("invokes trigger and returns workflow id", async () => {
-      const calls: Array<{ name: string; input: unknown }> = [];
-      const s = new ZoryaServer({
+      // QueuedWorkflows.acceptAny lets us trigger without a definition;
+      // the enqueued record is the spy.
+      const queue = new (
+        await import("../../server/workflow-starts.ts")
+      ).InMemoryWorkflowStartQueue();
+      const workflows = new QueuedWorkflows({
         storage,
-        trigger: async (name, input) => {
-          calls.push({ name, input });
-          return { workflowId: "wf-new" };
-        },
+        workflowStarts: queue,
+        acceptAny: true,
       });
+      const s = new ZoryaServer({ workflows });
       const res = await s.handle(
         new Request("http://x/api/runs/trigger/order", {
           method: "POST",
@@ -121,8 +136,11 @@ describe("ZoryaServer", () => {
       );
       expect(res.status).toBe(200);
       const body = (await res.json()) as TriggerRunResponse;
-      expect(body.workflowId).toBe("wf-new");
-      expect(calls).toEqual([{ name: "order", input: { a: 1 } }]);
+      expect(body.workflowId).toBeDefined();
+      const enqueued = await queue.list();
+      expect(enqueued.length).toBe(1);
+      expect(enqueued[0]?.workflowName).toBe("order");
+      expect(enqueued[0]?.input).toEqual({ a: 1 });
     });
   });
 
@@ -173,7 +191,7 @@ describe("ZoryaServer", () => {
 
     it("uses configured provider", async () => {
       const s = new ZoryaServer({
-        storage,
+        workflows: makeWorkflows(storage),
         workers: {
           listWorkers: async () => [
             {
@@ -195,13 +213,13 @@ describe("ZoryaServer", () => {
 
   describe("auth", () => {
     it("rejects /api requests with no key when auth enabled", async () => {
-      const s = new ZoryaServer({ storage, apiKeys: ["secret"] });
+      const s = new ZoryaServer({ workflows: makeWorkflows(storage), apiKeys: ["secret"] });
       const res = await s.handle(new Request("http://x/api/runs"));
       expect(res.status).toBe(401);
     });
 
     it("accepts request with valid bearer token", async () => {
-      const s = new ZoryaServer({ storage, apiKeys: ["secret"] });
+      const s = new ZoryaServer({ workflows: makeWorkflows(storage), apiKeys: ["secret"] });
       const res = await s.handle(
         new Request("http://x/api/runs", {
           headers: { authorization: "Bearer secret" },
@@ -211,7 +229,7 @@ describe("ZoryaServer", () => {
     });
 
     it("rejects invalid bearer token", async () => {
-      const s = new ZoryaServer({ storage, apiKeys: ["secret"] });
+      const s = new ZoryaServer({ workflows: makeWorkflows(storage), apiKeys: ["secret"] });
       const res = await s.handle(
         new Request("http://x/api/runs", {
           headers: { authorization: "Bearer wrong" },

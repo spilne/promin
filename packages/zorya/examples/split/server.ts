@@ -6,16 +6,18 @@
 //   bun run packages/zorya/examples/split/server.ts
 // ---------------------------------------------------------------------------
 
-import { InMemoryStepQueue, InMemoryWorkerRegistry } from "@promin/workflow";
+import { InMemoryWorkerRegistry } from "@promin/workflow";
 import { SqliteWorkflowStorage } from "@promin/sqlite";
 import { Database } from "bun:sqlite";
-import { ZoryaServer, InMemoryWorkflowAdvertisementRegistry } from "../../src/index.ts";
+import {
+  ZoryaServer,
+  QueuedWorkflows,
+  InMemoryWorkflowAdvertisementRegistry,
+  InMemoryWorkflowStartQueue,
+} from "../../src/index.ts";
 import path from "node:path";
 import { mkdirSync } from "node:fs";
 
-// Default to a persistent file under ./target so the seeded `tenant-a`
-// namespace run, advertised workflow versions, and run history all survive
-// server restarts. Override with ZORYA_DB=:memory: or a custom path.
 const dbPath = process.env.ZORYA_DB ?? "./target/zorya.db";
 if (dbPath !== ":memory:") {
   mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -26,22 +28,23 @@ db.exec("PRAGMA foreign_keys = ON");
 
 const storage = SqliteWorkflowStorage.make({ db });
 
-// In-memory primitives for the remote worker wire. Production would use
-// the Postgres variants of StepQueue + WorkerRegistry instead.
-const stepQueue = new InMemoryStepQueue();
 const workerRegistry = new InMemoryWorkerRegistry();
 const advertisements = new InMemoryWorkflowAdvertisementRegistry();
+const workflowStarts = new InMemoryWorkflowStartQueue();
 
 const uiDir = path.join(import.meta.dir, "..", "..", "dist", "public");
 
-const server = new ZoryaServer({
+const workflows = new QueuedWorkflows({
   storage,
+  workflowStarts,
+  advertisements,
+});
+
+const server = new ZoryaServer({
+  workflows,
   uiDir,
-  workerProtocol: {
-    stepQueue,
-    workerRegistry,
-    advertisements,
-  },
+  remoteWorkers: {},
+  workers: new (await import("../../src/index.ts")).RegistryBackedWorkersProvider(workerRegistry),
 });
 
 const port = Number(process.env.PORT ?? 4100);

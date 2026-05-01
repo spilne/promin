@@ -12,12 +12,21 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { WorkerControlSocket } from "@promin/zorya-client";
 import { ZoryaServer } from "../../server/server.ts";
+import { LocalWorkflows } from "../../index.ts";
 
 function listenServer(): { server: ZoryaServer; url: string; close: () => void } {
-  const server = new ZoryaServer({ storage: new InMemoryWorkflowStorage() });
+  const storage = new InMemoryWorkflowStorage();
+  const server = new ZoryaServer({
+    workflows: new LocalWorkflows({
+      storage,
+      runner: createWorkflowRunner({ storage }),
+      definitions: {},
+      sleepScanIntervalMs: 0,
+    }),
+  });
   const handle = server.listen({ port: 0, hostname: "127.0.0.1" });
   return {
     server,

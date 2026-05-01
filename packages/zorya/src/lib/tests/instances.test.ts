@@ -13,16 +13,35 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import { InMemoryAgentInstanceRegistry, InMemoryMemoryStore } from "@promin/agent";
+import {
+  InMemoryAgentInstanceRegistry,
+  InMemoryAgentRegistry,
+  InMemoryMemoryStore,
+} from "@promin/agent";
 import { ZoryaServer } from "../../server/server.ts";
-import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
+import { LocalWorkflows, ZoryaAgents } from "../../index.ts";
 
 function makeServer() {
   const registry = new InMemoryAgentInstanceRegistry();
   const memory = new InMemoryMemoryStore();
+  const storage = new InMemoryWorkflowStorage();
+  const runner = createWorkflowRunner({ storage });
   const server = new ZoryaServer({
-    storage: new InMemoryWorkflowStorage(),
-    instances: { registry, memory },
+    workflows: new LocalWorkflows({
+      storage,
+      runner,
+      definitions: {},
+      sleepScanIntervalMs: 0,
+    }),
+    agents: new ZoryaAgents({
+      registry: new InMemoryAgentRegistry(),
+      resolve: () => {
+        throw new Error("instances test should not resolve agents");
+      },
+      memory,
+      instances: registry,
+    }),
   });
   return { server, registry, memory };
 }

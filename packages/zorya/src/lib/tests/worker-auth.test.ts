@@ -5,16 +5,29 @@ import {
   InMemoryWorkflowStorage,
 } from "@promin/workflow";
 import { ZoryaServer } from "../../server/server.ts";
+import { DistributedWorkflows } from "../../index.ts";
+
+function makeServer(
+  opts: {
+    dashboardKeys?: ReadonlyArray<string>;
+    workerKeys?: ReadonlyArray<string>;
+  } = {},
+): ZoryaServer {
+  const workflows = new DistributedWorkflows({
+    storage: new InMemoryWorkflowStorage(),
+    stepQueue: new InMemoryStepQueue(),
+    workerRegistry: new InMemoryWorkerRegistry(),
+  });
+  return new ZoryaServer({
+    workflows,
+    ...(opts.dashboardKeys && { apiKeys: opts.dashboardKeys }),
+    remoteWorkers: opts.workerKeys ? { apiKeys: opts.workerKeys } : {},
+  });
+}
 
 describe("ZoryaServer worker-protocol auth", () => {
-  it("allows worker endpoints when no keys set (backward-compat)", async () => {
-    const server = new ZoryaServer({
-      storage: new InMemoryWorkflowStorage(),
-      workerProtocol: {
-        stepQueue: new InMemoryStepQueue(),
-        workerRegistry: new InMemoryWorkerRegistry(),
-      },
-    });
+  it("allows worker endpoints when no keys set", async () => {
+    const server = makeServer();
     const res = await server.handle(
       new Request("http://x/rpc/worker", {
         method: "POST",
@@ -26,14 +39,7 @@ describe("ZoryaServer worker-protocol auth", () => {
   });
 
   it("rejects worker calls without a key when keys are configured", async () => {
-    const server = new ZoryaServer({
-      storage: new InMemoryWorkflowStorage(),
-      workerProtocol: {
-        stepQueue: new InMemoryStepQueue(),
-        workerRegistry: new InMemoryWorkerRegistry(),
-        apiKeys: ["worker-key"],
-      },
-    });
+    const server = makeServer({ workerKeys: ["worker-key"] });
     const res = await server.handle(
       new Request("http://x/rpc/worker", {
         method: "POST",
@@ -45,14 +51,7 @@ describe("ZoryaServer worker-protocol auth", () => {
   });
 
   it("accepts worker calls with a valid bearer token", async () => {
-    const server = new ZoryaServer({
-      storage: new InMemoryWorkflowStorage(),
-      workerProtocol: {
-        stepQueue: new InMemoryStepQueue(),
-        workerRegistry: new InMemoryWorkerRegistry(),
-        apiKeys: ["worker-key"],
-      },
-    });
+    const server = makeServer({ workerKeys: ["worker-key"] });
     const res = await server.handle(
       new Request("http://x/rpc/worker", {
         method: "POST",
@@ -67,17 +66,11 @@ describe("ZoryaServer worker-protocol auth", () => {
   });
 
   it("protects /api/advertisements with the worker keyset, not dashboard keyset", async () => {
-    const server = new ZoryaServer({
-      storage: new InMemoryWorkflowStorage(),
-      apiKeys: ["dashboard-key"], // dashboard auth
-      workerProtocol: {
-        stepQueue: new InMemoryStepQueue(),
-        workerRegistry: new InMemoryWorkerRegistry(),
-        apiKeys: ["worker-key"],
-      },
+    const server = makeServer({
+      dashboardKeys: ["dashboard-key"],
+      workerKeys: ["worker-key"],
     });
 
-    // Dashboard key should be rejected on /api/advertisements
     const dashRes = await server.handle(
       new Request("http://x/api/advertisements", {
         headers: { authorization: "Bearer dashboard-key" },
@@ -85,7 +78,6 @@ describe("ZoryaServer worker-protocol auth", () => {
     );
     expect(dashRes.status).toBe(401);
 
-    // Worker key should be accepted
     const workerRes = await server.handle(
       new Request("http://x/api/advertisements", {
         headers: { authorization: "Bearer worker-key" },
@@ -93,7 +85,6 @@ describe("ZoryaServer worker-protocol auth", () => {
     );
     expect(workerRes.status).toBe(200);
 
-    // And /api/runs (dashboard surface) still requires the dashboard key
     const runsUnauth = await server.handle(new Request("http://x/api/runs"));
     expect(runsUnauth.status).toBe(401);
     const runsOk = await server.handle(

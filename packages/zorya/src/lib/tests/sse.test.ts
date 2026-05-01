@@ -1,7 +1,17 @@
 import { describe, it, expect } from "bun:test";
-import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { ZoryaServer } from "../../server/server.ts";
 import type { RunEvent } from "../../server/api-types.ts";
+import { LocalWorkflows } from "../../index.ts";
+
+function makeWorkflows(storage: InMemoryWorkflowStorage) {
+  return new LocalWorkflows({
+    storage,
+    runner: createWorkflowRunner({ storage }),
+    definitions: {},
+    sleepScanIntervalMs: 0,
+  });
+}
 
 async function readSseLines(
   reader: ReadableStreamDefaultReader<Uint8Array>,
@@ -34,7 +44,7 @@ describe("SSE /api/runs/:id/events", () => {
   it("emits a snapshot on subscribe", async () => {
     const storage = new InMemoryWorkflowStorage();
     await storage.createWorkflow({ workflowId: "wf-1", workflowName: "order", input: { a: 1 } });
-    const server = new ZoryaServer({ storage, sseIntervalMs: 50 });
+    const server = new ZoryaServer({ workflows: makeWorkflows(storage), sseIntervalMs: 50 });
 
     const res = await server.handle(new Request("http://x/api/runs/wf-1/events"));
     expect(res.status).toBe(200);
@@ -55,7 +65,7 @@ describe("SSE /api/runs/:id/events", () => {
 
   it("returns 404 for missing workflow", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const server = new ZoryaServer({ storage });
+    const server = new ZoryaServer({ workflows: makeWorkflows(storage) });
     const res = await server.handle(new Request("http://x/api/runs/missing/events"));
     expect(res.status).toBe(404);
   });

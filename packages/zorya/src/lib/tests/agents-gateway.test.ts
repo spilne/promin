@@ -23,6 +23,7 @@ import {
 import type { AgentInstanceRegistry, LLMProvider, LLMResponse } from "@promin/agent";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { ZoryaServer } from "../../server/server.ts";
+import { LocalWorkflows, ZoryaAgents } from "../../index.ts";
 
 function mockLLM(responses: LLMResponse[]): LLMProvider {
   let i = 0;
@@ -56,19 +57,27 @@ async function bootGateway(opts?: { responses?: LLMResponse[]; withInstances?: b
   });
 
   const responses = opts?.responses ?? [{ content: "ok", finishReason: "stop" }];
-  const server = new ZoryaServer({
+  const workflows = new LocalWorkflows({
     storage,
-    agents: {
-      registry,
-      ...(instanceRegistry ? { instanceRegistry } : {}),
-      resolve: (recipe) =>
-        resolveLocalAgent(recipe, {
-          runner,
-          memory,
-          llm: () => mockLLM(responses),
-          tools: {},
-        }),
-    },
+    runner,
+    definitions: {},
+    sleepScanIntervalMs: 0,
+  });
+  const agents = new ZoryaAgents({
+    registry,
+    resolve: (recipe) =>
+      resolveLocalAgent(recipe, {
+        runner,
+        memory,
+        llm: () => mockLLM(responses),
+        tools: {},
+      }),
+    memory,
+    ...(instanceRegistry && { instances: instanceRegistry }),
+  });
+  const server = new ZoryaServer({
+    workflows,
+    agents,
   });
 
   return { server, storage, runner, memory, registry, instanceRegistry };

@@ -29,16 +29,15 @@ if (!(console.log as unknown as { __ts?: boolean }).__ts) {
 // ---------------------------------------------------------------------------
 
 import {
-  InMemoryStepQueue,
   InMemoryWorkerRegistry,
   createWorkflowRunner,
   RecoveryStrategy,
-  createSleepScanner,
   completeSignal,
   isJournaledSuspendStorage,
   type Workflow,
 } from "@promin/workflow";
 import { InMemoryWorkflowStartQueue } from "../src/index.ts";
+import { LocalWorkflows, QueuedWorkflows, ZoryaScheduler, ZoryaAgents } from "../src/index.ts";
 import {
   SqliteWorkflowStorage,
   SqliteSchedulerStorage,
@@ -68,9 +67,9 @@ import { z } from "zod";
 import { Database } from "bun:sqlite";
 import {
   ZoryaServer,
+  RegistryBackedWorkersProvider,
   scanAgentsFolder,
   scanWorkflowsFolder,
-  startAgentsScanLoop,
 } from "../src/index.ts";
 // KB content lives at ./kb/org-knowledge-base.ts; the searchKnowledge +
 // getDocument tools that wrap it are exposed under ./tools/ for the
@@ -626,98 +625,19 @@ function nextId(name: string): string {
   return `${name}-${Date.now().toString(36)}-${idCounter}`;
 }
 
-// Shared workflow-start queue. The demo's trigger callback enqueues here
-// for any workflow it doesn't host in-process — connected external
-// workers (from `examples/external-worker.ts` or any `ZoryaWorker`) poll
-// this queue and execute the run in their own process. Same instance is
-// passed to ZoryaServer's workerProtocol below.
+// Shared workflow-start queue — used by QueuedWorkflows fallback below
+// so external workers (examples/split/worker.ts) can claim runs the
+// in-process LocalWorkflows can't handle.
 const workflowStarts = new InMemoryWorkflowStartQueue();
-
-async function triggerRun(
-  name: string,
-  input: unknown,
-  opts: {
-    workflowId?: string;
-    namespace?: string;
-    metadata?: Record<string, unknown>;
-    runSource?: import("@promin/workflow").RunSource;
-    runSourceId?: string;
-  } = {},
-): Promise<{ workflowId: string }> {
-  const wf = workflowsByName[name];
-  const workflowId = opts.workflowId ?? nextId(name);
-
-  // Unknown to the in-process registry — must be a workflow advertised
-  // by an external worker. Pre-create the storage row so /api/runs
-  // shows it, then enqueue a start record. The first connected worker
-  // that advertises this name will claim it and run it locally.
-  if (!wf) {
-    await storage.createWorkflow({
-      workflowId,
-      workflowName: name,
-      input,
-      namespace: opts.namespace,
-      metadata: opts.metadata,
-      runSource: opts.runSource,
-      runSourceId: opts.runSourceId,
-    });
-    await workflowStarts.enqueue({
-      workflowId,
-      workflowName: name,
-      input,
-      metadata: opts.metadata,
-    });
-    return { workflowId };
-  }
-  // Pre-create the row whenever the caller wants namespace, metadata, OR
-  // runSource to stick. `runner.run`'s internal createWorkflow is
-  // idempotent — it sees the existing row and resumes instead of
-  // overwriting — so pre-creation is the seam where these typed fields
-  // land. Without this, scheduler-fired runs would lose their runSource
-  // link and the dashboard's "filter by source" would return nothing.
-  if (opts.namespace || opts.metadata || opts.runSource) {
-    const result = await storage.createWorkflow({
-      workflowId,
-      workflowName: name,
-      input,
-      namespace: opts.namespace,
-      metadata: opts.metadata,
-      runSource: opts.runSource,
-      runSourceId: opts.runSourceId,
-      version: wf.version,
-    });
-    // Existing row hit. Two cases:
-    //  - Same boot, idempotent retry of the same fire — leave it; runner
-    //    will resume against the existing state.
-    //  - Cross-boot collision: the deterministic workflowId (e.g.
-    //    `${scheduleId}.${tickNumber}`) repeats after the scheduler's
-    //    tickCount resets. The previous run's terminal `startedAt` /
-    //    `completedAt` would otherwise pollute lag/duration math for THIS
-    //    fire. Reset via `startFreshRun` — bumps the run counter, archives
-    //    prior steps, clears the timestamps so the fresh run reports its
-    //    own latency.
-    if (!result.created && isTerminal(result.existing.status)) {
-      await storage.startFreshRun(workflowId);
-    }
-  }
-  // Fire-and-forget: we don't await run() so the server responds immediately.
-  runner.run({ workflow: wf, workflowId, input }).catch(() => {
-    // Failures are stored as workflow.failed state; swallow here so the
-    // background loop keeps running.
-  });
-  return { workflowId };
-}
-
-function isTerminal(status: string): boolean {
-  return status === "completed" || status === "failed" || status === "tripwire";
-}
 
 // ---------------------------------------------------------------------------
 // Background: seed a handful of runs on startup so the first page has data.
 // Ongoing traffic comes from schedules — pausing a schedule actually stops
 // its runs (no hidden random loop).
 
-async function seedInitialRuns() {
+async function seedInitialRuns(
+  seedTrigger: (name: string, input: unknown, opts: { namespace?: string }) => Promise<unknown>,
+) {
   // Skip when the persistent DB already has runs — keep accumulated
   // history intact across restarts. Schedules still fire on their own
   // cadence so the dashboard stays animated.
@@ -734,7 +654,7 @@ async function seedInitialRuns() {
   let i = 0;
   for (const name of Object.keys(workflowsByName)) {
     const namespace = namespaces[i++ % namespaces.length];
-    await triggerRun(name, inputFor(name), { namespace });
+    await seedTrigger(name, inputFor(name), namespace !== undefined ? { namespace } : {});
   }
 }
 
@@ -911,127 +831,96 @@ await seedAgents();
 await seedNamespaceMemory();
 void startApprovalAutoSignaler();
 
-// Hot-reload: poll the agents folder so new/edited recipe files land
-// in the registry without a server restart. mtime-aware import busts
-// ESM's module cache when a file changes; capability filter mirrors
-// the boot-time gating so live-only recipes don't surface mid-run if
-// the key isn't set.
-const agentScanLoop = startAgentsScanLoop({
-  registry: agentRegistry,
-  root: agentScanRoot,
-  intervalMs: 5_000,
-  onTick: (tick) => {
-    if (tick.added.length > 0) {
-      console.log(`[zorya] hot-reload: registered new agents: ${tick.added.join(", ")}`);
-    }
-    for (const w of tick.warnings) console.warn(`[zorya] agent-scan: ${w}`);
-  },
-});
-process.on("SIGTERM", () => agentScanLoop.stop());
-process.on("SIGINT", () => agentScanLoop.stop());
-
-// Wake suspended workflows whose sleep has expired or whose signal was
-// delivered. Without this, runs that entered ctx.sleep / ctx.signal never
-// resume after their wake condition — they just sit in "suspended" forever.
-const sleepScanner = createSleepScanner({
-  storage,
-  runner,
-  scanIntervalMs: 2_000,
-  resolveWorkflow: (name) => workflowsByName[name],
-});
-void sleepScanner.start();
-
-await seedInitialRuns();
+// Sleep scanner + agent scan loop are now owned by the service classes
+// (LocalWorkflows + ZoryaAgents). Their start() methods kick the loops
+// once server.listen() runs. SIGINT/SIGTERM go through server.stop()
+// which calls each service's stop() in turn.
 
 const uiDir = process.env.ZORYA_UI_DIR ?? path.join(import.meta.dir, "..", "dist", "public");
 
-const server = new ZoryaServer({
+// The hybrid: local for in-process workflows, queued fallback for any
+// workflow only an external worker advertises (e.g. examples/split/worker.ts).
+const workflows = new LocalWorkflows({
   storage,
-  // The runner is used by recovery (resumeRecent) and as the fallback trigger
-  // for any caller that doesn't go through the explicit trigger callback below.
   runner,
-  recovery: {
-    strategy: RecoveryStrategy.builder()
-      .failStale({ olderThanMs: 60 * 60 * 1000, error: "Stale run auto-failed on restart" })
-      .resumeRecent()
-      .build(),
+  definitions: workflowsByName,
+  recovery: RecoveryStrategy.builder()
+    .failStale({ olderThanMs: 60 * 60 * 1000, error: "Stale run auto-failed on restart" })
+    .resumeRecent()
+    .build(),
+  fallback: new QueuedWorkflows({
+    storage,
+    workflowStarts,
+    acceptAny: true,
+  }),
+});
+
+const agents = new ZoryaAgents({
+  registry: agentRegistry,
+  resolve: resolveAgent,
+  memory: memoryStore,
+  instances: instanceRegistry,
+  scan: {
+    root: agentScanRoot,
+    intervalMs: 5_000,
+    onTick: (tick) => {
+      if (tick.added.length > 0) {
+        console.log(`[zorya] hot-reload: registered new agents: ${tick.added.join(", ")}`);
+      }
+      for (const w of tick.warnings) console.warn(`[zorya] agent-scan: ${w}`);
+    },
   },
-  scheduler: schedulerStorage,
-  workflows: workflowsByName,
-  // Agent gateway — exposes /api/agents/* and powers the Agents tab. The
-  // resolver materialises a `LocalAgent` per request from the recipe in
-  // the registry, sharing the per-agent LLM map so cycle state persists
-  // across calls. Tools default to {} for now — no tool catalogue.
-  agents: {
-    registry: agentRegistry,
-    // When the gateway sees `ownerId` in an invoke body, it resolves an
-    // AgentInstance via this registry and uses instance.id as resourceId.
-    // Without it, ownerId in the body is rejected as ownerId_unsupported.
-    instanceRegistry,
-    resolve: resolveAgent,
+});
+
+// Custom fire override: schedules without a `metadata.input` arrive with
+// `input === undefined`. SQLite's NOT NULL constraint rejects that, so
+// synthesise a per-name default via `inputFor()` before triggering.
+// Returning { handled: false } lets the scheduler fall through to its
+// default workflow-trigger path (preserving runSource / namespace / etc).
+const scheduler = new ZoryaScheduler({
+  storage: schedulerStorage,
+  workflows,
+  agents,
+  namespaces: "all",
+  pollIntervalMs: 1_000,
+  dispatchConcurrency: 5,
+  fire: async (tick, schedule) => {
+    const meta = (schedule.metadata ?? {}) as { workflowName?: string; input?: unknown };
+    if (!meta.workflowName) return { handled: false };
+    if (meta.input !== undefined) return { handled: false };
+    // Synthesise the default input + dispatch via workflows.trigger
+    await workflows.trigger(meta.workflowName, inputFor(meta.workflowName), {
+      workflowId: `${tick.scheduleId}.${tick.tickNumber}`,
+      runSource: "schedule",
+      runSourceId: tick.scheduleId,
+      ...(schedule.namespace !== undefined && { namespace: schedule.namespace }),
+      metadata: {
+        ...(schedule.metadata ?? {}),
+        scheduleId: tick.scheduleId,
+        scheduleTick: tick.tickNumber,
+        scheduledAt: tick.scheduledAt.toISOString(),
+        firedAt: tick.firedAt.toISOString(),
+      },
+    });
+    return { handled: true };
   },
-  // Same store the resolver uses, so the inspector reads the live cascade.
-  memoryInspector: { memory: memoryStore },
-  // Long-lived per-(agent, namespace, owner) records. The HTTP routes
-  // mounted at /api/agents/:id/instances + /api/instances let operators
-  // enumerate, rename, and wipe instances; DELETE cascades through the
-  // memory store via wipeAgentInstance.
-  instances: { registry: instanceRegistry, memory: memoryStore },
-  // Feeds the "Trigger workflow" form on the Workflows page with plausible
-  // defaults so users can tweak fields instead of writing raw JSON.
+});
+
+await seedInitialRuns((name, input, opts) => workflows.trigger(name, input, opts));
+
+const server = new ZoryaServer({
+  workflows,
+  scheduler,
+  agents,
+  // Mounts /rpc/storage, /rpc/worker, /api/advertisements,
+  // /api/worker-protocol/* — the surface external workers connect to.
+  remoteWorkers: {},
   sampleInput: (name) => inputFor(name),
   uiDir,
-  // Workers page reads from the registry. The demo mocks two entries above.
-  // workflowStarts lets external workers (ZoryaClient/ZoryaWorker) poll and
-  // execute triggered runs locally. The explicit `trigger` below handles both
-  // paths: known workflows run in-process via the runner, unknown ones fall
-  // back to workflowStarts for external workers.
-  workerProtocol: {
-    stepQueue: new InMemoryStepQueue(),
-    workerRegistry,
-    workflowStarts,
-  },
-  // Embedded scheduler tick loop — `namespaces: "all"` polls every tenant
-  // (the seed mixes "tenant-a", "tenant-b", and the global namespace).
-  // `dispatchConcurrency: 5` caps the per-tick fan-out so a wakeup of
-  // many simultaneous schedules doesn't slam the trigger.
-  scheduling: {
-    enabled: true,
-    namespaces: "all",
-    pollIntervalMs: 1_000,
-    dispatchConcurrency: 5,
-  },
-  // Forward workflowId so the embedded SchedulerLoop's deterministic
-  // `${scheduleId}.${tickNumber}` lands on storage — keeps repeat ticks
-  // idempotent (createWorkflow is no-op on a known id). Schedules without
-  // a `metadata.input` arrive here with `input === undefined`; synthesise
-  // one from `inputFor(name)` so SQLite's NOT NULL constraint on the
-  // `input` column doesn't reject the row (silent dispatch failure that
-  // looks like "the scheduler ticked but no run appeared").
-  trigger: (name, input, opts) =>
-    triggerRun(name, input === undefined ? inputFor(name) : input, {
-      namespace: opts?.namespace,
-      workflowId: opts?.workflowId,
-      metadata: opts?.metadata,
-      // Forward the typed source link (`schedule` + scheduleId, `manual`,
-      // …) so the dashboard's "filter by source" works without parsing
-      // workflow ids or chasing metadata keys.
-      runSource: opts?.runSource,
-      runSourceId: opts?.runSourceId,
-    }),
-  rerun: async (workflowId) => {
-    // After startFreshRun the row is reset; we still need to drive the
-    // workflow again. Look up the name from storage, find its definition,
-    // and call runner.run with the same workflow id.
-    const state = await storage.loadWorkflow(workflowId);
-    if (!state) return;
-    const def = workflowsByName[state.workflowName];
-    if (!def) return;
-    runner.run({ workflow: def, workflowId, input: state.input }).catch(() => {});
-  },
-  // No explicit `workers` provider — the server falls through to
-  // RegistryBackedWorkersProvider over `workerProtocol.workerRegistry`,
-  // which surfaces the two mock workers we registered above.
+  // Surfaces the demo's mock workers on /api/workers. (Distributed mode
+  // auto-derives this from workflows.workerRegistry; LocalWorkflows
+  // doesn't expose one, so the host passes its own registry.)
+  workers: new RegistryBackedWorkersProvider(workerRegistry),
 });
 
 const port = Number(process.env.PORT ?? 4100);

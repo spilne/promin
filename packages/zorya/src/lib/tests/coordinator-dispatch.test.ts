@@ -23,6 +23,7 @@ import {
 } from "@promin/workflow";
 import { ZoryaClient, ZoryaWorker } from "@promin/zorya-client";
 import { ZoryaServer } from "../../server/server.ts";
+import { DistributedWorkflows } from "../../index.ts";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -45,17 +46,15 @@ describe("Coordinator-driven step dispatch (promin-2c29)", () => {
     const stepQueue = new InMemoryStepQueue();
     const workerRegistry = new InMemoryWorkerRegistry();
 
-    const server = new ZoryaServer({
+    const workflows = new DistributedWorkflows({
       storage,
-      workerProtocol: { stepQueue, workerRegistry },
-      coordination: {
-        enabled: true,
-        pollIntervalMs: 50,
-        stepPollIntervalMs: 25,
-      },
+      stepQueue,
+      workerRegistry,
+      pollIntervalMs: 50,
     });
-    expect(server.coordinator).toBeDefined();
-    server.startCoordinator();
+    const server = new ZoryaServer({ workflows, remoteWorkers: {} });
+    expect(server.workflows).toBeDefined();
+    await workflows.start();
 
     // Loopback fetch — point ZoryaClient at the in-process server handler.
     const fetch = (req: Request) => server.handle(req);
@@ -117,12 +116,14 @@ describe("Coordinator-driven step dispatch (promin-2c29)", () => {
     const stepQueue = new InMemoryStepQueue();
     const workerRegistry = new InMemoryWorkerRegistry();
 
-    const server = new ZoryaServer({
+    const workflows = new DistributedWorkflows({
       storage,
-      workerProtocol: { stepQueue, workerRegistry },
-      coordination: { enabled: true, pollIntervalMs: 25, stepPollIntervalMs: 25 },
+      stepQueue,
+      workerRegistry,
+      pollIntervalMs: 25,
     });
-    server.startCoordinator();
+    const server = new ZoryaServer({ workflows, remoteWorkers: {} });
+    await workflows.start();
 
     const fetch = (req: Request) => server.handle(req);
     const client = new ZoryaClient({ url: "http://test.local", fetch });
@@ -171,13 +172,16 @@ describe("Coordinator-driven step dispatch (promin-2c29)", () => {
     server.stop();
   });
 
-  it("rejects coordination.enabled without a stepQueue", () => {
-    expect(
-      () =>
-        new ZoryaServer({
-          storage: new InMemoryWorkflowStorage(),
-          coordination: { enabled: true },
-        }),
-    ).toThrow(/stepQueue/);
+  it("remoteWorkers requires DistributedWorkflows (LocalWorkflows has no stepQueue)", async () => {
+    const { LocalWorkflows } = await import("../../index.ts");
+    const { createWorkflowRunner } = await import("@promin/workflow");
+    const storage = new InMemoryWorkflowStorage();
+    const workflows = new LocalWorkflows({
+      storage,
+      runner: createWorkflowRunner({ storage }),
+      definitions: {},
+      sleepScanIntervalMs: 0,
+    });
+    expect(() => new ZoryaServer({ workflows, remoteWorkers: {} })).toThrow(/DistributedWorkflows/);
   });
 });

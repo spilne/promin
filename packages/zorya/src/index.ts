@@ -5,14 +5,41 @@ export {
   type ZoryaServerConfig,
   type ListenOptions,
   type Logger,
+  type RemoteWorkersConfig,
 } from "./server/server.ts";
+export {
+  ZoryaWorkflows,
+  LocalWorkflows,
+  DistributedWorkflows,
+  QueuedWorkflows,
+  UnknownWorkflowError,
+  type LocalWorkflowsConfig,
+  type DistributedWorkflowsConfig,
+  type QueuedWorkflowsConfig,
+  type TriggerOptions,
+  type TriggerResult,
+} from "./server/services/workflows/index.ts";
+export {
+  ZoryaScheduler,
+  type ZoryaSchedulerConfig,
+  type AgentScheduleDispatcher,
+} from "./server/services/scheduler/index.ts";
+export {
+  ZoryaAgents,
+  type ZoryaAgentsConfig,
+  type ZoryaAgentsScanConfig,
+} from "./server/services/agents/index.ts";
 export { Auth, type AuthConfig } from "./server/auth.ts";
 export { RunEventBus } from "./server/run-event-bus.ts";
 export { RunPollWatcher, isTerminalStatus } from "./server/run-poll-watcher.ts";
 export { Router, json, jsonError, readJson, type Handler } from "./server/router.ts";
 export { runToDto, runToSummaryDto, stepToDto } from "./server/serialize.ts";
 export { StorageMetricsProvider, type MetricsProvider } from "./server/routes/metrics.ts";
-export { emptyWorkersProvider, type WorkersProvider } from "./server/routes/workers.ts";
+export {
+  emptyWorkersProvider,
+  RegistryBackedWorkersProvider,
+  type WorkersProvider,
+} from "./server/routes/workers.ts";
 export type { RunTrigger } from "./server/routes/runs.ts";
 export type { ScheduleDto, SchedulesResponse } from "./server/routes/schedules.ts";
 export {
