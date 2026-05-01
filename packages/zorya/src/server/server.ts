@@ -14,6 +14,7 @@
 // ---------------------------------------------------------------------------
 
 import type { StepQueue, WorkerRegistry, WorkflowStorage } from "@promin/workflow";
+import { InMemoryStepQueue, InMemoryWorkerRegistry } from "@promin/workflow";
 import { createWorkerApiHandler, createWorkflowStorageHandler } from "@promin/workflow-remote";
 import { Auth, type AuthConfig } from "./auth.ts";
 import { Router, jsonError } from "./router.ts";
@@ -354,16 +355,20 @@ export class ZoryaServer {
       const storageHandler = createWorkflowStorageHandler(storage);
       this.router.post("/rpc/storage", (req) => storageHandler(req));
 
-      if (remoteDeps.stepQueue) {
-        const workerHandler = createWorkerApiHandler({
-          stepQueue: remoteDeps.stepQueue,
-          storage,
-          ...(remoteDeps.workerRegistry !== undefined && {
-            workerRegistry: remoteDeps.workerRegistry,
-          }),
-        });
-        this.router.post("/rpc/worker", (req) => workerHandler(req));
-      }
+      // /rpc/worker covers BOTH the step-queue claim path (DistributedWorkflows)
+      // AND the worker-registry / heartbeat path used by every connected
+      // worker regardless of mode. Always mount it; supply an in-memory
+      // step queue when the workflows chain doesn't expose one (workflow-mode
+      // workers don't poll it but their heartbeats / list calls still need
+      // a working endpoint).
+      const stepQueueForRpc = remoteDeps.stepQueue ?? new InMemoryStepQueue();
+      const workerRegistryForRpc = remoteDeps.workerRegistry ?? new InMemoryWorkerRegistry();
+      const workerHandler = createWorkerApiHandler({
+        stepQueue: stepQueueForRpc,
+        storage,
+        workerRegistry: workerRegistryForRpc,
+      });
+      this.router.post("/rpc/worker", (req) => workerHandler(req));
 
       if (advertisements) {
         this.router
