@@ -46,7 +46,12 @@ export type StorageMethod =
   | "appendPendingEntry"
   | "completePendingEntry"
   | "findDueSleeps"
-  | "findPendingSignal";
+  | "findPendingSignal"
+  // StepAttemptStorage — forwarded only when the underlying storage
+  // implements it. Lets remote workers populate the audit trail
+  // (workerId per attempt) on the central server's storage.
+  | "saveStepAttempt"
+  | "loadStepAttempts";
 
 export interface RpcRequest {
   readonly method: StorageMethod;

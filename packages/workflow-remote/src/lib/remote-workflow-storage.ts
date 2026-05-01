@@ -19,6 +19,8 @@ import type {
   FenceGuard,
   JournalEntry,
   JournaledSuspendStorage,
+  StepAttemptStorage,
+  StepAttemptRecord,
 } from "@promin/workflow";
 import { WIRE_CODEC, type RpcResponse, type StorageMethod } from "./wire.ts";
 
@@ -41,7 +43,9 @@ export interface RemoteWorkflowStorageConfig {
   readonly headers?: Record<string, string>;
 }
 
-export class RemoteWorkflowStorage implements WorkflowStorage, JournaledSuspendStorage {
+export class RemoteWorkflowStorage
+  implements WorkflowStorage, JournaledSuspendStorage, StepAttemptStorage
+{
   private readonly url: string;
   private readonly fetch: FetchLike;
   private readonly headers: Record<string, string>;
@@ -352,5 +356,23 @@ export class RemoteWorkflowStorage implements WorkflowStorage, JournaledSuspendS
     signalName: string;
   }): Promise<JournalEntry | null> {
     return this.call("findPendingSignal", params);
+  }
+
+  // -------------------------------------------------------------------------
+  // StepAttemptStorage
+  //
+  // The runner feature-detects via `isStepAttemptStorage(storage)` and
+  // calls saveStepAttempt after each step result. By proxying it over RPC
+  // here, remote workers (whose effective storage IS this RemoteWorkflowStorage)
+  // get the audit trail written on the central server's storage — surfacing
+  // workerId per attempt to the dashboard's run-detail / graph views.
+  // -------------------------------------------------------------------------
+
+  saveStepAttempt(record: StepAttemptRecord, guard?: FenceGuard): Promise<void> {
+    return this.call("saveStepAttempt", { record, guard });
+  }
+
+  loadStepAttempts(workflowId: string, stepName?: string): Promise<StepAttemptRecord[]> {
+    return this.call("loadStepAttempts", { workflowId, stepName });
   }
 }

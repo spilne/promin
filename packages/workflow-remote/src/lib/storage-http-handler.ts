@@ -17,7 +17,12 @@ import type {
   ActivityJournalStorage,
   JournaledSuspendStorage,
 } from "@promin/workflow";
-import { isActivityJournalStorage, isJournaledSuspendStorage } from "@promin/workflow";
+import {
+  isActivityJournalStorage,
+  isJournaledSuspendStorage,
+  isStepAttemptStorage,
+} from "@promin/workflow";
+import type { StepAttemptStorage } from "@promin/workflow";
 import { WIRE_CODEC, type RpcRequest, type RpcResponse, type StorageMethod } from "./wire.ts";
 
 /**
@@ -75,6 +80,11 @@ export function createWorkflowStorageHandler(
     completePendingEntry: (p) => requireSuspend(storage).completePendingEntry(p),
     findDueSleeps: (p) => requireSuspend(storage).findDueSleeps(p),
     findPendingSignal: (p) => requireSuspend(storage).findPendingSignal(p),
+    // -- StepAttempt methods. Feature-detected so backends without
+    // attempt-history support surface a clear error instead of silent
+    // failure.
+    saveStepAttempt: (p) => requireStepAttempt(storage).saveStepAttempt(p.record, p.guard),
+    loadStepAttempts: (p) => requireStepAttempt(storage).loadStepAttempts(p.workflowId, p.stepName),
   };
 
   return async (req) => {
@@ -153,6 +163,15 @@ function requireSuspend(storage: WorkflowStorage): JournaledSuspendStorage {
   if (!isActivityJournalStorage(storage) || !isJournaledSuspendStorage(storage)) {
     throw new Error(
       "storage does not implement JournaledSuspendStorage — ctx.sleep / ctx.signal in journaled steps are unsupported on this backend",
+    );
+  }
+  return storage;
+}
+
+function requireStepAttempt(storage: WorkflowStorage): StepAttemptStorage {
+  if (!isStepAttemptStorage(storage)) {
+    throw new Error(
+      "storage does not implement StepAttemptStorage — step attempt history is unsupported on this backend",
     );
   }
   return storage;
