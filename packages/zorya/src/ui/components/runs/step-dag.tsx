@@ -192,17 +192,24 @@ export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
             {/* Edges. The wrapping <g> sets `currentColor` for the
                 marker's arrowhead; same color flows into the path's
                 stroke too via inheritance — keeps the heads + lines
-                visually unified. */}
+                visually unified. Edges that land on a synthetic
+                activity node render dashed so the journal-expansion
+                sub-chain reads visually distinct from the main DAG. */}
             <g class="text-base-content/60" stroke="currentColor">
-              {edges.map((e, i) => (
-                <path
-                  key={`e-${i}`}
-                  d={edgePath(e.from, e.to, orientation)}
-                  fill="none"
-                  stroke-width={2.5}
-                  marker-end="url(#dag-arrow)"
-                />
-              ))}
+              {edges.map((e, i) => {
+                const intoActivity = e.to.step.metadata?.["journalActivityName"] !== undefined;
+                return (
+                  <path
+                    key={`e-${i}`}
+                    d={edgePath(e.from, e.to, orientation)}
+                    fill="none"
+                    stroke-width={2.5}
+                    marker-end="url(#dag-arrow)"
+                    stroke-dasharray={intoActivity ? "4 3" : undefined}
+                    opacity={intoActivity ? 0.65 : 1}
+                  />
+                );
+              })}
             </g>
 
             {/* Nodes */}
@@ -236,6 +243,20 @@ function NodeRect({
   const renderStatus = effectiveStepStatus(step);
   const v = STEP_STATUS_VISUAL[renderStatus];
   const isPlanned = step.isPlanned === true;
+  // Synthetic nodes from journal expansion — read this once so we can
+  // shrink the card and dash its border to read as "sub-step of the
+  // parent journaled step" rather than another DAG node in the main flow.
+  const isActivity = step.metadata?.["journalActivityName"] !== undefined;
+  // Parent journaled steps get a small "▷" container indicator so the
+  // sub-chain hanging off them reads as belonging to this node and not
+  // as a sibling fan-out to peer steps.
+  const isJournaledParent = step.metadata?.["isJournaledParent"] === true;
+
+  // Activities are visually subordinate: narrower card, indented inward,
+  // dotted border. Same rounded corners + status stripe so they still
+  // read as steps, just clearly nested.
+  const cardWidth = isActivity ? NODE_W - 32 : NODE_W;
+  const cardOffsetX = isActivity ? 16 : 0;
 
   // Strip + fill use Tailwind CSS classes (compiled to concrete colors) rather
   // than SVG fill attributes with CSS variables — latter don't resolve across
@@ -249,22 +270,29 @@ function NodeRect({
     ? "stroke-primary"
     : isPlanned
       ? "stroke-base-content/30"
-      : "stroke-base-content/40";
+      : isActivity
+        ? "stroke-base-content/30"
+        : "stroke-base-content/40";
+
+  // Dashed border for both planned and activity nodes — repurposes the
+  // existing "ghost" treatment to also signal "synthetic / sub-step".
+  const dashArray = isPlanned ? "4 3" : isActivity ? "3 2" : undefined;
 
   return (
     <g transform={`translate(${node.x} ${node.y})`} onClick={onSelect} class="cursor-pointer">
       {/* Card body */}
       <rect
-        width={NODE_W}
+        x={cardOffsetX}
+        width={cardWidth}
         height={NODE_H}
         rx={8}
         class={`${cardFillClass} ${borderClass} transition-all`}
         stroke-width={isSelected ? 2 : 1.5}
-        stroke-dasharray={isPlanned ? "4 3" : undefined}
+        stroke-dasharray={dashArray}
       />
       {/* Status stripe on the left */}
       <rect
-        x={0}
+        x={cardOffsetX}
         y={0}
         width={STRIPE_W + 4}
         height={NODE_H}
@@ -272,22 +300,28 @@ function NodeRect({
         class={stripClass}
         opacity={isPlanned ? 0.35 : 1}
       />
-      {/* Step type glyph */}
+      {/* Step type glyph. Activities show a smaller "ACTIVITY" label;
+          journaled parents get a "▷ activities" marker so the sub-chain
+          hanging off them is visually attributed. */}
       <text
-        x={STRIPE_W + 16}
+        x={cardOffsetX + STRIPE_W + 16}
         y={NODE_H / 2 - 6}
         class="fill-base-content/50"
         font-family="ui-monospace, monospace"
         font-size={11}
       >
-        {step.stepType.toUpperCase()} {STEP_TYPE_ICON[step.stepType]}
+        {isActivity
+          ? "ACTIVITY •"
+          : isJournaledParent
+            ? `${step.stepType.toUpperCase()} ${STEP_TYPE_ICON[step.stepType]}  ▷ activities`
+            : `${step.stepType.toUpperCase()} ${STEP_TYPE_ICON[step.stepType]}`}
       </text>
       {/* Step name. Synthetic activity nodes carry their human-readable
           label on `metadata.journalActivityName`; without this fallback
           they'd display the namespaced internal name like
           `research::fetch-sources::0`. */}
       <text
-        x={STRIPE_W + 16}
+        x={cardOffsetX + STRIPE_W + 16}
         y={NODE_H / 2 + 9}
         class="fill-base-content font-semibold"
         font-family="ui-sans-serif, system-ui"
@@ -299,7 +333,7 @@ function NodeRect({
         )}
       </text>
       {/* Status line at the bottom right */}
-      <g transform={`translate(${NODE_W - 8} ${NODE_H - 8})`}>
+      <g transform={`translate(${cardOffsetX + cardWidth - 8} ${NODE_H - 8})`}>
         <text
           text-anchor="end"
           class={`${v.textClass} font-medium`}
@@ -355,9 +389,16 @@ function expandJournaledSteps(
 ): StepDto[] {
   const out: StepDto[] = [];
   for (const s of steps) {
-    out.push(s);
     const journal = journalsByStep[s.stepName];
-    if (!journal || journal.length === 0) continue;
+    const hasJournal = journal && journal.length > 0;
+    // Clone the parent step with an isJournaledParent flag in metadata so
+    // NodeRect can render a subtle "container" indicator. Without this the
+    // parent looks identical to a regular `single` step and the activity
+    // sub-chain reads as a flat continuation of the main DAG.
+    out.push(
+      hasJournal ? { ...s, metadata: { ...(s.metadata ?? {}), isJournaledParent: true } } : s,
+    );
+    if (!hasJournal) continue;
     let prevSyntheticName = s.stepName;
     for (const entry of journal) {
       const syntheticName = `${s.stepName}::${entry.activityName}::${entry.activityIndex}`;
