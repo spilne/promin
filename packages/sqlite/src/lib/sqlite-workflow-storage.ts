@@ -23,6 +23,10 @@ import type {
   JournalEntry,
   JournalStepType,
   JournalPhase,
+  StepAttemptStorage,
+  StepAttemptRecord,
+  StepAttemptType,
+  FenceGuard,
 } from "@promin/workflow";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
@@ -50,7 +54,7 @@ import type { SqliteDatabase } from "./sqlite-database.ts";
  * ```
  */
 export class SqliteWorkflowStorage
-  implements WorkflowStorage, ActivityJournalStorage, JournaledSuspendStorage
+  implements WorkflowStorage, ActivityJournalStorage, JournaledSuspendStorage, StepAttemptStorage
 {
   private readonly _t: string;
   private _nextToken = 1;
@@ -171,6 +175,29 @@ export class SqliteWorkflowStorage
     `);
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_journal_wfid ON ${t}_journal (workflow_id, step_name)`,
+    );
+    // Step attempt history — append-only audit log of every execution +
+    // compensation attempt. Surfaces "which worker ran this?" + retry
+    // analysis on the dashboard. (PRIMARY KEY (workflow_id, step_name,
+    // attempt, type) makes saveStepAttempt naturally idempotent on retry.)
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS ${t}_attempts (
+        workflow_id  TEXT    NOT NULL,
+        step_name    TEXT    NOT NULL,
+        attempt      INTEGER NOT NULL,
+        type         TEXT    NOT NULL,            -- 'execution' | 'compensation'
+        status       TEXT    NOT NULL,            -- 'completed' | 'failed'
+        result       TEXT,                        -- JSON
+        error        TEXT,
+        duration_ms  INTEGER NOT NULL,
+        started_at   INTEGER NOT NULL,
+        completed_at INTEGER NOT NULL,
+        worker_id    TEXT,
+        PRIMARY KEY (workflow_id, step_name, attempt, type)
+      )
+    `);
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_attempts_wfid ON ${t}_attempts (workflow_id, step_name)`,
     );
     // Restore fence token counter from max stored token
     const row = this.db
@@ -1351,6 +1378,92 @@ export class SqliteWorkflowStorage
       )
       .get(params.workflowId, params.stepName, params.signalName);
     return row ? rowToJournalEntry(row) : null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // StepAttemptStorage — append-only audit trail of step execution +
+  // compensation attempts. Surfaces "which worker handled this attempt?" +
+  // retry analysis. Implemented as a separate table with (workflow_id,
+  // step_name, attempt, type) composite PK so retries are idempotent and
+  // execution / compensation rows for the same (step, attempt) can coexist.
+  // ---------------------------------------------------------------------------
+
+  async saveStepAttempt(record: StepAttemptRecord, _guard?: FenceGuard): Promise<void> {
+    this.db
+      .query(
+        `INSERT INTO ${this._t}_attempts
+           (workflow_id, step_name, attempt, type, status, result, error,
+            duration_ms, started_at, completed_at, worker_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (workflow_id, step_name, attempt, type) DO UPDATE SET
+           status       = excluded.status,
+           result       = excluded.result,
+           error        = excluded.error,
+           duration_ms  = excluded.duration_ms,
+           started_at   = excluded.started_at,
+           completed_at = excluded.completed_at,
+           worker_id    = excluded.worker_id`,
+      )
+      .run(
+        record.workflowId,
+        record.stepName,
+        record.attempt,
+        record.type,
+        record.status,
+        record.result !== undefined ? JSON.stringify(record.result) : null,
+        record.error ?? null,
+        record.durationMs,
+        record.startedAt.getTime(),
+        record.completedAt.getTime(),
+        record.workerId ?? null,
+      );
+  }
+
+  async loadStepAttempts(workflowId: string, stepName?: string): Promise<StepAttemptRecord[]> {
+    interface Row {
+      workflow_id: string;
+      step_name: string;
+      attempt: number;
+      type: string;
+      status: string;
+      result: string | null;
+      error: string | null;
+      duration_ms: number;
+      started_at: number;
+      completed_at: number;
+      worker_id: string | null;
+    }
+    const rows = stepName
+      ? this.db
+          .query<Row, [string, string]>(
+            `SELECT * FROM ${this._t}_attempts
+             WHERE workflow_id = ? AND step_name = ?
+             ORDER BY attempt ASC, type ASC`,
+          )
+          .all(workflowId, stepName)
+      : this.db
+          .query<Row, [string]>(
+            `SELECT * FROM ${this._t}_attempts
+             WHERE workflow_id = ?
+             ORDER BY step_name ASC, attempt ASC, type ASC`,
+          )
+          .all(workflowId);
+    return rows.map((r) => {
+      const rec: StepAttemptRecord = {
+        workflowId: r.workflow_id,
+        stepName: r.step_name,
+        attempt: r.attempt,
+        type: r.type as StepAttemptType,
+        status: r.status as "completed" | "failed",
+        durationMs: r.duration_ms,
+        startedAt: new Date(r.started_at),
+        completedAt: new Date(r.completed_at),
+        ...(r.result !== null && { result: JSON.parse(r.result) as unknown }),
+        ...(r.error !== null && { error: r.error }),
+        ...(r.worker_id !== null && { workerId: r.worker_id }),
+      };
+      return rec;
+    });
   }
 }
 
