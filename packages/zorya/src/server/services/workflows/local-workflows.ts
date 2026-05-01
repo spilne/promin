@@ -22,6 +22,21 @@ import type {
 import { DefaultSleepScanner } from "@promin/workflow";
 import { ZoryaWorkflows, type TriggerOptions, type TriggerResult } from "./zorya-workflows.ts";
 
+/**
+ * Local mirror of RecoveryStrategy's internal opts shape (not exported by
+ * @promin/workflow). Kept here so runRecovery can read its fields without
+ * a structural cast at every site.
+ */
+interface RecoveryOpts {
+  readonly staleThresholdMs: number | undefined;
+  readonly staleStatuses: ReadonlyArray<"pending" | "running" | "suspended">;
+  readonly staleAction:
+    | { readonly kind: "cancel" }
+    | { readonly kind: "fail"; readonly error: string };
+  readonly resumeRecent: boolean;
+  readonly resumeConcurrency: number;
+}
+
 export interface LocalWorkflowsConfig {
   storage: WorkflowStorage;
   runner: WorkflowRunner;
@@ -127,10 +142,64 @@ export class LocalWorkflows extends ZoryaWorkflows {
 
   protected override async onStart(): Promise<void> {
     if (this.recovery) {
-      await this.runner.recover(this.recovery);
+      await this.runRecovery(this.recovery);
     }
     // Sleep scanner runs forever; fire-and-forget so start() returns.
     if (this.sleepScanner) void this.sleepScanner.start();
+  }
+
+  /**
+   * Recovery using local definitions. Two phases:
+   *   1. Stale termination — delegated to `runner.recover` (uses storage
+   *      only; no registry needed for the stale phase).
+   *   2. Resume recent — done here, walking storage and looking up
+   *      definitions on this layer instead of going through the runner's
+   *      registry. This way the host doesn't have to also register every
+   *      workflow on the runner just to enable resume.
+   */
+  private async runRecovery(strategy: RecoveryStrategy): Promise<void> {
+    const opts = (strategy as unknown as { _opts: RecoveryOpts })._opts;
+
+    // Phase 1 — stale termination via runner.recover with resume disabled.
+    if (opts.staleThresholdMs !== undefined) {
+      const stalePart = {
+        _opts: {
+          ...opts,
+          resumeRecent: false,
+        },
+      } as unknown as RecoveryStrategy;
+      await this.runner.recover(stalePart);
+    }
+
+    // Phase 2 — resume recent using local definitions.
+    if (opts.resumeRecent) {
+      const PAGE = 200;
+      const concurrency = opts.resumeConcurrency ?? 10;
+      for (const status of ["pending", "running"] as const) {
+        let offset = 0;
+        while (true) {
+          const page = await this.storage.listWorkflows({ status, limit: PAGE, offset });
+          if (page.length === 0) break;
+          for (let i = 0; i < page.length; i += concurrency) {
+            const batch = page.slice(i, i + concurrency);
+            for (const wf of batch) {
+              const def = this.definitions[wf.workflowName];
+              if (!def) continue; // unknown to this layer; nothing to resume
+              void this.runner.runSafe({
+                workflow: def,
+                workflowId: wf.workflowId,
+                input: wf.input,
+              });
+            }
+            if (i + concurrency < page.length) {
+              await new Promise<void>((r) => setTimeout(r, 0));
+            }
+          }
+          if (page.length < PAGE) break;
+          offset += PAGE;
+        }
+      }
+    }
   }
 
   protected override async onStop(): Promise<void> {
