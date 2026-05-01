@@ -47,6 +47,7 @@ import {
 } from "@promin/sqlite";
 import {
   anthropic,
+  ollama,
   applyDiscoveredAgents,
   createDurableSchedulerTool,
   createFileToolRegistry,
@@ -383,6 +384,13 @@ const agentLlms: Record<string, LLMProvider> = {
         "knowledge-bot": anthropic("claude-sonnet-4-6"),
       }
     : {}),
+  // Local LLM via Ollama — assumes `ollama serve` is running on the
+  // default port and `qwen2.5:0.5b` has been pulled. Fast tiny model;
+  // good enough for the demo and free.
+  "ollama-bot": ollama({
+    model: "qwen2.5:0.5b",
+    baseURL: process.env["OLLAMA_URL"] ?? "http://localhost:11434",
+  }),
 };
 
 const KNOWN_CITIES = [
