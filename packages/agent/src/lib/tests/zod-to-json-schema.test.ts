@@ -147,8 +147,14 @@ describe("zodToJsonSchema — unions", () => {
     expect(result).not.toHaveProperty("allOf");
 
     const properties = result["properties"] as Record<string, Record<string, unknown>>;
-    // Discriminator becomes an enum over the literals.
-    expect(properties.kind).toEqual({ enum: ["a", "b"] });
+    // Discriminator becomes a typed enum over the literals — the explicit
+    // `type` and "REQUIRED" hint help small tool-tuned models (qwen2.5:3b
+    // et al.) actually fill the field instead of dropping it.
+    expect(properties.kind).toEqual({
+      type: "string",
+      enum: ["a", "b"],
+      description: expect.stringContaining("REQUIRED"),
+    });
     // Branch fields land as optional top-level properties.
     expect(properties.x).toEqual({ type: "string" });
     expect(properties.y).toEqual({ type: "number" });

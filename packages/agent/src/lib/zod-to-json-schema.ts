@@ -118,18 +118,35 @@ function discriminatedUnionToFlatObject(schema: {
     branchSummaries.push(summary);
   }
 
+  // Infer the discriminator's primitive type from the literal values so
+  // the JSON schema is self-describing. Small models (qwen2.5:3b,
+  // llama3.2:3b) drop required-discriminator fields when the property
+  // has no `type`. Falls back to "string" if the literals are mixed —
+  // unusual but cheap to handle.
+  const inferredType = literals.every((v) => typeof v === "string")
+    ? "string"
+    : literals.every((v) => typeof v === "number")
+      ? "number"
+      : literals.every((v) => typeof v === "boolean")
+        ? "boolean"
+        : "string";
+
+  const branchHint = branchSummaries.join("; ");
   const result: Record<string, unknown> = {
     type: "object",
     properties: {
-      [schema.discriminator]: { enum: literals },
+      [schema.discriminator]: {
+        type: inferredType,
+        enum: literals,
+        description: `REQUIRED. Pick one. ${branchHint}.`,
+      },
       ...properties,
     },
     required: [schema.discriminator],
   };
 
   if (branchSummaries.length > 0) {
-    result["description"] =
-      `Discriminated by \`${schema.discriminator}\`. ${branchSummaries.join("; ")}.`;
+    result["description"] = `Discriminated by \`${schema.discriminator}\`. ${branchHint}.`;
   }
   return result;
 }
