@@ -335,6 +335,13 @@ const schedulerTool = createDurableSchedulerTool({
   getClient: (scope) => inProcessSchedulerClient({ storage: schedulerStorage, scope }),
 });
 
+// Ollama config. The base URL is shared between the chat LLM (for
+// `ollama-bot`) and the consolidator (compaction / distillation across
+// every agent). Tiny model is the default — fast enough for summarisation
+// of short demo threads.
+const OLLAMA_URL = process.env["OLLAMA_URL"] ?? "http://localhost:11434";
+const OLLAMA_MODEL = process.env["OLLAMA_MODEL"] ?? "qwen2.5:0.5b";
+
 // Per-agent LLM map — keyed by recipe id. Built once at boot. A discovered
 // agent without an entry here falls through to a default `echoLLM` in the
 // resolver, so adding a new agent file under `./agents` works without a
@@ -384,13 +391,10 @@ const agentLlms: Record<string, LLMProvider> = {
         "knowledge-bot": anthropic("claude-sonnet-4-6"),
       }
     : {}),
-  // Local LLM via Ollama — assumes `ollama serve` is running on the
-  // default port and `qwen2.5:0.5b` has been pulled. Fast tiny model;
-  // good enough for the demo and free.
-  "ollama-bot": ollama({
-    model: "qwen2.5:0.5b",
-    baseURL: process.env["OLLAMA_URL"] ?? "http://localhost:11434",
-  }),
+  // Local LLM via Ollama — assumes `ollama serve` is running and the
+  // chosen model has been pulled. Fast tiny model; good enough for the
+  // demo and free.
+  "ollama-bot": ollama({ model: OLLAMA_MODEL, baseURL: OLLAMA_URL }),
 };
 
 const KNOWN_CITIES = [
@@ -444,10 +448,15 @@ function resolveAgent(recipe: RegisteredAgent): Agent {
       listWorkflows: listWorkflowsTool,
       scheduler: schedulerTool,
     },
-    // Distillation is summarisation work — use Haiku when we have a
-    // real key (cheaper / faster than Sonnet), fall back to the
-    // chat LLM for mock agents (echoLLM round-trip is free anyway).
-    consolidatorLlm: haveAnthropicKey ? anthropic("claude-haiku-4-5-20251001") : undefined,
+    // Compaction + distillation is summarisation work — route it to
+    // local Ollama by default (free, private, no API roundtrip). Falls
+    // back to Anthropic Haiku if `ZORYA_CONSOLIDATOR=anthropic` is set
+    // and the API key is present, or to undefined if neither is
+    // available (the chat LLM gets reused as a last resort).
+    consolidatorLlm:
+      process.env["ZORYA_CONSOLIDATOR"] === "anthropic" && haveAnthropicKey
+        ? anthropic("claude-haiku-4-5-20251001")
+        : ollama({ model: OLLAMA_MODEL, baseURL: OLLAMA_URL }),
     // Auto-fire compactThread after each thread turn once the
     // uncompacted backlog crosses either gate. Demo numbers — low
     // enough that you'll see a rollup episode appear in the
