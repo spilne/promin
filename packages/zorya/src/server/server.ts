@@ -200,8 +200,13 @@ export class ZoryaServer {
     this.agentStreamHub = new AgentStreamHub(this.workerWs);
 
     const storage: WorkflowStorage = this.workflows.storage;
-    const advertisements = this.workflows.advertisements;
-    const definitions = this.workflows.definitions;
+    // Walk the workflows chain to find an advertisements registry. The
+    // top layer (LocalWorkflows) doesn't expose one, but a Queued or
+    // Distributed fallback does — and that's the one workers actually
+    // upsert into. Without this, /api/advertisements never mounted and
+    // worker registrations silently hit the SPA fallback.
+    const advertisements = walkChainFor(this.workflows, (l) => l.advertisements);
+    const definitions = walkChainFor(this.workflows, (l) => l.definitions);
 
     const metrics = config.metrics ?? new StorageMetricsProvider(storage);
     // Workers provider: explicit > derived from DistributedWorkflows.workerRegistry > empty
@@ -514,4 +519,22 @@ export class ZoryaServer {
       return new Response("Not Found", { status: 404 });
     };
   }
+}
+
+/**
+ * Walk the workflows chain (top → fallback) returning the first non-undefined
+ * value the picker yields. Used to surface fields like advertisements /
+ * definitions that the outer layer might not own but a fallback layer does.
+ */
+function walkChainFor<T>(
+  start: ZoryaWorkflows,
+  pick: (layer: ZoryaWorkflows) => T | undefined,
+): T | undefined {
+  let layer: ZoryaWorkflows | undefined = start;
+  while (layer) {
+    const v = pick(layer);
+    if (v !== undefined) return v;
+    layer = (layer as unknown as { fallback?: ZoryaWorkflows }).fallback;
+  }
+  return undefined;
 }
