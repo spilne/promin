@@ -1,31 +1,53 @@
 // ---------------------------------------------------------------------------
-// start-all.ts — boot the demo server + remote worker together.
+// start-all.ts — boot the demo server + remote worker together with UI
+// auto-rebuild and server-side hot-reload.
 //
 // Run:
 //   bun --conditions=@promin/source run packages/zorya/examples/start-all.ts
+//   # or from the repo root:
+//   bun run demo
 //
-// Spawns two processes:
-//   1. demo.ts     — the dashboard / server (port 4100 by default)
-//   2. worker.ts   — joins the server, advertises hello-world + fan-out-demo
+// Three things happen on boot:
+//   1. UI is built once (src/ui/** → dist/public/) — skipped if a recent
+//      build exists; pass --rebuild to force.
+//   2. demo.ts is spawned with --hot so server-side .ts saves reload in
+//      place (port + sqlite handle stay bound).
+//   3. /api/health polls until green, then worker.ts joins.
 //
-// Both stdout / stderr streams are forwarded with prefixes so you can see
-// what came from where. Ctrl+C cleans up both children.
+// While running:
+//   - Edits under packages/zorya/src/ui/** trigger a debounced rebuild;
+//     the dashboard polls a sentinel file under dist/public and reloads
+//     when it changes.
+//   - Edits under .ts files imported by demo.ts hot-reload the server
+//     (Bun --hot does this automatically).
+//   - SIGINT / SIGTERM shut down both children cleanly.
 //
-// To run the third pattern (user-app.ts demo) in the same shell, set
-// USER_APP=true — it runs once and exits while demo + worker keep going.
+// USER_APP=true also spawns user-app.ts as a third (one-shot) process.
+// --rebuild forces a fresh UI build even if dist/public already exists.
 // ---------------------------------------------------------------------------
 
-import { spawn } from "bun";
+import { spawn, $ } from "bun";
+import path from "node:path";
+import { existsSync, watch } from "node:fs";
+import { writeFile } from "node:fs/promises";
 
 const PORT = process.env["PORT"] ?? "4100";
 const ZORYA_URL = `http://localhost:${PORT}`;
+const FORCE_REBUILD = process.argv.includes("--rebuild");
 
 const COLOURS = {
+  build: "\x1b[34m", // blue
   demo: "\x1b[36m", // cyan
   worker: "\x1b[35m", // magenta
   app: "\x1b[33m", // yellow
   reset: "\x1b[0m",
 };
+
+const pkgRoot = path.resolve(import.meta.dir, "..");
+const indexHtml = path.join(pkgRoot, "dist", "public", "index.html");
+const reloadFile = path.join(pkgRoot, "dist", "public", ".reload-timestamp");
+const uiSrc = path.join(pkgRoot, "src", "ui");
+const buildScript = path.join(pkgRoot, "scripts", "build-ui.ts");
 
 interface Child {
   label: string;
@@ -52,9 +74,9 @@ async function pipePrefixed(stream: ReadableStream<Uint8Array>, label: string, c
   }
 }
 
-function start(label: string, file: string, env: Record<string, string>, colour: string): Child {
+function start(label: string, cmd: string[], env: Record<string, string>, colour: string): Child {
   const proc = spawn({
-    cmd: ["bun", "--conditions=@promin/source", "run", file],
+    cmd,
     env: { ...process.env, ...env },
     stdout: "pipe",
     stderr: "pipe",
@@ -62,6 +84,15 @@ function start(label: string, file: string, env: Record<string, string>, colour:
   void pipePrefixed(proc.stdout as unknown as ReadableStream<Uint8Array>, label, colour);
   void pipePrefixed(proc.stderr as unknown as ReadableStream<Uint8Array>, label, colour);
   return { label, proc };
+}
+
+async function runBuild(): Promise<void> {
+  // ZORYA_DEV_RELOAD makes build-ui.ts inject the polling client that
+  // watches the .reload-timestamp sentinel — without it the dashboard
+  // doesn't know about the rebuild and you have to hit cmd+R.
+  await $`bun ${buildScript}`.cwd(pkgRoot).env({ ...process.env, ZORYA_DEV_RELOAD: "1" });
+  // Write sentinel AFTER build (the build clears dist/public).
+  await writeFile(reloadFile, String(Date.now()));
 }
 
 async function waitForServer(url: string, timeoutMs = 30_000): Promise<void> {
@@ -94,24 +125,95 @@ async function shutdown(signal: string): Promise<void> {
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-console.log(`[start-all] booting demo server on ${ZORYA_URL}…`);
-const demoDir = import.meta.dir;
-children.push(start("demo", `${demoDir}/demo.ts`, { PORT }, COLOURS.demo));
+// 1. Build the UI (or refresh sentinel if already built).
+if (FORCE_REBUILD || !existsSync(indexHtml)) {
+  console.log(`${COLOURS.build}[build]${COLOURS.reset} building UI…`);
+  await runBuild();
+  console.log(`${COLOURS.build}[build]${COLOURS.reset} UI ready at dist/public/`);
+} else {
+  console.log(
+    `${COLOURS.build}[build]${COLOURS.reset} UI cached at dist/public (pass --rebuild to force)`,
+  );
+  await writeFile(reloadFile, String(Date.now()));
+}
+
+// 2. Start the demo server with --hot for in-place server reload.
+console.log(`[start-all] booting demo server on ${ZORYA_URL} (hot)…`);
+children.push(
+  start(
+    "demo",
+    ["bun", "--hot", "--conditions=@promin/source", path.join(pkgRoot, "examples", "demo.ts")],
+    { PORT, ZORYA_DEV_RELOAD: "1" },
+    COLOURS.demo,
+  ),
+);
 
 try {
   await waitForServer(ZORYA_URL);
 
+  // 3. Worker joins.
   console.log(`[start-all] server up. starting worker…`);
-  children.push(start("worker", `${demoDir}/worker.ts`, { ZORYA_URL }, COLOURS.worker));
+  children.push(
+    start(
+      "worker",
+      ["bun", "--hot", "--conditions=@promin/source", path.join(pkgRoot, "examples", "worker.ts")],
+      { ZORYA_URL },
+      COLOURS.worker,
+    ),
+  );
 
   if (process.env["USER_APP"] === "true") {
     console.log(`[start-all] USER_APP=true — running user-app.ts (one-shot)…`);
-    children.push(start("app", `${demoDir}/user-app.ts`, { ZORYA_URL }, COLOURS.app));
+    children.push(
+      start(
+        "app",
+        ["bun", "--conditions=@promin/source", path.join(pkgRoot, "examples", "user-app.ts")],
+        { ZORYA_URL },
+        COLOURS.app,
+      ),
+    );
   }
 
-  console.log(`[start-all] all up. dashboard: ${ZORYA_URL}/  (Ctrl+C to stop)`);
+  // 4. Watch UI source for edits and rebuild. Debounced so a burst of
+  //    saves (editor formatter, multi-file rename) collapses into one
+  //    rebuild + browser reload.
+  console.log(
+    `[start-all] watching ${path.relative(process.cwd(), uiSrc)} for UI changes (Ctrl+C to stop)`,
+  );
+  let pending: ReturnType<typeof setTimeout> | undefined;
+  let busy = false;
+  let queued = false;
+  watch(uiSrc, { recursive: true }, (_evt, filename) => {
+    if (!filename) return;
+    if (pending) clearTimeout(pending);
+    pending = setTimeout(async () => {
+      pending = undefined;
+      if (busy) {
+        queued = true;
+        return;
+      }
+      busy = true;
+      try {
+        do {
+          queued = false;
+          console.log(`${COLOURS.build}[build]${COLOURS.reset} rebuild → ${filename}`);
+          await runBuild();
+          console.log(`${COLOURS.build}[build]${COLOURS.reset} reload broadcast`);
+        } while (queued);
+      } catch (err) {
+        console.error(
+          `${COLOURS.build}[build]${COLOURS.reset} rebuild failed:`,
+          (err as Error).message,
+        );
+      } finally {
+        busy = false;
+      }
+    }, 150);
+  });
 
-  // Block forever until SIGINT/SIGTERM.
+  console.log(`[start-all] all up. dashboard: ${ZORYA_URL}/`);
+
+  // Block until SIGINT/SIGTERM.
   await new Promise<void>(() => {});
 } catch (err) {
   console.error(`[start-all] ${(err as Error).message}`);
