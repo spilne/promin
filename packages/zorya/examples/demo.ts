@@ -335,12 +335,20 @@ const schedulerTool = createDurableSchedulerTool({
   getClient: (scope) => inProcessSchedulerClient({ storage: schedulerStorage, scope }),
 });
 
-// Ollama config. The base URL is shared between the chat LLM (for
-// `ollama-bot`) and the consolidator (compaction / distillation across
-// every agent). Tiny model is the default — fast enough for summarisation
-// of short demo threads.
+// Ollama config. Shared by `ollama-bot` (chat) and the consolidator
+// (compaction / distillation across every agent).
+//
+// `OLLAMA_MODEL`: chat default. llama3.2:3b is the smallest model in the
+// demo's needle-threading zone — it actually emits tool calls with the
+// right parameter names. Smaller models (qwen2.5:0.5b / 1.5b) either
+// invent schema fields or skip tool calls entirely.
+//
+// `OLLAMA_CONSOLIDATOR_MODEL`: summarisation has no tool-call requirement
+// so we can use a tiny model and trade quality for speed. Defaults to
+// the same chat model so a single `ollama pull` is enough to boot.
 const OLLAMA_URL = process.env["OLLAMA_URL"] ?? "http://localhost:11434";
-const OLLAMA_MODEL = process.env["OLLAMA_MODEL"] ?? "qwen2.5:0.5b";
+const OLLAMA_MODEL = process.env["OLLAMA_MODEL"] ?? "llama3.2:3b";
+const OLLAMA_CONSOLIDATOR_MODEL = process.env["OLLAMA_CONSOLIDATOR_MODEL"] ?? OLLAMA_MODEL;
 
 // Per-agent LLM map — keyed by recipe id. Built once at boot. A discovered
 // agent without an entry here falls through to a default `echoLLM` in the
@@ -456,7 +464,7 @@ function resolveAgent(recipe: RegisteredAgent): Agent {
     consolidatorLlm:
       process.env["ZORYA_CONSOLIDATOR"] === "anthropic" && haveAnthropicKey
         ? anthropic("claude-haiku-4-5-20251001")
-        : ollama({ model: OLLAMA_MODEL, baseURL: OLLAMA_URL }),
+        : ollama({ model: OLLAMA_CONSOLIDATOR_MODEL, baseURL: OLLAMA_URL }),
     // Auto-fire compactThread after each thread turn once the
     // uncompacted backlog crosses either gate. Demo numbers — low
     // enough that you'll see a rollup episode appear in the
