@@ -36,10 +36,11 @@ import {
   isJournaledSuspendStorage,
   type Workflow,
 } from "@promin/workflow";
-import { InMemoryWorkflowStartQueue } from "../src/index.ts";
 import { LocalWorkflows, QueuedWorkflows, ZoryaScheduler, ZoryaAgents } from "../src/index.ts";
 import {
   SqliteWorkflowStorage,
+  SqliteWorkflowStartQueue,
+  SqliteWorkflowAdvertisementRegistry,
   SqliteSchedulerStorage,
   SqliteAgentRegistry,
   SqliteAgentInstanceRegistry,
@@ -655,8 +656,15 @@ function nextId(name: string): string {
 
 // Shared workflow-start queue — used by QueuedWorkflows fallback below
 // so external workers (examples/worker.ts) can claim runs the
-// in-process LocalWorkflows can't handle.
-const workflowStarts = new InMemoryWorkflowStartQueue();
+// in-process LocalWorkflows can't handle. Persisted to the same SQLite
+// db as everything else, so triggers fired before a worker connects
+// stay queued across demo restarts.
+const workflowStarts = SqliteWorkflowStartQueue.make({ db });
+// Worker-advertisement registry — same db, same lifetime. Workers
+// re-advertise on connect, but persisting it means the dashboard's
+// Workflows page survives a quick demo restart without going blank
+// while the worker reconnects.
+const advertisements = SqliteWorkflowAdvertisementRegistry.make({ db });
 
 // ---------------------------------------------------------------------------
 // Background: seed a handful of runs on startup so the first page has data.
@@ -879,6 +887,7 @@ const workflows = new LocalWorkflows({
   fallback: new QueuedWorkflows({
     storage,
     workflowStarts,
+    advertisements,
     acceptAny: true,
   }),
 });

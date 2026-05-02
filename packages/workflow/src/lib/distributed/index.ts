@@ -47,3 +47,17 @@ export {
   metricsMiddleware,
 } from "./middleware.ts";
 export { StepQueueExecutor } from "./step-queue-executor.ts";
+export {
+  type WorkflowAdvertisementRegistry,
+  type AdvertisedWorkflow,
+  type AdvertisementEntry,
+  InMemoryWorkflowAdvertisementRegistry,
+} from "./workflow-advertisements.ts";
+export { workflowAdvertisementRegistryTestSuite } from "./workflow-advertisements-test-suite.ts";
+export {
+  type WorkflowStartQueue,
+  type WorkflowStartRecord,
+  type WorkerWorkflowSpec,
+  InMemoryWorkflowStartQueue,
+} from "./workflow-start-queue.ts";
+export { workflowStartQueueTestSuite } from "./workflow-start-queue-test-suite.ts";

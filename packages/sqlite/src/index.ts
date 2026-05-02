@@ -13,3 +13,11 @@ export { SqliteWorkflowStorage } from "./lib/sqlite-workflow-storage.ts";
 export { SqliteStepQueue } from "./lib/sqlite-step-queue.ts";
 export { SqliteWorkerRegistry } from "./lib/sqlite-worker-registry.ts";
 export { SqliteSchedulerStorage } from "./lib/sqlite-scheduler-storage.ts";
+export {
+  SqliteWorkflowAdvertisementRegistry,
+  type SqliteWorkflowAdvertisementRegistryOptions,
+} from "./lib/sqlite-workflow-advertisements.ts";
+export {
+  SqliteWorkflowStartQueue,
+  type SqliteWorkflowStartQueueOptions,
+} from "./lib/sqlite-workflow-start-queue.ts";

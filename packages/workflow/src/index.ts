@@ -226,6 +226,16 @@ export {
   loggingMiddleware,
   metricsMiddleware,
   StepQueueExecutor,
+  type WorkflowAdvertisementRegistry,
+  type AdvertisedWorkflow,
+  type AdvertisementEntry,
+  InMemoryWorkflowAdvertisementRegistry,
+  workflowAdvertisementRegistryTestSuite,
+  type WorkflowStartQueue,
+  type WorkflowStartRecord,
+  type WorkerWorkflowSpec,
+  InMemoryWorkflowStartQueue,
+  workflowStartQueueTestSuite,
 } from "./lib/distributed/index.ts";
 
 // SQL Models (dbt-style)
