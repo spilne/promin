@@ -119,16 +119,36 @@ export interface CursorChild {
  * Stdout/stderr are returned as readable streams converted to async
  * iterables of Uint8Array. Stdin is closed since `--print` mode reads
  * the prompt from argv.
+ *
+ * `Bun.spawn` throws synchronously when the binary isn't on PATH (the
+ * usual case: Cursor CLI not installed). We catch it and return a
+ * CursorChild that emits the failure as a structured stderr line plus
+ * exitCode -2 so the rest of the pipeline (events / result / agent
+ * stream) handles it the same way as any other "Cursor exited with
+ * an error" path — no crashing the request handler.
  */
 export const defaultCursorTransport: CursorTransport = {
   spawn(args, opts) {
-    const proc = Bun.spawn({
-      cmd: [...args],
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      env: { ...(process.env as Record<string, string>), ...(opts.env as Record<string, string>) },
-    });
+    let proc: ReturnType<typeof Bun.spawn>;
+    try {
+      proc = Bun.spawn({
+        cmd: [...args],
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          ...(process.env as Record<string, string>),
+          ...(opts.env as Record<string, string>),
+        },
+      });
+    } catch (err) {
+      const cmd = args[0] ?? "agent";
+      const message =
+        (err as { code?: string }).code === "ENOENT"
+          ? `Cursor CLI not found on PATH (looked for "${cmd}"). Install with:\n  curl https://cursor.com/install -fsS | bash\nThen ensure ~/.local/bin (or wherever the installer placed it) is on PATH.`
+          : `Failed to spawn Cursor CLI ("${cmd}"): ${(err as Error).message ?? String(err)}`;
+      return spawnFailureChild(message);
+    }
     if (opts.signal) {
       const onAbort = () => {
         try {
@@ -154,6 +174,28 @@ export const defaultCursorTransport: CursorTransport = {
     };
   },
 };
+
+/**
+ * Build a CursorChild that emits one stderr line, no stdout, and exits
+ * with `-2` (our sentinel for "spawn failed before the binary even
+ * ran"). Lets the session pipeline treat spawn failure as the same
+ * kind of error path as a non-zero CLI exit.
+ */
+function spawnFailureChild(message: string): CursorChild {
+  const enc = new TextEncoder();
+  async function* stdout() {
+    // No bytes — the parser flushes nothing.
+  }
+  async function* stderr() {
+    yield enc.encode(`${message}\n`);
+  }
+  return {
+    stdout: stdout(),
+    stderr: stderr(),
+    exited: Promise.resolve(-2),
+    kill: () => {},
+  };
+}
 
 async function* streamToAsyncIterable(
   stream: ReadableStream<Uint8Array>,
@@ -366,16 +408,28 @@ export function runCursorSession(
 
   const result: Promise<CursorSessionResult> = drainComplete.then(async () => {
     const exitCode = await child.exited;
-    const text =
-      resultFrame?.result !== undefined && resultFrame.result.length > 0
-        ? resultFrame.result
-        : accumulatedText;
+    const stderrText = stderrChunks.join("");
+    // Prefer Cursor's authoritative `result.result` text. Fall back to
+    // the cumulative assistant text when the run completed without a
+    // result frame. As a last resort — when the run errored before
+    // producing any text, like a spawn failure — surface stderr so the
+    // caller actually sees what went wrong instead of an empty answer.
     const isError = (resultFrame?.is_error ?? false) || exitCode !== 0;
+    let text: string;
+    if (resultFrame?.result !== undefined && resultFrame.result.length > 0) {
+      text = resultFrame.result;
+    } else if (accumulatedText.length > 0) {
+      text = accumulatedText;
+    } else if (isError && stderrText.length > 0) {
+      text = stderrText.trim();
+    } else {
+      text = "";
+    }
     return {
       sessionId,
       text,
       isError,
-      stderr: stderrChunks.join(""),
+      stderr: stderrText,
       toolCalls: Array.from(toolCalls.entries()).map(([callId, v]) => {
         const out: {
           callId: string;

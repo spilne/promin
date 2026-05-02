@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { buildCursorArgs, runCursorSession } from "../session.ts";
+import { buildCursorArgs, defaultCursorTransport, runCursorSession } from "../session.ts";
 import type { CursorChild, CursorEvent, CursorTransport } from "../session.ts";
 
 // ---------------------------------------------------------------------------
@@ -253,5 +253,29 @@ describe("runCursorSession", () => {
     expect(captured[0]!.args).toContain("auto");
     expect(captured[0]!.args[captured[0]!.args.length - 1]).toBe("build it");
     expect(captured[0]!.env?.CURSOR_API_KEY).toBe("k-1");
+  });
+
+  it("missing Cursor CLI binary surfaces a structured error, not a thrown exception", async () => {
+    // Drive defaultCursorTransport against a binary name we know
+    // doesn't exist. Bun.spawn throws ENOENT synchronously; the
+    // transport must catch it and convert to an error stream so the
+    // session pipeline produces a result with isError=true and a
+    // human-readable stderr message.
+    const { events, result } = runCursorSession(
+      { prompt: "x", command: "promin-cursor-cli-that-does-not-exist-zzz-abc" },
+      defaultCursorTransport,
+    );
+    let stderrText = "";
+    for await (const ev of events) {
+      if (ev.type === "stderr") stderrText += ev.text;
+    }
+    const r = await result;
+    expect(r.isError).toBe(true);
+    expect(r.exitCode).toBe(-2);
+    expect(r.stderr).toMatch(/Cursor CLI not found on PATH/);
+    expect(stderrText).toMatch(/curl https:\/\/cursor\.com\/install/);
+    // text falls back to stderr so callers (including the chat UI's
+    // streaming finish event) actually surface the install hint.
+    expect(r.text).toMatch(/Cursor CLI not found on PATH/);
   });
 });
