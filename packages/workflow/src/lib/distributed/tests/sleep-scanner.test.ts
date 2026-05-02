@@ -190,4 +190,50 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
     expect(errors.length).toBeGreaterThanOrEqual(1);
     expect(errors[0]!.id).toBe("sleep-err");
   });
+
+  it("storage RPC failures don't kill the scan loop — keeps polling, calls onError, recovers", async () => {
+    // Reproduces the symptom seen against a remote storage when the
+    // server briefly drops out: `listWorkflows` throws ConnectionRefused.
+    // Before: the unhandled exception terminated the scan loop. After:
+    // the loop catches, logs, hands off to onError, and keeps going so
+    // it picks up where it left off once the server is back.
+    let nextThrow: Error | null = new Error("Unable to connect");
+    (nextThrow as { code?: string }).code = "ConnectionRefused";
+    let listCalls = 0;
+    const fakeStorage = {
+      async listWorkflows() {
+        listCalls += 1;
+        if (nextThrow) throw nextThrow;
+        return [];
+      },
+    } as unknown as Parameters<typeof createSleepScanner>[0]["storage"];
+
+    const errors: { id: string; err: unknown }[] = [];
+    const scanner = createSleepScanner({
+      storage: fakeStorage,
+      runner: { run: async () => undefined } as unknown as Parameters<
+        typeof createSleepScanner
+      >[0]["runner"],
+      scanIntervalMs: 10,
+      resolveWorkflow: () => undefined,
+      onError: (id, err) => errors.push({ id, err }),
+    });
+
+    void scanner.start();
+    // First few ticks should fail with ConnectionRefused and call onError.
+    await new Promise((r) => setTimeout(r, 60));
+    expect(listCalls).toBeGreaterThanOrEqual(2);
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    expect(errors[0]!.id).toBe("(scan-loop)");
+    expect((errors[0]!.err as { code?: string }).code).toBe("ConnectionRefused");
+
+    // Server "comes back" — clear the throw and verify the loop is
+    // still alive and keeps polling cleanly.
+    nextThrow = null;
+    const callsBefore = listCalls;
+    await new Promise((r) => setTimeout(r, 60));
+    expect(listCalls).toBeGreaterThan(callsBefore);
+
+    await scanner.stop();
+  });
 });

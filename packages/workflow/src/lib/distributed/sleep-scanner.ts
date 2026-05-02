@@ -73,8 +73,33 @@ export class DefaultSleepScanner implements SleepScanner {
 
   async start(): Promise<void> {
     this.running = true;
+    let consecutiveFailures = 0;
     while (this.running) {
-      await this.scan();
+      try {
+        await this.scan();
+        consecutiveFailures = 0;
+      } catch (err) {
+        // Don't kill the scan loop on a transient error — most often
+        // the server is briefly down (dev hot-reload, restart) and the
+        // remote storage RPC throws ConnectionRefused. Log once,
+        // optionally bubble to `onError`, and keep polling.
+        consecutiveFailures += 1;
+        const isNetwork = isNetworkError(err);
+        if (isNetwork) {
+          // Network blip: terse one-liner the first few times, then
+          // stay silent so a long server outage doesn't spam logs.
+          if (consecutiveFailures <= 3) {
+            console.warn(`[sleep-scanner] storage unreachable, retrying — ${describeError(err)}`);
+          }
+        } else {
+          // Real bug-shaped failure: log loudly every time.
+          console.error("[sleep-scanner] scan failed:", err);
+        }
+        // `onError` is documented for resume-failure attribution. Pass
+        // a synthetic id so existing consumers still work, but include
+        // the real error.
+        this.onError?.("(scan-loop)", err);
+      }
       await new Promise<void>((r) => this.clock.setTimeout(() => r(), this.scanIntervalMs));
     }
   }
@@ -130,4 +155,25 @@ export class DefaultSleepScanner implements SleepScanner {
 
 export function createSleepScanner(config: SleepScannerConfig): SleepScanner {
   return new DefaultSleepScanner(config);
+}
+
+/**
+ * Heuristic — is this error a transport/network blip vs a real bug?
+ * Bun and Node throw a few canonical shapes; check both `code` and
+ * the message text. Used to choose between terse-log and loud-log.
+ */
+function isNetworkError(err: unknown): boolean {
+  const code = (err as { code?: string })?.code;
+  if (code === "ConnectionRefused" || code === "ECONNREFUSED") return true;
+  if (code === "ECONNRESET" || code === "ETIMEDOUT") return true;
+  if (code === "ENOTFOUND" || code === "EHOSTUNREACH") return true;
+  const msg = (err as { message?: string })?.message ?? "";
+  return /unable to connect|connection refused|fetch failed|socket hang up/i.test(msg);
+}
+
+/** One-line description for the warning log, no stack noise. */
+function describeError(err: unknown): string {
+  const code = (err as { code?: string })?.code;
+  const msg = (err as { message?: string })?.message ?? String(err);
+  return code ? `${code}: ${msg.split("\n")[0]}` : (msg.split("\n")[0] ?? "");
 }
