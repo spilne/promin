@@ -6,13 +6,18 @@
 // `AgentEvent`s and surfaced on the `AgentRunOutput`.
 //
 // Parity vs LocalAgent / RemoteAgent:
-//   - `invoke` / `stream` — supported
-//   - `thread(id).send` / `thread(id).stream` — supported. v1 spawns a
-//     fresh Cursor session per send (no `--resume` mapping yet); the
-//     thread id is stamped on session metadata for debugging but doesn't
-//     persist conversation across calls.
-//   - `compact` / `distill` / workingMemory / metadata — throw (Cursor
-//     doesn't expose these surfaces)
+//   - `invoke` / `stream` — supported.
+//   - `thread(id).send` / `thread(id).stream` — supported with multi-turn
+//     continuity: the first send captures Cursor's `session_id` from the
+//     initial frame; subsequent sends pass `--resume <session_id>` so
+//     the conversation persists on Cursor's side. Our local thread id
+//     and Cursor's session id are independent — the local id is what
+//     callers use to address the thread; Cursor's session id is hidden
+//     plumbing.
+//   - `compactThread` / `distillThread` — throw (Cursor doesn't expose
+//     these surfaces).
+//   - `workingMemory` / `metadata` / `title` / `setArchived` — no-op so
+//     callers don't have to special-case the backend.
 //   - `withScope` — returns a new instance with the scope baked in;
 //     scope flows into the `--workspace` choice when callers wire one.
 // ---------------------------------------------------------------------------
@@ -144,7 +149,7 @@ class CursorAgentThread implements AgentThread {
   readonly id: string;
   readonly resourceId: string | null;
   readonly isNew = true;
-  /** Cursor's own `session_id`, captured from the first `system init` frame. */
+  /** Cursor's own `session_id`, captured greedily from the first frame that carries one. */
   private cursorSessionId: string | null = null;
 
   constructor(
