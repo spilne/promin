@@ -248,6 +248,18 @@ export type { MemoryToolConfig } from "./tools/memory-tools.ts";
 export { createLayeredMemoryTool } from "./tools/layered-memory-tools.ts";
 export type { LayeredMemoryToolConfig } from "./tools/layered-memory-tools.ts";
 
+export { InMemoryKnowledgeGraph } from "./knowledge-graph.ts";
+export type {
+  KnowledgeGraph,
+  KnowledgeGraphNode,
+  KnowledgeGraphEdge,
+  QueryOptions,
+  SearchResult,
+} from "./knowledge-graph.ts";
+
+export { createKnowledgeGraphTool } from "./tools/knowledge-graph-tools.ts";
+export type { KnowledgeGraphToolsConfig } from "./tools/knowledge-graph-tools.ts";
+
 // Durable scheduler tool — agents create cron / interval schedules that
 // re-fire the agent (or a peer) when they trigger. Pairs with the
 // dispatchAgentSchedule helper for the host's scheduler-loop fireOverride.
