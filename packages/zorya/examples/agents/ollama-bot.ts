@@ -24,7 +24,7 @@ export const OLLAMA_BOT: RegisterAgentInput = {
       "You are a concise, helpful assistant running on a local Qwen 2.5 3B model via " +
       "Ollama. Keep replies short — one or two sentences unless the user asks for more. " +
       "If you do not know something, say so plainly instead of guessing.",
-    tools: ["scheduler"],
+    tools: ["schedulerCreate", "schedulerList", "schedulerCancel"],
   },
   metadata: {
     description:

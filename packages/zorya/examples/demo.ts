@@ -50,7 +50,7 @@ import {
   anthropic,
   ollama,
   applyDiscoveredAgents,
-  createDurableSchedulerTool,
+  createDurableSchedulerTools,
   createFileToolRegistry,
   inProcessSchedulerClient,
   resolveLocalAgent,
@@ -332,7 +332,7 @@ const toolRegistry = await createFileToolRegistry({
 // stamped with the right (namespace, resource, thread, agentId) — no
 // LocalAgent surface needed. Pairs with `dispatchAgentSchedule` which
 // ZoryaServer auto-installs as the loop's fire override (see server.ts).
-const schedulerTool = createDurableSchedulerTool({
+const schedulerTools = createDurableSchedulerTools({
   getClient: (scope) => inProcessSchedulerClient({ storage: schedulerStorage, scope }),
 });
 
@@ -457,7 +457,7 @@ function resolveAgent(recipe: RegisteredAgent): Agent {
     tools: {
       ...toolRegistry.getTools(),
       listWorkflows: listWorkflowsTool,
-      scheduler: schedulerTool,
+      ...schedulerTools,
     },
     // Compaction + distillation is summarisation work — route it to
     // local Ollama by default (free, private, no API roundtrip). Falls

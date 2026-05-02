@@ -1,6 +1,21 @@
 // ---------------------------------------------------------------------------
-// `createDurableSchedulerTool` — agent-callable scheduler that re-fires
-// the agent (or a peer agent) on a cron / interval / rrule trigger.
+// `createDurableSchedulerTools` — three flat agent tools (create / list /
+// cancel) for durable schedules that re-fire an agent on cron / interval /
+// rrule triggers.
+//
+// Why three tools, not one discriminated union
+// --------------------------------------------
+// Small tool-tuned models (qwen2.5:3b, llama3.2:3b) struggle with the
+// "pick one of three" decision when fused with field extraction. We
+// observed (on qwen2.5:3b in the live demo):
+//   - "list my schedules"          → scheduler({}) — drops `command`
+//   - "cancel abc123"              → scheduler({ id: "abc123" }) — drops it too
+//   - "schedule X every 30s"       → scheduler({ command: "list", task: "...", cron: "..." }) — wrong command
+//
+// 7B+ models handle the union fine, but tool-name selection is what every
+// LLM is best at. Three flat tools play to that strength: the model picks
+// `schedulerCreate` / `schedulerList` / `schedulerCancel` by name; field
+// extraction never has to share its budget with discriminator selection.
 //
 // Use case
 // --------
@@ -88,7 +103,6 @@ export interface DurableSchedulerToolDeps {
 const DEFAULT_MAX_PER_THREAD = 20;
 
 const CREATE_SCHEMA = z.object({
-  command: z.literal("create"),
   task: z
     .string()
     .min(1)
@@ -115,11 +129,10 @@ const CREATE_SCHEMA = z.object({
   endAt: z.string().optional().describe("ISO timestamp. Stop firing after this time."),
 });
 
-const LIST_SCHEMA = z.object({ command: z.literal("list") });
+const LIST_SCHEMA = z.object({});
 
 const CANCEL_SCHEMA = z.object({
-  command: z.literal("cancel"),
-  id: z.string().min(1).describe("Id returned from create."),
+  id: z.string().min(1).describe("Id returned from schedulerCreate."),
 });
 
 interface CreateOk {
@@ -155,41 +168,134 @@ interface ListOk {
   }>;
 }
 
-type Output = CreateOk | ListOk | ToolError | { ok: true };
+type CreateInput = z.infer<typeof CREATE_SCHEMA>;
+type ListInput = z.infer<typeof LIST_SCHEMA>;
+type CancelInput = z.infer<typeof CANCEL_SCHEMA>;
 
-type SchedulerInput =
-  | z.infer<typeof CREATE_SCHEMA>
-  | z.infer<typeof LIST_SCHEMA>
-  | z.infer<typeof CANCEL_SCHEMA>;
+export interface DurableSchedulerTools {
+  schedulerCreate: AgentTool<CreateInput, CreateOk | ToolError>;
+  schedulerList: AgentTool<ListInput, ListOk>;
+  schedulerCancel: AgentTool<CancelInput, { ok: true } | ToolError>;
+}
 
+/**
+ * Build the three durable-scheduler tools. Register all three on any
+ * agent that needs to manage its own recurring tasks:
+ *
+ * ```ts
+ * const tools = createDurableSchedulerTools({ getClient: ... });
+ * // recipe.backend.tools = ["schedulerCreate", "schedulerList", "schedulerCancel"]
+ * agent: { tools: { ...tools, ...otherTools } }
+ * ```
+ */
+export function createDurableSchedulerTools(deps: DurableSchedulerToolDeps): DurableSchedulerTools {
+  const maxPerThread = deps.maxPerThread ?? DEFAULT_MAX_PER_THREAD;
+  const generateIdFor = (scope: SchedulerClientScope) =>
+    deps.generateId ?? (() => `${scope.threadId ?? scope.agentId}-${randomUUID().slice(0, 8)}`);
+
+  const schedulerCreate = tool({
+    name: "schedulerCreate",
+    description:
+      "Schedule a recurring agent invocation. Each fire re-runs an agent with the given `task`. Survives server restart. Pass exactly one of `cron` (most common: '0 9 * * MON' = Monday 9am UTC; use `timezone` for other zones), `intervalMs`, or `rrule`. Defaults to firing the SAME agent that called this tool — pass `agentId` only to delegate to a peer.",
+    parameters: CREATE_SCHEMA,
+    execute: async (input, ctx): Promise<CreateOk | ToolError> => {
+      const scope = resolveSchedulerScope(ctx?.scope);
+      if ("error" in scope) return scope;
+      return handleCreate(input, deps.getClient(scope), scope, generateIdFor(scope), maxPerThread);
+    },
+  });
+
+  const schedulerList = tool({
+    name: "schedulerList",
+    description:
+      "List durable schedules you've created in this conversation. Returns id, task, cadence (cron / intervalMs / rrule), enabled flag, last fire time, and tick count. No arguments — call as `schedulerList({})`.",
+    parameters: LIST_SCHEMA,
+    execute: async (_input, ctx): Promise<ListOk> => {
+      const scope = resolveSchedulerScope(ctx?.scope);
+      if ("error" in scope) return { ok: true, schedules: [] };
+      return handleList(deps.getClient(scope));
+    },
+  });
+
+  const schedulerCancel = tool({
+    name: "schedulerCancel",
+    description:
+      "Cancel a durable schedule by its id. The id is the value returned from `schedulerCreate` (or shown in `schedulerList`).",
+    parameters: CANCEL_SCHEMA,
+    execute: async (input, ctx): Promise<{ ok: true } | ToolError> => {
+      const scope = resolveSchedulerScope(ctx?.scope);
+      if ("error" in scope) return scope;
+      return handleCancel(input, deps.getClient(scope));
+    },
+  });
+
+  return { schedulerCreate, schedulerList, schedulerCancel };
+}
+
+// ---------------------------------------------------------------------------
+// Unified `scheduler` tool — same handlers, different surface
+// ---------------------------------------------------------------------------
+//
+// Big tool-tuned models (Claude, GPT-4) handle a 3-way discriminated union
+// fine, and one tool name is a few hundred bytes lighter in the system
+// prompt than three. For agents with already-large tool registries that's
+// a real cost. This unified variant exists for those callers.
+//
+// Implementation note: this builds on the SAME `handleCreate` / `handleList`
+// / `handleCancel` helpers as the split version. Adding a new command
+// (e.g. `pause`) lands in one place — the handler — and both surfaces pick
+// it up. No drift risk between the two API shapes.
+
+const UNIFIED_CREATE_SCHEMA = CREATE_SCHEMA.extend({
+  command: z.literal("create"),
+});
+const UNIFIED_LIST_SCHEMA = z.object({ command: z.literal("list") });
+const UNIFIED_CANCEL_SCHEMA = CANCEL_SCHEMA.extend({
+  command: z.literal("cancel"),
+});
+
+type UnifiedSchedulerInput =
+  | z.infer<typeof UNIFIED_CREATE_SCHEMA>
+  | z.infer<typeof UNIFIED_LIST_SCHEMA>
+  | z.infer<typeof UNIFIED_CANCEL_SCHEMA>;
+type UnifiedSchedulerOutput = CreateOk | ListOk | ToolError | { ok: true };
+
+/**
+ * Build a single `scheduler` tool that takes a `command` discriminator.
+ * Prefer `createDurableSchedulerTools()` for small models — the unified
+ * shape trips up sub-7B models on the discriminator pick.
+ */
 export function createDurableSchedulerTool(
   deps: DurableSchedulerToolDeps,
-): AgentTool<SchedulerInput, Output> {
+): AgentTool<UnifiedSchedulerInput, UnifiedSchedulerOutput> {
   const maxPerThread = deps.maxPerThread ?? DEFAULT_MAX_PER_THREAD;
+  const generateIdFor = (scope: SchedulerClientScope) =>
+    deps.generateId ?? (() => `${scope.threadId ?? scope.agentId}-${randomUUID().slice(0, 8)}`);
 
   return tool({
     name: "scheduler",
     description:
-      "Create / list / cancel durable scheduled tasks. Each schedule re-fires an agent with a task on a cron / interval / rrule trigger. Survives server restart. Three commands:\n" +
-      "  - create({ task, agentId?, cron|intervalMs|rrule, timezone?, startAt?, endAt?, name? }) — schedule a recurring agent invocation\n" +
-      "  - list() — schedules you've created in this conversation\n" +
+      "Create / list / cancel durable scheduled agent invocations. Pick `command`:\n" +
+      "  - create({ task, cron|intervalMs|rrule, agentId?, name?, timezone?, startAt?, endAt? }) — schedule a recurring fire\n" +
+      "  - list() — your schedules in this conversation\n" +
       "  - cancel({ id }) — delete a schedule\n\n" +
-      "Pick exactly one of cron / intervalMs / rrule. Cron is most common ('0 9 * * MON' for Monday 9am UTC; pass `timezone` for other zones). Defaults to firing the SAME agent — pass `agentId` only if you want to delegate to a peer.",
-    parameters: z.discriminatedUnion("command", [CREATE_SCHEMA, LIST_SCHEMA, CANCEL_SCHEMA]),
-    execute: async (input, ctx): Promise<Output> => {
+      "Pick exactly one of cron / intervalMs / rrule. Cron is most common ('0 9 * * MON' = Monday 9am UTC; pass `timezone` for other zones). Defaults to firing the SAME agent — pass `agentId` only to delegate to a peer.",
+    parameters: z.discriminatedUnion("command", [
+      UNIFIED_CREATE_SCHEMA,
+      UNIFIED_LIST_SCHEMA,
+      UNIFIED_CANCEL_SCHEMA,
+    ]),
+    execute: async (input, ctx): Promise<UnifiedSchedulerOutput> => {
       const scope = resolveSchedulerScope(ctx?.scope);
       if ("error" in scope) return scope;
       const client = deps.getClient(scope);
-      const generateId =
-        deps.generateId ?? (() => `${scope.threadId ?? scope.agentId}-${randomUUID().slice(0, 8)}`);
-
       switch (input.command) {
         case "create":
-          return await handleCreate(input, client, scope, generateId, maxPerThread);
+          return handleCreate(input, client, scope, generateIdFor(scope), maxPerThread);
         case "list":
-          return await handleList(client);
+          return handleList(client);
         case "cancel":
-          return await handleCancel(input, client);
+          return handleCancel(input, client);
       }
     },
   });

@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // `dispatchAgentSchedule` — reference dispatch for tick events written by
-// `createDurableSchedulerTool`. Wire this from the host's scheduler-loop
+// `createDurableSchedulerTools`. Wire this from the host's scheduler-loop
 // `fireOverride` so agent-targeted ticks become fresh agent invocations.
 //
 // Contract

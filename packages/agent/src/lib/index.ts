@@ -269,8 +269,14 @@ export type {
   ListPendingApprovalsParams,
 } from "./approvals/list-pending-approvals.ts";
 
-export { createDurableSchedulerTool } from "./tools/durable-scheduler-tool.ts";
-export type { DurableSchedulerToolDeps } from "./tools/durable-scheduler-tool.ts";
+export {
+  createDurableSchedulerTool,
+  createDurableSchedulerTools,
+} from "./tools/durable-scheduler-tool.ts";
+export type {
+  DurableSchedulerToolDeps,
+  DurableSchedulerTools,
+} from "./tools/durable-scheduler-tool.ts";
 export { inProcessSchedulerClient, httpSchedulerClient } from "./tools/scheduler-client.ts";
 export type {
   SchedulerClient,

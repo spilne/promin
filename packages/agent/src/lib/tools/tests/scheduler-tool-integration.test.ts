@@ -15,7 +15,7 @@ import {
 } from "@promin/workflow";
 import { LocalAgent } from "../../agent/local-agent.ts";
 import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
-import { createDurableSchedulerTool } from "../durable-scheduler-tool.ts";
+import { createDurableSchedulerTools } from "../durable-scheduler-tool.ts";
 import { inProcessSchedulerClient } from "../scheduler-client.ts";
 import { dispatchAgentSchedule, isAgentSchedule } from "../dispatch-agent-schedule.ts";
 import type { AgentInput } from "../../agent/types.ts";
@@ -38,11 +38,11 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
     const workflowStorage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage: workflowStorage });
 
-    const schedulerTool = createDurableSchedulerTool({
+    const schedulerTools = createDurableSchedulerTools({
       getClient: (scope) => inProcessSchedulerClient({ storage: schedulerStorage, scope }),
     });
 
-    // First run: assistant calls scheduler.create + we don't expect a
+    // First run: assistant calls schedulerCreate + we don't expect a
     // follow-up since the tool result is enough to wrap the turn.
     const llmResponses: LLMResponse[] = [
       {
@@ -51,9 +51,8 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
         toolCalls: [
           {
             id: "tc-1",
-            name: "scheduler",
+            name: "schedulerCreate",
             input: {
-              command: "create",
               task: "Check Twitter for AI posts",
               intervalMs: 3_600_000,
             },
@@ -71,7 +70,7 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
       agent: {
         name: "writer",
         llm: mockLLM(llmResponses),
-        tools: { scheduler: schedulerTool },
+        tools: schedulerTools,
       },
     });
 
@@ -139,11 +138,11 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
     // dispatcher rolled fresh ids the join would miss and the UI would
     // show "pending" forever.
     const storage = new InMemorySchedulerStorage();
-    const tool = createDurableSchedulerTool({
+    const { schedulerCreate } = createDurableSchedulerTools({
       getClient: (scope) => inProcessSchedulerClient({ storage, scope }),
     });
-    await tool.execute(
-      { command: "create", task: "ping", intervalMs: 60_000 },
+    await schedulerCreate.execute(
+      { task: "ping", intervalMs: 60_000 },
       { scope: { namespaceId: "acme", agentId: "writer", threadId: "t1" } },
     );
     const [sched] = await storage.listSchedules({ namespace: "acme", limit: 5 });
@@ -225,11 +224,11 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
     // isAgentSchedule recognises (so the loop's fire override picks
     // up the row without re-running the agent).
     const storage = new InMemorySchedulerStorage();
-    const tool = createDurableSchedulerTool({
+    const { schedulerCreate } = createDurableSchedulerTools({
       getClient: (scope) => inProcessSchedulerClient({ storage, scope }),
     });
-    await tool.execute(
-      { command: "create", task: "ping", cron: "0 * * * *" },
+    await schedulerCreate.execute(
+      { task: "ping", cron: "0 * * * *" },
       {
         scope: {
           namespaceId: "acme",

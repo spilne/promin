@@ -1,10 +1,10 @@
 // ---------------------------------------------------------------------------
-// createDurableSchedulerTool + dispatchAgentSchedule — verifies:
-//   - create writes a schedule with the right metadata shape
-//   - create rejects when no trigger / multiple triggers
-//   - create enforces the per-thread cap
-//   - list filters to this thread's agent-created schedules
-//   - cancel deletes; rejects cross-thread cancel attempts
+// createDurableSchedulerTools + dispatchAgentSchedule — verifies:
+//   - schedulerCreate writes a schedule with the right metadata shape
+//   - schedulerCreate rejects when no trigger / multiple triggers
+//   - schedulerCreate enforces the per-thread cap
+//   - schedulerList filters to this thread's agent-created schedules
+//   - schedulerCancel deletes; rejects cross-thread cancel attempts
 //   - dispatch helper resolves the recipe + invokes the agent
 //     with a [Scheduled trigger: ...] prefixed task
 //   - dispatch skips non-agent schedules + missing recipes cleanly
@@ -13,7 +13,10 @@
 import { describe, expect, it } from "bun:test";
 import { InMemorySchedulerStorage } from "@promin/workflow";
 import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
-import { createDurableSchedulerTool } from "../durable-scheduler-tool.ts";
+import {
+  createDurableSchedulerTool,
+  createDurableSchedulerTools,
+} from "../durable-scheduler-tool.ts";
 import { dispatchAgentSchedule, isAgentSchedule } from "../dispatch-agent-schedule.ts";
 import { inProcessSchedulerClient } from "../scheduler-client.ts";
 import type { Agent, AgentInput, AgentRunOutput } from "../../agent/types.ts";
@@ -25,9 +28,9 @@ const SCOPE = {
   agentId: "writer",
 } as const;
 
-/** Mimic the agent runtime: build the tool with a per-call client factory. */
-function toolWith(storage: InMemorySchedulerStorage, opts: { maxPerThread?: number } = {}) {
-  return createDurableSchedulerTool({
+/** Mimic the agent runtime: build the tools with a per-call client factory. */
+function toolsWith(storage: InMemorySchedulerStorage, opts: { maxPerThread?: number } = {}) {
+  return createDurableSchedulerTools({
     getClient: (scope) => inProcessSchedulerClient({ storage, scope }),
     ...(opts.maxPerThread !== undefined && { maxPerThread: opts.maxPerThread }),
   });
@@ -36,14 +39,13 @@ function toolWith(storage: InMemorySchedulerStorage, opts: { maxPerThread?: numb
 /** Default ctx populated by the agent runtime — what the tool reads at execute. */
 const CTX = { scope: SCOPE };
 
-describe("createDurableSchedulerTool — create", () => {
+describe("createDurableSchedulerTools — schedulerCreate", () => {
   it("writes a schedule with agent-trigger metadata + scope routing", async () => {
     const storage = new InMemorySchedulerStorage();
-    const tool = toolWith(storage);
+    const tools = toolsWith(storage);
 
-    const result = await tool.execute(
+    const result = await tools.schedulerCreate.execute(
       {
-        command: "create",
         task: "Check Twitter for AI posts and summarize",
         cron: "0 * * * *",
         name: "hourly twitter",
@@ -72,11 +74,10 @@ describe("createDurableSchedulerTool — create", () => {
 
   it("agentId override targets a peer instead of self", async () => {
     const storage = new InMemorySchedulerStorage();
-    const tool = toolWith(storage);
+    const tools = toolsWith(storage);
 
-    const result = await tool.execute(
+    const result = await tools.schedulerCreate.execute(
       {
-        command: "create",
         task: "Draft a status update",
         agentId: "summarizer",
         intervalMs: 60_000,
@@ -92,17 +93,16 @@ describe("createDurableSchedulerTool — create", () => {
   });
 
   it("rejects when no trigger is set", async () => {
-    const tool = toolWith(new InMemorySchedulerStorage());
-    const result = await tool.execute({ command: "create", task: "x" }, CTX);
+    const tools = toolsWith(new InMemorySchedulerStorage());
+    const result = await tools.schedulerCreate.execute({ task: "x" }, CTX);
     expect(result.ok).toBe(false);
     if ("error" in result) expect(result.error).toMatch(/exactly one/);
   });
 
   it("rejects when multiple triggers are set", async () => {
-    const tool = toolWith(new InMemorySchedulerStorage());
-    const result = await tool.execute(
+    const tools = toolsWith(new InMemorySchedulerStorage());
+    const result = await tools.schedulerCreate.execute(
       {
-        command: "create",
         task: "x",
         cron: "* * * * *",
         intervalMs: 60_000,
@@ -115,10 +115,10 @@ describe("createDurableSchedulerTool — create", () => {
 
   it("enforces the per-thread cap", async () => {
     const storage = new InMemorySchedulerStorage();
-    const tool = toolWith(storage, { maxPerThread: 2 });
-    await tool.execute({ command: "create", task: "a", cron: "* * * * *" }, CTX);
-    await tool.execute({ command: "create", task: "b", cron: "* * * * *" }, CTX);
-    const result = await tool.execute({ command: "create", task: "c", cron: "* * * * *" }, CTX);
+    const tools = toolsWith(storage, { maxPerThread: 2 });
+    await tools.schedulerCreate.execute({ task: "a", cron: "* * * * *" }, CTX);
+    await tools.schedulerCreate.execute({ task: "b", cron: "* * * * *" }, CTX);
+    const result = await tools.schedulerCreate.execute({ task: "c", cron: "* * * * *" }, CTX);
     expect(result.ok).toBe(false);
     if ("error" in result) expect(result.error).toMatch(/cap 2/);
   });
@@ -129,8 +129,8 @@ describe("createDurableSchedulerTool — create", () => {
     // after a full server restart re-seeded them. Pin the contract that
     // create() puts the row into due-tracking right away.
     const storage = new InMemorySchedulerStorage();
-    const tool = toolWith(storage);
-    const result = await tool.execute({ command: "create", task: "hi", cron: "0 * * * *" }, CTX);
+    const tools = toolsWith(storage);
+    const result = await tools.schedulerCreate.execute({ task: "hi", cron: "0 * * * *" }, CTX);
     expect(result.ok).toBe(true);
     const due = await storage.findDue({
       now: new Date(),
@@ -141,7 +141,7 @@ describe("createDurableSchedulerTool — create", () => {
   });
 });
 
-describe("createDurableSchedulerTool — list / cancel", () => {
+describe("createDurableSchedulerTools — schedulerList / schedulerCancel", () => {
   it("list returns this thread's agent-created schedules only", async () => {
     const storage = new InMemorySchedulerStorage();
 
@@ -166,11 +166,11 @@ describe("createDurableSchedulerTool — list / cancel", () => {
       metadata: { workflowName: "x" },
     });
     // This thread's
-    const tool = toolWith(storage);
-    const created = await tool.execute({ command: "create", task: "ours", cron: "* * * * *" }, CTX);
+    const tools = toolsWith(storage);
+    const created = await tools.schedulerCreate.execute({ task: "ours", cron: "* * * * *" }, CTX);
     if (!created.ok || !("id" in created)) throw new Error("expected create ok");
 
-    const list = await tool.execute({ command: "list" }, CTX);
+    const list = await tools.schedulerList.execute({}, CTX);
     expect(list.ok).toBe(true);
     if (!("schedules" in list)) throw new Error("expected list result");
     expect(list.schedules.map((s) => s.id)).toEqual([created.id]);
@@ -179,11 +179,11 @@ describe("createDurableSchedulerTool — list / cancel", () => {
 
   it("cancel deletes the row", async () => {
     const storage = new InMemorySchedulerStorage();
-    const tool = toolWith(storage);
-    const created = await tool.execute({ command: "create", task: "x", cron: "* * * * *" }, CTX);
+    const tools = toolsWith(storage);
+    const created = await tools.schedulerCreate.execute({ task: "x", cron: "* * * * *" }, CTX);
     if (!created.ok || !("id" in created)) throw new Error("expected create ok");
 
-    const cancelled = await tool.execute({ command: "cancel", id: created.id }, CTX);
+    const cancelled = await tools.schedulerCancel.execute({ id: created.id }, CTX);
     expect(cancelled.ok).toBe(true);
     expect(await storage.loadSchedule(created.id)).toBeNull();
   });
@@ -203,16 +203,16 @@ describe("createDurableSchedulerTool — list / cancel", () => {
       },
     });
 
-    const tool = toolWith(storage);
-    const result = await tool.execute({ command: "cancel", id: "their-schedule" }, CTX);
+    const tools = toolsWith(storage);
+    const result = await tools.schedulerCancel.execute({ id: "their-schedule" }, CTX);
     expect(result.ok).toBe(false);
     if ("error" in result) expect(result.error).toMatch(/doesn't belong/);
     expect(await storage.loadSchedule("their-schedule")).not.toBeNull();
   });
 
   it("cancel returns error for unknown id", async () => {
-    const tool = toolWith(new InMemorySchedulerStorage());
-    const result = await tool.execute({ command: "cancel", id: "ghost" }, CTX);
+    const tools = toolsWith(new InMemorySchedulerStorage());
+    const result = await tools.schedulerCancel.execute({ id: "ghost" }, CTX);
     expect(result.ok).toBe(false);
     if ("error" in result) expect(result.error).toMatch(/no schedule/);
   });
@@ -411,5 +411,54 @@ describe("isAgentSchedule", () => {
         metadata: { agentTrigger: true, agentId: "writer" }, // missing task + namespaceId
       }),
     ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unified `createDurableSchedulerTool` — same behaviour, single tool surface
+// ---------------------------------------------------------------------------
+
+describe("createDurableSchedulerTool — unified shape (delegates to shared handlers)", () => {
+  function unifiedToolWith(storage: InMemorySchedulerStorage) {
+    return createDurableSchedulerTool({
+      getClient: (scope) => inProcessSchedulerClient({ storage, scope }),
+    });
+  }
+
+  it("create / list / cancel route through the same handlers as the split tools", async () => {
+    const storage = new InMemorySchedulerStorage();
+    const tool = unifiedToolWith(storage);
+
+    // create
+    const created = await tool.execute({ command: "create", task: "ping", cron: "0 * * * *" }, CTX);
+    expect(created.ok).toBe(true);
+    if (!("id" in created)) throw new Error("expected create result");
+
+    // Same metadata shape as the split-tool test asserted above — proves
+    // the unified surface delegates to handleCreate, no parallel impl.
+    const stored = await storage.loadSchedule(created.id);
+    expect(stored?.metadata).toMatchObject({
+      agentTrigger: true,
+      agentId: "writer",
+      task: "ping",
+      namespaceId: "acme",
+    });
+
+    // list
+    const listed = await tool.execute({ command: "list" }, CTX);
+    if (!("schedules" in listed)) throw new Error("expected list result");
+    expect(listed.schedules.map((s) => s.id)).toContain(created.id);
+
+    // cancel
+    const cancelled = await tool.execute({ command: "cancel", id: created.id }, CTX);
+    expect(cancelled.ok).toBe(true);
+    expect(await storage.loadSchedule(created.id)).toBeNull();
+  });
+
+  it("rejects a create with no trigger — same error as the split shape", async () => {
+    const tool = unifiedToolWith(new InMemorySchedulerStorage());
+    const result = await tool.execute({ command: "create", task: "x" }, CTX);
+    expect(result.ok).toBe(false);
+    if ("error" in result) expect(result.error).toMatch(/exactly one/);
   });
 });
