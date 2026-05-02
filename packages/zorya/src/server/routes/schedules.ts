@@ -7,7 +7,7 @@
 // ---------------------------------------------------------------------------
 
 import type { DurableScheduleConfig, SchedulerStorage, WorkflowStorage } from "@promin/workflow";
-import { computeNextRun, isTickLogStorage } from "@promin/workflow";
+import { computeNextRun, isTickLogStorage, scheduleTickRunId } from "@promin/workflow";
 import type { Clock } from "@promin/core";
 import { json, jsonError, readJson } from "../router.ts";
 
@@ -46,13 +46,11 @@ export interface ScheduleTickHistoryDto {
   workflowName: string;
   status: string;
   /**
-   * What kind of execution this tick produced.
-   * - `"workflow"` (default): a normal workflow run; `status` reflects the
-   *   workflow row's lifecycle.
-   * - `"agent"`: dispatched directly to an in-process agent via
-   *   `dispatchAgentSchedule`; there is no workflow row, so `status` is
-   *   `"completed"` (tick fired) and the row's lag/duration columns are
-   *   not meaningful. UI renders an agent-specific badge.
+   * What kind of execution this tick produced — derived from the schedule's
+   * `metadata.agentTrigger`, not from inspecting the run row. Both kinds
+   * produce a workflow row keyed by `scheduleTickRunId(...)`; `kind` is
+   * just provenance for the UI badge. `status`, `lagMs`, `durationMs`
+   * come from the joined workflow row in both cases.
    */
   kind?: "workflow" | "agent";
   /** Wall-clock fire time recorded by the dispatcher (ISO). */
@@ -369,11 +367,18 @@ export function getScheduleHistory(
     // same transaction as the tickCount advance, so the history is always
     // a complete record of every fire, independent of whether the resulting
     // workflow row preserved its metadata across replays / retries.
-    // Agent schedules dispatch directly to an in-process agent and never
-    // produce a workflow row. Skip the workflow lookup entirely and report
-    // each fired tick as a completed agent execution.
+    //
+    // Both workflow- and agent-targeted schedules produce a workflow row
+    // with id `scheduleTickRunId(scheduleId, tickNumber)` — workflow ones
+    // via `scheduler-loop`'s deterministic `workflowId`, agent ones via
+    // `dispatchAgentSchedule` passing `runId` into `agent.invoke`. Same
+    // join either way; the `kind` chip just reflects schedule provenance.
     const isAgentTrigger =
       (config.metadata as { agentTrigger?: unknown } | undefined)?.agentTrigger === true;
+    const fallbackName = isAgentTrigger
+      ? ((config.metadata?.["agentId"] as string) ?? "agent")
+      : ((config.metadata?.["workflowName"] as string) ?? "");
+    const kind: "agent" | "workflow" = isAgentTrigger ? "agent" : "workflow";
 
     if (isTickLogStorage(schedulerStorage)) {
       const [ticks, total] = await Promise.all([
@@ -381,44 +386,27 @@ export function getScheduleHistory(
         schedulerStorage.countTicks({ scheduleId: id }),
       ]);
 
-      if (isAgentTrigger) {
-        const history: ScheduleTickHistoryDto[] = ticks.map((t) => {
-          const wfId = `${id}.${t.tickNumber}`;
-          return {
-            tickNumber: t.tickNumber,
-            workflowId: wfId,
-            workflowName: (config.metadata?.["agentId"] as string) ?? "agent",
-            status: "completed",
-            kind: "agent",
-            firedAt: t.firedAt.toISOString(),
-            scheduledAt: t.scheduledAt.toISOString(),
-            namespace: config.namespace ?? undefined,
-          };
-        });
-        return json(200, { history, total } satisfies ScheduleHistoryResponse);
-      }
-
       // Enrich each tick with status / duration from the matching workflow
-      // row, joined on the deterministic `${scheduleId}.${tickNumber}` id.
-      // One bulk query per page, not N+1.
-      const workflowIds = ticks.map((t) => `${id}.${t.tickNumber}`);
+      // row, joined on the deterministic `scheduleTickRunId` id. One bulk
+      // query per page, not N+1.
+      const workflowIds = ticks.map((t) => scheduleTickRunId(id, t.tickNumber));
       const wfStates = await Promise.all(
         workflowIds.map((wfId) => workflowStorage.loadWorkflow(wfId)),
       );
       const wfById = new Map(wfStates.filter((s) => s != null).map((s) => [s!.workflowId, s!]));
 
       const history: ScheduleTickHistoryDto[] = ticks.map((t) => {
-        const wfId = `${id}.${t.tickNumber}`;
+        const wfId = scheduleTickRunId(id, t.tickNumber);
         const wf = wfById.get(wfId);
         const firedMs = t.firedAt.getTime();
         // Both lag and duration are measured against this fire's
         // `firedAt`, not the workflow row's `startedAt` / `completedAt`
-        // alone. The deterministic id `${scheduleId}.${tick}` can be
-        // reused across reboots when scheduler state resets but workflow
-        // rows persist; in that case `startedAt` is from a prior fire and
-        // would produce nonsense like "12h 47m" for a 6s-ago tick. The
-        // tick log's `firedAt` is freshly written every fire, so we
-        // require any derived latency to live AFTER it.
+        // alone. The deterministic id can be reused across reboots when
+        // scheduler state resets but workflow rows persist; in that case
+        // `startedAt` is from a prior fire and would produce nonsense
+        // like "12h 47m" for a 6s-ago tick. The tick log's `firedAt` is
+        // freshly written every fire, so we require any derived latency
+        // to live AFTER it.
         const lagMs =
           wf?.startedAt && wf.startedAt.getTime() >= firedMs
             ? wf.startedAt.getTime() - firedMs
@@ -430,9 +418,9 @@ export function getScheduleHistory(
         return {
           tickNumber: t.tickNumber,
           workflowId: wfId,
-          workflowName: wf?.workflowName ?? (config.metadata?.["workflowName"] as string) ?? "",
+          workflowName: wf?.workflowName ?? fallbackName,
           status: wf?.status ?? "pending",
-          kind: "workflow" as const,
+          kind,
           firedAt: t.firedAt.toISOString(),
           scheduledAt: t.scheduledAt.toISOString(),
           startedAt: iso(wf?.startedAt),
@@ -487,6 +475,7 @@ export function getScheduleHistory(
         completedAt: iso(wf.completedAt),
         lagMs,
         durationMs,
+        kind,
         namespace: wf.namespace ?? undefined,
       };
     });

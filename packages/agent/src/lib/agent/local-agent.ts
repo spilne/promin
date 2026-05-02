@@ -667,7 +667,11 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     const wf = (agentAction as (cfg: AgentActionConfig<TOutput>) => ReturnType<typeof agentAction>)(
       actionConfig as AgentActionConfig<TOutput>,
     );
-    const workflowId = `${this.config.invokeIdPrefix ?? agent.name}-${randomUUID().slice(0, 8)}`;
+    // Honor caller-provided `runId` so a schedule tick (or any deterministic
+    // caller) lands on the same workflow row across retries. Falls back to
+    // a fresh random id for plain interactive invocations.
+    const workflowId =
+      opts?.runId ?? `${this.config.invokeIdPrefix ?? agent.name}-${randomUUID().slice(0, 8)}`;
 
     // Best-effort cancel: when caller's signal aborts, the underlying
     // runner.run currently has no abort hook, so we just record and
@@ -959,7 +963,11 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     const wf = (agentAction as (cfg: AgentActionConfig<TOutput>) => ReturnType<typeof agentAction>)(
       actionConfig as AgentActionConfig<TOutput>,
     );
-    const workflowId = `${this.deps.key.threadId}-${randomUUID().slice(0, 8)}`;
+    // Honor caller-provided `runId` so a deterministic caller (e.g. a
+    // schedule tick using `scheduleTickRunId`) lands on the same workflow
+    // row across retries. Falls back to a thread-prefixed random id so
+    // `resumeTurn`'s thread-scoped suspended-workflow search still works.
+    const workflowId = opts?.runId ?? `${this.deps.key.threadId}-${randomUUID().slice(0, 8)}`;
 
     const seedLen = seed.length;
     const source = input.source;

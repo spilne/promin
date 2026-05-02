@@ -184,6 +184,7 @@ export {
   validateScheduleConfig,
   scheduleMetadataContains,
   flattenLeafPaths,
+  scheduleTickRunId,
 } from "./lib/scheduler/index.ts";
 
 // Distributed workflow execution

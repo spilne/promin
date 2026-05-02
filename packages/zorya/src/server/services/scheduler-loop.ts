@@ -24,7 +24,7 @@
 // ---------------------------------------------------------------------------
 
 import type { SchedulerStorage, ScheduleTick, DurableScheduleConfig } from "@promin/workflow";
-import { computeDueTicks, computeNextRun } from "@promin/workflow";
+import { computeDueTicks, computeNextRun, scheduleTickRunId } from "@promin/workflow";
 import type { RunTrigger } from "../routes/runs.ts";
 
 export interface SchedulerLoopConfig {
@@ -389,8 +389,9 @@ export class SchedulerLoop {
     }
     // Deterministic workflowId — keeps a duplicate tick (TTL-window leader
     // race) from creating two workflow rows. createWorkflow is idempotent
-    // on workflowId so the second submission is a safe no-op.
-    const workflowId = `${tick.scheduleId}.${tick.tickNumber}`;
+    // on workflowId so the second submission is a safe no-op. Same id
+    // shape used by `dispatchAgentSchedule` for agent-targeted ticks.
+    const workflowId = scheduleTickRunId(tick.scheduleId, tick.tickNumber);
     await this.trigger(workflowName, meta.input, {
       workflowId,
       namespace: meta.namespace ?? schedule.namespace,

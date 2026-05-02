@@ -32,6 +32,7 @@
 // ---------------------------------------------------------------------------
 
 import type { ScheduleTick, DurableScheduleConfig } from "@promin/workflow";
+import { scheduleTickRunId } from "@promin/workflow";
 import type { Agent } from "../agent/types.ts";
 import type { AgentRegistry, RegisteredAgent } from "../registry/types.ts";
 
@@ -131,14 +132,22 @@ export async function dispatchAgentSchedule(
     },
   };
 
+  // Deterministic run id — same `${scheduleId}.${tickNumber}` shape used
+  // by the workflow-trigger path. Two effects: (1) the schedule history
+  // route's join `wf_workflows.workflow_id = scheduleTickRunId(...)` finds
+  // the agent's run row directly, no special-case needed; (2) a leader
+  // race that fires the same tick twice lands on the same workflow row
+  // (createWorkflow is idempotent) instead of double-billing the model.
+  const runId = scheduleTickRunId(tick.scheduleId, tick.tickNumber);
+
   try {
     let text: string;
     if (meta.threadId) {
       const thread = await agent.thread(meta.threadId);
-      const out = await thread.send(input);
+      const out = await thread.send(input, { runId });
       text = await out.text;
     } else {
-      const out = await agent.invoke(input);
+      const out = await agent.invoke(input, { runId });
       text = await out.text;
     }
     const result = { ok: true as const, text };

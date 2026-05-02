@@ -124,6 +124,15 @@ export interface AgentInvokeOpts {
   readonly namespaceId?: string;
   /** Free-form metadata that adapters may surface back on events. */
   readonly metadata?: Readonly<Record<string, unknown>>;
+  /**
+   * Deterministic identity for this run. Backends map this to their own
+   * primitive (durable agents → workflow id; remote agents → forwarded as
+   * a hint). Pass when the caller already owns a stable id for the run —
+   * e.g. a schedule tick uses `scheduleTickRunId(scheduleId, tickNumber)`
+   * so a duplicate fire lands on the same row instead of creating a new
+   * one. Omitted: backend generates a fresh id.
+   */
+  readonly runId?: string;
 }
 
 export interface ThreadOptions {

@@ -102,7 +102,12 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
       id: "writer",
       backend: { type: "local", model: { provider: "x", id: "y" }, systemPrompt: null, tools: [] },
     });
-    const captures: Array<{ task: string; thread?: string; source: AgentInput["source"] }> = [];
+    const captures: Array<{
+      task: string;
+      thread?: string;
+      source: AgentInput["source"];
+      runId?: string;
+    }> = [];
     const fakeAgent = makeCapturingAgent(captures);
 
     const result = await dispatchAgentSchedule(
@@ -126,6 +131,93 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
         scheduleId: sched.id,
       },
     });
+  });
+
+  it("dispatch passes a deterministic runId so a duplicate tick lands on the same run row", async () => {
+    // Two firings of the same tick (e.g. brief leader race) must produce
+    // the SAME runId. Schedule history's join is keyed on this id; if the
+    // dispatcher rolled fresh ids the join would miss and the UI would
+    // show "pending" forever.
+    const storage = new InMemorySchedulerStorage();
+    const tool = createDurableSchedulerTool({
+      getClient: (scope) => inProcessSchedulerClient({ storage, scope }),
+    });
+    await tool.execute(
+      { command: "create", task: "ping", intervalMs: 60_000 },
+      { scope: { namespaceId: "acme", agentId: "writer", threadId: "t1" } },
+    );
+    const [sched] = await storage.listSchedules({ namespace: "acme", limit: 5 });
+
+    const registry = new InMemoryAgentRegistry();
+    await registry.register({
+      id: "writer",
+      backend: { type: "local", model: { provider: "x", id: "y" }, systemPrompt: null, tools: [] },
+    });
+    const captures: Array<{
+      task: string;
+      thread?: string;
+      source: AgentInput["source"];
+      runId?: string;
+    }> = [];
+    const fakeAgent = makeCapturingAgent(captures);
+
+    const tick = {
+      scheduleId: sched!.id,
+      scheduledAt: new Date("2026-04-28T15:00:00Z"),
+      firedAt: new Date("2026-04-28T15:00:01Z"),
+      tickNumber: 7,
+    };
+    await dispatchAgentSchedule(tick, sched!, { registry, resolve: () => fakeAgent });
+    await dispatchAgentSchedule(tick, sched!, { registry, resolve: () => fakeAgent });
+
+    expect(captures).toHaveLength(2);
+    expect(captures[0]!.runId).toBe(`${sched!.id}.7`);
+    expect(captures[1]!.runId).toBe(`${sched!.id}.7`);
+  });
+
+  it("LocalAgent.invoke honors caller-provided runId — the workflow row carries that exact id", async () => {
+    // The dispatch path relies on this contract. If a caller passes
+    // `runId: "X"`, `runner.run` must persist a row at `workflowId = "X"`
+    // — that's the join key the schedule history endpoint uses.
+    const workflowStorage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage: workflowStorage });
+
+    const llmResponses: LLMResponse[] = [{ content: "done.", finishReason: "stop" }];
+    const agent = new LocalAgent({
+      namespaceId: "acme",
+      agentId: "writer",
+      runner,
+      agent: { name: "writer", llm: mockLLM(llmResponses), tools: {} },
+    });
+
+    const fixedId = "schedule-abc.42";
+    const out = await agent.invoke({ task: "hi" }, { runId: fixedId });
+    await out.text;
+
+    const wf = await workflowStorage.loadWorkflow(fixedId);
+    expect(wf).not.toBeNull();
+    expect(wf!.workflowId).toBe(fixedId);
+  });
+
+  it("LocalAgent thread.send honors runId so a scheduled tick lands on the deterministic id", async () => {
+    const workflowStorage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage: workflowStorage });
+    const llmResponses: LLMResponse[] = [{ content: "ok.", finishReason: "stop" }];
+    const agent = new LocalAgent({
+      namespaceId: "acme",
+      agentId: "writer",
+      runner,
+      agent: { name: "writer", llm: mockLLM(llmResponses), tools: {} },
+    });
+
+    const fixedId = "sched-xyz.0";
+    const thread = await agent.thread("t1");
+    const out = await thread.send({ task: "hello" }, { runId: fixedId });
+    await out.text;
+
+    const wf = await workflowStorage.loadWorkflow(fixedId);
+    expect(wf).not.toBeNull();
+    expect(wf!.workflowId).toBe(fixedId);
   });
 
   it("isAgentSchedule + the fire-callback shape match the schedule the tool writes", async () => {
@@ -154,7 +246,12 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
 });
 
 function makeCapturingAgent(
-  captures: Array<{ task: string; thread?: string; source: AgentInput["source"] }>,
+  captures: Array<{
+    task: string;
+    thread?: string;
+    source: AgentInput["source"];
+    runId?: string;
+  }>,
 ) {
   const noopOutput = {
     text: Promise.resolve("ok"),
@@ -169,15 +266,20 @@ function makeCapturingAgent(
   // biome-ignore lint/suspicious/noExplicitAny: minimal stub
   const agent: any = {
     withScope: () => agent,
-    invoke: async (input: AgentInput) => {
-      captures.push({ task: input.task, source: input.source });
+    invoke: async (input: AgentInput, opts?: { runId?: string }) => {
+      captures.push({ task: input.task, source: input.source, runId: opts?.runId });
       return noopOutput;
     },
     thread: async (id: string) => ({
       id,
       isNew: false,
-      send: async (input: AgentInput) => {
-        captures.push({ task: input.task, thread: id, source: input.source });
+      send: async (input: AgentInput, opts?: { runId?: string }) => {
+        captures.push({
+          task: input.task,
+          thread: id,
+          source: input.source,
+          runId: opts?.runId,
+        });
         return noopOutput;
       },
       stream: () => noopOutput,

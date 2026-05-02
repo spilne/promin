@@ -1,4 +1,5 @@
 export type { ScheduleConfig, DurableScheduleConfig, ScheduleTick } from "./types.ts";
+export { scheduleTickRunId } from "./types.ts";
 export type { Scheduler } from "./scheduler.ts";
 export { InMemoryScheduler, createScheduler } from "./in-memory-scheduler.ts";
 export type { SchedulerStorage } from "./scheduler-storage.ts";
