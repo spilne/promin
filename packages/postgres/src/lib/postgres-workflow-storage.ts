@@ -1088,7 +1088,11 @@ export class PostgresWorkflowStorage
       durationMs: record.durationMs,
       startedAt: record.startedAt,
       completedAt: record.completedAt,
-      workerId: record.workerId,
+      // Schema column is still named `worker_id` (drizzle field
+      // `workerId`); the StepAttemptRecord interface renamed
+      // `workerId` → `executorId` so non-worker executors (in-process
+      // runner, embedded ZoryaWorkflows) read naturally too.
+      workerId: record.executorId,
     });
   }
 
@@ -1118,7 +1122,7 @@ export class PostgresWorkflowStorage
       durationMs: Number(r.durationMs ?? 0),
       startedAt: r.startedAt,
       completedAt: r.completedAt,
-      workerId: r.workerId ?? undefined,
+      executorId: r.workerId ?? undefined,
     }));
   }
 

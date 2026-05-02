@@ -6,7 +6,7 @@
 // exactly-once delivery and natural load balancing.
 // ---------------------------------------------------------------------------
 
-import { eq, and, lt, sql } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import type { StepQueue, StepTask, FairnessPolicy } from "@promin/workflow";
 import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
 import { stepQueue } from "./schema.ts";
@@ -286,8 +286,13 @@ export class PgStepQueue implements StepQueue {
     if (params.claimedBy) {
       conditions.push(eq(stepQueue.claimedBy, params.claimedBy));
     } else if (params.staleTimeoutMs) {
-      const cutoff = new Date(this.clock.currentTimeMs() - params.staleTimeoutMs);
-      conditions.push(lt(sql`COALESCE(${stepQueue.heartbeatAt}, ${stepQueue.claimedAt})`, cutoff));
+      // postgres-js refuses to bind Date directly against an untyped
+      // parameter; same workaround as `metrics()` below — pass an ISO
+      // string and let Postgres cast it.
+      const cutoff = new Date(this.clock.currentTimeMs() - params.staleTimeoutMs).toISOString();
+      conditions.push(
+        sql`COALESCE(${stepQueue.heartbeatAt}, ${stepQueue.claimedAt}) < ${cutoff}::timestamptz`,
+      );
     } else {
       return 0;
     }

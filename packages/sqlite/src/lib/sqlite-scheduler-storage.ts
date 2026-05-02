@@ -355,7 +355,14 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
         config.metadata ? JSON.stringify(config.metadata) : null,
         config.overlapPolicy ?? "allow",
         config.maxCatchUp ?? 0,
-        config.enabled === false ? null : now, // seed next_run on enabled INSERT only
+        // Seed next_run on enabled INSERT, honoring `startAt` so a deferred
+        // schedule isn't reported as due before its start time. ON CONFLICT
+        // below leaves the existing next_run alone.
+        config.enabled === false
+          ? null
+          : config.startAt && config.startAt.getTime() > now
+            ? config.startAt.getTime()
+            : now,
         now,
         now,
       );

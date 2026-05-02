@@ -155,11 +155,16 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
       this.state.set(config.id, { lastFired: null, tickCount: 0 });
     }
     // Seed nextRun on INSERT so findDue picks it up without a separate
-    // setNextRun call. On UPDATE, leave the existing nextRun untouched —
-    // the caller (registerAsync, patchSchedule) is responsible for
-    // recomputing it when the trigger expression changes.
+    // setNextRun call. Honor `startAt` if it's in the future — otherwise a
+    // schedule with a deferred start would still be reported as due
+    // immediately, which masks the "not yet" gate for callers that rely
+    // on storage-level filtering (e.g. `findDueAcross` in scaling tests).
+    // On UPDATE, leave the existing nextRun untouched — the caller
+    // (registerAsync, patchSchedule) is responsible for recomputing.
     if (isNew && !this.nextRun.has(config.id) && config.enabled !== false) {
-      this.nextRun.set(config.id, Date.now());
+      const now = Date.now();
+      const startAtMs = config.startAt ? config.startAt.getTime() : 0;
+      this.nextRun.set(config.id, Math.max(now, startAtMs));
     }
   }
 

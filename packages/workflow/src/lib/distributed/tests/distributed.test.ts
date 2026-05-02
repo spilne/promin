@@ -1025,8 +1025,8 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
     const attempts = await storage.loadStepAttempts("worker-trace");
     const okAttempt = attempts.find((a) => a.stepName === "ok");
     const boomAttempt = attempts.find((a) => a.stepName === "boom");
-    expect(okAttempt?.workerId).toBe("worker-alpha");
-    expect(boomAttempt?.workerId).toBe("worker-alpha");
+    expect(okAttempt?.executorId).toBe("worker-alpha");
+    expect(boomAttempt?.executorId).toBe("worker-alpha");
   });
 });
 
