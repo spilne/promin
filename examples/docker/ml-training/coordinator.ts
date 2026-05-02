@@ -33,7 +33,7 @@ const coordinator = createCoordinator({
 });
 
 console.log("[coordinator] starting (versions: 1, 2 registered)");
-coordinator.start().catch((err) => {
+coordinator.startLoop().catch((err) => {
   console.error("[coordinator] loop crashed", err);
   process.exit(1);
 });
@@ -71,7 +71,7 @@ console.log(
 const shutdown = async (): Promise<void> => {
   console.log("[coordinator] shutting down");
   clearInterval(submitTimer);
-  await coordinator.stop();
+  await coordinator.stopLoop();
   await close();
   process.exit(0);
 };

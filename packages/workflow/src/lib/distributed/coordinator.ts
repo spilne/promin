@@ -163,6 +163,15 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
     return this.innerRunner.getStatus(workflowId, params);
   }
 
+  /**
+   * Load the workflow's current persistent state. Pairs with the
+   * deprecated `WorkflowCoordinator.status` contract — new callers should
+   * prefer `getStatus()` (richer info) or `storage.loadWorkflow()`.
+   */
+  status(workflowId: string): Promise<WorkflowState | null> {
+    return this.storage.loadWorkflow(workflowId);
+  }
+
   recover(strategy: RecoveryStrategy): Promise<RecoveryResult> {
     return this.innerRunner.recover(strategy);
   }
@@ -246,6 +255,16 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
       })
       .finally(() => this.runningWorkflows.delete(workflowId));
     this.runningWorkflows.set(workflowId, p);
+  }
+
+  /**
+   * Wait for a previously-submitted workflow to complete (or fail). Pairs
+   * with `submit({...})` for the deprecated submit-then-wait flow that
+   * the `WorkflowCoordinator` interface still describes; new code should
+   * use `run({...})` which submits + waits in one call.
+   */
+  waitForResult<Output>(workflowId: string): Promise<Output> {
+    return this._waitForResult<Output>(workflowId);
   }
 
   private _waitForResult<Output>(workflowId: string): Promise<Output> {

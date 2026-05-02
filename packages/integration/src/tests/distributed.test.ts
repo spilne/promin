@@ -115,13 +115,13 @@ withPostgres("Distributed DAG workflow — video processing pipeline", (ctx) => 
     });
 
     // Start coordinator and worker in background
-    coordinator.start();
+    void coordinator.startLoop();
     worker.start();
 
     // Wait for completion
     const result = await coordinator.waitForResult<{ notified: boolean }>("vid-001");
 
-    await coordinator.stop();
+    await coordinator.stopLoop();
     await worker.stop();
 
     // Verify result
@@ -206,7 +206,7 @@ withPostgres("Distributed workers — competing task execution", (ctx) => {
     );
 
     // Start everything
-    coordinator.start();
+    void coordinator.startLoop();
     workers.forEach((w) => w.start());
 
     // Wait for all 50 workflows
@@ -219,7 +219,7 @@ withPostgres("Distributed workers — competing task execution", (ctx) => {
       { timeoutMs: 30_000, intervalMs: 200 },
     );
 
-    await coordinator.stop();
+    await coordinator.stopLoop();
     await Promise.all(workers.map((w) => w.stop()));
 
     // Verify no duplicates — each step executed exactly once
@@ -443,13 +443,13 @@ withPostgres("Queue routing — GPU vs CPU workers", (ctx) => {
       input: { imageUrl: "https://images.example.com/cat.jpg" },
     });
 
-    coordinator.start();
+    void coordinator.startLoop();
     gpuWorker.start();
     cpuWorker.start();
 
     await coordinator.waitForResult("ml-001");
 
-    await coordinator.stop();
+    await coordinator.stopLoop();
     await gpuWorker.stop();
     await cpuWorker.stop();
 
@@ -590,7 +590,7 @@ withAll("E2E: Kafka orders → distributed workflow → completion", (ctx) => {
     }
 
     // Start coordinator and worker
-    coordinator.start();
+    void coordinator.startLoop();
     worker.start();
 
     // Consume from Kafka and submit each order as a workflow
@@ -614,7 +614,7 @@ withAll("E2E: Kafka orders → distributed workflow → completion", (ctx) => {
       { timeoutMs: 10_000, intervalMs: 100 },
     );
 
-    await coordinator.stop();
+    await coordinator.stopLoop();
     await worker.stop();
     await kt.disconnect();
 

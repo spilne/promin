@@ -60,6 +60,18 @@ if ARGV[9] ~= '' then
   table.insert(fields, 'version')
   table.insert(fields, ARGV[9])
 end
+-- ARGV[10] = namespace (empty when none)
+if ARGV[10] ~= '' then
+  table.insert(fields, 'namespace')
+  table.insert(fields, ARGV[10])
+end
+-- ARGV[11] = metadata JSON (empty when none) — stored verbatim, parsed
+-- back on claim so search-attribute callers can round-trip arbitrary
+-- shapes (mirrors PgStepQueue.metadata).
+if ARGV[11] ~= '' then
+  table.insert(fields, 'metadata')
+  table.insert(fields, ARGV[11])
+end
 redis.call('HSET', task_key, unpack(fields))
 
 local priority = tonumber(ARGV[4])
@@ -183,6 +195,7 @@ export class RedisStepQueue implements StepQueue {
     priority?: number;
     namespace?: string;
     version?: string;
+    metadata?: Record<string, unknown>;
   }): Promise<string> {
     const priority = params.priority ?? 5;
     const needs = params.needs ?? [];
@@ -202,6 +215,8 @@ export class RedisStepQueue implements StepQueue {
       JSON.stringify(needs),
       this.clock.now().toISOString(),
       params.version ?? "",
+      params.namespace ?? "",
+      params.metadata !== undefined ? JSON.stringify(params.metadata) : "",
     )) as string;
     return id;
   }
@@ -408,7 +423,7 @@ export class RedisStepQueue implements StepQueue {
       map[arr[i]!] = arr[i + 1]!;
     }
     if (!map.id) return null;
-    return {
+    const task: StepTask = {
       id: map.id,
       workflowId: map.workflowId ?? "",
       stepName: map.stepName ?? "",
@@ -419,8 +434,16 @@ export class RedisStepQueue implements StepQueue {
       attempt: parseInt(map.attempt ?? "1", 10),
       status: "running" as const,
       createdAt: new Date(map.createdAt ?? this.clock.currentTimeMs()),
-      version: map.version,
     };
+    // Optional fields are only set when present so a missing value
+    // round-trips as `undefined`, not the empty string we used in the
+    // Lua's empty-sentinel handling.
+    if (map.version) (task as { version?: string }).version = map.version;
+    if (map.namespace) (task as { namespace?: string }).namespace = map.namespace;
+    if (map.metadata) {
+      (task as { metadata?: Record<string, unknown> }).metadata = JSON.parse(map.metadata);
+    }
+    return task;
   }
 }
 
