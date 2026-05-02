@@ -158,7 +158,7 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
       const names = params.workflowSpecs.map((s) => s.name);
       const placeholders = names.map(() => "?").join(", ");
       const candidates = this.db
-        .query<Row, string[]>(
+        .query<Row>(
           `SELECT * FROM ${t}
            WHERE status = 'pending' AND workflow_name IN (${placeholders})
            ORDER BY enqueued_at ASC
@@ -225,7 +225,7 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
       )
       .run(cutoff);
 
-    const rows = this.db.query<Row, []>(`SELECT * FROM ${this._t} ORDER BY enqueued_at ASC`).all();
+    const rows = this.db.query<Row>(`SELECT * FROM ${this._t} ORDER BY enqueued_at ASC`).all();
     return rows.map(rowToRecord);
   }
 }

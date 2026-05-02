@@ -119,7 +119,7 @@ export class SqliteWorkflowAdvertisementRegistry implements WorkflowAdvertisemen
 
   async list(): Promise<AdvertisementEntry[]> {
     const rows = this.db
-      .query<Row, []>(`SELECT * FROM ${this._t} ORDER BY worker_id, workflow_name`)
+      .query<Row>(`SELECT * FROM ${this._t} ORDER BY worker_id, workflow_name`)
       .all();
     const byWorker = new Map<string, AdvertisementEntry>();
     for (const r of rows) {
@@ -145,7 +145,7 @@ export class SqliteWorkflowAdvertisementRegistry implements WorkflowAdvertisemen
     // Dedupe on (workflow_name, version), keeping whichever row was
     // advertised most recently. Mirrors InMemoryWorkflowAdvertisementRegistry.
     const rows = this.db
-      .query<Row, []>(
+      .query<Row>(
         `SELECT * FROM ${this._t}
          ORDER BY workflow_name ASC, COALESCE(version, '') ASC, advertised_at DESC`,
       )

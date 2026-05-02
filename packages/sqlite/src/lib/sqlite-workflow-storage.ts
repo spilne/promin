@@ -26,7 +26,6 @@ import type {
   StepAttemptStorage,
   StepAttemptRecord,
   StepAttemptType,
-  FenceGuard,
 } from "@promin/workflow";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
@@ -1446,14 +1445,14 @@ export class SqliteWorkflowStorage
     }
     const rows = stepName
       ? this.db
-          .query<Row, [string, string]>(
+          .query<Row>(
             `SELECT * FROM ${this._t}_attempts
              WHERE workflow_id = ? AND step_name = ?
              ORDER BY attempt ASC, type ASC`,
           )
           .all(workflowId, stepName)
       : this.db
-          .query<Row, [string]>(
+          .query<Row>(
             `SELECT * FROM ${this._t}_attempts
              WHERE workflow_id = ?
              ORDER BY step_name ASC, attempt ASC, type ASC`,
