@@ -44,6 +44,18 @@ export { PgChangeStream, type PgChangeStreamConfig } from "./lib/pg-change-strea
 // Distributed step queue (SKIP LOCKED)
 export { PgStepQueue, type PgStepQueueConfig } from "./lib/pg-step-queue.ts";
 
+// Workflow advertisements + start queue — Postgres-backed for multi-replica
+// coordination. Same `WorkflowAdvertisementRegistry` / `WorkflowStartQueue`
+// interfaces the in-memory + sqlite backends implement.
+export {
+  PgWorkflowAdvertisementRegistry,
+  type PgWorkflowAdvertisementRegistryConfig,
+} from "./lib/pg-workflow-advertisements.ts";
+export {
+  PgWorkflowStartQueue,
+  type PgWorkflowStartQueueConfig,
+} from "./lib/pg-workflow-start-queue.ts";
+
 // Leader election (advisory lock)
 export { PgLeaderElection, type PgLeaderElectionConfig } from "./lib/pg-leader-election.ts";
 

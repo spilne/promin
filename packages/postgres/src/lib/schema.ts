@@ -325,6 +325,83 @@ export const workerRegistry = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Workflow advertisements — workers publish their workflow definitions
+// (name, version, DAG steps, optional sample input) on connect.
+// Postgres-backed so multi-replica deployments share one catalog;
+// readers populate dashboards + dispatch lookups via `distinct()`.
+// ---------------------------------------------------------------------------
+
+export const workflowAdvertisements = pgTable(
+  "wf_workflow_advertisements",
+  {
+    workerId: text("worker_id").notNull(),
+    workflowName: text("workflow_name").notNull(),
+    // Nullable version is part of the conceptual key; we expose it via a
+    // partial unique index pair below (the row PK is a composite).
+    version: text("version"),
+    // JSON payload of the AdvertisedWorkflow.steps array — kept as jsonb
+    // for flexible querying and forward-compat (steps gain new fields).
+    steps: jsonb("steps").notNull(),
+    sampleInput: jsonb("sample_input"),
+    advertisedAt: timestamp("advertised_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    // Composite uniqueness: a worker can advertise one (name, version)
+    // pair at a time. Two indexes because Postgres treats NULL as
+    // distinct in unique constraints — we want NULL versions to also
+    // dedupe per (worker, name).
+    uniqueIndex("wf_workflow_advertisements_worker_name_version_idx")
+      .on(t.workerId, t.workflowName, t.version)
+      .where(sql`${t.version} IS NOT NULL`),
+    uniqueIndex("wf_workflow_advertisements_worker_name_nullver_idx")
+      .on(t.workerId, t.workflowName)
+      .where(sql`${t.version} IS NULL`),
+    // Dashboard's "show every workflow" + dispatch's "find by name"
+    // both pivot on (workflow_name, version).
+    index("wf_workflow_advertisements_workflow_idx").on(t.workflowName, t.version),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Workflow start queue — pending start-workflow requests that a worker
+// must claim. Used by the queued / split deployment shape: dashboard
+// triggers create the storage row + push a start onto this queue;
+// workflow-mode workers poll, claim, and execute. Postgres-backed for
+// multi-replica deployments where the dashboard server doesn't run
+// workflows in-process.
+// ---------------------------------------------------------------------------
+
+export const workflowStarts = pgTable(
+  "wf_workflow_starts",
+  {
+    id: text("id").primaryKey(),
+    workflowId: text("workflow_id").notNull(),
+    workflowName: text("workflow_name").notNull(),
+    version: text("version"),
+    input: jsonb("input").notNull(),
+    metadata: jsonb("metadata"),
+    enqueuedAt: timestamp("enqueued_at", { withTimezone: true }).notNull().defaultNow(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    claimedBy: text("claimed_by"),
+    // status: 'pending' (waiting for a worker) | 'claimed' (in flight).
+    // Completion deletes the row to keep the queue tight.
+    status: text("status").notNull().default("pending"),
+  },
+  (t) => [
+    // Hot path: workers claim by (workflow_name, enqueued_at) over the
+    // pending partition only. Partial index keeps the scan tight even
+    // when the queue accumulates inflight + completed history.
+    index("wf_workflow_starts_pending_idx")
+      .on(t.workflowName, t.enqueuedAt)
+      .where(sql`${t.status} = 'pending'`),
+    // Stale-claim sweeper: find rows past the reclaim window.
+    index("wf_workflow_starts_claimed_idx")
+      .on(t.claimedAt)
+      .where(sql`${t.status} = 'claimed'`),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // State machine tables
 // ---------------------------------------------------------------------------
 
