@@ -53,6 +53,7 @@ import {
   createDurableSchedulerTools,
   createFileToolRegistry,
   inProcessSchedulerClient,
+  resolveCursorAgent,
   resolveLocalAgent,
   resolveRemoteAgent,
   tool,
@@ -447,6 +448,7 @@ async function seedAgents() {
 // for recursive `callAgent` lookups.
 function resolveAgent(recipe: RegisteredAgent): Agent {
   if (recipe.backend.type === "remote") return resolveRemoteAgent(recipe);
+  if (recipe.backend.type === "cursor") return resolveCursorAgent(recipe);
   return resolveLocalAgent(recipe, {
     runner,
     memory: memoryStore,
@@ -970,6 +972,7 @@ console.log(`                  + queued fallback for any workflow advertised by 
 console.log(`  - Agents:       ${agentScan.agents.map((a) => a.id).join(", ") || "(none)"}`);
 console.log(`                  • local backends (echo-bot, support-bot, ollama-bot, …)`);
 console.log(`                  • remote backend (remote-bot — federation proxy)`);
+console.log(`                  • cursor backend (cursor-bot — Cursor CLI 'agent -p')`);
 console.log(`  - Dashboard:    http://${host}:${actualPort}/`);
 console.log(`  - Agents tab:   http://${host}:${actualPort}/#/agents`);
 console.log(``);

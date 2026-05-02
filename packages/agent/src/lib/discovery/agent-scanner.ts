@@ -16,7 +16,27 @@ import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { type Clock, SystemClock } from "@promin/core";
-import type { AgentRegistry, RegisterAgentInput } from "../registry/types.ts";
+import type { AgentBackend, AgentRegistry, RegisterAgentInput } from "../registry/types.ts";
+
+/**
+ * Per-backend list of env vars that must be present at materialization
+ * time. The discovery pass uses this to warn at registration time —
+ * the resolver itself enforces them when called. Extend when a new
+ * `AgentBackend` variant introduces auth.
+ */
+function backendRequiredEnv(backend: AgentBackend): ReadonlyArray<string> {
+  switch (backend.type) {
+    case "local":
+      return backend.requiredEnv ?? [];
+    case "cursor":
+      // Default mirrors `resolveCursorAgent`'s default — `CURSOR_API_KEY`
+      // unless the recipe overrides.
+      return backend.requiredEnv ?? ["CURSOR_API_KEY"];
+    case "remote":
+      // Bearer-token auth lives on the recipe itself, not in env.
+      return [];
+  }
+}
 
 export interface AgentScannerOptions {
   /** File extensions to consider. Default: `.ts, .tsx, .js, .mjs`. */
@@ -214,12 +234,17 @@ export async function applyDiscoveredAgents(
   for (const input of agents) {
     if (options.idPrefix !== undefined && !input.id.startsWith(options.idPrefix)) continue;
     const wasExisting = existingIds.has(input.id) || (await registry.get(input.id)) !== null;
-    if (input.backend.type === "local" && input.backend.requiredEnv) {
-      const missing = input.backend.requiredEnv.filter((name) => !process.env[name]);
+    // Backend-specific required-env probe. We DON'T refuse to register a
+    // recipe whose env is missing — recipe rows are JSON and stay
+    // useful once the operator wires the var. We just warn so the boot
+    // log makes the missing config obvious.
+    const required = backendRequiredEnv(input.backend);
+    if (required.length > 0) {
+      const missing = required.filter((name) => !process.env[name]);
       if (missing.length > 0) {
         console.warn(
           `[agent-registry] registering "${input.id}" but required env var(s) are not set: ${missing.join(", ")}. ` +
-            "The recipe will be stored; resolveLocalAgent will throw until the vars are present.",
+            "The recipe will be stored; the resolver will throw until the vars are present.",
         );
       }
     }
