@@ -142,7 +142,47 @@ export { resolveLocalAgent } from "./registry/resolve-local-agent.ts";
 export type { ResolveLocalAgentDeps } from "./registry/resolve-local-agent.ts";
 export { RemoteAgent } from "./registry/remote-agent.ts";
 export { resolveRemoteAgent } from "./registry/resolve-remote-agent.ts";
-export type { RemoteAgentBackend } from "./registry/types.ts";
+export type { RemoteAgentBackend, CursorAgentBackend } from "./registry/types.ts";
+
+// Cursor backend — drives the Cursor CLI (`agent -p`) over its
+// stream-json NDJSON output. Two surfaces share the same session engine:
+// the registry-resolved `CursorAgent` (for whole-conversation routing)
+// and `createCursorCodingTool` (for inline delegation from another agent).
+export {
+  CursorAgent,
+  resolveCursorAgent,
+  runCursorSession,
+  buildCursorArgs,
+  defaultCursorTransport,
+  NdJsonLineParser,
+  classifyFrame,
+  assistantFrameText,
+} from "./cursor/index.ts";
+export type {
+  CursorAgentConfig,
+  ResolveCursorAgentDeps,
+  CursorEvent,
+  CursorSessionRequest,
+  CursorSessionResult,
+  CursorTransport,
+  CursorChild,
+  TransportSpawnOptions,
+  CursorFrame,
+  CursorAssistantFrame,
+  CursorResultFrame,
+  CursorSystemInitFrame,
+  CursorToolCallFrame,
+  CursorUnknownFrame,
+  CursorUserFrame,
+  CursorTextContent,
+} from "./cursor/index.ts";
+export { createCursorCodingTool } from "./tools/cursor-coding-tool.ts";
+export type {
+  CursorCodingToolDeps,
+  CursorCodingToolResult,
+  CursorCodingToolResultOk,
+  CursorCodingToolResultError,
+} from "./tools/cursor-coding-tool.ts";
 
 // Metrics — pluggable telemetry sink (Counter / Histogram). Default
 // no-op so instrumentation has zero cost when unconfigured. Hosts wire

@@ -51,7 +51,7 @@ export interface AgentMetadata {
  * - `local`  — LocalAgent running in this process (agentAction / agentLoop)
  * - `remote` — thin HTTP proxy forwarding calls to another Zorya deployment
  */
-export type AgentBackend = LocalAgentBackend | RemoteAgentBackend;
+export type AgentBackend = LocalAgentBackend | RemoteAgentBackend | CursorAgentBackend;
 
 export interface LocalAgentBackend {
   readonly type: "local";
@@ -126,6 +126,40 @@ export interface RemoteAgentBackend {
   };
   /** Per-call timeout in ms. No timeout by default. */
   readonly timeoutMs?: number;
+}
+
+/**
+ * Cursor backend — drives Anthropic's Cursor CLI (`agent -p`) over its
+ * NDJSON stream-json output. The runtime spawns one child per
+ * invocation; the resolver wires `process.env.CURSOR_API_KEY` (or
+ * whatever is named in `requiredEnv`) into the child env.
+ *
+ * Use case: route a tenant's coding-heavy agent invocations to Cursor
+ * while keeping chat / tool-driven agents on `local`.
+ */
+export interface CursorAgentBackend {
+  readonly type: "cursor";
+  /** Override the binary name. Default: `"agent"`. */
+  readonly command?: string;
+  /** Default model. Cursor accepts e.g. `"auto"`, `"composer-2"`, `"sonnet-4.5-thinking"`. */
+  readonly model?: string;
+  /** Workspace path Cursor operates in (mapped to `--workspace`). */
+  readonly workspace?: string;
+  /** Spawn inside a fresh git worktree (`--worktree`). */
+  readonly worktree?: boolean;
+  /** Pass `--trust` (skip Cursor's first-run trust prompt). Default: true. */
+  readonly trust?: boolean;
+  /** `--sandbox enabled|disabled`. Default: omitted (Cursor's own default). */
+  readonly sandbox?: "enabled" | "disabled";
+  /** Extra raw args appended to every spawn. Forward-compat for new flags. */
+  readonly extraArgs?: ReadonlyArray<string>;
+  /**
+   * Env var names that must be set at resolve time. Default:
+   * `["CURSOR_API_KEY"]`. `resolveCursorAgent` throws with a descriptive
+   * error when any are missing; `applyDiscoveredAgents` warns at
+   * registration time.
+   */
+  readonly requiredEnv?: ReadonlyArray<string>;
 }
 
 /**
