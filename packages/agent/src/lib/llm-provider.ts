@@ -27,6 +27,26 @@ export interface LLMUsage {
   cacheWriteTokens?: number;
 }
 
+/**
+ * Provider-supplied rate-limit budget remaining after this call. Populated
+ * by adapters that read headers from the API (e.g. Anthropic's
+ * `x-ratelimit-remaining-tokens` / `-reset-tokens`). Optional everywhere —
+ * adapters that don't expose it omit the field and consumers fall back to
+ * round-robin / blind retry. Surfaces on `LLMResponse` and on the final
+ * `LLMStreamChunk` (the one carrying `finishReason`).
+ *
+ * Used by `rotatingLLM` to pick the slot with the most headroom and to
+ * mark a slot exhausted before the next 429 fires.
+ */
+export interface RateLimitHint {
+  /** Remaining input tokens in the current rate-limit window. */
+  remainingTokens?: number;
+  /** Remaining requests in the current rate-limit window. */
+  remainingRequests?: number;
+  /** Unix-ms timestamp when the current window resets. */
+  resetsAt?: number;
+}
+
 export type LLMFinishReason = "stop" | "tool_calls" | "length" | "error";
 
 export interface LLMResponse {
@@ -36,6 +56,8 @@ export interface LLMResponse {
   usage?: LLMUsage;
   /** Thinking blocks produced by extended thinking, if enabled. */
   thinkingBlocks?: ThinkingBlock[];
+  /** Optional provider-reported rate-limit budget after this call. */
+  rateLimitHint?: RateLimitHint;
 }
 
 export interface LLMStreamChunk {
@@ -50,6 +72,11 @@ export interface LLMStreamChunk {
   /** Set on the final chunk. */
   finishReason?: LLMFinishReason;
   usage?: LLMUsage;
+  /**
+   * Provider-reported rate-limit budget. Set on the final chunk when the
+   * adapter has access to response headers (Anthropic, OpenAI, etc.).
+   */
+  rateLimitHint?: RateLimitHint;
 }
 
 export interface LLMProvider {

@@ -393,6 +393,7 @@ export type {
   LLMToolDefinition,
   LLMUsage,
   LLMFinishReason,
+  RateLimitHint,
 } from "./llm-provider.ts";
 
 export type {
@@ -428,6 +429,12 @@ export { resilientLLM } from "./adapters/resilient-llm.ts";
 export type { ResilientLLMPolicy } from "./adapters/resilient-llm.ts";
 export { classifyLLMError } from "./adapters/llm-error-classification.ts";
 export type { LLMErrorClass } from "./adapters/llm-error-classification.ts";
+
+export { rotatingLLM } from "./adapters/rotating-llm.ts";
+export type { RotatingLLMOptions, RotatingLLMStrategy } from "./adapters/rotating-llm.ts";
+
+export { InMemoryCapacityStore } from "./adapters/capacity-store.ts";
+export type { CapacityStore } from "./adapters/capacity-store.ts";
 
 export { ollama } from "./adapters/ollama.ts";
 export type { OllamaOptions } from "./adapters/ollama.ts";

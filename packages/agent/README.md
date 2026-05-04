@@ -410,6 +410,34 @@ const llm = fallbackLLM([primaryProvider, backupProvider]);
 
 **Note**: mid-stream fallback in `chatStream()` delivers partial interleaved output. Use `chat()` if that is unacceptable.
 
+### rotatingLLM
+
+Distribute load across N providers (typically multiple API keys for the same model) and transparently failover on 429:
+
+```ts
+import { rotatingLLM, InMemoryCapacityStore } from "@promin/agent";
+
+const llm = rotatingLLM([
+  anthropic("claude-sonnet-4-6", { apiKey: keyA }),
+  anthropic("claude-sonnet-4-6", { apiKey: keyB }),
+  anthropic("claude-sonnet-4-6", { apiKey: keyC }),
+]);
+```
+
+Selection: when slots report `LLMResponse.rateLimitHint.remainingTokens` (Anthropic does), `rotatingLLM` picks the slot with the most headroom. Otherwise it round-robins. Set `strategy: "round-robin"` to force it.
+
+Failover: a 429 marks the slot exhausted in a `CapacityStore` (using the response's `Retry-After` header) and the call retries against the next available slot. Near-zero `remainingTokens` mark the slot proactively, before the next 429 fires (`exhaustionTokenThreshold`, default `1000`).
+
+Multi-replica: pass a shared `CapacityStore` (Redis / Postgres) so a 429 hit by one process is honoured by every other process — no thundering-herd of 429s after the first slot exhausts. The default `InMemoryCapacityStore` is single-process.
+
+```ts
+const llm = rotatingLLM(slots, {
+  strategy: "round-robin",
+  capacityStore: redisCapacityStore,
+  exhaustionTokenThreshold: 5_000,
+});
+```
+
 ### twoSpeedLLM
 
 Automatically routes to a cheap/fast model for synthesis steps and a capable model for reasoning:

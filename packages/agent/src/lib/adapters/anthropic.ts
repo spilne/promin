@@ -4,6 +4,7 @@ import type {
   LLMResponse,
   LLMStreamChunk,
   LLMFinishReason,
+  RateLimitHint,
 } from "../llm-provider.ts";
 import type { Message, ToolCall, ThinkingBlock } from "../message.ts";
 
@@ -162,7 +163,9 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
       }
 
       const data = (await resp.json()) as AnthropicResponse;
-      return parseAnthropicResponse(data);
+      const parsed = parseAnthropicResponse(data);
+      const rateLimitHint = parseRateLimitHeaders(resp.headers);
+      return rateLimitHint ? { ...parsed, rateLimitHint } : parsed;
     },
 
     async *chatStream(params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
@@ -177,6 +180,10 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
         const text = await resp.text();
         throw new Error(`Anthropic API error ${resp.status}: ${text}`);
       }
+
+      // Stream headers arrive on the response itself, before the first
+      // SSE event. Capture once so the final chunk can carry the hint.
+      const rateLimitHint = parseRateLimitHeaders(resp.headers);
 
       // Accumulate per-block state keyed by block index
       const textBlocks = new Map<number, string>();
@@ -260,9 +267,52 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
         thinkingBlocks: completedThinkingBlocks.length > 0 ? completedThinkingBlocks : undefined,
         usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
+        ...(rateLimitHint ? { rateLimitHint } : {}),
       };
     },
   };
+}
+
+/**
+ * Read Anthropic's rate-limit headers off a Response and project them onto
+ * the protocol-level `RateLimitHint`. Returns `undefined` when no headers
+ * are present (e.g. test fakes, gateways that strip them) so consumers
+ * fall back to round-robin / blind retry without spurious zero hints.
+ *
+ * Header names per Anthropic's public API docs:
+ *   - x-ratelimit-remaining-tokens     — input-token budget remaining
+ *   - x-ratelimit-remaining-requests   — request budget remaining
+ *   - x-ratelimit-reset-tokens         — ISO-8601 reset timestamp (token bucket)
+ *
+ * The token reset is the most operationally useful timestamp. Falls back
+ * to the requests reset header when the token reset is missing.
+ */
+function parseRateLimitHeaders(headers: Headers): RateLimitHint | undefined {
+  const remainingTokens = parseIntHeader(headers.get("x-ratelimit-remaining-tokens"));
+  const remainingRequests = parseIntHeader(headers.get("x-ratelimit-remaining-requests"));
+  const resetsAt = parseDateHeader(
+    headers.get("x-ratelimit-reset-tokens") ?? headers.get("x-ratelimit-reset-requests"),
+  );
+  if (remainingTokens === undefined && remainingRequests === undefined && resetsAt === undefined) {
+    return undefined;
+  }
+  return {
+    ...(remainingTokens !== undefined && { remainingTokens }),
+    ...(remainingRequests !== undefined && { remainingRequests }),
+    ...(resetsAt !== undefined && { resetsAt }),
+  };
+}
+
+function parseIntHeader(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const n = Number.parseInt(value, 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function parseDateHeader(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const t = Date.parse(value);
+  return Number.isFinite(t) ? t : undefined;
 }
 
 async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncIterable<SSEEvent> {
