@@ -130,6 +130,34 @@ export interface JournaledContext<Input, Prev> {
   readonly workflowId: string;
 
   /**
+   * `true` when the body is re-executing on top of pre-existing journal
+   * entries — i.e. a worker restart / signal-resume / continueAsNew
+   * recovery is replaying earlier yields from the journal. `false` on
+   * the very first execution (no journal entries yet).
+   *
+   * The flag is fixed for the duration of one body invocation. It does
+   * NOT flip to `false` mid-body when the cursor passes the journal
+   * tail; "this body has run before" is the useful question for hook
+   * authors, and the simpler answer.
+   *
+   * Use it to gate non-idempotent side effects in code that runs
+   * BETWEEN `ctx.activity` yields (the body re-runs from the top each
+   * worker pass, so unguarded `metrics.record(...)` between yields
+   * double-counts on every restart). Side effects INSIDE
+   * `ctx.activity` callbacks don't need this gate — journal hits
+   * short-circuit the callback so it only fires fresh.
+   *
+   * ```ts
+   * .journaled("step", function*(ctx) {
+   *   const result = yield* ctx.activity("a", () => api.fetch());
+   *   if (!ctx.isReplay) metrics.record("step.progressed");
+   *   return result;
+   * })
+   * ```
+   */
+  readonly isReplay: boolean;
+
+  /**
    * The version the workflow row was created under, as stored in the DB.
    * Exposed for user-space custom version-comparison logic (e.g. semver,
    * date-based ordering) when `ctx.patched()`'s set-membership model
@@ -1340,6 +1368,7 @@ function makeCtx<Input, Prev>(params: {
     input,
     prev,
     workflowId,
+    isReplay: journal.length > 0,
     workflowVersion,
     activity,
     sleep,

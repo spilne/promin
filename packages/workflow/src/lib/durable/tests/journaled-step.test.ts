@@ -158,6 +158,81 @@ describe("journaled step", () => {
     });
   });
 
+  describe("ctx.isReplay", () => {
+    it("is false on the first body invocation and true on a replay run", async () => {
+      const seen: boolean[] = [];
+      const body = function* (ctx: JournaledContext<unknown, unknown>) {
+        seen.push(ctx.isReplay);
+        const v = yield* ctx.activity("a", async () => "v");
+        return v;
+      };
+
+      const first = await runJournaledStep({
+        input: {},
+        prev: {},
+        workflowId: "wf-replay-flag",
+        stepName: "step",
+        storage,
+        body,
+      });
+      expect(first).toBe("v");
+      expect(seen).toEqual([false]);
+
+      const replayed = await runJournaledStep({
+        input: {},
+        prev: {},
+        workflowId: "wf-replay-flag",
+        stepName: "step",
+        storage,
+        body,
+      });
+      expect(replayed).toBe("v");
+      // Body re-runs on replay; the second pass starts on top of a non-empty
+      // journal so isReplay flips to true. The first pass is unchanged.
+      expect(seen).toEqual([false, true]);
+    });
+
+    it("between-yield code observes isReplay=true on replay even when the activity short-circuits", async () => {
+      let betweenCalls = 0;
+      const isReplaySeenBetweenYields: boolean[] = [];
+      let activityCalls = 0;
+
+      const body = function* (ctx: JournaledContext<unknown, unknown>) {
+        const a = yield* ctx.activity("a", async () => {
+          activityCalls++;
+          return 1;
+        });
+        // This code runs every body pass (between yields) — not journaled.
+        // On replay it observes ctx.isReplay=true while the wrapping
+        // activity itself short-circuits and isn't re-invoked.
+        betweenCalls++;
+        isReplaySeenBetweenYields.push(ctx.isReplay);
+        return a;
+      };
+
+      await runJournaledStep({
+        input: {},
+        prev: {},
+        workflowId: "wf-isreplay-between",
+        stepName: "step",
+        storage,
+        body,
+      });
+      await runJournaledStep({
+        input: {},
+        prev: {},
+        workflowId: "wf-isreplay-between",
+        stepName: "step",
+        storage,
+        body,
+      });
+
+      expect(activityCalls).toBe(1); // journal short-circuited the second call
+      expect(betweenCalls).toBe(2); // body re-ran end-to-end
+      expect(isReplaySeenBetweenYields).toEqual([false, true]);
+    });
+  });
+
   describe("errors and retries", () => {
     it("activity failure: failure is journaled, replay rethrows, fn not re-run", async () => {
       let calls = 0;
