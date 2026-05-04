@@ -430,7 +430,10 @@ describe("createAgentTown — daemon turn timeout", () => {
     await new Promise<void>((r) => setTimeout(r, 10));
 
     expect(result).toBe("done");
-    expect(receivedToolResult).toContain("[from worker]");
+    // Daemon errors arrive as a structured `agent-error` envelope; readInbox
+    // formats them as "[from <name>, error] <detail>" so the LLM can tell
+    // a failure apart from a normal peer reply.
+    expect(receivedToolResult).toContain("[from worker, error]");
     expect(receivedToolResult).toContain("timed out");
     await town.close();
   });

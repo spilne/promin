@@ -42,6 +42,14 @@ export interface StepContext {
   step: number;
   messages: Message[];
   workflowId: string;
+  /**
+   * `true` when the workflow body is executing on top of pre-existing
+   * journal entries (worker restart / signal-resume). `onStep` runs
+   * BETWEEN journaled activities, so the body re-runs the callback on
+   * every recovery pass — gate non-idempotent side effects on
+   * `!ctx.isReplay` (or no-op the side-effect entirely on replay).
+   */
+  isReplay: boolean;
 }
 
 export interface AgentActionMemoryConfig {
@@ -192,6 +200,20 @@ export class StructuredOutputParseError extends Error {
  * Use `agentLoop` instead when you need a persistent interactive session with
  * multiple user turns, streaming, or manual context compaction.
  *
+ * ## Error contract
+ *
+ * Errors propagate through the workflow runner; classify them with
+ * `surfaceAgentError` to recover the kind:
+ * - `step-limit` (`MaxStepsError`): the loop ran `maxSteps` think steps
+ *   without a final answer.
+ * - `user-error`: includes `StructuredOutputParseError` (LLM produced a
+ *   `_respond` payload that failed Zod validation), tool errors, hook
+ *   errors, anything thrown by user code.
+ * - `infra-error`: framework / transient failures (e.g. `RetryableError`).
+ * - `suspended`: not normally observed — agentAction has no signal /
+ *   sleep yields, so suspension only happens if a tool or hook throws
+ *   `WorkflowSuspendedError` directly.
+ *
  * @example
  * ```ts
  * const agent = agentAction({
@@ -294,7 +316,12 @@ export function agentAction(
             tools: toolDefs.length > 0 ? toolDefs : undefined,
             rateLimiter: config.rateLimiter,
             processors: config.processors,
-            processorCtx: { step, turn: 0, workflowId: ctx.workflowId },
+            processorCtx: {
+              step,
+              turn: 0,
+              workflowId: ctx.workflowId,
+              isReplay: ctx.isReplay,
+            },
             onChunk: (delta) => {
               config.onChunk?.(delta);
               bus?.emit({ type: "token.delta", turn: 0, delta });
@@ -365,7 +392,12 @@ export function agentAction(
         messages = [...messages, assistantMsg];
 
         if (config.onStep) {
-          const decision = config.onStep({ step, messages, workflowId: ctx.workflowId });
+          const decision = config.onStep({
+            step,
+            messages,
+            workflowId: ctx.workflowId,
+            isReplay: ctx.isReplay,
+          });
           if (decision && !decision.continue) {
             const answer = response.content ?? "";
             yield* maybeSaveMemory(answer);

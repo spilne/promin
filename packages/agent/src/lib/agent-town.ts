@@ -9,6 +9,8 @@ import type { AgentSession, HooksConfig } from "./agent-loop.ts";
 import type { ToolCall } from "./message.ts";
 import type { MemoryIndex } from "./memory-index.ts";
 import type { SessionLogger } from "./session-logger.ts";
+import { surfaceAgentError } from "./agent-shared.ts";
+import type { SurfacedAgentErrorKind } from "./agent-shared.ts";
 
 // ---- AsyncQueue ----
 
@@ -44,9 +46,31 @@ class AsyncQueue<T> {
 
 // ---- types ----
 
-interface InboxMessage {
-  from: string;
-  content: string;
+/**
+ * Discriminated union of envelope kinds that can land in an agent's inbox.
+ *
+ * - `message`: a normal peer message OR a sentinel (`__shutdown__`,
+ *   `__interrupted__`) used by `town.close()` / `interruptMayorInbox()`.
+ * - `agent-error`: a daemon agent's turn threw. Surfaced to the sender so
+ *   their `readInbox()` unblocks with a structured failure rather than
+ *   a `'Error: ...'` string. `kind` mirrors `SurfacedAgentError.kind`
+ *   so callers can branch on (transient infra vs deliberate user error).
+ */
+type InboxMessage =
+  | { readonly kind: "message"; readonly from: string; readonly content: string }
+  | {
+      readonly kind: "agent-error";
+      readonly from: string;
+      readonly detail: string;
+      readonly errorKind: SurfacedAgentErrorKind;
+    };
+
+function formatInboxForReader(msg: InboxMessage): string {
+  if (msg.kind === "agent-error") {
+    return `[from ${msg.from}, error] ${msg.detail}`;
+  }
+  if (msg.from === "__interrupted__") return "(turn interrupted by user)";
+  return `[from ${msg.from}] ${msg.content}`;
 }
 
 export interface AgentDefinition {
@@ -154,6 +178,17 @@ export interface AgentTown {
  *   are plain async loops and will not restart after a process crash.
  * - The `AsyncQueue` inboxes — in-memory only; messages in flight are lost on crash.
  *
+ * ## Error contract
+ *
+ * Daemon agent failures (turn timeout, tool error, LLM error) DO NOT
+ * propagate out of the town. The daemon catches them, classifies via
+ * `surfaceAgentError`, and pushes a structured `agent-error` envelope
+ * into the sender's inbox: `{ kind: 'agent-error', from, detail, errorKind }`.
+ * The sender's `readInbox()` returns a formatted string
+ * (`[from <name>, error] <detail>`) so the LLM can tell a failure apart
+ * from a normal peer reply. Mayor failures propagate to `town.ask()` /
+ * `town.stream()` consistently with `agentLoop`'s contract.
+ *
  * To make the town fully restartable, replace `AsyncQueue` with a durable message
  * queue (e.g. `PgStepQueue` or a Kafka topic) and wrap each daemon iteration in a
  * workflow activity. Session history survives automatically as long as `sessionId`
@@ -223,7 +258,7 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
           const inbox = inboxes.get(to);
           if (!inbox)
             return `Unknown recipient "${to}". Available: ${peers(agentName).join(", ")}.`;
-          inbox.push({ from: agentName, content });
+          inbox.push({ kind: "message", from: agentName, content });
           sentTo?.add(to);
           return `Delivered to ${to}.`;
         },
@@ -244,8 +279,7 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
         execute: async () => {
           const inbox = inboxes.get(agentName)!;
           const msg = await inbox.pop();
-          if (msg.from === "__interrupted__") return "(turn interrupted by user)";
-          return `[from ${msg.from}] ${msg.content}`;
+          return formatInboxForReader(msg);
         },
       });
     }
@@ -394,7 +428,7 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
           // Attach .catch() before the race so that if timeoutPromise wins and then
           // session.close() later rejects sendPromise, it doesn't become an unhandled rejection.
           // The result is discarded either way — the sender is unblocked via the catch block below.
-          const sendPromise = session.send(`[from ${msg.from}] ${msg.content}`);
+          const sendPromise = session.send(formatInboxForReader(msg));
           sendPromise.catch(() => {});
           const answer = await Promise.race([sendPromise, timeoutPromise]);
 
@@ -403,15 +437,23 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
           // If the agent's LLM didn't call sendMessage back to the sender,
           // auto-reply with its text output so the sender's readInbox unblocks.
           if (!sentTo.has(msg.from) && inboxes.has(msg.from)) {
-            inboxes.get(msg.from)!.push({ from: name, content: answer });
+            inboxes.get(msg.from)!.push({ kind: "message", from: name, content: answer });
           }
         } catch (err) {
           config.onAgentActivity?.({ agent: name, state: "idle" });
-          // On error, unblock the sender with an error notice.
+          // On error, unblock the sender with a structured agent-error
+          // envelope. `surfaceAgentError` strips Effect FiberFailure
+          // wrappers and tags the kind so downstream consumers can
+          // branch (e.g. retry on `infra-error`, surface to user on
+          // `user-error`) without re-implementing the unwrap chain.
           if (inboxes.has(msg.from)) {
-            inboxes
-              .get(msg.from)!
-              .push({ from: name, content: `Error: ${(err as Error).message}` });
+            const surfaced = surfaceAgentError(err);
+            inboxes.get(msg.from)!.push({
+              kind: "agent-error",
+              from: name,
+              detail: surfaced.error.message,
+              errorKind: surfaced.kind,
+            });
           }
         }
       }
@@ -441,7 +483,7 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
       // Only push the sentinel when the mayor is actually blocked in readInbox.
       // If nobody is waiting, we'd leave a stale message that would confuse the next turn.
       if (inbox?.hasPendingPop) {
-        inbox.push({ from: "__interrupted__", content: "" });
+        inbox.push({ kind: "message", from: "__interrupted__", content: "" });
       }
     },
 
@@ -459,7 +501,7 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
       closed = true;
       // Unblock any daemon blocked in inbox.pop().
       for (const [name, inbox] of inboxes) {
-        if (name !== "human") inbox.push({ from: "__shutdown__", content: "" });
+        if (name !== "human") inbox.push({ kind: "message", from: "__shutdown__", content: "" });
       }
       await Promise.allSettled(daemons);
       for (const [, sp] of sessionPromises) {

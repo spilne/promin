@@ -128,6 +128,26 @@ agentLoop({
 });
 ```
 
+### Side effects in hooks
+
+Most agent hooks (`beforeTurn`, `afterTurn`, `onLifecycle`, `onApprovalRequired`, `processors.beforeLLM` / `afterLLM`) run inside journaled activities. The journal short-circuits the callback on replay — the activity's recorded return value is read directly without re-invoking the hook. This is the right default for replay safety: a worker restart mid-turn won't re-prompt the user for approval, won't double-write to your audit log, won't double-bump a rate-limit counter.
+
+`agentAction`'s `onStep` is the exception. It runs BETWEEN journaled activities, so the workflow body re-runs the callback on every recovery pass. To gate non-idempotent side effects, every hook context now carries a boolean `isReplay` flag plumbed from `ctx.isReplay` on the workflow body:
+
+```ts
+agentAction({
+  // ...
+  onStep: ({ step, isReplay }) => {
+    if (isReplay) return; // skip metrics on replay
+    metrics.record("agent.step", { step });
+  },
+});
+```
+
+The semantics: `isReplay` is `true` when the wrapping workflow body is executing on top of pre-existing journal entries (worker restart, signal-resume). For hooks that fire only when their wrapping `ctx.activity` is fresh (everything except `onStep`), the flag tells you whether the BODY containing this activity has been re-started — useful when you want side effects keyed to body restarts, but not required for replay safety. For `onStep`, gate non-idempotent side effects on `!isReplay`.
+
+For durable audit trails of approval decisions, prefer the persistent approval-storage primitive over relying on `onApprovalRequired` side effects — the storage records decisions outside the activity boundary so they survive replay correctly.
+
 ---
 
 ## agentAction — single-shot workflows

@@ -210,6 +210,54 @@ describe("agentAction", () => {
     expect(result.steps).toBe(1);
   });
 
+  it("onStep receives isReplay=false on a fresh run (plumbing check)", async () => {
+    const seen: boolean[] = [];
+    const agent = agentAction({
+      name: "isreplay-agent",
+      llm: mockLLM([{ content: "ok", finishReason: "stop" }]),
+      onStep: ({ isReplay }) => {
+        seen.push(isReplay);
+      },
+    });
+
+    const { runner } = makeRunner();
+    await runner.start({
+      workflow: agent,
+      workflowId: "w-isreplay",
+      input: { task: "go" },
+    });
+
+    // Plumbing check: the flag arrives as `false` on the very first body
+    // pass. Replay-mode behaviour (true after a body re-execution) is
+    // covered at the workflow-runner level in journaled-step.test.ts —
+    // agentAction is one-shot so the runner doesn't re-execute the body
+    // once it completes.
+    expect(seen).toEqual([false]);
+  });
+
+  it("processors.beforeLLM ctx.isReplay is plumbed (false on fresh run)", async () => {
+    const replayValuesSeen: boolean[] = [];
+    const agent = agentAction({
+      name: "isreplay-procs",
+      llm: mockLLM([{ content: "ok", finishReason: "stop" }]),
+      processors: {
+        beforeLLM: (msgs, ctx) => {
+          replayValuesSeen.push(ctx.isReplay);
+          return msgs;
+        },
+      },
+    });
+
+    const { runner } = makeRunner();
+    await runner.start({
+      workflow: agent,
+      workflowId: "w-isreplay-procs",
+      input: { task: "go" },
+    });
+
+    expect(replayValuesSeen).toEqual([false]);
+  });
+
   it("seeds conversation with prior messages", async () => {
     let capturedMessages: unknown[] = [];
 

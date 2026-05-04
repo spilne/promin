@@ -25,6 +25,7 @@ import {
   nonSystemMsgs,
   resolveTools,
   searchRelevantMemories,
+  surfaceAgentError,
 } from "./agent-shared.ts";
 import type { SessionLogger, SessionEvent } from "./session-logger.ts";
 import { SessionEventBus } from "./session-logger.ts";
@@ -36,6 +37,15 @@ import type { CompactionConfig } from "./agent-loop-compaction.ts";
 export interface HooksTurnParams {
   task: string;
   messages: Message[];
+  /**
+   * `true` when the agent's workflow body is executing on top of
+   * pre-existing journal entries (worker restart / signal-resume).
+   * `beforeTurn` runs inside a journaled activity so it fires only on
+   * fresh runs of the activity itself — `isReplay: true` means the
+   * body has been re-started but THIS activity is past the journal
+   * cursor and is firing for the first time.
+   */
+  isReplay: boolean;
 }
 
 export interface HooksAfterTurnParams {
@@ -45,6 +55,13 @@ export interface HooksAfterTurnParams {
   usage: { inputTokens: number; outputTokens: number };
   /** True when the turn was cut short by maxStepsPerTurn — the answer is a "(step limit reached)" sentinel. */
   truncated: boolean;
+  /**
+   * `true` when the workflow body is replaying. Same semantics as
+   * `HooksTurnParams.isReplay` — `afterTurn` runs inside a journaled
+   * activity, so this is only `true` when the body itself has been
+   * re-started but the activity is firing fresh.
+   */
+  isReplay: boolean;
 }
 
 export interface HooksConfig {
@@ -306,6 +323,15 @@ export interface AgentLifecycleEvent extends AgentLifecycleEntry {
   sessionId: string;
   /** The context of the destination state (e.g. `{ turn, task }` for "thinking"). */
   context: unknown;
+  /**
+   * `true` when the workflow body is executing on top of pre-existing
+   * journal entries. Lifecycle events fire from inside journaled
+   * activities so the hook only runs when the activity is fresh —
+   * `isReplay: true` indicates the body has been re-started by a
+   * worker restart or signal-resume but this particular transition
+   * is past the journal cursor.
+   */
+  isReplay: boolean;
 }
 
 export interface StreamOptions {
@@ -399,17 +425,6 @@ export interface AgentLoop {
   session(params: { runner: WorkflowRunner; sessionId: string }): Promise<AgentSession>;
 }
 
-// Effect wraps thrown errors inside journaled steps in a FiberFailure.
-// WorkflowSuspendedError is a normal signal that the workflow is waiting —
-// not a real failure. Check both the direct tag and the FiberFailure defect.
-// Validated against Effect 3.x; the cause symbol is a stable public API.
-const FIBER_FAILURE_CAUSE = Symbol.for("effect/Runtime/FiberFailure/Cause");
-
-type FiberFailureCause =
-  | { _tag: "Die"; defect: unknown }
-  | { _tag: "Fail"; error: unknown }
-  | { _tag: string };
-
 /**
  * Strip extended-thinking blocks from assistant messages older than the
  * most recent user turn. Thinking is per-turn ephemeral state — useful
@@ -446,29 +461,6 @@ export function redactPriorThinkingBlocks(messages: ReadonlyArray<Message>): Mes
     const { thinkingBlocks: _, ...rest } = m;
     return rest as Message;
   });
-}
-
-function getFiberFailureCause(error: unknown): FiberFailureCause | undefined {
-  if (!error || typeof error !== "object") return undefined;
-  return (error as Record<symbol, FiberFailureCause | undefined>)[FIBER_FAILURE_CAUSE];
-}
-
-function isWorkflowSuspension(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  if ((error as { _tag?: string })._tag === "WorkflowSuspendedError") return true;
-  const cause = getFiberFailureCause(error);
-  return (
-    cause?._tag === "Die" &&
-    (cause as { defect?: { _tag?: string } }).defect?._tag === "WorkflowSuspendedError"
-  );
-}
-
-/** Unwrap an Effect FiberFailure to get the underlying thrown error, if any. */
-function unwrapFiberFailure(error: unknown): unknown {
-  const cause = getFiberFailureCause(error);
-  if (cause?._tag === "Die") return (cause as { defect: unknown }).defect;
-  if (cause?._tag === "Fail") return (cause as { error: unknown }).error;
-  return error;
 }
 
 // ---- ChunkQueue ----
@@ -542,6 +534,17 @@ interface SessionState {
  * - **Approval gate**: tools with `requireApproval: true` pause the turn until
  *   `session.approve(toolCallId)` or `session.reject(toolCallId)` is called.
  * - **Idle hook**: `hooks.onIdle` fires after the session sits quiet for `idleTimeoutMs`.
+ *
+ * ## Error contract
+ *
+ * `session.send()` / `session.stream()` throw a plain `Error` with the
+ * underlying cause. Every error path goes through `surfaceAgentError` so
+ * Effect FiberFailure wrappers are unwrapped before they leave this
+ * module — what you catch is what your tool / hook actually threw.
+ * `WorkflowSuspendedError` (the workflow waiting for a signal / sleep)
+ * never escapes — it's classified as `suspended` and swallowed.
+ * Step-limit truncation is signalled separately via `HooksAfterTurnParams.truncated`
+ * + a `(step limit reached)` answer, not by throwing.
  *
  * @example
  * ```ts
@@ -659,7 +662,12 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
         lifecycleHistory: [],
       };
 
-      function transitionLifecycle(event: string, to: AgentLifecycleState, ctx: unknown) {
+      function transitionLifecycle(
+        event: string,
+        to: AgentLifecycleState,
+        ctx: unknown,
+        isReplay: boolean,
+      ) {
         const entry: AgentLifecycleEntry = {
           from: state.lifecycleState,
           event,
@@ -669,9 +677,9 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
         state.lifecycleHistory.push(entry);
         state.lifecycleState = to;
         state.lifecycleContext = ctx;
-        Promise.resolve(config.onLifecycle?.({ ...entry, sessionId, context: ctx })).catch((err) =>
-          console.error("[agentLoop] onLifecycle error:", err),
-        );
+        Promise.resolve(
+          config.onLifecycle?.({ ...entry, sessionId, context: ctx, isReplay }),
+        ).catch((err) => console.error("[agentLoop] onLifecycle error:", err));
       }
 
       const resetIdleTimer = () => {
@@ -715,7 +723,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
             // optimization that repopulates from the journaled value on
             // both fresh run and replay.
             const turnStartTime = yield* ctx.activity(`lc-${turn}-message`, async () => {
-              transitionLifecycle("message", "thinking", { turns: turn, turn, task });
+              transitionLifecycle("message", "thinking", { turns: turn, turn, task }, ctx.isReplay);
               const startedAt = Date.now();
               eventBus.emit({ type: "turn.start", turn, task });
               return startedAt;
@@ -729,7 +737,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
             // beforeTurn hook — can inject additional context into the message list
             if (config.hooks?.beforeTurn) {
               const modified = yield* ctx.activity(`before-turn-${turn}`, () =>
-                config.hooks!.beforeTurn!({ task, messages }),
+                config.hooks!.beforeTurn!({ task, messages, isReplay: ctx.isReplay }),
               );
               if (modified !== undefined) messages = modified;
             }
@@ -768,7 +776,12 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                   tools: toolDefs.length > 0 ? toolDefs : undefined,
                   rateLimiter: config.rateLimiter,
                   processors: config.processors,
-                  processorCtx: { step, turn, workflowId: ctx.workflowId },
+                  processorCtx: {
+                    step,
+                    turn,
+                    workflowId: ctx.workflowId,
+                    isReplay: ctx.isReplay,
+                  },
                   ...(config.metrics && { metrics: config.metrics }),
                   ...(config.costs && { costs: config.costs }),
                   ...(config.llmProvider && { provider: config.llmProvider }),
@@ -906,18 +919,23 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                     // `lc-*-approval-<callId>-start` step to surface the
                     // pending request without re-running anything.
                     yield* ctx.activity(`lc-${turn}-approval-${call.id}-start`, async () => {
-                      transitionLifecycle("approval-required", "waiting_approval", {
-                        toolCallId: call.id,
-                      });
+                      transitionLifecycle(
+                        "approval-required",
+                        "waiting_approval",
+                        { toolCallId: call.id },
+                        ctx.isReplay,
+                      );
                       logRequested();
                       return { toolName: call.name, toolInput: call.input };
                     });
                     decision = yield* ctx.signal<ApprovalDecision>(`approve:${call.id}`);
                     yield* ctx.activity(`lc-${turn}-approval-${call.id}-end`, async () => {
-                      transitionLifecycle(decision.approved ? "approved" : "rejected", "thinking", {
-                        toolCallId: call.id,
-                        approved: decision.approved,
-                      });
+                      transitionLifecycle(
+                        decision.approved ? "approved" : "rejected",
+                        "thinking",
+                        { toolCallId: call.id, approved: decision.approved },
+                        ctx.isReplay,
+                      );
                       logDecision(decision.approved);
                     });
                   }
@@ -1047,10 +1065,11 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                 messages,
                 usage: { inputTokens: turnInputTokens, outputTokens: turnOutputTokens },
                 truncated: hitStepLimit,
+                isReplay: ctx.isReplay,
               });
             });
             yield* ctx.activity(`lc-${turn}-done`, async () => {
-              transitionLifecycle("done", "idle", { turns: turn + 1 });
+              transitionLifecycle("done", "idle", { turns: turn + 1 }, ctx.isReplay);
             });
 
             // Compact if non-system messages exceed the threshold
@@ -1158,8 +1177,9 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
           workflowId: sessionId,
           input: undefined,
         });
-        if (error && !isWorkflowSuspension(error)) {
-          throw unwrapFiberFailure(error);
+        if (error) {
+          const surfaced = surfaceAgentError(error);
+          if (surfaced.kind !== "suspended") throw surfaced.error;
         }
       }
 
@@ -1184,7 +1204,10 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               workflowId: sessionId,
               input: undefined,
             });
-            if (error && !isWorkflowSuspension(error)) throw unwrapFiberFailure(error);
+            if (error) {
+              const surfaced = surfaceAgentError(error);
+              if (surfaced.kind !== "suspended") throw surfaced.error;
+            }
             return true;
           }
           if (attempt < 4) await new Promise<void>((r) => clock.setTimeout(r, 50));
@@ -1278,9 +1301,12 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                 input: undefined,
               })
               .then(({ error }) => {
-                if (error && !isWorkflowSuspension(error)) {
-                  runError = unwrapFiberFailure(error);
-                  chunkQueue.close();
+                if (error) {
+                  const surfaced = surfaceAgentError(error);
+                  if (surfaced.kind !== "suspended") {
+                    runError = surfaced.error;
+                    chunkQueue.close();
+                  }
                 }
               });
 

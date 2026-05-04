@@ -71,6 +71,100 @@ export async function searchRelevantMemories(
   return [{ role: "system" as const, content: `Relevant context from memory:\n${block}` }];
 }
 
+// ---- agent error surfacing ----
+
+// Effect wraps thrown errors inside journaled steps in a FiberFailure.
+// WorkflowSuspendedError is a normal signal — not a real failure. Validated
+// against Effect 3.x; the cause symbol is a stable public API.
+const FIBER_FAILURE_CAUSE = Symbol.for("effect/Runtime/FiberFailure/Cause");
+
+type FiberFailureCause =
+  | { _tag: "Die"; defect: unknown }
+  | { _tag: "Fail"; error: unknown }
+  | { _tag: string };
+
+function getFiberFailureCause(error: unknown): FiberFailureCause | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  return (error as Record<symbol, FiberFailureCause | undefined>)[FIBER_FAILURE_CAUSE];
+}
+
+/**
+ * Unwrap an Effect FiberFailure to the underlying thrown error. Returns the
+ * input unchanged when there's no FiberFailure cause.
+ */
+export function unwrapFiberFailure(error: unknown): unknown {
+  const cause = getFiberFailureCause(error);
+  if (cause?._tag === "Die") return (cause as { defect: unknown }).defect;
+  if (cause?._tag === "Fail") return (cause as { error: unknown }).error;
+  return error;
+}
+
+/**
+ * `true` when the error is a `WorkflowSuspendedError` — either as a direct
+ * tagged error or wrapped in an Effect FiberFailure defect. Suspension is a
+ * normal control signal; callers typically swallow it instead of propagating.
+ */
+export function isWorkflowSuspension(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  if ((error as { _tag?: string })._tag === "WorkflowSuspendedError") return true;
+  const cause = getFiberFailureCause(error);
+  return (
+    cause?._tag === "Die" &&
+    (cause as { defect?: { _tag?: string } }).defect?._tag === "WorkflowSuspendedError"
+  );
+}
+
+/**
+ * Classification produced by `surfaceAgentError`.
+ * - `suspended`: WorkflowSuspendedError — the body is waiting on a signal
+ *   or sleep. Not a failure.
+ * - `step-limit`: MaxStepsError from `agentAction` (the step loop ran out
+ *   without a final answer).
+ * - `user-error`: thrown by user code, a tool, a hook, or
+ *   `TerminalError` — won't succeed on retry.
+ * - `infra-error`: framework / transient failures
+ *   (`RetryableError`, FiberFailure with a non-Error defect, etc.).
+ */
+export type SurfacedAgentErrorKind = "suspended" | "step-limit" | "user-error" | "infra-error";
+
+export interface SurfacedAgentError {
+  readonly kind: SurfacedAgentErrorKind;
+  /** Always an Error instance with a meaningful `.message`. */
+  readonly error: Error;
+}
+
+function toError(err: unknown): Error {
+  if (err instanceof Error) return err;
+  if (typeof err === "string") return new Error(err);
+  try {
+    return new Error(JSON.stringify(err));
+  } catch {
+    return new Error(String(err));
+  }
+}
+
+/**
+ * Classify and unwrap an error from any agent primitive (agentLoop /
+ * agentAction / agentTown). Strips Effect FiberFailure wrappers so callers
+ * see the original thrown value, and tags the kind so call sites can
+ * branch (suspend vs surface to user vs infra-retry) without re-implementing
+ * the same `instanceof` chain.
+ *
+ * Preserves tagged-error metadata: a `TerminalError` keeps its `_tag`, the
+ * underlying `MaxStepsError` keeps its `maxSteps`. The returned `error.name`
+ * matches the original constructor when one is present.
+ */
+export function surfaceAgentError(err: unknown): SurfacedAgentError {
+  if (isWorkflowSuspension(err)) return { kind: "suspended", error: toError(err) };
+  const unwrapped = unwrapFiberFailure(err);
+  const tag = (unwrapped as { _tag?: string } | null | undefined)?._tag;
+  if (tag === "MaxStepsError") return { kind: "step-limit", error: toError(unwrapped) };
+  if (tag === "TerminalError") return { kind: "user-error", error: toError(unwrapped) };
+  if (tag === "RetryableError") return { kind: "infra-error", error: toError(unwrapped) };
+  if (unwrapped instanceof Error) return { kind: "user-error", error: unwrapped };
+  return { kind: "infra-error", error: toError(unwrapped) };
+}
+
 // ---- tool error formatting ----
 
 export function formatToolError(err: unknown): string {

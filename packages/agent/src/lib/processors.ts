@@ -7,6 +7,19 @@ export interface ProcessorContext {
   /** Turn index (agentLoop only; always 0 for agentAction). */
   turn: number;
   workflowId: string;
+  /**
+   * `true` when the wrapping workflow body is executing on top of
+   * pre-existing journal entries (worker restart, signal-resume).
+   *
+   * Processors run inside the journaled `think-N` activity, so they
+   * fire ONLY when that activity is fresh (journal hits short-circuit
+   * the callback). When `isReplay` is `true` your processor is firing
+   * fresh inside a body that has been started before — the previous
+   * worker pass got further down the body but didn't reach this
+   * activity yet. Use it to gate non-idempotent side effects in
+   * processors that you want to skip on body restart.
+   */
+  isReplay: boolean;
 }
 
 export interface ProcessorsConfig {
