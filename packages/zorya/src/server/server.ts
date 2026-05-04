@@ -89,6 +89,7 @@ import {
   streamThreadMessage,
   type AgentGatewayDeps,
 } from "./routes/agents.ts";
+import { listCatalogModels } from "./routes/agent-catalog.ts";
 import {
   addNamespaceFact,
   deleteNamespaceFact,
@@ -295,6 +296,16 @@ export class ZoryaServer {
       };
       this.router
         .get("/api/agents", listAgents(agentDeps))
+        // Read-only metadata route — designer UI's model dropdown source.
+        // Mounted before /api/agents/:id so the literal `_catalog` segment
+        // can't be shadowed by an agent that happens to be named `_catalog`
+        // (`_` prefix is reserved for catalog routes).
+        .get(
+          "/api/agents/_catalog/models",
+          this.agents.models
+            ? listCatalogModels({ models: this.agents.models })
+            : async () => new Response(JSON.stringify({ models: [] }), { status: 200 }),
+        )
         .get("/api/agents/:id", getAgent(agentDeps))
         .post("/api/agents/:id/invoke", invokeAgent(agentDeps))
         .post("/api/agents/:id/stream", streamAgent(agentDeps))

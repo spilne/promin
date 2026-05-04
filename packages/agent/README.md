@@ -455,6 +455,35 @@ const llm = twoSpeedLLM({
 
 Default heuristic: if the last non-system message is a tool result → `fast`; otherwise → `capable`.
 
+### ModelCatalog
+
+When agents are authored as data — recipes with `backend.model = { provider, id }` — the host needs a way to translate that string pair to a live `LLMProvider`. `ModelCatalog` is that bridge:
+
+```ts
+import { InMemoryModelCatalog, anthropic } from "@promin/agent";
+
+const catalog = new InMemoryModelCatalog([
+  {
+    provider: "anthropic",
+    id: "claude-sonnet-4-6",
+    displayName: "Claude Sonnet 4.6",
+    contextLimit: 200_000,
+    capabilities: ["chat", "tools", "vision", "thinking"],
+    costTier: "mid",
+    llm: anthropic("claude-sonnet-4-6"),
+  },
+]);
+
+resolveLocalAgent(recipe, {
+  // ...
+  llm: (provider, id) => catalog.get(provider, id)?.llm ?? fallback,
+});
+```
+
+The runtime-only `llm` field is stripped by `catalog.serialize()` so the catalog can be safely returned over HTTP — Zorya exposes `GET /api/agents/_catalog/models` to populate the designer UI's model dropdown without leaking provider closures or API keys.
+
+For folder-driven discovery (one file per model, hot-reload on change), use `createFileModelCatalog({ dir })` — same shape and ergonomics as `createFileToolRegistry`.
+
 ---
 
 ## Evals

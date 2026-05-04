@@ -144,6 +144,17 @@ export { RemoteAgent } from "./registry/remote-agent.ts";
 export { resolveRemoteAgent } from "./registry/resolve-remote-agent.ts";
 export type { RemoteAgentBackend, CursorAgentBackend } from "./registry/types.ts";
 
+export { InMemoryModelCatalog } from "./registry/model-catalog.ts";
+export type {
+  ModelCatalog,
+  ModelCatalogItem,
+  SerializedModelCatalogItem,
+  ModelCapability,
+  ModelCostTier,
+} from "./registry/model-catalog.ts";
+export { createFileModelCatalog } from "./registry/file-model-catalog.ts";
+export type { FileModelCatalogConfig } from "./registry/file-model-catalog.ts";
+
 // Cursor backend — drives the Cursor CLI (`agent -p`) over its
 // stream-json NDJSON output. Two surfaces share the same session engine:
 // the registry-resolved `CursorAgent` (for whole-conversation routing)

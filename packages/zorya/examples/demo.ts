@@ -53,6 +53,7 @@ import {
   createDurableSchedulerTools,
   createFileToolRegistry,
   inProcessSchedulerClient,
+  InMemoryModelCatalog,
   resolveCursorAgent,
   resolveLocalAgent,
   resolveRemoteAgent,
@@ -63,6 +64,7 @@ import {
   type LLMResponse,
   type LLMStreamChunk,
   type Agent,
+  type ModelCatalogItem,
   type RegisteredAgent,
 } from "@promin/agent";
 import { echoLLM } from "@promin/agent/testing";
@@ -409,6 +411,44 @@ const agentLlms: Record<string, LLMProvider> = {
   "ollama-bot": ollama({ model: OLLAMA_MODEL, baseURL: OLLAMA_URL }),
 };
 
+// Model catalog — bridge between recipes that pin `backend.model = { provider, id }`
+// and a runtime LLMProvider. Populated only with provider/model pairs we
+// can actually serve in this boot (live keys present, ollama running).
+// The designer UI's model dropdown reads this via `GET /api/agents/_catalog/models`.
+const catalogItems: ModelCatalogItem[] = [
+  {
+    provider: "ollama",
+    id: OLLAMA_MODEL,
+    displayName: `Ollama · ${OLLAMA_MODEL}`,
+    capabilities: ["chat"],
+    costTier: "low",
+    llm: ollama({ model: OLLAMA_MODEL, baseURL: OLLAMA_URL }),
+  },
+];
+if (haveAnthropicKey) {
+  catalogItems.push(
+    {
+      provider: "anthropic",
+      id: "claude-sonnet-4-6",
+      displayName: "Claude Sonnet 4.6",
+      contextLimit: 200_000,
+      capabilities: ["chat", "tools", "vision", "thinking", "stream"],
+      costTier: "mid",
+      llm: anthropic("claude-sonnet-4-6"),
+    },
+    {
+      provider: "anthropic",
+      id: "claude-haiku-4-5-20251001",
+      displayName: "Claude Haiku 4.5",
+      contextLimit: 200_000,
+      capabilities: ["chat", "tools", "stream"],
+      costTier: "low",
+      llm: anthropic("claude-haiku-4-5-20251001"),
+    },
+  );
+}
+const modelCatalog = new InMemoryModelCatalog(catalogItems);
+
 const KNOWN_CITIES = [
   "berlin",
   "paris",
@@ -452,7 +492,16 @@ function resolveAgent(recipe: RegisteredAgent): Agent {
   return resolveLocalAgent(recipe, {
     runner,
     memory: memoryStore,
-    llm: () => agentLlms[recipe.id] ?? naturalLLM(echoLLM()),
+    // Resolution order:
+    //   1. Demo-specific id-keyed mocks (echo / round-robin / tool-calling
+    //      placeholders) — kept so the hand-tuned demo agents still drive
+    //      deterministic UI snapshots.
+    //   2. ModelCatalog by `recipe.backend.model = { provider, id }` —
+    //      the path a recipe authored in the designer UI takes.
+    //   3. Echo fallback so a recipe pointing at an unknown model still
+    //      boots (with an obvious "echo" output) instead of throwing.
+    llm: (provider: string, id: string) =>
+      agentLlms[recipe.id] ?? modelCatalog.get(provider, id)?.llm ?? naturalLLM(echoLLM()),
     // Full registry of tools available; resolver's pickTools narrows by
     // recipe.backend.tools. listWorkflows is added inline because it
     // closes over `storage` + `workflowsByName`.
@@ -899,6 +948,7 @@ const agents = new ZoryaAgents({
   resolve: resolveAgent,
   memory: memoryStore,
   instances: instanceRegistry,
+  models: modelCatalog,
   scan: {
     root: agentScanRoot,
     intervalMs: 5_000,

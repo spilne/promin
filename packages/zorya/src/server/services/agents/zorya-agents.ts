@@ -12,6 +12,7 @@ import type {
   AgentInstanceRegistry,
   AgentRegistry,
   MemoryStore,
+  ModelCatalog,
   RegisteredAgent,
 } from "@promin/agent";
 import { dispatchAgentSchedule } from "@promin/agent";
@@ -44,6 +45,14 @@ export interface ZoryaAgentsConfig {
   resolve: (recipe: RegisteredAgent) => Agent;
   memory?: MemoryStore;
   instances?: AgentInstanceRegistry;
+  /**
+   * Catalog of available LLM models, keyed by `(provider, id)`. When set,
+   * the server exposes `GET /api/agents/_catalog/models` so the designer UI
+   * can populate its model dropdown. The same catalog typically backs the
+   * `resolve` callback's LLM lookup so a recipe pointing at
+   * `(provider, id)` resolves to the registered runtime instance.
+   */
+  models?: ModelCatalog;
   /** Filesystem hot-reload scan loop. Omit to disable. */
   scan?: ZoryaAgentsScanConfig;
 }
@@ -53,6 +62,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   readonly resolve: (recipe: RegisteredAgent) => Agent;
   readonly memory?: MemoryStore;
   readonly instances?: AgentInstanceRegistry;
+  readonly models?: ModelCatalog;
   private readonly scanConfig?: ZoryaAgentsScanConfig;
   private scanHandle?: { stop(): void };
 
@@ -61,6 +71,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
     this.resolve = config.resolve;
     if (config.memory) this.memory = config.memory;
     if (config.instances) this.instances = config.instances;
+    if (config.models) this.models = config.models;
     if (config.scan) this.scanConfig = config.scan;
   }
 
