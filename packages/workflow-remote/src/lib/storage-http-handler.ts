@@ -92,6 +92,8 @@ export function createWorkflowStorageHandler(
     findSignalTokenById: (p) => storage.findSignalTokenById(p.tokenId),
     markSignalTokenCompleted: (p) => storage.markSignalTokenCompleted(p),
     listSignalTokensForWorkflow: (p) => storage.listSignalTokensForWorkflow(p.workflowId),
+    appendStreamChunk: (p) => storage.appendStreamChunk(p),
+    readStreamChunks: (p) => storage.readStreamChunks(p),
   };
 
   return async (req) => {

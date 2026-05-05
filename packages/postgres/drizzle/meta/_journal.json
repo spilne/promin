@@ -218,6 +218,13 @@
       "when": 1743400030000,
       "tag": "0030_registry_lifecycle",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1743400031000,
+      "tag": "0031_workflow_streams",
+      "breakpoints": true
     }
   ]
 }

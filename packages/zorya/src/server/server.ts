@@ -91,6 +91,7 @@ import {
   promoteDeployment,
   rollbackDeployment,
 } from "./routes/deployments.ts";
+import { getStreamChunks, sendStreamChunk, streamChunks } from "./routes/streams.ts";
 import { getSparklines, getWorkflowGrid, getWorkflowHistory } from "./routes/grid.ts";
 import { getWorkflowDef, listWorkflowDefs } from "./routes/workflow-defs.ts";
 import {
@@ -334,6 +335,18 @@ export class ZoryaServer {
         "/api/deployments/:name/rollback",
         rollbackDeployment({ registry: this.versionRegistry }),
       )
+      // Streams — generic typed channels per workflow. Output (workflow →
+      // subscribers) reads via the SSE handler; input (subscribers →
+      // workflow) appends via the POST handler.
+      .get(
+        "/api/runs/:id/streams/:streamId",
+        streamChunks({
+          storage,
+          ...(config.sseIntervalMs !== undefined && { pollIntervalMs: config.sseIntervalMs }),
+        }),
+      )
+      .get("/api/runs/:id/streams/:streamId/chunks", getStreamChunks({ storage }))
+      .post("/api/runs/:id/streams/:streamId", sendStreamChunk({ storage }))
       .get(
         "/api/runs/:id/events",
         streamRunEvents({

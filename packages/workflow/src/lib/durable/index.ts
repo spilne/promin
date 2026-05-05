@@ -29,11 +29,22 @@ export {
   type FenceToken,
   type WorkflowOrderBy,
   type SignalTokenRecord,
+  type StreamChunk,
   workflowMetadataMatches,
   isStepAttemptStorage,
   isTripwireCapableStorage,
   isSubscribableStorage,
 } from "./workflow-storage.ts";
+export {
+  type StreamDescriptor,
+  type StreamKind,
+  type DefineStreamOptions,
+  defineStream,
+  defineInputStream,
+  appendStreamChunk,
+  appendExternalStreamChunk,
+  peekStreamChunk,
+} from "./streams.ts";
 export {
   type WorkflowState,
   type WorkflowSummary,

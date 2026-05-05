@@ -22,6 +22,7 @@ import type {
   StepAttemptStorage,
   StepAttemptRecord,
   SignalTokenRecord,
+  StreamChunk,
 } from "@promin/workflow";
 import { WIRE_CODEC, type RpcResponse, type StorageMethod } from "./wire.ts";
 
@@ -300,6 +301,24 @@ export class RemoteWorkflowStorage
 
   listSignalTokensForWorkflow(workflowId: string): Promise<ReadonlyArray<SignalTokenRecord>> {
     return this.call("listSignalTokensForWorkflow", { workflowId });
+  }
+
+  appendStreamChunk(params: {
+    workflowId: string;
+    streamId: string;
+    payload: unknown;
+    appendedBy: "workflow" | "external";
+  }): Promise<{ chunkIndex: number }> {
+    return this.call("appendStreamChunk", params);
+  }
+
+  readStreamChunks(params: {
+    workflowId: string;
+    streamId: string;
+    since?: number;
+    limit?: number;
+  }): Promise<ReadonlyArray<StreamChunk>> {
+    return this.call("readStreamChunks", params);
   }
 
   tryLock(

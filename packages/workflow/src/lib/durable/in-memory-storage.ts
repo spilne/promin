@@ -19,6 +19,7 @@ import type {
   FenceToken,
   WorkflowOrderBy,
   SignalTokenRecord,
+  StreamChunk,
 } from "./workflow-storage.ts";
 import { workflowMetadataMatches } from "./workflow-storage.ts";
 import { createWorkflowEventStream } from "./workflow-event-stream.ts";
@@ -135,6 +136,8 @@ export class InMemoryWorkflowStorage
   private journal = new Map<string, JournalEntry[]>();
   /** Signal tokens keyed by tokenId — public-bearer auth for deliverSignal. */
   private signalTokens = new Map<string, MutableSignalToken>();
+  /** Stream chunks keyed by `${workflowId}::${streamId}` → ordered by chunk_index. */
+  private streamChunks = new Map<string, StreamChunk[]>();
   /**
    * Per-workflow event subscribers. Each active call to `subscribeToWorkflow`
    * registers a push function keyed by workflowId; the mutating storage
@@ -1248,6 +1251,43 @@ export class InMemoryWorkflowStorage
     }
     out.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
     return out.map(snapshotSignalToken);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Streams — append-only chunks per (workflow, stream).
+  // ---------------------------------------------------------------------------
+
+  async appendStreamChunk(params: {
+    workflowId: string;
+    streamId: string;
+    payload: unknown;
+    appendedBy: "workflow" | "external";
+  }): Promise<{ chunkIndex: number }> {
+    const key = `${params.workflowId}::${params.streamId}`;
+    const existing = this.streamChunks.get(key) ?? [];
+    const chunkIndex = existing.length;
+    const chunk: StreamChunk = {
+      chunkIndex,
+      payload: params.payload,
+      appendedBy: params.appendedBy,
+      appendedAt: this.clock.now(),
+    };
+    existing.push(chunk);
+    this.streamChunks.set(key, existing);
+    return { chunkIndex };
+  }
+
+  async readStreamChunks(params: {
+    workflowId: string;
+    streamId: string;
+    since?: number;
+    limit?: number;
+  }): Promise<ReadonlyArray<StreamChunk>> {
+    const key = `${params.workflowId}::${params.streamId}`;
+    const all = this.streamChunks.get(key) ?? [];
+    const filtered =
+      params.since !== undefined ? all.filter((c) => c.chunkIndex > params.since!) : all;
+    return params.limit !== undefined ? filtered.slice(0, params.limit) : filtered;
   }
 
   /** Test helper: delete a specific journal entry (simulates crash-before-append). */

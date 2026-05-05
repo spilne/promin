@@ -59,7 +59,10 @@ export type StorageMethod =
   | "createSignalToken"
   | "findSignalTokenById"
   | "markSignalTokenCompleted"
-  | "listSignalTokensForWorkflow";
+  | "listSignalTokensForWorkflow"
+  // Streams — generic typed channels per workflow.
+  | "appendStreamChunk"
+  | "readStreamChunks";
 
 export interface RpcRequest {
   readonly method: StorageMethod;

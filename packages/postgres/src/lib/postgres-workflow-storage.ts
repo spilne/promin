@@ -21,6 +21,7 @@ import type {
   JournalEntry,
   FenceGuard,
   SignalTokenRecord,
+  StreamChunk,
 } from "@promin/workflow";
 import { FenceTokenMismatchError } from "@promin/workflow";
 import {
@@ -34,6 +35,7 @@ import {
   stepQueue,
   activityJournal,
   signalTokens,
+  workflowStreams,
   LOOKUP_BINDINGS,
 } from "./schema.ts";
 import {
@@ -1452,6 +1454,70 @@ export class PostgresWorkflowStorage
       .where(eq(signalTokens.workflowId, workflowId))
       .orderBy(desc(signalTokens.createdAt));
     return rows.map(rowToSignalToken);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Streams — append-only chunks per (workflow, stream).
+  // ---------------------------------------------------------------------------
+
+  async appendStreamChunk(params: {
+    workflowId: string;
+    streamId: string;
+    payload: unknown;
+    appendedBy: "workflow" | "external";
+  }): Promise<{ chunkIndex: number }> {
+    // Compute next index in a single statement via subquery — atomic
+    // against concurrent appends, no read-then-write race.
+    const inserted = await this.db.execute(sql`
+      INSERT INTO wf_streams (workflow_id, stream_id, chunk_index, payload, appended_by)
+      VALUES (
+        ${params.workflowId},
+        ${params.streamId},
+        COALESCE(
+          (SELECT MAX(chunk_index) + 1 FROM wf_streams
+           WHERE workflow_id = ${params.workflowId} AND stream_id = ${params.streamId}),
+          0
+        ),
+        ${JSON.stringify(params.payload)}::jsonb,
+        ${params.appendedBy}
+      )
+      RETURNING chunk_index
+    `);
+    const rows =
+      (inserted as unknown as { rows?: Array<{ chunk_index: number }> }).rows ??
+      (inserted as unknown as Array<{ chunk_index: number }>);
+    const chunkIndex = Array.isArray(rows) ? rows[0]?.chunk_index : undefined;
+    if (chunkIndex === undefined) {
+      throw new Error("appendStreamChunk: no row returned from INSERT");
+    }
+    return { chunkIndex };
+  }
+
+  async readStreamChunks(params: {
+    workflowId: string;
+    streamId: string;
+    since?: number;
+    limit?: number;
+  }): Promise<ReadonlyArray<StreamChunk>> {
+    const conditions = [
+      eq(workflowStreams.workflowId, params.workflowId),
+      eq(workflowStreams.streamId, params.streamId),
+    ];
+    if (params.since !== undefined) {
+      conditions.push(sql`${workflowStreams.chunkIndex} > ${params.since}`);
+    }
+    const baseQuery = this.db
+      .select()
+      .from(workflowStreams)
+      .where(and(...conditions))
+      .orderBy(asc(workflowStreams.chunkIndex));
+    const rows = await (params.limit !== undefined ? baseQuery.limit(params.limit) : baseQuery);
+    return rows.map((r) => ({
+      chunkIndex: r.chunkIndex,
+      payload: r.payload,
+      appendedBy: r.appendedBy as "workflow" | "external",
+      appendedAt: r.appendedAt,
+    }));
   }
 }
 

@@ -9,6 +9,7 @@ import {
   type WorkflowOrderBy,
   type RunSource,
   type SignalTokenRecord,
+  type StreamChunk,
 } from "@promin/workflow";
 import type {
   WorkflowState,
@@ -224,6 +225,21 @@ export class SqliteWorkflowStorage
     );
     this.db.run(
       `CREATE UNIQUE INDEX IF NOT EXISTS ${t}_signal_tokens_idemp ON ${t}_signal_tokens (workflow_id, idempotency_key) WHERE idempotency_key IS NOT NULL`,
+    );
+    // Generic typed streams — append-only chunks per (workflow, stream).
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS ${t}_streams (
+        workflow_id  TEXT    NOT NULL,
+        stream_id    TEXT    NOT NULL,
+        chunk_index  INTEGER NOT NULL,
+        payload      TEXT    NOT NULL,
+        appended_by  TEXT    NOT NULL,
+        appended_at  INTEGER NOT NULL,
+        PRIMARY KEY (workflow_id, stream_id, chunk_index)
+      )
+    `);
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_streams_wfid ON ${t}_streams (workflow_id, stream_id, chunk_index)`,
     );
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_attempts_wfid ON ${t}_attempts (workflow_id, step_name)`,
@@ -1212,6 +1228,75 @@ export class SqliteWorkflowStorage
       )
       .all(workflowId);
     return rows.map(rowToSignalToken);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Streams — append-only chunks per (workflow, stream).
+  // ---------------------------------------------------------------------------
+
+  async appendStreamChunk(params: {
+    workflowId: string;
+    streamId: string;
+    payload: unknown;
+    appendedBy: "workflow" | "external";
+  }): Promise<{ chunkIndex: number }> {
+    return this.db.transaction((): { chunkIndex: number } => {
+      const row = this.db
+        .query<{ next: number | null }>(
+          `SELECT MAX(chunk_index) AS next FROM ${this._t}_streams
+           WHERE workflow_id = ? AND stream_id = ?`,
+        )
+        .get(params.workflowId, params.streamId);
+      const chunkIndex = row?.next == null ? 0 : row.next + 1;
+      this.db
+        .query(
+          `INSERT INTO ${this._t}_streams (workflow_id, stream_id, chunk_index, payload, appended_by, appended_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          params.workflowId,
+          params.streamId,
+          chunkIndex,
+          JSON.stringify(params.payload),
+          params.appendedBy,
+          Date.now(),
+        );
+      return { chunkIndex };
+    })();
+  }
+
+  async readStreamChunks(params: {
+    workflowId: string;
+    streamId: string;
+    since?: number;
+    limit?: number;
+  }): Promise<ReadonlyArray<StreamChunk>> {
+    let sql = `SELECT chunk_index, payload, appended_by, appended_at FROM ${this._t}_streams
+               WHERE workflow_id = ? AND stream_id = ?`;
+    const args: Array<string | number> = [params.workflowId, params.streamId];
+    if (params.since !== undefined) {
+      sql += ` AND chunk_index > ?`;
+      args.push(params.since);
+    }
+    sql += ` ORDER BY chunk_index ASC`;
+    if (params.limit !== undefined) {
+      sql += ` LIMIT ?`;
+      args.push(params.limit);
+    }
+    const rows = this.db
+      .query<{
+        chunk_index: number;
+        payload: string;
+        appended_by: string;
+        appended_at: number;
+      }>(sql)
+      .all(...args);
+    return rows.map((r) => ({
+      chunkIndex: r.chunk_index,
+      payload: JSON.parse(r.payload),
+      appendedBy: r.appended_by as "workflow" | "external",
+      appendedAt: new Date(r.appended_at),
+    }));
   }
 
   // ---------------------------------------------------------------------------

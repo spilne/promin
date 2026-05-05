@@ -17,6 +17,7 @@ import type {
   FenceGuard,
   WorkflowOrderBy,
   SignalTokenRecord,
+  StreamChunk,
 } from "@promin/workflow";
 import type {
   WorkflowState,
@@ -1313,6 +1314,54 @@ export class RedisWorkflowStorage
     return Object.values(raw)
       .map(deserializeSignalToken)
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Streams — append-only chunks per (workflow, stream) via Redis lists.
+  // ---------------------------------------------------------------------------
+
+  private streamKey(workflowId: string, streamId: string): string {
+    return `${this.prefix}:${workflowId}:streams:${streamId}`;
+  }
+
+  async appendStreamChunk(params: {
+    workflowId: string;
+    streamId: string;
+    payload: unknown;
+    appendedBy: "workflow" | "external";
+  }): Promise<{ chunkIndex: number }> {
+    const key = this.streamKey(params.workflowId, params.streamId);
+    const chunkIndex = await this.redis.rpush(
+      key,
+      JSON.stringify({
+        payload: params.payload,
+        appendedBy: params.appendedBy,
+        appendedAt: this.serializeDate(this.clock.now()),
+      }),
+    );
+    // RPUSH returns the new list length; chunkIndex is length - 1.
+    return { chunkIndex: chunkIndex - 1 };
+  }
+
+  async readStreamChunks(params: {
+    workflowId: string;
+    streamId: string;
+    since?: number;
+    limit?: number;
+  }): Promise<ReadonlyArray<StreamChunk>> {
+    const key = this.streamKey(params.workflowId, params.streamId);
+    const start = params.since !== undefined ? params.since + 1 : 0;
+    const stop = params.limit !== undefined ? start + params.limit - 1 : -1;
+    const items = await this.redis.lrange(key, start, stop);
+    return items.map((raw: string, i: number) => {
+      const parsed = JSON.parse(raw);
+      return {
+        chunkIndex: start + i,
+        payload: parsed.payload,
+        appendedBy: parsed.appendedBy as "workflow" | "external",
+        appendedAt: new Date(parsed.appendedAt),
+      };
+    });
   }
 
   // -- Locking --------------------------------------------------------------

@@ -59,6 +59,18 @@ export type WorkflowOrderBy =
  * `bearer` is the plaintext credential — short-lived, single-use, bounded
  * by `expiresAt`. Compared with constant-time equality at completion time.
  */
+/**
+ * One chunk of a workflow stream. Returned by `readStreamChunks`. The
+ * `payload` is whatever the appender wrote — the type comes from the
+ * caller's `defineStream<T>` declaration; storage stores it as JSONB.
+ */
+export interface StreamChunk {
+  readonly chunkIndex: number;
+  readonly payload: unknown;
+  readonly appendedBy: "workflow" | "external";
+  readonly appendedAt: Date;
+}
+
 export interface SignalTokenRecord {
   readonly tokenId: string;
   readonly workflowId: string;
@@ -442,6 +454,41 @@ export interface WorkflowStorage {
    * Ordered by `createdAt DESC`.
    */
   listSignalTokensForWorkflow(workflowId: string): Promise<ReadonlyArray<SignalTokenRecord>>;
+
+  // -------------------------------------------------------------------------
+  // Generic typed streams — bidirectional append-only channels per workflow.
+  //
+  // Output streams: workflow appends, external subscribers read.
+  // Input streams: external subscribers append, workflow peeks/waits.
+  // Storage doesn't distinguish — `appendedBy` records direction so the
+  // SSE dashboard / consumer can render workflow-vs-external chunks
+  // differently.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Append one chunk to a workflow's stream. Returns the assigned
+   * `chunkIndex` (monotonic per `(workflowId, streamId)`). Atomic against
+   * concurrent appends — backends assign the index via `MAX+1` in a
+   * single statement so two callers can't claim the same slot.
+   */
+  appendStreamChunk(params: {
+    readonly workflowId: string;
+    readonly streamId: string;
+    readonly payload: unknown;
+    readonly appendedBy: "workflow" | "external";
+  }): Promise<{ readonly chunkIndex: number }>;
+
+  /**
+   * Read chunks from a stream. Pass `since` (exclusive) to replay from
+   * the last index observed (SSE reconnect). `limit` caps the page;
+   * default limits per backend (in-memory: 1000, postgres: 1000).
+   */
+  readStreamChunks(params: {
+    readonly workflowId: string;
+    readonly streamId: string;
+    readonly since?: number;
+    readonly limit?: number;
+  }): Promise<ReadonlyArray<StreamChunk>>;
 
   /**
    * Acquire a lock on a workflow. On success returns `{ acquired: true,

@@ -514,3 +514,26 @@ export const signalTokens = pgTable(
       .where(sql`${t.completedAt} IS NULL`),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// Generic typed streams — bidirectional append-only channels per workflow.
+// Output (workflow → subscribers) and input (subscribers → workflow) share
+// this table; direction is convention at the API layer.
+// ---------------------------------------------------------------------------
+
+export const workflowStreams = pgTable(
+  "wf_streams",
+  {
+    workflowId: text("workflow_id").notNull(),
+    streamId: text("stream_id").notNull(),
+    chunkIndex: integer("chunk_index").notNull(),
+    payload: jsonb("payload").notNull(),
+    appendedBy: text("appended_by").notNull().default("workflow"),
+    appendedAt: timestamp("appended_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.workflowId, t.streamId, t.chunkIndex] }),
+    index("wf_streams_workflow_idx").on(t.workflowId),
+    index("wf_streams_workflow_stream_idx").on(t.workflowId, t.streamId, t.chunkIndex),
+  ],
+);
