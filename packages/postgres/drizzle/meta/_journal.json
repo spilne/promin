@@ -232,6 +232,13 @@
       "when": 1743400032000,
       "tag": "0032_agent_registry",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1743400033000,
+      "tag": "0033_agent_memory",
+      "breakpoints": true
     }
   ]
 }

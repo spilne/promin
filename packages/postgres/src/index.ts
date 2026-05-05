@@ -9,6 +9,10 @@ export {
   PostgresAgentRegistry,
   type PostgresAgentRegistryConfig,
 } from "./lib/postgres-agent-registry.ts";
+export {
+  PostgresMemoryStore,
+  type PostgresMemoryStoreConfig,
+} from "./lib/postgres-memory-store.ts";
 export { type PostgresStorageConfig } from "./lib/config.ts";
 export { migrate, type MigrateOptions } from "./lib/migrate.ts";
 

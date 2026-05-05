@@ -10,6 +10,8 @@ import {
   timestamp,
   bigint,
   bigserial,
+  boolean,
+  doublePrecision,
   index,
   uniqueIndex,
   primaryKey,
@@ -564,4 +566,114 @@ export const agentRegistry = pgTable(
     // list({ backendType }) filter
     index("agent_registry_backend_type_idx").on(t.backendType),
   ],
+);
+
+// ---------------------------------------------------------------------------
+// Agent memory — three-scope cascade × four-tier model. Mirrors
+// SqliteMemoryStore's 6 tables. Single-table-per-tier with a `scope`
+// column keeps queries simple while supporting per-scope indexes.
+// All timestamps are millisecond unix epochs (BIGINT) for clock-parity
+// with the SQLite implementation, so the same conformance suite passes.
+// ---------------------------------------------------------------------------
+
+export const agentNamespace = pgTable("agent_namespace", {
+  namespaceId: text("namespace_id").primaryKey(),
+  staticRules: text("static_rules"),
+  workingMemory: text("working_memory"),
+  inheritFromParent: boolean("inherit_from_parent").notNull().default(true),
+  metadata: jsonb("metadata"),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+});
+
+export const agentResource = pgTable(
+  "agent_resource",
+  {
+    namespaceId: text("namespace_id").notNull(),
+    resourceId: text("resource_id").notNull(),
+    staticRules: text("static_rules"),
+    workingMemory: text("working_memory"),
+    inheritFromParent: boolean("inherit_from_parent").notNull().default(true),
+    metadata: jsonb("metadata"),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.namespaceId, t.resourceId] })],
+);
+
+export const agentThread = pgTable(
+  "agent_thread",
+  {
+    namespaceId: text("namespace_id").notNull(),
+    threadId: text("thread_id").notNull(),
+    resourceId: text("resource_id"),
+    title: text("title"),
+    workingMemory: text("working_memory"),
+    inheritFromParent: boolean("inherit_from_parent").notNull().default(true),
+    metadata: jsonb("metadata"),
+    archivedAt: bigint("archived_at", { mode: "number" }),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.namespaceId, t.threadId] }),
+    index("agent_thread_resource_idx").on(t.namespaceId, t.resourceId),
+  ],
+);
+
+export const agentFact = pgTable(
+  "agent_fact",
+  {
+    id: text("id").primaryKey(),
+    scope: text("scope").notNull(), // 'namespace' | 'resource' | 'thread'
+    namespaceId: text("namespace_id").notNull(),
+    resourceId: text("resource_id"),
+    threadId: text("thread_id"),
+    factText: text("text").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("agent_fact_ns_idx").on(t.scope, t.namespaceId, t.createdAt),
+    index("agent_fact_res_idx").on(t.scope, t.namespaceId, t.resourceId, t.createdAt),
+    index("agent_fact_thr_idx").on(t.scope, t.namespaceId, t.threadId, t.createdAt),
+  ],
+);
+
+export const agentEpisode = pgTable(
+  "agent_episode",
+  {
+    id: text("id").primaryKey(),
+    scope: text("scope").notNull(),
+    namespaceId: text("namespace_id").notNull(),
+    resourceId: text("resource_id"),
+    threadId: text("thread_id"),
+    summary: text("summary").notNull(),
+    outcome: text("outcome"),
+    salience: doublePrecision("salience").notNull().default(0.5),
+    embedding: jsonb("embedding"),
+    sourceThreadId: text("source_thread_id"),
+    sourceMsgFromSeq: integer("source_msg_from_seq"),
+    sourceMsgToSeq: integer("source_msg_to_seq"),
+    occurredAt: bigint("occurred_at", { mode: "number" }).notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    metadata: jsonb("metadata"),
+  },
+  (t) => [
+    index("agent_episode_ns_idx").on(t.scope, t.namespaceId, t.salience),
+    index("agent_episode_res_idx").on(t.scope, t.namespaceId, t.resourceId, t.salience),
+    index("agent_episode_thr_idx").on(t.scope, t.namespaceId, t.threadId, t.createdAt),
+  ],
+);
+
+export const agentMessage = pgTable(
+  "agent_message",
+  {
+    namespaceId: text("namespace_id").notNull(),
+    threadId: text("thread_id").notNull(),
+    seq: integer("seq").notNull(),
+    payload: jsonb("payload").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.namespaceId, t.threadId, t.seq] })],
 );
