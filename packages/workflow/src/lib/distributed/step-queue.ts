@@ -35,6 +35,21 @@ export interface StepTask {
    * convention. Round-trips unchanged; never read by the platform.
    */
   readonly metadata?: Record<string, unknown>;
+  /**
+   * Per-task concurrency cap. When set, `claim()` only claims this task
+   * when fewer than `concurrencyLimit` tasks with the same
+   * `(concurrencyScope, concurrencyKey)` are currently `running`.
+   *
+   * Scope conventions:
+   *   `<workflowName>`              — workflow-level (caps any step).
+   *   `<workflowName>::<stepName>`  — step-level (caps just one step).
+   *
+   * `concurrencyKey` is the user-evaluated string (e.g. `payload.tenantId`).
+   * Null on any of the three disables enforcement for this task.
+   */
+  readonly concurrencyKey?: string;
+  readonly concurrencyScope?: string;
+  readonly concurrencyLimit?: number;
 }
 
 /**
@@ -98,6 +113,15 @@ export interface StepQueue {
      * Round-trips through `claim` unchanged.
      */
     metadata?: Record<string, unknown>;
+    /**
+     * Per-task concurrency cap — see `StepTask.concurrencyKey` for the
+     * shape. Resolved by the coordinator from the workflow / step queue
+     * config (step-level overrides workflow-level). Stored on the row
+     * verbatim; `claim()` does the count check.
+     */
+    concurrencyKey?: string;
+    concurrencyScope?: string;
+    concurrencyLimit?: number;
   }): Promise<string>;
 
   /**

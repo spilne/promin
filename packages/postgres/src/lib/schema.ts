@@ -209,6 +209,13 @@ export const stepQueue = pgTable(
     // read by the platform for control flow; consumer-namespaced. No GIN
     // index added speculatively; lift to one when a query path becomes hot.
     metadata: jsonb("metadata"),
+    // Per-task concurrency keys — caps how many tasks with the same
+    // `(concurrency_scope, concurrency_key)` can be `running` at once.
+    // `concurrency_limit` is the cap; null on any of the three disables
+    // enforcement for this task.
+    concurrencyKey: text("concurrency_key"),
+    concurrencyScope: text("concurrency_scope"),
+    concurrencyLimit: integer("concurrency_limit"),
   },
   (t) => [
     index("wf_step_queue_dequeue_idx").on(t.status, t.priority, t.createdAt),
@@ -226,6 +233,10 @@ export const stepQueue = pgTable(
     index("wf_step_queue_needs_idx")
       .using("gin", t.needs)
       .where(sql`${t.status} = 'pending'`),
+    // Hot path for the concurrency-count subquery during claim.
+    index("wf_step_queue_concurrency_running_idx")
+      .on(t.concurrencyScope, t.concurrencyKey)
+      .where(sql`${t.status} = 'running' AND ${t.concurrencyKey} IS NOT NULL`),
   ],
 );
 

@@ -21,7 +21,7 @@ import type {
   WorkflowHandle,
   WorkflowStatusInfo,
 } from "./durable-pipeline.ts";
-import type { WorkflowHooks, IdempotencyConfig } from "./durable-pipeline.ts";
+import type { WorkflowHooks, IdempotencyConfig, WorkflowQueueConfig } from "./durable-pipeline.ts";
 import {
   isStepAttemptStorage,
   isSubscribableStorage,
@@ -82,6 +82,58 @@ export interface StepExecutionRequest {
   readonly needs?: readonly string[];
   readonly priority?: number;
   readonly version?: string;
+  /**
+   * Resolved per-task concurrency cap, computed by the coordinator from
+   * the workflow / step queue config (step-level wins over workflow-level).
+   * Forwarded to the step queue so `claim()` can enforce against currently-
+   * running tasks with the same `(scope, key)` tuple.
+   */
+  readonly concurrencyKey?: string;
+  readonly concurrencyScope?: string;
+  readonly concurrencyLimit?: number;
+}
+
+/**
+ * Resolve a step task's concurrency triple from the workflow + step queue
+ * config. Step-level wins over workflow-level. The key function is
+ * evaluated against the step ctx (input + prev/deps + workflowId), and the
+ * resolved string is what `claim()` counts against.
+ *
+ * Returns `null` when neither level configures concurrency — the caller
+ * stamps no concurrency fields on the task and `claim()` skips the count
+ * check entirely.
+ */
+function resolveStepConcurrency(params: {
+  workflowName?: string;
+  workflowQueue?: WorkflowQueueConfig<unknown>;
+  stepDef: StepDefinition;
+  workflowInput: unknown;
+  stepInput: unknown;
+  workflowId: string;
+  attempt: number;
+  results: Record<string, unknown>;
+}): { readonly scope: string; readonly key: string; readonly limit: number } | null {
+  const stepQueue = params.stepDef.queue;
+  if (stepQueue) {
+    const ctx = {
+      input: params.stepInput,
+      prev: params.stepInput,
+      deps: params.results,
+      workflowId: params.workflowId,
+      attempt: params.attempt,
+    };
+    const key = stepQueue.concurrencyKey ? stepQueue.concurrencyKey(ctx as never) : "__all__";
+    const scope = `${params.workflowName ?? ""}::${params.stepDef.name}`;
+    return { scope, key, limit: stepQueue.concurrencyLimit };
+  }
+  if (params.workflowQueue) {
+    const key = params.workflowQueue.concurrencyKey
+      ? params.workflowQueue.concurrencyKey(params.workflowInput)
+      : "__all__";
+    const scope = params.workflowName ?? "";
+    return { scope, key, limit: params.workflowQueue.concurrencyLimit };
+  }
+  return null;
 }
 
 export type StepExecutionResult =
@@ -1029,6 +1081,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       onVersionMismatch: def.onVersionMismatch,
       previousVersions: def.previousVersions,
       hooks: this.hooks ?? def.hooks,
+      queue: def.queue,
       stepExecutor: this.stepExecutor,
       clock: this.clock,
       ...(this.executorId !== undefined && { executorId: this.executorId }),
@@ -1084,6 +1137,11 @@ export interface WorkflowOrchestrationContext {
   readonly onVersionMismatch: "strict" | "drain";
   readonly previousVersions?: ReadonlyArray<Workflow<unknown, unknown>>;
   readonly hooks?: WorkflowHooks;
+  /**
+   * Workflow-level queue concurrency cap. Stamped onto every dispatched
+   * step task; step-level `StepDefinition.queue` overrides for that step.
+   */
+  readonly queue?: WorkflowQueueConfig<unknown>;
   /**
    * Pluggable step executor. Threaded through to `DagExecutionContext` so
    * the DAG loop delegates step bodies to the configured executor.
@@ -1244,6 +1302,7 @@ async function runOneOrchestrationCycle(
         onVersionMismatch: prevDef.onVersionMismatch,
         previousVersions: prevDef.previousVersions,
         hooks: ctx.hooks ?? prevDef.hooks,
+        queue: prevDef.queue,
         clock,
       };
       return runWorkflowOrchestration(prevCtx, { workflowId, input, force });
@@ -1363,6 +1422,8 @@ async function runOneOrchestrationCycle(
         stepExecutor: ctx.stepExecutor,
         guard,
         clock,
+        workflowName: ctx.name,
+        workflowQueue: ctx.queue,
         ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
       };
 
@@ -1531,6 +1592,14 @@ export interface DagExecutionContext {
   readonly hooks?: WorkflowHooks;
   readonly timeoutMs?: number;
   readonly dispatch?: DispatchConfig;
+  /**
+   * Workflow name + workflow-level queue config — needed to derive a
+   * task's `(concurrencyScope, concurrencyKey, concurrencyLimit)` triple
+   * at enqueue time. The DAG context is the lowest layer that still has
+   * both the input under run and the workflow-level config in scope.
+   */
+  readonly workflowName?: string;
+  readonly workflowQueue?: WorkflowQueueConfig<unknown>;
   /**
    * Fence guard for mutating writes. Captured by the orchestration loop
    * after `tryLock` and threaded into every `saveStepResult` /
@@ -1787,6 +1856,24 @@ export async function executeWorkflowDag(
             const currentAttempt = (params.stepAttempts.get(stepDef.name) ?? 0) + 1;
             params.stepAttempts.set(stepDef.name, currentAttempt);
 
+            // Resolve per-task concurrency cap. Step-level wins over the
+            // workflow-level default. The key fn is evaluated against the
+            // step's input ctx; the resolved string + scope + limit are
+            // stamped on the dispatched task so workers don't re-evaluate.
+            const concurrency = resolveStepConcurrency({
+              workflowName: ctx.workflowName,
+              workflowQueue: ctx.workflowQueue,
+              stepDef,
+              workflowInput: input,
+              stepInput: (() => {
+                const prevStepName = stepDef.dependsOn[0];
+                return prevStepName != null ? results[prevStepName] : input;
+              })(),
+              workflowId,
+              attempt: currentAttempt,
+              results,
+            });
+
             const req: StepExecutionRequest = {
               workflowId,
               stepName: stepDef.name,
@@ -1795,6 +1882,13 @@ export async function executeWorkflowDag(
               attempt: currentAttempt,
               needs: stepDef.needs,
               priority: stepDef.priority,
+              ...(concurrency
+                ? {
+                    concurrencyKey: concurrency.key,
+                    concurrencyScope: concurrency.scope,
+                    concurrencyLimit: concurrency.limit,
+                  }
+                : {}),
             };
             const res = await ctx.stepExecutor!.executeStep(req);
             if (!res.ok) {

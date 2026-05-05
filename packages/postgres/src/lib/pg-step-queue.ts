@@ -81,6 +81,9 @@ export class PgStepQueue implements StepQueue {
     namespace?: string;
     version?: string;
     metadata?: Record<string, unknown>;
+    concurrencyKey?: string;
+    concurrencyScope?: string;
+    concurrencyLimit?: number;
   }): Promise<string> {
     const ns = params.namespace ?? this.namespace;
     const priority = params.priority ?? 5;
@@ -100,7 +103,8 @@ export class PgStepQueue implements StepQueue {
     // callers always get an id back.
     const result = await this.db.execute(sql`
       INSERT INTO wf_step_queue (
-        workflow_id, step_name, namespace, needs, priority, input, prev_results, version, metadata
+        workflow_id, step_name, namespace, needs, priority, input, prev_results, version, metadata,
+        concurrency_key, concurrency_scope, concurrency_limit
       )
       VALUES (
         ${params.workflowId},
@@ -111,7 +115,10 @@ export class PgStepQueue implements StepQueue {
         ${inputJson}::jsonb,
         ${prevResultsJson}::jsonb,
         ${params.version ?? null},
-        ${metadataJson}::jsonb
+        ${metadataJson}::jsonb,
+        ${params.concurrencyKey ?? null},
+        ${params.concurrencyScope ?? null},
+        ${params.concurrencyLimit ?? null}
       )
       ON CONFLICT (workflow_id, step_name) WHERE status IN ('pending', 'running')
       DO UPDATE SET workflow_id = wf_step_queue.workflow_id
@@ -161,38 +168,86 @@ export class PgStepQueue implements StepQueue {
         break;
     }
 
+    // Concurrency cap admission. The CTE materializes per-candidate
+    // running_count + pos (priority-ordered position among pending
+    // siblings of the same scope+key); a candidate is admitted when
+    // `pos + running_count < concurrency_limit`. This is what makes a
+    // single `claim()` batch unable to itself violate the limit — even if
+    // we'd otherwise SKIP LOCKED N siblings in one go, only the first
+    // `(limit - running_count)` of them pass admission.
+    //
+    // Why a separate ID-only SELECT instead of `FOR UPDATE` directly on
+    // the candidate CTE: Postgres rejects `FOR UPDATE` on queries with
+    // window functions (error 0A000 — "FOR UPDATE is not allowed with
+    // window functions"). We materialize candidate IDs first, then do the
+    // SKIP LOCKED scan over the base table.
+    //
+    // The partial index `wf_step_queue_concurrency_running_idx` keeps the
+    // running_count subquery cheap; the GIN index on `needs` covers the
+    // capability filter.
+    const candidateCte = sql`
+      WITH candidates AS (
+        SELECT id,
+          CASE
+            WHEN concurrency_key IS NULL OR concurrency_scope IS NULL OR concurrency_limit IS NULL THEN 0
+            ELSE ROW_NUMBER() OVER (
+              PARTITION BY concurrency_scope, concurrency_key
+              ORDER BY priority DESC, created_at ASC
+            ) - 1
+          END AS pos,
+          CASE
+            WHEN concurrency_key IS NULL OR concurrency_scope IS NULL OR concurrency_limit IS NULL THEN 0
+            ELSE (
+              SELECT COUNT(*) FROM wf_step_queue r
+              WHERE r.status = 'running'
+                AND r.concurrency_scope = wf_step_queue.concurrency_scope
+                AND r.concurrency_key = wf_step_queue.concurrency_key
+            )
+          END AS running_count,
+          concurrency_limit
+        FROM wf_step_queue
+        WHERE status = 'pending'
+          AND needs <@ ${capsLiteral}
+          ${nsFilter}
+      )
+    `;
+
     const claimSql =
       fairness === "round-robin"
         ? sql`
+            ${candidateCte}
             UPDATE wf_step_queue
             SET status = 'running', claimed_by = ${workerId}, claimed_at = ${now}
             WHERE id IN (
               SELECT id FROM (
-                SELECT id, ROW_NUMBER() OVER (PARTITION BY workflow_id ORDER BY created_at ASC) as rn
-                FROM wf_step_queue
-                WHERE status = 'pending'
-                  AND needs <@ ${capsLiteral}
-                  ${nsFilter}
+                SELECT q.id,
+                  ROW_NUMBER() OVER (PARTITION BY q.workflow_id ORDER BY q.created_at ASC) AS rn,
+                  q.priority, q.created_at
+                FROM wf_step_queue q
+                JOIN candidates c ON c.id = q.id
+                WHERE c.concurrency_limit IS NULL
+                   OR (c.pos + c.running_count) < c.concurrency_limit
+                FOR UPDATE OF q SKIP LOCKED
               ) ranked
               ORDER BY ${orderBy}
               LIMIT ${limit}
-              FOR UPDATE SKIP LOCKED
             )
-            RETURNING id, workflow_id, step_name, needs, priority, input, prev_results, attempt, status, created_at, version, metadata
+            RETURNING id, workflow_id, step_name, needs, priority, input, prev_results, attempt, status, created_at, version, metadata, concurrency_key, concurrency_scope, concurrency_limit
           `
         : sql`
+            ${candidateCte}
             UPDATE wf_step_queue
             SET status = 'running', claimed_by = ${workerId}, claimed_at = ${now}
             WHERE id IN (
-              SELECT id FROM wf_step_queue
-              WHERE status = 'pending'
-                AND needs <@ ${capsLiteral}
-                ${nsFilter}
+              SELECT q.id FROM wf_step_queue q
+              JOIN candidates c ON c.id = q.id
+              WHERE c.concurrency_limit IS NULL
+                 OR (c.pos + c.running_count) < c.concurrency_limit
               ORDER BY ${orderBy}
               LIMIT ${limit}
-              FOR UPDATE SKIP LOCKED
+              FOR UPDATE OF q SKIP LOCKED
             )
-            RETURNING id, workflow_id, step_name, needs, priority, input, prev_results, attempt, status, created_at, version, metadata
+            RETURNING id, workflow_id, step_name, needs, priority, input, prev_results, attempt, status, created_at, version, metadata, concurrency_key, concurrency_scope, concurrency_limit
           `;
 
     const rows = await execRaw(this.db, claimSql);
@@ -211,6 +266,9 @@ export class PgStepQueue implements StepQueue {
         createdAt: r.created_at instanceof Date ? r.created_at : new Date(r.created_at),
         version: r.version ?? undefined,
         metadata: (r.metadata as Record<string, unknown> | null) ?? undefined,
+        concurrencyKey: r.concurrency_key ?? undefined,
+        concurrencyScope: r.concurrency_scope ?? undefined,
+        concurrencyLimit: r.concurrency_limit ?? undefined,
       }))
       .sort((a, b) => b.priority - a.priority || a.createdAt.getTime() - b.createdAt.getTime());
 

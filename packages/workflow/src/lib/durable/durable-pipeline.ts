@@ -101,6 +101,51 @@ export type BranchError<Branches extends Record<string, unknown>> = {
 }[keyof Branches];
 
 // ---------------------------------------------------------------------------
+// Queue concurrency config
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-workflow concurrency cap. Each step task this workflow enqueues
+ * carries the resolved key + limit; the step queue's `claim()` enforces
+ * the cap by counting currently-running tasks with the same
+ * `(workflowName, key)` tuple.
+ *
+ * Set `concurrencyKey` to a function of input — typical "cap per tenant"
+ * usage:
+ *
+ * ```ts
+ * workflow<{ tenantId: string }>({
+ *   name: "send-email",
+ *   queue: {
+ *     concurrencyLimit: 5,
+ *     concurrencyKey: (input) => input.tenantId,
+ *   },
+ * });
+ * ```
+ *
+ * Without `concurrencyKey`, the limit applies globally to every running
+ * step of this workflow regardless of input.
+ */
+export interface WorkflowQueueConfig<Input> {
+  readonly concurrencyLimit: number;
+  readonly concurrencyKey?: (input: Input) => string;
+}
+
+/**
+ * Per-step concurrency cap — same shape as workflow-level but scoped to
+ * just one step's tasks. Step-level wins over workflow-level for that
+ * specific step. Useful when one step is rate-limited by an external API
+ * (e.g. `concurrencyLimit: 3` on a "send-email" step that hits a vendor
+ * with a 3-rps cap, while the rest of the workflow has no cap).
+ */
+export interface StepQueueOption<T> {
+  readonly concurrencyLimit: number;
+  readonly concurrencyKey?: (
+    ctx: StepContext<T, unknown> | DagStepContext<T, Record<string, unknown>>,
+  ) => string;
+}
+
+// ---------------------------------------------------------------------------
 // Idempotency config
 // ---------------------------------------------------------------------------
 
@@ -182,6 +227,12 @@ export interface WorkflowDefinitionInternals {
   readonly onVersionMismatch: "strict" | "drain";
   readonly previousVersions?: ReadonlyArray<Workflow<unknown, unknown>>;
   readonly hooks?: WorkflowHooks;
+  /**
+   * Workflow-level concurrency cap — applied as a default to every step's
+   * dispatched task. Step-level `StepOptions.queue` wins for steps that
+   * declare their own. See `WorkflowQueueConfig`.
+   */
+  readonly queue?: WorkflowQueueConfig<unknown>;
 }
 
 /**
@@ -337,6 +388,12 @@ export interface StepOptions<T> {
    * a cache miss.
    */
   readonly cache?: StepCacheOption;
+  /**
+   * Per-step concurrency cap. Step-level wins over workflow-level — set
+   * this when one step is rate-limited by an external API while the rest
+   * of the workflow has no cap. See `WorkflowQueueConfig` for the shape.
+   */
+  readonly queue?: StepQueueOption<T>;
 }
 
 export interface StepCacheOption {
@@ -565,6 +622,15 @@ export interface StepDefinition {
   /** Dispatch priority copied onto the dispatched task. */
   readonly priority?: number;
   /**
+   * Per-step concurrency cap. The coordinator evaluates `queue.concurrencyKey`
+   * against the step ctx at enqueue time and stamps the result on the
+   * dispatched task. The step queue's `claim()` counts currently-running
+   * tasks with the same `(scope, key)` and refuses to claim past the limit.
+   * When set, takes precedence over the workflow's queue config for this
+   * specific step.
+   */
+  readonly queue?: StepQueueOption<unknown>;
+  /**
    * Static metadata for visualization/documentation. Currently set by `.match()`
    * to expose its case labels so the DAG can render decision branches; future
    * step kinds (e.g. branch with named arms) can populate it too. Runtime
@@ -660,6 +726,12 @@ export class WorkflowBuilder<
      * one SHA-256 per activity invocation.
      */
     private readonly _defaultPayloadHash?: boolean,
+    /**
+     * Workflow-level concurrency cap. Stamped onto every dispatched step
+     * task at coordinator-enqueue time, scoped to the workflow name; a
+     * step-level `StepOptions.queue` overrides this for its specific step.
+     */
+    private readonly _queue?: WorkflowQueueConfig<Input>,
   ) {}
 
   /** Resolve the codec a step or activity should use when no explicit override is set. */
@@ -688,6 +760,7 @@ export class WorkflowBuilder<
       this._patches,
       this._defaultCodec,
       this._defaultPayloadHash,
+      this._queue,
     );
   }
 
@@ -1959,6 +2032,7 @@ export class WorkflowBuilder<
       onVersionMismatch: this._onVersionMismatch,
       previousVersions: this._previousVersions,
       hooks: this._hooks,
+      queue: this._queue as WorkflowQueueConfig<unknown> | undefined,
     };
   }
 
@@ -2010,6 +2084,7 @@ export class WorkflowBuilder<
       this._patches,
       this._defaultCodec,
       this._defaultPayloadHash,
+      this._queue,
     );
   }
 
@@ -2035,6 +2110,7 @@ export class WorkflowBuilder<
       this._patches,
       this._defaultCodec,
       this._defaultPayloadHash,
+      this._queue,
     );
   }
 
@@ -2073,6 +2149,7 @@ export class WorkflowBuilder<
       skipValue: params.options?.skipValue as StepDefinition["skipValue"],
       needs: params.options?.needs,
       priority: params.options?.priority,
+      queue: params.options?.queue as StepQueueOption<unknown> | undefined,
       execute: (execParams) => {
         let ctx: StepContext<unknown, unknown> | DagStepContext<unknown, Record<string, unknown>>;
         if (params.isLinear) {
@@ -2218,6 +2295,21 @@ export function workflow<Input>(params: {
    * which is cheap but not free.
    */
   payloadHash?: boolean;
+  /**
+   * Workflow-level concurrency cap. Stamped onto every dispatched step
+   * task; the step queue's `claim()` enforces. Caller's
+   * `concurrencyKey(input)` runs once at coordinator-enqueue time and the
+   * resolved string is stored on each task so workers don't re-evaluate.
+   * A step's own `StepOptions.queue` overrides this for that step.
+   *
+   * ```ts
+   * workflow<{ tenantId: string }>({
+   *   name: "send-email",
+   *   queue: { concurrencyLimit: 5, concurrencyKey: (input) => input.tenantId },
+   * });
+   * ```
+   */
+  queue?: WorkflowQueueConfig<Input>;
 }): WorkflowBuilder<Input> {
   if (params.onVersionMismatch === "drain" && !params.previousVersions?.length) {
     throw new WorkflowError({
@@ -2255,6 +2347,7 @@ export function workflow<Input>(params: {
     params.patches,
     params.codec,
     params.payloadHash,
+    params.queue as WorkflowQueueConfig<Input> | undefined,
   );
 }
 

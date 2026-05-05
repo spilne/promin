@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { StepQueue, StepTask, FairnessPolicy } from "@promin/workflow";
+import { SystemClock, type Clock } from "@promin/core";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
 /**
@@ -33,12 +34,15 @@ import type { SqliteDatabase } from "./sqlite-database.ts";
  */
 export class SqliteStepQueue implements StepQueue {
   private readonly _table: string;
+  private readonly clock: Clock;
 
   private constructor(
     private readonly db: SqliteDatabase,
     table: string,
+    clock: Clock,
   ) {
     this._table = table;
+    this.clock = clock;
     this._setup();
   }
 
@@ -46,8 +50,18 @@ export class SqliteStepQueue implements StepQueue {
     db: SqliteDatabase;
     /** Override the table name (default: `promin_step_tasks`). */
     table?: string;
+    /**
+     * Time source for `created_at` / `claimed_at` / heartbeat / completion
+     * timestamps. Defaults to `SystemClock`. Tests pass a `FakeClock` so
+     * `clock.advance(ms)` drives the queue's time math deterministically.
+     */
+    clock?: Clock;
   }): SqliteStepQueue {
-    return new SqliteStepQueue(params.db, params.table ?? "promin_step_tasks");
+    return new SqliteStepQueue(
+      params.db,
+      params.table ?? "promin_step_tasks",
+      params.clock ?? SystemClock,
+    );
   }
 
   private _setup(): void {
@@ -80,11 +94,21 @@ export class SqliteStepQueue implements StepQueue {
     // ALTER TABLE ADD COLUMN IF NOT EXISTS arrived in 3.35; older dbs throw
     // "duplicate column" — we swallow that exact failure mode and let any
     // other error propagate.
-    try {
-      this.db.run(`ALTER TABLE ${t} ADD COLUMN metadata TEXT`);
-    } catch (e) {
-      if (!String(e).includes("duplicate column")) throw e;
+    for (const stmt of [
+      `ALTER TABLE ${t} ADD COLUMN metadata TEXT`,
+      `ALTER TABLE ${t} ADD COLUMN concurrency_key TEXT`,
+      `ALTER TABLE ${t} ADD COLUMN concurrency_scope TEXT`,
+      `ALTER TABLE ${t} ADD COLUMN concurrency_limit INTEGER`,
+    ]) {
+      try {
+        this.db.run(stmt);
+      } catch (e) {
+        if (!String(e).includes("duplicate column")) throw e;
+      }
     }
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_concurrency_running ON ${t} (concurrency_scope, concurrency_key) WHERE status = 'running' AND concurrency_key IS NOT NULL`,
+    );
     this.db.run(
       `CREATE UNIQUE INDEX IF NOT EXISTS ${t}_active ON ${t} (active_key) WHERE active_key IS NOT NULL`,
     );
@@ -107,6 +131,9 @@ export class SqliteStepQueue implements StepQueue {
     namespace?: string;
     version?: string;
     metadata?: Record<string, unknown>;
+    concurrencyKey?: string;
+    concurrencyScope?: string;
+    concurrencyLimit?: number;
   }): Promise<string> {
     const key = this._activeKey(params.namespace, params.workflowId, params.stepName);
 
@@ -121,8 +148,10 @@ export class SqliteStepQueue implements StepQueue {
         .query(
           `INSERT INTO ${this._table}
            (id, workflow_id, step_name, needs, priority, input, prev_results,
-            attempt, status, version, namespace, metadata, created_at, active_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'pending', ?, ?, ?, ?, ?)`,
+            attempt, status, version, namespace, metadata,
+            concurrency_key, concurrency_scope, concurrency_limit,
+            created_at, active_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -135,7 +164,10 @@ export class SqliteStepQueue implements StepQueue {
           params.version ?? null,
           params.namespace ?? null,
           params.metadata !== undefined ? JSON.stringify(params.metadata) : null,
-          Date.now(),
+          params.concurrencyKey ?? null,
+          params.concurrencyScope ?? null,
+          params.concurrencyLimit ?? null,
+          this.clock.currentTimeMs(),
           key,
         );
       return id;
@@ -203,14 +235,42 @@ export class SqliteStepQueue implements StepQueue {
         ordered = eligible;
     }
 
+    // Build a per-(scope, key) running counter — counts both already-running
+    // tasks and tasks claimed earlier in this same call so a single
+    // `claim()` batch can't itself violate a limit.
+    const runningPerKey = new Map<string, number>();
+    const runningRows = this.db
+      .query<{ concurrency_scope: string | null; concurrency_key: string | null }>(
+        `SELECT concurrency_scope, concurrency_key FROM ${this._table}
+         WHERE status = 'running' AND concurrency_key IS NOT NULL`,
+      )
+      .all();
+    for (const r of runningRows) {
+      if (!r.concurrency_scope || !r.concurrency_key) continue;
+      const k = `${r.concurrency_scope}::${r.concurrency_key}`;
+      runningPerKey.set(k, (runningPerKey.get(k) ?? 0) + 1);
+    }
+
     const claimed: StepTask[] = [];
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
 
     for (const row of ordered) {
       if (claimed.length >= params.limit) break;
 
       const task = rowToTask(row);
       if (params.filter && !params.filter(task)) continue;
+      // Concurrency cap check.
+      if (
+        row.concurrency_key &&
+        row.concurrency_scope &&
+        row.concurrency_limit !== null &&
+        row.concurrency_limit !== undefined
+      ) {
+        const k = `${row.concurrency_scope}::${row.concurrency_key}`;
+        const running = runningPerKey.get(k) ?? 0;
+        if (running >= row.concurrency_limit) continue;
+        runningPerKey.set(k, running + 1);
+      }
 
       this.db
         .query(
@@ -227,7 +287,7 @@ export class SqliteStepQueue implements StepQueue {
   }
 
   async complete(params: { taskId: string; result: unknown; durationMs: number }): Promise<void> {
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     this.db
       .query(
         `UPDATE ${this._table}
@@ -239,7 +299,7 @@ export class SqliteStepQueue implements StepQueue {
   }
 
   async fail(params: { taskId: string; error: string; durationMs: number }): Promise<void> {
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     this.db
       .query(
         `UPDATE ${this._table}
@@ -253,11 +313,11 @@ export class SqliteStepQueue implements StepQueue {
   async heartbeat(params: { taskId: string }): Promise<void> {
     this.db
       .query(`UPDATE ${this._table} SET last_heartbeat = ? WHERE id = ? AND status = 'running'`)
-      .run(Date.now(), params.taskId);
+      .run(this.clock.currentTimeMs(), params.taskId);
   }
 
   async requeueStuck(params: { claimedBy?: string; staleTimeoutMs?: number }): Promise<number> {
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     let count = 0;
 
     if (params.claimedBy !== undefined) {
@@ -392,6 +452,9 @@ interface TaskRow {
   version: string | null;
   namespace: string | null;
   metadata: string | null;
+  concurrency_key: string | null;
+  concurrency_scope: string | null;
+  concurrency_limit: number | null;
   created_at: number;
   claimed_at: number | null;
   completed_at: number | null;
@@ -417,6 +480,9 @@ function rowToTask(row: TaskRow): StepTask {
     version: row.version ?? undefined,
     metadata:
       row.metadata != null ? (JSON.parse(row.metadata) as Record<string, unknown>) : undefined,
+    concurrencyKey: row.concurrency_key ?? undefined,
+    concurrencyScope: row.concurrency_scope ?? undefined,
+    concurrencyLimit: row.concurrency_limit ?? undefined,
   };
 }
 

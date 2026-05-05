@@ -53,6 +53,9 @@ export class InMemoryStepQueue implements StepQueue {
     namespace?: string;
     version?: string;
     metadata?: Record<string, unknown>;
+    concurrencyKey?: string;
+    concurrencyScope?: string;
+    concurrencyLimit?: number;
   }): Promise<string> {
     const key = this.activeKey(params.namespace, params.workflowId, params.stepName);
     const existing = this.activeByKey.get(key);
@@ -73,6 +76,9 @@ export class InMemoryStepQueue implements StepQueue {
       version: params.version,
       namespace: params.namespace,
       metadata: params.metadata,
+      concurrencyKey: params.concurrencyKey,
+      concurrencyScope: params.concurrencyScope,
+      concurrencyLimit: params.concurrencyLimit,
     });
     this.activeByKey.set(key, id);
     return id;
@@ -142,11 +148,30 @@ export class InMemoryStepQueue implements StepQueue {
         ordered = pending;
     }
 
+    // Per-(scope,key) running counter — built once per claim() call so we
+    // can decide if claiming a task would push past its concurrencyLimit.
+    // Counts both already-running tasks and tasks claimed earlier in this
+    // same batch (so a single claim call can't itself violate the cap).
+    const runningPerKey = new Map<string, number>();
+    for (const t of this.tasks.values()) {
+      if (t.status !== "running") continue;
+      if (!t.concurrencyKey || !t.concurrencyScope) continue;
+      const k = `${t.concurrencyScope}::${t.concurrencyKey}`;
+      runningPerKey.set(k, (runningPerKey.get(k) ?? 0) + 1);
+    }
+
     const claimed: StepTask[] = [];
     for (const task of ordered) {
       if (claimed.length >= params.limit) break;
       if (task.status !== "pending") continue;
       if (params.filter && !params.filter({ ...task } as StepTask)) continue;
+      // Concurrency cap check — only when all three fields are set.
+      if (task.concurrencyKey && task.concurrencyScope && task.concurrencyLimit !== undefined) {
+        const k = `${task.concurrencyScope}::${task.concurrencyKey}`;
+        const running = runningPerKey.get(k) ?? 0;
+        if (running >= task.concurrencyLimit) continue;
+        runningPerKey.set(k, running + 1);
+      }
       task.status = "running";
       task.claimedBy = this.workerId;
       task.claimedAt = this.clock.now();
