@@ -20,6 +20,7 @@ import type {
   JournaledSuspendStorage,
   JournalEntry,
   FenceGuard,
+  SignalTokenRecord,
 } from "@promin/workflow";
 import { FenceTokenMismatchError } from "@promin/workflow";
 import {
@@ -32,6 +33,7 @@ import {
   stepAttempts,
   stepQueue,
   activityJournal,
+  signalTokens,
   LOOKUP_BINDINGS,
 } from "./schema.ts";
 import {
@@ -324,6 +326,8 @@ export class PostgresWorkflowStorage
     namespace?: string;
     metadata?: Record<string, unknown>;
     version?: string;
+    idempotencyKey?: string;
+    idempotencyExpiresAt?: Date;
   }): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
     const ns = this.resolveNamespace(params.namespace);
     const [inserted] = await this.db
@@ -337,15 +341,56 @@ export class PostgresWorkflowStorage
         statusId: WorkflowStatusIds.id.pending,
         input: params.input,
         metadata: params.metadata,
+        idempotencyKey: params.idempotencyKey,
+        idempotencyExpiresAt: params.idempotencyExpiresAt,
       })
       .onConflictDoNothing()
       .returning({ workflowId: workflows.workflowId });
 
     if (!inserted) {
-      const existing = await this.loadWorkflow(params.workflowId);
-      return { created: false, existing: existing! };
+      // Conflict: either workflowId PK matched (caller's id was already
+      // taken) or the partial-unique idempotency_key index matched
+      // (another caller registered the key first). Resolve to whichever
+      // row exists by id first, then by key.
+      const existingById = await this.loadWorkflow(params.workflowId);
+      if (existingById) return { created: false, existing: existingById };
+
+      if (params.idempotencyKey) {
+        const hit = await this.findWorkflowByIdempotencyKey({
+          workflowName: params.workflowName,
+          idempotencyKey: params.idempotencyKey,
+          now: this.config.clock.now(),
+        });
+        if (hit) {
+          const existing = await this.loadWorkflow(hit.workflowId);
+          if (existing) return { created: false, existing };
+        }
+      }
+      throw new Error(
+        `createWorkflow: insert conflict for "${params.workflowId}" but neither workflow_id nor idempotency_key resolved.`,
+      );
     }
     return { created: true };
+  }
+
+  async findWorkflowByIdempotencyKey(params: {
+    workflowName: string;
+    idempotencyKey: string;
+    now: Date;
+  }): Promise<{ workflowId: string } | null> {
+    const [row] = await this.db
+      .select({ workflowId: workflows.workflowId })
+      .from(workflows)
+      .where(
+        and(
+          eq(workflows.workflowName, params.workflowName),
+          eq(workflows.idempotencyKey, params.idempotencyKey),
+          sql`${workflows.idempotencyExpiresAt} IS NOT NULL`,
+          sql`${workflows.idempotencyExpiresAt} > ${params.now.toISOString()}::timestamptz`,
+        ),
+      )
+      .limit(1);
+    return row ? { workflowId: row.workflowId } : null;
   }
 
   /** Transition pending → running on first step activity. */
@@ -712,6 +757,30 @@ export class PostgresWorkflowStorage
         target: [workflowSignals.workflowId, workflowSignals.signalName],
         set: { payload, deliveredAt: this.config.clock.now() },
       });
+  }
+
+  async setWorkflowMetadata(workflowId: string, patch: Record<string, unknown>): Promise<void> {
+    // Postgres jsonb merge on the row's metadata column. `||` shallow-merges
+    // top-level keys; null-valued entries in the patch are stripped via a
+    // second `- text[]` op so callers can use `null` to remove a key.
+    const removeKeys = Object.entries(patch)
+      .filter(([, v]) => v === null)
+      .map(([k]) => k);
+    const writePatch: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(patch)) {
+      if (v !== null) writePatch[k] = v;
+    }
+    await this.db
+      .update(workflows)
+      .set({
+        metadata: sql`COALESCE(${workflows.metadata}, '{}'::jsonb) || ${JSON.stringify(writePatch)}::jsonb${
+          removeKeys.length > 0
+            ? sql` - ${sql.raw(`ARRAY[${removeKeys.map((k) => `'${k.replace(/'/g, "''")}'`).join(",")}]::text[]`)}`
+            : sql``
+        }`,
+        updatedAt: this.config.clock.now(),
+      })
+      .where(eq(workflows.workflowId, workflowId));
   }
 
   async loadSignals(workflowId: string): Promise<SignalState[]> {
@@ -1189,7 +1258,7 @@ export class PostgresWorkflowStorage
     branchPath?: string;
     activityName: string;
     payloadHash?: string;
-    stepType: "sleep" | "signal" | "activity" | "compensation";
+    stepType: "sleep" | "signal" | "activity" | "compensation" | "child" | "waitpoint";
     wakeAt?: Date;
   }): Promise<void> {
     await this.db
@@ -1296,6 +1365,94 @@ export class PostgresWorkflowStorage
       .limit(1);
     return row ? rowToJournalEntry(row) : null;
   }
+
+  // ---------------------------------------------------------------------------
+  // SignalToken — public-bearer authorization for storage.deliverSignal
+  // ---------------------------------------------------------------------------
+
+  async createSignalToken(params: {
+    tokenId: string;
+    workflowId: string;
+    signalName: string;
+    bearer: string;
+    tags: ReadonlyArray<string>;
+    idempotencyKey?: string | null;
+    expiresAt: Date;
+  }): Promise<{ record: SignalTokenRecord; isCached: boolean }> {
+    if (params.idempotencyKey) {
+      const [existing] = await this.db
+        .select()
+        .from(signalTokens)
+        .where(
+          and(
+            eq(signalTokens.workflowId, params.workflowId),
+            eq(signalTokens.idempotencyKey, params.idempotencyKey),
+          ),
+        )
+        .limit(1);
+      if (existing) {
+        return { record: rowToSignalToken(existing), isCached: true };
+      }
+    }
+    const [inserted] = await this.db
+      .insert(signalTokens)
+      .values({
+        tokenId: params.tokenId,
+        workflowId: params.workflowId,
+        signalName: params.signalName,
+        bearer: params.bearer,
+        tags: [...params.tags],
+        idempotencyKey: params.idempotencyKey ?? null,
+        expiresAt: params.expiresAt,
+      })
+      .returning();
+    return { record: rowToSignalToken(inserted!), isCached: false };
+  }
+
+  async findSignalTokenById(tokenId: string): Promise<SignalTokenRecord | null> {
+    const [row] = await this.db
+      .select()
+      .from(signalTokens)
+      .where(eq(signalTokens.tokenId, tokenId))
+      .limit(1);
+    return row ? rowToSignalToken(row) : null;
+  }
+
+  async markSignalTokenCompleted(params: {
+    tokenId: string;
+    value: unknown;
+    now: Date;
+  }): Promise<
+    | { outcome: "delivered"; record: SignalTokenRecord }
+    | { outcome: "already_completed"; record: SignalTokenRecord }
+  > {
+    // Atomic: only update rows still pending; UPDATE ... RETURNING tells us
+    // whether we won the race or lost to a concurrent completer.
+    const [won] = await this.db
+      .update(signalTokens)
+      .set({ completedAt: params.now, completedValue: params.value as never })
+      .where(
+        and(eq(signalTokens.tokenId, params.tokenId), sql`${signalTokens.completedAt} IS NULL`),
+      )
+      .returning();
+    if (won) {
+      return { outcome: "delivered", record: rowToSignalToken(won) };
+    }
+    const current = await this.findSignalTokenById(params.tokenId);
+    if (!current) {
+      throw new Error(`signal token ${params.tokenId} not found`);
+    }
+    return { outcome: "already_completed", record: current };
+  }
+
+  async listSignalTokensForWorkflow(workflowId: string): Promise<ReadonlyArray<SignalTokenRecord>> {
+    const rows = await this.db
+      .select()
+      .from(signalTokens)
+      .where(eq(signalTokens.workflowId, workflowId))
+      .orderBy(desc(signalTokens.createdAt));
+    return rows.map(rowToSignalToken);
+  }
 }
 
 /**
@@ -1348,6 +1505,32 @@ function rowToJournalEntry(row: {
     payloadHash: row.payloadHash ?? undefined,
     wakeAt: row.wakeAt ?? undefined,
     exit: (row.exit ?? undefined) as JournalEntry["exit"],
+    createdAt: row.createdAt,
+  };
+}
+
+function rowToSignalToken(row: {
+  tokenId: string;
+  workflowId: string;
+  signalName: string;
+  bearer: string;
+  tags: string[];
+  idempotencyKey: string | null;
+  expiresAt: Date;
+  completedAt: Date | null;
+  completedValue: unknown;
+  createdAt: Date;
+}): SignalTokenRecord {
+  return {
+    tokenId: row.tokenId,
+    workflowId: row.workflowId,
+    signalName: row.signalName,
+    bearer: row.bearer,
+    tags: row.tags,
+    idempotencyKey: row.idempotencyKey,
+    expiresAt: row.expiresAt,
+    completedAt: row.completedAt,
+    completedValue: row.completedValue,
     createdAt: row.createdAt,
   };
 }

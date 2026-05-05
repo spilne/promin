@@ -21,6 +21,7 @@ import type {
   JournaledSuspendStorage,
   StepAttemptStorage,
   StepAttemptRecord,
+  SignalTokenRecord,
 } from "@promin/workflow";
 import { WIRE_CODEC, type RpcResponse, type StorageMethod } from "./wire.ts";
 
@@ -153,8 +154,18 @@ export class RemoteWorkflowStorage
     namespace?: string;
     metadata?: Record<string, unknown>;
     version?: string;
+    idempotencyKey?: string;
+    idempotencyExpiresAt?: Date;
   }): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
     return this.call("createWorkflow", params);
+  }
+
+  findWorkflowByIdempotencyKey(params: {
+    workflowName: string;
+    idempotencyKey: string;
+    now: Date;
+  }): Promise<{ workflowId: string } | null> {
+    return this.call("findWorkflowByIdempotencyKey", params);
   }
 
   saveStepResult(
@@ -250,6 +261,45 @@ export class RemoteWorkflowStorage
 
   loadSignals(workflowId: string): Promise<SignalState[]> {
     return this.call("loadSignals", { workflowId });
+  }
+
+  setWorkflowMetadata(workflowId: string, patch: Record<string, unknown>): Promise<void> {
+    return this.call("setWorkflowMetadata", { workflowId, patch });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Signal tokens — public-bearer authz; remoted as plain RPC.
+  // ---------------------------------------------------------------------------
+
+  createSignalToken(params: {
+    tokenId: string;
+    workflowId: string;
+    signalName: string;
+    bearer: string;
+    tags: ReadonlyArray<string>;
+    idempotencyKey?: string | null;
+    expiresAt: Date;
+  }): Promise<{ record: SignalTokenRecord; isCached: boolean }> {
+    return this.call("createSignalToken", params);
+  }
+
+  findSignalTokenById(tokenId: string): Promise<SignalTokenRecord | null> {
+    return this.call("findSignalTokenById", { tokenId });
+  }
+
+  markSignalTokenCompleted(params: {
+    tokenId: string;
+    value: unknown;
+    now: Date;
+  }): Promise<
+    | { outcome: "delivered"; record: SignalTokenRecord }
+    | { outcome: "already_completed"; record: SignalTokenRecord }
+  > {
+    return this.call("markSignalTokenCompleted", params);
+  }
+
+  listSignalTokensForWorkflow(workflowId: string): Promise<ReadonlyArray<SignalTokenRecord>> {
+    return this.call("listSignalTokensForWorkflow", { workflowId });
   }
 
   tryLock(

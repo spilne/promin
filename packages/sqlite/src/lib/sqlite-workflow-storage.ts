@@ -8,6 +8,7 @@ import {
   type FenceGuard,
   type WorkflowOrderBy,
   type RunSource,
+  type SignalTokenRecord,
 } from "@promin/workflow";
 import type {
   WorkflowState,
@@ -106,6 +107,8 @@ export class SqliteWorkflowStorage
     for (const stmt of [
       `ALTER TABLE ${t} ADD COLUMN run_source INTEGER`,
       `ALTER TABLE ${t} ADD COLUMN run_source_id TEXT`,
+      `ALTER TABLE ${t} ADD COLUMN idempotency_key TEXT`,
+      `ALTER TABLE ${t} ADD COLUMN idempotency_expires_at INTEGER`,
     ]) {
       try {
         this.db.run(stmt);
@@ -113,6 +116,10 @@ export class SqliteWorkflowStorage
         if (!String(e).includes("duplicate column")) throw e;
       }
     }
+    // Partial unique index on the idempotency key for atomic claim-or-attach.
+    this.db.run(
+      `CREATE UNIQUE INDEX IF NOT EXISTS ${t}_idempotency_key ON ${t} (workflow_name, idempotency_key) WHERE idempotency_key IS NOT NULL`,
+    );
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_status ON ${t} (status)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_parent ON ${t} (parent_workflow_id)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_run_source ON ${t} (run_source, run_source_id)`);
@@ -195,6 +202,29 @@ export class SqliteWorkflowStorage
         PRIMARY KEY (workflow_id, step_name, attempt, type)
       )
     `);
+    // Public-bearer signal tokens — authz sidecar for deliverSignal. Tokens
+    // grant one-shot delivery rights to an external completer, scoped to a
+    // specific (workflow_id, signal_name).
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS ${t}_signal_tokens (
+        token_id        TEXT    NOT NULL PRIMARY KEY,
+        workflow_id     TEXT    NOT NULL,
+        signal_name     TEXT    NOT NULL,
+        bearer          TEXT    NOT NULL,
+        tags            TEXT    NOT NULL DEFAULT '[]',
+        idempotency_key TEXT,
+        expires_at      INTEGER NOT NULL,
+        completed_at    INTEGER,
+        completed_value TEXT,
+        created_at      INTEGER NOT NULL
+      )
+    `);
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_signal_tokens_wfid ON ${t}_signal_tokens (workflow_id)`,
+    );
+    this.db.run(
+      `CREATE UNIQUE INDEX IF NOT EXISTS ${t}_signal_tokens_idemp ON ${t}_signal_tokens (workflow_id, idempotency_key) WHERE idempotency_key IS NOT NULL`,
+    );
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_attempts_wfid ON ${t}_attempts (workflow_id, step_name)`,
     );
@@ -676,22 +706,42 @@ export class SqliteWorkflowStorage
     version?: string;
     runSource?: RunSource;
     runSourceId?: string;
+    idempotencyKey?: string;
+    idempotencyExpiresAt?: Date;
   }): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
     return this.db.transaction(
       (): { created: true } | { created: false; existing: WorkflowState } => {
+        const now = Date.now();
+
+        // Idempotency-key path: if (workflow_name, idempotency_key) exists
+        // and is unexpired, attach to it. Inside the transaction so the
+        // unique-index conflict resolves atomically.
+        if (params.idempotencyKey) {
+          const keyHit = this.db
+            .query<WfRow>(
+              `SELECT * FROM ${this._t}
+               WHERE workflow_name = ? AND idempotency_key = ?
+                 AND idempotency_expires_at IS NOT NULL
+                 AND idempotency_expires_at > ?
+               LIMIT 1`,
+            )
+            .get(params.workflowName, params.idempotencyKey, now);
+          if (keyHit) return { created: false, existing: this._rowToState(keyHit) };
+        }
+
         const existing = this.db
           .query<WfRow>(`SELECT * FROM ${this._t} WHERE workflow_id = ?`)
           .get(params.workflowId);
         if (existing) return { created: false, existing: this._rowToState(existing) };
 
-        const now = Date.now();
         this.db
           .query(
             `INSERT INTO ${this._t}
            (workflow_id, workflow_name, workflow_type, parent_workflow_id, namespace, status,
             version, run, input, metadata, steps, run_source, run_source_id,
+            idempotency_key, idempotency_expires_at,
             created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'pending', ?, 1, ?, ?, '{}', ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, 'pending', ?, 1, ?, ?, '{}', ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             params.workflowId,
@@ -704,12 +754,31 @@ export class SqliteWorkflowStorage
             params.metadata != null ? JSON.stringify(params.metadata) : null,
             encodeRunSource(params.runSource),
             params.runSourceId ?? null,
+            params.idempotencyKey ?? null,
+            params.idempotencyExpiresAt ? params.idempotencyExpiresAt.getTime() : null,
             now,
             now,
           );
         return { created: true };
       },
     )();
+  }
+
+  async findWorkflowByIdempotencyKey(params: {
+    workflowName: string;
+    idempotencyKey: string;
+    now: Date;
+  }): Promise<{ workflowId: string } | null> {
+    const row = this.db
+      .query<{ workflow_id: string }>(
+        `SELECT workflow_id FROM ${this._t}
+         WHERE workflow_name = ? AND idempotency_key = ?
+           AND idempotency_expires_at IS NOT NULL
+           AND idempotency_expires_at > ?
+         LIMIT 1`,
+      )
+      .get(params.workflowName, params.idempotencyKey, params.now.getTime());
+    return row ? { workflowId: row.workflow_id } : null;
   }
 
   // ---------------------------------------------------------------------------
@@ -1010,6 +1079,27 @@ export class SqliteWorkflowStorage
       .run(workflowId, signalName, JSON.stringify(payload), Date.now());
   }
 
+  async setWorkflowMetadata(workflowId: string, patch: Record<string, unknown>): Promise<void> {
+    // SQLite has json_patch but support is recent + spotty; do read-modify-
+    // write inside a transaction so concurrent body re-runs don't lose
+    // updates. Same shape as the in-memory + redis impls.
+    this.db.transaction((): void => {
+      const row = this.db
+        .query<{ metadata: string | null }>(`SELECT metadata FROM ${this._t} WHERE workflow_id = ?`)
+        .get(workflowId);
+      if (!row) return;
+      const current: Record<string, unknown> = row.metadata != null ? JSON.parse(row.metadata) : {};
+      const merged: Record<string, unknown> = { ...current };
+      for (const [k, v] of Object.entries(patch)) {
+        if (v === null) delete merged[k];
+        else merged[k] = v;
+      }
+      this.db
+        .query(`UPDATE ${this._t} SET metadata = ?, updated_at = ? WHERE workflow_id = ?`)
+        .run(JSON.stringify(merged), Date.now(), workflowId);
+    })();
+  }
+
   async loadSignals(workflowId: string): Promise<SignalState[]> {
     const rows = this.db
       .query<{ signal_name: string; payload: string; delivered_at: number }>(
@@ -1022,6 +1112,106 @@ export class SqliteWorkflowStorage
       payload: JSON.parse(r.payload),
       deliveredAt: new Date(r.delivered_at),
     }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Signal tokens — public-bearer authorization for deliverSignal
+  // ---------------------------------------------------------------------------
+
+  async createSignalToken(params: {
+    tokenId: string;
+    workflowId: string;
+    signalName: string;
+    bearer: string;
+    tags: ReadonlyArray<string>;
+    idempotencyKey?: string | null;
+    expiresAt: Date;
+  }): Promise<{ record: SignalTokenRecord; isCached: boolean }> {
+    return this.db.transaction((): { record: SignalTokenRecord; isCached: boolean } => {
+      if (params.idempotencyKey) {
+        const existing = this.db
+          .query<SignalTokenRow>(
+            `SELECT * FROM ${this._t}_signal_tokens WHERE workflow_id = ? AND idempotency_key = ?`,
+          )
+          .get(params.workflowId, params.idempotencyKey);
+        if (existing) {
+          return { record: rowToSignalToken(existing), isCached: true };
+        }
+      }
+      const now = Date.now();
+      this.db
+        .query(
+          `INSERT INTO ${this._t}_signal_tokens
+           (token_id, workflow_id, signal_name, bearer, tags, idempotency_key, expires_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          params.tokenId,
+          params.workflowId,
+          params.signalName,
+          params.bearer,
+          JSON.stringify([...params.tags]),
+          params.idempotencyKey ?? null,
+          params.expiresAt.getTime(),
+          now,
+        );
+      const inserted = this.db
+        .query<SignalTokenRow>(`SELECT * FROM ${this._t}_signal_tokens WHERE token_id = ?`)
+        .get(params.tokenId);
+      if (!inserted) throw new Error("createSignalToken: insert disappeared");
+      return { record: rowToSignalToken(inserted), isCached: false };
+    })();
+  }
+
+  async findSignalTokenById(tokenId: string): Promise<SignalTokenRecord | null> {
+    const row = this.db
+      .query<SignalTokenRow>(`SELECT * FROM ${this._t}_signal_tokens WHERE token_id = ?`)
+      .get(tokenId);
+    return row ? rowToSignalToken(row) : null;
+  }
+
+  async markSignalTokenCompleted(params: {
+    tokenId: string;
+    value: unknown;
+    now: Date;
+  }): Promise<
+    | { outcome: "delivered"; record: SignalTokenRecord }
+    | { outcome: "already_completed"; record: SignalTokenRecord }
+  > {
+    return this.db.transaction(
+      ():
+        | { outcome: "delivered"; record: SignalTokenRecord }
+        | { outcome: "already_completed"; record: SignalTokenRecord } => {
+        const row = this.db
+          .query<SignalTokenRow>(`SELECT * FROM ${this._t}_signal_tokens WHERE token_id = ?`)
+          .get(params.tokenId);
+        if (!row) throw new Error(`signal token ${params.tokenId} not found`);
+        if (row.completed_at !== null) {
+          return { outcome: "already_completed", record: rowToSignalToken(row) };
+        }
+        this.db
+          .query(
+            `UPDATE ${this._t}_signal_tokens
+             SET completed_at = ?, completed_value = ?
+             WHERE token_id = ? AND completed_at IS NULL`,
+          )
+          .run(params.now.getTime(), JSON.stringify(params.value), params.tokenId);
+        const updated = this.db
+          .query<SignalTokenRow>(`SELECT * FROM ${this._t}_signal_tokens WHERE token_id = ?`)
+          .get(params.tokenId);
+        if (!updated) throw new Error("markSignalTokenCompleted: row disappeared");
+        return { outcome: "delivered", record: rowToSignalToken(updated) };
+      },
+    )();
+  }
+
+  async listSignalTokensForWorkflow(workflowId: string): Promise<ReadonlyArray<SignalTokenRecord>> {
+    const rows = this.db
+      .query<SignalTokenRow>(
+        `SELECT * FROM ${this._t}_signal_tokens WHERE workflow_id = ? ORDER BY created_at DESC`,
+      )
+      .all(workflowId);
+    return rows.map(rowToSignalToken);
   }
 
   // ---------------------------------------------------------------------------
@@ -1629,6 +1819,34 @@ function rowToJournalEntry(row: JournalRow): JournalEntry {
     payloadHash: row.payload_hash ?? undefined,
     exit: row.exit ? JSON.parse(row.exit) : undefined,
     wakeAt: row.wake_at != null ? new Date(row.wake_at) : undefined,
+    createdAt: new Date(row.created_at),
+  };
+}
+
+interface SignalTokenRow {
+  token_id: string;
+  workflow_id: string;
+  signal_name: string;
+  bearer: string;
+  tags: string;
+  idempotency_key: string | null;
+  expires_at: number;
+  completed_at: number | null;
+  completed_value: string | null;
+  created_at: number;
+}
+
+function rowToSignalToken(row: SignalTokenRow): SignalTokenRecord {
+  return {
+    tokenId: row.token_id,
+    workflowId: row.workflow_id,
+    signalName: row.signal_name,
+    bearer: row.bearer,
+    tags: JSON.parse(row.tags),
+    idempotencyKey: row.idempotency_key,
+    expiresAt: new Date(row.expires_at),
+    completedAt: row.completed_at != null ? new Date(row.completed_at) : null,
+    completedValue: row.completed_value != null ? JSON.parse(row.completed_value) : null,
     createdAt: new Date(row.created_at),
   };
 }

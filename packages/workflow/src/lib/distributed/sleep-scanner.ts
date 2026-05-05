@@ -122,7 +122,17 @@ export class DefaultSleepScanner implements SleepScanner {
 
       for (const wf of suspended) {
         for (const step of Object.values(wf.steps)) {
-          if (step.status === "sleeping" && step.wakeAt && step.wakeAt <= now) {
+          // Sleeping steps wake on `wakeAt`. Signal-waiting steps with a
+          // configured `signalTimeoutAt` also wake — the body's
+          // `ctx.signal({ timeout })` self-heals on replay (sees the
+          // timeout has passed, completes the journal entry with the
+          // timeout outcome, returns).
+          const sleepDue = step.status === "sleeping" && step.wakeAt && step.wakeAt <= now;
+          const signalTimedOut =
+            step.status === "waiting_for_signal" &&
+            step.signalTimeoutAt &&
+            step.signalTimeoutAt <= now;
+          if (sleepDue || signalTimedOut) {
             await this.resumeWorkflow(wf.workflowId, wf.workflowName, wf.input);
             break; // one resume per workflow per scan
           }

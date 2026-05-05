@@ -142,6 +142,22 @@ export type WorkflowRunnerRunParams =
       readonly workflowId: string;
       readonly input: unknown;
       readonly force?: boolean;
+      /**
+       * Per-call dedup key. The runner first looks up an existing workflow
+       * by `(workflow.name, idempotencyKey)`; if a non-expired match
+       * exists, the run redirects to that workflow's id and the supplied
+       * `workflowId` is ignored. On miss, the new workflow is created with
+       * the key attached. Solves the auto-mint case where the caller can't
+       * encode dedup intent into a fresh UUID workflowId.
+       */
+      readonly idempotencyKey?: string;
+      /**
+       * How long the key resolves to this run (ms). Required when
+       * `idempotencyKey` is set; ignored otherwise. After expiry the key
+       * is reclaimable by a future call (the workflow row is untouched —
+       * only the `(name, key)` mapping lapses).
+       */
+      readonly idempotencyKeyTTL?: number;
     }
   | {
       readonly name: string;
@@ -149,6 +165,8 @@ export type WorkflowRunnerRunParams =
       readonly workflowId: string;
       readonly input: unknown;
       readonly force?: boolean;
+      readonly idempotencyKey?: string;
+      readonly idempotencyKeyTTL?: number;
     };
 
 /** Config for `createWorkflowRunner` / `DefaultWorkflowRunner`. */
@@ -469,10 +487,44 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
 
   async run(params: WorkflowRunnerRunParams): Promise<unknown> {
     const storage = this.storage;
-    const { workflowId, input, force } = params;
+    const { input, force, idempotencyKey, idempotencyKeyTTL } = params;
+
+    // Per-call idempotency key: resolve to an existing workflowId before
+    // dispatching. The supplied workflowId is the create-fallback when the
+    // key is fresh; if it resolves, the caller's id is ignored. Key + TTL
+    // flow into createWorkflow so a fresh create attaches the key
+    // atomically — the partial-unique index resolves any concurrent-create
+    // race by returning the canonical row in the conflict path.
+    const workflowName = "workflow" in params ? params.workflow.name : params.name;
+    const idempotencyExpiresAt =
+      idempotencyKey && idempotencyKeyTTL !== undefined
+        ? new Date(this.clock.currentTimeMs() + idempotencyKeyTTL)
+        : undefined;
+    let workflowId = params.workflowId;
+    if (idempotencyKey) {
+      if (idempotencyKeyTTL === undefined) {
+        throw new Error(
+          `WorkflowRunner.run: \`idempotencyKey\` requires \`idempotencyKeyTTL\`. ` +
+            `Pass a TTL in milliseconds — there is no default.`,
+        );
+      }
+      const hit = await storage.findWorkflowByIdempotencyKey({
+        workflowName,
+        idempotencyKey,
+        now: this.clock.now(),
+      });
+      if (hit) workflowId = hit.workflowId;
+    }
 
     if ("workflow" in params) {
-      return this._runWorkflow({ workflow: params.workflow, storage, workflowId, input, force });
+      return this._runWorkflow({
+        workflow: params.workflow,
+        storage,
+        workflowId,
+        input,
+        force,
+        ...(idempotencyKey && idempotencyExpiresAt ? { idempotencyKey, idempotencyExpiresAt } : {}),
+      });
     }
 
     // Name-based — resolve via registry, implement version-drain-resume:
@@ -505,10 +557,24 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
             `Keep old definitions registered until in-flight workflows drain.`,
         );
       }
-      return this._runWorkflow({ workflow: storedDef, storage, workflowId, input, force });
+      return this._runWorkflow({
+        workflow: storedDef,
+        storage,
+        workflowId,
+        input,
+        force,
+        ...(idempotencyKey && idempotencyExpiresAt ? { idempotencyKey, idempotencyExpiresAt } : {}),
+      });
     }
 
-    return this._runWorkflow({ workflow: latestDef, storage, workflowId, input, force });
+    return this._runWorkflow({
+      workflow: latestDef,
+      storage,
+      workflowId,
+      input,
+      force,
+      ...(idempotencyKey && idempotencyExpiresAt ? { idempotencyKey, idempotencyExpiresAt } : {}),
+    });
   }
 
   async runSafe(
@@ -943,6 +1009,8 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     workflowId: string;
     input: unknown;
     force?: boolean;
+    idempotencyKey?: string;
+    idempotencyExpiresAt?: Date;
   }): Promise<unknown> {
     const def = params.workflow._definition;
     const ctx: WorkflowOrchestrationContext = {
@@ -969,6 +1037,12 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       workflowId: params.workflowId,
       input: params.input,
       force: params.force,
+      ...(params.idempotencyKey && params.idempotencyExpiresAt
+        ? {
+            idempotencyKey: params.idempotencyKey,
+            idempotencyExpiresAt: params.idempotencyExpiresAt,
+          }
+        : {}),
     });
   }
 }
@@ -1053,7 +1127,13 @@ const DEFAULT_LOCK_DURATION_MS = 120_000;
  */
 export async function runWorkflowOrchestration(
   ctx: WorkflowOrchestrationContext,
-  params: { workflowId: string; input: unknown; force?: boolean },
+  params: {
+    workflowId: string;
+    input: unknown;
+    force?: boolean;
+    idempotencyKey?: string;
+    idempotencyExpiresAt?: Date;
+  },
 ): Promise<unknown> {
   // Continue-as-new wrapper: catch WorkflowContinueAsNewError thrown out
   // of withLock, archive the current run via startFreshRun, then re-run
@@ -1073,6 +1153,15 @@ export async function runWorkflowOrchestration(
         workflowId: params.workflowId,
         input: currentInput,
         force: chain > 0 ? true : params.force,
+        // Only thread the key on the first cycle. Continue-as-new chains
+        // are internal restarts; they shouldn't re-stamp the key onto the
+        // archived row.
+        ...(chain === 0 && params.idempotencyKey && params.idempotencyExpiresAt
+          ? {
+              idempotencyKey: params.idempotencyKey,
+              idempotencyExpiresAt: params.idempotencyExpiresAt,
+            }
+          : {}),
       });
       clearQueryHandlers(params.workflowId);
       return result;
@@ -1100,7 +1189,13 @@ export async function runWorkflowOrchestration(
 
 async function runOneOrchestrationCycle(
   ctx: WorkflowOrchestrationContext,
-  params: { workflowId: string; input: unknown; force?: boolean },
+  params: {
+    workflowId: string;
+    input: unknown;
+    force?: boolean;
+    idempotencyKey?: string;
+    idempotencyExpiresAt?: Date;
+  },
 ): Promise<unknown> {
   const { workflowId, input, force } = params;
   const clock = ctx.clock ?? SystemClock;
@@ -1213,9 +1308,18 @@ async function runOneOrchestrationCycle(
           workflowType: ctx.type,
           metadata: ctx.metadata,
           version: ctx.version,
+          ...(params.idempotencyKey && params.idempotencyExpiresAt
+            ? {
+                idempotencyKey: params.idempotencyKey,
+                idempotencyExpiresAt: params.idempotencyExpiresAt,
+              }
+            : {}),
         });
         if (!createResult.created) {
-          // Race: another caller created the workflow between our load and create
+          // Race: another caller created the workflow between load and
+          // create — could be the same workflowId (PK collision) or a
+          // concurrent create under the same idempotency key (partial
+          // unique-index collision). Either way, attach to whoever won.
           state = createResult.existing;
         } else {
           state = await ctx.storage.loadWorkflow(workflowId);

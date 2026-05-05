@@ -71,6 +71,11 @@ import {
   rerunRun,
 } from "./routes/run-extras.ts";
 import { listApprovals } from "./routes/approvals.ts";
+import {
+  completeSignalToken,
+  listSignalTokensForRun,
+  mintSignalToken,
+} from "./routes/signal-tokens.ts";
 import { getSparklines, getWorkflowGrid, getWorkflowHistory } from "./routes/grid.ts";
 import { getWorkflowDef, listWorkflowDefs } from "./routes/workflow-defs.ts";
 import {
@@ -156,6 +161,13 @@ export interface ZoryaServerConfig extends AuthConfig {
   uiDir?: string;
   /** SSE poll interval in ms. Default 1000. */
   sseIntervalMs?: number;
+  /**
+   * Public-facing base URL for token completion callbacks. When set, the
+   * `POST /api/runs/:id/signals/:name/token` mint route returns
+   * `url: "<publicBaseUrl>/api/signal-tokens/:tokenId/complete"` so external
+   * completers don't have to compose it themselves. Absent → `url: null`.
+   */
+  publicBaseUrl?: string;
 }
 
 export interface ListenOptions {
@@ -275,6 +287,19 @@ export class ZoryaServer {
       .post("/api/runs/trigger/:name", triggerRun(deps))
       .post("/api/runs/:id/cancel", cancelRun(deps))
       .post("/api/runs/:id/signal", sendSignal(deps))
+      // Signal tokens — public-bearer auth for deliverSignal.
+      // Mint and list are auth-gated through the regular /api auth layer;
+      // /complete is reachable without Zorya credentials and validates the
+      // bearer itself.
+      .post(
+        "/api/runs/:id/signals/:name/token",
+        mintSignalToken({
+          storage,
+          ...(config.publicBaseUrl !== undefined && { publicBaseUrl: config.publicBaseUrl }),
+        }),
+      )
+      .get("/api/runs/:id/signal-tokens", listSignalTokensForRun({ storage }))
+      .post("/api/signal-tokens/:tokenId/complete", completeSignalToken({ storage }))
       .get(
         "/api/runs/:id/events",
         streamRunEvents({
@@ -417,9 +442,15 @@ export class ZoryaServer {
       path.startsWith("/api/advertisements") ||
       path.startsWith("/api/worker-protocol/");
 
+    // Public-bearer signal token completion — bearer-validated by the
+    // route itself, no Zorya API key needed. Skip the global auth gate
+    // for the consume endpoint only; mint + list stay auth-gated.
+    const isPublicSignalTokenComplete =
+      req.method === "POST" && /^\/api\/signal-tokens\/[^/]+\/complete$/.test(path);
+
     if (isWorkerPath) {
       if (!this.workerAuth.check(req)) return jsonError(401, "unauthorized_worker");
-    } else if (path.startsWith("/api/")) {
+    } else if (path.startsWith("/api/") && !isPublicSignalTokenComplete) {
       if (!this.auth.check(req)) return jsonError(401, "unauthorized");
     }
 

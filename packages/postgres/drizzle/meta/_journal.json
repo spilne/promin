@@ -190,6 +190,20 @@
       "when": 1743400026000,
       "tag": "0026_stepqueue_metadata",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1743400027000,
+      "tag": "0027_signal_tokens",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1743400028000,
+      "tag": "0028_idempotency_keys",
+      "breakpoints": true
     }
   ]
 }

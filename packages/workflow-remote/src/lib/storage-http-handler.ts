@@ -45,6 +45,7 @@ export function createWorkflowStorageHandler(
     distinctNamespaces: () => storage.distinctNamespaces(),
     cancelWorkflow: (p) => storage.cancelWorkflow(p.workflowId, p.options, p.guard),
     createWorkflow: (p) => storage.createWorkflow(p),
+    findWorkflowByIdempotencyKey: (p) => storage.findWorkflowByIdempotencyKey(p),
     saveStepResult: (p) => storage.saveStepResult(p, p.guard),
     batchSaveStepResults: (p) => storage.batchSaveStepResults(p.records, p.guard),
     saveStepFailure: (p) => storage.saveStepFailure(p, p.guard),
@@ -65,6 +66,7 @@ export function createWorkflowStorageHandler(
       storage.suspendWorkflow(p.workflowId, p.stepName, p.stepUpdate, p.guard),
     deliverSignal: (p) => storage.deliverSignal(p.workflowId, p.signalName, p.payload),
     loadSignals: (p) => storage.loadSignals(p.workflowId),
+    setWorkflowMetadata: (p) => storage.setWorkflowMetadata(p.workflowId, p.patch),
     tryLock: (p) => storage.tryLock(p.workflowId, p.lockDurationMs),
     tryLockAndLoad: (p) => storage.tryLockAndLoad(p.workflowId, p.lockDurationMs),
     releaseLock: (p) => storage.releaseLock(p.workflowId, p.guard),
@@ -85,6 +87,11 @@ export function createWorkflowStorageHandler(
     // failure.
     saveStepAttempt: (p) => requireStepAttempt(storage).saveStepAttempt(p.record, p.guard),
     loadStepAttempts: (p) => requireStepAttempt(storage).loadStepAttempts(p.workflowId, p.stepName),
+    // -- Signal tokens. Core methods on WorkflowStorage — no feature gate.
+    createSignalToken: (p) => storage.createSignalToken(p),
+    findSignalTokenById: (p) => storage.findSignalTokenById(p.tokenId),
+    markSignalTokenCompleted: (p) => storage.markSignalTokenCompleted(p),
+    listSignalTokensForWorkflow: (p) => storage.listSignalTokensForWorkflow(p.workflowId),
   };
 
   return async (req) => {

@@ -16,6 +16,7 @@ import type {
   JournalEntry,
   FenceGuard,
   WorkflowOrderBy,
+  SignalTokenRecord,
 } from "@promin/workflow";
 import type {
   WorkflowState,
@@ -201,6 +202,26 @@ export class RedisWorkflowStorage
 
   private signalsKey(id: string): string {
     return `${this.prefix}:${id}:signals`;
+  }
+
+  /** `(workflowName, idempotencyKey) → workflowId` index with TTL matching the run's idempotency expiry. */
+  private workflowIdempotencyKeyIndex(workflowName: string, idempotencyKey: string): string {
+    return `${this.prefix}:wf-idempotency:${workflowName}:${idempotencyKey}`;
+  }
+
+  /** Hash mapping `${tokenId}` → JSON SignalTokenRecord (stored at the workflow scope). */
+  private signalTokensKey(workflowId: string): string {
+    return `${this.prefix}:${workflowId}:signal_tokens`;
+  }
+
+  /** Reverse index from tokenId → workflowId, so the public completion route can look up by tokenId alone. */
+  private signalTokenLookupKey(tokenId: string): string {
+    return `${this.prefix}:signal_token:${tokenId}`;
+  }
+
+  /** Per-workflow set of (idempotencyKey → tokenId), backing dedup for `createSignalToken`. */
+  private signalTokenIdempotencyKey(workflowId: string): string {
+    return `${this.prefix}:${workflowId}:signal_token_idempotency`;
   }
 
   private runsKey(id: string): string {
@@ -442,8 +463,27 @@ export class RedisWorkflowStorage
     namespace?: string;
     metadata?: Record<string, unknown>;
     version?: string;
+    idempotencyKey?: string;
+    idempotencyExpiresAt?: Date;
   }): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
-    // Check if workflow already exists before creating
+    // Idempotency-key path: check the index first. SET-NX below claims it
+    // atomically — concurrent creates serialize, the loser falls through
+    // to attach to the winning row.
+    if (params.idempotencyKey) {
+      const idxKey = this.workflowIdempotencyKeyIndex(params.workflowName, params.idempotencyKey);
+      const cachedId = await this.redis.get(idxKey);
+      if (cachedId) {
+        const raw = await this.redis.hgetall(this.wfKey(cachedId));
+        if (raw?.idempotencyExpiresAt) {
+          const expiresAt = new Date(raw.idempotencyExpiresAt);
+          if (expiresAt.getTime() > this.clock.now().getTime()) {
+            const existing = await this.loadWorkflow(cachedId);
+            if (existing) return { created: false, existing };
+          }
+        }
+      }
+    }
+
     const existingRaw = await this.redis.hgetall(this.wfKey(params.workflowId));
     if (existingRaw && existingRaw.id) {
       const existing = await this.loadWorkflow(params.workflowId);
@@ -467,10 +507,36 @@ export class RedisWorkflowStorage
     if (ns) fields.namespace = ns;
     if (params.metadata) fields.metadata = JSON.stringify(params.metadata);
     if (params.version) fields.version = params.version;
+    if (params.idempotencyKey) fields.idempotencyKey = params.idempotencyKey;
+    if (params.idempotencyExpiresAt) {
+      fields.idempotencyExpiresAt = this.serializeDate(params.idempotencyExpiresAt);
+    }
 
     await this.redis.hset(this.wfKey(params.workflowId), fields);
     await this.redis.sadd(this.statusIndexKey("pending"), params.workflowId);
     await this.redis.sadd(this.nameIndexKey(params.workflowName), params.workflowId);
+
+    // Atomic claim of the idempotency index. SET NX with PX expires the
+    // index entry exactly at the run's idempotency_expires_at — concurrent
+    // creates that race here lose the SET NX and back out below.
+    if (params.idempotencyKey && params.idempotencyExpiresAt) {
+      const idxKey = this.workflowIdempotencyKeyIndex(params.workflowName, params.idempotencyKey);
+      const ttlMs = params.idempotencyExpiresAt.getTime() - this.clock.now().getTime();
+      if (ttlMs > 0) {
+        const won = await this.redis.set(idxKey, params.workflowId, "NX", "PX", ttlMs);
+        if (!won) {
+          // Lost the race — undo the workflow row and resolve to the winner.
+          await this.redis.del(this.wfKey(params.workflowId));
+          await this.redis.srem(this.statusIndexKey("pending"), params.workflowId);
+          await this.redis.srem(this.nameIndexKey(params.workflowName), params.workflowId);
+          const winnerId = await this.redis.get(idxKey);
+          if (winnerId) {
+            const existing = await this.loadWorkflow(winnerId);
+            if (existing) return { created: false, existing };
+          }
+        }
+      }
+    }
 
     // Distinct-value indexes — record every name/type/namespace ever seen
     // so the dashboard dropdowns stay correct even after rows are purged.
@@ -484,6 +550,25 @@ export class RedisWorkflowStorage
       }
     }
     return { created: true };
+  }
+
+  async findWorkflowByIdempotencyKey(params: {
+    workflowName: string;
+    idempotencyKey: string;
+    now: Date;
+  }): Promise<{ workflowId: string } | null> {
+    const idxKey = this.workflowIdempotencyKeyIndex(params.workflowName, params.idempotencyKey);
+    const cachedId = await this.redis.get(idxKey);
+    if (!cachedId) return null;
+    // Defense-in-depth: confirm the workflow's stored expiry is unexpired
+    // before returning. The index has its own PEXPIREAT, but a clock skew
+    // between Redis and runner could surface a "live" index entry past
+    // the row's expiry.
+    const raw = await this.redis.hgetall(this.wfKey(cachedId));
+    if (!raw?.idempotencyExpiresAt) return null;
+    const expiresAt = new Date(raw.idempotencyExpiresAt);
+    if (expiresAt.getTime() <= params.now.getTime()) return null;
+    return { workflowId: cachedId };
   }
 
   async distinctWorkflowNames(params?: { namespace?: string }): Promise<string[]> {
@@ -1113,6 +1198,121 @@ export class RedisWorkflowStorage
         deliveredAt: new Date(s.deliveredAt),
       };
     });
+  }
+
+  async setWorkflowMetadata(workflowId: string, patch: Record<string, unknown>): Promise<void> {
+    // Read-modify-write: workflow metadata is stored as a JSON-encoded
+    // string field on the workflow hash. The race window is small (one
+    // body invocation between yields) and concurrent metadata writes
+    // colliding is exceedingly rare in practice.
+    const raw = await this.redis.hget(this.wfKey(workflowId), "metadata");
+    const current: Record<string, unknown> = raw ? JSON.parse(raw) : {};
+    const merged: Record<string, unknown> = { ...current };
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === null) delete merged[k];
+      else merged[k] = v;
+    }
+    await this.redis.hset(this.wfKey(workflowId), "metadata", JSON.stringify(merged));
+    await this.redis.hset(
+      this.wfKey(workflowId),
+      "updatedAt",
+      this.serializeDate(this.clock.now()),
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Signal tokens — public-bearer authorization for deliverSignal
+  // ---------------------------------------------------------------------------
+
+  async createSignalToken(params: {
+    tokenId: string;
+    workflowId: string;
+    signalName: string;
+    bearer: string;
+    tags: ReadonlyArray<string>;
+    idempotencyKey?: string | null;
+    expiresAt: Date;
+  }): Promise<{ record: SignalTokenRecord; isCached: boolean }> {
+    if (params.idempotencyKey) {
+      const cachedTokenId = await this.redis.hget(
+        this.signalTokenIdempotencyKey(params.workflowId),
+        params.idempotencyKey,
+      );
+      if (cachedTokenId) {
+        const cached = await this.findSignalTokenById(cachedTokenId);
+        if (cached) return { record: cached, isCached: true };
+      }
+    }
+    const record: SignalTokenRecord = {
+      tokenId: params.tokenId,
+      workflowId: params.workflowId,
+      signalName: params.signalName,
+      bearer: params.bearer,
+      tags: [...params.tags],
+      idempotencyKey: params.idempotencyKey ?? null,
+      expiresAt: params.expiresAt,
+      completedAt: null,
+      completedValue: null,
+      createdAt: this.clock.now(),
+    };
+    await this.redis.hset(
+      this.signalTokensKey(params.workflowId),
+      params.tokenId,
+      serializeSignalToken(record),
+    );
+    await this.redis.set(this.signalTokenLookupKey(params.tokenId), params.workflowId);
+    if (params.idempotencyKey) {
+      await this.redis.hset(
+        this.signalTokenIdempotencyKey(params.workflowId),
+        params.idempotencyKey,
+        params.tokenId,
+      );
+    }
+    return { record, isCached: false };
+  }
+
+  async findSignalTokenById(tokenId: string): Promise<SignalTokenRecord | null> {
+    const workflowId = await this.redis.get(this.signalTokenLookupKey(tokenId));
+    if (!workflowId) return null;
+    const raw = await this.redis.hget(this.signalTokensKey(workflowId), tokenId);
+    return raw ? deserializeSignalToken(raw) : null;
+  }
+
+  async markSignalTokenCompleted(params: {
+    tokenId: string;
+    value: unknown;
+    now: Date;
+  }): Promise<
+    | { outcome: "delivered"; record: SignalTokenRecord }
+    | { outcome: "already_completed"; record: SignalTokenRecord }
+  > {
+    // Read-modify-write — Redis lacks a native CAS for hash-field updates,
+    // but the bearer is already a one-shot credential so a concurrent racer
+    // is exceedingly unlikely. Re-read after write to confirm we won.
+    const current = await this.findSignalTokenById(params.tokenId);
+    if (!current) throw new Error(`signal token ${params.tokenId} not found`);
+    if (current.completedAt !== null) {
+      return { outcome: "already_completed", record: current };
+    }
+    const updated: SignalTokenRecord = {
+      ...current,
+      completedAt: params.now,
+      completedValue: params.value,
+    };
+    await this.redis.hset(
+      this.signalTokensKey(current.workflowId),
+      current.tokenId,
+      serializeSignalToken(updated),
+    );
+    return { outcome: "delivered", record: updated };
+  }
+
+  async listSignalTokensForWorkflow(workflowId: string): Promise<ReadonlyArray<SignalTokenRecord>> {
+    const raw = await this.redis.hgetall(this.signalTokensKey(workflowId));
+    if (!raw || Object.keys(raw).length === 0) return [];
+    return Object.values(raw)
+      .map(deserializeSignalToken)
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
   }
 
   // -- Locking --------------------------------------------------------------
@@ -1772,5 +1972,36 @@ function parseJournalMember(member: string): { activityIndex: number; branchPath
   return {
     activityIndex: Number(member.slice(0, pipe)),
     branchPath: member.slice(pipe + 1),
+  };
+}
+
+function serializeSignalToken(t: SignalTokenRecord): string {
+  return JSON.stringify({
+    tokenId: t.tokenId,
+    workflowId: t.workflowId,
+    signalName: t.signalName,
+    bearer: t.bearer,
+    tags: t.tags,
+    idempotencyKey: t.idempotencyKey,
+    expiresAt: t.expiresAt.toISOString(),
+    completedAt: t.completedAt ? t.completedAt.toISOString() : null,
+    completedValue: t.completedValue,
+    createdAt: t.createdAt.toISOString(),
+  });
+}
+
+function deserializeSignalToken(raw: string): SignalTokenRecord {
+  const parsed = JSON.parse(raw);
+  return {
+    tokenId: parsed.tokenId,
+    workflowId: parsed.workflowId,
+    signalName: parsed.signalName,
+    bearer: parsed.bearer,
+    tags: parsed.tags ?? [],
+    idempotencyKey: parsed.idempotencyKey ?? null,
+    expiresAt: new Date(parsed.expiresAt),
+    completedAt: parsed.completedAt ? new Date(parsed.completedAt) : null,
+    completedValue: parsed.completedValue,
+    createdAt: new Date(parsed.createdAt),
   };
 }

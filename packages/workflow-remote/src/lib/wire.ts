@@ -20,6 +20,7 @@ export type StorageMethod =
   | "distinctNamespaces"
   | "cancelWorkflow"
   | "createWorkflow"
+  | "findWorkflowByIdempotencyKey"
   | "saveStepResult"
   | "batchSaveStepResults"
   | "saveStepFailure"
@@ -31,6 +32,7 @@ export type StorageMethod =
   | "suspendWorkflow"
   | "deliverSignal"
   | "loadSignals"
+  | "setWorkflowMetadata"
   | "tryLock"
   | "tryLockAndLoad"
   | "releaseLock"
@@ -51,7 +53,13 @@ export type StorageMethod =
   // implements it. Lets remote workers populate the audit trail
   // (workerId per attempt) on the central server's storage.
   | "saveStepAttempt"
-  | "loadStepAttempts";
+  | "loadStepAttempts"
+  // Signal tokens — public-bearer authz for deliverSignal. Forwarded so
+  // remote workers can surface tokens through their parent storage.
+  | "createSignalToken"
+  | "findSignalTokenById"
+  | "markSignalTokenCompleted"
+  | "listSignalTokensForWorkflow";
 
 export interface RpcRequest {
   readonly method: StorageMethod;

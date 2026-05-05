@@ -429,3 +429,138 @@ describe("end-to-end workflow with suspend/resume", () => {
     expect(activityCalls).toEqual({ create: 1, check: 1, finalize: 1 });
   });
 });
+
+describe("ctx.signal({ timeout }) — bounded suspend", () => {
+  let storage: InMemoryWorkflowStorage;
+  beforeEach(() => {
+    storage = new InMemoryWorkflowStorage();
+  });
+
+  it("returns { ok: true, value } when delivery beats the timeout", async () => {
+    type Decision = { approved: boolean };
+    const body = function* (ctx: JournaledContext<unknown, unknown>) {
+      const result = yield* ctx.signal<Decision>("approve", { timeout: 60_000 });
+      return result;
+    };
+
+    // First run — suspends with the timeout configured.
+    await expect(
+      runJournaledStep({
+        input: {},
+        prev: {},
+        workflowId: "wf-tsig-1",
+        stepName: "wait",
+        storage,
+        body,
+      }),
+    ).rejects.toBeInstanceOf(WorkflowSuspendedError);
+
+    // Journal has a pending signal entry with wakeAt set.
+    const journalAfterSuspend = await storage.loadJournal("wf-tsig-1", "wait");
+    expect(journalAfterSuspend).toHaveLength(1);
+    expect(journalAfterSuspend[0]!.stepType).toBe("signal");
+    expect(journalAfterSuspend[0]!.wakeAt).toBeInstanceOf(Date);
+
+    // External delivery before the timeout fires.
+    const delivered = await completeSignal({
+      storage,
+      workflowId: "wf-tsig-1",
+      stepName: "wait",
+      signalName: "approve",
+      value: { approved: true } satisfies Decision,
+    });
+    expect(delivered).toBe(true);
+
+    // Replay returns the timed-signal envelope wrapping the bare value.
+    const result = await runJournaledStep({
+      input: {},
+      prev: {},
+      workflowId: "wf-tsig-1",
+      stepName: "wait",
+      storage,
+      body,
+    });
+    expect(result).toEqual({ ok: true, value: { approved: true } });
+  });
+
+  it("self-completes with timeout outcome on replay after timeout has passed", async () => {
+    type Decision = { approved: boolean };
+    const body = function* (ctx: JournaledContext<unknown, unknown>) {
+      const result = yield* ctx.signal<Decision>("approve", { timeout: 1 }); // 1ms — expires immediately
+      return result;
+    };
+
+    // First run suspends — even a 1ms timeout writes the pending journal
+    // entry first; wakeAt is in the past by the time the body re-runs.
+    await expect(
+      runJournaledStep({
+        input: {},
+        prev: {},
+        workflowId: "wf-tsig-2",
+        stepName: "wait",
+        storage,
+        body,
+      }),
+    ).rejects.toBeInstanceOf(WorkflowSuspendedError);
+
+    // Wait so wakeAt is unambiguously in the past, then re-run.
+    await new Promise((r) => setTimeout(r, 10));
+
+    const result = await runJournaledStep({
+      input: {},
+      prev: {},
+      workflowId: "wf-tsig-2",
+      stepName: "wait",
+      storage,
+      body,
+    });
+    expect(result).toEqual({ ok: false, error: "timeout" });
+
+    // Journal entry is now completed with the timeout envelope.
+    const journal = await storage.loadJournal("wf-tsig-2", "wait");
+    expect(journal[0]!.phase).toBe("completed");
+    expect(journal[0]!.exit).toEqual({
+      tag: "Success",
+      value: { ok: false, error: "timeout" },
+    });
+  });
+
+  it("delivery wins the race against an unexpired timeout — value, not envelope, when no opts", async () => {
+    // No-timeout overload preserves the legacy bare-T return shape.
+    type Decision = { approved: boolean };
+    const body = function* (ctx: JournaledContext<unknown, unknown>) {
+      const result = yield* ctx.signal<Decision>("approve");
+      return result;
+    };
+
+    await expect(
+      runJournaledStep({
+        input: {},
+        prev: {},
+        workflowId: "wf-tsig-3",
+        stepName: "wait",
+        storage,
+        body,
+      }),
+    ).rejects.toBeInstanceOf(WorkflowSuspendedError);
+
+    await completeSignal({
+      storage,
+      workflowId: "wf-tsig-3",
+      stepName: "wait",
+      signalName: "approve",
+      value: { approved: false } satisfies Decision,
+    });
+
+    const result = await runJournaledStep({
+      input: {},
+      prev: {},
+      workflowId: "wf-tsig-3",
+      stepName: "wait",
+      storage,
+      body,
+    });
+    // Bare T — backwards-compatible shape.
+    expect(result).toEqual({ approved: false });
+  });
+});

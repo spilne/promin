@@ -242,8 +242,22 @@ export interface JournaledContext<Input, Prev> {
    *
    * The generic `T` types the delivered payload; runtime validation via a
    * per-signal Zod codec is a planned refinement.
+   *
+   * With a `timeout`, the suspend is bounded: the existing sleep scanner
+   * completes pending signals past their `wakeAt` with a timeout outcome,
+   * and the call returns a result envelope instead of `T` directly. This
+   * mirrors the timeout already available on the builder-level
+   * `.waitForSignal({ timeoutMs })` step.
    */
   signal<T>(name: string): Generator<ActivityYield, T, T>;
+  signal<T>(
+    name: string,
+    options: { readonly timeout: number | Date },
+  ): Generator<
+    ActivityYield,
+    { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: "timeout" },
+    { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: "timeout" }
+  >;
 
   /**
    * Run `branches` concurrently and resolve to their results in input order.
@@ -416,6 +430,33 @@ export interface JournaledContext<Input, Prev> {
   setQueryHandler<R>(name: string, handler: (args?: unknown) => R | Promise<R>): void;
 
   /**
+   * Live-writable metadata surfaced on the workflow row. The dashboard reads
+   * `WorkflowState.metadata`, so writes through `ctx.metadata.set/merge`
+   * appear in the runs view in near-real-time. Useful for progress
+   * surfacing (`ctx.metadata.set("progress", "7/12")`), feature-flag
+   * snapshots, or any small JSON-safe state you want operators to see
+   * without spelunking through the journal.
+   *
+   * Semantics:
+   *   - Writes are fire-and-forget: storage is updated as a side effect of
+   *     calling `set`/`merge`, but the body doesn't yield. Errors are
+   *     surfaced through the standard step-failure path on the next
+   *     activity yield (a metadata-write storage error fails the step).
+   *   - Replay-safe: the same writes re-fire on body re-run with the same
+   *     values. Idempotent against the storage's merge semantics.
+   *   - Shallow merge — top-level keys in the patch overwrite the same
+   *     keys on existing metadata. Pass `null` for a key to remove it.
+   *   - `get()` returns the snapshot loaded at body-start time; in-body
+   *     `set()`s are visible to subsequent `get()`s within the same
+   *     invocation. Cross-invocation visibility goes through storage.
+   */
+  readonly metadata: {
+    set(key: string, value: unknown): void;
+    merge(patch: Record<string, unknown>): void;
+    get(): Record<string, unknown>;
+  };
+
+  /**
    * Bind a record of activity functions into a typed proxy where each
    * method is journal-recorded under its property key. Sugar over the
    * 2-arg `ctx.activity(name, fn)` form — same semantics, less ceremony:
@@ -557,6 +598,12 @@ function makeCtx<Input, Prev>(params: {
     workflowId: string;
     input: unknown;
   }) => Promise<unknown>;
+  /**
+   * Snapshot of workflow metadata as of body start. `ctx.metadata.get()`
+   * returns this layered with any in-body `set/merge` writes; storage is
+   * updated as a side effect of those writes via `workflowStorage`.
+   */
+  initialMetadata?: Record<string, unknown>;
 }): { ctx: JournaledContext<Input, Prev>; unwind: (bodyError: unknown) => Promise<void> } {
   const {
     input,
@@ -571,6 +618,7 @@ function makeCtx<Input, Prev>(params: {
     defaultCodec,
     defaultPayloadHash,
     runChild,
+    initialMetadata,
   } = params;
   const stepCodec = defaultCodec ?? LosslessJsonCodec;
   const patchSet = new Set(patches ?? []);
@@ -954,11 +1002,20 @@ function makeCtx<Input, Prev>(params: {
     return yield { _tag: "Activity", name, promise };
   }
 
-  function* signalImpl<T>(signalName: string): Generator<ActivityYield, T, T> {
+  /** Tagged outcome returned by `ctx.signal(name, { timeout })`. */
+  type TimedSignalOutcome<T> =
+    | { readonly ok: true; readonly value: T }
+    | { readonly ok: false; readonly error: "timeout" };
+
+  function* signalImpl<T>(
+    signalName: string,
+    options?: { readonly timeout: number | Date },
+  ): Generator<ActivityYield, T | TimedSignalOutcome<T>, unknown> {
     const suspendStorage = requireSuspendStorage("signal");
     const activityIndex = indexRef.next++;
+    const hasTimeout = options !== undefined;
 
-    const promise = (async (): Promise<T> => {
+    const promise = (async (): Promise<T | TimedSignalOutcome<T>> => {
       const recorded = journalByKey.get(journalKey(activityIndex, ""));
       const recordedType = recorded?.stepType ?? "activity";
       if (recorded && recordedType !== "signal") {
@@ -979,17 +1036,48 @@ function makeCtx<Input, Prev>(params: {
       }
 
       // Replay after delivery — entry completed with the signal payload.
+      // Two completion shapes:
+      //   - delivered  : exit.value is the bare T (legacy + non-timeout path)
+      //   - timed-out  : exit.value is `{ ok: false, error: "timeout" }`,
+      //                  written by the scanner. Identified by shape, not
+      //                  by a separate journal column, so old rows stay
+      //                  compatible.
       if (recorded && recorded.phase === "completed" && recorded.exit) {
         if (recorded.exit.tag === "Failure") {
           throw new Error(recorded.exit.error);
         }
-        return recorded.exit.value as T;
+        const exitValue = recorded.exit.value;
+        if (
+          hasTimeout &&
+          typeof exitValue === "object" &&
+          exitValue !== null &&
+          "ok" in exitValue &&
+          (exitValue as { ok?: unknown }).ok === false
+        ) {
+          return exitValue as TimedSignalOutcome<T>;
+        }
+        // Bare T came back (in-app delivery or no-timeout legacy form).
+        // With a timeout configured, wrap into the result envelope so the
+        // caller's switch on `result.ok` works uniformly.
+        const bare = exitValue as T;
+        return hasTimeout ? { ok: true, value: bare } : bare;
       }
 
       // First run (or still pending) — register interest, mark the workflow
-      // suspended, then suspend. The DefaultSleepScanner ignores workflows
-      // without a wakeAt, so signals require external delivery via
-      // `completeSignal` to resume (no automatic wake from the scanner).
+      // suspended, then suspend. The DefaultSleepScanner skips workflows
+      // without a wakeAt, so an unbounded signal still requires external
+      // delivery via `completeSignal`; with a timeout configured, the
+      // wakeAt is set so the scanner can complete the entry on expiry.
+      // Use the recorded wakeAt on replay so time isn't re-computed (which
+      // would drift on every replay).
+      const wakeAt = recorded?.wakeAt
+        ? recorded.wakeAt
+        : options
+          ? options.timeout instanceof Date
+            ? options.timeout
+            : new Date(Date.now() + options.timeout)
+          : undefined;
+
       if (!recorded) {
         await suspendStorage.appendPendingEntry({
           workflowId,
@@ -997,23 +1085,42 @@ function makeCtx<Input, Prev>(params: {
           activityIndex,
           activityName: signalName,
           stepType: "signal",
+          ...(wakeAt && { wakeAt }),
         });
       }
+
+      // Self-healing replay: if the scanner re-ran us and our timeout has
+      // passed without a delivery, complete the entry with the timeout
+      // outcome and return. Mirrors `ctx.sleep` — the scanner wakes us, the
+      // body decides what to do.
+      if (wakeAt && Date.now() >= wakeAt.getTime()) {
+        await suspendStorage.completePendingEntry({
+          workflowId,
+          stepName,
+          activityIndex,
+          exit: { tag: "Success", value: { ok: false, error: "timeout" } },
+        });
+        return { ok: false, error: "timeout" } as TimedSignalOutcome<T>;
+      }
+
       if (workflowStorage) {
         await workflowStorage.suspendWorkflow(workflowId, stepName, {
           status: "waiting_for_signal",
           signalName,
+          ...(wakeAt && { signalTimeoutAt: wakeAt }),
         });
       }
       throw new WorkflowSuspendedError({
         workflowId,
         stepName,
         reason: "signal",
-        message: `waiting for signal "${signalName}"`,
+        message: wakeAt
+          ? `waiting for signal "${signalName}" (timeout at ${wakeAt.toISOString()})`
+          : `waiting for signal "${signalName}"`,
       });
     })();
 
-    return yield { _tag: "Activity", name: signalName, promise };
+    return (yield { _tag: "Activity", name: signalName, promise }) as T | TimedSignalOutcome<T>;
   }
 
   // -------------------------------------------------------------------------
@@ -1364,6 +1471,43 @@ function makeCtx<Input, Prev>(params: {
     };
   }
 
+  // ---------------------------------------------------------------------------
+  // ctx.metadata — live-writable workflow metadata, surfaced to the dashboard
+  // ---------------------------------------------------------------------------
+  //
+  // In-process snapshot layered with side-effect storage writes. Reads return
+  // a copy so callers can't mutate the canonical object. Writes update the
+  // local snapshot synchronously and dispatch an async storage merge —
+  // fire-and-forget, errors logged. Replay re-fires the same writes (same
+  // values), idempotent against the storage's merge semantics.
+  const metadataState: Record<string, unknown> = { ...(initialMetadata ?? {}) };
+  const writeMetadataPatch = (patch: Record<string, unknown>): void => {
+    if (!workflowStorage) return; // tests that drive runJournaledStep without WorkflowStorage skip persistence
+    workflowStorage.setWorkflowMetadata(workflowId, patch).catch((err) => {
+      console.warn(
+        `[ctx.metadata] failed to persist for workflow ${workflowId}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    });
+  };
+  const metadata = {
+    set(key: string, value: unknown): void {
+      if (value === null) delete metadataState[key];
+      else metadataState[key] = value;
+      writeMetadataPatch({ [key]: value });
+    },
+    merge(patch: Record<string, unknown>): void {
+      for (const [k, v] of Object.entries(patch)) {
+        if (v === null) delete metadataState[k];
+        else metadataState[k] = v;
+      }
+      writeMetadataPatch(patch);
+    },
+    get(): Record<string, unknown> {
+      return { ...metadataState };
+    },
+  };
+
   const ctx: JournaledContext<Input, Prev> = {
     input,
     prev,
@@ -1378,6 +1522,7 @@ function makeCtx<Input, Prev>(params: {
     child: childImpl,
     dowhile: dowhileImpl,
     dountil: dountilImpl,
+    metadata,
     proxy: proxyImpl,
     setQueryHandler: <R>(name: string, handler: (args?: unknown) => R | Promise<R>): void => {
       // Process-local registry — query handlers close over the body's
@@ -1571,6 +1716,10 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
   } = params;
 
   const journal = await storage.loadJournal(workflowId, stepName);
+  // Load workflow metadata snapshot for `ctx.metadata.get()` — reads are
+  // synchronous from the body, so we materialize the snapshot up front.
+  // Writes go through `setWorkflowMetadata` independently.
+  const wfState = workflowStorage ? await workflowStorage.loadWorkflow(workflowId) : null;
   const { ctx, unwind } = makeCtx({
     input,
     prev,
@@ -1584,6 +1733,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     defaultCodec: codec,
     defaultPayloadHash: payloadHash,
     runChild,
+    ...(wfState?.metadata !== undefined && { initialMetadata: wfState.metadata }),
   });
   const gen = body(ctx, prev);
 

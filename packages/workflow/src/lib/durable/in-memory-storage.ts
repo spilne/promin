@@ -18,6 +18,7 @@ import type {
   FenceGuard,
   FenceToken,
   WorkflowOrderBy,
+  SignalTokenRecord,
 } from "./workflow-storage.ts";
 import { workflowMetadataMatches } from "./workflow-storage.ts";
 import { createWorkflowEventStream } from "./workflow-event-stream.ts";
@@ -101,6 +102,8 @@ interface MutableWorkflow {
   runSource?: RunSource;
   runSourceId?: string;
   metadata?: Record<string, unknown>;
+  idempotencyKey?: string;
+  idempotencyExpiresAt?: Date;
   steps: Map<string, StepState>;
   createdAt: Date;
   startedAt?: Date;
@@ -130,6 +133,8 @@ export class InMemoryWorkflowStorage
   private runHistory = new Map<string, WorkflowRunSummary[]>();
   /** Activity journal keyed by `${workflowId}::${stepName}` → ordered entries. */
   private journal = new Map<string, JournalEntry[]>();
+  /** Signal tokens keyed by tokenId — public-bearer auth for deliverSignal. */
+  private signalTokens = new Map<string, MutableSignalToken>();
   /**
    * Per-workflow event subscribers. Each active call to `subscribeToWorkflow`
    * registers a push function keyed by workflowId; the mutating storage
@@ -337,7 +342,27 @@ export class InMemoryWorkflowStorage
     version?: string;
     runSource?: RunSource;
     runSourceId?: string;
+    idempotencyKey?: string;
+    idempotencyExpiresAt?: Date;
   }): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
+    // Idempotency-key path: if `(workflowName, idempotencyKey)` is already
+    // claimed by an unexpired row, return that row instead. Mirrors the
+    // partial-unique-index conflict resolution that postgres does
+    // natively, which is what makes the redirect race-safe.
+    if (params.idempotencyKey) {
+      const now = this.clock.now();
+      for (const wf of this.workflows.values()) {
+        if (
+          wf.workflowName === params.workflowName &&
+          wf.idempotencyKey === params.idempotencyKey &&
+          wf.idempotencyExpiresAt &&
+          wf.idempotencyExpiresAt.getTime() > now.getTime()
+        ) {
+          return { created: false, existing: this.toState(wf) };
+        }
+      }
+    }
+
     const existing = this.workflows.get(params.workflowId);
     if (existing) return { created: false, existing: this.toState(existing) };
 
@@ -355,11 +380,31 @@ export class InMemoryWorkflowStorage
       metadata: params.metadata,
       runSource: params.runSource,
       runSourceId: params.runSourceId,
+      idempotencyKey: params.idempotencyKey,
+      idempotencyExpiresAt: params.idempotencyExpiresAt,
       steps: new Map(),
       createdAt: now,
       updatedAt: now,
     });
     return { created: true };
+  }
+
+  async findWorkflowByIdempotencyKey(params: {
+    workflowName: string;
+    idempotencyKey: string;
+    now: Date;
+  }): Promise<{ workflowId: string } | null> {
+    for (const wf of this.workflows.values()) {
+      if (
+        wf.workflowName === params.workflowName &&
+        wf.idempotencyKey === params.idempotencyKey &&
+        wf.idempotencyExpiresAt &&
+        wf.idempotencyExpiresAt.getTime() > params.now.getTime()
+      ) {
+        return { workflowId: wf.workflowId };
+      }
+    }
+    return null;
   }
 
   /** Transition pending → running on first step activity. */
@@ -704,6 +749,19 @@ export class InMemoryWorkflowStorage
     return this.signals.get(workflowId) ?? [];
   }
 
+  async setWorkflowMetadata(workflowId: string, patch: Record<string, unknown>): Promise<void> {
+    const wf = this.workflows.get(workflowId);
+    if (!wf) return; // silent no-op on missing workflow — scrubs don't need to fail
+    const current = wf.metadata ?? {};
+    const merged: Record<string, unknown> = { ...current };
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === null) delete merged[k];
+      else merged[k] = v;
+    }
+    wf.metadata = merged;
+    wf.updatedAt = this.clock.now();
+  }
+
   async tryLock(
     workflowId: string,
     lockDurationMs: number,
@@ -1024,7 +1082,7 @@ export class InMemoryWorkflowStorage
     branchPath?: string;
     activityName: string;
     payloadHash?: string;
-    stepType: "sleep" | "signal" | "activity" | "compensation";
+    stepType: "sleep" | "signal" | "activity" | "compensation" | "child";
     wakeAt?: Date;
   }): Promise<void> {
     const branchPath = params.branchPath ?? "";
@@ -1122,6 +1180,76 @@ export class InMemoryWorkflowStorage
     return hit ?? null;
   }
 
+  // ---------------------------------------------------------------------------
+  // Signal tokens — public-bearer authorization for deliverSignal
+  // ---------------------------------------------------------------------------
+
+  async createSignalToken(params: {
+    tokenId: string;
+    workflowId: string;
+    signalName: string;
+    bearer: string;
+    tags: ReadonlyArray<string>;
+    idempotencyKey?: string | null;
+    expiresAt: Date;
+  }): Promise<{ record: SignalTokenRecord; isCached: boolean }> {
+    if (params.idempotencyKey) {
+      for (const t of this.signalTokens.values()) {
+        if (t.workflowId === params.workflowId && t.idempotencyKey === params.idempotencyKey) {
+          return { record: snapshotSignalToken(t), isCached: true };
+        }
+      }
+    }
+    const record: MutableSignalToken = {
+      tokenId: params.tokenId,
+      workflowId: params.workflowId,
+      signalName: params.signalName,
+      bearer: params.bearer,
+      tags: [...params.tags],
+      idempotencyKey: params.idempotencyKey ?? null,
+      expiresAt: params.expiresAt,
+      completedAt: null,
+      completedValue: null,
+      createdAt: this.clock.now(),
+    };
+    this.signalTokens.set(params.tokenId, record);
+    return { record: snapshotSignalToken(record), isCached: false };
+  }
+
+  async findSignalTokenById(tokenId: string): Promise<SignalTokenRecord | null> {
+    const t = this.signalTokens.get(tokenId);
+    return t ? snapshotSignalToken(t) : null;
+  }
+
+  async markSignalTokenCompleted(params: {
+    tokenId: string;
+    value: unknown;
+    now: Date;
+  }): Promise<
+    | { outcome: "delivered"; record: SignalTokenRecord }
+    | { outcome: "already_completed"; record: SignalTokenRecord }
+  > {
+    const t = this.signalTokens.get(params.tokenId);
+    if (!t) {
+      throw new Error(`signal token ${params.tokenId} not found`);
+    }
+    if (t.completedAt !== null) {
+      return { outcome: "already_completed", record: snapshotSignalToken(t) };
+    }
+    t.completedAt = params.now;
+    t.completedValue = params.value;
+    return { outcome: "delivered", record: snapshotSignalToken(t) };
+  }
+
+  async listSignalTokensForWorkflow(workflowId: string): Promise<ReadonlyArray<SignalTokenRecord>> {
+    const out: MutableSignalToken[] = [];
+    for (const t of this.signalTokens.values()) {
+      if (t.workflowId === workflowId) out.push(t);
+    }
+    out.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    return out.map(snapshotSignalToken);
+  }
+
   /** Test helper: delete a specific journal entry (simulates crash-before-append). */
   deleteJournalEntry(workflowId: string, stepName: string, activityIndex: number): void {
     const key = this.journalKey(workflowId, stepName);
@@ -1147,5 +1275,34 @@ export class InMemoryWorkflowStorage
     this.attempts.clear();
     this.runHistory.clear();
     this.journal.clear();
+    this.signalTokens.clear();
   }
+}
+
+interface MutableSignalToken {
+  tokenId: string;
+  workflowId: string;
+  signalName: string;
+  bearer: string;
+  tags: string[];
+  idempotencyKey: string | null;
+  expiresAt: Date;
+  completedAt: Date | null;
+  completedValue: unknown;
+  createdAt: Date;
+}
+
+function snapshotSignalToken(t: MutableSignalToken): SignalTokenRecord {
+  return {
+    tokenId: t.tokenId,
+    workflowId: t.workflowId,
+    signalName: t.signalName,
+    bearer: t.bearer,
+    tags: [...t.tags],
+    idempotencyKey: t.idempotencyKey,
+    expiresAt: new Date(t.expiresAt.getTime()),
+    completedAt: t.completedAt ? new Date(t.completedAt.getTime()) : null,
+    completedValue: t.completedValue,
+    createdAt: new Date(t.createdAt.getTime()),
+  };
 }

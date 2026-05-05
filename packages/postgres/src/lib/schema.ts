@@ -64,6 +64,11 @@ export const workflows = pgTable(
     // Structured reason attached when the workflow ended via a `.tripwire()`
     // step. Present only for `status_id = tripwire (6)`; null otherwise.
     tripwire: jsonb("tripwire"),
+    // Per-call idempotency key — caller-supplied dedup token that resolves
+    // to this workflow_id while unexpired. Lets auto-minted ids dedup
+    // without the caller knowing them ahead of time.
+    idempotencyKey: text("idempotency_key"),
+    idempotencyExpiresAt: timestamp("idempotency_expires_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -74,6 +79,9 @@ export const workflows = pgTable(
     index("wf_workflows_status_idx").on(t.statusId),
     index("wf_workflows_type_idx").on(t.workflowType),
     index("wf_workflows_namespace_idx").on(t.namespace),
+    uniqueIndex("wf_workflows_idempotency_key_idx")
+      .on(t.workflowName, t.idempotencyKey)
+      .where(sql`${t.idempotencyKey} IS NOT NULL`),
   ],
 );
 
@@ -442,4 +450,42 @@ export const machineEvents = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("sm_machine_events_machine_idx").on(t.machineId)],
+);
+
+// ---------------------------------------------------------------------------
+// Public-bearer signal tokens — authorization sidecar for deliverSignal.
+//
+// A signal token grants one-shot delivery rights to a public completer for
+// a specific (workflow_id, signal_name). The completion route validates
+// the bearer, then calls `storage.deliverSignal(workflow_id, signal_name,
+// value)` to resume the workflow through the existing signal mechanic —
+// no new suspend semantics.
+// ---------------------------------------------------------------------------
+
+export const signalTokens = pgTable(
+  "wf_signal_tokens",
+  {
+    tokenId: text("token_id").primaryKey(),
+    workflowId: text("workflow_id").notNull(),
+    signalName: text("signal_name").notNull(),
+    bearer: text("bearer").notNull(),
+    tags: text("tags")
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
+    idempotencyKey: text("idempotency_key"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    completedValue: jsonb("completed_value"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("wf_signal_tokens_idempotency_key_idx")
+      .on(t.workflowId, t.idempotencyKey)
+      .where(sql`${t.idempotencyKey} IS NOT NULL`),
+    index("wf_signal_tokens_workflow_idx").on(t.workflowId),
+    index("wf_signal_tokens_expired_idx")
+      .on(t.expiresAt)
+      .where(sql`${t.completedAt} IS NULL`),
+  ],
 );
