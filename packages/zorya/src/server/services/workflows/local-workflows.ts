@@ -48,6 +48,14 @@ export interface LocalWorkflowsConfig {
   sleepScanIntervalMs?: number;
   /** Optional fallback for workflows this layer doesn't know. */
   fallback?: ZoryaWorkflows;
+  /**
+   * Optional version registry. When provided, `dispatch()` consults
+   * `registry.findActive(name)` first and uses that version's definition
+   * instead of the local `definitions[name]` mapping. Falls back to the
+   * local mapping when nothing's been promoted (preserves the existing
+   * "use the default-export" behaviour for unversioned workflows).
+   */
+  versionRegistry?: import("@promin/workflow").IWorkflowVersionRegistry;
 }
 
 export class LocalWorkflows extends ZoryaWorkflows {
@@ -56,6 +64,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
   private readonly runner: WorkflowRunner;
   private readonly recovery?: RecoveryStrategy;
   private readonly sleepScanner?: SleepScanner;
+  private readonly versionRegistry?: import("@promin/workflow").IWorkflowVersionRegistry;
 
   constructor(config: LocalWorkflowsConfig) {
     super({
@@ -65,6 +74,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
     this.storage = config.storage;
     this.runner = config.runner;
     if (config.recovery !== undefined) this.recovery = config.recovery;
+    if (config.versionRegistry !== undefined) this.versionRegistry = config.versionRegistry;
 
     const scanIntervalMs = config.sleepScanIntervalMs ?? 2_000;
     if (scanIntervalMs > 0) {
@@ -77,6 +87,22 @@ export class LocalWorkflows extends ZoryaWorkflows {
     }
   }
 
+  /**
+   * Resolve a workflow name to a definition. Prefers the active version
+   * registered in `versionRegistry` when set; otherwise returns the
+   * local `definitions[name]` mapping (the existing default-export path).
+   */
+  private async resolveDefinition(name: string): Promise<Workflow<unknown, unknown> | undefined> {
+    if (this.versionRegistry?.findActive) {
+      const active = await this.versionRegistry.findActive(name);
+      if (active) {
+        const resolved = await this.versionRegistry.resolve(name, active.version);
+        if (resolved) return resolved;
+      }
+    }
+    return this.definitions[name];
+  }
+
   protected canHandle(name: string): boolean {
     return name in this.definitions;
   }
@@ -86,7 +112,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
     input: unknown,
     opts?: TriggerOptions,
   ): Promise<TriggerResult> {
-    const def = this.definitions[name];
+    const def = await this.resolveDefinition(name);
     if (!def) throw new Error(`LocalWorkflows.dispatch: missing definition for "${name}"`);
 
     const workflowId = opts?.workflowId ?? crypto.randomUUID();

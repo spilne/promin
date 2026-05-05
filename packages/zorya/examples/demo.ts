@@ -694,6 +694,8 @@ function inputFor(name: string): unknown {
         ],
         sourceCount: 3 + Math.floor(Math.random() * 3),
       };
+    case "versioned-greeter":
+      return { name: ["world", "Promin", "Zorya", "Claude"][Math.floor(Math.random() * 4)] };
     default:
       return {};
   }
@@ -925,12 +927,28 @@ void startApprovalAutoSignaler();
 
 const uiDir = process.env.ZORYA_UI_DIR ?? path.join(import.meta.dir, "..", "dist", "public");
 
+// WorkflowVersionRegistry — drives the Deployments page and the
+// promote/findActive routing. Register the three versions of the
+// versioned-greeter demo workflow so the UI has something to promote
+// between. Coordinator picks the active version via `findActive` when no
+// explicit version is supplied to `runner.run({ name })`.
+const { WorkflowVersionRegistry } = await import("@promin/workflow");
+const versionRegistry = new WorkflowVersionRegistry();
+const { versionedGreeterVersions } = await import("./workflows/versioned-greeter.ts");
+for (const v of versionedGreeterVersions) versionRegistry.register(v);
+console.log(
+  `[zorya] versioned-greeter: registered ${versionedGreeterVersions
+    .map((v) => `v${v.version}`)
+    .join(", ")} (no active until promoted)`,
+);
+
 // The hybrid: local for in-process workflows, queued fallback for any
 // workflow only an external worker advertises (e.g. examples/worker.ts).
 const workflows = new LocalWorkflows({
   storage,
   runner,
   definitions: workflowsByName,
+  versionRegistry,
   recovery: RecoveryStrategy.builder()
     .failStale({ olderThanMs: 60 * 60 * 1000, error: "Stale run auto-failed on restart" })
     .resumeRecent()
@@ -1010,6 +1028,10 @@ const server = new ZoryaServer({
   // auto-derives this from workflows.workerRegistry; LocalWorkflows
   // doesn't expose one, so the host passes its own registry.)
   workers: new RegistryBackedWorkersProvider(workerRegistry),
+  // Drives the Deployments page (#/deployments) — promote/rollback
+  // mutates this registry and the runner's `findActive` lookup respects
+  // the active pointer for new starts.
+  versionRegistry,
 });
 
 const port = Number(process.env.PORT ?? 4100);
