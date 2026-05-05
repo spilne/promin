@@ -589,11 +589,27 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
           `Pass \`createWorkflowRunner({ storage, registry })\`.`,
       );
     }
-    const latestDef = await registry.resolve(params.name, params.version);
+
+    // Resolution order when the caller doesn't supply a version:
+    //   1. `findActive(name)` — explicit `promote()` target if any.
+    //   2. `latest(name)` (the registry's existing fallback inside
+    //      `resolve(name, undefined)`) — last-registered version.
+    //
+    // The first call lets `promote/rollback` actually shift dispatch
+    // without breaking pre-promote workflows: when nothing's been
+    // promoted, `findActive` returns null and we drop through to the
+    // legacy path. When the caller passes an explicit version, neither
+    // hook fires — the explicit version always wins.
+    let resolvedVersion = params.version;
+    if (!resolvedVersion && typeof registry.findActive === "function") {
+      const active = await registry.findActive(params.name);
+      if (active) resolvedVersion = active.version;
+    }
+    const latestDef = await registry.resolve(params.name, resolvedVersion);
     if (!latestDef) {
       const allNames = await registry.names();
       throw new Error(
-        `No workflow "${params.name}"${params.version ? ` version "${params.version}"` : ""} in registry. ` +
+        `No workflow "${params.name}"${resolvedVersion ? ` version "${resolvedVersion}"` : ""} in registry. ` +
           `Registered: ${(allNames as string[]).join(", ") || "(none)"}.`,
       );
     }

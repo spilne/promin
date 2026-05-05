@@ -459,4 +459,123 @@ describe("WorkflowVersionRegistry", () => {
       expect(count).toBe(1);
     });
   });
+
+  describe("runner routing — promote / findActive drives dispatch", () => {
+    it("by default (no promote) routes to latest registered — pre-promote behaviour preserved", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      const registry = createWorkflowVersionRegistry();
+
+      let v1Calls = 0;
+      let v2Calls = 0;
+      const v1 = workflow<{ n: number }>({ name: "compute", version: "1" })
+        .stepAsync("x", async ({ input }) => {
+          v1Calls++;
+          return input.n;
+        })
+        .build();
+      const v2 = workflow<{ n: number }>({ name: "compute", version: "2" })
+        .stepAsync("x", async ({ input }) => {
+          v2Calls++;
+          return input.n * 2;
+        })
+        .build();
+      registry.register(v1);
+      registry.register(v2); // v2 is "latest"
+
+      const runner = createWorkflowRunner({ storage, registry });
+      await runner.run({ name: "compute", workflowId: "r1", input: { n: 5 } });
+
+      expect(v1Calls).toBe(0);
+      expect(v2Calls).toBe(1);
+    });
+
+    it("when v1 is promoted, runner routes to v1 even though v2 is latest-registered", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      const registry = createWorkflowVersionRegistry();
+
+      let v1Calls = 0;
+      let v2Calls = 0;
+      const v1 = workflow<{ n: number }>({ name: "compute", version: "1" })
+        .stepAsync("x", async ({ input }) => {
+          v1Calls++;
+          return input.n;
+        })
+        .build();
+      const v2 = workflow<{ n: number }>({ name: "compute", version: "2" })
+        .stepAsync("x", async ({ input }) => {
+          v2Calls++;
+          return input.n * 2;
+        })
+        .build();
+      registry.register(v1);
+      registry.register(v2);
+      registry.promote("compute", "1"); // override "latest = v2"
+
+      const runner = createWorkflowRunner({ storage, registry });
+      await runner.run({ name: "compute", workflowId: "r2", input: { n: 5 } });
+
+      expect(v1Calls).toBe(1);
+      expect(v2Calls).toBe(0);
+    });
+
+    it("explicit version on .run() always wins over the active pointer", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      const registry = createWorkflowVersionRegistry();
+
+      let v1Calls = 0;
+      let v2Calls = 0;
+      const v1 = workflow<{ n: number }>({ name: "compute", version: "1" })
+        .stepAsync("x", async () => {
+          v1Calls++;
+          return "v1";
+        })
+        .build();
+      const v2 = workflow<{ n: number }>({ name: "compute", version: "2" })
+        .stepAsync("x", async () => {
+          v2Calls++;
+          return "v2";
+        })
+        .build();
+      registry.register(v1);
+      registry.register(v2);
+      registry.promote("compute", "1");
+
+      const runner = createWorkflowRunner({ storage, registry });
+      await runner.run({ name: "compute", version: "2", workflowId: "r3", input: { n: 5 } });
+
+      expect(v1Calls).toBe(0);
+      expect(v2Calls).toBe(1);
+    });
+
+    it("rollback shifts the routing target", async () => {
+      const storage = new InMemoryWorkflowStorage();
+      const registry = createWorkflowVersionRegistry();
+
+      let v1Calls = 0;
+      let v2Calls = 0;
+      const v1 = workflow<{ n: number }>({ name: "compute", version: "1" })
+        .stepAsync("x", async () => {
+          v1Calls++;
+          return "v1";
+        })
+        .build();
+      const v2 = workflow<{ n: number }>({ name: "compute", version: "2" })
+        .stepAsync("x", async () => {
+          v2Calls++;
+          return "v2";
+        })
+        .build();
+      registry.register(v1);
+      registry.register(v2);
+
+      registry.promote("compute", "2");
+      const runner = createWorkflowRunner({ storage, registry });
+      await runner.run({ name: "compute", workflowId: "r4a", input: { n: 5 } });
+      expect(v2Calls).toBe(1);
+
+      registry.rollback({ name: "compute", toVersion: "1" });
+      await runner.run({ name: "compute", workflowId: "r4b", input: { n: 5 } });
+      expect(v1Calls).toBe(1);
+    });
+  });
 });
