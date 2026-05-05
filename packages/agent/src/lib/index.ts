@@ -265,8 +265,19 @@ export type {
   AgentScanLoopHandle,
 } from "./discovery/agent-scanner.ts";
 
-export { tool } from "./tool.ts";
-export type { AgentTool, ApprovalDecision, AutoApprove } from "./tool.ts";
+export { tool, createScopedTool, createElevatedTool } from "./tool.ts";
+export type {
+  AgentTool,
+  ApprovalDecision,
+  AutoApprove,
+  ScopedToolContext,
+  ElevatedToolContext,
+  ScopedToolConfig,
+  ElevatedToolConfig,
+  ToolScope,
+  ToolExecuteContext,
+  ToolWriter,
+} from "./tool.ts";
 
 export { multiTool, command } from "./multi-tool.ts";
 export type { CommandDef } from "./multi-tool.ts";

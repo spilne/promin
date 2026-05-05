@@ -90,6 +90,186 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
   execute: (input: TInput, ctx?: ToolExecuteContext) => Promise<TOutput>;
   requireApproval?: boolean;
   toModelOutput?: (output: TOutput) => string;
+  /**
+   * Tool isolation kind — set by `createScopedTool` / `createElevatedTool`
+   * factories. Undefined for tools built with the bare `tool()` factory
+   * (no scope contract, ctx.scope is best-effort).
+   *
+   *   - "scoped"   — runtime guarantees a complete (namespaceId, resourceId)
+   *                  scope is injected; tool body cannot forge or override
+   *                  it. Use for any tool that reads/writes per-user state.
+   *   - "elevated" — cross-scope tool (admin, billing, system). Requires
+   *                  `ctx.audit()` to be called per invocation; missing
+   *                  audit fails the call. Optionally gated by `requires`.
+   */
+  readonly kind?: "scoped" | "elevated";
+  /**
+   * For elevated tools: the agent capability needed to expose this tool.
+   * `buildTools` should filter out elevated tools whose `requires` is
+   * not in the agent's `metadata.capabilities`. Capability filtering is
+   * not yet wired in; tracked as a follow-up to `promin-3paw`.
+   */
+  readonly requires?: string;
+}
+
+// ---- scoped + elevated tool factories ----------------------------------
+//
+// `tool()` is the bare factory: no scope contract, ctx is fully optional,
+// the tool body is responsible for whatever scope handling it wants.
+//
+// `createScopedTool()` and `createElevatedTool()` add type-safe contracts
+// on top — the user's `execute` callback receives a context with required
+// fields (no optional chains), and the runtime guarantees those fields
+// were sourced from the dispatching task's envelope. A tool body cannot
+// forge or override its own scope; the factory's adapter wraps the user
+// callback so only the runtime can supply the context.
+
+/**
+ * Per-call context for scoped tools. All identity fields are guaranteed
+ * non-empty when this context is passed — runtime enforces it.
+ */
+export interface ScopedToolContext {
+  readonly namespaceId: string;
+  readonly resourceId: string;
+  readonly threadId?: string;
+  readonly agentId?: string;
+  readonly writer?: ToolWriter;
+}
+
+/**
+ * Per-call context for elevated tools. Extends `ScopedToolContext` with
+ * a mandatory `audit` callback — the tool MUST call it at least once
+ * per invocation. The factory tracks whether audit was called; if not,
+ * the call resolves to an error result so the missing-audit case is
+ * loud, not silent.
+ */
+export interface ElevatedToolContext extends ScopedToolContext {
+  /**
+   * Audit hook — call once per invocation describing what cross-scope
+   * action was taken. Missing audit fails the tool call.
+   */
+  audit(entry: {
+    readonly action: string;
+    readonly target?: string;
+    readonly meta?: Readonly<Record<string, unknown>>;
+  }): void;
+}
+
+/**
+ * Configuration for `createScopedTool`. Same shape as `AgentTool` minus
+ * the kind/requires markers (factory sets them) and with a typed
+ * `execute` signature requiring a complete `ScopedToolContext`.
+ */
+export interface ScopedToolConfig<TInput, TOutput> {
+  name: string;
+  description: string;
+  usage?: string;
+  examples?: Array<{ input: TInput; output: string }>;
+  parameters: z.ZodType<TInput>;
+  requireApproval?: boolean;
+  toModelOutput?: (output: TOutput) => string;
+  execute: (input: TInput, ctx: ScopedToolContext) => Promise<TOutput>;
+}
+
+/**
+ * Configuration for `createElevatedTool`. Like `ScopedToolConfig`, plus
+ * an optional `requires` capability marker and an `execute` callback
+ * that receives `ElevatedToolContext`.
+ */
+export interface ElevatedToolConfig<TInput, TOutput> extends Omit<
+  ScopedToolConfig<TInput, TOutput>,
+  "execute"
+> {
+  /**
+   * Capability required on the agent template's `metadata.capabilities`
+   * for this tool to be exposed. When omitted, any agent with the
+   * implicit "elevated" capability sees the tool. Filtering is wired
+   * by `buildTools`; currently a no-op (see follow-up).
+   */
+  readonly requires?: string;
+  execute: (input: TInput, ctx: ElevatedToolContext) => Promise<TOutput>;
+}
+
+/**
+ * Build a scoped tool — the runtime guarantees `ctx.namespaceId` and
+ * `ctx.resourceId` are non-empty when `execute` runs. If the runtime
+ * dispatches without a complete scope, the call fails before reaching
+ * the user callback.
+ */
+export function createScopedTool<TInput, TOutput>(
+  config: ScopedToolConfig<TInput, TOutput>,
+): AgentTool<TInput, TOutput> {
+  const { execute: userExecute, ...rest } = config;
+  return {
+    ...rest,
+    kind: "scoped",
+    execute: async (input: TInput, ctx?: ToolExecuteContext): Promise<TOutput> => {
+      const scoped = scopedContextFrom(ctx);
+      if (!scoped) {
+        throw new Error(
+          `Scoped tool '${config.name}' invoked without complete (namespaceId, resourceId) scope. ` +
+            "This indicates a runtime bug — scoped tools must only be dispatched through " +
+            "the agent loop / agentAction with a populated ToolScope.",
+        );
+      }
+      return userExecute(input, scoped);
+    },
+  };
+}
+
+/**
+ * Build an elevated tool — same scope guarantees as `createScopedTool`,
+ * plus the user's `execute` callback receives an `audit()` callable.
+ * The audit hook MUST be invoked at least once per call; if `execute`
+ * returns without calling audit, the factory throws so the missing-audit
+ * case surfaces as a tool error (not a silent gap in the audit log).
+ */
+export function createElevatedTool<TInput, TOutput>(
+  config: ElevatedToolConfig<TInput, TOutput>,
+): AgentTool<TInput, TOutput> {
+  const { execute: userExecute, requires, ...rest } = config;
+  return {
+    ...rest,
+    kind: "elevated",
+    ...(requires !== undefined && { requires }),
+    execute: async (input: TInput, ctx?: ToolExecuteContext): Promise<TOutput> => {
+      const scoped = scopedContextFrom(ctx);
+      if (!scoped) {
+        throw new Error(
+          `Elevated tool '${config.name}' invoked without complete (namespaceId, resourceId) scope.`,
+        );
+      }
+      let auditCalled = false;
+      const audit: ElevatedToolContext["audit"] = (_entry) => {
+        auditCalled = true;
+        // Audit log emission is host-injectable in a follow-up; for now
+        // the factory only tracks that the tool DID call audit().
+      };
+      const elevated: ElevatedToolContext = { ...scoped, audit };
+      const output = await userExecute(input, elevated);
+      if (!auditCalled) {
+        throw new Error(
+          `Elevated tool '${config.name}' completed without calling ctx.audit(). ` +
+            "Every elevated invocation must record an audit entry.",
+        );
+      }
+      return output;
+    },
+  };
+}
+
+function scopedContextFrom(ctx: ToolExecuteContext | undefined): ScopedToolContext | null {
+  const scope = ctx?.scope;
+  if (!scope) return null;
+  if (typeof scope.namespaceId !== "string" || scope.namespaceId.length === 0) return null;
+  if (typeof scope.resourceId !== "string" || scope.resourceId.length === 0) return null;
+  return {
+    namespaceId: scope.namespaceId,
+    resourceId: scope.resourceId,
+    ...(scope.threadId !== undefined && { threadId: scope.threadId }),
+    ...(scope.agentId !== undefined && { agentId: scope.agentId }),
+    ...(ctx?.writer !== undefined && { writer: ctx.writer }),
+  };
 }
 
 /**
