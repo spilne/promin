@@ -11,7 +11,6 @@ import { AgentList } from "./components/agents/agent-list.tsx";
 import { AgentDetail } from "./components/agents/agent-detail.tsx";
 import { InstanceList } from "./components/agents/instance-list.tsx";
 import { ApprovalList } from "./components/approvals/approval-list.tsx";
-import { DeploymentList } from "./components/deployments/deployment-list.tsx";
 import { DialogHost, ToastHost } from "./components/ui/dialog-host.tsx";
 
 export function App() {
@@ -65,13 +64,11 @@ function renderRoute(route: string, navigate: (p: string) => void) {
     return <ApprovalList onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)} />;
   }
   if (path === "/deployments") {
-    return (
-      <DeploymentList
-        onOpenRuns={(name, version) =>
-          navigate(`/?name=${encodeURIComponent(name)}&version=${encodeURIComponent(version)}`)
-        }
-      />
-    );
+    // Legacy URL — version lifecycle now lives on the workflow-detail
+    // page (/workflows/:name → "Versions" panel). Redirect to the
+    // workflow directory so existing bookmarks still find their way.
+    navigate("/workflows");
+    return null;
   }
   const scheduleMatch = /^\/schedules\/([^/]+)$/.exec(path ?? "");
   if (scheduleMatch) {
@@ -106,11 +103,17 @@ function renderRoute(route: string, navigate: (p: string) => void) {
   }
   const workflowMatch = /^\/workflows\/([^/]+)$/.exec(path ?? "");
   if (workflowMatch) {
+    const workflowName = decodeURIComponent(workflowMatch[1]!);
     return (
       <WorkflowDetail
-        name={decodeURIComponent(workflowMatch[1]!)}
+        name={workflowName}
         onBack={() => navigate("/workflows")}
         onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)}
+        onOpenVersionRuns={(version) =>
+          navigate(
+            `/?name=${encodeURIComponent(workflowName)}&version=${encodeURIComponent(version)}`,
+          )
+        }
       />
     );
   }

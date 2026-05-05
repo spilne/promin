@@ -1,74 +1,27 @@
 // ---------------------------------------------------------------------------
-// DeploymentList — top-level deployments view. One stacked timeline row per
-// registered workflow, showing all version records with status badges +
-// promote/rollback affordances.
+// WorkflowVersionsPanel — version timeline + promote / rollback for one
+// workflow. Renders inline on the workflow-detail page so the lifecycle
+// lives next to the workflow it belongs to (instead of a separate page).
 //
-// Backed by the lifecycle methods on WorkflowVersionRegistry (added in the
-// registry-lifecycle commit). Coordinator routing on `findActive` is
-// deferred — the UI surfaces the model so operators can promote/rollback;
-// runs continue to dispatch via the existing `latest` rule until Phase B.
+// Hidden when no versions are registered — most workflows are
+// unversioned and we don't want a "no registered versions" panel
+// cluttering every detail page.
 // ---------------------------------------------------------------------------
 
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api, ApiError } from "../../api/client.ts";
 import type { DeploymentDto } from "../../../server/routes/deployments.ts";
-import { Page } from "../ui/page.tsx";
-import { SkeletonRows } from "../ui/skeleton.tsx";
-import { EmptyState } from "../ui/empty-state.tsx";
 import { confirm, toast } from "../../lib/dialogs.ts";
 
 interface Props {
-  /** Drill into the runs list filtered by (workflowName, version). */
-  onOpenRuns: (name: string, version: string) => void;
-}
-
-export function DeploymentList({ onOpenRuns }: Props) {
-  const { data, loading, error, refresh } = useFetch(() => api.listWorkflowDefs(), [], 30_000);
-
-  const workflowNames = useMemo(() => (data?.workflows ?? []).map((w) => w.name).sort(), [data]);
-
-  return (
-    <Page>
-      <div>
-        <h1 class="text-2xl font-semibold">Deployments</h1>
-        <p class="text-sm text-base-content/60 mt-1">
-          Promote or roll back which version a workflow's new runs target.
-        </p>
-      </div>
-      {error && (
-        <div class="alert alert-error mb-4">
-          Failed to load workflows: {(error as Error).message}
-        </div>
-      )}
-      {loading && !data && <SkeletonRows rows={4} />}
-      {!loading && workflowNames.length === 0 && (
-        <EmptyState
-          message="No registered workflows"
-          hint="Register a workflow definition to see its version timeline here."
-        />
-      )}
-      <div class="space-y-4">
-        {workflowNames.map((name) => (
-          <DeploymentTimelineRow
-            key={name}
-            name={name}
-            onOpenRuns={onOpenRuns}
-            onChange={refresh}
-          />
-        ))}
-      </div>
-    </Page>
-  );
-}
-
-interface RowProps {
+  /** Workflow name. */
   name: string;
-  onOpenRuns: (name: string, version: string) => void;
-  onChange: () => void;
+  /** Drill into the runs list filtered by `(name, version)`. */
+  onOpenRuns: (version: string) => void;
 }
 
-function DeploymentTimelineRow({ name, onOpenRuns, onChange }: RowProps) {
+export function WorkflowVersionsPanel({ name, onOpenRuns }: Props) {
   const { data, loading, error, refresh } = useFetch(
     () => api.listDeployments(name),
     [name],
@@ -76,16 +29,17 @@ function DeploymentTimelineRow({ name, onOpenRuns, onChange }: RowProps) {
   );
   const [actingVersion, setActingVersion] = useState<string | null>(null);
 
-  const deployments = data?.deployments ?? [];
   const sorted = useMemo(() => {
-    // registeredAt-desc from server; we want newest at the right edge of
-    // the timeline (timeline reads left = oldest, right = newest).
-    return [...deployments].sort(
+    const versions = data?.deployments ?? [];
+    return [...versions].sort(
       (a, b) => new Date(a.registeredAt).getTime() - new Date(b.registeredAt).getTime(),
     );
-  }, [deployments]);
-
+  }, [data]);
   const active = sorted.find((d) => d.status === "active");
+
+  // Hide the panel for workflows without registered versions — keeps the
+  // detail page clean for unversioned workflows.
+  if (!loading && sorted.length === 0 && !error) return null;
 
   const promote = async (version: string): Promise<void> => {
     setActingVersion(version);
@@ -93,7 +47,6 @@ function DeploymentTimelineRow({ name, onOpenRuns, onChange }: RowProps) {
       await api.promoteDeployment(name, version);
       toast(`Promoted ${name}@${version}`, { variant: "success" });
       refresh();
-      onChange();
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : String(err);
       toast(`Promote failed: ${msg}`, { variant: "error" });
@@ -118,7 +71,6 @@ function DeploymentTimelineRow({ name, onOpenRuns, onChange }: RowProps) {
       await api.rollbackDeployment(name, toVersion);
       toast(`Rolled back ${name} → ${toVersion}`, { variant: "success" });
       refresh();
-      onChange();
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : String(err);
       toast(`Rollback failed: ${msg}`, { variant: "error" });
@@ -128,31 +80,29 @@ function DeploymentTimelineRow({ name, onOpenRuns, onChange }: RowProps) {
   };
 
   return (
-    <div class="card bg-base-100 border border-base-content/10">
-      <div class="card-body p-4">
-        <div class="flex items-center justify-between mb-3">
-          <h3 class="font-semibold">{name}</h3>
+    <div class="card bg-base-100 shadow">
+      <div class="card-body p-4 space-y-3">
+        <div class="flex items-center justify-between">
+          <h3 class="text-xs font-semibold text-base-content/50 uppercase tracking-wide">
+            Versions
+          </h3>
           <div class="text-xs text-base-content/60">
             {active ? (
               <>
                 active: <span class="font-mono text-base-content/90">{active.version}</span>
               </>
             ) : (
-              <span class="italic">no active version</span>
+              <span class="italic">no active version — runs use latest-registered</span>
             )}
           </div>
         </div>
 
-        {error && <div class="text-error text-sm">Failed to load deployments: {error.message}</div>}
-        {loading && !data && <SkeletonRows rows={1} />}
-        {!loading && sorted.length === 0 && (
-          <div class="text-sm text-base-content/50 italic">No registered versions.</div>
-        )}
+        {error && <div class="text-error text-sm">Failed to load: {error.message}</div>}
 
         {sorted.length > 0 && (
           <ul class="divide-y divide-base-content/5">
             {sorted.map((d) => (
-              <DeploymentRow
+              <VersionRow
                 key={d.version}
                 deployment={d}
                 isActive={active?.version === d.version}
@@ -160,7 +110,7 @@ function DeploymentTimelineRow({ name, onOpenRuns, onChange }: RowProps) {
                 acting={actingVersion === d.version}
                 onPromote={() => promote(d.version)}
                 onRollback={() => rollback(d.version)}
-                onOpenRuns={() => onOpenRuns(name, d.version)}
+                onOpenRuns={() => onOpenRuns(d.version)}
               />
             ))}
           </ul>
@@ -170,7 +120,7 @@ function DeploymentTimelineRow({ name, onOpenRuns, onChange }: RowProps) {
   );
 }
 
-interface DeploymentRowProps {
+interface VersionRowProps {
   deployment: DeploymentDto;
   isActive: boolean;
   hasActive: boolean;
@@ -180,7 +130,7 @@ interface DeploymentRowProps {
   onOpenRuns: () => void;
 }
 
-function DeploymentRow({
+function VersionRow({
   deployment: d,
   isActive,
   hasActive,
@@ -188,11 +138,11 @@ function DeploymentRow({
   onPromote,
   onRollback,
   onOpenRuns,
-}: DeploymentRowProps) {
+}: VersionRowProps) {
   return (
-    <li class="py-2 flex items-center gap-3 text-sm">
+    <li class="py-2 flex items-center gap-3 text-sm flex-wrap">
       <StatusBadge status={d.status} />
-      <span class="font-mono text-base-content/90">{d.version}</span>
+      <span class="font-mono text-base-content/90">v{d.version}</span>
       <span class="text-xs text-base-content/50">
         registered <RelativeTime iso={d.registeredAt} />
         {d.activeAt && (

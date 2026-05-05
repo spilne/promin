@@ -17,8 +17,8 @@
 
 import { $ } from "bun";
 import path from "node:path";
-import { existsSync, watch } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { existsSync, statSync, watch } from "node:fs";
+import { readdir, writeFile } from "node:fs/promises";
 
 const pkgRoot = path.resolve(import.meta.dir, "..");
 
@@ -50,6 +50,11 @@ export async function buildUi(): Promise<void> {
  * Build the UI if needed (or always when forceRebuild is true). When
  * the build is skipped, still refreshes the sentinel so the polling
  * client has a stable baseline.
+ *
+ * "Needed" = dist artifact missing OR any source file under `src/ui/**`
+ * has an mtime newer than the dist's `index.html`. Pre-this-check, the
+ * rule was "skip if dist exists at all" — which silently served stale
+ * bundles after every code edit between demo runs.
  */
 export async function ensureUiBuilt(
   opts: {
@@ -58,14 +63,64 @@ export async function ensureUiBuilt(
   } = {},
 ): Promise<void> {
   const log = opts.log ?? ((s) => console.log(s));
-  if (opts.forceRebuild || !existsSync(ZORYA_DEV_PATHS.indexHtml)) {
-    log("[zorya] building UI…");
+  const distMissing = !existsSync(ZORYA_DEV_PATHS.indexHtml);
+  const stale = distMissing ? true : await isUiSourceNewerThanDist();
+  if (opts.forceRebuild || distMissing || stale) {
+    log(
+      opts.forceRebuild
+        ? "[zorya] building UI… (--rebuild)"
+        : distMissing
+          ? "[zorya] building UI… (no dist)"
+          : "[zorya] building UI… (source newer than dist)",
+    );
     await buildUi();
     log("[zorya] UI ready at dist/public/");
   } else {
-    log("[zorya] UI cached at dist/public (pass --rebuild to force)");
+    log("[zorya] UI cached at dist/public (no source changes since last build)");
     await writeFile(ZORYA_DEV_PATHS.reloadFile, String(Date.now()));
   }
+}
+
+/**
+ * True when any file under `src/ui/**` has an mtime greater than the
+ * built `index.html` — i.e. the source has been edited since the last
+ * build. Walks the tree, short-circuits on first hit. Symlinks +
+ * node_modules are skipped (the latter shouldn't appear under src/ui
+ * but the guard keeps surprises out).
+ */
+async function isUiSourceNewerThanDist(): Promise<boolean> {
+  const distMtime = (() => {
+    try {
+      return statSync(ZORYA_DEV_PATHS.indexHtml).mtimeMs;
+    } catch {
+      return 0;
+    }
+  })();
+  const stack: string[] = [ZORYA_DEV_PATHS.uiSrc];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries: Awaited<ReturnType<typeof readdir>>;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (e.name === "node_modules" || e.name.startsWith(".")) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        stack.push(full);
+        continue;
+      }
+      if (!e.isFile()) continue;
+      try {
+        if (statSync(full).mtimeMs > distMtime) return true;
+      } catch {
+        // unreadable — ignore, keep walking
+      }
+    }
+  }
+  return false;
 }
 
 /**

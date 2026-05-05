@@ -19,6 +19,7 @@ import { EmptyState } from "../ui/empty-state.tsx";
 import { Skeleton } from "../ui/skeleton.tsx";
 import { TriggerModal } from "./trigger-modal.tsx";
 import { HistoryChart } from "./history-chart.tsx";
+import { WorkflowVersionsPanel } from "./workflow-versions-panel.tsx";
 import { STEP_TYPE_ICON, formatDuration, formatRelative } from "../../lib/format.ts";
 import { Page } from "../ui/page.tsx";
 
@@ -26,9 +27,16 @@ interface WorkflowDetailProps {
   name: string;
   onBack: () => void;
   onOpenRun: (id: string) => void;
+  /** Navigate to the runs list pre-filtered by `(name, version)`. */
+  onOpenVersionRuns?: (version: string) => void;
 }
 
-export function WorkflowDetail({ name, onBack, onOpenRun }: WorkflowDetailProps) {
+export function WorkflowDetail({
+  name,
+  onBack,
+  onOpenRun,
+  onOpenVersionRuns,
+}: WorkflowDetailProps) {
   const [triggering, setTriggering] = useState(false);
 
   const { data: def, error } = useFetch(() => api.getWorkflowDef(name), [name]);
@@ -144,6 +152,10 @@ export function WorkflowDetail({ name, onBack, onOpenRun }: WorkflowDetailProps)
           <RecentRunsCard runs={runsList?.runs ?? []} onOpenRun={onOpenRun} />
         </div>
       </div>
+
+      {/* Versions — promote/rollback for workflows registered with versions.
+          Renders nothing for unversioned workflows so the page stays clean. */}
+      <WorkflowVersionsPanel name={name} onOpenRuns={(v) => onOpenVersionRuns?.(v)} />
 
       {/* Duration history chart — sits at the bottom so operators see the DAG
           and recent runs first, then scroll down to eyeball degradation
