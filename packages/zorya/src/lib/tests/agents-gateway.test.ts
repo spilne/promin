@@ -167,7 +167,7 @@ describe("agent gateway — stream (SSE)", () => {
       new Request("http://test/api/agents/support/stream", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ task: "hi", namespaceId: "acme" }),
+        body: JSON.stringify({ task: "hi", namespaceId: "acme", resourceId: "alice" }),
       }),
     );
     expect(res.status).toBe(200);
@@ -175,6 +175,20 @@ describe("agent gateway — stream (SSE)", () => {
     const text = await res.text();
     expect(text).toContain("event: finish");
     expect(text).toContain('"text":"streamed"');
+  });
+
+  it("400 when scope identity is missing (resourceId | ownerId required)", async () => {
+    const { server } = await bootGateway();
+    const res = await server.handle(
+      new Request("http://test/api/agents/support/invoke", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ task: "hi", namespaceId: "acme" }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("missing_scope_identity");
   });
 });
 

@@ -13,11 +13,17 @@
 //   GET  /api/agents/:id/threads/:threadId/messages — read message history
 //
 // Tenant binding:
-//   Every invocation requires `namespaceId` in the body. `resourceId` is
-//   optional — when set, the resource layer participates in the memory
-//   cascade. Both are passed through `agent.withScope()` per request, so the
-//   resolved agent template is shared across requests but each call sees
-//   its own tenant scope.
+//   Every invocation requires `namespaceId` AND ONE OF `resourceId | ownerId`
+//   in the body — cross-tenant leak is prevented by-construction, not by
+//   policy. `resourceId` = raw scope key; `ownerId` = "resolve via
+//   AgentInstance, use its id as the scope key". Both at once is rejected
+//   (`conflicting_identity`); neither is rejected (`missing_scope_identity`).
+//   Use the exported `AgentInvokeBody` discriminated-union type to get the
+//   constraint enforced at compile time.
+//
+//   The (namespaceId, resourceId) tuple flows through `agent.withScope()`
+//   per request — the resolved agent template is shared across requests
+//   but each call sees its own tenant + user scope.
 //
 // Resolver injection:
 //   The route doesn't know how to construct an Agent from a recipe — that's
@@ -115,11 +121,62 @@ interface ParsedInvoke {
   readonly ownerId?: string;
 }
 
-function parseInvokeBody(body: InvokeRequest | null): ParsedInvoke | { error: string } {
-  if (!body) return { error: "missing_body" };
-  if (typeof body.task !== "string" || body.task.length === 0) {
-    return { error: "missing_task" };
-  }
+/**
+ * Typed shape callers can use to construct an invoke body with the
+ * `(namespaceId, resourceId | ownerId)` constraint enforced at the type
+ * level. The discriminated union refuses bodies that omit both
+ * identity-scope fields — TypeScript clients catch the mistake at
+ * compile time; the runtime parser catches anyone bypassing TS.
+ *
+ * ```ts
+ * const body: AgentInvokeBody = {
+ *   task: "summarize",
+ *   namespaceId: "acme",
+ *   ownerId: "u-9",   // OR resourceId; never both, never neither
+ * };
+ * ```
+ */
+export type AgentInvokeBody =
+  | {
+      readonly task: string;
+      readonly namespaceId: string;
+      readonly resourceId: string;
+      readonly ownerId?: never;
+      readonly metadata?: Record<string, unknown>;
+    }
+  | {
+      readonly task: string;
+      readonly namespaceId: string;
+      readonly resourceId?: never;
+      readonly ownerId: string;
+      readonly metadata?: Record<string, unknown>;
+    };
+
+interface ScopeFields {
+  readonly namespaceId: string;
+  readonly resourceId?: string;
+  readonly ownerId?: string;
+}
+
+/**
+ * Parse + validate the `(namespaceId, resourceId | ownerId)` scope
+ * triple from any agent-invocation body. Cross-tenant leak prevention is
+ * by-construction: the parser rejects bodies that omit the user-scope
+ * field, so a caller can never accidentally invoke "as namespace acme"
+ * without saying "for which user" — there's no implicit "default user."
+ *
+ * Errors:
+ *   missing_namespaceId        — namespaceId absent or empty.
+ *   missing_scope_identity     — neither resourceId nor ownerId set.
+ *   conflicting_identity       — both resourceId and ownerId set.
+ *
+ * @internal — exported for tests; not part of the public route surface.
+ */
+export function parseScopeFields(body: {
+  readonly namespaceId?: unknown;
+  readonly resourceId?: unknown;
+  readonly ownerId?: unknown;
+}): ScopeFields | { error: string } {
   if (typeof body.namespaceId !== "string" || body.namespaceId.length === 0) {
     return { error: "missing_namespaceId" };
   }
@@ -127,14 +184,31 @@ function parseInvokeBody(body: InvokeRequest | null): ParsedInvoke | { error: st
     typeof body.resourceId === "string" && body.resourceId.length > 0 ? body.resourceId : undefined;
   const ownerId =
     typeof body.ownerId === "string" && body.ownerId.length > 0 ? body.ownerId : undefined;
-  // Conflicting identity signals — caller has to pick one model. resourceId
-  // is "use this raw scope key", ownerId is "resolve an AgentInstance and
-  // use its id as the scope key". Both at once would be ambiguous about
-  // which row the gateway should write through to.
+  // Both unset — by-construction tenancy means we never let a caller invoke
+  // "as namespace X" without naming the user. resourceId = raw scope key,
+  // ownerId = resolved-via-AgentInstance.
+  if (resourceId === undefined && ownerId === undefined) {
+    return { error: "missing_scope_identity" };
+  }
+  // Conflicting identity signals — caller has to pick one model.
   if (resourceId !== undefined && ownerId !== undefined) {
     return { error: "conflicting_identity" };
   }
-  return { task: body.task, namespaceId: body.namespaceId, resourceId, ownerId };
+  return {
+    namespaceId: body.namespaceId,
+    ...(resourceId !== undefined && { resourceId }),
+    ...(ownerId !== undefined && { ownerId }),
+  };
+}
+
+function parseInvokeBody(body: InvokeRequest | null): ParsedInvoke | { error: string } {
+  if (!body) return { error: "missing_body" };
+  if (typeof body.task !== "string" || body.task.length === 0) {
+    return { error: "missing_task" };
+  }
+  const scope = parseScopeFields(body);
+  if ("error" in scope) return scope;
+  return { task: body.task, ...scope };
 }
 
 /**
@@ -481,24 +555,14 @@ function parseApprovalBody(body: ApprovalRequest | null): ParsedApproval | { err
     return { error: "missing_toolCallId" };
   }
   if (typeof body.approved !== "boolean") return { error: "missing_approved" };
-  if (typeof body.namespaceId !== "string" || body.namespaceId.length === 0) {
-    return { error: "missing_namespaceId" };
-  }
+  const scope = parseScopeFields(body);
+  if ("error" in scope) return scope;
   const reason = typeof body.reason === "string" ? body.reason : undefined;
-  const resourceId =
-    typeof body.resourceId === "string" && body.resourceId.length > 0 ? body.resourceId : undefined;
-  const ownerId =
-    typeof body.ownerId === "string" && body.ownerId.length > 0 ? body.ownerId : undefined;
-  if (resourceId !== undefined && ownerId !== undefined) {
-    return { error: "conflicting_identity" };
-  }
   return {
     toolCallId: body.toolCallId,
     approved: body.approved,
-    namespaceId: body.namespaceId,
+    ...scope,
     ...(reason !== undefined && { reason }),
-    ...(resourceId !== undefined && { resourceId }),
-    ...(ownerId !== undefined && { ownerId }),
   };
 }
 
