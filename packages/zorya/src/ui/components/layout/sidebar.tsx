@@ -19,6 +19,7 @@ const SECTIONS: Array<{ title?: string; items: NavItem[] }> = [
     items: [
       { path: "/", label: "Runs", icon: "▦" },
       { path: "/workflows", label: "Workflows", icon: "◈" },
+      { path: "/deployments", label: "Deployments", icon: "☁" },
       { path: "/schedules", label: "Schedules", icon: "⏱" },
       { path: "/approvals", label: "Approvals", icon: "✓" },
       { path: "/workers", label: "Workers", icon: "◉" },
@@ -33,10 +34,7 @@ const SECTIONS: Array<{ title?: string; items: NavItem[] }> = [
   },
   {
     title: "Coming soon",
-    items: [
-      { path: "/deployments", label: "Deployments", icon: "☁", disabled: true },
-      { path: "/alerts", label: "Alerts", icon: "⚠", disabled: true },
-    ],
+    items: [{ path: "/alerts", label: "Alerts", icon: "⚠", disabled: true }],
   },
 ];
 

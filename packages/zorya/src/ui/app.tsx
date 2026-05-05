@@ -11,6 +11,7 @@ import { AgentList } from "./components/agents/agent-list.tsx";
 import { AgentDetail } from "./components/agents/agent-detail.tsx";
 import { InstanceList } from "./components/agents/instance-list.tsx";
 import { ApprovalList } from "./components/approvals/approval-list.tsx";
+import { DeploymentList } from "./components/deployments/deployment-list.tsx";
 import { DialogHost, ToastHost } from "./components/ui/dialog-host.tsx";
 
 export function App() {
@@ -62,6 +63,15 @@ function renderRoute(route: string, navigate: (p: string) => void) {
   }
   if (path === "/approvals") {
     return <ApprovalList onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)} />;
+  }
+  if (path === "/deployments") {
+    return (
+      <DeploymentList
+        onOpenRuns={(name, version) =>
+          navigate(`/?name=${encodeURIComponent(name)}&version=${encodeURIComponent(version)}`)
+        }
+      />
+    );
   }
   const scheduleMatch = /^\/schedules\/([^/]+)$/.exec(path ?? "");
   if (scheduleMatch) {

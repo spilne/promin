@@ -34,6 +34,7 @@ import type {
 } from "../../server/routes/agents.ts";
 import type { MemoryInspectResponse } from "../../server/routes/memory.ts";
 import type { ApprovalsResponse } from "../../server/routes/approvals.ts";
+import type { DeploymentDto } from "../../server/routes/deployments.ts";
 
 const BASE = ""; // served from same origin
 
@@ -166,6 +167,29 @@ export const api = {
     if (params.namespace) qp.set("namespace", params.namespace);
     const qs = qp.toString();
     return req(`/api/workflows${qs ? `?${qs}` : ""}`);
+  },
+  listDeployments(name: string): Promise<{ deployments: DeploymentDto[] }> {
+    return req(`/api/deployments?name=${encodeURIComponent(name)}`);
+  },
+  getActiveDeployment(name: string): Promise<DeploymentDto> {
+    return req(`/api/deployments/${encodeURIComponent(name)}/active`);
+  },
+  promoteDeployment(name: string, version: string): Promise<{ deployment: DeploymentDto }> {
+    return req(`/api/deployments/${encodeURIComponent(name)}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ version }),
+    });
+  },
+  rollbackDeployment(
+    name: string,
+    toVersion: string,
+  ): Promise<{ previous: DeploymentDto; active: DeploymentDto }> {
+    return req(`/api/deployments/${encodeURIComponent(name)}/rollback`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ toVersion }),
+    });
   },
   listApprovals(params: { namespace?: string; limit?: number } = {}): Promise<ApprovalsResponse> {
     const qp = new URLSearchParams();
