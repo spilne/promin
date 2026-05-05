@@ -86,11 +86,11 @@ import {
   mintSignalToken,
 } from "./routes/signal-tokens.ts";
 import {
-  getActiveDeployment,
-  listDeployments,
-  promoteDeployment,
-  rollbackDeployment,
-} from "./routes/deployments.ts";
+  getActiveWorkflowVersion,
+  listWorkflowVersions,
+  promoteWorkflowVersion,
+  rollbackWorkflow,
+} from "./routes/workflow-versions.ts";
 import { getStreamChunks, sendStreamChunk, streamChunks } from "./routes/streams.ts";
 import { getSparklines, getWorkflowGrid, getWorkflowHistory } from "./routes/grid.ts";
 import { getWorkflowDef, listWorkflowDefs } from "./routes/workflow-defs.ts";
@@ -178,10 +178,10 @@ export interface ZoryaServerConfig extends AuthConfig {
   /** SSE poll interval in ms. Default 1000. */
   sseIntervalMs?: number;
   /**
-   * Workflow version registry. Drives `/api/deployments` (promote/rollback,
-   * findActive, list-records). Defaults to a fresh in-memory
-   * `WorkflowVersionRegistry`; production deployments should pass
-   * `PostgresWorkflowVersionRegistry` so lifecycle survives restart.
+   * Workflow version registry. Drives `/api/workflows/:name/versions/*`
+   * (promote/rollback, findActive, list-records). Defaults to a fresh
+   * in-memory `WorkflowVersionRegistry`; production deployments should
+   * pass `PostgresWorkflowVersionRegistry` so lifecycle survives restart.
    */
   versionRegistry?: IWorkflowVersionRegistry;
   /**
@@ -325,16 +325,22 @@ export class ZoryaServer {
       )
       .get("/api/runs/:id/signal-tokens", listSignalTokensForRun({ storage }))
       .post("/api/signal-tokens/:tokenId/complete", completeSignalToken({ storage }))
-      // Deployments — thin layer over WorkflowVersionRegistry's lifecycle
-      // methods. Coordinator routing on `findActive` is a follow-up;
-      // these routes commit the dashboard-facing API.
-      .get("/api/deployments", listDeployments({ registry: this.versionRegistry }))
-      .get("/api/deployments/:name/active", getActiveDeployment({ registry: this.versionRegistry }))
-      .post("/api/deployments/:name/promote", promoteDeployment({ registry: this.versionRegistry }))
-      .post(
-        "/api/deployments/:name/rollback",
-        rollbackDeployment({ registry: this.versionRegistry }),
+      // Workflow versions — thin layer over WorkflowVersionRegistry's
+      // lifecycle methods. Versions are a property of a workflow, so the
+      // routes nest under /api/workflows/:name/...
+      .get(
+        "/api/workflows/:name/versions",
+        listWorkflowVersions({ registry: this.versionRegistry }),
       )
+      .get(
+        "/api/workflows/:name/versions/active",
+        getActiveWorkflowVersion({ registry: this.versionRegistry }),
+      )
+      .post(
+        "/api/workflows/:name/versions/:version/promote",
+        promoteWorkflowVersion({ registry: this.versionRegistry }),
+      )
+      .post("/api/workflows/:name/rollback", rollbackWorkflow({ registry: this.versionRegistry }))
       // Streams — generic typed channels per workflow. Output (workflow →
       // subscribers) reads via the SSE handler; input (subscribers →
       // workflow) appends via the POST handler.

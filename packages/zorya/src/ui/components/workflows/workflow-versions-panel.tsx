@@ -11,7 +11,7 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api, ApiError } from "../../api/client.ts";
-import type { DeploymentDto } from "../../../server/routes/deployments.ts";
+import type { WorkflowVersionDto } from "../../../server/routes/workflow-versions.ts";
 import { confirm, toast } from "../../lib/dialogs.ts";
 
 interface Props {
@@ -23,14 +23,14 @@ interface Props {
 
 export function WorkflowVersionsPanel({ name, onOpenRuns }: Props) {
   const { data, loading, error, refresh } = useFetch(
-    () => api.listDeployments(name),
+    () => api.listWorkflowVersions(name),
     [name],
     10_000,
   );
   const [actingVersion, setActingVersion] = useState<string | null>(null);
 
   const sorted = useMemo(() => {
-    const versions = data?.deployments ?? [];
+    const versions = data?.versions ?? [];
     return [...versions].sort(
       (a, b) => new Date(a.registeredAt).getTime() - new Date(b.registeredAt).getTime(),
     );
@@ -44,7 +44,7 @@ export function WorkflowVersionsPanel({ name, onOpenRuns }: Props) {
   const promote = async (version: string): Promise<void> => {
     setActingVersion(version);
     try {
-      await api.promoteDeployment(name, version);
+      await api.promoteWorkflowVersion(name, version);
       toast(`Promoted ${name}@${version}`, { variant: "success" });
       refresh();
     } catch (err) {
@@ -68,7 +68,7 @@ export function WorkflowVersionsPanel({ name, onOpenRuns }: Props) {
     if (!ok) return;
     setActingVersion(toVersion);
     try {
-      await api.rollbackDeployment(name, toVersion);
+      await api.rollbackWorkflow(name, toVersion);
       toast(`Rolled back ${name} → ${toVersion}`, { variant: "success" });
       refresh();
     } catch (err) {
@@ -104,7 +104,7 @@ export function WorkflowVersionsPanel({ name, onOpenRuns }: Props) {
             {sorted.map((d) => (
               <VersionRow
                 key={d.version}
-                deployment={d}
+                record={d}
                 isActive={active?.version === d.version}
                 hasActive={!!active}
                 acting={actingVersion === d.version}
@@ -121,7 +121,7 @@ export function WorkflowVersionsPanel({ name, onOpenRuns }: Props) {
 }
 
 interface VersionRowProps {
-  deployment: DeploymentDto;
+  record: WorkflowVersionDto;
   isActive: boolean;
   hasActive: boolean;
   acting: boolean;
@@ -131,7 +131,7 @@ interface VersionRowProps {
 }
 
 function VersionRow({
-  deployment: d,
+  record: d,
   isActive,
   hasActive,
   acting,
@@ -180,7 +180,7 @@ function VersionRow({
   );
 }
 
-function StatusBadge({ status }: { status: DeploymentDto["status"] }) {
+function StatusBadge({ status }: { status: WorkflowVersionDto["status"] }) {
   const cls =
     status === "active" ? "badge-success" : status === "archived" ? "badge-warning" : "badge-ghost";
   return <span class={`badge badge-sm ${cls}`}>{status}</span>;
