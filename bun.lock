@@ -165,6 +165,7 @@
       "name": "@promin/postgres",
       "version": "0.1.0",
       "dependencies": {
+        "@promin/agent": "workspace:*",
         "@promin/core": "workspace:*",
         "@promin/workflow": "workspace:*",
         "drizzle-orm": "^0.44.0",

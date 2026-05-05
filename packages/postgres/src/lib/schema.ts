@@ -537,3 +537,31 @@ export const workflowStreams = pgTable(
     index("wf_streams_workflow_stream_idx").on(t.workflowId, t.streamId, t.chunkIndex),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// Agent registry — versioned recipe store. Mirrors the shape of
+// SqliteAgentRegistry: one row per (id, version) tuple. Backend and
+// metadata are stored as JSONB so new backend variants land without
+// schema migrations. The `id` column is `agent_id` to keep the column
+// names readable when joined against future agent_* tables.
+// ---------------------------------------------------------------------------
+
+export const agentRegistry = pgTable(
+  "agent_registry",
+  {
+    agentId: text("agent_id").notNull(),
+    version: text("version").notNull(),
+    backendType: text("backend_type").notNull(),
+    backend: jsonb("backend").notNull(),
+    metadata: jsonb("metadata").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.agentId, t.version] }),
+    // get(id) without version — pick latest by updated_at
+    index("agent_registry_id_updated_idx").on(t.agentId, t.updatedAt),
+    // list({ backendType }) filter
+    index("agent_registry_backend_type_idx").on(t.backendType),
+  ],
+);

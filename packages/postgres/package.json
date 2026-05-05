@@ -53,6 +53,7 @@
     "access": "public"
   },
   "dependencies": {
+    "@promin/agent": "workspace:*",
     "@promin/core": "workspace:*",
     "@promin/workflow": "workspace:*",
     "drizzle-orm": "^0.44.0",
