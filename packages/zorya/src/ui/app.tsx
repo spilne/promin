@@ -63,13 +63,6 @@ function renderRoute(route: string, navigate: (p: string) => void) {
   if (path === "/approvals") {
     return <ApprovalList onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)} />;
   }
-  if (path === "/deployments") {
-    // Legacy URL — version lifecycle now lives on the workflow-detail
-    // page (/workflows/:name → "Versions" panel). Redirect to the
-    // workflow directory so existing bookmarks still find their way.
-    navigate("/workflows");
-    return null;
-  }
   const scheduleMatch = /^\/schedules\/([^/]+)$/.exec(path ?? "");
   if (scheduleMatch) {
     return (
