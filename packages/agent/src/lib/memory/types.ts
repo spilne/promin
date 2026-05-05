@@ -1,5 +1,8 @@
 // ---------------------------------------------------------------------------
-// Three-scope memory model for multi-tenant agent runtimes.
+// Three-scope memory model for agent runtimes with multi-user / multi-team
+// scoping. Today's outermost axis is `namespaceId` (think team / workspace
+// within a single trusted operator); a future `tenantId` axis would sit
+// above it for org-level isolation.
 //
 // Two orthogonal axes:
 //
@@ -44,7 +47,7 @@
 //   - on resource: namespace contributions skipped at prompt build
 //   - on thread:   both namespace AND resource contributions skipped
 //
-// This is the most important multi-tenant safety primitive (modeled on
+// This is the most important cross-scope safety primitive (modeled on
 // ChatGPT's project-only-memory mode shipped Aug 2025).
 //
 // `MemoryStore` is the canonical durable agent state. It is distinct
@@ -55,7 +58,7 @@
 
 import type { Message } from "../message.ts";
 
-/** A user-resource scope inside a tenant. */
+/** A user-resource scope inside a namespace. */
 export interface ScopedKey {
   readonly namespaceId: string;
   readonly resourceId: string;

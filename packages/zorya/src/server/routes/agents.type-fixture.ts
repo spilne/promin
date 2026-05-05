@@ -1,8 +1,10 @@
 // ---------------------------------------------------------------------------
 // Compile-time fixture for `AgentInvokeBody` — proves the discriminated
 // union enforces "namespaceId AND (resourceId XOR ownerId)" at the type
-// level. Bun runs this through tsc as part of the typecheck target;
-// any line here that compiles when it shouldn't is a regression.
+// level, so cross-scope leaks are prevented by the type system at every
+// caller of agent invoke. Bun runs this through tsc as part of the
+// typecheck target; any line here that compiles when it shouldn't is a
+// regression.
 // ---------------------------------------------------------------------------
 
 import type { AgentInvokeBody } from "./agents.ts";

@@ -1,15 +1,19 @@
 // ---------------------------------------------------------------------------
-// Agent invoke-body scope validation — proves cross-tenant leak prevention
+// Agent invoke-body scope validation — proves cross-scope leak prevention
 // is by-construction at the route boundary. Every invoke / stream /
 // thread-send / approval body MUST carry namespaceId AND one of
 // (resourceId | ownerId); empty body, missing namespaceId, missing scope,
 // or conflicting scope all reject before reaching the agent layer.
+//
+// "Scope" here means (namespaceId, resourceId | ownerId) — the outermost
+// boundary the agent layer enforces. Multi-tenant org isolation is a
+// future axis above this; today's deployment model is single-operator.
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
 import { parseScopeFields } from "../agents.ts";
 
-describe("parseScopeFields — cross-tenant leak prevention", () => {
+describe("parseScopeFields — cross-scope leak prevention", () => {
   it("accepts namespaceId + resourceId", () => {
     const result = parseScopeFields({ namespaceId: "acme", resourceId: "doc-42" });
     expect(result).toEqual({ namespaceId: "acme", resourceId: "doc-42" });

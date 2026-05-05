@@ -12,9 +12,9 @@
 //   GET  /api/agents/:id/threads              — list threads (requires namespaceId query)
 //   GET  /api/agents/:id/threads/:threadId/messages — read message history
 //
-// Tenant binding:
+// Scope binding:
 //   Every invocation requires `namespaceId` AND ONE OF `resourceId | ownerId`
-//   in the body — cross-tenant leak is prevented by-construction, not by
+//   in the body — cross-scope leak is prevented by-construction, not by
 //   policy. `resourceId` = raw scope key; `ownerId` = "resolve via
 //   AgentInstance, use its id as the scope key". Both at once is rejected
 //   (`conflicting_identity`); neither is rejected (`missing_scope_identity`).
@@ -23,7 +23,12 @@
 //
 //   The (namespaceId, resourceId) tuple flows through `agent.withScope()`
 //   per request — the resolved agent template is shared across requests
-//   but each call sees its own tenant + user scope.
+//   but each call sees its own scope.
+//
+//   Note on naming: today `namespaceId` acts as the outermost scope (think
+//   "team" / "workspace" within a single trusted operator). Promin doesn't
+//   yet model multi-tenant org-level isolation; if/when it does, a
+//   separate `tenantId` axis will be added above `namespaceId`.
 //
 // Resolver injection:
 //   The route doesn't know how to construct an Agent from a recipe — that's
