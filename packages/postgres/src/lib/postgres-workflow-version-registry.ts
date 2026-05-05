@@ -11,13 +11,15 @@
 // mode); they never call the stub execute bodies.
 // ---------------------------------------------------------------------------
 
-import { eq } from "drizzle-orm";
+import { eq, and, desc } from "drizzle-orm";
 import { Pipeline, LosslessJsonCodec, type TaggedError } from "@promin/core";
 import type {
   Workflow,
   WorkflowDAG,
   IdempotencyConfig,
   IWorkflowVersionRegistry,
+  VersionRecord,
+  VersionStatus,
 } from "@promin/workflow";
 import type { DrizzleDb } from "./drizzle-db.ts";
 import { workflowRegistry } from "./schema.ts";
@@ -25,7 +27,10 @@ import { workflowRegistry } from "./schema.ts";
 export class PostgresWorkflowVersionRegistry implements IWorkflowVersionRegistry {
   constructor(private readonly db: DrizzleDb) {}
 
-  async register(definition: Workflow<unknown, unknown>): Promise<void> {
+  async register(
+    definition: Workflow<unknown, unknown>,
+    options?: { contentHash?: string },
+  ): Promise<void> {
     const { name, version } = definition;
     if (!version) {
       throw new Error(
@@ -42,6 +47,7 @@ export class PostgresWorkflowVersionRegistry implements IWorkflowVersionRegistry
         idempotency: definition.idempotency
           ? (definition.idempotency as unknown as Record<string, unknown>)
           : null,
+        contentHash: options?.contentHash ?? null,
       })
       .onConflictDoUpdate({
         target: [workflowRegistry.name, workflowRegistry.version],
@@ -50,6 +56,7 @@ export class PostgresWorkflowVersionRegistry implements IWorkflowVersionRegistry
           idempotency: definition.idempotency
             ? (definition.idempotency as unknown as Record<string, unknown>)
             : null,
+          ...(options?.contentHash !== undefined && { contentHash: options.contentHash }),
         },
       });
   }
@@ -109,6 +116,140 @@ export class PostgresWorkflowVersionRegistry implements IWorkflowVersionRegistry
       .delete(workflowRegistry)
       .where(eq(workflowRegistry.name, name) && (eq(workflowRegistry.version, version) as any));
   }
+
+  // ---------------------------------------------------------------------------
+  // Lifecycle — promote / rollback / inspect.
+  // ---------------------------------------------------------------------------
+
+  async findActive(name: string): Promise<VersionRecord | null> {
+    const [row] = await this.db
+      .select()
+      .from(workflowRegistry)
+      .where(and(eq(workflowRegistry.name, name), eq(workflowRegistry.status, "active")))
+      .limit(1);
+    return row ? rowToVersionRecord(row) : null;
+  }
+
+  async getStatus(name: string, version: string): Promise<VersionRecord | null> {
+    const [row] = await this.db
+      .select()
+      .from(workflowRegistry)
+      .where(and(eq(workflowRegistry.name, name), eq(workflowRegistry.version, version)))
+      .limit(1);
+    return row ? rowToVersionRecord(row) : null;
+  }
+
+  async promote(name: string, version: string): Promise<VersionRecord> {
+    return this.db.transaction(async (tx) => {
+      const [target] = await tx
+        .select()
+        .from(workflowRegistry)
+        .where(and(eq(workflowRegistry.name, name), eq(workflowRegistry.version, version)))
+        .limit(1);
+      if (!target) {
+        throw new Error(`promote: ${name}@${version} not registered`);
+      }
+      if (target.status === "active") return rowToVersionRecord(target);
+
+      const now = new Date();
+      // Demote any current active to inactive — the partial unique index
+      // would otherwise reject the promote.
+      await tx
+        .update(workflowRegistry)
+        .set({ status: "inactive" })
+        .where(and(eq(workflowRegistry.name, name), eq(workflowRegistry.status, "active")));
+
+      const [promoted] = await tx
+        .update(workflowRegistry)
+        .set({ status: "active", activeAt: now, archivedAt: null })
+        .where(and(eq(workflowRegistry.name, name), eq(workflowRegistry.version, version)))
+        .returning();
+      return rowToVersionRecord(promoted!);
+    });
+  }
+
+  async rollback(params: {
+    name: string;
+    toVersion: string;
+  }): Promise<{ previous: VersionRecord; active: VersionRecord }> {
+    return this.db.transaction(async (tx) => {
+      const [target] = await tx
+        .select()
+        .from(workflowRegistry)
+        .where(
+          and(
+            eq(workflowRegistry.name, params.name),
+            eq(workflowRegistry.version, params.toVersion),
+          ),
+        )
+        .limit(1);
+      if (!target) {
+        throw new Error(`rollback: ${params.name}@${params.toVersion} not registered`);
+      }
+      const [currentActive] = await tx
+        .select()
+        .from(workflowRegistry)
+        .where(and(eq(workflowRegistry.name, params.name), eq(workflowRegistry.status, "active")))
+        .limit(1);
+      if (!currentActive || currentActive.version === params.toVersion) {
+        throw new Error(`rollback: no different active version for "${params.name}"`);
+      }
+      const now = new Date();
+      const [previous] = await tx
+        .update(workflowRegistry)
+        .set({ status: "archived", archivedAt: now })
+        .where(
+          and(
+            eq(workflowRegistry.name, params.name),
+            eq(workflowRegistry.version, currentActive.version),
+          ),
+        )
+        .returning();
+      const [active] = await tx
+        .update(workflowRegistry)
+        .set({ status: "active", activeAt: now, archivedAt: null })
+        .where(
+          and(
+            eq(workflowRegistry.name, params.name),
+            eq(workflowRegistry.version, params.toVersion),
+          ),
+        )
+        .returning();
+      return {
+        previous: rowToVersionRecord(previous!),
+        active: rowToVersionRecord(active!),
+      };
+    });
+  }
+
+  async listRecords(name: string): Promise<ReadonlyArray<VersionRecord>> {
+    const rows = await this.db
+      .select()
+      .from(workflowRegistry)
+      .where(eq(workflowRegistry.name, name))
+      .orderBy(desc(workflowRegistry.registeredAt));
+    return rows.map(rowToVersionRecord);
+  }
+}
+
+function rowToVersionRecord(row: {
+  name: string;
+  version: string;
+  status: string;
+  contentHash: string | null;
+  registeredAt: Date;
+  activeAt: Date | null;
+  archivedAt: Date | null;
+}): VersionRecord {
+  return {
+    name: row.name,
+    version: row.version,
+    status: row.status as VersionStatus,
+    contentHash: row.contentHash,
+    registeredAt: row.registeredAt,
+    activeAt: row.activeAt,
+    archivedAt: row.archivedAt,
+  };
 }
 
 // ---------------------------------------------------------------------------

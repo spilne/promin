@@ -61,6 +61,8 @@ export {
   createWorkflowVersionRegistry,
   type WorkflowVersionRegistryConfig,
   type IWorkflowVersionRegistry,
+  type VersionRecord,
+  type VersionStatus,
 } from "./workflow-version-registry.ts";
 export {
   WorkflowError,

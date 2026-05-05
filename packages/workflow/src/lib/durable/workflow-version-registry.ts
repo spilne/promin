@@ -11,6 +11,29 @@ import type { WorkflowStorage } from "./workflow-storage.ts";
 // ---------------------------------------------------------------------------
 
 /**
+ * Lifecycle status of a registered version. Three states:
+ *   `inactive` — default; registered but not the chosen version. New
+ *                workflows that resolve via `latest()` still get this if
+ *                it's the most-recently-registered.
+ *   `active`   — explicitly promoted. `findActive(name)` returns it.
+ *                At most one row per name carries this status (DB-enforced
+ *                in Postgres via partial unique index; in-memory enforced
+ *                by `promote` swapping atomically).
+ *   `archived` — drained / rolled-back. Out of rotation.
+ */
+export type VersionStatus = "inactive" | "active" | "archived";
+
+export interface VersionRecord {
+  readonly name: string;
+  readonly version: string;
+  readonly status: VersionStatus;
+  readonly contentHash: string | null;
+  readonly registeredAt: Date;
+  readonly activeAt: Date | null;
+  readonly archivedAt: Date | null;
+}
+
+/**
  * Async interface for resolving workflow definitions by name/version.
  * All backends (in-memory, Postgres, HTTP) implement this interface so
  * coordinator and runner code is backend-agnostic.
@@ -18,6 +41,11 @@ import type { WorkflowStorage } from "./workflow-storage.ts";
  * The local `WorkflowVersionRegistry` class also implements this interface
  * (its sync methods are exposed via trivially-async wrappers) so existing
  * code continues to work without changes.
+ *
+ * Lifecycle methods (`promote`, `rollback`, `findActive`, `getStatus`,
+ * `listRecords`) are optional — backends without persistent status throw
+ * a clear error when invoked. Callers who only use `register` + `resolve`
+ * + `latest` see no change.
  */
 export interface IWorkflowVersionRegistry {
   /** Register a workflow definition (persists for remote backends). */
@@ -35,6 +63,38 @@ export interface IWorkflowVersionRegistry {
   names(): Promise<readonly string[]> | readonly string[];
   /** Remove a specific (name, version) from the registry. */
   deregister(name: string, version: string): Promise<void> | void;
+
+  /**
+   * Lifecycle methods — explicit promote/rollback/inspect. Not all
+   * backends implement these; callers can feature-detect via instanceof
+   * or a try/catch. The dashboard + auto-mint trigger path use
+   * `findActive` to route new starts to the chosen version instead of
+   * always picking `latest`.
+   */
+  /** Resolve "the active version of workflow X". Null when no version has been promoted. */
+  findActive?(name: string): Promise<VersionRecord | null> | VersionRecord | null;
+  /** Inspect status + timestamps for one (name, version). */
+  getStatus?(name: string, version: string): Promise<VersionRecord | null> | VersionRecord | null;
+  /**
+   * Promote a version to `active`. Atomically demotes the prior active
+   * (if any) for the same name to `inactive` (NOT `archived` — we don't
+   * presume the demoted version is rolling-back; see `rollback` for that).
+   */
+  promote?(name: string, version: string): Promise<VersionRecord> | VersionRecord;
+  /**
+   * Roll back the current active to `archived` and promote a target to
+   * `active`. The archive distinguishes "demoted by promote" (still in
+   * rotation, just not chosen) from "explicitly rolled back" (out of
+   * rotation, drain expected).
+   */
+  rollback?(params: {
+    readonly name: string;
+    readonly toVersion: string;
+  }):
+    | Promise<{ readonly previous: VersionRecord; readonly active: VersionRecord }>
+    | { readonly previous: VersionRecord; readonly active: VersionRecord };
+  /** List all version records for one workflow, ordered by registration desc. */
+  listRecords?(name: string): Promise<ReadonlyArray<VersionRecord>> | ReadonlyArray<VersionRecord>;
 }
 
 /**
@@ -69,9 +129,19 @@ export interface WorkflowVersionRegistryConfig {
   onDrained?: (name: string, version: string) => void | Promise<void>;
 }
 
+/** Internal record holding lifecycle metadata alongside the definition. */
+interface VersionEntry {
+  definition: Workflow<unknown, unknown>;
+  status: VersionStatus;
+  contentHash: string | null;
+  registeredAt: Date;
+  activeAt: Date | null;
+  archivedAt: Date | null;
+}
+
 export class WorkflowVersionRegistry {
-  // Map: workflowName -> Map<version, definition>
-  private definitions = new Map<string, Map<string, Workflow<unknown, unknown>>>();
+  // Map: workflowName -> Map<version, entry>
+  private definitions = new Map<string, Map<string, VersionEntry>>();
   // Map: workflowName -> latest version string
   private latestVersions = new Map<string, string>();
   // Versions we've already fired onDrained for — prevents double-firing.
@@ -82,6 +152,19 @@ export class WorkflowVersionRegistry {
   constructor(config?: WorkflowVersionRegistryConfig) {
     this.autoDeregister = config?.autoDeregister ?? false;
     this.onDrained = config?.onDrained;
+  }
+
+  /** Convert an internal VersionEntry into the public VersionRecord shape. */
+  private toRecord(name: string, version: string, entry: VersionEntry): VersionRecord {
+    return {
+      name,
+      version,
+      status: entry.status,
+      contentHash: entry.contentHash,
+      registeredAt: new Date(entry.registeredAt.getTime()),
+      activeAt: entry.activeAt ? new Date(entry.activeAt.getTime()) : null,
+      archivedAt: entry.archivedAt ? new Date(entry.archivedAt.getTime()) : null,
+    };
   }
 
   /**
@@ -102,9 +185,11 @@ export class WorkflowVersionRegistry {
 
   /**
    * Register a versioned workflow definition. The definition must have a
-   * `version` (set via `workflow({ version: "2" })`).
+   * `version` (set via `workflow({ version: "2" })`). Initial status is
+   * `inactive` — promote it explicitly via `promote()` to make it the
+   * `findActive()` target.
    */
-  register(definition: Workflow<unknown, unknown>): void {
+  register(definition: Workflow<unknown, unknown>, options?: { contentHash?: string }): void {
     const { name, version } = definition;
 
     if (!version) {
@@ -114,9 +199,25 @@ export class WorkflowVersionRegistry {
     if (!this.definitions.has(name)) {
       this.definitions.set(name, new Map());
     }
-    this.definitions.get(name)!.set(version, definition);
+    const versions = this.definitions.get(name)!;
+    const existing = versions.get(version);
+    if (existing) {
+      // Re-registration of the same (name, version) — refresh the
+      // definition pointer + contentHash but preserve lifecycle status.
+      existing.definition = definition;
+      if (options?.contentHash !== undefined) existing.contentHash = options.contentHash;
+    } else {
+      versions.set(version, {
+        definition,
+        status: "inactive",
+        contentHash: options?.contentHash ?? null,
+        registeredAt: new Date(),
+        activeAt: null,
+        archivedAt: null,
+      });
+    }
 
-    // Track latest (by registration order — last registered is latest)
+    // Track latest (by registration order — last registered is latest).
     this.latestVersions.set(name, version);
   }
 
@@ -124,10 +225,10 @@ export class WorkflowVersionRegistry {
   resolve(name: string, version?: string): Workflow<unknown, unknown> | undefined {
     const versions = this.definitions.get(name);
     if (!versions) return undefined;
-    if (version) return versions.get(version);
+    if (version) return versions.get(version)?.definition;
     // No version specified -> return latest
     const latest = this.latestVersions.get(name);
-    return latest ? versions.get(latest) : undefined;
+    return latest ? versions.get(latest)?.definition : undefined;
   }
 
   /** Get the latest registered version string for a workflow name. */
@@ -144,6 +245,114 @@ export class WorkflowVersionRegistry {
   /** List all registered workflow names. */
   names(): string[] {
     return [...this.definitions.keys()];
+  }
+
+  // ---------------------------------------------------------------------------
+  // Lifecycle — promote / rollback / inspect.
+  //
+  // `findActive` returns the explicitly-promoted version. When nothing has
+  // been promoted, it returns null and the auto-mint trigger path falls
+  // back to `latest()` (preserving today's behaviour).
+  // ---------------------------------------------------------------------------
+
+  /** Resolve the explicitly-promoted version of a workflow. Null when none. */
+  findActive(name: string): VersionRecord | null {
+    const versions = this.definitions.get(name);
+    if (!versions) return null;
+    for (const [version, entry] of versions) {
+      if (entry.status === "active") return this.toRecord(name, version, entry);
+    }
+    return null;
+  }
+
+  /** Inspect status + timestamps for one (name, version). Null when not registered. */
+  getStatus(name: string, version: string): VersionRecord | null {
+    const entry = this.definitions.get(name)?.get(version);
+    return entry ? this.toRecord(name, version, entry) : null;
+  }
+
+  /**
+   * Promote a version to `active`. Atomically demotes the prior active
+   * (if any) for the same name back to `inactive` (NOT `archived` — the
+   * demoted version is still in rotation, just not chosen).
+   *
+   * Idempotent: promoting an already-active version is a no-op.
+   */
+  promote(name: string, version: string): VersionRecord {
+    const versions = this.definitions.get(name);
+    if (!versions) {
+      throw new Error(`promote: workflow "${name}" has no registered versions`);
+    }
+    const target = versions.get(version);
+    if (!target) {
+      throw new Error(`promote: ${name}@${version} not registered`);
+    }
+    if (target.status === "active") return this.toRecord(name, version, target);
+
+    const now = new Date();
+    // Demote the current active to inactive.
+    for (const [v, entry] of versions) {
+      if (v !== version && entry.status === "active") {
+        entry.status = "inactive";
+      }
+    }
+    target.status = "active";
+    target.activeAt = now;
+    target.archivedAt = null;
+    return this.toRecord(name, version, target);
+  }
+
+  /**
+   * Roll back the current active to `archived` and promote `toVersion` to
+   * `active`. The archive distinguishes "demoted by promote" (still in
+   * rotation, just not chosen) from "explicitly rolled back" (drain
+   * expected, out of rotation).
+   */
+  rollback(params: { name: string; toVersion: string }): {
+    previous: VersionRecord;
+    active: VersionRecord;
+  } {
+    const versions = this.definitions.get(params.name);
+    if (!versions) {
+      throw new Error(`rollback: workflow "${params.name}" has no registered versions`);
+    }
+    const target = versions.get(params.toVersion);
+    if (!target) {
+      throw new Error(`rollback: ${params.name}@${params.toVersion} not registered`);
+    }
+    let previousEntry: VersionEntry | null = null;
+    let previousVersion = "";
+    for (const [v, entry] of versions) {
+      if (entry.status === "active" && v !== params.toVersion) {
+        previousEntry = entry;
+        previousVersion = v;
+      }
+    }
+    if (!previousEntry) {
+      throw new Error(`rollback: no active version for "${params.name}" to roll back`);
+    }
+    const now = new Date();
+    previousEntry.status = "archived";
+    previousEntry.archivedAt = now;
+    target.status = "active";
+    target.activeAt = now;
+    target.archivedAt = null;
+    return {
+      previous: this.toRecord(params.name, previousVersion, previousEntry),
+      active: this.toRecord(params.name, params.toVersion, target),
+    };
+  }
+
+  /** List every (name, version) record for one workflow, registration-desc. */
+  listRecords(name: string): ReadonlyArray<VersionRecord> {
+    const versions = this.definitions.get(name);
+    if (!versions) return [];
+    const records: VersionRecord[] = [];
+    for (const [version, entry] of versions) {
+      records.push(this.toRecord(name, version, entry));
+    }
+    records.sort((a, b) => b.registeredAt.getTime() - a.registeredAt.getTime());
+    return records;
   }
 
   /**

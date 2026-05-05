@@ -13,8 +13,17 @@
 // ```
 // ---------------------------------------------------------------------------
 
-import type { StepQueue, WorkerRegistry, WorkflowStorage } from "@promin/workflow";
-import { InMemoryStepQueue, InMemoryWorkerRegistry } from "@promin/workflow";
+import type {
+  IWorkflowVersionRegistry,
+  StepQueue,
+  WorkerRegistry,
+  WorkflowStorage,
+} from "@promin/workflow";
+import {
+  InMemoryStepQueue,
+  InMemoryWorkerRegistry,
+  WorkflowVersionRegistry,
+} from "@promin/workflow";
 import { createWorkerApiHandler, createWorkflowStorageHandler } from "@promin/workflow-remote";
 import { Auth, type AuthConfig } from "./auth.ts";
 import { Router, jsonError } from "./router.ts";
@@ -76,6 +85,12 @@ import {
   listSignalTokensForRun,
   mintSignalToken,
 } from "./routes/signal-tokens.ts";
+import {
+  getActiveDeployment,
+  listDeployments,
+  promoteDeployment,
+  rollbackDeployment,
+} from "./routes/deployments.ts";
 import { getSparklines, getWorkflowGrid, getWorkflowHistory } from "./routes/grid.ts";
 import { getWorkflowDef, listWorkflowDefs } from "./routes/workflow-defs.ts";
 import {
@@ -162,6 +177,13 @@ export interface ZoryaServerConfig extends AuthConfig {
   /** SSE poll interval in ms. Default 1000. */
   sseIntervalMs?: number;
   /**
+   * Workflow version registry. Drives `/api/deployments` (promote/rollback,
+   * findActive, list-records). Defaults to a fresh in-memory
+   * `WorkflowVersionRegistry`; production deployments should pass
+   * `PostgresWorkflowVersionRegistry` so lifecycle survives restart.
+   */
+  versionRegistry?: IWorkflowVersionRegistry;
+  /**
    * Public-facing base URL for token completion callbacks. When set, the
    * `POST /api/runs/:id/signals/:name/token` mint route returns
    * `url: "<publicBaseUrl>/api/signal-tokens/:tokenId/complete"` so external
@@ -179,6 +201,7 @@ export class ZoryaServer {
   readonly workflows: ZoryaWorkflows;
   readonly scheduler?: ZoryaScheduler;
   readonly agents?: ZoryaAgents;
+  readonly versionRegistry: IWorkflowVersionRegistry;
   /**
    * Worker → server WebSocket multiplexer. Always present — workers in
    * step / agent mode connect on `/ws/worker` to receive server-pushed
@@ -202,6 +225,7 @@ export class ZoryaServer {
     this.workflows = config.workflows;
     if (config.scheduler) this.scheduler = config.scheduler;
     if (config.agents) this.agents = config.agents;
+    this.versionRegistry = config.versionRegistry ?? new WorkflowVersionRegistry();
 
     this.logger = config.logger ?? console;
     this.auth = new Auth(config);
@@ -300,6 +324,16 @@ export class ZoryaServer {
       )
       .get("/api/runs/:id/signal-tokens", listSignalTokensForRun({ storage }))
       .post("/api/signal-tokens/:tokenId/complete", completeSignalToken({ storage }))
+      // Deployments — thin layer over WorkflowVersionRegistry's lifecycle
+      // methods. Coordinator routing on `findActive` is a follow-up;
+      // these routes commit the dashboard-facing API.
+      .get("/api/deployments", listDeployments({ registry: this.versionRegistry }))
+      .get("/api/deployments/:name/active", getActiveDeployment({ registry: this.versionRegistry }))
+      .post("/api/deployments/:name/promote", promoteDeployment({ registry: this.versionRegistry }))
+      .post(
+        "/api/deployments/:name/rollback",
+        rollbackDeployment({ registry: this.versionRegistry }),
+      )
       .get(
         "/api/runs/:id/events",
         streamRunEvents({

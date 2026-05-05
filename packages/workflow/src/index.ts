@@ -41,6 +41,8 @@ export {
   createWorkflowVersionRegistry,
   type WorkflowVersionRegistryConfig,
   type IWorkflowVersionRegistry,
+  type VersionRecord,
+  type VersionStatus,
   WorkflowError,
   StepError,
   StorageError,

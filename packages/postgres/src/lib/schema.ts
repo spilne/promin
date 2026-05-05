@@ -306,11 +306,25 @@ export const workflowRegistry = pgTable(
     version: text("version").notNull(),
     dagJson: jsonb("dag_json").notNull(),
     idempotency: jsonb("idempotency"),
+    // Lifecycle status — `inactive` (registered but not the chosen one),
+    // `active` (current target for `findActive(name)`), `archived`
+    // (rolled-back / drained). Partial unique index enforces
+    // at-most-one-active per name.
+    status: text("status").notNull().default("inactive"),
+    activeAt: timestamp("active_at", { withTimezone: true }),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    contentHash: text("content_hash"),
     registeredAt: timestamp("registered_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     primaryKey({ columns: [t.name, t.version] }),
     index("wf_workflow_registry_name_idx").on(t.name),
+    uniqueIndex("wf_workflow_registry_active_uniq")
+      .on(t.name)
+      .where(sql`${t.status} = 'active'`),
+    uniqueIndex("wf_workflow_registry_content_hash_uniq")
+      .on(t.name, t.contentHash)
+      .where(sql`${t.contentHash} IS NOT NULL`),
   ],
 );
 
