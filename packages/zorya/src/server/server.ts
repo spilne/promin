@@ -13,6 +13,7 @@
 // ```
 // ---------------------------------------------------------------------------
 
+import type { SecretsStorage } from "@promin/agent";
 import type {
   IWorkflowVersionRegistry,
   StepQueue,
@@ -116,6 +117,7 @@ import {
   type AgentGatewayDeps,
 } from "./routes/agents.ts";
 import { listCatalogModels } from "./routes/agent-catalog.ts";
+import { createSecret, deleteSecret, listSecrets } from "./routes/secrets.ts";
 import {
   addNamespaceFact,
   deleteNamespaceFact,
@@ -196,6 +198,14 @@ export interface ZoryaServerConfig extends AuthConfig {
    * completers don't have to compose it themselves. Absent → `url: null`.
    */
   publicBaseUrl?: string;
+  /**
+   * Optional scoped SecretsStorage (BYOK / MCP credentialRef / per-tenant
+   * LLM keys). When set, exposes `/api/secrets/*` HTTP CRUD and is
+   * available to the agent gateway for setup-time credential resolution
+   * (Option A from promin-0p2i). When unset, the secrets surface is not
+   * mounted — fine for single-tenant deployments using env vars.
+   */
+  secrets?: SecretsStorage;
 }
 
 export interface ListenOptions {
@@ -219,6 +229,8 @@ export class ZoryaServer {
    * `/api/runs/:id/agent-stream`. Always present.
    */
   readonly agentStreamHub: AgentStreamHub;
+  /** Optional secrets vault — populated when ZoryaServerConfig provides one. */
+  readonly secrets?: SecretsStorage;
 
   private readonly auth: Auth;
   private readonly workerAuth: Auth;
@@ -231,6 +243,7 @@ export class ZoryaServer {
     this.workflows = config.workflows;
     if (config.scheduler) this.scheduler = config.scheduler;
     if (config.agents) this.agents = config.agents;
+    if (config.secrets) this.secrets = config.secrets;
     this.versionRegistry = config.versionRegistry ?? new WorkflowVersionRegistry();
 
     this.logger = config.logger ?? console;
@@ -429,6 +442,14 @@ export class ZoryaServer {
           .delete("/api/agents/:id/instances/:instanceId", deleteAgentInstance(inDeps))
           .get("/api/instances", listInstancesAcrossAgents(inDeps));
       }
+    }
+
+    if (this.secrets) {
+      const sec = { secrets: this.secrets };
+      this.router
+        .post("/api/secrets", createSecret(sec))
+        .get("/api/secrets", listSecrets(sec))
+        .delete("/api/secrets/:key", deleteSecret(sec));
     }
 
     if (this.scheduler) {
