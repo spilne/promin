@@ -56,6 +56,7 @@ import {
   inProcessSchedulerClient,
   InMemoryModelCatalog,
   resolveCursorAgent,
+  DefaultAgentToolCatalog,
   resolveCredentialRef,
   resolveLocalAgent,
   resolveRemoteAgent,
@@ -1000,12 +1001,26 @@ const workflows = new LocalWorkflows({
   }),
 });
 
+// Tool catalog drives GET /api/agents/_catalog/tools (Designer's tool
+// multi-select). Aggregates the host's static tools (the same map
+// resolveLocalAgent picks from) + the file-discovered registry. MCP
+// tool enumeration is opt-in via the catalog's mcp config — left out
+// here since the demo doesn't declare MCP servers.
+const agentToolCatalog = new DefaultAgentToolCatalog({
+  inProcess: {
+    listWorkflows: listWorkflowsTool,
+    ...schedulerTools,
+  },
+  file: toolRegistry.getTools(),
+});
+
 const agents = new ZoryaAgents({
   registry: agentRegistry,
   resolve: resolveAgent,
   memory: memoryStore,
   instances: instanceRegistry,
   models: modelCatalog,
+  toolCatalog: agentToolCatalog,
   scan: {
     root: agentScanRoot,
     intervalMs: 5_000,

@@ -12,6 +12,7 @@ import { AgentDetail } from "./components/agents/agent-detail.tsx";
 import { InstanceList } from "./components/agents/instance-list.tsx";
 import { ApprovalList } from "./components/approvals/approval-list.tsx";
 import { SecretsPage } from "./components/secrets/secrets-page.tsx";
+import { ToolsPage } from "./components/tools/tools-page.tsx";
 import { DialogHost, ToastHost } from "./components/ui/dialog-host.tsx";
 
 export function App() {
@@ -66,6 +67,9 @@ function renderRoute(route: string, navigate: (p: string) => void) {
   }
   if (path === "/secrets") {
     return <SecretsPage />;
+  }
+  if (path === "/tools") {
+    return <ToolsPage />;
   }
   const scheduleMatch = /^\/schedules\/([^/]+)$/.exec(path ?? "");
   if (scheduleMatch) {

@@ -335,6 +335,9 @@ export const api = {
       },
     );
   },
+  listCatalogTools(): Promise<{ tools: ToolCatalogEntryDto[] }> {
+    return req<{ tools: ToolCatalogEntryDto[] }>(`/api/agents/_catalog/tools`);
+  },
   listAgentThreads(
     id: string,
     params: { namespaceId: string; resourceId?: string; limit?: number; q?: string },
@@ -468,6 +471,20 @@ export const api = {
 // ---------------------------------------------------------------------------
 // Secrets API — scoped vault CRUD (h1st Phase 2/3)
 // ---------------------------------------------------------------------------
+
+// Wire shape for /api/agents/_catalog/tools. Keep loose-typed so the
+// UI doesn't drag in @promin/agent at the boundary.
+export type ToolCatalogSourceDto =
+  | { kind: "in-process" }
+  | { kind: "file"; path?: string }
+  | { kind: "mcp"; server: string };
+
+export interface ToolCatalogEntryDto {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  source: ToolCatalogSourceDto;
+}
 
 export type SecretScopeWire =
   | { kind: "global" }
