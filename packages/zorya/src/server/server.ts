@@ -116,7 +116,11 @@ import {
   updateAgent,
   type AgentGatewayDeps,
 } from "./routes/agents.ts";
-import { listCatalogModels, listCatalogTools } from "./routes/agent-catalog.ts";
+import {
+  getToolCatalogHealth,
+  listCatalogModels,
+  listCatalogTools,
+} from "./routes/agent-catalog.ts";
 import { createSecret, deleteSecret, listSecrets } from "./routes/secrets.ts";
 import {
   ingestWebhook,
@@ -440,6 +444,18 @@ export class ZoryaServer {
           this.agents.toolCatalog
             ? listCatalogTools({ tools: this.agents.toolCatalog })
             : async () => new Response(JSON.stringify({ tools: [] }), { status: 200 }),
+        )
+        // Reconciliation health: which recipe tool refs don't resolve?
+        // Pure query at view time — no persistence, no audit trail.
+        .get(
+          "/api/agents/_catalog/tools/health",
+          this.agents.toolCatalog
+            ? getToolCatalogHealth({
+                tools: this.agents.toolCatalog,
+                agents: this.agents.registry,
+              })
+            : async () =>
+                new Response(JSON.stringify({ recipes: [], orphans: [] }), { status: 200 }),
         )
         // Recipe CRUD — gsze Phase 1. Author/edit/clone agents over HTTP.
         .post("/api/agents", createAgent(agentDeps))

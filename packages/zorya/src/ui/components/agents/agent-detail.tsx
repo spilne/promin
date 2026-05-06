@@ -67,6 +67,18 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
 
   const { data: agent, error, refresh: refreshAgent } = useFetch(() => api.getAgent(id), [id]);
 
+  // Reconciliation health for this recipe — surfaces broken tool refs as
+  // a badge alongside the model + capabilities. Fetched lazily; missing
+  // health endpoint or empty report yields an empty `missingTools` array.
+  const { data: health } = useFetch(() => api.getToolCatalogHealth(), [], 0);
+  const missingTools = useMemo(() => {
+    if (!health || !agent) return [];
+    const entry = health.recipes.find(
+      (r) => r.recipeId === agent.id && r.version === agent.version,
+    );
+    return entry?.missing ?? [];
+  }, [health, agent]);
+
   const { data: threadsResp, refresh: refreshThreads } = useFetch(
     () => api.listAgentThreads(id, tenant),
     [id, tenant.namespaceId, tenant.resourceId],
@@ -99,7 +111,7 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
             </div>
           </div>
           <div class="flex items-center gap-3">
-            {agent && <AgentMetaBadges agent={agent} />}
+            {agent && <AgentMetaBadges agent={agent} missingTools={missingTools} />}
             {agent && (
               <button
                 class="btn btn-sm btn-ghost"
@@ -187,7 +199,13 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
   );
 }
 
-function AgentMetaBadges({ agent }: { agent: RegisteredAgent }) {
+function AgentMetaBadges({
+  agent,
+  missingTools,
+}: {
+  agent: RegisteredAgent;
+  missingTools?: ReadonlyArray<string>;
+}) {
   const model =
     agent.backend.type === "local"
       ? `${agent.backend.model.provider}/${agent.backend.model.id}`
@@ -202,6 +220,14 @@ function AgentMetaBadges({ agent }: { agent: RegisteredAgent }) {
       {agent.metadata.tags.map((t) => (
         <span class="badge badge-sm badge-ghost">{t}</span>
       ))}
+      {missingTools && missingTools.length > 0 && (
+        <span
+          class="badge badge-sm badge-warning"
+          title={`Recipe references tools that aren't wired: ${missingTools.join(", ")}`}
+        >
+          ⚠ {missingTools.length} broken tool{missingTools.length > 1 ? "s" : ""}
+        </span>
+      )}
     </div>
   );
 }

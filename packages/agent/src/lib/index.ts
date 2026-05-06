@@ -375,6 +375,14 @@ export {
   type DefaultAgentToolCatalogConfig,
 } from "./tool-catalog.ts";
 
+export {
+  reconcileToolReferences,
+  type RecipeToolRefHealth,
+  type OrphanToolEntry,
+  type ToolRefReport,
+  type ReconcileToolReferencesDeps,
+} from "./reconcile-tool-refs.ts";
+
 export { combineProcessors } from "./processors.ts";
 export type { ProcessorsConfig, ProcessorContext } from "./processors.ts";
 

@@ -11,16 +11,27 @@
 
 import { useMemo, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
-import { api, type ToolCatalogEntryDto, type ToolCatalogSourceDto } from "../../api/client.ts";
+import {
+  api,
+  type ToolCatalogEntryDto,
+  type ToolCatalogHealthDto,
+  type ToolCatalogSourceDto,
+} from "../../api/client.ts";
 import { Page } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 
 export function ToolsPage() {
   const { data, loading, error, refresh } = useFetch(() => api.listCatalogTools(), [], 0);
+  const { data: health, refresh: refreshHealth } = useFetch(
+    () => api.getToolCatalogHealth(),
+    [],
+    0,
+  );
   const [query, setQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState<"all" | "in-process" | "file" | "mcp">("all");
 
   const tools = data?.tools ?? [];
+  const orphans = health?.orphans ?? [];
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -58,11 +69,19 @@ export function ToolsPage() {
                 : `${tools.length} available · ${counts["in-process"]} in-process · ${counts.file} file · ${counts.mcp} MCP`}
           </p>
         </div>
-        <button class="btn btn-sm btn-ghost gap-1" onClick={() => refresh()}>
+        <button
+          class="btn btn-sm btn-ghost gap-1"
+          onClick={() => {
+            refresh();
+            refreshHealth();
+          }}
+        >
           <span>↻</span>
           Refresh
         </button>
       </div>
+
+      {orphans.length > 0 && <OrphansPanel orphans={orphans} />}
 
       {tools.length > 0 && (
         <div class="flex items-center gap-2">
@@ -146,6 +165,49 @@ function ToolRow({ tool }: { tool: ToolCatalogEntryDto }) {
         </tr>
       )}
     </>
+  );
+}
+
+function OrphansPanel({ orphans }: { orphans: ToolCatalogHealthDto["orphans"] }) {
+  return (
+    <div class="card bg-warning/10 border border-warning/30 shadow-sm">
+      <div class="card-body p-4 space-y-2">
+        <div class="flex items-center gap-2">
+          <span class="text-warning">⚠</span>
+          <h3 class="text-sm font-semibold">Recipes reference tools that aren't wired</h3>
+          <span class="badge badge-sm badge-warning badge-outline">{orphans.length}</span>
+        </div>
+        <p class="text-xs text-base-content/60">
+          These tool names appear in registered recipes but don't resolve to any in-process / file /
+          MCP source. Either re-wire the tool or update the recipe to drop the reference.
+        </p>
+        <table class="table table-xs">
+          <thead>
+            <tr class="text-xs uppercase tracking-wider text-base-content/50">
+              <th>Tool name</th>
+              <th>Referenced by</th>
+            </tr>
+          </thead>
+          <tbody>
+            {orphans.map((o) => (
+              <tr>
+                <td class="font-mono text-sm">{o.toolName}</td>
+                <td class="text-xs">
+                  <div class="flex gap-1 flex-wrap">
+                    {o.recipes.map((r) => (
+                      <span class="badge badge-xs badge-outline font-mono">
+                        {r.id}
+                        <span class="opacity-60">@{r.version}</span>
+                      </span>
+                    ))}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 

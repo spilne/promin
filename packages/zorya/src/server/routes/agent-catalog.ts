@@ -9,11 +9,14 @@
 // ---------------------------------------------------------------------------
 
 import type {
+  AgentRegistry,
   AgentToolCatalog,
   ModelCatalog,
   SerializedModelCatalogItem,
   ToolCatalogEntry,
+  ToolRefReport,
 } from "@promin/agent";
+import { reconcileToolReferences } from "@promin/agent";
 import { json, jsonError } from "../router.ts";
 
 export interface ModelsCatalogResponse {
@@ -47,6 +50,27 @@ export function listCatalogTools(deps: AgentToolCatalogDeps) {
       return json(200, body);
     } catch (err) {
       return jsonError(500, "list_failed", err instanceof Error ? err.message : String(err));
+    }
+  };
+}
+
+export interface ToolCatalogHealthDeps {
+  readonly tools: AgentToolCatalog;
+  readonly agents: AgentRegistry;
+}
+
+export type ToolCatalogHealthResponse = ToolRefReport;
+
+export function getToolCatalogHealth(deps: ToolCatalogHealthDeps) {
+  return async (): Promise<Response> => {
+    try {
+      const report = await reconcileToolReferences({
+        catalog: deps.tools,
+        registry: deps.agents,
+      });
+      return json(200, report);
+    } catch (err) {
+      return jsonError(500, "health_failed", err instanceof Error ? err.message : String(err));
     }
   };
 }

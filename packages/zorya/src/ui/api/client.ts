@@ -338,6 +338,9 @@ export const api = {
   listCatalogTools(): Promise<{ tools: ToolCatalogEntryDto[] }> {
     return req<{ tools: ToolCatalogEntryDto[] }>(`/api/agents/_catalog/tools`);
   },
+  getToolCatalogHealth(): Promise<ToolCatalogHealthDto> {
+    return req<ToolCatalogHealthDto>(`/api/agents/_catalog/tools/health`);
+  },
   listAgentThreads(
     id: string,
     params: { namespaceId: string; resourceId?: string; limit?: number; q?: string },
@@ -484,6 +487,20 @@ export interface ToolCatalogEntryDto {
   description: string;
   parameters: Record<string, unknown>;
   source: ToolCatalogSourceDto;
+}
+
+/** Wire shape for /api/agents/_catalog/tools/health. */
+export interface ToolCatalogHealthDto {
+  recipes: Array<{
+    recipeId: string;
+    version: string;
+    resolved: string[];
+    missing: string[];
+  }>;
+  orphans: Array<{
+    toolName: string;
+    recipes: Array<{ id: string; version: string }>;
+  }>;
 }
 
 export type SecretScopeWire =
