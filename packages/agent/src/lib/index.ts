@@ -289,6 +289,15 @@ export {
   DEFAULT_TURN_LEASE_TTL_MS,
 } from "./lease/agent-turn-gate.ts";
 
+// SecretsStorage — scoped secret storage (global / namespace / resource).
+// Distinct from the flat SecretStore in secret-store.ts; this surface
+// supports the multi-tenant SaaS path (BYOK, MCP credentialRef, etc.).
+// `SecretScope` is exported as both a type AND a const (with builders)
+// — the single `export {}` carries both.
+export type { SecretsStorage, ResolvedSecret } from "./secrets/types.ts";
+export { SecretScope } from "./secrets/types.ts";
+export { InMemorySecretsStorage } from "./secrets/in-memory-secrets-storage.ts";
+
 // MCP integration — connect agents to Model Context Protocol servers.
 export type {
   McpClient,

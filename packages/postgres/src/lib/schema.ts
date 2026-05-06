@@ -702,3 +702,43 @@ export const agentThreadLease = pgTable(
     index("agent_thread_lease_expires_idx").on(t.expiresAt),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// Secrets — scoped credential vault. Three scopes share one table; the
+// kind column discriminates 'global' / 'namespace' / 'resource'. Values
+// are stored encrypted (AES-256-GCM, scrypt-stretched passphrase). The
+// PK lets the same key name coexist at different scopes.
+//
+// Scope null-coalescing convention:
+//   global       — namespace_id = '', resource_id = ''
+//   namespace    — namespace_id = <ns>, resource_id = ''
+//   resource     — namespace_id = <ns>, resource_id = <res>
+//
+// Empty strings (not NULLs) so the PK + UNIQUE indexes treat them as
+// regular values (PG NULLs aren't equal to themselves under UNIQUE,
+// which would let duplicate global-scope rows slip in).
+// ---------------------------------------------------------------------------
+
+export const agentSecret = pgTable(
+  "agent_secret",
+  {
+    scopeKind: text("scope_kind").notNull(), // 'global' | 'namespace' | 'resource'
+    namespaceId: text("namespace_id").notNull().default(""),
+    resourceId: text("resource_id").notNull().default(""),
+    secretKey: text("secret_key").notNull(),
+    /** Initialization vector (12 bytes hex). */
+    iv: text("iv").notNull(),
+    /** AES-GCM auth tag (16 bytes hex). */
+    authTag: text("auth_tag").notNull(),
+    /** Ciphertext (hex). */
+    ciphertext: text("ciphertext").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.scopeKind, t.namespaceId, t.resourceId, t.secretKey] }),
+    // Per-scope listing index — `list({ scope })` queries by the
+    // (kind, ns, res) prefix, ordered however the caller wants.
+    index("agent_secret_scope_idx").on(t.scopeKind, t.namespaceId, t.resourceId),
+  ],
+);
