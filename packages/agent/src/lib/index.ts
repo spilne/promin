@@ -289,6 +289,21 @@ export {
   DEFAULT_TURN_LEASE_TTL_MS,
 } from "./lease/agent-turn-gate.ts";
 
+// RemoteDeploymentRegistry — tracks live remote Zorya deployments that
+// have self-registered to expose RemoteAgentBackend recipes here.
+// Mirrors the WorkerRegistry pattern (heartbeat + TTL + sweep).
+export type {
+  RemoteDeploymentRegistry,
+  RegisterDeploymentInput,
+  RegisteredDeployment,
+  RemoteDeploymentAuth,
+} from "./remote-deployments/types.ts";
+export { DEFAULT_DEPLOYMENT_TTL_MS } from "./remote-deployments/types.ts";
+export {
+  InMemoryRemoteDeploymentRegistry,
+  type InMemoryRemoteDeploymentRegistryConfig,
+} from "./remote-deployments/in-memory-remote-deployment-registry.ts";
+
 // SecretsStorage — scoped secret storage (global / namespace / resource).
 // Distinct from the flat SecretStore in secret-store.ts; this surface
 // supports the multi-tenant SaaS path (BYOK, MCP credentialRef, etc.).

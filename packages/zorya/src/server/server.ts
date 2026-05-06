@@ -13,7 +13,7 @@
 // ```
 // ---------------------------------------------------------------------------
 
-import type { SecretsStorage } from "@promin/agent";
+import type { RemoteDeploymentRegistry, SecretsStorage } from "@promin/agent";
 import type {
   IWorkflowVersionRegistry,
   StepQueue,
@@ -124,6 +124,13 @@ import {
   type WebhookGatewayDeps,
 } from "./routes/webhooks.ts";
 import {
+  heartbeatDeployment,
+  listDeployments,
+  registerDeployment,
+  unregisterDeployment,
+  type RemoteDeploymentsGatewayDeps,
+} from "./routes/remote-deployments.ts";
+import {
   addNamespaceFact,
   deleteNamespaceFact,
   inspectMemory,
@@ -221,6 +228,14 @@ export interface ZoryaServerConfig extends AuthConfig {
    * later.
    */
   webhooks?: { sources: Readonly<Record<string, WebhookSourceConfig>> };
+  /**
+   * Optional remote-deployment registry. When set, exposes
+   * /api/remote-deployments/* — external Zorya servers self-register
+   * here at startup, exposing their RemoteAgentBackend recipes via
+   * heartbeated TTL. Without it (and without `agents`), the routes
+   * are not mounted. See promin-21g5 for the design.
+   */
+  remoteDeployments?: RemoteDeploymentRegistry;
 }
 
 export interface ListenOptions {
@@ -478,6 +493,18 @@ export class ZoryaServer {
         sources: config.webhooks.sources,
       };
       this.router.post("/webhooks/:source/:agentId", ingestWebhook(webhookDeps));
+    }
+
+    if (config.remoteDeployments && this.agents) {
+      const remoteDeps: RemoteDeploymentsGatewayDeps = {
+        registry: config.remoteDeployments,
+        agents: this.agents.registry,
+      };
+      this.router
+        .post("/api/remote-deployments/register", registerDeployment(remoteDeps))
+        .post("/api/remote-deployments/:deploymentId/heartbeat", heartbeatDeployment(remoteDeps))
+        .delete("/api/remote-deployments/:deploymentId", unregisterDeployment(remoteDeps))
+        .get("/api/remote-deployments", listDeployments(remoteDeps));
     }
 
     if (this.scheduler) {
