@@ -677,3 +677,28 @@ export const agentMessage = pgTable(
   },
   (t) => [primaryKey({ columns: [t.namespaceId, t.threadId, t.seq] })],
 );
+
+// ---------------------------------------------------------------------------
+// Agent thread lease — coordination primitive that prevents two replicas
+// from running a turn on the same (namespace, thread) concurrently. One
+// row per leased thread; PK is the lease key. `expires_at` defines the
+// failover window — a worker that crashes mid-turn loses its lease at
+// that timestamp, after which any other worker can steal it.
+// ---------------------------------------------------------------------------
+
+export const agentThreadLease = pgTable(
+  "agent_thread_lease",
+  {
+    namespaceId: text("namespace_id").notNull(),
+    threadId: text("thread_id").notNull(),
+    leaseId: text("lease_id").notNull(),
+    ownerId: text("owner_id").notNull(),
+    acquiredAt: bigint("acquired_at", { mode: "number" }).notNull(),
+    expiresAt: bigint("expires_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.namespaceId, t.threadId] }),
+    // Hot-path index for stealing expired leases on the next acquire.
+    index("agent_thread_lease_expires_idx").on(t.expiresAt),
+  ],
+);

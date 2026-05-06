@@ -265,6 +265,30 @@ export type {
   AgentScanLoopHandle,
 } from "./discovery/agent-scanner.ts";
 
+// ThreadLeaseStore — coordination primitive for horizontally-scaled
+// agent runtimes. AgentTurnGate exposes strict-mode policy on top.
+export type {
+  LeaseStore,
+  ThreadLeaseKey,
+  ThreadLease,
+  AcquireResult,
+  ExtendResult,
+} from "./lease/types.ts";
+export {
+  InMemoryLeaseStore,
+  type InMemoryLeaseStoreConfig,
+} from "./lease/in-memory-lease-store.ts";
+export {
+  AgentTurnGate,
+  type AgentTurnGateConfig,
+  type AgentTurnPolicy,
+  type AgentTurnLease,
+  type RunParams as AgentTurnRunParams,
+  TurnInProgressError,
+  QueuedPolicyNotImplementedError,
+  DEFAULT_TURN_LEASE_TTL_MS,
+} from "./lease/agent-turn-gate.ts";
+
 export { tool, createScopedTool, createElevatedTool } from "./tool.ts";
 export type {
   AgentTool,

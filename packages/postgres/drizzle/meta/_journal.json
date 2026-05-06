@@ -239,6 +239,13 @@
       "when": 1743400033000,
       "tag": "0033_agent_memory",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1743400034000,
+      "tag": "0034_agent_thread_lease",
+      "breakpoints": true
     }
   ]
 }

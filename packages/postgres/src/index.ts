@@ -13,6 +13,7 @@ export {
   PostgresMemoryStore,
   type PostgresMemoryStoreConfig,
 } from "./lib/postgres-memory-store.ts";
+export { PostgresLeaseStore, type PostgresLeaseStoreConfig } from "./lib/postgres-lease-store.ts";
 export { type PostgresStorageConfig } from "./lib/config.ts";
 export { migrate, type MigrateOptions } from "./lib/migrate.ts";
 
