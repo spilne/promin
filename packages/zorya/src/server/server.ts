@@ -116,7 +116,7 @@ import {
   updateAgent,
   type AgentGatewayDeps,
 } from "./routes/agents.ts";
-import { listCatalogModels } from "./routes/agent-catalog.ts";
+import { listCatalogModels, listCatalogTools } from "./routes/agent-catalog.ts";
 import { createSecret, deleteSecret, listSecrets } from "./routes/secrets.ts";
 import {
   ingestWebhook,
@@ -434,6 +434,12 @@ export class ZoryaServer {
           this.agents.models
             ? listCatalogModels({ models: this.agents.models })
             : async () => new Response(JSON.stringify({ models: [] }), { status: 200 }),
+        )
+        .get(
+          "/api/agents/_catalog/tools",
+          this.agents.toolCatalog
+            ? listCatalogTools({ tools: this.agents.toolCatalog })
+            : async () => new Response(JSON.stringify({ tools: [] }), { status: 200 }),
         )
         // Recipe CRUD — gsze Phase 1. Author/edit/clone agents over HTTP.
         .post("/api/agents", createAgent(agentDeps))

@@ -367,6 +367,14 @@ export type { CommandDef } from "./multi-tool.ts";
 export { buildToolDefs, createFileToolRegistry } from "./tool-registry.ts";
 export type { ToolRegistry, FileToolRegistryConfig } from "./tool-registry.ts";
 
+export {
+  DefaultAgentToolCatalog,
+  type AgentToolCatalog,
+  type ToolCatalogEntry,
+  type ToolCatalogSource,
+  type DefaultAgentToolCatalogConfig,
+} from "./tool-catalog.ts";
+
 export { combineProcessors } from "./processors.ts";
 export type { ProcessorsConfig, ProcessorContext } from "./processors.ts";
 

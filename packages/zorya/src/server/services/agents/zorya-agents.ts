@@ -11,6 +11,7 @@ import type {
   Agent,
   AgentInstanceRegistry,
   AgentRegistry,
+  AgentToolCatalog,
   AgentTurnGate,
   MemoryStore,
   ModelCatalog,
@@ -63,6 +64,13 @@ export interface ZoryaAgentsConfig {
    * `(provider, id)` resolves to the registered runtime instance.
    */
   models?: ModelCatalog;
+  /**
+   * Optional tool catalog. When set, the server exposes
+   * `GET /api/agents/_catalog/tools` so the Designer's tool multi-
+   * select can populate options from in-process / file / MCP sources.
+   * Without it, the route is not mounted.
+   */
+  toolCatalog?: AgentToolCatalog;
   /** Filesystem hot-reload scan loop. Omit to disable. */
   scan?: ZoryaAgentsScanConfig;
   /**
@@ -90,6 +98,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   readonly memory?: MemoryStore;
   readonly instances?: AgentInstanceRegistry;
   readonly models?: ModelCatalog;
+  readonly toolCatalog?: AgentToolCatalog;
   readonly turnGate?: AgentTurnGate;
   readonly workerId?: string;
   private readonly scanConfig?: ZoryaAgentsScanConfig;
@@ -101,6 +110,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
     if (config.memory) this.memory = config.memory;
     if (config.instances) this.instances = config.instances;
     if (config.models) this.models = config.models;
+    if (config.toolCatalog) this.toolCatalog = config.toolCatalog;
     if (config.scan) this.scanConfig = config.scan;
     if (config.turnGate) this.turnGate = config.turnGate;
     if (config.workerId) this.workerId = config.workerId;
