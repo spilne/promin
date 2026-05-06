@@ -95,12 +95,16 @@ import { getStreamChunks, sendStreamChunk, streamChunks } from "./routes/streams
 import { getSparklines, getWorkflowGrid, getWorkflowHistory } from "./routes/grid.ts";
 import { getWorkflowDef, listWorkflowDefs } from "./routes/workflow-defs.ts";
 import {
+  cloneAgent,
   compactThread,
   archiveAgentThread,
+  createAgent,
+  deleteAgent,
   distillThread,
   getAgent,
   invokeAgent,
   listAgentThreads,
+  listAgentVersions,
   listAgents,
   listThreadMessages,
   renameAgentThread,
@@ -108,6 +112,7 @@ import {
   streamAgent,
   streamThreadApproval,
   streamThreadMessage,
+  updateAgent,
   type AgentGatewayDeps,
 } from "./routes/agents.ts";
 import { listCatalogModels } from "./routes/agent-catalog.ts";
@@ -386,7 +391,13 @@ export class ZoryaServer {
             ? listCatalogModels({ models: this.agents.models })
             : async () => new Response(JSON.stringify({ models: [] }), { status: 200 }),
         )
+        // Recipe CRUD — gsze Phase 1. Author/edit/clone agents over HTTP.
+        .post("/api/agents", createAgent(agentDeps))
         .get("/api/agents/:id", getAgent(agentDeps))
+        .patch("/api/agents/:id", updateAgent(agentDeps))
+        .delete("/api/agents/:id", deleteAgent(agentDeps))
+        .get("/api/agents/:id/versions", listAgentVersions(agentDeps))
+        .post("/api/agents/:id/clone", cloneAgent(agentDeps))
         .post("/api/agents/:id/invoke", invokeAgent(agentDeps))
         .post("/api/agents/:id/stream", streamAgent(agentDeps))
         .get("/api/agents/:id/threads", listAgentThreads(agentDeps))

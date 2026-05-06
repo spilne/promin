@@ -316,6 +316,234 @@ export function getAgent(deps: AgentGatewayDeps) {
 }
 
 // ---------------------------------------------------------------------------
+// Recipe CRUD — author / edit / clone agents through HTTP. The dashboard
+// designer UI calls these; programmatic callers (e.g. infra-as-code) can
+// also POST recipes here.
+//
+// Permission gradient is currently coarse — anyone with dashboard auth
+// can author. Tightening (per-namespace ACLs, role gating) is tracked
+// separately as part of the multi-tenant SaaS direction.
+// ---------------------------------------------------------------------------
+
+interface CreateAgentRequest {
+  readonly id?: unknown;
+  readonly version?: unknown;
+  readonly backend?: unknown;
+  readonly metadata?: unknown;
+}
+
+interface UpdateAgentRequest {
+  readonly version?: unknown; // version to update; default = latest
+  readonly backend?: unknown; // partial replacement; only set fields update
+  readonly metadata?: unknown; // partial replacement; only set fields update
+}
+
+interface CloneAgentRequest {
+  readonly targetId?: unknown;
+  readonly targetVersion?: unknown;
+  /**
+   * Optional secrets to provision alongside the clone. When the source
+   * recipe is a template (metadata.template === true) and lists
+   * `requiredSecrets`, the clone endpoint validates that this body
+   * provides every required name. Today these values are accepted but
+   * NOT yet stored — SecretsStorage (promin-qwy8) is a pending
+   * dependency, after which BYOK semantics (promin-an9l) wire the
+   * stored values into LocalAgentBackend.model.credentialRef. Until
+   * then, any provided secrets are recorded only in the response so
+   * callers can see they were accepted.
+   */
+  readonly secrets?: Record<string, string>;
+}
+
+export function createAgent(deps: AgentGatewayDeps) {
+  return async (req: Request): Promise<Response> => {
+    const body = await readJson<CreateAgentRequest>(req);
+    if (!body) return jsonError(400, "missing_body");
+    if (typeof body.id !== "string" || body.id.length === 0) {
+      return jsonError(400, "missing_id");
+    }
+    if (body.id.startsWith("_")) {
+      // The `_catalog/*` URL prefix is reserved; an agent named `_x`
+      // would shadow it once the route has the recipe in registry.
+      return jsonError(400, "reserved_id_prefix", "Agent ids starting with `_` are reserved.");
+    }
+    if (typeof body.backend !== "object" || body.backend === null) {
+      return jsonError(400, "missing_backend");
+    }
+    const version =
+      typeof body.version === "string" && body.version.length > 0 ? body.version : undefined;
+    try {
+      const recipe = await deps.registry.register({
+        id: body.id,
+        ...(version !== undefined && { version }),
+        backend: body.backend as RegisteredAgent["backend"],
+        ...(typeof body.metadata === "object" &&
+          body.metadata !== null && {
+            metadata: body.metadata as Partial<RegisteredAgent["metadata"]>,
+          }),
+      });
+      return json(201, recipe);
+    } catch (err) {
+      return jsonError(500, "create_failed", asMessage(err));
+    }
+  };
+}
+
+export function updateAgent(deps: AgentGatewayDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const id = params.id;
+    if (!id) return jsonError(400, "missing_id");
+    const body = await readJson<UpdateAgentRequest>(req);
+    if (!body) return jsonError(400, "missing_body");
+
+    const version =
+      typeof body.version === "string" && body.version.length > 0 ? body.version : undefined;
+    const existing = await deps.registry.get(id, version);
+    if (!existing) {
+      return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+    }
+
+    // Partial-replace: only fields present in the body are touched.
+    // backend is replaced wholesale because LocalAgentBackend's shape
+    // (model / systemPrompt / tools / etc.) doesn't have a clean per-
+    // field merge story. metadata is also wholesale-replaced; the
+    // designer is expected to round-trip the full object.
+    const nextBackend =
+      typeof body.backend === "object" && body.backend !== null
+        ? (body.backend as RegisteredAgent["backend"])
+        : existing.backend;
+    const nextMetadata =
+      typeof body.metadata === "object" && body.metadata !== null
+        ? (body.metadata as Partial<RegisteredAgent["metadata"]>)
+        : existing.metadata;
+    try {
+      const updated = await deps.registry.register({
+        id,
+        version: existing.version,
+        backend: nextBackend,
+        metadata: nextMetadata,
+      });
+      return json(200, updated);
+    } catch (err) {
+      return jsonError(500, "update_failed", asMessage(err));
+    }
+  };
+}
+
+export function deleteAgent(deps: AgentGatewayDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const id = params.id;
+    if (!id) return jsonError(400, "missing_id");
+    const url = new URL(req.url);
+    const version = url.searchParams.get("version") ?? undefined;
+    try {
+      await deps.registry.unregister(id, version);
+      return new Response(null, { status: 204 });
+    } catch (err) {
+      return jsonError(500, "delete_failed", asMessage(err));
+    }
+  };
+}
+
+export function listAgentVersions(deps: AgentGatewayDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const id = params.id;
+    if (!id) return jsonError(400, "missing_id");
+    const versions = await deps.registry.versions(id);
+    if (versions.length === 0) {
+      // 404 when the id has never been registered, vs an empty array.
+      // The registry contract returns [] for both — the route surfaces
+      // 404 to keep "doesn't exist" distinct from "no versions yet"
+      // (which can't happen given register() always writes one row).
+      return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+    }
+    return json(200, { versions });
+  };
+}
+
+export function cloneAgent(deps: AgentGatewayDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const sourceId = params.id;
+    if (!sourceId) return jsonError(400, "missing_id");
+    const body = await readJson<CloneAgentRequest>(req);
+    if (!body) return jsonError(400, "missing_body");
+    if (typeof body.targetId !== "string" || body.targetId.length === 0) {
+      return jsonError(400, "missing_targetId");
+    }
+    if (body.targetId.startsWith("_")) {
+      return jsonError(400, "reserved_id_prefix", "Agent ids starting with `_` are reserved.");
+    }
+
+    const url = new URL(req.url);
+    const sourceVersion = url.searchParams.get("version") ?? undefined;
+    const source = await deps.registry.get(sourceId, sourceVersion);
+    if (!source) {
+      return jsonError(404, "agent_not_found", `Agent "${sourceId}" is not registered.`);
+    }
+
+    // Template handshake: when the source declares requiredSecrets,
+    // verify the cloner provided every named value. Storage of those
+    // values is gated on SecretsStorage (qwy8) — for now we accept and
+    // echo back so callers can build forward-compatible clients.
+    const required = readRequiredSecrets(source.metadata);
+    const provided = body.secrets ?? {};
+    const missing = required.filter((name) => !(name in provided));
+    if (missing.length > 0) {
+      return jsonError(
+        400,
+        "missing_required_secrets",
+        `Required secrets not provided: ${missing.join(", ")}`,
+      );
+    }
+
+    const targetVersion =
+      typeof body.targetVersion === "string" && body.targetVersion.length > 0
+        ? body.targetVersion
+        : undefined;
+
+    // Clones are not themselves templates; strip the marker. requiredSecrets
+    // also drops since the clone now owns its credentialRefs directly.
+    const clonedMetadata: Partial<RegisteredAgent["metadata"]> = {
+      description: source.metadata.description,
+      capabilities: [...source.metadata.capabilities],
+      tags: [...source.metadata.tags],
+    };
+
+    try {
+      const clone = await deps.registry.register({
+        id: body.targetId,
+        ...(targetVersion !== undefined && { version: targetVersion }),
+        backend: source.backend,
+        metadata: clonedMetadata,
+      });
+      // `acceptedSecrets` echoes back the keys the caller supplied so
+      // forward-compatible clients can confirm the clone took. Values
+      // are NEVER echoed — the secret never leaves the response surface
+      // either way (today they're ignored; tomorrow they sit in
+      // SecretsStorage). Surface as a separate field so 'recipe' stays
+      // a clean RegisteredAgent shape.
+      return json(201, {
+        recipe: clone,
+        acceptedSecrets: Object.keys(provided),
+      });
+    } catch (err) {
+      return jsonError(500, "clone_failed", asMessage(err));
+    }
+  };
+}
+
+function readRequiredSecrets(metadata: RegisteredAgent["metadata"]): string[] {
+  // metadata.requiredSecrets is an additive field landing alongside
+  // the template flag (promin-ui4b). Today AgentMetadata does not
+  // declare it; we read defensively from the loose-typed object so
+  // recipes that DO carry it (forward-written by future-aware clients)
+  // are honored before the type lands.
+  const m = metadata as unknown as { requiredSecrets?: unknown };
+  if (!Array.isArray(m.requiredSecrets)) return [];
+  return m.requiredSecrets.filter((x): x is string => typeof x === "string" && x.length > 0);
+}
+
+// ---------------------------------------------------------------------------
 // One-shot invoke + stream
 // ---------------------------------------------------------------------------
 

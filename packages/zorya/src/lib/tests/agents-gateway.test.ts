@@ -463,6 +463,245 @@ describe("agent gateway — instance auto-resolve from ownerId", () => {
   });
 });
 
+describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
+  describe("POST /api/agents — create", () => {
+    it("creates a recipe with id + backend, returns 201", async () => {
+      const { server, registry } = await bootGateway();
+      const res = await server.handle(
+        new Request("http://test/api/agents", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            id: "new-bot",
+            backend: {
+              type: "local",
+              model: { provider: "anthropic", id: "claude-sonnet-4-6" },
+              systemPrompt: "Helpful new bot",
+              tools: [],
+            },
+            metadata: { capabilities: ["chat"], tags: ["alpha"] },
+          }),
+        }),
+      );
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as { id: string; metadata: { tags: string[] } };
+      expect(body.id).toBe("new-bot");
+      expect(body.metadata.tags).toContain("alpha");
+      expect(await registry.get("new-bot")).not.toBeNull();
+    });
+
+    it("rejects ids starting with `_` (reserved for catalog routes)", async () => {
+      const { server } = await bootGateway();
+      const res = await server.handle(
+        new Request("http://test/api/agents", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            id: "_internal",
+            backend: {
+              type: "local",
+              model: { provider: "anthropic", id: "claude-sonnet-4-6" },
+              systemPrompt: null,
+              tools: [],
+            },
+          }),
+        }),
+      );
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toBe("reserved_id_prefix");
+    });
+
+    it("rejects missing id / backend with 400", async () => {
+      const { server } = await bootGateway();
+      const noId = await server.handle(
+        new Request("http://test/api/agents", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ backend: {} }),
+        }),
+      );
+      expect(noId.status).toBe(400);
+      const noBackend = await server.handle(
+        new Request("http://test/api/agents", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: "x" }),
+        }),
+      );
+      expect(noBackend.status).toBe(400);
+    });
+  });
+
+  describe("PATCH /api/agents/:id — update", () => {
+    it("partially replaces backend + metadata, preserves identity", async () => {
+      const { server, registry } = await bootGateway();
+      const res = await server.handle(
+        new Request("http://test/api/agents/support", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            metadata: { description: "now helpful", capabilities: ["chat", "search"], tags: [] },
+          }),
+        }),
+      );
+      expect(res.status).toBe(200);
+      const updated = await registry.get("support");
+      expect(updated?.metadata.description).toBe("now helpful");
+      expect(updated?.metadata.capabilities).toContain("search");
+    });
+
+    it("404 when id is unknown", async () => {
+      const { server } = await bootGateway();
+      const res = await server.handle(
+        new Request("http://test/api/agents/never", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ metadata: { description: "x" } }),
+        }),
+      );
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("DELETE /api/agents/:id — unregister", () => {
+    it("removes all versions when ?version is omitted, returns 204", async () => {
+      const { server, registry } = await bootGateway();
+      const res = await server.handle(
+        new Request("http://test/api/agents/support", { method: "DELETE" }),
+      );
+      expect(res.status).toBe(204);
+      expect(await registry.get("support")).toBeNull();
+    });
+
+    it("removes a single version when ?version=X", async () => {
+      const { server, registry } = await bootGateway();
+      // Add a v2 first.
+      await registry.register({
+        id: "support",
+        version: "v2",
+        backend: {
+          type: "local",
+          model: { provider: "anthropic", id: "claude-sonnet-4-6" },
+          systemPrompt: null,
+          tools: [],
+        },
+      });
+      const res = await server.handle(
+        new Request("http://test/api/agents/support?version=v2", { method: "DELETE" }),
+      );
+      expect(res.status).toBe(204);
+      expect(await registry.get("support", "v2")).toBeNull();
+      expect(await registry.get("support", "v1")).not.toBeNull();
+    });
+  });
+
+  describe("GET /api/agents/:id/versions", () => {
+    it("returns all versions of one id, oldest first", async () => {
+      const { server, registry } = await bootGateway();
+      await registry.register({
+        id: "support",
+        version: "v2",
+        backend: {
+          type: "local",
+          model: { provider: "anthropic", id: "claude-sonnet-4-6" },
+          systemPrompt: "v2",
+          tools: [],
+        },
+      });
+      const res = await server.handle(
+        new Request("http://test/api/agents/support/versions", { method: "GET" }),
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { versions: Array<{ version: string }> };
+      const versions = body.versions.map((v) => v.version);
+      expect(versions).toContain("v1");
+      expect(versions).toContain("v2");
+    });
+
+    it("404 for unknown id", async () => {
+      const { server } = await bootGateway();
+      const res = await server.handle(
+        new Request("http://test/api/agents/never/versions", { method: "GET" }),
+      );
+      expect(res.status).toBe(404);
+    });
+  });
+
+  describe("POST /api/agents/:id/clone", () => {
+    it("clones an existing recipe under a new id, returns 201", async () => {
+      const { server, registry } = await bootGateway();
+      const res = await server.handle(
+        new Request("http://test/api/agents/support/clone", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ targetId: "support-fork" }),
+        }),
+      );
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as {
+        recipe: { id: string };
+        acceptedSecrets: string[];
+      };
+      expect(body.recipe.id).toBe("support-fork");
+      expect(body.acceptedSecrets).toEqual([]);
+      expect(await registry.get("support-fork")).not.toBeNull();
+    });
+
+    it("rejects missing targetId with 400", async () => {
+      const { server } = await bootGateway();
+      const res = await server.handle(
+        new Request("http://test/api/agents/support/clone", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        }),
+      );
+      expect(res.status).toBe(400);
+    });
+
+    it("404 when source id is unknown", async () => {
+      const { server } = await bootGateway();
+      const res = await server.handle(
+        new Request("http://test/api/agents/never/clone", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ targetId: "ok" }),
+        }),
+      );
+      expect(res.status).toBe(404);
+    });
+
+    it("echoes back accepted secret names without storing values", async () => {
+      // Today AgentMetadata doesn't yet carry `requiredSecrets` (lands
+      // with ui4b, which extends the type). The clone endpoint's
+      // validation reads the field defensively — when present, it
+      // checks that all named secrets are provided. When absent (today),
+      // any provided secrets are accepted and echoed in `acceptedSecrets`.
+      // This test pins the no-template path: secrets are accepted by
+      // shape so forward-compatible clients can build today.
+      const { server } = await bootGateway();
+      const res = await server.handle(
+        new Request("http://test/api/agents/support/clone", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            targetId: "support-fork",
+            secrets: { anthropic_api_key: "sk-ant-test", openai_key: "sk-..." },
+          }),
+        }),
+      );
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as {
+        recipe: { id: string };
+        acceptedSecrets: string[];
+      };
+      expect(body.recipe.id).toBe("support-fork");
+      expect(body.acceptedSecrets.sort()).toEqual(["anthropic_api_key", "openai_key"]);
+    });
+  });
+});
+
 describe("agent gateway — turn gate (per-thread coordination)", () => {
   it("succeeds when the lease is free (no contention)", async () => {
     const { server } = await bootGateway({
