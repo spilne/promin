@@ -283,6 +283,58 @@ export const api = {
   getAgent(id: string): Promise<RegisteredAgent> {
     return req<RegisteredAgent>(`/api/agents/${encodeURIComponent(id)}`);
   },
+  // Recipe CRUD — gsze Phase 2 (Designer UI wiring)
+  createAgent(body: {
+    id: string;
+    version?: string;
+    backend: RegisteredAgent["backend"];
+    metadata?: Partial<RegisteredAgent["metadata"]>;
+  }): Promise<RegisteredAgent> {
+    return req<RegisteredAgent>(`/api/agents`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  updateAgent(
+    id: string,
+    body: {
+      version?: string;
+      backend?: RegisteredAgent["backend"];
+      metadata?: Partial<RegisteredAgent["metadata"]>;
+    },
+  ): Promise<RegisteredAgent> {
+    return req<RegisteredAgent>(`/api/agents/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  deleteAgent(id: string, version?: string): Promise<void> {
+    const qp = version ? `?version=${encodeURIComponent(version)}` : "";
+    return req<void>(`/api/agents/${encodeURIComponent(id)}${qp}`, { method: "DELETE" });
+  },
+  listAgentVersions(id: string): Promise<{ versions: RegisteredAgent[] }> {
+    return req<{ versions: RegisteredAgent[] }>(`/api/agents/${encodeURIComponent(id)}/versions`);
+  },
+  cloneAgent(
+    id: string,
+    body: {
+      targetId: string;
+      targetVersion?: string;
+      secrets?: Record<string, string>;
+      secretsScope?: { kind: "global" } | { kind: "namespace"; namespaceId: string };
+    },
+  ): Promise<{ recipe: RegisteredAgent; acceptedSecrets: string[] }> {
+    return req<{ recipe: RegisteredAgent; acceptedSecrets: string[] }>(
+      `/api/agents/${encodeURIComponent(id)}/clone`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+  },
   listAgentThreads(
     id: string,
     params: { namespaceId: string; resourceId?: string; limit?: number; q?: string },

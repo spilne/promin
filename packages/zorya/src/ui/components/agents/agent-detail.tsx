@@ -11,6 +11,7 @@ import { toast } from "../../lib/dialogs.ts";
 import { Markdown } from "../../lib/markdown.tsx";
 import { MemoryInspector } from "./memory-inspector.tsx";
 import { AgentConfigDrawer } from "./agent-config-drawer.tsx";
+import { AgentEditDrawer } from "./agent-edit-drawer.tsx";
 
 interface AgentDetailProps {
   id: string;
@@ -54,6 +55,7 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
   );
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
 
   // Persist resource id + active thread (namespace already persists in
   // the global useNamespace store).
@@ -63,7 +65,7 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
     else localStorage.removeItem(`${ACTIVE_THREAD_KEY}:${id}`);
   }, [activeThread, id]);
 
-  const { data: agent, error } = useFetch(() => api.getAgent(id), [id]);
+  const { data: agent, error, refresh: refreshAgent } = useFetch(() => api.getAgent(id), [id]);
 
   const { data: threadsResp, refresh: refreshThreads } = useFetch(
     () => api.listAgentThreads(id, tenant),
@@ -98,6 +100,16 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
           </div>
           <div class="flex items-center gap-3">
             {agent && <AgentMetaBadges agent={agent} />}
+            {agent && (
+              <button
+                class="btn btn-sm btn-ghost"
+                onClick={() => setEditOpen(true)}
+                aria-label="Edit agent"
+                title="Edit description, system prompt, capabilities, tags"
+              >
+                Edit
+              </button>
+            )}
             <button
               class="btn btn-md btn-square btn-ghost text-2xl"
               onClick={() => setConfigOpen(true)}
@@ -164,6 +176,13 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
       )}
 
       {configOpen && <AgentConfigDrawer agent={agent} onClose={() => setConfigOpen(false)} />}
+      {editOpen && agent && (
+        <AgentEditDrawer
+          agent={agent}
+          onClose={() => setEditOpen(false)}
+          onSaved={() => refreshAgent()}
+        />
+      )}
     </Page>
   );
 }
