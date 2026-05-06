@@ -141,6 +141,12 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
 /**
  * Per-call context for scoped tools. All identity fields are guaranteed
  * non-empty when this context is passed — runtime enforces it.
+ *
+ * `secrets` carries the resolved values for any refs declared on the
+ * tool config — the factory wrapper resolves them via cascade
+ * (resource → namespace → global) at execute time using the live
+ * scope, so the user callback sees plaintext values keyed by the
+ * declared name. Empty record when no secrets declared.
  */
 export interface ScopedToolContext {
   readonly namespaceId: string;
@@ -148,6 +154,7 @@ export interface ScopedToolContext {
   readonly threadId?: string;
   readonly agentId?: string;
   readonly writer?: ToolWriter;
+  readonly secrets: Readonly<Record<string, string>>;
 }
 
 /**
@@ -170,6 +177,37 @@ export interface ElevatedToolContext extends ScopedToolContext {
 }
 
 /**
+ * Declarative secret-injection config for scoped/elevated tools.
+ *
+ *   secrets: {
+ *     storage: secretsStorageInstance,
+ *     refs: {
+ *       slackToken: { ref: 'SLACK_BOT_TOKEN' },
+ *       githubToken: { ref: 'GITHUB_TOKEN', required: false },
+ *     },
+ *   }
+ *
+ * At tool execute time the factory wrapper:
+ *   1. Reads ctx.scope from the runtime
+ *   2. Calls storage.resolve({ ns, res, key: ref }) for each declared
+ *   3. Required + unresolved → throws with tool name + ref name
+ *   4. Optional + unresolved → silently absent from ctx.secrets
+ *   5. Builds ctx.secrets = { name: resolvedValue, ... }
+ *   6. Calls user's execute with the populated ctx
+ *
+ * Storage is captured at construction time (closure), not threaded
+ * through ToolExecuteContext at runtime. Hosts that need per-call
+ * storage swap should construct multiple tool variants — uncommon
+ * enough that the simpler closure pattern is the right default.
+ */
+export interface ScopedToolSecretsConfig {
+  /** SecretsStorage instance the host wires in at construction time. */
+  readonly storage: import("./secrets/types.ts").SecretsStorage;
+  /** Map: ctx.secrets.<name> → secret-store key + required-ness. */
+  readonly refs: Readonly<Record<string, { readonly ref: string; readonly required?: boolean }>>;
+}
+
+/**
  * Configuration for `createScopedTool`. Same shape as `AgentTool` minus
  * the kind/requires markers (factory sets them) and with a typed
  * `execute` signature requiring a complete `ScopedToolContext`.
@@ -182,6 +220,13 @@ export interface ScopedToolConfig<TInput, TOutput> {
   parameters: z.ZodType<TInput>;
   requireApproval?: boolean;
   toModelOutput?: (output: TOutput) => string;
+  /**
+   * Optional declarative secret injection. When set, the factory
+   * wrapper resolves each declared ref at execute time via
+   * SecretsStorage cascade and exposes the values on ctx.secrets.
+   * Without it, ctx.secrets is an empty record.
+   */
+  secrets?: ScopedToolSecretsConfig;
   execute: (input: TInput, ctx: ScopedToolContext) => Promise<TOutput>;
 }
 
@@ -213,12 +258,12 @@ export interface ElevatedToolConfig<TInput, TOutput> extends Omit<
 export function createScopedTool<TInput, TOutput>(
   config: ScopedToolConfig<TInput, TOutput>,
 ): AgentTool<TInput, TOutput> {
-  const { execute: userExecute, ...rest } = config;
+  const { execute: userExecute, secrets: secretsConfig, ...rest } = config;
   return {
     ...rest,
     kind: "scoped",
     execute: async (input: TInput, ctx?: ToolExecuteContext): Promise<TOutput> => {
-      const scoped = scopedContextFrom(ctx);
+      const scoped = await scopedContextFrom(ctx, config.name, secretsConfig);
       if (!scoped) {
         throw new Error(
           `Scoped tool '${config.name}' invoked without complete (namespaceId, resourceId) scope. ` +
@@ -241,13 +286,13 @@ export function createScopedTool<TInput, TOutput>(
 export function createElevatedTool<TInput, TOutput>(
   config: ElevatedToolConfig<TInput, TOutput>,
 ): AgentTool<TInput, TOutput> {
-  const { execute: userExecute, requires, ...rest } = config;
+  const { execute: userExecute, requires, secrets: secretsConfig, ...rest } = config;
   return {
     ...rest,
     kind: "elevated",
     ...(requires !== undefined && { requires }),
     execute: async (input: TInput, ctx?: ToolExecuteContext): Promise<TOutput> => {
-      const scoped = scopedContextFrom(ctx);
+      const scoped = await scopedContextFrom(ctx, config.name, secretsConfig);
       if (!scoped) {
         throw new Error(
           `Elevated tool '${config.name}' invoked without complete (namespaceId, resourceId) scope.`,
@@ -272,18 +317,67 @@ export function createElevatedTool<TInput, TOutput>(
   };
 }
 
-function scopedContextFrom(ctx: ToolExecuteContext | undefined): ScopedToolContext | null {
+async function scopedContextFrom(
+  ctx: ToolExecuteContext | undefined,
+  toolName: string,
+  secretsConfig: ScopedToolSecretsConfig | undefined,
+): Promise<ScopedToolContext | null> {
   const scope = ctx?.scope;
   if (!scope) return null;
   if (typeof scope.namespaceId !== "string" || scope.namespaceId.length === 0) return null;
   if (typeof scope.resourceId !== "string" || scope.resourceId.length === 0) return null;
+
+  const secrets = await resolveDeclaredSecrets(toolName, secretsConfig, {
+    namespaceId: scope.namespaceId,
+    resourceId: scope.resourceId,
+  });
+
   return {
     namespaceId: scope.namespaceId,
     resourceId: scope.resourceId,
     ...(scope.threadId !== undefined && { threadId: scope.threadId }),
     ...(scope.agentId !== undefined && { agentId: scope.agentId }),
     ...(ctx?.writer !== undefined && { writer: ctx.writer }),
+    secrets,
   };
+}
+
+/**
+ * Walks the declared `secrets.refs` and resolves each via cascade. The
+ * cascade walk is `secrets.storage.resolve({ ns, res, key })`. Required
+ * refs that don't resolve throw with a clear "tool X needs secret Y at
+ * any of resource/namespace/global" message; optional refs are silently
+ * absent from the result. Returns an empty record when no secrets
+ * declared.
+ */
+async function resolveDeclaredSecrets(
+  toolName: string,
+  secretsConfig: ScopedToolSecretsConfig | undefined,
+  scope: { namespaceId: string; resourceId: string },
+): Promise<Readonly<Record<string, string>>> {
+  if (!secretsConfig) return {};
+  const out: Record<string, string> = {};
+  for (const [name, decl] of Object.entries(secretsConfig.refs)) {
+    const resolved = await secretsConfig.storage.resolve({
+      namespaceId: scope.namespaceId,
+      resourceId: scope.resourceId,
+      key: decl.ref,
+    });
+    if (resolved) {
+      out[name] = resolved.value;
+      continue;
+    }
+    const required = decl.required !== false; // default true
+    if (required) {
+      throw new Error(
+        `Tool '${toolName}' requires secret '${decl.ref}' (mapped as ctx.secrets.${name}) ` +
+          `at scope (namespace=${scope.namespaceId}, resource=${scope.resourceId}). ` +
+          "Secret not found at any cascade tier (resource → namespace → global). " +
+          "Set the secret via /api/secrets or mark this ref as `required: false`.",
+      );
+    }
+  }
+  return out;
 }
 
 /**
