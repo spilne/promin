@@ -55,8 +55,22 @@ export type AgentBackend = LocalAgentBackend | RemoteAgentBackend | CursorAgentB
 
 export interface LocalAgentBackend {
   readonly type: "local";
-  /** Model identifier — runtime resolves to an `LLMProvider`. */
-  readonly model: { readonly provider: string; readonly id: string };
+  /**
+   * Model identifier — runtime resolves to an `LLMProvider`.
+   *
+   * `credentialRef` is the BYOK hook: when set, the resolver fetches
+   * the named secret from `SecretsStorage` (cascade: resource →
+   * namespace → global) at request time and passes the value as the
+   * LLM factory's `apiKey` argument. This lets a tenant supply their
+   * own Anthropic / OpenAI / etc. key — they pay their own bills,
+   * stay under their own contract, manage their own rate limits.
+   * When unset, the host's pooled key is used (today's behaviour).
+   */
+  readonly model: {
+    readonly provider: string;
+    readonly id: string;
+    readonly credentialRef?: string;
+  };
   /** Inline system prompt. For prompt-registry indirection, use `null` and resolve outside. */
   readonly systemPrompt: string | null;
   /** Tool names to wire in. Runtime supplies the implementations. */

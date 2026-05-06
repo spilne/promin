@@ -43,7 +43,16 @@ export interface ZoryaAgentsScanConfig {
 
 export interface ZoryaAgentsConfig {
   registry: AgentRegistry;
-  resolve: (recipe: RegisteredAgent) => Agent;
+  /**
+   * Materialize a `LocalAgent` from a recipe. Optional `scope` carries
+   * the per-request namespace + resource so the host can resolve
+   * recipe-level credentialRefs (BYOK) at this boundary; hosts that
+   * don't care can ignore it.
+   */
+  resolve: (
+    recipe: RegisteredAgent,
+    scope?: { readonly namespaceId?: string; readonly resourceId?: string },
+  ) => Agent | Promise<Agent>;
   memory?: MemoryStore;
   instances?: AgentInstanceRegistry;
   /**
@@ -74,7 +83,10 @@ export interface ZoryaAgentsConfig {
 
 export class ZoryaAgents implements AgentScheduleDispatcher {
   readonly registry: AgentRegistry;
-  readonly resolve: (recipe: RegisteredAgent) => Agent;
+  readonly resolve: (
+    recipe: RegisteredAgent,
+    scope?: { readonly namespaceId?: string; readonly resourceId?: string },
+  ) => Agent | Promise<Agent>;
   readonly memory?: MemoryStore;
   readonly instances?: AgentInstanceRegistry;
   readonly models?: ModelCatalog;

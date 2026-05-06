@@ -22,6 +22,7 @@ import type { AgentTool } from "../tool.ts";
 import type { Consolidator } from "../memory/consolidator.ts";
 import type { AutoCompactConfig, AutoDistillConfig } from "../agent/local-agent.ts";
 import type { TokenBudget } from "../memory/types.ts";
+import type { SecretsStorage } from "../secrets/types.ts";
 import type {
   AutoCompactRecipe,
   AutoDistillRecipe,
@@ -35,10 +36,22 @@ export interface ResolveLocalAgentDeps {
   readonly runner: WorkflowRunner;
   readonly memory?: MemoryStore;
   /**
-   * Resolve `(provider, modelId)` → `LLMProvider`. The gateway typically
-   * builds this from a config map of API keys + provider adapters.
+   * Resolve `(provider, modelId, apiKey?)` → `LLMProvider`. The host
+   * typically builds this from a config map of API keys + provider
+   * adapters; the optional `apiKey` arg is the BYOK hook — when set,
+   * the factory should construct the provider with that key instead of
+   * the host's pooled default. Existing factories that ignore the
+   * third arg keep working unchanged.
    */
-  readonly llm: (provider: string, modelId: string) => LLMProvider;
+  readonly llm: (provider: string, modelId: string, apiKey?: string) => LLMProvider;
+  /**
+   * Pre-resolved BYOK credential, typically sourced from
+   * `resolveCredentialRef()` (also in this module) before invoking
+   * `resolveLocalAgent`. When unset, the LLM factory uses its baseline.
+   * Multi-tenant gateways resolve the credential per-request and pass
+   * the value here.
+   */
+  readonly apiKey?: string;
   /**
    * Tool name → implementation. Tool names referenced by the recipe but
    * absent from this map cause a clear error (see `onUnknownTool`).
@@ -113,7 +126,11 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
   const backend: LocalAgentBackend = agent.backend;
 
   const tools = pickTools(backend.tools, deps.tools, deps.onUnknownTool ?? "throw");
-  const llm = deps.llm(backend.model.provider, backend.model.id);
+  // BYOK: deps.apiKey carries a pre-resolved credential — typically
+  // sourced via `resolveCredentialRef()` (this module) before calling
+  // resolveLocalAgent. Sync path; secrets-storage I/O happens in the
+  // caller, not here.
+  const llm = deps.llm(backend.model.provider, backend.model.id, deps.apiKey);
 
   // Merge runtime config: recipe wins, host's deps fall back. The recipe
   // carries JSON-serialisable subsets; the host's deps may carry richer
@@ -214,4 +231,51 @@ function mergeContextBudget(
   // Recipe wins on the numeric fields; host's `estimate` callbacks
   // (closures) carry through.
   return { ...host, ...recipe };
+}
+
+/**
+ * BYOK credential resolution. Reads `recipe.backend.model.credentialRef`
+ * and looks up the named secret with cascade (resource → namespace →
+ * global). Returns `undefined` when the recipe doesn't declare a
+ * credentialRef — that's the host-default path. Throws when a ref IS
+ * declared but the secret isn't resolvable, so misconfig surfaces
+ * loudly instead of silently using the wrong key.
+ *
+ * Sync `resolveLocalAgent` stays sync; this async pre-step is the
+ * caller's responsibility. The agent gateway pattern is:
+ *
+ *   const apiKey = await resolveCredentialRef({ recipe, secrets, scope });
+ *   const agent = resolveLocalAgent(recipe, { ...deps, apiKey });
+ *
+ * Hosts without BYOK (single-tenant, env-var keys) skip this entirely.
+ */
+export async function resolveCredentialRef(params: {
+  readonly recipe: RegisteredAgent;
+  readonly secrets?: SecretsStorage;
+  readonly scope?: { readonly namespaceId?: string; readonly resourceId?: string };
+}): Promise<string | undefined> {
+  const { recipe, secrets, scope } = params;
+  if (recipe.backend.type !== "local") return undefined;
+  const ref = recipe.backend.model.credentialRef;
+  if (ref === undefined) return undefined;
+  if (!secrets) {
+    throw new Error(
+      `resolveCredentialRef: recipe "${recipe.id}" declares credentialRef "${ref}" but no ` +
+        "SecretsStorage was supplied. Wire one in to enable BYOK.",
+    );
+  }
+  const resolved = await secrets.resolve({
+    ...(scope?.namespaceId !== undefined && { namespaceId: scope.namespaceId }),
+    ...(scope?.resourceId !== undefined && { resourceId: scope.resourceId }),
+    key: ref,
+  });
+  if (!resolved) {
+    throw new Error(
+      `resolveCredentialRef: credentialRef "${ref}" not found in any scope ` +
+        `(namespace=${scope?.namespaceId ?? "<none>"}, ` +
+        `resource=${scope?.resourceId ?? "<none>"}). ` +
+        "Set the secret at global scope as a fallback, or per-namespace / per-resource for BYOK.",
+    );
+  }
+  return resolved.value;
 }

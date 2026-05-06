@@ -66,7 +66,16 @@ export function isAgentSchedule(
 
 export interface DispatchAgentScheduleDeps {
   readonly registry: AgentRegistry;
-  readonly resolve: (recipe: RegisteredAgent) => Agent;
+  /**
+   * Resolve a recipe to a live Agent. Optional `scope` carries the
+   * schedule's namespace + resource so hosts can resolve recipe-level
+   * credentialRefs (BYOK) at this boundary; ignored by hosts that
+   * don't care.
+   */
+  readonly resolve: (
+    recipe: RegisteredAgent,
+    scope?: { readonly namespaceId?: string; readonly resourceId?: string },
+  ) => Agent | Promise<Agent>;
   /**
    * Optional hook fired BEFORE the agent invocation runs. Hosts can
    * use it to write an audit row, increment a metrics counter, or
@@ -119,7 +128,11 @@ export async function dispatchAgentSchedule(
     }
   }
 
-  const agent = deps.resolve(recipe).withScope({
+  const resolved = await deps.resolve(recipe, {
+    namespaceId: meta.namespaceId,
+    ...(meta.resourceId !== undefined && { resourceId: meta.resourceId }),
+  });
+  const agent = resolved.withScope({
     namespaceId: meta.namespaceId,
     ...(meta.resourceId !== undefined && { resourceId: meta.resourceId }),
   });

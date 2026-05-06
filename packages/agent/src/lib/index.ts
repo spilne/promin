@@ -138,7 +138,7 @@ export type {
 export { DEFAULT_AGENT_VERSION, DEFAULT_AGENT_METADATA } from "./registry/types.ts";
 export { InMemoryAgentRegistry } from "./registry/in-memory-agent-registry.ts";
 export type { InMemoryAgentRegistryConfig } from "./registry/in-memory-agent-registry.ts";
-export { resolveLocalAgent } from "./registry/resolve-local-agent.ts";
+export { resolveLocalAgent, resolveCredentialRef } from "./registry/resolve-local-agent.ts";
 export type { ResolveLocalAgentDeps } from "./registry/resolve-local-agent.ts";
 export { RemoteAgent } from "./registry/remote-agent.ts";
 export { resolveRemoteAgent } from "./registry/resolve-remote-agent.ts";
