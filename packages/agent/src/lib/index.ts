@@ -289,6 +289,16 @@ export {
   DEFAULT_TURN_LEASE_TTL_MS,
 } from "./lease/agent-turn-gate.ts";
 
+// Federation — host-side allowlist gating remote-backend recipe
+// registration. Composable as a wrapper around any AgentRegistry impl.
+export type { FederationManifest } from "./federation/types.ts";
+export {
+  StaticFederationManifest,
+  AllowAllFederationManifest,
+  FederationManifestError,
+} from "./federation/types.ts";
+export { FederatedAgentRegistry } from "./federation/federated-agent-registry.ts";
+
 // RemoteDeploymentRegistry — tracks live remote Zorya deployments that
 // have self-registered to expose RemoteAgentBackend recipes here.
 // Mirrors the WorkerRegistry pattern (heartbeat + TTL + sweep).
