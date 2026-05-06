@@ -46,8 +46,9 @@ import type {
   AgentTurnPolicy,
   Message,
   RegisteredAgent,
+  SecretsStorage,
 } from "@promin/agent";
-import { TurnInProgressError } from "@promin/agent";
+import { SecretScope, TurnInProgressError } from "@promin/agent";
 import { WorkflowSuspendedError } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 
@@ -147,6 +148,16 @@ export interface AgentGatewayDeps {
    * promin-872n). Default: 'strict'.
    */
   readonly defaultTurnPolicy?: AgentTurnPolicy;
+  /**
+   * Optional scoped secrets vault. When set, the clone endpoint
+   * persists secrets supplied in the request body at the requested
+   * scope; agent invocations resolve `model.credentialRef` against
+   * this vault (BYOK). Without it, recipes that declare credentialRefs
+   * will fail at resolve time, and clone requests with a `secrets`
+   * body persist nothing (still echo the keys back so callers know
+   * they were rejected silently — TODO: 400 in a future commit).
+   */
+  readonly secrets?: SecretsStorage;
 }
 
 /**
@@ -354,17 +365,26 @@ interface CloneAgentRequest {
   readonly targetId?: unknown;
   readonly targetVersion?: unknown;
   /**
-   * Optional secrets to provision alongside the clone. When the source
-   * recipe is a template (metadata.template === true) and lists
-   * `requiredSecrets`, the clone endpoint validates that this body
-   * provides every required name. Today these values are accepted but
-   * NOT yet stored — SecretsStorage (promin-qwy8) is a pending
-   * dependency, after which BYOK semantics (promin-an9l) wire the
-   * stored values into LocalAgentBackend.model.credentialRef. Until
-   * then, any provided secrets are recorded only in the response so
-   * callers can see they were accepted.
+   * Optional secrets to provision alongside the clone. When provided
+   * and `deps.secrets` is configured, the clone endpoint stores each
+   * (key, value) pair in SecretsStorage at the requested scope. The
+   * cloned recipe's `model.credentialRef` then resolves to the stored
+   * value at agent-invocation time (BYOK end-to-end).
+   *
+   * Without `deps.secrets` configured, the values are accepted but
+   * NOT persisted (the response still echoes back the key names so
+   * forward-compatible clients know what was passed).
    */
   readonly secrets?: Record<string, string>;
+  /**
+   * Where to store the supplied `secrets`. Three shapes match
+   * SecretScope:
+   *   { kind: 'global' }                            — host-wide
+   *   { kind: 'namespace', namespaceId }            — tenant-scope
+   *   { kind: 'resource', namespaceId, resourceId } — per-user
+   * Default: global (matches the simplest single-tenant story).
+   */
+  readonly secretsScope?: unknown;
 }
 
 export function createAgent(deps: AgentGatewayDeps) {
@@ -521,6 +541,13 @@ export function cloneAgent(deps: AgentGatewayDeps) {
       tags: [...source.metadata.tags],
     };
 
+    // Resolve the secrets scope upfront so we can fail fast on bad
+    // shape — actual writes happen after the recipe is registered so
+    // a half-success doesn't leave secrets without a recipe pointing
+    // at them. Default scope is 'global' for the simplest case.
+    const secretsScope = parseCloneSecretsScope(body.secretsScope);
+    if ("error" in secretsScope) return jsonError(400, secretsScope.error);
+
     try {
       const clone = await deps.registry.register({
         id: body.targetId,
@@ -528,12 +555,17 @@ export function cloneAgent(deps: AgentGatewayDeps) {
         backend: source.backend,
         metadata: clonedMetadata,
       });
-      // `acceptedSecrets` echoes back the keys the caller supplied so
-      // forward-compatible clients can confirm the clone took. Values
-      // are NEVER echoed — the secret never leaves the response surface
-      // either way (today they're ignored; tomorrow they sit in
-      // SecretsStorage). Surface as a separate field so 'recipe' stays
-      // a clean RegisteredAgent shape.
+      // Persist supplied secrets at the requested scope when SecretsStorage
+      // is configured. Without it, values are silently ignored (the
+      // acceptedSecrets echo lets callers see the disconnect).
+      if (deps.secrets && Object.keys(provided).length > 0) {
+        for (const [key, value] of Object.entries(provided)) {
+          await deps.secrets.set({ scope: secretsScope, key, value });
+        }
+      }
+      // `acceptedSecrets` echoes back the keys the caller supplied. Values
+      // are NEVER echoed — they're either persisted in the vault or
+      // silently dropped (when secrets storage is unconfigured).
       return json(201, {
         recipe: clone,
         acceptedSecrets: Object.keys(provided),
@@ -545,14 +577,38 @@ export function cloneAgent(deps: AgentGatewayDeps) {
 }
 
 function readRequiredSecrets(metadata: RegisteredAgent["metadata"]): string[] {
-  // metadata.requiredSecrets is an additive field landing alongside
-  // the template flag (promin-ui4b). Today AgentMetadata does not
-  // declare it; we read defensively from the loose-typed object so
-  // recipes that DO carry it (forward-written by future-aware clients)
-  // are honored before the type lands.
-  const m = metadata as unknown as { requiredSecrets?: unknown };
-  if (!Array.isArray(m.requiredSecrets)) return [];
-  return m.requiredSecrets.filter((x): x is string => typeof x === "string" && x.length > 0);
+  // metadata.requiredSecrets is the AgentMetadata extension landed
+  // alongside the template flag (promin-ui4b). Read defensively so
+  // older recipes (no field set) just produce an empty list.
+  if (!Array.isArray(metadata.requiredSecrets)) return [];
+  return metadata.requiredSecrets.filter((x): x is string => typeof x === "string" && x.length > 0);
+}
+
+/**
+ * Parse the `secretsScope` field from a clone request. Defaults to
+ * global when omitted; validates the discriminated union shape.
+ */
+function parseCloneSecretsScope(raw: unknown): SecretScope | { error: string } {
+  if (raw === undefined || raw === null) return SecretScope.global();
+  if (typeof raw !== "object") return { error: "invalid_secretsScope" };
+  const obj = raw as { kind?: unknown; namespaceId?: unknown; resourceId?: unknown };
+  if (obj.kind === "global") return SecretScope.global();
+  if (obj.kind === "namespace") {
+    if (typeof obj.namespaceId !== "string" || obj.namespaceId.length === 0) {
+      return { error: "missing_namespaceId" };
+    }
+    return SecretScope.namespace(obj.namespaceId);
+  }
+  if (obj.kind === "resource") {
+    if (typeof obj.namespaceId !== "string" || obj.namespaceId.length === 0) {
+      return { error: "missing_namespaceId" };
+    }
+    if (typeof obj.resourceId !== "string" || obj.resourceId.length === 0) {
+      return { error: "missing_resourceId" };
+    }
+    return SecretScope.resource(obj.namespaceId, obj.resourceId);
+  }
+  return { error: "invalid_secretsScope_kind" };
 }
 
 // ---------------------------------------------------------------------------

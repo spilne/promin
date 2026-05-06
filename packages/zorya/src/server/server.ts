@@ -391,6 +391,7 @@ export class ZoryaServer {
         ...(this.agents.instances !== undefined && { instanceRegistry: this.agents.instances }),
         ...(this.agents.turnGate !== undefined && { turnGate: this.agents.turnGate }),
         ...(this.agents.workerId !== undefined && { workerId: this.agents.workerId }),
+        ...(this.secrets !== undefined && { secrets: this.secrets }),
       };
       this.router
         .get("/api/agents", listAgents(agentDeps))

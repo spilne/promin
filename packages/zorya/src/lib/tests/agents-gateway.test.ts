@@ -20,6 +20,8 @@ import {
   InMemoryAgentRegistry,
   InMemoryLeaseStore,
   InMemoryMemoryStore,
+  InMemorySecretsStorage,
+  SecretScope,
   resolveLocalAgent,
 } from "@promin/agent";
 import type { AgentInstanceRegistry, LLMProvider, LLMResponse } from "@promin/agent";
@@ -44,6 +46,8 @@ async function bootGateway(opts?: {
   withTurnGate?: boolean;
   /** Pre-acquire the lease for this thread before booting (simulates a turn already in flight). */
   preAcquireThread?: { namespaceId: string; threadId: string; ownerId: string };
+  /** When true, mounts an InMemorySecretsStorage and exposes it to the gateway. */
+  withSecrets?: boolean;
 }) {
   const storage = new InMemoryWorkflowStorage();
   const runner = createWorkflowRunner({ storage });
@@ -97,12 +101,24 @@ async function bootGateway(opts?: {
     ...(instanceRegistry && { instances: instanceRegistry }),
     ...(turnGate && { turnGate, workerId: "worker-test" }),
   });
+  const secrets = opts?.withSecrets ? new InMemorySecretsStorage() : undefined;
   const server = new ZoryaServer({
     workflows,
     agents,
+    ...(secrets !== undefined && { secrets }),
   });
 
-  return { server, storage, runner, memory, registry, instanceRegistry, leaseStore, turnGate };
+  return {
+    server,
+    storage,
+    runner,
+    memory,
+    registry,
+    instanceRegistry,
+    leaseStore,
+    turnGate,
+    secrets,
+  };
 }
 
 describe("agent gateway — discovery", () => {
@@ -672,14 +688,10 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
       expect(res.status).toBe(404);
     });
 
-    it("echoes back accepted secret names without storing values", async () => {
-      // Today AgentMetadata doesn't yet carry `requiredSecrets` (lands
-      // with ui4b, which extends the type). The clone endpoint's
-      // validation reads the field defensively — when present, it
-      // checks that all named secrets are provided. When absent (today),
-      // any provided secrets are accepted and echoed in `acceptedSecrets`.
-      // This test pins the no-template path: secrets are accepted by
-      // shape so forward-compatible clients can build today.
+    it("echoes back accepted secret names without storing values when no SecretsStorage configured", async () => {
+      // Without `secrets` on the gateway deps, supplied values are
+      // silently dropped. The acceptedSecrets echo lets callers see
+      // their values were received but not persisted.
       const { server } = await bootGateway();
       const res = await server.handle(
         new Request("http://test/api/agents/support/clone", {
@@ -698,6 +710,114 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
       };
       expect(body.recipe.id).toBe("support-fork");
       expect(body.acceptedSecrets.sort()).toEqual(["anthropic_api_key", "openai_key"]);
+    });
+
+    it("rejects with 400 missing_required_secrets when source is a template missing keys", async () => {
+      const { server, registry } = await bootGateway();
+      await registry.register({
+        id: "anthropic-template",
+        backend: {
+          type: "local",
+          model: {
+            provider: "anthropic",
+            id: "claude-sonnet-4-6",
+            credentialRef: "anthropic_api_key",
+          },
+          systemPrompt: "Cloneable",
+          tools: [],
+        },
+        metadata: {
+          description: null,
+          capabilities: [],
+          tags: ["template"],
+          template: true,
+          requiredSecrets: ["anthropic_api_key"],
+        },
+      });
+
+      const res = await server.handle(
+        new Request("http://test/api/agents/anthropic-template/clone", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ targetId: "my-bot" }),
+        }),
+      );
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toBe("missing_required_secrets");
+    });
+
+    it("clone-with-secrets persists supplied secrets at the requested scope", async () => {
+      const { server, registry, secrets } = await bootGateway({ withSecrets: true });
+      await registry.register({
+        id: "anthropic-template",
+        backend: {
+          type: "local",
+          model: {
+            provider: "anthropic",
+            id: "claude-sonnet-4-6",
+            credentialRef: "anthropic_api_key",
+          },
+          systemPrompt: "Cloneable",
+          tools: [],
+        },
+        metadata: {
+          description: null,
+          capabilities: [],
+          tags: ["template"],
+          template: true,
+          requiredSecrets: ["anthropic_api_key"],
+        },
+      });
+
+      const res = await server.handle(
+        new Request("http://test/api/agents/anthropic-template/clone", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            targetId: "my-bot",
+            secrets: { anthropic_api_key: "sk-ant-tenant-key" },
+            secretsScope: { kind: "namespace", namespaceId: "acme" },
+          }),
+        }),
+      );
+      expect(res.status).toBe(201);
+
+      // Secret persisted at namespace scope.
+      const stored = await secrets!.get({
+        scope: SecretScope.namespace("acme"),
+        key: "anthropic_api_key",
+      });
+      expect(stored).toBe("sk-ant-tenant-key");
+    });
+
+    it("clones with template flag stripped (clone is not itself a template)", async () => {
+      const { server, registry } = await bootGateway();
+      await registry.register({
+        id: "tmpl",
+        backend: {
+          type: "local",
+          model: { provider: "anthropic", id: "claude-sonnet-4-6" },
+          systemPrompt: "Cloneable",
+          tools: [],
+        },
+        metadata: {
+          description: null,
+          capabilities: [],
+          tags: [],
+          template: true,
+        },
+      });
+      const res = await server.handle(
+        new Request("http://test/api/agents/tmpl/clone", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ targetId: "my-fork" }),
+        }),
+      );
+      expect(res.status).toBe(201);
+      const got = await registry.get("my-fork");
+      expect(got?.metadata.template).toBeUndefined();
     });
   });
 });
