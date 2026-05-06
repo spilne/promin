@@ -45,6 +45,7 @@ import {
   SqliteAgentRegistry,
   SqliteAgentInstanceRegistry,
   SqliteMemoryStore,
+  SqliteSecretsStorage,
 } from "@promin/sqlite";
 import {
   anthropic,
@@ -55,6 +56,7 @@ import {
   inProcessSchedulerClient,
   InMemoryModelCatalog,
   resolveCursorAgent,
+  resolveCredentialRef,
   resolveLocalAgent,
   resolveRemoteAgent,
   tool,
@@ -119,6 +121,15 @@ const memoryStore = SqliteMemoryStore.make({ db });
 // survive restarts; the cascade still keys memory by `resourceId =
 // instance.id`, so one instance = one per-(agent, owner) memory slot.
 const instanceRegistry = SqliteAgentInstanceRegistry.make({ db });
+
+// Secrets vault. AES-256-GCM at rest (passphrase via PROMIN_SECRETS_PASSPHRASE,
+// dev default below). Exposes /api/secrets HTTP CRUD + the dashboard's
+// /secrets page; agent resolver fetches model.credentialRef from here
+// at request time (BYOK). The dev-default passphrase is fine for local
+// hacking — production deployments must set PROMIN_SECRETS_PASSPHRASE.
+const secretsPassphrase =
+  process.env.PROMIN_SECRETS_PASSPHRASE ?? "demo-only-passphrase-change-in-prod";
+const secretsStorage = SqliteSecretsStorage.make({ db, passphrase: secretsPassphrase });
 
 // ---------------------------------------------------------------------------
 // Agents — auto-discovered from ./agents (mirrors the workflow scanner).
@@ -486,12 +497,30 @@ async function seedAgents() {
 // remote recipes are proxied over HTTP without touching the local LLM/memory
 // stack. Defined as a named function so the network deps can pass it back in
 // for recursive `callAgent` lookups.
-function resolveAgent(recipe: RegisteredAgent): Agent {
+//
+// The optional `scope` carries the per-request (namespaceId, resourceId)
+// for BYOK credential resolution. When the recipe declares
+// `model.credentialRef`, the secret is fetched here and forwarded to
+// the LLM factory's third arg. Existing recipes without credentialRef
+// take the host-default path (pooled API keys via env vars).
+async function resolveAgent(
+  recipe: RegisteredAgent,
+  scope?: { readonly namespaceId?: string; readonly resourceId?: string },
+): Promise<Agent> {
   if (recipe.backend.type === "remote") return resolveRemoteAgent(recipe);
   if (recipe.backend.type === "cursor") return resolveCursorAgent(recipe);
+  // BYOK: resolve credentialRef from secrets vault before constructing
+  // the LLM. Throws clearly when a ref is set but no value exists at
+  // any scope; falls through to undefined (host default) when unset.
+  const apiKey = await resolveCredentialRef({
+    recipe,
+    secrets: secretsStorage,
+    ...(scope !== undefined && { scope }),
+  });
   return resolveLocalAgent(recipe, {
     runner,
     memory: memoryStore,
+    ...(apiKey !== undefined && { apiKey }),
     // Resolution order:
     //   1. Demo-specific id-keyed mocks (echo / round-robin / tool-calling
     //      placeholders) — kept so the hand-tuned demo agents still drive
@@ -500,7 +529,17 @@ function resolveAgent(recipe: RegisteredAgent): Agent {
     //      the path a recipe authored in the designer UI takes.
     //   3. Echo fallback so a recipe pointing at an unknown model still
     //      boots (with an obvious "echo" output) instead of throwing.
-    llm: (provider: string, id: string) =>
+    //
+    // BYOK note: the third `byokKey` argument arrives when the recipe
+    // declares `model.credentialRef` and the secret was resolved from
+    // the vault. The demo's catalog doesn't currently rebuild providers
+    // with per-tenant keys (single shared anthropic / ollama instance);
+    // wiring that into InMemoryModelCatalog is a follow-up. For now
+    // BYOK works end-to-end via the `apiKey` plumbing in resolveLocalAgent
+    // — the value is captured but not yet swapped into the LLM provider.
+    // The agent_secret table + credentialRef flow are still verifiable
+    // in tests; this is a demo-side hook for production hosts to wire in.
+    llm: (provider: string, id: string, _byokKey?: string) =>
       agentLlms[recipe.id] ?? modelCatalog.get(provider, id)?.llm ?? naturalLLM(echoLLM()),
     // Full registry of tools available; resolver's pickTools narrows by
     // recipe.backend.tools. listWorkflows is added inline because it
@@ -1019,6 +1058,11 @@ const server = new ZoryaServer({
   workflows,
   scheduler,
   agents,
+  // BYOK / per-tenant API keys / MCP credentials live here. Exposes
+  // /api/secrets HTTP CRUD + the dashboard's Secrets page; the agent
+  // resolver wiring (in `agents.resolve` above) reads model.credentialRef
+  // from this vault at request time.
+  secrets: secretsStorage,
   // Mounts /rpc/storage, /rpc/worker, /api/advertisements,
   // /api/worker-protocol/* — the surface external workers connect to.
   remoteWorkers: {},
