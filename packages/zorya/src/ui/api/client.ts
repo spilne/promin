@@ -413,6 +413,55 @@ export const api = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// Secrets API — scoped vault CRUD (h1st Phase 2/3)
+// ---------------------------------------------------------------------------
+
+export type SecretScopeWire =
+  | { kind: "global" }
+  | { kind: "namespace"; namespaceId: string }
+  | { kind: "resource"; namespaceId: string; resourceId: string };
+
+export interface SecretsListResponse {
+  scope: SecretScopeWire;
+  keys: string[];
+}
+
+export interface SecretsCreateResponse {
+  scope: SecretScopeWire;
+  key: string;
+}
+
+function scopeToQuery(scope: SecretScopeWire): string {
+  const qp = new URLSearchParams();
+  qp.set("scope", scope.kind);
+  if (scope.kind !== "global") qp.set("namespaceId", scope.namespaceId);
+  if (scope.kind === "resource") qp.set("resourceId", scope.resourceId);
+  return qp.toString();
+}
+
+export const secretsApi = {
+  list(scope: SecretScopeWire): Promise<SecretsListResponse> {
+    return req<SecretsListResponse>(`/api/secrets?${scopeToQuery(scope)}`);
+  },
+  create(body: {
+    scope: SecretScopeWire;
+    key: string;
+    value: string;
+  }): Promise<SecretsCreateResponse> {
+    return req<SecretsCreateResponse>(`/api/secrets`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  delete(scope: SecretScopeWire, key: string): Promise<void> {
+    return req<void>(`/api/secrets/${encodeURIComponent(key)}?${scopeToQuery(scope)}`, {
+      method: "DELETE",
+    });
+  },
+};
+
 export interface AgentStreamHandlers {
   onThread?: (info: { threadId: string; isNew: boolean; instanceId?: string }) => void;
   onDelta: (delta: string) => void;
