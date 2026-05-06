@@ -289,6 +289,20 @@ export {
   DEFAULT_TURN_LEASE_TTL_MS,
 } from "./lease/agent-turn-gate.ts";
 
+// MCP integration — connect agents to Model Context Protocol servers.
+export type {
+  McpClient,
+  McpServerConfig,
+  StdioMcpServerConfig,
+  HttpMcpServerConfig,
+  SseMcpServerConfig,
+  McpToolDefinition,
+  McpToolResult,
+  McpContentBlock,
+} from "./mcp/types.ts";
+export { createMcpTools } from "./mcp/mcp-tools.ts";
+export { createSdkMcpClient, type SdkMcpClientConfig } from "./mcp/mcp-client.ts";
+
 export { tool, createScopedTool, createElevatedTool } from "./tool.ts";
 export type {
   AgentTool,
