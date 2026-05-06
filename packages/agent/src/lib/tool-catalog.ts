@@ -31,6 +31,13 @@ export interface ToolCatalogEntry {
   readonly parameters: Record<string, unknown>;
   /** Where the tool implementation came from. */
   readonly source: ToolCatalogSource;
+  /**
+   * Operator kill-switch state. `true` (default) means the tool is
+   * pickable by recipes; `false` means it's wired but disabled —
+   * still surfaced in the catalog so operators see the gap, but
+   * resolveLocalAgent rejects recipes that reference it.
+   */
+  readonly enabled: boolean;
 }
 
 export type ToolCatalogSource =
@@ -112,6 +119,11 @@ export class DefaultAgentToolCatalog implements AgentToolCatalog {
               description: tool.description ?? `MCP tool '${tool.name}' (no description)`,
               parameters: { ...tool.inputSchema },
               source: { kind: "mcp", server: server.name },
+              // MCP tools are always 'enabled' from the catalog's POV —
+              // the MCP server itself is the kill-switch (remove server
+              // from the recipe to disable). Per-tool toggling is the
+              // server's responsibility.
+              enabled: true,
             });
             seen.add(mounted);
           }
@@ -139,5 +151,6 @@ function toEntry(
     description: tool.description,
     parameters: zodToJsonSchema(tool.parameters),
     source,
+    enabled: tool.enabled !== false,
   };
 }

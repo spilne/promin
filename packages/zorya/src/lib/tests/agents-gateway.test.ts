@@ -822,6 +822,119 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
   });
 });
 
+describe("agent gateway — disabled recipe gate", () => {
+  it("invoke returns 410 when recipe.metadata.enabled === false", async () => {
+    const { server, registry } = await bootGateway();
+    await registry.register({
+      id: "support",
+      backend: {
+        type: "local",
+        model: { provider: "anthropic", id: "claude-sonnet-4-6" },
+        systemPrompt: "Helpful",
+        tools: [],
+      },
+      metadata: { description: null, capabilities: [], tags: [], enabled: false },
+    });
+    const res = await server.handle(
+      new Request("http://test/api/agents/support/invoke", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ task: "hi", namespaceId: "acme", resourceId: "alice" }),
+      }),
+    );
+    expect(res.status).toBe(410);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("agent_disabled");
+  });
+
+  it("thread-send returns 410 when recipe is disabled", async () => {
+    const { server, registry } = await bootGateway();
+    await registry.register({
+      id: "support",
+      backend: {
+        type: "local",
+        model: { provider: "anthropic", id: "claude-sonnet-4-6" },
+        systemPrompt: "Helpful",
+        tools: [],
+      },
+      metadata: { description: null, capabilities: [], tags: [], enabled: false },
+    });
+    const res = await server.handle(
+      new Request("http://test/api/agents/support/threads/t-1", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ task: "hi", namespaceId: "acme", resourceId: "alice" }),
+      }),
+    );
+    expect(res.status).toBe(410);
+  });
+
+  it("read paths still work on disabled agents (browse + edit allowed)", async () => {
+    const { server, registry } = await bootGateway();
+    await registry.register({
+      id: "support",
+      backend: {
+        type: "local",
+        model: { provider: "anthropic", id: "claude-sonnet-4-6" },
+        systemPrompt: "Helpful",
+        tools: [],
+      },
+      metadata: { description: null, capabilities: [], tags: [], enabled: false },
+    });
+    const get = await server.handle(
+      new Request("http://test/api/agents/support", { method: "GET" }),
+    );
+    expect(get.status).toBe(200);
+    const patch = await server.handle(
+      new Request("http://test/api/agents/support", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ metadata: { description: "edited while disabled" } }),
+      }),
+    );
+    expect(patch.status).toBe(200);
+  });
+
+  it("re-enabling lets invocations through again", async () => {
+    const { server, registry } = await bootGateway({
+      responses: [{ content: "ok", finishReason: "stop" }],
+    });
+    await registry.register({
+      id: "support",
+      backend: {
+        type: "local",
+        model: { provider: "anthropic", id: "claude-sonnet-4-6" },
+        systemPrompt: "Helpful",
+        tools: [],
+      },
+      metadata: { description: null, capabilities: [], tags: [], enabled: false },
+    });
+    const blocked = await server.handle(
+      new Request("http://test/api/agents/support/invoke", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ task: "hi", namespaceId: "acme", resourceId: "alice" }),
+      }),
+    );
+    expect(blocked.status).toBe(410);
+    await server.handle(
+      new Request("http://test/api/agents/support", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ metadata: { enabled: true } }),
+      }),
+    );
+    const ok = await server.handle(
+      new Request("http://test/api/agents/support/invoke", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ task: "hi", namespaceId: "acme", resourceId: "alice" }),
+      }),
+    );
+    expect(ok.status).toBe(200);
+  });
+});
+
 describe("agent gateway — turn gate (per-thread coordination)", () => {
   it("succeeds when the lease is free (no contention)", async () => {
     const { server } = await bootGateway({

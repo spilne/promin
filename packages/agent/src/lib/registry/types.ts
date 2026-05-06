@@ -62,6 +62,18 @@ export interface AgentMetadata {
    * stored under the same name the recipe references.
    */
   readonly requiredSecrets?: ReadonlyArray<string>;
+  /**
+   * Operator kill-switch. `enabled !== false` (default) means the
+   * recipe is invokable; setting `enabled: false` keeps the row in
+   * the registry (so threads / history / metadata stay browsable)
+   * but rejects new invocations at the gateway with 410 Gone.
+   *
+   * Lets operators take a recipe out of rotation without losing its
+   * threads / runs / memory. Useful for: incident response (LLM
+   * provider outage), schema migrations (new tool refs not yet
+   * wired), staged rollouts (disable v1 after promoting v2).
+   */
+  readonly enabled?: boolean;
 }
 
 /**

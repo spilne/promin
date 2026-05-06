@@ -143,8 +143,15 @@ function ToolRow({ tool }: { tool: ToolCatalogEntryDto }) {
   const [expanded, setExpanded] = useState(false);
   return (
     <>
-      <tr class="hover:bg-base-200">
-        <td class="font-mono text-sm">{tool.name}</td>
+      <tr class={`hover:bg-base-200 ${tool.enabled ? "" : "opacity-60"}`}>
+        <td class="font-mono text-sm">
+          {tool.name}
+          {!tool.enabled && (
+            <span class="badge badge-xs badge-error ml-2" title="Tool is disabled (enabled: false)">
+              disabled
+            </span>
+          )}
+        </td>
         <td class="text-xs text-base-content/70">{tool.description}</td>
         <td>
           <SourceBadge source={tool.source} />

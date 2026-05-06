@@ -185,6 +185,17 @@ function pickTools(
           "in deps.tools. Either add the implementation or set onUnknownTool: 'skip'.",
       );
     }
+    // Disabled tools are treated like unknown ones — operator kill-
+    // switched the implementation. The agent doesn't get a stale
+    // reference; the catalog still shows the tool with a 'disabled'
+    // badge so operators see the gap.
+    if (tool.enabled === false) {
+      if (onUnknown === "skip") continue;
+      throw new Error(
+        `resolveLocalAgent: tool "${name}" is disabled (enabled: false) on the host. ` +
+          "Re-enable it or remove the reference from the recipe.",
+      );
+    }
     out[name] = tool;
   }
   return out;

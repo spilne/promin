@@ -30,6 +30,7 @@ export function AgentEditDrawer({ agent, onClose, onSaved }: Props) {
   );
   const [capabilities, setCapabilities] = useState(agent.metadata.capabilities.join(", "));
   const [tags, setTags] = useState(agent.metadata.tags.join(", "));
+  const [enabled, setEnabled] = useState(agent.metadata.enabled !== false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -49,6 +50,7 @@ export function AgentEditDrawer({ agent, onClose, onSaved }: Props) {
           description: description.trim() || null,
           capabilities: parseList(capabilities),
           tags: parseList(tags),
+          enabled,
         },
       };
       // System prompt only meaningful for local backends.
@@ -150,6 +152,26 @@ export function AgentEditDrawer({ agent, onClose, onSaved }: Props) {
               value={tags}
               onInput={(e) => setTags((e.target as HTMLInputElement).value)}
             />
+          </label>
+
+          <label class="form-control">
+            <span class="text-xs text-base-content/60 mb-1 uppercase tracking-wider">Status</span>
+            <label class="cursor-pointer label justify-start gap-2 px-0 py-1">
+              <input
+                type="checkbox"
+                class="toggle toggle-sm toggle-success"
+                checked={enabled}
+                onChange={(e) => setEnabled((e.target as HTMLInputElement).checked)}
+              />
+              <span class="text-sm">
+                {enabled ? "Enabled" : "Disabled"}
+                <span class="text-[10px] text-base-content/50 ml-1">
+                  {enabled
+                    ? "— recipe accepts invocations"
+                    : "— invocations rejected with 410, threads + history still browsable"}
+                </span>
+              </span>
+            </label>
           </label>
 
           {error && <div class="alert alert-error text-xs">{error}</div>}

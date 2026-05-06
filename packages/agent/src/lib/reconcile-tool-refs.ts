@@ -51,7 +51,13 @@ export async function reconcileToolReferences(
   deps: ReconcileToolReferencesDeps,
 ): Promise<ToolRefReport> {
   const liveTools = await deps.catalog.listAll();
-  const liveNames = new Set(liveTools.map((t) => t.name));
+  // Disabled tools are reported by the catalog (so operators can see
+  // them) but treated as NOT live for reconciliation — a recipe
+  // referencing a disabled tool can't actually invoke it, so it's
+  // effectively broken from the recipe's POV. The catalog's UI
+  // distinguishes 'disabled' from 'removed' via the source/enabled
+  // badges.
+  const liveNames = new Set(liveTools.filter((t) => t.enabled).map((t) => t.name));
   const allRecipes = await deps.registry.list();
 
   const recipes: RecipeToolRefHealth[] = [];

@@ -210,8 +210,17 @@ function AgentMetaBadges({
     agent.backend.type === "local"
       ? `${agent.backend.model.provider}/${agent.backend.model.id}`
       : agent.backend.type;
+  const isDisabled = agent.metadata.enabled === false;
   return (
     <div class="flex gap-1 flex-wrap items-center">
+      {isDisabled && (
+        <span
+          class="badge badge-sm badge-error"
+          title="Recipe is disabled. Invocations return 410."
+        >
+          DISABLED
+        </span>
+      )}
       <span class="badge badge-sm badge-outline font-mono">v{agent.version}</span>
       <span class="badge badge-sm badge-outline font-mono">{model}</span>
       {agent.metadata.capabilities.map((c) => (

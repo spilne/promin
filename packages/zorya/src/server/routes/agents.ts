@@ -161,6 +161,23 @@ export interface AgentGatewayDeps {
 }
 
 /**
+ * Reject invocations on disabled recipes with 410 Gone. Read / edit
+ * routes (list threads, update metadata, list versions, clone, etc.)
+ * still work on disabled agents — operators need to re-enable them
+ * after fixing whatever drove the kill-switch.
+ */
+function disabled410(recipe: RegisteredAgent): Response | null {
+  if (recipe.metadata.enabled === false) {
+    return jsonError(
+      410,
+      "agent_disabled",
+      `Agent "${recipe.id}" is disabled. Re-enable it before invoking.`,
+    );
+  }
+  return null;
+}
+
+/**
  * Translate a TurnInProgressError into a 409 response with structured
  * body. Returns null when the error is something else.
  */
@@ -622,6 +639,8 @@ export function invokeAgent(deps: AgentGatewayDeps) {
 
     const recipe = await deps.registry.get(id);
     if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+    const disabled = disabled410(recipe);
+    if (disabled) return disabled;
 
     const body = await readJson<InvokeRequest>(req);
     const parsed = parseInvokeBody(body);
@@ -666,6 +685,8 @@ export function streamAgent(deps: AgentGatewayDeps) {
 
     const recipe = await deps.registry.get(id);
     if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+    const disabled = disabled410(recipe);
+    if (disabled) return disabled;
 
     const body = await readJson<InvokeRequest>(req);
     const parsed = parseInvokeBody(body);
@@ -741,6 +762,8 @@ export function sendThreadMessage(deps: AgentGatewayDeps) {
 
     const recipe = await deps.registry.get(id);
     if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+    const disabled = disabled410(recipe);
+    if (disabled) return disabled;
 
     const body = await readJson<InvokeRequest>(req);
     const parsed = parseInvokeBody(body);
@@ -807,6 +830,8 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
 
     const recipe = await deps.registry.get(id);
     if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+    const disabled = disabled410(recipe);
+    if (disabled) return disabled;
 
     const body = await readJson<InvokeRequest>(req);
     const parsed = parseInvokeBody(body);
@@ -884,6 +909,8 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
 
     const recipe = await deps.registry.get(id);
     if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+    const disabled = disabled410(recipe);
+    if (disabled) return disabled;
 
     const body = await readJson<ApprovalRequest>(req);
     const parsed = parseApprovalBody(body);
@@ -1088,6 +1115,8 @@ export function listAgentThreads(deps: AgentGatewayDeps) {
 
     const recipe = await deps.registry.get(id);
     if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+    const disabled = disabled410(recipe);
+    if (disabled) return disabled;
 
     let agent: Agent;
     try {
@@ -1126,6 +1155,8 @@ export function listThreadMessages(deps: AgentGatewayDeps) {
 
     const recipe = await deps.registry.get(id);
     if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+    const disabled = disabled410(recipe);
+    if (disabled) return disabled;
 
     let agent: Agent;
     try {
@@ -1181,6 +1212,8 @@ export function renameAgentThread(deps: AgentGatewayDeps) {
 
     const recipe = await deps.registry.get(id);
     if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+    const disabled = disabled410(recipe);
+    if (disabled) return disabled;
 
     let agent: Agent;
     try {
@@ -1229,6 +1262,8 @@ export function distillThread(deps: AgentGatewayDeps) {
 
     const recipe = await deps.registry.get(id);
     if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+    const disabled = disabled410(recipe);
+    if (disabled) return disabled;
 
     let agent: Agent;
     try {
@@ -1265,6 +1300,8 @@ export function compactThread(deps: AgentGatewayDeps) {
 
     const recipe = await deps.registry.get(id);
     if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+    const disabled = disabled410(recipe);
+    if (disabled) return disabled;
 
     let agent: Agent;
     try {
@@ -1318,6 +1355,8 @@ export function archiveAgentThread(deps: AgentGatewayDeps) {
 
     const recipe = await deps.registry.get(id);
     if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+    const disabled = disabled410(recipe);
+    if (disabled) return disabled;
 
     let agent: Agent;
     try {

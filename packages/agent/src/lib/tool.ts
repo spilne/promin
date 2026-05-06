@@ -110,6 +110,20 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
    * not yet wired in; tracked as a follow-up to `promin-3paw`.
    */
   readonly requires?: string;
+  /**
+   * Operator-toggleable flag. `enabled !== false` (default) means the
+   * tool is wired and pickable by recipes. Setting `enabled: false`
+   * keeps the source file (or in-process binding) intact while:
+   *   - Hiding the tool from the agent's resolved tool list
+   *   - Surfacing it in the catalog with a disabled badge
+   *   - Treating recipe references as broken (reconciliation surfaces
+   *     them in the orphans panel)
+   *
+   * Lets operators kill-switch a tool without code changes — useful
+   * during incident response or when a tool's external dependency is
+   * down and you want the agent to stop trying.
+   */
+  readonly enabled?: boolean;
 }
 
 // ---- scoped + elevated tool factories ----------------------------------

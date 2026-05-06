@@ -487,6 +487,7 @@ export interface ToolCatalogEntryDto {
   description: string;
   parameters: Record<string, unknown>;
   source: ToolCatalogSourceDto;
+  enabled: boolean;
 }
 
 /** Wire shape for /api/agents/_catalog/tools/health. */

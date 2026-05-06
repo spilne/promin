@@ -49,6 +49,7 @@ export class PostgresAgentRegistry implements AgentRegistry {
       ...(input.metadata?.requiredSecrets !== undefined && {
         requiredSecrets: [...input.metadata.requiredSecrets],
       }),
+      ...(input.metadata?.enabled !== undefined && { enabled: input.metadata.enabled }),
     };
     const rows = await this.db
       .insert(agentRegistry)

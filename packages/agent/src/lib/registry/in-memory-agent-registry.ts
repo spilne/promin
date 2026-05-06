@@ -112,6 +112,7 @@ export function mergeMetadata(patch?: Partial<AgentMetadata>): AgentMetadata {
     ...(patch?.requiredSecrets !== undefined && {
       requiredSecrets: [...patch.requiredSecrets],
     }),
+    ...(patch?.enabled !== undefined && { enabled: patch.enabled }),
   };
 }
 
