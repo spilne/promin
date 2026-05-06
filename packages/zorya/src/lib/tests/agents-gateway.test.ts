@@ -15,8 +15,10 @@
 
 import { describe, it, expect } from "bun:test";
 import {
+  AgentTurnGate,
   InMemoryAgentInstanceRegistry,
   InMemoryAgentRegistry,
+  InMemoryLeaseStore,
   InMemoryMemoryStore,
   resolveLocalAgent,
 } from "@promin/agent";
@@ -36,7 +38,13 @@ function mockLLM(responses: LLMResponse[]): LLMProvider {
   };
 }
 
-async function bootGateway(opts?: { responses?: LLMResponse[]; withInstances?: boolean }) {
+async function bootGateway(opts?: {
+  responses?: LLMResponse[];
+  withInstances?: boolean;
+  withTurnGate?: boolean;
+  /** Pre-acquire the lease for this thread before booting (simulates a turn already in flight). */
+  preAcquireThread?: { namespaceId: string; threadId: string; ownerId: string };
+}) {
   const storage = new InMemoryWorkflowStorage();
   const runner = createWorkflowRunner({ storage });
   const memory = new InMemoryMemoryStore();
@@ -44,6 +52,19 @@ async function bootGateway(opts?: { responses?: LLMResponse[]; withInstances?: b
   const instanceRegistry: AgentInstanceRegistry | undefined = opts?.withInstances
     ? new InMemoryAgentInstanceRegistry()
     : undefined;
+  const leaseStore =
+    opts?.withTurnGate || opts?.preAcquireThread ? new InMemoryLeaseStore() : undefined;
+  const turnGate = leaseStore ? new AgentTurnGate({ leaseStore }) : undefined;
+  if (opts?.preAcquireThread && leaseStore) {
+    await leaseStore.acquire({
+      key: {
+        namespaceId: opts.preAcquireThread.namespaceId,
+        threadId: opts.preAcquireThread.threadId,
+      },
+      ownerId: opts.preAcquireThread.ownerId,
+      ttlMs: 60_000,
+    });
+  }
 
   await registry.register({
     id: "support",
@@ -74,13 +95,14 @@ async function bootGateway(opts?: { responses?: LLMResponse[]; withInstances?: b
       }),
     memory,
     ...(instanceRegistry && { instances: instanceRegistry }),
+    ...(turnGate && { turnGate, workerId: "worker-test" }),
   });
   const server = new ZoryaServer({
     workflows,
     agents,
   });
 
-  return { server, storage, runner, memory, registry, instanceRegistry };
+  return { server, storage, runner, memory, registry, instanceRegistry, leaseStore, turnGate };
 }
 
 describe("agent gateway — discovery", () => {
@@ -438,5 +460,128 @@ describe("agent gateway — instance auto-resolve from ownerId", () => {
       threadId: "main",
     });
     expect(thread).not.toBeNull();
+  });
+});
+
+describe("agent gateway — turn gate (per-thread coordination)", () => {
+  it("succeeds when the lease is free (no contention)", async () => {
+    const { server } = await bootGateway({
+      responses: [{ content: "ok", finishReason: "stop" }],
+      withTurnGate: true,
+    });
+    const res = await server.handle(
+      new Request("http://test/api/agents/support/threads/t-1", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ task: "hi", namespaceId: "acme", resourceId: "alice" }),
+      }),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("returns 409 turn_in_progress when another worker holds the lease", async () => {
+    const { server } = await bootGateway({
+      responses: [{ content: "ok", finishReason: "stop" }],
+      preAcquireThread: { namespaceId: "acme", threadId: "t-1", ownerId: "worker-other" },
+    });
+    const res = await server.handle(
+      new Request("http://test/api/agents/support/threads/t-1", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ task: "hi", namespaceId: "acme", resourceId: "alice" }),
+      }),
+    );
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as {
+      error: string;
+      currentOwner: string;
+      expiresAt: number;
+    };
+    expect(body.error).toBe("turn_in_progress");
+    expect(body.currentOwner).toBe("worker-other");
+    expect(typeof body.expiresAt).toBe("number");
+  });
+
+  it("releases the lease after a successful turn so the next request succeeds", async () => {
+    const { server } = await bootGateway({
+      responses: [
+        { content: "first", finishReason: "stop" },
+        { content: "second", finishReason: "stop" },
+      ],
+      withTurnGate: true,
+    });
+    const a = await server.handle(
+      new Request("http://test/api/agents/support/threads/t-1", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ task: "hi", namespaceId: "acme", resourceId: "alice" }),
+      }),
+    );
+    expect(a.status).toBe(200);
+    // Same thread, second call. Should succeed (lease released by previous turn).
+    const b = await server.handle(
+      new Request("http://test/api/agents/support/threads/t-1", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ task: "again", namespaceId: "acme", resourceId: "alice" }),
+      }),
+    );
+    expect(b.status).toBe(200);
+  });
+
+  it("different threads do not contend with each other", async () => {
+    const { server, leaseStore } = await bootGateway({
+      responses: [
+        { content: "r1", finishReason: "stop" },
+        { content: "r2", finishReason: "stop" },
+      ],
+      withTurnGate: true,
+    });
+    // Pre-acquire t-1 — t-2 should still succeed.
+    await leaseStore!.acquire({
+      key: { namespaceId: "acme", threadId: "t-1" },
+      ownerId: "worker-other",
+      ttlMs: 60_000,
+    });
+    const res = await server.handle(
+      new Request("http://test/api/agents/support/threads/t-2", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ task: "hi", namespaceId: "acme", resourceId: "alice" }),
+      }),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("stream route also returns 409 on contention", async () => {
+    const { server } = await bootGateway({
+      responses: [{ content: "ok", finishReason: "stop" }],
+      preAcquireThread: { namespaceId: "acme", threadId: "t-1", ownerId: "worker-other" },
+    });
+    const res = await server.handle(
+      new Request("http://test/api/agents/support/threads/t-1/stream", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ task: "hi", namespaceId: "acme", resourceId: "alice" }),
+      }),
+    );
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("turn_in_progress");
+  });
+
+  it("without a turnGate configured, contention is not enforced (single-process default)", async () => {
+    const { server } = await bootGateway({
+      responses: [{ content: "ok", finishReason: "stop" }],
+      // withTurnGate omitted — gate is undefined
+    });
+    const res = await server.handle(
+      new Request("http://test/api/agents/support/threads/t-1", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ task: "hi", namespaceId: "acme", resourceId: "alice" }),
+      }),
+    );
+    expect(res.status).toBe(200);
   });
 });

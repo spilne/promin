@@ -103,6 +103,56 @@ export class AgentTurnGate {
     return this.runStrict(params);
   }
 
+  /**
+   * Acquire a lease without holding it inside a body — for streaming
+   * routes where the request returns immediately and the lease must
+   * outlive the synchronous handler. Caller MUST call `release()` (or
+   * lease will expire on its own at TTL). Same `policy` semantics as
+   * `run()`: 'strict' throws TurnInProgressError on contention,
+   * 'queued' throws NotImplementedError.
+   */
+  async acquire(params: {
+    readonly key: ThreadLeaseKey;
+    readonly ownerId: string;
+    readonly ttlMs?: number;
+    readonly policy: AgentTurnPolicy;
+  }): Promise<AgentTurnLease> {
+    if (params.policy === "queued") {
+      throw new QueuedPolicyNotImplementedError();
+    }
+    const ttlMs = params.ttlMs ?? this.defaultTtlMs;
+    const result = await this.leaseStore.acquire({
+      key: params.key,
+      ownerId: params.ownerId,
+      ttlMs,
+    });
+    if (!result.acquired) {
+      throw new TurnInProgressError(result.currentLease);
+    }
+    const lease = result.lease;
+    return {
+      ...lease,
+      extend: async (additionalMs) => {
+        const r = await this.leaseStore.extend({ leaseId: lease.leaseId, additionalMs });
+        if (!r.extended) {
+          throw new Error(
+            `Failed to extend lease for ${lease.key.namespaceId}/${lease.key.threadId} ` +
+              `— either expired or stolen.`,
+          );
+        }
+        return r.lease;
+      },
+    };
+  }
+
+  /**
+   * Release a lease the caller holds. Best-effort — failures are
+   * swallowed (lease will expire on its own at TTL).
+   */
+  async release(leaseId: string): Promise<void> {
+    await this.leaseStore.release({ leaseId }).catch(() => {});
+  }
+
   private async runStrict<T>(params: RunParams<T>): Promise<T> {
     const ttlMs = params.ttlMs ?? this.defaultTtlMs;
     const result = await this.leaseStore.acquire({

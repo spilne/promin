@@ -42,9 +42,12 @@ import type {
   AgentRegistry,
   AgentRunOutput,
   AgentThreadSummary,
+  AgentTurnGate,
+  AgentTurnPolicy,
   Message,
   RegisteredAgent,
 } from "@promin/agent";
+import { TurnInProgressError } from "@promin/agent";
 import { WorkflowSuspendedError } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 
@@ -108,6 +111,46 @@ export interface AgentGatewayDeps {
    * honor the implied semantics without somewhere to record the row.
    */
   readonly instanceRegistry?: AgentInstanceRegistry;
+  /**
+   * Optional per-thread coordination gate. Wraps thread-bound routes
+   * (`POST /threads/:threadId`, `POST /threads/:threadId/stream`,
+   * `POST /threads/:threadId/approve`) so two replicas processing the
+   * same conversation atomically: only one runs the turn at a time;
+   * concurrent attempts are rejected with 409 Conflict + current owner.
+   *
+   * When unset, no coordination is enforced — fine for single-process
+   * deployments. Multi-replica deployments (sharing a PgMemoryStore)
+   * should always set this.
+   */
+  readonly turnGate?: AgentTurnGate;
+  /**
+   * Identifier for THIS gateway process. Used as `ownerId` when the
+   * gate acquires a lease, so 409 responses can name which replica
+   * holds the conversation. Default: a random hex string per process.
+   */
+  readonly workerId?: string;
+  /**
+   * Default policy when contention happens. Today only 'strict' is
+   * implemented (queued throws NotImplementedError; tracked as
+   * promin-872n). Default: 'strict'.
+   */
+  readonly defaultTurnPolicy?: AgentTurnPolicy;
+}
+
+/**
+ * Translate a TurnInProgressError into a 409 response with structured
+ * body. Returns null when the error is something else.
+ */
+function turnInProgress409(err: unknown): Response | null {
+  if (err instanceof TurnInProgressError) {
+    return json(409, {
+      error: "turn_in_progress",
+      message: err.message,
+      currentOwner: err.currentLease.ownerId,
+      expiresAt: err.currentLease.expiresAt,
+    });
+  }
+  return null;
 }
 
 /** Body shape for invoke / stream / thread send. */
@@ -412,7 +455,10 @@ export function sendThreadMessage(deps: AgentGatewayDeps) {
       return jsonError(500, "resolve_failed", asMessage(err));
     }
 
-    try {
+    const policy = deps.defaultTurnPolicy ?? "strict";
+    const ownerId = deps.workerId ?? "gateway";
+
+    const runTurn = async (): Promise<ThreadInvokeResponse> => {
       const thread = await agent.thread(threadId);
       const out = await thread.send({ task: parsed.task });
       const response: ThreadInvokeResponse = {
@@ -423,8 +469,22 @@ export function sendThreadMessage(deps: AgentGatewayDeps) {
         usage: await out.usage,
       };
       if (scope.instanceId !== undefined) response.instanceId = scope.instanceId;
+      return response;
+    };
+
+    try {
+      const response = deps.turnGate
+        ? await deps.turnGate.run({
+            key: { namespaceId: parsed.namespaceId, threadId },
+            ownerId,
+            policy,
+            run: async () => runTurn(),
+          })
+        : await runTurn();
       return json(200, response);
     } catch (err) {
+      const conflict = turnInProgress409(err);
+      if (conflict) return conflict;
       return jsonError(500, "send_failed", asMessage(err));
     }
   };
@@ -457,6 +517,26 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
       return jsonError(500, "resolve_failed", asMessage(err));
     }
 
+    // Acquire the turn lease BEFORE starting the stream — the lease
+    // must outlive the synchronous handler since the stream is consumed
+    // asynchronously. Release happens when the stream closes (success,
+    // error, or client cancel) via the `onClose` hook.
+    let leaseId: string | null = null;
+    if (deps.turnGate) {
+      try {
+        const lease = await deps.turnGate.acquire({
+          key: { namespaceId: parsed.namespaceId, threadId },
+          ownerId: deps.workerId ?? "gateway",
+          policy: deps.defaultTurnPolicy ?? "strict",
+        });
+        leaseId = lease.leaseId;
+      } catch (err) {
+        const conflict = turnInProgress409(err);
+        if (conflict) return conflict;
+        return jsonError(500, "acquire_failed", asMessage(err));
+      }
+    }
+
     const thread = await agent.thread(threadId);
     const out = thread.stream({ task: parsed.task });
     const threadMeta = {
@@ -464,7 +544,13 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
       isNew: thread.isNew,
       ...(scope.instanceId !== undefined && { instanceId: scope.instanceId }),
     };
-    return streamAgentRunResponse(out, threadMeta);
+    const onClose =
+      leaseId !== null && deps.turnGate
+        ? async () => {
+            await deps.turnGate!.release(leaseId!);
+          }
+        : undefined;
+    return streamAgentRunResponse(out, threadMeta, onClose);
   };
 }
 
@@ -586,7 +672,13 @@ function parseApprovalBody(body: ApprovalRequest | null): ParsedApproval | { err
 function streamAgentRunResponse(
   out: AgentRunOutput,
   threadMeta: Record<string, unknown>,
+  onClose?: () => Promise<void>,
 ): Response {
+  const cleanup = async () => {
+    if (onClose) {
+      await onClose().catch(() => {});
+    }
+  };
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const enc = new TextEncoder();
@@ -649,10 +741,12 @@ function streamAgentRunResponse(
         }
       } finally {
         controller.close();
+        await cleanup();
       }
     },
     cancel: async () => {
       await out.cancel().catch(() => {});
+      await cleanup();
     },
   });
 

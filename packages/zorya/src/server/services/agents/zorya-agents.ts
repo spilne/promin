@@ -11,6 +11,7 @@ import type {
   Agent,
   AgentInstanceRegistry,
   AgentRegistry,
+  AgentTurnGate,
   MemoryStore,
   ModelCatalog,
   RegisteredAgent,
@@ -55,6 +56,20 @@ export interface ZoryaAgentsConfig {
   models?: ModelCatalog;
   /** Filesystem hot-reload scan loop. Omit to disable. */
   scan?: ZoryaAgentsScanConfig;
+  /**
+   * Per-thread turn gate. When set, the gateway serializes thread-bound
+   * routes (POST /threads/:threadId, /stream, /approve) so two replicas
+   * cannot run a turn on the same conversation concurrently. Required
+   * for multi-replica deployments sharing a Postgres memory store; safe
+   * to omit for single-process deployments.
+   */
+  turnGate?: AgentTurnGate;
+  /**
+   * Identifier for THIS process — used as the lease ownerId so 409
+   * responses can name which replica holds the conversation. Defaults
+   * to a random hex string.
+   */
+  workerId?: string;
 }
 
 export class ZoryaAgents implements AgentScheduleDispatcher {
@@ -63,6 +78,8 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   readonly memory?: MemoryStore;
   readonly instances?: AgentInstanceRegistry;
   readonly models?: ModelCatalog;
+  readonly turnGate?: AgentTurnGate;
+  readonly workerId?: string;
   private readonly scanConfig?: ZoryaAgentsScanConfig;
   private scanHandle?: { stop(): void };
 
@@ -73,6 +90,8 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
     if (config.instances) this.instances = config.instances;
     if (config.models) this.models = config.models;
     if (config.scan) this.scanConfig = config.scan;
+    if (config.turnGate) this.turnGate = config.turnGate;
+    if (config.workerId) this.workerId = config.workerId;
   }
 
   /**
