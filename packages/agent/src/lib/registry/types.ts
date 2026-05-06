@@ -75,6 +75,15 @@ export interface LocalAgentBackend {
   readonly systemPrompt: string | null;
   /** Tool names to wire in. Runtime supplies the implementations. */
   readonly tools: ReadonlyArray<string>;
+  /**
+   * Optional MCP servers to attach. The host opens (or reuses) an
+   * `McpClient` per server via `McpClientPool` at resolve time, lists
+   * each server's tools, and merges them into the agent's tool list
+   * keyed as `<serverName>:<toolName>`. The recipe's `tools` field
+   * picks which of those to actually expose to the LLM (alongside
+   * in-process tools).
+   */
+  readonly mcpServers?: ReadonlyArray<import("../mcp/types.ts").McpServerConfig>;
   /** Per-turn step cap. Optional, runtime default applies when unset. */
   readonly maxStepsPerTurn?: number;
   /** Max user turns per session before the loop terminates. */

@@ -311,6 +311,16 @@ export type {
 } from "./mcp/types.ts";
 export { createMcpTools } from "./mcp/mcp-tools.ts";
 export { createSdkMcpClient, type SdkMcpClientConfig } from "./mcp/mcp-client.ts";
+export {
+  DefaultMcpClientPool,
+  InMemoryMcpClientPool,
+  type McpClientPool,
+  type DefaultMcpClientPoolConfig,
+} from "./mcp/mcp-client-pool.ts";
+export {
+  loadMcpToolsFromRecipe,
+  type LoadMcpToolsFromRecipeParams,
+} from "./mcp/load-mcp-tools-from-recipe.ts";
 
 export { tool, createScopedTool, createElevatedTool } from "./tool.ts";
 export type {
