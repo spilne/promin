@@ -119,6 +119,11 @@ import {
 import { listCatalogModels } from "./routes/agent-catalog.ts";
 import { createSecret, deleteSecret, listSecrets } from "./routes/secrets.ts";
 import {
+  ingestWebhook,
+  type WebhookSourceConfig,
+  type WebhookGatewayDeps,
+} from "./routes/webhooks.ts";
+import {
   addNamespaceFact,
   deleteNamespaceFact,
   inspectMemory,
@@ -206,6 +211,16 @@ export interface ZoryaServerConfig extends AuthConfig {
    * mounted — fine for single-tenant deployments using env vars.
    */
   secrets?: SecretsStorage;
+  /**
+   * Optional webhook ingress — POST /webhooks/:source/:agentId routes
+   * external events (Slack / GitHub / Stripe / custom) into a registered
+   * agent after HMAC signature verification + replay dedup. Each source
+   * declares its secret + signature scheme. Without `agents` configured
+   * this is a no-op (no agent to dispatch to). Phase 1 supports
+   * 'sha256-hex' (GitHub-style) signatures; Stripe/Slack variants land
+   * later.
+   */
+  webhooks?: { sources: Readonly<Record<string, WebhookSourceConfig>> };
 }
 
 export interface ListenOptions {
@@ -451,6 +466,18 @@ export class ZoryaServer {
         .post("/api/secrets", createSecret(sec))
         .get("/api/secrets", listSecrets(sec))
         .delete("/api/secrets/:key", deleteSecret(sec));
+    }
+
+    if (config.webhooks && this.agents) {
+      const webhookDeps: WebhookGatewayDeps = {
+        registry: this.agents.registry,
+        // Cast through `unknown` — the resolve signature is structurally
+        // compatible (returns Agent which has invoke + withScope) but the
+        // webhook deps narrow to only the methods it uses.
+        resolve: this.agents.resolve as unknown as WebhookGatewayDeps["resolve"],
+        sources: config.webhooks.sources,
+      };
+      this.router.post("/webhooks/:source/:agentId", ingestWebhook(webhookDeps));
     }
 
     if (this.scheduler) {
