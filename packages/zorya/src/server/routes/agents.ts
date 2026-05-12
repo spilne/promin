@@ -48,7 +48,7 @@ import type {
   RegisteredAgent,
   SecretsStorage,
 } from "@promin/agent";
-import { SecretScope, TurnInProgressError } from "@promin/agent";
+import { ConsolidatorRateLimitError, SecretScope, TurnInProgressError } from "@promin/agent";
 import { WorkflowSuspendedError } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 
@@ -1280,6 +1280,27 @@ export function distillThread(deps: AgentGatewayDeps) {
       const episode = await agent.distillThread(threadId, { force });
       return json(200, { episode });
     } catch (err) {
+      if (err instanceof ConsolidatorRateLimitError) {
+        const retryAfter = err.retryAfterSeconds(Date.now());
+        return new Response(
+          JSON.stringify({
+            error: "distill_rate_limited",
+            message: err.message,
+            scope: err.scope,
+            windowMs: err.windowMs,
+            max: err.max,
+            seen: err.seen,
+            retryAfterSeconds: retryAfter,
+          }),
+          {
+            status: 429,
+            headers: {
+              "content-type": "application/json",
+              "retry-after": String(retryAfter),
+            },
+          },
+        );
+      }
       return jsonError(500, "distill_failed", asMessage(err));
     }
   };

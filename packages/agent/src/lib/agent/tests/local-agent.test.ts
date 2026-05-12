@@ -726,6 +726,172 @@ describe("LocalAgent — autoDistill", () => {
     expect(distillEps.length).toBe(1);
   });
 
+  it("tokenThreshold fires distillThread once when NEW-message tokens cross", async () => {
+    const { runner } = makeRunner();
+    const memory = new InMemoryMemoryStore();
+    // Reply long enough that a single turn pushes past the token gate.
+    // chattyLLM replies are ~10 chars → ~3 tokens. We need a beefier reply.
+    const longLLM: LLMProvider = {
+      chat: async () => ({
+        content: "x".repeat(800), // ~200 estimated tokens per assistant turn
+        finishReason: "stop" as const,
+      }),
+    };
+    const agent = new LocalAgent({
+      agent: { name: "support", llm: longLLM },
+      runner,
+      memory,
+      namespaceId: "acme",
+      resourceId: "alice",
+      consolidatorLlm: envelopeLLM(),
+      autoDistill: { tokenThreshold: 300, mode: "blocking" },
+    });
+    const t = await agent.thread("auto-d-tokens");
+
+    // First turn: user "turn 0" (~2 tok) + assistant 800-char reply (~200 tok)
+    // = ~202 tok < 300 → no fire.
+    await (
+      await t.send({ task: "turn 0" })
+    ).text;
+    let eps = await memory.listResourceEpisodes({ namespaceId: "acme", resourceId: "alice" });
+    expect(eps.filter((e) => e.sourceThreadId === "auto-d-tokens")).toHaveLength(0);
+
+    // Second turn pushes total uncompacted tokens past 300 → fires.
+    await (
+      await t.send({ task: "turn 1" })
+    ).text;
+    eps = await memory.listResourceEpisodes({ namespaceId: "acme", resourceId: "alice" });
+    const distillEps = eps.filter((e) => e.sourceThreadId === "auto-d-tokens");
+    expect(distillEps.length).toBe(1);
+  });
+
+  it("intervalMs gates re-fire by wall-clock gap from last distill", async () => {
+    const { FakeClock } = await import("@promin/core");
+    const clock = FakeClock.create(1_000_000);
+    const { runner } = makeRunner();
+    // Memory store must share the clock so episode.createdAt is in
+    // the same domain as the trigger's "now".
+    const memory = new InMemoryMemoryStore({ clock });
+    const agent = new LocalAgent({
+      agent: { name: "support", llm: chattyLLM(), clock },
+      runner,
+      memory,
+      namespaceId: "acme",
+      resourceId: "alice",
+      consolidatorLlm: envelopeLLM(),
+      // Only intervalMs is set. First call: lastDistilledAt=0 →
+      // msSinceLastDistill=Infinity → trips. Subsequent calls gated
+      // until 60s of wall-clock has passed.
+      autoDistill: { intervalMs: 60_000, force: true, mode: "blocking" },
+    });
+    const t = await agent.thread("auto-d-interval");
+
+    // Turn 1: no prior distill → Infinity > 60_000 → fires.
+    await (
+      await t.send({ task: "turn 0" })
+    ).text;
+    let eps = await memory.listResourceEpisodes({ namespaceId: "acme", resourceId: "alice" });
+    expect(eps.filter((e) => e.sourceThreadId === "auto-d-interval")).toHaveLength(1);
+
+    // Turn 2 with only +30s elapsed → 30_000 < 60_000 → no re-fire.
+    clock.advance(30_000);
+    await (
+      await t.send({ task: "turn 1" })
+    ).text;
+    eps = await memory.listResourceEpisodes({ namespaceId: "acme", resourceId: "alice" });
+    expect(eps.filter((e) => e.sourceThreadId === "auto-d-interval").length).toBe(1);
+
+    // Turn 3 after another +35s → 65_000 since last distill → fires
+    // again (force:true so a fresh episode rather than dedup).
+    clock.advance(35_000);
+    await (
+      await t.send({ task: "turn 2" })
+    ).text;
+    eps = await memory.listResourceEpisodes({ namespaceId: "acme", resourceId: "alice" });
+    expect(eps.filter((e) => e.sourceThreadId === "auto-d-interval").length).toBe(2);
+  });
+
+  it("OR-composition: gates compose so any one tripping fires", async () => {
+    const { runner } = makeRunner();
+    const memory = new InMemoryMemoryStore();
+    const agent = new LocalAgent({
+      agent: { name: "support", llm: chattyLLM() },
+      runner,
+      memory,
+      namespaceId: "acme",
+      resourceId: "alice",
+      consolidatorLlm: envelopeLLM(),
+      // Both gates set; whichever fires first wins. tokenThreshold is
+      // unrealistically high — only messageThreshold can trip in this run.
+      autoDistill: {
+        messageThreshold: 2,
+        tokenThreshold: 1_000_000,
+        mode: "blocking",
+      },
+    });
+    const t = await agent.thread("auto-d-or");
+    await driveTurns(t, 1); // 2 messages persisted → messageThreshold trips
+    const eps = await memory.listResourceEpisodes({ namespaceId: "acme", resourceId: "alice" });
+    expect(eps.filter((e) => e.sourceThreadId === "auto-d-or")).toHaveLength(1);
+  });
+
+  it("rate-limited consolidator: auto-trigger swallows ConsolidatorRateLimitError silently", async () => {
+    const { FakeClock } = await import("@promin/core");
+    const { DefaultConsolidator } = await import("../../memory/consolidator.ts");
+    const { RateLimitedConsolidator } = await import("../../memory/rate-limited-consolidator.ts");
+    const clock = FakeClock.create(1_000_000);
+    const { runner } = makeRunner();
+    const memory = new InMemoryMemoryStore({ clock });
+
+    const inner = new DefaultConsolidator({ store: memory, llm: envelopeLLM() });
+    const consolidator = new RateLimitedConsolidator(inner, memory, {
+      windowMs: 60_000,
+      maxDistillsPerWindow: 1,
+      clock,
+    });
+
+    // Pre-seed one distill episode → cap is already reached. Auto-trigger
+    // should fire, hit the rate limit, and swallow without warning.
+    await memory.appendResourceEpisode(
+      { namespaceId: "acme", resourceId: "alice" },
+      {
+        summary: "seed",
+        sourceThreadId: "earlier",
+        salience: 0.5,
+        facts: [],
+        metadata: { kind: "distill" },
+      },
+    );
+
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+
+    try {
+      const agent = new LocalAgent({
+        agent: { name: "support", llm: chattyLLM(), clock },
+        runner,
+        memory,
+        namespaceId: "acme",
+        resourceId: "alice",
+        consolidator,
+        autoDistill: { messageThreshold: 2, mode: "blocking" },
+      });
+      const t = await agent.thread("auto-d-rl");
+      await driveTurns(t, 1);
+
+      expect(warnings.filter((w) => w.includes("autoDistill"))).toHaveLength(0);
+      // Still only the seeded episode — auto-trigger did NOT add a second.
+      const eps = await memory.listResourceEpisodes({ namespaceId: "acme", resourceId: "alice" });
+      const distillEps = eps.filter((e) => (e.metadata as { kind?: unknown }).kind === "distill");
+      expect(distillEps).toHaveLength(1);
+    } finally {
+      console.warn = origWarn;
+    }
+  });
+
   it("does nothing when autoDistill is unset", async () => {
     const { runner } = makeRunner();
     const memory = new InMemoryMemoryStore();

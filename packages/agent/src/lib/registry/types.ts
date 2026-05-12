@@ -230,9 +230,18 @@ export interface AutoCompactRecipe {
   readonly mode?: "background" | "blocking";
 }
 
-/** Recipe-level subset of `AutoDistillConfig`. */
+/**
+ * Recipe-level subset of `AutoDistillConfig`. Numeric thresholds + mode
+ * persist on the recipe; the predicate-based `when` escape hatch is
+ * runtime-only (host can layer it via `resolveLocalAgent.deps.autoDistill.when`).
+ *
+ * Multiple thresholds compose with OR semantics — fires when ANY of
+ * `messageThreshold`, `tokenThreshold`, `intervalMs` trips.
+ */
 export interface AutoDistillRecipe {
   readonly messageThreshold?: number;
+  readonly tokenThreshold?: number;
+  readonly intervalMs?: number;
   readonly force?: boolean;
   readonly mode?: "background" | "blocking";
 }

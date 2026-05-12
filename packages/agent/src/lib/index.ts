@@ -65,6 +65,11 @@ export type {
   ConsolidationSignals,
   DefaultConsolidatorConfig,
 } from "./memory/consolidator.ts";
+export {
+  RateLimitedConsolidator,
+  ConsolidatorRateLimitError,
+} from "./memory/rate-limited-consolidator.ts";
+export type { ConsolidatorRateLimitConfig } from "./memory/rate-limited-consolidator.ts";
 
 export {
   CompactionStrategy,

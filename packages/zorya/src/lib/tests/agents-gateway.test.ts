@@ -16,11 +16,13 @@
 import { describe, it, expect } from "bun:test";
 import {
   AgentTurnGate,
+  DefaultConsolidator,
   InMemoryAgentInstanceRegistry,
   InMemoryAgentRegistry,
   InMemoryLeaseStore,
   InMemoryMemoryStore,
   InMemorySecretsStorage,
+  RateLimitedConsolidator,
   SecretScope,
   resolveLocalAgent,
 } from "@promin/agent";
@@ -1055,5 +1057,85 @@ describe("agent gateway — turn gate (per-thread coordination)", () => {
       }),
     );
     expect(res.status).toBe(200);
+  });
+});
+
+describe("agent gateway — distill rate limit (429)", () => {
+  it("POST /distill returns 429 with Retry-After when consolidator is rate-limited", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const memory = new InMemoryMemoryStore();
+    const registry = new InMemoryAgentRegistry();
+
+    await registry.register({
+      id: "support",
+      backend: {
+        type: "local",
+        model: { provider: "anthropic", id: "claude-sonnet-4-6" },
+        systemPrompt: "Helpful",
+        tools: [],
+      },
+      metadata: { capabilities: ["chat"], tags: [] },
+    });
+
+    // Pre-seed enough distill episodes to hit the cap.
+    const SCOPE = { namespaceId: "acme", resourceId: "alice" };
+    await memory.appendResourceEpisode(SCOPE, {
+      summary: "old distill",
+      sourceThreadId: "earlier",
+      salience: 0.5,
+      facts: [],
+      metadata: { kind: "distill" },
+    });
+
+    const llm = mockLLM([{ content: "ignored", finishReason: "stop" }]);
+    const inner = new DefaultConsolidator({ store: memory, llm });
+    const rateLimited = new RateLimitedConsolidator(inner, memory, {
+      windowMs: 600_000,
+      maxDistillsPerWindow: 1,
+    });
+
+    const workflows = new LocalWorkflows({
+      storage,
+      runner,
+      definitions: {},
+      sleepScanIntervalMs: 0,
+    });
+    const agents = new ZoryaAgents({
+      registry,
+      resolve: (recipe) =>
+        resolveLocalAgent(recipe, {
+          runner,
+          memory,
+          llm: () => llm,
+          tools: {},
+          consolidator: rateLimited,
+        }),
+      memory,
+    });
+    const server = new ZoryaServer({ workflows, agents });
+
+    const res = await server.handle(
+      new Request("http://test/api/agents/support/threads/t-now/distill", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ namespaceId: "acme", resourceId: "alice" }),
+      }),
+    );
+
+    expect(res.status).toBe(429);
+    const retryAfter = res.headers.get("retry-after");
+    expect(retryAfter).not.toBeNull();
+    expect(Number.parseInt(retryAfter ?? "0", 10)).toBeGreaterThan(0);
+    const body = (await res.json()) as {
+      error: string;
+      max: number;
+      seen: number;
+      retryAfterSeconds: number;
+    };
+    expect(body.error).toBe("distill_rate_limited");
+    expect(body.max).toBe(1);
+    expect(body.seen).toBe(1);
+    expect(body.retryAfterSeconds).toBeGreaterThan(0);
   });
 });

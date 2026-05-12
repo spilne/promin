@@ -297,37 +297,53 @@ export interface AutoCompactSignals {
 
 export interface AutoDistillConfig {
   /**
-   * Built-in count gate: fire when the thread's persisted message
-   * count reaches this number. Combined with `force: false` (the
-   * default), this means "distill once when the thread reaches N
-   * messages" — the consolidator's idempotency dedupes subsequent
-   * triggers on the same thread.
+   * Built-in message-count gate: fire when the thread's persisted
+   * message count reaches this number. Cheap to compute — best for
+   * simple "distill once after N messages" patterns.
    *
-   * Common values: 6 (after a couple of turns, the conversation has
-   * enough substance to be worth a cross-thread summary), 20 (only
-   * substantial threads).
+   * Common values: 6 (after a couple of turns, conversation has
+   * enough substance), 20 (only substantial threads).
+   *
+   * Multiple gates compose with OR semantics — fires when ANY of
+   * `messageThreshold`, `tokenThreshold`, `intervalMs` trips.
    */
   readonly messageThreshold?: number;
   /**
-   * Custom predicate. Mirrors `AutoCompactConfig.when`. When set,
-   * REPLACES `messageThreshold`. Use for compound rules like "every
-   * N turns, re-distill" (pair with `force: true`):
+   * Built-in token-count gate: fire when the SUM of estimated tokens
+   * across NEW messages (since last distill) exceeds this value.
+   * Tokens estimated as `chars/4`, matching autoCompact's heuristic.
    *
-   *     when: ({ turnsSinceLastDistill }) => turnsSinceLastDistill >= 10,
-   *     force: true,
+   * More cost-aware than `messageThreshold` — three short messages
+   * vs three giant ones cost very different amounts to distill.
+   * Common values: 4_000 (roughly one Haiku context's worth of new
+   * material), 16_000 (substantial accumulated content).
+   */
+  readonly tokenThreshold?: number;
+  /**
+   * Built-in time-since-last-distill gate (milliseconds): fire when
+   * the elapsed time since the last distill episode exceeds this.
+   * Distinct from message/token gates — useful for low-volume
+   * threads where 6 messages might span a week, OR for periodic
+   * re-distillation patterns regardless of message volume.
    *
-   * Or "the user said something goodbye-y":
+   * Combine with `force: true` to re-distill on every interval tick.
+   */
+  readonly intervalMs?: number;
+  /**
+   * Custom predicate. When set, REPLACES the built-in gates entirely
+   * — the predicate has full control. Use for compound rules:
    *
-   *     when: ({ lastUserMessage }) =>
+   *     when: ({ turnsSinceLastDistill, lastUserMessage }) =>
+   *       turnsSinceLastDistill >= 10 ||
    *       /^(thanks|bye|goodbye|see ya)\b/i.test(lastUserMessage ?? ""),
    */
   readonly when?: (signals: AutoDistillSignals) => boolean;
   /**
    * Re-distill even when an episode for this thread already exists.
    * Default `false` (idempotent — first qualifying turn writes one
-   * episode; subsequent turns are no-ops). Set `true` for "every N
-   * turns" patterns where you want each pass to capture the latest
-   * additions.
+   * episode; subsequent turns are no-ops). Set `true` for periodic
+   * re-distillation patterns (works well with `intervalMs` or
+   * `tokenThreshold` past initial fire).
    */
   readonly force?: boolean;
   /**
@@ -348,6 +364,17 @@ export interface AutoDistillSignals {
    * Equals `totalCount` when never distilled.
    */
   readonly turnsSinceLastDistill: number;
+  /**
+   * Estimated token count (chars/4) summed across the NEW messages
+   * since the most recent distill episode. Equals total-thread-tokens
+   * when never distilled.
+   */
+  readonly tokensSinceLastDistill: number;
+  /**
+   * Milliseconds elapsed since the most recent distill episode.
+   * `Infinity` when never distilled (so `intervalMs` always trips).
+   */
+  readonly msSinceLastDistill: number;
   /**
    * `createdAt` of the most recent distill episode for this thread
    * (0 if none).
@@ -1185,7 +1212,12 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
   private async maybeAutoDistill(): Promise<void> {
     const cfg = this.deps.autoDistill;
     if (!cfg || !this.deps.memory || !this.deps.consolidator) return;
-    if (cfg.messageThreshold === undefined && !cfg.when) return;
+    const hasGate =
+      cfg.messageThreshold !== undefined ||
+      cfg.tokenThreshold !== undefined ||
+      cfg.intervalMs !== undefined ||
+      cfg.when !== undefined;
+    if (!hasGate) return;
     // Distillation writes a ResourceEpisode — only meaningful when a
     // resourceId is bound. Without one, silently skip.
     if (!this.deps.key.resourceId) return;
@@ -1205,7 +1237,11 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     );
     const lastDistilledSeq = lastDistill?.sourceMessageRange?.toSeq ?? 0;
     const lastDistilledAt = lastDistill?.createdAt ?? 0;
-    const turnsSinceLastDistill = messages.filter((m) => m.seq > lastDistilledSeq).length;
+    const newMessages = messages.filter((m) => m.seq > lastDistilledSeq);
+    const turnsSinceLastDistill = newMessages.length;
+    const tokensSinceLastDistill = newMessages.reduce((s, m) => s + estimateTokens(m), 0);
+    const now = this.deps.loopConfig.clock?.currentTimeMs() ?? Date.now();
+    const msSinceLastDistill = lastDistilledAt ? now - lastDistilledAt : Number.POSITIVE_INFINITY;
 
     // Walk back from the end to find the most recent USER message —
     // after persistTurn the assistant turn (and any tool messages)
@@ -1222,20 +1258,36 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     const signals: AutoDistillSignals = {
       totalCount: messages.length,
       turnsSinceLastDistill,
+      tokensSinceLastDistill,
+      msSinceLastDistill,
       lastDistilledAt,
       lastUserMessage,
       threadKey: this.deps.key,
     };
 
+    // Custom predicate REPLACES built-in gates entirely. Otherwise OR
+    // across whichever built-in gates are configured: any one tripping
+    // is enough to fire.
     const fire = cfg.when
       ? cfg.when(signals)
-      : cfg.messageThreshold !== undefined && messages.length >= cfg.messageThreshold;
+      : (cfg.messageThreshold !== undefined && messages.length >= cfg.messageThreshold) ||
+        (cfg.tokenThreshold !== undefined && tokensSinceLastDistill >= cfg.tokenThreshold) ||
+        (cfg.intervalMs !== undefined && msSinceLastDistill >= cfg.intervalMs);
     if (!fire) return;
 
     const consolidator = this.deps.consolidator();
     const run = consolidator
       .distillThread(this.deps.key, { force: cfg.force ?? false })
       .catch((err) => {
+        // Rate-limit hits are by design (host-configured cost cap),
+        // not failures worth a warn. Swallow silently.
+        if (
+          err &&
+          typeof err === "object" &&
+          (err as { name?: string }).name === "ConsolidatorRateLimitError"
+        ) {
+          return;
+        }
         console.warn(
           `[LocalAgent] autoDistill failed for thread ${this.deps.key.threadId}:`,
           err instanceof Error ? err.message : err,
