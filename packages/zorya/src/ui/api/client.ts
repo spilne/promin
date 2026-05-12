@@ -341,6 +341,9 @@ export const api = {
   getToolCatalogHealth(): Promise<ToolCatalogHealthDto> {
     return req<ToolCatalogHealthDto>(`/api/agents/_catalog/tools/health`);
   },
+  listCatalogModels(): Promise<{ models: ModelCatalogEntryDto[] }> {
+    return req<{ models: ModelCatalogEntryDto[] }>(`/api/agents/_catalog/models`);
+  },
   // Agentic DAG endpoints (promin-li95)
   listDags(params?: { tag?: string }): Promise<{ dags: DagDto[] }> {
     const qp = new URLSearchParams();
@@ -630,6 +633,16 @@ export interface DagRunResultDto {
     errors: Record<string, string>;
     skipped: string[];
   };
+}
+
+/** Wire shape for /api/agents/_catalog/models — mirrors SerializedModelCatalogItem. */
+export interface ModelCatalogEntryDto {
+  provider: string;
+  id: string;
+  displayName?: string;
+  contextLimit?: number;
+  capabilities?: string[];
+  costTier?: string;
 }
 
 export type SecretScopeWire =
