@@ -7,6 +7,13 @@ export { SqliteMemoryStore } from "./lib/sqlite-memory-store.ts";
 export type { SqliteMemoryStoreConfig } from "./lib/sqlite-memory-store.ts";
 export { SqliteAgentRegistry } from "./lib/sqlite-agent-registry.ts";
 export type { SqliteAgentRegistryConfig } from "./lib/sqlite-agent-registry.ts";
+export { SqliteDagRegistry } from "./lib/sqlite-dag-registry.ts";
+export type { SqliteDagRegistryConfig } from "./lib/sqlite-dag-registry.ts";
+export { createVersionedRecipeStore } from "./lib/versioned-recipe-store.ts";
+export type {
+  VersionedRecipeStore,
+  VersionedRecipeStoreConfig,
+} from "./lib/versioned-recipe-store.ts";
 export { SqliteAgentInstanceRegistry } from "./lib/sqlite-agent-instance-registry.ts";
 export type { SqliteAgentInstanceRegistryConfig } from "./lib/sqlite-agent-instance-registry.ts";
 export { SqliteSecretsStorage } from "./lib/sqlite-secrets-storage.ts";

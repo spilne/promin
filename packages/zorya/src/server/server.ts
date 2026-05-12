@@ -156,6 +156,16 @@ import {
 } from "./services/workflows/index.ts";
 import { ZoryaScheduler } from "./services/scheduler/index.ts";
 import { ZoryaAgents } from "./services/agents/index.ts";
+import { ZoryaDags } from "./services/dags/index.ts";
+import {
+  createDag,
+  deleteDag,
+  getDag,
+  listDagVersions,
+  listDags,
+  runDag,
+  type DagGatewayDeps,
+} from "./routes/dags.ts";
 
 export interface Logger {
   log(message: string, ...args: unknown[]): void;
@@ -183,6 +193,8 @@ export interface ZoryaServerConfig extends AuthConfig {
   scheduler?: ZoryaScheduler;
   /** Optional agent gateway service. */
   agents?: ZoryaAgents;
+  /** Optional DAG gateway service. Mounts /api/dags/* routes. */
+  dags?: ZoryaDags;
   /**
    * Mount the remote-worker HTTP surface. Pulls stepQueue / workerRegistry /
    * advertisements / workflowStarts from the workflows service.
@@ -252,6 +264,7 @@ export class ZoryaServer {
   readonly workflows: ZoryaWorkflows;
   readonly scheduler?: ZoryaScheduler;
   readonly agents?: ZoryaAgents;
+  readonly dags?: ZoryaDags;
   readonly versionRegistry: IWorkflowVersionRegistry;
   /**
    * Worker → server WebSocket multiplexer. Always present — workers in
@@ -278,6 +291,7 @@ export class ZoryaServer {
     this.workflows = config.workflows;
     if (config.scheduler) this.scheduler = config.scheduler;
     if (config.agents) this.agents = config.agents;
+    if (config.dags) this.dags = config.dags;
     if (config.secrets) this.secrets = config.secrets;
     this.versionRegistry = config.versionRegistry ?? new WorkflowVersionRegistry();
 
@@ -529,6 +543,21 @@ export class ZoryaServer {
         .post("/api/remote-deployments/:deploymentId/heartbeat", heartbeatDeployment(remoteDeps))
         .delete("/api/remote-deployments/:deploymentId", unregisterDeployment(remoteDeps))
         .get("/api/remote-deployments", listDeployments(remoteDeps));
+    }
+
+    if (this.dags) {
+      const dagDeps: DagGatewayDeps = {
+        registry: this.dags.registry,
+        resolver: this.dags.resolver,
+        runner: this.dags.runner,
+      };
+      this.router
+        .get("/api/dags", listDags(dagDeps))
+        .post("/api/dags", createDag(dagDeps))
+        .get("/api/dags/:id", getDag(dagDeps))
+        .delete("/api/dags/:id", deleteDag(dagDeps))
+        .get("/api/dags/:id/versions", listDagVersions(dagDeps))
+        .post("/api/dags/:id/run", runDag(dagDeps));
     }
 
     if (this.scheduler) {

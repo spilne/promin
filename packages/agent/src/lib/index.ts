@@ -609,3 +609,35 @@ export type {
   TraceSystemNode,
   TraceSummary,
 } from "./trace.ts";
+
+// Agentic DAG — operator-authored multi-agent execution graph.
+export { executeDag, pickPath, createRegistryResolver } from "./dag/executor.ts";
+export type {
+  DagExecuteParams,
+  DagExecutionEvent,
+  DagExecutionResult,
+  AgentResolver,
+} from "./dag/executor.ts";
+export { validateDag, topologicalOrder } from "./dag/validate.ts";
+export { DagValidationError } from "./dag/types.ts";
+export type {
+  AgenticDagRecipe,
+  DagNode,
+  DagEdge,
+  DagRunState,
+  NodeInputSource,
+} from "./dag/types.ts";
+export { createDagWorkflow } from "./dag/durable-executor.ts";
+export type {
+  DurableDagInput,
+  DurableDagOutput,
+  CreateDagWorkflowConfig,
+} from "./dag/durable-executor.ts";
+export { InMemoryDagRegistry } from "./dag/registry.ts";
+export type {
+  DagRegistry,
+  RegisteredDag,
+  RegisterDagInput,
+  ListDagsParams,
+  InMemoryDagRegistryConfig,
+} from "./dag/registry.ts";

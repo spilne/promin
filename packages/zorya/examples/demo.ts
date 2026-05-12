@@ -36,7 +36,14 @@ import {
   isJournaledSuspendStorage,
   type Workflow,
 } from "@promin/workflow";
-import { LocalWorkflows, QueuedWorkflows, ZoryaScheduler, ZoryaAgents } from "../src/index.ts";
+import {
+  LocalWorkflows,
+  QueuedWorkflows,
+  ZoryaScheduler,
+  ZoryaAgents,
+  ZoryaDags,
+} from "../src/index.ts";
+import { researchSynthesisRecipe } from "./dags/research-synthesis.ts";
 import {
   SqliteWorkflowStorage,
   SqliteWorkflowStartQueue,
@@ -44,6 +51,7 @@ import {
   SqliteSchedulerStorage,
   SqliteAgentRegistry,
   SqliteAgentInstanceRegistry,
+  SqliteDagRegistry,
   SqliteMemoryStore,
   SqliteSecretsStorage,
 } from "@promin/sqlite";
@@ -117,6 +125,7 @@ const runner = createWorkflowRunner({ storage });
 // recipes, threads, messages, and per-scope memory across restarts so
 // chats in the dashboard's Agents tab survive hot-reloads of the demo.
 const agentRegistry = SqliteAgentRegistry.make({ db });
+const dagRegistry = SqliteDagRegistry.make({ db });
 const memoryStore = SqliteMemoryStore.make({ db });
 // Long-lived agent instances. Persisted alongside the registry so they
 // survive restarts; the cascade still keys memory by `resourceId =
@@ -1069,10 +1078,86 @@ const scheduler = new ZoryaScheduler({
 
 await seedInitialRuns((name, input, opts) => workflows.trigger(name, input, opts));
 
+// ---------------------------------------------------------------------------
+// Agentic DAG demo wiring — register 3 specialist recipes (planner /
+// researcher / synthesizer) + the diamond-shape research-synthesis DAG
+// the recipes power. Each node references one of these agentIds; the
+// dag executor resolves them via the same resolveAgent path the chat
+// gateway uses, so credentialRefs / tools / memory all flow through.
+// ---------------------------------------------------------------------------
+
+const dagAgentRecipes = [
+  {
+    id: "dag-planner",
+    description: "Splits a topic into 3 research sub-questions.",
+    systemPrompt:
+      "You are a research planner. Given a topic, emit exactly 3 sub-questions (one per line) " +
+      "covering different angles: historical, current, contrarian. Be concise — sub-questions only, no preamble.",
+  },
+  {
+    id: "dag-researcher",
+    description: "Produces a focused finding for one sub-question.",
+    systemPrompt:
+      "You are a research specialist. Given a topic and a focus directive, produce a 4-6 sentence " +
+      "finding that's factual and concrete. No filler.",
+  },
+  {
+    id: "dag-synthesizer",
+    description: "Joins multiple findings into a single report.",
+    systemPrompt:
+      "You are a senior research editor. Given a topic and multiple research findings, produce a " +
+      "single synthesized 8-12 sentence report. Resolve contradictions explicitly.",
+  },
+] as const;
+
+for (const r of dagAgentRecipes) {
+  await agentRegistry.register({
+    id: r.id,
+    backend: {
+      type: "local",
+      // Prefer Sonnet for synthesizer (quality), Haiku for planner / researcher
+      // (cheap + fast). When ANTHROPIC_API_KEY is missing, fall back to ollama
+      // so the demo still runs.
+      model: haveAnthropicKey
+        ? r.id === "dag-synthesizer"
+          ? { provider: "anthropic", id: "claude-sonnet-4-6" }
+          : { provider: "anthropic", id: "claude-haiku-4-5-20251001" }
+        : { provider: "ollama", id: OLLAMA_MODEL },
+      systemPrompt: r.systemPrompt,
+      tools: [],
+    },
+    metadata: {
+      description: r.description,
+      capabilities: ["chat"],
+      tags: ["dag-demo"],
+    },
+  });
+}
+await dagRegistry.register(researchSynthesisRecipe);
+
+// DAG resolver: agentId → Agent. Reuses the existing agentRegistry +
+// resolveAgent so DAG runs share the same credential / tool / memory
+// machinery as direct chat invocations.
+const dags = new ZoryaDags({
+  registry: dagRegistry,
+  runner,
+  resolveAgent: async (agentId, version) => {
+    const recipe = await agentRegistry.get(agentId, version);
+    if (!recipe) throw new Error(`DAG node references unknown agent: ${agentId}`);
+    return resolveAgent(recipe);
+  },
+});
+
+console.log(
+  `[zorya] DAG registered: ${researchSynthesisRecipe.id}@${researchSynthesisRecipe.version ?? "v1"} ` +
+    `(${researchSynthesisRecipe.nodes.length} nodes, ${researchSynthesisRecipe.edges.length} edges)`,
+);
+
 const server = new ZoryaServer({
   workflows,
   scheduler,
   agents,
+  dags,
   // BYOK / per-tenant API keys / MCP credentials live here. Exposes
   // /api/secrets HTTP CRUD + the dashboard's Secrets page; the agent
   // resolver wiring (in `agents.resolve` above) reads model.credentialRef

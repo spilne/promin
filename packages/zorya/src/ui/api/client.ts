@@ -341,6 +341,30 @@ export const api = {
   getToolCatalogHealth(): Promise<ToolCatalogHealthDto> {
     return req<ToolCatalogHealthDto>(`/api/agents/_catalog/tools/health`);
   },
+  // Agentic DAG endpoints (promin-li95)
+  listDags(params?: { tag?: string }): Promise<{ dags: DagDto[] }> {
+    const qp = new URLSearchParams();
+    if (params?.tag) qp.set("tag", params.tag);
+    const q = qp.toString();
+    return req<{ dags: DagDto[] }>(`/api/dags${q ? `?${q}` : ""}`);
+  },
+  getDag(id: string, version?: string): Promise<DagDto> {
+    const qp = version ? `?version=${encodeURIComponent(version)}` : "";
+    return req<DagDto>(`/api/dags/${encodeURIComponent(id)}${qp}`);
+  },
+  listDagVersions(id: string): Promise<{ versions: DagDto[] }> {
+    return req<{ versions: DagDto[] }>(`/api/dags/${encodeURIComponent(id)}/versions`);
+  },
+  runDag(
+    id: string,
+    body: { version?: string; initialInput?: Record<string, unknown>; workflowId?: string },
+  ): Promise<DagRunResultDto> {
+    return req<DagRunResultDto>(`/api/dags/${encodeURIComponent(id)}/run`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
   getThreadTrace(
     id: string,
     threadId: string,
@@ -556,6 +580,56 @@ export interface TraceToolCallDto {
   input: unknown;
   callSeq: number;
   result?: { seq: number; content: string; failed: boolean };
+}
+
+// ---------------------------------------------------------------------------
+// Agentic DAG wire shapes (promin-li95). Loose-typed at the boundary so
+// the UI doesn't import @promin/agent.
+// ---------------------------------------------------------------------------
+
+export type DagNodeInputSourceDto =
+  | { kind: "initial"; path: string }
+  | { kind: "node"; nodeId: string; path: string }
+  | { kind: "literal"; value: unknown };
+
+export interface DagNodeDto {
+  id: string;
+  agentId: string;
+  inputs: Record<string, DagNodeInputSourceDto>;
+  outputPath?: string;
+  onError?: "abort" | "skip";
+}
+
+export interface DagEdgeDto {
+  from: string;
+  to: string;
+  condition?: { kind: "equals"; path: string; value: string };
+}
+
+export interface DagDto {
+  id: string;
+  version: string;
+  nodes: DagNodeDto[];
+  edges: DagEdgeDto[];
+  entry: string[];
+  terminals: string[];
+  metadata?: {
+    description?: string;
+    tags?: string[];
+  };
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DagRunResultDto {
+  workflowId: string;
+  result: {
+    outputs: Record<string, unknown>;
+    ok: boolean;
+    nodeOutputs: Record<string, unknown>;
+    errors: Record<string, string>;
+    skipped: string[];
+  };
 }
 
 export type SecretScopeWire =
