@@ -48,7 +48,12 @@ import type {
   RegisteredAgent,
   SecretsStorage,
 } from "@promin/agent";
-import { ConsolidatorRateLimitError, SecretScope, TurnInProgressError } from "@promin/agent";
+import {
+  buildAgentTrace,
+  ConsolidatorRateLimitError,
+  SecretScope,
+  TurnInProgressError,
+} from "@promin/agent";
 import { WorkflowSuspendedError } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 
@@ -1137,6 +1142,45 @@ export function listAgentThreads(deps: AgentGatewayDeps) {
       return json(200, { threads });
     } catch (err) {
       return jsonError(500, "list_threads_failed", asMessage(err));
+    }
+  };
+}
+
+export function getThreadTrace(deps: AgentGatewayDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const id = params.id;
+    const threadId = params.threadId;
+    if (!id) return jsonError(400, "missing_id");
+    if (!threadId) return jsonError(400, "missing_threadId");
+
+    const url = new URL(req.url);
+    const namespaceId = url.searchParams.get("namespaceId") ?? undefined;
+    const resourceId = url.searchParams.get("resourceId") ?? undefined;
+    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+
+    const recipe = await deps.registry.get(id);
+    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+    const disabled = disabled410(recipe);
+    if (disabled) return disabled;
+
+    let agent: Agent;
+    try {
+      const resolved = await deps.resolve(recipe, {
+        namespaceId,
+        ...(resourceId !== undefined && { resourceId }),
+      });
+      agent = resolved.withScope({ namespaceId, resourceId });
+    } catch (err) {
+      return jsonError(500, "resolve_failed", asMessage(err));
+    }
+
+    try {
+      const thread = await agent.thread(threadId, { createIfMissing: false });
+      const messages = await thread.messages();
+      const trace = buildAgentTrace(messages);
+      return json(200, { threadId: thread.id, trace });
+    } catch (err) {
+      return jsonError(404, "thread_not_found", asMessage(err));
     }
   };
 }

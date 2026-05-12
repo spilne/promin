@@ -341,6 +341,17 @@ export const api = {
   getToolCatalogHealth(): Promise<ToolCatalogHealthDto> {
     return req<ToolCatalogHealthDto>(`/api/agents/_catalog/tools/health`);
   },
+  getThreadTrace(
+    id: string,
+    threadId: string,
+    params: { namespaceId: string; resourceId?: string },
+  ): Promise<{ threadId: string; trace: AgentTraceDto }> {
+    const qp = new URLSearchParams({ namespaceId: params.namespaceId });
+    if (params.resourceId) qp.set("resourceId", params.resourceId);
+    return req(
+      `/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/trace?${qp}`,
+    );
+  },
   listAgentThreads(
     id: string,
     params: { namespaceId: string; resourceId?: string; limit?: number; q?: string },
@@ -502,6 +513,49 @@ export interface ToolCatalogHealthDto {
     toolName: string;
     recipes: Array<{ id: string; version: string }>;
   }>;
+}
+
+/**
+ * Wire shape for /api/agents/:id/threads/:threadId/trace.
+ * Mirrors `AgentTrace` from @promin/agent — kept loose-typed at the
+ * boundary so the UI doesn't drag the whole agent package in.
+ */
+export interface AgentTraceDto {
+  turns: Array<{
+    kind: "turn";
+    turnIndex: number;
+    fromSeq: number;
+    toSeq: number;
+    children: Array<TraceChildDto>;
+  }>;
+  orphanSystem: Array<{ kind: "system"; seq: number; content: string }>;
+  summary: {
+    turns: number;
+    assistantMoves: number;
+    toolCalls: number;
+    toolFailures: number;
+    orphanedToolCalls: number;
+    orphanedToolResults: number;
+  };
+}
+export type TraceChildDto =
+  | { kind: "user"; seq: number; content: string; metadata?: Record<string, unknown> }
+  | {
+      kind: "assistant";
+      seq: number;
+      content: string | null;
+      thinkingBlocks?: unknown[];
+      toolCalls: Array<TraceToolCallDto>;
+    }
+  | TraceToolCallDto
+  | { kind: "system"; seq: number; content: string };
+export interface TraceToolCallDto {
+  kind: "tool-call";
+  id: string;
+  name: string;
+  input: unknown;
+  callSeq: number;
+  result?: { seq: number; content: string; failed: boolean };
 }
 
 export type SecretScopeWire =

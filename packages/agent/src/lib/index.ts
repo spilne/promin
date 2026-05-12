@@ -596,3 +596,16 @@ export type {
   CouncilResult,
   CouncilToolConfig,
 } from "./council.ts";
+
+// Agent run trace — turn-structured tree from stored messages.
+export { buildAgentTrace } from "./trace.ts";
+export type {
+  AgentTrace,
+  TraceNode,
+  TraceTurnNode,
+  TraceUserNode,
+  TraceAssistantNode,
+  TraceToolCallNode,
+  TraceSystemNode,
+  TraceSummary,
+} from "./trace.ts";

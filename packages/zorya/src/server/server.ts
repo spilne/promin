@@ -107,6 +107,7 @@ import {
   listAgentThreads,
   listAgentVersions,
   listAgents,
+  getThreadTrace,
   listThreadMessages,
   renameAgentThread,
   sendThreadMessage,
@@ -472,6 +473,7 @@ export class ZoryaServer {
         .post("/api/agents/:id/threads/:threadId/stream", streamThreadMessage(agentDeps))
         .post("/api/agents/:id/threads/:threadId/approve", streamThreadApproval(agentDeps))
         .get("/api/agents/:id/threads/:threadId/messages", listThreadMessages(agentDeps))
+        .get("/api/agents/:id/threads/:threadId/trace", getThreadTrace(agentDeps))
         .post("/api/agents/:id/threads/:threadId/distill", distillThread(agentDeps))
         .post("/api/agents/:id/threads/:threadId/compact", compactThread(agentDeps))
         .post("/api/agents/:id/threads/:threadId/archive", archiveAgentThread(agentDeps));
