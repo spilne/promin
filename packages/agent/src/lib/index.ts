@@ -393,6 +393,24 @@ export {
   type DefaultAgentToolCatalogConfig,
 } from "./tool-catalog.ts";
 
+// Tool catalog history — durable audit trail of catalogued tools over time.
+export type {
+  ToolHistorySourceKind,
+  ToolObservation,
+  ToolHistoryRecord,
+  ToolHistoryQuery,
+  ToolHistoryStore,
+} from "./tool-history/types.ts";
+export {
+  InMemoryToolHistoryStore,
+  type InMemoryToolHistoryStoreConfig,
+} from "./tool-history/in-memory-tool-history-store.ts";
+export {
+  AgentToolCatalogHistory,
+  type AgentToolCatalogHistoryConfig,
+  toObservation,
+} from "./tool-history/agent-tool-catalog-history.ts";
+
 export {
   reconcileToolReferences,
   type RecipeToolRefHealth,
