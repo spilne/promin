@@ -526,6 +526,10 @@ export interface ToolCatalogEntryDto {
   parameters: Record<string, unknown>;
   source: ToolCatalogSourceDto;
   enabled: boolean;
+  /** Secret-store keys the tool needs to run. Empty when none declared. */
+  requiredSecrets: string[];
+  /** True when the tool declares scoped memory. */
+  usesMemory: boolean;
 }
 
 /** Wire shape for /api/agents/_catalog/tools/health. */

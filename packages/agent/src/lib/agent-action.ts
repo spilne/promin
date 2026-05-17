@@ -172,6 +172,13 @@ export interface AgentActionConfig<TOutput = any> {
    * on behalf of the live caller.
    */
   scope?: import("./tool.ts").ToolScope;
+  /**
+   * Audit sink for elevated tools. Threaded into `ctx.auditLogger` on
+   * every tool `execute`; `createElevatedTool` emits a record per
+   * `ctx.audit()` call. Absent → audit calls are enforced but not
+   * persisted.
+   */
+  auditLogger?: import("./audit/types.ts").AuditLogger;
 }
 
 export class MaxStepsError extends Error {
@@ -525,6 +532,7 @@ export function agentAction(
                     config.onToolResult,
                     undefined,
                     config.scope,
+                    config.auditLogger,
                   );
                   return out;
                 } catch (err) {

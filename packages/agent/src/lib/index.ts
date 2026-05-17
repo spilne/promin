@@ -69,7 +69,10 @@ export {
   RateLimitedConsolidator,
   ConsolidatorRateLimitError,
 } from "./memory/rate-limited-consolidator.ts";
-export type { ConsolidatorRateLimitConfig } from "./memory/rate-limited-consolidator.ts";
+export type {
+  ConsolidatorRateLimitConfig,
+  ConsolidatorRateLimitScope,
+} from "./memory/rate-limited-consolidator.ts";
 
 export {
   CompactionStrategy,
@@ -328,6 +331,13 @@ export type { SecretsStorage, ResolvedSecret } from "./secrets/types.ts";
 export { SecretScope } from "./secrets/types.ts";
 export { InMemorySecretsStorage } from "./secrets/in-memory-secrets-storage.ts";
 
+// Audit log — durable record of elevated (cross-scope) tool calls.
+export type { AuditEntry, AuditRecord, AuditLogger } from "./audit/types.ts";
+export {
+  InMemoryAuditLogger,
+  type InMemoryAuditLoggerConfig,
+} from "./audit/in-memory-audit-logger.ts";
+
 // MCP integration — connect agents to Model Context Protocol servers.
 export type {
   McpClient,
@@ -361,6 +371,9 @@ export type {
   ElevatedToolContext,
   ScopedToolConfig,
   ElevatedToolConfig,
+  ScopedToolSecretsConfig,
+  ScopedToolMemoryConfig,
+  ScopedMemory,
   ToolScope,
   ToolExecuteContext,
   ToolWriter,

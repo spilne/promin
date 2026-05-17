@@ -204,6 +204,12 @@ export async function executeToolCall(
    * live caller. Surfaced on `ctx.scope`.
    */
   scope?: import("./tool.ts").ToolScope,
+  /**
+   * Optional audit sink. Populated by the agent runtime from the agent
+   * config; surfaced on `ctx.auditLogger` so elevated tools emit an
+   * audit record per `ctx.audit()` call.
+   */
+  auditLogger?: import("./audit/types.ts").AuditLogger,
 ): Promise<ToolResultMessage> {
   let parsed: unknown;
   try {
@@ -219,10 +225,11 @@ export async function executeToolCall(
   try {
     // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
     const ctx =
-      onProgress || scope
+      onProgress || scope || auditLogger
         ? {
             ...(onProgress && { writer: { write: onProgress } }),
             ...(scope && { scope }),
+            ...(auditLogger && { auditLogger }),
           }
         : undefined;
     const output = await toolDef.execute(parsed as any, ctx);

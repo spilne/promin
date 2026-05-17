@@ -613,7 +613,7 @@ function ToolPicker({ tools, selected, onChange }: ToolPickerProps) {
                     onChange={() => toggle(t.name)}
                   />
                   <div class="flex-1 min-w-0">
-                    <div class="flex items-center gap-2">
+                    <div class="flex items-center gap-2 flex-wrap">
                       <span class="font-mono text-xs">{t.name}</span>
                       <ToolSourceBadge source={t.source} />
                       {!t.enabled && (
@@ -622,6 +622,27 @@ function ToolPicker({ tools, selected, onChange }: ToolPickerProps) {
                           title="Tool is disabled (enabled: false)"
                         >
                           disabled
+                        </span>
+                      )}
+                      {t.requiredSecrets.length > 0 && (
+                        <span
+                          class="badge badge-xs badge-ghost"
+                          title={`Requires secret${
+                            t.requiredSecrets.length === 1 ? "" : "s"
+                          }: ${t.requiredSecrets.join(", ")}`}
+                        >
+                          🔑{" "}
+                          {t.requiredSecrets.length === 1
+                            ? t.requiredSecrets[0]
+                            : `${t.requiredSecrets.length} secrets`}
+                        </span>
+                      )}
+                      {t.usesMemory && (
+                        <span
+                          class="badge badge-xs badge-ghost"
+                          title="Reads / writes scoped memory"
+                        >
+                          🧠 memory
                         </span>
                       )}
                     </div>

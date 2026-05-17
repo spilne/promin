@@ -1,4 +1,14 @@
 import type { z } from "zod";
+import type { AuditEntry, AuditLogger } from "./audit/types.ts";
+import type {
+  EpisodeInput,
+  EpisodeListParams,
+  EpisodicRecord,
+  Fact,
+  MemoryStore,
+  ScopedKey,
+  ThreadKey,
+} from "./memory/types.ts";
 
 /**
  * Free-form progress sink for long-running tools. Without it, a tool that
@@ -70,6 +80,13 @@ export interface ToolExecuteContext {
    * back to a sensible default or throw a clear error.
    */
   readonly scope?: ToolScope;
+  /**
+   * Audit sink for elevated tools. Populated by the agent runtime from
+   * the agent config. `createElevatedTool` emits one record here per
+   * `ctx.audit()` call once the tool body completes. Absent → audit
+   * calls are still enforced but not persisted.
+   */
+  readonly auditLogger?: AuditLogger;
 }
 
 export interface AgentTool<TInput = unknown, TOutput = unknown> {
@@ -124,6 +141,20 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
    * down and you want the agent to stop trying.
    */
   readonly enabled?: boolean;
+  /**
+   * Secret-store keys this tool needs to run — the `ref`s of every
+   * non-optional entry in a `createScopedTool`/`createElevatedTool`
+   * `secrets` config. Set by those factories; absent for bare `tool()`
+   * tools and for scoped tools that declare no required secrets.
+   * Surfaced in the catalog so operators can see a tool's secret
+   * dependencies without reading its source.
+   */
+  readonly requiredSecrets?: ReadonlyArray<string>;
+  /**
+   * True when the tool declares a `memory` config (and so receives a
+   * scope-bound `ctx.memory`). Set by the scoped/elevated factories.
+   */
+  readonly usesMemory?: boolean;
 }
 
 // ---- scoped + elevated tool factories ----------------------------------
@@ -139,6 +170,32 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
 // callback so only the runtime can supply the context.
 
 /**
+ * Scope-bound memory handle handed to a tool on `ctx.memory` when the
+ * tool config declares `memory`. Every call is pre-bound to one scope
+ * (namespace / resource / thread — chosen by the config) so the tool
+ * body never names a key or risks crossing tenants.
+ *
+ * Surfaces the two durable `MemoryStore` tiers: `facts` (small plaintext
+ * statements) and `episodes` (summarized events with salience/outcome).
+ * The agent runtime's own scratchpad (thread working memory) is
+ * deliberately not exposed — it's the loop's, not a tool's.
+ */
+export interface ScopedMemory {
+  /** Append a durable plaintext fact at the bound scope. */
+  recordFact(text: string): Promise<Fact>;
+  /** All facts at the bound scope. */
+  listFacts(): Promise<Fact[]>;
+  /** Remove a fact by id. No-op if it doesn't exist. */
+  deleteFact(factId: string): Promise<void>;
+  /** Append a summarized episode at the bound scope. */
+  recordEpisode(input: EpisodeInput): Promise<EpisodicRecord>;
+  /** Episodes at the bound scope, newest/most-salient first per `params`. */
+  listEpisodes(params?: EpisodeListParams): Promise<EpisodicRecord[]>;
+  /** Remove an episode by id. No-op if it doesn't exist. */
+  deleteEpisode(episodeId: string): Promise<void>;
+}
+
+/**
  * Per-call context for scoped tools. All identity fields are guaranteed
  * non-empty when this context is passed — runtime enforces it.
  *
@@ -147,6 +204,11 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
  * (resource → namespace → global) at execute time using the live
  * scope, so the user callback sees plaintext values keyed by the
  * declared name. Empty record when no secrets declared.
+ *
+ * `memory` is a scope-bound `ScopedMemory` handle — present iff the
+ * tool config declares `memory`, absent otherwise. (Unlike `secrets`,
+ * which has a natural empty value, a memory handle has no meaningful
+ * "empty" form, so it's optional rather than always-present.)
  */
 export interface ScopedToolContext {
   readonly namespaceId: string;
@@ -155,6 +217,7 @@ export interface ScopedToolContext {
   readonly agentId?: string;
   readonly writer?: ToolWriter;
   readonly secrets: Readonly<Record<string, string>>;
+  readonly memory?: ScopedMemory;
 }
 
 /**
@@ -208,6 +271,34 @@ export interface ScopedToolSecretsConfig {
 }
 
 /**
+ * Declarative scoped-memory config for scoped/elevated tools.
+ *
+ *   memory: {
+ *     store: memoryStoreInstance,
+ *     scope: 'resource',   // default — see below
+ *   }
+ *
+ * When set, the factory wrapper builds a `ScopedMemory` adapter
+ * pre-bound to the live caller scope and hands it to the tool body as
+ * `ctx.memory`. Like `secrets.storage`, the `MemoryStore` is captured
+ * at construction time (closure), not threaded through the runtime.
+ *
+ * `scope` selects which memory tier the handle binds to:
+ *   - `'resource'` (default) — per-user memory; the common case
+ *   - `'namespace'`          — per-tenant memory, shared across users
+ *   - `'thread'`             — per-conversation memory; requires a
+ *                              `threadId` at call time, else the call
+ *                              throws (same loud-failure contract as a
+ *                              missing required secret)
+ */
+export interface ScopedToolMemoryConfig {
+  /** MemoryStore instance the host wires in at construction time. */
+  readonly store: MemoryStore;
+  /** Which memory tier `ctx.memory` binds to. Default `'resource'`. */
+  readonly scope?: "namespace" | "resource" | "thread";
+}
+
+/**
  * Configuration for `createScopedTool`. Same shape as `AgentTool` minus
  * the kind/requires markers (factory sets them) and with a typed
  * `execute` signature requiring a complete `ScopedToolContext`.
@@ -227,6 +318,12 @@ export interface ScopedToolConfig<TInput, TOutput> {
    * Without it, ctx.secrets is an empty record.
    */
   secrets?: ScopedToolSecretsConfig;
+  /**
+   * Optional declarative scoped-memory injection. When set, the factory
+   * wrapper builds a scope-bound `ScopedMemory` adapter and exposes it
+   * on ctx.memory. Without it, ctx.memory is undefined.
+   */
+  memory?: ScopedToolMemoryConfig;
   execute: (input: TInput, ctx: ScopedToolContext) => Promise<TOutput>;
 }
 
@@ -258,12 +355,15 @@ export interface ElevatedToolConfig<TInput, TOutput> extends Omit<
 export function createScopedTool<TInput, TOutput>(
   config: ScopedToolConfig<TInput, TOutput>,
 ): AgentTool<TInput, TOutput> {
-  const { execute: userExecute, secrets: secretsConfig, ...rest } = config;
+  const { execute: userExecute, secrets: secretsConfig, memory: memoryConfig, ...rest } = config;
+  const requiredSecrets = requiredSecretRefs(secretsConfig);
   return {
     ...rest,
     kind: "scoped",
+    ...(requiredSecrets.length > 0 && { requiredSecrets }),
+    ...(memoryConfig !== undefined && { usesMemory: true }),
     execute: async (input: TInput, ctx?: ToolExecuteContext): Promise<TOutput> => {
-      const scoped = await scopedContextFrom(ctx, config.name, secretsConfig);
+      const scoped = await scopedContextFrom(ctx, config.name, secretsConfig, memoryConfig);
       if (!scoped) {
         throw new Error(
           `Scoped tool '${config.name}' invoked without complete (namespaceId, resourceId) scope. ` +
@@ -286,23 +386,40 @@ export function createScopedTool<TInput, TOutput>(
 export function createElevatedTool<TInput, TOutput>(
   config: ElevatedToolConfig<TInput, TOutput>,
 ): AgentTool<TInput, TOutput> {
-  const { execute: userExecute, requires, secrets: secretsConfig, ...rest } = config;
+  const {
+    execute: userExecute,
+    requires,
+    secrets: secretsConfig,
+    memory: memoryConfig,
+    ...rest
+  } = config;
+  const requiredSecrets = requiredSecretRefs(secretsConfig);
   return {
     ...rest,
     kind: "elevated",
     ...(requires !== undefined && { requires }),
+    ...(requiredSecrets.length > 0 && { requiredSecrets }),
+    ...(memoryConfig !== undefined && { usesMemory: true }),
     execute: async (input: TInput, ctx?: ToolExecuteContext): Promise<TOutput> => {
-      const scoped = await scopedContextFrom(ctx, config.name, secretsConfig);
+      const scoped = await scopedContextFrom(ctx, config.name, secretsConfig, memoryConfig);
       if (!scoped) {
         throw new Error(
           `Elevated tool '${config.name}' invoked without complete (namespaceId, resourceId) scope.`,
         );
       }
       let auditCalled = false;
-      const audit: ElevatedToolContext["audit"] = (_entry) => {
+      const auditEntries: AuditEntry[] = [];
+      const audit: ElevatedToolContext["audit"] = (entry) => {
         auditCalled = true;
-        // Audit log emission is host-injectable in a follow-up; for now
-        // the factory only tracks that the tool DID call audit().
+        auditEntries.push({
+          namespaceId: scoped.namespaceId,
+          resourceId: scoped.resourceId,
+          ...(scoped.agentId !== undefined && { agentId: scoped.agentId }),
+          toolName: config.name,
+          action: entry.action,
+          ...(entry.target !== undefined && { target: entry.target }),
+          ...(entry.meta !== undefined && { meta: entry.meta }),
+        });
       };
       const elevated: ElevatedToolContext = { ...scoped, audit };
       const output = await userExecute(input, elevated);
@@ -311,6 +428,16 @@ export function createElevatedTool<TInput, TOutput>(
           `Elevated tool '${config.name}' completed without calling ctx.audit(). ` +
             "Every elevated invocation must record an audit entry.",
         );
+      }
+      // Persist the audit trail once the body succeeds. A logger
+      // rejection fails the call — an unrecorded cross-scope action is
+      // a compliance gap, not a silent skip. No-op when no logger is
+      // wired (audit is still enforced above).
+      const auditLogger = ctx?.auditLogger;
+      if (auditLogger) {
+        for (const entry of auditEntries) {
+          await auditLogger.record(entry);
+        }
       }
       return output;
     },
@@ -321,6 +448,7 @@ async function scopedContextFrom(
   ctx: ToolExecuteContext | undefined,
   toolName: string,
   secretsConfig: ScopedToolSecretsConfig | undefined,
+  memoryConfig: ScopedToolMemoryConfig | undefined,
 ): Promise<ScopedToolContext | null> {
   const scope = ctx?.scope;
   if (!scope) return null;
@@ -332,6 +460,14 @@ async function scopedContextFrom(
     resourceId: scope.resourceId,
   });
 
+  const memory = memoryConfig
+    ? buildScopedMemory(toolName, memoryConfig, {
+        namespaceId: scope.namespaceId,
+        resourceId: scope.resourceId,
+        ...(scope.threadId !== undefined && { threadId: scope.threadId }),
+      })
+    : undefined;
+
   return {
     namespaceId: scope.namespaceId,
     resourceId: scope.resourceId,
@@ -339,7 +475,84 @@ async function scopedContextFrom(
     ...(scope.agentId !== undefined && { agentId: scope.agentId }),
     ...(ctx?.writer !== undefined && { writer: ctx.writer }),
     secrets,
+    ...(memory !== undefined && { memory }),
   };
+}
+
+/**
+ * Builds a `ScopedMemory` adapter pre-bound to the live caller scope.
+ * `scope` (default `'resource'`) picks the `MemoryStore` tier; the six
+ * methods are thin pass-throughs that supply the bound key so the tool
+ * body can neither name a key nor cross tenants. Thread scope without
+ * a `threadId` throws — the same loud-failure contract as a missing
+ * required secret.
+ */
+function buildScopedMemory(
+  toolName: string,
+  config: ScopedToolMemoryConfig,
+  scope: { namespaceId: string; resourceId: string; threadId?: string },
+): ScopedMemory {
+  const store = config.store;
+  const tier = config.scope ?? "resource";
+
+  if (tier === "namespace") {
+    const ns = scope.namespaceId;
+    return {
+      recordFact: (text) => store.appendNamespaceFact(ns, text),
+      listFacts: () => store.listNamespaceFacts(ns),
+      deleteFact: (id) => store.deleteNamespaceFact(ns, id),
+      recordEpisode: (input) => store.appendNamespaceEpisode(ns, input),
+      listEpisodes: (params) => store.listNamespaceEpisodes(ns, params),
+      deleteEpisode: (id) => store.deleteNamespaceEpisode(ns, id),
+    };
+  }
+
+  if (tier === "resource") {
+    const key: ScopedKey = { namespaceId: scope.namespaceId, resourceId: scope.resourceId };
+    return {
+      recordFact: (text) => store.appendResourceFact(key, text),
+      listFacts: () => store.listResourceFacts(key),
+      deleteFact: (id) => store.deleteResourceFact(key, id),
+      recordEpisode: (input) => store.appendResourceEpisode(key, input),
+      listEpisodes: (params) => store.listResourceEpisodes(key, params),
+      deleteEpisode: (id) => store.deleteResourceEpisode(key, id),
+    };
+  }
+
+  // tier === "thread"
+  if (typeof scope.threadId !== "string" || scope.threadId.length === 0) {
+    throw new Error(
+      `Tool '${toolName}' declares thread-scoped memory but was invoked without a threadId. ` +
+        "Thread-scoped memory requires the call to run inside a thread — use scope " +
+        "'resource' or 'namespace' for tools that can run outside one.",
+    );
+  }
+  const key: ThreadKey = {
+    namespaceId: scope.namespaceId,
+    resourceId: scope.resourceId,
+    threadId: scope.threadId,
+  };
+  return {
+    recordFact: (text) => store.appendThreadFact(key, text),
+    listFacts: () => store.listThreadFacts(key),
+    deleteFact: (id) => store.deleteThreadFact(key, id),
+    recordEpisode: (input) => store.appendThreadEpisode(key, input),
+    listEpisodes: (params) => store.listThreadEpisodes(key, params),
+    deleteEpisode: (id) => store.deleteThreadEpisode(key, id),
+  };
+}
+
+/**
+ * The secret-store keys a tool must have to run — the `ref` of every
+ * non-optional entry in its `secrets` config. Drives the catalog's
+ * `requiredSecrets`. Optional refs (`required: false`) are excluded:
+ * the tool runs without them.
+ */
+function requiredSecretRefs(secretsConfig: ScopedToolSecretsConfig | undefined): string[] {
+  if (!secretsConfig) return [];
+  return Object.values(secretsConfig.refs)
+    .filter((decl) => decl.required !== false)
+    .map((decl) => decl.ref);
 }
 
 /**

@@ -7,7 +7,9 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { DefaultAgentToolCatalog } from "../tool-catalog.ts";
-import { tool } from "../tool.ts";
+import { createScopedTool, tool } from "../tool.ts";
+import { InMemorySecretsStorage } from "../secrets/in-memory-secrets-storage.ts";
+import { InMemoryMemoryStore } from "../memory/in-memory-memory-store.ts";
 import { InMemoryMcpClientPool } from "../mcp/mcp-client-pool.ts";
 import type { McpClient, McpToolDefinition, McpToolResult } from "../mcp/types.ts";
 
@@ -45,6 +47,35 @@ describe("DefaultAgentToolCatalog", () => {
     const all = await cat.listAll();
     expect(all.map((e) => e.name)).toEqual(["memory", "search"]);
     for (const e of all) expect(e.source.kind).toBe("in-process");
+  });
+
+  it("surfaces requiredSecrets + usesMemory from scoped tool factories", async () => {
+    const slackPost = createScopedTool({
+      name: "slack_post",
+      description: "Post to Slack",
+      parameters: z.object({ text: z.string() }),
+      secrets: {
+        storage: new InMemorySecretsStorage(),
+        refs: {
+          token: { ref: "SLACK_BOT_TOKEN" },
+          // Optional ref — must NOT appear in requiredSecrets.
+          debug: { ref: "DEBUG_FLAG", required: false },
+        },
+      },
+      memory: { store: new InMemoryMemoryStore() },
+      execute: async () => "ok",
+    });
+    const cat = new DefaultAgentToolCatalog({ inProcess: { search, slack_post: slackPost } });
+    const all = await cat.listAll();
+
+    const slack = all.find((e) => e.name === "slack_post")!;
+    expect(slack.requiredSecrets).toEqual(["SLACK_BOT_TOKEN"]);
+    expect(slack.usesMemory).toBe(true);
+
+    // A bare tool() reports neither.
+    const plain = all.find((e) => e.name === "search")!;
+    expect(plain.requiredSecrets).toEqual([]);
+    expect(plain.usesMemory).toBe(false);
   });
 
   it("converts Zod parameters to JSON Schema", async () => {

@@ -224,6 +224,13 @@ export interface AgentLoopConfig {
   memory?: MemoryConfig;
   hooks?: HooksConfig;
   processors?: ProcessorsConfig;
+  /**
+   * Audit sink for elevated tools. Threaded through to `ctx.auditLogger`
+   * on every tool `execute`, so `createElevatedTool` emits a durable
+   * record per `ctx.audit()` call. Absent → audit calls are enforced
+   * but not persisted.
+   */
+  auditLogger?: import("./audit/types.ts").AuditLogger;
   /** Time source. Default: SystemClock. Pass FakeClock in tests to drive idle timers. */
   clock?: Clock;
   /**

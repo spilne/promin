@@ -38,6 +38,18 @@ export interface ToolCatalogEntry {
    * resolveLocalAgent rejects recipes that reference it.
    */
   readonly enabled: boolean;
+  /**
+   * Secret-store keys the tool needs to run (from its scoped/elevated
+   * `secrets` config). Empty for tools that declare no required
+   * secrets. Lets the catalog UI badge a tool's secret dependencies
+   * and lets reconciliation ask "is this resolvable at namespace X".
+   */
+  readonly requiredSecrets: ReadonlyArray<string>;
+  /**
+   * True when the tool declares scoped `memory` (receives a
+   * `ctx.memory` handle). Lets the catalog UI badge memory-using tools.
+   */
+  readonly usesMemory: boolean;
 }
 
 export type ToolCatalogSource =
@@ -124,6 +136,10 @@ export class DefaultAgentToolCatalog implements AgentToolCatalog {
               // from the recipe to disable). Per-tool toggling is the
               // server's responsibility.
               enabled: true,
+              // Secret/memory wiring is internal to the MCP server —
+              // the catalog has no visibility into it.
+              requiredSecrets: [],
+              usesMemory: false,
             });
             seen.add(mounted);
           }
@@ -152,5 +168,7 @@ function toEntry(
     parameters: zodToJsonSchema(tool.parameters),
     source,
     enabled: tool.enabled !== false,
+    requiredSecrets: tool.requiredSecrets ?? [],
+    usesMemory: tool.usesMemory === true,
   };
 }
