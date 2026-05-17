@@ -777,3 +777,38 @@ export const agentAuditLog = pgTable(
     index("agent_audit_log_ns_time_idx").on(t.namespaceId, t.recordedAt),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// Agent tool history — durable audit trail of which tools the host has
+// exposed over time. The live AgentToolCatalog is ephemeral; this is the
+// opt-in persistence layer over it (AgentToolCatalogHistory snapshots the
+// catalog and upserts here).
+//
+// One row per (name, source_kind, source_detail, schema_hash) tuple — a
+// tool re-observed with the same schema bumps last_seen_at; a parameter
+// change flips schema_hash and lands as a new row. Rows are never
+// deleted: a vanished tool simply stops having last_seen_at advanced.
+// ---------------------------------------------------------------------------
+
+export const agentToolHistory = pgTable(
+  "agent_tool_history",
+  {
+    name: text("name").notNull(),
+    sourceKind: text("source_kind").notNull(), // 'in-process' | 'file' | 'mcp'
+    sourceDetail: text("source_detail").notNull().default(""),
+    /** SHA-256 of the canonical JSON Schema of the tool's parameters. */
+    schemaHash: text("schema_hash").notNull(),
+    description: text("description").notNull(),
+    /** Epoch ms the tuple was first recorded. */
+    firstSeenAt: bigint("first_seen_at", { mode: "number" }).notNull(),
+    /** Epoch ms the tuple was most recently observed. */
+    lastSeenAt: bigint("last_seen_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    primaryKey({
+      columns: [t.name, t.sourceKind, t.sourceDetail, t.schemaHash],
+    }),
+    // Read path: history for a tool name, most recently seen first.
+    index("agent_tool_history_name_idx").on(t.name, t.lastSeenAt),
+  ],
+);

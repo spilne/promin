@@ -23,6 +23,8 @@ export type {
   SqliteToolAuditLoggerConfig,
   ToolAuditLogQuery,
 } from "./lib/agent/tool-audit-logger.ts";
+export { SqliteToolHistoryStore } from "./lib/agent/tool-history-store.ts";
+export type { SqliteToolHistoryStoreConfig } from "./lib/agent/tool-history-store.ts";
 export { SqliteWorkflowStorage } from "./lib/sqlite-workflow-storage.ts";
 export { SqliteStepQueue } from "./lib/sqlite-step-queue.ts";
 export { SqliteWorkerRegistry } from "./lib/sqlite-worker-registry.ts";
