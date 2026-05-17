@@ -232,6 +232,20 @@ export class InMemoryMemoryStore implements MemoryStore {
     return this.queryEpisodes(this.resourceEpisodes.get(this.resourceK(key)) ?? [], params);
   }
 
+  async listResourceEpisodesForNamespace(
+    namespaceId: string,
+    params?: EpisodeListParams,
+  ): Promise<EpisodicRecord[]> {
+    // Resource keys are `${namespaceId}|${resourceId}` — scan every
+    // resource bucket in this namespace and flatten before querying.
+    const prefix = `${namespaceId}|`;
+    const all: EpisodicRecord[] = [];
+    for (const [k, list] of this.resourceEpisodes) {
+      if (k.startsWith(prefix)) all.push(...list);
+    }
+    return this.queryEpisodes(all, params);
+  }
+
   async deleteResourceEpisode(key: ScopedKey, episodeId: string): Promise<void> {
     const k = this.resourceK(key);
     const list = this.resourceEpisodes.get(k);

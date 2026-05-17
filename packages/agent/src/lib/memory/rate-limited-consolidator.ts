@@ -34,13 +34,31 @@ export interface ConsolidatorRateLimitConfig {
    * `ConsolidatorRateLimitError` until older episodes age out.
    */
   readonly maxDistillsPerWindow: number;
+  /**
+   * Optional second cap, applied across ALL resources in a namespace
+   * within the same window. The per-resource cap protects per-user
+   * cost; this protects per-tenant cost — a namespace with hundreds of
+   * resources, each just under its own cap, can still rack up unbounded
+   * distill spend. When set, BOTH caps apply; whichever trips first
+   * throws (`scope.kind` tells the caller which).
+   */
+  readonly maxDistillsPerNamespacePerWindow?: number;
   /** Time source. Default: `SystemClock`. Tests pass `FakeClock`. */
   readonly clock?: Clock;
 }
 
+/**
+ * Which cap a `ConsolidatorRateLimitError` tripped — lets a gateway
+ * distinguish per-user (`resource`) from per-tenant (`namespace`)
+ * throttling in the 429 body.
+ */
+export type ConsolidatorRateLimitScope =
+  | { readonly kind: "resource"; readonly namespaceId: string; readonly resourceId: string }
+  | { readonly kind: "namespace"; readonly namespaceId: string };
+
 export class ConsolidatorRateLimitError extends Error {
   readonly kind = "distill" as const;
-  readonly scope: { readonly namespaceId: string; readonly resourceId: string };
+  readonly scope: ConsolidatorRateLimitScope;
   readonly windowMs: number;
   readonly max: number;
   readonly seen: number;
@@ -53,14 +71,18 @@ export class ConsolidatorRateLimitError extends Error {
   readonly oldestInWindowAt: number;
 
   constructor(args: {
-    scope: { namespaceId: string; resourceId: string };
+    scope: ConsolidatorRateLimitScope;
     windowMs: number;
     max: number;
     seen: number;
     oldestInWindowAt: number;
   }) {
+    const where =
+      args.scope.kind === "resource"
+        ? `${args.scope.namespaceId}/${args.scope.resourceId}`
+        : `namespace ${args.scope.namespaceId}`;
     super(
-      `Consolidator distill rate limit exceeded for ${args.scope.namespaceId}/${args.scope.resourceId}: ` +
+      `Consolidator distill rate limit exceeded for ${where}: ` +
         `${args.seen}/${args.max} distills in the past ${args.windowMs}ms`,
     );
     this.name = "ConsolidatorRateLimitError";
@@ -102,27 +124,64 @@ export class RateLimitedConsolidator implements Consolidator {
       // anyway; defer to inner so the same error surfaces.
       return this.inner.distillThread(key, opts);
     }
-    const scope = { namespaceId: key.namespaceId, resourceId: key.resourceId };
+    const resourceId = key.resourceId;
     const since = this.clock.currentTimeMs() - this.config.windowMs;
-    const recent = await this.memory.listResourceEpisodes(scope, { order: "createdDesc" });
-    let seen = 0;
-    let oldestInWindowAt = Number.POSITIVE_INFINITY;
-    for (const ep of recent) {
-      if (ep.createdAt < since) break; // ordered desc — older entries are older
-      if ((ep.metadata as { kind?: unknown } | null)?.kind === "distill") {
-        seen += 1;
-        if (ep.createdAt < oldestInWindowAt) oldestInWindowAt = ep.createdAt;
-      }
-    }
-    if (seen >= this.config.maxDistillsPerWindow) {
+
+    // Per-(namespace, resource) cap — protects per-user cost.
+    const resourceEpisodes = await this.memory.listResourceEpisodes(
+      { namespaceId: key.namespaceId, resourceId },
+      { order: "createdDesc" },
+    );
+    const perResource = countDistillsInWindow(resourceEpisodes, since);
+    if (perResource.seen >= this.config.maxDistillsPerWindow) {
       throw new ConsolidatorRateLimitError({
-        scope,
+        scope: { kind: "resource", namespaceId: key.namespaceId, resourceId },
         windowMs: this.config.windowMs,
         max: this.config.maxDistillsPerWindow,
-        seen,
-        oldestInWindowAt,
+        seen: perResource.seen,
+        oldestInWindowAt: perResource.oldestInWindowAt,
       });
     }
+
+    // Optional per-namespace cap — protects per-tenant cost.
+    const nsMax = this.config.maxDistillsPerNamespacePerWindow;
+    if (nsMax !== undefined) {
+      const nsEpisodes = await this.memory.listResourceEpisodesForNamespace(key.namespaceId, {
+        order: "createdDesc",
+      });
+      const perNamespace = countDistillsInWindow(nsEpisodes, since);
+      if (perNamespace.seen >= nsMax) {
+        throw new ConsolidatorRateLimitError({
+          scope: { kind: "namespace", namespaceId: key.namespaceId },
+          windowMs: this.config.windowMs,
+          max: nsMax,
+          seen: perNamespace.seen,
+          oldestInWindowAt: perNamespace.oldestInWindowAt,
+        });
+      }
+    }
+
     return this.inner.distillThread(key, opts);
   }
+}
+
+/**
+ * Count distill-kind episodes whose `createdAt` falls inside the
+ * trailing window. `episodes` must be ordered `createdDesc` — the scan
+ * stops at the first entry older than `since`.
+ */
+function countDistillsInWindow(
+  episodes: ReadonlyArray<EpisodicRecord>,
+  since: number,
+): { seen: number; oldestInWindowAt: number } {
+  let seen = 0;
+  let oldestInWindowAt = Number.POSITIVE_INFINITY;
+  for (const ep of episodes) {
+    if (ep.createdAt < since) break; // ordered desc — older entries are older
+    if ((ep.metadata as { kind?: unknown } | null)?.kind === "distill") {
+      seen += 1;
+      if (ep.createdAt < oldestInWindowAt) oldestInWindowAt = ep.createdAt;
+    }
+  }
+  return { seen, oldestInWindowAt };
 }

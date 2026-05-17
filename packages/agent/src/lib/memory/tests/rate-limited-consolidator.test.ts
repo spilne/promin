@@ -8,6 +8,10 @@
 //   5. no-resourceId calls bypass the limit entirely (delegate, surface inner error)
 //   6. force: true does NOT bypass the rate limit (limit is cost-based, not dedup-based)
 //   7. counts only kind==="distill" episodes, ignoring other resource episodes
+//   8. per-namespace cap throttles tenant-wide spend even when every
+//      individual resource is under its own per-resource cap
+//   9. per-namespace cap allows distill while the namespace total is under it
+//  10. per-resource cap is checked first when both caps would trip
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
@@ -102,7 +106,7 @@ describe("RateLimitedConsolidator", () => {
       caught = err as ConsolidatorRateLimitError;
     }
     expect(caught).toBeInstanceOf(ConsolidatorRateLimitError);
-    expect(caught!.scope).toEqual(SCOPE);
+    expect(caught!.scope).toEqual({ kind: "resource", ...SCOPE });
     expect(caught!.max).toBe(2);
     expect(caught!.seen).toBe(2);
     // Oldest in-window episode was the seed at t=1_000_000.
@@ -209,5 +213,78 @@ describe("RateLimitedConsolidator", () => {
 
     await rl.distillThread(KEY); // first distill ever for resource → allowed
     expect(counts().distill).toBe(1);
+  });
+
+  it("per-namespace cap throttles tenant-wide spend under generous per-resource caps", async () => {
+    const clock = FakeClock.create(1_000_000);
+    const memory = new InMemoryMemoryStore({ clock });
+    const { inner, counts } = makeStubConsolidator();
+    const rl = new RateLimitedConsolidator(inner, memory, {
+      windowMs: 60_000,
+      maxDistillsPerWindow: 5, // generous per-resource cap
+      maxDistillsPerNamespacePerWindow: 2,
+      clock,
+    });
+
+    // Two different resources in the same namespace, one distill each.
+    // Each is well under the per-resource cap of 5, but the namespace
+    // total is at the per-namespace cap of 2.
+    await seedDistillEpisode(memory, SCOPE, "t-alice");
+    clock.advance(10_000);
+    await seedDistillEpisode(memory, { namespaceId: "acme", resourceId: "bob" }, "t-bob");
+
+    let caught: ConsolidatorRateLimitError | undefined;
+    try {
+      await rl.distillThread(KEY);
+    } catch (err) {
+      caught = err as ConsolidatorRateLimitError;
+    }
+    expect(caught).toBeInstanceOf(ConsolidatorRateLimitError);
+    expect(caught!.scope).toEqual({ kind: "namespace", namespaceId: "acme" });
+    expect(caught!.max).toBe(2);
+    expect(caught!.seen).toBe(2);
+    // Oldest in-window distill across the namespace was the alice seed.
+    expect(caught!.oldestInWindowAt).toBe(1_000_000);
+    expect(counts().distill).toBe(0);
+  });
+
+  it("per-namespace cap allows distill while the namespace total is under it", async () => {
+    const clock = FakeClock.create(1_000_000);
+    const memory = new InMemoryMemoryStore({ clock });
+    const { inner, counts } = makeStubConsolidator();
+    const rl = new RateLimitedConsolidator(inner, memory, {
+      windowMs: 60_000,
+      maxDistillsPerWindow: 5,
+      maxDistillsPerNamespacePerWindow: 3,
+      clock,
+    });
+
+    await seedDistillEpisode(memory, SCOPE, "t-alice");
+    await seedDistillEpisode(memory, { namespaceId: "acme", resourceId: "bob" }, "t-bob");
+    // Namespace total = 2, cap 3 → allowed.
+    await rl.distillThread(KEY);
+    expect(counts().distill).toBe(1);
+  });
+
+  it("checks the per-resource cap first when both caps would trip", async () => {
+    const clock = FakeClock.create(1_000_000);
+    const memory = new InMemoryMemoryStore({ clock });
+    const { inner } = makeStubConsolidator();
+    const rl = new RateLimitedConsolidator(inner, memory, {
+      windowMs: 60_000,
+      maxDistillsPerWindow: 1,
+      maxDistillsPerNamespacePerWindow: 1,
+      clock,
+    });
+
+    await seedDistillEpisode(memory, SCOPE, "t");
+    let caught: ConsolidatorRateLimitError | undefined;
+    try {
+      await rl.distillThread(KEY);
+    } catch (err) {
+      caught = err as ConsolidatorRateLimitError;
+    }
+    // Both caps sit at 1 and both are hit — the resource check runs first.
+    expect(caught!.scope).toEqual({ kind: "resource", ...SCOPE });
   });
 });

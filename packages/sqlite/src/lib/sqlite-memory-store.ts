@@ -430,6 +430,20 @@ export class SqliteMemoryStore implements MemoryStore {
     return this.queryEpisodesPostFilter(rows, params);
   }
 
+  async listResourceEpisodesForNamespace(
+    namespaceId: string,
+    params?: EpisodeListParams,
+  ): Promise<EpisodicRecord[]> {
+    // Same query as listResourceEpisodes minus the resource_id filter.
+    const rows = this.db
+      .query<DbEpisodeRow>(
+        `SELECT * FROM ${this.prefix}_episode
+         WHERE scope = ? AND namespace_id = ?`,
+      )
+      .all(SCOPE_RES, namespaceId);
+    return this.queryEpisodesPostFilter(rows, params);
+  }
+
   async deleteResourceEpisode(key: ScopedKey, episodeId: string): Promise<void> {
     this.db
       .query(

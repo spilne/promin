@@ -335,6 +335,18 @@ export class PostgresMemoryStore implements MemoryStore {
     return queryEpisodesPostFilter(rows, params);
   }
 
+  async listResourceEpisodesForNamespace(
+    namespaceId: string,
+    params?: EpisodeListParams,
+  ): Promise<EpisodicRecord[]> {
+    // Same query as listResourceEpisodes minus the resource_id filter.
+    const rows = await this.db
+      .select()
+      .from(agentEpisode)
+      .where(and(eq(agentEpisode.scope, SCOPE_RES), eq(agentEpisode.namespaceId, namespaceId)));
+    return queryEpisodesPostFilter(rows, params);
+  }
+
   async deleteResourceEpisode(key: ScopedKey, episodeId: string): Promise<void> {
     await this.db
       .delete(agentEpisode)

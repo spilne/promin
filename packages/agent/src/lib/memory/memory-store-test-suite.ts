@@ -396,6 +396,31 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
         expect(capped.map((e) => e.summary)).toEqual(["c"]);
       });
 
+      it("listResourceEpisodesForNamespace aggregates across resources, scoped to the namespace", async () => {
+        const s = await make();
+        await s.appendResourceEpisode(
+          { namespaceId: NS, resourceId: ALICE },
+          { summary: "alice-ep", salience: 0.9 },
+        );
+        await s.appendResourceEpisode(
+          { namespaceId: NS, resourceId: BOB },
+          { summary: "bob-ep", salience: 0.5 },
+        );
+        // A different namespace must not leak into the aggregate.
+        await s.appendResourceEpisode(
+          { namespaceId: "other-ns", resourceId: ALICE },
+          { summary: "other-ep", salience: 0.7 },
+        );
+        const out = await s.listResourceEpisodesForNamespace(NS);
+        expect(out.map((e) => e.summary).sort()).toEqual(["alice-ep", "bob-ep"]);
+        // Honors order + limit like the per-resource list.
+        const top = await s.listResourceEpisodesForNamespace(NS, {
+          order: "salienceDesc",
+          limit: 1,
+        });
+        expect(top.map((e) => e.summary)).toEqual(["alice-ep"]);
+      });
+
       it("supports per-thread and per-namespace episodes", async () => {
         const s = await make();
         const tkey = { namespaceId: NS, threadId: T_DEFAULT };

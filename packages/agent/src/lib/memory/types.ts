@@ -380,6 +380,17 @@ export interface MemoryStore {
   deleteResourceFact(key: ScopedKey, factId: string): Promise<void>;
   appendResourceEpisode(key: ScopedKey, input: EpisodeInput): Promise<EpisodicRecord>;
   listResourceEpisodes(key: ScopedKey, params?: EpisodeListParams): Promise<EpisodicRecord[]>;
+  /**
+   * Resource-scoped episodes across EVERY resource in a namespace.
+   * `listResourceEpisodes` only ever sees one resource; namespace-wide
+   * cost controls (e.g. the consolidator rate limiter's per-namespace
+   * cap) need the aggregate. Same filter/order semantics as the
+   * per-resource list.
+   */
+  listResourceEpisodesForNamespace(
+    namespaceId: string,
+    params?: EpisodeListParams,
+  ): Promise<EpisodicRecord[]>;
   deleteResourceEpisode(key: ScopedKey, episodeId: string): Promise<void>;
 
   // --- Thread ----------------------------------------------------------
