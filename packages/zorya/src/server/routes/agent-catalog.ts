@@ -14,6 +14,10 @@ import type {
   ModelCatalog,
   SerializedModelCatalogItem,
   ToolCatalogEntry,
+  ToolHistoryQuery,
+  ToolHistoryRecord,
+  ToolHistorySourceKind,
+  ToolHistoryStore,
   ToolRefReport,
 } from "@promin/agent";
 import { reconcileToolReferences } from "@promin/agent";
@@ -71,6 +75,55 @@ export function getToolCatalogHealth(deps: ToolCatalogHealthDeps) {
       return json(200, report);
     } catch (err) {
       return jsonError(500, "health_failed", err instanceof Error ? err.message : String(err));
+    }
+  };
+}
+
+export interface ToolHistoryDeps {
+  readonly history: ToolHistoryStore;
+}
+
+export interface ToolHistoryResponse {
+  history: ToolHistoryRecord[];
+}
+
+const SOURCE_KINDS: ReadonlyArray<ToolHistorySourceKind> = ["in-process", "file", "mcp"];
+
+/** Parse `?n` as a finite non-negative integer, or `undefined`. */
+function parseCount(raw: string | null): number | undefined {
+  if (raw === null) return undefined;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : undefined;
+}
+
+/**
+ * `GET /api/agents/_catalog/tools/history` — durable audit trail of which
+ * tools the host has exposed over time. Query params: `name`, `source`
+ * (`in-process` | `file` | `mcp`), `since` (epoch ms), `limit`. Unknown
+ * `source` values are ignored rather than rejected.
+ */
+export function listToolHistory(deps: ToolHistoryDeps) {
+  return async (req: Request): Promise<Response> => {
+    try {
+      const params = new URL(req.url).searchParams;
+      const name = params.get("name") ?? undefined;
+      const source = params.get("source");
+      const sourceKind = SOURCE_KINDS.find((k) => k === source);
+      const query: ToolHistoryQuery = {
+        ...(name ? { name } : {}),
+        ...(sourceKind ? { sourceKind } : {}),
+        ...(parseCount(params.get("since")) !== undefined
+          ? { since: parseCount(params.get("since")) }
+          : {}),
+        ...(parseCount(params.get("limit")) !== undefined
+          ? { limit: parseCount(params.get("limit")) }
+          : {}),
+      };
+      const history = await deps.history.list(query);
+      const body: ToolHistoryResponse = { history };
+      return json(200, body);
+    } catch (err) {
+      return jsonError(500, "history_failed", err instanceof Error ? err.message : String(err));
     }
   };
 }

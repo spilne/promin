@@ -16,6 +16,7 @@ import type {
   MemoryStore,
   ModelCatalog,
   RegisteredAgent,
+  ToolHistoryStore,
 } from "@promin/agent";
 import { dispatchAgentSchedule } from "@promin/agent";
 import type { DurableScheduleConfig, ScheduleTick } from "@promin/workflow";
@@ -71,6 +72,14 @@ export interface ZoryaAgentsConfig {
    * Without it, the route is not mounted.
    */
   toolCatalog?: AgentToolCatalog;
+  /**
+   * Optional tool-history store. When set, the server exposes
+   * `GET /api/agents/_catalog/tools/history` so a compliance / forensic
+   * query can read which tools the host has exposed over time. Pair it
+   * with an `AgentToolCatalogHistory` snapshot loop to populate it.
+   * Without it, the route is not mounted.
+   */
+  toolHistory?: ToolHistoryStore;
   /** Filesystem hot-reload scan loop. Omit to disable. */
   scan?: ZoryaAgentsScanConfig;
   /**
@@ -99,6 +108,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   readonly instances?: AgentInstanceRegistry;
   readonly models?: ModelCatalog;
   readonly toolCatalog?: AgentToolCatalog;
+  readonly toolHistory?: ToolHistoryStore;
   readonly turnGate?: AgentTurnGate;
   readonly workerId?: string;
   private readonly scanConfig?: ZoryaAgentsScanConfig;
@@ -111,6 +121,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
     if (config.instances) this.instances = config.instances;
     if (config.models) this.models = config.models;
     if (config.toolCatalog) this.toolCatalog = config.toolCatalog;
+    if (config.toolHistory) this.toolHistory = config.toolHistory;
     if (config.scan) this.scanConfig = config.scan;
     if (config.turnGate) this.turnGate = config.turnGate;
     if (config.workerId) this.workerId = config.workerId;

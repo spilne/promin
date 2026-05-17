@@ -121,6 +121,7 @@ import {
   getToolCatalogHealth,
   listCatalogModels,
   listCatalogTools,
+  listToolHistory,
 } from "./routes/agent-catalog.ts";
 import { createSecret, deleteSecret, listSecrets } from "./routes/secrets.ts";
 import {
@@ -471,6 +472,14 @@ export class ZoryaServer {
               })
             : async () =>
                 new Response(JSON.stringify({ recipes: [], orphans: [] }), { status: 200 }),
+        )
+        // Tool catalog history: durable audit trail of exposed tools over
+        // time. Mounted only when a tool-history store is wired.
+        .get(
+          "/api/agents/_catalog/tools/history",
+          this.agents.toolHistory
+            ? listToolHistory({ history: this.agents.toolHistory })
+            : async () => new Response(JSON.stringify({ history: [] }), { status: 200 }),
         )
         // Recipe CRUD — gsze Phase 1. Author/edit/clone agents over HTTP.
         .post("/api/agents", createAgent(agentDeps))
