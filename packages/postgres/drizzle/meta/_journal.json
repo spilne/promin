@@ -253,6 +253,13 @@
       "when": 1743400035000,
       "tag": "0035_agent_secret",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1743400036000,
+      "tag": "0036_agent_audit_log",
+      "breakpoints": true
     }
   ]
 }

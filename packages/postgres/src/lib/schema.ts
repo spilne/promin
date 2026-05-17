@@ -742,3 +742,38 @@ export const agentSecret = pgTable(
     index("agent_secret_scope_idx").on(t.scopeKind, t.namespaceId, t.resourceId),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// Agent audit log — append-only record of elevated (cross-scope) tool
+// calls. Every elevated tool must call `ctx.audit()` per invocation;
+// each such call lands here as one row a security review can read.
+//
+// `recorded_at` is owned by the database clock (server-side NOW()), not
+// the caller — an audit trail must not be back-datable by a skewed or
+// hostile client. Stored as epoch-ms BIGINT for parity with the rest of
+// the agent tables. `agent_id` / `target` / `meta` are nullable: a tool
+// can run outside a recipe, and action detail is tool-defined.
+// ---------------------------------------------------------------------------
+
+export const agentAuditLog = pgTable(
+  "agent_audit_log",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    namespaceId: text("namespace_id").notNull(),
+    resourceId: text("resource_id").notNull(),
+    /** Recipe id of the agent the tool ran under, when known. */
+    agentId: text("agent_id"),
+    toolName: text("tool_name").notNull(),
+    action: text("action").notNull(),
+    /** Optional target of the action — an id, a path, a scope key. */
+    target: text("target"),
+    /** Optional structured detail, tool-defined. */
+    meta: jsonb("meta"),
+    /** Epoch ms, assigned by the database clock at insert time. */
+    recordedAt: bigint("recorded_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    // Read path: list by namespace within a time range, newest first.
+    index("agent_audit_log_ns_time_idx").on(t.namespaceId, t.recordedAt),
+  ],
+);

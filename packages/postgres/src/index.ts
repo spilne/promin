@@ -18,6 +18,11 @@ export {
   PostgresSecretsStorage,
   type PostgresSecretsStorageConfig,
 } from "./lib/postgres-secrets-storage.ts";
+export {
+  PostgresAuditLogger,
+  type PostgresAuditLoggerConfig,
+  type AuditLogQuery,
+} from "./lib/postgres-audit-logger.ts";
 export { type PostgresStorageConfig } from "./lib/config.ts";
 export { migrate, type MigrateOptions } from "./lib/migrate.ts";
 
