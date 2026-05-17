@@ -22,6 +22,8 @@ import {
   type TraceToolCallDto,
 } from "../../api/client.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
+import { buildTraceGraph, type TraceGraphNode } from "../../lib/trace-graph.ts";
+import { TraceGraph } from "./trace-graph.tsx";
 
 interface Props {
   agentId: string;
@@ -49,6 +51,17 @@ export function AgentTraceModal({ agentId, threadId, namespaceId, resourceId, on
 
   const [filterToolCalls, setFilterToolCalls] = useState(false);
   const [filterFailuresOnly, setFilterFailuresOnly] = useState(false);
+
+  // Graph view — see TraceGraph. The model is derived from the same
+  // trace; selecting a node opens the detail panel beside the canvas.
+  const [view, setView] = useState<"tree" | "graph">("tree");
+  const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined);
+  const [toolQuery, setToolQuery] = useState("");
+  const graphModel = useMemo(() => (trace ? buildTraceGraph(trace) : { nodes: [] }), [trace]);
+  const selectedNode = useMemo(
+    () => graphModel.nodes.find((n) => n.id === selectedNodeId),
+    [graphModel, selectedNodeId],
+  );
 
   const exportJson = () => {
     if (!trace) return;
@@ -111,24 +124,50 @@ export function AgentTraceModal({ agentId, threadId, namespaceId, resourceId, on
         </header>
 
         <div class="px-4 py-2 border-b border-base-300 flex items-center gap-3 text-xs">
-          <label class="cursor-pointer flex items-center gap-1">
+          <div class="join">
+            <button
+              class={`btn btn-xs join-item ${view === "tree" ? "btn-active" : ""}`}
+              onClick={() => setView("tree")}
+            >
+              Tree
+            </button>
+            <button
+              class={`btn btn-xs join-item ${view === "graph" ? "btn-active" : ""}`}
+              onClick={() => setView("graph")}
+            >
+              Graph
+            </button>
+          </div>
+          {view === "tree" ? (
+            <>
+              <label class="cursor-pointer flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  class="checkbox checkbox-xs"
+                  checked={filterToolCalls}
+                  onChange={(e) => setFilterToolCalls((e.target as HTMLInputElement).checked)}
+                />
+                Hide tool calls
+              </label>
+              <label class="cursor-pointer flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  class="checkbox checkbox-xs"
+                  checked={filterFailuresOnly}
+                  onChange={(e) => setFilterFailuresOnly((e.target as HTMLInputElement).checked)}
+                />
+                Failures only
+              </label>
+            </>
+          ) : (
             <input
-              type="checkbox"
-              class="checkbox checkbox-xs"
-              checked={filterToolCalls}
-              onChange={(e) => setFilterToolCalls((e.target as HTMLInputElement).checked)}
+              type="text"
+              class="input input-xs input-bordered w-48"
+              placeholder="Highlight tool by name…"
+              value={toolQuery}
+              onInput={(e) => setToolQuery((e.target as HTMLInputElement).value)}
             />
-            Hide tool calls
-          </label>
-          <label class="cursor-pointer flex items-center gap-1">
-            <input
-              type="checkbox"
-              class="checkbox checkbox-xs"
-              checked={filterFailuresOnly}
-              onChange={(e) => setFilterFailuresOnly((e.target as HTMLInputElement).checked)}
-            />
-            Failures only
-          </label>
+          )}
         </div>
 
         {error && <div class="alert alert-error m-4 text-xs">{error.message}</div>}
@@ -140,6 +179,18 @@ export function AgentTraceModal({ agentId, threadId, namespaceId, resourceId, on
         ) : trace.turns.length === 0 && trace.orphanSystem.length === 0 ? (
           <div class="p-8 text-center text-base-content/50 text-sm">
             Empty thread — no turns recorded yet.
+          </div>
+        ) : view === "graph" ? (
+          <div class="flex-1 flex min-h-0">
+            <TraceGraph
+              model={graphModel}
+              selectedId={selectedNodeId}
+              onSelect={setSelectedNodeId}
+              toolQuery={toolQuery}
+            />
+            {selectedNode && (
+              <TraceNodeDetail node={selectedNode} onClose={() => setSelectedNodeId(undefined)} />
+            )}
           </div>
         ) : (
           <div class="flex-1 overflow-y-auto p-4 space-y-4 font-mono text-xs">
@@ -307,4 +358,88 @@ function containsFailure(children: ReadonlyArray<TraceChildDto>): boolean {
     }
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Graph-view detail panel — full payload for the node clicked in TraceGraph.
+// ---------------------------------------------------------------------------
+
+function TraceNodeDetail({ node, onClose }: { node: TraceGraphNode; onClose: () => void }) {
+  const d = node.detail;
+  return (
+    <aside class="w-80 shrink-0 border-l border-base-300 overflow-y-auto p-3 text-xs font-mono space-y-2">
+      <div class="flex items-start justify-between gap-2">
+        <div>
+          <div class="text-[10px] uppercase tracking-wider text-base-content/50">
+            {node.kind} · turn {node.turnIndex + 1}
+            {node.failed && <span class="text-error"> · failed</span>}
+            {node.orphan && !node.failed && <span class="text-warning"> · orphan</span>}
+          </div>
+          {node.seq >= 0 && <div class="text-[10px] text-base-content/40">seq {node.seq}</div>}
+        </div>
+        <button class="btn btn-xs btn-ghost" onClick={onClose} title="Close panel">
+          ✕
+        </button>
+      </div>
+
+      {(d.kind === "user" || d.kind === "system") && (
+        <DetailField label="content" value={d.content} />
+      )}
+
+      {d.kind === "assistant" && (
+        <>
+          {d.content && <DetailField label="content" value={d.content} />}
+          {d.thinkingBlocks && d.thinkingBlocks.length > 0 && (
+            <div class="text-[10px] text-base-content/50">
+              {d.thinkingBlocks.length} thinking block{d.thinkingBlocks.length === 1 ? "" : "s"}
+            </div>
+          )}
+          {d.toolCalls.length > 0 && (
+            <div>
+              <div class="text-[10px] uppercase tracking-wider text-base-content/40 mb-0.5">
+                tool calls
+              </div>
+              {d.toolCalls.map((tc) => (
+                <div class="ml-1">
+                  • {tc.name}
+                  {tc.result?.failed && <span class="text-error"> (failed)</span>}
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {d.kind === "tool-call" && (
+        <>
+          <DetailField label="tool" value={d.name} />
+          <DetailField label="input" value={JSON.stringify(d.input, null, 2)} />
+          {d.result ? (
+            <DetailField
+              label={d.result.failed ? "result (failed)" : "result"}
+              value={d.result.content}
+              error={d.result.failed}
+            />
+          ) : (
+            <div class="text-warning text-[10px]">no result recorded</div>
+          )}
+        </>
+      )}
+    </aside>
+  );
+}
+
+function DetailField({ label, value, error }: { label: string; value: string; error?: boolean }) {
+  return (
+    <div>
+      <div class="text-[10px] uppercase tracking-wider text-base-content/40 mb-0.5">{label}</div>
+      <pre
+        class={`p-2 rounded whitespace-pre-wrap break-words text-[11px] ${
+          error ? "bg-error/10" : "bg-base-200"
+        }`}
+      >
+        {value}
+      </pre>
+    </div>
+  );
 }

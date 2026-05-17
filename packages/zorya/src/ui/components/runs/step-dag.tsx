@@ -1,17 +1,20 @@
 // ---------------------------------------------------------------------------
 // StepDag — SVG renderer for a workflow's step DAG.
 //
-// Layout: Sugiyama-lite. Topological-rank on x, simple row packing on y.
-// Edges are cubic Beziers so they look clean even with multiple hops.
-// Nodes are colored by their executed status (planned = dashed).
+// Layout + edge geometry come from the shared `graph-layout` engine
+// (Sugiyama-lite); this file owns the workflow-specific parts: journal
+// expansion into activity sub-nodes, status colouring, and the
+// horizontal/vertical orientation pick.
 // ---------------------------------------------------------------------------
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useEffect, useMemo, useState } from "preact/hooks";
 import type { RunDto, StepDto } from "../../../server/api-types.ts";
 import type { JournalEntryDto } from "../../../server/routes/run-extras.ts";
 import { api } from "../../api/client.ts";
 import { STEP_STATUS_VISUAL, STEP_TYPE_ICON, effectiveStepStatus } from "../../lib/format.ts";
 import type { ExtendedStepStatus } from "../../../server/api-types.ts";
+import { graphEdgePath, layoutGraph, type PlacedNode } from "../../lib/graph-layout.ts";
+import { useGraphOrientation } from "../../hooks/use-graph-orientation.ts";
 
 interface StepDagProps {
   run: RunDto;
@@ -21,50 +24,16 @@ interface StepDagProps {
 
 const NODE_W = 200;
 const NODE_H = 56;
-const COL_GAP = 90;
-const ROW_GAP = 20;
-const PADDING = 24;
 const STRIPE_W = 4;
-// Container can be a few pixels narrower than the horizontal layout (e.g.
-// scrollbar, padding rounding) without it being worth flipping to a
-// taller vertical layout. Empirically 24px swallows the common cases
-// without letting a real overflow slip through.
-const ORIENTATION_HYSTERESIS_PX = 24;
 
-type Orientation = "horizontal" | "vertical";
-
-interface LaidOutNode {
-  step: StepDto;
-  rank: number;
-  row: number;
-  x: number;
-  y: number;
+/** Graph-layout node carrying its source `StepDto`. */
+interface StepGraphNode {
+  readonly id: string;
+  readonly dependsOn: readonly string[];
+  readonly step: StepDto;
 }
 
 export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  // `null` = not yet measured (don't pick an orientation). Once a real
-  // width arrives the value is a positive number. Mid-flap rendering (the
-  // first paint with containerW=0 then the post-effect with the real
-  // width) was visible to users as the diagram briefly flipping
-  // horizontal → vertical → horizontal.
-  const [containerW, setContainerW] = useState<number | null>(null);
-
-  useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    // Synchronously measure before paint, so the first painted frame is
-    // already in the correct orientation.
-    setContainerW(el.clientWidth || null);
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        if (entry.contentRect.width > 0) setContainerW(entry.contentRect.width);
-      }
-    });
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
-
   // Fetch activity-journal entries for every non-planned step so we can
   // expand `.journaled()` steps into per-activity sub-nodes. Same shape as
   // the timeline's bulk fetch — keeps request count proportional to the
@@ -101,21 +70,23 @@ export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
     () => expandJournaledSteps(run.steps, journalsByStep),
     [run.steps, journalsByStep],
   );
-  const horizontal = useMemo(() => layout(expandedSteps, "horizontal"), [expandedSteps]);
-  const vertical = useMemo(() => layout(expandedSteps, "vertical"), [expandedSteps]);
+  const graphNodes = useMemo<StepGraphNode[]>(
+    () => expandedSteps.map((step) => ({ id: step.stepName, dependsOn: step.dependsOn, step })),
+    [expandedSteps],
+  );
+  const horizontal = useMemo(
+    () => layoutGraph(graphNodes, { orientation: "horizontal", nodeW: NODE_W, nodeH: NODE_H }),
+    [graphNodes],
+  );
+  const vertical = useMemo(
+    () => layoutGraph(graphNodes, { orientation: "vertical", nodeW: NODE_W, nodeH: NODE_H }),
+    [graphNodes],
+  );
 
-  // Default to horizontal. Switch to vertical only after we've actually
-  // measured the container AND the horizontal layout overflows by more
-  // than ORIENTATION_HYSTERESIS_PX so a 1-pixel overshoot doesn't flap
-  // the layout when the container is right at the boundary. Holding the
-  // initial render in horizontal also matches the most common case
-  // (most users have wide enough panels for a 3-step DAG).
-  const orientation: Orientation =
-    containerW != null &&
-    horizontal.width > containerW + ORIENTATION_HYSTERESIS_PX &&
-    vertical.width <= horizontal.width
-      ? "vertical"
-      : "horizontal";
+  const { containerRef, orientation } = useGraphOrientation({
+    horizontalWidth: horizontal.width,
+    verticalWidth: vertical.width,
+  });
 
   // Diagnostic log — opt in via `window.__DAG_DEBUG = true` in the
   // console. Was load-bearing while tracking down the SSE-replaces-
@@ -127,7 +98,6 @@ export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
   ) {
     console.log("[dag] render", {
       steps: run.steps.length,
-      containerW,
       horizontalWidth: horizontal.width,
       verticalWidth: vertical.width,
       orientation,
@@ -197,11 +167,11 @@ export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
                 sub-chain reads visually distinct from the main DAG. */}
             <g class="text-base-content/60" stroke="currentColor">
               {edges.map((e, i) => {
-                const intoActivity = e.to.step.metadata?.["journalActivityName"] !== undefined;
+                const intoActivity = e.to.node.step.metadata?.["journalActivityName"] !== undefined;
                 return (
                   <path
                     key={`e-${i}`}
-                    d={edgePath(e.from, e.to, orientation)}
+                    d={graphEdgePath(e, { orientation, nodeW: NODE_W, nodeH: NODE_H })}
                     fill="none"
                     stroke-width={2.5}
                     marker-end="url(#dag-arrow)"
@@ -215,11 +185,13 @@ export function StepDag({ run, selectedStep, onSelectStep }: StepDagProps) {
             {/* Nodes */}
             {nodes.map((n) => (
               <NodeRect
-                key={n.step.stepName}
+                key={n.node.step.stepName}
                 node={n}
-                isSelected={selectedStep === n.step.stepName}
+                isSelected={selectedStep === n.node.step.stepName}
                 onSelect={() =>
-                  onSelectStep?.(selectedStep === n.step.stepName ? undefined : n.step.stepName)
+                  onSelectStep?.(
+                    selectedStep === n.node.step.stepName ? undefined : n.node.step.stepName,
+                  )
                 }
               />
             ))}
@@ -235,11 +207,11 @@ function NodeRect({
   isSelected,
   onSelect,
 }: {
-  node: LaidOutNode;
+  node: PlacedNode<StepGraphNode>;
   isSelected: boolean;
   onSelect: () => void;
 }) {
-  const step = node.step;
+  const step = node.node.step;
   const renderStatus = effectiveStepStatus(step);
   const v = STEP_STATUS_VISUAL[renderStatus];
   const isPlanned = step.isPlanned === true;
@@ -463,127 +435,6 @@ function activityToStepDto(
     attempt: 1,
     metadata: { journalActivityName: entry.activityName, branchPath: entry.branchPath },
   };
-}
-
-// ---------------------------------------------------------------------------
-// Layout
-// ---------------------------------------------------------------------------
-
-function layout(
-  steps: StepDto[],
-  orientation: Orientation,
-): {
-  nodes: LaidOutNode[];
-  edges: Array<{ from: LaidOutNode; to: LaidOutNode }>;
-  width: number;
-  height: number;
-} {
-  const byName = new Map<string, StepDto>();
-  for (const s of steps) byName.set(s.stepName, s);
-
-  // Assign ranks via longest-path topological sort.
-  const rank = new Map<string, number>();
-  const visit = (name: string): number => {
-    if (rank.has(name)) return rank.get(name)!;
-    const s = byName.get(name);
-    if (!s) {
-      rank.set(name, 0);
-      return 0;
-    }
-    const parents = s.dependsOn.filter((d) => byName.has(d));
-    const r = parents.length === 0 ? 0 : Math.max(...parents.map(visit)) + 1;
-    rank.set(name, r);
-    return r;
-  };
-  for (const s of steps) visit(s.stepName);
-
-  // Group by rank, then within each rank pick row by stable sort on name
-  // (fallback — prefer keeping same-parent children adjacent).
-  const byRank = new Map<number, StepDto[]>();
-  for (const s of steps) {
-    const r = rank.get(s.stepName)!;
-    const list = byRank.get(r) ?? [];
-    list.push(s);
-    byRank.set(r, list);
-  }
-  for (const list of byRank.values()) {
-    list.sort((a, b) => a.stepName.localeCompare(b.stepName));
-  }
-
-  const maxRank = Math.max(0, ...rank.values());
-  const maxRows = Math.max(0, ...Array.from(byRank.values(), (l) => l.length));
-
-  // Horizontal: rank → x, row-within-rank → y.
-  // Vertical: rank → y, row-within-rank → x. (Swap the two axes.)
-  const horizontal = orientation === "horizontal";
-  const rankStep = horizontal ? NODE_W + COL_GAP : NODE_H + COL_GAP;
-  const rowStep = horizontal ? NODE_H + ROW_GAP : NODE_W + ROW_GAP;
-  const rankSize = horizontal ? NODE_W : NODE_H;
-  const rowSize = horizontal ? NODE_H : NODE_W;
-
-  const nodes: LaidOutNode[] = [];
-  const nodeByName = new Map<string, LaidOutNode>();
-  for (let r = 0; r <= maxRank; r++) {
-    const list = byRank.get(r) ?? [];
-    // Centre each rank's row band so the diagram is balanced.
-    const bandLen = list.length * rowStep - ROW_GAP;
-    const totalBand = maxRows * rowStep - ROW_GAP;
-    const offset = (totalBand - bandLen) / 2;
-    for (let i = 0; i < list.length; i++) {
-      const s = list[i]!;
-      const rankCoord = PADDING + r * rankStep;
-      const rowCoord = PADDING + offset + i * rowStep;
-      const n: LaidOutNode = {
-        step: s,
-        rank: r,
-        row: i,
-        x: horizontal ? rankCoord : rowCoord,
-        y: horizontal ? rowCoord : rankCoord,
-      };
-      nodes.push(n);
-      nodeByName.set(s.stepName, n);
-    }
-  }
-
-  const edges: Array<{ from: LaidOutNode; to: LaidOutNode }> = [];
-  for (const s of steps) {
-    const to = nodeByName.get(s.stepName);
-    if (!to) continue;
-    for (const parent of s.dependsOn) {
-      const from = nodeByName.get(parent);
-      if (from) edges.push({ from, to });
-    }
-  }
-
-  const width =
-    PADDING * 2 +
-    (horizontal
-      ? (maxRank + 1) * rankSize + maxRank * COL_GAP
-      : maxRows * rowSize + (maxRows - 1) * ROW_GAP);
-  const height =
-    PADDING * 2 +
-    (horizontal
-      ? maxRows * rowSize + (maxRows - 1) * ROW_GAP
-      : (maxRank + 1) * rankSize + maxRank * COL_GAP);
-  return { nodes, edges, width, height };
-}
-
-function edgePath(from: LaidOutNode, to: LaidOutNode, orientation: Orientation): string {
-  if (orientation === "horizontal") {
-    const x1 = from.x + NODE_W;
-    const y1 = from.y + NODE_H / 2;
-    const x2 = to.x;
-    const y2 = to.y + NODE_H / 2;
-    const midX = (x1 + x2) / 2;
-    return `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2 - 4} ${y2}`;
-  }
-  // Vertical: edge from bottom-of-from to top-of-to.
-  const x1 = from.x + NODE_W / 2;
-  const y1 = from.y + NODE_H;
-  const x2 = to.x + NODE_W / 2;
-  const y2 = to.y;
-  const midY = (y1 + y2) / 2;
-  return `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2 - 4}`;
 }
 
 function truncate(s: string, n: number): string {
