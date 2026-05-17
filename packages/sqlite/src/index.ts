@@ -18,6 +18,8 @@ export { SqliteAgentInstanceRegistry } from "./lib/agent/agent-instance-registry
 export type { SqliteAgentInstanceRegistryConfig } from "./lib/agent/agent-instance-registry.ts";
 export { SqliteSecretsStorage } from "./lib/agent/secrets-storage.ts";
 export type { SqliteSecretsStorageConfig } from "./lib/agent/secrets-storage.ts";
+export { SqliteAuditLogger } from "./lib/agent/audit-logger.ts";
+export type { SqliteAuditLoggerConfig, AuditLogQuery } from "./lib/agent/audit-logger.ts";
 export { SqliteWorkflowStorage } from "./lib/sqlite-workflow-storage.ts";
 export { SqliteStepQueue } from "./lib/sqlite-step-queue.ts";
 export { SqliteWorkerRegistry } from "./lib/sqlite-worker-registry.ts";
