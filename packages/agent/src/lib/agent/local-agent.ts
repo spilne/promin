@@ -1551,7 +1551,7 @@ function toActionConfig(
     processors: loopConfig.processors,
     bus,
     ...(scope && { scope }),
-    ...(loopConfig.auditLogger && { auditLogger: loopConfig.auditLogger }),
+    ...(loopConfig.toolAuditLogger && { toolAuditLogger: loopConfig.toolAuditLogger }),
   };
 }
 

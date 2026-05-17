@@ -1,8 +1,8 @@
 // ---------------------------------------------------------------------------
-// PostgresAuditLogger — durable backend for the elevated-tool audit log.
+// PostgresToolAuditLogger — durable backend for the elevated-tool audit log.
 //
 // `createElevatedTool` already enforces that every elevated tool calls
-// `ctx.audit()` per invocation and emits one `AuditLogger.record()` per
+// `ctx.audit()` per invocation and emits one `ToolAuditLogger.record()` per
 // call. The in-memory logger covers tests and single-process use; this
 // one persists to Postgres so a compliance review survives a restart
 // and spans every replica.
@@ -13,16 +13,16 @@
 // ---------------------------------------------------------------------------
 
 import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
-import type { AuditEntry, AuditLogger, AuditRecord } from "@promin/agent";
+import type { ToolAuditEntry, ToolAuditLogger, ToolAuditRecord } from "@promin/agent";
 import type { DrizzleDb } from "../drizzle-db.ts";
 import { agentAuditLog } from "../schema.ts";
 
-export interface PostgresAuditLoggerConfig {
+export interface PostgresToolAuditLoggerConfig {
   readonly db: DrizzleDb;
 }
 
 /** Filters for the audit-log read path. All fields are optional. */
-export interface AuditLogQuery {
+export interface ToolAuditLogQuery {
   /** Restrict to one caller namespace. */
   readonly namespaceId?: string;
   /** Restrict to one caller resource. */
@@ -35,14 +35,14 @@ export interface AuditLogQuery {
   readonly limit?: number;
 }
 
-export class PostgresAuditLogger implements AuditLogger {
+export class PostgresToolAuditLogger implements ToolAuditLogger {
   private readonly db: DrizzleDb;
 
-  constructor(config: PostgresAuditLoggerConfig) {
+  constructor(config: PostgresToolAuditLoggerConfig) {
     this.db = config.db;
   }
 
-  async record(entry: AuditEntry): Promise<void> {
+  async record(entry: ToolAuditEntry): Promise<void> {
     await this.db.insert(agentAuditLog).values({
       namespaceId: entry.namespaceId,
       resourceId: entry.resourceId,
@@ -59,9 +59,9 @@ export class PostgresAuditLogger implements AuditLogger {
 
   /**
    * Read recorded entries, newest first. Inspection / review affordance —
-   * the `AuditLogger` interface itself is write-only.
+   * the `ToolAuditLogger` interface itself is write-only.
    */
-  async list(query: AuditLogQuery = {}): Promise<AuditRecord[]> {
+  async list(query: ToolAuditLogQuery = {}): Promise<ToolAuditRecord[]> {
     const conditions = [];
     if (query.namespaceId !== undefined) {
       conditions.push(eq(agentAuditLog.namespaceId, query.namespaceId));
@@ -91,7 +91,7 @@ export class PostgresAuditLogger implements AuditLogger {
   }
 }
 
-function rowToRecord(row: typeof agentAuditLog.$inferSelect): AuditRecord {
+function rowToRecord(row: typeof agentAuditLog.$inferSelect): ToolAuditRecord {
   return {
     namespaceId: row.namespaceId,
     resourceId: row.resourceId,

@@ -1,40 +1,30 @@
 // ---------------------------------------------------------------------------
-// PostgresAuditLogger — durable backend for the elevated-tool audit log,
-// exercised against a real PG container.
+// SqliteToolAuditLogger — durable backend for the elevated-tool audit log,
+// exercised against an in-memory SQLite database.
 // Pinned cases:
-//   1. record() → list() round-trip; recorded_at is server-clock assigned
+//   1. record() -> list() round-trip; recorded_at is clock-assigned
 //   2. an actual createElevatedTool call's ctx.audit() entry persists
-//   3. multiple audit() calls in one tool body → multiple rows, in order
+//   3. multiple audit() calls in one tool body -> multiple rows, in order
 //   4. nullable fields (agentId / target / meta) omitted on read when absent
 //   5. list({ namespaceId }) filters by caller namespace
 //   6. list({ since, until }) filters by recorded-at window
 //   7. two logger instances on the same db see each other's writes
+//   8. respects a custom table name
 // ---------------------------------------------------------------------------
 
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
+import { Database } from "bun:sqlite";
 import { z } from "zod";
+import { FakeClock } from "@promin/core";
 import { createElevatedTool } from "@promin/agent";
-import { migrate } from "../../migrate.ts";
-import { PostgresAuditLogger } from "../audit-logger.ts";
-import { PostgresTestContainer } from "../../test-utils.ts";
-
-const pg = new PostgresTestContainer();
-
-beforeAll(async () => {
-  await pg.start();
-  await migrate(pg.db);
-}, 60_000);
-
-afterEach(async () => {
-  await pg.sql`TRUNCATE agent_audit_log`;
-});
+import { SqliteToolAuditLogger } from "../tool-audit-logger.ts";
 
 const scope = { namespaceId: "acme", resourceId: "alice", agentId: "billing-agent" };
 
-describe("PostgresAuditLogger", () => {
-  it("round-trips a recorded entry, with a server-clock timestamp", async () => {
-    const logger = new PostgresAuditLogger({ db: pg.db });
-    const before = Date.now();
+describe("SqliteToolAuditLogger", () => {
+  it("round-trips a recorded entry, with a clock-assigned timestamp", async () => {
+    const clock = FakeClock.create(1_700_000);
+    const logger = SqliteToolAuditLogger.make({ db: new Database(":memory:"), clock });
     await logger.record({
       namespaceId: "acme",
       resourceId: "alice",
@@ -42,26 +32,21 @@ describe("PostgresAuditLogger", () => {
       toolName: "issue_refund",
       action: "refund",
     });
-    const after = Date.now();
 
-    const records = await logger.list();
-    expect(records).toHaveLength(1);
-    const [r] = records;
-    expect(r).toMatchObject({
-      namespaceId: "acme",
-      resourceId: "alice",
-      agentId: "billing-agent",
-      toolName: "issue_refund",
-      action: "refund",
-    });
-    // recorded_at owned by the DB clock — within the call window, not
-    // a value the caller supplied (record() takes no timestamp).
-    expect(r?.timestamp).toBeGreaterThanOrEqual(before - 1_000);
-    expect(r?.timestamp).toBeLessThanOrEqual(after + 1_000);
+    expect(await logger.list()).toEqual([
+      {
+        namespaceId: "acme",
+        resourceId: "alice",
+        agentId: "billing-agent",
+        toolName: "issue_refund",
+        action: "refund",
+        timestamp: 1_700_000,
+      },
+    ]);
   });
 
   it("persists an elevated tool's ctx.audit() entry", async () => {
-    const logger = new PostgresAuditLogger({ db: pg.db });
+    const logger = SqliteToolAuditLogger.make({ db: new Database(":memory:") });
     const refund = createElevatedTool({
       name: "issue_refund",
       description: "test",
@@ -72,7 +57,7 @@ describe("PostgresAuditLogger", () => {
       },
     });
 
-    expect(await refund.execute({}, { scope, auditLogger: logger })).toBe("done");
+    expect(await refund.execute({}, { scope, toolAuditLogger: logger })).toBe("done");
 
     const [r] = await logger.list();
     expect(r).toEqual({
@@ -88,7 +73,7 @@ describe("PostgresAuditLogger", () => {
   });
 
   it("emits one row per audit() call, oldest first", async () => {
-    const logger = new PostgresAuditLogger({ db: pg.db });
+    const logger = SqliteToolAuditLogger.make({ db: new Database(":memory:") });
     const tool = createElevatedTool({
       name: "bulk_op",
       description: "test",
@@ -99,7 +84,7 @@ describe("PostgresAuditLogger", () => {
         ctx.audit({ action: "step-3" });
       },
     });
-    await tool.execute({}, { scope, auditLogger: logger });
+    await tool.execute({}, { scope, toolAuditLogger: logger });
 
     // list() is newest-first; reverse for insertion order.
     const actions = (await logger.list()).map((r) => r.action).reverse();
@@ -107,7 +92,7 @@ describe("PostgresAuditLogger", () => {
   });
 
   it("omits agentId / target / meta on read when not supplied", async () => {
-    const logger = new PostgresAuditLogger({ db: pg.db });
+    const logger = SqliteToolAuditLogger.make({ db: new Database(":memory:") });
     await logger.record({
       namespaceId: "acme",
       resourceId: "alice",
@@ -128,7 +113,7 @@ describe("PostgresAuditLogger", () => {
   });
 
   it("filters by caller namespace", async () => {
-    const logger = new PostgresAuditLogger({ db: pg.db });
+    const logger = SqliteToolAuditLogger.make({ db: new Database(":memory:") });
     await logger.record({
       namespaceId: "acme",
       resourceId: "alice",
@@ -151,8 +136,8 @@ describe("PostgresAuditLogger", () => {
   });
 
   it("filters by recorded-at window", async () => {
-    const logger = new PostgresAuditLogger({ db: pg.db });
-    const start = Date.now();
+    const clock = FakeClock.create(1_000_000);
+    const logger = SqliteToolAuditLogger.make({ db: new Database(":memory:"), clock });
     await logger.record({
       namespaceId: "acme",
       resourceId: "alice",
@@ -160,17 +145,17 @@ describe("PostgresAuditLogger", () => {
       action: "in-window",
     });
 
-    // Window that brackets the write sees it; a window entirely in the
-    // past does not.
-    expect(
-      (await logger.list({ since: start - 5_000, until: Date.now() + 5_000 })).map((r) => r.action),
-    ).toEqual(["in-window"]);
-    expect(await logger.list({ until: start - 5_000 })).toEqual([]);
+    // A window bracketing the write sees it; one entirely in the past does not.
+    expect((await logger.list({ since: 999_000, until: 1_001_000 })).map((r) => r.action)).toEqual([
+      "in-window",
+    ]);
+    expect(await logger.list({ until: 999_000 })).toEqual([]);
   });
 
   it("two instances on the same db see each other's writes", async () => {
-    const writer = new PostgresAuditLogger({ db: pg.db });
-    const reader = new PostgresAuditLogger({ db: pg.db });
+    const db = new Database(":memory:");
+    const writer = SqliteToolAuditLogger.make({ db });
+    const reader = SqliteToolAuditLogger.make({ db });
     await writer.record({
       namespaceId: "acme",
       resourceId: "alice",
@@ -178,5 +163,18 @@ describe("PostgresAuditLogger", () => {
       action: "cross-instance",
     });
     expect((await reader.list()).map((r) => r.action)).toEqual(["cross-instance"]);
+  });
+
+  it("respects a custom table name", async () => {
+    const db = new Database(":memory:");
+    const logger = SqliteToolAuditLogger.make({ db, table: "my_audit" });
+    await logger.record({
+      namespaceId: "acme",
+      resourceId: "alice",
+      toolName: "t",
+      action: "custom-table",
+    });
+    const rows = db.query("SELECT action FROM my_audit").all() as Array<{ action: string }>;
+    expect(rows).toEqual([{ action: "custom-table" }]);
   });
 });

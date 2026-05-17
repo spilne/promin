@@ -332,11 +332,11 @@ export { SecretScope } from "./secrets/types.ts";
 export { InMemorySecretsStorage } from "./secrets/in-memory-secrets-storage.ts";
 
 // Audit log — durable record of elevated (cross-scope) tool calls.
-export type { AuditEntry, AuditRecord, AuditLogger } from "./audit/types.ts";
+export type { ToolAuditEntry, ToolAuditRecord, ToolAuditLogger } from "./tool-audit/types.ts";
 export {
-  InMemoryAuditLogger,
-  type InMemoryAuditLoggerConfig,
-} from "./audit/in-memory-audit-logger.ts";
+  InMemoryToolAuditLogger,
+  type InMemoryToolAuditLoggerConfig,
+} from "./tool-audit/in-memory-tool-audit-logger.ts";
 
 // MCP integration — connect agents to Model Context Protocol servers.
 export type {

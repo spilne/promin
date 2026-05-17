@@ -2,7 +2,7 @@
 // Audit log — durable record of elevated (cross-scope) tool invocations.
 //
 // `createElevatedTool` already enforces that every elevated tool calls
-// `ctx.audit()` per invocation; the `AuditLogger` is what turns that call
+// `ctx.audit()` per invocation; the `ToolAuditLogger` is what turns that call
 // into a durable record a security review can read. Injected on the agent
 // config — absent → audit calls are still enforced, just not persisted.
 // ---------------------------------------------------------------------------
@@ -13,7 +13,7 @@
  * body — `action` / `target` / `meta` come from that call, the scope
  * fields and `toolName` are filled by the factory.
  */
-export interface AuditEntry {
+export interface ToolAuditEntry {
   /** Caller namespace the elevated tool ran under. */
   readonly namespaceId: string;
   /** Caller resource (user / persona). */
@@ -30,8 +30,8 @@ export interface AuditEntry {
   readonly meta?: Readonly<Record<string, unknown>>;
 }
 
-/** A persisted audit entry — `AuditEntry` plus the logger-assigned timestamp. */
-export interface AuditRecord extends AuditEntry {
+/** A persisted audit entry — `ToolAuditEntry` plus the logger-assigned timestamp. */
+export interface ToolAuditRecord extends ToolAuditEntry {
   /** Epoch ms the entry was recorded. Assigned by the logger. */
   readonly timestamp: number;
 }
@@ -42,6 +42,6 @@ export interface AuditRecord extends AuditEntry {
  * the tool body completes. A `record()` rejection fails the tool call —
  * an unrecorded cross-scope action is a compliance gap, not a silent skip.
  */
-export interface AuditLogger {
-  record(entry: AuditEntry): Promise<void>;
+export interface ToolAuditLogger {
+  record(entry: ToolAuditEntry): Promise<void>;
 }

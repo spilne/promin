@@ -1,23 +1,23 @@
 // ---------------------------------------------------------------------------
 // createElevatedTool — audit-log emission.
 // An elevated tool must call ctx.audit() per invocation; this turns each
-// such call into a durable AuditLogger record.
+// such call into a durable ToolAuditLogger record.
 // Pinned cases:
 //   1. One ctx.audit() call → one record carrying the caller scope + toolName
 //   2. action / target / meta round-trip from the audit() call
 //   3. Multiple audit() calls → multiple records, in order
-//   4. No AuditLogger wired → audit() still enforced, just not persisted
+//   4. No ToolAuditLogger wired → audit() still enforced, just not persisted
 //   5. Elevated tool that never calls audit() → still throws (unchanged)
 //   6. A logger that rejects fails the tool call
-//   7. executeToolCall threads the logger onto ctx.auditLogger
+//   7. executeToolCall threads the logger onto ctx.toolAuditLogger
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { FakeClock } from "@promin/core";
 import { createElevatedTool } from "../tool.ts";
-import { InMemoryAuditLogger } from "../audit/in-memory-audit-logger.ts";
-import type { AuditLogger } from "../audit/types.ts";
+import { InMemoryToolAuditLogger } from "../tool-audit/in-memory-tool-audit-logger.ts";
+import type { ToolAuditLogger } from "../tool-audit/types.ts";
 import { executeToolCall } from "../agent-shared.ts";
 
 const scope = { namespaceId: "acme", resourceId: "alice", agentId: "billing-agent" };
@@ -25,7 +25,7 @@ const scope = { namespaceId: "acme", resourceId: "alice", agentId: "billing-agen
 describe("createElevatedTool — audit log emission", () => {
   it("emits one record per ctx.audit() call, carrying caller scope + toolName", async () => {
     const clock = FakeClock.create(1_700_000);
-    const logger = new InMemoryAuditLogger({ clock });
+    const logger = new InMemoryToolAuditLogger({ clock });
     const refund = createElevatedTool({
       name: "issue_refund",
       description: "test",
@@ -36,7 +36,7 @@ describe("createElevatedTool — audit log emission", () => {
       },
     });
 
-    await refund.execute({}, { scope, auditLogger: logger });
+    await refund.execute({}, { scope, toolAuditLogger: logger });
 
     const records = logger.list();
     expect(records).toHaveLength(1);
@@ -51,7 +51,7 @@ describe("createElevatedTool — audit log emission", () => {
   });
 
   it("round-trips action / target / meta from the audit() call", async () => {
-    const logger = new InMemoryAuditLogger();
+    const logger = new InMemoryToolAuditLogger();
     const tool = createElevatedTool({
       name: "grant_role",
       description: "test",
@@ -61,7 +61,7 @@ describe("createElevatedTool — audit log emission", () => {
       },
     });
 
-    await tool.execute({}, { scope, auditLogger: logger });
+    await tool.execute({}, { scope, toolAuditLogger: logger });
 
     const [entry] = logger.list();
     expect(entry?.action).toBe("grant");
@@ -70,7 +70,7 @@ describe("createElevatedTool — audit log emission", () => {
   });
 
   it("emits one record per audit() call, in order", async () => {
-    const logger = new InMemoryAuditLogger();
+    const logger = new InMemoryToolAuditLogger();
     const tool = createElevatedTool({
       name: "bulk_op",
       description: "test",
@@ -81,7 +81,7 @@ describe("createElevatedTool — audit log emission", () => {
       },
     });
 
-    await tool.execute({}, { scope, auditLogger: logger });
+    await tool.execute({}, { scope, toolAuditLogger: logger });
 
     expect(logger.list().map((r) => r.action)).toEqual(["step-1", "step-2"]);
   });
@@ -96,26 +96,26 @@ describe("createElevatedTool — audit log emission", () => {
         return "ok";
       },
     });
-    // No auditLogger on ctx — the call still succeeds (audit was called).
+    // No toolAuditLogger on ctx — the call still succeeds (audit was called).
     expect(await tool.execute({}, { scope })).toBe("ok");
   });
 
   it("still throws when an elevated tool never calls audit()", async () => {
-    const logger = new InMemoryAuditLogger();
+    const logger = new InMemoryToolAuditLogger();
     const tool = createElevatedTool({
       name: "forgot_audit",
       description: "test",
       parameters: z.object({}),
       execute: async () => "ok",
     });
-    await expect(tool.execute({}, { scope, auditLogger: logger })).rejects.toThrow(
+    await expect(tool.execute({}, { scope, toolAuditLogger: logger })).rejects.toThrow(
       /without calling ctx\.audit/,
     );
     expect(logger.list()).toHaveLength(0);
   });
 
   it("fails the tool call when the logger rejects", async () => {
-    const failing: AuditLogger = {
+    const failing: ToolAuditLogger = {
       record: async () => {
         throw new Error("audit store offline");
       },
@@ -129,13 +129,13 @@ describe("createElevatedTool — audit log emission", () => {
         return "ok";
       },
     });
-    await expect(tool.execute({}, { scope, auditLogger: failing })).rejects.toThrow(
+    await expect(tool.execute({}, { scope, toolAuditLogger: failing })).rejects.toThrow(
       /audit store offline/,
     );
   });
 
-  it("executeToolCall threads the logger onto ctx.auditLogger", async () => {
-    const logger = new InMemoryAuditLogger();
+  it("executeToolCall threads the logger onto ctx.toolAuditLogger", async () => {
+    const logger = new InMemoryToolAuditLogger();
     const tool = createElevatedTool({
       name: "via_execute",
       description: "test",

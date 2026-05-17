@@ -1,15 +1,15 @@
 // ---------------------------------------------------------------------------
-// SqliteAuditLogger — durable backend for the elevated-tool audit log.
+// SqliteToolAuditLogger — durable backend for the elevated-tool audit log.
 //
-// Mirror of PostgresAuditLogger for embedded / single-process deployments
-// — without it, InMemoryAuditLogger is the only non-Postgres option and a
+// Mirror of PostgresToolAuditLogger for embedded / single-process deployments
+// — without it, InMemoryToolAuditLogger is the only non-Postgres option and a
 // SQLite-backed host has no audit trail surviving a restart.
 //
 // `createElevatedTool` enforces that every elevated tool calls
 // `ctx.audit()` per invocation and emits one `record()` per call; this
 // turns each into an append-only row a security review can read.
 //
-// `recorded_at` is logger-assigned, never carried on the `AuditEntry` —
+// `recorded_at` is logger-assigned, never carried on the `ToolAuditEntry` —
 // an audit trail must not be back-datable by the caller. SQLite is
 // in-process, so the app clock *is* the database clock (no client/server
 // skew to defend against, unlike Postgres); it stays a `Clock` so tests
@@ -21,10 +21,10 @@
 // ---------------------------------------------------------------------------
 
 import { SystemClock, type Clock } from "@promin/core";
-import type { AuditEntry, AuditLogger, AuditRecord } from "@promin/agent";
+import type { ToolAuditEntry, ToolAuditLogger, ToolAuditRecord } from "@promin/agent";
 import type { SqliteDatabase } from "../sqlite-database.ts";
 
-export interface SqliteAuditLoggerConfig {
+export interface SqliteToolAuditLoggerConfig {
   readonly db: SqliteDatabase;
   /** Override the table name (default: `agent_audit_log`). */
   readonly table?: string;
@@ -33,7 +33,7 @@ export interface SqliteAuditLoggerConfig {
 }
 
 /** Filters for the audit-log read path. All fields are optional. */
-export interface AuditLogQuery {
+export interface ToolAuditLogQuery {
   /** Restrict to one caller namespace. */
   readonly namespaceId?: string;
   /** Restrict to one caller resource. */
@@ -58,20 +58,20 @@ interface DbRow {
   recorded_at: number;
 }
 
-export class SqliteAuditLogger implements AuditLogger {
+export class SqliteToolAuditLogger implements ToolAuditLogger {
   private readonly db: SqliteDatabase;
   private readonly table: string;
   private readonly clock: Clock;
 
-  private constructor(config: SqliteAuditLoggerConfig) {
+  private constructor(config: SqliteToolAuditLoggerConfig) {
     this.db = config.db;
     this.table = config.table ?? "agent_audit_log";
     this.clock = config.clock ?? SystemClock;
     this._setup();
   }
 
-  static make(config: SqliteAuditLoggerConfig): SqliteAuditLogger {
-    return new SqliteAuditLogger(config);
+  static make(config: SqliteToolAuditLoggerConfig): SqliteToolAuditLogger {
+    return new SqliteToolAuditLogger(config);
   }
 
   private _setup(): void {
@@ -93,7 +93,7 @@ export class SqliteAuditLogger implements AuditLogger {
     );
   }
 
-  async record(entry: AuditEntry): Promise<void> {
+  async record(entry: ToolAuditEntry): Promise<void> {
     this.db
       .query(
         `INSERT INTO ${this.table}
@@ -114,9 +114,9 @@ export class SqliteAuditLogger implements AuditLogger {
 
   /**
    * Read recorded entries, newest first. Inspection / review affordance —
-   * the `AuditLogger` interface itself is write-only.
+   * the `ToolAuditLogger` interface itself is write-only.
    */
-  async list(query: AuditLogQuery = {}): Promise<AuditRecord[]> {
+  async list(query: ToolAuditLogQuery = {}): Promise<ToolAuditRecord[]> {
     const where: string[] = [];
     const params: unknown[] = [];
     if (query.namespaceId !== undefined) {
@@ -151,7 +151,7 @@ export class SqliteAuditLogger implements AuditLogger {
   }
 }
 
-function rowToRecord(row: DbRow): AuditRecord {
+function rowToRecord(row: DbRow): ToolAuditRecord {
   return {
     namespaceId: row.namespace_id,
     resourceId: row.resource_id,

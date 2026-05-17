@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// InMemoryAuditLogger — in-process AuditLogger.
+// InMemoryToolAuditLogger — in-process ToolAuditLogger.
 //
 // The default impl for tests and single-process deployments. Keeps every
 // recorded entry in memory; swap a durable backend in for multi-process /
@@ -7,27 +7,27 @@
 // ---------------------------------------------------------------------------
 
 import { SystemClock, type Clock } from "@promin/core";
-import type { AuditEntry, AuditLogger, AuditRecord } from "./types.ts";
+import type { ToolAuditEntry, ToolAuditLogger, ToolAuditRecord } from "./types.ts";
 
-export interface InMemoryAuditLoggerConfig {
+export interface InMemoryToolAuditLoggerConfig {
   /** Time source. Default: `SystemClock`. Tests pass a `FakeClock`. */
   readonly clock?: Clock;
 }
 
-export class InMemoryAuditLogger implements AuditLogger {
+export class InMemoryToolAuditLogger implements ToolAuditLogger {
   private readonly clock: Clock;
-  private readonly entries: AuditRecord[] = [];
+  private readonly entries: ToolAuditRecord[] = [];
 
-  constructor(config: InMemoryAuditLoggerConfig = {}) {
+  constructor(config: InMemoryToolAuditLoggerConfig = {}) {
     this.clock = config.clock ?? SystemClock;
   }
 
-  async record(entry: AuditEntry): Promise<void> {
+  async record(entry: ToolAuditEntry): Promise<void> {
     this.entries.push({ ...entry, timestamp: this.clock.currentTimeMs() });
   }
 
   /** All recorded entries, oldest first. Inspection / test affordance. */
-  list(): ReadonlyArray<AuditRecord> {
+  list(): ReadonlyArray<ToolAuditRecord> {
     return this.entries.slice();
   }
 }

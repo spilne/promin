@@ -225,12 +225,12 @@ export interface AgentLoopConfig {
   hooks?: HooksConfig;
   processors?: ProcessorsConfig;
   /**
-   * Audit sink for elevated tools. Threaded through to `ctx.auditLogger`
+   * Audit sink for elevated tools. Threaded through to `ctx.toolAuditLogger`
    * on every tool `execute`, so `createElevatedTool` emits a durable
    * record per `ctx.audit()` call. Absent → audit calls are enforced
    * but not persisted.
    */
-  auditLogger?: import("./audit/types.ts").AuditLogger;
+  toolAuditLogger?: import("./tool-audit/types.ts").ToolAuditLogger;
   /** Time source. Default: SystemClock. Pass FakeClock in tests to drive idle timers. */
   clock?: Clock;
   /**

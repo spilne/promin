@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import type { AuditEntry, AuditLogger } from "./audit/types.ts";
+import type { ToolAuditEntry, ToolAuditLogger } from "./tool-audit/types.ts";
 import type {
   EpisodeInput,
   EpisodeListParams,
@@ -86,7 +86,7 @@ export interface ToolExecuteContext {
    * `ctx.audit()` call once the tool body completes. Absent → audit
    * calls are still enforced but not persisted.
    */
-  readonly auditLogger?: AuditLogger;
+  readonly toolAuditLogger?: ToolAuditLogger;
 }
 
 export interface AgentTool<TInput = unknown, TOutput = unknown> {
@@ -408,7 +408,7 @@ export function createElevatedTool<TInput, TOutput>(
         );
       }
       let auditCalled = false;
-      const auditEntries: AuditEntry[] = [];
+      const auditEntries: ToolAuditEntry[] = [];
       const audit: ElevatedToolContext["audit"] = (entry) => {
         auditCalled = true;
         auditEntries.push({
@@ -433,10 +433,10 @@ export function createElevatedTool<TInput, TOutput>(
       // rejection fails the call — an unrecorded cross-scope action is
       // a compliance gap, not a silent skip. No-op when no logger is
       // wired (audit is still enforced above).
-      const auditLogger = ctx?.auditLogger;
-      if (auditLogger) {
+      const toolAuditLogger = ctx?.toolAuditLogger;
+      if (toolAuditLogger) {
         for (const entry of auditEntries) {
-          await auditLogger.record(entry);
+          await toolAuditLogger.record(entry);
         }
       }
       return output;
