@@ -7,7 +7,7 @@
 import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
 import { dagRegistryTestSuite } from "@promin/agent/testing";
-import { SqliteDagRegistry } from "../sqlite-dag-registry.ts";
+import { SqliteDagRegistry } from "../dag-registry.ts";
 
 dagRegistryTestSuite(() => SqliteDagRegistry.make({ db: new Database(":memory:") }));
 

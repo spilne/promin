@@ -14,7 +14,7 @@
 
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 import type { ResolvedSecret, SecretScope, SecretsStorage } from "@promin/agent";
-import type { SqliteDatabase } from "./sqlite-database.ts";
+import type { SqliteDatabase } from "../sqlite-database.ts";
 
 export interface SqliteSecretsStorageConfig {
   readonly db: SqliteDatabase;

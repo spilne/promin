@@ -25,7 +25,7 @@ import {
   type ListAgentInstancesParams,
   type UpdateAgentInstancePatch,
 } from "@promin/agent";
-import type { SqliteDatabase } from "./sqlite-database.ts";
+import type { SqliteDatabase } from "../sqlite-database.ts";
 
 export interface SqliteAgentInstanceRegistryConfig {
   readonly db: SqliteDatabase;

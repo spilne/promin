@@ -24,8 +24,8 @@ import type {
   ThreadLease,
   ThreadLeaseKey,
 } from "@promin/agent";
-import type { DrizzleDb } from "./drizzle-db.ts";
-import { agentThreadLease } from "./schema.ts";
+import type { DrizzleDb } from "../drizzle-db.ts";
+import { agentThreadLease } from "../schema.ts";
 
 export interface PostgresLeaseStoreConfig {
   readonly db: DrizzleDb;

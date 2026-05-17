@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
 import { memoryIndexTestSuite } from "@promin/agent/testing";
-import { SqliteMemoryIndex } from "../sqlite-memory-index.ts";
+import { SqliteMemoryIndex } from "../memory-index.ts";
 
 function makeStore() {
   return SqliteMemoryIndex.make({ db: new Database(":memory:") });

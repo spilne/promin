@@ -20,8 +20,8 @@ import type {
   RegisteredAgent,
 } from "@promin/agent";
 import { DEFAULT_AGENT_VERSION } from "@promin/agent";
-import type { DrizzleDb } from "./drizzle-db.ts";
-import { agentRegistry } from "./schema.ts";
+import type { DrizzleDb } from "../drizzle-db.ts";
+import { agentRegistry } from "../schema.ts";
 
 export interface PostgresAgentRegistryConfig {
   readonly db: DrizzleDb;

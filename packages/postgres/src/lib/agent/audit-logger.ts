@@ -14,8 +14,8 @@
 
 import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import type { AuditEntry, AuditLogger, AuditRecord } from "@promin/agent";
-import type { DrizzleDb } from "./drizzle-db.ts";
-import { agentAuditLog } from "./schema.ts";
+import type { DrizzleDb } from "../drizzle-db.ts";
+import { agentAuditLog } from "../schema.ts";
 
 export interface PostgresAuditLoggerConfig {
   readonly db: DrizzleDb;

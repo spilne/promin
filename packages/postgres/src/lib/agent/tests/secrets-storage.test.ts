@@ -6,9 +6,9 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { SecretScope } from "@promin/agent";
 import { secretsStorageTestSuite } from "@promin/agent/testing";
-import { migrate } from "../migrate.ts";
-import { PostgresSecretsStorage } from "../postgres-secrets-storage.ts";
-import { PostgresTestContainer } from "../test-utils.ts";
+import { migrate } from "../../migrate.ts";
+import { PostgresSecretsStorage } from "../secrets-storage.ts";
+import { PostgresTestContainer } from "../../test-utils.ts";
 
 const pg = new PostgresTestContainer();
 

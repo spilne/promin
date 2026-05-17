@@ -8,21 +8,18 @@ export { PostgresWorkerRegistry } from "./lib/postgres-worker-registry.ts";
 export {
   PostgresAgentRegistry,
   type PostgresAgentRegistryConfig,
-} from "./lib/postgres-agent-registry.ts";
-export {
-  PostgresMemoryStore,
-  type PostgresMemoryStoreConfig,
-} from "./lib/postgres-memory-store.ts";
-export { PostgresLeaseStore, type PostgresLeaseStoreConfig } from "./lib/postgres-lease-store.ts";
+} from "./lib/agent/agent-registry.ts";
+export { PostgresMemoryStore, type PostgresMemoryStoreConfig } from "./lib/agent/memory-store.ts";
+export { PostgresLeaseStore, type PostgresLeaseStoreConfig } from "./lib/agent/lease-store.ts";
 export {
   PostgresSecretsStorage,
   type PostgresSecretsStorageConfig,
-} from "./lib/postgres-secrets-storage.ts";
+} from "./lib/agent/secrets-storage.ts";
 export {
   PostgresAuditLogger,
   type PostgresAuditLoggerConfig,
   type AuditLogQuery,
-} from "./lib/postgres-audit-logger.ts";
+} from "./lib/agent/audit-logger.ts";
 export { type PostgresStorageConfig } from "./lib/config.ts";
 export { migrate, type MigrateOptions } from "./lib/migrate.ts";
 

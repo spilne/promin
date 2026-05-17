@@ -40,7 +40,7 @@ import type {
   ThreadSummary,
   TokenBudget,
 } from "@promin/agent";
-import type { DrizzleDb } from "./drizzle-db.ts";
+import type { DrizzleDb } from "../drizzle-db.ts";
 import {
   agentEpisode,
   agentFact,
@@ -48,7 +48,7 @@ import {
   agentNamespace,
   agentResource,
   agentThread,
-} from "./schema.ts";
+} from "../schema.ts";
 
 const SCOPE_NS = "namespace";
 const SCOPE_RES = "resource";

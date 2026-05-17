@@ -6,9 +6,9 @@
 
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { memoryStoreTestSuite } from "@promin/agent/testing";
-import { migrate } from "../migrate.ts";
-import { PostgresMemoryStore } from "../postgres-memory-store.ts";
-import { PostgresTestContainer } from "../test-utils.ts";
+import { migrate } from "../../migrate.ts";
+import { PostgresMemoryStore } from "../memory-store.ts";
+import { PostgresTestContainer } from "../../test-utils.ts";
 
 const pg = new PostgresTestContainer();
 

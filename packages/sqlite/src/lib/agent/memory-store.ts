@@ -41,7 +41,7 @@ import type {
   ThreadSummary,
   TokenBudget,
 } from "@promin/agent";
-import type { SqliteDatabase } from "./sqlite-database.ts";
+import type { SqliteDatabase } from "../sqlite-database.ts";
 
 const SCOPE_NS = "namespace";
 const SCOPE_RES = "resource";

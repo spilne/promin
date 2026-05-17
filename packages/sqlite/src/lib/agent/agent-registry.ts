@@ -26,7 +26,7 @@ import type {
   RegisteredAgent,
 } from "@promin/agent";
 import { DEFAULT_AGENT_VERSION } from "@promin/agent";
-import type { SqliteDatabase } from "./sqlite-database.ts";
+import type { SqliteDatabase } from "../sqlite-database.ts";
 
 export interface SqliteAgentRegistryConfig {
   readonly db: SqliteDatabase;

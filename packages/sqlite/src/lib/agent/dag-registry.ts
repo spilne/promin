@@ -17,7 +17,7 @@ import type {
   RegisteredDag,
 } from "@promin/agent";
 import { validateDag } from "@promin/agent";
-import type { SqliteDatabase } from "./sqlite-database.ts";
+import type { SqliteDatabase } from "../sqlite-database.ts";
 import { createVersionedRecipeStore, type VersionedRecipeStore } from "./versioned-recipe-store.ts";
 
 export interface SqliteDagRegistryConfig {

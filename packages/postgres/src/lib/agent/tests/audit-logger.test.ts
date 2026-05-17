@@ -14,9 +14,9 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { createElevatedTool } from "@promin/agent";
-import { migrate } from "../migrate.ts";
-import { PostgresAuditLogger } from "../postgres-audit-logger.ts";
-import { PostgresTestContainer } from "../test-utils.ts";
+import { migrate } from "../../migrate.ts";
+import { PostgresAuditLogger } from "../audit-logger.ts";
+import { PostgresTestContainer } from "../../test-utils.ts";
 
 const pg = new PostgresTestContainer();
 

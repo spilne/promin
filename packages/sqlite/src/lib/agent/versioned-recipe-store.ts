@@ -26,7 +26,7 @@
 //   )
 // ---------------------------------------------------------------------------
 
-import type { SqliteDatabase } from "./sqlite-database.ts";
+import type { SqliteDatabase } from "../sqlite-database.ts";
 
 export interface VersionedRecipeStoreConfig<TStored, TInput> {
   readonly db: SqliteDatabase;

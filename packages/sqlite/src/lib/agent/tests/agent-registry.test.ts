@@ -6,7 +6,7 @@
 import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
 import { agentRegistryTestSuite } from "@promin/agent/testing";
-import { SqliteAgentRegistry } from "../sqlite-agent-registry.ts";
+import { SqliteAgentRegistry } from "../agent-registry.ts";
 
 function makeRegistry() {
   return SqliteAgentRegistry.make({ db: new Database(":memory:") });

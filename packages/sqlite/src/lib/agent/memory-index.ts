@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { MemoryIndex, MemoryEntry, MemoryScope, EmbeddingProvider } from "@promin/agent";
-import type { SqliteDatabase } from "./sqlite-database.ts";
+import type { SqliteDatabase } from "../sqlite-database.ts";
 
 /**
  * Persistent memory store backed by SQLite.

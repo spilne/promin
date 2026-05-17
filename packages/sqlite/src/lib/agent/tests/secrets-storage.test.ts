@@ -7,7 +7,7 @@ import { describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
 import { SecretScope } from "@promin/agent";
 import { secretsStorageTestSuite } from "@promin/agent/testing";
-import { SqliteSecretsStorage } from "../sqlite-secrets-storage.ts";
+import { SqliteSecretsStorage } from "../secrets-storage.ts";
 
 const TEST_PASSPHRASE = "test-only-passphrase";
 

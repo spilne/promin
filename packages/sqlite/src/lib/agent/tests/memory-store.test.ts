@@ -6,7 +6,7 @@
 import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
 import { memoryStoreTestSuite } from "@promin/agent/testing";
-import { SqliteMemoryStore } from "../sqlite-memory-store.ts";
+import { SqliteMemoryStore } from "../memory-store.ts";
 
 function makeStore() {
   return SqliteMemoryStore.make({ db: new Database(":memory:") });

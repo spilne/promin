@@ -9,7 +9,7 @@
 import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
 import { composeAgentInstanceId, InMemoryMemoryStore, wipeAgentInstance } from "@promin/agent";
-import { SqliteAgentInstanceRegistry } from "../sqlite-agent-instance-registry.ts";
+import { SqliteAgentInstanceRegistry } from "../agent-instance-registry.ts";
 
 function makeRegistry() {
   return SqliteAgentInstanceRegistry.make({ db: new Database(":memory:") });
