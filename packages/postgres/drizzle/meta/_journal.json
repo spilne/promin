@@ -267,6 +267,13 @@
       "when": 1743400037000,
       "tag": "0037_agent_tool_history",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1743400038000,
+      "tag": "0038_worker_retired_at",
+      "breakpoints": true
     }
   ]
 }

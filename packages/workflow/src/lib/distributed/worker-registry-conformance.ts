@@ -104,11 +104,18 @@ export function workerRegistryConformance(params: {
   });
 
   describe("deregister", () => {
-    it("removes the row entirely", async () => {
+    it("retires the worker — keeps the row, sets status=retired + retiredAt", async () => {
       const registry = await params.factory();
       await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
       await registry.deregister("w-1");
-      expect(await registry.list()).toHaveLength(0);
+
+      const all = await registry.list();
+      expect(all).toHaveLength(1);
+      expect(all[0]!.status).toBe("retired");
+      expect(all[0]!.retiredAt).toBeInstanceOf(Date);
+      // Filterable as retired; no longer counted active.
+      expect(await registry.list({ status: "retired" })).toHaveLength(1);
+      expect(await registry.list({ status: "active" })).toHaveLength(0);
     });
 
     it("silently no-ops on unknown worker", async () => {
@@ -188,6 +195,62 @@ export function workerRegistryConformance(params: {
       expect(dead).toHaveLength(1);
       expect(dead[0]!.workerId).toBe("w-1");
       expect(dead[0]!.status).toBe("dead");
+    });
+
+    it("never relabels a retired worker as dead", async () => {
+      const registry = await params.factory();
+      await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
+      await registry.deregister("w-1"); // graceful retire
+      await wait(120);
+
+      // A retired worker's heartbeat is stale, but it stopped on purpose.
+      const dead = await registry.detectDead(50);
+      expect(dead).toHaveLength(0);
+      expect(await registry.list({ status: "retired" })).toHaveLength(1);
+      expect(await registry.list({ status: "dead" })).toHaveLength(0);
+    });
+  });
+
+  describe("gc", () => {
+    it("reaps a retired worker once retiredAt is older than retainMs", async () => {
+      const registry = await params.factory();
+      await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
+      await registry.deregister("w-1");
+      await wait(120);
+
+      const reaped = await registry.gc({ retainMs: 50 });
+      expect(reaped).toBe(1);
+      expect(await registry.list()).toHaveLength(0);
+    });
+
+    it("keeps a retired worker still inside the retention window", async () => {
+      const registry = await params.factory();
+      await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
+      await registry.deregister("w-1");
+
+      const reaped = await registry.gc({ retainMs: 60_000 });
+      expect(reaped).toBe(0);
+      expect(await registry.list({ status: "retired" })).toHaveLength(1);
+    });
+
+    it("reaps a dead worker whose heartbeat is older than retainMs", async () => {
+      const registry = await params.factory();
+      await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
+      await wait(120);
+      await registry.detectDead(50); // → dead
+
+      const reaped = await registry.gc({ retainMs: 50 });
+      expect(reaped).toBe(1);
+      expect(await registry.list()).toHaveLength(0);
+    });
+
+    it("keeps a worker with a fresh heartbeat", async () => {
+      const registry = await params.factory();
+      await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
+
+      const reaped = await registry.gc({ retainMs: 60_000 });
+      expect(reaped).toBe(0);
+      expect(await registry.list()).toHaveLength(1);
     });
   });
 }

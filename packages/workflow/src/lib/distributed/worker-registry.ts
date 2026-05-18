@@ -1,14 +1,29 @@
 // ---------------------------------------------------------------------------
-// WorkerRegistry — tracks active workers, heartbeats, dead detection
+// WorkerRegistry — tracks workers, heartbeats, dead detection, retirement
 // ---------------------------------------------------------------------------
+
+/**
+ * Worker lifecycle status.
+ *  - `active`   — registered, heartbeating, accepting work.
+ *  - `draining` — finishing current work, not accepting new tasks.
+ *  - `dead`     — `detectDead` flipped it after its heartbeat went stale.
+ *  - `retired`  — `deregister` retired it on a graceful stop. The row is
+ *                 kept (for forensics / the dashboard) until `gc` reaps it.
+ */
+export type WorkerStatus = "active" | "draining" | "dead" | "retired";
 
 export interface WorkerInfo {
   readonly workerId: string;
   readonly capabilities: readonly string[];
   readonly concurrency: number;
-  readonly status: "active" | "draining" | "dead";
+  readonly status: WorkerStatus;
   readonly lastHeartbeat: Date;
   readonly startedAt: Date;
+  /**
+   * When `deregister` retired the worker. Set only while `status` is
+   * `retired`; absent for active / draining / dead rows.
+   */
+  readonly retiredAt?: Date;
   readonly metadata?: Record<string, unknown>;
 }
 
@@ -27,21 +42,36 @@ export interface WorkerRegistry {
   /** Mark worker as draining (finishing current work, not accepting new tasks). */
   drain(workerId: string): Promise<void>;
 
-  /** Remove a worker from the registry. */
+  /**
+   * Retire a worker on a graceful stop — sets `status: 'retired'` and a
+   * `retiredAt` timestamp but KEEPS the row, so the dashboard and run
+   * forensics can still resolve it. Reaped later by `gc`. No-ops on an
+   * unknown worker.
+   */
   deregister(workerId: string): Promise<void>;
 
-  /** List all workers with a given status. Default: active. */
-  list(params?: { status?: "active" | "draining" | "dead" }): Promise<WorkerInfo[]>;
+  /** List all workers, optionally filtered to a single status. */
+  list(params?: { status?: WorkerStatus }): Promise<WorkerInfo[]>;
 
   /**
-   * Detect workers whose heartbeat is older than timeoutMs.
-   * Marks them as dead and returns them.
+   * Detect workers whose heartbeat is older than `timeoutMs`, flip them
+   * to `dead`, and return them. Skips workers already `dead` or `retired`
+   * — a retired worker stopped heartbeating on purpose and must not be
+   * mislabelled as a crash.
    */
   detectDead(timeoutMs: number): Promise<WorkerInfo[]>;
+
+  /**
+   * Reap long-gone rows: delete every worker whose `retiredAt` (or, when
+   * it never retired, `lastHeartbeat`) is older than `retainMs`. Returns
+   * the number of rows deleted. Runs from the coordinator's sweep loop so
+   * retired / dead rows stay visible for a retention window, then go.
+   */
+  gc(params: { retainMs: number }): Promise<number>;
 }
 
 export class InMemoryWorkerRegistry implements WorkerRegistry {
-  private workers = new Map<string, WorkerInfo & { status: "active" | "draining" | "dead" }>();
+  private workers = new Map<string, WorkerInfo>();
 
   async register(params: {
     workerId: string;
@@ -76,10 +106,14 @@ export class InMemoryWorkerRegistry implements WorkerRegistry {
   }
 
   async deregister(workerId: string): Promise<void> {
-    this.workers.delete(workerId);
+    // Retire, don't delete — the row stays for forensics until `gc`.
+    const w = this.workers.get(workerId);
+    if (w) {
+      this.workers.set(workerId, { ...w, status: "retired", retiredAt: new Date() });
+    }
   }
 
-  async list(params?: { status?: "active" | "draining" | "dead" }): Promise<WorkerInfo[]> {
+  async list(params?: { status?: WorkerStatus }): Promise<WorkerInfo[]> {
     const all = [...this.workers.values()];
     if (params?.status) return all.filter((w) => w.status === params.status);
     return all;
@@ -90,13 +124,30 @@ export class InMemoryWorkerRegistry implements WorkerRegistry {
     const dead: WorkerInfo[] = [];
 
     for (const [id, w] of this.workers) {
-      if (w.status !== "dead" && w.lastHeartbeat.getTime() < cutoff) {
-        const updated = { ...w, status: "dead" as const };
+      // A retired worker stopped on purpose — never relabel it `dead`.
+      if (w.status === "dead" || w.status === "retired") continue;
+      if (w.lastHeartbeat.getTime() < cutoff) {
+        const updated: WorkerInfo = { ...w, status: "dead" };
         this.workers.set(id, updated);
         dead.push(updated);
       }
     }
 
     return dead;
+  }
+
+  async gc(params: { retainMs: number }): Promise<number> {
+    const cutoff = Date.now() - params.retainMs;
+    let reaped = 0;
+    for (const [id, w] of this.workers) {
+      // Reap on the most-recent activity: when the worker retired, that;
+      // otherwise its last heartbeat.
+      const lastActive = (w.retiredAt ?? w.lastHeartbeat).getTime();
+      if (lastActive < cutoff) {
+        this.workers.delete(id);
+        reaped += 1;
+      }
+    }
+    return reaped;
   }
 }

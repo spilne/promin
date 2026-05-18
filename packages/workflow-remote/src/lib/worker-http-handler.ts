@@ -92,6 +92,7 @@ export function createWorkerApiHandler(config: {
     deregisterWorker: (p) => requireRegistry((r) => r.deregister(p.workerId)),
     listWorkers: (p) => requireRegistry((r) => r.list({ status: p?.status })),
     detectDeadWorkers: (p) => requireRegistry((r) => r.detectDead(p?.timeoutMs ?? 30_000)),
+    gcWorkers: (p) => requireRegistry((r) => r.gc({ retainMs: p.retainMs })),
   };
 
   return async (req) => {

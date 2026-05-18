@@ -27,7 +27,8 @@ export type WorkerMethod =
   | "drainWorker"
   | "deregisterWorker"
   | "listWorkers"
-  | "detectDeadWorkers";
+  | "detectDeadWorkers"
+  | "gcWorkers";
 
 export interface WorkerRpcRequest {
   readonly method: WorkerMethod;

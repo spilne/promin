@@ -342,12 +342,15 @@ export const workerRegistry = pgTable(
   "wf_worker_registry",
   {
     workerId: text("worker_id").primaryKey(),
-    status: text("status").notNull().default("active"), // active | draining | dead
+    status: text("status").notNull().default("active"), // active | draining | dead | retired
     capabilities: text("capabilities").array().notNull().default([]),
     concurrency: integer("concurrency").notNull().default(1),
     metadata: jsonb("metadata"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }).notNull().defaultNow(),
+    // Set by deregister() on a graceful stop; the row is kept for the
+    // retention window, then reaped by gc(). NULL for non-retired rows.
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
   },
   (t) => [
     // Hot path: detectDead scans stale heartbeats among non-dead rows.

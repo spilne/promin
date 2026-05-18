@@ -10,12 +10,10 @@
 // ---------------------------------------------------------------------------
 
 import { eq, sql } from "drizzle-orm";
-import type { WorkerRegistry, WorkerInfo } from "@promin/workflow";
+import type { WorkerRegistry, WorkerInfo, WorkerStatus } from "@promin/workflow";
 import { workerRegistry } from "./schema.ts";
 import type { PostgresStorageConfig } from "./config.ts";
 import { resolveConfig } from "./config.ts";
-
-type WorkerStatus = "active" | "draining" | "dead";
 
 export class PostgresWorkerRegistry implements WorkerRegistry {
   /** Drizzle schema for migration pipelines that include the workflow tables. */
@@ -93,7 +91,13 @@ export class PostgresWorkerRegistry implements WorkerRegistry {
   }
 
   async deregister(workerId: string): Promise<void> {
-    await this.db.delete(workerRegistry).where(eq(workerRegistry.workerId, workerId));
+    // Retire, don't delete — the row stays for forensics until gc() reaps
+    // it. Server-side NOW() so retiredAt isn't at the mercy of the
+    // worker's wall clock. No-ops on a missing worker.
+    await this.db
+      .update(workerRegistry)
+      .set({ status: "retired", retiredAt: sql`NOW()` })
+      .where(eq(workerRegistry.workerId, workerId));
   }
 
   async list(params?: { status?: WorkerStatus }): Promise<WorkerInfo[]> {
@@ -104,19 +108,30 @@ export class PostgresWorkerRegistry implements WorkerRegistry {
   }
 
   async detectDead(timeoutMs: number): Promise<WorkerInfo[]> {
-    // Atomic transition: any non-dead row whose heartbeat is older than
-    // `timeoutMs` flips to 'dead' in a single UPDATE ... RETURNING. Match
-    // the InMemory semantics: active AND draining workers are both
-    // candidates for the dead transition (a draining worker that stops
-    // heartbeating should also get reclaimed).
+    // Atomic transition: any active / draining row whose heartbeat is
+    // older than `timeoutMs` flips to 'dead' in a single UPDATE ...
+    // RETURNING. Skips 'dead' and 'retired' — a retired worker stopped
+    // on purpose and must not be relabelled a crash.
     const rows = await this.db
       .update(workerRegistry)
       .set({ status: "dead" })
       .where(
-        sql`${workerRegistry.status} <> 'dead' AND ${workerRegistry.lastHeartbeatAt} < NOW() - ${timeoutMs} * INTERVAL '1 millisecond'`,
+        sql`${workerRegistry.status} NOT IN ('dead', 'retired') AND ${workerRegistry.lastHeartbeatAt} < NOW() - ${timeoutMs} * INTERVAL '1 millisecond'`,
       )
       .returning();
     return rows.map(rowToWorkerInfo);
+  }
+
+  async gc(params: { retainMs: number }): Promise<number> {
+    // Reap on the most-recent activity: retired_at when the worker
+    // retired, otherwise its last heartbeat. One DELETE ... RETURNING.
+    const rows = await this.db
+      .delete(workerRegistry)
+      .where(
+        sql`COALESCE(${workerRegistry.retiredAt}, ${workerRegistry.lastHeartbeatAt}) < NOW() - ${params.retainMs} * INTERVAL '1 millisecond'`,
+      )
+      .returning({ workerId: workerRegistry.workerId });
+    return rows.length;
   }
 }
 
@@ -128,6 +143,7 @@ function rowToWorkerInfo(row: typeof workerRegistry.$inferSelect): WorkerInfo {
     concurrency: row.concurrency ?? 1,
     lastHeartbeat: row.lastHeartbeatAt,
     startedAt: row.startedAt,
+    ...(row.retiredAt ? { retiredAt: row.retiredAt } : {}),
     metadata: (row.metadata as Record<string, unknown> | null) ?? undefined,
   };
 }

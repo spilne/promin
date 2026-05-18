@@ -57,19 +57,41 @@ describe("SqliteWorkerRegistry", () => {
     expect(row!.metadata).toBeUndefined();
   });
 
-  it("CHECK constraint rejects bogus status values on direct INSERT", () => {
-    // Defense-in-depth: code paths should never write an unknown status,
-    // but if they did, the CHECK constraint would catch it.
+  it("migrates a legacy pre-retired table — rebuilds it, preserving rows", async () => {
     const db = new Database(":memory:");
-    SqliteWorkerRegistry.make({ db });
-    expect(() => {
-      db.run(
-        `INSERT INTO promin_wf_workers (worker_id, status, capabilities, concurrency, started_at, last_heartbeat_at)
-         VALUES (?, 'running', '[]', 1, ?, ?)`,
-        "bogus-1",
-        Date.now(),
-        Date.now(),
-      );
-    }).toThrow();
+    // Hand-create the old schema: status CHECK-constrained to the three
+    // pre-retirement values, no retired_at column.
+    db.run(`
+      CREATE TABLE promin_wf_workers (
+        worker_id         TEXT    NOT NULL PRIMARY KEY,
+        status            TEXT    NOT NULL DEFAULT 'active'
+          CHECK (status IN ('active', 'draining', 'dead')),
+        capabilities      TEXT    NOT NULL DEFAULT '[]',
+        concurrency       INTEGER NOT NULL DEFAULT 1,
+        metadata          TEXT,
+        started_at        INTEGER NOT NULL,
+        last_heartbeat_at INTEGER NOT NULL
+      )
+    `);
+    db.run(
+      `INSERT INTO promin_wf_workers
+         (worker_id, status, capabilities, concurrency, started_at, last_heartbeat_at)
+       VALUES ('legacy-1', 'active', '["gpu"]', 2, ?, ?)`,
+      Date.now(),
+      Date.now(),
+    );
+
+    // make() runs _setup → detects the legacy schema → rebuilds the table.
+    const registry = SqliteWorkerRegistry.make({ db });
+
+    // The legacy row survived the rebuild.
+    const all = await registry.list();
+    expect(all.map((w) => w.workerId)).toEqual(["legacy-1"]);
+    expect(all[0]!.capabilities).toEqual(["gpu"]);
+    expect(all[0]!.concurrency).toBe(2);
+
+    // 'retired' — rejected by the old CHECK — now works post-migration.
+    await registry.deregister("legacy-1");
+    expect(await registry.list({ status: "retired" })).toHaveLength(1);
   });
 });

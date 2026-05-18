@@ -1,7 +1,5 @@
-import type { WorkerRegistry, WorkerInfo } from "@promin/workflow";
+import type { WorkerRegistry, WorkerInfo, WorkerStatus } from "@promin/workflow";
 import type { SqliteDatabase } from "./sqlite-database.ts";
-
-type WorkerStatus = "active" | "draining" | "dead";
 
 /**
  * Persistent WorkerRegistry backed by SQLite.
@@ -49,24 +47,47 @@ export class SqliteWorkerRegistry implements WorkerRegistry {
 
   private _setup(): void {
     const t = this._t;
-    // Status is constrained by CHECK rather than a lookup table — three
-    // values, zero seeding.
+    const tbl = `${t}_workers`;
+
+    // Migrate a pre-`retired` table: the old schema CHECK-constrained
+    // status to ('active','draining','dead') and has no `retired_at`
+    // column. SQLite can't ALTER a CHECK constraint, so rebuild — rename
+    // the old table aside, create the new one, copy rows, drop the old.
+    const existing = this.db
+      .query<{ sql: string }>(`SELECT sql FROM sqlite_master WHERE type='table' AND name = ?`)
+      .get(tbl);
+    const legacy = existing != null && !existing.sql.includes("retired_at");
+    if (legacy) {
+      this.db.run(`ALTER TABLE ${tbl} RENAME TO ${tbl}_legacy`);
+    }
+
+    // Status is left unconstrained (validated by the WorkerStatus type) —
+    // a CHECK can't be ALTER'd, and the four values are app-controlled.
     this.db.run(`
-      CREATE TABLE IF NOT EXISTS ${t}_workers (
+      CREATE TABLE IF NOT EXISTS ${tbl} (
         worker_id         TEXT    NOT NULL PRIMARY KEY,
-        status            TEXT    NOT NULL DEFAULT 'active'
-          CHECK (status IN ('active', 'draining', 'dead')),
+        status            TEXT    NOT NULL DEFAULT 'active',
         capabilities      TEXT    NOT NULL DEFAULT '[]',
         concurrency       INTEGER NOT NULL DEFAULT 1,
         metadata          TEXT,
         started_at        INTEGER NOT NULL,
-        last_heartbeat_at INTEGER NOT NULL
+        last_heartbeat_at INTEGER NOT NULL,
+        retired_at        INTEGER
       )
     `);
-    this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_workers_status ON ${t}_workers (status)`);
-    this.db.run(
-      `CREATE INDEX IF NOT EXISTS ${t}_workers_heartbeat ON ${t}_workers (last_heartbeat_at)`,
-    );
+
+    if (legacy) {
+      this.db.run(
+        `INSERT INTO ${tbl}
+           (worker_id, status, capabilities, concurrency, metadata, started_at, last_heartbeat_at)
+         SELECT worker_id, status, capabilities, concurrency, metadata, started_at, last_heartbeat_at
+         FROM ${tbl}_legacy`,
+      );
+      this.db.run(`DROP TABLE ${tbl}_legacy`);
+    }
+
+    this.db.run(`CREATE INDEX IF NOT EXISTS ${tbl}_status ON ${tbl} (status)`);
+    this.db.run(`CREATE INDEX IF NOT EXISTS ${tbl}_heartbeat ON ${tbl} (last_heartbeat_at)`);
   }
 
   async register(params: {
@@ -114,7 +135,13 @@ export class SqliteWorkerRegistry implements WorkerRegistry {
   }
 
   async deregister(workerId: string): Promise<void> {
-    this.db.run(`DELETE FROM ${this._t}_workers WHERE worker_id = ?`, workerId);
+    // Retire, don't delete — the row stays for forensics until gc() reaps
+    // it. No-ops on a missing worker (zero rows updated).
+    this.db.run(
+      `UPDATE ${this._t}_workers SET status = 'retired', retired_at = ? WHERE worker_id = ?`,
+      Date.now(),
+      workerId,
+    );
   }
 
   async list(params?: { status?: WorkerStatus }): Promise<WorkerInfo[]> {
@@ -129,17 +156,32 @@ export class SqliteWorkerRegistry implements WorkerRegistry {
   async detectDead(timeoutMs: number): Promise<WorkerInfo[]> {
     // Atomic transition in one statement. Modern SQLite (bun:sqlite ships
     // 3.45+) supports UPDATE ... RETURNING, matching the Postgres impl's
-    // single-round-trip sweep.
+    // single-round-trip sweep. Skips 'dead' and 'retired' — a retired
+    // worker stopped on purpose and must not be relabelled a crash.
     const cutoff = Date.now() - timeoutMs;
     const rows = this.db
       .query<WorkerRow>(
         `UPDATE ${this._t}_workers
          SET status = 'dead'
-         WHERE status <> 'dead' AND last_heartbeat_at < ?
+         WHERE status NOT IN ('dead', 'retired') AND last_heartbeat_at < ?
          RETURNING *`,
       )
       .all(cutoff);
     return rows.map(rowToWorkerInfo);
+  }
+
+  async gc(params: { retainMs: number }): Promise<number> {
+    // Reap on the most-recent activity: retired_at when the worker
+    // retired, otherwise its last heartbeat. RETURNING gives the count.
+    const cutoff = Date.now() - params.retainMs;
+    const rows = this.db
+      .query<{ worker_id: string }>(
+        `DELETE FROM ${this._t}_workers
+         WHERE COALESCE(retired_at, last_heartbeat_at) < ?
+         RETURNING worker_id`,
+      )
+      .all(cutoff);
+    return rows.length;
   }
 }
 
@@ -151,6 +193,7 @@ interface WorkerRow {
   metadata: string | null;
   started_at: number;
   last_heartbeat_at: number;
+  retired_at: number | null;
 }
 
 function rowToWorkerInfo(row: WorkerRow): WorkerInfo {
@@ -161,6 +204,7 @@ function rowToWorkerInfo(row: WorkerRow): WorkerInfo {
     concurrency: row.concurrency,
     lastHeartbeat: new Date(row.last_heartbeat_at),
     startedAt: new Date(row.started_at),
+    ...(row.retired_at != null ? { retiredAt: new Date(row.retired_at) } : {}),
     metadata:
       row.metadata != null ? (JSON.parse(row.metadata) as Record<string, unknown>) : undefined,
   };

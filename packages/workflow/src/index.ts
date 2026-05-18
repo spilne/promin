@@ -221,6 +221,7 @@ export {
   type WorkflowWorker,
   type WorkerConfig,
   type WorkerInfo,
+  type WorkerStatus,
   type WorkerRegistry,
   InMemoryWorkerRegistry,
   type LeaderElection,

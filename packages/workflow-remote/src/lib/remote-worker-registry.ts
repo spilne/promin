@@ -4,7 +4,7 @@
 // `createWorkerApiHandler` configured with a real WorkerRegistry.
 // ---------------------------------------------------------------------------
 
-import type { WorkerInfo, WorkerRegistry } from "@promin/workflow";
+import type { WorkerInfo, WorkerRegistry, WorkerStatus } from "@promin/workflow";
 import type { FetchLike } from "./remote-workflow-storage.ts";
 import { WORKER_WIRE_CODEC, type WorkerMethod, type WorkerRpcResponse } from "./worker-wire.ts";
 
@@ -64,11 +64,15 @@ export class RemoteWorkerRegistry implements WorkerRegistry {
     return this.call("deregisterWorker", { workerId });
   }
 
-  list(params?: { status?: "active" | "draining" | "dead" }): Promise<WorkerInfo[]> {
+  list(params?: { status?: WorkerStatus }): Promise<WorkerInfo[]> {
     return this.call<WorkerInfo[]>("listWorkers", { status: params?.status });
   }
 
   detectDead(timeoutMs: number): Promise<WorkerInfo[]> {
     return this.call<WorkerInfo[]>("detectDeadWorkers", { timeoutMs });
+  }
+
+  gc(params: { retainMs: number }): Promise<number> {
+    return this.call<number>("gcWorkers", { retainMs: params.retainMs });
   }
 }

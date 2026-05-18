@@ -56,9 +56,13 @@ describe("Worker + registry integration — automatic lifecycle management", () 
 
     await worker.stop();
 
-    // Worker should be gone
-    const afterStop = await workerRegistry.list();
-    expect(afterStop).toHaveLength(0);
+    // Worker is retired on a graceful stop — the row stays (for forensics
+    // / the dashboard) but is no longer counted active.
+    expect(await workerRegistry.list({ status: "active" })).toHaveLength(0);
+    const retired = await workerRegistry.list({ status: "retired" });
+    expect(retired).toHaveLength(1);
+    expect(retired[0]!.workerId).toBe(worker.workerId);
+    expect(retired[0]!.retiredAt).toBeInstanceOf(Date);
   });
 
   it("worker sends periodic heartbeats — registry knows it is healthy", async () => {
@@ -131,9 +135,9 @@ describe("Worker + registry integration — automatic lifecycle management", () 
 
     await stopPromise;
 
-    // After stop — fully deregistered
-    const after = await workerRegistry.list();
-    expect(after).toHaveLength(0);
+    // After stop — retired (row kept), no longer active.
+    expect(await workerRegistry.list({ status: "active" })).toHaveLength(0);
+    expect(await workerRegistry.list({ status: "retired" })).toHaveLength(1);
   });
 });
 
