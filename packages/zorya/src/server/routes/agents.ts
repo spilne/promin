@@ -56,6 +56,7 @@ import {
 } from "@promin/agent";
 import { WorkflowSuspendedError } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
+import { isDraftId } from "./agent-drafts.ts";
 
 // ---------------------------------------------------------------------------
 // Response DTOs — UI imports these for typing API responses. Re-export the
@@ -344,7 +345,9 @@ export function listAgents(deps: AgentGatewayDeps) {
     const limit = parseIntParam(url.searchParams.get("limit"));
     const cursor = url.searchParams.get("cursor") ?? undefined;
     const agents = await deps.registry.list({ capability, tag, limit, cursor });
-    return json(200, { agents });
+    // Hide ephemeral Designer drafts — they're not real recipes and
+    // shouldn't clutter the agent list.
+    return json(200, { agents: agents.filter((a) => !isDraftId(a.id)) });
   };
 }
 

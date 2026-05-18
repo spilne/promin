@@ -337,6 +337,25 @@ export const api = {
       },
     );
   },
+  /**
+   * Register an ephemeral draft recipe (`__draft__`-prefixed id) — used
+   * to chat a recipe edit before committing it. Pair with `deleteDraft`
+   * on modal close; orphans are TTL-swept server-side.
+   */
+  createDraft(body: {
+    backend: RegisteredAgent["backend"];
+    metadata?: Partial<RegisteredAgent["metadata"]>;
+    sourceId?: string;
+  }): Promise<{ recipe: RegisteredAgent }> {
+    return req<{ recipe: RegisteredAgent }>(`/api/agents/_draft`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  deleteDraft(id: string): Promise<void> {
+    return req<void>(`/api/agents/_draft/${encodeURIComponent(id)}`, { method: "DELETE" });
+  },
   listCatalogTools(): Promise<{ tools: ToolCatalogEntryDto[] }> {
     return req<{ tools: ToolCatalogEntryDto[] }>(`/api/agents/_catalog/tools`);
   },

@@ -906,6 +906,78 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
       expect(got?.metadata.template).toBeUndefined();
     });
   });
+
+  describe("draft recipes (_draft)", () => {
+    const draftBackend = {
+      type: "local" as const,
+      model: { provider: "anthropic", id: "claude-sonnet-4-6" },
+      systemPrompt: "draft prompt",
+      tools: [] as string[],
+    };
+
+    async function createDraft(server: ZoryaServer): Promise<string> {
+      const res = await server.handle(
+        new Request("http://test/api/agents/_draft", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ backend: draftBackend, sourceId: "support" }),
+        }),
+      );
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { recipe: { id: string } }).recipe.id;
+    }
+
+    it("registers a draft under a __draft__ id, hidden from the agent list", async () => {
+      const { server } = await bootGateway();
+      const id = await createDraft(server);
+      expect(id.startsWith("__draft__")).toBe(true);
+
+      const list = (await (await server.handle(new Request("http://test/api/agents"))).json()) as {
+        agents: Array<{ id: string }>;
+      };
+      expect(list.agents.some((a) => a.id.startsWith("__draft__"))).toBe(false);
+    });
+
+    it("a draft is chattable through the standard invoke endpoint", async () => {
+      const { server } = await bootGateway({
+        responses: [{ content: "draft says hi", finishReason: "stop" }],
+      });
+      const id = await createDraft(server);
+      const res = await server.handle(
+        new Request(`http://test/api/agents/${encodeURIComponent(id)}/invoke`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ task: "hi", namespaceId: "acme", resourceId: "alice" }),
+        }),
+      );
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { text: string }).text).toBe("draft says hi");
+    });
+
+    it("DELETE /api/agents/_draft/:id removes the draft", async () => {
+      const { server } = await bootGateway();
+      const id = await createDraft(server);
+      const del = await server.handle(
+        new Request(`http://test/api/agents/_draft/${encodeURIComponent(id)}`, {
+          method: "DELETE",
+        }),
+      );
+      expect(del.status).toBe(204);
+      const get = await server.handle(
+        new Request(`http://test/api/agents/${encodeURIComponent(id)}`),
+      );
+      expect(get.status).toBe(404);
+    });
+
+    it("DELETE /api/agents/_draft/:id rejects a non-draft id", async () => {
+      const { server } = await bootGateway();
+      const del = await server.handle(
+        new Request("http://test/api/agents/_draft/support", { method: "DELETE" }),
+      );
+      expect(del.status).toBe(400);
+      expect(((await del.json()) as { error: string }).error).toBe("not_a_draft");
+    });
+  });
 });
 
 describe("agent gateway — disabled recipe gate", () => {

@@ -124,6 +124,7 @@ import {
   listToolHistory,
 } from "./routes/agent-catalog.ts";
 import { createSecret, deleteSecret, listSecrets } from "./routes/secrets.ts";
+import { createDraft, deleteDraft } from "./routes/agent-drafts.ts";
 import {
   ingestWebhook,
   type WebhookSourceConfig,
@@ -481,6 +482,11 @@ export class ZoryaServer {
             ? listToolHistory({ history: this.agents.toolHistory })
             : async () => new Response(JSON.stringify({ history: [] }), { status: 200 }),
         )
+        // Draft recipes — test a recipe edit before committing it.
+        // Mounted before /api/agents/:id so the literal `_draft` segment
+        // isn't shadowed by an agent that happens to be named `_draft`.
+        .post("/api/agents/_draft", createDraft({ registry: this.agents.registry }))
+        .delete("/api/agents/_draft/:id", deleteDraft({ registry: this.agents.registry }))
         // Recipe CRUD — gsze Phase 1. Author/edit/clone agents over HTTP.
         .post("/api/agents", createAgent(agentDeps))
         .get("/api/agents/:id", getAgent(agentDeps))
