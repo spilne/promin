@@ -34,6 +34,13 @@ export interface ToolResultMessage {
   role: "tool";
   toolCallId: string;
   content: string;
+  /**
+   * Structured side-channel data, persisted with the message but NOT
+   * shown to the LLM (only `content` reaches the model). A tool emits it
+   * via `AgentTool.toResultMetadata`. Used by `callAgent` to carry the
+   * sub-agent run's trace for the cross-thread graph view.
+   */
+  metadata?: Readonly<Record<string, unknown>>;
 }
 
 export type Message = SystemMessage | UserMessage | AssistantMessage | ToolResultMessage;

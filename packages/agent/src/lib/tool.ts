@@ -108,6 +108,14 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
   requireApproval?: boolean;
   toModelOutput?: (output: TOutput) => string;
   /**
+   * Extract structured side-channel data from the tool's output to
+   * persist on the result message's `metadata`. Unlike `toModelOutput`,
+   * this is NOT shown to the LLM — it's for the trace / audit layers.
+   * `callAgent` uses it to carry the sub-agent run's trace. Return
+   * `undefined` to attach no metadata.
+   */
+  toResultMetadata?: (output: TOutput) => Readonly<Record<string, unknown>> | undefined;
+  /**
    * Tool isolation kind — set by `createScopedTool` / `createElevatedTool`
    * factories. Undefined for tools built with the bare `tool()` factory
    * (no scope contract, ctx.scope is best-effort).

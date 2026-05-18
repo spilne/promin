@@ -151,6 +151,7 @@ function TraceNodeRect({
         font-size={10}
       >
         {v.kindLabel}
+        {n.depth > 0 ? `  ↳ sub-agent L${n.depth}` : ""}
         {n.failed ? "  ✕ failed" : n.orphan ? "  ⚠ orphan" : ""}
       </text>
       {/* Main label. */}

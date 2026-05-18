@@ -14,6 +14,7 @@
 
 import { z } from "zod";
 import { tool, type AgentTool } from "../tool.ts";
+import { buildAgentTrace, CHILD_TRACE_META_KEY, type AgentTrace } from "../trace.ts";
 import type { Agent } from "../agent/types.ts";
 import type { AgentInstanceRegistry } from "../instance/types.ts";
 import type { AgentRegistry, LocalAgentBackend, RegisteredAgent } from "../registry/types.ts";
@@ -196,6 +197,13 @@ interface CallAgentOutput {
   };
   resolvedResourceId?: string;
   error?: string;
+  /**
+   * Trace of the peer's run, built from the sub-run's messages. Carried
+   * to the caller's result-message `metadata` (never shown to the LLM —
+   * see `toModelOutput` / `toResultMetadata` below) so the trace graph
+   * can expand this call into the peer's turns.
+   */
+  trace?: AgentTrace;
 }
 
 export function createCallAgentTool(args: {
@@ -275,11 +283,16 @@ export function createCallAgentTool(args: {
           const text = await out.text;
           const finishReason = await out.finishReason;
           const usage = await out.usage;
+          // Capture the peer's run as a trace for the cross-thread graph.
+          // The peer ran one-shot (no persisted thread), so its trace
+          // travels here, on the caller's result-message metadata.
+          const trace = buildAgentTrace(await out.messages);
           return {
             ok: true,
             text,
             finishReason,
             usage,
+            trace,
             ...(calleeResourceId !== undefined ? { resolvedResourceId: calleeResourceId } : {}),
           };
         });
@@ -290,6 +303,14 @@ export function createCallAgentTool(args: {
         };
       }
     },
+    // Keep the LLM-visible result exactly as before — the peer's trace
+    // is observability data, not something the caller's model should
+    // reason over (and it would burn context). Strip it from `content`.
+    toModelOutput: ({ trace: _trace, ...rest }) => JSON.stringify(rest),
+    // ...but persist the trace on the result message's metadata so the
+    // trace graph can expand this call into the peer's turns.
+    toResultMetadata: (output) =>
+      output.trace ? { [CHILD_TRACE_META_KEY]: output.trace } : undefined,
   });
 }
 

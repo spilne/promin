@@ -76,6 +76,13 @@ export interface TraceToolCallNode {
      */
     readonly failed: boolean;
   };
+  /**
+   * Sub-agent run trace, present on `callAgent` tool calls that
+   * dispatched a peer. `callAgent` builds it from the sub-run's
+   * messages and stows it on the result message's `metadata`; this
+   * lets the graph view expand the call node into the peer's turns.
+   */
+  readonly childTrace?: AgentTrace;
 }
 
 export interface TraceSystemNode {
@@ -188,6 +195,7 @@ export function buildAgentTrace(rawMessages: ReadonlyArray<Message>): AgentTrace
             };
           }
           const resultMsg = resultIm.msg as Extract<Message, { role: "tool" }>;
+          const childTrace = extractChildTrace(resultMsg.metadata);
           return {
             kind: "tool-call",
             id: call.id,
@@ -199,6 +207,7 @@ export function buildAgentTrace(rawMessages: ReadonlyArray<Message>): AgentTrace
               content: resultMsg.content,
               failed: detectFailure(resultMsg.content),
             },
+            ...(childTrace && { childTrace }),
           };
         });
         children.push({
@@ -264,6 +273,24 @@ export function buildAgentTrace(rawMessages: ReadonlyArray<Message>): AgentTrace
     orphanSystem,
     summary: summarise(turns),
   };
+}
+
+/** Key under which `callAgent` stows the sub-run trace on result metadata. */
+export const CHILD_TRACE_META_KEY = "childTrace";
+
+/**
+ * Pull a sub-agent `AgentTrace` out of a tool-result message's metadata,
+ * if one was stowed there (by `callAgent`). Guards the shape — the value
+ * round-tripped through JSON storage, so it's untyped on the way back.
+ */
+function extractChildTrace(
+  metadata: Readonly<Record<string, unknown>> | undefined,
+): AgentTrace | undefined {
+  const raw = metadata?.[CHILD_TRACE_META_KEY];
+  if (raw && typeof raw === "object" && Array.isArray((raw as { turns?: unknown }).turns)) {
+    return raw as AgentTrace;
+  }
+  return undefined;
 }
 
 function detectFailure(content: string): boolean {

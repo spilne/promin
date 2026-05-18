@@ -158,4 +158,46 @@ describe("buildAgentTrace", () => {
     expect(trace.summary.toolFailures).toBe(1);
     expect(trace.summary.orphanedToolCalls).toBe(0);
   });
+
+  it("surfaces a callAgent sub-run trace from result-message metadata as childTrace", () => {
+    // A peer's run, pre-built by callAgent and stowed on the tool
+    // result's metadata under `childTrace`.
+    const childTrace = buildAgentTrace([
+      { role: "user", content: "draft a haiku" },
+      { role: "assistant", content: "branches into the sub-run" },
+    ]);
+    const messages: Message[] = [
+      { role: "user", content: "ask the writer" },
+      {
+        role: "assistant",
+        content: null,
+        toolCalls: [{ id: "c1", name: "callAgent", input: { id: "writer", prompt: "x" } }],
+      },
+      { role: "tool", toolCallId: "c1", content: '{"ok":true}', metadata: { childTrace } },
+      { role: "assistant", content: "done" },
+    ];
+    const assistant = buildAgentTrace(messages).turns[0]!.children.find(
+      (c) => c.kind === "assistant",
+    );
+    const callNode = assistant?.kind === "assistant" ? assistant.toolCalls[0] : undefined;
+    expect(callNode?.name).toBe("callAgent");
+    expect(callNode?.childTrace?.turns).toHaveLength(1);
+  });
+
+  it("ignores result metadata that isn't a well-formed child trace", () => {
+    const messages: Message[] = [
+      { role: "user", content: "go" },
+      {
+        role: "assistant",
+        content: null,
+        toolCalls: [{ id: "c1", name: "someTool", input: {} }],
+      },
+      { role: "tool", toolCallId: "c1", content: "ok", metadata: { childTrace: "not-a-trace" } },
+    ];
+    const assistant = buildAgentTrace(messages).turns[0]!.children.find(
+      (c) => c.kind === "assistant",
+    );
+    const callNode = assistant?.kind === "assistant" ? assistant.toolCalls[0] : undefined;
+    expect(callNode?.childTrace).toBeUndefined();
+  });
 });

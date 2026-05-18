@@ -587,6 +587,12 @@ export interface TraceToolCallDto {
   input: unknown;
   callSeq: number;
   result?: { seq: number; content: string; failed: boolean };
+  /**
+   * Sub-agent run trace — present on `callAgent` tool calls. Lets the
+   * graph view expand the call into the peer's turns. Recursive: a
+   * peer that itself called `callAgent` carries its own `childTrace`.
+   */
+  childTrace?: AgentTraceDto;
 }
 
 // ---------------------------------------------------------------------------

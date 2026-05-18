@@ -179,4 +179,61 @@ describe("buildTraceGraph", () => {
     expect(label.length).toBeLessThanOrEqual(38);
     expect(label.endsWith("…")).toBe(true);
   });
+
+  it("main-thread nodes are all depth 0", () => {
+    const m = buildTraceGraph(
+      trace([
+        turn(0, [
+          { kind: "user", seq: 0, content: "hi" },
+          { kind: "assistant", seq: 1, content: "hello", toolCalls: [] },
+        ]),
+      ]),
+    );
+    expect(m.nodes.every((n) => n.depth === 0)).toBe(true);
+  });
+
+  it("expands a callAgent childTrace as a side branch rooted at the call node", () => {
+    // A callAgent tool call whose result carries the peer's trace.
+    const childTrace = trace([
+      turn(0, [
+        { kind: "user", seq: 0, content: "draft a haiku" },
+        { kind: "assistant", seq: 1, content: "the peer answers", toolCalls: [] },
+      ]),
+    ]);
+    const m = buildTraceGraph(
+      trace([
+        turn(0, [
+          { kind: "user", seq: 0, content: "ask the peer" },
+          {
+            kind: "assistant",
+            seq: 1,
+            content: null,
+            toolCalls: [
+              {
+                kind: "tool-call",
+                id: "c1",
+                name: "callAgent",
+                input: {},
+                callSeq: 1,
+                result: { seq: 2, content: "ok", failed: false },
+                childTrace,
+              },
+            ],
+          },
+          { kind: "assistant", seq: 3, content: "done", toolCalls: [] },
+        ]),
+      ]),
+    );
+
+    const call = m.nodes.find((n) => n.label === "callAgent")!;
+    // The peer's user + assistant nodes are present, at depth 1.
+    const sub = m.nodes.filter((n) => n.depth === 1);
+    expect(sub.map((n) => n.kind)).toEqual(["user", "assistant"]);
+    // The peer sub-graph roots at the callAgent node.
+    expect(sub.find((n) => n.kind === "user")!.dependsOn).toEqual([call.id]);
+    // The main thread is unaffected — the final assistant still depends
+    // on the callAgent node, not on the peer's internals.
+    const finalAssistant = m.nodes.filter((n) => n.kind === "assistant" && n.depth === 0).at(-1)!;
+    expect(finalAssistant.dependsOn).toEqual([call.id]);
+  });
 });

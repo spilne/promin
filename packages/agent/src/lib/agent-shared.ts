@@ -244,7 +244,11 @@ export async function executeToolCall(
         content.slice(0, MAX_TOOL_CONTENT_CHARS) +
         `\n\n[Output truncated: ${content.length.toLocaleString()} chars total. Use a more specific query to avoid truncation.]`;
     }
-    return { role: "tool", toolCallId: call.id, content };
+    // Structured side-channel metadata — persisted with the message but
+    // never shown to the LLM. `callAgent` uses it to carry the sub-run
+    // trace; most tools declare no `toResultMetadata` and emit none.
+    const metadata = toolDef.toResultMetadata?.(output);
+    return { role: "tool", toolCallId: call.id, content, ...(metadata && { metadata }) };
   } catch (err) {
     return {
       role: "tool",

@@ -11,6 +11,7 @@ import {
   InMemoryAgentInstanceRegistry,
   InMemoryAgentRegistry,
   InMemoryMemoryStore,
+  buildAgentTrace,
   resolveLocalAgent,
 } from "../../../lib/index.ts";
 import type {
@@ -246,6 +247,40 @@ describe("agents network — delegation", () => {
     const writerMessages = captures.writer.calls[0]!.messages;
     const writerUser = writerMessages.find((m) => m.role === "user");
     expect(writerUser?.content).toContain("draft a haiku");
+  });
+
+  it("callAgent carries the sub-run trace on the result message metadata", async () => {
+    const { coordinator, resolve } = await bootNetwork({
+      coordinatorScript: [
+        {
+          content: null,
+          finishReason: "tool_use",
+          toolCalls: [
+            { id: "t1", name: "callAgent", input: { id: "writer", prompt: "draft a haiku" } },
+          ],
+        },
+        { content: "done", finishReason: "stop" },
+      ],
+      writerResponse: { content: "writer's haiku", finishReason: "stop" },
+    });
+    const agent = resolve(coordinator).withScope({ namespaceId: "acme" });
+    const out = await agent.invoke({ task: "ask the writer" });
+    const messages = await out.messages;
+
+    // The callAgent result message carries the peer's trace as metadata,
+    // never in the LLM-visible content.
+    const toolResult = messages.find((m) => m.role === "tool");
+    expect(toolResult?.metadata?.childTrace).toBeDefined();
+    expect(toolResult?.content ?? "").not.toContain("turns");
+
+    // buildAgentTrace surfaces it as childTrace on the callAgent node.
+    const callNode = buildAgentTrace(messages)
+      .turns.flatMap((t) => t.children)
+      .flatMap((c) => (c.kind === "assistant" ? c.toolCalls : []))
+      .find((tc) => tc.name === "callAgent");
+    expect(callNode?.childTrace).toBeDefined();
+    // The child trace is the writer's own run — at least one turn.
+    expect(callNode?.childTrace?.turns.length ?? 0).toBeGreaterThan(0);
   });
 
   it("callAgent denies when the caller's policy doesn't match", async () => {
