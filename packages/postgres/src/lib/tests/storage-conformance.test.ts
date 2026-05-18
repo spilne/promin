@@ -25,6 +25,6 @@ postgresDescribe("PostgresWorkflowStorage conformance", { migrate }, (pg) => {
     async () => {
       return PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false });
     },
-    { hasJournal: true, hasJournaledSuspend: true },
+    { hasJournal: true, hasJournaledSuspend: true, hasResetSteps: true },
   );
 });

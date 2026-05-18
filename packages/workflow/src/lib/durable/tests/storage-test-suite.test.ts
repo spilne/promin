@@ -5,4 +5,5 @@ import { storageTestSuite } from "../storage-test-suite.ts";
 storageTestSuite(() => new InMemoryWorkflowStorage(), {
   hasJournal: true,
   hasJournaledSuspend: true,
+  hasResetSteps: true,
 });

@@ -12,6 +12,7 @@ function makeStorage() {
 storageTestSuite(makeStorage, {
   hasJournal: true,
   hasJournaledSuspend: true,
+  hasResetSteps: true,
 });
 
 // ---- SQLite-specific tests ----

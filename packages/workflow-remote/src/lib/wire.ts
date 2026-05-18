@@ -39,6 +39,7 @@ export type StorageMethod =
   | "heartbeat"
   | "startFreshRun"
   | "loadRunHistory"
+  | "resetSteps"
   | "purgeCompleted"
   // ActivityJournalStorage / JournaledSuspendStorage — forwarded only when
   // the underlying storage implements them. Lets `.journaled()` workflows

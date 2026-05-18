@@ -28,6 +28,12 @@ export interface StorageTestSuiteOptions {
    * `findPendingSignal`). Implies `hasJournal: true`.
    */
   hasJournaledSuspend?: boolean;
+  /**
+   * Opt in to the `resetSteps` conformance section. Defaults to `false`.
+   * When `true`, the factory must return a storage that implements the
+   * optional `resetSteps` method (backs `WorkflowRunner.resume`).
+   */
+  hasResetSteps?: boolean;
 }
 
 /**
@@ -1385,6 +1391,98 @@ export function storageTestSuite(
         expect(await s.loadRunHistory("purge-cascade")).toEqual([]);
       });
     });
+
+    // -------------------------------------------------------------------
+    // resetSteps (opt-in) — backs WorkflowRunner.resume
+    // -------------------------------------------------------------------
+
+    if (options.hasResetSteps) {
+      describe("resetSteps", () => {
+        // A workflow with three completed steps, then completed overall.
+        async function seedCompleted(s: WorkflowStorage, id: string): Promise<void> {
+          await s.createWorkflow({ workflowId: id, workflowName: "reset-wf", input: {} });
+          for (const name of ["s1", "s2", "s3"]) {
+            await s.saveStepResult({
+              workflowId: id,
+              stepName: name,
+              result: `${name}-result`,
+              durationMs: 5,
+              startedAt: new Date(),
+            });
+          }
+          await s.completeWorkflow(id, "final");
+        }
+
+        it("clears the listed steps and flips a completed workflow to running", async () => {
+          const s = await getStorage();
+          if (!s.resetSteps) throw new Error("factory storage lacks resetSteps");
+          await seedCompleted(s, "reset-1");
+          expect((await s.loadWorkflow("reset-1"))!.status).toBe("completed");
+
+          await s.resetSteps("reset-1", ["s2", "s3"]);
+
+          const state = (await s.loadWorkflow("reset-1"))!;
+          expect(state.status).toBe("running");
+          // Reset steps read back as never-run; the unlisted step is kept.
+          expect(state.steps["s1"]?.result).toBe("s1-result");
+          expect(state.steps["s2"]).toBeUndefined();
+          expect(state.steps["s3"]).toBeUndefined();
+          // Terminal fields are cleared.
+          expect(state.result).toBeUndefined();
+          expect(state.completedAt).toBeUndefined();
+        });
+
+        it("an empty step list is a no-op", async () => {
+          const s = await getStorage();
+          if (!s.resetSteps) throw new Error("factory storage lacks resetSteps");
+          await seedCompleted(s, "reset-empty");
+          await s.resetSteps("reset-empty", []);
+          const state = (await s.loadWorkflow("reset-empty"))!;
+          expect(state.status).toBe("completed");
+          expect(state.steps["s1"]?.result).toBe("s1-result");
+        });
+
+        it("leaves a non-terminal workflow's status untouched", async () => {
+          const s = await getStorage();
+          if (!s.resetSteps) throw new Error("factory storage lacks resetSteps");
+          await s.createWorkflow({
+            workflowId: "reset-running",
+            workflowName: "reset-wf",
+            input: {},
+          });
+          await s.saveStepResult({
+            workflowId: "reset-running",
+            stepName: "s1",
+            result: "ok",
+            durationMs: 5,
+            startedAt: new Date(),
+          });
+          expect((await s.loadWorkflow("reset-running"))!.status).toBe("running");
+
+          await s.resetSteps("reset-running", ["s1"]);
+
+          const state = (await s.loadWorkflow("reset-running"))!;
+          expect(state.status).toBe("running");
+          expect(state.steps["s1"]).toBeUndefined();
+        });
+
+        it("is idempotent on step names that aren't present", async () => {
+          const s = await getStorage();
+          if (!s.resetSteps) throw new Error("factory storage lacks resetSteps");
+          await seedCompleted(s, "reset-missing-step");
+          await s.resetSteps("reset-missing-step", ["s2", "never-existed"]);
+          const state = (await s.loadWorkflow("reset-missing-step"))!;
+          expect(state.steps["s2"]).toBeUndefined();
+          expect(state.steps["s1"]?.result).toBe("s1-result");
+        });
+
+        it("throws when the workflow doesn't exist", async () => {
+          const s = await getStorage();
+          if (!s.resetSteps) throw new Error("factory storage lacks resetSteps");
+          await expect(s.resetSteps("ghost-workflow", ["s1"])).rejects.toThrow();
+        });
+      });
+    }
 
     // -------------------------------------------------------------------
     // ActivityJournalStorage (opt-in)

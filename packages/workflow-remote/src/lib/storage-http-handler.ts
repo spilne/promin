@@ -73,6 +73,14 @@ export function createWorkflowStorageHandler(
     heartbeat: (p) => storage.heartbeat(p.workflowId, p.lockDurationMs, p.guard),
     startFreshRun: (p) => storage.startFreshRun(p.workflowId),
     loadRunHistory: (p) => storage.loadRunHistory(p.workflowId, p.params),
+    resetSteps: async (p) => {
+      // Forwarded only if the underlying storage implements it — surface
+      // a clear error rather than a silent miss.
+      if (!storage.resetSteps) {
+        throw new Error("storage does not implement resetSteps");
+      }
+      await storage.resetSteps(p.workflowId, p.stepNames);
+    },
     purgeCompleted: (p) => storage.purgeCompleted(p),
     // -- Journal methods. Feature-detected so backends without journal
     // support surface a clear error instead of silently dropping calls.

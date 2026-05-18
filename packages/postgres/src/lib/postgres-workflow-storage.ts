@@ -950,6 +950,74 @@ export class PostgresWorkflowStorage
     return row?.run ?? 1;
   }
 
+  async resetSteps(workflowId: string, stepNames: readonly string[]): Promise<void> {
+    if (stepNames.length === 0) return;
+    const names = [...stepNames];
+    await this.db.transaction(async (tx) => {
+      // Step / task rows are keyed per `run`; only the live run resets.
+      // Unknown workflow → throw, matching InMemoryWorkflowStorage so
+      // every backend shares one contract (the runner guards existence
+      // before calling, so this is a defensive check).
+      const [wf] = await tx
+        .select({ run: workflows.run })
+        .from(workflows)
+        .where(eq(workflows.workflowId, workflowId));
+      if (!wf) throw new Error(`Workflow ${workflowId} not found`);
+
+      // Delete the listed steps + their map tasks — a deleted row reads
+      // back as "never ran" (same shape as InMemoryWorkflowStorage,
+      // which drops the entries from its step map). The DAG executor
+      // re-creates them on the resumed run.
+      await tx
+        .delete(workflowSteps)
+        .where(
+          and(
+            eq(workflowSteps.workflowId, workflowId),
+            eq(workflowSteps.run, wf.run),
+            inArray(workflowSteps.stepName, names),
+          ),
+        );
+      await tx
+        .delete(workflowStepTasks)
+        .where(
+          and(
+            eq(workflowStepTasks.workflowId, workflowId),
+            eq(workflowStepTasks.run, wf.run),
+            inArray(workflowStepTasks.stepName, names),
+          ),
+        );
+      // Clear journal entries so the activities re-fire on replay rather
+      // than returning stale recorded values.
+      await tx
+        .delete(activityJournal)
+        .where(
+          and(eq(activityJournal.workflowId, workflowId), inArray(activityJournal.stepName, names)),
+        );
+      // Flip a terminal workflow back to running so the runner resumes
+      // it; a still-running / suspended workflow is left as-is.
+      await tx
+        .update(workflows)
+        .set({
+          statusId: WorkflowStatusIds.id.running,
+          result: null,
+          error: null,
+          tripwire: null,
+          completedAt: null,
+          updatedAt: this.config.clock.now(),
+        })
+        .where(
+          and(
+            eq(workflows.workflowId, workflowId),
+            inArray(workflows.statusId, [
+              WorkflowStatusIds.id.completed,
+              WorkflowStatusIds.id.failed,
+              WorkflowStatusIds.id.tripwire,
+            ]),
+          ),
+        );
+    });
+  }
+
   async loadRunHistory(
     workflowId: string,
     params?: { limit?: number; offset?: number },

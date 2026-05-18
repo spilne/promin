@@ -354,6 +354,15 @@ export class RemoteWorkflowStorage
     return this.call("loadRunHistory", { workflowId, params });
   }
 
+  /**
+   * Reset the listed steps so a resumed run re-executes them. Forwarded
+   * over the wire; the server feature-detects on the backing storage and
+   * surfaces a clear error if that storage doesn't implement `resetSteps`.
+   */
+  resetSteps(workflowId: string, stepNames: readonly string[]): Promise<void> {
+    return this.call("resetSteps", { workflowId, stepNames });
+  }
+
   purgeCompleted(
     params: { olderThanMs: number; limit: number } | { from: Date; to: Date; limit: number },
   ): Promise<number> {

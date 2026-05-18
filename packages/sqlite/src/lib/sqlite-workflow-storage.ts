@@ -1413,6 +1413,57 @@ export class SqliteWorkflowStorage
     })();
   }
 
+  async resetSteps(workflowId: string, stepNames: readonly string[]): Promise<void> {
+    if (stepNames.length === 0) return;
+    const names = [...stepNames];
+    this.db.transaction((): void => {
+      // Unknown workflow → throw, matching InMemoryWorkflowStorage so
+      // every backend shares one contract (the runner guards existence
+      // before calling, so this is a defensive check).
+      const row = this.db
+        .query<{ status: string; steps: string }>(
+          `SELECT status, steps FROM ${this._t} WHERE workflow_id = ?`,
+        )
+        .get(workflowId);
+      if (!row) throw new Error(`Workflow ${workflowId} not found`);
+
+      // Drop the listed steps from the JSON step map — a removed entry
+      // reads back as "never ran", same shape as InMemoryWorkflowStorage.
+      // Map-step tasks live nested under the step, so they go with it.
+      const steps = JSON.parse(row.steps) as Record<string, unknown>;
+      for (const name of names) delete steps[name];
+
+      // Clear journal entries so the activities re-fire on replay rather
+      // than returning stale recorded values.
+      const placeholders = names.map(() => "?").join(", ");
+      this.db
+        .query(
+          `DELETE FROM ${this._t}_journal WHERE workflow_id = ? AND step_name IN (${placeholders})`,
+        )
+        .run(workflowId, ...names);
+
+      // Flip a terminal workflow back to running so the runner resumes
+      // it; a still-running / suspended workflow keeps its status.
+      const terminal =
+        row.status === "completed" || row.status === "failed" || row.status === "tripwire";
+      const now = Date.now();
+      if (terminal) {
+        this.db
+          .query(
+            `UPDATE ${this._t}
+             SET steps = ?, status = 'running', result = NULL, error = NULL,
+                 completed_at = NULL, updated_at = ?
+             WHERE workflow_id = ?`,
+          )
+          .run(JSON.stringify(steps), now, workflowId);
+      } else {
+        this.db
+          .query(`UPDATE ${this._t} SET steps = ?, updated_at = ? WHERE workflow_id = ?`)
+          .run(JSON.stringify(steps), now, workflowId);
+      }
+    })();
+  }
+
   async loadRunHistory(
     workflowId: string,
     params?: { limit?: number; offset?: number },

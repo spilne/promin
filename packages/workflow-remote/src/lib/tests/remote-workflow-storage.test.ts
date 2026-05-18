@@ -14,14 +14,17 @@ import { storageTestSuite } from "@promin/workflow/testing";
 import { RemoteWorkflowStorage } from "../remote-workflow-storage.ts";
 import { createWorkflowStorageHandler } from "../storage-http-handler.ts";
 
-storageTestSuite(() => {
-  // Fresh in-memory backend per test — matches how the suite's factory is
-  // re-invoked on every describe-block entry. The handler closes over this
-  // backend, the remote closes over the handler, and nothing leaks across.
-  const backing = new InMemoryWorkflowStorage();
-  const handler = createWorkflowStorageHandler(backing);
-  return new RemoteWorkflowStorage({
-    url: "http://test.local/storage",
-    fetch: handler,
-  });
-});
+storageTestSuite(
+  () => {
+    // Fresh in-memory backend per test — matches how the suite's factory is
+    // re-invoked on every describe-block entry. The handler closes over this
+    // backend, the remote closes over the handler, and nothing leaks across.
+    const backing = new InMemoryWorkflowStorage();
+    const handler = createWorkflowStorageHandler(backing);
+    return new RemoteWorkflowStorage({
+      url: "http://test.local/storage",
+      fetch: handler,
+    });
+  },
+  { hasResetSteps: true },
+);
