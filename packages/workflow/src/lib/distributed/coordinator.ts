@@ -52,6 +52,12 @@ export interface DistributedRunnerConfig {
   workerRegistry?: WorkerRegistry;
   /** How long before a worker is considered dead (ms). Default: 30000. */
   workerTimeoutMs?: number;
+  /**
+   * How long a retired / dead worker row is kept before the sweep loop's
+   * `gc()` reaps it (ms). Keeps gracefully-stopped workers visible to the
+   * dashboard + run forensics for a window. Default: 7 days.
+   */
+  workerRetentionMs?: number;
   /** Leader election — ensures only one instance runs the sweep. Default: SingleLeader (always wins). */
   leaderElection?: LeaderElection;
   /**
@@ -69,6 +75,13 @@ export interface DistributedRunnerConfig {
 /** @deprecated Use DistributedRunnerConfig */
 export type CoordinatorConfig = DistributedRunnerConfig;
 
+/**
+ * Run worker `gc()` every Nth dead-worker sweep rather than every tick —
+ * the retention window is days, so a reap scan every poll buys nothing.
+ * At the default 1s poll this is roughly once a minute.
+ */
+const WORKER_GC_EVERY_N_TICKS = 60;
+
 export class DistributedWorkflowRunner implements WorkflowRunner {
   readonly storage: WorkflowStorage;
   private readonly innerRunner: WorkflowRunner;
@@ -76,6 +89,9 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
   private readonly pollIntervalMs: number;
   private readonly workerRegistry?: WorkerRegistry;
   private readonly workerTimeoutMs: number;
+  private readonly workerRetentionMs: number;
+  /** Dead-worker sweep counter — drives the throttled `gc()` cadence. */
+  private workerSweepCount = 0;
   private readonly leaderElection: LeaderElection;
   private running = false;
   private isLeader = false;
@@ -91,6 +107,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
     this.workerRegistry = config.workerRegistry;
     this.workerTimeoutMs = config.workerTimeoutMs ?? 30_000;
+    this.workerRetentionMs = config.workerRetentionMs ?? 7 * 24 * 60 * 60 * 1000;
     this.leaderElection = config.leaderElection ?? new SingleLeader();
 
     const executor = new StepQueueExecutor({
@@ -312,6 +329,13 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
       const dead = await this.workerRegistry.detectDead(this.workerTimeoutMs);
       for (const worker of dead) {
         await this.stepQueue.requeueStuck({ claimedBy: worker.workerId });
+      }
+      // Reap worker rows past the retention window. Throttled — see
+      // WORKER_GC_EVERY_N_TICKS — so retired / dead rows stay visible
+      // for the window, then go.
+      this.workerSweepCount += 1;
+      if (this.workerSweepCount % WORKER_GC_EVERY_N_TICKS === 0) {
+        await this.workerRegistry.gc({ retainMs: this.workerRetentionMs });
       }
     }
     await this.stepQueue.requeueStuck({ staleTimeoutMs: this.workerTimeoutMs });
