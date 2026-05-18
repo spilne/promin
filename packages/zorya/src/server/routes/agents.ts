@@ -535,18 +535,32 @@ export function cloneAgent(deps: AgentGatewayDeps) {
       return jsonError(404, "agent_not_found", `Agent "${sourceId}" is not registered.`);
     }
 
-    // Template handshake: when the source declares requiredSecrets,
-    // verify the cloner provided every named value. Storage of those
-    // values is gated on SecretsStorage (qwy8) — for now we accept and
-    // echo back so callers can build forward-compatible clients.
+    // Resolve the secrets scope upfront — both the handshake below and
+    // the post-register writes need it. Fail fast on a bad shape.
+    // Default scope is 'global' for the simplest case.
+    const secretsScope = parseCloneSecretsScope(body.secretsScope);
+    if ("error" in secretsScope) return jsonError(400, secretsScope.error);
+
+    // Template handshake: every secret the source declares as required
+    // must be satisfied — supplied in this request OR already stored at
+    // the target scope. The latter lets a re-clone reuse the tenant's
+    // existing key without re-entering it (and without overwriting it,
+    // since the persist loop below only writes what the body provided).
     const required = readRequiredSecrets(source.metadata);
     const provided = body.secrets ?? {};
-    const missing = required.filter((name) => !(name in provided));
+    const missing: string[] = [];
+    for (const name of required) {
+      if (name in provided) continue;
+      const stored = deps.secrets
+        ? await deps.secrets.get({ scope: secretsScope, key: name })
+        : null;
+      if (stored === null) missing.push(name);
+    }
     if (missing.length > 0) {
       return jsonError(
         400,
         "missing_required_secrets",
-        `Required secrets not provided: ${missing.join(", ")}`,
+        `Required secrets not provided and not already stored: ${missing.join(", ")}`,
       );
     }
 
@@ -562,13 +576,6 @@ export function cloneAgent(deps: AgentGatewayDeps) {
       capabilities: [...source.metadata.capabilities],
       tags: [...source.metadata.tags],
     };
-
-    // Resolve the secrets scope upfront so we can fail fast on bad
-    // shape — actual writes happen after the recipe is registered so
-    // a half-success doesn't leave secrets without a recipe pointing
-    // at them. Default scope is 'global' for the simplest case.
-    const secretsScope = parseCloneSecretsScope(body.secretsScope);
-    if ("error" in secretsScope) return jsonError(400, secretsScope.error);
 
     try {
       const clone = await deps.registry.register({

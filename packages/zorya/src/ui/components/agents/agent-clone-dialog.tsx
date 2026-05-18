@@ -3,13 +3,18 @@
 //
 // Wraps POST /api/agents/:id/clone: the clone copies the source's backend
 // verbatim, so the new recipe starts identical and the operator then
-// customizes it in the edit drawer. When the source is a template with
-// `requiredSecrets`, the dialog collects those BYOK values up front (the
-// clone endpoint rejects the request otherwise).
+// customizes it in the edit drawer.
+//
+// When the source is a template with `requiredSecrets`, the dialog
+// reconciles against what's already stored at the chosen scope — a
+// secret the tenant already has shows as "reuse" (no re-entry, no
+// overwrite), with an explicit Replace opt-in. Only genuinely-missing
+// secrets demand a value.
 // ---------------------------------------------------------------------------
 
 import { useEffect, useState } from "preact/hooks";
-import { api } from "../../api/client.ts";
+import { api, secretsApi, type SecretScopeWire } from "../../api/client.ts";
+import { useFetch } from "../../hooks/use-fetch.ts";
 import type { RegisteredAgent } from "../../../server/routes/agents.ts";
 
 interface Props {
@@ -34,6 +39,9 @@ export function AgentCloneDialog({ source, namespaceId, onClose, onCloned }: Pro
   const [targetId, setTargetId] = useState("");
   const [targetVersion, setTargetVersion] = useState("");
   const [secrets, setSecrets] = useState<Record<string, string>>({});
+  // Required secrets the user explicitly chose to overwrite rather than
+  // reuse. Only relevant for secrets already stored at the scope.
+  const [replacing, setReplacing] = useState<Record<string, boolean>>({});
   // Where supplied secrets land. Default to the tenant's namespace when
   // one is known — global would leak a SaaS tenant's key fleet-wide.
   const [scopeKind, setScopeKind] = useState<"namespace" | "global">(
@@ -41,6 +49,20 @@ export function AgentCloneDialog({ source, namespaceId, onClose, onCloned }: Pro
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const scope: SecretScopeWire =
+    scopeKind === "namespace" && namespaceId
+      ? { kind: "namespace", namespaceId }
+      : { kind: "global" };
+
+  // Key NAMES already stored at the chosen scope. A missing /api/secrets
+  // route (no vault wired) just degrades to "type every secret".
+  const { data: secretsList, loading: secretsLoading } = useFetch(
+    () => secretsApi.list(scope),
+    [scopeKind],
+    0,
+  );
+  const existingKeys = new Set(secretsList?.keys ?? []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -50,27 +72,33 @@ export function AgentCloneDialog({ source, namespaceId, onClose, onCloned }: Pro
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, busy]);
 
+  /** True when this required secret still needs a typed value. */
+  const needsInput = (name: string): boolean => !existingKeys.has(name) || replacing[name] === true;
+
   const idValid = ID_RE.test(targetId);
-  const secretsComplete = requiredSecrets.every((name) => (secrets[name] ?? "").length > 0);
-  const canSubmit = idValid && secretsComplete && !busy;
+  const secretsComplete = requiredSecrets.every(
+    (name) => !needsInput(name) || (secrets[name] ?? "").length > 0,
+  );
+  // While the existing-keys list is still loading we can't tell reuse
+  // from missing — hold submit until it settles.
+  const canSubmit =
+    idValid && secretsComplete && !busy && (requiredSecrets.length === 0 || !secretsLoading);
 
   async function submit(): Promise<void> {
     if (!canSubmit) return;
     setBusy(true);
     setError(null);
     try {
+      // Send only the secrets actually being set — reused ones are
+      // omitted so the server neither demands nor overwrites them.
+      const secretsToSend: Record<string, string> = {};
+      for (const name of requiredSecrets) {
+        if (needsInput(name)) secretsToSend[name] = secrets[name] ?? "";
+      }
       const res = await api.cloneAgent(source.id, {
         targetId,
         ...(targetVersion.trim() ? { targetVersion: targetVersion.trim() } : {}),
-        ...(requiredSecrets.length > 0
-          ? {
-              secrets,
-              secretsScope:
-                scopeKind === "namespace" && namespaceId
-                  ? { kind: "namespace", namespaceId }
-                  : { kind: "global" },
-            }
-          : {}),
+        ...(requiredSecrets.length > 0 ? { secrets: secretsToSend, secretsScope: scope } : {}),
       });
       onCloned(res.recipe.id);
     } catch (err) {
@@ -148,19 +176,58 @@ export function AgentCloneDialog({ source, namespaceId, onClose, onCloned }: Pro
                 </div>
               )}
             </label>
-            {requiredSecrets.map((name) => (
-              <label class="block space-y-1" key={name}>
-                <span class="text-xs font-mono text-base-content/70">{name}</span>
-                <input
-                  type="password"
-                  class="input input-sm input-bordered w-full font-mono"
-                  value={secrets[name] ?? ""}
-                  onInput={(e) =>
-                    setSecrets((s) => ({ ...s, [name]: (e.target as HTMLInputElement).value }))
-                  }
-                />
-              </label>
-            ))}
+            {requiredSecrets.map((name) => {
+              const alreadySet = existingKeys.has(name);
+              if (secretsLoading) {
+                return (
+                  <div class="text-xs font-mono text-base-content/50" key={name}>
+                    {name} — checking…
+                  </div>
+                );
+              }
+              if (alreadySet && !replacing[name]) {
+                return (
+                  <div class="flex items-center gap-2 text-xs" key={name}>
+                    <span class="font-mono text-base-content/70">{name}</span>
+                    <span class="badge badge-xs badge-success">already set — reuse</span>
+                    <button
+                      type="button"
+                      class="text-[10px] text-base-content/50 hover:text-base-content underline"
+                      onClick={() => setReplacing((r) => ({ ...r, [name]: true }))}
+                    >
+                      Replace
+                    </button>
+                  </div>
+                );
+              }
+              return (
+                <label class="block space-y-1" key={name}>
+                  <span class="flex items-center gap-2 text-xs font-mono text-base-content/70">
+                    {name}
+                    {alreadySet && (
+                      <button
+                        type="button"
+                        class="text-[10px] text-base-content/50 hover:text-base-content underline"
+                        onClick={() => {
+                          setReplacing((r) => ({ ...r, [name]: false }));
+                          setSecrets((s) => ({ ...s, [name]: "" }));
+                        }}
+                      >
+                        keep existing
+                      </button>
+                    )}
+                  </span>
+                  <input
+                    type="password"
+                    class="input input-sm input-bordered w-full font-mono"
+                    value={secrets[name] ?? ""}
+                    onInput={(e) =>
+                      setSecrets((s) => ({ ...s, [name]: (e.target as HTMLInputElement).value }))
+                    }
+                  />
+                </label>
+              );
+            })}
           </div>
         )}
 

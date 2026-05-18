@@ -793,6 +793,90 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
       expect(stored).toBe("sk-ant-tenant-key");
     });
 
+    it("reuses an already-stored required secret — no re-entry, no overwrite", async () => {
+      const { server, registry, secrets } = await bootGateway({ withSecrets: true });
+      await registry.register({
+        id: "anthropic-template",
+        backend: {
+          type: "local",
+          model: {
+            provider: "anthropic",
+            id: "claude-sonnet-4-6",
+            credentialRef: "anthropic_api_key",
+          },
+          systemPrompt: "Cloneable",
+          tools: [],
+        },
+        metadata: {
+          description: null,
+          capabilities: [],
+          tags: ["template"],
+          template: true,
+          requiredSecrets: ["anthropic_api_key"],
+        },
+      });
+      // The tenant already holds the key at namespace scope (e.g. a prior clone).
+      await secrets!.set({
+        scope: SecretScope.namespace("acme"),
+        key: "anthropic_api_key",
+        value: "sk-ant-existing",
+      });
+
+      const res = await server.handle(
+        new Request("http://test/api/agents/anthropic-template/clone", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          // No `secrets` body — relies on the already-stored key.
+          body: JSON.stringify({
+            targetId: "my-bot-2",
+            secretsScope: { kind: "namespace", namespaceId: "acme" },
+          }),
+        }),
+      );
+      expect(res.status).toBe(201);
+      // The stored value is untouched — the empty re-clone didn't overwrite it.
+      expect(
+        await secrets!.get({ scope: SecretScope.namespace("acme"), key: "anthropic_api_key" }),
+      ).toBe("sk-ant-existing");
+    });
+
+    it("still rejects when a required secret is neither provided nor stored at the scope", async () => {
+      const { server, registry } = await bootGateway({ withSecrets: true });
+      await registry.register({
+        id: "anthropic-template",
+        backend: {
+          type: "local",
+          model: {
+            provider: "anthropic",
+            id: "claude-sonnet-4-6",
+            credentialRef: "anthropic_api_key",
+          },
+          systemPrompt: "Cloneable",
+          tools: [],
+        },
+        metadata: {
+          description: null,
+          capabilities: [],
+          tags: ["template"],
+          template: true,
+          requiredSecrets: ["anthropic_api_key"],
+        },
+      });
+
+      const res = await server.handle(
+        new Request("http://test/api/agents/anthropic-template/clone", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            targetId: "my-bot-3",
+            secretsScope: { kind: "namespace", namespaceId: "acme" },
+          }),
+        }),
+      );
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe("missing_required_secrets");
+    });
+
     it("clones with template flag stripped (clone is not itself a template)", async () => {
       const { server, registry } = await bootGateway();
       await registry.register({
