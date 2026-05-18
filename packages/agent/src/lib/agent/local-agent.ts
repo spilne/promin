@@ -60,6 +60,9 @@ import {
 } from "@promin/workflow";
 import type { ApprovalDecision } from "../tool.ts";
 import { filterToolsByCapability } from "../tool.ts";
+import { resolveLocalAgent } from "../registry/resolve-local-agent.ts";
+import type { ResolveLocalAgentDeps } from "../registry/resolve-local-agent.ts";
+import type { AgentRegistry } from "../registry/types.ts";
 import type {
   Agent,
   AgentEvent,
@@ -406,6 +409,32 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     // Note: agentLoop is built fresh per-thread so the auto-injected
     // `memory` tool can bind the right `threadId`. One-shot paths build
     // agentAction inline.
+  }
+
+  /**
+   * Materialize a `LocalAgent` straight from an `AgentRegistry` — fetch
+   * the recipe by id, then resolve it against `deps`. Collapses the
+   * `registry.get(id)` + `resolveLocalAgent(recipe, deps)` two-step that
+   * operators otherwise have to remember into a single call.
+   *
+   * Throws if no agent is registered under `id` (or `id` + `version`).
+   *
+   * @example
+   * const agent = await LocalAgent.fromRegistry(registry, "support-bot", deps);
+   * await agent.withScope({ namespaceId, resourceId }).invoke({ task });
+   */
+  static async fromRegistry(
+    registry: AgentRegistry,
+    id: string,
+    deps: ResolveLocalAgentDeps,
+    opts?: { version?: string },
+  ): Promise<LocalAgent> {
+    const recipe = await registry.get(id, opts?.version);
+    if (!recipe) {
+      const v = opts?.version ? ` version "${opts.version}"` : "";
+      throw new Error(`LocalAgent.fromRegistry: no agent "${id}"${v} in the registry.`);
+    }
+    return resolveLocalAgent(recipe, deps);
   }
 
   // --- One-shot ---------------------------------------------------------

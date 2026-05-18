@@ -11,6 +11,8 @@
 import { describe, it, expect } from "bun:test";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { resolveLocalAgent } from "../resolve-local-agent.ts";
+import { InMemoryAgentRegistry } from "../in-memory-agent-registry.ts";
+import { LocalAgent } from "../../agent/local-agent.ts";
 import type { LLMProvider, LLMResponse } from "../../llm-provider.ts";
 import type { RegisteredAgent } from "../types.ts";
 import { createElevatedTool, tool } from "../../tool.ts";
@@ -313,5 +315,81 @@ describe("resolveLocalAgent — elevated-tool capability gate", () => {
   it("never gates a bare (non-elevated) tool", async () => {
     const observed = await offeredTools(recipeWith([], ["search"]), { search: searchTool });
     expect(observed).toEqual(["search"]);
+  });
+});
+
+// --- LocalAgent.fromRegistry ----------------------------------------------
+
+describe("LocalAgent.fromRegistry", () => {
+  const okDeps = () => ({
+    runner: makeRunner(),
+    llm: () => mockLLM([{ content: "ok", finishReason: "stop" }]),
+    tools: { search: searchTool },
+    namespaceId: "acme",
+  });
+
+  it("fetches the recipe by id and returns a working agent", async () => {
+    const registry = new InMemoryAgentRegistry();
+    const row = baseRow();
+    await registry.register({ id: row.id, backend: row.backend, metadata: row.metadata });
+
+    const agent = await LocalAgent.fromRegistry(registry, row.id, okDeps());
+    const out = await agent.invoke({ task: "hi" });
+    expect(await out.text).toBe("ok");
+  });
+
+  it("throws a clear error when the id is unknown", async () => {
+    const registry = new InMemoryAgentRegistry();
+    await expect(LocalAgent.fromRegistry(registry, "ghost", okDeps())).rejects.toThrow(
+      /no agent "ghost"/,
+    );
+  });
+
+  it("resolves the requested version", async () => {
+    const registry = new InMemoryAgentRegistry();
+    const row = baseRow();
+    await registry.register({
+      id: row.id,
+      version: "v1",
+      backend: { ...row.backend, systemPrompt: "ALPHA" },
+      metadata: row.metadata,
+    });
+    await registry.register({
+      id: row.id,
+      version: "v2",
+      backend: { ...row.backend, systemPrompt: "BETA" },
+      metadata: row.metadata,
+    });
+
+    // Capture the system prompt the resolved agent sends to the LLM.
+    let seenSystem: string | undefined;
+    const capturingLlm: LLMProvider = {
+      chat: async (params) => {
+        seenSystem = params.messages.find((m) => m.role === "system")?.content;
+        return { content: "ok", finishReason: "stop" };
+      },
+    };
+    const agent = await LocalAgent.fromRegistry(
+      registry,
+      row.id,
+      {
+        runner: makeRunner(),
+        llm: () => capturingLlm,
+        tools: { search: searchTool },
+        namespaceId: "acme",
+      },
+      { version: "v1" },
+    );
+    await agent.invoke({ task: "hi" });
+    expect(seenSystem).toBe("ALPHA");
+  });
+
+  it("surfaces a clear error for an unknown version", async () => {
+    const registry = new InMemoryAgentRegistry();
+    const row = baseRow();
+    await registry.register({ id: row.id, backend: row.backend, metadata: row.metadata });
+    await expect(
+      LocalAgent.fromRegistry(registry, row.id, okDeps(), { version: "v99" }),
+    ).rejects.toThrow(/version "v99"/);
   });
 });
