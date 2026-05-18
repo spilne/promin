@@ -14,6 +14,7 @@ import { AgentConfigDrawer } from "./agent-config-drawer.tsx";
 import { AgentEditDrawer } from "./agent-edit-drawer.tsx";
 import { AgentVersionsModal } from "./agent-versions-modal.tsx";
 import { AgentCloneDialog } from "./agent-clone-dialog.tsx";
+import { AgentSecretsPanel } from "./agent-secrets-panel.tsx";
 import { AgentTraceModal } from "./agent-trace-modal.tsx";
 import { exportRecipeAsTs } from "../../lib/export-recipe-ts.ts";
 
@@ -66,6 +67,7 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [traceOpen, setTraceOpen] = useState(false);
   const [cloneOpen, setCloneOpen] = useState(false);
+  const [secretsOpen, setSecretsOpen] = useState(false);
 
   // Persist resource id + active thread (namespace already persists in
   // the global useNamespace store).
@@ -150,6 +152,16 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
                 title="Fork this recipe into a new agent you can customize"
               >
                 Clone
+              </button>
+            )}
+            {agent && (
+              <button
+                class="btn btn-sm btn-ghost"
+                onClick={() => setSecretsOpen(true)}
+                aria-label="Agent secrets"
+                title="Set / rotate the BYOK key for this agent's model.credentialRef"
+              >
+                Secrets
               </button>
             )}
             {agent && (
@@ -246,6 +258,14 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
             setCloneOpen(false);
             onOpenAgent?.(newId);
           }}
+        />
+      )}
+
+      {secretsOpen && agent && (
+        <AgentSecretsPanel
+          source={agent}
+          namespaceId={tenant.namespaceId}
+          onClose={() => setSecretsOpen(false)}
         />
       )}
 
