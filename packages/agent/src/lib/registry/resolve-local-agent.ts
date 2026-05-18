@@ -153,6 +153,8 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
     memory: deps.memory,
     namespaceId: deps.namespaceId,
     resourceId: deps.resourceId,
+    // Recipe capabilities gate elevated tools — see filterToolsByCapability.
+    capabilities: agent.metadata.capabilities,
     consolidator: deps.consolidator,
     consolidatorLlm: deps.consolidatorLlm,
     autoCompact,

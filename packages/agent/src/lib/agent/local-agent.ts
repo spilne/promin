@@ -59,6 +59,7 @@ import {
   isJournaledSuspendStorage,
 } from "@promin/workflow";
 import type { ApprovalDecision } from "../tool.ts";
+import { filterToolsByCapability } from "../tool.ts";
 import type {
   Agent,
   AgentEvent,
@@ -97,6 +98,14 @@ export interface LocalAgentConfig<TOutput = any> {
   readonly namespaceId?: string;
   /** Default user / persona key. Per-thread override via `ThreadOptions`. */
   readonly resourceId?: string;
+  /**
+   * Agent capabilities, from the recipe's `metadata.capabilities`.
+   * Gates elevated tools: an elevated tool whose `requires` capability
+   * is not listed here is filtered out of the LLM's tool list (see
+   * `filterToolsByCapability`). Default `[]` — no capabilities granted,
+   * so no elevated tools are exposed.
+   */
+  readonly capabilities?: ReadonlyArray<string>;
   /**
    * ID prefix used for one-shot workflow IDs (`<prefix>-<uuid>`). Default
    * is the agent name. Threads use `threadId` directly as workflow ID, so
@@ -570,7 +579,11 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       }
     }
 
-    return tools;
+    // Capability gate — an elevated tool is exposed only when the
+    // recipe's `capabilities` grant its `requires`. Applied last so the
+    // auto-attached memory / network tools are gated too (they aren't
+    // elevated today, so they pass through unchanged).
+    return tools ? filterToolsByCapability(tools, this.config.capabilities ?? []) : tools;
   }
 
   /**

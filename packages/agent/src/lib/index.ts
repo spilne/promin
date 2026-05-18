@@ -362,7 +362,7 @@ export {
   type LoadMcpToolsFromRecipeParams,
 } from "./mcp/load-mcp-tools-from-recipe.ts";
 
-export { tool, createScopedTool, createElevatedTool } from "./tool.ts";
+export { tool, createScopedTool, createElevatedTool, filterToolsByCapability } from "./tool.ts";
 export type {
   AgentTool,
   ApprovalDecision,

@@ -13,7 +13,7 @@ import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow"
 import { resolveLocalAgent } from "../resolve-local-agent.ts";
 import type { LLMProvider, LLMResponse } from "../../llm-provider.ts";
 import type { RegisteredAgent } from "../types.ts";
-import { tool } from "../../tool.ts";
+import { createElevatedTool, tool } from "../../tool.ts";
 import { z } from "zod";
 
 function mockLLM(responses: LLMResponse[]): LLMProvider {
@@ -224,5 +224,94 @@ describe("resolveLocalAgent", () => {
         namespaceId: "acme",
       }),
     ).toThrow(/not supported/);
+  });
+});
+
+// --- elevated-tool capability gate --------------------------------------
+
+const adminTool = createElevatedTool({
+  name: "admin_action",
+  description: "Run a privileged admin action",
+  parameters: z.object({}),
+  requires: "admin",
+  execute: async (_input, ctx) => {
+    ctx.audit({ action: "admin_action" });
+    return "ok";
+  },
+});
+const ungatedElevatedTool = createElevatedTool({
+  name: "elevated_action",
+  description: "An elevated tool that declares no explicit requires",
+  parameters: z.object({}),
+  execute: async (_input, ctx) => {
+    ctx.audit({ action: "elevated_action" });
+    return "ok";
+  },
+});
+
+/** Recipe row with the given capabilities + recipe tool list. */
+function recipeWith(capabilities: string[], toolNames: string[]): RegisteredAgent {
+  const row = baseRow();
+  return {
+    ...row,
+    backend: { ...row.backend, tools: toolNames },
+    metadata: { description: null, capabilities, tags: [] },
+  };
+}
+
+/** Resolve + run one turn, return the tool names the LLM was offered. */
+async function offeredTools(
+  recipe: RegisteredAgent,
+  // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary shapes
+  tools: Record<string, any>,
+): Promise<string[]> {
+  let observed: string[] = [];
+  const llm: LLMProvider = {
+    chat: async (params) => {
+      observed = (params.tools ?? []).map((t) => t.name);
+      return { content: "ok", finishReason: "stop" };
+    },
+  };
+  const agent = resolveLocalAgent(recipe, {
+    runner: makeRunner(),
+    llm: () => llm,
+    tools,
+    namespaceId: "acme",
+  });
+  await agent.invoke({ task: "hi" });
+  return observed;
+}
+
+describe("resolveLocalAgent — elevated-tool capability gate", () => {
+  it("hides a requires-gated elevated tool when the recipe lacks the capability", async () => {
+    const observed = await offeredTools(recipeWith([], ["search", "admin_action"]), {
+      search: searchTool,
+      admin_action: adminTool,
+    });
+    expect(observed).toContain("search");
+    expect(observed).not.toContain("admin_action");
+  });
+
+  it("exposes a requires-gated elevated tool when the capability is granted", async () => {
+    const observed = await offeredTools(recipeWith(["admin"], ["search", "admin_action"]), {
+      search: searchTool,
+      admin_action: adminTool,
+    });
+    expect(observed).toContain("admin_action");
+  });
+
+  it("an elevated tool with no `requires` needs the implicit 'elevated' capability", async () => {
+    const tools = { elevated_action: ungatedElevatedTool };
+    expect(await offeredTools(recipeWith([], ["elevated_action"]), tools)).not.toContain(
+      "elevated_action",
+    );
+    expect(await offeredTools(recipeWith(["elevated"], ["elevated_action"]), tools)).toContain(
+      "elevated_action",
+    );
+  });
+
+  it("never gates a bare (non-elevated) tool", async () => {
+    const observed = await offeredTools(recipeWith([], ["search"]), { search: searchTool });
+    expect(observed).toEqual(["search"]);
   });
 });

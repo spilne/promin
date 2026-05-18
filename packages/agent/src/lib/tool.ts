@@ -346,9 +346,11 @@ export interface ElevatedToolConfig<TInput, TOutput> extends Omit<
 > {
   /**
    * Capability required on the agent template's `metadata.capabilities`
-   * for this tool to be exposed. When omitted, any agent with the
-   * implicit "elevated" capability sees the tool. Filtering is wired
-   * by `buildTools`; currently a no-op (see follow-up).
+   * for this tool to be exposed to the LLM. When omitted, the tool
+   * needs the implicit `"elevated"` capability instead. `buildTools`
+   * enforces this via `filterToolsByCapability` — a tool whose
+   * capability isn't granted is filtered out of the LLM's tool list
+   * (the runtime audit/scope guard is a separate, always-on check).
    */
   readonly requires?: string;
   execute: (input: TInput, ctx: ElevatedToolContext) => Promise<TOutput>;
@@ -642,4 +644,37 @@ export function shouldAutoApprove(
   if (policy === true) return true;
   if (Array.isArray(policy)) return policy.includes(call.name);
   return policy(call, toolDef);
+}
+
+/** Capability an elevated tool needs when it declares no explicit `requires`. */
+export const IMPLICIT_ELEVATED_CAPABILITY = "elevated";
+
+/**
+ * Drop elevated tools the agent lacks the capability for. An elevated
+ * tool is exposed only when the agent's `capabilities` grant the one it
+ * needs: its own `requires` when set, otherwise the implicit
+ * `"elevated"` capability. Fail closed — the default recipe has no
+ * capabilities, so no elevated tool leaks its existence (name +
+ * description) into the LLM's tool list; an agent opts in by listing a
+ * bespoke capability or `"elevated"` for general elevated tooling.
+ *
+ * Scoped and bare (`tool()`) tools always pass — capability gating is an
+ * elevated-tool concern only.
+ */
+export function filterToolsByCapability(
+  // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
+  tools: Record<string, AgentTool<any, any>>,
+  capabilities: ReadonlyArray<string>,
+  // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
+): Record<string, AgentTool<any, any>> {
+  // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
+  const out: Record<string, AgentTool<any, any>> = {};
+  for (const [name, t] of Object.entries(tools)) {
+    if (t.kind === "elevated") {
+      const required = t.requires ?? IMPLICIT_ELEVATED_CAPABILITY;
+      if (!capabilities.includes(required)) continue;
+    }
+    out[name] = t;
+  }
+  return out;
 }
