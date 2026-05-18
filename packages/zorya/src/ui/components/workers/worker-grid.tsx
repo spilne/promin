@@ -1,3 +1,4 @@
+import { useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api } from "../../api/client.ts";
 import type { WorkerDto } from "../../../server/api-types.ts";
@@ -10,8 +11,13 @@ interface WorkerGridProps {
   onOpenRun?: (id: string) => void;
 }
 
+type WorkerFilter = "online" | "all" | "retired";
+
 export function WorkerGrid({ onOpenRun }: WorkerGridProps = {}) {
   const { data, loading, error } = useFetch(() => api.listWorkers(), [], 5000);
+  // Default to the live fleet — retired / offline workers are kept for
+  // forensics but shouldn't clutter the at-a-glance view.
+  const [filter, setFilter] = useState<WorkerFilter>("online");
 
   if (loading && !data) {
     return (
@@ -36,23 +42,54 @@ export function WorkerGrid({ onOpenRun }: WorkerGridProps = {}) {
       </Page>
     );
   }
-  const workers = data?.workers ?? [];
-  const online = workers.filter((w) => w.status === "online").length;
-  const offline = workers.length - online;
+  const allWorkers = data?.workers ?? [];
+  const online = allWorkers.filter((w) => w.status === "online").length;
+  const offline = allWorkers.filter((w) => w.status === "offline").length;
+  const retired = allWorkers.filter((w) => w.status === "retired").length;
+
+  const workers =
+    filter === "all"
+      ? allWorkers
+      : filter === "retired"
+        ? allWorkers.filter((w) => w.status === "retired")
+        : allWorkers.filter((w) => w.status === "online");
+
+  const filters: ReadonlyArray<{ id: WorkerFilter; label: string }> = [
+    { id: "online", label: "Online" },
+    { id: "all", label: "All" },
+    { id: "retired", label: retired > 0 ? `Retired (${retired})` : "Retired" },
+  ];
 
   return (
     <Page>
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-3 flex-wrap">
         <h2 class="text-xl font-semibold">Workers</h2>
-        <span class="text-base-content/60">
-          · {online} online
+        <span class="text-base-content/60 text-sm">
+          {online} online
           {offline > 0 && `, ${offline} offline`}
+          {retired > 0 && `, ${retired} retired`}
         </span>
+        <div class="flex-1" />
+        <div class="join">
+          {filters.map((f) => (
+            <button
+              type="button"
+              class={`btn btn-xs join-item ${filter === f.id ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setFilter(f.id)}
+            >
+              {f.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {workers.length === 0 && (
         <Card bodyClassName="py-8 text-center text-base-content/50" padding="none">
-          No workers registered
+          {filter === "online"
+            ? "No online workers"
+            : filter === "retired"
+              ? "No retired workers"
+              : "No workers registered"}
         </Card>
       )}
 
@@ -73,6 +110,8 @@ function WorkerCard({
   onOpenRun?: (id: string) => void;
 }) {
   const online = worker.status === "online";
+  const retired = worker.status === "retired";
+  const dotClass = online ? "bg-success" : retired ? "bg-base-content/30" : "bg-error";
   const labels = worker.labels ?? {};
   const labelEntries = Object.entries(labels);
 
@@ -84,7 +123,10 @@ function WorkerCard({
             visually distinct from the ID. Hostname moves to a sub-line so
             it stops competing with the ID for attention. */}
       <div class="flex items-center gap-2 flex-wrap">
-        <span class={`w-2.5 h-2.5 rounded-full shrink-0 ${online ? "bg-success" : "bg-error"}`} />
+        <span
+          class={`w-2.5 h-2.5 rounded-full shrink-0 ${dotClass}`}
+          title={`Status: ${worker.status}`}
+        />
         <span class="font-mono text-base font-semibold truncate" title={worker.workerId}>
           {worker.workerId}
         </span>
@@ -163,6 +205,12 @@ function WorkerCard({
           <span class="w-24 shrink-0">Last seen</span>
           <span>{formatRelative(worker.lastHeartbeatAt)}</span>
         </div>
+        {worker.retiredAt && (
+          <div class="flex items-start gap-2 text-base-content/50">
+            <span class="w-24 shrink-0">Retired</span>
+            <span>{formatRelative(worker.retiredAt)}</span>
+          </div>
+        )}
       </div>
 
       {/* Active runs */}

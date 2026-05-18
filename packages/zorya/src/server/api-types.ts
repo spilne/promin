@@ -154,13 +154,19 @@ export interface MetricsDto {
 
 export interface WorkerDto {
   workerId: string;
-  status: "online" | "offline";
+  /**
+   * `online` / `offline` are derived from heartbeat freshness; `retired`
+   * is a graceful stop (the registry kept the row for forensics).
+   */
+  status: "online" | "offline" | "retired";
   queue?: string;
   labels?: Record<string, string>;
   activeTasks: number;
   completedToday: number;
   /** ISO timestamp of last heartbeat. */
   lastHeartbeatAt?: string;
+  /** ISO timestamp the worker retired (graceful stop). Set only when `status` is `retired`. */
+  retiredAt?: string;
   // Richer fields populated when the worker protocol is wired. Stay
   // optional so the existing mock WorkersProvider still satisfies the type.
   capabilities?: readonly string[];

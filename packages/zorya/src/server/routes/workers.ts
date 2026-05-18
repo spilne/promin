@@ -50,11 +50,17 @@ export class RegistryBackedWorkersProvider implements WorkersProvider {
   private toDto(info: WorkerInfo, now: number): WorkerDto {
     const meta = (info.metadata ?? {}) as Record<string, unknown>;
     const lastHb = info.lastHeartbeat.getTime();
+    // A retired worker is its own state — never collapse it into
+    // `offline`, which it would otherwise share with crashed / stale
+    // workers.
     const online = info.status === "active" && now - lastHb < this.offlineAfterMs;
+    const status: WorkerDto["status"] =
+      info.status === "retired" ? "retired" : online ? "online" : "offline";
 
     return {
       workerId: info.workerId,
-      status: online ? "online" : "offline",
+      status,
+      ...(info.retiredAt ? { retiredAt: info.retiredAt.toISOString() } : {}),
       lastHeartbeatAt: info.lastHeartbeat.toISOString(),
       capabilities: info.capabilities,
       concurrency: info.concurrency,
