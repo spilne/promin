@@ -15,6 +15,8 @@ import { useEffect, useMemo, useState } from "preact/hooks";
 import { api, type ModelCatalogEntryDto, type ToolCatalogEntryDto } from "../../api/client.ts";
 import type { RegisteredAgent } from "../../../server/routes/agents.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
+import { DraftTestModal } from "./agent-draft-test-modal.tsx";
+import type { Tenant } from "./agent-detail.tsx";
 import {
   buildAutoCompact,
   buildAutoDistill,
@@ -31,6 +33,11 @@ import {
 
 interface Props {
   agent: RegisteredAgent;
+  /**
+   * Current tenant scope. When set, a "Test draft" button appears —
+   * it chats an uncommitted draft of the current edits in this scope.
+   */
+  tenant?: Tenant;
   onClose: () => void;
   onSaved: (updated: RegisteredAgent) => void;
   /**
@@ -41,7 +48,7 @@ interface Props {
   onSavedAndTest?: (updated: RegisteredAgent) => void;
 }
 
-export function AgentEditDrawer({ agent, onClose, onSaved, onSavedAndTest }: Props) {
+export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTest }: Props) {
   const isLocal = agent.backend.type === "local";
   const [description, setDescription] = useState(agent.metadata.description ?? "");
   const [systemPrompt, setSystemPrompt] = useState(
@@ -89,6 +96,8 @@ export function AgentEditDrawer({ agent, onClose, onSaved, onSavedAndTest }: Pro
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
   const [publishVersion, setPublishVersion] = useState(() => bumpVersion(agent.version));
+  // Id of the draft recipe currently being chat-tested, if any.
+  const [draftTestId, setDraftTestId] = useState<string | null>(null);
 
   const { data: modelsData } = useFetch(() => api.listCatalogModels(), [], 0);
   const models = useMemo(() => modelsData?.models ?? [], [modelsData]);
@@ -190,6 +199,29 @@ export function AgentEditDrawer({ agent, onClose, onSaved, onSavedAndTest }: Pro
     if (!updated || !onSavedAndTest) return;
     onSavedAndTest(updated);
     onClose();
+  };
+
+  // Register an uncommitted draft of the current edits and open the
+  // test-chat modal against it. Nothing touches the real recipe.
+  const onTestDraftClick = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const { backend, metadata } = buildPayload();
+      const { recipe } = await api.createDraft({ backend, metadata, sourceId: agent.id });
+      setDraftTestId(recipe.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Closing the test modal discards the draft. A browser closed with the
+  // modal still open is caught by the server's TTL sweep.
+  const closeDraftTest = () => {
+    if (draftTestId) void api.deleteDraft(draftTestId);
+    setDraftTestId(null);
   };
 
   const onPublish = async (newVersion: string) => {
@@ -633,6 +665,17 @@ export function AgentEditDrawer({ agent, onClose, onSaved, onSavedAndTest }: Pro
                 Publish new version…
               </button>
             )}
+            {isLocal && tenant && !publishOpen && (
+              <button
+                type="button"
+                class="btn btn-sm btn-ghost"
+                disabled={saving}
+                onClick={onTestDraftClick}
+                title="Chat these edits in a throwaway draft — nothing is committed"
+              >
+                {saving ? "…" : "Test draft"}
+              </button>
+            )}
             {onSavedAndTest && !publishOpen && (
               <button
                 type="button"
@@ -650,6 +693,15 @@ export function AgentEditDrawer({ agent, onClose, onSaved, onSavedAndTest }: Pro
           </div>
         </form>
       </aside>
+
+      {draftTestId && tenant && (
+        <DraftTestModal
+          draftId={draftTestId}
+          sourceId={agent.id}
+          tenant={tenant}
+          onClose={closeDraftTest}
+        />
+      )}
     </>
   );
 }

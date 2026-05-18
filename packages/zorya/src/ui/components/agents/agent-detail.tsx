@@ -32,7 +32,7 @@ interface AgentDetailProps {
 const RESOURCE_KEY = "zorya_agent_resource";
 const ACTIVE_THREAD_KEY = "zorya_agent_active_thread";
 
-interface Tenant {
+export interface Tenant {
   namespaceId: string;
   resourceId: string;
 }
@@ -273,6 +273,7 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
       {editOpen && agent && (
         <AgentEditDrawer
           agent={agent}
+          tenant={tenant}
           onClose={() => setEditOpen(false)}
           onSaved={() => refreshAgent()}
           onSavedAndTest={() => {
@@ -739,7 +740,7 @@ interface PendingAssistant {
   };
 }
 
-function ChatPane({
+export function ChatPane({
   agentId,
   threadId,
   tenant,
