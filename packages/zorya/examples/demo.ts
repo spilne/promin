@@ -56,6 +56,12 @@ import {
   SqliteSecretsStorage,
 } from "@promin/sqlite";
 import {
+  createPostgresDb,
+  migrate as migratePostgres,
+  PostgresAgentRegistry,
+  PostgresMemoryStore,
+} from "@promin/postgres";
+import {
   anthropic,
   ollama,
   applyDiscoveredAgents,
@@ -75,6 +81,8 @@ import {
   type LLMResponse,
   type LLMStreamChunk,
   type Agent,
+  type AgentRegistry,
+  type MemoryStore,
   type ModelCatalogItem,
   type RegisteredAgent,
 } from "@promin/agent";
@@ -102,6 +110,12 @@ import { mkdirSync } from "node:fs";
 // loop, which restarts the subprocess on .ts changes). Override with:
 //   ZORYA_DB=:memory:        bun run zorya     # fresh on every boot
 //   ZORYA_DB=./somewhere.db  bun run zorya     # custom path
+//
+// Set ZORYA_PG_URL to a Postgres connection string to run the agent
+// registry + memory store on Postgres instead — boots the demo against
+// a shared store so the multi-replica agent path can be exercised
+// locally. Workflow storage / scheduler stay on the SQLite db above.
+//   ZORYA_PG_URL=postgres://localhost/zorya  bun run zorya
 
 const dbPath = process.env.ZORYA_DB ?? "./target/zorya.db";
 if (dbPath !== ":memory:") {
@@ -121,12 +135,24 @@ const storage = SqliteWorkflowStorage.make({ db });
 const schedulerStorage = SqliteSchedulerStorage.make({ db });
 const runner = createWorkflowRunner({ storage });
 
-// Agent registry + memory store share the same db. Persists registered
-// recipes, threads, messages, and per-scope memory across restarts so
-// chats in the dashboard's Agents tab survive hot-reloads of the demo.
-const agentRegistry = SqliteAgentRegistry.make({ db });
+// Agent registry + memory store — SQLite (shares the db above) by
+// default, or Postgres when ZORYA_PG_URL is set. Postgres mode boots
+// the demo against a shared store so the multi-replica agent path can
+// be exercised locally; `migrate()` brings the PG schema up first.
+const pgUrl = process.env.ZORYA_PG_URL;
+let agentRegistry: AgentRegistry;
+let memoryStore: MemoryStore;
+if (pgUrl) {
+  const pgDb = createPostgresDb(pgUrl);
+  await migratePostgres(pgDb);
+  agentRegistry = new PostgresAgentRegistry({ db: pgDb });
+  memoryStore = new PostgresMemoryStore({ db: pgDb });
+  console.log("[zorya] agent registry + memory store → Postgres (ZORYA_PG_URL)");
+} else {
+  agentRegistry = SqliteAgentRegistry.make({ db });
+  memoryStore = SqliteMemoryStore.make({ db });
+}
 const dagRegistry = SqliteDagRegistry.make({ db });
-const memoryStore = SqliteMemoryStore.make({ db });
 // Long-lived agent instances. Persisted alongside the registry so they
 // survive restarts; the cascade still keys memory by `resourceId =
 // instance.id`, so one instance = one per-(agent, owner) memory slot.

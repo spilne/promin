@@ -14,22 +14,25 @@
   "exclude": ["src/**/*.test.ts", "src/**/*.bench.ts", "src/ui/**/*"],
   "references": [
     {
-      "path": "../agent/tsconfig.lib.json"
+      "path": "../workflow-remote/tsconfig.lib.json"
     },
     {
-      "path": "../workflow-remote/tsconfig.lib.json"
+      "path": "../core/tsconfig.lib.json"
     },
     {
       "path": "../zorya-client/tsconfig.lib.json"
     },
     {
-      "path": "../core/tsconfig.lib.json"
+      "path": "../postgres/tsconfig.lib.json"
     },
     {
       "path": "../sqlite/tsconfig.lib.json"
     },
     {
       "path": "../workflow/tsconfig.lib.json"
+    },
+    {
+      "path": "../agent/tsconfig.lib.json"
     }
   ]
 }

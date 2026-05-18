@@ -8,22 +8,25 @@
   "include": [],
   "references": [
     {
-      "path": "../agent"
+      "path": "../workflow-remote"
     },
     {
-      "path": "../workflow-remote"
+      "path": "../core"
     },
     {
       "path": "../zorya-client"
     },
     {
-      "path": "../core"
+      "path": "../postgres"
     },
     {
       "path": "../sqlite"
     },
     {
       "path": "../workflow"
+    },
+    {
+      "path": "../agent"
     },
     {
       "path": "./tsconfig.lib.json"

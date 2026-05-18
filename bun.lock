@@ -254,6 +254,7 @@
         "marked": "^18.0.2",
       },
       "devDependencies": {
+        "@promin/postgres": "workspace:*",
         "@promin/sqlite": "workspace:*",
         "@promin/zorya-client": "workspace:*",
         "@types/bun": "catalog:",
