@@ -15,6 +15,19 @@ import { useEffect, useMemo, useState } from "preact/hooks";
 import { api, type ModelCatalogEntryDto, type ToolCatalogEntryDto } from "../../api/client.ts";
 import type { RegisteredAgent } from "../../../server/routes/agents.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
+import {
+  buildAutoCompact,
+  buildAutoDistill,
+  buildContextBudget,
+  initAutoCompact,
+  initAutoDistill,
+  initContextBudget,
+  type AutoCompactForm,
+  type AutoDistillForm,
+  type CompactionMode,
+  type ContextBudgetForm,
+  type RunMode,
+} from "../../lib/recipe-memory-form.ts";
 
 interface Props {
   agent: RegisteredAgent;
@@ -53,6 +66,18 @@ export function AgentEditDrawer({ agent, onClose, onSaved, onSavedAndTest }: Pro
   const [maxTurns, setMaxTurns] = useState<string>(
     isLocal && agent.backend.maxTurns !== undefined ? String(agent.backend.maxTurns) : "",
   );
+
+  // Memory & compaction (local backends only).
+  const [autoCompact, setAutoCompact] = useState<AutoCompactForm>(() =>
+    initAutoCompact(isLocal ? agent.backend.autoCompact : undefined),
+  );
+  const [autoDistill, setAutoDistill] = useState<AutoDistillForm>(() =>
+    initAutoDistill(isLocal ? agent.backend.autoDistill : undefined),
+  );
+  const [contextBudget, setContextBudget] = useState<ContextBudgetForm>(() =>
+    initContextBudget(isLocal ? agent.backend.contextBudget : undefined),
+  );
+  const [showMemory, setShowMemory] = useState(false);
 
   // Tool selection (local backends only).
   const [selectedTools, setSelectedTools] = useState<ReadonlySet<string>>(
@@ -102,7 +127,19 @@ export function AgentEditDrawer({ agent, onClose, onSaved, onSavedAndTest }: Pro
     const trimmedCred = credentialRef.trim();
     const steps = parseLimit(maxStepsPerTurn);
     const turns = parseLimit(maxTurns);
-    const { maxStepsPerTurn: _stripSteps, maxTurns: _stripTurns, ...backendBase } = agent.backend;
+    // `undefined` → omit the field (inherit host default); `false` →
+    // explicitly disabled; object → recipe-level config.
+    const autoCompactValue = buildAutoCompact(autoCompact);
+    const autoDistillValue = buildAutoDistill(autoDistill);
+    const contextBudgetValue = buildContextBudget(contextBudget);
+    const {
+      maxStepsPerTurn: _stripSteps,
+      maxTurns: _stripTurns,
+      autoCompact: _stripAutoCompact,
+      autoDistill: _stripAutoDistill,
+      contextBudget: _stripContextBudget,
+      ...backendBase
+    } = agent.backend;
     const backend = {
       ...backendBase,
       systemPrompt: systemPrompt.trim() || null,
@@ -114,6 +151,9 @@ export function AgentEditDrawer({ agent, onClose, onSaved, onSavedAndTest }: Pro
       tools: Array.from(selectedTools).sort(),
       ...(steps !== undefined ? { maxStepsPerTurn: steps } : {}),
       ...(turns !== undefined ? { maxTurns: turns } : {}),
+      ...(autoCompactValue !== undefined ? { autoCompact: autoCompactValue } : {}),
+      ...(autoDistillValue !== undefined ? { autoDistill: autoDistillValue } : {}),
+      ...(contextBudgetValue !== undefined ? { contextBudget: contextBudgetValue } : {}),
     } as typeof agent.backend;
     return { backend, metadata };
   };
@@ -378,6 +418,164 @@ export function AgentEditDrawer({ agent, onClose, onSaved, onSavedAndTest }: Pro
             </div>
           )}
 
+          {isLocal && (
+            <div class="form-control">
+              <button
+                type="button"
+                class="text-xs text-base-content/60 uppercase tracking-wider flex items-center gap-1 hover:text-base-content"
+                onClick={() => setShowMemory((v) => !v)}
+              >
+                <span>{showMemory ? "▼" : "▶"}</span>
+                Memory &amp; compaction
+              </button>
+              {showMemory && (
+                <div class="mt-2 space-y-4">
+                  {/* autoCompact — in-thread roll-up */}
+                  <div class="space-y-2">
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="text-[10px] uppercase tracking-wider text-base-content/50">
+                        In-thread compaction
+                      </span>
+                      <select
+                        class="select select-bordered select-xs"
+                        value={autoCompact.mode}
+                        onChange={(e) =>
+                          setAutoCompact((f) => ({
+                            ...f,
+                            mode: (e.target as HTMLSelectElement).value as CompactionMode,
+                          }))
+                        }
+                      >
+                        <option value="inherit">Inherit host default</option>
+                        <option value="off">Off</option>
+                        <option value="on">Custom</option>
+                      </select>
+                    </div>
+                    {autoCompact.mode === "on" && (
+                      <div class="grid grid-cols-2 gap-2 pl-1">
+                        <NumField
+                          label="Message threshold"
+                          value={autoCompact.messageThreshold}
+                          onChange={(v) => setAutoCompact((f) => ({ ...f, messageThreshold: v }))}
+                        />
+                        <NumField
+                          label="Token threshold"
+                          value={autoCompact.tokenThreshold}
+                          onChange={(v) => setAutoCompact((f) => ({ ...f, tokenThreshold: v }))}
+                        />
+                        <NumField
+                          label="Context limit"
+                          value={autoCompact.contextLimit}
+                          onChange={(v) => setAutoCompact((f) => ({ ...f, contextLimit: v }))}
+                        />
+                        <NumField
+                          label="Compress at"
+                          value={autoCompact.compressAt}
+                          onChange={(v) => setAutoCompact((f) => ({ ...f, compressAt: v }))}
+                        />
+                        <NumField
+                          label="Keep recent"
+                          value={autoCompact.keepRecent}
+                          onChange={(v) => setAutoCompact((f) => ({ ...f, keepRecent: v }))}
+                        />
+                        <RunModeField
+                          value={autoCompact.runMode}
+                          onChange={(v) => setAutoCompact((f) => ({ ...f, runMode: v }))}
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  {/* autoDistill — cross-thread roll-up */}
+                  <div class="space-y-2">
+                    <div class="flex items-center justify-between gap-2">
+                      <span class="text-[10px] uppercase tracking-wider text-base-content/50">
+                        Cross-thread distillation
+                      </span>
+                      <select
+                        class="select select-bordered select-xs"
+                        value={autoDistill.mode}
+                        onChange={(e) =>
+                          setAutoDistill((f) => ({
+                            ...f,
+                            mode: (e.target as HTMLSelectElement).value as CompactionMode,
+                          }))
+                        }
+                      >
+                        <option value="inherit">Inherit host default</option>
+                        <option value="off">Off</option>
+                        <option value="on">Custom</option>
+                      </select>
+                    </div>
+                    {autoDistill.mode === "on" && (
+                      <div class="space-y-2 pl-1">
+                        <div class="grid grid-cols-2 gap-2">
+                          <NumField
+                            label="Message threshold"
+                            value={autoDistill.messageThreshold}
+                            onChange={(v) => setAutoDistill((f) => ({ ...f, messageThreshold: v }))}
+                          />
+                          <NumField
+                            label="Token threshold"
+                            value={autoDistill.tokenThreshold}
+                            onChange={(v) => setAutoDistill((f) => ({ ...f, tokenThreshold: v }))}
+                          />
+                          <NumField
+                            label="Interval (ms)"
+                            value={autoDistill.intervalMs}
+                            onChange={(v) => setAutoDistill((f) => ({ ...f, intervalMs: v }))}
+                          />
+                          <RunModeField
+                            value={autoDistill.runMode}
+                            onChange={(v) => setAutoDistill((f) => ({ ...f, runMode: v }))}
+                          />
+                        </div>
+                        <label class="cursor-pointer label justify-start gap-2 px-0 py-0">
+                          <input
+                            type="checkbox"
+                            class="checkbox checkbox-xs"
+                            checked={autoDistill.force}
+                            onChange={(e) =>
+                              setAutoDistill((f) => ({
+                                ...f,
+                                force: (e.target as HTMLInputElement).checked,
+                              }))
+                            }
+                          />
+                          <span class="text-[10px] text-base-content/60">
+                            Force — re-distill even when a prior summary exists
+                          </span>
+                        </label>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* contextBudget — per-turn prompt assembly */}
+                  <div class="space-y-2">
+                    <span class="text-[10px] uppercase tracking-wider text-base-content/50">
+                      Context budget
+                    </span>
+                    <div class="grid grid-cols-2 gap-2 pl-1">
+                      <NumField
+                        label="Max message tokens"
+                        value={contextBudget.maxMessageTokens}
+                        onChange={(v) => setContextBudget((f) => ({ ...f, maxMessageTokens: v }))}
+                      />
+                      <NumField
+                        label="Max episode tokens"
+                        value={contextBudget.maxEpisodeTokens}
+                        onChange={(v) => setContextBudget((f) => ({ ...f, maxEpisodeTokens: v }))}
+                      />
+                    </div>
+                    <span class="text-[10px] text-base-content/40">
+                      Leave Max message tokens blank to inherit the host default.
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {error && <div class="alert alert-error text-xs">{error}</div>}
 
           {publishOpen && (
@@ -470,6 +668,48 @@ function parseList(raw: string): string[] {
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
+}
+
+/** Compact labelled number input — blank means "unset / inherit". */
+function NumField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <label class="form-control">
+      <span class="text-[10px] text-base-content/50 mb-1">{label}</span>
+      <input
+        class="input input-bordered input-xs font-mono"
+        type="number"
+        min="1"
+        placeholder="(unset)"
+        value={value}
+        onInput={(e) => onChange((e.target as HTMLInputElement).value)}
+      />
+    </label>
+  );
+}
+
+/** background / blocking selector for autoCompact / autoDistill. */
+function RunModeField({ value, onChange }: { value: RunMode; onChange: (v: RunMode) => void }) {
+  return (
+    <label class="form-control">
+      <span class="text-[10px] text-base-content/50 mb-1">Run mode</span>
+      <select
+        class="select select-bordered select-xs"
+        value={value}
+        onChange={(e) => onChange((e.target as HTMLSelectElement).value as RunMode)}
+      >
+        <option value="background">background</option>
+        <option value="blocking">blocking</option>
+      </select>
+    </label>
+  );
 }
 
 interface ToolPickerProps {
