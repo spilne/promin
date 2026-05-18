@@ -323,7 +323,9 @@ export const api = {
       targetId: string;
       targetVersion?: string;
       secrets?: Record<string, string>;
-      secretsScope?: { kind: "global" } | { kind: "namespace"; namespaceId: string };
+      /** Where supplied secrets are stored. Full scope union — the
+       *  server accepts global / namespace / resource. */
+      secretsScope?: SecretScopeWire;
     },
   ): Promise<{ recipe: RegisteredAgent; acceptedSecrets: string[] }> {
     return req<{ recipe: RegisteredAgent; acceptedSecrets: string[] }>(

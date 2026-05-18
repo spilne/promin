@@ -240,6 +240,7 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
       {cloneOpen && agent && (
         <AgentCloneDialog
           source={agent}
+          namespaceId={tenant.namespaceId}
           onClose={() => setCloneOpen(false)}
           onCloned={(newId) => {
             setCloneOpen(false);

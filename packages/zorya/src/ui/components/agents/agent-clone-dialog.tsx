@@ -15,6 +15,12 @@ import type { RegisteredAgent } from "../../../server/routes/agents.ts";
 interface Props {
   /** The recipe being forked. */
   source: RegisteredAgent;
+  /**
+   * Current tenant namespace. When set, supplied BYOK secrets default to
+   * this namespace's scope so a SaaS tenant's key stays isolated rather
+   * than landing in the shared global scope.
+   */
+  namespaceId?: string;
   onClose: () => void;
   /** Called with the new recipe id once the clone succeeds. */
   onCloned: (newId: string) => void;
@@ -23,11 +29,16 @@ interface Props {
 /** Agent ids: letters / digits / `-` / `_`, not starting with `_` (reserved). */
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
-export function AgentCloneDialog({ source, onClose, onCloned }: Props) {
+export function AgentCloneDialog({ source, namespaceId, onClose, onCloned }: Props) {
   const requiredSecrets = source.metadata.requiredSecrets ?? [];
   const [targetId, setTargetId] = useState("");
   const [targetVersion, setTargetVersion] = useState("");
   const [secrets, setSecrets] = useState<Record<string, string>>({});
+  // Where supplied secrets land. Default to the tenant's namespace when
+  // one is known — global would leak a SaaS tenant's key fleet-wide.
+  const [scopeKind, setScopeKind] = useState<"namespace" | "global">(
+    namespaceId ? "namespace" : "global",
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -51,7 +62,15 @@ export function AgentCloneDialog({ source, onClose, onCloned }: Props) {
       const res = await api.cloneAgent(source.id, {
         targetId,
         ...(targetVersion.trim() ? { targetVersion: targetVersion.trim() } : {}),
-        ...(requiredSecrets.length > 0 ? { secrets } : {}),
+        ...(requiredSecrets.length > 0
+          ? {
+              secrets,
+              secretsScope:
+                scopeKind === "namespace" && namespaceId
+                  ? { kind: "namespace", namespaceId }
+                  : { kind: "global" },
+            }
+          : {}),
       });
       onCloned(res.recipe.id);
     } catch (err) {
@@ -108,6 +127,27 @@ export function AgentCloneDialog({ source, onClose, onCloned }: Props) {
             <div class="text-xs text-base-content/60">
               This template needs secrets — supply your own (BYOK):
             </div>
+            <label class="block space-y-1">
+              <span class="text-xs text-base-content/60">Store secrets at</span>
+              {namespaceId ? (
+                <select
+                  class="select select-sm select-bordered w-full"
+                  value={scopeKind}
+                  onChange={(e) =>
+                    setScopeKind((e.target as HTMLSelectElement).value as "namespace" | "global")
+                  }
+                >
+                  <option value="namespace">
+                    This namespace ({namespaceId}) — isolated to your tenant
+                  </option>
+                  <option value="global">Global — shared across all tenants</option>
+                </select>
+              ) : (
+                <div class="text-xs text-base-content/50">
+                  Global scope (no tenant namespace in context).
+                </div>
+              )}
+            </label>
             {requiredSecrets.map((name) => (
               <label class="block space-y-1" key={name}>
                 <span class="text-xs font-mono text-base-content/70">{name}</span>
