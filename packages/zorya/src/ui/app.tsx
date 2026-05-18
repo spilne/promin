@@ -94,7 +94,11 @@ function renderRoute(route: string, navigate: (p: string) => void) {
   const agentMatch = /^\/agents\/([^/]+)$/.exec(path ?? "");
   if (agentMatch) {
     return (
-      <AgentDetail id={decodeURIComponent(agentMatch[1]!)} onBack={() => navigate("/agents")} />
+      <AgentDetail
+        id={decodeURIComponent(agentMatch[1]!)}
+        onBack={() => navigate("/agents")}
+        onOpenAgent={(id) => navigate(`/agents/${encodeURIComponent(id)}`)}
+      />
     );
   }
   if (path === "/workflows") {

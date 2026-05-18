@@ -13,12 +13,15 @@ import { MemoryInspector } from "./memory-inspector.tsx";
 import { AgentConfigDrawer } from "./agent-config-drawer.tsx";
 import { AgentEditDrawer } from "./agent-edit-drawer.tsx";
 import { AgentVersionsModal } from "./agent-versions-modal.tsx";
+import { AgentCloneDialog } from "./agent-clone-dialog.tsx";
 import { AgentTraceModal } from "./agent-trace-modal.tsx";
 import { exportRecipeAsTs } from "../../lib/export-recipe-ts.ts";
 
 interface AgentDetailProps {
   id: string;
   onBack: () => void;
+  /** Navigate to another agent's detail — used after a clone. */
+  onOpenAgent?: (id: string) => void;
 }
 
 // Local-only persistence: only the resource (owner / user) id lives in
@@ -41,7 +44,7 @@ function saveResourceId(id: string) {
   localStorage.setItem(RESOURCE_KEY, id);
 }
 
-export function AgentDetail({ id, onBack }: AgentDetailProps) {
+export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
   // Namespace comes from the global sidebar switcher; only resourceId is
   // page-local state. Default to "default" when no namespace is selected
   // so the agent API still has something to scope by — same convention
@@ -62,6 +65,7 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
   const [exportOpen, setExportOpen] = useState(false);
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [traceOpen, setTraceOpen] = useState(false);
+  const [cloneOpen, setCloneOpen] = useState(false);
 
   // Persist resource id + active thread (namespace already persists in
   // the global useNamespace store).
@@ -136,6 +140,16 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
                 title="Show this thread's execution as a turn-tree (tool calls, results, failures)"
               >
                 Trace
+              </button>
+            )}
+            {agent && (
+              <button
+                class="btn btn-sm btn-ghost"
+                onClick={() => setCloneOpen(true)}
+                aria-label="Clone agent"
+                title="Fork this recipe into a new agent you can customize"
+              >
+                Clone
               </button>
             )}
             {agent && (
@@ -220,6 +234,17 @@ export function AgentDetail({ id, onBack }: AgentDetailProps) {
           resourceId={tenant.resourceId || undefined}
           initialThreadId={activeThread ?? undefined}
           onClose={() => setInspectorOpen(false)}
+        />
+      )}
+
+      {cloneOpen && agent && (
+        <AgentCloneDialog
+          source={agent}
+          onClose={() => setCloneOpen(false)}
+          onCloned={(newId) => {
+            setCloneOpen(false);
+            onOpenAgent?.(newId);
+          }}
         />
       )}
 
