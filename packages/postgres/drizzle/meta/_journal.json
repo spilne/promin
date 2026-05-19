@@ -274,6 +274,13 @@
       "when": 1743400038000,
       "tag": "0038_worker_retired_at",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1743400039000,
+      "tag": "0039_agent_instance",
+      "breakpoints": true
     }
   ]
 }

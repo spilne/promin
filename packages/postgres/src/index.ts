@@ -25,6 +25,10 @@ export {
   PostgresToolHistoryStore,
   type PostgresToolHistoryStoreConfig,
 } from "./lib/agent/tool-history-store.ts";
+export {
+  PostgresAgentInstanceRegistry,
+  type PostgresAgentInstanceRegistryConfig,
+} from "./lib/agent/agent-instance-registry.ts";
 export { type PostgresStorageConfig } from "./lib/config.ts";
 export { migrate, type MigrateOptions } from "./lib/migrate.ts";
 

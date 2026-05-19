@@ -815,3 +815,30 @@ export const agentToolHistory = pgTable(
     index("agent_tool_history_name_idx").on(t.name, t.lastSeenAt),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// Agent instance — a long-lived per-(agent, namespace, owner) instance of a
+// recipe. The id (`namespace::recipe::owner`) doubles as the resourceId for
+// the memory cascade, so each instance gets its own working memory + facts.
+// This table is the thin index; the memory store does the heavy lifting.
+// ---------------------------------------------------------------------------
+
+export const agentInstance = pgTable(
+  "agent_instance",
+  {
+    /** Deterministic `${namespaceId}::${registeredAgentId}::${ownerId}`. */
+    id: text("id").primaryKey(),
+    registeredAgentId: text("registered_agent_id").notNull(),
+    namespaceId: text("namespace_id").notNull(),
+    ownerId: text("owner_id").notNull(),
+    displayName: text("display_name"),
+    metadata: jsonb("metadata").notNull().default({}),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    // list({ namespaceId, ownerId }) — "what agents has this owner instantiated".
+    index("agent_instance_ns_owner_idx").on(t.namespaceId, t.ownerId),
+    // list({ registeredAgentId }) — all instances of one recipe.
+    index("agent_instance_agent_idx").on(t.registeredAgentId),
+  ],
+);
