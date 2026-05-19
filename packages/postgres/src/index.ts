@@ -29,6 +29,7 @@ export {
   PostgresAgentInstanceRegistry,
   type PostgresAgentInstanceRegistryConfig,
 } from "./lib/agent/agent-instance-registry.ts";
+export { PostgresDagRegistry, type PostgresDagRegistryConfig } from "./lib/agent/dag-registry.ts";
 export { type PostgresStorageConfig } from "./lib/config.ts";
 export { migrate, type MigrateOptions } from "./lib/migrate.ts";
 

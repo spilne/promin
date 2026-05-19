@@ -842,3 +842,27 @@ export const agentInstance = pgTable(
     index("agent_instance_agent_idx").on(t.registeredAgentId),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// Agent DAG registry — operator-authored multi-agent execution graphs,
+// version-keyed (one row per (id, version), like the agent registry). The
+// graph itself (nodes / edges / entry / terminals / metadata) lives in the
+// `body` jsonb blob; `created_at` is preserved across version re-writes.
+// ---------------------------------------------------------------------------
+
+export const agentDag = pgTable(
+  "agent_dag",
+  {
+    id: text("id").notNull(),
+    version: text("version").notNull(),
+    /** AgenticDagRecipe minus the identity columns — nodes/edges/entry/... */
+    body: jsonb("body").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.id, t.version] }),
+    // get(id) without version + list() pick the latest by updated_at.
+    index("agent_dag_id_updated_idx").on(t.id, t.updatedAt),
+  ],
+);
