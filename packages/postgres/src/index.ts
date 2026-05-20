@@ -30,6 +30,14 @@ export {
   type PostgresAgentInstanceRegistryConfig,
 } from "./lib/agent/agent-instance-registry.ts";
 export { PostgresDagRegistry, type PostgresDagRegistryConfig } from "./lib/agent/dag-registry.ts";
+export {
+  PostgresEvalRunStore,
+  type PostgresEvalRunStoreConfig,
+} from "./lib/evals/eval-run-store.ts";
+export {
+  PostgresEvalDatasetStore,
+  type PostgresEvalDatasetStoreConfig,
+} from "./lib/evals/eval-dataset-store.ts";
 export { type PostgresStorageConfig } from "./lib/config.ts";
 export { migrate, type MigrateOptions } from "./lib/migrate.ts";
 

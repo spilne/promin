@@ -19,6 +19,9 @@
     },
     {
       "path": "../agent/tsconfig.lib.json"
+    },
+    {
+      "path": "../evals/tsconfig.lib.json"
     }
   ]
 }

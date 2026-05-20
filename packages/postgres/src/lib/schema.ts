@@ -866,3 +866,38 @@ export const agentDag = pgTable(
     index("agent_dag_id_updated_idx").on(t.id, t.updatedAt),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// Eval run store — persistent history of completed evaluation runs. One row
+// per run, keyed on the deterministic composeRunId; the full EvalRunSummary
+// rides in the `summary` jsonb blob, identity columns are projected out for
+// indexed filtering.
+// ---------------------------------------------------------------------------
+
+export const evalRun = pgTable(
+  "eval_run",
+  {
+    runId: text("run_id").primaryKey(),
+    targetId: text("target_id").notNull(),
+    targetVersion: text("target_version"),
+    datasetId: text("dataset_id").notNull(),
+    ranAt: bigint("ran_at", { mode: "number" }).notNull(),
+    /** The full EvalRunSummary. */
+    summary: jsonb("summary").notNull(),
+    savedAt: bigint("saved_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("eval_run_target_ran_idx").on(t.targetId, t.ranAt),
+    index("eval_run_dataset_idx").on(t.datasetId),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Eval dataset store — named, replaceable eval case lists. The case array
+// rides in the `cases` jsonb blob.
+// ---------------------------------------------------------------------------
+
+export const evalDataset = pgTable("eval_dataset", {
+  datasetId: text("dataset_id").primaryKey(),
+  cases: jsonb("cases").notNull(),
+});
