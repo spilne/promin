@@ -29,12 +29,18 @@ interface Props {
   onClose: () => void;
   /** Called with the new recipe id once the clone succeeds. */
   onCloned: (newId: string) => void;
+  /**
+   * When true, render only the form body (no backdrop, no positioning,
+   * no own title block). The host owns the chrome — e.g. a tab inside
+   * the agent's ⚙ Manage drawer.
+   */
+  embed?: boolean;
 }
 
 /** Agent ids: letters / digits / `-` / `_`, not starting with `_` (reserved). */
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
-export function AgentCloneDialog({ source, namespaceId, onClose, onCloned }: Props) {
+export function AgentCloneDialog({ source, namespaceId, onClose, onCloned, embed }: Props) {
   const requiredSecrets = source.metadata.requiredSecrets ?? [];
   const [targetId, setTargetId] = useState("");
   const [targetVersion, setTargetVersion] = useState("");
@@ -65,12 +71,14 @@ export function AgentCloneDialog({ source, namespaceId, onClose, onCloned }: Pro
   const existingKeys = new Set(secretsList?.keys ?? []);
 
   useEffect(() => {
+    // Skip the global Esc handler in embed mode — host drawer owns close.
+    if (embed) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && !busy) onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, busy]);
+  }, [onClose, busy, embed]);
 
   /** True when this required secret still needs a typed value. */
   const needsInput = (name: string): boolean => !existingKeys.has(name) || replacing[name] === true;
@@ -109,19 +117,29 @@ export function AgentCloneDialog({ source, namespaceId, onClose, onCloned }: Pro
 
   return (
     <>
+      {!embed && (
+        <div
+          class="fixed inset-0 bg-black/40 z-30 anim-backdrop-in"
+          onClick={() => !busy && onClose()}
+          aria-hidden
+        />
+      )}
       <div
-        class="fixed inset-0 bg-black/40 z-30 anim-backdrop-in"
-        onClick={() => !busy && onClose()}
-        aria-hidden
-      />
-      <div class="fixed inset-x-4 top-24 mx-auto max-w-md bg-base-100 rounded-lg shadow-2xl z-40 p-5 space-y-4">
-        <div>
-          <div class="text-xs text-base-content/50 uppercase tracking-wider">Clone agent</div>
-          <div class="font-mono text-sm">{source.id}</div>
-          <p class="text-xs text-base-content/50 mt-1">
-            Copies this recipe into a new agent you own. Customize it afterwards in Edit.
-          </p>
-        </div>
+        class={
+          embed
+            ? "space-y-4"
+            : "fixed inset-x-4 top-24 mx-auto max-w-md bg-base-100 rounded-lg shadow-2xl z-40 p-5 space-y-4"
+        }
+      >
+        {!embed && (
+          <div>
+            <div class="text-xs text-base-content/50 uppercase tracking-wider">Clone agent</div>
+            <div class="font-mono text-sm">{source.id}</div>
+            <p class="text-xs text-base-content/50 mt-1">
+              Copies this recipe into a new agent you own. Customize it afterwards in Edit.
+            </p>
+          </div>
+        )}
 
         <label class="block space-y-1">
           <span class="text-xs text-base-content/60">New agent id</span>

@@ -11,9 +11,6 @@ import { toast } from "../../lib/dialogs.ts";
 import { Markdown } from "../../lib/markdown.tsx";
 import { MemoryInspector } from "./memory-inspector.tsx";
 import { AgentConfigDrawer } from "./agent-config-drawer.tsx";
-import { AgentEditDrawer } from "./agent-edit-drawer.tsx";
-import { AgentVersionsModal } from "./agent-versions-modal.tsx";
-import { AgentCloneDialog } from "./agent-clone-dialog.tsx";
 import { AgentTraceModal } from "./agent-trace-modal.tsx";
 
 interface AgentDetailProps {
@@ -60,10 +57,7 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
   );
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
-  const [editOpen, setEditOpen] = useState(false);
-  const [versionsOpen, setVersionsOpen] = useState(false);
   const [traceOpen, setTraceOpen] = useState(false);
-  const [cloneOpen, setCloneOpen] = useState(false);
 
   // Persist resource id + active thread (namespace already persists in
   // the global useNamespace store).
@@ -190,33 +184,12 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
         />
       )}
 
-      {cloneOpen && agent && (
-        <AgentCloneDialog
-          source={agent}
-          namespaceId={tenant.namespaceId}
-          onClose={() => setCloneOpen(false)}
-          onCloned={(newId) => {
-            setCloneOpen(false);
-            onOpenAgent?.(newId);
-          }}
-        />
-      )}
-
       {configOpen && (
         <AgentConfigDrawer
           agent={agent}
           onClose={() => setConfigOpen(false)}
-          namespaceId={tenant.namespaceId}
-          onOpenEdit={() => setEditOpen(true)}
-          onOpenClone={() => setCloneOpen(true)}
-          onOpenVersions={() => setVersionsOpen(true)}
-        />
-      )}
-      {editOpen && agent && (
-        <AgentEditDrawer
-          agent={agent}
           tenant={tenant}
-          onClose={() => setEditOpen(false)}
+          namespaceId={tenant.namespaceId}
           onSaved={() => refreshAgent()}
           onSavedAndTest={() => {
             refreshAgent();
@@ -227,13 +200,10 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
             setActiveThread(threadId);
             refreshThreads();
           }}
-        />
-      )}
-      {versionsOpen && agent && (
-        <AgentVersionsModal
-          agentId={id}
-          initialVersion={agent.version}
-          onClose={() => setVersionsOpen(false)}
+          onCloned={(newId) => {
+            setConfigOpen(false);
+            onOpenAgent?.(newId);
+          }}
         />
       )}
       {traceOpen && agent && activeThread && (

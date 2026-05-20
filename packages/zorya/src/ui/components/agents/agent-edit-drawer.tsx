@@ -46,9 +46,15 @@ interface Props {
    * the saved recipe so it can open a fresh thread for iteration.
    */
   onSavedAndTest?: (updated: RegisteredAgent) => void;
+  /**
+   * When true, render only the editor form (no backdrop, no positioning,
+   * no own header). The host owns the surrounding chrome — e.g. a tab
+   * inside the agent's ⚙ Manage drawer.
+   */
+  embed?: boolean;
 }
 
-export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTest }: Props) {
+export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTest, embed }: Props) {
   const isLocal = agent.backend.type === "local";
   const [description, setDescription] = useState(agent.metadata.description ?? "");
   const [systemPrompt, setSystemPrompt] = useState(
@@ -105,10 +111,11 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
   const tools = useMemo(() => toolsData?.tools ?? [], [toolsData]);
 
   useEffect(() => {
+    if (embed) return; // host drawer owns close
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, embed]);
 
   const parseLimit = (raw: string): number | undefined => {
     const trimmed = raw.trim();
@@ -248,33 +255,46 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
 
   return (
     <>
-      <div class="fixed inset-0 bg-black/40 z-30 anim-backdrop-in" onClick={onClose} aria-hidden />
+      {!embed && (
+        <div
+          class="fixed inset-0 bg-black/40 z-30 anim-backdrop-in"
+          onClick={onClose}
+          aria-hidden
+        />
+      )}
       <aside
-        class="fixed top-0 right-0 h-screen w-full max-w-2xl bg-base-100 shadow-2xl
-               z-40 flex flex-col anim-drawer-in"
-        role="dialog"
-        aria-label="Edit agent"
+        class={
+          embed
+            ? "flex flex-col"
+            : "fixed top-0 right-0 h-screen w-full max-w-2xl bg-base-100 shadow-2xl z-40 flex flex-col anim-drawer-in"
+        }
+        {...(embed ? {} : { role: "dialog", "aria-label": "Edit agent" })}
       >
-        <header class="flex items-start justify-between gap-2 p-4 border-b border-base-300">
-          <div class="min-w-0">
-            <div class="text-xs text-base-content/50 uppercase tracking-wider">Edit agent</div>
-            <div class="font-mono text-sm truncate">{agent.id}</div>
-            <div class="text-[10px] text-base-content/40 mt-0.5">
-              Updates the latest version in place. Changing model or tools needs a programmatic edit
-              until the full Designer ships.
+        {!embed && (
+          <header class="flex items-start justify-between gap-2 p-4 border-b border-base-300">
+            <div class="min-w-0">
+              <div class="text-xs text-base-content/50 uppercase tracking-wider">Edit agent</div>
+              <div class="font-mono text-sm truncate">{agent.id}</div>
+              <div class="text-[10px] text-base-content/40 mt-0.5">
+                Updates the latest version in place. Changing model or tools needs a programmatic
+                edit until the full Designer ships.
+              </div>
             </div>
-          </div>
-          <button
-            class="btn btn-sm btn-ghost"
-            onClick={onClose}
-            aria-label="Close"
-            title="Close (Esc)"
-          >
-            ✕
-          </button>
-        </header>
+            <button
+              class="btn btn-sm btn-ghost"
+              onClick={onClose}
+              aria-label="Close"
+              title="Close (Esc)"
+            >
+              ✕
+            </button>
+          </header>
+        )}
 
-        <form class="flex-1 overflow-y-auto p-4 space-y-4" onSubmit={onSubmit}>
+        <form
+          class={embed ? "space-y-4" : "flex-1 overflow-y-auto p-4 space-y-4"}
+          onSubmit={onSubmit}
+        >
           <label class="form-control">
             <span class="text-xs text-base-content/60 mb-1 uppercase tracking-wider">
               Description

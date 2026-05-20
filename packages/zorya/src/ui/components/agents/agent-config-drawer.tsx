@@ -23,7 +23,11 @@ import { toast } from "../../lib/dialogs.ts";
 import { formatRelative } from "../../lib/format.ts";
 import { JsonBlock } from "../ui/json-block.tsx";
 import { Skeleton } from "../ui/skeleton.tsx";
+import { AgentCloneDialog } from "./agent-clone-dialog.tsx";
+import { AgentEditDrawer } from "./agent-edit-drawer.tsx";
 import { AgentSecretsPanel } from "./agent-secrets-panel.tsx";
+import { AgentVersionsModal } from "./agent-versions-modal.tsx";
+import type { Tenant } from "./agent-detail.tsx";
 
 export type ManageTab = "view" | "edit" | "clone" | "secrets" | "versions" | "export";
 
@@ -61,27 +65,28 @@ const TABS: ReadonlyArray<TabSpec> = [
 interface Props {
   agent: RegisteredAgent | undefined;
   onClose: () => void;
-  /** Tenant namespace for the embedded Secrets tab. */
+  /** Tenant for the embedded Edit + Secrets tabs. */
+  tenant?: Tenant;
+  /** Tenant namespace for the embedded Secrets / Clone tabs. */
   namespaceId?: string;
   initialTab?: ManageTab;
-  /**
-   * Launch handlers for tabs whose UI isn't yet embedded inline. Each
-   * opens the dedicated standalone surface; the drawer stays open
-   * behind it so context isn't lost on close.
-   */
-  onOpenEdit?: () => void;
-  onOpenClone?: () => void;
-  onOpenVersions?: () => void;
+  /** Embedded Edit tab — called after a successful save. */
+  onSaved?: (updated: RegisteredAgent) => void;
+  /** Embedded Edit tab — Save & Test variant. */
+  onSavedAndTest?: (updated: RegisteredAgent) => void;
+  /** Embedded Clone tab — called with the new agent's id once cloned. */
+  onCloned?: (newId: string) => void;
 }
 
 export function AgentConfigDrawer({
   agent,
   onClose,
+  tenant,
   namespaceId,
   initialTab,
-  onOpenEdit,
-  onOpenClone,
-  onOpenVersions,
+  onSaved,
+  onSavedAndTest,
+  onCloned,
 }: Props) {
   const [tab, setTab] = useState<ManageTab>(initialTab ?? "view");
 
@@ -155,62 +160,35 @@ export function AgentConfigDrawer({
           ) : tab === "export" ? (
             <ExportTsBody agent={agent} />
           ) : tab === "edit" ? (
-            <ActionCard
-              title="Edit recipe"
-              description="Open the full editor — description, system prompt, model, tools, capabilities, tags. (Inline embed coming in a follow-up.)"
-              actionLabel="Open editor"
-              disabled={onOpenEdit === undefined}
-              onAction={() => onOpenEdit?.()}
+            <AgentEditDrawer
+              agent={agent}
+              tenant={tenant}
+              onClose={onClose}
+              onSaved={(updated) => onSaved?.(updated)}
+              {...(onSavedAndTest && {
+                onSavedAndTest: (updated: RegisteredAgent) => onSavedAndTest(updated),
+              })}
+              embed
             />
           ) : tab === "clone" ? (
-            <ActionCard
-              title="Clone recipe"
-              description="Fork this recipe into a new agent under a chosen id, optionally seeding required secrets. (Inline embed coming in a follow-up.)"
-              actionLabel="Open clone dialog"
-              disabled={onOpenClone === undefined}
-              onAction={() => onOpenClone?.()}
+            <AgentCloneDialog
+              source={agent}
+              namespaceId={namespaceId}
+              onClose={onClose}
+              onCloned={(newId) => onCloned?.(newId)}
+              embed
             />
           ) : (
-            <ActionCard
-              title="Versions"
-              description="Browse this recipe's prior versions and view side-by-side diffs. (Inline embed coming in a follow-up.)"
-              actionLabel="Browse versions"
-              disabled={onOpenVersions === undefined}
-              onAction={() => onOpenVersions?.()}
+            <AgentVersionsModal
+              agentId={agent.id}
+              initialVersion={agent.version}
+              onClose={onClose}
+              embed
             />
           )}
         </div>
       </aside>
     </>
-  );
-}
-
-function ActionCard({
-  title,
-  description,
-  actionLabel,
-  onAction,
-  disabled,
-}: {
-  title: string;
-  description: string;
-  actionLabel: string;
-  onAction: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <div class="space-y-3">
-      <div class="text-sm font-medium">{title}</div>
-      <div class="text-xs text-base-content/60 leading-relaxed">{description}</div>
-      <button
-        type="button"
-        class="btn btn-sm btn-primary"
-        onClick={onAction}
-        disabled={disabled === true}
-      >
-        {actionLabel}
-      </button>
-    </div>
   );
 }
 

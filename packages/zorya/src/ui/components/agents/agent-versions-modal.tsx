@@ -24,9 +24,15 @@ interface Props {
   agentId: string;
   initialVersion?: string;
   onClose: () => void;
+  /**
+   * When true, render only the picker + diff body (no backdrop, no
+   * positioning, no own header). The host owns the chrome — e.g. a tab
+   * inside the agent's ⚙ Manage drawer.
+   */
+  embed?: boolean;
 }
 
-export function AgentVersionsModal({ agentId, initialVersion, onClose }: Props) {
+export function AgentVersionsModal({ agentId, initialVersion, onClose, embed }: Props) {
   const { data, loading, error } = useFetch(() => api.listAgentVersions(agentId), [agentId], 0);
   const versions = useMemo(() => {
     const list = data?.versions ?? [];
@@ -49,35 +55,52 @@ export function AgentVersionsModal({ agentId, initialVersion, onClose }: Props) 
   }, [versions, initialVersion, rightVersion]);
 
   useEffect(() => {
+    if (embed) return; // host drawer owns close
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, embed]);
 
   const left = versions.find((v) => v.version === leftVersion) ?? null;
   const right = versions.find((v) => v.version === rightVersion) ?? null;
 
   return (
     <>
-      <div class="fixed inset-0 bg-black/40 z-30 anim-backdrop-in" onClick={onClose} aria-hidden />
+      {!embed && (
+        <div
+          class="fixed inset-0 bg-black/40 z-30 anim-backdrop-in"
+          onClick={onClose}
+          aria-hidden
+        />
+      )}
       <div
-        class="fixed inset-x-4 top-8 bottom-8 mx-auto max-w-6xl bg-base-100 rounded-lg shadow-2xl
-               z-40 flex flex-col anim-drawer-in"
-        role="dialog"
-        aria-label="Agent versions"
+        class={
+          embed
+            ? "flex flex-col"
+            : "fixed inset-x-4 top-8 bottom-8 mx-auto max-w-6xl bg-base-100 rounded-lg shadow-2xl z-40 flex flex-col anim-drawer-in"
+        }
+        {...(embed ? {} : { role: "dialog", "aria-label": "Agent versions" })}
       >
-        <header class="flex items-start justify-between gap-2 p-4 border-b border-base-300">
-          <div class="min-w-0">
-            <div class="text-xs text-base-content/50 uppercase tracking-wider">Versions</div>
-            <div class="font-mono text-sm">{agentId}</div>
-            <div class="text-[10px] text-base-content/40 mt-0.5">
-              {versions.length} version{versions.length === 1 ? "" : "s"} · pick two to compare
+        {!embed && (
+          <header class="flex items-start justify-between gap-2 p-4 border-b border-base-300">
+            <div class="min-w-0">
+              <div class="text-xs text-base-content/50 uppercase tracking-wider">Versions</div>
+              <div class="font-mono text-sm">{agentId}</div>
+              <div class="text-[10px] text-base-content/40 mt-0.5">
+                {versions.length} version{versions.length === 1 ? "" : "s"} · pick two to compare
+              </div>
             </div>
+            <button class="btn btn-sm btn-ghost" onClick={onClose} title="Close (Esc)">
+              ✕
+            </button>
+          </header>
+        )}
+
+        {embed && (
+          <div class="text-[10px] text-base-content/40 mb-3">
+            {versions.length} version{versions.length === 1 ? "" : "s"} · pick two to compare
           </div>
-          <button class="btn btn-sm btn-ghost" onClick={onClose} title="Close (Esc)">
-            ✕
-          </button>
-        </header>
+        )}
 
         {error && <div class="alert alert-error m-4 text-xs">{error.message}</div>}
 
