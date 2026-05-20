@@ -34,7 +34,10 @@ import type {
 } from "../../server/routes/agents.ts";
 import type { MemoryInspectResponse } from "../../server/routes/memory.ts";
 import type { SignalsResponse } from "../../server/routes/signals.ts";
-import type { MintTokenResponse } from "../../server/routes/signal-tokens.ts";
+import type {
+  DescribeSignalTokenResponse,
+  MintTokenResponse,
+} from "../../server/routes/signal-tokens.ts";
 import type { WorkflowVersionDto } from "../../server/routes/workflow-versions.ts";
 
 const BASE = ""; // served from same origin
@@ -204,6 +207,36 @@ export const api = {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ signalName, payload }),
+    });
+  },
+  /**
+   * Fetch a signal token's metadata for the public share page. Bearer-authed
+   * (passed in `Authorization`), doesn't require dashboard credentials —
+   * used by the shared form at /#/share/:combined.
+   */
+  describeSignalToken(tokenId: string, bearer: string): Promise<DescribeSignalTokenResponse> {
+    return req(`/api/signal-tokens/${encodeURIComponent(tokenId)}/describe`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${bearer}` },
+    });
+  },
+  /**
+   * Deliver a signal via a public bearer token — the no-dashboard path.
+   * Returns the resume status (201 first delivery, 200 idempotent
+   * re-submission, 410 already consumed, 408 expired).
+   */
+  completeSignalToken(
+    tokenId: string,
+    bearer: string,
+    value: unknown,
+  ): Promise<{ ok: boolean; value?: unknown; alreadyCompleted?: boolean }> {
+    return req(`/api/signal-tokens/${encodeURIComponent(tokenId)}/complete`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${bearer}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ value }),
     });
   },
   /**

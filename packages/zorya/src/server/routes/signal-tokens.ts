@@ -13,6 +13,7 @@
 // workflow resumes through the existing signal mechanic.
 // ---------------------------------------------------------------------------
 
+import { parseApprovalSignal } from "@promin/agent";
 import type { SignalTokenRecord, WorkflowStorage } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 
@@ -46,6 +47,19 @@ export interface MintTokenResponse {
 export interface CompleteTokenRequest {
   /** Payload delivered through `storage.deliverSignal`. JSON-serializable. */
   value: unknown;
+}
+
+/** Bearer-authed metadata fetch for the public share page. */
+export interface DescribeSignalTokenResponse {
+  workflowId: string;
+  workflowName: string;
+  signalName: string;
+  /** True when the signal follows the `approve:<callId>` convention. */
+  isApproval: boolean;
+  expiresAt: string;
+  completedAt: string | null;
+  /** True when the workflow is still suspended on this signal. */
+  pending: boolean;
 }
 
 export interface SignalTokenDto {
@@ -176,6 +190,52 @@ export function completeSignalToken(deps: SignalTokenRoutesDeps) {
     await deps.storage.deliverSignal(token.workflowId, token.signalName, body.value);
 
     return json(201, { ok: true, value: body.value });
+  };
+}
+
+/**
+ * Bearer-authed metadata fetch — what a public share page needs to render
+ * a meaningful "approve / reject this signal" UI without exposing the rest
+ * of the dashboard. Surfaces workflow name, signal name, approval-shape
+ * discriminator, expiry, and whether the workflow is still suspended on
+ * this signal (so an already-resolved share link can show a friendly
+ * "already handled" state instead of failing on complete).
+ */
+export function describeSignalToken(deps: SignalTokenRoutesDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const tokenId = params.tokenId;
+    if (!tokenId) return jsonError(400, "missing_token_id");
+    const bearer = extractBearer(req);
+    if (!bearer) return jsonError(401, "missing_bearer");
+    const token = await deps.storage.findSignalTokenById(tokenId);
+    if (!token) return jsonError(404, "token_not_found");
+    if (!constantTimeEqual(bearer, token.bearer)) return jsonError(401, "invalid_bearer");
+
+    const wf = await deps.storage.loadWorkflow(token.workflowId);
+    if (!wf) return jsonError(404, "workflow_not_found");
+
+    // Pending check — the workflow could have resumed via another delivery
+    // between mint and now. Surface that explicitly so the share page renders
+    // an "already handled" state instead of letting the user click Approve
+    // into a workflow that's already finished.
+    let pending = false;
+    for (const step of Object.values(wf.steps)) {
+      if (step.status === "waiting_for_signal" && step.signalName === token.signalName) {
+        pending = true;
+        break;
+      }
+    }
+
+    const body: DescribeSignalTokenResponse = {
+      workflowId: token.workflowId,
+      workflowName: wf.workflowName,
+      signalName: token.signalName,
+      isApproval: parseApprovalSignal(token.signalName) !== null,
+      expiresAt: token.expiresAt.toISOString(),
+      completedAt: token.completedAt ? token.completedAt.toISOString() : null,
+      pending,
+    };
+    return json(200, body);
   };
 }
 

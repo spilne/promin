@@ -11,6 +11,7 @@ import { AgentList } from "./components/agents/agent-list.tsx";
 import { AgentDetail } from "./components/agents/agent-detail.tsx";
 import { InstanceList } from "./components/agents/instance-list.tsx";
 import { SignalList } from "./components/signals/signal-list.tsx";
+import { SharedSignalPage } from "./components/signals/shared-signal-page.tsx";
 import { SecretsPage } from "./components/secrets/secrets-page.tsx";
 import { ToolsPage } from "./components/tools/tools-page.tsx";
 import { DagsPage } from "./components/dags/dags-page.tsx";
@@ -57,6 +58,17 @@ function locationToRoute(): string {
 function renderRoute(route: string, navigate: (p: string) => void) {
   const [path, query] = route.split("?");
   const params = new URLSearchParams(query ?? "");
+  // Public share page — combined credential in the path segment:
+  // /share/<tokenId>.<bearer>. The describe + complete endpoints are
+  // bearer-authed only, so this route is reachable without dashboard auth.
+  const shareMatch = /^\/share\/([^/]+)$/.exec(path ?? "");
+  if (shareMatch) {
+    const combined = decodeURIComponent(shareMatch[1]!);
+    const dotIdx = combined.indexOf(".");
+    const tokenId = dotIdx > 0 ? combined.slice(0, dotIdx) : "";
+    const bearer = dotIdx > 0 ? combined.slice(dotIdx + 1) : "";
+    return <SharedSignalPage tokenId={tokenId} bearer={bearer} />;
+  }
   if (path === "/workers") {
     return <WorkerGrid onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)} />;
   }

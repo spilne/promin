@@ -83,6 +83,7 @@ import {
 import { listSignals } from "./routes/signals.ts";
 import {
   completeSignalToken,
+  describeSignalToken,
   listSignalTokensForRun,
   mintSignalToken,
 } from "./routes/signal-tokens.ts";
@@ -393,6 +394,7 @@ export class ZoryaServer {
         }),
       )
       .get("/api/runs/:id/signal-tokens", listSignalTokensForRun({ storage }))
+      .get("/api/signal-tokens/:tokenId/describe", describeSignalToken({ storage }))
       .post("/api/signal-tokens/:tokenId/complete", completeSignalToken({ storage }))
       // Workflow versions — thin layer over WorkflowVersionRegistry's
       // lifecycle methods. Versions are a property of a workflow, so the

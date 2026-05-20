@@ -386,6 +386,7 @@ function ShareLinkModal({
   const expiresAt = new Date(token.expiresAt);
   const expired = expiresAt.getTime() <= Date.now();
   const url = token.url ?? `${location.origin}/api/signal-tokens/${token.tokenId}/complete`;
+  const sharePageUrl = `${location.origin}/#/share/${token.tokenId}.${token.bearer}`;
   const examplePayload = ctx.isApproval
     ? `{"approved": true, "by": "external"}`
     : `<YOUR_JSON_PAYLOAD>`;
@@ -432,6 +433,26 @@ function ShareLinkModal({
             ✕
           </button>
         </div>
+
+        <label class="block space-y-1">
+          <span class="text-xs text-base-content/60">
+            Browser share link — opens an Approve / Reject page for the recipient
+          </span>
+          <div class="flex gap-1">
+            <input
+              readonly
+              class="input input-sm input-bordered w-full font-mono text-xs"
+              value={sharePageUrl}
+            />
+            <button
+              type="button"
+              class="btn btn-sm btn-primary"
+              onClick={() => void copy(sharePageUrl, "Share link")}
+            >
+              Copy
+            </button>
+          </div>
+        </label>
 
         <label class="block space-y-1">
           <span class="text-xs text-base-content/60">Complete endpoint</span>
