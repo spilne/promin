@@ -20,6 +20,7 @@
 // after demo boot via the scheduler's never-fired-yet kickstart.
 // ---------------------------------------------------------------------------
 
+import { composeApprovalSignal } from "@promin/agent";
 import { Pipeline } from "@promin/core";
 import { workflow } from "@promin/workflow";
 
@@ -49,13 +50,12 @@ export const manualApprovalWorkflow = workflow<ManualApprovalInput>({
       requestId: (ctx as unknown as { prev: { requestId: number } }).prev.requestId,
     }));
 
-    // Wait on `approve:<id>` — the prefix the /approvals inbox filters on
-    // (listPendingApprovals.findSuspendedApprovalStep). No auto-signaler
-    // targets this workflow, so the suspension is long-lived and the run
-    // shows up in /approvals as actually pending. Resolve it by delivering
-    // the same signal name from the workflow run's Signals tab.
+    // Wait on the tool-call approval convention so the /signals inbox
+    // tags this row as an approval and surfaces the shortcut Approve /
+    // Reject buttons. composeApprovalSignal centralises the wire format
+    // — never hand-string the `approve:` prefix yourself.
     const decision = yield* ctx.signal<{ approved: boolean; by?: string }>(
-      `approve:demo-${previous.requestId}`,
+      composeApprovalSignal(`demo-${previous.requestId}`),
     );
 
     return { requestId: previous.requestId, approved: decision.approved, by: decision.by };

@@ -12,8 +12,8 @@
 
 import type { ActivityJournalStorage, JournalEntry, WorkflowStorage } from "@promin/workflow";
 import { isActivityJournalStorage } from "@promin/workflow";
+import { parseApprovalSignal } from "./approve-signal.ts";
 
-const APPROVE_SIGNAL_PREFIX = "approve:";
 const APPROVAL_START_SUFFIX = "-start";
 
 export interface PendingSignal {
@@ -24,6 +24,12 @@ export interface PendingSignal {
   readonly stepName: string;
   /** Exact signal name the step is waiting for. */
   readonly signalName: string;
+  /**
+   * True when the signal name matches the tool-call approval convention
+   * (`approve:<callId>`). Consumers should branch on this, NOT on the
+   * prefix string — see `parseApprovalSignal` in `./approve-signal.ts`.
+   */
+  readonly isApproval: boolean;
   readonly suspendedAt: Date | undefined;
   /** Tool-call id parsed out of an `approve:<id>` signal — undefined otherwise. */
   readonly toolCallId?: string;
@@ -76,15 +82,14 @@ export async function listPendingSignals(
     }
     if (!waiting) continue;
 
-    const isApprove = waiting.signalName.startsWith(APPROVE_SIGNAL_PREFIX);
-    const toolCallId = isApprove ? waiting.signalName.slice(APPROVE_SIGNAL_PREFIX.length) : "";
+    const parsed = parseApprovalSignal(waiting.signalName);
     const meta =
-      isApprove && journalStorage && toolCallId.length > 0
+      parsed && journalStorage
         ? await readApprovalStartMetadata(
             journalStorage,
             wf.workflowId,
             waiting.stepName,
-            toolCallId,
+            parsed.toolCallId,
           )
         : { toolName: undefined, toolInput: undefined };
 
@@ -94,8 +99,9 @@ export async function listPendingSignals(
       namespace: wf.namespace,
       stepName: waiting.stepName,
       signalName: waiting.signalName,
+      isApproval: parsed !== null,
       suspendedAt: waiting.startedAt,
-      ...(toolCallId.length > 0 && { toolCallId }),
+      ...(parsed && { toolCallId: parsed.toolCallId }),
       ...(meta.toolName !== undefined && { toolName: meta.toolName }),
       ...(meta.toolInput !== undefined && { toolInput: meta.toolInput }),
     });

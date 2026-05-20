@@ -40,8 +40,8 @@ import type {
   WorkflowStorage,
 } from "@promin/workflow";
 import { isActivityJournalStorage } from "@promin/workflow";
+import { parseApprovalSignal } from "./approve-signal.ts";
 
-const APPROVE_SIGNAL_PREFIX = "approve:";
 const APPROVAL_START_SUFFIX = "-start";
 
 export interface PendingApproval {
@@ -130,14 +130,9 @@ function findSuspendedApprovalStep(
   wf: WorkflowState,
 ): { step: StepState; toolCallId: string } | null {
   for (const step of Object.values(wf.steps)) {
-    if (
-      step.status === "waiting_for_signal" &&
-      step.signalName !== undefined &&
-      step.signalName.startsWith(APPROVE_SIGNAL_PREFIX)
-    ) {
-      const toolCallId = step.signalName.slice(APPROVE_SIGNAL_PREFIX.length);
-      if (toolCallId.length > 0) return { step, toolCallId };
-    }
+    if (step.status !== "waiting_for_signal" || step.signalName === undefined) continue;
+    const parsed = parseApprovalSignal(step.signalName);
+    if (parsed) return { step, toolCallId: parsed.toolCallId };
   }
   return null;
 }

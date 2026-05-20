@@ -23,6 +23,13 @@ export interface SignalDto {
   stepName: string;
   /** Exact signal name the step is waiting for (e.g. `approve:<callId>`). */
   signalName: string;
+  /**
+   * True when the signal follows the tool-call approval convention.
+   * Computed server-side via `parseApprovalSignal` so the wire-format
+   * prefix never crosses the bundle boundary — UI keys its shortcut
+   * Approve / Reject buttons off this discriminator, not a string check.
+   */
+  isApproval: boolean;
   /** ISO timestamp when the suspending step started; null when unknown. */
   suspendedAt: string | null;
   /** Parsed `<callId>` portion of an `approve:` signal. */
@@ -56,6 +63,7 @@ export function listSignals(storage: WorkflowStorage) {
       namespace: p.namespace ?? null,
       stepName: p.stepName,
       signalName: p.signalName,
+      isApproval: p.isApproval,
       suspendedAt: p.suspendedAt ? p.suspendedAt.toISOString() : null,
       ...(p.toolCallId !== undefined && { toolCallId: p.toolCallId }),
       ...(p.toolName !== undefined && { toolName: p.toolName }),
