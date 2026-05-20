@@ -281,3 +281,31 @@ export {
   type ApplyDiscoveredSchedulesOptions,
   type ApplyDiscoveredSchedulesResult,
 } from "./lib/discovery/index.ts";
+
+// Zero-dep JSON-Schema-native schema builder + validator. Used by
+// `defineSignal` to type signal payloads and snapshot validation rules
+// onto pending journal entries.
+//
+// `JsonSchema` (the tagged union the builder produces) is intentionally
+// NOT re-exported at the top level — there's already a separate
+// open-shape `JsonSchema` interface from `workflow-schema.ts` for
+// workflow-IR I/O annotations. Callers pass through `someSig.schema.jsonSchema`
+// (typed via `Schema<T>` structurally); deep-import from
+// `./lib/schema/builder.ts` if you ever need to name the type.
+export { s, type Schema, type OptionalSchema, type Infer } from "./lib/schema/builder.ts";
+export { validate, type ValidationError, type ValidationResult } from "./lib/schema/validator.ts";
+
+// First-class signal types — `defineSignal` returns an addressable
+// artifact (name + schema) callers import wherever they suspend on /
+// deliver to / inspect the signal. Mirrors how `tool({...})` works for
+// tools. `approvalSignal` is the canonical preset over `ctx.signal` with
+// the canonical approval shape and the `approve:` name prefix.
+export {
+  defineSignal,
+  approvalSignal,
+  ApprovalSchema,
+  APPROVAL_NAME_PREFIX,
+  type SignalType,
+  type SignalPayload,
+  type ApprovalDecision,
+} from "./lib/signals/define-signal.ts";
