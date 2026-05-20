@@ -117,13 +117,9 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
             </button>
             <div>
               <h2 class="text-xl font-semibold font-mono">{id}</h2>
-              {agent && agent.metadata.tags.length > 0 && (
-                <div class="flex flex-wrap gap-1 mt-1">
-                  {agent.metadata.tags.map((tag) => (
-                    <span key={tag} class="badge badge-sm badge-ghost">
-                      {tag}
-                    </span>
-                  ))}
+              {agent && (
+                <div class="mt-1">
+                  <AgentMetaBadges agent={agent} missingTools={missingTools} />
                 </div>
               )}
               {agent?.metadata.description && (
@@ -132,7 +128,6 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
             </div>
           </div>
           <div class="flex items-center gap-3">
-            {agent && <AgentMetaBadges agent={agent} missingTools={missingTools} />}
             {agent && (
               <button
                 class="btn btn-sm btn-ghost"
@@ -390,6 +385,9 @@ function AgentMetaBadges({
       <span class="badge badge-sm badge-outline font-mono">{model}</span>
       {agent.metadata.capabilities.map((c) => (
         <span class="badge badge-sm badge-info badge-outline">{c}</span>
+      ))}
+      {agent.metadata.tags.map((t) => (
+        <span class="badge badge-sm badge-ghost">{t}</span>
       ))}
       {missingTools && missingTools.length > 0 && (
         <span
