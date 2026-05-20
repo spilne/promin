@@ -823,13 +823,20 @@ export function ChatPane({
     }
   }, [messages, pendingUser]);
 
-  // Auto-scroll on new messages or pending updates (including the
-  // optimistic user bubble).
+  // Auto-scroll to the latest message — on initial load (when `loading`
+  // flips false), on every new persisted message, on the optimistic user
+  // bubble, and as the assistant response streams in. Deferred one frame
+  // so message content (markdown, code blocks) has laid out before we
+  // read `scrollHeight` — measuring synchronously lands the scroll short
+  // of the true bottom.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    el.scrollTop = el.scrollHeight;
-  }, [messages.length, pending?.text, pending?.done, pendingUser]);
+    const frame = requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [loading, messages.length, pending?.text, pending?.done, pendingUser]);
 
   /** Shared SSE handlers — used by both the user-task and resume streams. */
   const streamHandlers = (): Parameters<typeof api.streamAgentThread>[3] => ({
