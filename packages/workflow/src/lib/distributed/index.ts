@@ -44,6 +44,12 @@ export {
   createSleepScanner,
 } from "./sleep-scanner.ts";
 export {
+  type SignalScanner,
+  type SignalScannerConfig,
+  DefaultSignalScanner,
+  createSignalScanner,
+} from "./signal-scanner.ts";
+export {
   type WorkerMiddleware,
   type NextFn,
   timeoutMiddleware,

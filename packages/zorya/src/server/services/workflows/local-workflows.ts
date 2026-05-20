@@ -14,12 +14,13 @@
 
 import type {
   RecoveryStrategy,
+  SignalScanner,
   SleepScanner,
   Workflow,
   WorkflowRunner,
   WorkflowStorage,
 } from "@promin/workflow";
-import { DefaultSleepScanner } from "@promin/workflow";
+import { DefaultSignalScanner, DefaultSleepScanner } from "@promin/workflow";
 import { ZoryaWorkflows, type TriggerOptions, type TriggerResult } from "./zorya-workflows.ts";
 
 /**
@@ -46,6 +47,8 @@ export interface LocalWorkflowsConfig {
   recovery?: RecoveryStrategy;
   /** Sleep scanner cadence (ms). Default 2000. Pass 0 to disable. */
   sleepScanIntervalMs?: number;
+  /** Signal scanner cadence (ms). Default 2000. Pass 0 to disable. */
+  signalScanIntervalMs?: number;
   /** Optional fallback for workflows this layer doesn't know. */
   fallback?: ZoryaWorkflows;
   /**
@@ -64,6 +67,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
   private readonly runner: WorkflowRunner;
   private readonly recovery?: RecoveryStrategy;
   private readonly sleepScanner?: SleepScanner;
+  private readonly signalScanner?: SignalScanner;
   private readonly versionRegistry?: import("@promin/workflow").IWorkflowVersionRegistry;
 
   constructor(config: LocalWorkflowsConfig) {
@@ -82,6 +86,21 @@ export class LocalWorkflows extends ZoryaWorkflows {
         storage: this.storage,
         runner: this.runner,
         scanIntervalMs,
+        resolveWorkflow: (name) => this.definitions[name],
+      });
+    }
+
+    // Mirror for delivered signals: an `approve:<id>` or any custom
+    // `ctx.signal(...)` wait gets resumed when a signal row matches the
+    // suspended step's name. Without this, `storage.deliverSignal` would
+    // append the row but the workflow would stay suspended until a caller
+    // explicitly completed the journal entry and re-ran it.
+    const signalIntervalMs = config.signalScanIntervalMs ?? 2_000;
+    if (signalIntervalMs > 0) {
+      this.signalScanner = new DefaultSignalScanner({
+        storage: this.storage,
+        runner: this.runner,
+        scanIntervalMs: signalIntervalMs,
         resolveWorkflow: (name) => this.definitions[name],
       });
     }
@@ -172,6 +191,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
     }
     // Sleep scanner runs forever; fire-and-forget so start() returns.
     if (this.sleepScanner) void this.sleepScanner.start();
+    if (this.signalScanner) void this.signalScanner.start();
   }
 
   /**
@@ -230,6 +250,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
 
   protected override async onStop(): Promise<void> {
     if (this.sleepScanner) await this.sleepScanner.stop();
+    if (this.signalScanner) await this.signalScanner.stop();
   }
 }
 
