@@ -51,6 +51,9 @@
       "path": "./packages/agent"
     },
     {
+      "path": "./packages/evals"
+    },
+    {
       "path": "./packages/sqlite"
     },
     {

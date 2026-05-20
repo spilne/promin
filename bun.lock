@@ -113,6 +113,17 @@
         "@types/bun": "catalog:",
       },
     },
+    "packages/evals": {
+      "name": "@promin/evals",
+      "version": "0.1.0",
+      "dependencies": {
+        "@promin/agent": "workspace:*",
+        "@promin/core": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+      },
+    },
     "packages/http": {
       "name": "@promin/http",
       "version": "0.1.0",
@@ -828,6 +839,8 @@
     "@promin/docs": ["@promin/docs@workspace:documentation/generator"],
 
     "@promin/duckdb": ["@promin/duckdb@workspace:packages/duckdb"],
+
+    "@promin/evals": ["@promin/evals@workspace:packages/evals"],
 
     "@promin/examples": ["@promin/examples@workspace:examples"],
 

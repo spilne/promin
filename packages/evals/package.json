@@ -1,0 +1,61 @@
+{
+  "name": "@promin/evals",
+  "version": "0.1.0",
+  "description": "Agent evaluation framework for promin — pluggable datasets, targets, scorers and reporters.",
+  "keywords": [
+    "agent",
+    "eval",
+    "evaluation",
+    "llm",
+    "scorer",
+    "typescript"
+  ],
+  "homepage": "https://github.com/spilne/promin/tree/main/packages/evals",
+  "bugs": {
+    "url": "https://github.com/spilne/promin/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spilne/promin.git",
+    "directory": "packages/evals"
+  },
+  "files": [
+    "dist",
+    "package.json"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "@promin/source": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@promin/agent": "workspace:*",
+    "@promin/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:"
+  },
+  "nx": {
+    "targets": {
+      "typecheck": {},
+      "test": {},
+      "lint": {},
+      "format": {},
+      "format-check": {},
+      "ci": {},
+      "publish": {}
+    }
+  }
+}

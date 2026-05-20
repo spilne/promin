@@ -604,9 +604,6 @@ export type { TwoSpeedLLMConfig } from "./adapters/two-speed-llm.ts";
 export { SystemClock, FakeClock } from "@promin/core";
 export type { Clock, TimerHandle } from "@promin/core";
 
-export { runEval, exactMatch, containsAll, llmJudge } from "./eval.ts";
-export type { EvalCase, EvalScore, EvalResult, EvalScorer } from "./eval.ts";
-
 export { broadcast } from "./broadcast.ts";
 
 export { compact, DEFAULT_SUMMARY_PROMPT, RECAP_SUMMARY_PROMPT } from "./agent-loop-compaction.ts";
