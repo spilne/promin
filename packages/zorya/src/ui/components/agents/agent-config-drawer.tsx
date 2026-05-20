@@ -22,9 +22,28 @@ import { formatRelative } from "../../lib/format.ts";
 interface Props {
   agent: RegisteredAgent | undefined;
   onClose: () => void;
+  /**
+   * Optional recipe-management actions. When supplied, each renders as a
+   * button in an action bar above the recipe body. Each handler is
+   * expected to close this drawer before opening its own target (so two
+   * drawers never overlap).
+   */
+  onEdit?: () => void;
+  onClone?: () => void;
+  onSecrets?: () => void;
+  onVersions?: () => void;
+  onExport?: () => void;
 }
 
-export function AgentConfigDrawer({ agent, onClose }: Props) {
+export function AgentConfigDrawer({
+  agent,
+  onClose,
+  onEdit,
+  onClone,
+  onSecrets,
+  onVersions,
+  onExport,
+}: Props) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -58,6 +77,56 @@ export function AgentConfigDrawer({ agent, onClose }: Props) {
             ✕
           </button>
         </header>
+
+        {(onEdit || onClone || onSecrets || onVersions || onExport) && (
+          <div class="flex flex-wrap gap-2 px-4 py-3 border-b border-base-300">
+            {onEdit && (
+              <button
+                class="btn btn-sm btn-ghost"
+                onClick={onEdit}
+                title="Edit description, system prompt, model, tools, capabilities, tags"
+              >
+                Edit
+              </button>
+            )}
+            {onClone && (
+              <button
+                class="btn btn-sm btn-ghost"
+                onClick={onClone}
+                title="Fork this recipe into a new agent you can customize"
+              >
+                Clone
+              </button>
+            )}
+            {onSecrets && (
+              <button
+                class="btn btn-sm btn-ghost"
+                onClick={onSecrets}
+                title="Set / rotate the BYOK key for this agent's model.credentialRef"
+              >
+                Secrets
+              </button>
+            )}
+            {onVersions && (
+              <button
+                class="btn btn-sm btn-ghost"
+                onClick={onVersions}
+                title="Browse versions, side-by-side diff against previous"
+              >
+                Versions
+              </button>
+            )}
+            {onExport && (
+              <button
+                class="btn btn-sm btn-ghost"
+                onClick={onExport}
+                title="Export this recipe as a TS snippet for VCS-tracked deployment"
+              >
+                Export TS
+              </button>
+            )}
+          </div>
+        )}
 
         <div class="flex-1 overflow-y-auto p-4 space-y-4">
           {!agent ? (

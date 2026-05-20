@@ -128,61 +128,11 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
             </div>
           </div>
           <div class="flex items-center gap-3">
-            {agent && (
-              <button
-                class="btn btn-sm btn-ghost"
-                onClick={() => setEditOpen(true)}
-                aria-label="Edit agent"
-                title="Edit description, system prompt, model, tools, capabilities, tags"
-              >
-                Edit
-              </button>
-            )}
-            {agent && (
-              <button
-                class="btn btn-sm btn-ghost"
-                onClick={() => setCloneOpen(true)}
-                aria-label="Clone agent"
-                title="Fork this recipe into a new agent you can customize"
-              >
-                Clone
-              </button>
-            )}
-            {agent && (
-              <button
-                class="btn btn-sm btn-ghost"
-                onClick={() => setSecretsOpen(true)}
-                aria-label="Agent secrets"
-                title="Set / rotate the BYOK key for this agent's model.credentialRef"
-              >
-                Secrets
-              </button>
-            )}
-            {agent && (
-              <button
-                class="btn btn-sm btn-ghost"
-                onClick={() => setVersionsOpen(true)}
-                aria-label="Recipe versions"
-                title="Browse versions, side-by-side diff against previous"
-              >
-                Versions
-              </button>
-            )}
-            {agent && (
-              <button
-                class="btn btn-sm btn-ghost"
-                onClick={() => setExportOpen(true)}
-                aria-label="Export recipe as TS"
-                title="Export this recipe as a TS snippet for VCS-tracked deployment"
-              >
-                Export TS
-              </button>
-            )}
             <button
               class="btn btn-md btn-square btn-ghost text-2xl"
               onClick={() => setConfigOpen(true)}
-              aria-label="Agent config"
-              title="View this agent's recipe — system prompt, tools, model, metadata"
+              aria-label="Manage agent"
+              title="Manage this agent — view recipe and run Edit / Clone / Secrets / Versions / Export TS"
             >
               ⚙
             </button>
@@ -264,7 +214,32 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
         />
       )}
 
-      {configOpen && <AgentConfigDrawer agent={agent} onClose={() => setConfigOpen(false)} />}
+      {configOpen && (
+        <AgentConfigDrawer
+          agent={agent}
+          onClose={() => setConfigOpen(false)}
+          onEdit={() => {
+            setConfigOpen(false);
+            setEditOpen(true);
+          }}
+          onClone={() => {
+            setConfigOpen(false);
+            setCloneOpen(true);
+          }}
+          onSecrets={() => {
+            setConfigOpen(false);
+            setSecretsOpen(true);
+          }}
+          onVersions={() => {
+            setConfigOpen(false);
+            setVersionsOpen(true);
+          }}
+          onExport={() => {
+            setConfigOpen(false);
+            setExportOpen(true);
+          }}
+        />
+      )}
       {editOpen && agent && (
         <AgentEditDrawer
           agent={agent}
