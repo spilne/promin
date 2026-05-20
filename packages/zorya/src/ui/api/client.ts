@@ -197,6 +197,14 @@ export const api = {
     const qs = qp.toString();
     return req(`/api/signals${qs ? `?${qs}` : ""}`);
   },
+  /** Deliver a signal payload to a suspended workflow. */
+  sendSignal(workflowId: string, signalName: string, payload: unknown): Promise<{ ok: true }> {
+    return req(`/api/runs/${encodeURIComponent(workflowId)}/signal`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ signalName, payload }),
+    });
+  },
   listSchedules(
     params: {
       namespace?: string;
