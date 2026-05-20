@@ -42,6 +42,7 @@
   "dependencies": {
     "@promin/agent": "workspace:*",
     "@promin/core": "workspace:*",
+    "@promin/evals": "workspace:*",
     "@promin/workflow": "workspace:*"
   },
   "devDependencies": {

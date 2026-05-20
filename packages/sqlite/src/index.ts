@@ -37,3 +37,8 @@ export {
   SqliteWorkflowStartQueue,
   type SqliteWorkflowStartQueueOptions,
 } from "./lib/sqlite-workflow-start-queue.ts";
+export { SqliteEvalRunStore, type SqliteEvalRunStoreConfig } from "./lib/evals/eval-run-store.ts";
+export {
+  SqliteEvalDatasetStore,
+  type SqliteEvalDatasetStoreConfig,
+} from "./lib/evals/eval-dataset-store.ts";

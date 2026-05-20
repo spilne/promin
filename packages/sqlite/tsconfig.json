@@ -10,6 +10,9 @@
       "path": "../agent"
     },
     {
+      "path": "../evals"
+    },
+    {
       "path": "../core"
     },
     {
