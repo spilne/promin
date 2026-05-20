@@ -464,6 +464,8 @@ export type {
   PendingApproval,
   ListPendingApprovalsParams,
 } from "./approvals/list-pending-approvals.ts";
+export { listPendingSignals } from "./approvals/list-pending-signals.ts";
+export type { PendingSignal, ListPendingSignalsParams } from "./approvals/list-pending-signals.ts";
 
 export {
   createDurableSchedulerTool,

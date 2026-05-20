@@ -33,7 +33,7 @@ import type {
   ThreadMessagesResponse,
 } from "../../server/routes/agents.ts";
 import type { MemoryInspectResponse } from "../../server/routes/memory.ts";
-import type { ApprovalsResponse } from "../../server/routes/approvals.ts";
+import type { SignalsResponse } from "../../server/routes/signals.ts";
 import type { WorkflowVersionDto } from "../../server/routes/workflow-versions.ts";
 
 const BASE = ""; // served from same origin
@@ -190,12 +190,12 @@ export const api = {
       body: JSON.stringify({ toVersion }),
     });
   },
-  listApprovals(params: { namespace?: string; limit?: number } = {}): Promise<ApprovalsResponse> {
+  listSignals(params: { namespace?: string; limit?: number } = {}): Promise<SignalsResponse> {
     const qp = new URLSearchParams();
     if (params.namespace) qp.set("namespace", params.namespace);
     if (params.limit !== undefined) qp.set("limit", String(params.limit));
     const qs = qp.toString();
-    return req(`/api/approvals${qs ? `?${qs}` : ""}`);
+    return req(`/api/signals${qs ? `?${qs}` : ""}`);
   },
   listSchedules(
     params: {

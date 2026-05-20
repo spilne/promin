@@ -10,7 +10,7 @@ import { WorkflowDetail } from "./components/workflows/workflow-detail.tsx";
 import { AgentList } from "./components/agents/agent-list.tsx";
 import { AgentDetail } from "./components/agents/agent-detail.tsx";
 import { InstanceList } from "./components/agents/instance-list.tsx";
-import { ApprovalList } from "./components/approvals/approval-list.tsx";
+import { SignalList } from "./components/signals/signal-list.tsx";
 import { SecretsPage } from "./components/secrets/secrets-page.tsx";
 import { ToolsPage } from "./components/tools/tools-page.tsx";
 import { DagsPage } from "./components/dags/dags-page.tsx";
@@ -63,8 +63,8 @@ function renderRoute(route: string, navigate: (p: string) => void) {
   if (path === "/schedules") {
     return <ScheduleList onNavigate={navigate} />;
   }
-  if (path === "/approvals") {
-    return <ApprovalList onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)} />;
+  if (path === "/signals") {
+    return <SignalList onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)} />;
   }
   if (path === "/secrets") {
     return <SecretsPage />;

@@ -80,7 +80,7 @@ import {
   markRunSuccess,
   rerunRun,
 } from "./routes/run-extras.ts";
-import { listApprovals } from "./routes/approvals.ts";
+import { listSignals } from "./routes/signals.ts";
 import {
   completeSignalToken,
   listSignalTokensForRun,
@@ -352,7 +352,7 @@ export class ZoryaServer {
       .get("/api/runs/:id/history", getRunHistory(storage))
       .get("/api/runs/:id/children", getRunChildren(storage))
       .get("/api/runs/:id/journal/:stepName", getRunStepJournal(storage))
-      .get("/api/approvals", listApprovals(storage))
+      .get("/api/signals", listSignals(storage))
       .post("/api/runs/:id/mark-success", markRunSuccess(storage))
       .post("/api/runs/:id/mark-failed", markRunFailed(storage))
       .post(
