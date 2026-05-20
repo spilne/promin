@@ -18,7 +18,7 @@
 // ---------------------------------------------------------------------------
 
 import { useEffect, useState } from "preact/hooks";
-import { api } from "../../api/client.ts";
+import { ApiError, api } from "../../api/client.ts";
 import type { DescribeSignalTokenResponse } from "../../../server/routes/signal-tokens.ts";
 
 interface Props {
@@ -26,7 +26,7 @@ interface Props {
   bearer: string;
 }
 
-type Phase = "loading" | "ready" | "delivered" | "error";
+type Phase = "loading" | "ready" | "delivered" | "expired" | "error";
 
 export function SharedSignalPage({ tokenId, bearer }: Props) {
   const [phase, setPhase] = useState<Phase>("loading");
@@ -50,11 +50,19 @@ export function SharedSignalPage({ tokenId, bearer }: Props) {
         if (m.completedAt) {
           setResolvedAs("previously");
           setPhase("delivered");
+        } else if (new Date(m.expiresAt).getTime() <= Date.now()) {
+          // Pre-empt the 408 the complete endpoint would return — the user
+          // shouldn't have to click Approve only to discover the link's dead.
+          setPhase("expired");
         } else {
           setPhase("ready");
         }
       })
       .catch((err: unknown) => {
+        if (err instanceof ApiError && err.status === 408) {
+          setPhase("expired");
+          return;
+        }
         setError(err instanceof Error ? err.message : String(err));
         setPhase("error");
       });
@@ -69,7 +77,13 @@ export function SharedSignalPage({ tokenId, bearer }: Props) {
       setResolvedAs(result.alreadyCompleted ? "previously" : "just now");
       setPhase("delivered");
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // Race: link was live at describe-time, expired before the click landed.
+      // Surface as the same expired state instead of a raw HTTP error.
+      if (err instanceof ApiError && err.status === 408) {
+        setPhase("expired");
+      } else {
+        setError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       setBusy(false);
     }
@@ -181,6 +195,25 @@ export function SharedSignalPage({ tokenId, bearer }: Props) {
           <div class="text-xs text-base-content/60">
             Workflow <span class="font-mono">{meta.workflowName}</span> has been notified. You can
             close this page.
+          </div>
+        </div>
+      )}
+
+      {phase === "expired" && (
+        <div class="card bg-base-100 shadow p-4 space-y-3">
+          <div class="text-warning font-medium">This share link has expired.</div>
+          <div class="text-xs text-base-content/60 space-y-1">
+            {meta && (
+              <div>
+                Signal <span class="font-mono">{meta.signalName}</span> on workflow{" "}
+                <span class="font-mono">{meta.workflowName}</span> was reachable through this link
+                until {new Date(meta.expiresAt).toLocaleString()}.
+              </div>
+            )}
+            <div>
+              Ask the operator who shared it to mint a fresh link — each share link has a fixed TTL
+              and can't be extended.
+            </div>
           </div>
         </div>
       )}
