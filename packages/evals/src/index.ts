@@ -89,3 +89,13 @@ export { compareRuns } from "./lib/storage/compare-runs.ts";
 
 // CI gate.
 export { assertEvalSummary, type EvalAssertion } from "./lib/assert-eval-summary.ts";
+
+// Live scoring — score an agent's own production runs, sampled.
+export type { LiveScore, LiveScoreSink, LiveScoringConfig } from "./lib/live/types.ts";
+export { liveScored } from "./lib/live/live-scored.ts";
+export { metricsLiveSink, inMemoryLiveSink, InMemoryLiveScoreSink } from "./lib/live/sinks.ts";
+export {
+  liveScoredFromRecipe,
+  type LiveScoringRecipeConfig,
+  type LiveScoredFromRecipeDeps,
+} from "./lib/live/from-recipe.ts";
