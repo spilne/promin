@@ -32,6 +32,14 @@ export interface SignalDto {
   isApproval: boolean;
   /** ISO timestamp when the suspending step started; null when unknown. */
   suspendedAt: string | null;
+  /**
+   * JSON Schema snapshot the suspend point waited on (from
+   * `ctx.validatedSignal` / `ctx.approval`). Undefined for plain
+   * `ctx.signal` callers — UI falls back to the generic JSON editor in
+   * that case. The dashboard form renderer + the public share page key
+   * schema-driven form rendering off this field.
+   */
+  jsonSchema?: unknown;
   /** Parsed `<callId>` portion of an `approve:` signal. */
   toolCallId?: string;
   /** Tool name (only populated when the agent loop wrote it). */
@@ -65,6 +73,7 @@ export function listSignals(storage: WorkflowStorage) {
       signalName: p.signalName,
       isApproval: p.isApproval,
       suspendedAt: p.suspendedAt ? p.suspendedAt.toISOString() : null,
+      ...(p.signalJsonSchema !== undefined && { jsonSchema: p.signalJsonSchema }),
       ...(p.toolCallId !== undefined && { toolCallId: p.toolCallId }),
       ...(p.toolName !== undefined && { toolName: p.toolName }),
       ...(p.toolInput !== undefined && { toolInput: p.toolInput }),

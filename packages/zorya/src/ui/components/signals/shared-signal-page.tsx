@@ -20,6 +20,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { ApiError, api } from "../../api/client.ts";
 import type { DescribeSignalTokenResponse } from "../../../server/routes/signal-tokens.ts";
+import { SchemaForm } from "./schema-form.tsx";
 
 interface Props {
   tokenId: string;
@@ -34,6 +35,7 @@ export function SharedSignalPage({ tokenId, bearer }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [draftPayload, setDraftPayload] = useState("");
+  const [draftValue, setDraftValue] = useState<unknown>({});
   const [draftError, setDraftError] = useState<string | null>(null);
   const [resolvedAs, setResolvedAs] = useState<string | null>(null);
 
@@ -157,6 +159,28 @@ export function SharedSignalPage({ tokenId, bearer }: Props) {
                 disabled={busy}
               >
                 {busy ? "…" : "Reject"}
+              </button>
+            </div>
+          ) : meta.jsonSchema !== undefined ? (
+            // Schema-driven form — the workflow suspended via
+            // ctx.validatedSignal so we know the exact payload shape.
+            <div class="space-y-2">
+              <SchemaForm
+                schema={meta.jsonSchema}
+                value={draftValue}
+                onChange={(next) => {
+                  setDraftValue(next);
+                  if (draftError !== null) setDraftError(null);
+                }}
+                error={draftError}
+              />
+              <button
+                type="button"
+                class="btn btn-primary"
+                onClick={() => void deliver(draftValue)}
+                disabled={busy}
+              >
+                {busy ? "Delivering…" : "Deliver"}
               </button>
             </div>
           ) : (

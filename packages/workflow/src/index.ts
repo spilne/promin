@@ -284,15 +284,19 @@ export {
 
 // Zero-dep JSON-Schema-native schema builder + validator. Used by
 // `defineSignal` to type signal payloads and snapshot validation rules
-// onto pending journal entries.
+// onto suspended steps.
 //
-// `JsonSchema` (the tagged union the builder produces) is intentionally
-// NOT re-exported at the top level — there's already a separate
-// open-shape `JsonSchema` interface from `workflow-schema.ts` for
-// workflow-IR I/O annotations. Callers pass through `someSig.schema.jsonSchema`
-// (typed via `Schema<T>` structurally); deep-import from
-// `./lib/schema/builder.ts` if you ever need to name the type.
-export { s, type Schema, type OptionalSchema, type Infer } from "./lib/schema/builder.ts";
+// The builder's `JsonSchema` is exported as `SignalPayloadSchema` to
+// avoid colliding with the existing workflow-IR `JsonSchema` interface
+// (a permissive open-shape type for activity I/O annotations, not the
+// tagged union the schema builder produces).
+export {
+  s,
+  type Schema,
+  type OptionalSchema,
+  type JsonSchema as SignalPayloadSchema,
+  type Infer,
+} from "./lib/schema/builder.ts";
 export { validate, type ValidationError, type ValidationResult } from "./lib/schema/validator.ts";
 
 // First-class signal types — `defineSignal` returns an addressable

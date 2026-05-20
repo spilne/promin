@@ -31,6 +31,13 @@ export interface PendingSignal {
    */
   readonly isApproval: boolean;
   readonly suspendedAt: Date | undefined;
+  /**
+   * JSON Schema snapshot the suspend point waited on, populated when the
+   * workflow used `ctx.validatedSignal` / `ctx.approval`. Plain `ctx.signal`
+   * callers leave this undefined (server falls back to pass-through). The
+   * dashboard form renderer keys schema-driven UI off this field.
+   */
+  readonly signalJsonSchema?: unknown;
   /** Tool-call id parsed out of an `approve:<id>` signal — undefined otherwise. */
   readonly toolCallId?: string;
   /** Tool name (only set for `approve:` signals where the agent loop wrote it). */
@@ -68,14 +75,19 @@ export async function listPendingSignals(
 
   const out: PendingSignal[] = [];
   for (const wf of suspended) {
-    let waiting: { stepName: string; signalName: string; startedAt: Date | undefined } | null =
-      null;
+    let waiting: {
+      stepName: string;
+      signalName: string;
+      startedAt: Date | undefined;
+      signalJsonSchema: unknown;
+    } | null = null;
     for (const step of Object.values(wf.steps)) {
       if (step.status === "waiting_for_signal" && step.signalName !== undefined) {
         waiting = {
           stepName: step.stepName,
           signalName: step.signalName,
           startedAt: step.startedAt,
+          signalJsonSchema: step.signalJsonSchema,
         };
         break;
       }
@@ -101,6 +113,9 @@ export async function listPendingSignals(
       signalName: waiting.signalName,
       isApproval: parsed !== null,
       suspendedAt: waiting.startedAt,
+      ...(waiting.signalJsonSchema !== undefined && {
+        signalJsonSchema: waiting.signalJsonSchema,
+      }),
       ...(parsed && { toolCallId: parsed.toolCallId }),
       ...(meta.toolName !== undefined && { toolName: meta.toolName }),
       ...(meta.toolInput !== undefined && { toolInput: meta.toolInput }),

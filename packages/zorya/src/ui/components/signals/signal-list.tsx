@@ -31,6 +31,7 @@ import { formatRelative } from "../../lib/format.ts";
 import type { MintTokenResponse } from "../../../server/routes/signal-tokens.ts";
 import { Page } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
+import { SchemaForm } from "./schema-form.tsx";
 
 interface ShareCtx {
   readonly workflowId: string;
@@ -50,9 +51,14 @@ export function SignalList({ onOpenRun }: Props) {
     15_000,
   );
   const [busyKey, setBusyKey] = useState<string | null>(null);
-  // Which row's inline Deliver editor is open + its draft state.
+  // Which row's inline Deliver editor is open + its draft state. `draftValue`
+  // holds the structured value when the row has a schema (SchemaForm path);
+  // `draftPayload` holds the raw JSON when no schema is present (fallback
+  // textarea). `draftError` is set when JSON parsing fails or the server
+  // returns a validation error.
   const [deliveringKey, setDeliveringKey] = useState<string | null>(null);
   const [draftPayload, setDraftPayload] = useState("");
+  const [draftValue, setDraftValue] = useState<unknown>(undefined);
   const [draftError, setDraftError] = useState<string | null>(null);
   // Share-link modal — non-null when a token has been minted for one row.
   const [shareToken, setShareToken] = useState<MintTokenResponse | null>(null);
@@ -80,15 +86,20 @@ export function SignalList({ onOpenRun }: Props) {
     }
   }
 
-  function openDeliver(key: string): void {
+  function openDeliver(key: string, hasSchema: boolean): void {
     setDeliveringKey(key);
     setDraftPayload("");
+    // Schema-driven forms start with an empty object (object schemas) so
+    // first-keystroke renders correctly; JSON fallback starts with empty
+    // string. The renderer fills in fields from `draftValue` on each render.
+    setDraftValue(hasSchema ? {} : undefined);
     setDraftError(null);
   }
 
   function cancelDeliver(): void {
     setDeliveringKey(null);
     setDraftPayload("");
+    setDraftValue(undefined);
     setDraftError(null);
   }
 
@@ -114,10 +125,18 @@ export function SignalList({ onOpenRun }: Props) {
     setShareCtx(null);
   }
 
-  async function submitDeliver(workflowId: string, signalName: string): Promise<void> {
+  async function submitDeliver(
+    workflowId: string,
+    signalName: string,
+    hasSchema: boolean,
+  ): Promise<void> {
     const key = workflowId + signalName;
     let parsed: unknown;
-    if (draftPayload.trim() === "") {
+    if (hasSchema) {
+      // Schema-driven form — the SchemaForm component already keeps
+      // `draftValue` parsed; no string parsing needed.
+      parsed = draftValue;
+    } else if (draftPayload.trim() === "") {
       parsed = null;
     } else {
       try {
@@ -135,7 +154,13 @@ export function SignalList({ onOpenRun }: Props) {
       cancelDeliver();
       refresh();
     } catch (err) {
-      toast(`Signal delivery failed: ${err instanceof Error ? err.message : String(err)}`, {
+      // Surface server-side schema_mismatch inline (under the editor) so
+      // the user can fix and resubmit without losing their draft.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("schema_mismatch")) {
+        setDraftError(msg);
+      }
+      toast(`Signal delivery failed: ${msg}`, {
         variant: "error",
       });
     } finally {
@@ -262,9 +287,17 @@ export function SignalList({ onOpenRun }: Props) {
                         <button
                           type="button"
                           class="btn btn-xs btn-ghost"
-                          onClick={() => (editorOpen ? cancelDeliver() : openDeliver(key))}
+                          onClick={() =>
+                            editorOpen
+                              ? cancelDeliver()
+                              : openDeliver(key, s.jsonSchema !== undefined)
+                          }
                           disabled={busy}
-                          title="Deliver a custom JSON payload to this signal"
+                          title={
+                            s.jsonSchema !== undefined
+                              ? "Deliver a typed payload (schema-driven form)"
+                              : "Deliver a custom JSON payload to this signal"
+                          }
                         >
                           {editorOpen ? "Close" : "Deliver…"}
                         </button>
@@ -299,21 +332,40 @@ export function SignalList({ onOpenRun }: Props) {
                       <td colSpan={5}>
                         <div class="p-3 space-y-2">
                           <div class="text-xs text-base-content/60">
-                            Deliver to <span class="font-mono">{s.signalName}</span> — payload must
-                            be valid JSON. Blank means <code>null</code>.
+                            Deliver to <span class="font-mono">{s.signalName}</span>
+                            {s.jsonSchema === undefined && (
+                              <>
+                                {" "}
+                                — payload must be valid JSON. Blank means <code>null</code>.
+                              </>
+                            )}
                           </div>
-                          <textarea
-                            class="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
-                            rows={4}
-                            value={draftPayload}
-                            placeholder={exampleHint}
-                            onInput={(e) => {
-                              setDraftPayload((e.target as HTMLTextAreaElement).value);
-                              if (draftError !== null) setDraftError(null);
-                            }}
-                          />
-                          {draftError !== null && (
-                            <div class="alert alert-error text-xs">{draftError}</div>
+                          {s.jsonSchema !== undefined ? (
+                            <SchemaForm
+                              schema={s.jsonSchema}
+                              value={draftValue}
+                              onChange={(next) => {
+                                setDraftValue(next);
+                                if (draftError !== null) setDraftError(null);
+                              }}
+                              error={draftError}
+                            />
+                          ) : (
+                            <>
+                              <textarea
+                                class="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
+                                rows={4}
+                                value={draftPayload}
+                                placeholder={exampleHint}
+                                onInput={(e) => {
+                                  setDraftPayload((e.target as HTMLTextAreaElement).value);
+                                  if (draftError !== null) setDraftError(null);
+                                }}
+                              />
+                              {draftError !== null && (
+                                <div class="alert alert-error text-xs">{draftError}</div>
+                              )}
+                            </>
                           )}
                           <div class="flex justify-end gap-2">
                             <button
@@ -327,7 +379,13 @@ export function SignalList({ onOpenRun }: Props) {
                             <button
                               type="button"
                               class="btn btn-xs btn-primary"
-                              onClick={() => void submitDeliver(s.workflowId, s.signalName)}
+                              onClick={() =>
+                                void submitDeliver(
+                                  s.workflowId,
+                                  s.signalName,
+                                  s.jsonSchema !== undefined,
+                                )
+                              }
                               disabled={busy}
                             >
                               {busy ? "Delivering…" : "Deliver"}

@@ -14,7 +14,8 @@
 // ---------------------------------------------------------------------------
 
 import { parseApprovalSignal } from "@promin/agent";
-import type { SignalTokenRecord, WorkflowStorage } from "@promin/workflow";
+import type { SignalPayloadSchema, SignalTokenRecord, WorkflowStorage } from "@promin/workflow";
+import { validate } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 
 export interface SignalTokenRoutesDeps {
@@ -60,6 +61,13 @@ export interface DescribeSignalTokenResponse {
   completedAt: string | null;
   /** True when the workflow is still suspended on this signal. */
   pending: boolean;
+  /**
+   * JSON Schema snapshot the suspend point waited on, from
+   * `ctx.validatedSignal` / `ctx.approval`. Undefined for plain
+   * `ctx.signal` suspends — the share page falls back to a JSON editor
+   * in that case. The schema-driven form renderer keys off presence.
+   */
+  jsonSchema?: unknown;
 }
 
 export interface SignalTokenDto {
@@ -165,6 +173,33 @@ export function completeSignalToken(deps: SignalTokenRoutesDeps) {
       return jsonError(400, "missing_value");
     }
 
+    // Schema check — when the suspend point was set up via
+    // `ctx.validatedSignal` / `ctx.approval`, the StepState carries a
+    // JSON Schema snapshot. Reject mismatching payloads here so a webhook
+    // or share-link recipient can't smuggle the wrong shape through. Plain
+    // `ctx.signal` suspends leave the schema undefined → pass-through.
+    const wf = await deps.storage.loadWorkflow(token.workflowId);
+    if (wf) {
+      for (const step of Object.values(wf.steps)) {
+        if (step.status === "waiting_for_signal" && step.signalName === token.signalName) {
+          const schema = step.signalJsonSchema;
+          if (schema !== undefined && schema !== null) {
+            const result = validate(body.value, schema as SignalPayloadSchema);
+            if (!result.ok) {
+              return jsonError(
+                400,
+                "schema_mismatch",
+                result.errors
+                  .map((e) => (e.path === "" ? e.message : `${e.path}: ${e.message}`))
+                  .join("; "),
+              );
+            }
+          }
+          break;
+        }
+      }
+    }
+
     const claim = await deps.storage.markSignalTokenCompleted({
       tokenId,
       value: body.value,
@@ -217,11 +252,15 @@ export function describeSignalToken(deps: SignalTokenRoutesDeps) {
     // Pending check — the workflow could have resumed via another delivery
     // between mint and now. Surface that explicitly so the share page renders
     // an "already handled" state instead of letting the user click Approve
-    // into a workflow that's already finished.
+    // into a workflow that's already finished. Pull the schema snapshot off
+    // the same step while we're walking — populates the share form when
+    // the suspend used ctx.validatedSignal / ctx.approval.
     let pending = false;
+    let jsonSchema: unknown;
     for (const step of Object.values(wf.steps)) {
       if (step.status === "waiting_for_signal" && step.signalName === token.signalName) {
         pending = true;
+        jsonSchema = step.signalJsonSchema;
         break;
       }
     }
@@ -234,6 +273,7 @@ export function describeSignalToken(deps: SignalTokenRoutesDeps) {
       expiresAt: token.expiresAt.toISOString(),
       completedAt: token.completedAt ? token.completedAt.toISOString() : null,
       pending,
+      ...(jsonSchema !== undefined && { jsonSchema }),
     };
     return json(200, body);
   };

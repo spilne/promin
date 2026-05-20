@@ -6,7 +6,14 @@
 // and `../services/trigger-service.ts`.
 // ---------------------------------------------------------------------------
 
-import type { Workflow, WorkflowOrderBy, WorkflowStatus, WorkflowStorage } from "@promin/workflow";
+import type {
+  SignalPayloadSchema,
+  Workflow,
+  WorkflowOrderBy,
+  WorkflowStatus,
+  WorkflowStorage,
+} from "@promin/workflow";
+import { validate } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 import type {
   RunListQuery,
@@ -152,6 +159,20 @@ export function sendSignal(deps: RunRoutesDeps) {
     if (!id) return jsonError(400, "missing_id");
     const body = await readJson<SignalRequest>(req);
     if (!body || !body.signalName) return jsonError(400, "missing_signal_name");
+
+    // Schema check — when the suspend point was set up via
+    // `ctx.validatedSignal` / `ctx.approval`, the schema snapshot lives on
+    // the StepState. Reject mismatching payloads before delivery so the
+    // workflow never resumes with junk. Plain `ctx.signal` suspends carry
+    // no schema; the validator's absence-path is pass-through.
+    const mismatch = await checkSignalSchema(
+      deps.storage,
+      id,
+      body.signalName,
+      body.payload ?? null,
+    );
+    if (mismatch) return mismatch;
+
     try {
       await deps.storage.deliverSignal(id, body.signalName, body.payload ?? null);
       return json(200, { ok: true });
@@ -159,6 +180,39 @@ export function sendSignal(deps: RunRoutesDeps) {
       return jsonError(400, "signal_failed", err instanceof Error ? err.message : String(err));
     }
   };
+}
+
+/**
+ * Walk the workflow's steps for one waiting on this signal name; if its
+ * StepState carries a `signalJsonSchema`, validate the payload against it
+ * and return a 400 response on mismatch. Returns null when there's no
+ * schema (pass-through) or no matching step (let deliverSignal handle —
+ * it queues the value for whenever the suspend lands).
+ */
+async function checkSignalSchema(
+  storage: RunRoutesDeps["storage"],
+  workflowId: string,
+  signalName: string,
+  payload: unknown,
+): Promise<Response | null> {
+  const wf = await storage.loadWorkflow(workflowId);
+  if (!wf) return null;
+  for (const step of Object.values(wf.steps)) {
+    if (step.status === "waiting_for_signal" && step.signalName === signalName) {
+      const schema = step.signalJsonSchema;
+      if (schema === undefined || schema === null) return null;
+      const result = validate(payload, schema as SignalPayloadSchema);
+      if (!result.ok) {
+        return jsonError(400, "schema_mismatch", formatValidationErrors(result.errors));
+      }
+      return null;
+    }
+  }
+  return null;
+}
+
+function formatValidationErrors(errors: ReadonlyArray<{ path: string; message: string }>): string {
+  return errors.map((e) => (e.path === "" ? e.message : `${e.path}: ${e.message}`)).join("; ");
 }
 
 function parseIntParam(s: string | null): number | undefined {
