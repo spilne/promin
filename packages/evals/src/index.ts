@@ -29,10 +29,26 @@ export type {
 export { inlineDataset } from "./lib/datasets/inline.ts";
 export { jsonlDataset } from "./lib/datasets/jsonl.ts";
 
-// Scorers.
+// Scorers — deterministic.
 export { exactMatch } from "./lib/scorers/exact-match.ts";
 export { regexMatch, type RegexMatchConfig } from "./lib/scorers/regex-match.ts";
 export { jsonMatch, type JsonMatchConfig } from "./lib/scorers/json-match.ts";
+
+// Scorers — judgement.
+export {
+  createLLMScorer,
+  type JudgePrompt,
+  type LLMScorerConfig,
+  type ParsedJudgement,
+} from "./lib/scorers/llm-scorer.ts";
+export { llmJudge, type LLMJudgeConfig } from "./lib/scorers/llm-judge.ts";
+export {
+  toolTrajectory,
+  toolCallNames,
+  type ToolTrajectoryConfig,
+  type TrajectoryMode,
+} from "./lib/scorers/tool-trajectory.ts";
+export { budget, type BudgetConfig } from "./lib/scorers/budget.ts";
 
 // Targets.
 export { toEvalOutput, type ToEvalOutputOpts } from "./lib/targets/to-eval-output.ts";
