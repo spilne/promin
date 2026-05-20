@@ -400,9 +400,6 @@ function AgentMetaBadges({
       {agent.metadata.capabilities.map((c) => (
         <span class="badge badge-sm badge-info badge-outline">{c}</span>
       ))}
-      {agent.metadata.tags.map((t) => (
-        <span class="badge badge-sm badge-ghost">{t}</span>
-      ))}
       {missingTools && missingTools.length > 0 && (
         <span
           class="badge badge-sm badge-warning"
