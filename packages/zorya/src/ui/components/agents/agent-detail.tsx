@@ -143,16 +143,6 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
                 Edit
               </button>
             )}
-            {agent && activeThread && (
-              <button
-                class="btn btn-sm btn-ghost"
-                onClick={() => setTraceOpen(true)}
-                aria-label="Run trace"
-                title="Show this thread's execution as a turn-tree (tool calls, results, failures)"
-              >
-                Trace
-              </button>
-            )}
             {agent && (
               <button
                 class="btn btn-sm btn-ghost"
@@ -227,6 +217,7 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
               tenant={tenant}
               onTurnComplete={refreshThreads}
               onInspect={() => setInspectorOpen(true)}
+              onTrace={() => setTraceOpen(true)}
               onArchived={() => {
                 setActiveThread(null);
                 refreshThreads();
@@ -752,6 +743,7 @@ export function ChatPane({
   tenant,
   onTurnComplete,
   onInspect,
+  onTrace,
   onArchived,
 }: {
   agentId: string;
@@ -759,6 +751,8 @@ export function ChatPane({
   tenant: Tenant;
   onTurnComplete: () => void;
   onInspect: () => void;
+  /** Optional — when absent, the Trace button is hidden (e.g. draft-test modal). */
+  onTrace?: () => void;
   onArchived: () => void;
 }) {
   const {
@@ -960,20 +954,32 @@ export function ChatPane({
         <span class="font-mono text-sm truncate" title={threadId}>
           {threadId}
         </span>
-        <div class="flex gap-1 shrink-0">
+        <div class="flex items-center gap-1 shrink-0">
+          {/* Inspection lenses — both are per-thread, complementary views. */}
+          {onTrace && (
+            <button
+              class="btn btn-xs btn-ghost"
+              onClick={onTrace}
+              title="Show this thread's execution as a turn-tree (tool calls, results, failures)"
+            >
+              Trace
+            </button>
+          )}
+          <button
+            class="btn btn-xs btn-ghost"
+            onClick={onInspect}
+            title="Inspect resolved prompt, namespace/resource/thread cascade, working memory, facts, episodes — what the agent saw"
+          >
+            ⌬ Context
+          </button>
+          <span class="border-l border-base-content/20 h-4 mx-1" aria-hidden />
+          {/* Thread actions. */}
           <button
             class="btn btn-xs btn-ghost"
             onClick={() => setSchedulesOpen(true)}
             title="Schedules created by this thread — view + cancel cron / interval triggers the agent set up"
           >
             ⏱ Schedules
-          </button>
-          <button
-            class="btn btn-xs btn-ghost"
-            onClick={onInspect}
-            title="Inspect resolved prompt, namespace/resource/thread cascade, working memory, facts, episodes"
-          >
-            ⌬ Debug
           </button>
           <button class="btn btn-xs btn-ghost" onClick={() => refreshMessages()} title="Refresh">
             ↻
