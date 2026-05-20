@@ -1,49 +1,90 @@
 // ---------------------------------------------------------------------------
-// Agent config drawer — read-only view of the registered recipe.
+// Agent ⚙ Manage drawer — tabbed surface for everything you do to a recipe.
 //
-// Shows what's stored in the AgentRegistry for this agent: identity
-// (id / version / timestamps / description), model, system prompt, tool
-// list, metadata (capabilities / tags), recipe-level runtime knobs
-// (autoCompact / autoDistill / contextBudget — when the recipe overrides
-// the host's defaults), and any free-form `backend.extra`.
+// Tabs (icon · label):
+//   ◎ View      — read-only recipe overview (identity, model, tools, ...)
+//   ✎ Edit      — opens the dedicated AgentEditDrawer (Phase 2: embed)
+//   ⧉ Clone     — opens the dedicated AgentCloneDialog (Phase 2: embed)
+//   ✚ Secrets   — embedded AgentSecretsPanel (no flicker)
+//   ≡ Versions  — opens the dedicated AgentVersionsModal (Phase 2: embed)
+//   ↓ Export TS — embedded snippet view + copy (no flicker)
 //
-// Runtime knobs that live ONLY on the host's resolver (`when` predicates,
-// estimate callbacks, the consolidator factory) aren't visible here —
-// they're closures, not JSON-serialisable, and don't make sense on the
-// per-recipe surface. The merge happens inside resolveLocalAgent.
+// Phase 1 ships View / Secrets / Export embedded inline; Edit / Clone /
+// Versions still launch their standalone dedicated surfaces from the tab
+// (the embed-mode prop pattern shipped on AgentSecretsPanel is the
+// template for embedding those in a follow-up).
 // ---------------------------------------------------------------------------
 
-import { useEffect } from "preact/hooks";
+import type * as preact from "preact";
+import { useEffect, useMemo, useState } from "preact/hooks";
 import type { RegisteredAgent } from "../../../server/routes/agents.ts";
-import { Skeleton } from "../ui/skeleton.tsx";
-import { JsonBlock } from "../ui/json-block.tsx";
+import { exportRecipeAsTs } from "../../lib/export-recipe-ts.ts";
+import { toast } from "../../lib/dialogs.ts";
 import { formatRelative } from "../../lib/format.ts";
+import { JsonBlock } from "../ui/json-block.tsx";
+import { Skeleton } from "../ui/skeleton.tsx";
+import { AgentSecretsPanel } from "./agent-secrets-panel.tsx";
+
+export type ManageTab = "view" | "edit" | "clone" | "secrets" | "versions" | "export";
+
+interface TabSpec {
+  readonly key: ManageTab;
+  readonly icon: string;
+  readonly label: string;
+  readonly title: string;
+}
+
+const TABS: ReadonlyArray<TabSpec> = [
+  { key: "view", icon: "◎", label: "View", title: "Read-only recipe overview" },
+  {
+    key: "edit",
+    icon: "✎",
+    label: "Edit",
+    title: "Edit description, system prompt, model, tools, capabilities, tags",
+  },
+  { key: "clone", icon: "⧉", label: "Clone", title: "Fork this recipe into a new agent" },
+  {
+    key: "secrets",
+    icon: "✚",
+    label: "Secrets",
+    title: "Manage the BYOK key for this recipe's model.credentialRef",
+  },
+  {
+    key: "versions",
+    icon: "≡",
+    label: "Versions",
+    title: "Browse versions, side-by-side diff",
+  },
+  { key: "export", icon: "↓", label: "Export TS", title: "Export this recipe as a TS snippet" },
+];
 
 interface Props {
   agent: RegisteredAgent | undefined;
   onClose: () => void;
+  /** Tenant namespace for the embedded Secrets tab. */
+  namespaceId?: string;
+  initialTab?: ManageTab;
   /**
-   * Optional recipe-management actions. When supplied, each renders as a
-   * button in an action bar above the recipe body. Each handler is
-   * expected to close this drawer before opening its own target (so two
-   * drawers never overlap).
+   * Launch handlers for tabs whose UI isn't yet embedded inline. Each
+   * opens the dedicated standalone surface; the drawer stays open
+   * behind it so context isn't lost on close.
    */
-  onEdit?: () => void;
-  onClone?: () => void;
-  onSecrets?: () => void;
-  onVersions?: () => void;
-  onExport?: () => void;
+  onOpenEdit?: () => void;
+  onOpenClone?: () => void;
+  onOpenVersions?: () => void;
 }
 
 export function AgentConfigDrawer({
   agent,
   onClose,
-  onEdit,
-  onClone,
-  onSecrets,
-  onVersions,
-  onExport,
+  namespaceId,
+  initialTab,
+  onOpenEdit,
+  onOpenClone,
+  onOpenVersions,
 }: Props) {
+  const [tab, setTab] = useState<ManageTab>(initialTab ?? "view");
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -57,15 +98,15 @@ export function AgentConfigDrawer({
         class="fixed top-0 right-0 h-screen w-full max-w-2xl bg-base-100 shadow-2xl
                z-40 flex flex-col anim-drawer-in"
         role="dialog"
-        aria-label="Agent config"
+        aria-label="Manage agent"
       >
         <header class="flex items-start justify-between gap-2 p-4 border-b border-base-300">
           <div class="min-w-0">
-            <div class="text-xs text-base-content/50 uppercase tracking-wider">Agent config</div>
+            <div class="text-xs text-base-content/50 uppercase tracking-wider">Manage agent</div>
             <div class="font-mono text-sm truncate">{agent?.id ?? "…"}</div>
             <div class="text-[10px] text-base-content/40 mt-0.5">
-              Read-only recipe. Recipe values override host defaults; unset fields inherit from the
-              host's resolver.
+              Recipe view + actions. Recipe values override host defaults; unset fields inherit from
+              the host's resolver.
             </div>
           </div>
           <button
@@ -78,55 +119,27 @@ export function AgentConfigDrawer({
           </button>
         </header>
 
-        {(onEdit || onClone || onSecrets || onVersions || onExport) && (
-          <div class="flex flex-wrap gap-2 px-4 py-3 border-b border-base-300">
-            {onEdit && (
-              <button
-                class="btn btn-sm btn-ghost"
-                onClick={onEdit}
-                title="Edit description, system prompt, model, tools, capabilities, tags"
-              >
-                Edit
-              </button>
-            )}
-            {onClone && (
-              <button
-                class="btn btn-sm btn-ghost"
-                onClick={onClone}
-                title="Fork this recipe into a new agent you can customize"
-              >
-                Clone
-              </button>
-            )}
-            {onSecrets && (
-              <button
-                class="btn btn-sm btn-ghost"
-                onClick={onSecrets}
-                title="Set / rotate the BYOK key for this agent's model.credentialRef"
-              >
-                Secrets
-              </button>
-            )}
-            {onVersions && (
-              <button
-                class="btn btn-sm btn-ghost"
-                onClick={onVersions}
-                title="Browse versions, side-by-side diff against previous"
-              >
-                Versions
-              </button>
-            )}
-            {onExport && (
-              <button
-                class="btn btn-sm btn-ghost"
-                onClick={onExport}
-                title="Export this recipe as a TS snippet for VCS-tracked deployment"
-              >
-                Export TS
-              </button>
-            )}
-          </div>
-        )}
+        <div
+          class="flex flex-wrap gap-0.5 px-2 py-2 border-b border-base-300"
+          role="tablist"
+          aria-label="Manage agent tabs"
+        >
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              role="tab"
+              aria-selected={tab === t.key}
+              class={`btn btn-sm gap-1 ${
+                tab === t.key ? "btn-primary btn-outline" : "btn-ghost text-base-content/70"
+              }`}
+              onClick={() => setTab(t.key)}
+              title={t.title}
+            >
+              <span aria-hidden>{t.icon}</span> {t.label}
+            </button>
+          ))}
+        </div>
 
         <div class="flex-1 overflow-y-auto p-4 space-y-4">
           {!agent ? (
@@ -135,12 +148,104 @@ export function AgentConfigDrawer({
               <Skeleton w="w-3/4" h="h-4" />
               <Skeleton w="w-1/2" h="h-4" />
             </div>
-          ) : (
+          ) : tab === "view" ? (
             <RecipeBody agent={agent} />
+          ) : tab === "secrets" ? (
+            <AgentSecretsPanel source={agent} namespaceId={namespaceId} onClose={onClose} embed />
+          ) : tab === "export" ? (
+            <ExportTsBody agent={agent} />
+          ) : tab === "edit" ? (
+            <ActionCard
+              title="Edit recipe"
+              description="Open the full editor — description, system prompt, model, tools, capabilities, tags. (Inline embed coming in a follow-up.)"
+              actionLabel="Open editor"
+              disabled={onOpenEdit === undefined}
+              onAction={() => onOpenEdit?.()}
+            />
+          ) : tab === "clone" ? (
+            <ActionCard
+              title="Clone recipe"
+              description="Fork this recipe into a new agent under a chosen id, optionally seeding required secrets. (Inline embed coming in a follow-up.)"
+              actionLabel="Open clone dialog"
+              disabled={onOpenClone === undefined}
+              onAction={() => onOpenClone?.()}
+            />
+          ) : (
+            <ActionCard
+              title="Versions"
+              description="Browse this recipe's prior versions and view side-by-side diffs. (Inline embed coming in a follow-up.)"
+              actionLabel="Browse versions"
+              disabled={onOpenVersions === undefined}
+              onAction={() => onOpenVersions?.()}
+            />
           )}
         </div>
       </aside>
     </>
+  );
+}
+
+function ActionCard({
+  title,
+  description,
+  actionLabel,
+  onAction,
+  disabled,
+}: {
+  title: string;
+  description: string;
+  actionLabel: string;
+  onAction: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div class="space-y-3">
+      <div class="text-sm font-medium">{title}</div>
+      <div class="text-xs text-base-content/60 leading-relaxed">{description}</div>
+      <button
+        type="button"
+        class="btn btn-sm btn-primary"
+        onClick={onAction}
+        disabled={disabled === true}
+      >
+        {actionLabel}
+      </button>
+    </div>
+  );
+}
+
+function ExportTsBody({ agent }: { agent: RegisteredAgent }) {
+  const snippet = useMemo(() => exportRecipeAsTs(agent), [agent]);
+  const [copied, setCopied] = useState(false);
+
+  const copy = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(snippet);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toast("Clipboard write failed", { variant: "error" });
+    }
+  };
+
+  return (
+    <div class="space-y-3">
+      <div class="flex items-center justify-between gap-2">
+        <div class="text-xs text-base-content/60">
+          Paste into your registry-bootstrap module to round-trip this recipe to VCS.
+        </div>
+        <button
+          type="button"
+          class={`btn btn-xs ${copied ? "btn-success" : "btn-primary"}`}
+          onClick={() => void copy()}
+        >
+          {copied ? "✓ Copied" : "Copy"}
+        </button>
+      </div>
+      <pre class="text-xs font-mono p-3 overflow-auto max-h-[60vh] bg-base-200 rounded whitespace-pre">
+        {snippet}
+      </pre>
+    </div>
   );
 }
 
@@ -219,7 +324,7 @@ function RecipeBody({ agent }: { agent: RegisteredAgent }) {
           )}
           <div class="text-[10px] text-base-content/40 mt-2">
             Tool implementations are wired by the host (resolver), not stored on the recipe. Names
-            listed here must match a key in the host'&apos;s tool map.
+            listed here must match a key in the host's tool map.
           </div>
         </Section>
       )}
@@ -320,5 +425,3 @@ function KV({ k, v }: { k: string; v: preact.ComponentChildren }) {
     </div>
   );
 }
-
-import type * as preact from "preact";

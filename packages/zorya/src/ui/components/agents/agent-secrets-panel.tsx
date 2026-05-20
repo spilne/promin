@@ -20,9 +20,15 @@ interface Props {
   /** Current tenant namespace — supplied secrets default to its scope. */
   namespaceId?: string;
   onClose: () => void;
+  /**
+   * When true, render only the form body (no backdrop, no positioning, no
+   * own header). The host owns the surrounding chrome — e.g. a tab inside
+   * the agent's ⚙ Manage drawer.
+   */
+  embed?: boolean;
 }
 
-export function AgentSecretsPanel({ source, namespaceId, onClose }: Props) {
+export function AgentSecretsPanel({ source, namespaceId, onClose, embed }: Props) {
   const credentialRef =
     source.backend.type === "local" ? source.backend.model.credentialRef : undefined;
 
@@ -49,12 +55,16 @@ export function AgentSecretsPanel({ source, namespaceId, onClose }: Props) {
   const isSet = credentialRef !== undefined && (data?.keys ?? []).includes(credentialRef);
 
   useEffect(() => {
+    // Skip the global Esc handler in embed mode — the host drawer owns the
+    // close key, and intercepting it here would close the whole drawer
+    // while the user is typing into the password field.
+    if (embed) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && !busy) onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, busy]);
+  }, [onClose, busy, embed]);
 
   async function save(): Promise<void> {
     if (!credentialRef || value.length === 0 || busy) return;
@@ -89,6 +99,86 @@ export function AgentSecretsPanel({ source, namespaceId, onClose }: Props) {
     }
   }
 
+  const body =
+    credentialRef === undefined ? (
+      <div class="text-xs text-base-content/60 leading-relaxed">
+        This agent declares no <code class="font-mono">model.credentialRef</code> — it runs on the
+        host's pooled key. Set a credential reference in <strong>Edit</strong> to enable BYOK, then
+        return here to store the key.
+      </div>
+    ) : (
+      <>
+        <label class="block space-y-1">
+          <span class="text-xs text-base-content/60">Scope</span>
+          {namespaceId ? (
+            <select
+              class="select select-sm select-bordered w-full"
+              value={scopeKind}
+              onChange={(e) =>
+                setScopeKind((e.target as HTMLSelectElement).value as "namespace" | "global")
+              }
+            >
+              <option value="namespace">
+                This namespace ({namespaceId}) — isolated to your tenant
+              </option>
+              <option value="global">Global — shared across all tenants</option>
+            </select>
+          ) : (
+            <div class="text-xs text-base-content/50">Global scope.</div>
+          )}
+        </label>
+
+        <div class="flex items-center gap-2">
+          <span class="font-mono text-sm">{credentialRef}</span>
+          {loading ? (
+            <span class="badge badge-sm badge-ghost">checking…</span>
+          ) : isSet ? (
+            <span class="badge badge-sm badge-success">set</span>
+          ) : (
+            <span class="badge badge-sm badge-warning">not set</span>
+          )}
+        </div>
+
+        <label class="block space-y-1">
+          <span class="text-xs text-base-content/60">{isSet ? "Replace value" : "Set value"}</span>
+          <input
+            type="password"
+            class="input input-sm input-bordered w-full font-mono"
+            placeholder="paste the key — stored encrypted, never displayed"
+            value={value}
+            onInput={(e) => setValue((e.target as HTMLInputElement).value)}
+          />
+        </label>
+
+        {listError && <div class="alert alert-error text-xs">{listError.message}</div>}
+        {error && <div class="alert alert-error text-xs">{error}</div>}
+        {notice && <div class="alert alert-success text-xs">{notice}</div>}
+
+        <div class="flex justify-end gap-2">
+          {isSet && (
+            <button
+              class="btn btn-sm btn-ghost text-error"
+              onClick={() => void remove()}
+              disabled={busy}
+            >
+              Remove
+            </button>
+          )}
+          <button
+            class="btn btn-sm btn-primary"
+            onClick={() => void save()}
+            disabled={busy || value.length === 0}
+          >
+            {busy ? "Saving…" : isSet ? "Replace" : "Save"}
+          </button>
+        </div>
+      </>
+    );
+
+  if (embed) {
+    return <div class="space-y-4">{body}</div>;
+  }
+
   return (
     <>
       <div
@@ -111,83 +201,7 @@ export function AgentSecretsPanel({ source, namespaceId, onClose }: Props) {
             ✕
           </button>
         </div>
-
-        {credentialRef === undefined ? (
-          <div class="text-xs text-base-content/60 leading-relaxed">
-            This agent declares no <code class="font-mono">model.credentialRef</code> — it runs on
-            the host's pooled key. Set a credential reference in <strong>Edit</strong> to enable
-            BYOK, then return here to store the key.
-          </div>
-        ) : (
-          <>
-            <label class="block space-y-1">
-              <span class="text-xs text-base-content/60">Scope</span>
-              {namespaceId ? (
-                <select
-                  class="select select-sm select-bordered w-full"
-                  value={scopeKind}
-                  onChange={(e) =>
-                    setScopeKind((e.target as HTMLSelectElement).value as "namespace" | "global")
-                  }
-                >
-                  <option value="namespace">
-                    This namespace ({namespaceId}) — isolated to your tenant
-                  </option>
-                  <option value="global">Global — shared across all tenants</option>
-                </select>
-              ) : (
-                <div class="text-xs text-base-content/50">Global scope.</div>
-              )}
-            </label>
-
-            <div class="flex items-center gap-2">
-              <span class="font-mono text-sm">{credentialRef}</span>
-              {loading ? (
-                <span class="badge badge-sm badge-ghost">checking…</span>
-              ) : isSet ? (
-                <span class="badge badge-sm badge-success">set</span>
-              ) : (
-                <span class="badge badge-sm badge-warning">not set</span>
-              )}
-            </div>
-
-            <label class="block space-y-1">
-              <span class="text-xs text-base-content/60">
-                {isSet ? "Replace value" : "Set value"}
-              </span>
-              <input
-                type="password"
-                class="input input-sm input-bordered w-full font-mono"
-                placeholder="paste the key — stored encrypted, never displayed"
-                value={value}
-                onInput={(e) => setValue((e.target as HTMLInputElement).value)}
-              />
-            </label>
-
-            {listError && <div class="alert alert-error text-xs">{listError.message}</div>}
-            {error && <div class="alert alert-error text-xs">{error}</div>}
-            {notice && <div class="alert alert-success text-xs">{notice}</div>}
-
-            <div class="flex justify-end gap-2">
-              {isSet && (
-                <button
-                  class="btn btn-sm btn-ghost text-error"
-                  onClick={() => void remove()}
-                  disabled={busy}
-                >
-                  Remove
-                </button>
-              )}
-              <button
-                class="btn btn-sm btn-primary"
-                onClick={() => void save()}
-                disabled={busy || value.length === 0}
-              >
-                {busy ? "Saving…" : isSet ? "Replace" : "Save"}
-              </button>
-            </div>
-          </>
-        )}
+        {body}
       </div>
     </>
   );

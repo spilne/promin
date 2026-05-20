@@ -14,9 +14,7 @@ import { AgentConfigDrawer } from "./agent-config-drawer.tsx";
 import { AgentEditDrawer } from "./agent-edit-drawer.tsx";
 import { AgentVersionsModal } from "./agent-versions-modal.tsx";
 import { AgentCloneDialog } from "./agent-clone-dialog.tsx";
-import { AgentSecretsPanel } from "./agent-secrets-panel.tsx";
 import { AgentTraceModal } from "./agent-trace-modal.tsx";
-import { exportRecipeAsTs } from "../../lib/export-recipe-ts.ts";
 
 interface AgentDetailProps {
   id: string;
@@ -63,11 +61,9 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
-  const [exportOpen, setExportOpen] = useState(false);
   const [versionsOpen, setVersionsOpen] = useState(false);
   const [traceOpen, setTraceOpen] = useState(false);
   const [cloneOpen, setCloneOpen] = useState(false);
-  const [secretsOpen, setSecretsOpen] = useState(false);
 
   // Persist resource id + active thread (namespace already persists in
   // the global useNamespace store).
@@ -206,38 +202,14 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
         />
       )}
 
-      {secretsOpen && agent && (
-        <AgentSecretsPanel
-          source={agent}
-          namespaceId={tenant.namespaceId}
-          onClose={() => setSecretsOpen(false)}
-        />
-      )}
-
       {configOpen && (
         <AgentConfigDrawer
           agent={agent}
           onClose={() => setConfigOpen(false)}
-          onEdit={() => {
-            setConfigOpen(false);
-            setEditOpen(true);
-          }}
-          onClone={() => {
-            setConfigOpen(false);
-            setCloneOpen(true);
-          }}
-          onSecrets={() => {
-            setConfigOpen(false);
-            setSecretsOpen(true);
-          }}
-          onVersions={() => {
-            setConfigOpen(false);
-            setVersionsOpen(true);
-          }}
-          onExport={() => {
-            setConfigOpen(false);
-            setExportOpen(true);
-          }}
+          namespaceId={tenant.namespaceId}
+          onOpenEdit={() => setEditOpen(true)}
+          onOpenClone={() => setCloneOpen(true)}
+          onOpenVersions={() => setVersionsOpen(true)}
         />
       )}
       {editOpen && agent && (
@@ -257,7 +229,6 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
           }}
         />
       )}
-      {exportOpen && agent && <ExportTsModal agent={agent} onClose={() => setExportOpen(false)} />}
       {versionsOpen && agent && (
         <AgentVersionsModal
           agentId={id}
@@ -275,62 +246,6 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
         />
       )}
     </Page>
-  );
-}
-
-function ExportTsModal({ agent, onClose }: { agent: RegisteredAgent; onClose: () => void }) {
-  const snippet = useMemo(() => exportRecipeAsTs(agent), [agent]);
-  const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(snippet);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      toast("Clipboard write failed", { variant: "error" });
-    }
-  };
-
-  return (
-    <>
-      <div class="fixed inset-0 bg-black/40 z-30 anim-backdrop-in" onClick={onClose} aria-hidden />
-      <div
-        class="fixed inset-x-0 top-12 mx-auto max-w-3xl bg-base-100 rounded-lg shadow-2xl
-               z-40 flex flex-col anim-drawer-in"
-        role="dialog"
-        aria-label="Export recipe as TS"
-      >
-        <header class="flex items-start justify-between gap-2 p-4 border-b border-base-300">
-          <div class="min-w-0">
-            <div class="text-xs text-base-content/50 uppercase tracking-wider">Export TS</div>
-            <div class="font-mono text-sm truncate">
-              {agent.id}@{agent.version}
-            </div>
-            <div class="text-[10px] text-base-content/40 mt-0.5">
-              Paste into your registry-bootstrap module to round-trip this recipe to VCS.
-            </div>
-          </div>
-          <div class="flex items-center gap-2">
-            <button class={`btn btn-sm ${copied ? "btn-success" : "btn-primary"}`} onClick={copy}>
-              {copied ? "✓ Copied" : "Copy"}
-            </button>
-            <button class="btn btn-sm btn-ghost" onClick={onClose} title="Close (Esc)">
-              ✕
-            </button>
-          </div>
-        </header>
-        <pre class="text-xs font-mono p-4 overflow-auto max-h-[70vh] bg-base-200 rounded-b-lg whitespace-pre">
-          {snippet}
-        </pre>
-      </div>
-    </>
   );
 }
 
