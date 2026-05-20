@@ -28,6 +28,7 @@ export type {
 // Datasets.
 export { inlineDataset } from "./lib/datasets/inline.ts";
 export { jsonlDataset } from "./lib/datasets/jsonl.ts";
+export { traceDataset, type TraceDatasetConfig } from "./lib/datasets/trace.ts";
 
 // Scorers — deterministic.
 export { exactMatch } from "./lib/scorers/exact-match.ts";
@@ -69,3 +70,22 @@ export {
 } from "./lib/runner.ts";
 export { diffRuns } from "./lib/diff.ts";
 export { defineEval, type DefineEvalConfig, type DefinedEval } from "./lib/define-eval.ts";
+
+// Storage — persistent run history + datasets.
+export type {
+  EvalDatasetStore,
+  EvalRunQuery,
+  EvalRunStore,
+  StoredEvalRun,
+} from "./lib/storage/types.ts";
+export { composeRunId } from "./lib/storage/run-id.ts";
+export {
+  InMemoryEvalRunStore,
+  type InMemoryEvalRunStoreConfig,
+} from "./lib/storage/in-memory-run-store.ts";
+export { InMemoryEvalDatasetStore } from "./lib/storage/in-memory-dataset-store.ts";
+export { storedDataset } from "./lib/storage/stored-dataset.ts";
+export { compareRuns } from "./lib/storage/compare-runs.ts";
+
+// CI gate.
+export { assertEvalSummary, type EvalAssertion } from "./lib/assert-eval-summary.ts";
