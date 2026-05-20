@@ -117,8 +117,17 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
             </button>
             <div>
               <h2 class="text-xl font-semibold font-mono">{id}</h2>
+              {agent && agent.metadata.tags.length > 0 && (
+                <div class="flex flex-wrap gap-1 mt-1">
+                  {agent.metadata.tags.map((tag) => (
+                    <span key={tag} class="badge badge-sm badge-ghost">
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              )}
               {agent?.metadata.description && (
-                <p class="text-xs text-base-content/60">{agent.metadata.description}</p>
+                <p class="text-xs text-base-content/60 mt-1">{agent.metadata.description}</p>
               )}
             </div>
           </div>
@@ -982,7 +991,10 @@ export function ChatPane({
         </div>
       </div>
 
-      <div ref={scrollRef} class="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-[40vh]">
+      <div
+        ref={scrollRef}
+        class="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-[40vh] max-h-[calc(100vh-200px)]"
+      >
         {loading && messages.length === 0 && (
           <div class="space-y-2">
             <Skeleton w="w-3/4" h="h-4" />
