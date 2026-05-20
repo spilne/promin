@@ -2,11 +2,18 @@
 // manual-approval workflow — the long-lived demo of /approvals.
 //
 // Same shape as approval-flow (submit -> review-with-signal -> apply), but
-// keyed on a different signal name (`manual-approval`) and a different
-// workflow name. The auto-signaler in demo.ts is hardcoded to
-// `name: "approval-flow"`, so this workflow's suspensions are NOT auto-
-// resolved — each fire stays pending until an operator approves or rejects
-// it from the dashboard's /approvals view.
+// the signal name uses the `approve:` prefix that the dashboard's
+// /approvals inbox filters on (listPendingApprovals matches
+// signalName.startsWith("approve:")) — so each suspended run shows up in
+// the operator's approval inbox. The auto-signaler in demo.ts is
+// hardcoded to `name: "approval-flow"`, so this workflow's suspensions
+// are NOT auto-resolved.
+//
+// Tool metadata (toolName / toolInput) is normally written by agentLoop
+// when an agent calls a require-approval tool; this workflow bypasses
+// the agent path, so /approvals shows the row with tool "unknown" — the
+// workflow name + suspendedAt + "View run" link still work and the
+// signal can be resolved from the workflow run's Signals tab.
 //
 // Paired with the `manual-approval-hourly` schedule (see seedSchedules in
 // demo.ts) so a new pending approval appears every hour, plus one right
@@ -42,10 +49,14 @@ export const manualApprovalWorkflow = workflow<ManualApprovalInput>({
       requestId: (ctx as unknown as { prev: { requestId: number } }).prev.requestId,
     }));
 
-    // Wait for an operator to deliver the `manual-approval` signal from the
-    // dashboard. No auto-signaler targets this workflow, so the suspension
-    // is long-lived and the run shows up in /approvals as actually pending.
-    const decision = yield* ctx.signal<{ approved: boolean; by?: string }>("manual-approval");
+    // Wait on `approve:<id>` — the prefix the /approvals inbox filters on
+    // (listPendingApprovals.findSuspendedApprovalStep). No auto-signaler
+    // targets this workflow, so the suspension is long-lived and the run
+    // shows up in /approvals as actually pending. Resolve it by delivering
+    // the same signal name from the workflow run's Signals tab.
+    const decision = yield* ctx.signal<{ approved: boolean; by?: string }>(
+      `approve:demo-${previous.requestId}`,
+    );
 
     return { requestId: previous.requestId, approved: decision.approved, by: decision.by };
   })
