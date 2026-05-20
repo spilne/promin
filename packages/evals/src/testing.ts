@@ -5,3 +5,4 @@
 
 export { evalRunStoreTestSuite } from "./lib/storage/run-store-test-suite.ts";
 export { evalDatasetStoreTestSuite } from "./lib/storage/dataset-store-test-suite.ts";
+export { evalSpecRegistryTestSuite } from "./lib/spec/registry-test-suite.ts";

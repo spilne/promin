@@ -99,3 +99,24 @@ export {
   type LiveScoringRecipeConfig,
   type LiveScoredFromRecipeDeps,
 } from "./lib/live/from-recipe.ts";
+
+// Eval specs — serializable, version-keyed eval definitions.
+export {
+  DEFAULT_EVAL_SPEC_VERSION,
+  type DatasetSpec,
+  type EvalSpec,
+  type EvalSpecRegistry,
+  type RegisterEvalSpecInput,
+  type ScorerSpec,
+  type TargetSpec,
+} from "./lib/spec/types.ts";
+export {
+  resolveEvalSpec,
+  runEvalSpec,
+  type ResolveEvalSpecDeps,
+  type ResolvedEvalSpec,
+} from "./lib/spec/resolve.ts";
+export {
+  InMemoryEvalSpecRegistry,
+  type InMemoryEvalSpecRegistryConfig,
+} from "./lib/spec/in-memory-registry.ts";
