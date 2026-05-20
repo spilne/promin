@@ -22,14 +22,21 @@
 // string never crosses the bundle boundary.
 // ---------------------------------------------------------------------------
 
-import { useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import { api } from "../../api/client.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { useNamespace } from "../../hooks/use-namespace.ts";
 import { toast } from "../../lib/dialogs.ts";
 import { formatRelative } from "../../lib/format.ts";
+import type { MintTokenResponse } from "../../../server/routes/signal-tokens.ts";
 import { Page } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
+
+interface ShareCtx {
+  readonly workflowId: string;
+  readonly signalName: string;
+  readonly isApproval: boolean;
+}
 
 interface Props {
   onOpenRun: (workflowId: string) => void;
@@ -47,6 +54,10 @@ export function SignalList({ onOpenRun }: Props) {
   const [deliveringKey, setDeliveringKey] = useState<string | null>(null);
   const [draftPayload, setDraftPayload] = useState("");
   const [draftError, setDraftError] = useState<string | null>(null);
+  // Share-link modal — non-null when a token has been minted for one row.
+  const [shareToken, setShareToken] = useState<MintTokenResponse | null>(null);
+  const [shareCtx, setShareCtx] = useState<ShareCtx | null>(null);
+  const [sharingKey, setSharingKey] = useState<string | null>(null);
 
   const signals = data?.signals ?? [];
 
@@ -79,6 +90,28 @@ export function SignalList({ onOpenRun }: Props) {
     setDeliveringKey(null);
     setDraftPayload("");
     setDraftError(null);
+  }
+
+  async function shareLink(ctx: ShareCtx): Promise<void> {
+    const key = ctx.workflowId + ctx.signalName;
+    if (sharingKey !== null) return;
+    setSharingKey(key);
+    try {
+      const token = await api.mintSignalToken(ctx.workflowId, ctx.signalName);
+      setShareToken(token);
+      setShareCtx(ctx);
+    } catch (err) {
+      toast(`Could not mint share link: ${err instanceof Error ? err.message : String(err)}`, {
+        variant: "error",
+      });
+    } finally {
+      setSharingKey(null);
+    }
+  }
+
+  function closeShare(): void {
+    setShareToken(null);
+    setShareCtx(null);
   }
 
   async function submitDeliver(workflowId: string, signalName: string): Promise<void> {
@@ -132,6 +165,16 @@ export function SignalList({ onOpenRun }: Props) {
         <div class="alert alert-error text-sm mb-3">
           <span>{error.message}</span>
         </div>
+      )}
+
+      {shareToken && shareCtx && (
+        <ShareLinkModal
+          token={shareToken}
+          ctx={shareCtx}
+          onMintAgain={() => void shareLink(shareCtx)}
+          onClose={closeShare}
+          busy={sharingKey !== null}
+        />
       )}
 
       <div class="rounded-box border border-base-content/10 overflow-x-auto">
@@ -228,6 +271,21 @@ export function SignalList({ onOpenRun }: Props) {
                         <button
                           type="button"
                           class="btn btn-xs btn-ghost"
+                          onClick={() =>
+                            void shareLink({
+                              workflowId: s.workflowId,
+                              signalName: s.signalName,
+                              isApproval: s.isApproval,
+                            })
+                          }
+                          disabled={sharingKey !== null}
+                          title="Mint a bearer-token URL anyone can use to deliver this signal — for Slack / email / webhook flows"
+                        >
+                          {sharingKey === key ? "…" : "Share link"}
+                        </button>
+                        <button
+                          type="button"
+                          class="btn btn-xs btn-ghost"
                           onClick={() => onOpenRun(s.workflowId)}
                           title="View the workflow run"
                         >
@@ -295,4 +353,159 @@ function safeStringify(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function ShareLinkModal({
+  token,
+  ctx,
+  onMintAgain,
+  onClose,
+  busy,
+}: {
+  token: MintTokenResponse;
+  ctx: ShareCtx;
+  onMintAgain: () => void;
+  onClose: () => void;
+  busy: boolean;
+}) {
+  // Tick once a minute so the "Expires in …" relative time refreshes.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((n) => n + 1), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const expiresAt = new Date(token.expiresAt);
+  const expired = expiresAt.getTime() <= Date.now();
+  const url = token.url ?? `${location.origin}/api/signal-tokens/${token.tokenId}/complete`;
+  const examplePayload = ctx.isApproval
+    ? `{"approved": true, "by": "external"}`
+    : `<YOUR_JSON_PAYLOAD>`;
+  const curl =
+    `curl -X POST "${url}" \\\n` +
+    `  -H "Authorization: Bearer ${token.bearer}" \\\n` +
+    `  -H "content-type: application/json" \\\n` +
+    `  -d '{"value": ${examplePayload}}'`;
+
+  const copy = async (text: string, label: string): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast(`${label} copied.`, { variant: "success" });
+    } catch {
+      toast(`Could not copy ${label}.`, { variant: "error" });
+    }
+  };
+
+  return (
+    <>
+      <div class="fixed inset-0 bg-black/40 z-30 anim-backdrop-in" onClick={onClose} aria-hidden />
+      <div
+        class="fixed inset-x-4 top-12 mx-auto max-w-2xl bg-base-100 rounded-lg shadow-2xl z-40 p-5 space-y-4"
+        role="dialog"
+        aria-label="Share signal link"
+      >
+        <div class="flex items-start justify-between gap-2">
+          <div class="min-w-0">
+            <div class="text-xs text-base-content/50 uppercase tracking-wider">Share link</div>
+            <div class="font-mono text-sm truncate">{ctx.signalName}</div>
+            <div class="text-[10px] text-base-content/40 mt-0.5">
+              Anyone with this URL + bearer can deliver the signal.{" "}
+              {expired ? (
+                <span class="text-error">Expired.</span>
+              ) : (
+                <>
+                  Expires {formatRelative(expiresAt.toISOString())} ({expiresAt.toISOString()}).
+                </>
+              )}{" "}
+              {token.isCached && <span class="text-warning">Reused an existing token.</span>}
+            </div>
+          </div>
+          <button class="btn btn-sm btn-ghost" onClick={onClose} title="Close (Esc)">
+            ✕
+          </button>
+        </div>
+
+        <label class="block space-y-1">
+          <span class="text-xs text-base-content/60">Complete endpoint</span>
+          <div class="flex gap-1">
+            <input
+              readonly
+              class="input input-sm input-bordered w-full font-mono text-xs"
+              value={url}
+            />
+            <button
+              type="button"
+              class="btn btn-sm btn-ghost"
+              onClick={() => void copy(url, "URL")}
+            >
+              Copy
+            </button>
+          </div>
+          {token.url === null && (
+            <div class="text-[10px] text-warning">
+              Server has no <code>publicBaseUrl</code> configured; URL was built from{" "}
+              <code>location.origin</code>. Set <code>publicBaseUrl</code> in production so the link
+              works from outside the dashboard.
+            </div>
+          )}
+        </label>
+
+        <label class="block space-y-1">
+          <span class="text-xs text-base-content/60">Bearer token</span>
+          <div class="flex gap-1">
+            <input
+              readonly
+              type="password"
+              class="input input-sm input-bordered w-full font-mono text-xs"
+              value={token.bearer}
+            />
+            <button
+              type="button"
+              class="btn btn-sm btn-ghost"
+              onClick={() => void copy(token.bearer, "Bearer")}
+            >
+              Copy
+            </button>
+          </div>
+        </label>
+
+        <label class="block space-y-1">
+          <span class="text-xs text-base-content/60">One-line curl</span>
+          <pre class="text-[11px] font-mono bg-base-200 rounded p-2 overflow-x-auto whitespace-pre">
+            {curl}
+          </pre>
+          <button
+            type="button"
+            class="btn btn-sm btn-primary"
+            onClick={() => void copy(curl, "curl command")}
+          >
+            Copy curl
+          </button>
+        </label>
+
+        <div class="flex justify-between gap-2 pt-2 border-t border-base-300">
+          <button
+            type="button"
+            class="btn btn-sm btn-ghost"
+            onClick={onMintAgain}
+            disabled={busy}
+            title="Mint a fresh token — replaces this one in the modal (the prior token stays valid until it expires)"
+          >
+            {busy ? "Minting…" : "Mint another"}
+          </button>
+          <button type="button" class="btn btn-sm btn-ghost" onClick={onClose}>
+            Done
+          </button>
+        </div>
+      </div>
+    </>
+  );
 }

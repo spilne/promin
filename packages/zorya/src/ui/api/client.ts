@@ -34,6 +34,7 @@ import type {
 } from "../../server/routes/agents.ts";
 import type { MemoryInspectResponse } from "../../server/routes/memory.ts";
 import type { SignalsResponse } from "../../server/routes/signals.ts";
+import type { MintTokenResponse } from "../../server/routes/signal-tokens.ts";
 import type { WorkflowVersionDto } from "../../server/routes/workflow-versions.ts";
 
 const BASE = ""; // served from same origin
@@ -204,6 +205,28 @@ export const api = {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ signalName, payload }),
     });
+  },
+  /**
+   * Mint a public bearer token that lets a non-dashboard user deliver the
+   * named signal — surfaces in /signals as the Share-link affordance.
+   * Default TTL is 24 hours; tags are free-form labels for ops filtering.
+   */
+  mintSignalToken(
+    workflowId: string,
+    signalName: string,
+    opts: { expiresInMs?: number; tags?: ReadonlyArray<string> } = {},
+  ): Promise<MintTokenResponse> {
+    return req(
+      `/api/runs/${encodeURIComponent(workflowId)}/signals/${encodeURIComponent(signalName)}/token`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          expiresInMs: opts.expiresInMs ?? 24 * 60 * 60 * 1000,
+          ...(opts.tags !== undefined && { tags: [...opts.tags] }),
+        }),
+      },
+    );
   },
   listSchedules(
     params: {
