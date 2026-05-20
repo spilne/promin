@@ -127,6 +127,12 @@ export const workflowSteps = pgTable(
     wakeAt: timestamp("wake_at", { withTimezone: true }),
     signalName: text("signal_name"),
     signalTimeoutAt: timestamp("signal_timeout_at", { withTimezone: true }),
+    // JSON Schema snapshot the suspend point waited on. Written by
+    // `ctx.validatedSignal` / `ctx.approval` from `sig.schema.jsonSchema`;
+    // read by the server's signal-delivery path to validate inbound
+    // payloads before calling `deliverSignal`. Null for plain
+    // `ctx.signal()` callers (pass-through, no validation).
+    signalJsonSchema: jsonb("signal_json_schema"),
     // Step-kind-specific audit data (e.g. `.match()` writes the chosen
     // case). Opaque JSON; queryable with `metadata->>'<key>'`. Null for
     // steps that don't produce audit data.

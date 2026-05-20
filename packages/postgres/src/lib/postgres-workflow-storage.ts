@@ -171,6 +171,7 @@ export class PostgresWorkflowStorage
       wakeAt: row.wakeAt ?? undefined,
       signalName: row.signalName ?? undefined,
       signalTimeoutAt: row.signalTimeoutAt ?? undefined,
+      signalJsonSchema: row.signalJsonSchema ?? undefined,
       metadata: (row.metadata as Record<string, unknown> | null) ?? undefined,
     };
   }
@@ -736,6 +737,9 @@ export class PostgresWorkflowStorage
       wakeAt: (stepUpdate.wakeAt as Date) ?? undefined,
       signalName: (stepUpdate.signalName as string) ?? undefined,
       signalTimeoutAt: (stepUpdate.signalTimeoutAt as Date) ?? undefined,
+      // Schema snapshot for `ctx.validatedSignal` / `ctx.approval` suspends.
+      // Null for plain `ctx.signal()` — those keep the pass-through path.
+      signalJsonSchema: stepUpdate.signalJsonSchema ?? undefined,
     };
 
     await this.db

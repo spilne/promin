@@ -491,7 +491,10 @@ export function agentAction(
               ? yield* ctx.activity(`approval-${call.name}-${step}-${call.id}`, () =>
                   config.onApprovalRequired!(call),
                 )
-              : yield* ctx.signal<ApprovalDecision>(`approve:${call.id}`);
+              : // ctx.approval(id) wires the canonical ApprovalSchema snapshot
+                // onto the suspend point so the server's signal-delivery path
+                // can validate inbound payloads. Same `approve:<id>` wire name.
+                yield* ctx.approval(call.id);
             bus?.emit({
               type: "approval.decision",
               turn: 0,

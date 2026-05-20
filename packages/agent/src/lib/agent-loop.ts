@@ -935,7 +935,13 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                       logRequested();
                       return { toolName: call.name, toolInput: call.input };
                     });
-                    decision = yield* ctx.signal<ApprovalDecision>(`approve:${call.id}`);
+                    // ctx.approval(id) waits on `approve:<id>` (same wire name
+                    // the dashboard /signals Approve/Reject shortcut and
+                    // SignalScanner already use) and snapshots the canonical
+                    // ApprovalSchema onto the suspend point so the server can
+                    // validate inbound payloads. Drop-in for the previous raw
+                    // ctx.signal call.
+                    decision = yield* ctx.approval(call.id);
                     yield* ctx.activity(`lc-${turn}-approval-${call.id}-end`, async () => {
                       transitionLifecycle(
                         decision.approved ? "approved" : "rejected",

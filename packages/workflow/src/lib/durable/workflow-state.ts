@@ -158,6 +158,19 @@ export interface StepState {
   readonly wakeAt?: Date;
   readonly signalName?: string;
   readonly signalTimeoutAt?: Date;
+  /**
+   * JSON Schema snapshot the suspend point waited on, written by
+   * `ctx.validatedSignal(sig)` / `ctx.approval(id)` from
+   * `sig.schema.jsonSchema`. The server reads this before delivering
+   * any inbound payload and rejects 400 if the payload doesn't match
+   * (POST /api/runs/:id/signal + the public signal-token complete
+   * route). Stays `undefined` for plain `ctx.signal()` callers — those
+   * keep the existing pass-through semantics. Persisted on the suspend
+   * record (not on the journal entry) so a SignalType definition
+   * change between suspend and delivery doesn't retro-break workflows
+   * already waiting.
+   */
+  readonly signalJsonSchema?: unknown;
   readonly compensationStatus?: "pending" | "compensated" | "compensation_failed";
   readonly compensationError?: string;
   readonly compensatedAt?: Date;

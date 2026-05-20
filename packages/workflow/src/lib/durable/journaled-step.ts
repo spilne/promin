@@ -44,6 +44,11 @@ import {
 } from "./journaled-body-scope.ts";
 import { registerQueryHandler } from "./query-registry.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
+import {
+  approvalSignal,
+  type ApprovalDecision,
+  type SignalType,
+} from "../signals/define-signal.ts";
 
 // ---------------------------------------------------------------------------
 // Ctx types
@@ -257,6 +262,45 @@ export interface JournaledContext<Input, Prev> {
     ActivityYield,
     { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: "timeout" },
     { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: "timeout" }
+  >;
+
+  /**
+   * Typed signal wait — same suspend/resume semantics as `ctx.signal`, but
+   * keyed by a `SignalType` artifact (`defineSignal({ name, schema })`).
+   * The JSON Schema snapshot is persisted on the suspended step so the
+   * server can validate any future delivery against the shape the workflow
+   * actually waited on — even if the SignalType definition later evolves.
+   *
+   * The return type is the schema's payload type (via the `SignalType<T>`
+   * phantom), so callers get a narrowed result without an `as` cast.
+   */
+  validatedSignal<T>(sig: SignalType<T>): Generator<ActivityYield, T, T>;
+  validatedSignal<T>(
+    sig: SignalType<T>,
+    options: { readonly timeout: number | Date },
+  ): Generator<
+    ActivityYield,
+    { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: "timeout" },
+    { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: "timeout" }
+  >;
+
+  /**
+   * Approval preset — sugar over `validatedSignal(approvalSignal(id))`. The
+   * wire-format signal name is `approve:<id>` (matches the existing
+   * convention SignalScanner and the dashboard `/signals` Approve/Reject
+   * shortcut already use). Returns the canonical `ApprovalDecision`
+   * `{ approved, by?, reason?, metadata? }`.
+   */
+  approval(id: string): Generator<ActivityYield, ApprovalDecision, ApprovalDecision>;
+  approval(
+    id: string,
+    options: { readonly timeout: number | Date },
+  ): Generator<
+    ActivityYield,
+    | { readonly ok: true; readonly value: ApprovalDecision }
+    | { readonly ok: false; readonly error: "timeout" },
+    | { readonly ok: true; readonly value: ApprovalDecision }
+    | { readonly ok: false; readonly error: "timeout" }
   >;
 
   /**
@@ -1009,11 +1053,22 @@ function makeCtx<Input, Prev>(params: {
 
   function* signalImpl<T>(
     signalName: string,
-    options?: { readonly timeout: number | Date },
+    options?: {
+      readonly timeout?: number | Date;
+      /**
+       * Internal — JSON Schema snapshot for the suspended signal. Persisted
+       * onto `step.metadata.signalJsonSchema` so server-side delivery can
+       * validate payloads against the shape this suspend point waited on,
+       * even if the SignalType definition later evolves. Not exposed on the
+       * public `ctx.signal` overload — `ctx.validatedSignal` / `ctx.approval`
+       * pass it in.
+       */
+      readonly jsonSchema?: unknown;
+    },
   ): Generator<ActivityYield, T | TimedSignalOutcome<T>, unknown> {
     const suspendStorage = requireSuspendStorage("signal");
     const activityIndex = indexRef.next++;
-    const hasTimeout = options !== undefined;
+    const hasTimeout = options?.timeout !== undefined;
 
     const promise = (async (): Promise<T | TimedSignalOutcome<T>> => {
       const recorded = journalByKey.get(journalKey(activityIndex, ""));
@@ -1072,7 +1127,7 @@ function makeCtx<Input, Prev>(params: {
       // would drift on every replay).
       const wakeAt = recorded?.wakeAt
         ? recorded.wakeAt
-        : options
+        : options?.timeout !== undefined
           ? options.timeout instanceof Date
             ? options.timeout
             : new Date(Date.now() + options.timeout)
@@ -1108,6 +1163,15 @@ function makeCtx<Input, Prev>(params: {
           status: "waiting_for_signal",
           signalName,
           ...(wakeAt && { signalTimeoutAt: wakeAt }),
+          // Schema snapshot — a dedicated field on `StepState`. The server's
+          // delivery path (POST /api/runs/:id/signal + the public token
+          // complete route) reads `step.signalJsonSchema` and validates
+          // inbound payloads against it before calling deliverSignal. Lives
+          // on the suspend record (not the journal entry) so it survives a
+          // SignalType definition change between suspend and delivery.
+          ...(options?.jsonSchema !== undefined && {
+            signalJsonSchema: options.jsonSchema,
+          }),
         });
       }
       throw new WorkflowSuspendedError({
@@ -1121,6 +1185,59 @@ function makeCtx<Input, Prev>(params: {
     })();
 
     return (yield { _tag: "Activity", name: signalName, promise }) as T | TimedSignalOutcome<T>;
+  }
+
+  // -------------------------------------------------------------------------
+  // ctx.validatedSignal — typed wrapper around signalImpl
+  //
+  // Same suspend/resume mechanics, but keyed by a SignalType artifact. The
+  // schema's `jsonSchema` is passed through to signalImpl, which writes it
+  // onto `step.metadata.signalJsonSchema` so the server can validate any
+  // future delivery against the shape this suspend point waited on.
+  // -------------------------------------------------------------------------
+
+  // Overloaded declaration so the interface's two-overload shape matches
+  // (TS won't accept a single union-return impl assigned to overloaded
+  // interface signatures unless the impl is declared with overloads).
+  function validatedSignalImpl<T>(sig: SignalType<T>): Generator<ActivityYield, T, T>;
+  function validatedSignalImpl<T>(
+    sig: SignalType<T>,
+    options: { readonly timeout: number | Date },
+  ): Generator<ActivityYield, TimedSignalOutcome<T>, TimedSignalOutcome<T>>;
+  function validatedSignalImpl<T>(
+    sig: SignalType<T>,
+    options?: { readonly timeout: number | Date },
+  ): Generator<ActivityYield, T | TimedSignalOutcome<T>, unknown> {
+    return signalImpl<T>(sig.name, {
+      ...(options?.timeout !== undefined && { timeout: options.timeout }),
+      jsonSchema: sig.schema.jsonSchema,
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // ctx.approval — preset sugar over validatedSignal
+  //
+  // Wire-format signal name is `approve:<id>` (matches the convention
+  // agentLoop, SignalScanner, and the dashboard /signals Approve/Reject
+  // shortcut already use). Returns the canonical ApprovalDecision.
+  // -------------------------------------------------------------------------
+
+  function approvalImpl(id: string): Generator<ActivityYield, ApprovalDecision, ApprovalDecision>;
+  function approvalImpl(
+    id: string,
+    options: { readonly timeout: number | Date },
+  ): Generator<
+    ActivityYield,
+    TimedSignalOutcome<ApprovalDecision>,
+    TimedSignalOutcome<ApprovalDecision>
+  >;
+  function approvalImpl(
+    id: string,
+    options?: { readonly timeout: number | Date },
+  ): Generator<ActivityYield, ApprovalDecision | TimedSignalOutcome<ApprovalDecision>, unknown> {
+    return options !== undefined
+      ? validatedSignalImpl(approvalSignal(id), options)
+      : validatedSignalImpl(approvalSignal(id));
   }
 
   // -------------------------------------------------------------------------
@@ -1517,6 +1634,8 @@ function makeCtx<Input, Prev>(params: {
     activity,
     sleep,
     signal: signalImpl,
+    validatedSignal: validatedSignalImpl,
+    approval: approvalImpl,
     patched,
     parallel,
     child: childImpl,
