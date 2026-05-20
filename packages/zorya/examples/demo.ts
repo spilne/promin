@@ -762,6 +762,12 @@ function inputFor(name: string): unknown {
         requestId: Math.floor(Math.random() * 10_000),
         requester: `user-${Math.floor(Math.random() * 100)}`,
       };
+    case "manual-approval":
+      return {
+        requestId: Math.floor(Math.random() * 10_000),
+        requester: "scheduler",
+        description: "Hourly manual-approval demo — open /approvals and resolve",
+      };
     case "research":
       return {
         topic: ["durable-execution", "distributed-systems", "saga-patterns", "event-sourcing"][
@@ -899,6 +905,19 @@ async function seedSchedules() {
     intervalMs: 75_000,
     enabled: true,
     metadata: { workflowName: "approval-flow" },
+  });
+  // Hourly manual approval — the auto-signaler ignores this workflow (it
+  // targets name="approval-flow") so each fire stays pending until an
+  // operator resolves it from /approvals. The seedSchedules kickstart
+  // below also fires it once at boot so the page isn't empty out of the
+  // gate on a fresh demo.
+  await schedulerStorage.upsertSchedule({
+    id: "manual-approval-hourly",
+    name: "Manual approval (hourly, awaits operator)",
+    cron: "0 * * * *",
+    timezone: "UTC",
+    enabled: true,
+    metadata: { workflowName: "manual-approval" },
   });
   await schedulerStorage.upsertSchedule({
     id: "research-every-90s",
