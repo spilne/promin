@@ -190,6 +190,8 @@ export type {
 } from "./skills/resolve-skill-catalog.ts";
 export { createLoadSkillTool, LOAD_SKILL_TOOL_NAME } from "./skills/load-skill-tool.ts";
 export type { LoadSkillToolConfig, LoadSkillOutput } from "./skills/load-skill-tool.ts";
+export { parseMarkdownSkill, slugify } from "./skills/parse-markdown-skill.ts";
+export type { ParseMarkdownSkillParams } from "./skills/parse-markdown-skill.ts";
 
 // Cursor backend — drives the Cursor CLI (`agent -p`) over its
 // stream-json NDJSON output. Two surfaces share the same session engine:

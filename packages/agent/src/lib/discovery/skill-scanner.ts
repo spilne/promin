@@ -11,11 +11,15 @@
 // upsert by default, opt-in `sync` mode to delete entries not in the scan.
 // ---------------------------------------------------------------------------
 
-import { readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, readdir, stat } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { type Clock, SystemClock } from "@promin/core";
+import { parseMarkdownSkill } from "../skills/parse-markdown-skill.ts";
 import type { RegisterSkillInput, SkillRegistry } from "../skills/types.ts";
+
+/** File extensions a bundled skill might ship that we intentionally ignore. */
+const EXECUTABLE_EXTENSIONS = [".py", ".sh", ".rb", ".js", ".ts", ".mjs", ".bin", ".pl"];
 
 export interface SkillScannerOptions {
   /** File extensions to consider. Default: `.ts, .tsx, .js, .mjs`. */
@@ -101,14 +105,96 @@ export class SkillScanner {
         continue;
       }
       if (!entry.isFile()) continue;
-      if (!this.extensions.some((ext) => name.endsWith(ext))) continue;
       if (!this.filter(full)) continue;
+
+      // Markdown skills (SKILL.md or any *.md with frontmatter). Handled
+      // before the module-extension gate so .md files are picked up even
+      // though they aren't importable modules.
+      if (name.endsWith(".md")) {
+        await this.loadMarkdownSkill(full, name, entries, skills, sources, warnings);
+        continue;
+      }
+
+      if (!this.extensions.some((ext) => name.endsWith(ext))) continue;
       if (name.includes(".test.") || name.includes(".bench.") || name.endsWith(".d.ts")) {
         continue;
       }
 
       await this.importModule(full, skills, sources, warnings);
     }
+  }
+
+  /**
+   * Load a markdown skill (`SKILL.md` or a bare `*.md` with frontmatter).
+   * Files without frontmatter (e.g. README.md) are silently skipped — only
+   * the body is consumed, never bundled scripts. When a `SKILL.md` ships
+   * sibling executables, a warning notes they were ignored.
+   */
+  private async loadMarkdownSkill(
+    absPath: string,
+    fileName: string,
+    siblings: ReadonlyArray<{ name: string; isFile(): boolean; isDirectory(): boolean }>,
+    skills: RegisterSkillInput[],
+    sources: Record<string, string>,
+    warnings: string[],
+  ): Promise<void> {
+    let text: string;
+    try {
+      text = await readFile(absPath, "utf8");
+    } catch (err) {
+      warnings.push(`failed to read ${absPath}: ${asMessage(err)}`);
+      return;
+    }
+    // `SKILL.md` → id falls back to the containing directory name; a bare
+    // `foo.md` → falls back to `foo`.
+    const fallbackId =
+      fileName.toLowerCase() === "skill.md"
+        ? basename(absPath.slice(0, absPath.length - fileName.length - 1))
+        : fileName.slice(0, -3);
+    const parsed = parseMarkdownSkill({ text, fallbackId });
+    if (parsed === null) return; // no frontmatter → not a skill
+    if ("warning" in parsed) {
+      warnings.push(`${absPath}: ${parsed.warning}`);
+      return;
+    }
+    // Instruction-only boundary: note (and ignore) any bundled executables
+    // shipped beside a SKILL.md so the operator knows they weren't run.
+    if (fileName.toLowerCase() === "skill.md") {
+      const bundled = siblings.filter(
+        (e) =>
+          (e.isDirectory() && e.name === "scripts") ||
+          (e.isFile() && EXECUTABLE_EXTENSIONS.some((ext) => e.name.endsWith(ext))),
+      );
+      if (bundled.length > 0) {
+        warnings.push(
+          `skill "${parsed.skill.id}" ships bundled files (${bundled
+            .map((e) => e.name)
+            .join(", ")}) — ignored; skills are instruction-only`,
+        );
+      }
+    }
+    this.recordSkill(parsed.skill, absPath, skills, sources, warnings);
+  }
+
+  /** Add a discovered skill, warning + last-wins on a duplicate id. */
+  private recordSkill(
+    candidate: RegisterSkillInput,
+    absPath: string,
+    skills: RegisterSkillInput[],
+    sources: Record<string, string>,
+    warnings: string[],
+  ): void {
+    const existing = sources[candidate.id];
+    if (existing && existing !== absPath) {
+      warnings.push(`duplicate skill id "${candidate.id}": ${existing} vs ${absPath} — last wins`);
+      const i = skills.findIndex((s) => s.id === candidate.id);
+      if (i >= 0) skills[i] = candidate;
+      else skills.push(candidate);
+    } else {
+      skills.push(candidate);
+    }
+    sources[candidate.id] = absPath;
+    this.onSkill?.(candidate, absPath);
   }
 
   private async importModule(
@@ -143,19 +229,7 @@ export class SkillScanner {
       const candidates = Array.isArray(value) ? value : [value];
       for (const candidate of candidates) {
         if (!isSkillInput(candidate)) continue;
-        const existing = sources[candidate.id];
-        if (existing && existing !== absPath) {
-          warnings.push(
-            `duplicate skill id "${candidate.id}": ${existing} vs ${absPath} — last wins`,
-          );
-          const i = skills.findIndex((s) => s.id === candidate.id);
-          if (i >= 0) skills[i] = candidate;
-          else skills.push(candidate);
-        } else {
-          skills.push(candidate);
-        }
-        sources[candidate.id] = absPath;
-        this.onSkill?.(candidate, absPath);
+        this.recordSkill(candidate, absPath, skills, sources, warnings);
       }
     }
   }
@@ -163,19 +237,15 @@ export class SkillScanner {
 
 function isSkillInput(v: unknown): v is RegisterSkillInput {
   if (v === null || typeof v !== "object") return false;
-  const o = v as {
-    id?: unknown;
-    description?: unknown;
-    whenToUse?: unknown;
-    body?: unknown;
-  };
+  const o = v as { id?: unknown; description?: unknown; whenToUse?: unknown; body?: unknown };
+  // whenToUse is optional (the markdown convention folds it into
+  // description) — require only id + description + body.
+  if (o.whenToUse !== undefined && typeof o.whenToUse !== "string") return false;
   return (
     typeof o.id === "string" &&
     o.id.length > 0 &&
     typeof o.description === "string" &&
     o.description.length > 0 &&
-    typeof o.whenToUse === "string" &&
-    o.whenToUse.length > 0 &&
     typeof o.body === "string" &&
     o.body.length > 0
   );

@@ -46,7 +46,9 @@ export class InMemorySkillRegistry implements SkillRegistry {
       id: input.id,
       version,
       description: input.description,
-      whenToUse: input.whenToUse,
+      // Fall back to description when an author (e.g. a SKILL.md) folds the
+      // trigger into the description rather than stating it separately.
+      whenToUse: input.whenToUse ?? input.description,
       body: input.body,
       metadata: mergeSkillMetadata(input.metadata),
       createdAt: existing?.createdAt ?? now,

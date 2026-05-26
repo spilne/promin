@@ -87,7 +87,13 @@ export interface RegisterSkillInput {
   /** Defaults to `"v1"` when omitted. */
   readonly version?: string;
   readonly description: string;
-  readonly whenToUse: string;
+  /**
+   * When the model should reach for this skill. Optional: the markdown
+   * ecosystem (SKILL.md) folds "when to use" into a single `description`,
+   * so a skill may omit this — the store falls back to `description`. When
+   * authored explicitly it's the more specific trigger the catalog shows.
+   */
+  readonly whenToUse?: string;
   readonly body: string;
   readonly metadata?: Partial<SkillMetadata>;
 }

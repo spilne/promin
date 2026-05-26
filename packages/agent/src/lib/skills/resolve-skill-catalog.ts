@@ -94,9 +94,12 @@ export async function resolveSkillCatalog(
  */
 export function buildSkillCatalogPrompt(entries: ReadonlyArray<ResolvedSkillEntry>): string {
   if (entries.length === 0) return "";
-  const lines = entries.map(
-    (e) => `- \`${e.id}\` (${e.version}): ${e.description} Use when: ${e.whenToUse}`,
-  );
+  const lines = entries.map((e) => {
+    // A SKILL.md-style skill folds the trigger into its description, so
+    // whenToUse == description — don't print "Use when:" twice.
+    const trigger = e.whenToUse && e.whenToUse !== e.description ? ` Use when: ${e.whenToUse}` : "";
+    return `- \`${e.id}\` (${e.version}): ${e.description}${trigger}`;
+  });
   return [
     "## Skills",
     "",
