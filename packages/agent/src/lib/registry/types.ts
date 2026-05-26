@@ -115,6 +115,19 @@ export interface LocalAgentBackend {
    * in-process tools).
    */
   readonly mcpServers?: ReadonlyArray<import("../mcp/types.ts").McpServerConfig>;
+  /**
+   * Catalog of skills this agent may load on demand. Each ref pins a skill
+   * `(id, version?)` from the `SkillRegistry`. At resolve time the host
+   * resolves the catalog (see `resolveSkillCatalog`), injects each skill's
+   * `description` + `whenToUse` into the system prompt, and auto-attaches a
+   * `loadSkill` tool the model calls to pull a full body into context.
+   *
+   * Pinned per recipe: changing this list (or cutting a new recipe version)
+   * is the supported way to change an agent's catalog — the change surfaces
+   * on the next turn since the system prompt is rebuilt from live config.
+   * Leave unset for an agent with no skills.
+   */
+  readonly skills?: ReadonlyArray<import("../skills/types.ts").SkillRef>;
   /** Per-turn step cap. Optional, runtime default applies when unset. */
   readonly maxStepsPerTurn?: number;
   /** Max user turns per session before the loop terminates. */

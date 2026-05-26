@@ -30,6 +30,12 @@ import type {
   LocalAgentBackend,
   RegisteredAgent,
 } from "./types.ts";
+import type { SkillRegistry } from "../skills/types.ts";
+import {
+  buildSkillCatalogPrompt,
+  type ResolvedSkillEntry,
+} from "../skills/resolve-skill-catalog.ts";
+import { LOAD_SKILL_TOOL_NAME, createLoadSkillTool } from "../skills/load-skill-tool.ts";
 
 /** Caller-supplied runtime injectables. */
 export interface ResolveLocalAgentDeps {
@@ -109,6 +115,20 @@ export interface ResolveLocalAgentDeps {
    * opted into the network surface.
    */
   readonly network?: import("../network/runtime.ts").NetworkRuntimeDeps;
+  /**
+   * Skill registry the auto-attached `loadSkill` tool reads bodies from.
+   * Required for skills to work: a recipe's `backend.skills` is ignored
+   * unless both this and `skillCatalog` are supplied.
+   */
+  readonly skills?: SkillRegistry;
+  /**
+   * Pre-resolved skill catalog for this recipe — the async output of
+   * `resolveSkillCatalog`, sourced before calling this (sync) resolver,
+   * exactly like `apiKey` via `resolveCredentialRef`. When present and
+   * non-empty, its `description` + `whenToUse` are injected into the system
+   * prompt and `loadSkill` is auto-attached (bound to this catalog).
+   */
+  readonly skillCatalog?: ReadonlyArray<ResolvedSkillEntry>;
 }
 
 /**
@@ -126,6 +146,25 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
   const backend: LocalAgentBackend = agent.backend;
 
   const tools = pickTools(backend.tools, deps.tools, deps.onUnknownTool ?? "throw");
+
+  // Skills: when the recipe declares a catalog AND the host pre-resolved it
+  // (deps.skillCatalog, via resolveSkillCatalog) we (a) append the catalog
+  // block — description + whenToUse only, never bodies — to the system
+  // prompt, and (b) auto-attach `loadSkill` bound to the catalog + registry
+  // so the model can pull a body into context on demand. The system prompt
+  // is rebuilt from this on every replay (it isn't journaled), so editing
+  // the recipe's catalog surfaces on the next turn; bodies stay out of the
+  // prompt and travel only through the journaled loadSkill result.
+  const catalog = deps.skillCatalog ?? [];
+  const catalogBlock = buildSkillCatalogPrompt(catalog);
+  const systemPrompt =
+    catalogBlock && backend.systemPrompt
+      ? `${backend.systemPrompt}\n\n${catalogBlock}`
+      : ((catalogBlock || backend.systemPrompt) ?? undefined);
+  if (catalog.length > 0 && deps.skills && !(LOAD_SKILL_TOOL_NAME in tools)) {
+    tools[LOAD_SKILL_TOOL_NAME] = createLoadSkillTool({ registry: deps.skills, catalog });
+  }
+
   // BYOK: deps.apiKey carries a pre-resolved credential — typically
   // sourced via `resolveCredentialRef()` (this module) before calling
   // resolveLocalAgent. Sync path; secrets-storage I/O happens in the
@@ -145,7 +184,7 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
       name: agent.id,
       llm,
       tools,
-      systemPrompt: backend.systemPrompt ?? undefined,
+      systemPrompt,
       maxStepsPerTurn: backend.maxStepsPerTurn,
       maxTurns: backend.maxTurns,
     },

@@ -163,6 +163,34 @@ export type {
 export { createFileModelCatalog } from "./registry/file-model-catalog.ts";
 export type { FileModelCatalogConfig } from "./registry/file-model-catalog.ts";
 
+// SkillRegistry — versioned instruction-block store. Sibling of
+// AgentRegistry: an agent recipe references a catalog of skills, the
+// resolver injects their description + whenToUse into the system prompt,
+// and the model pulls a full body into context on demand via loadSkill.
+export type {
+  SkillRegistry,
+  RegisteredSkill,
+  RegisterSkillInput,
+  SkillMetadata,
+  SkillRef,
+  ListSkillsParams,
+} from "./skills/types.ts";
+export { DEFAULT_SKILL_VERSION, DEFAULT_SKILL_METADATA } from "./skills/types.ts";
+export {
+  InMemorySkillRegistry,
+  mergeSkillMetadata,
+  matchesSkillFilter,
+  sortSkills,
+} from "./skills/in-memory-skill-registry.ts";
+export type { InMemorySkillRegistryConfig } from "./skills/in-memory-skill-registry.ts";
+export { resolveSkillCatalog, buildSkillCatalogPrompt } from "./skills/resolve-skill-catalog.ts";
+export type {
+  ResolvedSkillEntry,
+  ResolveSkillCatalogParams,
+} from "./skills/resolve-skill-catalog.ts";
+export { createLoadSkillTool, LOAD_SKILL_TOOL_NAME } from "./skills/load-skill-tool.ts";
+export type { LoadSkillToolConfig, LoadSkillOutput } from "./skills/load-skill-tool.ts";
+
 // Cursor backend — drives the Cursor CLI (`agent -p`) over its
 // stream-json NDJSON output. Two surfaces share the same session engine:
 // the registry-resolved `CursorAgent` (for whole-conversation routing)
@@ -272,6 +300,22 @@ export type {
   AgentScanLoopTick,
   AgentScanLoopHandle,
 } from "./discovery/agent-scanner.ts";
+
+// Discovery — auto-scan skill manifests from a folder + reconcile into a SkillRegistry.
+export {
+  SkillScanner,
+  applyDiscoveredSkills,
+  startSkillScanLoop,
+} from "./discovery/skill-scanner.ts";
+export type {
+  SkillScannerOptions,
+  SkillScanResult,
+  ApplyDiscoveredSkillsOptions,
+  ApplyDiscoveredSkillsResult,
+  SkillScanLoopOptions,
+  SkillScanLoopTick,
+  SkillScanLoopHandle,
+} from "./discovery/skill-scanner.ts";
 
 // ThreadLeaseStore — coordination primitive for horizontally-scaled
 // agent runtimes. AgentTurnGate exposes strict-mode policy on top.

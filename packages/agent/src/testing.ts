@@ -1,6 +1,7 @@
 export { memoryIndexTestSuite } from "./lib/memory-index-test-suite.ts";
 export { memoryStoreTestSuite } from "./lib/memory/memory-store-test-suite.ts";
 export { agentRegistryTestSuite } from "./lib/registry/agent-registry-test-suite.ts";
+export { skillRegistryTestSuite } from "./lib/skills/skill-registry-test-suite.ts";
 export { agentInstanceRegistryTestSuite } from "./lib/instance/agent-instance-registry-test-suite.ts";
 export { dagRegistryTestSuite } from "./lib/dag/dag-registry-test-suite.ts";
 export { leaseStoreTestSuite, type LeaseStoreFactory } from "./lib/lease/lease-store-test-suite.ts";
