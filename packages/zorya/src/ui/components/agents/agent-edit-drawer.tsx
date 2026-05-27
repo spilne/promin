@@ -15,6 +15,7 @@ import { useEffect, useMemo, useState } from "preact/hooks";
 import { api, type ModelCatalogEntryDto, type ToolCatalogEntryDto } from "../../api/client.ts";
 import type { RegisteredAgent } from "../../../server/routes/agents.ts";
 import type { SkillCatalogEntry } from "../../../server/routes/agent-catalog.ts";
+import { systemToolsFor, SystemToolsSection } from "./system-tools.tsx";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { DraftTestModal } from "./agent-draft-test-modal.tsx";
 import type { Tenant } from "./agent-detail.tsx";
@@ -406,6 +407,15 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
               skills={catalogSkills}
               selected={selectedSkills}
               onChange={setSelectedSkills}
+            />
+          )}
+
+          {isLocal && (
+            <SystemToolsSection
+              tools={systemToolsFor({
+                skillCount: selectedSkills.size,
+                hasNetwork: agent.backend.type === "local" && agent.backend.network !== undefined,
+              })}
             />
           )}
 

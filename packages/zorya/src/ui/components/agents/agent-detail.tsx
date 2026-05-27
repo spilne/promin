@@ -12,6 +12,7 @@ import { Markdown } from "../../lib/markdown.tsx";
 import { MemoryInspector } from "./memory-inspector.tsx";
 import { AgentConfigDrawer } from "./agent-config-drawer.tsx";
 import { AgentTraceModal } from "./agent-trace-modal.tsx";
+import { systemToolsFor, SystemToolChips } from "./system-tools.tsx";
 
 interface AgentDetailProps {
   id: string;
@@ -110,6 +111,16 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
               {agent && (
                 <div class="mt-1">
                   <AgentMetaBadges agent={agent} missingTools={missingTools} />
+                </div>
+              )}
+              {agent && agent.backend.type === "local" && (
+                <div class="mt-1">
+                  <SystemToolChips
+                    tools={systemToolsFor({
+                      skillCount: agent.backend.skills?.length ?? 0,
+                      hasNetwork: agent.backend.network !== undefined,
+                    })}
+                  />
                 </div>
               )}
               {agent?.metadata.description && (
