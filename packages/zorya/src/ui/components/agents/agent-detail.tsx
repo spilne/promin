@@ -249,6 +249,16 @@ function AgentMetaBadges({
       {agent.metadata.tags.map((t) => (
         <span class="badge badge-sm badge-ghost">{t}</span>
       ))}
+      {agent.backend.type === "local" &&
+        agent.backend.skills !== undefined &&
+        agent.backend.skills.length > 0 && (
+          <span
+            class="badge badge-sm badge-secondary badge-outline"
+            title={`Loadable skills: ${agent.backend.skills.map((s) => s.id).join(", ")}`}
+          >
+            🧩 {agent.backend.skills.length} skill{agent.backend.skills.length > 1 ? "s" : ""}
+          </span>
+        )}
       {missingTools && missingTools.length > 0 && (
         <span
           class="badge badge-sm badge-warning"

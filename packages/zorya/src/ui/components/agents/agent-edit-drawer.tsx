@@ -14,6 +14,7 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { api, type ModelCatalogEntryDto, type ToolCatalogEntryDto } from "../../api/client.ts";
 import type { RegisteredAgent } from "../../../server/routes/agents.ts";
+import type { SkillCatalogEntry } from "../../../server/routes/agent-catalog.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { DraftTestModal } from "./agent-draft-test-modal.tsx";
 import type { Tenant } from "./agent-detail.tsx";
@@ -96,6 +97,11 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
   const [selectedTools, setSelectedTools] = useState<ReadonlySet<string>>(
     new Set(isLocal ? agent.backend.tools : []),
   );
+  // Skill catalog selection (local backends only). Held as a set of skill
+  // ids; versions are pinned at resolve time, so the recipe stores `{id}`.
+  const [selectedSkills, setSelectedSkills] = useState<ReadonlySet<string>>(
+    new Set(isLocal ? (agent.backend.skills ?? []).map((s) => s.id) : []),
+  );
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -109,6 +115,8 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
   const models = useMemo(() => modelsData?.models ?? [], [modelsData]);
   const { data: toolsData } = useFetch(() => api.listCatalogTools(), [], 0);
   const tools = useMemo(() => toolsData?.tools ?? [], [toolsData]);
+  const { data: skillsData } = useFetch(() => api.listCatalogSkills(), [], 0);
+  const catalogSkills = useMemo(() => skillsData?.skills ?? [], [skillsData]);
 
   useEffect(() => {
     if (embed) return; // host drawer owns close
@@ -154,8 +162,13 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
       autoCompact: _stripAutoCompact,
       autoDistill: _stripAutoDistill,
       contextBudget: _stripContextBudget,
+      skills: _stripSkills,
       ...backendBase
     } = agent.backend;
+    // Empty selection → omit `skills` entirely so the recipe stays clean.
+    const skillRefs = Array.from(selectedSkills)
+      .sort()
+      .map((id) => ({ id }));
     const backend = {
       ...backendBase,
       systemPrompt: systemPrompt.trim() || null,
@@ -165,6 +178,7 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
         ...(trimmedCred && { credentialRef: trimmedCred }),
       },
       tools: Array.from(selectedTools).sort(),
+      ...(skillRefs.length > 0 ? { skills: skillRefs } : {}),
       ...(steps !== undefined ? { maxStepsPerTurn: steps } : {}),
       ...(turns !== undefined ? { maxTurns: turns } : {}),
       ...(autoCompactValue !== undefined ? { autoCompact: autoCompactValue } : {}),
@@ -385,6 +399,14 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
 
           {isLocal && (
             <ToolPicker tools={tools} selected={selectedTools} onChange={setSelectedTools} />
+          )}
+
+          {isLocal && (
+            <SkillPicker
+              skills={catalogSkills}
+              selected={selectedSkills}
+              onChange={setSelectedSkills}
+            />
           )}
 
           <label class="form-control">
@@ -961,6 +983,171 @@ function ToolPicker({ tools, selected, onChange }: ToolPickerProps) {
                     {t.description && (
                       <div class="text-[10px] text-base-content/50 truncate mt-0.5">
                         {t.description}
+                      </div>
+                    )}
+                  </div>
+                </label>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+interface SkillPickerProps {
+  skills: ReadonlyArray<SkillCatalogEntry>;
+  selected: ReadonlySet<string>;
+  onChange: (next: ReadonlySet<string>) => void;
+}
+
+// Mirrors ToolPicker for the skill catalog. Skills are instruction blocks
+// the agent can load on demand (loadSkill); checking one adds its id to the
+// recipe's `backend.skills`. No source/secrets/memory axes — skills are
+// plain instructions — so the row shows description + "use when" + tags.
+function SkillPicker({ skills, selected, onChange }: SkillPickerProps) {
+  const [query, setQuery] = useState("");
+  const [showOnlySelected, setShowOnlySelected] = useState(false);
+
+  const catalogById = useMemo(() => {
+    const m = new Map<string, SkillCatalogEntry>();
+    for (const s of skills) m.set(s.id, s);
+    return m;
+  }, [skills]);
+
+  // Skills pinned on the recipe but not in the live catalog (deleted, or a
+  // not-yet-registered ref) — surfaced so operators can clear them.
+  const brokenRefs = useMemo(
+    () =>
+      Array.from(selected)
+        .filter((id) => !catalogById.has(id))
+        .sort(),
+    [selected, catalogById],
+  );
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return skills
+      .filter((s) => {
+        if (showOnlySelected && !selected.has(s.id)) return false;
+        if (!q) return true;
+        return (
+          s.id.toLowerCase().includes(q) ||
+          s.description.toLowerCase().includes(q) ||
+          s.whenToUse.toLowerCase().includes(q)
+        );
+      })
+      .sort((a, b) => {
+        const aSel = selected.has(a.id) ? 0 : 1;
+        const bSel = selected.has(b.id) ? 0 : 1;
+        if (aSel !== bSel) return aSel - bSel;
+        if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+        return a.id.localeCompare(b.id);
+      });
+  }, [skills, query, showOnlySelected, selected]);
+
+  const toggle = (id: string) => {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    onChange(next);
+  };
+
+  return (
+    <div class="form-control">
+      <div class="flex items-center justify-between mb-1">
+        <span class="text-xs text-base-content/60 uppercase tracking-wider">
+          Skills
+          <span class="ml-2 text-[10px] text-base-content/40 normal-case tracking-normal">
+            {selected.size} selected · {skills.length} available
+          </span>
+        </span>
+        {selected.size > 0 && (
+          <button
+            type="button"
+            class="text-[10px] text-base-content/50 hover:text-base-content underline"
+            onClick={() => onChange(new Set())}
+          >
+            Clear all
+          </button>
+        )}
+      </div>
+
+      {brokenRefs.length > 0 && (
+        <div class="alert alert-warning py-2 mb-2 text-xs">
+          <span class="font-semibold">
+            ⚠ {brokenRefs.length} skill{brokenRefs.length === 1 ? "" : "s"} not in catalog:
+          </span>
+          <div class="flex flex-wrap gap-1 mt-1">
+            {brokenRefs.map((id) => (
+              <button
+                type="button"
+                class="badge badge-sm badge-warning gap-1 cursor-pointer"
+                title="Click to remove from recipe"
+                onClick={() => toggle(id)}
+              >
+                {id} <span>✕</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div class="flex items-center gap-1 mb-2">
+        <input
+          class="input input-bordered input-xs flex-1 font-mono"
+          placeholder="Search skills…"
+          value={query}
+          onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
+        />
+        <button
+          type="button"
+          class={`btn btn-xs ${showOnlySelected ? "btn-primary" : "btn-ghost"}`}
+          title="Show only currently-selected skills"
+          onClick={() => setShowOnlySelected((v) => !v)}
+        >
+          {showOnlySelected ? "✓ selected" : "selected"}
+        </button>
+      </div>
+
+      <div class="border border-base-300 rounded max-h-64 overflow-y-auto">
+        {skills.length === 0 ? (
+          <div class="text-xs text-base-content/40 p-3 text-center">
+            No skills registered. Create one in the Skills page, then attach it here.
+          </div>
+        ) : filtered.length === 0 ? (
+          <div class="text-xs text-base-content/40 p-3 text-center">No skills match.</div>
+        ) : (
+          <ul class="divide-y divide-base-300">
+            {filtered.map((s) => (
+              <li class={`p-2 hover:bg-base-200 ${s.enabled ? "" : "opacity-60"}`}>
+                <label class="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    class="checkbox checkbox-xs mt-0.5"
+                    checked={selected.has(s.id)}
+                    onChange={() => toggle(s.id)}
+                  />
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <span class="font-mono text-xs">{s.id}</span>
+                      <span class="text-[10px] text-base-content/40">{s.version}</span>
+                      {!s.enabled && (
+                        <span class="badge badge-xs badge-error" title="Skill is disabled">
+                          disabled
+                        </span>
+                      )}
+                      {s.tags.map((t) => (
+                        <span class="badge badge-xs badge-ghost">{t}</span>
+                      ))}
+                    </div>
+                    <div class="text-[10px] text-base-content/50 truncate mt-0.5">
+                      {s.description}
+                    </div>
+                    {s.whenToUse && s.whenToUse !== s.description && (
+                      <div class="text-[10px] text-base-content/40 truncate">
+                        Use when: {s.whenToUse}
                       </div>
                     )}
                   </div>
