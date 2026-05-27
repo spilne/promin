@@ -14,6 +14,7 @@ import { SignalList } from "./components/signals/signal-list.tsx";
 import { SharedSignalPage } from "./components/signals/shared-signal-page.tsx";
 import { SecretsPage } from "./components/secrets/secrets-page.tsx";
 import { ToolsPage } from "./components/tools/tools-page.tsx";
+import { SkillsPage } from "./components/skills/skills-page.tsx";
 import { DagsPage } from "./components/dags/dags-page.tsx";
 import { DialogHost, ToastHost } from "./components/ui/dialog-host.tsx";
 
@@ -83,6 +84,9 @@ function renderRoute(route: string, navigate: (p: string) => void) {
   }
   if (path === "/tools") {
     return <ToolsPage />;
+  }
+  if (path === "/skills") {
+    return <SkillsPage />;
   }
   if (path === "/dags") {
     return <DagsPage />;
