@@ -7,6 +7,8 @@ export { SqliteMemoryStore } from "./lib/agent/memory-store.ts";
 export type { SqliteMemoryStoreConfig } from "./lib/agent/memory-store.ts";
 export { SqliteAgentRegistry } from "./lib/agent/agent-registry.ts";
 export type { SqliteAgentRegistryConfig } from "./lib/agent/agent-registry.ts";
+export { SqliteSkillRegistry } from "./lib/agent/skill-registry.ts";
+export type { SqliteSkillRegistryConfig } from "./lib/agent/skill-registry.ts";
 export { SqliteDagRegistry } from "./lib/agent/dag-registry.ts";
 export type { SqliteDagRegistryConfig } from "./lib/agent/dag-registry.ts";
 export { createVersionedRecipeStore } from "./lib/agent/versioned-recipe-store.ts";

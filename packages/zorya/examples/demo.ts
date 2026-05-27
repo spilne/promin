@@ -51,6 +51,7 @@ import {
   SqliteWorkflowAdvertisementRegistry,
   SqliteSchedulerStorage,
   SqliteAgentRegistry,
+  SqliteSkillRegistry,
   SqliteAgentInstanceRegistry,
   SqliteDagRegistry,
   SqliteMemoryStore,
@@ -60,6 +61,7 @@ import {
   createPostgresDb,
   migrate as migratePostgres,
   PostgresAgentRegistry,
+  PostgresSkillRegistry,
   PostgresMemoryStore,
 } from "@promin/postgres";
 import {
@@ -70,7 +72,6 @@ import {
   createFileToolRegistry,
   inProcessSchedulerClient,
   InMemoryModelCatalog,
-  InMemorySkillRegistry,
   resolveCursorAgent,
   DefaultAgentToolCatalog,
   resolveCredentialRef,
@@ -88,6 +89,7 @@ import {
   type MemoryStore,
   type ModelCatalogItem,
   type RegisteredAgent,
+  type SkillRegistry,
 } from "@promin/agent";
 import { echoLLM } from "@promin/agent/testing";
 import { z } from "zod";
@@ -144,21 +146,20 @@ const runner = createWorkflowRunner({ storage });
 // be exercised locally; `migrate()` brings the PG schema up first.
 const pgUrl = process.env.ZORYA_PG_URL;
 let agentRegistry: AgentRegistry;
+let skillRegistry: SkillRegistry;
 let memoryStore: MemoryStore;
 if (pgUrl) {
   const pgDb = createPostgresDb(pgUrl);
   await migratePostgres(pgDb);
   agentRegistry = new PostgresAgentRegistry({ db: pgDb });
+  skillRegistry = new PostgresSkillRegistry({ db: pgDb });
   memoryStore = new PostgresMemoryStore({ db: pgDb });
-  console.log("[zorya] agent registry + memory store → Postgres (ZORYA_PG_URL)");
+  console.log("[zorya] agent + skill registries + memory store → Postgres (ZORYA_PG_URL)");
 } else {
   agentRegistry = SqliteAgentRegistry.make({ db });
+  skillRegistry = SqliteSkillRegistry.make({ db });
   memoryStore = SqliteMemoryStore.make({ db });
 }
-
-// Skill registry — in-memory for the demo (no Postgres parity yet). The
-// scanner under ZoryaSkills populates it from ./skills on boot + on a tick.
-const skillRegistry = new InMemorySkillRegistry();
 const dagRegistry = SqliteDagRegistry.make({ db });
 // Long-lived agent instances. Persisted alongside the registry so they
 // survive restarts; the cascade still keys memory by `resourceId =

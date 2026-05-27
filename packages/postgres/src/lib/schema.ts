@@ -578,6 +578,32 @@ export const agentRegistry = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Skill registry — versioned instruction-block store. Sibling of
+// agent_registry: one row per (skill_id, version). Content fields
+// (description / when_to_use / body) are columns; metadata (capabilities /
+// tags / enabled) is a JSONB blob.
+// ---------------------------------------------------------------------------
+
+export const skillRegistry = pgTable(
+  "skill_registry",
+  {
+    skillId: text("skill_id").notNull(),
+    version: text("version").notNull(),
+    description: text("description").notNull(),
+    whenToUse: text("when_to_use").notNull(),
+    body: text("body").notNull(),
+    metadata: jsonb("metadata").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.skillId, t.version] }),
+    // get(id) without version — pick latest by updated_at
+    index("skill_registry_id_updated_idx").on(t.skillId, t.updatedAt),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // Agent memory — three-scope cascade × four-tier model. Mirrors
 // SqliteMemoryStore's 6 tables. Single-table-per-tier with a `scope`
 // column keeps queries simple while supporting per-scope indexes.
