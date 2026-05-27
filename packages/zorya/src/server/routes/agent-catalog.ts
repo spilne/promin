@@ -13,6 +13,7 @@ import type {
   AgentToolCatalog,
   ModelCatalog,
   SerializedModelCatalogItem,
+  SkillRegistry,
   ToolCatalogEntry,
   ToolHistoryQuery,
   ToolHistoryRecord,
@@ -29,6 +30,30 @@ export interface ModelsCatalogResponse {
 
 export interface ToolsCatalogResponse {
   tools: ToolCatalogEntry[];
+}
+
+/**
+ * Catalog entry for the agent editor's skill picker — the metadata an
+ * operator needs to choose which skills an agent can load. Deliberately
+ * omits `body` (the picker only needs description + trigger); the full body
+ * is fetched via `GET /api/skills/:id` when editing the skill itself.
+ */
+export interface SkillCatalogEntry {
+  readonly id: string;
+  readonly version: string;
+  readonly description: string;
+  readonly whenToUse: string;
+  readonly tags: ReadonlyArray<string>;
+  readonly capabilities: ReadonlyArray<string>;
+  readonly enabled: boolean;
+}
+
+export interface SkillsCatalogResponse {
+  skills: SkillCatalogEntry[];
+}
+
+export interface AgentSkillCatalogDeps {
+  readonly skills: SkillRegistry;
 }
 
 export interface AgentCatalogDeps {
@@ -52,6 +77,30 @@ export function listCatalogTools(deps: AgentToolCatalogDeps) {
       const tools = await deps.tools.listAll();
       const body: ToolsCatalogResponse = { tools };
       return json(200, body);
+    } catch (err) {
+      return jsonError(500, "list_failed", err instanceof Error ? err.message : String(err));
+    }
+  };
+}
+
+/**
+ * List available skills (sans body) for the agent editor's skill picker.
+ * Mirrors `listCatalogTools`; backed by the host's `SkillRegistry`.
+ */
+export function listCatalogSkills(deps: AgentSkillCatalogDeps) {
+  return async (): Promise<Response> => {
+    try {
+      const rows = await deps.skills.list();
+      const skills: SkillCatalogEntry[] = rows.map((s) => ({
+        id: s.id,
+        version: s.version,
+        description: s.description,
+        whenToUse: s.whenToUse,
+        tags: s.metadata.tags,
+        capabilities: s.metadata.capabilities,
+        enabled: s.metadata.enabled !== false,
+      }));
+      return json(200, { skills } satisfies SkillsCatalogResponse);
     } catch (err) {
       return jsonError(500, "list_failed", err instanceof Error ? err.message : String(err));
     }

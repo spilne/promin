@@ -32,6 +32,12 @@ import type {
   ThreadInvokeResponse,
   ThreadMessagesResponse,
 } from "../../server/routes/agents.ts";
+import type {
+  RegisteredSkill,
+  SkillsListResponse,
+  SkillVersionsResponse,
+} from "../../server/routes/skills.ts";
+import type { SkillsCatalogResponse } from "../../server/routes/agent-catalog.ts";
 import type { MemoryInspectResponse } from "../../server/routes/memory.ts";
 import type { SignalsResponse } from "../../server/routes/signals.ts";
 import type {
@@ -429,6 +435,58 @@ export const api = {
   listCatalogModels(): Promise<{ models: ModelCatalogEntryDto[] }> {
     return req<{ models: ModelCatalogEntryDto[] }>(`/api/agents/_catalog/models`);
   },
+
+  // ---------------------------------------------------------------------
+  // Skills — registry CRUD + the agent editor's picker catalog
+  // ---------------------------------------------------------------------
+  listSkills(): Promise<SkillsListResponse> {
+    return req<SkillsListResponse>(`/api/skills`);
+  },
+  getSkill(id: string, version?: string): Promise<RegisteredSkill> {
+    const qp = version ? `?version=${encodeURIComponent(version)}` : "";
+    return req<RegisteredSkill>(`/api/skills/${encodeURIComponent(id)}${qp}`);
+  },
+  listSkillVersions(id: string): Promise<SkillVersionsResponse> {
+    return req<SkillVersionsResponse>(`/api/skills/${encodeURIComponent(id)}/versions`);
+  },
+  createSkill(body: {
+    id: string;
+    version?: string;
+    description: string;
+    whenToUse?: string;
+    body: string;
+    metadata?: RegisteredSkill["metadata"];
+  }): Promise<RegisteredSkill> {
+    return req<RegisteredSkill>(`/api/skills`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  updateSkill(
+    id: string,
+    body: {
+      version?: string;
+      description?: string;
+      whenToUse?: string;
+      body?: string;
+      metadata?: RegisteredSkill["metadata"];
+    },
+  ): Promise<RegisteredSkill> {
+    return req<RegisteredSkill>(`/api/skills/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  deleteSkill(id: string, version?: string): Promise<void> {
+    const qp = version ? `?version=${encodeURIComponent(version)}` : "";
+    return req<void>(`/api/skills/${encodeURIComponent(id)}${qp}`, { method: "DELETE" });
+  },
+  listCatalogSkills(): Promise<SkillsCatalogResponse> {
+    return req<SkillsCatalogResponse>(`/api/agents/_catalog/skills`);
+  },
+
   // Agentic DAG endpoints (promin-li95)
   listDags(params?: { tag?: string }): Promise<{ dags: DagDto[] }> {
     const qp = new URLSearchParams();

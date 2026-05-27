@@ -29,6 +29,11 @@ export {
   type ZoryaAgentsConfig,
   type ZoryaAgentsScanConfig,
 } from "./server/services/agents/index.ts";
+export {
+  ZoryaSkills,
+  type ZoryaSkillsConfig,
+  type ZoryaSkillsScanConfig,
+} from "./server/services/skills/index.ts";
 export { ZoryaDags, type ZoryaDagsConfig } from "./server/services/dags/index.ts";
 export { Auth, type AuthConfig } from "./server/auth.ts";
 export { RunEventBus } from "./server/run-event-bus.ts";

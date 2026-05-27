@@ -41,6 +41,7 @@ import {
   QueuedWorkflows,
   ZoryaScheduler,
   ZoryaAgents,
+  ZoryaSkills,
   ZoryaDags,
 } from "../src/index.ts";
 import { researchSynthesisRecipe } from "./dags/research-synthesis.ts";
@@ -69,10 +70,12 @@ import {
   createFileToolRegistry,
   inProcessSchedulerClient,
   InMemoryModelCatalog,
+  InMemorySkillRegistry,
   resolveCursorAgent,
   DefaultAgentToolCatalog,
   resolveCredentialRef,
   resolveLocalAgent,
+  resolveSkillCatalog,
   resolveRemoteAgent,
   tool,
   type AgentTool,
@@ -152,6 +155,10 @@ if (pgUrl) {
   agentRegistry = SqliteAgentRegistry.make({ db });
   memoryStore = SqliteMemoryStore.make({ db });
 }
+
+// Skill registry — in-memory for the demo (no Postgres parity yet). The
+// scanner under ZoryaSkills populates it from ./skills on boot + on a tick.
+const skillRegistry = new InMemorySkillRegistry();
 const dagRegistry = SqliteDagRegistry.make({ db });
 // Long-lived agent instances. Persisted alongside the registry so they
 // survive restarts; the cascade still keys memory by `resourceId =
@@ -553,9 +560,21 @@ async function resolveAgent(
     secrets: secretsStorage,
     ...(scope !== undefined && { scope }),
   });
+  // Skills: resolve the recipe's catalog (description + whenToUse, pinned
+  // versions) from the skill registry. `skip` so a recipe that pins a
+  // not-yet-registered skill still resolves — same forgiving stance as
+  // onUnknownTool. resolveLocalAgent injects the catalog block into the
+  // system prompt and auto-attaches `loadSkill` when both are present.
+  const skillCatalog = await resolveSkillCatalog({
+    recipe,
+    registry: skillRegistry,
+    onMissing: "skip",
+  });
   return resolveLocalAgent(recipe, {
     runner,
     memory: memoryStore,
+    skills: skillRegistry,
+    skillCatalog,
     ...(apiKey !== undefined && { apiKey }),
     // Resolution order:
     //   1. Demo-specific id-keyed mocks (echo / round-robin / tool-calling
@@ -1087,6 +1106,25 @@ const agents = new ZoryaAgents({
   },
 });
 
+// Skills service — owns the SkillRegistry that backs /api/skills CRUD, the
+// agent editor's skill picker (/api/agents/_catalog/skills), and the
+// resolver's catalog injection (see resolveAgent above). Hot-reloads skill
+// manifests (.ts modules + SKILL.md) from ./skills on a tick.
+const skillScanRoot = path.join(import.meta.dir, "skills");
+const skills = new ZoryaSkills({
+  registry: skillRegistry,
+  scan: {
+    root: skillScanRoot,
+    intervalMs: 5_000,
+    onTick: (tick) => {
+      if (tick.added.length > 0) {
+        console.log(`[zorya] hot-reload: registered new skills: ${tick.added.join(", ")}`);
+      }
+      for (const w of tick.warnings) console.warn(`[zorya] skill-scan: ${w}`);
+    },
+  },
+});
+
 // Custom fire override: schedules without a `metadata.input` arrive with
 // `input === undefined`. SQLite's NOT NULL constraint rejects that, so
 // synthesise a per-name default via `inputFor()` before triggering.
@@ -1202,6 +1240,7 @@ const server = new ZoryaServer({
   workflows,
   scheduler,
   agents,
+  skills,
   dags,
   // BYOK / per-tenant API keys / MCP credentials live here. Exposes
   // /api/secrets HTTP CRUD + the dashboard's Secrets page; the agent

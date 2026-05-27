@@ -121,9 +121,18 @@ import {
 import {
   getToolCatalogHealth,
   listCatalogModels,
+  listCatalogSkills,
   listCatalogTools,
   listToolHistory,
 } from "./routes/agent-catalog.ts";
+import {
+  createSkill,
+  deleteSkill,
+  getSkill,
+  listSkillVersions,
+  listSkills,
+  updateSkill,
+} from "./routes/skills.ts";
 import { createSecret, deleteSecret, listSecrets } from "./routes/secrets.ts";
 import { createDraft, deleteDraft } from "./routes/agent-drafts.ts";
 import {
@@ -159,6 +168,7 @@ import {
 } from "./services/workflows/index.ts";
 import { ZoryaScheduler } from "./services/scheduler/index.ts";
 import { ZoryaAgents } from "./services/agents/index.ts";
+import { ZoryaSkills } from "./services/skills/index.ts";
 import { ZoryaDags } from "./services/dags/index.ts";
 import {
   createDag,
@@ -196,6 +206,11 @@ export interface ZoryaServerConfig extends AuthConfig {
   scheduler?: ZoryaScheduler;
   /** Optional agent gateway service. */
   agents?: ZoryaAgents;
+  /**
+   * Optional skill registry service. Mounts /api/skills/* CRUD and
+   * /api/agents/_catalog/skills (the agent editor's skill picker source).
+   */
+  skills?: ZoryaSkills;
   /** Optional DAG gateway service. Mounts /api/dags/* routes. */
   dags?: ZoryaDags;
   /**
@@ -267,6 +282,7 @@ export class ZoryaServer {
   readonly workflows: ZoryaWorkflows;
   readonly scheduler?: ZoryaScheduler;
   readonly agents?: ZoryaAgents;
+  readonly skills?: ZoryaSkills;
   readonly dags?: ZoryaDags;
   readonly versionRegistry: IWorkflowVersionRegistry;
   /**
@@ -294,6 +310,7 @@ export class ZoryaServer {
     this.workflows = config.workflows;
     if (config.scheduler) this.scheduler = config.scheduler;
     if (config.agents) this.agents = config.agents;
+    if (config.skills) this.skills = config.skills;
     if (config.dags) this.dags = config.dags;
     if (config.secrets) this.secrets = config.secrets;
     this.versionRegistry = config.versionRegistry ?? new WorkflowVersionRegistry();
@@ -484,6 +501,15 @@ export class ZoryaServer {
             ? listToolHistory({ history: this.agents.toolHistory })
             : async () => new Response(JSON.stringify({ history: [] }), { status: 200 }),
         )
+        // Skill catalog — the agent editor's skill picker source. Mounted
+        // here (under the agents block) so the `_catalog` prefix groups with
+        // the model/tool catalogs; backed by the skills service registry.
+        .get(
+          "/api/agents/_catalog/skills",
+          this.skills
+            ? listCatalogSkills({ skills: this.skills.registry })
+            : async () => new Response(JSON.stringify({ skills: [] }), { status: 200 }),
+        )
         // Draft recipes — test a recipe edit before committing it.
         // Mounted before /api/agents/:id so the literal `_draft` segment
         // isn't shadowed by an agent that happens to be named `_draft`.
@@ -528,6 +554,17 @@ export class ZoryaServer {
           .delete("/api/agents/:id/instances/:instanceId", deleteAgentInstance(inDeps))
           .get("/api/instances", listInstancesAcrossAgents(inDeps));
       }
+    }
+
+    if (this.skills) {
+      const skillDeps = { registry: this.skills.registry };
+      this.router
+        .get("/api/skills", listSkills(skillDeps))
+        .post("/api/skills", createSkill(skillDeps))
+        .get("/api/skills/:id", getSkill(skillDeps))
+        .patch("/api/skills/:id", updateSkill(skillDeps))
+        .delete("/api/skills/:id", deleteSkill(skillDeps))
+        .get("/api/skills/:id/versions", listSkillVersions(skillDeps));
     }
 
     if (this.secrets) {
@@ -698,9 +735,12 @@ export class ZoryaServer {
     this.agentStreamHub.start();
 
     // Fire and forget — services own their own logging on errors.
-    void Promise.all([this.workflows.start(), this.scheduler?.start(), this.agents?.start()]).catch(
-      (err) => this.logger.error("[zorya] service start error:", err),
-    );
+    void Promise.all([
+      this.workflows.start(),
+      this.scheduler?.start(),
+      this.agents?.start(),
+      this.skills?.start(),
+    ]).catch((err) => this.logger.error("[zorya] service start error:", err));
 
     return {
       port: resolvedPort,
@@ -716,9 +756,12 @@ export class ZoryaServer {
     this.serverHandle = undefined;
     this.agentStreamHub.stop();
     this.workerWs.stop();
-    await Promise.all([this.workflows.stop(), this.scheduler?.stop(), this.agents?.stop()]).catch(
-      () => {},
-    );
+    await Promise.all([
+      this.workflows.stop(),
+      this.scheduler?.stop(),
+      this.agents?.stop(),
+      this.skills?.stop(),
+    ]).catch(() => {});
   }
 
   /**
