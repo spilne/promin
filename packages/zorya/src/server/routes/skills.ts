@@ -34,6 +34,22 @@ export interface SkillGatewayDeps {
   readonly registry: SkillRegistry;
 }
 
+export interface SkillSourcesResponse {
+  /** Skill ids currently backed by a file on disk — read-only in the UI. */
+  fileManaged: string[];
+}
+
+/**
+ * Report which skills are file-managed (scanned from disk) vs operator-
+ * authored. The manager UI marks file-managed skills read-only so an edit
+ * isn't silently overwritten by the next scan tick.
+ */
+export function listSkillSources(deps: { readonly fileManagedIds: () => string[] }) {
+  return async (): Promise<Response> => {
+    return json(200, { fileManaged: deps.fileManagedIds() } satisfies SkillSourcesResponse);
+  };
+}
+
 function asMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }

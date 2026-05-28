@@ -35,6 +35,7 @@ import type {
 import type {
   RegisteredSkill,
   SkillsListResponse,
+  SkillSourcesResponse,
   SkillVersionsResponse,
 } from "../../server/routes/skills.ts";
 import type { SkillsCatalogResponse } from "../../server/routes/agent-catalog.ts";
@@ -485,6 +486,9 @@ export const api = {
   },
   listCatalogSkills(): Promise<SkillsCatalogResponse> {
     return req<SkillsCatalogResponse>(`/api/agents/_catalog/skills`);
+  },
+  listSkillSources(): Promise<SkillSourcesResponse> {
+    return req<SkillSourcesResponse>(`/api/skills/_sources`);
   },
 
   // Agentic DAG endpoints (promin-li95)

@@ -5,6 +5,9 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
+import { mkdir, writeFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { InMemorySkillRegistry, type RegisteredSkill } from "@promin/agent";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { LocalWorkflows, ZoryaSkills } from "../../../index.ts";
@@ -104,6 +107,52 @@ describe("skills HTTP routes — read / update / delete", () => {
     expect(del.status).toBe(204);
     const after = await server.handle(new Request("http://test/api/skills/structured-debugging"));
     expect(after.status).toBe(404);
+  });
+});
+
+describe("GET /api/skills/_sources — file-managed tracking", () => {
+  it("returns [] when no scanner is configured", async () => {
+    const { server } = bootServerWithSkills();
+    const res = await server.handle(new Request("http://test/api/skills/_sources"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { fileManaged: string[] };
+    expect(body.fileManaged).toEqual([]);
+  });
+
+  it("marks scanned skills as file-managed, not operator-created ones", async () => {
+    const root = join(tmpdir(), `skill-sources-${process.pid}-${Date.now()}`);
+    await mkdir(root, { recursive: true });
+    await writeFile(
+      join(root, "from-file.md"),
+      ["---", "name: from-file", "description: Scanned skill.", "---", "# Body"].join("\n"),
+    );
+    try {
+      const storage = new InMemoryWorkflowStorage();
+      const runner = createWorkflowRunner({ storage });
+      const workflows = new LocalWorkflows({
+        storage,
+        runner,
+        definitions: {},
+        sleepScanIntervalMs: 0,
+      });
+      const registry = new InMemorySkillRegistry();
+      const skills = new ZoryaSkills({ registry, scan: { root, intervalMs: 60_000 } });
+      const server = new ZoryaServer({ workflows, skills });
+      await skills.start(); // runs an immediate scan tick
+
+      // An operator-authored skill that has no file behind it.
+      await server.handle(post("/api/skills", VALID));
+
+      const body = (await (
+        await server.handle(new Request("http://test/api/skills/_sources"))
+      ).json()) as { fileManaged: string[] };
+      expect(body.fileManaged).toContain("from-file");
+      expect(body.fileManaged).not.toContain("structured-debugging");
+
+      await skills.stop();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

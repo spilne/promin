@@ -35,22 +35,41 @@ export interface ZoryaSkillsConfig {
 export class ZoryaSkills {
   readonly registry: SkillRegistry;
   private readonly scanConfig?: ZoryaSkillsScanConfig;
-  private scanHandle?: { stop(): void };
+  private scanHandle?: { stop(): void; tick(): Promise<unknown> };
+  // Ids currently backed by a file on disk (rebuilt each scan tick). The UI
+  // marks these read-only so an operator edit isn't silently overwritten by
+  // the next scan. Empty when no scanner is configured.
+  private _fileManaged: ReadonlySet<string> = new Set();
 
   constructor(config: ZoryaSkillsConfig) {
     this.registry = config.registry;
     if (config.scan) this.scanConfig = config.scan;
   }
 
+  /** Skill ids that are managed by a file on disk (vs. operator-authored). */
+  fileManagedIds(): string[] {
+    return [...this._fileManaged];
+  }
+
   async start(): Promise<void> {
     if (this.scanHandle || !this.scanConfig) return;
+    const userOnTick = this.scanConfig.onTick;
     this.scanHandle = startSkillScanLoop({
       registry: this.registry,
       root: this.scanConfig.root,
       ...(this.scanConfig.intervalMs !== undefined && { intervalMs: this.scanConfig.intervalMs }),
       ...(this.scanConfig.sync !== undefined && { sync: this.scanConfig.sync }),
-      ...(this.scanConfig.onTick !== undefined && { onTick: this.scanConfig.onTick }),
+      // Rebuild the file-managed set from each tick's discovered ids
+      // (`upserted` = every skill the scan applied this tick, so a
+      // deleted file drops out next tick), then fan out to the user hook.
+      onTick: (tick) => {
+        this._fileManaged = new Set(tick.upserted);
+        userOnTick?.(tick);
+      },
     });
+    // Populate immediately so skills (and their file-managed flags) are
+    // available right after boot instead of after the first interval.
+    await this.scanHandle.tick();
   }
 
   async stop(): Promise<void> {

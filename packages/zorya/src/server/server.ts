@@ -129,6 +129,7 @@ import {
   createSkill,
   deleteSkill,
   getSkill,
+  listSkillSources,
   listSkillVersions,
   listSkills,
   updateSkill,
@@ -557,10 +558,17 @@ export class ZoryaServer {
     }
 
     if (this.skills) {
-      const skillDeps = { registry: this.skills.registry };
+      const skills = this.skills;
+      const skillDeps = { registry: skills.registry };
       this.router
         .get("/api/skills", listSkills(skillDeps))
         .post("/api/skills", createSkill(skillDeps))
+        // `_sources` before `:id` so the literal segment isn't shadowed
+        // (skill ids starting with `_` are rejected at create time).
+        .get(
+          "/api/skills/_sources",
+          listSkillSources({ fileManagedIds: () => skills.fileManagedIds() }),
+        )
         .get("/api/skills/:id", getSkill(skillDeps))
         .patch("/api/skills/:id", updateSkill(skillDeps))
         .delete("/api/skills/:id", deleteSkill(skillDeps))

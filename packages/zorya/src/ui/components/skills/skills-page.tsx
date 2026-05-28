@@ -25,6 +25,8 @@ type EditorTarget = { mode: "create" } | { mode: "edit"; skill: RegisteredSkill 
 export function SkillsPage() {
   const { data, loading, error, refresh } = useFetch(() => api.listSkills(), [], 0);
   const skills = useMemo(() => data?.skills ?? [], [data]);
+  const { data: sourcesData } = useFetch(() => api.listSkillSources(), [], 0);
+  const fileManaged = useMemo(() => new Set(sourcesData?.fileManaged ?? []), [sourcesData]);
   const [editor, setEditor] = useState<EditorTarget | null>(null);
   const [query, setQuery] = useState("");
 
@@ -119,6 +121,14 @@ export function SkillsPage() {
                       {s.description}
                     </td>
                     <td class="flex flex-wrap gap-1 py-2">
+                      {fileManaged.has(s.id) && (
+                        <span
+                          class="badge badge-xs badge-info gap-1"
+                          title="Defined by a file on disk — edit the source file, not here"
+                        >
+                          📄 file
+                        </span>
+                      )}
                       {s.metadata.enabled === false && (
                         <span class="badge badge-xs badge-error">disabled</span>
                       )}
@@ -154,6 +164,7 @@ export function SkillsPage() {
         <SkillEditor
           target={editor}
           existingIds={skills.map((s) => s.id)}
+          fileManaged={editor.mode === "edit" && fileManaged.has(editor.skill.id)}
           onClose={() => setEditor(null)}
           onSaved={() => {
             setEditor(null);
@@ -168,11 +179,13 @@ export function SkillsPage() {
 interface SkillEditorProps {
   target: EditorTarget;
   existingIds: ReadonlyArray<string>;
+  /** True when editing a skill backed by a file on disk — read-only here. */
+  fileManaged?: boolean;
   onClose: () => void;
   onSaved: () => void;
 }
 
-function SkillEditor({ target, existingIds, onClose, onSaved }: SkillEditorProps) {
+function SkillEditor({ target, existingIds, fileManaged, onClose, onSaved }: SkillEditorProps) {
   const isEdit = target.mode === "edit";
   const seed = target.mode === "edit" ? target.skill : null;
   const [id, setId] = useState(seed?.id ?? "");
@@ -246,6 +259,13 @@ function SkillEditor({ target, existingIds, onClose, onSaved }: SkillEditorProps
             ✕
           </button>
         </div>
+
+        {fileManaged && (
+          <div class="alert alert-warning text-xs">
+            📄 This skill is defined by a file on disk. Saving is disabled here — edit the source
+            file instead, since the next scan would overwrite any change made through the UI.
+          </div>
+        )}
 
         <label class="form-control">
           <span class="text-xs text-base-content/60 mb-1 uppercase tracking-wider">Id</span>
@@ -359,7 +379,7 @@ function SkillEditor({ target, existingIds, onClose, onSaved }: SkillEditorProps
           <button
             type="button"
             class="btn btn-sm btn-primary"
-            disabled={!valid || idClash || saving}
+            disabled={!valid || idClash || saving || fileManaged}
             onClick={save}
           >
             {saving ? "Saving…" : isEdit ? "Save" : "Create"}
