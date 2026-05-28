@@ -76,6 +76,14 @@ export async function resolveSkillCatalog(
           "Re-enable it or remove the reference from the recipe.",
       );
     }
+    // Capability gate (fail-closed, SILENT — not subject to onMissing): a
+    // skill that declares capabilities is surfaced only when the agent's
+    // capabilities grant at least one. Empty skill capabilities = ungated.
+    // A policy exclusion, not a misconfiguration — so we drop it quietly,
+    // mirroring how `filterToolsByCapability` drops elevated tools.
+    if (!skillAllowedByCapabilities(row.metadata.capabilities, recipe.metadata.capabilities)) {
+      continue;
+    }
     out.push({
       id: row.id,
       version: row.version,
@@ -84,6 +92,20 @@ export async function resolveSkillCatalog(
     });
   }
   return out;
+}
+
+/**
+ * Whether a skill is allowed for an agent given each side's capabilities.
+ * A skill with no declared capabilities is ungated (always allowed). When it
+ * declares capabilities, the agent must hold at least one of them — the same
+ * "grant one of these" / fail-closed rule elevated tools use.
+ */
+export function skillAllowedByCapabilities(
+  skillCapabilities: ReadonlyArray<string>,
+  agentCapabilities: ReadonlyArray<string>,
+): boolean {
+  if (skillCapabilities.length === 0) return true;
+  return skillCapabilities.some((c) => agentCapabilities.includes(c));
 }
 
 /**

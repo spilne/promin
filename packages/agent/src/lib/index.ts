@@ -183,7 +183,11 @@ export {
   sortSkills,
 } from "./skills/in-memory-skill-registry.ts";
 export type { InMemorySkillRegistryConfig } from "./skills/in-memory-skill-registry.ts";
-export { resolveSkillCatalog, buildSkillCatalogPrompt } from "./skills/resolve-skill-catalog.ts";
+export {
+  resolveSkillCatalog,
+  buildSkillCatalogPrompt,
+  skillAllowedByCapabilities,
+} from "./skills/resolve-skill-catalog.ts";
 export type {
   ResolvedSkillEntry,
   ResolveSkillCatalogParams,

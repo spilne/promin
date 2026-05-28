@@ -3,6 +3,7 @@ import { InMemorySkillRegistry } from "../in-memory-skill-registry.ts";
 import {
   buildSkillCatalogPrompt,
   resolveSkillCatalog,
+  skillAllowedByCapabilities,
   type ResolvedSkillEntry,
 } from "../resolve-skill-catalog.ts";
 import type { RegisteredAgent } from "../../registry/types.ts";
@@ -171,5 +172,76 @@ describe("buildSkillCatalogPrompt", () => {
     expect(block).toContain("loadSkill");
     expect(block).toContain("`writing-style` (v1): Rubric. Use when: Drafting.");
     expect(block).toContain("`structured-debugging` (v3): Loop. Use when: Hard bug.");
+  });
+});
+
+describe("skillAllowedByCapabilities", () => {
+  it("allows ungated skills (no declared capabilities)", () => {
+    expect(skillAllowedByCapabilities([], [])).toBe(true);
+    expect(skillAllowedByCapabilities([], ["anything"])).toBe(true);
+  });
+
+  it("requires the agent to hold at least one declared capability", () => {
+    expect(skillAllowedByCapabilities(["rag"], ["rag", "chat"])).toBe(true);
+    expect(skillAllowedByCapabilities(["rag", "search"], ["search"])).toBe(true);
+    expect(skillAllowedByCapabilities(["rag"], ["chat"])).toBe(false);
+    expect(skillAllowedByCapabilities(["rag"], [])).toBe(false);
+  });
+});
+
+describe("resolveSkillCatalog — capability gating", () => {
+  function recipeWithCaps(caps: string[], skills: ReadonlyArray<SkillRef>): RegisteredAgent {
+    return {
+      id: "gated-bot",
+      version: "v1",
+      backend: {
+        type: "local",
+        model: { provider: "anthropic", id: "claude-sonnet-4-6" },
+        systemPrompt: "x",
+        tools: [],
+        skills,
+      },
+      metadata: { description: null, capabilities: caps, tags: [] },
+      createdAt: 0,
+      updatedAt: 0,
+    };
+  }
+
+  async function seedGated(registry: InMemorySkillRegistry) {
+    await registry.register({
+      id: "rag-skill",
+      description: "RAG technique.",
+      whenToUse: "Retrieval.",
+      body: "# RAG",
+      metadata: { capabilities: ["rag"], tags: [] },
+    });
+    await registry.register({
+      id: "open-skill",
+      description: "Ungated.",
+      whenToUse: "Anytime.",
+      body: "# Open",
+    });
+  }
+
+  it("excludes a gated skill from an agent lacking the capability (silent, even with onMissing: throw)", async () => {
+    const registry = new InMemorySkillRegistry();
+    await seedGated(registry);
+    const catalog = await resolveSkillCatalog({
+      recipe: recipeWithCaps([], [{ id: "rag-skill" }, { id: "open-skill" }]),
+      registry,
+      onMissing: "throw",
+    });
+    // rag-skill is policy-excluded (no throw); ungated open-skill remains.
+    expect(catalog.map((e) => e.id)).toEqual(["open-skill"]);
+  });
+
+  it("includes a gated skill when the agent holds the capability", async () => {
+    const registry = new InMemorySkillRegistry();
+    await seedGated(registry);
+    const catalog = await resolveSkillCatalog({
+      recipe: recipeWithCaps(["rag"], [{ id: "rag-skill" }, { id: "open-skill" }]),
+      registry,
+    });
+    expect(catalog.map((e) => e.id).sort()).toEqual(["open-skill", "rag-skill"]);
   });
 });
