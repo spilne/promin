@@ -235,6 +235,23 @@ describe("resolveSkillCatalog — capability gating", () => {
     expect(catalog.map((e) => e.id)).toEqual(["open-skill"]);
   });
 
+  it("drops a needs-review skill silently (trust gate, fail-closed)", async () => {
+    const registry = new InMemorySkillRegistry();
+    await registry.register({
+      id: "review-pending",
+      description: "x",
+      whenToUse: "x",
+      body: "x",
+      metadata: { tags: [], capabilities: [], trust: "needs-review" },
+    });
+    const catalog = await resolveSkillCatalog({
+      recipe: recipeWithCaps([], [{ id: "review-pending" }]),
+      registry,
+      onMissing: "throw", // even with throw, trust-gate is silent
+    });
+    expect(catalog).toEqual([]);
+  });
+
   it("includes a gated skill when the agent holds the capability", async () => {
     const registry = new InMemorySkillRegistry();
     await seedGated(registry);

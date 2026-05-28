@@ -110,6 +110,9 @@ export function mergeSkillMetadata(patch?: Partial<SkillMetadata>): SkillMetadat
     // Kill-switch carries through additively. Default-undefined when omitted
     // so listings distinguish 'never set' from 'explicitly enabled/disabled'.
     ...(patch?.enabled !== undefined && { enabled: patch.enabled }),
+    // Trust state — same pass-through. The scanner sets this on first
+    // discovery via applyDiscoveredSkills; operators flip it via PATCH.
+    ...(patch?.trust !== undefined && { trust: patch.trust }),
   };
 }
 

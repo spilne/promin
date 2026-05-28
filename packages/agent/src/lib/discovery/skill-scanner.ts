@@ -293,8 +293,24 @@ export async function applyDiscoveredSkills(
 
   for (const input of skills) {
     if (options.idPrefix !== undefined && !input.id.startsWith(options.idPrefix)) continue;
-    const wasExisting = existingIds.has(input.id) || (await registry.get(input.id)) !== null;
-    await registry.register(input);
+    const existingRow = existingIds.has(input.id)
+      ? (existing.find((e) => e.id === input.id) ?? null)
+      : await registry.get(input.id);
+    const wasExisting = existingRow !== null;
+    // Trust policy: preserve trust on rescan; manifest-declared trust wins
+    // on first discovery; otherwise default a NEWLY-scanned file skill to
+    // 'needs-review' so unreviewed third-party instructions can't enter
+    // agent context until an operator approves them.
+    const declaredTrust = input.metadata?.trust;
+    const trust =
+      declaredTrust ?? existingRow?.metadata.trust ?? (wasExisting ? undefined : "needs-review");
+    const finalInput: RegisterSkillInput = {
+      ...input,
+      ...(trust !== undefined && {
+        metadata: { ...input.metadata, trust },
+      }),
+    };
+    await registry.register(finalInput);
     upserted.push(input.id);
     if (!wasExisting) added.push(input.id);
   }

@@ -87,6 +87,20 @@ describe("parseMarkdownSkill", () => {
     expect(r && "warning" in r).toBe(true);
   });
 
+  it("reads an explicit trust state from frontmatter", () => {
+    const trusted = ok(
+      ["---", "name: x", "description: d", "trust: trusted", "---", "b"].join("\n"),
+    );
+    expect(trusted.metadata?.trust).toBe("trusted");
+    const review = ok(
+      ["---", "name: y", "description: d", "trust: needs-review", "---", "b"].join("\n"),
+    );
+    expect(review.metadata?.trust).toBe("needs-review");
+    // Garbage value → undefined (scanner will then apply its default).
+    const junk = ok(["---", "name: z", "description: d", "trust: maybe", "---", "b"].join("\n"));
+    expect(junk.metadata?.trust).toBeUndefined();
+  });
+
   it("tolerates CRLF line endings", () => {
     const skill = ok("---\r\nname: x\r\ndescription: d\r\n---\r\nbody text");
     expect(skill.id).toBe("x");

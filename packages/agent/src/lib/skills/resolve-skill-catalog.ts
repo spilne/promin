@@ -84,6 +84,10 @@ export async function resolveSkillCatalog(
     if (!skillAllowedByCapabilities(row.metadata.capabilities, recipe.metadata.capabilities)) {
       continue;
     }
+    // Trust gate (fail-closed, SILENT). A needs-review skill is in the
+    // registry but hasn't been approved by an operator yet — silently keep
+    // it out of agent context. The skills manager surfaces these for review.
+    if (row.metadata.trust === "needs-review") continue;
     out.push({
       id: row.id,
       version: row.version,

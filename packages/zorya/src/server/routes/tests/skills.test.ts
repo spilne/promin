@@ -171,4 +171,19 @@ describe("listCatalogSkills handler", () => {
     // No body field in the catalog entry.
     expect((body.skills[0] as Record<string, unknown>).body).toBeUndefined();
   });
+
+  it("excludes needs-review skills (trust gate)", async () => {
+    const registry = new InMemorySkillRegistry();
+    await registry.register({ ...VALID }); // trusted (default)
+    await registry.register({
+      id: "unreviewed",
+      description: "third-party, not approved",
+      whenToUse: "never until reviewed",
+      body: "# x",
+      metadata: { tags: [], capabilities: [], trust: "needs-review" },
+    });
+    const res = await listCatalogSkills({ skills: registry })();
+    const body = (await res.json()) as { skills: Array<{ id: string }> };
+    expect(body.skills.map((s) => s.id)).toEqual(["structured-debugging"]);
+  });
 });

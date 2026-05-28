@@ -27,5 +27,6 @@ export const PLAIN_WRITING: RegisterSkillInput = {
   ].join("\n"),
   metadata: {
     tags: ["writing"],
+    trust: "trusted",
   },
 };

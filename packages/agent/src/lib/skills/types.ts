@@ -76,6 +76,21 @@ export interface SkillMetadata {
    * tool `enabled` flag.
    */
   readonly enabled?: boolean;
+  /**
+   * Approval state. `undefined` or `"trusted"` = the skill behaves normally.
+   * `"needs-review"` = registry keeps the row but it's HIDDEN from the agent
+   * editor's picker and SILENTLY DROPPED by `resolveSkillCatalog` (same
+   * fail-closed shape as the capabilities gate). Distinct from `enabled`:
+   * `enabled: false` is "operator turned this off"; `"needs-review"` is
+   * "nobody has approved this yet."
+   *
+   * The scanner sets this to `"needs-review"` when it discovers a NEW
+   * file-scanned skill that doesn't declare its own trust — so cloned
+   * third-party SKILL.md files can't enter agent context until an operator
+   * reviews them. Manifest-declared trust on first discovery wins (the
+   * repo's own example skills declare `"trusted"`).
+   */
+  readonly trust?: "trusted" | "needs-review";
 }
 
 /**

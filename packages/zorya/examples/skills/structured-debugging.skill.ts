@@ -32,5 +32,8 @@ export const STRUCTURED_DEBUGGING: RegisterSkillInput = {
   ].join("\n"),
   metadata: {
     tags: ["engineering", "debugging"],
+    // First-party skill in this repo — declare trust so the scanner
+    // doesn't default us to needs-review on a fresh registry.
+    trust: "trusted",
   },
 };

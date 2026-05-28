@@ -112,6 +112,52 @@ describe("applyDiscoveredSkills", () => {
     expect(await registry.get("structured-debugging")).toBeNull();
   });
 
+  it("defaults a newly-discovered skill to needs-review (trust step)", async () => {
+    const registry = new InMemorySkillRegistry();
+    await applyDiscoveredSkills(registry, [
+      { id: "unreviewed", description: "x", whenToUse: "x", body: "x" },
+    ]);
+    const row = await registry.get("unreviewed");
+    expect(row?.metadata.trust).toBe("needs-review");
+  });
+
+  it("respects a manifest-declared trust on first discovery", async () => {
+    const registry = new InMemorySkillRegistry();
+    await applyDiscoveredSkills(registry, [
+      {
+        id: "first-party",
+        description: "x",
+        whenToUse: "x",
+        body: "x",
+        metadata: { tags: [], capabilities: [], trust: "trusted" },
+      },
+    ]);
+    const row = await registry.get("first-party");
+    expect(row?.metadata.trust).toBe("trusted");
+  });
+
+  it("preserves operator-approved trust on re-scan (no revert to needs-review)", async () => {
+    const registry = new InMemorySkillRegistry();
+    // First scan → needs-review.
+    await applyDiscoveredSkills(registry, [
+      { id: "to-approve", description: "x", whenToUse: "x", body: "x" },
+    ]);
+    expect((await registry.get("to-approve"))?.metadata.trust).toBe("needs-review");
+    // Operator approves.
+    await registry.register({
+      id: "to-approve",
+      description: "x",
+      whenToUse: "x",
+      body: "x",
+      metadata: { tags: [], capabilities: [], trust: "trusted" },
+    });
+    // Re-scan with no declared trust — preserves operator's "trusted".
+    await applyDiscoveredSkills(registry, [
+      { id: "to-approve", description: "x", whenToUse: "x", body: "x" },
+    ]);
+    expect((await registry.get("to-approve"))?.metadata.trust).toBe("trusted");
+  });
+
   it("sync mode deletes registry entries not in the scan", async () => {
     const registry = new InMemorySkillRegistry();
     await registry.register({

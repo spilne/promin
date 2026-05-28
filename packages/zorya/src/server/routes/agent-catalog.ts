@@ -91,15 +91,21 @@ export function listCatalogSkills(deps: AgentSkillCatalogDeps) {
   return async (): Promise<Response> => {
     try {
       const rows = await deps.skills.list();
-      const skills: SkillCatalogEntry[] = rows.map((s) => ({
-        id: s.id,
-        version: s.version,
-        description: s.description,
-        whenToUse: s.whenToUse,
-        tags: s.metadata.tags,
-        capabilities: s.metadata.capabilities,
-        enabled: s.metadata.enabled !== false,
-      }));
+      // Hide needs-review skills from the agent editor's picker — they
+      // can't actually be loaded (resolveSkillCatalog drops them), so
+      // showing them would only confuse the operator. Review happens in
+      // the skills manager via /api/skills, which surfaces all of them.
+      const skills: SkillCatalogEntry[] = rows
+        .filter((s) => s.metadata.trust !== "needs-review")
+        .map((s) => ({
+          id: s.id,
+          version: s.version,
+          description: s.description,
+          whenToUse: s.whenToUse,
+          tags: s.metadata.tags,
+          capabilities: s.metadata.capabilities,
+          enabled: s.metadata.enabled !== false,
+        }));
       return json(200, { skills } satisfies SkillsCatalogResponse);
     } catch (err) {
       return jsonError(500, "list_failed", err instanceof Error ? err.message : String(err));

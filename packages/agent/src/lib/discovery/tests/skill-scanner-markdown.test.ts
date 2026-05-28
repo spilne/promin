@@ -35,6 +35,10 @@ beforeAll(async () => {
       "name: Structured Debugging",
       "description: A disciplined debugging loop.",
       "tags: [engineering]",
+      // Declare trust so the catalog-flow test doesn't get blocked by the
+      // scanner's needs-review default (that policy is exercised in the
+      // skill-scanner.test.ts "newly-discovered skill" cases).
+      "trust: trusted",
       "---",
       "",
       "# Structured debugging",

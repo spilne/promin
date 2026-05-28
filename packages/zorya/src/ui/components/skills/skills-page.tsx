@@ -42,6 +42,29 @@ export function SkillsPage() {
     );
   }, [skills, query]);
 
+  const onApprove = async (id: string) => {
+    // Flip metadata.trust to "trusted". updateSkill PATCH does a partial
+    // metadata replace — re-send the existing tags/capabilities/enabled so
+    // they aren't dropped. (The route's parseSkillBody preserves
+    // description/whenToUse/body when omitted.)
+    const skill = skills.find((s) => s.id === id);
+    if (!skill) return;
+    try {
+      await api.updateSkill(id, {
+        metadata: {
+          capabilities: skill.metadata.capabilities,
+          tags: skill.metadata.tags,
+          ...(skill.metadata.enabled !== undefined && { enabled: skill.metadata.enabled }),
+          trust: "trusted",
+        },
+      });
+      toast(`Approved skill "${id}"`, { variant: "success" });
+      refresh();
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err), { variant: "error" });
+    }
+  };
+
   const onDelete = async (id: string) => {
     if (
       !(await confirm({
@@ -130,6 +153,14 @@ export function SkillsPage() {
                           📄 file
                         </span>
                       )}
+                      {s.metadata.trust === "needs-review" && (
+                        <span
+                          class="badge badge-xs badge-warning gap-1"
+                          title="Unreviewed third-party instructions. Hidden from agents until you Approve."
+                        >
+                          🛡 needs review
+                        </span>
+                      )}
                       {s.metadata.enabled === false && (
                         <span class="badge badge-xs badge-error">disabled</span>
                       )}
@@ -138,6 +169,16 @@ export function SkillsPage() {
                       ))}
                     </td>
                     <td class="text-right whitespace-nowrap">
+                      {s.metadata.trust === "needs-review" && (
+                        <button
+                          type="button"
+                          class="btn btn-xs btn-warning"
+                          title="Approve this skill so agents can load it"
+                          onClick={() => onApprove(s.id)}
+                        >
+                          Approve
+                        </button>
+                      )}
                       <button
                         type="button"
                         class="btn btn-xs btn-ghost"
