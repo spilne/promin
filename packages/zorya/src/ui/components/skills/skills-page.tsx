@@ -5,10 +5,11 @@
 //
 // Skills are instruction blocks an agent loads on demand (loadSkill); the
 // agent editor's skill picker attaches them by id. File-scanned skills
-// (.ts / SKILL.md) and operator-authored ones share this registry — editing
-// a file-scanned skill here republishes the row, but the next scan tick will
-// overwrite it from disk, so the form warns when that's the case is left to
-// a future polish; for now any skill is editable.
+// (.ts / SKILL.md) and operator-authored ones share this registry. A
+// file-scanned skill would be overwritten on the next scan tick, so it's
+// shown with a 📄 badge and its editor disables Save (edit the source file
+// instead) — see the `fileManaged` flow below. Operator-authored skills are
+// fully editable.
 // ---------------------------------------------------------------------------
 
 import { useEffect, useMemo, useState } from "preact/hooks";
