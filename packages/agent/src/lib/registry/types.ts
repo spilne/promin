@@ -102,8 +102,22 @@ export interface LocalAgentBackend {
     readonly id: string;
     readonly credentialRef?: string;
   };
-  /** Inline system prompt. For prompt-registry indirection, use `null` and resolve outside. */
-  readonly systemPrompt: string | null;
+  /**
+   * Inline system prompt. Two shapes:
+   * - **`string`** (or `null`) — the original form; passed through verbatim.
+   * - **`{ base, layers? }`** — `base` is concatenated with each fragment
+   *   the `FragmentRegistry` resolves for `layers[]`, in declaration order
+   *   (`base\n\n<layer-1>\n\n<layer-2>…`). Lets curated role recipes share
+   *   well-tested rubrics/checklists without copy-paste.
+   *
+   * Backwards compat: any existing `string` recipe keeps working unchanged.
+   * The layered form requires a `FragmentRegistry` wired into
+   * `resolveLocalAgent` deps — without one, only `base` is used.
+   */
+  readonly systemPrompt:
+    | string
+    | { readonly base: string; readonly layers?: ReadonlyArray<string> }
+    | null;
   /** Tool names to wire in. Runtime supplies the implementations. */
   readonly tools: ReadonlyArray<string>;
   /**

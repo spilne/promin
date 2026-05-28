@@ -45,6 +45,7 @@ import {
   ZoryaDags,
 } from "../src/index.ts";
 import { researchSynthesisRecipe } from "./dags/research-synthesis.ts";
+import { FRAGMENTS } from "./fragments/index.ts";
 import {
   SqliteWorkflowStorage,
   SqliteWorkflowStartQueue,
@@ -71,6 +72,7 @@ import {
   createDurableSchedulerTools,
   createFileToolRegistry,
   inProcessSchedulerClient,
+  InMemoryFragmentRegistry,
   InMemoryModelCatalog,
   resolveCursorAgent,
   DefaultAgentToolCatalog,
@@ -160,6 +162,10 @@ if (pgUrl) {
   skillRegistry = SqliteSkillRegistry.make({ db });
   memoryStore = SqliteMemoryStore.make({ db });
 }
+// Prompt-fragment registry — small curated markdown layers role recipes
+// compose into their system prompt. See ./fragments/index.ts; passed into
+// resolveLocalAgent via deps.fragments (promin-kx26).
+const fragmentRegistry = new InMemoryFragmentRegistry(FRAGMENTS);
 const dagRegistry = SqliteDagRegistry.make({ db });
 // Long-lived agent instances. Persisted alongside the registry so they
 // survive restarts; the cascade still keys memory by `resourceId =
@@ -576,6 +582,7 @@ async function resolveAgent(
     memory: memoryStore,
     skills: skillRegistry,
     skillCatalog,
+    fragments: fragmentRegistry,
     ...(apiKey !== undefined && { apiKey }),
     // Resolution order:
     //   1. Demo-specific id-keyed mocks (echo / round-robin / tool-calling

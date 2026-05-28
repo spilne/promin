@@ -198,8 +198,16 @@ function ModelDiff({ left, right }: { left: RegisteredAgent; right: RegisteredAg
 }
 
 function SystemPromptDiff({ left, right }: { left: RegisteredAgent; right: RegisteredAgent }) {
-  const leftPrompt = left.backend.type === "local" ? (left.backend.systemPrompt ?? "") : "";
-  const rightPrompt = right.backend.type === "local" ? (right.backend.systemPrompt ?? "") : "";
+  // systemPrompt can be plain-string or layered `{ base, layers }` (kx26).
+  // Diff the `base` only; layer diffing is future polish.
+  const extractPrompt = (a: typeof left): string => {
+    if (a.backend.type !== "local") return "";
+    const sp = a.backend.systemPrompt;
+    if (sp === null) return "";
+    return typeof sp === "string" ? sp : sp.base;
+  };
+  const leftPrompt = extractPrompt(left);
+  const rightPrompt = extractPrompt(right);
   if (leftPrompt === rightPrompt) {
     return (
       <section>

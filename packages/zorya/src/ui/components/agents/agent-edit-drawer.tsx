@@ -59,9 +59,19 @@ interface Props {
 export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTest, embed }: Props) {
   const isLocal = agent.backend.type === "local";
   const [description, setDescription] = useState(agent.metadata.description ?? "");
-  const [systemPrompt, setSystemPrompt] = useState(
-    isLocal ? (agent.backend.systemPrompt ?? "") : "",
-  );
+  // `systemPrompt` on the recipe can be either a plain string OR the layered
+  // `{ base, layers }` form (promin-kx26). The drawer's input is plain-string
+  // only; surface the `base` for editing. Saving writes a plain string back,
+  // which loses layers — but file-managed role recipes (the only ones using
+  // the layered form today) have Save disabled, so the loss can't happen
+  // through this path. Layered-prompt-aware UI is future work.
+  const initialSystemPrompt = (() => {
+    if (!isLocal) return "";
+    const sp = agent.backend.systemPrompt;
+    if (sp === null) return "";
+    return typeof sp === "string" ? sp : sp.base;
+  })();
+  const [systemPrompt, setSystemPrompt] = useState(initialSystemPrompt);
   const [capabilities, setCapabilities] = useState(agent.metadata.capabilities.join(", "));
   const [tags, setTags] = useState(agent.metadata.tags.join(", "));
   const [enabled, setEnabled] = useState(agent.metadata.enabled !== false);

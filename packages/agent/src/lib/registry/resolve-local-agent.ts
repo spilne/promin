@@ -36,6 +36,8 @@ import {
   type ResolvedSkillEntry,
 } from "../skills/resolve-skill-catalog.ts";
 import { LOAD_SKILL_TOOL_NAME, createLoadSkillTool } from "../skills/load-skill-tool.ts";
+import { resolveSystemPrompt } from "../fragments/resolve-prompt.ts";
+import type { FragmentRegistry } from "../fragments/types.ts";
 
 /** Caller-supplied runtime injectables. */
 export interface ResolveLocalAgentDeps {
@@ -129,6 +131,15 @@ export interface ResolveLocalAgentDeps {
    * prompt and `loadSkill` is auto-attached (bound to this catalog).
    */
   readonly skillCatalog?: ReadonlyArray<ResolvedSkillEntry>;
+  /**
+   * Optional fragment registry. When a recipe uses the layered system-prompt
+   * form (`{ base, layers }`), each layer name is resolved through this
+   * registry and concatenated with `base`. A recipe declaring layers
+   * without a registry wired here still resolves — only `base` is used and
+   * each missing layer logs a warning. Recipes using the plain string form
+   * are unaffected.
+   */
+  readonly fragments?: FragmentRegistry;
 }
 
 /**
@@ -155,12 +166,19 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
   // is rebuilt from this on every replay (it isn't journaled), so editing
   // the recipe's catalog surfaces on the next turn; bodies stay out of the
   // prompt and travel only through the journaled loadSkill result.
+  // Resolve the recipe's systemPrompt to a flat string first (handles
+  // plain-string, layered { base, layers }, and null shapes), then append
+  // the skill catalog block when there is one.
+  const baseSystemPrompt = resolveSystemPrompt({
+    systemPrompt: backend.systemPrompt,
+    ...(deps.fragments !== undefined && { fragments: deps.fragments }),
+  });
   const catalog = deps.skillCatalog ?? [];
   const catalogBlock = buildSkillCatalogPrompt(catalog);
   const systemPrompt =
-    catalogBlock && backend.systemPrompt
-      ? `${backend.systemPrompt}\n\n${catalogBlock}`
-      : ((catalogBlock || backend.systemPrompt) ?? undefined);
+    catalogBlock && baseSystemPrompt
+      ? `${baseSystemPrompt}\n\n${catalogBlock}`
+      : ((catalogBlock || baseSystemPrompt) ?? undefined);
   if (catalog.length > 0 && deps.skills && !(LOAD_SKILL_TOOL_NAME in tools)) {
     tools[LOAD_SKILL_TOOL_NAME] = createLoadSkillTool({ registry: deps.skills, catalog });
   }
