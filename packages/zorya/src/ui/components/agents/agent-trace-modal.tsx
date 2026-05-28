@@ -304,6 +304,12 @@ function ToolCallView({
   if (failuresOnly && !failed) return null;
   const [expanded, setExpanded] = useState(failed);
   const colorClass = failed ? "border-error" : orphan ? "border-warning" : "border-base-content/30";
+  // Special-case loadSkill so a skill load is visually distinct from generic
+  // tool activity. The skill id lives on `input.id` (the trace DTO doesn't
+  // currently surface tool-result metadata; that's a separate plumbing job).
+  const isLoadSkill = call.name === "loadSkill" && !failed;
+  const skillIdRaw = (call.input as { id?: unknown } | null | undefined)?.id;
+  const skillId = typeof skillIdRaw === "string" ? skillIdRaw : undefined;
   return (
     <div class={`border-l-2 ${colorClass} pl-2 ml-${indent * 4} mt-1`}>
       <button
@@ -312,9 +318,16 @@ function ToolCallView({
         onClick={() => setExpanded((v) => !v)}
       >
         <span class="text-[10px] uppercase tracking-wider text-base-content/50">
-          {expanded ? "▼" : "▶"} Tool
+          {expanded ? "▼" : "▶"} {isLoadSkill ? "Skill" : "Tool"}
         </span>
-        <span class="ml-1">{call.name}</span>
+        {isLoadSkill ? (
+          <>
+            <span class="ml-1">🧩 Loaded skill:</span>
+            <span class="ml-1 font-mono">{skillId ?? "?"}</span>
+          </>
+        ) : (
+          <span class="ml-1">{call.name}</span>
+        )}
         {failed && <span class="badge badge-xs badge-error ml-2">failed</span>}
         {orphan && <span class="badge badge-xs badge-warning ml-2">orphan</span>}
         {!call.result && !orphan && (
@@ -332,7 +345,8 @@ function ToolCallView({
           {call.result && (
             <details class="ml-4" open={failed}>
               <summary class="cursor-pointer text-[10px] text-base-content/50">
-                result {failed && <span class="text-error">(failed)</span>}
+                {isLoadSkill ? "instructions" : "result"}{" "}
+                {failed && <span class="text-error">(failed)</span>}
               </summary>
               <pre
                 class={`p-2 rounded text-[11px] whitespace-pre-wrap break-words ${
