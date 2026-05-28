@@ -118,6 +118,15 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
   const tools = useMemo(() => toolsData?.tools ?? [], [toolsData]);
   const { data: skillsData } = useFetch(() => api.listCatalogSkills(), [], 0);
   const catalogSkills = useMemo(() => skillsData?.skills ?? [], [skillsData]);
+  // Self-fetch which agent recipes are file-managed. When THIS one is, Save
+  // would be silently overwritten by the next scan tick — show a warning +
+  // disable Save (Publish stays enabled; a new version is operator-managed
+  // and doesn't conflict with the file's version). Mirrors the skills page.
+  const { data: agentSourcesData } = useFetch(() => api.listAgentSources(), [], 0);
+  const fileManaged = useMemo(
+    () => (agentSourcesData?.fileManaged ?? []).includes(agent.id),
+    [agentSourcesData, agent.id],
+  );
 
   useEffect(() => {
     if (embed) return; // host drawer owns close
@@ -310,6 +319,13 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
           class={embed ? "space-y-4" : "flex-1 overflow-y-auto p-4 space-y-4"}
           onSubmit={onSubmit}
         >
+          {fileManaged && (
+            <div class="alert alert-warning text-xs">
+              📄 This agent recipe is defined by a file on disk. Saving in place is disabled — edit
+              the source file, or use <span class="font-mono">Publish new version</span> to create
+              an operator-managed copy. The next scan would overwrite any in-place change.
+            </div>
+          )}
           <label class="form-control">
             <span class="text-xs text-base-content/60 mb-1 uppercase tracking-wider">
               Description
@@ -732,14 +748,27 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
               <button
                 type="button"
                 class="btn btn-sm btn-secondary"
-                disabled={saving}
+                disabled={saving || fileManaged}
                 onClick={onSaveAndTestClick}
-                title="Save edits and open a fresh chat thread to test"
+                title={
+                  fileManaged
+                    ? "Disabled — this recipe is defined by a file on disk."
+                    : "Save edits and open a fresh chat thread to test"
+                }
               >
                 {saving ? "Saving…" : "Save & test"}
               </button>
             )}
-            <button type="submit" class="btn btn-sm btn-primary" disabled={saving}>
+            <button
+              type="submit"
+              class="btn btn-sm btn-primary"
+              disabled={saving || fileManaged}
+              title={
+                fileManaged
+                  ? "Disabled — this recipe is defined by a file on disk. Edit the source file or use Publish new version."
+                  : undefined
+              }
+            >
               {saving ? "Saving…" : "Save changes"}
             </button>
           </div>

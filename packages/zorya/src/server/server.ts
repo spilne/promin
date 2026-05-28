@@ -105,6 +105,7 @@ import {
   distillThread,
   getAgent,
   invokeAgent,
+  listAgentSources,
   listAgentThreads,
   listAgentVersions,
   listAgents,
@@ -510,6 +511,14 @@ export class ZoryaServer {
           this.skills
             ? listCatalogSkills({ skills: this.skills.registry })
             : async () => new Response(JSON.stringify({ skills: [] }), { status: 200 }),
+        )
+        // File-managed agent sources — which recipes are backed by a file on
+        // disk (so the editor can disable in-place Save and the list can
+        // badge them). Mounted before /api/agents/:id so `_sources` isn't
+        // shadowed by an agent named `_sources` (`_`-prefix is reserved).
+        .get(
+          "/api/agents/_sources",
+          listAgentSources({ fileManagedIds: () => this.agents!.fileManagedIds() }),
         )
         // Draft recipes — test a recipe edit before committing it.
         // Mounted before /api/agents/:id so the literal `_draft` segment

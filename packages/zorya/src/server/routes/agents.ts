@@ -337,6 +337,23 @@ async function resolveScope(
 // Discovery — list + get
 // ---------------------------------------------------------------------------
 
+export interface AgentSourcesResponse {
+  /** Agent ids currently backed by a recipe file on disk — read-only in the UI. */
+  fileManaged: string[];
+}
+
+/**
+ * Report which agent recipes are file-managed (scanned from disk) vs
+ * operator-authored. The editor uses this to disable in-place Save on a
+ * file-scanned recipe so the next scan tick doesn't silently overwrite the
+ * change. Mirror of `listSkillSources` from routes/skills.ts.
+ */
+export function listAgentSources(deps: { readonly fileManagedIds: () => string[] }) {
+  return async (): Promise<Response> => {
+    return json(200, { fileManaged: deps.fileManagedIds() } satisfies AgentSourcesResponse);
+  };
+}
+
 export function listAgents(deps: AgentGatewayDeps) {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);

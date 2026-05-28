@@ -12,6 +12,8 @@ interface AgentListProps {
 
 export function AgentList({ onOpen }: AgentListProps) {
   const { data, loading, error, refresh } = useFetch(() => api.listAgents(), [], 30_000);
+  const { data: sourcesData } = useFetch(() => api.listAgentSources(), [], 30_000);
+  const fileManaged = useMemo(() => new Set(sourcesData?.fileManaged ?? []), [sourcesData]);
   const [query, setQuery] = useState("");
 
   const agents = data?.agents ?? [];
@@ -128,7 +130,7 @@ export function AgentList({ onOpen }: AgentListProps) {
               </thead>
               <tbody>
                 {filtered.map((a) => (
-                  <AgentRow agent={a} onOpen={onOpen} />
+                  <AgentRow agent={a} onOpen={onOpen} fileManaged={fileManaged.has(a.id)} />
                 ))}
               </tbody>
             </table>
@@ -139,7 +141,15 @@ export function AgentList({ onOpen }: AgentListProps) {
   );
 }
 
-function AgentRow({ agent, onOpen }: { agent: RegisteredAgent; onOpen: (id: string) => void }) {
+function AgentRow({
+  agent,
+  onOpen,
+  fileManaged,
+}: {
+  agent: RegisteredAgent;
+  onOpen: (id: string) => void;
+  fileManaged: boolean;
+}) {
   const model =
     agent.backend.type === "local"
       ? `${agent.backend.model.provider}/${agent.backend.model.id}`
@@ -184,10 +194,18 @@ function AgentRow({ agent, onOpen }: { agent: RegisteredAgent; onOpen: (id: stri
         )}
       </td>
       <td>
-        {agent.metadata.tags.length === 0 ? (
+        {!fileManaged && agent.metadata.tags.length === 0 ? (
           <span class="text-base-content/40">—</span>
         ) : (
           <div class="flex gap-1 flex-wrap">
+            {fileManaged && (
+              <span
+                class="badge badge-sm badge-info gap-1"
+                title="Defined by a file on disk — edit the source file, not in the UI"
+              >
+                📄 file
+              </span>
+            )}
             {agent.metadata.tags.map((t) => (
               <span class="badge badge-sm badge-ghost">{t}</span>
             ))}

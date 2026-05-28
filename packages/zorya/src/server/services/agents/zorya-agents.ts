@@ -112,7 +112,12 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   readonly turnGate?: AgentTurnGate;
   readonly workerId?: string;
   private readonly scanConfig?: ZoryaAgentsScanConfig;
-  private scanHandle?: { stop(): void };
+  private scanHandle?: { stop(): void; tick(): Promise<unknown> };
+  // Agent ids currently backed by a recipe file on disk (rebuilt each scan
+  // tick). The editor uses this to mark a recipe read-only — without it, an
+  // in-place edit gets silently overwritten by the next scan. Empty when no
+  // scanner is configured. Sibling of ZoryaSkills.fileManagedIds().
+  private _fileManaged: ReadonlySet<string> = new Set();
 
   constructor(config: ZoryaAgentsConfig) {
     this.registry = config.registry;
@@ -139,8 +144,14 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
     });
   }
 
+  /** Agent ids currently managed by a recipe file on disk. */
+  fileManagedIds(): string[] {
+    return [...this._fileManaged];
+  }
+
   async start(): Promise<void> {
     if (this.scanHandle || !this.scanConfig) return;
+    const userOnTick = this.scanConfig.onTick;
     this.scanHandle = startAgentsScanLoop({
       registry: this.registry,
       root: this.scanConfig.root,
@@ -148,8 +159,18 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
         intervalMs: this.scanConfig.intervalMs,
       }),
       ...(this.scanConfig.sync !== undefined && { sync: this.scanConfig.sync }),
-      ...(this.scanConfig.onTick !== undefined && { onTick: this.scanConfig.onTick }),
+      // Rebuild the file-managed set from each tick's discovered ids
+      // (`upserted` = every recipe the scan applied, so a deleted file
+      // drops out next tick), then fan out to the user hook. Mirrors
+      // ZoryaSkills.start().
+      onTick: (tick) => {
+        this._fileManaged = new Set(tick.upserted);
+        userOnTick?.(tick);
+      },
     });
+    // One immediate tick so the file-managed flag is available at boot
+    // instead of after the first interval (which is 5s in the demo).
+    await this.scanHandle.tick();
   }
 
   async stop(): Promise<void> {

@@ -27,6 +27,7 @@ import type {
 import type { WorkflowDefDto, WorkflowDefsResponse } from "../../server/routes/workflow-defs.ts";
 import type {
   AgentsListResponse,
+  AgentSourcesResponse,
   AgentThreadsResponse,
   RegisteredAgent,
   ThreadInvokeResponse,
@@ -429,6 +430,9 @@ export const api = {
   },
   listCatalogTools(): Promise<{ tools: ToolCatalogEntryDto[] }> {
     return req<{ tools: ToolCatalogEntryDto[] }>(`/api/agents/_catalog/tools`);
+  },
+  listAgentSources(): Promise<AgentSourcesResponse> {
+    return req<AgentSourcesResponse>(`/api/agents/_sources`);
   },
   getToolCatalogHealth(): Promise<ToolCatalogHealthDto> {
     return req<ToolCatalogHealthDto>(`/api/agents/_catalog/tools/health`);
