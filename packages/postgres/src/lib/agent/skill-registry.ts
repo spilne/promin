@@ -152,6 +152,9 @@ function buildMetadata(patch?: Partial<SkillMetadata>): SkillMetadata {
     capabilities: patch?.capabilities ? [...patch.capabilities] : [],
     tags: patch?.tags ? [...patch.tags] : [],
     ...(patch?.enabled !== undefined && { enabled: patch.enabled }),
+    // Pass trust through — the scanner's needs-review default and an
+    // operator's Approve both flow via metadata.trust on register.
+    ...(patch?.trust !== undefined && { trust: patch.trust }),
   };
 }
 

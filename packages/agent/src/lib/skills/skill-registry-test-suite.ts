@@ -91,6 +91,25 @@ export function skillRegistryTestSuite(factory: () => SkillRegistry | Promise<Sk
         const row = await r.register(input("writing-style", { metadata: { enabled: false } }));
         expect(row.metadata.enabled).toBe(false);
       });
+
+      it("carries the trust state through (needs-review / trusted)", async () => {
+        const r = await make();
+        const review = await r.register(
+          input("needs-review-skill", {
+            metadata: { capabilities: [], tags: [], trust: "needs-review" },
+          }),
+        );
+        expect(review.metadata.trust).toBe("needs-review");
+        const trusted = await r.register(
+          input("trusted-skill", {
+            metadata: { capabilities: [], tags: [], trust: "trusted" },
+          }),
+        );
+        expect(trusted.metadata.trust).toBe("trusted");
+        // Round-trip through get (catches buildMetadata vs storage drift).
+        expect((await r.get("needs-review-skill"))?.metadata.trust).toBe("needs-review");
+        expect((await r.get("trusted-skill"))?.metadata.trust).toBe("trusted");
+      });
     });
 
     // --- list ---------------------------------------------------------
