@@ -40,6 +40,11 @@ import type {
   SkillVersionsResponse,
 } from "../../server/routes/skills.ts";
 import type {
+  FragmentDto,
+  FragmentsListResponse,
+  FragmentSourcesResponse,
+} from "../../server/routes/fragments.ts";
+import type {
   FragmentsCatalogResponse,
   SkillsCatalogResponse,
 } from "../../server/routes/agent-catalog.ts";
@@ -496,6 +501,36 @@ export const api = {
   },
   listCatalogFragments(): Promise<FragmentsCatalogResponse> {
     return req<FragmentsCatalogResponse>(`/api/agents/_catalog/fragments`);
+  },
+
+  // ---------------------------------------------------------------------
+  // Fragments — registry CRUD (parallel to skills)
+  // ---------------------------------------------------------------------
+  listFragments(): Promise<FragmentsListResponse> {
+    return req<FragmentsListResponse>(`/api/fragments`);
+  },
+  getFragment(key: string): Promise<FragmentDto> {
+    return req<FragmentDto>(`/api/fragments/${encodeURIComponent(key)}`);
+  },
+  createFragment(body: { key: string; content: string }): Promise<FragmentDto> {
+    return req<FragmentDto>(`/api/fragments`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  updateFragment(key: string, body: { content: string }): Promise<FragmentDto> {
+    return req<FragmentDto>(`/api/fragments/${encodeURIComponent(key)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  deleteFragment(key: string): Promise<void> {
+    return req<void>(`/api/fragments/${encodeURIComponent(key)}`, { method: "DELETE" });
+  },
+  listFragmentSources(): Promise<FragmentSourcesResponse> {
+    return req<FragmentSourcesResponse>(`/api/fragments/_sources`);
   },
   listSkillSources(): Promise<SkillSourcesResponse> {
     return req<SkillSourcesResponse>(`/api/skills/_sources`);

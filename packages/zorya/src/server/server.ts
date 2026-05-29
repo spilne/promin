@@ -136,6 +136,14 @@ import {
   listSkills,
   updateSkill,
 } from "./routes/skills.ts";
+import {
+  createFragment,
+  deleteFragment,
+  getFragment,
+  listFragmentSources,
+  listFragments,
+  updateFragment,
+} from "./routes/fragments.ts";
 import { createSecret, deleteSecret, listSecrets } from "./routes/secrets.ts";
 import { createDraft, deleteDraft } from "./routes/agent-drafts.ts";
 import {
@@ -172,6 +180,7 @@ import {
 import { ZoryaScheduler } from "./services/scheduler/index.ts";
 import { ZoryaAgents } from "./services/agents/index.ts";
 import { ZoryaSkills } from "./services/skills/index.ts";
+import { ZoryaFragments } from "./services/fragments/index.ts";
 import { ZoryaDags } from "./services/dags/index.ts";
 import {
   createDag,
@@ -214,6 +223,12 @@ export interface ZoryaServerConfig extends AuthConfig {
    * /api/agents/_catalog/skills (the agent editor's skill picker source).
    */
   skills?: ZoryaSkills;
+  /**
+   * Optional fragment registry service. Mounts /api/fragments/* CRUD and
+   * backs /api/agents/_catalog/fragments (the layered-prompt editor source).
+   * When set, takes precedence over `config.agents.fragments`.
+   */
+  fragments?: ZoryaFragments;
   /** Optional DAG gateway service. Mounts /api/dags/* routes. */
   dags?: ZoryaDags;
   /**
@@ -286,6 +301,7 @@ export class ZoryaServer {
   readonly scheduler?: ZoryaScheduler;
   readonly agents?: ZoryaAgents;
   readonly skills?: ZoryaSkills;
+  readonly fragments?: ZoryaFragments;
   readonly dags?: ZoryaDags;
   readonly versionRegistry: IWorkflowVersionRegistry;
   /**
@@ -314,6 +330,7 @@ export class ZoryaServer {
     if (config.scheduler) this.scheduler = config.scheduler;
     if (config.agents) this.agents = config.agents;
     if (config.skills) this.skills = config.skills;
+    if (config.fragments) this.fragments = config.fragments;
     if (config.dags) this.dags = config.dags;
     if (config.secrets) this.secrets = config.secrets;
     this.versionRegistry = config.versionRegistry ?? new WorkflowVersionRegistry();
@@ -514,12 +531,16 @@ export class ZoryaServer {
             : async () => new Response(JSON.stringify({ skills: [] }), { status: 200 }),
         )
         // Fragment catalog — the agent editor's layered-prompt editor source.
-        // Backed by the host's FragmentRegistry; empty when none wired.
+        // Prefers the dedicated ZoryaFragments service (which the manager UI
+        // also writes through); falls back to a registry passed inline on
+        // ZoryaAgents for legacy hosts that haven't moved to the service yet.
         .get(
           "/api/agents/_catalog/fragments",
-          this.agents.fragments
-            ? listCatalogFragments({ fragments: this.agents.fragments })
-            : async () => new Response(JSON.stringify({ fragments: [] }), { status: 200 }),
+          this.fragments
+            ? listCatalogFragments({ fragments: this.fragments.registry })
+            : this.agents.fragments
+              ? listCatalogFragments({ fragments: this.agents.fragments })
+              : async () => new Response(JSON.stringify({ fragments: [] }), { status: 200 }),
         )
         // File-managed agent sources — which recipes are backed by a file on
         // disk (so the editor can disable in-place Save and the list can
@@ -591,6 +612,23 @@ export class ZoryaServer {
         .patch("/api/skills/:id", updateSkill(skillDeps))
         .delete("/api/skills/:id", deleteSkill(skillDeps))
         .get("/api/skills/:id/versions", listSkillVersions(skillDeps));
+    }
+
+    if (this.fragments) {
+      const fragments = this.fragments;
+      const fragmentDeps = { registry: fragments.registry };
+      this.router
+        .get("/api/fragments", listFragments(fragmentDeps))
+        .post("/api/fragments", createFragment(fragmentDeps))
+        // `_sources` before `:key` so the literal segment isn't shadowed
+        // (operator-supplied fragment keys starting with `_` are rejected).
+        .get(
+          "/api/fragments/_sources",
+          listFragmentSources({ fileManagedIds: () => fragments.fileManagedIds() }),
+        )
+        .get("/api/fragments/:key", getFragment(fragmentDeps))
+        .patch("/api/fragments/:key", updateFragment(fragmentDeps))
+        .delete("/api/fragments/:key", deleteFragment(fragmentDeps));
     }
 
     if (this.secrets) {
@@ -766,6 +804,7 @@ export class ZoryaServer {
       this.scheduler?.start(),
       this.agents?.start(),
       this.skills?.start(),
+      this.fragments?.start(),
     ]).catch((err) => this.logger.error("[zorya] service start error:", err));
 
     return {
@@ -787,6 +826,7 @@ export class ZoryaServer {
       this.scheduler?.stop(),
       this.agents?.stop(),
       this.skills?.stop(),
+      this.fragments?.stop(),
     ]).catch(() => {});
   }
 

@@ -34,6 +34,11 @@ export {
   type ZoryaSkillsConfig,
   type ZoryaSkillsScanConfig,
 } from "./server/services/skills/index.ts";
+export {
+  ZoryaFragments,
+  type ZoryaFragmentsConfig,
+  type ZoryaFragmentsScanConfig,
+} from "./server/services/fragments/index.ts";
 export { ZoryaDags, type ZoryaDagsConfig } from "./server/services/dags/index.ts";
 export { Auth, type AuthConfig } from "./server/auth.ts";
 export { RunEventBus } from "./server/run-event-bus.ts";

@@ -1,25 +1,32 @@
 // ---------------------------------------------------------------------------
-// `InMemoryFragmentRegistry` — reference implementation. A frozen
-// `Record<string, string>` keyed by layer name. Hosts construct one at
-// boot with their curated fragment library and pass it into
-// `resolveLocalAgent` deps; the resolver concatenates referenced layers
-// into the system prompt.
+// `InMemoryFragmentRegistry` — reference implementation. Hosts construct one
+// at boot, optionally seeded from a curated library; the scanner and the
+// CRUD routes both mutate it via `set` / `delete`. resolveSystemPrompt reads
+// it synchronously.
 // ---------------------------------------------------------------------------
 
 import type { FragmentRegistry } from "./types.ts";
 
 export class InMemoryFragmentRegistry implements FragmentRegistry {
-  private readonly fragments: Readonly<Record<string, string>>;
+  private readonly fragments: Map<string, string>;
 
-  constructor(fragments: Readonly<Record<string, string>>) {
-    this.fragments = { ...fragments };
+  constructor(seed: Readonly<Record<string, string>> = {}) {
+    this.fragments = new Map(Object.entries(seed));
   }
 
   get(key: string): string | undefined {
-    return this.fragments[key];
+    return this.fragments.get(key);
   }
 
   list(): ReadonlyArray<{ readonly key: string; readonly content: string }> {
-    return Object.entries(this.fragments).map(([key, content]) => ({ key, content }));
+    return [...this.fragments.entries()].map(([key, content]) => ({ key, content }));
+  }
+
+  set(key: string, content: string): void {
+    this.fragments.set(key, content);
+  }
+
+  delete(key: string): void {
+    this.fragments.delete(key);
   }
 }

@@ -42,10 +42,10 @@ import {
   ZoryaScheduler,
   ZoryaAgents,
   ZoryaSkills,
+  ZoryaFragments,
   ZoryaDags,
 } from "../src/index.ts";
 import { researchSynthesisRecipe } from "./dags/research-synthesis.ts";
-import { FRAGMENTS } from "./fragments/index.ts";
 import {
   SqliteWorkflowStorage,
   SqliteWorkflowStartQueue,
@@ -163,9 +163,10 @@ if (pgUrl) {
   memoryStore = SqliteMemoryStore.make({ db });
 }
 // Prompt-fragment registry — small curated markdown layers role recipes
-// compose into their system prompt. See ./fragments/index.ts; passed into
-// resolveLocalAgent via deps.fragments (promin-kx26).
-const fragmentRegistry = new InMemoryFragmentRegistry(FRAGMENTS);
+// compose into their system prompt. The ZoryaFragments service below scans
+// examples/fragments/*.md on boot + on a tick, and the manager UI mutates
+// the same in-memory registry via /api/fragments CRUD.
+const fragmentRegistry = new InMemoryFragmentRegistry();
 const dagRegistry = SqliteDagRegistry.make({ db });
 // Long-lived agent instances. Persisted alongside the registry so they
 // survive restarts; the cascade still keys memory by `resourceId =
@@ -1134,6 +1135,23 @@ const skills = new ZoryaSkills({
   },
 });
 
+// Fragments service — scans examples/fragments/*.md on boot + on a tick;
+// the manager UI mutates the same registry via /api/fragments CRUD.
+const fragmentScanRoot = path.join(import.meta.dir, "fragments");
+const fragments = new ZoryaFragments({
+  registry: fragmentRegistry,
+  scan: {
+    root: fragmentScanRoot,
+    intervalMs: 5_000,
+    onTick: (tick) => {
+      if (tick.added.length > 0) {
+        console.log(`[zorya] hot-reload: registered new fragments: ${tick.added.join(", ")}`);
+      }
+      for (const w of tick.warnings) console.warn(`[zorya] fragment-scan: ${w}`);
+    },
+  },
+});
+
 // Custom fire override: schedules without a `metadata.input` arrive with
 // `input === undefined`. SQLite's NOT NULL constraint rejects that, so
 // synthesise a per-name default via `inputFor()` before triggering.
@@ -1250,6 +1268,7 @@ const server = new ZoryaServer({
   scheduler,
   agents,
   skills,
+  fragments,
   dags,
   // BYOK / per-tenant API keys / MCP credentials live here. Exposes
   // /api/secrets HTTP CRUD + the dashboard's Secrets page; the agent

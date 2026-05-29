@@ -333,6 +333,24 @@ export type {
   SkillScanLoopHandle,
 } from "./discovery/skill-scanner.ts";
 
+// Discovery — auto-scan markdown prompt fragments from a folder + reconcile
+// into a FragmentRegistry. Each .md file is one fragment, key = basename.
+export {
+  FragmentScanner,
+  applyDiscoveredFragments,
+  startFragmentScanLoop,
+} from "./discovery/fragment-scanner.ts";
+export type {
+  FragmentSpec,
+  FragmentScannerOptions,
+  FragmentScanResult,
+  ApplyDiscoveredFragmentsOptions,
+  ApplyDiscoveredFragmentsResult,
+  FragmentScanLoopOptions,
+  FragmentScanLoopTick,
+  FragmentScanLoopHandle,
+} from "./discovery/fragment-scanner.ts";
+
 // ThreadLeaseStore — coordination primitive for horizontally-scaled
 // agent runtimes. AgentTurnGate exposes strict-mode policy on top.
 export type {
