@@ -13,6 +13,7 @@ import type {
   AgentRegistry,
   AgentToolCatalog,
   AgentTurnGate,
+  FragmentRegistry,
   MemoryStore,
   ModelCatalog,
   RegisteredAgent,
@@ -73,6 +74,14 @@ export interface ZoryaAgentsConfig {
    */
   toolCatalog?: AgentToolCatalog;
   /**
+   * Optional fragment registry. When set, the server exposes
+   * `GET /api/agents/_catalog/fragments` so the agent editor's
+   * layered-prompt editor can populate its layer picker (and so the
+   * resolver itself, if wired separately, has the same registry).
+   * Mirrors the `toolCatalog` opt-in.
+   */
+  fragments?: FragmentRegistry;
+  /**
    * Optional tool-history store. When set, the server exposes
    * `GET /api/agents/_catalog/tools/history` so a compliance / forensic
    * query can read which tools the host has exposed over time. Pair it
@@ -108,6 +117,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   readonly instances?: AgentInstanceRegistry;
   readonly models?: ModelCatalog;
   readonly toolCatalog?: AgentToolCatalog;
+  readonly fragments?: FragmentRegistry;
   readonly toolHistory?: ToolHistoryStore;
   readonly turnGate?: AgentTurnGate;
   readonly workerId?: string;
@@ -126,6 +136,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
     if (config.instances) this.instances = config.instances;
     if (config.models) this.models = config.models;
     if (config.toolCatalog) this.toolCatalog = config.toolCatalog;
+    if (config.fragments) this.fragments = config.fragments;
     if (config.toolHistory) this.toolHistory = config.toolHistory;
     if (config.scan) this.scanConfig = config.scan;
     if (config.turnGate) this.turnGate = config.turnGate;

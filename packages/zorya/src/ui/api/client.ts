@@ -39,7 +39,10 @@ import type {
   SkillSourcesResponse,
   SkillVersionsResponse,
 } from "../../server/routes/skills.ts";
-import type { SkillsCatalogResponse } from "../../server/routes/agent-catalog.ts";
+import type {
+  FragmentsCatalogResponse,
+  SkillsCatalogResponse,
+} from "../../server/routes/agent-catalog.ts";
 import type { MemoryInspectResponse } from "../../server/routes/memory.ts";
 import type { SignalsResponse } from "../../server/routes/signals.ts";
 import type {
@@ -490,6 +493,9 @@ export const api = {
   },
   listCatalogSkills(): Promise<SkillsCatalogResponse> {
     return req<SkillsCatalogResponse>(`/api/agents/_catalog/skills`);
+  },
+  listCatalogFragments(): Promise<FragmentsCatalogResponse> {
+    return req<FragmentsCatalogResponse>(`/api/agents/_catalog/fragments`);
   },
   listSkillSources(): Promise<SkillSourcesResponse> {
     return req<SkillSourcesResponse>(`/api/skills/_sources`);

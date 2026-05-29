@@ -11,6 +11,7 @@
 import type {
   AgentRegistry,
   AgentToolCatalog,
+  FragmentRegistry,
   ModelCatalog,
   SerializedModelCatalogItem,
   SkillRegistry,
@@ -77,6 +78,40 @@ export function listCatalogTools(deps: AgentToolCatalogDeps) {
       const tools = await deps.tools.listAll();
       const body: ToolsCatalogResponse = { tools };
       return json(200, body);
+    } catch (err) {
+      return jsonError(500, "list_failed", err instanceof Error ? err.message : String(err));
+    }
+  };
+}
+
+/**
+ * Catalog entry for the agent editor's layered-prompt editor — a fragment
+ * key + its full content (so the picker can show a preview without a
+ * follow-up fetch). Fragments are small markdown layers; sending them
+ * inline keeps the picker snappy and the wire shape simple.
+ */
+export interface FragmentCatalogEntry {
+  readonly key: string;
+  readonly content: string;
+}
+
+export interface FragmentsCatalogResponse {
+  fragments: FragmentCatalogEntry[];
+}
+
+export interface AgentFragmentCatalogDeps {
+  readonly fragments: FragmentRegistry;
+}
+
+/**
+ * List the registered prompt fragments for the layered-prompt editor.
+ * Mirrors `listCatalogTools` / `listCatalogSkills`.
+ */
+export function listCatalogFragments(deps: AgentFragmentCatalogDeps) {
+  return async (): Promise<Response> => {
+    try {
+      const fragments = deps.fragments.list().map((f) => ({ key: f.key, content: f.content }));
+      return json(200, { fragments } satisfies FragmentsCatalogResponse);
     } catch (err) {
       return jsonError(500, "list_failed", err instanceof Error ? err.message : String(err));
     }

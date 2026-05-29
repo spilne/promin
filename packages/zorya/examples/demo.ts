@@ -1102,6 +1102,7 @@ const agents = new ZoryaAgents({
   instances: instanceRegistry,
   models: modelCatalog,
   toolCatalog: agentToolCatalog,
+  fragments: fragmentRegistry,
   scan: {
     root: agentScanRoot,
     intervalMs: 5_000,

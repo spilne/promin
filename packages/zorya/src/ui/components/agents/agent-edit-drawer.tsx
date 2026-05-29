@@ -60,18 +60,23 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
   const isLocal = agent.backend.type === "local";
   const [description, setDescription] = useState(agent.metadata.description ?? "");
   // `systemPrompt` on the recipe can be either a plain string OR the layered
-  // `{ base, layers }` form (promin-kx26). The drawer's input is plain-string
-  // only; surface the `base` for editing. Saving writes a plain string back,
-  // which loses layers — but file-managed role recipes (the only ones using
-  // the layered form today) have Save disabled, so the loss can't happen
-  // through this path. Layered-prompt-aware UI is future work.
+  // `{ base, layers }` form (promin-kx26). The drawer edits both: the
+  // textarea drives `base`, the LayersSection drives `layers`. Save emits
+  // the layered form when layers are non-empty, plain string otherwise.
   const initialSystemPrompt = (() => {
     if (!isLocal) return "";
     const sp = agent.backend.systemPrompt;
     if (sp === null) return "";
     return typeof sp === "string" ? sp : sp.base;
   })();
+  const initialLayers = (() => {
+    if (!isLocal) return [] as string[];
+    const sp = agent.backend.systemPrompt;
+    if (sp === null || typeof sp === "string") return [] as string[];
+    return [...(sp.layers ?? [])];
+  })();
   const [systemPrompt, setSystemPrompt] = useState(initialSystemPrompt);
+  const [selectedLayers, setSelectedLayers] = useState<ReadonlyArray<string>>(initialLayers);
   const [capabilities, setCapabilities] = useState(agent.metadata.capabilities.join(", "));
   const [tags, setTags] = useState(agent.metadata.tags.join(", "));
   const [enabled, setEnabled] = useState(agent.metadata.enabled !== false);
@@ -132,6 +137,9 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
   // would be silently overwritten by the next scan tick — show a warning +
   // disable Save (Publish stays enabled; a new version is operator-managed
   // and doesn't conflict with the file's version). Mirrors the skills page.
+  // Fragment catalog drives the LayersSection's add-layer dropdown.
+  const { data: fragmentsData } = useFetch(() => api.listCatalogFragments(), [], 0);
+  const catalogFragments = useMemo(() => fragmentsData?.fragments ?? [], [fragmentsData]);
   const { data: agentSourcesData } = useFetch(() => api.listAgentSources(), [], 0);
   const fileManaged = useMemo(
     () => (agentSourcesData?.fileManaged ?? []).includes(agent.id),
@@ -189,9 +197,17 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
     const skillRefs = Array.from(selectedSkills)
       .sort()
       .map((id) => ({ id }));
+    // Emit the layered shape when the operator picked layers; fall back
+    // to the plain-string form (or null) otherwise. Keeps backward-compat
+    // for recipes that don't use fragments.
+    const trimmedBase = systemPrompt.trim();
+    const promptValue =
+      selectedLayers.length > 0
+        ? { base: trimmedBase, layers: [...selectedLayers] }
+        : trimmedBase || null;
     const backend = {
       ...backendBase,
-      systemPrompt: systemPrompt.trim() || null,
+      systemPrompt: promptValue,
       model: {
         provider: provider || agent.backend.model.provider,
         id: modelId || agent.backend.model.id,
@@ -422,6 +438,14 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
                 MemoryStore.resolveContext at turn time.
               </span>
             </label>
+          )}
+
+          {isLocal && (
+            <LayersSection
+              fragments={catalogFragments}
+              selected={selectedLayers}
+              onChange={setSelectedLayers}
+            />
           )}
 
           {isLocal && (
@@ -852,6 +876,137 @@ function RunModeField({ value, onChange }: { value: RunMode; onChange: (v: RunMo
         <option value="blocking">blocking</option>
       </select>
     </label>
+  );
+}
+
+interface LayersSectionProps {
+  fragments: ReadonlyArray<{ key: string; content: string }>;
+  selected: ReadonlyArray<string>;
+  onChange: (next: ReadonlyArray<string>) => void;
+}
+
+// Layered-prompt editor. The system-prompt textarea drives `base`; this
+// section drives `layers[]`. Order matters (concatenation order at resolve
+// time), so each chip has ↑ / ↓ controls. ✕ removes. An "Add layer"
+// dropdown lists fragments from the catalog that aren't selected yet.
+//
+// Hidden when no fragment catalog is wired AND no layers are already
+// pinned on the recipe — keeps the form quiet for hosts that aren't using
+// fragments.
+function LayersSection({ fragments, selected, onChange }: LayersSectionProps) {
+  if (fragments.length === 0 && selected.length === 0) return null;
+
+  const fragmentByKey = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const f of fragments) m.set(f.key, f.content);
+    return m;
+  }, [fragments]);
+
+  const availableToAdd = useMemo(
+    () => fragments.filter((f) => !selected.includes(f.key)).map((f) => f.key),
+    [fragments, selected],
+  );
+
+  const move = (index: number, delta: -1 | 1) => {
+    const next = [...selected];
+    const target = index + delta;
+    if (target < 0 || target >= next.length) return;
+    [next[index], next[target]] = [next[target]!, next[index]!];
+    onChange(next);
+  };
+  const remove = (index: number) => {
+    const next = [...selected];
+    next.splice(index, 1);
+    onChange(next);
+  };
+  const add = (key: string) => {
+    if (!key || selected.includes(key)) return;
+    onChange([...selected, key]);
+  };
+
+  return (
+    <div class="form-control">
+      <div class="flex items-center justify-between mb-1">
+        <span class="text-xs text-base-content/60 uppercase tracking-wider">
+          Prompt layers
+          <span class="ml-2 text-[10px] text-base-content/40 normal-case tracking-normal">
+            appended after the base in this order
+          </span>
+        </span>
+      </div>
+
+      {selected.length === 0 ? (
+        <div class="text-[11px] text-base-content/40 border border-dashed border-base-300 rounded p-2">
+          No layers — the system prompt is just the base above.
+        </div>
+      ) : (
+        <ul class="space-y-1">
+          {selected.map((key, i) => {
+            const broken = !fragmentByKey.has(key);
+            return (
+              <li class="flex items-center gap-2 bg-base-200 rounded px-2 py-1">
+                <span class="text-[10px] text-base-content/50 font-mono w-4">{i + 1}.</span>
+                <span
+                  class={`font-mono text-xs flex-1 truncate ${broken ? "text-error" : ""}`}
+                  title={broken ? "Fragment not in catalog — broken ref" : fragmentByKey.get(key)}
+                >
+                  {key}
+                  {broken && <span class="ml-1">⚠</span>}
+                </span>
+                <button
+                  type="button"
+                  class="btn btn-xs btn-ghost"
+                  disabled={i === 0}
+                  title="Move up"
+                  onClick={() => move(i, -1)}
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-xs btn-ghost"
+                  disabled={i === selected.length - 1}
+                  title="Move down"
+                  onClick={() => move(i, 1)}
+                >
+                  ↓
+                </button>
+                <button
+                  type="button"
+                  class="btn btn-xs btn-ghost text-error"
+                  title="Remove layer"
+                  onClick={() => remove(i)}
+                >
+                  ✕
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {availableToAdd.length > 0 && (
+        <div class="flex items-center gap-2 mt-2">
+          <span class="text-[10px] text-base-content/50">Add layer:</span>
+          <select
+            class="select select-bordered select-xs flex-1 font-mono"
+            value=""
+            onChange={(e) => {
+              const v = (e.target as HTMLSelectElement).value;
+              if (v) {
+                add(v);
+                (e.target as HTMLSelectElement).value = "";
+              }
+            }}
+          >
+            <option value="">— pick a fragment —</option>
+            {availableToAdd.map((k) => (
+              <option value={k}>{k}</option>
+            ))}
+          </select>
+        </div>
+      )}
+    </div>
   );
 }
 

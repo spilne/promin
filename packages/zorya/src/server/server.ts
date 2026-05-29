@@ -121,6 +121,7 @@ import {
 } from "./routes/agents.ts";
 import {
   getToolCatalogHealth,
+  listCatalogFragments,
   listCatalogModels,
   listCatalogSkills,
   listCatalogTools,
@@ -511,6 +512,14 @@ export class ZoryaServer {
           this.skills
             ? listCatalogSkills({ skills: this.skills.registry })
             : async () => new Response(JSON.stringify({ skills: [] }), { status: 200 }),
+        )
+        // Fragment catalog — the agent editor's layered-prompt editor source.
+        // Backed by the host's FragmentRegistry; empty when none wired.
+        .get(
+          "/api/agents/_catalog/fragments",
+          this.agents.fragments
+            ? listCatalogFragments({ fragments: this.agents.fragments })
+            : async () => new Response(JSON.stringify({ fragments: [] }), { status: 200 }),
         )
         // File-managed agent sources — which recipes are backed by a file on
         // disk (so the editor can disable in-place Save and the list can
