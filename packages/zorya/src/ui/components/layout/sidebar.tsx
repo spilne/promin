@@ -28,6 +28,7 @@ const SECTIONS: Array<{ title?: string; items: NavItem[] }> = [
     title: "Agents",
     items: [
       { path: "/agents", label: "Registry", icon: "✦" },
+      { path: "/roles", label: "Roles", icon: "🎭" },
       { path: "/instances", label: "All instances", icon: "❋" },
       { path: "/tools", label: "Tools", icon: "⚒" },
       { path: "/skills", label: "Skills", icon: "🧩" },
