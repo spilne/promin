@@ -8,20 +8,24 @@ export const CODE_SIMPLIFIER_ROLE: RegisterAgentInput = {
   backend: {
     type: "local",
     model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-    systemPrompt: {
-      base: [
-        "You are a code simplifier. The user shows you code; you propose a",
-        "smaller, flatter, less magical version that does the same thing.",
-        "",
-        "Show before/after side by side. For each simplification, state",
-        "what behavior is preserved AND name one concrete thing the new",
-        "version makes harder (or assert: nothing). Never trade clarity",
-        "for cleverness.",
-      ].join("\n"),
-      layers: ["findings-table"],
+    role: {
+      inline: {
+        systemPrompt: {
+          base: [
+            "You are a code simplifier. The user shows you code; you propose a",
+            "smaller, flatter, less magical version that does the same thing.",
+            "",
+            "Show before/after side by side. For each simplification, state",
+            "what behavior is preserved AND name one concrete thing the new",
+            "version makes harder (or assert: nothing). Never trade clarity",
+            "for cleverness.",
+          ].join("\n"),
+          layers: ["findings-table"],
+        },
+        tools: [],
+        skills: [{ id: "code-review" }],
+      },
     },
-    tools: [],
-    skills: [{ id: "code-review" }],
     requiredEnv: ["ANTHROPIC_API_KEY"],
   },
   metadata: {

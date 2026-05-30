@@ -7,7 +7,26 @@ import {
   type ResolvedSkillEntry,
 } from "../resolve-skill-catalog.ts";
 import type { RegisteredAgent } from "../../registry/types.ts";
+import { inlineRoleDefinition } from "../../role/resolve-role.ts";
 import type { SkillRef } from "../types.ts";
+
+/**
+ * Resolve a recipe's skill catalog, sourcing the role's skills the way a host
+ * does: the bound role's `definition.skills` are passed to `resolveSkillCatalog`.
+ */
+function catalogFor(
+  recipe: RegisteredAgent,
+  opts: { registry: InMemorySkillRegistry; onMissing?: "throw" | "skip" },
+): Promise<ResolvedSkillEntry[]> {
+  const skills =
+    recipe.backend.type === "local" ? inlineRoleDefinition(recipe.backend.role)?.skills : undefined;
+  return resolveSkillCatalog({
+    recipe,
+    registry: opts.registry,
+    skills,
+    ...(opts.onMissing !== undefined && { onMissing: opts.onMissing }),
+  });
+}
 
 function recipe(skills?: ReadonlyArray<SkillRef>): RegisteredAgent {
   return {
@@ -16,9 +35,13 @@ function recipe(skills?: ReadonlyArray<SkillRef>): RegisteredAgent {
     backend: {
       type: "local",
       model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-      systemPrompt: "You are a writer.",
-      tools: [],
-      ...(skills !== undefined && { skills }),
+      role: {
+        inline: {
+          systemPrompt: "You are a writer.",
+          tools: [],
+          ...(skills !== undefined && { skills }),
+        },
+      },
     },
     metadata: { description: null, capabilities: [], tags: [] },
     createdAt: 0,
@@ -44,17 +67,17 @@ async function seed(registry: InMemorySkillRegistry) {
 describe("resolveSkillCatalog", () => {
   it("returns [] when the recipe declares no skills", async () => {
     const registry = new InMemorySkillRegistry();
-    expect(await resolveSkillCatalog({ recipe: recipe(), registry })).toEqual([]);
-    expect(await resolveSkillCatalog({ recipe: recipe([]), registry })).toEqual([]);
+    expect(await catalogFor(recipe(), { registry })).toEqual([]);
+    expect(await catalogFor(recipe([]), { registry })).toEqual([]);
   });
 
   it("resolves refs to entries with description + whenToUse + pinned version (no body)", async () => {
     const registry = new InMemorySkillRegistry();
     await seed(registry);
-    const catalog = await resolveSkillCatalog({
-      recipe: recipe([{ id: "writing-style" }, { id: "structured-debugging" }]),
-      registry,
-    });
+    const catalog = await catalogFor(
+      recipe([{ id: "writing-style" }, { id: "structured-debugging" }]),
+      { registry },
+    );
     expect(catalog).toEqual([
       {
         id: "writing-style",
@@ -90,10 +113,7 @@ describe("resolveSkillCatalog", () => {
       whenToUse: "x",
       body: "new",
     });
-    const catalog = await resolveSkillCatalog({
-      recipe: recipe([{ id: "writing-style" }]),
-      registry,
-    });
+    const catalog = await catalogFor(recipe([{ id: "writing-style" }]), { registry });
     expect(catalog[0]!.version).toBe("v2"); // latest pinned to its concrete version
   });
 
@@ -113,8 +133,7 @@ describe("resolveSkillCatalog", () => {
       whenToUse: "x",
       body: "new",
     });
-    const catalog = await resolveSkillCatalog({
-      recipe: recipe([{ id: "writing-style", version: "v1" }]),
+    const catalog = await catalogFor(recipe([{ id: "writing-style", version: "v1" }]), {
       registry,
     });
     expect(catalog[0]!.version).toBe("v1");
@@ -124,8 +143,8 @@ describe("resolveSkillCatalog", () => {
     const registry = new InMemorySkillRegistry();
     await seed(registry);
     const r = recipe([{ id: "writing-style" }, { id: "ghost" }]);
-    await expect(resolveSkillCatalog({ recipe: r, registry })).rejects.toThrow(/ghost/);
-    const skipped = await resolveSkillCatalog({ recipe: r, registry, onMissing: "skip" });
+    await expect(catalogFor(r, { registry })).rejects.toThrow(/ghost/);
+    const skipped = await catalogFor(r, { registry, onMissing: "skip" });
     expect(skipped.map((e) => e.id)).toEqual(["writing-style"]);
   });
 
@@ -139,8 +158,8 @@ describe("resolveSkillCatalog", () => {
       metadata: { enabled: false },
     });
     const r = recipe([{ id: "writing-style" }]);
-    await expect(resolveSkillCatalog({ recipe: r, registry })).rejects.toThrow(/disabled/);
-    expect(await resolveSkillCatalog({ recipe: r, registry, onMissing: "skip" })).toEqual([]);
+    await expect(catalogFor(r, { registry })).rejects.toThrow(/disabled/);
+    expect(await catalogFor(r, { registry, onMissing: "skip" })).toEqual([]);
   });
 
   it("returns [] for a non-local backend", async () => {
@@ -153,7 +172,7 @@ describe("resolveSkillCatalog", () => {
       createdAt: 0,
       updatedAt: 0,
     };
-    expect(await resolveSkillCatalog({ recipe: remote, registry })).toEqual([]);
+    expect(await catalogFor(remote, { registry })).toEqual([]);
   });
 });
 
@@ -197,9 +216,7 @@ describe("resolveSkillCatalog — capability gating", () => {
       backend: {
         type: "local",
         model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-        systemPrompt: "x",
-        tools: [],
-        skills,
+        role: { inline: { systemPrompt: "x", tools: [], skills } },
       },
       metadata: { description: null, capabilities: caps, tags: [] },
       createdAt: 0,
@@ -226,11 +243,10 @@ describe("resolveSkillCatalog — capability gating", () => {
   it("excludes a gated skill from an agent lacking the capability (silent, even with onMissing: throw)", async () => {
     const registry = new InMemorySkillRegistry();
     await seedGated(registry);
-    const catalog = await resolveSkillCatalog({
-      recipe: recipeWithCaps([], [{ id: "rag-skill" }, { id: "open-skill" }]),
-      registry,
-      onMissing: "throw",
-    });
+    const catalog = await catalogFor(
+      recipeWithCaps([], [{ id: "rag-skill" }, { id: "open-skill" }]),
+      { registry, onMissing: "throw" },
+    );
     // rag-skill is policy-excluded (no throw); ungated open-skill remains.
     expect(catalog.map((e) => e.id)).toEqual(["open-skill"]);
   });
@@ -244,8 +260,7 @@ describe("resolveSkillCatalog — capability gating", () => {
       body: "x",
       metadata: { tags: [], capabilities: [], trust: "needs-review" },
     });
-    const catalog = await resolveSkillCatalog({
-      recipe: recipeWithCaps([], [{ id: "review-pending" }]),
+    const catalog = await catalogFor(recipeWithCaps([], [{ id: "review-pending" }]), {
       registry,
       onMissing: "throw", // even with throw, trust-gate is silent
     });
@@ -255,10 +270,10 @@ describe("resolveSkillCatalog — capability gating", () => {
   it("includes a gated skill when the agent holds the capability", async () => {
     const registry = new InMemorySkillRegistry();
     await seedGated(registry);
-    const catalog = await resolveSkillCatalog({
-      recipe: recipeWithCaps(["rag"], [{ id: "rag-skill" }, { id: "open-skill" }]),
-      registry,
-    });
+    const catalog = await catalogFor(
+      recipeWithCaps(["rag"], [{ id: "rag-skill" }, { id: "open-skill" }]),
+      { registry },
+    );
     expect(catalog.map((e) => e.id).sort()).toEqual(["open-skill", "rag-skill"]);
   });
 });

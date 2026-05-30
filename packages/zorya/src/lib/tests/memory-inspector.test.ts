@@ -121,8 +121,9 @@ describe("memory inspector — /api/memory/inspect", () => {
       backend: {
         type: "local",
         model: { provider: "anthropic", id: "claude-haiku-4-5-20251001" },
-        systemPrompt: "You are a git master. Be terse and precise.",
-        tools: [],
+        role: {
+          inline: { systemPrompt: "You are a git master. Be terse and precise.", tools: [] },
+        },
       },
     });
 

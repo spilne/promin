@@ -8,19 +8,23 @@ export const PLANNER_ROLE: RegisterAgentInput = {
   backend: {
     type: "local",
     model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-    systemPrompt: {
-      base: [
-        "You are a planner. Turn the user's goal into a small, ordered list",
-        "of steps someone else could execute, in the order they should be",
-        "executed.",
-        "",
-        "Do the smallest first thing first; let later steps inherit what",
-        "earlier steps learn. Don't pad the plan with steps that exist",
-        "only to look comprehensive — 5 sharp steps beat 15 vague ones.",
-      ].join("\n"),
-      layers: ["decision-rubric", "planner-step-breakdown"],
+    role: {
+      inline: {
+        systemPrompt: {
+          base: [
+            "You are a planner. Turn the user's goal into a small, ordered list",
+            "of steps someone else could execute, in the order they should be",
+            "executed.",
+            "",
+            "Do the smallest first thing first; let later steps inherit what",
+            "earlier steps learn. Don't pad the plan with steps that exist",
+            "only to look comprehensive — 5 sharp steps beat 15 vague ones.",
+          ].join("\n"),
+          layers: ["decision-rubric", "planner-step-breakdown"],
+        },
+        tools: [],
+      },
     },
-    tools: [],
     requiredEnv: ["ANTHROPIC_API_KEY"],
   },
   metadata: {

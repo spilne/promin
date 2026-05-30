@@ -72,8 +72,7 @@ async function bootNetwork(opts: {
     backend: {
       type: "local",
       model: { provider: "test", id: "writer-llm" },
-      systemPrompt: "I am the writer.",
-      tools: [],
+      role: { inline: { systemPrompt: "I am the writer.", tools: [] } },
       network: { networks: ["default"] },
     },
     metadata: { capabilities: ["writing"], tags: ["public"] },
@@ -84,8 +83,7 @@ async function bootNetwork(opts: {
     backend: {
       type: "local",
       model: { provider: "test", id: "reviewer-llm" },
-      systemPrompt: "I am the reviewer.",
-      tools: [],
+      role: { inline: { systemPrompt: "I am the reviewer.", tools: [] } },
       network: { networks: ["default"] },
     },
     metadata: { capabilities: ["review"], tags: ["public"] },
@@ -96,8 +94,7 @@ async function bootNetwork(opts: {
     backend: {
       type: "local",
       model: { provider: "test", id: "coordinator-llm" },
-      systemPrompt: "I am the coordinator.",
-      tools: [],
+      role: { inline: { systemPrompt: "I am the coordinator.", tools: [] } },
       network: {
         networks: ["default"],
         canDiscover: true,
@@ -200,8 +197,7 @@ describe("agents network — discovery", () => {
       backend: {
         type: "local",
         model: { provider: "test", id: "x" },
-        systemPrompt: null,
-        tools: [],
+        role: { inline: { systemPrompt: null, tools: [] } },
         network: { networks: ["finance"] },
       },
       metadata: { capabilities: ["billing"], tags: [] },

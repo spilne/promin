@@ -20,11 +20,15 @@ export const OLLAMA_BOT: RegisterAgentInput = {
   backend: {
     type: "local",
     model: { provider: "ollama", id: "qwen2.5:3b" },
-    systemPrompt:
-      "You are a concise, helpful assistant running on a local Qwen 2.5 3B model via " +
-      "Ollama. Keep replies short — one or two sentences unless the user asks for more. " +
-      "If you do not know something, say so plainly instead of guessing.",
-    tools: ["schedulerCreate", "schedulerList", "schedulerCancel"],
+    role: {
+      inline: {
+        systemPrompt:
+          "You are a concise, helpful assistant running on a local Qwen 2.5 3B model via " +
+          "Ollama. Keep replies short — one or two sentences unless the user asks for more. " +
+          "If you do not know something, say so plainly instead of guessing.",
+        tools: ["schedulerCreate", "schedulerList", "schedulerCancel"],
+      },
+    },
   },
   metadata: {
     description:

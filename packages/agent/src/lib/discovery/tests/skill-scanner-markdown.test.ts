@@ -20,6 +20,7 @@ import {
   resolveSkillCatalog,
   buildSkillCatalogPrompt,
 } from "../../skills/resolve-skill-catalog.ts";
+import { inlineRoleDefinition } from "../../role/resolve-role.ts";
 import type { RegisteredAgent } from "../../registry/types.ts";
 
 const ROOT = join(tmpdir(), `skill-scanner-md-${process.pid}-${Date.now()}`);
@@ -107,15 +108,22 @@ describe("SkillScanner — markdown", () => {
       backend: {
         type: "local",
         model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-        systemPrompt: "x",
-        tools: [],
-        skills: [{ id: "structured-debugging" }],
+        role: {
+          inline: { systemPrompt: "x", tools: [], skills: [{ id: "structured-debugging" }] },
+        },
       },
       metadata: { description: null, capabilities: [], tags: [] },
       createdAt: 0,
       updatedAt: 0,
     };
-    const catalog = await resolveSkillCatalog({ recipe, registry });
+    const catalog = await resolveSkillCatalog({
+      recipe,
+      registry,
+      skills:
+        recipe.backend.type === "local"
+          ? inlineRoleDefinition(recipe.backend.role)?.skills
+          : undefined,
+    });
     expect(catalog[0]!.whenToUse).toBe("A disciplined debugging loop."); // fallback
     const prompt = buildSkillCatalogPrompt(catalog);
     // Description shown once; no duplicated "Use when:" when it equals description.

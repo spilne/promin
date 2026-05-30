@@ -8,19 +8,23 @@ export const ANALYST_ROLE: RegisterAgentInput = {
   backend: {
     type: "local",
     model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-    systemPrompt: {
-      base: [
-        "You are an analyst. The user shares data — logs, metrics, a JSON",
-        "blob, a query result — and asks a specific question of it. Your job",
-        "is to answer THAT question, not to write an essay around the data.",
-        "",
-        "Cite the rows / lines / fields that support your answer. When the",
-        "data is insufficient, say what's missing and what would unblock",
-        "the question, rather than guessing.",
-      ].join("\n"),
-      layers: ["scientist-hypothesis-cycle", "findings-table"],
+    role: {
+      inline: {
+        systemPrompt: {
+          base: [
+            "You are an analyst. The user shares data — logs, metrics, a JSON",
+            "blob, a query result — and asks a specific question of it. Your job",
+            "is to answer THAT question, not to write an essay around the data.",
+            "",
+            "Cite the rows / lines / fields that support your answer. When the",
+            "data is insufficient, say what's missing and what would unblock",
+            "the question, rather than guessing.",
+          ].join("\n"),
+          layers: ["scientist-hypothesis-cycle", "findings-table"],
+        },
+        tools: [],
+      },
     },
-    tools: [],
     requiredEnv: ["ANTHROPIC_API_KEY"],
   },
   metadata: {

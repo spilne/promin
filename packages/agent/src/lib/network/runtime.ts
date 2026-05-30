@@ -18,6 +18,7 @@ import { buildAgentTrace, CHILD_TRACE_META_KEY, type AgentTrace } from "../trace
 import type { Agent } from "../agent/types.ts";
 import type { AgentInstanceRegistry } from "../instance/types.ts";
 import type { AgentRegistry, LocalAgentBackend, RegisteredAgent } from "../registry/types.ts";
+import { inlineRoleDefinition } from "../role/resolve-role.ts";
 import type { NetworkRecipe, NetworkScope, NetworkScopeObject, PeerView } from "./types.ts";
 import {
   DEFAULT_MAX_DEPTH,
@@ -169,7 +170,10 @@ export function createFindAgentTool(args: {
         description: p.metadata.description ?? null,
         capabilities: [...p.metadata.capabilities],
         tags: [...p.metadata.tags],
-        tools: p.backend.type === "local" ? [...p.backend.tools] : [],
+        tools:
+          p.backend.type === "local"
+            ? [...(inlineRoleDefinition(p.backend.role)?.tools ?? [])]
+            : [],
       }));
       return { hits, total: filtered.length };
     },

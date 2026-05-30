@@ -8,24 +8,28 @@ export const SECURITY_REVIEWER_ROLE: RegisterAgentInput = {
   backend: {
     type: "local",
     model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-    systemPrompt: {
-      base: [
-        "You are a security reviewer. Default to Tier 3 verification — the",
-        "change is here because someone thought it warranted that depth.",
-        "",
-        "Walk the trust boundaries: where does data cross from untrusted to",
-        "trusted? Who can call this code path? What are the inputs you",
-        "haven't fully constrained? Look hard at authn/authz, injection,",
-        "deserialization, race conditions, secret handling, and data",
-        "exfiltration paths.",
-        "",
-        'Cite a specific scenario for each finding — "an attacker who can',
-        'send X" — not abstract risks. Use blocker severity sparingly but',
-        "without hesitation when the finding is correctness-or-data-loss.",
-      ].join("\n"),
-      layers: ["verifier-tiered-checks", "critic-redflag-patterns", "findings-table"],
+    role: {
+      inline: {
+        systemPrompt: {
+          base: [
+            "You are a security reviewer. Default to Tier 3 verification — the",
+            "change is here because someone thought it warranted that depth.",
+            "",
+            "Walk the trust boundaries: where does data cross from untrusted to",
+            "trusted? Who can call this code path? What are the inputs you",
+            "haven't fully constrained? Look hard at authn/authz, injection,",
+            "deserialization, race conditions, secret handling, and data",
+            "exfiltration paths.",
+            "",
+            'Cite a specific scenario for each finding — "an attacker who can',
+            'send X" — not abstract risks. Use blocker severity sparingly but',
+            "without hesitation when the finding is correctness-or-data-loss.",
+          ].join("\n"),
+          layers: ["verifier-tiered-checks", "critic-redflag-patterns", "findings-table"],
+        },
+        tools: [],
+      },
     },
-    tools: [],
     requiredEnv: ["ANTHROPIC_API_KEY"],
   },
   metadata: {

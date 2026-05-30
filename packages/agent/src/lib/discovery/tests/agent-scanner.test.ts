@@ -27,8 +27,7 @@ export const support = {
   backend: {
     type: "local",
     model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-    systemPrompt: "Helpful",
-    tools: ["search"],
+    role: { inline: { systemPrompt: "Helpful", tools: ["search"] } },
   },
   metadata: { capabilities: ["chat"] },
 };
@@ -38,11 +37,11 @@ const arrayExportSrc = `
 export const all = [
   {
     id: "research",
-    backend: { type: "local", model: { provider: "openai", id: "gpt-x" }, systemPrompt: null, tools: [] },
+    backend: { type: "local", model: { provider: "openai", id: "gpt-x" }, role: { inline: { systemPrompt: null, tools: [] } } },
   },
   {
     id: "summarize",
-    backend: { type: "local", model: { provider: "openai", id: "gpt-x" }, systemPrompt: null, tools: [] },
+    backend: { type: "local", model: { provider: "openai", id: "gpt-x" }, role: { inline: { systemPrompt: null, tools: [] } } },
   },
 ];
 `;
@@ -52,7 +51,7 @@ export const someConfig = { id: "not-an-agent" }; // no backend
 export const otherConfig = "string-export";
 export const tenantOnly = {
   id: "tenant-acme:billing",
-  backend: { type: "local", model: { provider: "anthropic", id: "x" }, systemPrompt: null, tools: [] },
+  backend: { type: "local", model: { provider: "anthropic", id: "x" }, role: { inline: { systemPrompt: null, tools: [] } } },
 };
 `;
 
@@ -121,8 +120,7 @@ describe("applyDiscoveredAgents", () => {
       backend: {
         type: "local",
         model: { provider: "anthropic", id: "x" },
-        systemPrompt: null,
-        tools: [],
+        role: { inline: { systemPrompt: null, tools: [] } },
       },
     });
     const { agents } = await AgentScanner.scanFolder(FIXTURE_ROOT);
@@ -149,7 +147,7 @@ describe("startAgentScanLoop", () => {
       // Drop a recipe in and tick again.
       await writeFile(
         join(root, "support.ts"),
-        `export const s = { id: "support", backend: { type: "local", model: { provider: "anthropic", id: "x" }, systemPrompt: null, tools: [] } };`,
+        `export const s = { id: "support", backend: { type: "local", model: { provider: "anthropic", id: "x" }, role: { inline: { systemPrompt: null, tools: [] } } } };`,
       );
       const t2 = await loop.tick();
       expect(t2.added).toEqual(["support"]);
@@ -166,7 +164,7 @@ describe("startAgentScanLoop", () => {
     const recipePath = join(root, "live.ts");
     await writeFile(
       recipePath,
-      `export const a = { id: "live-only", backend: { type: "local", model: { provider: "anthropic", id: "x" }, systemPrompt: null, tools: [] } };`,
+      `export const a = { id: "live-only", backend: { type: "local", model: { provider: "anthropic", id: "x" }, role: { inline: { systemPrompt: null, tools: [] } } } };`,
     );
     try {
       const registry = new InMemoryAgentRegistry();
@@ -196,8 +194,8 @@ describe("startAgentScanLoop", () => {
     await mkdir(root, { recursive: true });
     await writeFile(
       join(root, "a.ts"),
-      `export const a = { id: "keep-me", backend: { type: "local", model: { provider: "anthropic", id: "x" }, systemPrompt: null, tools: [] } };
-       export const b = { id: "drop-me", backend: { type: "local", model: { provider: "anthropic", id: "y" }, systemPrompt: null, tools: [] } };`,
+      `export const a = { id: "keep-me", backend: { type: "local", model: { provider: "anthropic", id: "x" }, role: { inline: { systemPrompt: null, tools: [] } } } };
+       export const b = { id: "drop-me", backend: { type: "local", model: { provider: "anthropic", id: "y" }, role: { inline: { systemPrompt: null, tools: [] } } } };`,
     );
     try {
       const registry = new InMemoryAgentRegistry();
@@ -223,7 +221,7 @@ describe("startAgentScanLoop", () => {
     await mkdir(root, { recursive: true });
     await writeFile(
       join(root, "x.ts"),
-      `export const x = { id: "x", backend: { type: "local", model: { provider: "anthropic", id: "x" }, systemPrompt: null, tools: [] } };`,
+      `export const x = { id: "x", backend: { type: "local", model: { provider: "anthropic", id: "x" }, role: { inline: { systemPrompt: null, tools: [] } } } };`,
     );
     try {
       const registry = new InMemoryAgentRegistry();

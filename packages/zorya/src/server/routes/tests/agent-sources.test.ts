@@ -48,7 +48,7 @@ describe("GET /api/agents/_sources — file-managed agent tracking", () => {
     await mkdir(root, { recursive: true });
     await writeFile(
       join(root, "from-file.agent.ts"),
-      `export const fromFile = { id: "from-file", backend: { type: "local", model: { provider: "anthropic", id: "x" }, systemPrompt: null, tools: [] } };`,
+      `export const fromFile = { id: "from-file", backend: { type: "local", model: { provider: "anthropic", id: "x" }, role: { inline: { systemPrompt: null, tools: [] } } } };`,
     );
     try {
       const { server, agents, registry } = boot(root);
@@ -60,8 +60,7 @@ describe("GET /api/agents/_sources — file-managed agent tracking", () => {
         backend: {
           type: "local",
           model: { provider: "anthropic", id: "x" },
-          systemPrompt: null,
-          tools: [],
+          role: { inline: { systemPrompt: null, tools: [] } },
         },
       });
 

@@ -32,8 +32,20 @@ export interface ResolveSkillCatalogParams {
   readonly recipe: RegisteredAgent;
   readonly registry: SkillRegistry;
   /**
-   * Behavior for a recipe skill ref that resolves to nothing — either no
-   * such skill/version, or the row is kill-switched (`enabled: false`).
+   * Skill refs to resolve — sourced from the bound role's `definition.skills`
+   * (the host resolves the role binding first, then passes its skills here).
+   * Defaults to `[]`.
+   */
+  readonly skills?: ReadonlyArray<SkillRef>;
+  /**
+   * Agent capabilities for the skill capability gate. Sourced from the role
+   * (`definition.capabilities`) when set, else `recipe.metadata.capabilities`.
+   * Defaults to `recipe.metadata.capabilities`.
+   */
+  readonly capabilities?: ReadonlyArray<string>;
+  /**
+   * Behavior for a skill ref that resolves to nothing — either no such
+   * skill/version, or the row is kill-switched (`enabled: false`).
    * Default `"throw"`. `"skip"` quietly drops it, mirroring
    * `resolveLocalAgent`'s `onUnknownTool: "skip"` for forward-looking refs.
    */
@@ -41,9 +53,9 @@ export interface ResolveSkillCatalogParams {
 }
 
 /**
- * Read each `(id, version?)` the recipe references out of the registry and
+ * Read each `(id, version?)` from the bound role out of the registry and
  * return the resolved catalog (pinned version + description + whenToUse).
- * Returns `[]` when the backend isn't local or declares no skills.
+ * Returns `[]` when the backend isn't local or the role declares no skills.
  *
  * Version pinning: when a ref omits `version`, the registry's latest is
  * used and its concrete version is recorded in the entry — so downstream
@@ -55,8 +67,9 @@ export async function resolveSkillCatalog(
   const { recipe, registry } = params;
   const onMissing = params.onMissing ?? "throw";
   if (recipe.backend.type !== "local") return [];
-  const refs: ReadonlyArray<SkillRef> = recipe.backend.skills ?? [];
+  const refs: ReadonlyArray<SkillRef> = params.skills ?? [];
   if (refs.length === 0) return [];
+  const agentCapabilities = params.capabilities ?? recipe.metadata.capabilities;
 
   const out: ResolvedSkillEntry[] = [];
   for (const ref of refs) {
@@ -81,7 +94,7 @@ export async function resolveSkillCatalog(
     // capabilities grant at least one. Empty skill capabilities = ungated.
     // A policy exclusion, not a misconfiguration — so we drop it quietly,
     // mirroring how `filterToolsByCapability` drops elevated tools.
-    if (!skillAllowedByCapabilities(row.metadata.capabilities, recipe.metadata.capabilities)) {
+    if (!skillAllowedByCapabilities(row.metadata.capabilities, agentCapabilities)) {
       continue;
     }
     // Trust gate (fail-closed, SILENT). A needs-review skill is in the

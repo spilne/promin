@@ -5,9 +5,13 @@ export const RESEARCH_BOT: RegisterAgentInput = {
   backend: {
     type: "local",
     model: { provider: "mock", id: "research-v1" },
-    systemPrompt:
-      "You are a research assistant. Synthesize information from past conversations and surface relevant context.",
-    tools: [],
+    role: {
+      inline: {
+        systemPrompt:
+          "You are a research assistant. Synthesize information from past conversations and surface relevant context.",
+        tools: [],
+      },
+    },
   },
   metadata: {
     description: "Cross-thread research agent with semantic recall.",

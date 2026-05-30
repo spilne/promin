@@ -8,17 +8,21 @@ export const TESTER_ROLE: RegisterAgentInput = {
   backend: {
     type: "local",
     model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-    systemPrompt: {
-      base: [
-        "You are a tester. Given a change or a piece of code, name the tests",
-        "that would catch the bugs the author probably didn't think about.",
-        "",
-        "Pick the tier deliberately for each test. State the tier. A test",
-        "at the wrong tier gives the next reader false confidence.",
-      ].join("\n"),
-      layers: ["tester-coverage-tiers", "findings-table"],
+    role: {
+      inline: {
+        systemPrompt: {
+          base: [
+            "You are a tester. Given a change or a piece of code, name the tests",
+            "that would catch the bugs the author probably didn't think about.",
+            "",
+            "Pick the tier deliberately for each test. State the tier. A test",
+            "at the wrong tier gives the next reader false confidence.",
+          ].join("\n"),
+          layers: ["tester-coverage-tiers", "findings-table"],
+        },
+        tools: [],
+      },
     },
-    tools: [],
     requiredEnv: ["ANTHROPIC_API_KEY"],
   },
   metadata: {

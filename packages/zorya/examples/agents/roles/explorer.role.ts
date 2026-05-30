@@ -8,18 +8,22 @@ export const EXPLORER_ROLE: RegisterAgentInput = {
   backend: {
     type: "local",
     model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-    systemPrompt: {
-      base: [
-        "You are an explorer. The user asks where something lives or how a",
-        "subsystem fits together; your job is to map it cleanly under a",
-        "stated time budget, not to fix or design anything.",
-        "",
-        "Open with the chosen budget. Cite files as `path:line`. Surface",
-        "surprises — things that are not where a reader would expect.",
-      ].join("\n"),
-      layers: ["explorer-time-budget"],
+    role: {
+      inline: {
+        systemPrompt: {
+          base: [
+            "You are an explorer. The user asks where something lives or how a",
+            "subsystem fits together; your job is to map it cleanly under a",
+            "stated time budget, not to fix or design anything.",
+            "",
+            "Open with the chosen budget. Cite files as `path:line`. Surface",
+            "surprises — things that are not where a reader would expect.",
+          ].join("\n"),
+          layers: ["explorer-time-budget"],
+        },
+        tools: [],
+      },
     },
-    tools: [],
     requiredEnv: ["ANTHROPIC_API_KEY"],
   },
   metadata: {

@@ -40,8 +40,7 @@ function recipe(servers: McpServerConfig[]): RegisteredAgent {
     backend: {
       type: "local",
       model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-      systemPrompt: null,
-      tools: [],
+      role: { inline: { systemPrompt: null, tools: [] } },
       mcpServers: servers,
     },
     metadata: { description: null, capabilities: [], tags: [] },
@@ -115,8 +114,7 @@ describe("loadMcpToolsFromRecipe", () => {
       backend: {
         type: "local",
         model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-        systemPrompt: null,
-        tools: [],
+        role: { inline: { systemPrompt: null, tools: [] } },
       },
       metadata: { description: null, capabilities: [], tags: [] },
       createdAt: 0,

@@ -15,6 +15,7 @@ import { describe, expect, it } from "bun:test";
 import {
   InMemoryAgentRegistry,
   InMemorySkillRegistry,
+  inlineRoleDefinition,
   resolveLocalAgent,
   resolveSkillCatalog,
   type Agent,
@@ -66,12 +67,18 @@ function boot() {
     },
   };
 
-  // Mirror the demo host's resolve wiring: resolve the recipe's skill
-  // catalog, then hand skills + skillCatalog to resolveLocalAgent.
+  // Mirror the demo host's resolve wiring: resolve the bound role first,
+  // then hand its skills to the catalog resolver, then skills +
+  // skillCatalog to resolveLocalAgent.
   const resolve = async (recipe: RegisteredAgent): Promise<Agent> => {
+    const roleSkills =
+      recipe.backend.type === "local"
+        ? (inlineRoleDefinition(recipe.backend.role)?.skills ?? [])
+        : [];
     const skillCatalog = await resolveSkillCatalog({
       recipe,
       registry: skillRegistry,
+      skills: roleSkills,
       onMissing: "skip",
     });
     return resolveLocalAgent(recipe, {
@@ -128,9 +135,13 @@ describe("skills e2e — create → catalog → attach → resolve → run → d
           backend: {
             type: "local",
             model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-            systemPrompt: "You are a helpful engineering assistant.",
-            tools: [],
-            skills: [{ id: "structured-debugging" }],
+            role: {
+              inline: {
+                systemPrompt: "You are a helpful engineering assistant.",
+                tools: [],
+                skills: [{ id: "structured-debugging" }],
+              },
+            },
           },
           metadata: { capabilities: ["skills"] },
         }),
@@ -144,7 +155,9 @@ describe("skills e2e — create → catalog → attach → resolve → run → d
     );
     expect(recipe.backend.type).toBe("local");
     if (recipe.backend.type === "local") {
-      expect(recipe.backend.skills).toEqual([{ id: "structured-debugging" }]);
+      expect(inlineRoleDefinition(recipe.backend.role)?.skills).toEqual([
+        { id: "structured-debugging" },
+      ]);
     }
 
     // 5. Resolve + RUN: the agent loads the skill, the body reaches the model.

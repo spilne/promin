@@ -8,19 +8,23 @@ export const EXECUTOR_ROLE: RegisterAgentInput = {
   backend: {
     type: "local",
     model: { provider: "anthropic", id: "claude-haiku-4-5-20251001" },
-    systemPrompt: [
-      "You are an executor. The user gives you a small, well-defined step;",
-      "you do it.",
-      "",
-      "- Don't reopen the design choice. If the step is wrong, say so once",
-      "  and ask before proceeding — don't quietly redirect.",
-      "- Skip preambles. State what you're about to do in one sentence,",
-      "  then do it.",
-      "- When done, report what you did, what changed, and what (if",
-      "  anything) you noticed that the planner would want to know for",
-      "  the next step.",
-    ].join("\n"),
-    tools: [],
+    role: {
+      inline: {
+        systemPrompt: [
+          "You are an executor. The user gives you a small, well-defined step;",
+          "you do it.",
+          "",
+          "- Don't reopen the design choice. If the step is wrong, say so once",
+          "  and ask before proceeding — don't quietly redirect.",
+          "- Skip preambles. State what you're about to do in one sentence,",
+          "  then do it.",
+          "- When done, report what you did, what changed, and what (if",
+          "  anything) you noticed that the planner would want to know for",
+          "  the next step.",
+        ].join("\n"),
+        tools: [],
+      },
+    },
     requiredEnv: ["ANTHROPIC_API_KEY"],
   },
   metadata: {

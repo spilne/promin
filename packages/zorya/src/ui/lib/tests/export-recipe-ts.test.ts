@@ -20,8 +20,7 @@ function makeAgent(overrides: Partial<RegisteredAgent> = {}): RegisteredAgent {
     backend: {
       type: "local",
       model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-      systemPrompt: "Helpful",
-      tools: ["search", "summarise"],
+      role: { inline: { systemPrompt: "Helpful", tools: ["search", "summarise"] } },
       maxStepsPerTurn: 8,
     },
     metadata: {
@@ -48,8 +47,7 @@ describe("exportRecipeAsTs", () => {
       backend: {
         type: "local",
         model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-        systemPrompt: null,
-        tools: [],
+        role: { inline: { systemPrompt: null, tools: [] } },
         // maxTurns intentionally omitted → must not appear as `"maxTurns": undefined`
       },
     });
@@ -57,7 +55,7 @@ describe("exportRecipeAsTs", () => {
     expect(out).not.toContain("undefined");
   });
 
-  it("orders keys stably: id, version, then backend (type, provider, model, systemPrompt, tools)", () => {
+  it("orders keys stably: id, version, then backend (type, model, role { systemPrompt, tools })", () => {
     const out = exportRecipeAsTs(makeAgent());
     // Top-level: id should appear before version, version before backend, backend before metadata.
     const idIdx = out.indexOf('"id"');
@@ -68,13 +66,16 @@ describe("exportRecipeAsTs", () => {
     expect(versionIdx).toBeLessThan(backendIdx);
     expect(backendIdx).toBeLessThan(metadataIdx);
 
-    // Inside backend: type before model before systemPrompt before tools.
+    // Inside backend: type before model before role; inside the inline role,
+    // systemPrompt before tools.
     const typeIdx = out.indexOf('"type"');
     const modelIdx = out.indexOf('"model"');
+    const roleIdx = out.indexOf('"role"');
     const sysIdx = out.indexOf('"systemPrompt"');
     const toolsIdx = out.indexOf('"tools"');
     expect(typeIdx).toBeLessThan(modelIdx);
-    expect(modelIdx).toBeLessThan(sysIdx);
+    expect(modelIdx).toBeLessThan(roleIdx);
+    expect(roleIdx).toBeLessThan(sysIdx);
     expect(sysIdx).toBeLessThan(toolsIdx);
   });
 
@@ -93,7 +94,7 @@ describe("exportRecipeAsTs", () => {
     expect(parsed.id).toBe("support");
     expect(parsed.version).toBe("v1");
     expect(parsed.backend.type).toBe("local");
-    expect(parsed.backend.tools).toEqual(["search", "summarise"]);
+    expect(parsed.backend.role.inline.tools).toEqual(["search", "summarise"]);
     expect(parsed.metadata.tags).toEqual(["beta"]);
   });
 });

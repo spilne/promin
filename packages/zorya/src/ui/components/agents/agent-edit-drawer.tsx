@@ -12,6 +12,7 @@
 // ---------------------------------------------------------------------------
 
 import { useEffect, useMemo, useState } from "preact/hooks";
+import { inlineRoleDefinition } from "@promin/agent";
 import { api, type ModelCatalogEntryDto, type ToolCatalogEntryDto } from "../../api/client.ts";
 import type { RegisteredAgent } from "../../../server/routes/agents.ts";
 import type { SkillCatalogEntry } from "../../../server/routes/agent-catalog.ts";
@@ -74,6 +75,11 @@ export function AgentEditDrawer({
 }: Props) {
   const isCreate = mode === "create";
   const isLocal = agent.backend.type === "local";
+  // Behavioral fields (systemPrompt / tools / skills) live on the role
+  // binding now. For a `ref` binding `inlineRoleDefinition` returns
+  // undefined — treated as empty until a follow-up resolves refs; current
+  // recipes are all inline.
+  const roleDef = isLocal ? inlineRoleDefinition(agent.backend.role) : undefined;
   // Create mode lets the operator type the recipe id; edit mode pins it.
   const [agentId, setAgentId] = useState(agent.id);
   const trimmedId = agentId.trim();
@@ -86,14 +92,12 @@ export function AgentEditDrawer({
   // textarea drives `base`, the LayersSection drives `layers`. Save emits
   // the layered form when layers are non-empty, plain string otherwise.
   const initialSystemPrompt = (() => {
-    if (!isLocal) return "";
-    const sp = agent.backend.systemPrompt;
+    const sp = roleDef?.systemPrompt ?? null;
     if (sp === null) return "";
     return typeof sp === "string" ? sp : sp.base;
   })();
   const initialLayers = (() => {
-    if (!isLocal) return [] as string[];
-    const sp = agent.backend.systemPrompt;
+    const sp = roleDef?.systemPrompt ?? null;
     if (sp === null || typeof sp === "string") return [] as string[];
     return [...(sp.layers ?? [])];
   })();
@@ -133,12 +137,12 @@ export function AgentEditDrawer({
 
   // Tool selection (local backends only).
   const [selectedTools, setSelectedTools] = useState<ReadonlySet<string>>(
-    new Set(isLocal ? agent.backend.tools : []),
+    new Set(roleDef?.tools ?? []),
   );
   // Skill catalog selection (local backends only). Held as a set of skill
   // ids; versions are pinned at resolve time, so the recipe stores `{id}`.
   const [selectedSkills, setSelectedSkills] = useState<ReadonlySet<string>>(
-    new Set(isLocal ? (agent.backend.skills ?? []).map((s) => s.id) : []),
+    new Set((roleDef?.skills ?? []).map((s) => s.id)),
   );
 
   const [saving, setSaving] = useState(false);
@@ -212,10 +216,10 @@ export function AgentEditDrawer({
       autoCompact: _stripAutoCompact,
       autoDistill: _stripAutoDistill,
       contextBudget: _stripContextBudget,
-      skills: _stripSkills,
+      role: _stripRole,
       ...backendBase
     } = agent.backend;
-    // Empty selection → omit `skills` entirely so the recipe stays clean.
+    // Empty selection → omit `skills` entirely so the inline role stays clean.
     const skillRefs = Array.from(selectedSkills)
       .sort()
       .map((id) => ({ id }));
@@ -227,16 +231,23 @@ export function AgentEditDrawer({
       selectedLayers.length > 0
         ? { base: trimmedBase, layers: [...selectedLayers] }
         : trimmedBase || null;
+    // Behavioral fields now live on the role binding. Carry over the
+    // non-behavioral parts of the prior inline role (e.g. capabilities)
+    // so editing tools/prompt doesn't silently drop them.
+    const inlineRole = {
+      ...(roleDef ?? {}),
+      systemPrompt: promptValue,
+      tools: Array.from(selectedTools).sort(),
+      ...(skillRefs.length > 0 ? { skills: skillRefs } : {}),
+    };
     const backend = {
       ...backendBase,
-      systemPrompt: promptValue,
+      role: { inline: inlineRole },
       model: {
         provider: provider || agent.backend.model.provider,
         id: modelId || agent.backend.model.id,
         ...(trimmedCred && { credentialRef: trimmedCred }),
       },
-      tools: Array.from(selectedTools).sort(),
-      ...(skillRefs.length > 0 ? { skills: skillRefs } : {}),
       ...(steps !== undefined ? { maxStepsPerTurn: steps } : {}),
       ...(turns !== undefined ? { maxTurns: turns } : {}),
       ...(autoCompactValue !== undefined ? { autoCompact: autoCompactValue } : {}),

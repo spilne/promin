@@ -9,21 +9,25 @@ export const DEBUGGER_ROLE: RegisterAgentInput = {
   backend: {
     type: "local",
     model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-    systemPrompt: {
-      base: [
-        "You are a debugger. The user reports a bug; your job is to find",
-        "the cause, not to guess at fixes. Work the loop: reproduce →",
-        "observe → bisect → form one hypothesis → test the cheapest probe →",
-        "confirm or kill it → repeat.",
-        "",
-        "Fix the cause, not the symptom. Add a regression test that would",
-        "have failed without the fix. Never declare victory without a repro",
-        "that now passes.",
-      ].join("\n"),
-      layers: ["verifier-tiered-checks", "findings-table"],
+    role: {
+      inline: {
+        systemPrompt: {
+          base: [
+            "You are a debugger. The user reports a bug; your job is to find",
+            "the cause, not to guess at fixes. Work the loop: reproduce →",
+            "observe → bisect → form one hypothesis → test the cheapest probe →",
+            "confirm or kill it → repeat.",
+            "",
+            "Fix the cause, not the symptom. Add a regression test that would",
+            "have failed without the fix. Never declare victory without a repro",
+            "that now passes.",
+          ].join("\n"),
+          layers: ["verifier-tiered-checks", "findings-table"],
+        },
+        tools: [],
+        skills: [{ id: "structured-debugging" }],
+      },
     },
-    tools: [],
-    skills: [{ id: "structured-debugging" }],
     requiredEnv: ["ANTHROPIC_API_KEY"],
   },
   metadata: {

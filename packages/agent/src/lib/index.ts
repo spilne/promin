@@ -161,7 +161,7 @@ export type {
 export { DEFAULT_ROLE_VERSION, DEFAULT_ROLE_METADATA } from "./role/types.ts";
 export { InMemoryRoleRegistry } from "./role/in-memory-role-registry.ts";
 export type { InMemoryRoleRegistryConfig } from "./role/in-memory-role-registry.ts";
-export { resolveRoleBinding } from "./role/resolve-role.ts";
+export { resolveRoleBinding, inlineRoleDefinition } from "./role/resolve-role.ts";
 export type { ResolveRoleBindingDeps } from "./role/resolve-role.ts";
 export { resolveLocalAgent, resolveCredentialRef } from "./registry/resolve-local-agent.ts";
 export type { ResolveLocalAgentDeps } from "./registry/resolve-local-agent.ts";

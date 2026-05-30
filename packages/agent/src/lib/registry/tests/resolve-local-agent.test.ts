@@ -39,8 +39,7 @@ const baseRow = (): RegisteredAgent => ({
   backend: {
     type: "local",
     model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-    systemPrompt: "You are a helpful assistant.",
-    tools: ["search"],
+    role: { inline: { systemPrompt: "You are a helpful assistant.", tools: ["search"] } },
   },
   metadata: { description: null, capabilities: [], tags: [] },
   createdAt: 0,
@@ -256,7 +255,10 @@ function recipeWith(capabilities: string[], toolNames: string[]): RegisteredAgen
   const row = baseRow();
   return {
     ...row,
-    backend: { ...row.backend, tools: toolNames },
+    backend: {
+      ...row.backend,
+      role: { inline: { systemPrompt: "You are a helpful assistant.", tools: toolNames } },
+    },
     metadata: { description: null, capabilities, tags: [] },
   };
 }
@@ -348,14 +350,12 @@ describe("resolveLocalAgent — role binding", () => {
     return { system, tools: observed };
   }
 
-  it("an inline role overrides the legacy backend systemPrompt + tools", async () => {
+  it("an inline role drives the resolved systemPrompt + tools", async () => {
     const row = baseRow();
     const recipe: RegisteredAgent = {
       ...row,
       backend: {
         ...row.backend,
-        systemPrompt: "LEGACY PROMPT",
-        tools: ["search"],
         role: { inline: { systemPrompt: "ROLE PROMPT", tools: ["fileRead"] } },
       },
     };
@@ -364,7 +364,7 @@ describe("resolveLocalAgent — role binding", () => {
       fileRead: fileTool,
     });
     expect(system).toBe("ROLE PROMPT");
-    expect(tools).toEqual(["fileRead"]); // legacy "search" ignored
+    expect(tools).toEqual(["fileRead"]);
   });
 
   it("a pre-resolved role (deps.role) is the source of truth for a ref binding", async () => {
@@ -445,13 +445,13 @@ describe("LocalAgent.fromRegistry", () => {
     await registry.register({
       id: row.id,
       version: "v1",
-      backend: { ...row.backend, systemPrompt: "ALPHA" },
+      backend: { ...row.backend, role: { inline: { systemPrompt: "ALPHA", tools: ["search"] } } },
       metadata: row.metadata,
     });
     await registry.register({
       id: row.id,
       version: "v2",
-      backend: { ...row.backend, systemPrompt: "BETA" },
+      backend: { ...row.backend, role: { inline: { systemPrompt: "BETA", tools: ["search"] } } },
       metadata: row.metadata,
     });
 

@@ -9,19 +9,23 @@ export const SCIENTIST_ROLE: RegisterAgentInput = {
   backend: {
     type: "local",
     model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-    systemPrompt: {
-      base: [
-        "You are a scientist. The user has an open question — about behavior,",
-        "performance, correctness, or design — and wants you to investigate.",
-        "",
-        "Work hypothesis-by-hypothesis. Narrate each cycle so the user can",
-        "follow your reasoning and intervene if you're heading the wrong",
-        "way. State your conclusions as 'confirmed X / ruled out Y', not",
-        "'I think probably…'.",
-      ].join("\n"),
-      layers: ["scientist-hypothesis-cycle", "findings-table"],
+    role: {
+      inline: {
+        systemPrompt: {
+          base: [
+            "You are a scientist. The user has an open question — about behavior,",
+            "performance, correctness, or design — and wants you to investigate.",
+            "",
+            "Work hypothesis-by-hypothesis. Narrate each cycle so the user can",
+            "follow your reasoning and intervene if you're heading the wrong",
+            "way. State your conclusions as 'confirmed X / ruled out Y', not",
+            "'I think probably…'.",
+          ].join("\n"),
+          layers: ["scientist-hypothesis-cycle", "findings-table"],
+        },
+        tools: [],
+      },
     },
-    tools: [],
     requiredEnv: ["ANTHROPIC_API_KEY"],
   },
   metadata: {

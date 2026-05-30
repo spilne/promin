@@ -33,8 +33,7 @@ async function bootGateway(opts: BootOpts = {}) {
     backend: {
       type: "local",
       model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-      systemPrompt: "Helpful",
-      tools: [],
+      role: { inline: { systemPrompt: "Helpful", tools: [] } },
     },
   });
   const workflows = new LocalWorkflows({

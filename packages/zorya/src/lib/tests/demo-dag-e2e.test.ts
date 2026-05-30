@@ -351,8 +351,7 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
           backend: {
             type: "local",
             model: { provider: "mock", id: "echo-v1" },
-            systemPrompt: "Echo bot, e2e-published variant.",
-            tools: [],
+            role: { inline: { systemPrompt: "Echo bot, e2e-published variant.", tools: [] } },
           },
           metadata: {
             description: "Echo — e2e published version.",

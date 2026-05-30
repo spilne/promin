@@ -5,9 +5,13 @@ export const SUPPORT_BOT: RegisterAgentInput = {
   backend: {
     type: "local",
     model: { provider: "mock", id: "support-v1" },
-    systemPrompt:
-      "You are Acme's customer support assistant. Triage issues, gather details, and resolve common problems.",
-    tools: [],
+    role: {
+      inline: {
+        systemPrompt:
+          "You are Acme's customer support assistant. Triage issues, gather details, and resolve common problems.",
+        tools: [],
+      },
+    },
   },
   metadata: {
     description: "Customer support triage agent.",

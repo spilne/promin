@@ -104,55 +104,24 @@ export interface LocalAgentBackend {
     readonly credentialRef?: string;
   };
   /**
-   * Optional role binding — the behavioral half of the recipe (persona
-   * prompt + fragments + tools + skills + capabilities) by `ref` (shared,
-   * live link) or `inline` (one-off). When set, `resolveLocalAgent` sources
-   * the persona/tools/capabilities from the resolved role and the inline
-   * `systemPrompt` / `tools` below are ignored. The eventual home for all
-   * behavior — see ROLE_AGENT_MODEL; the inline fields stay for now so
-   * existing recipes resolve unchanged.
+   * The behavioral half of the recipe — persona prompt (plain or layered
+   * over fragments) + tools + skills + capabilities — bound by `ref`
+   * (shared, live link to the RoleRegistry) or `inline` (one-off embedded).
+   * This is the single source of an agent's behavior; `resolveLocalAgent`
+   * resolves it into the live persona, tool set, and capability gate. See
+   * ROLE_AGENT_MODEL.
    */
-  readonly role?: RoleBinding;
-  /**
-   * Inline system prompt. Two shapes:
-   * - **`string`** (or `null`) — the original form; passed through verbatim.
-   * - **`{ base, layers? }`** — `base` is concatenated with each fragment
-   *   the `FragmentRegistry` resolves for `layers[]`, in declaration order
-   *   (`base\n\n<layer-1>\n\n<layer-2>…`). Lets curated role recipes share
-   *   well-tested rubrics/checklists without copy-paste.
-   *
-   * Backwards compat: any existing `string` recipe keeps working unchanged.
-   * The layered form requires a `FragmentRegistry` wired into
-   * `resolveLocalAgent` deps — without one, only `base` is used.
-   */
-  readonly systemPrompt:
-    | string
-    | { readonly base: string; readonly layers?: ReadonlyArray<string> }
-    | null;
-  /** Tool names to wire in. Runtime supplies the implementations. */
-  readonly tools: ReadonlyArray<string>;
+  readonly role: RoleBinding;
   /**
    * Optional MCP servers to attach. The host opens (or reuses) an
    * `McpClient` per server via `McpClientPool` at resolve time, lists
    * each server's tools, and merges them into the agent's tool list
-   * keyed as `<serverName>:<toolName>`. The recipe's `tools` field
-   * picks which of those to actually expose to the LLM (alongside
-   * in-process tools).
+   * keyed as `<serverName>:<toolName>`. The role's `tools` list picks
+   * which of those to actually expose to the LLM (alongside in-process
+   * tools). MCP connection config is a deployment concern, so it stays
+   * on the agent, not the role.
    */
   readonly mcpServers?: ReadonlyArray<import("../mcp/types.ts").McpServerConfig>;
-  /**
-   * Catalog of skills this agent may load on demand. Each ref pins a skill
-   * `(id, version?)` from the `SkillRegistry`. At resolve time the host
-   * resolves the catalog (see `resolveSkillCatalog`), injects each skill's
-   * `description` + `whenToUse` into the system prompt, and auto-attaches a
-   * `loadSkill` tool the model calls to pull a full body into context.
-   *
-   * Pinned per recipe: changing this list (or cutting a new recipe version)
-   * is the supported way to change an agent's catalog — the change surfaces
-   * on the next turn since the system prompt is rebuilt from live config.
-   * Leave unset for an agent with no skills.
-   */
-  readonly skills?: ReadonlyArray<import("../skills/types.ts").SkillRef>;
   /** Per-turn step cap. Optional, runtime default applies when unset. */
   readonly maxStepsPerTurn?: number;
   /** Max user turns per session before the loop terminates. */

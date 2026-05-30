@@ -22,6 +22,7 @@
 
 import type { AgentToolCatalog } from "./tool-catalog.ts";
 import type { AgentRegistry, RegisteredAgent } from "./registry/types.ts";
+import { inlineRoleDefinition } from "./role/resolve-role.ts";
 
 export interface RecipeToolRefHealth {
   readonly recipeId: string;
@@ -112,12 +113,13 @@ export async function reconcileToolReferences(
 }
 
 /**
- * Returns the recipe's declared tool list when the backend is local;
- * null otherwise (caller skips the recipe). Other backend types
- * (remote / cursor) don't pull from the host's tool catalog so their
- * tool refs (if any) aren't part of this reconciliation.
+ * Returns the recipe's declared tool list when the backend is local and
+ * binds an INLINE role; null otherwise (caller skips the recipe). Remote /
+ * cursor backends don't pull from the host's tool catalog, and a `ref`-bound
+ * role's tools live in the RoleRegistry — out of reach for this sync,
+ * catalog-only reconciliation (a role-aware pass is future work).
  */
 function extractLocalToolList(recipe: RegisteredAgent): ReadonlyArray<string> | null {
   if (recipe.backend.type !== "local") return null;
-  return recipe.backend.tools;
+  return inlineRoleDefinition(recipe.backend.role)?.tools ?? null;
 }

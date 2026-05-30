@@ -13,6 +13,7 @@ import { MemoryInspector } from "./memory-inspector.tsx";
 import { AgentConfigDrawer } from "./agent-config-drawer.tsx";
 import { AgentTraceModal } from "./agent-trace-modal.tsx";
 import { systemToolsFor, SystemToolChips } from "./system-tools.tsx";
+import { inlineRoleDefinition } from "@promin/agent";
 
 interface AgentDetailProps {
   id: string;
@@ -117,7 +118,7 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
                 <div class="mt-1">
                   <SystemToolChips
                     tools={systemToolsFor({
-                      skillCount: agent.backend.skills?.length ?? 0,
+                      skillCount: inlineRoleDefinition(agent.backend.role)?.skills?.length ?? 0,
                       hasNetwork: agent.backend.network !== undefined,
                     })}
                   />
@@ -241,6 +242,8 @@ function AgentMetaBadges({
     agent.backend.type === "local"
       ? `${agent.backend.model.provider}/${agent.backend.model.id}`
       : agent.backend.type;
+  const skills =
+    agent.backend.type === "local" ? (inlineRoleDefinition(agent.backend.role)?.skills ?? []) : [];
   const isDisabled = agent.metadata.enabled === false;
   return (
     <div class="flex gap-1 flex-wrap items-center">
@@ -260,16 +263,14 @@ function AgentMetaBadges({
       {agent.metadata.tags.map((t) => (
         <span class="badge badge-sm badge-ghost">{t}</span>
       ))}
-      {agent.backend.type === "local" &&
-        agent.backend.skills !== undefined &&
-        agent.backend.skills.length > 0 && (
-          <span
-            class="badge badge-sm badge-secondary badge-outline"
-            title={`Loadable skills: ${agent.backend.skills.map((s) => s.id).join(", ")}`}
-          >
-            🧩 {agent.backend.skills.length} skill{agent.backend.skills.length > 1 ? "s" : ""}
-          </span>
-        )}
+      {skills.length > 0 && (
+        <span
+          class="badge badge-sm badge-secondary badge-outline"
+          title={`Loadable skills: ${skills.map((s) => s.id).join(", ")}`}
+        >
+          🧩 {skills.length} skill{skills.length > 1 ? "s" : ""}
+        </span>
+      )}
       {missingTools && missingTools.length > 0 && (
         <span
           class="badge badge-sm badge-warning"

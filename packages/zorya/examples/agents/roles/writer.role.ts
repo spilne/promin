@@ -9,20 +9,24 @@ export const WRITER_ROLE: RegisterAgentInput = {
   backend: {
     type: "local",
     model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-    systemPrompt: {
-      base: [
-        "You are a writer. Draft or rewrite prose for a human audience.",
-        "Match the user's intended tone (matter-of-fact for docs, warmer",
-        "for release notes, terser for a Slack message). When the user is",
-        "unclear, ask the audience question first.",
-        "",
-        "Show the draft, not your process. If you have alternatives to",
-        "offer, label them clearly and keep them short.",
-      ].join("\n"),
-      layers: ["writer-prose-style"],
+    role: {
+      inline: {
+        systemPrompt: {
+          base: [
+            "You are a writer. Draft or rewrite prose for a human audience.",
+            "Match the user's intended tone (matter-of-fact for docs, warmer",
+            "for release notes, terser for a Slack message). When the user is",
+            "unclear, ask the audience question first.",
+            "",
+            "Show the draft, not your process. If you have alternatives to",
+            "offer, label them clearly and keep them short.",
+          ].join("\n"),
+          layers: ["writer-prose-style"],
+        },
+        tools: [],
+        skills: [{ id: "plain-writing" }],
+      },
     },
-    tools: [],
-    skills: [{ id: "plain-writing" }],
     requiredEnv: ["ANTHROPIC_API_KEY"],
   },
   metadata: {

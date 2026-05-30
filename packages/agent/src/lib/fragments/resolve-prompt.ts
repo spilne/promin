@@ -12,11 +12,11 @@
 // silently skipped, mirroring `onMissing: 'skip'` semantics for skills).
 // ---------------------------------------------------------------------------
 
-import type { LocalAgentBackend } from "../registry/types.ts";
+import type { RoleDefinition } from "../role/types.ts";
 import type { FragmentRegistry } from "./types.ts";
 
 export interface ResolveSystemPromptParams {
-  readonly systemPrompt: LocalAgentBackend["systemPrompt"];
+  readonly systemPrompt: RoleDefinition["systemPrompt"];
   readonly fragments?: FragmentRegistry;
   /**
    * What to do when a `layers[]` entry doesn't resolve in the registry.

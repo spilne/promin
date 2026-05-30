@@ -82,6 +82,7 @@ import {
   resolveCredentialRef,
   resolveLocalAgent,
   resolveSkillCatalog,
+  inlineRoleDefinition,
   resolveRemoteAgent,
   tool,
   type AgentTool,
@@ -581,9 +582,17 @@ async function resolveAgent(
   // not-yet-registered skill still resolves — same forgiving stance as
   // onUnknownTool. resolveLocalAgent injects the catalog block into the
   // system prompt and auto-attaches `loadSkill` when both are present.
+  // Role binding: demo recipes use INLINE roles, so the definition is
+  // knowable synchronously. The role carries the behavioral bundle
+  // (system prompt, tools, skills, capabilities). resolveSkillCatalog no
+  // longer reads `recipe.backend.skills` — it needs the role's skills
+  // passed explicitly, so resolve the role first and hand them over.
+  const roleDef = inlineRoleDefinition(recipe.backend.role);
   const skillCatalog = await resolveSkillCatalog({
     recipe,
     registry: skillRegistry,
+    skills: roleDef?.skills ?? [],
+    ...(roleDef?.capabilities !== undefined && { capabilities: roleDef.capabilities }),
     onMissing: "skip",
   });
   return resolveLocalAgent(recipe, {
@@ -591,6 +600,7 @@ async function resolveAgent(
     memory: memoryStore,
     skills: skillRegistry,
     skillCatalog,
+    ...(roleDef !== undefined && { role: roleDef }),
     fragments: fragmentRegistry,
     ...(apiKey !== undefined && { apiKey }),
     // Resolution order:
@@ -1242,8 +1252,12 @@ for (const r of dagAgentRecipes) {
           ? { provider: "anthropic", id: "claude-sonnet-4-6" }
           : { provider: "anthropic", id: "claude-haiku-4-5-20251001" }
         : { provider: "ollama", id: OLLAMA_MODEL },
-      systemPrompt: r.systemPrompt,
-      tools: [],
+      role: {
+        inline: {
+          systemPrompt: r.systemPrompt,
+          tools: [],
+        },
+      },
     },
     metadata: {
       description: r.description,

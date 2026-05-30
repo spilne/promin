@@ -40,7 +40,7 @@ import type {
   StoredMessage,
   ThreadRow,
 } from "@promin/agent";
-import { resolveSystemPrompt } from "@promin/agent";
+import { inlineRoleDefinition, resolveSystemPrompt } from "@promin/agent";
 import { json, jsonError } from "../router.ts";
 
 export interface MemoryInspectorDeps {
@@ -291,8 +291,12 @@ async function loadPersona(deps: MemoryInspectorDeps, agentId: string): Promise<
   try {
     const recipe: RegisteredAgent | null = await deps.registry.get(agentId);
     if (!recipe || recipe.backend.type !== "local") return null;
+    // Behavioral fields live on the role binding. A `ref` binding resolves
+    // to undefined here (no I/O) → null persona for now; a follow-up will
+    // resolve refs.
+    const def = inlineRoleDefinition(recipe.backend.role);
     const persona = resolveSystemPrompt({
-      systemPrompt: recipe.backend.systemPrompt,
+      systemPrompt: def?.systemPrompt ?? null,
       ...(deps.fragments !== undefined && { fragments: deps.fragments }),
     });
     return persona?.trim() ? persona : null;

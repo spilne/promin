@@ -99,7 +99,11 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
     const registry = new InMemoryAgentRegistry();
     await registry.register({
       id: "writer",
-      backend: { type: "local", model: { provider: "x", id: "y" }, systemPrompt: null, tools: [] },
+      backend: {
+        type: "local",
+        model: { provider: "x", id: "y" },
+        role: { inline: { systemPrompt: null, tools: [] } },
+      },
     });
     const captures: Array<{
       task: string;
@@ -150,7 +154,11 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
     const registry = new InMemoryAgentRegistry();
     await registry.register({
       id: "writer",
-      backend: { type: "local", model: { provider: "x", id: "y" }, systemPrompt: null, tools: [] },
+      backend: {
+        type: "local",
+        model: { provider: "x", id: "y" },
+        role: { inline: { systemPrompt: null, tools: [] } },
+      },
     });
     const captures: Array<{
       task: string;

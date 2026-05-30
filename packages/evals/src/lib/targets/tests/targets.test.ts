@@ -93,8 +93,7 @@ describe("recipeTarget", () => {
     backend: {
       type: "local",
       model: { provider: "anthropic", id: "claude-x" },
-      systemPrompt: null,
-      tools: ["ghostTool"],
+      role: { inline: { systemPrompt: null, tools: ["ghostTool"] } },
     },
     metadata: { description: null, capabilities: [], tags: [] },
     createdAt: 0,

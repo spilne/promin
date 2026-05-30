@@ -35,8 +35,7 @@ describe("PostgresAgentRegistry — Postgres-specific", () => {
       backend: {
         type: "local",
         model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-        systemPrompt: "Helpful assistant",
-        tools: ["search"],
+        role: { inline: { systemPrompt: "Helpful assistant", tools: ["search"] } },
       },
       metadata: { capabilities: ["chat"], tags: ["beta"] },
     });
@@ -98,8 +97,7 @@ describe("PostgresAgentRegistry — Postgres-specific", () => {
       backend: {
         type: "local",
         model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-        systemPrompt: null,
-        tools: [],
+        role: { inline: { systemPrompt: null, tools: [] } },
       },
     });
     expect(await reader.get("shared")).not.toBeNull();

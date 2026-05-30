@@ -46,19 +46,22 @@ function stableReplacer(_key: string, value: unknown): unknown {
   return value;
 }
 
-// Field priority for readability: identity → backend type → model →
-// systemPrompt → tools → metadata-ish, then alpha for the long tail.
+// Field priority for readability: identity → backend type → model → role
+// (with its inline systemPrompt → tools) → metadata-ish, then alpha for the
+// long tail. `systemPrompt` / `tools` order the inline role definition.
 const KEY_PRIORITY: Readonly<Record<string, number>> = {
   id: 0,
   version: 1,
   type: 2,
   provider: 3,
   model: 4,
-  systemPrompt: 5,
-  tools: 6,
-  description: 7,
-  capabilities: 8,
-  tags: 9,
+  role: 5,
+  inline: 5,
+  systemPrompt: 6,
+  tools: 7,
+  description: 8,
+  capabilities: 9,
+  tags: 10,
 };
 
 function orderedKeyCompare(a: string, b: string): number {

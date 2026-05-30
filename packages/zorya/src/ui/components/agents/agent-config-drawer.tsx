@@ -18,6 +18,7 @@
 import type * as preact from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
 import type { RegisteredAgent } from "../../../server/routes/agents.ts";
+import { inlineRoleDefinition } from "@promin/agent";
 import { exportRecipeAsTs } from "../../lib/export-recipe-ts.ts";
 import { toast } from "../../lib/dialogs.ts";
 import { formatRelative } from "../../lib/format.ts";
@@ -230,6 +231,12 @@ function ExportTsBody({ agent }: { agent: RegisteredAgent }) {
 function RecipeBody({ agent }: { agent: RegisteredAgent }) {
   const isLocal = agent.backend.type === "local";
   const local = isLocal ? agent.backend : null;
+  // Behavioral fields live on the role binding now. `ref` bindings resolve
+  // to undefined here (no I/O); current recipes are all inline.
+  const roleDef = local ? inlineRoleDefinition(local.role) : undefined;
+  const sp = roleDef?.systemPrompt ?? null;
+  const systemPromptText = sp === null ? null : typeof sp === "string" ? sp : sp.base;
+  const tools = roleDef?.tools ?? [];
   return (
     <>
       <Section label="Identity">
@@ -276,9 +283,9 @@ function RecipeBody({ agent }: { agent: RegisteredAgent }) {
 
       {local && (
         <Section label="System prompt">
-          {local.systemPrompt ? (
+          {systemPromptText ? (
             <pre class="bg-base-200 p-3 rounded text-xs whitespace-pre-wrap break-words font-mono leading-relaxed max-h-[40vh] overflow-y-auto">
-              {local.systemPrompt}
+              {systemPromptText}
             </pre>
           ) : (
             <div class="text-xs text-base-content/40 italic">
@@ -290,12 +297,12 @@ function RecipeBody({ agent }: { agent: RegisteredAgent }) {
       )}
 
       {local && (
-        <Section label={`Tools (${local.tools.length})`}>
-          {local.tools.length === 0 ? (
+        <Section label={`Tools (${tools.length})`}>
+          {tools.length === 0 ? (
             <div class="text-xs text-base-content/40 italic">(none)</div>
           ) : (
             <div class="flex gap-1 flex-wrap">
-              {local.tools.map((t) => (
+              {tools.map((t) => (
                 <span class="badge badge-outline font-mono text-xs">{t}</span>
               ))}
             </div>

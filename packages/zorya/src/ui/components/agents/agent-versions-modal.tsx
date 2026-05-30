@@ -18,6 +18,7 @@ import { useEffect, useMemo, useState } from "preact/hooks";
 import { api } from "../../api/client.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { formatRelative } from "../../lib/format.ts";
+import { inlineRoleDefinition } from "@promin/agent";
 import type { RegisteredAgent } from "../../../server/routes/agents.ts";
 
 interface Props {
@@ -202,7 +203,7 @@ function SystemPromptDiff({ left, right }: { left: RegisteredAgent; right: Regis
   // Diff the `base` only; layer diffing is future polish.
   const extractPrompt = (a: typeof left): string => {
     if (a.backend.type !== "local") return "";
-    const sp = a.backend.systemPrompt;
+    const sp = inlineRoleDefinition(a.backend.role)?.systemPrompt ?? null;
     if (sp === null) return "";
     return typeof sp === "string" ? sp : sp.base;
   };
@@ -241,9 +242,14 @@ function SystemPromptDiff({ left, right }: { left: RegisteredAgent; right: Regis
 }
 
 function ToolsDiff({ left, right }: { left: RegisteredAgent; right: RegisteredAgent }) {
-  const leftTools = left.backend.type === "local" ? new Set(left.backend.tools) : new Set<string>();
+  const leftTools =
+    left.backend.type === "local"
+      ? new Set(inlineRoleDefinition(left.backend.role)?.tools ?? [])
+      : new Set<string>();
   const rightTools =
-    right.backend.type === "local" ? new Set(right.backend.tools) : new Set<string>();
+    right.backend.type === "local"
+      ? new Set(inlineRoleDefinition(right.backend.role)?.tools ?? [])
+      : new Set<string>();
   const added = [...rightTools].filter((t) => !leftTools.has(t)).sort();
   const removed = [...leftTools].filter((t) => !rightTools.has(t)).sort();
   const unchanged = [...rightTools].filter((t) => leftTools.has(t)).sort();

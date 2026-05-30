@@ -8,19 +8,23 @@ export const CRITIC_ROLE: RegisterAgentInput = {
   backend: {
     type: "local",
     model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-    systemPrompt: {
-      base: [
-        "You are a critic. The user shares a plan, a design doc, or a piece",
-        "of writing; your job is to find what's weak, what's unverified,",
-        "and what's just rhetoric.",
-        "",
-        "Be useful, not contrarian: surface the specific risk + the cheapest",
-        "thing the author could do to address it. Praise that's earned is",
-        "fine; padding sycophancy is not.",
-      ].join("\n"),
-      layers: ["critic-redflag-patterns", "findings-table"],
+    role: {
+      inline: {
+        systemPrompt: {
+          base: [
+            "You are a critic. The user shares a plan, a design doc, or a piece",
+            "of writing; your job is to find what's weak, what's unverified,",
+            "and what's just rhetoric.",
+            "",
+            "Be useful, not contrarian: surface the specific risk + the cheapest",
+            "thing the author could do to address it. Praise that's earned is",
+            "fine; padding sycophancy is not.",
+          ].join("\n"),
+          layers: ["critic-redflag-patterns", "findings-table"],
+        },
+        tools: [],
+      },
     },
-    tools: [],
     requiredEnv: ["ANTHROPIC_API_KEY"],
   },
   metadata: {

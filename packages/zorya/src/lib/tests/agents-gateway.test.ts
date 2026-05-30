@@ -77,8 +77,7 @@ async function bootGateway(opts?: {
     backend: {
       type: "local",
       model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-      systemPrompt: "Helpful",
-      tools: [],
+      role: { inline: { systemPrompt: "Helpful", tools: [] } },
     },
     metadata: { capabilities: ["chat"], tags: ["beta"] },
   });
@@ -494,8 +493,7 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
             backend: {
               type: "local",
               model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-              systemPrompt: "Helpful new bot",
-              tools: [],
+              role: { inline: { systemPrompt: "Helpful new bot", tools: [] } },
             },
             metadata: { capabilities: ["chat"], tags: ["alpha"] },
           }),
@@ -519,8 +517,7 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
             backend: {
               type: "local",
               model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-              systemPrompt: null,
-              tools: [],
+              role: { inline: { systemPrompt: null, tools: [] } },
             },
           }),
         }),
@@ -601,8 +598,7 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
         backend: {
           type: "local",
           model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-          systemPrompt: null,
-          tools: [],
+          role: { inline: { systemPrompt: null, tools: [] } },
         },
       });
       const res = await server.handle(
@@ -623,8 +619,7 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
         backend: {
           type: "local",
           model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-          systemPrompt: "v2",
-          tools: [],
+          role: { inline: { systemPrompt: "v2", tools: [] } },
         },
       });
       const res = await server.handle(
@@ -725,8 +720,7 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
             id: "claude-sonnet-4-6",
             credentialRef: "anthropic_api_key",
           },
-          systemPrompt: "Cloneable",
-          tools: [],
+          role: { inline: { systemPrompt: "Cloneable", tools: [] } },
         },
         metadata: {
           description: null,
@@ -760,8 +754,7 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
             id: "claude-sonnet-4-6",
             credentialRef: "anthropic_api_key",
           },
-          systemPrompt: "Cloneable",
-          tools: [],
+          role: { inline: { systemPrompt: "Cloneable", tools: [] } },
         },
         metadata: {
           description: null,
@@ -804,8 +797,7 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
             id: "claude-sonnet-4-6",
             credentialRef: "anthropic_api_key",
           },
-          systemPrompt: "Cloneable",
-          tools: [],
+          role: { inline: { systemPrompt: "Cloneable", tools: [] } },
         },
         metadata: {
           description: null,
@@ -851,8 +843,7 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
             id: "claude-sonnet-4-6",
             credentialRef: "anthropic_api_key",
           },
-          systemPrompt: "Cloneable",
-          tools: [],
+          role: { inline: { systemPrompt: "Cloneable", tools: [] } },
         },
         metadata: {
           description: null,
@@ -884,8 +875,7 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
         backend: {
           type: "local",
           model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-          systemPrompt: "Cloneable",
-          tools: [],
+          role: { inline: { systemPrompt: "Cloneable", tools: [] } },
         },
         metadata: {
           description: null,
@@ -911,8 +901,7 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
     const draftBackend = {
       type: "local" as const,
       model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-      systemPrompt: "draft prompt",
-      tools: [] as string[],
+      role: { inline: { systemPrompt: "draft prompt", tools: [] as string[] } },
     };
 
     async function createDraft(server: ZoryaServer): Promise<string> {
@@ -988,8 +977,7 @@ describe("agent gateway — disabled recipe gate", () => {
       backend: {
         type: "local",
         model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-        systemPrompt: "Helpful",
-        tools: [],
+        role: { inline: { systemPrompt: "Helpful", tools: [] } },
       },
       metadata: { description: null, capabilities: [], tags: [], enabled: false },
     });
@@ -1012,8 +1000,7 @@ describe("agent gateway — disabled recipe gate", () => {
       backend: {
         type: "local",
         model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-        systemPrompt: "Helpful",
-        tools: [],
+        role: { inline: { systemPrompt: "Helpful", tools: [] } },
       },
       metadata: { description: null, capabilities: [], tags: [], enabled: false },
     });
@@ -1034,8 +1021,7 @@ describe("agent gateway — disabled recipe gate", () => {
       backend: {
         type: "local",
         model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-        systemPrompt: "Helpful",
-        tools: [],
+        role: { inline: { systemPrompt: "Helpful", tools: [] } },
       },
       metadata: { description: null, capabilities: [], tags: [], enabled: false },
     });
@@ -1062,8 +1048,7 @@ describe("agent gateway — disabled recipe gate", () => {
       backend: {
         type: "local",
         model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-        systemPrompt: "Helpful",
-        tools: [],
+        role: { inline: { systemPrompt: "Helpful", tools: [] } },
       },
       metadata: { description: null, capabilities: [], tags: [], enabled: false },
     });
@@ -1228,8 +1213,7 @@ describe("agent gateway — distill rate limit (429)", () => {
       backend: {
         type: "local",
         model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-        systemPrompt: "Helpful",
-        tools: [],
+        role: { inline: { systemPrompt: "Helpful", tools: [] } },
       },
       metadata: { capabilities: ["chat"], tags: [] },
     });

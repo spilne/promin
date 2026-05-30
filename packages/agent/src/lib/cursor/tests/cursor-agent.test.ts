@@ -192,8 +192,7 @@ describe("resolveCursorAgent", () => {
       backend: {
         type: "local",
         model: { provider: "x", id: "y" },
-        systemPrompt: null,
-        tools: [],
+        role: { inline: { systemPrompt: null, tools: [] } },
       },
     };
     expect(() => resolveCursorAgent(r)).toThrow(/expected backend.type "cursor"/);

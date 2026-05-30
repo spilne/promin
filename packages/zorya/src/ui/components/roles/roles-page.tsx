@@ -9,6 +9,7 @@ import { useMemo, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api } from "../../api/client.ts";
 import type { RegisteredAgent } from "../../../server/routes/agents.ts";
+import { inlineRoleDefinition } from "@promin/agent";
 import { Page } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { AgentCloneDialog } from "../agents/agent-clone-dialog.tsx";
@@ -100,15 +101,12 @@ function RoleCard({ role, onClone }: { role: RegisteredAgent; onClone: () => voi
     role.backend.type === "local"
       ? `${role.backend.model.provider}/${role.backend.model.id}`
       : role.backend.type;
-  const isLayered =
-    role.backend.type === "local" &&
-    typeof role.backend.systemPrompt === "object" &&
-    role.backend.systemPrompt !== null;
+  const roleDef =
+    role.backend.type === "local" ? inlineRoleDefinition(role.backend.role) : undefined;
+  const sp = roleDef?.systemPrompt ?? null;
   const layers =
-    isLayered && role.backend.type === "local"
-      ? ((role.backend.systemPrompt as { layers?: ReadonlyArray<string> }).layers ?? [])
-      : [];
-  const skills = role.backend.type === "local" ? (role.backend.skills ?? []) : [];
+    typeof sp === "object" && sp !== null ? (sp.layers ?? []) : ([] as ReadonlyArray<string>);
+  const skills = roleDef?.skills ?? [];
 
   return (
     <div class="card bg-base-100 shadow hover:shadow-md transition-shadow">

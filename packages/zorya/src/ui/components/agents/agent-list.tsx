@@ -5,6 +5,7 @@ import type { RegisteredAgent } from "../../../server/routes/agents.ts";
 import { Page } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { formatRelative } from "../../lib/format.ts";
+import { inlineRoleDefinition } from "@promin/agent";
 import { AgentEditDrawer } from "./agent-edit-drawer.tsx";
 
 interface AgentListProps {
@@ -21,8 +22,7 @@ const BLANK_AGENT: RegisteredAgent = {
   backend: {
     type: "local",
     model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-    systemPrompt: null,
-    tools: [],
+    role: { inline: { systemPrompt: null, tools: [] } },
   },
   metadata: { description: null, capabilities: [], tags: [], enabled: true },
   createdAt: 0,
@@ -195,7 +195,8 @@ function AgentRow({
     agent.backend.type === "local"
       ? `${agent.backend.model.provider}/${agent.backend.model.id}`
       : "—";
-  const tools = agent.backend.type === "local" ? agent.backend.tools : [];
+  const tools =
+    agent.backend.type === "local" ? (inlineRoleDefinition(agent.backend.role)?.tools ?? []) : [];
   return (
     <tr class="hover:bg-base-200 cursor-pointer" onClick={() => onOpen(agent.id)}>
       <td>

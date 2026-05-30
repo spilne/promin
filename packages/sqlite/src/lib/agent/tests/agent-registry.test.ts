@@ -23,8 +23,7 @@ describe("SqliteAgentRegistry — persistence", () => {
       backend: {
         type: "local",
         model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-        systemPrompt: "Helpful assistant",
-        tools: ["search"],
+        role: { inline: { systemPrompt: "Helpful assistant", tools: ["search"] } },
       },
       metadata: { capabilities: ["chat"], tags: ["beta"] },
     });
@@ -46,8 +45,7 @@ describe("SqliteAgentRegistry — persistence", () => {
       backend: {
         type: "local",
         model: { provider: "anthropic", id: "x" },
-        systemPrompt: null,
-        tools: [],
+        role: { inline: { systemPrompt: null, tools: [] } },
       },
     });
     const rows = db.query("SELECT id FROM my_registry").all() as Array<{ id: string }>;

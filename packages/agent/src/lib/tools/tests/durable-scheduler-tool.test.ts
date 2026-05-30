@@ -267,8 +267,7 @@ describe("dispatchAgentSchedule", () => {
       backend: {
         type: "local",
         model: { provider: "test", id: "x" },
-        systemPrompt: null,
-        tools: [],
+        role: { inline: { systemPrompt: null, tools: [] } },
       },
     });
     const tick = {
@@ -310,7 +309,11 @@ describe("dispatchAgentSchedule", () => {
     const registry = new InMemoryAgentRegistry();
     await registry.register({
       id: "writer",
-      backend: { type: "local", model: { provider: "x", id: "y" }, systemPrompt: null, tools: [] },
+      backend: {
+        type: "local",
+        model: { provider: "x", id: "y" },
+        role: { inline: { systemPrompt: null, tools: [] } },
+      },
     });
     const result = await dispatchAgentSchedule(
       {

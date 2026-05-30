@@ -12,6 +12,17 @@
 
 import type { RoleBinding, RoleDefinition, RoleRegistry } from "./types.ts";
 
+/**
+ * The role definition when it's knowable synchronously — i.e. an `inline`
+ * binding. A `ref`'s definition lives in the RoleRegistry, so this returns
+ * `undefined` for refs; callers that need a ref's definition must resolve it
+ * via `resolveRoleBinding`. Handy for read-only, sync contexts (listings,
+ * tool-ref reconciliation, UI) that shouldn't do I/O.
+ */
+export function inlineRoleDefinition(binding: RoleBinding): RoleDefinition | undefined {
+  return "inline" in binding ? binding.inline : undefined;
+}
+
 export interface ResolveRoleBindingDeps {
   /** Required to resolve `ref` bindings. `inline` bindings don't need it. */
   readonly roles?: RoleRegistry;

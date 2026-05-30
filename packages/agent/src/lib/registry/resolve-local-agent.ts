@@ -250,30 +250,18 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
  *   1. `preResolved` — a role the host resolved via `resolveRoleBinding()`
  *      (the only way a `ref` binding gets here).
  *   2. `backend.role.inline` — resolves with no I/O.
- *   3. legacy inline fields — synthesize a definition from the recipe's
- *      own `systemPrompt` / `tools` / `skills` + `metadata.capabilities`,
- *      so recipes with no role binding behave exactly as before.
  *
  * Throws on a `ref` binding with nothing pre-resolved — the host must
  * resolve it (async) and pass `deps.role`.
  */
 function effectiveDefinition(agent: RegisteredAgent, preResolved?: RoleDefinition): RoleDefinition {
   if (preResolved) return preResolved;
-  const backend = agent.backend as LocalAgentBackend;
-  const binding = backend.role;
-  if (binding) {
-    if ("inline" in binding) return binding.inline;
-    throw new Error(
-      `resolveLocalAgent: backend.role is a ref ("${binding.ref.id}") — resolve it via ` +
-        "resolveRoleBinding() and pass the result as deps.role.",
-    );
-  }
-  return {
-    systemPrompt: backend.systemPrompt,
-    tools: backend.tools,
-    ...(backend.skills !== undefined && { skills: backend.skills }),
-    capabilities: agent.metadata.capabilities,
-  };
+  const binding = (agent.backend as LocalAgentBackend).role;
+  if ("inline" in binding) return binding.inline;
+  throw new Error(
+    `resolveLocalAgent: backend.role is a ref ("${binding.ref.id}") — resolve it via ` +
+      "resolveRoleBinding() and pass the result as deps.role.",
+  );
 }
 
 function pickTools(

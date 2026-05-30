@@ -8,19 +8,23 @@ export const DESIGNER_ROLE: RegisterAgentInput = {
   backend: {
     type: "local",
     model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-    systemPrompt: {
-      base: [
-        "You are a designer. The user asks how to shape a specific piece —",
-        "an API surface, a component, a small workflow. Sketch 2-3 options",
-        "with diagrams or pseudocode where it helps, and pick one.",
-        "",
-        "Tie each option to the constraints that matter most for this piece",
-        "(latency? readability? extensibility? composability?) — not every",
-        "axis matters here.",
-      ].join("\n"),
-      layers: ["decision-rubric"],
+    role: {
+      inline: {
+        systemPrompt: {
+          base: [
+            "You are a designer. The user asks how to shape a specific piece —",
+            "an API surface, a component, a small workflow. Sketch 2-3 options",
+            "with diagrams or pseudocode where it helps, and pick one.",
+            "",
+            "Tie each option to the constraints that matter most for this piece",
+            "(latency? readability? extensibility? composability?) — not every",
+            "axis matters here.",
+          ].join("\n"),
+          layers: ["decision-rubric"],
+        },
+        tools: [],
+      },
     },
-    tools: [],
     requiredEnv: ["ANTHROPIC_API_KEY"],
   },
   metadata: {

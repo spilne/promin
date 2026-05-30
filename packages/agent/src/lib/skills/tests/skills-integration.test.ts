@@ -18,6 +18,7 @@ import {
 } from "@promin/workflow";
 import { resolveLocalAgent } from "../../registry/resolve-local-agent.ts";
 import { resolveSkillCatalog } from "../resolve-skill-catalog.ts";
+import { inlineRoleDefinition } from "../../role/resolve-role.ts";
 import { createLoadSkillTool, type LoadSkillOutput } from "../load-skill-tool.ts";
 import { InMemorySkillRegistry } from "../in-memory-skill-registry.ts";
 import type { RegisteredAgent } from "../../registry/types.ts";
@@ -49,19 +50,27 @@ const recipe: RegisteredAgent = {
   backend: {
     type: "local",
     model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-    systemPrompt: "You are a helpful engineering assistant.",
-    tools: [],
-    skills: [{ id: "structured-debugging" }, { id: "plain-writing" }],
+    role: {
+      inline: {
+        systemPrompt: "You are a helpful engineering assistant.",
+        tools: [],
+        skills: [{ id: "structured-debugging" }, { id: "plain-writing" }],
+      },
+    },
   },
   metadata: { description: null, capabilities: ["skills"], tags: [] },
   createdAt: 0,
   updatedAt: 0,
 };
 
+// Skills the host sources from the bound role and feeds to resolveSkillCatalog.
+const roleSkills =
+  recipe.backend.type === "local" ? inlineRoleDefinition(recipe.backend.role)?.skills : undefined;
+
 describe("skills end-to-end", () => {
   it("injects the catalog, auto-attaches loadSkill, and delivers the body to the model", async () => {
     const registry = await seedRegistry();
-    const catalog = await resolveSkillCatalog({ recipe, registry });
+    const catalog = await resolveSkillCatalog({ recipe, registry, skills: roleSkills });
 
     // Capture what the model sees on each step.
     const seenSystemPrompts: string[] = [];
@@ -120,7 +129,7 @@ describe("skills end-to-end", () => {
 
   it("loadSkill body survives replay bit-identically (journaled, not re-fetched)", async () => {
     const registry = await seedRegistry();
-    const catalog = await resolveSkillCatalog({ recipe, registry });
+    const catalog = await resolveSkillCatalog({ recipe, registry, skills: roleSkills });
     const loadSkill = createLoadSkillTool({ registry, catalog });
 
     const storage = new InMemoryWorkflowStorage();

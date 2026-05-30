@@ -14,13 +14,17 @@ export const SKILLED_BOT: RegisterAgentInput = {
   backend: {
     type: "local",
     model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-    systemPrompt:
-      "You are a helpful engineering assistant. You have skills you can load on demand — " +
-      "consult the '## Skills' section and load the matching skill before tackling a task it covers.",
-    tools: [],
-    // Catalog: which skills this agent may load. Versions omitted → the host
-    // pins each to the registry's latest at resolve time.
-    skills: [{ id: "structured-debugging" }, { id: "plain-writing" }],
+    role: {
+      inline: {
+        systemPrompt:
+          "You are a helpful engineering assistant. You have skills you can load on demand — " +
+          "consult the '## Skills' section and load the matching skill before tackling a task it covers.",
+        tools: [],
+        // Catalog: which skills this agent may load. Versions omitted → the host
+        // pins each to the registry's latest at resolve time.
+        skills: [{ id: "structured-debugging" }, { id: "plain-writing" }],
+      },
+    },
     requiredEnv: ["ANTHROPIC_API_KEY"],
   },
   metadata: {

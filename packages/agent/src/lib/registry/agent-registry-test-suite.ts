@@ -9,14 +9,13 @@
 
 import { describe, it, expect } from "bun:test";
 import type { AgentBackend, AgentRegistry, RegisterAgentInput } from "./types.ts";
+import type { RoleDefinition } from "../role/types.ts";
 
-function localBackend(patch?: Partial<Extract<AgentBackend, { type: "local" }>>): AgentBackend {
+function localBackend(role?: Partial<RoleDefinition>): AgentBackend {
   return {
     type: "local",
     model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-    systemPrompt: null,
-    tools: [],
-    ...patch,
+    role: { inline: { systemPrompt: null, tools: [], ...role } },
   };
 }
 
@@ -78,8 +77,8 @@ export function agentRegistryTestSuite(factory: () => AgentRegistry | Promise<Ag
         );
         expect(second.createdAt).toBe(first.createdAt);
         expect(second.updatedAt).toBeGreaterThanOrEqual(first.updatedAt);
-        if (second.backend.type === "local") {
-          expect(second.backend.tools).toEqual(["search"]);
+        if (second.backend.type === "local" && "inline" in second.backend.role) {
+          expect(second.backend.role.inline.tools).toEqual(["search"]);
         }
         expect(second.metadata.tags).toEqual(["beta"]);
       });
