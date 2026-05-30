@@ -38,6 +38,7 @@ import {
 import { LOAD_SKILL_TOOL_NAME, createLoadSkillTool } from "../skills/load-skill-tool.ts";
 import { resolveSystemPrompt } from "../fragments/resolve-prompt.ts";
 import type { FragmentRegistry } from "../fragments/types.ts";
+import type { RoleDefinition } from "../role/types.ts";
 
 /** Caller-supplied runtime injectables. */
 export interface ResolveLocalAgentDeps {
@@ -140,6 +141,17 @@ export interface ResolveLocalAgentDeps {
    * are unaffected.
    */
   readonly fragments?: FragmentRegistry;
+  /**
+   * Pre-resolved role definition — the behavioral bundle (persona prompt +
+   * tools + capabilities) sourced from `resolveRoleBinding()` before calling
+   * this sync resolver, exactly like `skillCatalog` / `apiKey`. When set, it
+   * is the source of persona + tools + capabilities, overriding the inline
+   * `backend.systemPrompt` / `backend.tools`. A `ref` binding MUST be
+   * pre-resolved here; an `inline` binding resolves automatically when this
+   * is omitted. Skills still arrive via `skillCatalog` (the host resolves
+   * the catalog from the role's `skills` when a role is bound).
+   */
+  readonly role?: RoleDefinition;
 }
 
 /**
@@ -156,7 +168,13 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
   }
   const backend: LocalAgentBackend = agent.backend;
 
-  const tools = pickTools(backend.tools, deps.tools, deps.onUnknownTool ?? "throw");
+  // The behavioral triple (persona + tools + capabilities) comes from the
+  // bound role when there is one, falling back to the inline backend fields
+  // so existing recipes resolve unchanged. A `ref` binding must be
+  // pre-resolved into `deps.role`; an `inline` binding resolves here.
+  const effective = effectiveDefinition(agent, deps.role);
+
+  const tools = pickTools(effective.tools, deps.tools, deps.onUnknownTool ?? "throw");
 
   // Skills: when the recipe declares a catalog AND the host pre-resolved it
   // (deps.skillCatalog, via resolveSkillCatalog) we (a) append the catalog
@@ -170,7 +188,7 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
   // plain-string, layered { base, layers }, and null shapes), then append
   // the skill catalog block when there is one.
   const baseSystemPrompt = resolveSystemPrompt({
-    systemPrompt: backend.systemPrompt,
+    systemPrompt: effective.systemPrompt,
     ...(deps.fragments !== undefined && { fragments: deps.fragments }),
   });
   const catalog = deps.skillCatalog ?? [];
@@ -210,8 +228,9 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
     memory: deps.memory,
     namespaceId: deps.namespaceId,
     resourceId: deps.resourceId,
-    // Recipe capabilities gate elevated tools — see filterToolsByCapability.
-    capabilities: agent.metadata.capabilities,
+    // Capabilities gate elevated tools — see filterToolsByCapability. Sourced
+    // from the role when bound (it describes the behavior), else the recipe's.
+    capabilities: effective.capabilities ?? agent.metadata.capabilities,
     consolidator: deps.consolidator,
     consolidatorLlm: deps.consolidatorLlm,
     autoCompact,
@@ -224,6 +243,37 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
   };
 
   return new LocalAgent(config);
+}
+
+/**
+ * The behavioral definition a resolve should use. Precedence:
+ *   1. `preResolved` — a role the host resolved via `resolveRoleBinding()`
+ *      (the only way a `ref` binding gets here).
+ *   2. `backend.role.inline` — resolves with no I/O.
+ *   3. legacy inline fields — synthesize a definition from the recipe's
+ *      own `systemPrompt` / `tools` / `skills` + `metadata.capabilities`,
+ *      so recipes with no role binding behave exactly as before.
+ *
+ * Throws on a `ref` binding with nothing pre-resolved — the host must
+ * resolve it (async) and pass `deps.role`.
+ */
+function effectiveDefinition(agent: RegisteredAgent, preResolved?: RoleDefinition): RoleDefinition {
+  if (preResolved) return preResolved;
+  const backend = agent.backend as LocalAgentBackend;
+  const binding = backend.role;
+  if (binding) {
+    if ("inline" in binding) return binding.inline;
+    throw new Error(
+      `resolveLocalAgent: backend.role is a ref ("${binding.ref.id}") — resolve it via ` +
+        "resolveRoleBinding() and pass the result as deps.role.",
+    );
+  }
+  return {
+    systemPrompt: backend.systemPrompt,
+    tools: backend.tools,
+    ...(backend.skills !== undefined && { skills: backend.skills }),
+    capabilities: agent.metadata.capabilities,
+  };
 }
 
 function pickTools(

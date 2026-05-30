@@ -54,6 +54,19 @@ export interface RoleDefinition {
   readonly capabilities?: ReadonlyArray<string>;
 }
 
+/**
+ * How an agent binds a role. Two shapes, one resolved code path:
+ *   - `ref`    — points at a `(id, version?)` in the RoleRegistry. A live
+ *                link: editing that role changes every agent that refs it.
+ *                Omitting `version` floats to the latest registered version.
+ *   - `inline` — carries the definition directly on the agent. A one-off,
+ *                no shared link. "Save as role" lifts it into the registry
+ *                and swaps the binding to a `ref`.
+ */
+export type RoleBinding =
+  | { readonly ref: { readonly id: string; readonly version?: string } }
+  | { readonly inline: RoleDefinition };
+
 export interface RoleMetadata {
   readonly description: string | null;
   readonly tags: ReadonlyArray<string>;

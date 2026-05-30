@@ -23,6 +23,7 @@
 // ---------------------------------------------------------------------------
 
 import type { NetworkRecipe } from "../network/types.ts";
+import type { RoleBinding } from "../role/types.ts";
 
 /**
  * A registered agent recipe — JSON-serializable, durable, version-keyed.
@@ -102,6 +103,16 @@ export interface LocalAgentBackend {
     readonly id: string;
     readonly credentialRef?: string;
   };
+  /**
+   * Optional role binding — the behavioral half of the recipe (persona
+   * prompt + fragments + tools + skills + capabilities) by `ref` (shared,
+   * live link) or `inline` (one-off). When set, `resolveLocalAgent` sources
+   * the persona/tools/capabilities from the resolved role and the inline
+   * `systemPrompt` / `tools` below are ignored. The eventual home for all
+   * behavior — see ROLE_AGENT_MODEL; the inline fields stay for now so
+   * existing recipes resolve unchanged.
+   */
+  readonly role?: RoleBinding;
   /**
    * Inline system prompt. Two shapes:
    * - **`string`** (or `null`) — the original form; passed through verbatim.

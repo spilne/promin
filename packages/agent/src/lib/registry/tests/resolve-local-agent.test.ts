@@ -318,6 +318,100 @@ describe("resolveLocalAgent — elevated-tool capability gate", () => {
   });
 });
 
+// --- role binding ---------------------------------------------------------
+
+describe("resolveLocalAgent — role binding", () => {
+  /** Resolve + run one turn, return { system, tools } the LLM saw. */
+  async function runWith(
+    recipe: RegisteredAgent,
+    // biome-ignore lint/suspicious/noExplicitAny: tool shapes vary
+    tools: Record<string, any>,
+    extraDeps: Partial<Parameters<typeof resolveLocalAgent>[1]> = {},
+  ): Promise<{ system: string | undefined; tools: string[] }> {
+    let system: string | undefined;
+    let observed: string[] = [];
+    const llm: LLMProvider = {
+      chat: async (params) => {
+        system = params.messages.find((m) => m.role === "system")?.content;
+        observed = (params.tools ?? []).map((t) => t.name);
+        return { content: "ok", finishReason: "stop" };
+      },
+    };
+    const agent = resolveLocalAgent(recipe, {
+      runner: makeRunner(),
+      llm: () => llm,
+      tools,
+      namespaceId: "acme",
+      ...extraDeps,
+    });
+    await agent.invoke({ task: "hi" });
+    return { system, tools: observed };
+  }
+
+  it("an inline role overrides the legacy backend systemPrompt + tools", async () => {
+    const row = baseRow();
+    const recipe: RegisteredAgent = {
+      ...row,
+      backend: {
+        ...row.backend,
+        systemPrompt: "LEGACY PROMPT",
+        tools: ["search"],
+        role: { inline: { systemPrompt: "ROLE PROMPT", tools: ["fileRead"] } },
+      },
+    };
+    const { system, tools } = await runWith(recipe, {
+      search: searchTool,
+      fileRead: fileTool,
+    });
+    expect(system).toBe("ROLE PROMPT");
+    expect(tools).toEqual(["fileRead"]); // legacy "search" ignored
+  });
+
+  it("a pre-resolved role (deps.role) is the source of truth for a ref binding", async () => {
+    const row = baseRow();
+    const recipe: RegisteredAgent = {
+      ...row,
+      backend: { ...row.backend, role: { ref: { id: "git-master" } } },
+    };
+    const { system, tools } = await runWith(
+      recipe,
+      { fileRead: fileTool },
+      { role: { systemPrompt: "RESOLVED ROLE", tools: ["fileRead"] } },
+    );
+    expect(system).toBe("RESOLVED ROLE");
+    expect(tools).toEqual(["fileRead"]);
+  });
+
+  it("throws when a ref binding is not pre-resolved into deps.role", () => {
+    const row = baseRow();
+    const recipe: RegisteredAgent = {
+      ...row,
+      backend: { ...row.backend, role: { ref: { id: "git-master" } } },
+    };
+    expect(() =>
+      resolveLocalAgent(recipe, {
+        runner: makeRunner(),
+        llm: () => mockLLM([]),
+        tools: {},
+      }),
+    ).toThrow(/role is a ref/);
+  });
+
+  it("the role's capabilities gate elevated tools", async () => {
+    const row = baseRow();
+    const recipe: RegisteredAgent = {
+      ...row,
+      // recipe metadata has no capabilities; the role grants 'admin'.
+      backend: {
+        ...row.backend,
+        role: { inline: { systemPrompt: null, tools: ["admin_action"], capabilities: ["admin"] } },
+      },
+    };
+    const { tools } = await runWith(recipe, { admin_action: adminTool });
+    expect(tools).toContain("admin_action");
+  });
+});
+
 // --- LocalAgent.fromRegistry ----------------------------------------------
 
 describe("LocalAgent.fromRegistry", () => {
