@@ -2,7 +2,7 @@
 // Memory inspector — snapshot + targeted edits over a thread's memory cascade.
 //
 // Routes:
-//   GET    /api/memory/inspect?namespaceId=&resourceId=&threadId=
+//   GET    /api/memory/inspect?namespaceId=&resourceId=&threadId=&agentId=
 //   PATCH  /api/memory/namespace/:namespaceId          { staticRules?, workingMemory? }
 //   POST   /api/memory/namespace/:namespaceId/facts    { text }
 //   DELETE /api/memory/namespace/:namespaceId/facts/:factId
@@ -10,15 +10,16 @@
 // The operator's debugging question is "what does the model actually see?"
 // The answer needs four things in one round-trip:
 //
-//   1. The composite system prompt (resolveContext output) — what the LLM
-//      will read after the cascade collapses.
+//   1. The persona (role system prompt) + the composite cascade
+//      (resolveContext output) — together, what the LLM actually reads:
+//      persona first, then the cascade.
 //   2. Per-scope rows + working memory + facts + episodes — so the operator
 //      can locate which layer a wrong/stale piece of context came from.
 //   3. The thread message history.
 //
 // Tenant binding: `namespaceId` is required. `resourceId` opts the resource
 // layer in. `threadId` opts the thread layer in (and unlocks resolveContext
-// since the cascade is thread-rooted).
+// since the cascade is thread-rooted). `agentId` opts the persona in.
 //
 // Namespace mutations are operator-only — the agent-side memory tool does
 // not expose namespace writes. Episodes stay read-only here because they're
@@ -27,19 +28,36 @@
 // ---------------------------------------------------------------------------
 
 import type {
+  AgentRegistry,
   EpisodicRecord,
   Fact,
+  FragmentRegistry,
   MemoryStore,
   NamespaceRow,
+  RegisteredAgent,
   ResourceRow,
   ResolvedContext,
   StoredMessage,
   ThreadRow,
 } from "@promin/agent";
+import { resolveSystemPrompt } from "@promin/agent";
 import { json, jsonError } from "../router.ts";
 
 export interface MemoryInspectorDeps {
   readonly memory: MemoryStore;
+  /**
+   * Recipe store. When set (and the request carries `agentId`), the
+   * inspector resolves the agent's persona — its role system prompt — so
+   * the Prompt tab can show the full picture the model receives: persona
+   * first, then the memory cascade. Without it, only the cascade is shown.
+   */
+  readonly registry?: AgentRegistry;
+  /**
+   * Fragment registry. Needed to expand layered (`{ base, layers }`)
+   * personas exactly as `resolveLocalAgent` does at run time. Recipes
+   * using the plain-string form resolve without it.
+   */
+  readonly fragments?: FragmentRegistry;
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +111,17 @@ export interface MemoryInspectResponse {
   readonly thread: ThreadSnapshot | null;
   /** Present only when `threadId` is given. */
   readonly resolved: ResolvedContextSummary | null;
+  /**
+   * The agent's resolved persona — its role system prompt, with layered
+   * `{ base, layers }` forms expanded through the fragment registry. The
+   * model sees this BEFORE the memory cascade (`resolved.systemPrompt`).
+   * `null` when no `agentId` was given, no registry is wired, the agent
+   * isn't found, or the recipe has no system prompt.
+   *
+   * Note: this is the role prompt only — the auto-generated skill-catalog
+   * block that `resolveLocalAgent` appends at run time is NOT included.
+   */
+  readonly persona: string | null;
 }
 
 // Default budget used by `resolveContext` for inspection. The inspector
@@ -112,6 +141,7 @@ export function inspectMemory(deps: MemoryInspectorDeps) {
     const namespaceId = url.searchParams.get("namespaceId") ?? undefined;
     const resourceId = url.searchParams.get("resourceId") ?? undefined;
     const threadId = url.searchParams.get("threadId") ?? undefined;
+    const agentId = url.searchParams.get("agentId") ?? undefined;
     if (!namespaceId) return jsonError(400, "missing_namespaceId");
 
     try {
@@ -125,6 +155,7 @@ export function inspectMemory(deps: MemoryInspectorDeps) {
       const resolved = threadId
         ? await loadResolvedSummary(deps.memory, { namespaceId, resourceId, threadId })
         : null;
+      const persona = agentId ? await loadPersona(deps, agentId) : null;
 
       const response: MemoryInspectResponse = {
         namespaceId,
@@ -134,6 +165,7 @@ export function inspectMemory(deps: MemoryInspectorDeps) {
         resource,
         thread,
         resolved,
+        persona,
       };
       return json(200, response);
     } catch (err) {
@@ -242,6 +274,31 @@ export function deleteNamespaceFact(deps: MemoryInspectorDeps) {
       return jsonError(500, "delete_failed", err instanceof Error ? err.message : String(err));
     }
   };
+}
+
+/**
+ * Resolve an agent's persona (role system prompt) the same way the runtime
+ * does in `resolveLocalAgent` — flattening the plain-string / layered /
+ * null shapes through the fragment registry. Only the role prompt: the
+ * skill-catalog block appended at run time is intentionally left out (it's
+ * auto-generated boilerplate and resolving it needs the async skill
+ * catalog, which the inspector doesn't carry). Returns `null` when the
+ * agent can't be resolved to a persona, so a missing recipe degrades
+ * gracefully rather than failing the whole inspection.
+ */
+async function loadPersona(deps: MemoryInspectorDeps, agentId: string): Promise<string | null> {
+  if (!deps.registry) return null;
+  try {
+    const recipe: RegisteredAgent | null = await deps.registry.get(agentId);
+    if (!recipe || recipe.backend.type !== "local") return null;
+    const persona = resolveSystemPrompt({
+      systemPrompt: recipe.backend.systemPrompt,
+      ...(deps.fragments !== undefined && { fragments: deps.fragments }),
+    });
+    return persona?.trim() ? persona : null;
+  } catch {
+    return null;
+  }
 }
 
 async function loadResolvedSummary(

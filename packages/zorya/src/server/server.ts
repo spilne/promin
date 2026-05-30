@@ -576,7 +576,18 @@ export class ZoryaServer {
         .post("/api/agents/:id/threads/:threadId/archive", archiveAgentThread(agentDeps));
 
       if (this.agents.memory) {
-        const mem = { memory: this.agents.memory };
+        // Persona resolution piggybacks on the recipe store + fragment
+        // registry the agents gateway already carries, so the Prompt tab
+        // can show the role prompt alongside the memory cascade. The
+        // standalone `this.fragments` service wins over the agents-config
+        // registry, matching the /api/agents/_catalog/fragments precedence.
+        const mem = {
+          memory: this.agents.memory,
+          registry: this.agents.registry,
+          ...((this.fragments?.registry ?? this.agents.fragments) && {
+            fragments: this.fragments?.registry ?? this.agents.fragments,
+          }),
+        };
         this.router
           .get("/api/memory/inspect", inspectMemory(mem))
           .patch("/api/memory/namespace/:namespaceId", patchNamespace(mem))

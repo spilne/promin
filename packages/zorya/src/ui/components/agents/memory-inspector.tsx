@@ -9,7 +9,8 @@
 // across the whole (namespace, resource) without leaving.
 //
 // Tabs:
-//   Prompt    — resolveContext() output. What the model actually sees.
+//   Prompt    — persona (role prompt) + resolveContext() cascade. The two
+//               blocks the model actually sees, in order.
 //   Namespace — tenant-wide static rules + facts + episodes.
 //   Resource  — per-user static rules + facts + episodes.
 //   Thread    — per-thread working memory + facts + episodes + messages.
@@ -66,7 +67,7 @@ export function MemoryInspector({
     setData(undefined);
     setError(undefined);
     memoryApi
-      .inspect({ namespaceId, resourceId, threadId: currentThread })
+      .inspect({ namespaceId, resourceId, threadId: currentThread, agentId })
       .then((r) => !cancelled && setData(r))
       .catch((e) => !cancelled && setError(e instanceof Error ? e.message : String(e)));
     return () => {
@@ -268,6 +269,14 @@ export function MemoryInspector({
   );
 }
 
+// Mirror of @promin/agent's PROMPT_CACHE_BOUNDARY. Inlined rather than
+// imported so the browser bundle stays clear of the agent runtime — the
+// marker is stable API (cache-splitting providers match it verbatim).
+const CACHE_BOUNDARY = "<!-- promin:cache-boundary -->";
+
+const PROMPT_PRE_CLASS =
+  "bg-base-200 p-3 rounded text-xs whitespace-pre-wrap break-words font-mono leading-relaxed max-h-[40vh] overflow-y-auto";
+
 function PromptTab({ data }: { data: MemoryInspectResponse }) {
   if (!data.resolved) {
     return (
@@ -277,18 +286,32 @@ function PromptTab({ data }: { data: MemoryInspectResponse }) {
       </div>
     );
   }
+  // What the model actually sees is two blocks: the persona (role prompt)
+  // first, then the memory cascade. The cascade always carries the
+  // cache-boundary marker even when every layer is empty — treat
+  // "marker only" as no cascade so the operator sees an honest "(empty)"
+  // rather than a lone HTML comment.
+  const cascadeRaw = data.resolved.systemPrompt.trim();
+  const cascade = cascadeRaw && cascadeRaw !== CACHE_BOUNDARY ? data.resolved.systemPrompt : "";
+  const persona = data.persona?.trim() ? data.persona : "";
   return (
-    <section class="space-y-3">
+    <section class="space-y-4">
       <div>
-        <SectionLabel>Resolved system prompt</SectionLabel>
+        <SectionLabel>Persona (role prompt)</SectionLabel>
         <p class="text-xs text-base-content/60 mb-2">
-          What the LLM sees after the cascade collapses (namespace → resource → thread). Trimmed
-          message tail: {data.resolved.messageCount} message
+          The agent's role system prompt, with layered fragments expanded. The model reads this
+          first, before any memory.
+        </p>
+        <pre class={PROMPT_PRE_CLASS}>{persona || <em class="opacity-60">(empty)</em>}</pre>
+      </div>
+      <div>
+        <SectionLabel>Memory cascade</SectionLabel>
+        <p class="text-xs text-base-content/60 mb-2">
+          What memory collapses to (namespace → resource → thread), injected after the persona.
+          Trimmed message tail: {data.resolved.messageCount} message
           {data.resolved.messageCount === 1 ? "" : "s"}.
         </p>
-        <pre class="bg-base-200 p-3 rounded text-xs whitespace-pre-wrap break-words font-mono leading-relaxed max-h-[60vh] overflow-y-auto">
-          {data.resolved.systemPrompt || <em class="opacity-60">(empty)</em>}
-        </pre>
+        <pre class={PROMPT_PRE_CLASS}>{cascade || <em class="opacity-60">(empty)</em>}</pre>
       </div>
     </section>
   );

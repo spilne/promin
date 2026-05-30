@@ -991,10 +991,12 @@ export const memoryApi = {
     namespaceId: string;
     resourceId?: string;
     threadId?: string;
+    agentId?: string;
   }): Promise<MemoryInspectResponse> {
     const qp = new URLSearchParams({ namespaceId: params.namespaceId });
     if (params.resourceId) qp.set("resourceId", params.resourceId);
     if (params.threadId) qp.set("threadId", params.threadId);
+    if (params.agentId) qp.set("agentId", params.agentId);
     return req<MemoryInspectResponse>(`/api/memory/inspect?${qp}`);
   },
   patchNamespace(

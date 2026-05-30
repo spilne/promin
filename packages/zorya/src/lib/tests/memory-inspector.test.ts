@@ -16,7 +16,7 @@ import { ZoryaServer } from "../../server/server.ts";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { LocalWorkflows, ZoryaAgents } from "../../index.ts";
 
-function makeServer(memory: InMemoryMemoryStore) {
+function makeServer(memory: InMemoryMemoryStore, registry = new InMemoryAgentRegistry()) {
   const storage = new InMemoryWorkflowStorage();
   const runner = createWorkflowRunner({ storage });
   return new ZoryaServer({
@@ -27,7 +27,7 @@ function makeServer(memory: InMemoryMemoryStore) {
       sleepScanIntervalMs: 0,
     }),
     agents: new ZoryaAgents({
-      registry: new InMemoryAgentRegistry(),
+      registry,
       resolve: () => {
         throw new Error("memory-inspector test should not resolve agents");
       },
@@ -110,6 +110,53 @@ describe("memory inspector — /api/memory/inspect", () => {
     expect(body.resolved.systemPrompt).toContain("be polite");
     expect(body.resolved.systemPrompt).toContain("terse");
     expect(body.resolved.messageCount).toBe(2);
+  });
+
+  it("resolves the agent's persona when agentId is given", async () => {
+    const memory = new InMemoryMemoryStore();
+    await memory.createThread({ namespaceId: "acme", resourceId: "alice", threadId: "t1" });
+    const registry = new InMemoryAgentRegistry();
+    await registry.register({
+      id: "role-git-master",
+      backend: {
+        type: "local",
+        model: { provider: "anthropic", id: "claude-haiku-4-5-20251001" },
+        systemPrompt: "You are a git master. Be terse and precise.",
+        tools: [],
+      },
+    });
+
+    const server = makeServer(memory, registry);
+    const res = await server.handle(
+      new Request(
+        "http://test/api/memory/inspect?namespaceId=acme&resourceId=alice&threadId=t1&agentId=role-git-master",
+        { method: "GET" },
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { persona: string | null };
+    expect(body.persona).toBe("You are a git master. Be terse and precise.");
+  });
+
+  it("persona is null when agentId is omitted or the agent is unknown", async () => {
+    const memory = new InMemoryMemoryStore();
+    await memory.createThread({ namespaceId: "acme", resourceId: "alice", threadId: "t1" });
+    const server = makeServer(memory);
+
+    const noAgent = await server.handle(
+      new Request("http://test/api/memory/inspect?namespaceId=acme&resourceId=alice&threadId=t1", {
+        method: "GET",
+      }),
+    );
+    expect(((await noAgent.json()) as { persona: string | null }).persona).toBeNull();
+
+    const unknownAgent = await server.handle(
+      new Request(
+        "http://test/api/memory/inspect?namespaceId=acme&resourceId=alice&threadId=t1&agentId=ghost",
+        { method: "GET" },
+      ),
+    );
+    expect(((await unknownAgent.json()) as { persona: string | null }).persona).toBeNull();
   });
 });
 
