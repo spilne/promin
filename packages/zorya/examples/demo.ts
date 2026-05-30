@@ -82,7 +82,8 @@ import {
   resolveCredentialRef,
   resolveLocalAgent,
   resolveSkillCatalog,
-  inlineRoleDefinition,
+  resolveRoleBinding,
+  InMemoryRoleRegistry,
   resolveRemoteAgent,
   tool,
   type AgentTool,
@@ -176,6 +177,10 @@ if (pgUrl) {
 // examples/fragments/*.md on boot + on a tick, and the manager UI mutates
 // the same in-memory registry via /api/fragments CRUD.
 const fragmentRegistry = new InMemoryFragmentRegistry();
+// Role registry — the behavioral bundles agents bind by ref. Empty at boot;
+// operators author roles via /api/roles, or "Save as role" lifts an agent's
+// inline role into here. Refs resolve through this at agent-materialize time.
+const roleRegistry = new InMemoryRoleRegistry();
 const dagRegistry = SqliteDagRegistry.make({ db });
 // Long-lived agent instances. Persisted alongside the registry so they
 // survive restarts; the cascade still keys memory by `resourceId =
@@ -582,17 +587,17 @@ async function resolveAgent(
   // not-yet-registered skill still resolves — same forgiving stance as
   // onUnknownTool. resolveLocalAgent injects the catalog block into the
   // system prompt and auto-attaches `loadSkill` when both are present.
-  // Role binding: demo recipes use INLINE roles, so the definition is
-  // knowable synchronously. The role carries the behavioral bundle
-  // (system prompt, tools, skills, capabilities). resolveSkillCatalog no
-  // longer reads `recipe.backend.skills` — it needs the role's skills
+  // Role binding: resolve it to the behavioral bundle (system prompt,
+  // tools, skills, capabilities). `resolveRoleBinding` handles both inline
+  // (no I/O) and ref (reads the role registry) bindings. resolveSkillCatalog
+  // no longer reads `recipe.backend.skills` — it needs the role's skills
   // passed explicitly, so resolve the role first and hand them over.
-  const roleDef = inlineRoleDefinition(recipe.backend.role);
+  const roleDef = await resolveRoleBinding(recipe.backend.role, { roles: roleRegistry });
   const skillCatalog = await resolveSkillCatalog({
     recipe,
     registry: skillRegistry,
-    skills: roleDef?.skills ?? [],
-    ...(roleDef?.capabilities !== undefined && { capabilities: roleDef.capabilities }),
+    skills: roleDef.skills ?? [],
+    ...(roleDef.capabilities !== undefined && { capabilities: roleDef.capabilities }),
     onMissing: "skip",
   });
   return resolveLocalAgent(recipe, {
@@ -600,7 +605,7 @@ async function resolveAgent(
     memory: memoryStore,
     skills: skillRegistry,
     skillCatalog,
-    ...(roleDef !== undefined && { role: roleDef }),
+    role: roleDef,
     fragments: fragmentRegistry,
     ...(apiKey !== undefined && { apiKey }),
     // Resolution order:
@@ -1122,6 +1127,7 @@ const agents = new ZoryaAgents({
   models: modelCatalog,
   toolCatalog: agentToolCatalog,
   fragments: fragmentRegistry,
+  roles: roleRegistry,
   scan: {
     root: agentScanRoot,
     intervalMs: 5_000,

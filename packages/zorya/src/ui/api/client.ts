@@ -45,6 +45,12 @@ import type {
   FragmentSourcesResponse,
 } from "../../server/routes/fragments.ts";
 import type {
+  RegisteredRole,
+  RoleDefinition,
+  RolesListResponse,
+  RoleVersionsResponse,
+} from "../../server/routes/roles.ts";
+import type {
   FragmentsCatalogResponse,
   SkillsCatalogResponse,
 } from "../../server/routes/agent-catalog.ts";
@@ -534,6 +540,61 @@ export const api = {
   },
   listSkillSources(): Promise<SkillSourcesResponse> {
     return req<SkillSourcesResponse>(`/api/skills/_sources`);
+  },
+
+  // ---------------------------------------------------------------------
+  // Roles — registry CRUD (the behavioral bundle an agent binds)
+  // ---------------------------------------------------------------------
+  listRoles(): Promise<RolesListResponse> {
+    return req<RolesListResponse>(`/api/roles`);
+  },
+  getRole(id: string, version?: string): Promise<RegisteredRole> {
+    const qp = version ? `?version=${encodeURIComponent(version)}` : "";
+    return req<RegisteredRole>(`/api/roles/${encodeURIComponent(id)}${qp}`);
+  },
+  listRoleVersions(id: string): Promise<RoleVersionsResponse> {
+    return req<RoleVersionsResponse>(`/api/roles/${encodeURIComponent(id)}/versions`);
+  },
+  createRole(body: {
+    id: string;
+    version?: string;
+    definition: RoleDefinition;
+    metadata?: RegisteredRole["metadata"];
+  }): Promise<RegisteredRole> {
+    return req<RegisteredRole>(`/api/roles`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  updateRole(
+    id: string,
+    body: {
+      version?: string;
+      definition?: RoleDefinition;
+      metadata?: RegisteredRole["metadata"];
+    },
+  ): Promise<RegisteredRole> {
+    return req<RegisteredRole>(`/api/roles/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  deleteRole(id: string, version?: string): Promise<void> {
+    const qp = version ? `?version=${encodeURIComponent(version)}` : "";
+    return req<void>(`/api/roles/${encodeURIComponent(id)}${qp}`, { method: "DELETE" });
+  },
+  /** Lift an agent's inline role into the registry and rebind it to a ref. */
+  extractRole(
+    agentId: string,
+    body: { roleId: string; roleVersion?: string; metadata?: RegisteredRole["metadata"] },
+  ): Promise<{ role: RegisteredRole; agent: RegisteredAgent }> {
+    return req(`/api/agents/${encodeURIComponent(agentId)}/extract-role`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
   },
 
   // Agentic DAG endpoints (promin-li95)

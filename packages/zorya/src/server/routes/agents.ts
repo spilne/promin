@@ -46,6 +46,7 @@ import type {
   AgentTurnPolicy,
   Message,
   RegisteredAgent,
+  RoleRegistry,
   SecretsStorage,
 } from "@promin/agent";
 import {
@@ -101,6 +102,13 @@ export interface ThreadInvokeResponse extends InvokeResponse {
 
 export interface AgentGatewayDeps {
   readonly registry: AgentRegistry;
+  /**
+   * Optional role registry. When set, `extract-role` can lift an agent's
+   * inline role into it (and rebind the agent to a ref). Agent resolution
+   * of `ref` bindings happens in the host's `resolve` callback, which is
+   * wired with the same registry.
+   */
+  readonly roles?: RoleRegistry;
   /**
    * Materialize a live `Agent` from a registered recipe. The gateway
    * calls this per request, then `.withScope()` for tenancy. The
@@ -658,6 +666,76 @@ function parseCloneSecretsScope(raw: unknown): SecretScope | { error: string } {
     return SecretScope.resource(obj.namespaceId, obj.resourceId);
   }
   return { error: "invalid_secretsScope_kind" };
+}
+
+// ---------------------------------------------------------------------------
+// Extract role — "Save as role". Lifts an agent's INLINE role into the
+// RoleRegistry under a new id, then rebinds the agent to a `ref` so the two
+// share a live link. The agent's own version is preserved (this edits the
+// behavioral binding in place, it doesn't cut a new agent version).
+// ---------------------------------------------------------------------------
+
+interface ExtractRoleRequest {
+  readonly roleId?: unknown;
+  readonly roleVersion?: unknown;
+  readonly metadata?: unknown;
+}
+
+export function extractRole(deps: AgentGatewayDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const agentId = params.id;
+    if (!agentId) return jsonError(400, "missing_id");
+    if (!deps.roles) {
+      return jsonError(501, "roles_not_configured", "This server has no role registry wired.");
+    }
+    const body = await readJson<ExtractRoleRequest>(req);
+    if (!body) return jsonError(400, "missing_body");
+    if (typeof body.roleId !== "string" || body.roleId.length === 0) {
+      return jsonError(400, "missing_roleId");
+    }
+    if (body.roleId.startsWith("_")) {
+      return jsonError(400, "reserved_id_prefix", "Role ids starting with `_` are reserved.");
+    }
+
+    const recipe = await deps.registry.get(agentId);
+    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${agentId}" is not registered.`);
+    if (recipe.backend.type !== "local" || !("inline" in recipe.backend.role)) {
+      return jsonError(
+        400,
+        "no_inline_role",
+        "Only an agent that carries an inline role can be extracted.",
+      );
+    }
+
+    const roleVersion =
+      typeof body.roleVersion === "string" && body.roleVersion.length > 0
+        ? body.roleVersion
+        : undefined;
+    const metadata =
+      typeof body.metadata === "object" && body.metadata !== null
+        ? (body.metadata as { description?: string | null; tags?: string[] })
+        : undefined;
+
+    try {
+      const role = await deps.roles.register({
+        id: body.roleId,
+        ...(roleVersion !== undefined && { version: roleVersion }),
+        definition: recipe.backend.role.inline,
+        ...(metadata !== undefined && { metadata }),
+      });
+      // Rebind the agent to a ref at the same agent version. Pin the role
+      // version we just wrote so the link is reproducible.
+      const agent = await deps.registry.register({
+        id: recipe.id,
+        version: recipe.version,
+        backend: { ...recipe.backend, role: { ref: { id: role.id, version: role.version } } },
+        metadata: recipe.metadata,
+      });
+      return json(201, { role, agent });
+    } catch (err) {
+      return jsonError(500, "extract_failed", asMessage(err));
+    }
+  };
 }
 
 // ---------------------------------------------------------------------------

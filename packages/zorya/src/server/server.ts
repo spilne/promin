@@ -103,6 +103,7 @@ import {
   createAgent,
   deleteAgent,
   distillThread,
+  extractRole,
   getAgent,
   invokeAgent,
   listAgentSources,
@@ -136,6 +137,14 @@ import {
   listSkills,
   updateSkill,
 } from "./routes/skills.ts";
+import {
+  createRole,
+  deleteRole,
+  getRole,
+  listRoleVersions,
+  listRoles,
+  updateRole,
+} from "./routes/roles.ts";
 import {
   createFragment,
   deleteFragment,
@@ -479,6 +488,7 @@ export class ZoryaServer {
         registry: this.agents.registry,
         resolve: this.agents.resolve,
         ...(this.agents.instances !== undefined && { instanceRegistry: this.agents.instances }),
+        ...(this.agents.roles !== undefined && { roles: this.agents.roles }),
         ...(this.agents.turnGate !== undefined && { turnGate: this.agents.turnGate }),
         ...(this.agents.workerId !== undefined && { workerId: this.agents.workerId }),
         ...(this.secrets !== undefined && { secrets: this.secrets }),
@@ -562,6 +572,7 @@ export class ZoryaServer {
         .delete("/api/agents/:id", deleteAgent(agentDeps))
         .get("/api/agents/:id/versions", listAgentVersions(agentDeps))
         .post("/api/agents/:id/clone", cloneAgent(agentDeps))
+        .post("/api/agents/:id/extract-role", extractRole(agentDeps))
         .post("/api/agents/:id/invoke", invokeAgent(agentDeps))
         .post("/api/agents/:id/stream", streamAgent(agentDeps))
         .get("/api/agents/:id/threads", listAgentThreads(agentDeps))
@@ -604,6 +615,17 @@ export class ZoryaServer {
           .patch("/api/agents/:id/instances/:instanceId", updateAgentInstance(inDeps))
           .delete("/api/agents/:id/instances/:instanceId", deleteAgentInstance(inDeps))
           .get("/api/instances", listInstancesAcrossAgents(inDeps));
+      }
+
+      if (this.agents.roles) {
+        const roleDeps = { registry: this.agents.roles };
+        this.router
+          .get("/api/roles", listRoles(roleDeps))
+          .post("/api/roles", createRole(roleDeps))
+          .get("/api/roles/:id", getRole(roleDeps))
+          .patch("/api/roles/:id", updateRole(roleDeps))
+          .delete("/api/roles/:id", deleteRole(roleDeps))
+          .get("/api/roles/:id/versions", listRoleVersions(roleDeps));
       }
     }
 

@@ -17,6 +17,7 @@ import type {
   MemoryStore,
   ModelCatalog,
   RegisteredAgent,
+  RoleRegistry,
   ToolHistoryStore,
 } from "@promin/agent";
 import { dispatchAgentSchedule } from "@promin/agent";
@@ -82,6 +83,14 @@ export interface ZoryaAgentsConfig {
    */
   fragments?: FragmentRegistry;
   /**
+   * Optional role registry. When set, the server mounts `/api/roles/*`
+   * CRUD and `GET /api/agents/_catalog/roles` (the agent editor's role
+   * picker), and `extract-role` can lift an inline role into it. The same
+   * registry should back the `resolve` callback so `ref`-bound agents
+   * load their role at materialize time.
+   */
+  roles?: RoleRegistry;
+  /**
    * Optional tool-history store. When set, the server exposes
    * `GET /api/agents/_catalog/tools/history` so a compliance / forensic
    * query can read which tools the host has exposed over time. Pair it
@@ -118,6 +127,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   readonly models?: ModelCatalog;
   readonly toolCatalog?: AgentToolCatalog;
   readonly fragments?: FragmentRegistry;
+  readonly roles?: RoleRegistry;
   readonly toolHistory?: ToolHistoryStore;
   readonly turnGate?: AgentTurnGate;
   readonly workerId?: string;
@@ -137,6 +147,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
     if (config.models) this.models = config.models;
     if (config.toolCatalog) this.toolCatalog = config.toolCatalog;
     if (config.fragments) this.fragments = config.fragments;
+    if (config.roles) this.roles = config.roles;
     if (config.toolHistory) this.toolHistory = config.toolHistory;
     if (config.scan) this.scanConfig = config.scan;
     if (config.turnGate) this.turnGate = config.turnGate;
