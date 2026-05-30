@@ -709,40 +709,6 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
       expect(body.acceptedSecrets.sort()).toEqual(["anthropic_api_key", "openai_key"]);
     });
 
-    it("rejects with 400 missing_required_secrets when source is a template missing keys", async () => {
-      const { server, registry } = await bootGateway();
-      await registry.register({
-        id: "anthropic-template",
-        backend: {
-          type: "local",
-          model: {
-            provider: "anthropic",
-            id: "claude-sonnet-4-6",
-            credentialRef: "anthropic_api_key",
-          },
-          role: { inline: { systemPrompt: "Cloneable", tools: [] } },
-        },
-        metadata: {
-          description: null,
-          capabilities: [],
-          tags: ["template"],
-          template: true,
-          requiredSecrets: ["anthropic_api_key"],
-        },
-      });
-
-      const res = await server.handle(
-        new Request("http://test/api/agents/anthropic-template/clone", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ targetId: "my-bot" }),
-        }),
-      );
-      expect(res.status).toBe(400);
-      const body = (await res.json()) as { error: string };
-      expect(body.error).toBe("missing_required_secrets");
-    });
-
     it("clone-with-secrets persists supplied secrets at the requested scope", async () => {
       const { server, registry, secrets } = await bootGateway({ withSecrets: true });
       await registry.register({
@@ -760,8 +726,6 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
           description: null,
           capabilities: [],
           tags: ["template"],
-          template: true,
-          requiredSecrets: ["anthropic_api_key"],
         },
       });
 
@@ -803,8 +767,6 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
           description: null,
           capabilities: [],
           tags: ["template"],
-          template: true,
-          requiredSecrets: ["anthropic_api_key"],
         },
       });
       // The tenant already holds the key at namespace scope (e.g. a prior clone).
@@ -830,70 +792,6 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
       expect(
         await secrets!.get({ scope: SecretScope.namespace("acme"), key: "anthropic_api_key" }),
       ).toBe("sk-ant-existing");
-    });
-
-    it("still rejects when a required secret is neither provided nor stored at the scope", async () => {
-      const { server, registry } = await bootGateway({ withSecrets: true });
-      await registry.register({
-        id: "anthropic-template",
-        backend: {
-          type: "local",
-          model: {
-            provider: "anthropic",
-            id: "claude-sonnet-4-6",
-            credentialRef: "anthropic_api_key",
-          },
-          role: { inline: { systemPrompt: "Cloneable", tools: [] } },
-        },
-        metadata: {
-          description: null,
-          capabilities: [],
-          tags: ["template"],
-          template: true,
-          requiredSecrets: ["anthropic_api_key"],
-        },
-      });
-
-      const res = await server.handle(
-        new Request("http://test/api/agents/anthropic-template/clone", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            targetId: "my-bot-3",
-            secretsScope: { kind: "namespace", namespaceId: "acme" },
-          }),
-        }),
-      );
-      expect(res.status).toBe(400);
-      expect(((await res.json()) as { error: string }).error).toBe("missing_required_secrets");
-    });
-
-    it("clones with template flag stripped (clone is not itself a template)", async () => {
-      const { server, registry } = await bootGateway();
-      await registry.register({
-        id: "tmpl",
-        backend: {
-          type: "local",
-          model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-          role: { inline: { systemPrompt: "Cloneable", tools: [] } },
-        },
-        metadata: {
-          description: null,
-          capabilities: [],
-          tags: [],
-          template: true,
-        },
-      });
-      const res = await server.handle(
-        new Request("http://test/api/agents/tmpl/clone", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ targetId: "my-fork" }),
-        }),
-      );
-      expect(res.status).toBe(201);
-      const got = await registry.get("my-fork");
-      expect(got?.metadata.template).toBeUndefined();
     });
   });
 

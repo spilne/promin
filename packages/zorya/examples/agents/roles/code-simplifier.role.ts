@@ -33,7 +33,5 @@ export const CODE_SIMPLIFIER_ROLE: RegisterAgentInput = {
       "Simplification assistant. Proposes shorter / flatter / less-magical versions of code with before/after + an honest cost statement. Pulls the code-review skill when relevant.",
     capabilities: ["chat", "live", "code-review", "skills"],
     tags: ["live", "role", "anthropic", "simplifier"],
-    template: true,
-    requiredSecrets: ["ANTHROPIC_API_KEY"],
   },
 };

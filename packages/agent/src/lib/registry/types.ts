@@ -45,25 +45,6 @@ export interface AgentMetadata {
   readonly capabilities: ReadonlyArray<string>;
   readonly tags: ReadonlyArray<string>;
   /**
-   * Marks this recipe as a CLONEABLE TEMPLATE. The Designer surfaces
-   * templates in a gallery view; the gateway's clone endpoint accepts
-   * a `secrets` body for templates and validates that every named
-   * `requiredSecrets` key has a value.
-   *
-   * Clones do NOT inherit the template flag — once cloned, it's an
-   * ordinary recipe owned by the cloner.
-   */
-  readonly template?: boolean;
-  /**
-   * Names of secrets a cloner must supply when forking this template.
-   * The clone endpoint validates that body.secrets covers every name
-   * before persisting; missing names return 400 missing_required_secrets.
-   *
-   * Typically pairs with `model.credentialRef` so the cloner's key is
-   * stored under the same name the recipe references.
-   */
-  readonly requiredSecrets?: ReadonlyArray<string>;
-  /**
    * Operator kill-switch. `enabled !== false` (default) means the
    * recipe is invokable; setting `enabled: false` keeps the row in
    * the registry (so threads / history / metadata stay browsable)

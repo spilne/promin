@@ -35,7 +35,5 @@ export const DEBUGGER_ROLE: RegisterAgentInput = {
       "Debugging assistant. Reproduces first, bisects, runs hypothesis-test loops; reports findings in the standard table; uses the structured-debugging skill for stubborn cases.",
     capabilities: ["chat", "live", "debugging", "skills"],
     tags: ["live", "role", "anthropic", "debugger"],
-    template: true,
-    requiredSecrets: ["ANTHROPIC_API_KEY"],
   },
 };

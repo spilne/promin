@@ -32,7 +32,5 @@ export const ARCHITECT_ROLE: RegisterAgentInput = {
       "Architecture-decision assistant. Frames a problem, lays out 2-3 options with costs + what each forecloses, and recommends one with a clear reason. Uses the decision-rubric fragment.",
     capabilities: ["chat", "live", "architecture"],
     tags: ["live", "role", "anthropic", "architect"],
-    template: true,
-    requiredSecrets: ["ANTHROPIC_API_KEY"],
   },
 };

@@ -37,7 +37,5 @@ export const SECURITY_REVIEWER_ROLE: RegisterAgentInput = {
       "Security review assistant. Defaults to Tier 3 (thorough) verification with explicit attacker scenarios. Reports findings in the standard table; uses verifier + red-flag + findings-table fragments.",
     capabilities: ["chat", "live", "security", "review"],
     tags: ["live", "role", "anthropic", "security"],
-    template: true,
-    requiredSecrets: ["ANTHROPIC_API_KEY"],
   },
 };

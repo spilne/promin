@@ -32,7 +32,5 @@ export const DESIGNER_ROLE: RegisterAgentInput = {
       "Design assistant for component-/API-level work. Frames 2-3 options with diagrams or pseudocode, picks one with reasoning tied to the constraints that matter most.",
     capabilities: ["chat", "live", "design"],
     tags: ["live", "role", "anthropic", "designer"],
-    template: true,
-    requiredSecrets: ["ANTHROPIC_API_KEY"],
   },
 };

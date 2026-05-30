@@ -32,7 +32,5 @@ export const ANALYST_ROLE: RegisterAgentInput = {
       "Data-reading assistant. Answers a specific question from supplied data, cites the supporting rows, and surfaces gaps when the data doesn't reach.",
     capabilities: ["chat", "live", "analysis"],
     tags: ["live", "role", "anthropic", "analyst"],
-    template: true,
-    requiredSecrets: ["ANTHROPIC_API_KEY"],
   },
 };

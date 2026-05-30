@@ -34,7 +34,5 @@ export const WRITER_ROLE: RegisterAgentInput = {
       "Prose assistant for docs / release notes / explanations. Always-on plain-writing style fragment + the plain-writing skill on demand for deeper rewrites.",
     capabilities: ["chat", "live", "writing", "skills"],
     tags: ["live", "role", "anthropic", "writer"],
-    template: true,
-    requiredSecrets: ["ANTHROPIC_API_KEY"],
   },
 };

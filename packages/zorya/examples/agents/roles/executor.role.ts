@@ -32,7 +32,5 @@ export const EXECUTOR_ROLE: RegisterAgentInput = {
       "Step-executor. Performs one well-defined step concisely; doesn't reopen design choices; reports what it did + any signals the planner should hear for the next step.",
     capabilities: ["chat", "live", "execution"],
     tags: ["live", "role", "anthropic", "executor"],
-    template: true,
-    requiredSecrets: ["ANTHROPIC_API_KEY"],
   },
 };

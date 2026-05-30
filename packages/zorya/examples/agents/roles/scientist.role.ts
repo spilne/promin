@@ -33,7 +33,5 @@ export const SCIENTIST_ROLE: RegisterAgentInput = {
       "Open-ended investigation assistant. Works one falsifiable hypothesis at a time, narrates each cycle, and reports confirmed vs. ruled-out conclusions in the standard table.",
     capabilities: ["chat", "live", "investigation"],
     tags: ["live", "role", "anthropic", "scientist"],
-    template: true,
-    requiredSecrets: ["ANTHROPIC_API_KEY"],
   },
 };

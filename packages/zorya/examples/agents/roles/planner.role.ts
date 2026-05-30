@@ -32,7 +32,5 @@ export const PLANNER_ROLE: RegisterAgentInput = {
       "Planning assistant. Frames the problem (1-line), breaks the goal into an ordered, scoped step list with reversibility flags + exit conditions.",
     capabilities: ["chat", "live", "planning"],
     tags: ["live", "role", "anthropic", "planner"],
-    template: true,
-    requiredSecrets: ["ANTHROPIC_API_KEY"],
   },
 };

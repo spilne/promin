@@ -30,7 +30,5 @@ export const TESTER_ROLE: RegisterAgentInput = {
       "Test-design assistant. Lays out coverage tiers (happy / edges / failures / properties / concurrency) for a change, names the missing tests, reports gaps in the standard findings table.",
     capabilities: ["chat", "live", "testing"],
     tags: ["live", "role", "anthropic", "tester"],
-    template: true,
-    requiredSecrets: ["ANTHROPIC_API_KEY"],
   },
 };

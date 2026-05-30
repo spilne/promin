@@ -20,7 +20,8 @@ import { useEffect, useMemo, useState } from "preact/hooks";
 import type { RegisteredAgent } from "../../../server/routes/agents.ts";
 import { inlineRoleDefinition } from "@promin/agent";
 import { exportRecipeAsTs } from "../../lib/export-recipe-ts.ts";
-import { toast } from "../../lib/dialogs.ts";
+import { prompt, toast } from "../../lib/dialogs.ts";
+import { api } from "../../api/client.ts";
 import { formatRelative } from "../../lib/format.ts";
 import { JsonBlock } from "../ui/json-block.tsx";
 import { Skeleton } from "../ui/skeleton.tsx";
@@ -155,7 +156,7 @@ export function AgentConfigDrawer({
               <Skeleton w="w-1/2" h="h-4" />
             </div>
           ) : tab === "view" ? (
-            <RecipeBody agent={agent} />
+            <RecipeBody agent={agent} onChanged={onSaved} />
           ) : tab === "secrets" ? (
             <AgentSecretsPanel source={agent} namespaceId={namespaceId} onClose={onClose} embed />
           ) : tab === "export" ? (
@@ -174,7 +175,6 @@ export function AgentConfigDrawer({
           ) : tab === "clone" ? (
             <AgentCloneDialog
               source={agent}
-              namespaceId={namespaceId}
               onClose={onClose}
               onCloned={(newId) => onCloned?.(newId)}
               embed
@@ -228,7 +228,13 @@ function ExportTsBody({ agent }: { agent: RegisteredAgent }) {
   );
 }
 
-function RecipeBody({ agent }: { agent: RegisteredAgent }) {
+function RecipeBody({
+  agent,
+  onChanged,
+}: {
+  agent: RegisteredAgent;
+  onChanged?: (updated: RegisteredAgent) => void;
+}) {
   const isLocal = agent.backend.type === "local";
   const local = isLocal ? agent.backend : null;
   // Behavioral fields live on the role binding now. `ref` bindings resolve
@@ -237,6 +243,30 @@ function RecipeBody({ agent }: { agent: RegisteredAgent }) {
   const sp = roleDef?.systemPrompt ?? null;
   const systemPromptText = sp === null ? null : typeof sp === "string" ? sp : sp.base;
   const tools = roleDef?.tools ?? [];
+  // Binding shape — `ref` is a shared live link; `inline` is one-off and can
+  // be lifted into the registry via "Save as role" (extract-role).
+  const binding = local?.role;
+  const roleRef = binding && "ref" in binding ? binding.ref : null;
+
+  const onSaveAsRole = async () => {
+    const roleId = await prompt({
+      title: "Save as role",
+      label: "New role id",
+      placeholder: "e.g. support-persona",
+      confirmLabel: "Save as role",
+    });
+    if (!roleId) return;
+    try {
+      const { agent: updated } = await api.extractRole(agent.id, { roleId: roleId.trim() });
+      toast(`Saved role "${roleId.trim()}" — this agent now references it.`, {
+        variant: "success",
+      });
+      onChanged?.(updated);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : String(err), { variant: "error" });
+    }
+  };
+
   return (
     <>
       <Section label="Identity">
@@ -277,6 +307,35 @@ function RecipeBody({ agent }: { agent: RegisteredAgent }) {
           )}
           {local.maxTurns !== undefined && (
             <KV k="maxTurns" v={<span class="font-mono">{local.maxTurns}</span>} />
+          )}
+        </Section>
+      )}
+
+      {local && (
+        <Section label="Role">
+          {roleRef ? (
+            <KV
+              k="binding"
+              v={
+                <span class="text-base-content/70">
+                  ref →{" "}
+                  <span class="font-mono">
+                    {roleRef.id}
+                    {roleRef.version ? `@${roleRef.version}` : ""}
+                  </span>{" "}
+                  <span class="text-base-content/40">(shared — edit it on the Roles page)</span>
+                </span>
+              }
+            />
+          ) : (
+            <div class="flex items-center justify-between gap-2">
+              <span class="text-xs text-base-content/60">
+                Inline role — this agent owns its behavior directly.
+              </span>
+              <button class="btn btn-xs btn-ghost" onClick={onSaveAsRole}>
+                Save as role…
+              </button>
+            </div>
           )}
         </Section>
       )}

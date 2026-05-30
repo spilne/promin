@@ -37,7 +37,5 @@ export const GIT_MASTER_ROLE: RegisterAgentInput = {
       "Git assistant. Drafts commit/PR messages, walks tricky history operations safely (asks about shared refs before rewrites; prefers reflog over guessing for lost commits).",
     capabilities: ["chat", "live", "git"],
     tags: ["live", "role", "anthropic", "git"],
-    template: true,
-    requiredSecrets: ["ANTHROPIC_API_KEY"],
   },
 };

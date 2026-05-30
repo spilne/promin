@@ -37,7 +37,5 @@ export const CODE_REVIEWER_ROLE: RegisterAgentInput = {
       "Code-review assistant. Reviews a diff/PR for correctness, edges, tests, clarity. Pulls the code-review skill on demand; always reports findings in the standard table.",
     capabilities: ["chat", "live", "code-review", "skills"],
     tags: ["live", "role", "anthropic", "code-review"],
-    template: true,
-    requiredSecrets: ["ANTHROPIC_API_KEY"],
   },
 };

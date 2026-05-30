@@ -31,7 +31,5 @@ export const VERIFIER_ROLE: RegisterAgentInput = {
       "Verification assistant. Names a verification tier (smoke / normal / thorough) matched to the blast radius, then reports findings in the standard table. Uses verifier-tiered-checks + findings-table fragments.",
     capabilities: ["chat", "live", "verification"],
     tags: ["live", "role", "anthropic", "verifier"],
-    template: true,
-    requiredSecrets: ["ANTHROPIC_API_KEY"],
   },
 };

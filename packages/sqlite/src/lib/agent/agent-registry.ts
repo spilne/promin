@@ -81,10 +81,6 @@ export class SqliteAgentRegistry implements AgentRegistry {
       description: input.metadata?.description ?? null,
       capabilities: input.metadata?.capabilities ? [...input.metadata.capabilities] : [],
       tags: input.metadata?.tags ? [...input.metadata.tags] : [],
-      ...(input.metadata?.template !== undefined && { template: input.metadata.template }),
-      ...(input.metadata?.requiredSecrets !== undefined && {
-        requiredSecrets: [...input.metadata.requiredSecrets],
-      }),
       ...(input.metadata?.enabled !== undefined && { enabled: input.metadata.enabled }),
     };
     const next: RegisteredAgent = {

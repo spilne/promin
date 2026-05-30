@@ -563,42 +563,18 @@ export function cloneAgent(deps: AgentGatewayDeps) {
       return jsonError(404, "agent_not_found", `Agent "${sourceId}" is not registered.`);
     }
 
-    // Resolve the secrets scope upfront — both the handshake below and
-    // the post-register writes need it. Fail fast on a bad shape.
-    // Default scope is 'global' for the simplest case.
+    // Resolve the secrets scope upfront — the post-register writes need it.
+    // Fail fast on a bad shape. Default scope is 'global' for the simplest case.
     const secretsScope = parseCloneSecretsScope(body.secretsScope);
     if ("error" in secretsScope) return jsonError(400, secretsScope.error);
 
-    // Template handshake: every secret the source declares as required
-    // must be satisfied — supplied in this request OR already stored at
-    // the target scope. The latter lets a re-clone reuse the tenant's
-    // existing key without re-entering it (and without overwriting it,
-    // since the persist loop below only writes what the body provided).
-    const required = readRequiredSecrets(source.metadata);
     const provided = body.secrets ?? {};
-    const missing: string[] = [];
-    for (const name of required) {
-      if (name in provided) continue;
-      const stored = deps.secrets
-        ? await deps.secrets.get({ scope: secretsScope, key: name })
-        : null;
-      if (stored === null) missing.push(name);
-    }
-    if (missing.length > 0) {
-      return jsonError(
-        400,
-        "missing_required_secrets",
-        `Required secrets not provided and not already stored: ${missing.join(", ")}`,
-      );
-    }
 
     const targetVersion =
       typeof body.targetVersion === "string" && body.targetVersion.length > 0
         ? body.targetVersion
         : undefined;
 
-    // Clones are not themselves templates; strip the marker. requiredSecrets
-    // also drops since the clone now owns its credentialRefs directly.
     const clonedMetadata: Partial<RegisteredAgent["metadata"]> = {
       description: source.metadata.description,
       capabilities: [...source.metadata.capabilities],
@@ -631,14 +607,6 @@ export function cloneAgent(deps: AgentGatewayDeps) {
       return jsonError(500, "clone_failed", asMessage(err));
     }
   };
-}
-
-function readRequiredSecrets(metadata: RegisteredAgent["metadata"]): string[] {
-  // metadata.requiredSecrets is the AgentMetadata extension landed
-  // alongside the template flag (promin-ui4b). Read defensively so
-  // older recipes (no field set) just produce an empty list.
-  if (!Array.isArray(metadata.requiredSecrets)) return [];
-  return metadata.requiredSecrets.filter((x): x is string => typeof x === "string" && x.length > 0);
 }
 
 /**

@@ -32,7 +32,5 @@ export const CRITIC_ROLE: RegisterAgentInput = {
       "Adversarial reader. Names red flags in a plan / design / writeup (unstated assumptions, hand-waves, scale fudges), reports them in the standard findings table.",
     capabilities: ["chat", "live", "review"],
     tags: ["live", "role", "anthropic", "critic"],
-    template: true,
-    requiredSecrets: ["ANTHROPIC_API_KEY"],
   },
 };

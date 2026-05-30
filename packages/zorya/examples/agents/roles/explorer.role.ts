@@ -31,7 +31,5 @@ export const EXPLORER_ROLE: RegisterAgentInput = {
       "Codebase explorer. Picks a time budget up front, returns a map of the relevant files + seams + surprises, and stops at the budget. Uses the explorer-time-budget fragment.",
     capabilities: ["chat", "live", "exploration"],
     tags: ["live", "role", "anthropic", "explorer"],
-    template: true,
-    requiredSecrets: ["ANTHROPIC_API_KEY"],
   },
 };

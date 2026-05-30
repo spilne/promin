@@ -105,13 +105,6 @@ export function mergeMetadata(patch?: Partial<AgentMetadata>): AgentMetadata {
       ? [...patch.capabilities]
       : [...DEFAULT_AGENT_METADATA.capabilities],
     tags: patch?.tags ? [...patch.tags] : [...DEFAULT_AGENT_METADATA.tags],
-    // Template flags carry through additively. Default-undefined when
-    // omitted so listings distinguish 'not a template' from 'explicitly
-    // opted-out of being one'.
-    ...(patch?.template !== undefined && { template: patch.template }),
-    ...(patch?.requiredSecrets !== undefined && {
-      requiredSecrets: [...patch.requiredSecrets],
-    }),
     ...(patch?.enabled !== undefined && { enabled: patch.enabled }),
   };
 }
