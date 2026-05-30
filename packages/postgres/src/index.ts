@@ -14,6 +14,10 @@ export {
   PostgresSkillRegistry,
   type PostgresSkillRegistryConfig,
 } from "./lib/agent/skill-registry.ts";
+export {
+  PostgresFragmentStore,
+  type PostgresFragmentStoreConfig,
+} from "./lib/agent/fragment-store.ts";
 export { PostgresMemoryStore, type PostgresMemoryStoreConfig } from "./lib/agent/memory-store.ts";
 export { PostgresLeaseStore, type PostgresLeaseStoreConfig } from "./lib/agent/lease-store.ts";
 export {

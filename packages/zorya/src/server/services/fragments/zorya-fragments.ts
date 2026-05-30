@@ -5,7 +5,7 @@
 // /_catalog/fragments), and the resolver's `fragments` dep.
 // ---------------------------------------------------------------------------
 
-import type { FragmentRegistry } from "@promin/agent";
+import type { FragmentRegistry, FragmentStore } from "@promin/agent";
 import { startFragmentScanLoop } from "@promin/agent";
 
 export interface ZoryaFragmentsScanConfig {
@@ -27,12 +27,21 @@ export interface ZoryaFragmentsScanConfig {
 
 export interface ZoryaFragmentsConfig {
   registry: FragmentRegistry;
+  /**
+   * Durable persistence for operator-authored fragments. When set, the
+   * service loads everything from the store into the registry at boot
+   * (before the scan loop), and `setFragment` / `deleteFragment` write
+   * through to it. File-scanned fragments are NEVER persisted here —
+   * the .md file is their source of truth.
+   */
+  store?: FragmentStore;
   /** Filesystem hot-reload scan loop. Omit to disable. */
   scan?: ZoryaFragmentsScanConfig;
 }
 
 export class ZoryaFragments {
   readonly registry: FragmentRegistry;
+  readonly store?: FragmentStore;
   private readonly scanConfig?: ZoryaFragmentsScanConfig;
   private scanHandle?: { stop(): void; tick(): Promise<unknown> };
   // Fragment keys currently backed by a file on disk — rebuilt each tick.
@@ -40,9 +49,11 @@ export class ZoryaFragments {
   // an in-place edit isn't silently overwritten by the next scan. Mirrors
   // ZoryaSkills.fileManagedIds().
   private _fileManaged: ReadonlySet<string> = new Set();
+  private hydrated = false;
 
   constructor(config: ZoryaFragmentsConfig) {
     this.registry = config.registry;
+    if (config.store) this.store = config.store;
     if (config.scan) this.scanConfig = config.scan;
   }
 
@@ -51,7 +62,30 @@ export class ZoryaFragments {
     return [...this._fileManaged];
   }
 
+  /**
+   * Operator write: update the in-memory registry AND persist to the
+   * durable store (if any). Used by the /api/fragments CRUD routes.
+   * Scanned fragments do NOT come through this path.
+   */
+  async setFragment(key: string, content: string): Promise<void> {
+    this.registry.set(key, content);
+    await this.store?.set(key, content);
+  }
+
+  async deleteFragment(key: string): Promise<void> {
+    this.registry.delete(key);
+    await this.store?.delete(key);
+  }
+
   async start(): Promise<void> {
+    // Seed the registry from durable storage BEFORE the scan loop runs, so
+    // operator-authored fragments are present at boot. Idempotent across
+    // restarts via the in-memory cache flag.
+    if (!this.hydrated && this.store) {
+      const all = await this.store.loadAll();
+      for (const f of all) this.registry.set(f.key, f.content);
+      this.hydrated = true;
+    }
     if (this.scanHandle || !this.scanConfig) return;
     const userOnTick = this.scanConfig.onTick;
     this.scanHandle = startFragmentScanLoop({

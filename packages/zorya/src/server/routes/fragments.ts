@@ -31,7 +31,15 @@ export interface FragmentSourcesResponse {
 }
 
 export interface FragmentGatewayDeps {
+  /** Sync read surface for list/get; resolveSystemPrompt also reads from this. */
   readonly registry: FragmentRegistry;
+  /**
+   * Write-through mutators. The ZoryaFragments service supplies these
+   * (they update the registry AND persist to the optional durable store).
+   * Scanned fragments do NOT come through this path.
+   */
+  setFragment(key: string, content: string): Promise<void>;
+  deleteFragment(key: string): Promise<void>;
 }
 
 function asMessage(err: unknown): string {
@@ -110,7 +118,7 @@ export function createFragment(deps: FragmentGatewayDeps) {
       );
     }
     try {
-      deps.registry.set(body.key, body.content);
+      await deps.setFragment(body.key, body.content);
       return json(201, { key: body.key, content: body.content } satisfies FragmentDto);
     } catch (err) {
       return jsonError(500, "create_failed", asMessage(err));
@@ -131,7 +139,7 @@ export function updateFragment(deps: FragmentGatewayDeps) {
       return jsonError(404, "fragment_not_found", `Fragment "${key}" is not registered.`);
     }
     try {
-      deps.registry.set(key, body.content);
+      await deps.setFragment(key, body.content);
       return json(200, { key, content: body.content } satisfies FragmentDto);
     } catch (err) {
       return jsonError(500, "update_failed", asMessage(err));
@@ -144,7 +152,7 @@ export function deleteFragment(deps: FragmentGatewayDeps) {
     const key = params.key;
     if (!key) return jsonError(400, "missing_key");
     try {
-      deps.registry.delete(key);
+      await deps.deleteFragment(key);
       return new Response(null, { status: 204 });
     } catch (err) {
       return jsonError(500, "delete_failed", asMessage(err));

@@ -604,6 +604,18 @@ export const skillRegistry = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Fragment store — durable storage for operator-authored prompt fragments.
+// Sibling of skill_registry. File-scanned fragments live in memory only and
+// are NOT persisted here (the .md file is the source of truth).
+// ---------------------------------------------------------------------------
+
+export const fragmentStore = pgTable("fragment_store", {
+  key: text("key").primaryKey(),
+  content: text("content").notNull(),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+});
+
+// ---------------------------------------------------------------------------
 // Agent memory — three-scope cascade × four-tier model. Mirrors
 // SqliteMemoryStore's 6 tables. Single-table-per-tier with a `scope`
 // column keeps queries simple while supporting per-scope indexes.

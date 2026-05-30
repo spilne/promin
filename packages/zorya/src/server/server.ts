@@ -616,7 +616,11 @@ export class ZoryaServer {
 
     if (this.fragments) {
       const fragments = this.fragments;
-      const fragmentDeps = { registry: fragments.registry };
+      const fragmentDeps = {
+        registry: fragments.registry,
+        setFragment: (key: string, content: string) => fragments.setFragment(key, content),
+        deleteFragment: (key: string) => fragments.deleteFragment(key),
+      };
       this.router
         .get("/api/fragments", listFragments(fragmentDeps))
         .post("/api/fragments", createFragment(fragmentDeps))

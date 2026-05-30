@@ -200,8 +200,9 @@ export type { LoadSkillToolConfig, LoadSkillOutput } from "./skills/load-skill-t
 // load-on-demand). See packages/zorya/examples/fragments for the curated
 // library; resolveLocalAgent reads fragments via the optional `fragments`
 // dep (FragmentRegistry).
-export type { FragmentRegistry } from "./fragments/types.ts";
+export type { FragmentRegistry, FragmentStore } from "./fragments/types.ts";
 export { InMemoryFragmentRegistry } from "./fragments/in-memory-fragment-registry.ts";
+export { InMemoryFragmentStore } from "./fragments/in-memory-fragment-store.ts";
 export { resolveSystemPrompt } from "./fragments/resolve-prompt.ts";
 export type { ResolveSystemPromptParams } from "./fragments/resolve-prompt.ts";
 export { parseMarkdownSkill, slugify } from "./skills/parse-markdown-skill.ts";

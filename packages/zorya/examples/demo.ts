@@ -53,6 +53,7 @@ import {
   SqliteSchedulerStorage,
   SqliteAgentRegistry,
   SqliteSkillRegistry,
+  SqliteFragmentStore,
   SqliteAgentInstanceRegistry,
   SqliteDagRegistry,
   SqliteMemoryStore,
@@ -63,6 +64,7 @@ import {
   migrate as migratePostgres,
   PostgresAgentRegistry,
   PostgresSkillRegistry,
+  PostgresFragmentStore,
   PostgresMemoryStore,
 } from "@promin/postgres";
 import {
@@ -76,6 +78,7 @@ import {
   InMemoryModelCatalog,
   resolveCursorAgent,
   DefaultAgentToolCatalog,
+  type FragmentStore,
   resolveCredentialRef,
   resolveLocalAgent,
   resolveSkillCatalog,
@@ -149,17 +152,22 @@ const runner = createWorkflowRunner({ storage });
 const pgUrl = process.env.ZORYA_PG_URL;
 let agentRegistry: AgentRegistry;
 let skillRegistry: SkillRegistry;
+let fragmentStore: FragmentStore;
 let memoryStore: MemoryStore;
 if (pgUrl) {
   const pgDb = createPostgresDb(pgUrl);
   await migratePostgres(pgDb);
   agentRegistry = new PostgresAgentRegistry({ db: pgDb });
   skillRegistry = new PostgresSkillRegistry({ db: pgDb });
+  fragmentStore = new PostgresFragmentStore({ db: pgDb });
   memoryStore = new PostgresMemoryStore({ db: pgDb });
-  console.log("[zorya] agent + skill registries + memory store → Postgres (ZORYA_PG_URL)");
+  console.log(
+    "[zorya] agent + skill registries + fragment store + memory store → Postgres (ZORYA_PG_URL)",
+  );
 } else {
   agentRegistry = SqliteAgentRegistry.make({ db });
   skillRegistry = SqliteSkillRegistry.make({ db });
+  fragmentStore = SqliteFragmentStore.make({ db });
   memoryStore = SqliteMemoryStore.make({ db });
 }
 // Prompt-fragment registry — small curated markdown layers role recipes
@@ -1140,6 +1148,7 @@ const skills = new ZoryaSkills({
 const fragmentScanRoot = path.join(import.meta.dir, "fragments");
 const fragments = new ZoryaFragments({
   registry: fragmentRegistry,
+  store: fragmentStore,
   scan: {
     root: fragmentScanRoot,
     intervalMs: 5_000,
