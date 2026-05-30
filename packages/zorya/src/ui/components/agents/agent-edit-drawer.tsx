@@ -54,10 +54,32 @@ interface Props {
    * inside the agent's ⚙ Manage drawer.
    */
   embed?: boolean;
+  /**
+   * "edit" (default) saves in place via PATCH against `agent.id`. "create"
+   * builds a brand-new recipe: the id becomes an editable field and Save
+   * POSTs to /api/agents. The caller passes a blank `agent` template to
+   * seed the form defaults (model, empty tools, etc.).
+   */
+  mode?: "create" | "edit";
 }
 
-export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTest, embed }: Props) {
+export function AgentEditDrawer({
+  agent,
+  tenant,
+  onClose,
+  onSaved,
+  onSavedAndTest,
+  embed,
+  mode = "edit",
+}: Props) {
+  const isCreate = mode === "create";
   const isLocal = agent.backend.type === "local";
+  // Create mode lets the operator type the recipe id; edit mode pins it.
+  const [agentId, setAgentId] = useState(agent.id);
+  const trimmedId = agentId.trim();
+  // Mirror the gateway's id rule (createAgent rejects empty / `_`-prefixed)
+  // so the operator sees the problem before the round-trip.
+  const idValid = trimmedId.length > 0 && !trimmedId.startsWith("_");
   const [description, setDescription] = useState(agent.metadata.description ?? "");
   // `systemPrompt` on the recipe can be either a plain string OR the layered
   // `{ base, layers }` form (promin-kx26). The drawer edits both: the
@@ -227,11 +249,17 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
   const save = async (): Promise<RegisteredAgent | null> => {
     setError(null);
     const { backend, metadata } = buildPayload();
-    const updates: Parameters<typeof api.updateAgent>[1] = {
-      metadata,
-      ...(isLocal && { backend }),
-    };
     try {
+      // Create posts a new recipe keyed on the typed id; edit patches the
+      // existing one in place. A blank-template backend is always local,
+      // so `backend` is sent unconditionally in create mode.
+      if (isCreate) {
+        return await api.createAgent({ id: trimmedId, backend, metadata });
+      }
+      const updates: Parameters<typeof api.updateAgent>[1] = {
+        metadata,
+        ...(isLocal && { backend }),
+      };
       return await api.updateAgent(agent.id, updates);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -323,11 +351,14 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
         {!embed && (
           <header class="flex items-start justify-between gap-2 p-4 border-b border-base-300">
             <div class="min-w-0">
-              <div class="text-xs text-base-content/50 uppercase tracking-wider">Edit agent</div>
-              <div class="font-mono text-sm truncate">{agent.id}</div>
+              <div class="text-xs text-base-content/50 uppercase tracking-wider">
+                {isCreate ? "New agent" : "Edit agent"}
+              </div>
+              <div class="font-mono text-sm truncate">{isCreate ? trimmedId || "—" : agent.id}</div>
               <div class="text-[10px] text-base-content/40 mt-0.5">
-                Updates the latest version in place. Changing model or tools needs a programmatic
-                edit until the full Designer ships.
+                {isCreate
+                  ? "Creates a new local recipe. Fill in an id, pick a model, and save."
+                  : "Updates the latest version in place. Changing model or tools needs a programmatic edit until the full Designer ships."}
               </div>
             </div>
             <button
@@ -345,12 +376,29 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
           class={embed ? "space-y-4" : "flex-1 overflow-y-auto p-4 space-y-4"}
           onSubmit={onSubmit}
         >
-          {fileManaged && (
+          {!isCreate && fileManaged && (
             <div class="alert alert-warning text-xs">
               📄 This agent recipe is defined by a file on disk. Saving in place is disabled — edit
               the source file, or use <span class="font-mono">Publish new version</span> to create
               an operator-managed copy. The next scan would overwrite any in-place change.
             </div>
+          )}
+          {isCreate && (
+            <label class="form-control">
+              <span class="text-xs text-base-content/60 mb-1 uppercase tracking-wider">
+                Agent id
+              </span>
+              <input
+                class="input input-bordered input-sm font-mono"
+                placeholder="e.g. support-bot (letters, digits, - and _; can't start with _)"
+                value={agentId}
+                onInput={(e) => setAgentId((e.target as HTMLInputElement).value)}
+                autoFocus
+              />
+              {trimmedId.length > 0 && !idValid && (
+                <span class="text-[10px] text-error mt-1">Id can't start with an underscore.</span>
+              )}
+            </label>
           )}
           <label class="form-control">
             <span class="text-xs text-base-content/60 mb-1 uppercase tracking-wider">
@@ -757,7 +805,7 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
             <button type="button" class="btn btn-sm btn-ghost" onClick={onClose}>
               Cancel
             </button>
-            {!publishOpen && (
+            {!isCreate && !publishOpen && (
               <button
                 type="button"
                 class="btn btn-sm btn-ghost"
@@ -767,7 +815,7 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
                 Publish new version…
               </button>
             )}
-            {isLocal && tenant && !publishOpen && (
+            {!isCreate && isLocal && tenant && !publishOpen && (
               <button
                 type="button"
                 class="btn btn-sm btn-ghost"
@@ -778,7 +826,7 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
                 {saving ? "…" : "Test draft"}
               </button>
             )}
-            {onSavedAndTest && !publishOpen && (
+            {!isCreate && onSavedAndTest && !publishOpen && (
               <button
                 type="button"
                 class="btn btn-sm btn-secondary"
@@ -796,14 +844,24 @@ export function AgentEditDrawer({ agent, tenant, onClose, onSaved, onSavedAndTes
             <button
               type="submit"
               class="btn btn-sm btn-primary"
-              disabled={saving || fileManaged}
+              disabled={saving || (isCreate ? !idValid : fileManaged)}
               title={
-                fileManaged
-                  ? "Disabled — this recipe is defined by a file on disk. Edit the source file or use Publish new version."
-                  : undefined
+                isCreate
+                  ? !idValid
+                    ? "Enter a valid agent id to create."
+                    : undefined
+                  : fileManaged
+                    ? "Disabled — this recipe is defined by a file on disk. Edit the source file or use Publish new version."
+                    : undefined
               }
             >
-              {saving ? "Saving…" : "Save changes"}
+              {saving
+                ? isCreate
+                  ? "Creating…"
+                  : "Saving…"
+                : isCreate
+                  ? "Create agent"
+                  : "Save changes"}
             </button>
           </div>
         </form>

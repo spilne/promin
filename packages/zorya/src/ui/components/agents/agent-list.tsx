@@ -5,16 +5,36 @@ import type { RegisteredAgent } from "../../../server/routes/agents.ts";
 import { Page } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { formatRelative } from "../../lib/format.ts";
+import { AgentEditDrawer } from "./agent-edit-drawer.tsx";
 
 interface AgentListProps {
   onOpen: (id: string) => void;
 }
+
+// Blank local recipe seeding the "New agent" drawer. The id is empty (the
+// operator types it); the model default mirrors the create-from-scratch
+// examples. Timestamps are placeholders — the registry stamps real ones on
+// register.
+const BLANK_AGENT: RegisteredAgent = {
+  id: "",
+  version: "v1",
+  backend: {
+    type: "local",
+    model: { provider: "anthropic", id: "claude-sonnet-4-6" },
+    systemPrompt: null,
+    tools: [],
+  },
+  metadata: { description: null, capabilities: [], tags: [], enabled: true },
+  createdAt: 0,
+  updatedAt: 0,
+};
 
 export function AgentList({ onOpen }: AgentListProps) {
   const { data, loading, error, refresh } = useFetch(() => api.listAgents(), [], 30_000);
   const { data: sourcesData } = useFetch(() => api.listAgentSources(), [], 30_000);
   const fileManaged = useMemo(() => new Set(sourcesData?.fileManaged ?? []), [sourcesData]);
   const [query, setQuery] = useState("");
+  const [creating, setCreating] = useState(false);
 
   const agents = data?.agents ?? [];
   const filtered = useMemo(() => {
@@ -80,10 +100,18 @@ export function AgentList({ onOpen }: AgentListProps) {
               : "Agent gateway not configured on this server"}
           </p>
         </div>
-        <button class="btn btn-sm btn-ghost gap-1" onClick={() => refresh()}>
-          <span>↻</span>
-          Refresh
-        </button>
+        <div class="flex items-center gap-2">
+          <button class="btn btn-sm btn-ghost gap-1" onClick={() => refresh()}>
+            <span>↻</span>
+            Refresh
+          </button>
+          {configured && (
+            <button class="btn btn-sm btn-primary gap-1" onClick={() => setCreating(true)}>
+              <span>+</span>
+              New agent
+            </button>
+          )}
+        </div>
       </div>
 
       {agents.length === 0 && (
@@ -136,6 +164,19 @@ export function AgentList({ onOpen }: AgentListProps) {
             </table>
           </div>
         </div>
+      )}
+
+      {creating && (
+        <AgentEditDrawer
+          agent={BLANK_AGENT}
+          mode="create"
+          onClose={() => setCreating(false)}
+          onSaved={(created) => {
+            setCreating(false);
+            refresh();
+            onOpen(created.id);
+          }}
+        />
       )}
     </Page>
   );
