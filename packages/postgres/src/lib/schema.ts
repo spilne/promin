@@ -578,6 +578,32 @@ export const agentRegistry = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Role registry — versioned behavioral-bundle store. Sibling of
+// agent_registry: one row per (role_id, version). The behavioral
+// `definition` (persona prompt + tools + skills + capabilities) and the
+// `metadata` (description / tags / suggestedSecrets) are JSONB so the shapes
+// evolve without schema migrations. An agent binds a role; see
+// ROLE_AGENT_MODEL.
+// ---------------------------------------------------------------------------
+
+export const roleRegistry = pgTable(
+  "role_registry",
+  {
+    roleId: text("role_id").notNull(),
+    version: text("version").notNull(),
+    definition: jsonb("definition").notNull(),
+    metadata: jsonb("metadata").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.roleId, t.version] }),
+    // get(id) without version — pick latest by updated_at
+    index("role_registry_id_updated_idx").on(t.roleId, t.updatedAt),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // Skill registry — versioned instruction-block store. Sibling of
 // agent_registry: one row per (skill_id, version). Content fields
 // (description / when_to_use / body) are columns; metadata (capabilities /

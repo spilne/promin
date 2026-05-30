@@ -146,6 +146,20 @@ export type {
 export { DEFAULT_AGENT_VERSION, DEFAULT_AGENT_METADATA } from "./registry/types.ts";
 export { InMemoryAgentRegistry } from "./registry/in-memory-agent-registry.ts";
 export type { InMemoryAgentRegistryConfig } from "./registry/in-memory-agent-registry.ts";
+
+// RoleRegistry — versioned behavioral-bundle store (persona prompt +
+// fragments + tools + skills). An agent binds a role; see ROLE_AGENT_MODEL.
+export type {
+  RoleRegistry,
+  RegisteredRole,
+  RegisterRoleInput,
+  RoleDefinition,
+  RoleMetadata,
+  ListRolesParams,
+} from "./role/types.ts";
+export { DEFAULT_ROLE_VERSION, DEFAULT_ROLE_METADATA } from "./role/types.ts";
+export { InMemoryRoleRegistry } from "./role/in-memory-role-registry.ts";
+export type { InMemoryRoleRegistryConfig } from "./role/in-memory-role-registry.ts";
 export { resolveLocalAgent, resolveCredentialRef } from "./registry/resolve-local-agent.ts";
 export type { ResolveLocalAgentDeps } from "./registry/resolve-local-agent.ts";
 export { RemoteAgent } from "./registry/remote-agent.ts";

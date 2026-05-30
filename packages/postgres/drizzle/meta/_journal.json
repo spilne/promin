@@ -316,6 +316,13 @@
       "when": 1743400044000,
       "tag": "0044_fragment_store",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1743400045000,
+      "tag": "0045_role_registry",
+      "breakpoints": true
     }
   ]
 }

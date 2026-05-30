@@ -11,6 +11,10 @@ export {
   type PostgresAgentRegistryConfig,
 } from "./lib/agent/agent-registry.ts";
 export {
+  PostgresRoleRegistry,
+  type PostgresRoleRegistryConfig,
+} from "./lib/agent/role-registry.ts";
+export {
   PostgresSkillRegistry,
   type PostgresSkillRegistryConfig,
 } from "./lib/agent/skill-registry.ts";
