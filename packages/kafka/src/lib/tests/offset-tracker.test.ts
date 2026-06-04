@@ -137,3 +137,42 @@ describe("OffsetTracker — parallel-safe commit ordering", () => {
     expect(committable.get(0)).toBe(10); // 5-9 now contiguous from frontier
   });
 });
+
+describe("OffsetTracker — observe() frontier seeding", () => {
+  it("commits from a non-zero starting offset (no stall on resume)", () => {
+    const tracker = new OffsetTracker();
+    // Consumer resumes from committed offset 5000 — broker delivers 5000 first.
+    tracker.observe(0, 5000);
+    tracker.complete(0, 5000);
+    expect(tracker.committable().get(0)).toBe(5001);
+  });
+
+  it("seeds from the LOWEST observed offset regardless of arrival order", () => {
+    const tracker = new OffsetTracker();
+    // Out-of-order arrival into the pipe (e.g. after a parallel map): 102 first.
+    tracker.observe(0, 102);
+    tracker.observe(0, 100);
+    tracker.observe(0, 101);
+    tracker.complete(0, 100);
+    tracker.complete(0, 101);
+    tracker.complete(0, 102);
+    expect(tracker.committable().get(0)).toBe(103);
+  });
+
+  it("self-heals on a rewind (rebalance/seek redelivers below the frontier)", () => {
+    const tracker = new OffsetTracker();
+    for (let o = 100; o <= 104; o++) {
+      tracker.observe(0, o);
+      tracker.complete(0, o);
+    }
+    expect(tracker.committable().get(0)).toBe(105);
+
+    // Partition reassigned; broker redelivers from the actually-committed
+    // offset 102 (below our frontier). observe() lowers it so commits resume.
+    tracker.observe(0, 102);
+    tracker.complete(0, 102);
+    tracker.complete(0, 103);
+    tracker.complete(0, 104);
+    expect(tracker.committable().get(0)).toBe(105);
+  });
+});

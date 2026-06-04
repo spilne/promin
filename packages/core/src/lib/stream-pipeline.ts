@@ -1,4 +1,4 @@
-import { Effect, Stream, Chunk, Duration, Schedule, Ref, Option, Cause } from "effect";
+import { Effect, Stream, Chunk, Duration, Schedule, Ref, Option, Cause, Either } from "effect";
 import type { TaggedError, Pipeline } from "./pipeline.ts";
 import type { PipelineRef } from "./ref.ts";
 import { type FusibleOp, fuseOpsToStream } from "./fusion.ts";
@@ -1302,9 +1302,25 @@ export class StreamPipeline<T, E extends TaggedError> {
     return Effect.runPromise(Stream.runFold(this._materialize(), initial, fn));
   }
 
-  /** Drain the stream (consume all items, discard values). */
+  /** Drain the stream (consume all items, discard values). Throws on error. */
   async drain(): Promise<void> {
     await Effect.runPromise(Stream.runDrain(this._materialize()));
+  }
+
+  /**
+   * Drain the stream but NEVER throw — returns the terminal error (or null).
+   * Sibling of {@link drain} for fire-and-forget runs (e.g. a consumer with
+   * infinite retry) where you don't want a surrounding try/catch. Catches both
+   * typed failures and defects.
+   */
+  async runSafe(): Promise<{ error: E | Error | null }> {
+    const program = Stream.runDrain(this._materialize()).pipe(
+      Effect.catchAllDefect((defect) =>
+        Effect.fail((defect instanceof Error ? defect : new Error(String(defect))) as E | Error),
+      ),
+    );
+    const either = await Effect.runPromise(Effect.either(program));
+    return Either.isRight(either) ? { error: null } : { error: either.left };
   }
 
   /** Escape hatch: get the raw Effect Stream for advanced composition. */

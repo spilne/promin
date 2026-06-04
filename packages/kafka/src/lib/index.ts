@@ -8,6 +8,7 @@ export {
 export type {
   KafkaClient,
   KafkaConsumer,
+  KafkaConsumerOptions,
   KafkaProducer,
   KafkaAdmin,
   KafkaMessage,

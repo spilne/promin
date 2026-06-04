@@ -1041,3 +1041,26 @@ describe("StreamPipeline", () => {
     });
   });
 });
+
+describe("StreamPipeline.runSafe", () => {
+  it("returns { error: null } on success", async () => {
+    const res = await StreamPipeline.fromIterable([1, 2, 3]).runSafe();
+    expect(res).toEqual({ error: null });
+  });
+
+  it("never throws — returns the typed error on failure", async () => {
+    const failing = StreamPipeline.from(
+      Stream.fail(new TestError({ message: "boom" })) as Stream.Stream<number, TestError>,
+    );
+    const res = await failing.runSafe();
+    expect(res.error).toBeInstanceOf(TestError);
+  });
+
+  it("never throws — captures a defect too", async () => {
+    const dying = StreamPipeline.from(
+      Stream.dieMessage("kaboom") as unknown as Stream.Stream<number, TestError>,
+    );
+    const res = await dying.runSafe();
+    expect(res.error).toBeInstanceOf(Error);
+  });
+});
