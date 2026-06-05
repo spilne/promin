@@ -129,6 +129,58 @@ export function storageTestSuite(
         }
       });
 
+      it("scopes idempotency-key creates by namespace", async () => {
+        const s = await getStorage();
+        const expires = new Date(Date.now() + 60_000);
+
+        const first = await s.createWorkflow({
+          workflowId: "idem-ns-a1",
+          workflowName: "compute",
+          namespace: "team-a",
+          input: { n: 1 },
+          idempotencyKey: "shared",
+          idempotencyExpiresAt: expires,
+        });
+        const sameNamespace = await s.createWorkflow({
+          workflowId: "idem-ns-a2",
+          workflowName: "compute",
+          namespace: "team-a",
+          input: { n: 2 },
+          idempotencyKey: "shared",
+          idempotencyExpiresAt: expires,
+        });
+        const otherNamespace = await s.createWorkflow({
+          workflowId: "idem-ns-b1",
+          workflowName: "compute",
+          namespace: "team-b",
+          input: { n: 3 },
+          idempotencyKey: "shared",
+          idempotencyExpiresAt: expires,
+        });
+
+        expect(first.created).toBe(true);
+        expect(sameNamespace.created).toBe(false);
+        if (!sameNamespace.created) expect(sameNamespace.existing.workflowId).toBe("idem-ns-a1");
+        expect(otherNamespace.created).toBe(true);
+
+        await expect(
+          s.findWorkflowByIdempotencyKey({
+            workflowName: "compute",
+            namespace: "team-a",
+            idempotencyKey: "shared",
+            now: new Date(),
+          }),
+        ).resolves.toEqual({ workflowId: "idem-ns-a1" });
+        await expect(
+          s.findWorkflowByIdempotencyKey({
+            workflowName: "compute",
+            namespace: "team-b",
+            idempotencyKey: "shared",
+            now: new Date(),
+          }),
+        ).resolves.toEqual({ workflowId: "idem-ns-b1" });
+      });
+
       it("returns null for non-existent workflow", async () => {
         const s = await getStorage();
         expect(await s.loadWorkflow("nonexistent")).toBeNull();

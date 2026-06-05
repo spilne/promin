@@ -212,7 +212,7 @@ export interface WorkflowStorage {
      * Per-call idempotency key + expiry. Lets the auto-mint path
      * (`workflows.trigger()` minting workflowId via `crypto.randomUUID`)
      * dedup without the caller knowing the workflowId ahead of time. The
-     * partial-unique index on `(workflowName, idempotencyKey)` guarantees
+     * partial-unique index on `(namespace, workflowName, idempotencyKey)` guarantees
      * concurrent creates with the same key resolve to the same row —
      * `created: false; existing` returns the canonical workflowId.
      */
@@ -221,7 +221,7 @@ export interface WorkflowStorage {
   }): Promise<{ created: true } | { created: false; existing: WorkflowState }>;
 
   /**
-   * Resolve a `(workflowName, idempotencyKey)` pair to its workflow row,
+   * Resolve a `(namespace, workflowName, idempotencyKey)` tuple to its workflow row,
    * if still unexpired. Returns null when no matching key exists or the
    * key's TTL has passed (expired keys are reclaimable by future creates).
    *
@@ -231,6 +231,7 @@ export interface WorkflowStorage {
    */
   findWorkflowByIdempotencyKey(params: {
     readonly workflowName: string;
+    readonly namespace?: string;
     readonly idempotencyKey: string;
     readonly now: Date;
   }): Promise<{ readonly workflowId: string } | null>;

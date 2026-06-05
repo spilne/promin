@@ -361,6 +361,7 @@ export class PostgresWorkflowStorage
       if (params.idempotencyKey) {
         const hit = await this.findWorkflowByIdempotencyKey({
           workflowName: params.workflowName,
+          ...(params.namespace !== undefined && { namespace: params.namespace }),
           idempotencyKey: params.idempotencyKey,
           now: this.config.clock.now(),
         });
@@ -378,14 +379,17 @@ export class PostgresWorkflowStorage
 
   async findWorkflowByIdempotencyKey(params: {
     workflowName: string;
+    namespace?: string;
     idempotencyKey: string;
     now: Date;
   }): Promise<{ workflowId: string } | null> {
+    const ns = this.resolveNamespace(params.namespace);
     const [row] = await this.db
       .select({ workflowId: workflows.workflowId })
       .from(workflows)
       .where(
         and(
+          ns === null ? sql`${workflows.namespace} IS NULL` : eq(workflows.namespace, ns),
           eq(workflows.workflowName, params.workflowName),
           eq(workflows.idempotencyKey, params.idempotencyKey),
           sql`${workflows.idempotencyExpiresAt} IS NOT NULL`,

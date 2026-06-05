@@ -12,6 +12,7 @@ type MutableTask = {
   error?: string;
   claimedBy?: string;
   claimedAt?: Date;
+  claimToken?: string;
   heartbeatAt?: Date;
   completedAt?: Date;
   durationMs?: number;
@@ -175,39 +176,50 @@ export class InMemoryStepQueue implements StepQueue {
       task.status = "running";
       task.claimedBy = this.workerId;
       task.claimedAt = this.clock.now();
+      task.claimToken = `claim-${this.workerId}-${++this.counter}`;
       claimed.push({ ...task });
     }
 
     return claimed;
   }
 
-  async complete(params: { taskId: string; result: unknown; durationMs: number }): Promise<void> {
+  async complete(params: {
+    taskId: string;
+    claimToken?: string;
+    result: unknown;
+    durationMs: number;
+  }): Promise<boolean> {
     const task = this.tasks.get(params.taskId);
-    if (task) {
-      task.status = "completed";
-      task.result = params.result;
-      task.durationMs = params.durationMs;
-      task.completedAt = this.clock.now();
-      this.activeByKey.delete(this.activeKey(task.namespace, task.workflowId, task.stepName));
-    }
+    if (!this.isCurrentClaim(task, params.claimToken)) return false;
+    task.status = "completed";
+    task.result = params.result;
+    task.durationMs = params.durationMs;
+    task.completedAt = this.clock.now();
+    this.activeByKey.delete(this.activeKey(task.namespace, task.workflowId, task.stepName));
+    return true;
   }
 
-  async heartbeat(params: { taskId: string }): Promise<void> {
+  async heartbeat(params: { taskId: string; claimToken?: string }): Promise<boolean> {
     const task = this.tasks.get(params.taskId);
-    if (task?.status === "running") {
-      task.heartbeatAt = this.clock.now();
-    }
+    if (!this.isCurrentClaim(task, params.claimToken)) return false;
+    task.heartbeatAt = this.clock.now();
+    return true;
   }
 
-  async fail(params: { taskId: string; error: string; durationMs: number }): Promise<void> {
+  async fail(params: {
+    taskId: string;
+    claimToken?: string;
+    error: string;
+    durationMs: number;
+  }): Promise<boolean> {
     const task = this.tasks.get(params.taskId);
-    if (task) {
-      task.status = "failed";
-      task.error = params.error;
-      task.durationMs = params.durationMs;
-      task.completedAt = this.clock.now();
-      this.activeByKey.delete(this.activeKey(task.namespace, task.workflowId, task.stepName));
-    }
+    if (!this.isCurrentClaim(task, params.claimToken)) return false;
+    task.status = "failed";
+    task.error = params.error;
+    task.durationMs = params.durationMs;
+    task.completedAt = this.clock.now();
+    this.activeByKey.delete(this.activeKey(task.namespace, task.workflowId, task.stepName));
+    return true;
   }
 
   async requeueStuck(params: { claimedBy?: string; staleTimeoutMs?: number }): Promise<number> {
@@ -227,6 +239,7 @@ export class InMemoryStepQueue implements StepQueue {
         task.status = "pending";
         task.claimedBy = undefined;
         task.claimedAt = undefined;
+        task.claimToken = undefined;
         count++;
       }
     }
@@ -299,6 +312,14 @@ export class InMemoryStepQueue implements StepQueue {
   /** Test helper: get all tasks. */
   getAllTasks(): StepTask[] {
     return [...this.tasks.values()];
+  }
+
+  private isCurrentClaim(
+    task: MutableTask | undefined,
+    claimToken: string | undefined,
+  ): task is MutableTask {
+    if (!task || task.status !== "running") return false;
+    return claimToken === undefined || task.claimToken === claimToken;
   }
 }
 

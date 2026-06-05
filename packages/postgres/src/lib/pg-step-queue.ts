@@ -144,6 +144,7 @@ export class PgStepQueue implements StepQueue {
     const limit = Math.max(1, Math.floor(params.limit));
     const workerId = this.workerId.replace(/'/g, "");
     const now = this.clock.now().toISOString();
+    const claimToken = crypto.randomUUID();
     const fairness = params.fairness ?? "strict-priority";
 
     // Capability filter: `needs <@ caps` = "every element of needs is in
@@ -217,7 +218,7 @@ export class PgStepQueue implements StepQueue {
         ? sql`
             ${candidateCte}
             UPDATE wf_step_queue
-            SET status = 'running', claimed_by = ${workerId}, claimed_at = ${now}
+            SET status = 'running', claimed_by = ${workerId}, claimed_at = ${now}, claim_token = ${claimToken}
             WHERE id IN (
               SELECT id FROM (
                 SELECT q.id,
@@ -232,12 +233,12 @@ export class PgStepQueue implements StepQueue {
               ORDER BY ${orderBy}
               LIMIT ${limit}
             )
-            RETURNING id, workflow_id, step_name, needs, priority, input, prev_results, attempt, status, created_at, version, metadata, concurrency_key, concurrency_scope, concurrency_limit
+            RETURNING id, workflow_id, step_name, needs, priority, input, prev_results, attempt, status, created_at, version, metadata, concurrency_key, concurrency_scope, concurrency_limit, claim_token
           `
         : sql`
             ${candidateCte}
             UPDATE wf_step_queue
-            SET status = 'running', claimed_by = ${workerId}, claimed_at = ${now}
+            SET status = 'running', claimed_by = ${workerId}, claimed_at = ${now}, claim_token = ${claimToken}
             WHERE id IN (
               SELECT q.id FROM wf_step_queue q
               JOIN candidates c ON c.id = q.id
@@ -247,7 +248,7 @@ export class PgStepQueue implements StepQueue {
               LIMIT ${limit}
               FOR UPDATE OF q SKIP LOCKED
             )
-            RETURNING id, workflow_id, step_name, needs, priority, input, prev_results, attempt, status, created_at, version, metadata, concurrency_key, concurrency_scope, concurrency_limit
+            RETURNING id, workflow_id, step_name, needs, priority, input, prev_results, attempt, status, created_at, version, metadata, concurrency_key, concurrency_scope, concurrency_limit, claim_token
           `;
 
     const rows = await execRaw(this.db, claimSql);
@@ -264,6 +265,7 @@ export class PgStepQueue implements StepQueue {
         attempt: r.attempt,
         status: "running" as const,
         createdAt: r.created_at instanceof Date ? r.created_at : new Date(r.created_at),
+        claimToken: r.claim_token ?? undefined,
         version: r.version ?? undefined,
         metadata: (r.metadata as Record<string, unknown> | null) ?? undefined,
         concurrencyKey: r.concurrency_key ?? undefined,
@@ -287,7 +289,7 @@ export class PgStepQueue implements StepQueue {
         await execRaw(
           this.db,
           sql.raw(
-            `UPDATE wf_step_queue SET status = 'pending', claimed_by = NULL, claimed_at = NULL ` +
+            `UPDATE wf_step_queue SET status = 'pending', claimed_by = NULL, claimed_at = NULL, claim_token = NULL ` +
               `WHERE id IN (${released
                 .map((id) => parseInt(id, 10))
                 .filter(Number.isFinite)
@@ -301,9 +303,14 @@ export class PgStepQueue implements StepQueue {
     return claimed;
   }
 
-  async complete(params: { taskId: string; result: unknown; durationMs: number }): Promise<void> {
+  async complete(params: {
+    taskId: string;
+    claimToken?: string;
+    result: unknown;
+    durationMs: number;
+  }): Promise<boolean> {
     const now = this.clock.now();
-    await this.db
+    const rows = await this.db
       .update(stepQueue)
       .set({
         status: "completed",
@@ -311,12 +318,25 @@ export class PgStepQueue implements StepQueue {
         durationMs: params.durationMs,
         completedAt: now,
       })
-      .where(eq(stepQueue.id, Number(params.taskId)));
+      .where(
+        and(
+          eq(stepQueue.id, Number(params.taskId)),
+          eq(stepQueue.status, "running"),
+          params.claimToken ? eq(stepQueue.claimToken, params.claimToken) : sql`true`,
+        ),
+      )
+      .returning({ id: stepQueue.id });
+    return rows.length > 0;
   }
 
-  async fail(params: { taskId: string; error: string; durationMs: number }): Promise<void> {
+  async fail(params: {
+    taskId: string;
+    claimToken?: string;
+    error: string;
+    durationMs: number;
+  }): Promise<boolean> {
     const now = this.clock.now();
-    await this.db
+    const rows = await this.db
       .update(stepQueue)
       .set({
         status: "failed",
@@ -324,14 +344,30 @@ export class PgStepQueue implements StepQueue {
         durationMs: params.durationMs,
         completedAt: now,
       })
-      .where(eq(stepQueue.id, Number(params.taskId)));
+      .where(
+        and(
+          eq(stepQueue.id, Number(params.taskId)),
+          eq(stepQueue.status, "running"),
+          params.claimToken ? eq(stepQueue.claimToken, params.claimToken) : sql`true`,
+        ),
+      )
+      .returning({ id: stepQueue.id });
+    return rows.length > 0;
   }
 
-  async heartbeat(params: { taskId: string }): Promise<void> {
-    await this.db
+  async heartbeat(params: { taskId: string; claimToken?: string }): Promise<boolean> {
+    const rows = await this.db
       .update(stepQueue)
       .set({ heartbeatAt: this.clock.now() })
-      .where(and(eq(stepQueue.id, Number(params.taskId)), eq(stepQueue.status, "running")));
+      .where(
+        and(
+          eq(stepQueue.id, Number(params.taskId)),
+          eq(stepQueue.status, "running"),
+          params.claimToken ? eq(stepQueue.claimToken, params.claimToken) : sql`true`,
+        ),
+      )
+      .returning({ id: stepQueue.id });
+    return rows.length > 0;
   }
 
   async requeueStuck(params: { claimedBy?: string; staleTimeoutMs?: number }): Promise<number> {
@@ -357,7 +393,13 @@ export class PgStepQueue implements StepQueue {
 
     const rows = await this.db
       .update(stepQueue)
-      .set({ status: "pending", claimedBy: null, claimedAt: null, heartbeatAt: null })
+      .set({
+        status: "pending",
+        claimedBy: null,
+        claimedAt: null,
+        claimToken: null,
+        heartbeatAt: null,
+      })
       .where(and(...conditions))
       .returning({ id: stepQueue.id });
 

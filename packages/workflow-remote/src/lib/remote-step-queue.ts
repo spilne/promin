@@ -79,15 +79,25 @@ export class RemoteStepQueue implements StepQueue {
     );
   }
 
-  complete(params: { taskId: string; result: unknown; durationMs: number }): Promise<void> {
+  complete(params: {
+    taskId: string;
+    claimToken?: string;
+    result: unknown;
+    durationMs: number;
+  }): Promise<boolean> {
     return this.call("complete", params);
   }
 
-  fail(params: { taskId: string; error: string; durationMs: number }): Promise<void> {
+  fail(params: {
+    taskId: string;
+    claimToken?: string;
+    error: string;
+    durationMs: number;
+  }): Promise<boolean> {
     return this.call("fail", params);
   }
 
-  heartbeat(params: { taskId: string }): Promise<void> {
+  heartbeat(params: { taskId: string; claimToken?: string }): Promise<boolean> {
     return this.call("heartbeat", params);
   }
 

@@ -59,16 +59,18 @@ export function createWorkerApiHandler(config: {
     complete: (p) =>
       stepQueue.complete({
         taskId: p.taskId,
+        claimToken: p.claimToken,
         result: p.result,
         durationMs: p.durationMs,
       }),
     fail: (p) =>
       stepQueue.fail({
         taskId: p.taskId,
+        claimToken: p.claimToken,
         error: p.error,
         durationMs: p.durationMs,
       }),
-    heartbeat: (p) => stepQueue.heartbeat({ taskId: p.taskId }),
+    heartbeat: (p) => stepQueue.heartbeat({ taskId: p.taskId, claimToken: p.claimToken }),
     requeueStuck: (p) =>
       stepQueue.requeueStuck({
         claimedBy: p.claimedBy,

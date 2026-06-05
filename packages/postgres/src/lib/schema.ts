@@ -82,7 +82,7 @@ export const workflows = pgTable(
     index("wf_workflows_type_idx").on(t.workflowType),
     index("wf_workflows_namespace_idx").on(t.namespace),
     uniqueIndex("wf_workflows_idempotency_key_idx")
-      .on(t.workflowName, t.idempotencyKey)
+      .on(sql`COALESCE(${t.namespace}, '')`, t.workflowName, t.idempotencyKey)
       .where(sql`${t.idempotencyKey} IS NOT NULL`),
   ],
 );
@@ -209,6 +209,7 @@ export const stepQueue = pgTable(
     durationMs: bigint("duration_ms", { mode: "number" }),
     claimedBy: text("claimed_by"),
     claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    claimToken: text("claim_token"),
     heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

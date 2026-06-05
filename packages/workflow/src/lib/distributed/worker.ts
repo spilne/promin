@@ -228,7 +228,7 @@ export class DefaultWorker implements WorkflowWorker {
     };
 
     const taskHeartbeatTimer = this.clock.setInterval(() => {
-      this.stepQueue.heartbeat({ taskId: task.id }).catch(() => {});
+      this.stepQueue.heartbeat({ taskId: task.id, claimToken: task.claimToken }).catch(() => {});
     }, this.heartbeatIntervalMs);
 
     try {
@@ -239,7 +239,13 @@ export class DefaultWorker implements WorkflowWorker {
 
       const durationMs = this.clock.currentTimeMs() - startTime;
 
-      await this.stepQueue.complete({ taskId: task.id, result: value, durationMs });
+      const completed = await this.stepQueue.complete({
+        taskId: task.id,
+        claimToken: task.claimToken,
+        result: value,
+        durationMs,
+      });
+      if (!completed) return;
       await this.storage.saveStepResult({
         workflowId: task.workflowId,
         stepName: task.stepName,
@@ -270,7 +276,13 @@ export class DefaultWorker implements WorkflowWorker {
       // Apply onFailure strategy
       const strategy = registration.options?.onFailure ?? "fail";
       if (strategy === "skip") {
-        await this.stepQueue.complete({ taskId: task.id, result: undefined, durationMs });
+        const completed = await this.stepQueue.complete({
+          taskId: task.id,
+          claimToken: task.claimToken,
+          result: undefined,
+          durationMs,
+        });
+        if (!completed) return;
         await this.storage.saveStepResult({
           workflowId: task.workflowId,
           stepName: task.stepName,
@@ -284,7 +296,13 @@ export class DefaultWorker implements WorkflowWorker {
 
       if (typeof strategy === "object" && "fallback" in strategy) {
         const fallbackValue = strategy.fallback(err);
-        await this.stepQueue.complete({ taskId: task.id, result: fallbackValue, durationMs });
+        const completed = await this.stepQueue.complete({
+          taskId: task.id,
+          claimToken: task.claimToken,
+          result: fallbackValue,
+          durationMs,
+        });
+        if (!completed) return;
         await this.storage.saveStepResult({
           workflowId: task.workflowId,
           stepName: task.stepName,
@@ -354,7 +372,13 @@ export class DefaultWorker implements WorkflowWorker {
   private async failTask(task: StepTask, error: string, startTime: number): Promise<void> {
     const durationMs = this.clock.currentTimeMs() - startTime;
 
-    await this.stepQueue.fail({ taskId: task.id, error, durationMs });
+    const failed = await this.stepQueue.fail({
+      taskId: task.id,
+      claimToken: task.claimToken,
+      error,
+      durationMs,
+    });
+    if (!failed) return;
     await this.storage.saveStepFailure({
       workflowId: task.workflowId,
       stepName: task.stepName,

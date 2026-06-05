@@ -324,6 +324,7 @@ export class InMemoryWorkflowStorage
     wf.error = "Cancelled";
     wf.completedAt = now;
     wf.updatedAt = now;
+    this.emitEvent(workflowId, { type: "workflow-failed", error: "Cancelled", at: now }, true);
 
     if (options?.cascade) {
       for (const [childId, child] of this.workflows) {
@@ -348,14 +349,16 @@ export class InMemoryWorkflowStorage
     idempotencyKey?: string;
     idempotencyExpiresAt?: Date;
   }): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
-    // Idempotency-key path: if `(workflowName, idempotencyKey)` is already
+    // Idempotency-key path: if `(namespace, workflowName, idempotencyKey)` is already
     // claimed by an unexpired row, return that row instead. Mirrors the
     // partial-unique-index conflict resolution that postgres does
     // natively, which is what makes the redirect race-safe.
     if (params.idempotencyKey) {
       const now = this.clock.now();
+      const namespace = this.resolveNamespace(params.namespace);
       for (const wf of this.workflows.values()) {
         if (
+          wf.namespace === namespace &&
           wf.workflowName === params.workflowName &&
           wf.idempotencyKey === params.idempotencyKey &&
           wf.idempotencyExpiresAt &&
@@ -394,11 +397,14 @@ export class InMemoryWorkflowStorage
 
   async findWorkflowByIdempotencyKey(params: {
     workflowName: string;
+    namespace?: string;
     idempotencyKey: string;
     now: Date;
   }): Promise<{ workflowId: string } | null> {
+    const namespace = this.resolveNamespace(params.namespace);
     for (const wf of this.workflows.values()) {
       if (
+        wf.namespace === namespace &&
         wf.workflowName === params.workflowName &&
         wf.idempotencyKey === params.idempotencyKey &&
         wf.idempotencyExpiresAt &&

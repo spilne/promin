@@ -18,6 +18,7 @@ import type { SqliteDatabase } from "./sqlite-database.ts";
  *     id TEXT PRIMARY KEY, workflow_id, step_name, needs TEXT (JSON),
  *     priority, input TEXT (JSON), prev_results TEXT (JSON),
  *     attempt, status, version, namespace, created_at, claimed_at,
+ *     claim_token,
  *     completed_at, result TEXT (JSON), error, duration_ms,
  *     last_heartbeat, active_key TEXT UNIQUE WHERE NOT NULL
  *   )
@@ -29,7 +30,7 @@ import type { SqliteDatabase } from "./sqlite-database.ts";
  * const queue = SqliteStepQueue.make({ db });
  * const id = await queue.enqueue({ workflowId: "wf-1", stepName: "charge", input: {}, prevResults: {} });
  * const [task] = await queue.claim({ limit: 1 });
- * await queue.complete({ taskId: task.id, result: "ok", durationMs: 50 });
+ * await queue.complete({ taskId: task.id, claimToken: task.claimToken, result: "ok", durationMs: 50 });
  * ```
  */
 export class SqliteStepQueue implements StepQueue {
@@ -81,8 +82,9 @@ export class SqliteStepQueue implements StepQueue {
         namespace      TEXT,
         metadata       TEXT,
         created_at     INTEGER NOT NULL,
-        claimed_at     INTEGER,
-        completed_at   INTEGER,
+	        claimed_at     INTEGER,
+	        claim_token    TEXT,
+	        completed_at   INTEGER,
         result         TEXT,
         error          TEXT,
         duration_ms    INTEGER,
@@ -99,6 +101,7 @@ export class SqliteStepQueue implements StepQueue {
       `ALTER TABLE ${t} ADD COLUMN concurrency_key TEXT`,
       `ALTER TABLE ${t} ADD COLUMN concurrency_scope TEXT`,
       `ALTER TABLE ${t} ADD COLUMN concurrency_limit INTEGER`,
+      `ALTER TABLE ${t} ADD COLUMN claim_token TEXT`,
     ]) {
       try {
         this.db.run(stmt);
@@ -272,48 +275,88 @@ export class SqliteStepQueue implements StepQueue {
         runningPerKey.set(k, running + 1);
       }
 
+      const claimToken = randomUUID();
       this.db
         .query(
           `UPDATE ${this._table}
-           SET status = 'running', claimed_at = ?, last_heartbeat = ?
-           WHERE id = ? AND status = 'pending'`,
+	           SET status = 'running', claimed_at = ?, last_heartbeat = ?, claim_token = ?
+	           WHERE id = ? AND status = 'pending'`,
         )
-        .run(now, now, row.id);
+        .run(now, now, claimToken, row.id);
 
-      claimed.push({ ...task, status: "running" });
+      claimed.push({ ...task, status: "running", claimToken });
     }
 
     return claimed;
   }
 
-  async complete(params: { taskId: string; result: unknown; durationMs: number }): Promise<void> {
+  async complete(params: {
+    taskId: string;
+    claimToken?: string;
+    result: unknown;
+    durationMs: number;
+  }): Promise<boolean> {
     const now = this.clock.currentTimeMs();
     this.db
       .query(
         `UPDATE ${this._table}
          SET status = 'completed', result = ?, duration_ms = ?,
-             completed_at = ?, active_key = NULL
-         WHERE id = ?`,
+	             completed_at = ?, active_key = NULL
+	         WHERE id = ? AND status = 'running'
+	           AND (? IS NULL OR claim_token = ?)`,
       )
-      .run(JSON.stringify(params.result), params.durationMs, now, params.taskId);
+      .run(
+        JSON.stringify(params.result),
+        params.durationMs,
+        now,
+        params.taskId,
+        params.claimToken ?? null,
+        params.claimToken ?? null,
+      );
+    return this._changes() > 0;
   }
 
-  async fail(params: { taskId: string; error: string; durationMs: number }): Promise<void> {
+  async fail(params: {
+    taskId: string;
+    claimToken?: string;
+    error: string;
+    durationMs: number;
+  }): Promise<boolean> {
     const now = this.clock.currentTimeMs();
     this.db
       .query(
         `UPDATE ${this._table}
          SET status = 'failed', error = ?, duration_ms = ?,
-             completed_at = ?, active_key = NULL
-         WHERE id = ?`,
+	             completed_at = ?, active_key = NULL
+	         WHERE id = ? AND status = 'running'
+	           AND (? IS NULL OR claim_token = ?)`,
       )
-      .run(params.error, params.durationMs, now, params.taskId);
+      .run(
+        params.error,
+        params.durationMs,
+        now,
+        params.taskId,
+        params.claimToken ?? null,
+        params.claimToken ?? null,
+      );
+    return this._changes() > 0;
   }
 
-  async heartbeat(params: { taskId: string }): Promise<void> {
+  async heartbeat(params: { taskId: string; claimToken?: string }): Promise<boolean> {
     this.db
-      .query(`UPDATE ${this._table} SET last_heartbeat = ? WHERE id = ? AND status = 'running'`)
-      .run(this.clock.currentTimeMs(), params.taskId);
+      .query(
+        `UPDATE ${this._table}
+         SET last_heartbeat = ?
+         WHERE id = ? AND status = 'running'
+           AND (? IS NULL OR claim_token = ?)`,
+      )
+      .run(
+        this.clock.currentTimeMs(),
+        params.taskId,
+        params.claimToken ?? null,
+        params.claimToken ?? null,
+      );
+    return this._changes() > 0;
   }
 
   async requeueStuck(params: { claimedBy?: string; staleTimeoutMs?: number }): Promise<number> {
@@ -339,8 +382,8 @@ export class SqliteStepQueue implements StepQueue {
         this.db
           .query(
             `UPDATE ${this._table}
-             SET status = 'pending', claimed_at = NULL, last_heartbeat = NULL
-             WHERE id = ? AND status = 'running'`,
+	             SET status = 'pending', claimed_at = NULL, last_heartbeat = NULL, claim_token = NULL
+	             WHERE id = ? AND status = 'running'`,
           )
           .run(id);
         count++;
@@ -433,6 +476,10 @@ export class SqliteStepQueue implements StepQueue {
       p95ExecMs: execTimes.length > 0 ? percentile(execTimes, 0.95) : 0,
     };
   }
+
+  private _changes(): number {
+    return this.db.query<{ changes: number }>(`SELECT changes() AS changes`).get()?.changes ?? 0;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -457,6 +504,7 @@ interface TaskRow {
   concurrency_limit: number | null;
   created_at: number;
   claimed_at: number | null;
+  claim_token: string | null;
   completed_at: number | null;
   result: string | null;
   error: string | null;
@@ -477,6 +525,7 @@ function rowToTask(row: TaskRow): StepTask {
     attempt: row.attempt,
     status: row.status as StepTask["status"],
     createdAt: new Date(row.created_at),
+    claimToken: row.claim_token ?? undefined,
     version: row.version ?? undefined,
     metadata:
       row.metadata != null ? (JSON.parse(row.metadata) as Record<string, unknown>) : undefined,

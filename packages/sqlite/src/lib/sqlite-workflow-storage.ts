@@ -117,9 +117,11 @@ export class SqliteWorkflowStorage
         if (!String(e).includes("duplicate column")) throw e;
       }
     }
-    // Partial unique index on the idempotency key for atomic claim-or-attach.
+    // Partial unique index on namespace-scoped idempotency keys for atomic claim-or-attach.
+    // Rebuild the pre-namespace index if it exists under the same historical name.
+    this.db.run(`DROP INDEX IF EXISTS ${t}_idempotency_key`);
     this.db.run(
-      `CREATE UNIQUE INDEX IF NOT EXISTS ${t}_idempotency_key ON ${t} (workflow_name, idempotency_key) WHERE idempotency_key IS NOT NULL`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS ${t}_idempotency_key ON ${t} (COALESCE(namespace, ''), workflow_name, idempotency_key) WHERE idempotency_key IS NOT NULL`,
     );
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_status ON ${t} (status)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_parent ON ${t} (parent_workflow_id)`);
@@ -729,19 +731,20 @@ export class SqliteWorkflowStorage
       (): { created: true } | { created: false; existing: WorkflowState } => {
         const now = Date.now();
 
-        // Idempotency-key path: if (workflow_name, idempotency_key) exists
+        // Idempotency-key path: if (namespace, workflow_name, idempotency_key) exists
         // and is unexpired, attach to it. Inside the transaction so the
         // unique-index conflict resolves atomically.
         if (params.idempotencyKey) {
           const keyHit = this.db
             .query<WfRow>(
               `SELECT * FROM ${this._t}
-               WHERE workflow_name = ? AND idempotency_key = ?
-                 AND idempotency_expires_at IS NOT NULL
-                 AND idempotency_expires_at > ?
-               LIMIT 1`,
+	               WHERE COALESCE(namespace, '') = COALESCE(?, '')
+	                 AND workflow_name = ? AND idempotency_key = ?
+	                 AND idempotency_expires_at IS NOT NULL
+	                 AND idempotency_expires_at > ?
+	               LIMIT 1`,
             )
-            .get(params.workflowName, params.idempotencyKey, now);
+            .get(params.namespace ?? null, params.workflowName, params.idempotencyKey, now);
           if (keyHit) return { created: false, existing: this._rowToState(keyHit) };
         }
 
@@ -782,18 +785,25 @@ export class SqliteWorkflowStorage
 
   async findWorkflowByIdempotencyKey(params: {
     workflowName: string;
+    namespace?: string;
     idempotencyKey: string;
     now: Date;
   }): Promise<{ workflowId: string } | null> {
     const row = this.db
       .query<{ workflow_id: string }>(
         `SELECT workflow_id FROM ${this._t}
-         WHERE workflow_name = ? AND idempotency_key = ?
-           AND idempotency_expires_at IS NOT NULL
-           AND idempotency_expires_at > ?
-         LIMIT 1`,
+	         WHERE COALESCE(namespace, '') = COALESCE(?, '')
+	           AND workflow_name = ? AND idempotency_key = ?
+	           AND idempotency_expires_at IS NOT NULL
+	           AND idempotency_expires_at > ?
+	         LIMIT 1`,
       )
-      .get(params.workflowName, params.idempotencyKey, params.now.getTime());
+      .get(
+        params.namespace ?? null,
+        params.workflowName,
+        params.idempotencyKey,
+        params.now.getTime(),
+      );
     return row ? { workflowId: row.workflow_id } : null;
   }
 

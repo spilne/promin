@@ -190,6 +190,54 @@ describe("ctx.run({ idempotencyKey })", () => {
     expect(await storage.loadWorkflow(idB)).not.toBeNull();
   });
 
+  it("workflows with the same key but different namespaces don't collide", async () => {
+    let calls = 0;
+    const wf = workflow<{ n: number }>({ name: "compute" })
+      .step("multiply", ({ input }) => {
+        calls++;
+        return Pipeline.succeed(input.n * 2);
+      })
+      .build();
+
+    const runner = createWorkflowRunner({ storage });
+    const teamA1 = crypto.randomUUID();
+    const teamA2 = crypto.randomUUID();
+    const teamB = crypto.randomUUID();
+
+    const a1 = await runner.run({
+      workflow: wf,
+      workflowId: teamA1,
+      namespace: "team-a",
+      input: { n: 2 },
+      idempotencyKey: "shared",
+      idempotencyKeyTTL: 60_000,
+    });
+    const a2 = await runner.run({
+      workflow: wf,
+      workflowId: teamA2,
+      namespace: "team-a",
+      input: { n: 99 },
+      idempotencyKey: "shared",
+      idempotencyKeyTTL: 60_000,
+    });
+    const b = await runner.run({
+      workflow: wf,
+      workflowId: teamB,
+      namespace: "team-b",
+      input: { n: 3 },
+      idempotencyKey: "shared",
+      idempotencyKeyTTL: 60_000,
+    });
+
+    expect(a1).toBe(4);
+    expect(a2).toBe(4);
+    expect(b).toBe(6);
+    expect(calls).toBe(2);
+    expect(await storage.loadWorkflow(teamA1)).not.toBeNull();
+    expect(await storage.loadWorkflow(teamA2)).toBeNull();
+    expect(await storage.loadWorkflow(teamB)).not.toBeNull();
+  });
+
   it("composes with workflow-level idempotency.ttl for result caching", async () => {
     let calls = 0;
     const wf = workflow<{ n: number }>({ name: "compute" })

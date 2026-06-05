@@ -387,6 +387,38 @@ export function stepQueueTestSuite(factory: () => StepQueue | Promise<StepQueue>
         expect(requeued).toBe(0);
       });
 
+      it("rejects stale claim completion after requeue", async () => {
+        const q = await getQueue();
+        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
+        const [first] = await q.claim({ limit: 1 });
+        expect(first?.claimToken).toBeDefined();
+
+        await new Promise((r) => setTimeout(r, 10));
+        expect(await q.requeueStuck({ staleTimeoutMs: 1 })).toBe(1);
+
+        const [second] = await q.claim({ limit: 1 });
+        expect(second?.claimToken).toBeDefined();
+        expect(second!.claimToken).not.toBe(first!.claimToken);
+
+        await expect(
+          q.complete({
+            taskId: first!.id,
+            claimToken: first!.claimToken,
+            result: "stale",
+            durationMs: 1,
+          }),
+        ).resolves.toBe(false);
+
+        await expect(
+          q.complete({
+            taskId: second!.id,
+            claimToken: second!.claimToken,
+            result: "fresh",
+            durationMs: 1,
+          }),
+        ).resolves.toBe(true);
+      });
+
       it("does not requeue completed or failed tasks", async () => {
         const q = await getQueue();
         await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });

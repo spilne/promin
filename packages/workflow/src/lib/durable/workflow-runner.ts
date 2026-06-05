@@ -194,9 +194,11 @@ export type WorkflowRunnerRunParams =
       readonly workflowId: string;
       readonly input: unknown;
       readonly force?: boolean;
+      /** Optional namespace used for workflow creation and idempotency-key scoping. */
+      readonly namespace?: string;
       /**
        * Per-call dedup key. The runner first looks up an existing workflow
-       * by `(workflow.name, idempotencyKey)`; if a non-expired match
+       * by `(namespace, workflow.name, idempotencyKey)`; if a non-expired match
        * exists, the run redirects to that workflow's id and the supplied
        * `workflowId` is ignored. On miss, the new workflow is created with
        * the key attached. Solves the auto-mint case where the caller can't
@@ -217,6 +219,8 @@ export type WorkflowRunnerRunParams =
       readonly workflowId: string;
       readonly input: unknown;
       readonly force?: boolean;
+      /** Optional namespace used for workflow creation and idempotency-key scoping. */
+      readonly namespace?: string;
       readonly idempotencyKey?: string;
       readonly idempotencyKeyTTL?: number;
     };
@@ -539,7 +543,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
 
   async run(params: WorkflowRunnerRunParams): Promise<unknown> {
     const storage = this.storage;
-    const { input, force, idempotencyKey, idempotencyKeyTTL } = params;
+    const { input, force, namespace, idempotencyKey, idempotencyKeyTTL } = params;
 
     // Per-call idempotency key: resolve to an existing workflowId before
     // dispatching. The supplied workflowId is the create-fallback when the
@@ -562,6 +566,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       }
       const hit = await storage.findWorkflowByIdempotencyKey({
         workflowName,
+        ...(namespace !== undefined && { namespace }),
         idempotencyKey,
         now: this.clock.now(),
       });
@@ -575,6 +580,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
         workflowId,
         input,
         force,
+        ...(namespace !== undefined && { namespace }),
         ...(idempotencyKey && idempotencyExpiresAt ? { idempotencyKey, idempotencyExpiresAt } : {}),
       });
     }
@@ -631,6 +637,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
         workflowId,
         input,
         force,
+        ...(namespace !== undefined && { namespace }),
         ...(idempotencyKey && idempotencyExpiresAt ? { idempotencyKey, idempotencyExpiresAt } : {}),
       });
     }
@@ -641,6 +648,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       workflowId,
       input,
       force,
+      ...(namespace !== undefined && { namespace }),
       ...(idempotencyKey && idempotencyExpiresAt ? { idempotencyKey, idempotencyExpiresAt } : {}),
     });
   }
@@ -1077,6 +1085,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     workflowId: string;
     input: unknown;
     force?: boolean;
+    namespace?: string;
     idempotencyKey?: string;
     idempotencyExpiresAt?: Date;
   }): Promise<unknown> {
@@ -1106,6 +1115,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       workflowId: params.workflowId,
       input: params.input,
       force: params.force,
+      namespace: params.namespace,
       ...(params.idempotencyKey && params.idempotencyExpiresAt
         ? {
             idempotencyKey: params.idempotencyKey,
@@ -1205,6 +1215,7 @@ export async function runWorkflowOrchestration(
     workflowId: string;
     input: unknown;
     force?: boolean;
+    namespace?: string;
     idempotencyKey?: string;
     idempotencyExpiresAt?: Date;
   },
@@ -1227,6 +1238,7 @@ export async function runWorkflowOrchestration(
         workflowId: params.workflowId,
         input: currentInput,
         force: chain > 0 ? true : params.force,
+        namespace: params.namespace,
         // Only thread the key on the first cycle. Continue-as-new chains
         // are internal restarts; they shouldn't re-stamp the key onto the
         // archived row.
@@ -1267,11 +1279,12 @@ async function runOneOrchestrationCycle(
     workflowId: string;
     input: unknown;
     force?: boolean;
+    namespace?: string;
     idempotencyKey?: string;
     idempotencyExpiresAt?: Date;
   },
 ): Promise<unknown> {
-  const { workflowId, input, force } = params;
+  const { workflowId, input, force, namespace } = params;
   const clock = ctx.clock ?? SystemClock;
   const workflowStartTime = clock.currentTimeMs();
   const compensateTrigger = ctx.compensateConfig?.trigger ?? "after-retries";
@@ -1321,7 +1334,7 @@ async function runOneOrchestrationCycle(
         queue: prevDef.queue,
         clock,
       };
-      return runWorkflowOrchestration(prevCtx, { workflowId, input, force });
+      return runWorkflowOrchestration(prevCtx, { workflowId, input, force, namespace });
     }
   }
 
@@ -1381,6 +1394,7 @@ async function runOneOrchestrationCycle(
           workflowName: ctx.name,
           input,
           workflowType: ctx.type,
+          ...(namespace !== undefined ? { namespace } : {}),
           metadata: ctx.metadata,
           version: ctx.version,
           ...(params.idempotencyKey && params.idempotencyExpiresAt

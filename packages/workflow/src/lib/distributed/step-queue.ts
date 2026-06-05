@@ -25,6 +25,12 @@ export interface StepTask {
   readonly status: "pending" | "running" | "completed" | "failed";
   readonly createdAt: Date;
   /**
+   * Opaque token minted by claim(). Workers must pass it to heartbeat,
+   * complete, and fail so a stale worker cannot commit after the task has
+   * been requeued and claimed by someone else.
+   */
+  readonly claimToken?: string;
+  /**
    * Workflow version that enqueued this task, if any. Enables rolling deploys
    * where v1 and v2 workflows run concurrently but workers filter by the
    * versions they support. Undefined for unversioned workflows.
@@ -149,18 +155,34 @@ export interface StepQueue {
     filter?: (task: StepTask) => boolean;
   }): Promise<StepTask[]>;
 
-  /** Mark a task as completed with a result. */
-  complete(params: { taskId: string; result: unknown; durationMs: number }): Promise<void>;
+  /**
+   * Mark a task as completed with a result. Returns false when the task is no
+   * longer held by this claim, letting workers skip stale workflow checkpoints.
+   */
+  complete(params: {
+    taskId: string;
+    claimToken?: string;
+    result: unknown;
+    durationMs: number;
+  }): Promise<boolean>;
 
-  /** Mark a task as failed with an error. */
-  fail(params: { taskId: string; error: string; durationMs: number }): Promise<void>;
+  /**
+   * Mark a task as failed with an error. Returns false when the task is no
+   * longer held by this claim.
+   */
+  fail(params: {
+    taskId: string;
+    claimToken?: string;
+    error: string;
+    durationMs: number;
+  }): Promise<boolean>;
 
   /**
    * Extend the running lease on a task. Workers call this periodically while
    * executing a long step so `requeueStuck` doesn't reclaim it prematurely.
    * No-op if the task is not in `running` state.
    */
-  heartbeat(params: { taskId: string }): Promise<void>;
+  heartbeat(params: { taskId: string; claimToken?: string }): Promise<boolean>;
 
   /**
    * Re-enqueue tasks stuck in "running" state. Returns count re-enqueued.

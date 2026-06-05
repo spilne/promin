@@ -99,6 +99,24 @@ describe("subscribe — run-scoped event stream", () => {
     expect(events[events.length - 1]!.type).toBe("workflow-failed");
   });
 
+  it("emits workflow-failed and closes on cancellation", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+
+    await storage.createWorkflow({
+      workflowId: "sub-cancel-1",
+      workflowName: "sub-cancel",
+      input: {},
+    });
+
+    const eventsP = collect(runner.subscribe("sub-cancel-1"));
+    await runner.handle("sub-cancel-1").cancel();
+    const events = await eventsP;
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "workflow-failed", error: "Cancelled" });
+  });
+
   it("emits workflow-tripwire on tripwire exit", async () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });

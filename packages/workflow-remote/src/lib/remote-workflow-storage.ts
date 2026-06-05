@@ -163,6 +163,7 @@ export class RemoteWorkflowStorage
 
   findWorkflowByIdempotencyKey(params: {
     workflowName: string;
+    namespace?: string;
     idempotencyKey: string;
     now: Date;
   }): Promise<{ workflowId: string } | null> {

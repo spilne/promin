@@ -129,15 +129,90 @@ for _, id in ipairs(candidates) do
     end
   end
   if ok then
+    local claim_token = worker_id .. ':' .. id .. ':' .. now
     redis.call('ZREM', pending_key, id)
     redis.call('SADD', running_key, id)
-    redis.call('HSET', task_key, 'status', 'running', 'claimedBy', worker_id, 'claimedAt', now)
+    redis.call('HSET', task_key, 'status', 'running', 'claimedBy', worker_id, 'claimedAt', now, 'claimToken', claim_token)
     local task = redis.call('HGETALL', task_key)
     table.insert(results, task)
   end
 end
 
 return results
+`;
+
+const COMPLETE_LUA = `
+local task_key = KEYS[1]
+local running_key = KEYS[2]
+local active_key_prefix = KEYS[3]
+local id = ARGV[1]
+local claim_token = ARGV[2]
+local result = ARGV[3]
+local duration_ms = ARGV[4]
+local completed_at = ARGV[5]
+
+local status = redis.call('HGET', task_key, 'status')
+local current_token = redis.call('HGET', task_key, 'claimToken')
+if status ~= 'running' then return 0 end
+if claim_token ~= '' and current_token ~= claim_token then return 0 end
+
+redis.call('HSET', task_key,
+  'status', 'completed',
+  'result', result,
+  'durationMs', duration_ms,
+  'completedAt', completed_at)
+redis.call('SREM', running_key, id)
+
+local workflow_id = redis.call('HGET', task_key, 'workflowId')
+local step_name = redis.call('HGET', task_key, 'stepName')
+if workflow_id and step_name then
+  redis.call('DEL', active_key_prefix .. workflow_id .. '::' .. step_name)
+end
+return 1
+`;
+
+const FAIL_LUA = `
+local task_key = KEYS[1]
+local running_key = KEYS[2]
+local active_key_prefix = KEYS[3]
+local id = ARGV[1]
+local claim_token = ARGV[2]
+local error = ARGV[3]
+local duration_ms = ARGV[4]
+local completed_at = ARGV[5]
+
+local status = redis.call('HGET', task_key, 'status')
+local current_token = redis.call('HGET', task_key, 'claimToken')
+if status ~= 'running' then return 0 end
+if claim_token ~= '' and current_token ~= claim_token then return 0 end
+
+redis.call('HSET', task_key,
+  'status', 'failed',
+  'error', error,
+  'durationMs', duration_ms,
+  'completedAt', completed_at)
+redis.call('SREM', running_key, id)
+
+local workflow_id = redis.call('HGET', task_key, 'workflowId')
+local step_name = redis.call('HGET', task_key, 'stepName')
+if workflow_id and step_name then
+  redis.call('DEL', active_key_prefix .. workflow_id .. '::' .. step_name)
+end
+return 1
+`;
+
+const HEARTBEAT_LUA = `
+local task_key = KEYS[1]
+local claim_token = ARGV[1]
+local heartbeat_at = ARGV[2]
+
+local status = redis.call('HGET', task_key, 'status')
+local current_token = redis.call('HGET', task_key, 'claimToken')
+if status ~= 'running' then return 0 end
+if claim_token ~= '' and current_token ~= claim_token then return 0 end
+
+redis.call('HSET', task_key, 'heartbeatAt', heartbeat_at)
+return 1
 `;
 
 // -- Implementation ----------------------------------------------------------
@@ -276,41 +351,57 @@ export class RedisStepQueue implements StepQueue {
     return claimed;
   }
 
-  async complete(params: { taskId: string; result: unknown; durationMs: number }): Promise<void> {
-    const hash = await this.redis.hgetall(this.taskKey(params.taskId));
-    await this.redis.hset(this.taskKey(params.taskId), {
-      status: "completed",
-      result: JSON.stringify(params.result),
-      durationMs: String(params.durationMs),
-      completedAt: this.clock.now().toISOString(),
-    });
-    await this.redis.srem(this.runningKey(), params.taskId);
-    if (hash?.workflowId && hash.stepName) {
-      await this.redis.del(this.activeKey(hash.workflowId, hash.stepName));
-    }
+  async complete(params: {
+    taskId: string;
+    claimToken?: string;
+    result: unknown;
+    durationMs: number;
+  }): Promise<boolean> {
+    const ok = await this.redis.eval(
+      COMPLETE_LUA,
+      3,
+      this.taskKey(params.taskId),
+      this.runningKey(),
+      `${this.prefix}:active:`,
+      params.taskId,
+      params.claimToken ?? "",
+      JSON.stringify(params.result),
+      String(params.durationMs),
+      this.clock.now().toISOString(),
+    );
+    return ok === 1;
   }
 
-  async fail(params: { taskId: string; error: string; durationMs: number }): Promise<void> {
-    const hash = await this.redis.hgetall(this.taskKey(params.taskId));
-    await this.redis.hset(this.taskKey(params.taskId), {
-      status: "failed",
-      error: params.error,
-      durationMs: String(params.durationMs),
-      completedAt: this.clock.now().toISOString(),
-    });
-    await this.redis.srem(this.runningKey(), params.taskId);
-    if (hash?.workflowId && hash.stepName) {
-      await this.redis.del(this.activeKey(hash.workflowId, hash.stepName));
-    }
+  async fail(params: {
+    taskId: string;
+    claimToken?: string;
+    error: string;
+    durationMs: number;
+  }): Promise<boolean> {
+    const ok = await this.redis.eval(
+      FAIL_LUA,
+      3,
+      this.taskKey(params.taskId),
+      this.runningKey(),
+      `${this.prefix}:active:`,
+      params.taskId,
+      params.claimToken ?? "",
+      params.error,
+      String(params.durationMs),
+      this.clock.now().toISOString(),
+    );
+    return ok === 1;
   }
 
-  async heartbeat(params: { taskId: string }): Promise<void> {
-    const raw = await this.redis.hgetall(this.taskKey(params.taskId));
-    if (raw?.status === "running") {
-      await this.redis.hset(this.taskKey(params.taskId), {
-        heartbeatAt: this.clock.now().toISOString(),
-      });
-    }
+  async heartbeat(params: { taskId: string; claimToken?: string }): Promise<boolean> {
+    const ok = await this.redis.eval(
+      HEARTBEAT_LUA,
+      1,
+      this.taskKey(params.taskId),
+      params.claimToken ?? "",
+      this.clock.now().toISOString(),
+    );
+    return ok === 1;
   }
 
   async requeueStuck(params: { claimedBy?: string; staleTimeoutMs?: number }): Promise<number> {
@@ -335,6 +426,7 @@ export class RedisStepQueue implements StepQueue {
         status: "pending",
         claimedBy: "",
         claimedAt: "",
+        claimToken: "",
         heartbeatAt: "",
       });
       await this.redis.srem(this.runningKey(), id);
@@ -440,6 +532,7 @@ export class RedisStepQueue implements StepQueue {
     // Lua's empty-sentinel handling.
     if (map.version) (task as { version?: string }).version = map.version;
     if (map.namespace) (task as { namespace?: string }).namespace = map.namespace;
+    if (map.claimToken) (task as { claimToken?: string }).claimToken = map.claimToken;
     if (map.metadata) {
       (task as { metadata?: Record<string, unknown> }).metadata = JSON.parse(map.metadata);
     }

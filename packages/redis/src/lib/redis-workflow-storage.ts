@@ -205,9 +205,13 @@ export class RedisWorkflowStorage
     return `${this.prefix}:${id}:signals`;
   }
 
-  /** `(workflowName, idempotencyKey) → workflowId` index with TTL matching the run's idempotency expiry. */
-  private workflowIdempotencyKeyIndex(workflowName: string, idempotencyKey: string): string {
-    return `${this.prefix}:wf-idempotency:${workflowName}:${idempotencyKey}`;
+  /** `(namespace, workflowName, idempotencyKey) → workflowId` index with TTL matching the run's idempotency expiry. */
+  private workflowIdempotencyKeyIndex(
+    namespace: string | undefined,
+    workflowName: string,
+    idempotencyKey: string,
+  ): string {
+    return `${this.prefix}:wf-idempotency:${namespace ?? ""}:${workflowName}:${idempotencyKey}`;
   }
 
   /** Hash mapping `${tokenId}` → JSON SignalTokenRecord (stored at the workflow scope). */
@@ -471,7 +475,12 @@ export class RedisWorkflowStorage
     // atomically — concurrent creates serialize, the loser falls through
     // to attach to the winning row.
     if (params.idempotencyKey) {
-      const idxKey = this.workflowIdempotencyKeyIndex(params.workflowName, params.idempotencyKey);
+      const ns = this.resolveNamespace(params.namespace);
+      const idxKey = this.workflowIdempotencyKeyIndex(
+        ns,
+        params.workflowName,
+        params.idempotencyKey,
+      );
       const cachedId = await this.redis.get(idxKey);
       if (cachedId) {
         const raw = await this.redis.hgetall(this.wfKey(cachedId));
@@ -521,7 +530,11 @@ export class RedisWorkflowStorage
     // index entry exactly at the run's idempotency_expires_at — concurrent
     // creates that race here lose the SET NX and back out below.
     if (params.idempotencyKey && params.idempotencyExpiresAt) {
-      const idxKey = this.workflowIdempotencyKeyIndex(params.workflowName, params.idempotencyKey);
+      const idxKey = this.workflowIdempotencyKeyIndex(
+        ns,
+        params.workflowName,
+        params.idempotencyKey,
+      );
       const ttlMs = params.idempotencyExpiresAt.getTime() - this.clock.now().getTime();
       if (ttlMs > 0) {
         const won = await this.redis.set(idxKey, params.workflowId, "NX", "PX", ttlMs);
@@ -555,10 +568,12 @@ export class RedisWorkflowStorage
 
   async findWorkflowByIdempotencyKey(params: {
     workflowName: string;
+    namespace?: string;
     idempotencyKey: string;
     now: Date;
   }): Promise<{ workflowId: string } | null> {
-    const idxKey = this.workflowIdempotencyKeyIndex(params.workflowName, params.idempotencyKey);
+    const ns = this.resolveNamespace(params.namespace);
+    const idxKey = this.workflowIdempotencyKeyIndex(ns, params.workflowName, params.idempotencyKey);
     const cachedId = await this.redis.get(idxKey);
     if (!cachedId) return null;
     // Defense-in-depth: confirm the workflow's stored expiry is unexpired
