@@ -20,15 +20,15 @@ export function NamespaceSwitcher() {
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   // Refresh the namespace list whenever the dropdown opens — cheap, and it
-  // picks up newly-triggered runs without requiring a full page reload.
+  // picks up newly-created namespaces without requiring a full page reload.
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
     api
-      .listWorkflowNames()
+      .listNamespaces({ status: "active" })
       .then((r) => {
         if (cancelled) return;
-        setNamespaces(r.namespaces ?? []);
+        setNamespaces(r.namespaces.map((ns) => ns.id));
       })
       .catch(() => {
         // Ignore — show whatever we have and let the user try again.
@@ -42,8 +42,8 @@ export function NamespaceSwitcher() {
   // before the user opens the panel.
   useEffect(() => {
     api
-      .listWorkflowNames()
-      .then((r) => setNamespaces(r.namespaces ?? []))
+      .listNamespaces({ status: "active" })
+      .then((r) => setNamespaces(r.namespaces.map((ns) => ns.id)))
       .catch(() => {});
   }, []);
 

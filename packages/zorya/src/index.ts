@@ -40,6 +40,20 @@ export {
   type ZoryaFragmentsScanConfig,
 } from "./server/services/fragments/index.ts";
 export { ZoryaDags, type ZoryaDagsConfig } from "./server/services/dags/index.ts";
+export {
+  DEFAULT_NAMESPACE_ID,
+  InMemoryNamespaceRegistry,
+  NamespaceArchivedError,
+  NamespaceNotFoundError,
+  NamespaceService,
+  normalizeNamespaceId,
+  type Namespace,
+  type NamespaceCapabilities,
+  type NamespaceCreateInput,
+  type NamespaceRegistry,
+  type NamespaceServiceConfig,
+  type NamespaceUpdateInput,
+} from "./server/services/namespaces.ts";
 export { Auth, type AuthConfig } from "./server/auth.ts";
 export { RunEventBus } from "./server/run-event-bus.ts";
 export { RunPollWatcher, isTerminalStatus } from "./server/run-poll-watcher.ts";
@@ -98,6 +112,7 @@ export type {
   WorkflowDefDto,
   WorkflowDefsResponse,
 } from "./server/routes/workflow-defs.ts";
+export type { NamespacesResponse } from "./server/routes/namespaces.ts";
 
 // Wire format
 export type {

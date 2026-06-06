@@ -23,6 +23,8 @@ import type {
 } from "../api-types.ts";
 import type { WorkflowAdvertisementRegistry } from "../workflow-advertisements.ts";
 import { RunsService } from "../services/runs-service.ts";
+import type { NamespaceService } from "../services/namespaces.ts";
+import { NamespaceArchivedError, NamespaceNotFoundError } from "../services/namespaces.ts";
 
 export interface RunTrigger {
   (
@@ -47,6 +49,12 @@ export interface RunRoutesDeps {
   storage: WorkflowStorage;
   /** Called to start a new run. Server doesn't know how to run workflows by name. */
   trigger?: RunTrigger;
+  /**
+   * Zorya-owned namespace resolver. The workflow engine receives only the
+   * resolved opaque id; existence/lifecycle validation stays at the server
+   * boundary.
+   */
+  namespaces?: NamespaceService;
   /** Static workflow definitions, used to surface planned steps. */
   workflows?: Readonly<Record<string, Workflow<unknown, unknown>>>;
   /** Worker-advertised step defs — fallback when `workflows` doesn't have the def. */
@@ -109,10 +117,13 @@ export function triggerRun(deps: RunRoutesDeps) {
     if (!name) return jsonError(400, "missing_name");
     const body = (await readJson<TriggerRunRequest>(req)) ?? {};
     try {
+      const namespace = deps.namespaces
+        ? (await deps.namespaces.resolve(body.namespace)).id
+        : body.namespace;
       const result = await deps.trigger(name, body.input, {
         workflowId: body.workflowId,
         workflowType: body.workflowType,
-        namespace: body.namespace,
+        namespace,
         metadata: body.metadata,
         version: body.version,
         // Default tag for dashboard-initiated runs. Body fields can
@@ -125,6 +136,8 @@ export function triggerRun(deps: RunRoutesDeps) {
       const response: TriggerRunResponse = { workflowId: result.workflowId };
       return json(200, response);
     } catch (err) {
+      if (err instanceof NamespaceNotFoundError) return jsonError(404, "namespace_not_found");
+      if (err instanceof NamespaceArchivedError) return jsonError(409, "namespace_archived");
       return jsonError(400, "trigger_failed", err instanceof Error ? err.message : String(err));
     }
   };

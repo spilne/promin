@@ -18,6 +18,7 @@ import type {
   MetricsDto,
   WorkersResponse,
 } from "../../server/api-types.ts";
+import type { NamespacesResponse } from "../../server/routes/namespaces.ts";
 
 async function seedWorkflow(
   storage: InMemoryWorkflowStorage,
@@ -141,6 +142,28 @@ describe("ZoryaServer", () => {
       expect(enqueued.length).toBe(1);
       expect(enqueued[0]?.workflowName).toBe("order");
       expect(enqueued[0]?.input).toEqual({ a: 1 });
+      expect(enqueued[0]?.namespace).toBe("default");
+    });
+
+    it("rejects explicit namespaces that are not registered", async () => {
+      const queue = new (
+        await import("../../server/workflow-starts.ts")
+      ).InMemoryWorkflowStartQueue();
+      const workflows = new QueuedWorkflows({
+        storage,
+        workflowStarts: queue,
+        acceptAny: true,
+      });
+      const s = new ZoryaServer({ workflows });
+      const res = await s.handle(
+        new Request("http://x/api/runs/trigger/order", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ namespace: "missing" }),
+        }),
+      );
+      expect(res.status).toBe(404);
+      expect(await queue.list()).toEqual([]);
     });
   });
 
@@ -208,6 +231,38 @@ describe("ZoryaServer", () => {
       const body = (await res.json()) as WorkersResponse;
       expect(body.workers).toHaveLength(1);
       expect(body.workers[0]!.workerId).toBe("w-1");
+    });
+  });
+
+  describe("namespaces", () => {
+    it("prebuilds and lists the default namespace", async () => {
+      const res = await server.handle(new Request("http://x/api/namespaces"));
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as NamespacesResponse;
+      expect(body.defaultNamespaceId).toBe("default");
+      expect(body.namespaces.map((ns) => ns.id)).toContain("default");
+      expect(body.namespaces.find((ns) => ns.id === "default")?.capabilities).toEqual({});
+    });
+
+    it("creates a namespace with capability policy", async () => {
+      const create = await server.handle(
+        new Request("http://x/api/namespaces", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            id: "acme",
+            displayName: "Acme",
+            capabilities: { ai: { enabled: true, maxTokensPerTurn: 8192 } },
+          }),
+        }),
+      );
+      expect(create.status).toBe(201);
+
+      const res = await server.handle(new Request("http://x/api/namespaces"));
+      const body = (await res.json()) as NamespacesResponse;
+      const acme = body.namespaces.find((ns) => ns.id === "acme");
+      expect(acme?.displayName).toBe("Acme");
+      expect(acme?.capabilities.ai?.maxTokensPerTurn).toBe(8192);
     });
   });
 

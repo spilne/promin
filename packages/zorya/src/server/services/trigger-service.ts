@@ -57,6 +57,7 @@ export class TriggerService {
         workflowId,
         workflowName: name,
         input,
+        ...(options?.namespace !== undefined && { namespace: options.namespace }),
         metadata: options?.metadata,
         version,
       });

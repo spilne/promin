@@ -61,6 +61,7 @@ import type {
   MintTokenResponse,
 } from "../../server/routes/signal-tokens.ts";
 import type { WorkflowVersionDto } from "../../server/routes/workflow-versions.ts";
+import type { NamespacesResponse } from "../../server/routes/namespaces.ts";
 
 const BASE = ""; // served from same origin
 
@@ -128,6 +129,12 @@ export const api = {
   },
   listWorkers(): Promise<WorkersResponse> {
     return req<WorkersResponse>(`/api/workers`);
+  },
+  listNamespaces(params: { status?: "active" | "archived" } = {}): Promise<NamespacesResponse> {
+    const qp = new URLSearchParams();
+    if (params.status) qp.set("status", params.status);
+    const qs = qp.toString();
+    return req<NamespacesResponse>(`/api/namespaces${qs ? `?${qs}` : ""}`);
   },
   eventsUrl(id: string): string {
     return `${BASE}/api/runs/${encodeURIComponent(id)}/events`;

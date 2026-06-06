@@ -28,6 +28,7 @@ import {
 import { createWorkerApiHandler, createWorkflowStorageHandler } from "@promin/workflow-remote";
 import { Auth, type AuthConfig } from "./auth.ts";
 import { Router, jsonError } from "./router.ts";
+import { NamespaceService, type NamespaceRegistry } from "./services/namespaces.ts";
 import type { WorkflowStartQueue } from "./workflow-starts.ts";
 import { WorkerWebSocketServer } from "./services/worker-ws-server.ts";
 import {
@@ -200,6 +201,13 @@ import {
   runDag,
   type DagGatewayDeps,
 } from "./routes/dags.ts";
+import {
+  archiveNamespace,
+  createNamespace,
+  getNamespace,
+  listNamespaces,
+  updateNamespace,
+} from "./routes/namespaces.ts";
 
 export interface Logger {
   log(message: string, ...args: unknown[]): void;
@@ -240,6 +248,12 @@ export interface ZoryaServerConfig extends AuthConfig {
   fragments?: ZoryaFragments;
   /** Optional DAG gateway service. Mounts /api/dags/* routes. */
   dags?: ZoryaDags;
+  /**
+   * Authoritative namespace registry. Defaults to an in-memory registry with
+   * a prebuilt "default" namespace. Production hosts should pass a durable
+   * registry so namespace lifecycle and policy survive restart.
+   */
+  namespaces?: NamespaceService | NamespaceRegistry;
   /**
    * Mount the remote-worker HTTP surface. Pulls stepQueue / workerRegistry /
    * advertisements / workflowStarts from the workflows service.
@@ -312,6 +326,7 @@ export class ZoryaServer {
   readonly skills?: ZoryaSkills;
   readonly fragments?: ZoryaFragments;
   readonly dags?: ZoryaDags;
+  readonly namespaces: NamespaceService;
   readonly versionRegistry: IWorkflowVersionRegistry;
   /**
    * Worker → server WebSocket multiplexer. Always present — workers in
@@ -342,6 +357,10 @@ export class ZoryaServer {
     if (config.fragments) this.fragments = config.fragments;
     if (config.dags) this.dags = config.dags;
     if (config.secrets) this.secrets = config.secrets;
+    this.namespaces =
+      config.namespaces instanceof NamespaceService
+        ? config.namespaces
+        : new NamespaceService({ registry: config.namespaces });
     this.versionRegistry = config.versionRegistry ?? new WorkflowVersionRegistry();
 
     this.logger = config.logger ?? console;
@@ -379,6 +398,7 @@ export class ZoryaServer {
     const deps = {
       storage,
       trigger,
+      namespaces: this.namespaces,
       ...(definitions !== undefined && { workflows: definitions }),
       ...(advertisements !== undefined && { advertisements }),
     };
@@ -392,6 +412,11 @@ export class ZoryaServer {
           }),
       )
       .get("/api/runs", listRuns(deps))
+      .get("/api/namespaces", listNamespaces({ namespaces: this.namespaces }))
+      .post("/api/namespaces", createNamespace({ namespaces: this.namespaces }))
+      .get("/api/namespaces/:id", getNamespace({ namespaces: this.namespaces }))
+      .patch("/api/namespaces/:id", updateNamespace({ namespaces: this.namespaces }))
+      .delete("/api/namespaces/:id", archiveNamespace({ namespaces: this.namespaces }))
       .get("/api/workflows", listWorkflowNames(deps))
       .get("/api/runs/:id", getRun(deps))
       .get("/api/runs/:id/signals", getRunSignals(storage))
@@ -842,6 +867,7 @@ export class ZoryaServer {
       this.agents?.start(),
       this.skills?.start(),
       this.fragments?.start(),
+      this.namespaces.ensureDefaultNamespace(),
     ]).catch((err) => this.logger.error("[zorya] service start error:", err));
 
     return {

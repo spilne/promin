@@ -152,6 +152,21 @@ export function workflowStartQueueTestSuite(
       expect(claimed[0]?.metadata).toEqual({ source: "test", n: 42 });
     });
 
+    it("namespace round-trips through enqueue/claim", async () => {
+      const q = await make();
+      await q.enqueue({
+        workflowId: "a",
+        workflowName: "wf",
+        namespace: "acme",
+        input: {},
+      });
+      const claimed = await q.claim({
+        workflowSpecs: [{ name: "wf", versions: ANY_VERSION }],
+        limit: 1,
+      });
+      expect(claimed[0]?.namespace).toBe("acme");
+    });
+
     it("list returns both pending and inflight records", async () => {
       const q = await make();
       await q.enqueue({ workflowId: "a", workflowName: "wf", input: {} });

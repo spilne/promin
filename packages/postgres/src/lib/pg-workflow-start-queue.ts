@@ -61,6 +61,7 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
   async enqueue(params: {
     workflowId: string;
     workflowName: string;
+    namespace?: string;
     input: unknown;
     metadata?: Record<string, unknown>;
     version?: string;
@@ -70,6 +71,7 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
       id,
       workflowId: params.workflowId,
       workflowName: params.workflowName,
+      namespace: params.namespace ?? null,
       version: params.version ?? null,
       input: params.input as unknown,
       metadata: params.metadata !== undefined ? (params.metadata as unknown) : null,
@@ -139,6 +141,7 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
         id: string;
         workflowId: string;
         workflowName: string;
+        namespace: string | null;
         version: string | null;
         input: unknown;
         metadata: unknown;
@@ -168,6 +171,7 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
           id: row.id,
           workflowId: row.workflowId,
           workflowName: row.workflowName,
+          ...(row.namespace !== null && { namespace: row.namespace }),
           input: row.input,
           enqueuedAt: row.enqueuedAt.getTime(),
           claimedAt: now.getTime(),
@@ -225,6 +229,7 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
         id: r.id,
         workflowId: r.workflowId,
         workflowName: r.workflowName,
+        ...(r.namespace !== null && { namespace: r.namespace }),
         input: r.input,
         enqueuedAt: r.enqueuedAt.getTime(),
       };

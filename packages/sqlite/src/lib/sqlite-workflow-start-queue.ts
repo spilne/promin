@@ -17,6 +17,7 @@
 //     id            TEXT PRIMARY KEY,
 //     workflow_id   TEXT NOT NULL,
 //     workflow_name TEXT NOT NULL,
+//     namespace     TEXT,
 //     version       TEXT,
 //     input         TEXT NOT NULL,
 //     metadata      TEXT,
@@ -34,6 +35,7 @@ interface Row {
   id: string;
   workflow_id: string;
   workflow_name: string;
+  namespace: string | null;
   version: string | null;
   input: string;
   metadata: string | null;
@@ -80,6 +82,7 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
         id            TEXT PRIMARY KEY,
         workflow_id   TEXT NOT NULL,
         workflow_name TEXT NOT NULL,
+        namespace     TEXT,
         version       TEXT,
         input         TEXT NOT NULL,
         metadata      TEXT,
@@ -89,6 +92,11 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
         status        TEXT NOT NULL DEFAULT 'pending'
       )
     `);
+    try {
+      this.db.run(`ALTER TABLE ${t} ADD COLUMN namespace TEXT`);
+    } catch (e) {
+      if (!String(e).includes("duplicate column")) throw e;
+    }
     // Most claims hit the pending partition — partial index keeps the
     // scan tight even when the queue accumulates completed history.
     this.db.run(
@@ -102,6 +110,7 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
   async enqueue(params: {
     workflowId: string;
     workflowName: string;
+    namespace?: string;
     input: unknown;
     metadata?: Record<string, unknown>;
     version?: string;
@@ -110,13 +119,14 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
     this.db
       .query(
         `INSERT INTO ${this._t}
-           (id, workflow_id, workflow_name, version, input, metadata, enqueued_at, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`,
+           (id, workflow_id, workflow_name, namespace, version, input, metadata, enqueued_at, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
       )
       .run(
         id,
         params.workflowId,
         params.workflowName,
+        params.namespace ?? null,
         params.version ?? null,
         JSON.stringify(params.input),
         params.metadata !== undefined ? JSON.stringify(params.metadata) : null,
@@ -239,6 +249,7 @@ function rowToRecord(r: Row): WorkflowStartRecord {
     enqueuedAt: r.enqueued_at,
   };
   if (r.version !== null) (out as { version?: string }).version = r.version;
+  if (r.namespace !== null) (out as { namespace?: string }).namespace = r.namespace;
   if (r.metadata !== null) {
     (out as { metadata?: Record<string, unknown> }).metadata = JSON.parse(r.metadata);
   }

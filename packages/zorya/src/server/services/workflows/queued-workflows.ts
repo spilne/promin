@@ -91,6 +91,7 @@ export class QueuedWorkflows extends ZoryaWorkflows {
       workflowId,
       workflowName: name,
       input,
+      ...(opts?.namespace !== undefined && { namespace: opts.namespace }),
       ...(opts?.metadata !== undefined && { metadata: opts.metadata }),
       ...(version !== undefined && { version }),
     });
@@ -109,6 +110,7 @@ export class QueuedWorkflows extends ZoryaWorkflows {
       workflowId,
       workflowName: state.workflowName,
       input: state.input,
+      ...(state.namespace !== undefined && { namespace: state.namespace }),
       ...(state.metadata !== undefined && { metadata: state.metadata }),
       ...(state.version !== undefined && { version: state.version }),
     });

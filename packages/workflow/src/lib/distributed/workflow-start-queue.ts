@@ -17,6 +17,7 @@ export interface WorkflowStartRecord {
   readonly id: string;
   readonly workflowId: string;
   readonly workflowName: string;
+  readonly namespace?: string;
   readonly input: unknown;
   readonly metadata?: Record<string, unknown>;
   /** Workflow version requested at trigger time, if any. */
@@ -40,6 +41,7 @@ export interface WorkflowStartQueue {
   enqueue(params: {
     workflowId: string;
     workflowName: string;
+    namespace?: string;
     input: unknown;
     metadata?: Record<string, unknown>;
     version?: string;
@@ -71,6 +73,7 @@ export class InMemoryWorkflowStartQueue implements WorkflowStartQueue {
   async enqueue(params: {
     workflowId: string;
     workflowName: string;
+    namespace?: string;
     input: unknown;
     metadata?: Record<string, unknown>;
     version?: string;
@@ -80,6 +83,7 @@ export class InMemoryWorkflowStartQueue implements WorkflowStartQueue {
       id,
       workflowId: params.workflowId,
       workflowName: params.workflowName,
+      ...(params.namespace !== undefined && { namespace: params.namespace }),
       input: params.input,
       ...(params.metadata !== undefined && { metadata: params.metadata }),
       ...(params.version !== undefined && { version: params.version }),
@@ -142,6 +146,7 @@ export class InMemoryWorkflowStartQueue implements WorkflowStartQueue {
           id: rec.id,
           workflowId: rec.workflowId,
           workflowName: rec.workflowName,
+          ...(rec.namespace !== undefined && { namespace: rec.namespace }),
           input: rec.input,
           enqueuedAt: rec.enqueuedAt,
           ...(rec.metadata !== undefined && { metadata: rec.metadata }),

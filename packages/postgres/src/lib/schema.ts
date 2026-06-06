@@ -422,6 +422,7 @@ export const workflowStarts = pgTable(
     id: text("id").primaryKey(),
     workflowId: text("workflow_id").notNull(),
     workflowName: text("workflow_name").notNull(),
+    namespace: text("namespace"),
     version: text("version"),
     input: jsonb("input").notNull(),
     metadata: jsonb("metadata"),
