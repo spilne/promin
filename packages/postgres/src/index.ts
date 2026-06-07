@@ -7,6 +7,10 @@ export { PostgresWorkflowStorage } from "./lib/postgres-workflow-storage.ts";
 export { PostgresWorkflowVersionRegistry } from "./lib/postgres-workflow-version-registry.ts";
 export { PostgresWorkerRegistry } from "./lib/postgres-worker-registry.ts";
 export {
+  PostgresNamespaceRegistry,
+  type PostgresNamespaceRegistryConfig,
+} from "./lib/postgres-namespace-registry.ts";
+export {
   PostgresAgentRegistry,
   type PostgresAgentRegistryConfig,
 } from "./lib/agent/agent-registry.ts";
@@ -127,6 +131,7 @@ export {
   workerRegistry,
   machines,
   machineEvents,
+  zoryaNamespace,
   LOOKUP_BINDINGS,
 } from "./lib/schema.ts";
 export { createQueueTable, type QueueTable } from "./lib/pg-queue-schema.ts";

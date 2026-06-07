@@ -10,5 +10,6 @@ export { queueTestSuite } from "./lib/queue-test-suite.ts";
 export { poolTestSuite } from "./lib/pool-test-suite.ts";
 export { latchTestSuite } from "./lib/latch-test-suite.ts";
 export { barrierTestSuite } from "./lib/barrier-test-suite.ts";
+export { namespaceRegistryTestSuite } from "./lib/namespace-registry-test-suite.ts";
 
 // NOTE: storageTestSuite and stepQueueTestSuite moved to @promin/workflow/testing

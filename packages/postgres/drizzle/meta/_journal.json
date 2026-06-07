@@ -323,6 +323,13 @@
       "when": 1743400045000,
       "tag": "0045_role_registry",
       "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1743400046000,
+      "tag": "0046_zorya_namespace",
+      "breakpoints": true
     }
   ]
 }

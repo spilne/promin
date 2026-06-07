@@ -36,6 +36,21 @@ export { Duration, type DurationInput, resolveMs } from "./lib/duration.ts";
 
 // Schema parser (library-agnostic validation contract)
 export { type SchemaParser } from "./lib/schema-parser.ts";
+export {
+  DEFAULT_NAMESPACE_ID,
+  InMemoryNamespaceRegistry,
+  NamespaceArchivedError,
+  NamespaceNotFoundError,
+  normalizeNamespaceDisplayName,
+  normalizeNamespaceId,
+  sanitizeNamespaceCapabilities,
+  sanitizeNamespaceRecord,
+  type Namespace,
+  type NamespaceCapabilities,
+  type NamespaceCreateInput,
+  type NamespaceRegistry,
+  type NamespaceUpdateInput,
+} from "./lib/namespace-registry.ts";
 
 // Primitives
 export { PipelineSemaphore, type Semaphore } from "./lib/semaphore.ts";

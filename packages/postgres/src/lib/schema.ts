@@ -644,6 +644,27 @@ export const fragmentStore = pgTable("fragment_store", {
 });
 
 // ---------------------------------------------------------------------------
+// Zorya namespace entity — authoritative namespace lifecycle/policy registry.
+// This is intentionally separate from agent_namespace, which stores memory
+// configuration for a namespace.
+// ---------------------------------------------------------------------------
+
+export const zoryaNamespace = pgTable(
+  "zorya_namespace",
+  {
+    id: text("id").primaryKey(),
+    displayName: text("display_name").notNull(),
+    description: text("description"),
+    status: text("status").notNull().default("active"),
+    capabilities: jsonb("capabilities").notNull(),
+    metadata: jsonb("metadata").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [index("zorya_namespace_status_display_idx").on(t.status, t.displayName, t.id)],
+);
+
+// ---------------------------------------------------------------------------
 // Agent memory — three-scope cascade × four-tier model. Mirrors
 // SqliteMemoryStore's 6 tables. Single-table-per-tier with a `scope`
 // column keeps queries simple while supporting per-scope indexes.
