@@ -16,10 +16,10 @@ import { ZoryaServer } from "../../server/server.ts";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { LocalWorkflows, ZoryaAgents } from "../../index.ts";
 
-function makeServer(memory: InMemoryMemoryStore, registry = new InMemoryAgentRegistry()) {
+async function makeServer(memory: InMemoryMemoryStore, registry = new InMemoryAgentRegistry()) {
   const storage = new InMemoryWorkflowStorage();
   const runner = createWorkflowRunner({ storage });
-  return new ZoryaServer({
+  const server = new ZoryaServer({
     workflows: new LocalWorkflows({
       storage,
       runner,
@@ -34,11 +34,19 @@ function makeServer(memory: InMemoryMemoryStore, registry = new InMemoryAgentReg
       memory,
     }),
   });
+  await server.handle(
+    new Request("http://test/api/namespaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "acme", displayName: "Acme" }),
+    }),
+  );
+  return server;
 }
 
 describe("memory inspector — /api/memory/inspect", () => {
   it("400 without namespaceId", async () => {
-    const server = makeServer(new InMemoryMemoryStore());
+    const server = await makeServer(new InMemoryMemoryStore());
     const res = await server.handle(
       new Request("http://test/api/memory/inspect", { method: "GET" }),
     );
@@ -50,7 +58,7 @@ describe("memory inspector — /api/memory/inspect", () => {
     await memory.upsertNamespace("acme", { staticRules: "be polite" });
     await memory.appendNamespaceFact("acme", "company name is Acme");
 
-    const server = makeServer(memory);
+    const server = await makeServer(memory);
     const res = await server.handle(
       new Request("http://test/api/memory/inspect?namespaceId=acme", { method: "GET" }),
     );
@@ -88,7 +96,7 @@ describe("memory inspector — /api/memory/inspect", () => {
       { role: "assistant", content: "hello there" },
     ]);
 
-    const server = makeServer(memory);
+    const server = await makeServer(memory);
     const res = await server.handle(
       new Request("http://test/api/memory/inspect?namespaceId=acme&resourceId=alice&threadId=t1", {
         method: "GET",
@@ -127,7 +135,7 @@ describe("memory inspector — /api/memory/inspect", () => {
       },
     });
 
-    const server = makeServer(memory, registry);
+    const server = await makeServer(memory, registry);
     const res = await server.handle(
       new Request(
         "http://test/api/memory/inspect?namespaceId=acme&resourceId=alice&threadId=t1&agentId=role-git-master",
@@ -142,7 +150,7 @@ describe("memory inspector — /api/memory/inspect", () => {
   it("persona is null when agentId is omitted or the agent is unknown", async () => {
     const memory = new InMemoryMemoryStore();
     await memory.createThread({ namespaceId: "acme", resourceId: "alice", threadId: "t1" });
-    const server = makeServer(memory);
+    const server = await makeServer(memory);
 
     const noAgent = await server.handle(
       new Request("http://test/api/memory/inspect?namespaceId=acme&resourceId=alice&threadId=t1", {
@@ -164,7 +172,7 @@ describe("memory inspector — /api/memory/inspect", () => {
 describe("namespace mutations — operator-only writes", () => {
   it("PATCH /api/memory/namespace/:id upserts staticRules + workingMemory", async () => {
     const memory = new InMemoryMemoryStore();
-    const server = makeServer(memory);
+    const server = await makeServer(memory);
     const res = await server.handle(
       new Request("http://test/api/memory/namespace/acme", {
         method: "PATCH",
@@ -184,7 +192,7 @@ describe("namespace mutations — operator-only writes", () => {
   it("PATCH preserves omitted fields — sending only staticRules does not clear workingMemory", async () => {
     const memory = new InMemoryMemoryStore();
     await memory.upsertNamespace("acme", { workingMemory: "in flight" });
-    const server = makeServer(memory);
+    const server = await makeServer(memory);
     const res = await server.handle(
       new Request("http://test/api/memory/namespace/acme", {
         method: "PATCH",
@@ -199,7 +207,7 @@ describe("namespace mutations — operator-only writes", () => {
   });
 
   it("PATCH 400s on empty body", async () => {
-    const server = makeServer(new InMemoryMemoryStore());
+    const server = await makeServer(new InMemoryMemoryStore());
     const res = await server.handle(
       new Request("http://test/api/memory/namespace/acme", {
         method: "PATCH",
@@ -212,7 +220,7 @@ describe("namespace mutations — operator-only writes", () => {
 
   it("POST /facts appends and the next inspect lists it", async () => {
     const memory = new InMemoryMemoryStore();
-    const server = makeServer(memory);
+    const server = await makeServer(memory);
     const res = await server.handle(
       new Request("http://test/api/memory/namespace/acme/facts", {
         method: "POST",
@@ -226,7 +234,7 @@ describe("namespace mutations — operator-only writes", () => {
   });
 
   it("POST /facts 400s on missing text", async () => {
-    const server = makeServer(new InMemoryMemoryStore());
+    const server = await makeServer(new InMemoryMemoryStore());
     const res = await server.handle(
       new Request("http://test/api/memory/namespace/acme/facts", {
         method: "POST",
@@ -240,7 +248,7 @@ describe("namespace mutations — operator-only writes", () => {
   it("DELETE /facts/:factId removes the fact", async () => {
     const memory = new InMemoryMemoryStore();
     const fact = await memory.appendNamespaceFact("acme", "transient");
-    const server = makeServer(memory);
+    const server = await makeServer(memory);
     const res = await server.handle(
       new Request(`http://test/api/memory/namespace/acme/facts/${encodeURIComponent(fact.id)}`, {
         method: "DELETE",

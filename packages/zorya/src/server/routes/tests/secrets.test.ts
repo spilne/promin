@@ -21,6 +21,13 @@ async function bootServerWithSecrets() {
   });
   const secrets = new InMemorySecretsStorage();
   const server = new ZoryaServer({ workflows, secrets });
+  await server.handle(
+    new Request("http://test/api/namespaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "acme", displayName: "Acme" }),
+    }),
+  );
   return { server, secrets };
 }
 

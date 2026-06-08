@@ -11,6 +11,7 @@ import {
   bigint,
   bigserial,
   boolean,
+  check,
   doublePrecision,
   index,
   uniqueIndex,
@@ -656,12 +657,19 @@ export const zoryaNamespace = pgTable(
     displayName: text("display_name").notNull(),
     description: text("description"),
     status: text("status").notNull().default("active"),
-    capabilities: jsonb("capabilities").notNull(),
-    metadata: jsonb("metadata").notNull(),
+    capabilities: jsonb("capabilities")
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    metadata: jsonb("metadata")
+      .notNull()
+      .default(sql`'{}'::jsonb`),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
-  (t) => [index("zorya_namespace_status_display_idx").on(t.status, t.displayName, t.id)],
+  (t) => [
+    check("zorya_namespace_status_check", sql`${t.status} IN ('active', 'archived')`),
+    index("zorya_namespace_status_display_idx").on(t.status, t.displayName, t.id),
+  ],
 );
 
 // ---------------------------------------------------------------------------

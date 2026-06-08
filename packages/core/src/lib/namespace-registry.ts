@@ -68,6 +68,11 @@ export interface NamespaceRegistry {
   archive(id: string): Promise<Namespace>;
 }
 
+export function normalizeNamespaceStatus(status: string): Namespace["status"] {
+  if (status === "active" || status === "archived") return status;
+  throw new Error("invalid_namespace_status");
+}
+
 export class InMemoryNamespaceRegistry implements NamespaceRegistry {
   private readonly rows = new Map<string, Namespace>();
   private readonly clock: () => number;
@@ -100,7 +105,8 @@ export class InMemoryNamespaceRegistry implements NamespaceRegistry {
 
   async list(params: { status?: Namespace["status"] } = {}): Promise<Namespace[]> {
     const rows = [...this.rows.values()];
-    const filtered = params.status ? rows.filter((r) => r.status === params.status) : rows;
+    const status = params.status ? normalizeNamespaceStatus(params.status) : undefined;
+    const filtered = status ? rows.filter((r) => r.status === status) : rows;
     return filtered.sort(
       (a, b) => a.displayName.localeCompare(b.displayName) || a.id.localeCompare(b.id),
     );
@@ -116,7 +122,7 @@ export class InMemoryNamespaceRegistry implements NamespaceRegistry {
         displayName: normalizeDisplayName(patch.displayName, key),
       }),
       ...(patch.description !== undefined && { description: patch.description }),
-      ...(patch.status !== undefined && { status: patch.status }),
+      ...(patch.status !== undefined && { status: normalizeNamespaceStatus(patch.status) }),
       ...(patch.capabilities !== undefined && {
         capabilities: sanitizeCapabilities(patch.capabilities),
       }),
@@ -174,9 +180,108 @@ function normalizeDisplayName(value: string | undefined, fallback: string): stri
 }
 
 function sanitizeRecord(value: Record<string, unknown> | undefined): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value) ? { ...value } : {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    const next = sanitizeJsonValue(item, `metadata.${key}`);
+    if (next !== undefined) out[key] = next;
+  }
+  return out;
 }
 
 function sanitizeCapabilities(value: NamespaceCapabilities | undefined): NamespaceCapabilities {
-  return value && typeof value === "object" && !Array.isArray(value) ? { ...value } : {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const input = value as Record<string, unknown>;
+  const out: NamespaceCapabilities = {
+    ...(input.ai !== undefined && {
+      ai: sanitizeCapabilitySection(input.ai, {
+        enabled: "boolean",
+        providers: "stringArray",
+        models: "stringArray",
+        maxTokensPerTurn: "positiveInteger",
+        maxTurnsPerRun: "positiveInteger",
+      }),
+    }),
+    ...(input.agents !== undefined && {
+      agents: sanitizeCapabilitySection(input.agents, {
+        enabled: "boolean",
+        maxConcurrentThreads: "positiveInteger",
+        maxInvocationsPerMinute: "positiveInteger",
+      }),
+    }),
+    ...(input.workflows !== undefined && {
+      workflows: sanitizeCapabilitySection(input.workflows, {
+        enabled: "boolean",
+        maxConcurrentRuns: "positiveInteger",
+        maxRunMs: "positiveInteger",
+      }),
+    }),
+    ...(input.tools !== undefined && {
+      tools: sanitizeCapabilitySection(input.tools, {
+        network: "boolean",
+        filesystem: "boolean",
+        shell: "boolean",
+      }),
+    }),
+  };
+  return out;
+}
+
+type CapabilityFieldKind = "boolean" | "positiveInteger" | "stringArray";
+
+function sanitizeCapabilitySection<T extends Record<string, unknown>>(
+  value: unknown,
+  spec: Record<string, CapabilityFieldKind>,
+): T {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("invalid_namespace_capabilities");
+  }
+  const input = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const [key, kind] of Object.entries(spec)) {
+    const item = input[key];
+    if (item === undefined) continue;
+    if (kind === "boolean" && typeof item === "boolean") {
+      out[key] = item;
+      continue;
+    }
+    if (kind === "positiveInteger" && Number.isInteger(item) && (item as number) > 0) {
+      out[key] = item;
+      continue;
+    }
+    if (
+      kind === "stringArray" &&
+      Array.isArray(item) &&
+      item.every((part) => typeof part === "string" && part.length > 0)
+    ) {
+      out[key] = [...item];
+      continue;
+    }
+    throw new Error("invalid_namespace_capabilities");
+  }
+  return out as T;
+}
+
+function sanitizeJsonValue(value: unknown, path: string): unknown {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    (typeof value === "number" && Number.isFinite(value))
+  ) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item, index) => sanitizeJsonValue(item, `${path}[${index}]`));
+  }
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      const next = sanitizeJsonValue(item, `${path}.${key}`);
+      if (next !== undefined) out[key] = next;
+    }
+    return out;
+  }
+  if (value === undefined) return undefined;
+  throw new Error("invalid_namespace_metadata");
 }

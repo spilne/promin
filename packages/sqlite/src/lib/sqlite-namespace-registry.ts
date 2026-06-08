@@ -6,6 +6,7 @@ import {
   NamespaceNotFoundError,
   normalizeNamespaceDisplayName,
   normalizeNamespaceId,
+  normalizeNamespaceStatus,
   sanitizeNamespaceCapabilities,
   sanitizeNamespaceRecord,
   type Namespace,
@@ -20,7 +21,7 @@ interface Row {
   id: string;
   display_name: string;
   description: string | null;
-  status: "active" | "archived";
+  status: string;
   capabilities: string | null;
   metadata: string | null;
   created_at: number;
@@ -41,7 +42,7 @@ export class SqliteNamespaceRegistry implements NamespaceRegistry {
     private readonly db: SqliteDatabase,
     config: SqliteNamespaceRegistryConfig,
   ) {
-    this.table = config.tableName ?? "promin_namespace";
+    this.table = normalizeSqliteIdentifier(config.tableName ?? "promin_namespace");
     this.clock = config.now ?? (() => Date.now());
     this.setup();
   }
@@ -56,9 +57,9 @@ export class SqliteNamespaceRegistry implements NamespaceRegistry {
         id           TEXT NOT NULL PRIMARY KEY,
         display_name TEXT NOT NULL,
         description  TEXT,
-        status       TEXT NOT NULL DEFAULT 'active',
-        capabilities TEXT,
-        metadata     TEXT,
+        status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+        capabilities TEXT NOT NULL DEFAULT '{}',
+        metadata     TEXT NOT NULL DEFAULT '{}',
         created_at   INTEGER NOT NULL,
         updated_at   INTEGER NOT NULL
       )
@@ -115,12 +116,13 @@ export class SqliteNamespaceRegistry implements NamespaceRegistry {
   }
 
   async list(params: { status?: Namespace["status"] } = {}): Promise<Namespace[]> {
-    const rows = params.status
+    const status = params.status ? normalizeNamespaceStatus(params.status) : undefined;
+    const rows = status
       ? this.db
           .query<Row>(
             `SELECT * FROM ${this.table} WHERE status = ? ORDER BY display_name ASC, id ASC`,
           )
-          .all(params.status)
+          .all(status)
       : this.db.query<Row>(`SELECT * FROM ${this.table} ORDER BY display_name ASC, id ASC`).all();
     return rows.map(toNamespace);
   }
@@ -135,7 +137,7 @@ export class SqliteNamespaceRegistry implements NamespaceRegistry {
         displayName: normalizeNamespaceDisplayName(patch.displayName, key),
       }),
       ...(patch.description !== undefined && { description: patch.description }),
-      ...(patch.status !== undefined && { status: patch.status }),
+      ...(patch.status !== undefined && { status: normalizeNamespaceStatus(patch.status) }),
       ...(patch.capabilities !== undefined && {
         capabilities: sanitizeNamespaceCapabilities(patch.capabilities),
       }),
@@ -170,12 +172,19 @@ function toNamespace(row: Row): Namespace {
     id: row.id,
     displayName: row.display_name,
     description: row.description,
-    status: row.status,
+    status: normalizeNamespaceStatus(row.status),
     capabilities: parseJsonObject<NamespaceCapabilities>(row.capabilities),
     metadata: parseJsonObject<Record<string, unknown>>(row.metadata),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function normalizeSqliteIdentifier(value: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+    throw new Error("invalid_sqlite_identifier");
+  }
+  return value;
 }
 
 function parseJsonObject<T extends object>(raw: string | null): T {

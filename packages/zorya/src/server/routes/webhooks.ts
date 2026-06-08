@@ -23,6 +23,8 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { AgentRegistry, RegisteredAgent } from "@promin/agent";
 import { json, jsonError } from "../router.ts";
+import type { NamespaceService } from "../services/namespaces.ts";
+import { resolveRequiredNamespaceId } from "./namespace-validation.ts";
 
 export type WebhookSignatureScheme = "sha256-hex";
 
@@ -55,6 +57,7 @@ export interface WebhookGatewayDeps {
   }>;
   /** Per-source verifier configs, keyed by URL `:source` segment. */
   readonly sources: Readonly<Record<string, WebhookSourceConfig>>;
+  readonly namespaces?: NamespaceService;
   /**
    * Optional dedup store override. Default: in-memory bounded LRU
    * keyed by `${source}:${deliveryId}`. Multi-replica deployments
@@ -173,13 +176,16 @@ export function ingestWebhook(deps: WebhookGatewayDeps) {
       return jsonError(404, "agent_not_found", `Agent "${agentId}" is not registered.`);
     }
 
+    const namespace = await resolveRequiredNamespaceId(deps.namespaces, namespaceId);
+    if ("response" in namespace) return namespace.response;
+
     try {
       const resolved = await deps.resolve(recipe, {
-        namespaceId,
+        namespaceId: namespace.namespaceId,
         ...(resourceId !== undefined && { resourceId }),
       });
       const scoped = resolved.withScope({
-        namespaceId,
+        namespaceId: namespace.namespaceId,
         ...(resourceId !== undefined && { resourceId }),
       });
       const task = formatWebhookTask(source, payload);

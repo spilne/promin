@@ -10,6 +10,8 @@ import type { DurableScheduleConfig, SchedulerStorage, WorkflowStorage } from "@
 import { computeNextRun, isTickLogStorage, scheduleTickRunId } from "@promin/workflow";
 import type { Clock } from "@promin/core";
 import { json, jsonError, readJson } from "../router.ts";
+import type { NamespaceService } from "../services/namespaces.ts";
+import { resolveOptionalNamespaceId } from "./namespace-validation.ts";
 
 export interface ScheduleDto {
   id: string;
@@ -88,6 +90,11 @@ export interface ScheduleUpcomingResponse {
   upcoming: ScheduleUpcomingTickDto[];
   /** Cron / RRULE / interval already played out — no further fires. */
   exhausted: boolean;
+}
+
+export interface ScheduleRouteDeps {
+  readonly storage: SchedulerStorage;
+  readonly namespaces?: NamespaceService;
 }
 
 export interface SchedulePatchRequest {
@@ -169,11 +176,15 @@ function toDto(
   };
 }
 
-export function listSchedules(storage: SchedulerStorage) {
+export function listSchedules(deps: ScheduleRouteDeps) {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const enabled = parseBool(url.searchParams.get("enabled"));
-    const namespace = url.searchParams.get("namespace") ?? undefined;
+    const namespace = await resolveOptionalNamespaceId(
+      deps.namespaces,
+      url.searchParams.get("namespace"),
+    );
+    if ("response" in namespace) return namespace.response;
     const limit = parseInt10(url.searchParams.get("limit")) ?? 100;
     const offset = parseInt10(url.searchParams.get("offset")) ?? 0;
     // Metadata filter — JSON-encoded for nested-path queries (the chat
@@ -195,12 +206,18 @@ export function listSchedules(storage: SchedulerStorage) {
     }
 
     const [configs, total] = await Promise.all([
-      storage.listSchedules({ enabled, namespace, limit, offset, metadata }),
-      storage.countSchedules({ enabled, namespace, metadata }),
+      deps.storage.listSchedules({
+        enabled,
+        namespace: namespace.namespaceId,
+        limit,
+        offset,
+        metadata,
+      }),
+      deps.storage.countSchedules({ enabled, namespace: namespace.namespaceId, metadata }),
     ]);
 
     const ids = configs.map((c) => c.id);
-    const states = ids.length > 0 ? await storage.loadScheduleStates(ids) : new Map();
+    const states = ids.length > 0 ? await deps.storage.loadScheduleStates(ids) : new Map();
     const schedules = configs.map((c) => toDto(c, states.get(c.id) ?? null));
     const response: SchedulesResponse = { schedules, total };
     return json(200, response);
@@ -218,10 +235,12 @@ export function getSchedule(storage: SchedulerStorage) {
   };
 }
 
-export function createSchedule(storage: SchedulerStorage) {
+export function createSchedule(deps: ScheduleRouteDeps) {
   return async (req: Request): Promise<Response> => {
     const body = await readJson<ScheduleCreateRequest>(req);
     if (!body || !body.id) return jsonError(400, "missing_id");
+    const namespace = await resolveOptionalNamespaceId(deps.namespaces, body.namespace);
+    if ("response" in namespace) return namespace.response;
 
     const triggerCount =
       (body.cron ? 1 : 0) + (body.rrule ? 1 : 0) + (body.intervalMs !== undefined ? 1 : 0);
@@ -240,7 +259,7 @@ export function createSchedule(storage: SchedulerStorage) {
     const config: DurableScheduleConfig = {
       id: body.id,
       name: body.name,
-      namespace: body.namespace,
+      namespace: namespace.namespaceId,
       cron: body.cron,
       rrule: body.rrule,
       intervalMs: body.intervalMs,
@@ -255,7 +274,7 @@ export function createSchedule(storage: SchedulerStorage) {
     };
 
     try {
-      await storage.upsertSchedule(config);
+      await deps.storage.upsertSchedule(config);
       // `upsertSchedule` writes config columns only — `next_run` stays
       // NULL on insert, which makes the row invisible to `findDue` and
       // the SchedulerLoop never fires it. Match
@@ -263,8 +282,8 @@ export function createSchedule(storage: SchedulerStorage) {
       // so the first poll picks it up (computeDueTicks fires one boot
       // tick at `now` when `lastFired` is null, then commitPoll advances
       // nextRun onto the natural cron / interval cadence).
-      await storage.setNextRun(config.id, new Date());
-      const state = await storage.loadScheduleState(config.id);
+      await deps.storage.setNextRun(config.id, new Date());
+      const state = await deps.storage.loadScheduleState(config.id);
       return json(200, toDto(config, state));
     } catch (err) {
       return jsonError(400, "upsert_failed", err instanceof Error ? err.message : String(err));

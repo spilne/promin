@@ -19,6 +19,11 @@ export function NamespaceSwitcher() {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
 
+  const applyNamespaceList = (ids: string[]) => {
+    setNamespaces(ids);
+    if (current && !ids.includes(current)) setCurrent("");
+  };
+
   // Refresh the namespace list whenever the dropdown opens — cheap, and it
   // picks up newly-created namespaces without requiring a full page reload.
   useEffect(() => {
@@ -28,7 +33,7 @@ export function NamespaceSwitcher() {
       .listNamespaces({ status: "active" })
       .then((r) => {
         if (cancelled) return;
-        setNamespaces(r.namespaces.map((ns) => ns.id));
+        applyNamespaceList(r.namespaces.map((ns) => ns.id));
       })
       .catch(() => {
         // Ignore — show whatever we have and let the user try again.
@@ -43,7 +48,7 @@ export function NamespaceSwitcher() {
   useEffect(() => {
     api
       .listNamespaces({ status: "active" })
-      .then((r) => setNamespaces(r.namespaces.map((ns) => ns.id)))
+      .then((r) => applyNamespaceList(r.namespaces.map((ns) => ns.id)))
       .catch(() => {});
   }, []);
 

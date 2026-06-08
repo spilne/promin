@@ -249,11 +249,11 @@ export interface ZoryaServerConfig extends AuthConfig {
   /** Optional DAG gateway service. Mounts /api/dags/* routes. */
   dags?: ZoryaDags;
   /**
-   * Authoritative namespace registry. Defaults to an in-memory registry with
-   * a prebuilt "default" namespace. Production hosts should pass a durable
-   * registry so namespace lifecycle and policy survive restart.
+   * Authoritative namespace registry storage. ZoryaServer wraps it in its
+   * NamespaceService policy boundary. Defaults to in-memory storage for
+   * tests/demo hosts that do not pass a durable registry.
    */
-  namespaces?: NamespaceService | NamespaceRegistry;
+  namespaces?: NamespaceRegistry;
   /**
    * Mount the remote-worker HTTP surface. Pulls stepQueue / workerRegistry /
    * advertisements / workflowStarts from the workflows service.
@@ -357,10 +357,7 @@ export class ZoryaServer {
     if (config.fragments) this.fragments = config.fragments;
     if (config.dags) this.dags = config.dags;
     if (config.secrets) this.secrets = config.secrets;
-    this.namespaces =
-      config.namespaces instanceof NamespaceService
-        ? config.namespaces
-        : new NamespaceService({ registry: config.namespaces });
+    this.namespaces = new NamespaceService({ registry: config.namespaces });
     this.versionRegistry = config.versionRegistry ?? new WorkflowVersionRegistry();
 
     this.logger = config.logger ?? console;
@@ -412,10 +409,17 @@ export class ZoryaServer {
           }),
       )
       .get("/api/runs", listRuns(deps))
-      .get("/api/namespaces", listNamespaces({ namespaces: this.namespaces }))
+      .get(
+        "/api/namespaces",
+        listNamespaces({
+          namespaces: this.namespaces,
+          discover: () => storage.distinctNamespaces(),
+        }),
+      )
       .post("/api/namespaces", createNamespace({ namespaces: this.namespaces }))
       .get("/api/namespaces/:id", getNamespace({ namespaces: this.namespaces }))
       .patch("/api/namespaces/:id", updateNamespace({ namespaces: this.namespaces }))
+      .post("/api/namespaces/:id/archive", archiveNamespace({ namespaces: this.namespaces }))
       .delete("/api/namespaces/:id", archiveNamespace({ namespaces: this.namespaces }))
       .get("/api/workflows", listWorkflowNames(deps))
       .get("/api/runs/:id", getRun(deps))
@@ -512,6 +516,7 @@ export class ZoryaServer {
       const agentDeps: AgentGatewayDeps = {
         registry: this.agents.registry,
         resolve: this.agents.resolve,
+        namespaces: this.namespaces,
         ...(this.agents.instances !== undefined && { instanceRegistry: this.agents.instances }),
         ...(this.agents.roles !== undefined && { roles: this.agents.roles }),
         ...(this.agents.turnGate !== undefined && { turnGate: this.agents.turnGate }),
@@ -619,6 +624,7 @@ export class ZoryaServer {
         // registry, matching the /api/agents/_catalog/fragments precedence.
         const mem = {
           memory: this.agents.memory,
+          namespaces: this.namespaces,
           registry: this.agents.registry,
           ...((this.fragments?.registry ?? this.agents.fragments) && {
             fragments: this.fragments?.registry ?? this.agents.fragments,
@@ -694,7 +700,7 @@ export class ZoryaServer {
     }
 
     if (this.secrets) {
-      const sec = { secrets: this.secrets };
+      const sec = { secrets: this.secrets, namespaces: this.namespaces };
       this.router
         .post("/api/secrets", createSecret(sec))
         .get("/api/secrets", listSecrets(sec))
@@ -709,6 +715,7 @@ export class ZoryaServer {
         // webhook deps narrow to only the methods it uses.
         resolve: this.agents.resolve as unknown as WebhookGatewayDeps["resolve"],
         sources: config.webhooks.sources,
+        namespaces: this.namespaces,
       };
       this.router.post("/webhooks/:source/:agentId", ingestWebhook(webhookDeps));
     }
@@ -742,10 +749,11 @@ export class ZoryaServer {
 
     if (this.scheduler) {
       const sch = this.scheduler.storage;
+      const schDeps = { storage: sch, namespaces: this.namespaces };
       const sched = this.scheduler;
       this.router
-        .get("/api/schedules", listSchedules(sch))
-        .post("/api/schedules", createSchedule(sch))
+        .get("/api/schedules", listSchedules(schDeps))
+        .post("/api/schedules", createSchedule(schDeps))
         .get("/api/schedules/:id", getSchedule(sch))
         .patch("/api/schedules/:id", patchSchedule(sch))
         .delete("/api/schedules/:id", deleteSchedule(sch))

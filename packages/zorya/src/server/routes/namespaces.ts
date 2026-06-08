@@ -14,6 +14,7 @@ import { NamespaceArchivedError, NamespaceNotFoundError } from "../services/name
 
 export interface NamespacesGatewayDeps {
   readonly namespaces: NamespaceService;
+  readonly discover?: () => Promise<readonly string[]>;
 }
 
 export interface NamespacesResponse {
@@ -41,12 +42,22 @@ export function listNamespaces(deps: NamespacesGatewayDeps) {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const status = url.searchParams.get("status");
-    const allowedStatus = status === "active" || status === "archived" ? status : undefined;
+    if (status !== null && status !== "active" && status !== "archived") {
+      return jsonError(400, "invalid_namespace_status");
+    }
     try {
       await deps.namespaces.ensureDefaultNamespace();
-      const namespaces = await deps.namespaces.registry.list(
-        allowedStatus ? { status: allowedStatus } : undefined,
-      );
+      if (deps.discover) {
+        for (const id of await deps.discover()) {
+          try {
+            await deps.namespaces.ensure({ id });
+          } catch (err) {
+            if (err instanceof Error && err.message === "invalid_namespace_id") continue;
+            throw err;
+          }
+        }
+      }
+      const namespaces = await deps.namespaces.registry.list(status ? { status } : undefined);
       const response: NamespacesResponse = {
         namespaces,
         defaultNamespaceId: deps.namespaces.defaultNamespaceId,
@@ -108,7 +119,12 @@ export function updateNamespace(deps: NamespacesGatewayDeps) {
     if (body.description === null || typeof body.description === "string") {
       patch.description = body.description;
     }
-    if (body.status === "active" || body.status === "archived") patch.status = body.status;
+    if (body.status !== undefined) {
+      if (body.status !== "active" && body.status !== "archived") {
+        return jsonError(400, "invalid_namespace_status");
+      }
+      patch.status = body.status;
+    }
     if (isRecord(body.capabilities)) {
       patch.capabilities = body.capabilities as NamespaceCapabilities;
     }
@@ -141,6 +157,11 @@ function namespaceRouteError(err: unknown, fallback: string): Response {
   if (err instanceof NamespaceArchivedError) return jsonError(409, "namespace_archived");
   const message = err instanceof Error ? err.message : String(err);
   if (message === "invalid_namespace_id") return jsonError(400, "invalid_namespace_id");
+  if (message === "invalid_namespace_status") return jsonError(400, "invalid_namespace_status");
+  if (message === "invalid_namespace_capabilities") {
+    return jsonError(400, "invalid_namespace_capabilities");
+  }
+  if (message === "invalid_namespace_metadata") return jsonError(400, "invalid_namespace_metadata");
   if (message.startsWith("namespace already exists")) {
     return jsonError(409, "namespace_exists", message);
   }

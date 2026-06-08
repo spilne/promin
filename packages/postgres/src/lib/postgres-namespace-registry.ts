@@ -7,6 +7,7 @@ import {
   NamespaceNotFoundError,
   normalizeNamespaceDisplayName,
   normalizeNamespaceId,
+  normalizeNamespaceStatus,
   sanitizeNamespaceCapabilities,
   sanitizeNamespaceRecord,
   type Namespace,
@@ -81,11 +82,12 @@ export class PostgresNamespaceRegistry implements NamespaceRegistry {
   }
 
   async list(params: { status?: Namespace["status"] } = {}): Promise<Namespace[]> {
-    const rows = params.status
+    const status = params.status ? normalizeNamespaceStatus(params.status) : undefined;
+    const rows = status
       ? await this.db
           .select()
           .from(zoryaNamespace)
-          .where(eq(zoryaNamespace.status, params.status))
+          .where(eq(zoryaNamespace.status, status))
           .orderBy(asc(zoryaNamespace.displayName), asc(zoryaNamespace.id))
       : await this.db
           .select()
@@ -104,7 +106,7 @@ export class PostgresNamespaceRegistry implements NamespaceRegistry {
         displayName: normalizeNamespaceDisplayName(patch.displayName, key),
       }),
       ...(patch.description !== undefined && { description: patch.description }),
-      ...(patch.status !== undefined && { status: patch.status }),
+      ...(patch.status !== undefined && { status: normalizeNamespaceStatus(patch.status) }),
       ...(patch.capabilities !== undefined && {
         capabilities: sanitizeNamespaceCapabilities(patch.capabilities),
       }),
@@ -144,7 +146,7 @@ function toNamespace(row: {
     id: row.id,
     displayName: row.displayName,
     description: row.description,
-    status: row.status === "archived" ? "archived" : "active",
+    status: normalizeNamespaceStatus(row.status),
     capabilities: coerceObject<NamespaceCapabilities>(row.capabilities),
     metadata: coerceObject<Record<string, unknown>>(row.metadata),
     createdAt: row.createdAt,

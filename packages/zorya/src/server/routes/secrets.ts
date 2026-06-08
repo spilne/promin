@@ -17,9 +17,12 @@
 
 import type { SecretScope, SecretsStorage } from "@promin/agent";
 import { json, jsonError, readJson } from "../router.ts";
+import type { NamespaceService } from "../services/namespaces.ts";
+import { resolveRequiredNamespaceId } from "./namespace-validation.ts";
 
 export interface SecretsGatewayDeps {
   readonly secrets: SecretsStorage;
+  readonly namespaces?: NamespaceService;
 }
 
 interface CreateSecretRequest {
@@ -100,6 +103,8 @@ export function createSecret(deps: SecretsGatewayDeps) {
     if (!body) return jsonError(400, "missing_body");
     const scope = parseScopeFromBody(body.scope);
     if ("error" in scope) return jsonError(400, scope.error);
+    const resolvedScope = await resolveSecretScope(deps.namespaces, scope);
+    if ("response" in resolvedScope) return resolvedScope.response;
     if (typeof body.key !== "string" || !KEY_PATTERN.test(body.key)) {
       return jsonError(400, "invalid_key", "Key must match [A-Za-z][A-Za-z0-9_\\-.]{0,127}.");
     }
@@ -110,8 +115,8 @@ export function createSecret(deps: SecretsGatewayDeps) {
       return jsonError(413, "value_too_large", `Secret value exceeds ${MAX_VALUE_BYTES} bytes.`);
     }
     try {
-      await deps.secrets.set({ scope, key: body.key, value: body.value });
-      const response: CreateSecretResponse = { scope, key: body.key };
+      await deps.secrets.set({ scope: resolvedScope.scope, key: body.key, value: body.value });
+      const response: CreateSecretResponse = { scope: resolvedScope.scope, key: body.key };
       return json(201, response);
     } catch (err) {
       return jsonError(500, "set_failed", err instanceof Error ? err.message : String(err));
@@ -124,9 +129,11 @@ export function listSecrets(deps: SecretsGatewayDeps) {
     const url = new URL(req.url);
     const scope = parseScopeFromQuery(url);
     if ("error" in scope) return jsonError(400, scope.error);
+    const resolvedScope = await resolveSecretScope(deps.namespaces, scope);
+    if ("response" in resolvedScope) return resolvedScope.response;
     try {
-      const keys = await deps.secrets.list({ scope });
-      const response: ListSecretsResponse = { scope, keys };
+      const keys = await deps.secrets.list({ scope: resolvedScope.scope });
+      const response: ListSecretsResponse = { scope: resolvedScope.scope, keys };
       return json(200, response);
     } catch (err) {
       return jsonError(500, "list_failed", err instanceof Error ? err.message : String(err));
@@ -141,11 +148,32 @@ export function deleteSecret(deps: SecretsGatewayDeps) {
     const url = new URL(req.url);
     const scope = parseScopeFromQuery(url);
     if ("error" in scope) return jsonError(400, scope.error);
+    const resolvedScope = await resolveSecretScope(deps.namespaces, scope);
+    if ("response" in resolvedScope) return resolvedScope.response;
     try {
-      await deps.secrets.delete({ scope, key });
+      await deps.secrets.delete({ scope: resolvedScope.scope, key });
       return new Response(null, { status: 204 });
     } catch (err) {
       return jsonError(500, "delete_failed", err instanceof Error ? err.message : String(err));
     }
+  };
+}
+
+async function resolveSecretScope(
+  namespaces: NamespaceService | undefined,
+  scope: SecretScope,
+): Promise<{ scope: SecretScope } | { response: Response }> {
+  if (scope.kind === "global") return { scope };
+  const namespace = await resolveRequiredNamespaceId(namespaces, scope.namespaceId);
+  if ("response" in namespace) return namespace;
+  if (scope.kind === "namespace") {
+    return { scope: { kind: "namespace", namespaceId: namespace.namespaceId } };
+  }
+  return {
+    scope: {
+      kind: "resource",
+      namespaceId: namespace.namespaceId,
+      resourceId: scope.resourceId,
+    },
   };
 }

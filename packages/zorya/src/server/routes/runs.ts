@@ -25,6 +25,7 @@ import type { WorkflowAdvertisementRegistry } from "../workflow-advertisements.t
 import { RunsService } from "../services/runs-service.ts";
 import type { NamespaceService } from "../services/namespaces.ts";
 import { NamespaceArchivedError, NamespaceNotFoundError } from "../services/namespaces.ts";
+import { resolveOptionalNamespaceId } from "./namespace-validation.ts";
 
 export interface RunTrigger {
   (
@@ -74,11 +75,16 @@ export function listRuns(deps: RunRoutesDeps) {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const sort = parseSortParam(url.searchParams.get("sort"));
+    const namespace = await resolveOptionalNamespaceId(
+      deps.namespaces,
+      url.searchParams.get("namespace"),
+    );
+    if ("response" in namespace) return namespace.response;
     const q: RunListQuery = {
       status: (url.searchParams.get("status") as WorkflowStatus | null) ?? undefined,
       name: url.searchParams.get("name") ?? undefined,
       type: url.searchParams.get("type") ?? undefined,
-      namespace: url.searchParams.get("namespace") ?? undefined,
+      namespace: namespace.namespaceId,
       version: url.searchParams.get("version") ?? undefined,
       runSource:
         (url.searchParams.get("runSource") as RunListQuery["runSource"] | null) ?? undefined,
@@ -161,8 +167,12 @@ export function listWorkflowNames(deps: RunRoutesDeps) {
   const service = makeService(deps);
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
-    const namespace = url.searchParams.get("namespace") ?? undefined;
-    return json(200, await service.listNames({ namespace }));
+    const namespace = await resolveOptionalNamespaceId(
+      deps.namespaces,
+      url.searchParams.get("namespace"),
+    );
+    if ("response" in namespace) return namespace.response;
+    return json(200, await service.listNames({ namespace: namespace.namespaceId }));
   };
 }
 

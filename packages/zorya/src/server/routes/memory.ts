@@ -42,9 +42,12 @@ import type {
 } from "@promin/agent";
 import { inlineRoleDefinition, resolveSystemPrompt } from "@promin/agent";
 import { json, jsonError } from "../router.ts";
+import type { NamespaceService } from "../services/namespaces.ts";
+import { resolveRequiredNamespaceId } from "./namespace-validation.ts";
 
 export interface MemoryInspectorDeps {
   readonly memory: MemoryStore;
+  readonly namespaces?: NamespaceService;
   /**
    * Recipe store. When set (and the request carries `agentId`), the
    * inspector resolves the agent's persona — its role system prompt — so
@@ -142,26 +145,38 @@ export function inspectMemory(deps: MemoryInspectorDeps) {
     const resourceId = url.searchParams.get("resourceId") ?? undefined;
     const threadId = url.searchParams.get("threadId") ?? undefined;
     const agentId = url.searchParams.get("agentId") ?? undefined;
-    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    const namespace = await resolveRequiredNamespaceId(deps.namespaces, namespaceId);
+    if ("response" in namespace) return namespace.response;
 
     try {
-      const namespace = await loadNamespaceSnapshot(deps.memory, namespaceId);
+      const namespaceSnapshot = await loadNamespaceSnapshot(deps.memory, namespace.namespaceId);
       const resource = resourceId
-        ? await loadResourceSnapshot(deps.memory, { namespaceId, resourceId })
+        ? await loadResourceSnapshot(deps.memory, {
+            namespaceId: namespace.namespaceId,
+            resourceId,
+          })
         : null;
       const thread = threadId
-        ? await loadThreadSnapshot(deps.memory, { namespaceId, resourceId, threadId })
+        ? await loadThreadSnapshot(deps.memory, {
+            namespaceId: namespace.namespaceId,
+            resourceId,
+            threadId,
+          })
         : null;
       const resolved = threadId
-        ? await loadResolvedSummary(deps.memory, { namespaceId, resourceId, threadId })
+        ? await loadResolvedSummary(deps.memory, {
+            namespaceId: namespace.namespaceId,
+            resourceId,
+            threadId,
+          })
         : null;
       const persona = agentId ? await loadPersona(deps, agentId) : null;
 
       const response: MemoryInspectResponse = {
-        namespaceId,
+        namespaceId: namespace.namespaceId,
         resourceId: resourceId ?? null,
         threadId: threadId ?? null,
-        namespace,
+        namespace: namespaceSnapshot,
         resource,
         thread,
         resolved,
@@ -220,7 +235,8 @@ async function loadThreadSnapshot(
 export function patchNamespace(deps: MemoryInspectorDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const namespaceId = params.namespaceId;
-    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    const namespace = await resolveRequiredNamespaceId(deps.namespaces, namespaceId);
+    if ("response" in namespace) return namespace.response;
     const body = (await req.json().catch(() => null)) as {
       staticRules?: string | null;
       workingMemory?: string | null;
@@ -235,7 +251,7 @@ export function patchNamespace(deps: MemoryInspectorDeps) {
     if (Object.keys(patch).length === 0) return jsonError(400, "empty_patch");
 
     try {
-      const row = await deps.memory.upsertNamespace(namespaceId, patch);
+      const row = await deps.memory.upsertNamespace(namespace.namespaceId, patch);
       return json(200, { row });
     } catch (err) {
       return jsonError(500, "patch_failed", err instanceof Error ? err.message : String(err));
@@ -246,13 +262,14 @@ export function patchNamespace(deps: MemoryInspectorDeps) {
 export function addNamespaceFact(deps: MemoryInspectorDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const namespaceId = params.namespaceId;
-    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    const namespace = await resolveRequiredNamespaceId(deps.namespaces, namespaceId);
+    if ("response" in namespace) return namespace.response;
     const body = (await req.json().catch(() => null)) as { text?: unknown } | null;
     const text = typeof body?.text === "string" ? body.text.trim() : "";
     if (!text) return jsonError(400, "missing_text");
 
     try {
-      const fact = await deps.memory.appendNamespaceFact(namespaceId, text);
+      const fact = await deps.memory.appendNamespaceFact(namespace.namespaceId, text);
       return json(201, { fact });
     } catch (err) {
       return jsonError(500, "add_failed", err instanceof Error ? err.message : String(err));
@@ -264,11 +281,12 @@ export function deleteNamespaceFact(deps: MemoryInspectorDeps) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
     const namespaceId = params.namespaceId;
     const factId = params.factId;
-    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    const namespace = await resolveRequiredNamespaceId(deps.namespaces, namespaceId);
+    if ("response" in namespace) return namespace.response;
     if (!factId) return jsonError(400, "missing_factId");
 
     try {
-      await deps.memory.deleteNamespaceFact(namespaceId, factId);
+      await deps.memory.deleteNamespaceFact(namespace.namespaceId, factId);
       return json(200, { ok: true });
     } catch (err) {
       return jsonError(500, "delete_failed", err instanceof Error ? err.message : String(err));

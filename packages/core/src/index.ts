@@ -43,6 +43,7 @@ export {
   NamespaceNotFoundError,
   normalizeNamespaceDisplayName,
   normalizeNamespaceId,
+  normalizeNamespaceStatus,
   sanitizeNamespaceCapabilities,
   sanitizeNamespaceRecord,
   type Namespace,

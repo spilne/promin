@@ -65,6 +65,13 @@ async function bootGateway(opts: BootOpts = {}) {
       },
     },
   });
+  await server.handle(
+    new Request("http://test/api/namespaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "acme", displayName: "Acme" }),
+    }),
+  );
   return { server };
 }
 

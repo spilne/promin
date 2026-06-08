@@ -57,6 +57,8 @@ import {
 } from "@promin/agent";
 import { WorkflowSuspendedError } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
+import type { NamespaceService } from "../services/namespaces.ts";
+import { resolveRequiredNamespaceId } from "./namespace-validation.ts";
 import { isDraftId } from "./agent-drafts.ts";
 
 // ---------------------------------------------------------------------------
@@ -138,6 +140,7 @@ export interface AgentGatewayDeps {
    * honor the implied semantics without somewhere to record the row.
    */
   readonly instanceRegistry?: AgentInstanceRegistry;
+  readonly namespaces?: NamespaceService;
   /**
    * Optional per-thread coordination gate. Wraps thread-bound routes
    * (`POST /threads/:threadId`, `POST /threads/:threadId/stream`,
@@ -326,19 +329,25 @@ async function resolveScope(
   deps: AgentGatewayDeps,
   registeredAgentId: string,
   parsed: ParsedInvoke,
-): Promise<{ resourceId?: string; instanceId?: string } | { error: string }> {
+): Promise<
+  | { namespaceId: string; resourceId?: string; instanceId?: string }
+  | { error: string }
+  | { response: Response }
+> {
+  const namespace = await resolveRequiredNamespaceId(deps.namespaces, parsed.namespaceId);
+  if ("response" in namespace) return namespace;
   if (parsed.ownerId !== undefined) {
     if (!deps.instanceRegistry) {
       return { error: "ownerId_unsupported" };
     }
     const instance = await deps.instanceRegistry.resolveOrCreate({
       registeredAgentId,
-      namespaceId: parsed.namespaceId,
+      namespaceId: namespace.namespaceId,
       ownerId: parsed.ownerId,
     });
-    return { resourceId: instance.id, instanceId: instance.id };
+    return { namespaceId: namespace.namespaceId, resourceId: instance.id, instanceId: instance.id };
   }
-  return { resourceId: parsed.resourceId };
+  return { namespaceId: namespace.namespaceId, resourceId: parsed.resourceId };
 }
 
 // ---------------------------------------------------------------------------
@@ -726,15 +735,16 @@ export function invokeAgent(deps: AgentGatewayDeps) {
 
     const scope = await resolveScope(deps, id, parsed);
     if ("error" in scope) return jsonError(400, scope.error);
+    if ("response" in scope) return scope.response;
 
     let agent: Agent;
     try {
       const resolved = await deps.resolve(recipe, {
-        namespaceId: parsed.namespaceId,
+        namespaceId: scope.namespaceId,
         ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
       });
       agent = resolved.withScope({
-        namespaceId: parsed.namespaceId,
+        namespaceId: scope.namespaceId,
         resourceId: scope.resourceId,
       });
     } catch (err) {
@@ -772,15 +782,16 @@ export function streamAgent(deps: AgentGatewayDeps) {
 
     const scope = await resolveScope(deps, id, parsed);
     if ("error" in scope) return jsonError(400, scope.error);
+    if ("response" in scope) return scope.response;
 
     let agent: Agent;
     try {
       const resolved = await deps.resolve(recipe, {
-        namespaceId: parsed.namespaceId,
+        namespaceId: scope.namespaceId,
         ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
       });
       agent = resolved.withScope({
-        namespaceId: parsed.namespaceId,
+        namespaceId: scope.namespaceId,
         resourceId: scope.resourceId,
       });
     } catch (err) {
@@ -849,15 +860,16 @@ export function sendThreadMessage(deps: AgentGatewayDeps) {
 
     const scope = await resolveScope(deps, id, parsed);
     if ("error" in scope) return jsonError(400, scope.error);
+    if ("response" in scope) return scope.response;
 
     let agent: Agent;
     try {
       const resolved = await deps.resolve(recipe, {
-        namespaceId: parsed.namespaceId,
+        namespaceId: scope.namespaceId,
         ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
       });
       agent = resolved.withScope({
-        namespaceId: parsed.namespaceId,
+        namespaceId: scope.namespaceId,
         resourceId: scope.resourceId,
       });
     } catch (err) {
@@ -884,7 +896,7 @@ export function sendThreadMessage(deps: AgentGatewayDeps) {
     try {
       const response = deps.turnGate
         ? await deps.turnGate.run({
-            key: { namespaceId: parsed.namespaceId, threadId },
+            key: { namespaceId: scope.namespaceId, threadId },
             ownerId,
             policy,
             run: async () => runTurn(),
@@ -917,15 +929,16 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
 
     const scope = await resolveScope(deps, id, parsed);
     if ("error" in scope) return jsonError(400, scope.error);
+    if ("response" in scope) return scope.response;
 
     let agent: Agent;
     try {
       const resolved = await deps.resolve(recipe, {
-        namespaceId: parsed.namespaceId,
+        namespaceId: scope.namespaceId,
         ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
       });
       agent = resolved.withScope({
-        namespaceId: parsed.namespaceId,
+        namespaceId: scope.namespaceId,
         resourceId: scope.resourceId,
       });
     } catch (err) {
@@ -940,7 +953,7 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
     if (deps.turnGate) {
       try {
         const lease = await deps.turnGate.acquire({
-          key: { namespaceId: parsed.namespaceId, threadId },
+          key: { namespaceId: scope.namespaceId, threadId },
           ownerId: deps.workerId ?? "gateway",
           policy: deps.defaultTurnPolicy ?? "strict",
         });
@@ -1001,15 +1014,16 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
       ...(parsed.ownerId !== undefined && { ownerId: parsed.ownerId }),
     });
     if ("error" in scope) return jsonError(400, scope.error);
+    if ("response" in scope) return scope.response;
 
     let agent: Agent;
     try {
       const resolved = await deps.resolve(recipe, {
-        namespaceId: parsed.namespaceId,
+        namespaceId: scope.namespaceId,
         ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
       });
       agent = resolved.withScope({
-        namespaceId: parsed.namespaceId,
+        namespaceId: scope.namespaceId,
         resourceId: scope.resourceId,
       });
     } catch (err) {
@@ -1189,7 +1203,8 @@ export function listAgentThreads(deps: AgentGatewayDeps) {
     const url = new URL(req.url);
     const namespaceId = url.searchParams.get("namespaceId") ?? undefined;
     const resourceId = url.searchParams.get("resourceId") ?? undefined;
-    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    const namespace = await resolveRequiredNamespaceId(deps.namespaces, namespaceId);
+    if ("response" in namespace) return namespace.response;
 
     const recipe = await deps.registry.get(id);
     if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
@@ -1199,10 +1214,10 @@ export function listAgentThreads(deps: AgentGatewayDeps) {
     let agent: Agent;
     try {
       const resolved = await deps.resolve(recipe, {
-        namespaceId,
+        namespaceId: namespace.namespaceId,
         ...(resourceId !== undefined && { resourceId }),
       });
-      agent = resolved.withScope({ namespaceId, resourceId });
+      agent = resolved.withScope({ namespaceId: namespace.namespaceId, resourceId });
     } catch (err) {
       return jsonError(500, "resolve_failed", asMessage(err));
     }
@@ -1229,7 +1244,8 @@ export function getThreadTrace(deps: AgentGatewayDeps) {
     const url = new URL(req.url);
     const namespaceId = url.searchParams.get("namespaceId") ?? undefined;
     const resourceId = url.searchParams.get("resourceId") ?? undefined;
-    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    const namespace = await resolveRequiredNamespaceId(deps.namespaces, namespaceId);
+    if ("response" in namespace) return namespace.response;
 
     const recipe = await deps.registry.get(id);
     if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
@@ -1239,10 +1255,10 @@ export function getThreadTrace(deps: AgentGatewayDeps) {
     let agent: Agent;
     try {
       const resolved = await deps.resolve(recipe, {
-        namespaceId,
+        namespaceId: namespace.namespaceId,
         ...(resourceId !== undefined && { resourceId }),
       });
-      agent = resolved.withScope({ namespaceId, resourceId });
+      agent = resolved.withScope({ namespaceId: namespace.namespaceId, resourceId });
     } catch (err) {
       return jsonError(500, "resolve_failed", asMessage(err));
     }
@@ -1268,7 +1284,8 @@ export function listThreadMessages(deps: AgentGatewayDeps) {
     const url = new URL(req.url);
     const namespaceId = url.searchParams.get("namespaceId") ?? undefined;
     const resourceId = url.searchParams.get("resourceId") ?? undefined;
-    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    const namespace = await resolveRequiredNamespaceId(deps.namespaces, namespaceId);
+    if ("response" in namespace) return namespace.response;
 
     const recipe = await deps.registry.get(id);
     if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
@@ -1278,10 +1295,10 @@ export function listThreadMessages(deps: AgentGatewayDeps) {
     let agent: Agent;
     try {
       const resolved = await deps.resolve(recipe, {
-        namespaceId,
+        namespaceId: namespace.namespaceId,
         ...(resourceId !== undefined && { resourceId }),
       });
-      agent = resolved.withScope({ namespaceId, resourceId });
+      agent = resolved.withScope({ namespaceId: namespace.namespaceId, resourceId });
     } catch (err) {
       return jsonError(500, "resolve_failed", asMessage(err));
     }
@@ -1322,7 +1339,8 @@ export function renameAgentThread(deps: AgentGatewayDeps) {
     const body = (await readJson<RenameThreadRequest>(req)) ?? {};
     const namespaceId = typeof body.namespaceId === "string" ? body.namespaceId : undefined;
     const resourceId = typeof body.resourceId === "string" ? body.resourceId : undefined;
-    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    const namespace = await resolveRequiredNamespaceId(deps.namespaces, namespaceId);
+    if ("response" in namespace) return namespace.response;
     // Empty / undefined title clears the rename — back to the threadId default.
     const title =
       typeof body.title === "string" && body.title.trim().length > 0 ? body.title.trim() : null;
@@ -1335,10 +1353,10 @@ export function renameAgentThread(deps: AgentGatewayDeps) {
     let agent: Agent;
     try {
       const resolved = await deps.resolve(recipe, {
-        namespaceId,
+        namespaceId: namespace.namespaceId,
         ...(resourceId !== undefined && { resourceId }),
       });
-      agent = resolved.withScope({ namespaceId, resourceId });
+      agent = resolved.withScope({ namespaceId: namespace.namespaceId, resourceId });
     } catch (err) {
       return jsonError(500, "resolve_failed", asMessage(err));
     }
@@ -1374,7 +1392,8 @@ export function distillThread(deps: AgentGatewayDeps) {
     const namespaceId = typeof body?.namespaceId === "string" ? body.namespaceId : undefined;
     const resourceId = typeof body?.resourceId === "string" ? body.resourceId : undefined;
     const force = body?.force === true;
-    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    const namespace = await resolveRequiredNamespaceId(deps.namespaces, namespaceId);
+    if ("response" in namespace) return namespace.response;
     if (!resourceId) return jsonError(400, "missing_resourceId");
 
     const recipe = await deps.registry.get(id);
@@ -1385,10 +1404,10 @@ export function distillThread(deps: AgentGatewayDeps) {
     let agent: Agent;
     try {
       const resolved = await deps.resolve(recipe, {
-        namespaceId,
+        namespaceId: namespace.namespaceId,
         ...(resourceId !== undefined && { resourceId }),
       });
-      agent = resolved.withScope({ namespaceId, resourceId });
+      agent = resolved.withScope({ namespaceId: namespace.namespaceId, resourceId });
     } catch (err) {
       return jsonError(500, "resolve_failed", asMessage(err));
     }
@@ -1434,7 +1453,8 @@ export function compactThread(deps: AgentGatewayDeps) {
     const namespaceId = typeof body?.namespaceId === "string" ? body.namespaceId : undefined;
     const resourceId = typeof body?.resourceId === "string" ? body.resourceId : undefined;
     const keepRecent = typeof body?.keepRecent === "number" ? body.keepRecent : undefined;
-    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    const namespace = await resolveRequiredNamespaceId(deps.namespaces, namespaceId);
+    if ("response" in namespace) return namespace.response;
 
     const recipe = await deps.registry.get(id);
     if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
@@ -1444,10 +1464,10 @@ export function compactThread(deps: AgentGatewayDeps) {
     let agent: Agent;
     try {
       const resolved = await deps.resolve(recipe, {
-        namespaceId,
+        namespaceId: namespace.namespaceId,
         ...(resourceId !== undefined && { resourceId }),
       });
-      agent = resolved.withScope({ namespaceId, resourceId });
+      agent = resolved.withScope({ namespaceId: namespace.namespaceId, resourceId });
     } catch (err) {
       return jsonError(500, "resolve_failed", asMessage(err));
     }
@@ -1483,7 +1503,8 @@ export function archiveAgentThread(deps: AgentGatewayDeps) {
     const body = (await readJson<ArchiveThreadRequest>(req)) ?? {};
     const namespaceId = typeof body.namespaceId === "string" ? body.namespaceId : undefined;
     const resourceId = typeof body.resourceId === "string" ? body.resourceId : undefined;
-    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    const namespace = await resolveRequiredNamespaceId(deps.namespaces, namespaceId);
+    if ("response" in namespace) return namespace.response;
     const archivedAt =
       body.archivedAt === null
         ? null
@@ -1499,10 +1520,10 @@ export function archiveAgentThread(deps: AgentGatewayDeps) {
     let agent: Agent;
     try {
       const resolved = await deps.resolve(recipe, {
-        namespaceId,
+        namespaceId: namespace.namespaceId,
         ...(resourceId !== undefined && { resourceId }),
       });
-      agent = resolved.withScope({ namespaceId, resourceId });
+      agent = resolved.withScope({ namespaceId: namespace.namespaceId, resourceId });
     } catch (err) {
       return jsonError(500, "resolve_failed", asMessage(err));
     }

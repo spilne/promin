@@ -6,9 +6,9 @@ CREATE TABLE IF NOT EXISTS zorya_namespace (
   id           TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,
   description  TEXT,
-  status       TEXT NOT NULL DEFAULT 'active',
-  capabilities JSONB NOT NULL,
-  metadata     JSONB NOT NULL,
+  status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+  capabilities JSONB NOT NULL DEFAULT '{}'::jsonb,
+  metadata     JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at   BIGINT NOT NULL,
   updated_at   BIGINT NOT NULL
 );

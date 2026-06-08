@@ -29,7 +29,7 @@ import { ZoryaServer } from "../../server.ts";
 
 const SKILL_BODY = "# Structured debugging\n\n1. Reproduce. 2. Bisect. 3. Hypothesize.";
 
-function boot() {
+async function boot() {
   const storage = new InMemoryWorkflowStorage();
   const runner = createWorkflowRunner({ storage });
   const workflows = new LocalWorkflows({
@@ -93,6 +93,13 @@ function boot() {
   const agents = new ZoryaAgents({ registry: agentRegistry, resolve });
   const skills = new ZoryaSkills({ registry: skillRegistry });
   const server = new ZoryaServer({ workflows, agents, skills });
+  await server.handle(
+    new Request("http://t/api/namespaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "acme", displayName: "Acme" }),
+    }),
+  );
   return { server, seen };
 }
 
@@ -102,7 +109,7 @@ async function jsonOf<T>(res: Response): Promise<T> {
 
 describe("skills e2e — create → catalog → attach → resolve → run → delete", () => {
   it("drives the full flow through the server", async () => {
-    const { server, seen } = boot();
+    const { server, seen } = await boot();
 
     // 1. Create a custom skill.
     const created = await server.handle(

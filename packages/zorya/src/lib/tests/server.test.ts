@@ -25,11 +25,13 @@ async function seedWorkflow(
   id: string,
   name: string,
   type?: string,
+  namespace?: string,
 ): Promise<void> {
   await storage.createWorkflow({
     workflowId: id,
     workflowName: name,
     workflowType: type,
+    ...(namespace !== undefined && { namespace }),
     input: { hello: "world" },
   });
 }
@@ -244,6 +246,14 @@ describe("ZoryaServer", () => {
       expect(body.namespaces.find((ns) => ns.id === "default")?.capabilities).toEqual({});
     });
 
+    it("backfills namespaces already present in workflow storage", async () => {
+      await seedWorkflow(storage, "wf-tenant", "order", undefined, "tenant-a");
+      const res = await server.handle(new Request("http://x/api/namespaces"));
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as NamespacesResponse;
+      expect(body.namespaces.map((ns) => ns.id)).toContain("tenant-a");
+    });
+
     it("creates a namespace with capability policy", async () => {
       const create = await server.handle(
         new Request("http://x/api/namespaces", {
@@ -263,6 +273,37 @@ describe("ZoryaServer", () => {
       const acme = body.namespaces.find((ns) => ns.id === "acme");
       expect(acme?.displayName).toBe("Acme");
       expect(acme?.capabilities.ai?.maxTokensPerTurn).toBe(8192);
+    });
+
+    it("rejects invalid namespace status filters", async () => {
+      const res = await server.handle(new Request("http://x/api/namespaces?status=deleted"));
+      expect(res.status).toBe(400);
+      expect((await res.json()) as { error: string }).toEqual({
+        error: "invalid_namespace_status",
+      });
+    });
+
+    it("rejects malformed capability policy", async () => {
+      const res = await server.handle(
+        new Request("http://x/api/namespaces", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            id: "bad",
+            capabilities: { ai: { maxTokensPerTurn: "lots" } },
+          }),
+        }),
+      );
+      expect(res.status).toBe(400);
+      expect((await res.json()) as { error: string }).toEqual({
+        error: "invalid_namespace_capabilities",
+      });
+    });
+
+    it("rejects explicit run filters for unknown namespaces", async () => {
+      const res = await server.handle(new Request("http://x/api/runs?namespace=missing"));
+      expect(res.status).toBe(404);
+      expect((await res.json()) as { error: string }).toEqual({ error: "namespace_not_found" });
     });
   });
 

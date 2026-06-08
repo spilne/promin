@@ -57,6 +57,7 @@ import {
   SqliteAgentInstanceRegistry,
   SqliteDagRegistry,
   SqliteMemoryStore,
+  SqliteNamespaceRegistry,
   SqliteSecretsStorage,
 } from "@promin/sqlite";
 import {
@@ -140,6 +141,7 @@ db.exec("PRAGMA journal_mode = WAL");
 db.exec("PRAGMA foreign_keys = ON");
 
 const storage = SqliteWorkflowStorage.make({ db });
+const namespaceRegistry = SqliteNamespaceRegistry.make({ db });
 // Persistent scheduler state — `lastFiredAt`, `tickCount`, `nextRun`, and
 // leader locks all live on disk in the same db as workflow runs, so a
 // server restart resumes schedules from where they left off instead of
@@ -879,6 +881,17 @@ async function seedInitialRuns(
   }
 }
 
+async function seedDemoNamespaces() {
+  for (const ns of [
+    { id: "default", displayName: "Default", description: "Default Zorya namespace" },
+    { id: "tenant-a", displayName: "Tenant A", description: "Demo tenant A" },
+    { id: "tenant-b", displayName: "Tenant B", description: "Demo tenant B" },
+  ]) {
+    const existing = await namespaceRegistry.get(ns.id);
+    if (!existing) await namespaceRegistry.create(ns);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Schedules — seed + lightweight poll-based firing
 
@@ -1060,6 +1073,7 @@ async function startApprovalAutoSignaler(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Boot
 
+await seedDemoNamespaces();
 await seedSchedules();
 await seedAgents();
 await seedNamespaceMemory();
@@ -1299,6 +1313,7 @@ const server = new ZoryaServer({
   skills,
   fragments,
   dags,
+  namespaces: namespaceRegistry,
   // BYOK / per-tenant API keys / MCP credentials live here. Exposes
   // /api/secrets HTTP CRUD + the dashboard's Secrets page; the agent
   // resolver wiring (in `agents.resolve` above) reads model.credentialRef

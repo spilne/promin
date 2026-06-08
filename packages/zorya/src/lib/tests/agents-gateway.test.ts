@@ -108,6 +108,13 @@ async function bootGateway(opts?: {
     agents,
     ...(secrets !== undefined && { secrets }),
   });
+  await server.handle(
+    new Request("http://test/api/namespaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: "acme", displayName: "Acme" }),
+    }),
+  );
 
   return {
     server,
@@ -1152,6 +1159,13 @@ describe("agent gateway — distill rate limit (429)", () => {
       memory,
     });
     const server = new ZoryaServer({ workflows, agents });
+    await server.handle(
+      new Request("http://test/api/namespaces", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: "acme", displayName: "Acme" }),
+      }),
+    );
 
     const res = await server.handle(
       new Request("http://test/api/agents/support/threads/t-now/distill", {
