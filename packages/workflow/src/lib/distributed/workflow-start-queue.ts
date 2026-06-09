@@ -38,6 +38,11 @@ export interface WorkerWorkflowSpec {
 }
 
 export interface WorkflowStartQueue {
+  /**
+   * Enqueue a workflow start. Idempotent on active `workflowId`: while an
+   * existing start is pending or claimed, implementations return that start's
+   * id instead of creating a duplicate.
+   */
   enqueue(params: {
     workflowId: string;
     workflowName: string;
@@ -78,6 +83,11 @@ export class InMemoryWorkflowStartQueue implements WorkflowStartQueue {
     metadata?: Record<string, unknown>;
     version?: string;
   }): Promise<{ id: string }> {
+    const existing =
+      this.pending.find((rec) => rec.workflowId === params.workflowId) ??
+      [...this.inflight.values()].find((rec) => rec.workflowId === params.workflowId);
+    if (existing) return { id: existing.id };
+
     const id = `start-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     this.pending.push({
       id,

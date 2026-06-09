@@ -15,7 +15,7 @@
 //
 //   CREATE TABLE promin_workflow_starts (
 //     id            TEXT PRIMARY KEY,
-//     workflow_id   TEXT NOT NULL,
+//     workflow_id   TEXT NOT NULL UNIQUE,
 //     workflow_name TEXT NOT NULL,
 //     namespace     TEXT,
 //     version       TEXT,
@@ -105,6 +105,7 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_claimed ON ${t} (claimed_at) WHERE status = 'claimed'`,
     );
+    this.db.run(`CREATE UNIQUE INDEX IF NOT EXISTS ${t}_workflow_id ON ${t} (workflow_id)`);
   }
 
   async enqueue(params: {
@@ -118,7 +119,7 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
     const id = `start-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     this.db
       .query(
-        `INSERT INTO ${this._t}
+        `INSERT OR IGNORE INTO ${this._t}
            (id, workflow_id, workflow_name, namespace, version, input, metadata, enqueued_at, status)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
       )
@@ -132,7 +133,10 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
         params.metadata !== undefined ? JSON.stringify(params.metadata) : null,
         Date.now(),
       );
-    return { id };
+    const row = this.db
+      .query<{ id: string }>(`SELECT id FROM ${this._t} WHERE workflow_id = ?`)
+      .get(params.workflowId);
+    return { id: row?.id ?? id };
   }
 
   async claim(params: {

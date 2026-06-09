@@ -112,6 +112,7 @@ export class DefaultWorker implements WorkflowWorker {
   private readonly workerRegistry?: WorkerRegistry;
   private readonly heartbeatIntervalMs: number;
   private readonly workerMetadata?: Record<string, unknown>;
+  private readonly supportedVersions?: readonly string[];
   private readonly claimFilter: (task: StepTask) => boolean;
   private readonly clock: Clock;
   private running = false;
@@ -131,6 +132,7 @@ export class DefaultWorker implements WorkflowWorker {
     this.workerRegistry = config.workerRegistry;
     this.heartbeatIntervalMs = config.heartbeatIntervalMs ?? 5000;
     this.workerMetadata = config.metadata;
+    this.supportedVersions = config.supportedVersions;
     this.clock = config.clock ?? SystemClock;
 
     // Build the claim-time filter. Explicit `taskFilter` wins; otherwise
@@ -172,6 +174,8 @@ export class DefaultWorker implements WorkflowWorker {
         const claimCount = this.concurrency - this.activeCount;
         const tasks = await this.stepQueue.claim({
           capabilities: this.capabilities,
+          stepNames: this.registry.list(),
+          supportedVersions: this.supportedVersions,
           limit: claimCount,
           filter: this.claimFilter,
         });

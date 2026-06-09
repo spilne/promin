@@ -58,6 +58,43 @@ export function workflowStartQueueTestSuite(
       expect(claimed.length).toBe(2);
     });
 
+    it("enqueue is idempotent while a start is active", async () => {
+      const q = await make();
+      const first = await q.enqueue({
+        workflowId: "wf-dupe",
+        workflowName: "hello",
+        input: { n: 1 },
+      });
+      const second = await q.enqueue({
+        workflowId: "wf-dupe",
+        workflowName: "hello",
+        input: { n: 2 },
+      });
+      expect(second.id).toBe(first.id);
+      expect(await q.list()).toHaveLength(1);
+
+      const [claimed] = await q.claim({
+        workflowSpecs: [{ name: "hello", versions: ANY_VERSION }],
+        limit: 1,
+      });
+      const third = await q.enqueue({
+        workflowId: "wf-dupe",
+        workflowName: "hello",
+        input: { n: 3 },
+      });
+      expect(third.id).toBe(first.id);
+      expect(await q.list()).toHaveLength(1);
+
+      await q.complete(claimed!.id);
+      const fresh = await q.enqueue({
+        workflowId: "wf-dupe",
+        workflowName: "hello",
+        input: { n: 4 },
+      });
+      expect(fresh.id).not.toBe(first.id);
+      expect(await q.list()).toHaveLength(1);
+    });
+
     it("claim only returns starts the worker can run by name", async () => {
       const q = await make();
       await q.enqueue({ workflowId: "a", workflowName: "alpha", input: {} });

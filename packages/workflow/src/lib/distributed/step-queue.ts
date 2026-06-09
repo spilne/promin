@@ -142,6 +142,16 @@ export interface StepQueue {
      * with no `needs` declared.
      */
     capabilities?: readonly string[];
+    /**
+     * Optional step-name allow-list. Used by remote workers because their
+     * registry predicate cannot cross the HTTP boundary.
+     */
+    stepNames?: readonly string[];
+    /**
+     * Optional workflow-version allow-list. Unversioned tasks are always
+     * accepted for backward compatibility.
+     */
+    supportedVersions?: readonly string[];
     limit: number;
     /** Fairness policy for dequeue ordering. Default: strict-priority. */
     fairness?: FairnessPolicy;

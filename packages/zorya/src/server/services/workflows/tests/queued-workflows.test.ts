@@ -109,3 +109,29 @@ describe("QueuedWorkflows.rerun", () => {
     expect(list.some((r) => r.workflowId === workflowId)).toBe(true);
   });
 });
+
+describe("QueuedWorkflows deterministic ids", () => {
+  it("fresh-runs a terminal row before enqueueing the next start", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const queue = new InMemoryWorkflowStartQueue();
+    const workflows = new QueuedWorkflows({
+      storage,
+      workflowStarts: queue,
+      acceptAny: true,
+    });
+
+    await storage.createWorkflow({
+      workflowId: "scheduled-wf",
+      workflowName: "wf",
+      input: { old: true },
+    });
+    await storage.completeWorkflow("scheduled-wf", "old-result");
+
+    await workflows.trigger("wf", { old: false }, { workflowId: "scheduled-wf" });
+
+    const state = await storage.loadWorkflow("scheduled-wf");
+    expect(state?.status).toBe("pending");
+    expect(state?.result).toBeUndefined();
+    expect(await queue.list()).toHaveLength(1);
+  });
+});

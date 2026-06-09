@@ -38,6 +38,11 @@ import type { WorkflowRunner } from "../durable/workflow-runner.ts";
 import type { WorkflowState } from "../durable/workflow-state.ts";
 import type { WorkflowStorage } from "../durable/workflow-storage.ts";
 
+type WorkflowResolver = (
+  workflowName: string,
+  version?: string,
+) => Workflow<unknown, unknown> | Promise<Workflow<unknown, unknown> | undefined> | undefined;
+
 export interface SignalScannerConfig {
   /** Workflow storage to scan. */
   readonly storage: WorkflowStorage;
@@ -49,7 +54,7 @@ export interface SignalScannerConfig {
    * Resolve a pure `Workflow` definition by name. Passed back to the runner
    * for resumption; the scanner doesn't bind storage itself.
    */
-  readonly resolveWorkflow: (workflowName: string) => Workflow<unknown, unknown> | undefined;
+  readonly resolveWorkflow: WorkflowResolver;
   readonly onResume?: (workflowId: string) => void;
   readonly onError?: (workflowId: string, error: unknown) => void;
   /** Time source. Default `SystemClock`. Tests pass `FakeClock`. */
@@ -159,7 +164,8 @@ export class DefaultSignalScanner implements SignalScanner {
           consumed = true;
         }
 
-        if (consumed) await this.resumeWorkflow(wf.workflowId, wf.workflowName, wf.input);
+        if (consumed)
+          await this.resumeWorkflow(wf.workflowId, wf.workflowName, wf.input, wf.version);
       }
 
       if (suspended.length < pageSize) break;
@@ -171,8 +177,9 @@ export class DefaultSignalScanner implements SignalScanner {
     workflowId: string,
     workflowName: string,
     input: unknown,
+    version?: string,
   ): Promise<void> {
-    const definition = this.resolveWorkflow(workflowName);
+    const definition = await this.resolveWorkflow(workflowName, version);
     if (!definition) return;
 
     try {

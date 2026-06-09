@@ -43,7 +43,7 @@ export class TriggerService {
   readonly trigger: RunTrigger = async (name, input, options) => {
     const workflowId = options?.workflowId ?? crypto.randomUUID();
     const version = options?.version ?? (await this.resolveDefaultVersion(name));
-    await this.deps.storage.createWorkflow({
+    const result = await this.deps.storage.createWorkflow({
       workflowId,
       workflowName: name,
       input,
@@ -52,6 +52,9 @@ export class TriggerService {
       metadata: options?.metadata,
       version,
     });
+    if (!result.created && isTerminal(result.existing.status)) {
+      await this.deps.storage.startFreshRun(workflowId);
+    }
     if (this.deps.workflowStarts) {
       await this.deps.workflowStarts.enqueue({
         workflowId,
@@ -84,4 +87,8 @@ export class TriggerService {
     versions.sort();
     return versions[versions.length - 1];
   }
+}
+
+function isTerminal(status: string): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
 }

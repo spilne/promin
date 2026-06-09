@@ -86,7 +86,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
         storage: this.storage,
         runner: this.runner,
         scanIntervalMs,
-        resolveWorkflow: (name) => this.definitions[name],
+        resolveWorkflow: (name, version) => this.resolveDefinition(name, version),
       });
     }
 
@@ -101,17 +101,24 @@ export class LocalWorkflows extends ZoryaWorkflows {
         storage: this.storage,
         runner: this.runner,
         scanIntervalMs: signalIntervalMs,
-        resolveWorkflow: (name) => this.definitions[name],
+        resolveWorkflow: (name, version) => this.resolveDefinition(name, version),
       });
     }
   }
 
   /**
-   * Resolve a workflow name to a definition. Prefers the active version
-   * registered in `versionRegistry` when set; otherwise returns the
-   * local `definitions[name]` mapping (the existing default-export path).
+   * Resolve a workflow name to a definition. When a stored version is passed
+   * (scanner/recovery path), resolve that exact version. Fresh dispatches
+   * prefer the active registry version, then the local definitions map.
    */
-  private async resolveDefinition(name: string): Promise<Workflow<unknown, unknown> | undefined> {
+  private async resolveDefinition(
+    name: string,
+    version?: string,
+  ): Promise<Workflow<unknown, unknown> | undefined> {
+    if (version !== undefined && this.versionRegistry) {
+      const resolved = await this.versionRegistry.resolve(name, version);
+      if (resolved) return resolved;
+    }
     if (this.versionRegistry?.findActive) {
       const active = await this.versionRegistry.findActive(name);
       if (active) {

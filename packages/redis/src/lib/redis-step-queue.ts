@@ -298,11 +298,17 @@ export class RedisStepQueue implements StepQueue {
 
   async claim(params: {
     capabilities?: readonly string[];
+    stepNames?: readonly string[];
+    supportedVersions?: readonly string[];
     limit: number;
     fairness?: FairnessPolicy;
     filter?: (task: StepTask) => boolean;
   }): Promise<StepTask[]> {
     const caps = params.capabilities ?? [];
+    const stepNames = params.stepNames ? new Set(params.stepNames) : undefined;
+    const supportedVersions = params.supportedVersions
+      ? new Set(params.supportedVersions)
+      : undefined;
     const limit = Math.max(1, Math.floor(params.limit));
     // Fairness policies beyond strict-priority could be added to the Lua
     // — today we accept round-robin / weighted in the interface but fall
@@ -328,12 +334,16 @@ export class RedisStepQueue implements StepQueue {
       if (t) claimed.push(t);
     }
 
-    // Version filter / custom predicate — rejected tasks go back to
+    // Step/version/custom filters — rejected tasks go back to
     // pending so another worker can grab them.
-    if (params.filter) {
+    if (stepNames || supportedVersions || params.filter) {
       const accepted: StepTask[] = [];
       for (const t of claimed) {
-        if (params.filter(t)) {
+        const acceptedByStep = !stepNames || stepNames.has(t.stepName);
+        const acceptedByVersion =
+          !supportedVersions || t.version === undefined || supportedVersions.has(t.version);
+        const acceptedByCustom = !params.filter || params.filter(t);
+        if (acceptedByStep && acceptedByVersion && acceptedByCustom) {
           accepted.push(t);
           continue;
         }

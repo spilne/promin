@@ -445,6 +445,7 @@ export const workflowStarts = pgTable(
     index("wf_workflow_starts_claimed_idx")
       .on(t.claimedAt)
       .where(sql`${t.status} = 'claimed'`),
+    uniqueIndex("wf_workflow_starts_workflow_id_uniq").on(t.workflowId),
   ],
 );
 

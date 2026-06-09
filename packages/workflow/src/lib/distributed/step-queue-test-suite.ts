@@ -197,6 +197,61 @@ export function stepQueueTestSuite(factory: () => StepQueue | Promise<StepQueue>
         expect(tasks[0]!.needs).toEqual(["gpu"]);
       });
 
+      it("stepNames claim filter leaves unknown steps pending", async () => {
+        const q = await getQueue();
+        await q.enqueue({
+          workflowId: "wf-known",
+          stepName: "known",
+          input: {},
+          prevResults: {},
+        });
+        await q.enqueue({
+          workflowId: "wf-unknown",
+          stepName: "unknown",
+          input: {},
+          prevResults: {},
+        });
+
+        const claimed = await q.claim({ stepNames: ["known"], limit: 10 });
+        expect(claimed).toHaveLength(1);
+        expect(claimed[0]!.stepName).toBe("known");
+
+        const remaining = await q.claim({ stepNames: ["unknown"], limit: 10 });
+        expect(remaining).toHaveLength(1);
+        expect(remaining[0]!.stepName).toBe("unknown");
+      });
+
+      it("supportedVersions claim filter skips mismatched versioned tasks", async () => {
+        const q = await getQueue();
+        await q.enqueue({
+          workflowId: "wf-v1",
+          stepName: "step",
+          input: {},
+          prevResults: {},
+          version: "1",
+        });
+        await q.enqueue({
+          workflowId: "wf-v2",
+          stepName: "step",
+          input: {},
+          prevResults: {},
+          version: "2",
+        });
+        await q.enqueue({
+          workflowId: "wf-unversioned",
+          stepName: "step",
+          input: {},
+          prevResults: {},
+        });
+
+        const claimed = await q.claim({ supportedVersions: ["2"], limit: 10 });
+        expect(claimed.map((t) => t.workflowId).sort()).toEqual(["wf-unversioned", "wf-v2"]);
+
+        const remaining = await q.claim({ supportedVersions: ["1"], limit: 10 });
+        expect(remaining).toHaveLength(1);
+        expect(remaining[0]!.workflowId).toBe("wf-v1");
+      });
+
       it("worker missing a required capability leaves the task pending", async () => {
         const q = await getQueue();
         await q.enqueue({

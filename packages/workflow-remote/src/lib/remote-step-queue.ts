@@ -65,6 +65,8 @@ export class RemoteStepQueue implements StepQueue {
 
   claim(params: {
     capabilities?: readonly string[];
+    stepNames?: readonly string[];
+    supportedVersions?: readonly string[];
     limit: number;
     fairness?: FairnessPolicy;
     filter?: (task: StepTask) => boolean;

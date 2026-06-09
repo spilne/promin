@@ -53,6 +53,8 @@ export function createWorkerApiHandler(config: {
     claim: (p) =>
       stepQueue.claim({
         capabilities: p.capabilities,
+        stepNames: p.stepNames,
+        supportedVersions: p.supportedVersions,
         limit: p.limit,
         fairness: p.fairness,
       }),

@@ -18,7 +18,7 @@
 //     start; sweep runs on every `claim()` and `list()`
 // ---------------------------------------------------------------------------
 
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql, type SQL } from "drizzle-orm";
 import type { WorkerWorkflowSpec, WorkflowStartQueue, WorkflowStartRecord } from "@promin/workflow";
 import { SystemClock, type Clock } from "@promin/core";
 import type { DrizzleDb } from "./drizzle-db.ts";
@@ -67,18 +67,29 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
     version?: string;
   }): Promise<{ id: string }> {
     const id = generateStartId(this.clock.currentTimeMs());
-    await this.db.insert(workflowStarts).values({
-      id,
-      workflowId: params.workflowId,
-      workflowName: params.workflowName,
-      namespace: params.namespace ?? null,
-      version: params.version ?? null,
-      input: params.input as unknown,
-      metadata: params.metadata !== undefined ? (params.metadata as unknown) : null,
-      enqueuedAt: this.clock.now(),
-      status: "pending",
-    });
-    return { id };
+    const inserted = await this.db
+      .insert(workflowStarts)
+      .values({
+        id,
+        workflowId: params.workflowId,
+        workflowName: params.workflowName,
+        namespace: params.namespace ?? null,
+        version: params.version ?? null,
+        input: params.input as unknown,
+        metadata: params.metadata !== undefined ? (params.metadata as unknown) : null,
+        enqueuedAt: this.clock.now(),
+        status: "pending",
+      })
+      .onConflictDoNothing({ target: workflowStarts.workflowId })
+      .returning({ id: workflowStarts.id });
+    if (inserted[0]) return { id: inserted[0].id };
+
+    const [existing] = await this.db
+      .select({ id: workflowStarts.id })
+      .from(workflowStarts)
+      .where(eq(workflowStarts.workflowId, params.workflowId))
+      .limit(1);
+    return { id: existing?.id ?? id };
   }
 
   async claim(params: {
@@ -112,7 +123,7 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
       //    the worker advertises. Version-set match is filtered in JS
       //    after the lock is acquired (same as SQLite impl).
       const names = params.workflowSpecs.map((s) => s.name);
-      const namesLiteral = sql.raw(textArrayLiteral(names));
+      const namesLiteral = textArrayParam(names);
       // We need a window larger than `limit` ONLY when the caller has
       // version-pinned specs (one of `spec.versions` is non-empty) —
       // those filter rows out in JS so we have to fetch extras. When no
@@ -184,7 +195,7 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
       }
 
       if (idsToClaim.length > 0) {
-        const idsLiteral = sql.raw(textArrayLiteral(idsToClaim));
+        const idsLiteral = textArrayParam(idsToClaim);
         await tx
           .update(workflowStarts)
           .set({
@@ -252,21 +263,10 @@ function generateStartId(nowMs: number): string {
   return `start-${nowMs.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/**
- * Render a JS string[] as a Postgres `text[]` literal:
- *   ["foo", "bar"] → `'{"foo","bar"}'::text[]`
- *
- * postgres-js's parameter binding doesn't round-trip string[] cleanly
- * when the cast target is `text[]` — it sends the array as a single
- * delimited string and the receiver parses it as one element. Embedding
- * the literal as raw SQL avoids the binder entirely. Same workaround
- * used by `PgStepQueue` for its `needs` column.
- *
- * Values come from code (workflow names + ids), not user input, so the
- * literal is safe as long as we escape the two special chars (" and \).
- */
-function textArrayLiteral(arr: readonly string[]): string {
-  if (arr.length === 0) return `'{}'::text[]`;
-  const escaped = arr.map((s) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
-  return `'{${escaped.join(",")}}'::text[]`;
+function textArrayParam(arr: readonly string[]): SQL {
+  if (arr.length === 0) return sql`ARRAY[]::text[]`;
+  return sql`ARRAY[${sql.join(
+    arr.map((value) => sql`${value}`),
+    sql`, `,
+  )}]::text[]`;
 }

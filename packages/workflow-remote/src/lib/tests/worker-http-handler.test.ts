@@ -58,6 +58,42 @@ describe("createWorkerApiHandler", () => {
     expect(tasks[0].stepName).toBe("step-a");
   });
 
+  it("claim forwards step-name and version filters", async () => {
+    await queue.enqueue({
+      workflowId: "wf-v1",
+      stepName: "remote-step",
+      input: {},
+      prevResults: {},
+      version: "1",
+    });
+    await queue.enqueue({
+      workflowId: "wf-v2",
+      stepName: "remote-step",
+      input: {},
+      prevResults: {},
+      version: "2",
+    });
+    await queue.enqueue({
+      workflowId: "wf-other",
+      stepName: "other-step",
+      input: {},
+      prevResults: {},
+      version: "2",
+    });
+
+    const res = await post(handler, "claim", {
+      stepNames: ["remote-step"],
+      supportedVersions: ["2"],
+      limit: 5,
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    const tasks = WORKER_WIRE_CODEC.decode(body.result) as any[];
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].workflowId).toBe("wf-v2");
+  });
+
   it("complete marks task completed", async () => {
     await queue.enqueue({ workflowId: "wf-1", stepName: "step-a", input: {}, prevResults: {} });
     const [task] = await queue.claim({ limit: 1 });

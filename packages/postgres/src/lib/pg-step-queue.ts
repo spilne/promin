@@ -6,27 +6,19 @@
 // exactly-once delivery and natural load balancing.
 // ---------------------------------------------------------------------------
 
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, sql, type SQL } from "drizzle-orm";
 import type { StepQueue, StepTask, FairnessPolicy } from "@promin/workflow";
 import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
 import { stepQueue } from "./schema.ts";
 import { ensureTable as ensureTableFromSchema } from "./schema-utils.ts";
 import { SystemClock, type Clock } from "@promin/core";
 
-/**
- * Render a JS string[] as a Postgres `text[]` literal:
- *   ["foo", "bar"] → `'{"foo","bar"}'::text[]`
- *
- * Drizzle's parameter binding doesn't round-trip string[] cleanly for text[]
- * columns (it serializes the array into a single delimited string at bind
- * time). Embedding the literal as raw SQL avoids the binder entirely.
- * Values are escaped for the Postgres array-literal syntax — double quotes
- * and backslashes are the only escape targets.
- */
-function textArrayLiteral(arr: readonly string[]): string {
-  if (arr.length === 0) return `'{}'::text[]`;
-  const escaped = arr.map((s) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`);
-  return `'{${escaped.join(",")}}'::text[]`;
+function textArrayParam(arr: readonly string[]): SQL {
+  if (arr.length === 0) return sql`ARRAY[]::text[]`;
+  return sql`ARRAY[${sql.join(
+    arr.map((value) => sql`${value}`),
+    sql`, `,
+  )}]::text[]`;
 }
 
 export interface PgStepQueueConfig {
@@ -91,12 +83,7 @@ export class PgStepQueue implements StepQueue {
     const inputJson = params.input === undefined ? null : JSON.stringify(params.input);
     const prevResultsJson = JSON.stringify(params.prevResults);
     const metadataJson = params.metadata === undefined ? null : JSON.stringify(params.metadata);
-    // Raw SQL literal for text[] — drizzle's binder doesn't handle JS
-    // arrays cleanly for this column type. Step names / capability names
-    // come from code (readonly string[] on the interface), so the literal
-    // is safe as long as textArrayLiteral escapes the two special chars
-    // (" and \).
-    const needsLiteral = sql.raw(textArrayLiteral(needs));
+    const needsLiteral = textArrayParam(needs);
     // Idempotent on (workflow_id, step_name) via the partial unique index
     // `wf_step_queue_active_uniq`. DO UPDATE is a no-op self-assignment
     // that lets RETURNING surface the existing task id on conflict, so
@@ -136,6 +123,8 @@ export class PgStepQueue implements StepQueue {
 
   async claim(params: {
     capabilities?: readonly string[];
+    stepNames?: readonly string[];
+    supportedVersions?: readonly string[];
     limit: number;
     fairness?: FairnessPolicy;
     filter?: (task: StepTask) => boolean;
@@ -149,10 +138,16 @@ export class PgStepQueue implements StepQueue {
 
     // Capability filter: `needs <@ caps` = "every element of needs is in
     // caps." Empty caps still matches tasks with empty needs (∅ ⊆ ∅).
-    // Use raw literal for the same reason as enqueue — drizzle's
-    // parameter binding doesn't round-trip JS string[] to text[].
-    const capsLiteral = sql.raw(textArrayLiteral(caps));
+    const capsLiteral = textArrayParam(caps);
     const nsFilter = this.namespace ? sql` AND namespace = ${this.namespace}` : sql``;
+    const stepNameFilter =
+      params.stepNames !== undefined
+        ? sql` AND step_name = ANY(${textArrayParam(params.stepNames)})`
+        : sql``;
+    const versionFilter =
+      params.supportedVersions !== undefined
+        ? sql` AND (version IS NULL OR version = ANY(${textArrayParam(params.supportedVersions)}))`
+        : sql``;
 
     // ORDER BY fragment per fairness policy.
     let orderBy;
@@ -210,6 +205,8 @@ export class PgStepQueue implements StepQueue {
         WHERE status = 'pending'
           AND needs <@ ${capsLiteral}
           ${nsFilter}
+          ${stepNameFilter}
+          ${versionFilter}
       )
     `;
 

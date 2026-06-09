@@ -62,6 +62,24 @@ describe("DurableScheduler scalability features", () => {
     expect(after).toEqual({ lastFired: fired, tickCount: 5 });
   });
 
+  it("stream persists emitted ticks through commitPoll", async () => {
+    const storage = new InMemorySchedulerStorage();
+    const scheduler = new DurableScheduler({ storage, pollIntervalMs: 25 });
+    await scheduler.registerAsync({
+      id: "tick-log",
+      intervalMs: 1000,
+      metadata: { source: "test" },
+    });
+
+    const [tick] = await scheduler.stream("tick-log").take(1).collect();
+    expect(tick?.scheduleId).toBe("tick-log");
+
+    const logged = await storage.listTicks({ scheduleId: "tick-log" });
+    expect(logged).toHaveLength(1);
+    expect(logged[0]?.scheduleId).toBe("tick-log");
+    expect(logged[0]?.metadata).toEqual({ source: "test" });
+  });
+
   it("jitterMs randomizes firedAt within the configured window", async () => {
     const storage = new InMemorySchedulerStorage();
     const scheduler = new DurableScheduler({ storage, pollIntervalMs: 25 });

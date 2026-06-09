@@ -75,7 +75,7 @@ export class QueuedWorkflows extends ZoryaWorkflows {
     const workflowId = opts?.workflowId ?? crypto.randomUUID();
     const version = opts?.version ?? (await this.resolveDefaultVersion(name));
 
-    await this.storage.createWorkflow({
+    const result = await this.storage.createWorkflow({
       workflowId,
       workflowName: name,
       input,
@@ -86,6 +86,9 @@ export class QueuedWorkflows extends ZoryaWorkflows {
       ...(opts?.runSourceId !== undefined && { runSourceId: opts.runSourceId }),
       ...(version !== undefined && { version }),
     });
+    if (!result.created && isTerminal(result.existing.status)) {
+      await this.storage.startFreshRun(workflowId);
+    }
 
     await this.workflowStarts.enqueue({
       workflowId,
@@ -126,4 +129,8 @@ export class QueuedWorkflows extends ZoryaWorkflows {
     versions.sort();
     return versions[versions.length - 1];
   }
+}
+
+function isTerminal(status: string): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
 }

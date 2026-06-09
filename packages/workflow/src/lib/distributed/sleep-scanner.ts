@@ -14,6 +14,11 @@ import type { Workflow } from "../durable/durable-pipeline.ts";
 import type { WorkflowRunner } from "../durable/workflow-runner.ts";
 import { SystemClock, type Clock } from "@promin/core";
 
+type WorkflowResolver = (
+  workflowName: string,
+  version?: string,
+) => Workflow<unknown, unknown> | Promise<Workflow<unknown, unknown> | undefined> | undefined;
+
 export interface SleepScannerConfig {
   /** Workflow storage to scan for expired sleeps. */
   storage: WorkflowStorage;
@@ -30,7 +35,7 @@ export interface SleepScannerConfig {
    * returned definition back to the runner for resumption; it doesn't bind
    * storage itself.
    */
-  resolveWorkflow: (workflowName: string) => Workflow<unknown, unknown> | undefined;
+  resolveWorkflow: WorkflowResolver;
   /** Called when a workflow is resumed. */
   onResume?: (workflowId: string) => void;
   /** Called when resumption fails. */
@@ -133,7 +138,7 @@ export class DefaultSleepScanner implements SleepScanner {
             step.signalTimeoutAt &&
             step.signalTimeoutAt <= now;
           if (sleepDue || signalTimedOut) {
-            await this.resumeWorkflow(wf.workflowId, wf.workflowName, wf.input);
+            await this.resumeWorkflow(wf.workflowId, wf.workflowName, wf.input, wf.version);
             break; // one resume per workflow per scan
           }
         }
@@ -148,8 +153,9 @@ export class DefaultSleepScanner implements SleepScanner {
     workflowId: string,
     workflowName: string,
     input: unknown,
+    version?: string,
   ): Promise<void> {
-    const definition = this.resolveWorkflow(workflowName);
+    const definition = await this.resolveWorkflow(workflowName, version);
     if (!definition) return;
 
     try {

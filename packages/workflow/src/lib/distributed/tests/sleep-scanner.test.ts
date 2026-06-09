@@ -122,6 +122,39 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
     expect(errors).toHaveLength(0);
   });
 
+  it("passes the stored workflow version to resolveWorkflow", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const seenVersions: Array<string | undefined> = [];
+
+    const wfDef = workflow<string>({ name: "versioned-sleep", version: "1" })
+      .step("before", () => Pipeline.succeed("ok"))
+      .sleep("nap", 1)
+      .step("after", () => Pipeline.succeed("done"))
+      .build();
+
+    await runner.runSafe({ workflow: wfDef, workflowId: "sleep-versioned", input: "x" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const scanner = createSleepScanner({
+      storage,
+      runner,
+      scanIntervalMs: 50,
+      resolveWorkflow: (name, version) => {
+        seenVersions.push(version);
+        return name === "versioned-sleep" && version === "1" ? wfDef : undefined;
+      },
+    });
+
+    void scanner.start();
+    await new Promise((r) => setTimeout(r, 200));
+    await scanner.stop();
+
+    expect(seenVersions).toContain("1");
+    const state = await storage.loadWorkflow("sleep-versioned");
+    expect(state?.status).toBe("completed");
+  });
+
   it("three workflows sleeping — scanner wakes all of them in one scan cycle", async () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });

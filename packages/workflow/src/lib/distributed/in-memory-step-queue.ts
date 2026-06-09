@@ -87,17 +87,27 @@ export class InMemoryStepQueue implements StepQueue {
 
   async claim(params: {
     capabilities?: readonly string[];
+    stepNames?: readonly string[];
+    supportedVersions?: readonly string[];
     limit: number;
     fairness?: FairnessPolicy;
     filter?: (task: StepTask) => boolean;
   }): Promise<StepTask[]> {
     const caps = new Set(params.capabilities ?? []);
+    const stepNames = params.stepNames ? new Set(params.stepNames) : undefined;
+    const supportedVersions = params.supportedVersions
+      ? new Set(params.supportedVersions)
+      : undefined;
     const fairness = params.fairness ?? "strict-priority";
 
     // Subset check: task.needs ⊆ capabilities. Empty needs matches anyone.
     const canHandle = (task: MutableTask): boolean => {
       for (const n of task.needs) {
         if (!caps.has(n)) return false;
+      }
+      if (stepNames && !stepNames.has(task.stepName)) return false;
+      if (supportedVersions && task.version !== undefined && !supportedVersions.has(task.version)) {
+        return false;
       }
       return true;
     };

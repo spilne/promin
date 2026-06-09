@@ -322,6 +322,7 @@ export class DurableScheduler implements Scheduler {
           firedAt?: Date;
           tickIncrement?: number;
           nextRun: Date | null;
+          ticks?: readonly ScheduleTick[];
         }> = [];
 
         for (const id of targetIds) {
@@ -342,6 +343,7 @@ export class DurableScheduler implements Scheduler {
             firedAt: due.length > 0 ? due[due.length - 1]!.firedAt : undefined,
             tickIncrement: due.length > 0 ? due.length : undefined,
             nextRun: computeNextRun(config),
+            ticks: due.length > 0 ? due : undefined,
           });
         }
 

@@ -179,11 +179,17 @@ export class SqliteStepQueue implements StepQueue {
 
   async claim(params: {
     capabilities?: readonly string[];
+    stepNames?: readonly string[];
+    supportedVersions?: readonly string[];
     limit: number;
     fairness?: FairnessPolicy;
     filter?: (task: StepTask) => boolean;
   }): Promise<StepTask[]> {
     const caps = new Set(params.capabilities ?? []);
+    const stepNames = params.stepNames ? new Set(params.stepNames) : undefined;
+    const supportedVersions = params.supportedVersions
+      ? new Set(params.supportedVersions)
+      : undefined;
     const fairness = params.fairness ?? "strict-priority";
 
     // Load all pending tasks — SQLite is local so this is fine for reasonable queue sizes.
@@ -261,6 +267,10 @@ export class SqliteStepQueue implements StepQueue {
       if (claimed.length >= params.limit) break;
 
       const task = rowToTask(row);
+      if (stepNames && !stepNames.has(task.stepName)) continue;
+      if (supportedVersions && task.version !== undefined && !supportedVersions.has(task.version)) {
+        continue;
+      }
       if (params.filter && !params.filter(task)) continue;
       // Concurrency cap check.
       if (
