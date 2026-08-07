@@ -19,10 +19,40 @@ import {
 } from "@promin/sqlite";
 
 export interface SqliteZoryaStackConfig {
+  /**
+   * SQLite database path. Defaults to `./target/zorya.db`.
+   * Use `":memory:"` for an ephemeral stack.
+   */
   readonly path?: string;
+  /**
+   * Passphrase for the SQLite secrets vault.
+   * Production hosts should provide their own stable secret.
+   */
   readonly secretsPassphrase?: string;
 }
 
+/**
+ * Create the common single-process SQLite Zorya stack.
+ *
+ * This is a convenience for local apps, demos, tests, and small self-hosted
+ * deployments. It creates one Bun SQLite connection, enables WAL/foreign keys,
+ * and returns matching workflow, scheduler, namespace, agent, skill, fragment,
+ * DAG, memory, secrets, worker-start, and advertisement stores plus a workflow
+ * runner bound to the workflow storage.
+ *
+ * Advanced hosts can still construct each store manually, or swap selected
+ * stores after creation, as the demo does for Postgres-backed agent state.
+ *
+ * @example
+ * ```ts
+ * const stack = createSqliteZoryaStack({ path: "./target/zorya.db" });
+ * const workflows = new LocalWorkflows({
+ *   storage: stack.storage,
+ *   runner: stack.runner,
+ *   definitions,
+ * });
+ * ```
+ */
 export function createSqliteZoryaStack(config: SqliteZoryaStackConfig = {}) {
   const dbPath = config.path ?? "./target/zorya.db";
   if (dbPath !== ":memory:") {

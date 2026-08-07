@@ -136,93 +136,131 @@ export interface ZoryaWorkerConfig {
       };
 }
 
+/**
+ * Fluent builder for a `ZoryaWorker`.
+ *
+ * Use this when a worker has more than a client and a workflow list. The
+ * builder accepts typed workflow definitions without casts, accumulates
+ * repeated `.workflow()` / `.workflows(...)` calls, and validates the required
+ * `client()` + at least one workflow before constructing the worker.
+ *
+ * @example
+ * ```ts
+ * const worker = createZoryaWorkerBuilder()
+ *   .client(new ZoryaClient({ url }))
+ *   .workflows(orderWorkflow, paymentWorkflow)
+ *   .capabilities(["payments"])
+ *   .sampleInput(sampleInputFor)
+ *   .build();
+ *
+ * await worker.start();
+ * ```
+ */
 export class ZoryaWorkerBuilder {
   private config: Partial<ZoryaWorkerConfig> = {};
 
+  /** Required Zorya client. Provides remote storage, advertisements, and worker RPC. */
   client(client: ZoryaClient): this {
     this.config.client = client;
     return this;
   }
 
+  /** Add one or more workflow definitions this worker can advertise and execute. */
   workflows(...workflows: AnyWorkflow[]): this {
     this.config.workflows = [...(this.config.workflows ?? []), ...workflows];
     return this;
   }
 
+  /** Add a single workflow definition. Equivalent to `.workflows(workflow)`. */
   workflow(workflow: AnyWorkflow): this {
     return this.workflows(workflow);
   }
 
+  /** Stable worker id. Defaults to a random UUID when omitted. */
   workerId(workerId: string): this {
     this.config.workerId = workerId;
     return this;
   }
 
+  /** Capability tags used by step-mode routing and surfaced on the Workers page. */
   capabilities(capabilities: readonly string[]): this {
     this.config.capabilities = capabilities;
     return this;
   }
 
+  /** Advisory max concurrent workflow runs, surfaced as worker metadata. */
   concurrency(concurrency: number): this {
     this.config.concurrency = concurrency;
     return this;
   }
 
+  /** Heartbeat cadence for the worker registry. */
   heartbeatIntervalMs(heartbeatIntervalMs: number): this {
     this.config.heartbeatIntervalMs = heartbeatIntervalMs;
     return this;
   }
 
+  /** Provide default trigger-form input for advertised workflow definitions. */
   sampleInput(sampleInput: (workflowName: string) => unknown): this {
     this.config.sampleInput = sampleInput;
     return this;
   }
 
+  /** Application/deployment version shown in worker metadata. */
   version(version: string): this {
     this.config.version = version;
     return this;
   }
 
+  /** Free-form worker labels, such as region, team, environment, or deployment color. */
   labels(labels: Record<string, string>): this {
     this.config.labels = labels;
     return this;
   }
 
+  /** Namespaces this worker is allowed to serve. */
   namespaces(namespaces: readonly string[]): this {
     this.config.namespaces = namespaces;
     return this;
   }
 
+  /** Raw metadata merged with auto-detected runtime metadata. */
   metadata(metadata: Record<string, unknown>): this {
     this.config.metadata = metadata;
     return this;
   }
 
+  /** Enable or disable the worker-side sleep scanner for suspended workflow-mode runs. */
   resumeSuspendedRuns(resumeSuspendedRuns: boolean): this {
     this.config.resumeSuspendedRuns = resumeSuspendedRuns;
     return this;
   }
 
+  /** Configure polling for server-created workflow starts. Workflow mode only. */
   pollWorkflowStarts(pollWorkflowStarts: ZoryaWorkerConfig["pollWorkflowStarts"]): this {
     this.config.pollWorkflowStarts = pollWorkflowStarts;
     return this;
   }
 
+  /** Choose whole-workflow execution or step-task execution. Defaults to `"workflow"`. */
   mode(mode: ZoryaWorkerConfig["mode"]): this {
     this.config.mode = mode;
     return this;
   }
 
+  /** Configure step-task polling. Used when `mode("step")` is selected. */
   stepPolling(stepPolling: ZoryaWorkerConfig["stepPolling"]): this {
     this.config.stepPolling = stepPolling;
     return this;
   }
 
+  /** Enable the worker control WebSocket for server-pushed commands and stream relays. */
   controlSocket(controlSocket: ZoryaWorkerConfig["controlSocket"] = true): this {
     this.config.controlSocket = controlSocket;
     return this;
   }
 
+  /** Build the worker. Throws if `client()` or a workflow was not supplied. */
   build(): ZoryaWorker {
     if (!this.config.client) throw new Error("ZoryaWorkerBuilder.build: client() is required");
     if (!this.config.workflows || this.config.workflows.length === 0) {
@@ -232,6 +270,7 @@ export class ZoryaWorkerBuilder {
   }
 }
 
+/** Start a fluent `ZoryaWorker` configuration chain. */
 export function createZoryaWorkerBuilder(): ZoryaWorkerBuilder {
   return new ZoryaWorkerBuilder();
 }
