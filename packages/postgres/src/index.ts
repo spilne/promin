@@ -47,6 +47,12 @@ export {
 } from "./lib/agent/agent-instance-registry.ts";
 export { PostgresDagRegistry, type PostgresDagRegistryConfig } from "./lib/agent/dag-registry.ts";
 export {
+  PgVectorRetriever,
+  createPgVectorRetriever,
+  type PgVectorEnsureSchemaOptions,
+  type PgVectorRetrieverConfig,
+} from "./lib/agent/pgvector-retriever.ts";
+export {
   PostgresEvalRunStore,
   type PostgresEvalRunStoreConfig,
 } from "./lib/evals/eval-run-store.ts";
