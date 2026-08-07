@@ -89,7 +89,13 @@ export interface LoopOptions<T> {
 }
 
 /** Extract the success type from a parallel branch function. */
-export type BranchOutput<B> = B extends (ctx: any) => Pipeline<infer T, any> ? T : never;
+export type BranchOutput<B> = B extends (ctx: any) => Pipeline<infer T, any>
+  ? T
+  : B extends (ctx: any) => Promise<infer T>
+    ? T
+    : B extends (ctx: any) => infer T
+      ? T
+      : never;
 
 /** Union of all branch error types — flows into the builder's typed Error channel. */
 export type BranchError<Branches extends Record<string, unknown>> = {
@@ -99,6 +105,24 @@ export type BranchError<Branches extends Record<string, unknown>> = {
       : never
     : never;
 }[keyof Branches];
+
+export type StepBodyResult<T, E extends TaggedError = never> = Pipeline<T, E> | Promise<T>;
+export type StepBody<Ctx, T, E extends TaggedError = never> = (ctx: Ctx) => StepBodyResult<T, E>;
+
+function isPromiseLike<T>(value: unknown): value is Promise<T> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "then" in value &&
+    typeof (value as { then?: unknown }).then === "function"
+  );
+}
+
+function toPipeline<T, E extends TaggedError>(value: StepBodyResult<T, E>): Pipeline<T, E> {
+  if (value instanceof Pipeline) return value;
+  if (isPromiseLike<T>(value)) return Pipeline.fromPromise(() => value) as Pipeline<T, E>;
+  return Pipeline.succeed(value as T) as Pipeline<T, E>;
+}
 
 // ---------------------------------------------------------------------------
 // Queue concurrency config
@@ -413,6 +437,173 @@ export interface StepCacheOption {
    * workflows don't collide when they share a backing store.
    */
   readonly namespace?: string;
+}
+
+export class StepOptionsBuilder<T> {
+  private readonly options: StepOptions<T>;
+
+  constructor(options: StepOptions<T> = {}) {
+    this.options = options;
+  }
+
+  timeout(ms: number): StepOptionsBuilder<T> {
+    return new StepOptionsBuilder({ ...this.options, timeoutMs: ms });
+  }
+
+  retry(policy: RetryPolicy<TaggedError>): StepOptionsBuilder<T> {
+    return new StepOptionsBuilder({ ...this.options, retry: policy });
+  }
+
+  failure(strategy: StepFailureStrategy<T>): StepOptionsBuilder<T> {
+    return new StepOptionsBuilder({ ...this.options, onFailure: strategy });
+  }
+
+  fallback(fn: (error: unknown) => T): StepOptionsBuilder<T> {
+    return this.failure({ fallback: fn });
+  }
+
+  skipWhen(
+    predicate: (prev: unknown) => boolean,
+    value?: (prev: unknown) => T,
+  ): StepOptionsBuilder<T> {
+    return new StepOptionsBuilder({
+      ...this.options,
+      skipWhen: predicate,
+      ...(value ? { skipValue: value } : {}),
+    });
+  }
+
+  compensate(fn: StepOptions<T>["compensate"]): StepOptionsBuilder<T> {
+    return new StepOptionsBuilder({ ...this.options, compensate: fn });
+  }
+
+  cache(option: StepCacheOption): StepOptionsBuilder<T> {
+    return new StepOptionsBuilder({ ...this.options, cache: option });
+  }
+
+  queue(option: StepQueueOption<T>): StepOptionsBuilder<T> {
+    return new StepOptionsBuilder({ ...this.options, queue: option });
+  }
+
+  needs(capabilities: readonly string[]): StepOptionsBuilder<T> {
+    return new StepOptionsBuilder({ ...this.options, needs: capabilities });
+  }
+
+  priority(value: number): StepOptionsBuilder<T> {
+    return new StepOptionsBuilder({ ...this.options, priority: value });
+  }
+
+  codec(codec: Codec<T>): StepOptionsBuilder<T> {
+    return new StepOptionsBuilder({ ...this.options, codec });
+  }
+
+  show(show: Show<T>): StepOptionsBuilder<T> {
+    return new StepOptionsBuilder({ ...this.options, show });
+  }
+
+  build(): StepOptions<T> {
+    return this.options;
+  }
+}
+
+export function stepOptions<T = unknown>(): StepOptionsBuilder<T> {
+  return new StepOptionsBuilder<T>();
+}
+
+export interface WorkflowFragment<Input, Output = unknown> {
+  readonly name?: string;
+  apply(builder: WorkflowBuilder<Input, any, any, any>): WorkflowBuilder<Input, any, Output, any>;
+}
+
+type FragmentOperation =
+  | {
+      readonly kind: "step";
+      readonly name: string;
+      readonly fn: StepBody<any, unknown, any>;
+      readonly options?: StepOptions<any>;
+    }
+  | {
+      readonly kind: "parallel";
+      readonly name: string;
+      readonly branches: Record<string, StepBody<any, unknown, any>>;
+      readonly options?: StepOptions<any>;
+    };
+
+export class WorkflowTaskBuilder<
+  Input,
+  Current,
+  Error extends TaggedError = never,
+> implements WorkflowFragment<Input, Current> {
+  constructor(
+    readonly name: string,
+    private readonly operations: readonly FragmentOperation[],
+  ) {}
+
+  andThen<Name extends string, Output, E2 extends TaggedError = never>(
+    name: Name,
+    fn: StepBody<StepContext<Input, Current>, Output, E2>,
+    options?: StepOptions<Output>,
+  ): WorkflowTaskBuilder<Input, Output, Error | E2> {
+    return new WorkflowTaskBuilder(this.name, [
+      ...this.operations,
+      {
+        kind: "step",
+        name,
+        fn: fn as StepBody<any, unknown, any>,
+        options: options as StepOptions<any> | undefined,
+      },
+    ]);
+  }
+
+  parallel<
+    Name extends string,
+    Branches extends Record<string, StepBody<StepContext<Input, Current>, unknown, TaggedError>>,
+  >(
+    name: Name,
+    branches: Branches,
+    options?: StepOptions<{ [K in keyof Branches]: Awaited<ReturnType<Branches[K]>> }>,
+  ): WorkflowTaskBuilder<
+    Input,
+    { [K in keyof Branches]: Awaited<ReturnType<Branches[K]>> },
+    Error
+  > {
+    return new WorkflowTaskBuilder(this.name, [
+      ...this.operations,
+      {
+        kind: "parallel",
+        name,
+        branches: branches as Record<string, StepBody<any, unknown, any>>,
+        options: options as StepOptions<any> | undefined,
+      },
+    ]) as any;
+  }
+
+  apply(builder: WorkflowBuilder<Input, any, any, any>): WorkflowBuilder<Input, any, Current, any> {
+    let next: WorkflowBuilder<Input, any, any, any> = builder;
+    for (const op of this.operations) {
+      if (op.kind === "step") {
+        next = next.step(op.name, op.fn, op.options);
+      } else {
+        next = next.parallel(op.name, op.branches, op.options);
+      }
+    }
+    return next as WorkflowBuilder<Input, any, Current, any>;
+  }
+}
+
+export function step<Input = unknown, Output = unknown, E extends TaggedError = never>(
+  name: string,
+  fn: StepBody<StepContext<Input, Input>, Output, E>,
+  options?: StepOptions<Output>,
+): WorkflowTaskBuilder<Input, Output, E> {
+  return new WorkflowTaskBuilder(name, [
+    {
+      kind: "step",
+      name,
+      fn: fn as StepBody<any, unknown, any>,
+      options: options as StepOptions<any> | undefined,
+    },
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -771,7 +962,7 @@ export class WorkflowBuilder<
 
   step<Name extends string, Output, E2 extends TaggedError = never>(
     name: Name,
-    fn: (ctx: StepContext<Input, Current>) => Pipeline<Output, E2>,
+    fn: StepBody<StepContext<Input, Current>, Output, E2>,
     options?: StepOptions<Output>,
   ): WorkflowBuilder<Input, Steps & Record<Name, Output>, Output, Error | E2>;
 
@@ -787,7 +978,7 @@ export class WorkflowBuilder<
   >(
     name: Name,
     config: { dependsOn: [...DependsOn] },
-    fn: (ctx: DagStepContext<Input, Pick<Steps, DependsOn[number]>>) => Pipeline<Output, E2>,
+    fn: StepBody<DagStepContext<Input, Pick<Steps, DependsOn[number]>>, Output, E2>,
     options?: StepOptions<Output>,
   ): WorkflowBuilder<Input, Steps & Record<Name, Output>, Output, Error | E2>;
 
@@ -797,8 +988,8 @@ export class WorkflowBuilder<
 
   step(
     name: string,
-    fnOrConfig: ((ctx: any) => Pipeline<unknown, any>) | { dependsOn: string[] },
-    fnOrOptions?: ((ctx: any) => Pipeline<unknown, any>) | StepOptions<unknown>,
+    fnOrConfig: StepBody<any, unknown, any> | { dependsOn: string[] },
+    fnOrOptions?: StepBody<any, unknown, any> | StepOptions<unknown>,
     maybeOptions?: StepOptions<unknown>,
   ): WorkflowBuilder<Input, any, any, any> {
     let dependsOn: string[];
@@ -807,11 +998,19 @@ export class WorkflowBuilder<
 
     if (typeof fnOrConfig === "function") {
       dependsOn = this._lastStepName ? [this._lastStepName] : [];
-      fn = fnOrConfig;
+      fn = (ctx: any) => toPipeline(fnOrConfig(ctx));
       options = fnOrOptions as StepOptions<unknown> | undefined;
+      if (Array.isArray((options as { dependsOn?: unknown } | undefined)?.dependsOn)) {
+        dependsOn = [...((options as { dependsOn: string[] }).dependsOn ?? [])];
+        const { dependsOn: _dependsOn, ...rest } = options as StepOptions<unknown> & {
+          dependsOn?: string[];
+        };
+        options = rest;
+      }
     } else {
       dependsOn = fnOrConfig.dependsOn;
-      fn = fnOrOptions as (ctx: any) => Pipeline<unknown, any>;
+      const body = fnOrOptions as StepBody<any, unknown, any>;
+      fn = (ctx: any) => toPipeline(body(ctx));
       options = maybeOptions;
     }
 
@@ -832,7 +1031,7 @@ export class WorkflowBuilder<
   stepAsync<Name extends string, Output>(
     name: Name,
     fn: (ctx: StepContext<Input, Current>) => Promise<Output>,
-    options?: StepOptions<Output>,
+    options?: StepOptions<Output> & { dependsOn?: string[] },
   ): WorkflowBuilder<Input, Steps & Record<Name, Output>, Output, Error>;
 
   // ---------------------------------------------------------------------------
@@ -856,29 +1055,33 @@ export class WorkflowBuilder<
     fnOrOptions?: ((ctx: any) => Promise<unknown>) | StepOptions<unknown>,
     maybeOptions?: StepOptions<unknown>,
   ): WorkflowBuilder<Input, any, any, any> {
-    let dependsOn: string[];
-    let asyncFn: (ctx: any) => Promise<unknown>;
-    let options: StepOptions<unknown> | undefined;
-
     if (typeof fnOrConfig === "function") {
-      dependsOn = this._lastStepName ? [this._lastStepName] : [];
-      asyncFn = fnOrConfig;
-      options = fnOrOptions as StepOptions<unknown> | undefined;
-    } else {
-      dependsOn = fnOrConfig.dependsOn;
-      asyncFn = fnOrOptions as (ctx: any) => Promise<unknown>;
-      options = maybeOptions;
+      return this.step(name, fnOrConfig, fnOrOptions as StepOptions<unknown> | undefined);
     }
+    return this.step(name, fnOrConfig, fnOrOptions as (ctx: any) => Promise<unknown>, maybeOptions);
+  }
 
-    const wrappedFn = (ctx: any) => Pipeline.fromPromise(() => asyncFn(ctx));
-    return this._addStep({
-      name,
-      dependsOn,
-      fn: wrappedFn,
-      isLinear: typeof fnOrConfig === "function",
-      kind: "normal",
-      options,
-    });
+  // ---------------------------------------------------------------------------
+  // andThen — linear alias for fluent task-style composition
+  // ---------------------------------------------------------------------------
+
+  andThen<Name extends string, Output, E2 extends TaggedError = never>(
+    name: Name,
+    fn: StepBody<StepContext<Input, Current>, Output, E2>,
+    options?: StepOptions<Output>,
+  ): WorkflowBuilder<Input, Steps & Record<Name, Output>, Output, Error | E2> {
+    return this.step(name, fn, options);
+  }
+
+  use<Output>(
+    fragment: WorkflowFragment<Input, Output>,
+  ): WorkflowBuilder<Input, Steps & Record<string, unknown>, Output, Error> {
+    return fragment.apply(this as any) as WorkflowBuilder<
+      Input,
+      Steps & Record<string, unknown>,
+      Output,
+      Error
+    >;
   }
 
   // ---------------------------------------------------------------------------
@@ -1340,10 +1543,7 @@ export class WorkflowBuilder<
    */
   parallelSteps<
     Name extends string,
-    Branches extends Record<
-      string,
-      (ctx: StepContext<Input, Current>) => Pipeline<unknown, TaggedError>
-    >,
+    Branches extends Record<string, StepBody<StepContext<Input, Current>, unknown, TaggedError>>,
   >(
     name: Name,
     branches: Branches,
@@ -1354,6 +1554,49 @@ export class WorkflowBuilder<
     { [K in keyof Branches]: BranchOutput<Branches[K]> },
     Error | BranchError<Branches>
   > {
+    return this._parallelSteps(name, undefined, branches, options) as any;
+  }
+
+  parallel<
+    Name extends string,
+    Branches extends Record<string, StepBody<StepContext<Input, Current>, unknown, TaggedError>>,
+  >(
+    name: Name,
+    branches: Branches,
+    options?: StepOptions<{ [K in keyof Branches]: BranchOutput<Branches[K]> }>,
+  ): WorkflowBuilder<
+    Input,
+    Steps & Record<Name, { [K in keyof Branches]: BranchOutput<Branches[K]> }>,
+    { [K in keyof Branches]: BranchOutput<Branches[K]> },
+    Error | BranchError<Branches>
+  > {
+    return this.parallelSteps(name, branches, options);
+  }
+
+  fork<
+    Name extends string,
+    DependsOn extends (keyof Steps & string)[],
+    Branches extends Record<string, StepBody<StepContext<Input, Current>, unknown, TaggedError>>,
+  >(
+    name: Name,
+    config: { dependsOn: [...DependsOn] },
+    branches: Branches,
+    options?: StepOptions<{ [K in keyof Branches]: BranchOutput<Branches[K]> }>,
+  ): WorkflowBuilder<
+    Input,
+    Steps & Record<Name, { [K in keyof Branches]: BranchOutput<Branches[K]> }>,
+    { [K in keyof Branches]: BranchOutput<Branches[K]> },
+    Error | BranchError<Branches>
+  > {
+    return this._parallelSteps(name, config.dependsOn, branches, options) as any;
+  }
+
+  private _parallelSteps(
+    name: string,
+    dependsOnOverride: readonly string[] | undefined,
+    branches: Record<string, StepBody<StepContext<Input, Current>, unknown, TaggedError>>,
+    options?: StepOptions<any>,
+  ): WorkflowBuilder<Input, any, any, any> {
     this._validateName(name);
     const branchKeys = Object.keys(branches);
     if (branchKeys.length === 0) {
@@ -1364,7 +1607,11 @@ export class WorkflowBuilder<
     }
 
     const parentStep = this._lastStepName;
-    const parentDepends = parentStep ? [parentStep] : [];
+    const parentDepends = dependsOnOverride
+      ? [...dependsOnOverride]
+      : parentStep
+        ? [parentStep]
+        : [];
     const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
     const workflowName = this._name;
 
@@ -1389,7 +1636,7 @@ export class WorkflowBuilder<
 
       const branchFn = branches[key] as (
         ctx: StepContext<Input, Current>,
-      ) => Pipeline<unknown, TaggedError>;
+      ) => StepBodyResult<unknown, TaggedError>;
 
       branchSteps.push({
         name: scopedName,
@@ -1411,11 +1658,11 @@ export class WorkflowBuilder<
             attempt: execParams.attemptRef.current,
           };
           const cacheOption = options?.cache;
-          if (!cacheOption) return branchFn(ctx as StepContext<Input, Current>);
+          if (!cacheOption) return toPipeline(branchFn(ctx as StepContext<Input, Current>));
           return wrapWithStepCache(
             cacheOption,
             ctx as StepContext<unknown, unknown>,
-            () => branchFn(ctx as StepContext<Input, Current>),
+            () => toPipeline(branchFn(ctx as StepContext<Input, Current>)),
             cacheOption.namespace ?? workflowName,
           );
         },
@@ -1451,6 +1698,7 @@ export class WorkflowBuilder<
   branch<Name extends string, Output, E2 extends TaggedError = never>(
     name: Name,
     params: {
+      dependsOn?: readonly string[];
       condition: (value: Current) => boolean;
       ifTrue: (ctx: StepContext<Input, Current>) => Pipeline<Output, E2>;
       ifFalse: (ctx: StepContext<Input, Current>) => Pipeline<Output, E2>;
@@ -1459,7 +1707,11 @@ export class WorkflowBuilder<
   ): WorkflowBuilder<Input, Steps & Record<Name, Output>, Output, Error | E2> {
     this._validateName(name);
 
-    const dependsOn = this._lastStepName ? [this._lastStepName] : [];
+    const dependsOn = params.dependsOn
+      ? [...params.dependsOn]
+      : this._lastStepName
+        ? [this._lastStepName]
+        : [];
     const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
 
     const stepDef: StepDefinition = {
@@ -1797,10 +2049,15 @@ export class WorkflowBuilder<
   sleep(
     name: string,
     ms: number,
+    params?: { dependsOn?: readonly string[] },
   ): WorkflowBuilder<Input, Steps, Current, Error | WorkflowSuspendedError> {
     this._validateName(name);
 
-    const dependsOn = this._lastStepName ? [this._lastStepName] : [];
+    const dependsOn = params?.dependsOn
+      ? [...params.dependsOn]
+      : this._lastStepName
+        ? [this._lastStepName]
+        : [];
 
     const stepDef: StepDefinition = {
       name,
@@ -1857,6 +2114,7 @@ export class WorkflowBuilder<
   waitForSignal<T>(
     name: string,
     params: {
+      dependsOn?: readonly string[];
       signalName: string;
       timeoutMs?: number;
       codec?: Codec<T>;
@@ -1869,7 +2127,11 @@ export class WorkflowBuilder<
   > {
     this._validateName(name);
 
-    const dependsOn = this._lastStepName ? [this._lastStepName] : [];
+    const dependsOn = params.dependsOn
+      ? [...params.dependsOn]
+      : this._lastStepName
+        ? [this._lastStepName]
+        : [];
     const codec = (params.codec ?? this._codec()) as Codec<unknown>;
     const signalName = params.signalName;
     const timeoutMs = params.timeoutMs;
@@ -1933,6 +2195,28 @@ export class WorkflowBuilder<
     };
 
     return this._derive([...this._steps, stepDef], name) as any;
+  }
+
+  approval<T = { approved: boolean }>(
+    name: string,
+    params?: {
+      dependsOn?: readonly string[];
+      signalName?: string;
+      timeoutMs?: number;
+      codec?: Codec<T>;
+    },
+  ): WorkflowBuilder<
+    Input,
+    Steps & Record<string, T>,
+    T,
+    Error | WorkflowSuspendedError | WorkflowTimeoutError
+  > {
+    return this.waitForSignal<T>(name, {
+      dependsOn: params?.dependsOn,
+      signalName: params?.signalName ?? `${name}-approved`,
+      timeoutMs: params?.timeoutMs,
+      codec: params?.codec,
+    });
   }
 
   // ---------------------------------------------------------------------------

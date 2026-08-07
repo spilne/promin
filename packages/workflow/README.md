@@ -38,6 +38,34 @@ Steps with independent dependencies run in parallel automatically. Each step is 
 
 For non-durable use cases (scripts, request handlers), use `flow()` with the same API but no storage requirement.
 
+## Fluent Authoring
+
+```typescript
+import { createWorkflowApp, step, stepOptions, workflow } from "@promin/workflow";
+
+const normalizeUser = step<{ name: string }>("trim", async ({ input }) =>
+  input.name.trim(),
+).andThen("upper", async ({ prev }) => prev.toUpperCase());
+
+const onboardUser = workflow<{ name: string }>({ name: "onboard-user" })
+  .use(normalizeUser)
+  .parallel("enrich", {
+    profile: async ({ prev }) => profiles.lookup(prev),
+    permissions: async ({ prev }) => permissions.lookup(prev),
+  })
+  .approval("manager", { signalName: "manager-approved" })
+  .step(
+    "finish",
+    async ({ prev }) => ({ approved: prev.approved }),
+    stepOptions().timeout(30_000).retry({ maxRetries: 3, baseDelayMs: 500 }).build(),
+  )
+  .build();
+
+const app = createWorkflowApp({ storage });
+const onboard = app.workflow(onboardUser);
+await onboard.run({ workflowId: "onboard-1", input: { name: " Ada " } });
+```
+
 ## Features
 
 - **DAG scheduling** — declare step dependencies, auto-parallel execution

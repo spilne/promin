@@ -1134,6 +1134,70 @@ export function createWorkflowRunner(config: WorkflowRunnerConfig): WorkflowRunn
   return new DefaultWorkflowRunner(config);
 }
 
+export interface BoundWorkflow<Input, Output> {
+  readonly workflow: Workflow<Input, Output>;
+  run(params: {
+    readonly workflowId: string;
+    readonly input: Input;
+    readonly force?: boolean;
+    readonly namespace?: string;
+    readonly idempotencyKey?: string;
+    readonly idempotencyKeyTTL?: number;
+  }): Promise<Output>;
+  runSafe(params: {
+    readonly workflowId: string;
+    readonly input: Input;
+    readonly force?: boolean;
+    readonly namespace?: string;
+    readonly idempotencyKey?: string;
+    readonly idempotencyKeyTTL?: number;
+  }): Promise<{ data: Output; error: null } | { data: null; error: WorkflowRunSafeError }>;
+  start(params: {
+    readonly workflowId: string;
+    readonly input: Input;
+  }): Promise<WorkflowHandle<Output>>;
+  resume(params: { readonly workflowId: string; readonly fromStep: string }): Promise<Output>;
+}
+
+export function bindWorkflow<Input, Output>(
+  runner: WorkflowRunner,
+  workflow: Workflow<Input, Output>,
+): BoundWorkflow<Input, Output> {
+  return {
+    workflow,
+    run: (params) => runner.run({ workflow, ...params }) as Promise<Output>,
+    runSafe: (params) =>
+      runner.runSafe({ workflow, ...params }) as Promise<
+        { data: Output; error: null } | { data: null; error: WorkflowRunSafeError }
+      >,
+    start: (params) => runner.start({ workflow, ...params }),
+    resume: (params) => runner.resume({ workflow, ...params }),
+  };
+}
+
+export interface WorkflowApp {
+  readonly runner: WorkflowRunner;
+  workflow<Input, Output>(workflow: Workflow<Input, Output>): BoundWorkflow<Input, Output>;
+  run(params: WorkflowRunnerRunParams): Promise<unknown>;
+  runSafe(
+    params: WorkflowRunnerRunParams,
+  ): Promise<{ data: unknown; error: null } | { data: null; error: WorkflowRunSafeError }>;
+  handle<Output = unknown>(workflowId: string): WorkflowHandle<Output>;
+}
+
+export function createWorkflowApp(
+  config: WorkflowRunnerConfig | { runner: WorkflowRunner },
+): WorkflowApp {
+  const runner = "runner" in config ? config.runner : createWorkflowRunner(config);
+  return {
+    runner,
+    workflow: (workflow) => bindWorkflow(runner, workflow),
+    run: (params) => runner.run(params),
+    runSafe: (params) => runner.runSafe(params),
+    handle: (workflowId) => runner.handle(workflowId),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Orchestration helpers — pure, context-taking versions of the utilities
 // that used to be private methods on WorkflowBuilder. They live here so
@@ -2069,6 +2133,20 @@ export async function executeWorkflowDag(
             const fallbackFn = strategy.fallback;
             raw = raw.handleError((err) => fallbackFn(err));
           }
+
+          raw = Pipeline.from(
+            raw.effect.pipe(
+              Effect.catchAllDefect((defect) =>
+                Effect.fail(
+                  new StepError({
+                    workflowId,
+                    stepName: stepDef.name,
+                    message: defect instanceof Error ? defect.message : String(defect),
+                  }),
+                ),
+              ),
+            ),
+          ) as Pipeline<unknown, TaggedError>;
 
           // Map to step result + eager save. Without flatMap-ing the
           // save into the pipeline, the legacy path has the same wave-

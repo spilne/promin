@@ -97,7 +97,14 @@ export interface WorkflowSchema {
  * Use `type: "step"` for normal steps (including DAG steps with `dependsOn`).
  * Use `type: "map"` for fan-out over an array produced by another step.
  */
-export type StepSchema = SingleStepSchema | MapStepSchema;
+export type StepSchema =
+  | SingleStepSchema
+  | MapStepSchema
+  | SleepStepSchema
+  | SignalStepSchema
+  | ApprovalStepSchema
+  | BranchStepSchema
+  | ParallelStepSchema;
 
 /**
  * A single workflow step that executes one activity.
@@ -173,6 +180,56 @@ export interface MapStepSchema {
   /** Step-level options (retry, timeout, concurrency). */
   options?: MapStepSchemaOptions;
   /** JSON Schema describing each element's output type. */
+  outputSchema?: JsonSchema;
+}
+
+export interface SleepStepSchema {
+  type: "sleep";
+  name: string;
+  dependsOn: string[];
+  ms: number;
+}
+
+export interface SignalStepSchema {
+  type: "signal";
+  name: string;
+  dependsOn: string[];
+  signalName: string;
+  timeoutMs?: number;
+  outputSchema?: JsonSchema;
+}
+
+export interface ApprovalStepSchema {
+  type: "approval";
+  name: string;
+  dependsOn: string[];
+  signalName?: string;
+  timeoutMs?: number;
+  outputSchema?: JsonSchema;
+}
+
+export interface BranchStepSchema {
+  type: "branch";
+  name: string;
+  dependsOn: string[];
+  conditionRef: string;
+  ifTrue: { activityRef: string; config?: Record<string, unknown> };
+  ifFalse: { activityRef: string; config?: Record<string, unknown> };
+  options?: StepSchemaOptions;
+  outputSchema?: JsonSchema;
+}
+
+export interface ParallelBranchSchema {
+  activityRef: string;
+  config?: Record<string, unknown>;
+}
+
+export interface ParallelStepSchema {
+  type: "parallel";
+  name: string;
+  dependsOn: string[];
+  branches: Record<string, ParallelBranchSchema>;
+  options?: StepSchemaOptions;
   outputSchema?: JsonSchema;
 }
 

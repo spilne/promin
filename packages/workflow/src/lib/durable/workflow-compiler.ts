@@ -15,6 +15,11 @@ import type {
   StepSchema,
   SingleStepSchema,
   MapStepSchema,
+  SleepStepSchema,
+  SignalStepSchema,
+  ApprovalStepSchema,
+  BranchStepSchema,
+  ParallelStepSchema,
 } from "./workflow-schema.ts";
 import type { ActivityRegistry, ActivityContext } from "./activity-registry.ts";
 import { validateWorkflowSchema } from "./workflow-schema-validator.ts";
@@ -154,6 +159,16 @@ export function compileWorkflow<Input = unknown>(params: {
       builder = compileSingleStep(builder, step, registry);
     } else if (step.type === "map") {
       builder = compileMapStep(builder, step, registry);
+    } else if (step.type === "sleep") {
+      builder = compileSleepStep(builder, step);
+    } else if (step.type === "signal") {
+      builder = compileSignalStep(builder, step);
+    } else if (step.type === "approval") {
+      builder = compileApprovalStep(builder, step);
+    } else if (step.type === "branch") {
+      builder = compileBranchStep(builder, step, registry);
+    } else if (step.type === "parallel") {
+      builder = compileParallelStep(builder, step, registry);
     }
   }
 
@@ -209,6 +224,61 @@ function compileMapStep(builder: any, step: MapStepSchema, registry: ActivityReg
   ) as any;
 }
 
+function compileSleepStep(builder: any, step: SleepStepSchema): any {
+  return builder.sleep(step.name, step.ms, { dependsOn: step.dependsOn });
+}
+
+function compileSignalStep(builder: any, step: SignalStepSchema): any {
+  return builder.waitForSignal(step.name, {
+    dependsOn: step.dependsOn,
+    signalName: step.signalName,
+    timeoutMs: step.timeoutMs,
+  });
+}
+
+function compileApprovalStep(builder: any, step: ApprovalStepSchema): any {
+  return builder.approval(step.name, {
+    dependsOn: step.dependsOn,
+    signalName: step.signalName,
+    timeoutMs: step.timeoutMs,
+  });
+}
+
+function compileBranchStep(builder: any, step: BranchStepSchema, registry: ActivityRegistry): any {
+  const conditionFn = registry.resolve(step.conditionRef);
+  const trueFn = registry.resolve(step.ifTrue.activityRef, step.ifTrue.config);
+  const falseFn = registry.resolve(step.ifFalse.activityRef, step.ifFalse.config);
+  const options = compileStepOptions(step.options);
+
+  return builder.step(
+    step.name,
+    { dependsOn: step.dependsOn },
+    (ctx: any) =>
+      conditionFn(toActivityContext(ctx)).flatMap((passes) =>
+        (passes ? trueFn : falseFn)(toActivityContext(ctx)),
+      ),
+    options,
+  );
+}
+
+function compileParallelStep(
+  builder: any,
+  step: ParallelStepSchema,
+  registry: ActivityRegistry,
+): any {
+  const branches: Record<string, (ctx: any) => unknown> = {};
+  for (const [name, branch] of Object.entries(step.branches)) {
+    const activityFn = registry.resolve(branch.activityRef, branch.config);
+    branches[name] = (ctx: any) => activityFn(toActivityContext(ctx));
+  }
+  return builder.fork(
+    step.name,
+    { dependsOn: step.dependsOn },
+    branches,
+    compileStepOptions(step.options),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -255,6 +325,11 @@ function compileStepOptions(options?: {
 function stepDependsOn(step: StepSchema): string[] {
   if (step.type === "step") return step.dependsOn;
   if (step.type === "map") return [step.arrayFrom];
+  if (step.type === "sleep") return step.dependsOn;
+  if (step.type === "signal") return step.dependsOn;
+  if (step.type === "approval") return step.dependsOn;
+  if (step.type === "branch") return step.dependsOn;
+  if (step.type === "parallel") return step.dependsOn;
   return [];
 }
 
@@ -281,10 +356,35 @@ function validateDag(schema: WorkflowSchema, registry: ActivityRegistry): string
 
   for (const step of schema.steps) {
     // Check activity refs exist in registry
-    if (!registry.has(step.activityRef)) {
-      issues.push(
-        `Step "${step.name}" references unknown activity "${step.activityRef}". Available: ${registry.list().join(", ")}`,
-      );
+    if (step.type === "step" || step.type === "map") {
+      if (!registry.has(step.activityRef)) {
+        issues.push(
+          `Step "${step.name}" references unknown activity "${step.activityRef}". Available: ${registry.list().join(", ")}`,
+        );
+      }
+    } else if (step.type === "branch") {
+      for (const [label, activityRef] of [
+        ["condition", step.conditionRef],
+        ["ifTrue", step.ifTrue.activityRef],
+        ["ifFalse", step.ifFalse.activityRef],
+      ] as const) {
+        if (!registry.has(activityRef)) {
+          issues.push(
+            `Branch step "${step.name}" ${label} references unknown activity "${activityRef}". Available: ${registry.list().join(", ")}`,
+          );
+        }
+      }
+    } else if (step.type === "parallel") {
+      for (const [label, branch] of Object.entries(step.branches)) {
+        if (!registry.has(branch.activityRef)) {
+          issues.push(
+            `Parallel step "${step.name}" branch "${label}" references unknown activity "${branch.activityRef}". Available: ${registry.list().join(", ")}`,
+          );
+        }
+      }
+      if (Object.keys(step.branches).length === 0) {
+        issues.push(`Parallel step "${step.name}" requires at least one branch`);
+      }
     }
 
     // Check dependencies reference existing steps

@@ -37,6 +37,12 @@ const registry = new MapActivityRegistry({
   "transform.exclaim": () => (ctx) => Pipeline.succeed(`${ctx.prev}!`),
 
   "transform.identity": () => (ctx) => Pipeline.succeed(ctx.prev),
+
+  "predicate.long": () => (ctx) => Pipeline.succeed(String(ctx.prev).length > 3),
+
+  "transform.true": () => () => Pipeline.succeed("long"),
+
+  "transform.false": () => () => Pipeline.succeed("short"),
 });
 
 // ---------------------------------------------------------------------------
@@ -91,6 +97,36 @@ describe("WorkflowSchema validation", () => {
       ui: {
         a: { x: 100, y: 200, color: "#ff0000", label: "Transform" },
       },
+    };
+    expect(() => validateWorkflowSchema(schema)).not.toThrow();
+  });
+
+  it("validates fluent parity node schemas", () => {
+    const schema: WorkflowSchema = {
+      version: 1,
+      name: "parity",
+      steps: [
+        { type: "step", name: "start", dependsOn: [], activityRef: "transform.identity" },
+        { type: "sleep", name: "pause", dependsOn: ["start"], ms: 1 },
+        {
+          type: "parallel",
+          name: "fanout",
+          dependsOn: ["pause"],
+          branches: {
+            upper: { activityRef: "transform.uppercase" },
+            reverse: { activityRef: "transform.reverse" },
+          },
+        },
+        {
+          type: "branch",
+          name: "route",
+          dependsOn: ["start"],
+          conditionRef: "predicate.long",
+          ifTrue: { activityRef: "transform.true" },
+          ifFalse: { activityRef: "transform.false" },
+        },
+        { type: "approval", name: "approve", dependsOn: ["route"], signalName: "approved" },
+      ],
     };
     expect(() => validateWorkflowSchema(schema)).not.toThrow();
   });
@@ -223,6 +259,103 @@ describe("compileWorkflow", () => {
         input: "a,b,c",
       });
       expect(result).toEqual(["a", "b", "c"]);
+    });
+  });
+
+  describe("fluent parity nodes", () => {
+    it("compiles branch nodes", async () => {
+      const definition = compileWorkflow({
+        schema: {
+          version: 1,
+          name: "branch-schema",
+          steps: [
+            { type: "step", name: "start", dependsOn: [], activityRef: "transform.identity" },
+            {
+              type: "branch",
+              name: "route",
+              dependsOn: ["start"],
+              conditionRef: "predicate.long",
+              ifTrue: { activityRef: "transform.true" },
+              ifFalse: { activityRef: "transform.false" },
+            },
+          ],
+        },
+        registry,
+      });
+
+      const result = await runner.run({
+        workflow: definition,
+        workflowId: "compile-branch-1",
+        input: "hello",
+      });
+      expect(result).toBe("long");
+    });
+
+    it("compiles parallel nodes", async () => {
+      const definition = compileWorkflow({
+        schema: {
+          version: 1,
+          name: "parallel-schema",
+          steps: [
+            { type: "step", name: "start", dependsOn: [], activityRef: "transform.identity" },
+            {
+              type: "parallel",
+              name: "fanout",
+              dependsOn: ["start"],
+              branches: {
+                upper: { activityRef: "transform.uppercase" },
+                reverse: { activityRef: "transform.reverse" },
+              },
+            },
+          ],
+        },
+        registry,
+      });
+
+      const result = await runner.run({
+        workflow: definition,
+        workflowId: "compile-parallel-1",
+        input: "abc",
+      });
+      expect(result).toEqual({ upper: "ABC", reverse: "cba" });
+    });
+
+    it("compiles approval nodes as waitForSignal sugar", async () => {
+      const localStorage = new InMemoryWorkflowStorage();
+      const localRunner = createWorkflowRunner({ storage: localStorage });
+      const definition = compileWorkflow({
+        schema: {
+          version: 1,
+          name: "approval-schema",
+          steps: [
+            { type: "step", name: "start", dependsOn: [], activityRef: "transform.identity" },
+            {
+              type: "approval",
+              name: "approve",
+              dependsOn: ["start"],
+              signalName: "approved",
+            },
+            {
+              type: "step",
+              name: "finish",
+              dependsOn: ["approve"],
+              activityRef: "transform.identity",
+            },
+          ],
+        },
+        registry,
+      });
+
+      await localRunner.runSafe({
+        workflow: definition,
+        workflowId: "compile-approval-1",
+        input: "go",
+      });
+      await localStorage.deliverSignal("compile-approval-1", "approved", { ok: true });
+
+      await expect(
+        localRunner.run({ workflow: definition, workflowId: "compile-approval-1", input: "go" }),
+      ).resolves.toEqual({ ok: true });
     });
   });
 
