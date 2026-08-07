@@ -17,6 +17,7 @@ import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow"
 import { LocalAgent } from "../local-agent.ts";
 import { InMemoryMemoryStore } from "../../memory/in-memory-memory-store.ts";
 import type { LLMProvider, LLMResponse } from "../../llm-provider.ts";
+import { InMemoryRetriever } from "../../rag/in-memory-retriever.ts";
 
 function mockLLM(responses: LLMResponse[]): LLMProvider {
   let i = 0;
@@ -81,6 +82,77 @@ describe("LocalAgent — stream (one-shot)", () => {
     const out = agent.stream({ task: "hi" });
     expect(await out.text).toBe("streamed");
     expect(await out.finishReason).toBe("stop");
+  });
+});
+
+describe("LocalAgent — retrievers", () => {
+  it("auto-attaches retriever tools", async () => {
+    const { runner } = makeRunner();
+    let observedTools: string[] = [];
+    const llm: LLMProvider = {
+      chat: async (params) => {
+        observedTools = (params.tools ?? []).map((t) => t.name);
+        return { content: "ok", finishReason: "stop" };
+      },
+    };
+
+    const agent = new LocalAgent({
+      agent: { name: "support", llm },
+      runner,
+      namespaceId: "acme",
+      retrievers: {
+        docs: new InMemoryRetriever({
+          documents: [{ id: "returns", text: "Return unopened items within 30 days." }],
+        }),
+      },
+    });
+
+    const out = await agent.invoke({ task: "How do returns work?" });
+
+    expect(await out.text).toBe("ok");
+    expect(observedTools).toEqual(["search_docs"]);
+  });
+
+  it("injects context-mode retriever results before a turn", async () => {
+    const { runner } = makeRunner();
+    let observedSystem = "";
+    const llm: LLMProvider = {
+      chat: async (params) => {
+        observedSystem = params.messages
+          .filter((m) => m.role === "system")
+          .map((m) => m.content)
+          .join("\n\n");
+        return { content: "grounded", finishReason: "stop" };
+      },
+    };
+
+    const agent = new LocalAgent({
+      agent: { name: "support", llm, systemPrompt: "Answer from policy." },
+      runner,
+      namespaceId: "acme",
+      retrievers: {
+        docs: {
+          mode: "context",
+          retriever: new InMemoryRetriever({
+            documents: [
+              {
+                id: "returns",
+                title: "Returns",
+                uri: "https://example.test/returns",
+                text: "Returns allow unopened items within 30 days.",
+              },
+            ],
+          }),
+        },
+      },
+    });
+
+    await agent.invoke({ task: "How do returns work?" });
+
+    expect(observedSystem).toContain("Answer from policy.");
+    expect(observedSystem).toContain("Knowledge results from docs");
+    expect(observedSystem).toContain("Returns allow unopened items");
+    expect(observedSystem).toContain("source=Returns");
   });
 });
 

@@ -52,6 +52,8 @@ import {
 } from "../memory/consolidator.ts";
 import { createLayeredMemoryTool } from "../tools/layered-memory-tools.ts";
 import { createCallAgentTool, createFindAgentTool } from "../network/runtime.ts";
+import { createRetrieverTool } from "../rag/retriever-tool.ts";
+import type { Retriever, RetrieverFilter } from "../rag/types.ts";
 import { frameTask } from "./frame-task.ts";
 import {
   completeSignal,
@@ -210,6 +212,11 @@ export interface LocalAgentConfig<TOutput = any> {
     readonly recipe: import("../registry/types.ts").RegisteredAgent;
   };
   /**
+   * First-class RAG bindings. A binding can expose a retriever as an LLM tool,
+   * inject retrieved context before every turn, or do both.
+   */
+  readonly retrievers?: Readonly<Record<string, Retriever | AgentRetrieverBinding>>;
+  /**
    * Recipe id surfaced as `ctx.scope.agentId` to scope-aware tools
    * (the durable scheduler stamps this in schedule metadata so
    * `dispatchAgentSchedule` can look the recipe up later). Decoupled
@@ -218,6 +225,20 @@ export interface LocalAgentConfig<TOutput = any> {
    * to `agent.name` for backward compat.
    */
   readonly agentId?: string;
+}
+
+export interface AgentRetrieverBinding {
+  readonly retriever: Retriever;
+  /** LLM-facing tool name. Defaults to `search_knowledge_base` or `search_<id>`. */
+  readonly name?: string;
+  readonly description?: string;
+  readonly topK?: number;
+  readonly includeSources?: boolean;
+  readonly includeScores?: boolean;
+  readonly maxChunkCharacters?: number;
+  readonly filter?: RetrieverFilter;
+  /** Default `tool`. */
+  readonly mode?: "tool" | "context" | "tool-and-context";
 }
 
 export interface AutoCompactConfig {
@@ -534,6 +555,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       autoDistill: this.config.autoDistill === false ? undefined : this.config.autoDistill,
       consolidator: () => this.resolveConsolidator(),
       contextBudget: this.config.contextBudget,
+      retrievers: this.config.retrievers,
     });
   }
 
@@ -606,6 +628,26 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
         if (!("callAgent" in merged)) merged.callAgent = callAgent;
         tools = merged;
       }
+    }
+
+    if (this.config.retrievers) {
+      const merged: NonNullable<typeof tools> = { ...tools };
+      for (const [id, bindingLike] of Object.entries(this.config.retrievers)) {
+        const binding = normalizeRetrieverBinding(id, bindingLike);
+        if (!binding.mode.includes("tool")) continue;
+        const name = binding.name ?? retrieverToolName(id);
+        if (name in merged) continue;
+        merged[name] = createRetrieverTool({
+          retriever: binding.retriever,
+          name,
+          description: binding.description,
+          topK: binding.topK,
+          includeSources: binding.includeSources,
+          includeScores: binding.includeScores,
+          maxChunkCharacters: binding.maxChunkCharacters,
+        });
+      }
+      tools = merged;
     }
 
     // Capability gate — an elevated tool is exposed only when the
@@ -718,29 +760,12 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     // one-shot invoke too — the thread path used to be the only caller.
     // No threadId here (one-shot is stateless), so the layered memory
     // tool stays opt-out for invoke.
-    const namespaceId = opts?.namespaceId ?? this.config.namespaceId;
-    const resourceId = this.config.resourceId;
-    const agent = {
-      ...this.config.agent,
-      tools: this.buildTools({
-        ...(namespaceId !== undefined && { namespaceId }),
-        ...(resourceId !== undefined && { resourceId }),
-      }),
-    };
-    // Pass everything except agentLoop-specific knobs into agentAction.
-    const actionConfig = toActionConfig(agent, bus, {
-      ...(namespaceId !== undefined && { namespaceId }),
-      ...(resourceId !== undefined && { resourceId }),
-      agentId: this.config.agentId ?? this.config.agent.name,
-    });
-    const wf = (agentAction as (cfg: AgentActionConfig<TOutput>) => ReturnType<typeof agentAction>)(
-      actionConfig as AgentActionConfig<TOutput>,
-    );
     // Honor caller-provided `runId` so a schedule tick (or any deterministic
     // caller) lands on the same workflow row across retries. Falls back to
     // a fresh random id for plain interactive invocations.
     const workflowId =
-      opts?.runId ?? `${this.config.invokeIdPrefix ?? agent.name}-${randomUUID().slice(0, 8)}`;
+      opts?.runId ??
+      `${this.config.invokeIdPrefix ?? this.config.agent.name}-${randomUUID().slice(0, 8)}`;
 
     // Best-effort cancel: when caller's signal aborts, the underlying
     // runner.run currently has no abort hook, so we just record and
@@ -751,13 +776,33 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       });
     }
 
-    const promise = this.config.runner
-      .run({
+    const promise = (async () => {
+      const namespaceId = opts?.namespaceId ?? this.config.namespaceId;
+      const resourceId = this.config.resourceId;
+      const knowledgeContext = await buildRetrieverContext(this.config.retrievers, input.task);
+      const agent = {
+        ...this.config.agent,
+        systemPrompt: appendSystemBlock(this.config.agent.systemPrompt, knowledgeContext),
+        tools: this.buildTools({
+          ...(namespaceId !== undefined && { namespaceId }),
+          ...(resourceId !== undefined && { resourceId }),
+        }),
+      };
+      // Pass everything except agentLoop-specific knobs into agentAction.
+      const actionConfig = toActionConfig(agent, bus, {
+        ...(namespaceId !== undefined && { namespaceId }),
+        ...(resourceId !== undefined && { resourceId }),
+        agentId: this.config.agentId ?? this.config.agent.name,
+      });
+      const wf = (
+        agentAction as (cfg: AgentActionConfig<TOutput>) => ReturnType<typeof agentAction>
+      )(actionConfig as AgentActionConfig<TOutput>);
+      return this.config.runner.run({
         workflow: wf,
         workflowId,
         input: { task: frameTask(input), messages: [...(input.messages ?? [])] },
-      })
-      .then((r) => r as AgentResult);
+      });
+    })().then((r) => r as AgentResult);
     return { promise, capture };
   }
 }
@@ -784,6 +829,7 @@ interface LocalAgentThreadDeps {
   readonly consolidator?: () => Consolidator;
   /** Token budget for resolveContext. Default DEFAULT_CONTEXT_BUDGET. */
   readonly contextBudget?: TokenBudget;
+  readonly retrievers?: Readonly<Record<string, Retriever | AgentRetrieverBinding>>;
 }
 
 /**
@@ -1019,8 +1065,10 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     // blocks → two cache breakpoints at the Anthropic adapter, so the
     // persona prefix stays cached when the cascade changes mid-session.
     const { persona, cascade, messages: history } = await this.loadContext();
+    const knowledgeContext = await buildRetrieverContext(this.deps.retrievers, input.task);
     const seed: Message[] = [];
     if (cascade) seed.push({ role: "system", content: cascade });
+    if (knowledgeContext) seed.push({ role: "system", content: knowledgeContext });
     seed.push(...history);
     if (input.messages) seed.push(...input.messages);
 
@@ -1698,6 +1746,63 @@ function serializeSource(
 function stripStorageMeta(m: Message & { seq?: number; createdAt?: number }): Message {
   const { seq: _seq, createdAt: _createdAt, ...rest } = m as Record<string, unknown> & Message;
   return rest as Message;
+}
+
+function normalizeRetrieverBinding(
+  id: string,
+  bindingLike: Retriever | AgentRetrieverBinding,
+): Required<Pick<AgentRetrieverBinding, "retriever" | "mode">> &
+  Omit<AgentRetrieverBinding, "retriever" | "mode"> {
+  if ("retrieve" in bindingLike) {
+    return { retriever: bindingLike, mode: "tool" };
+  }
+  return { ...bindingLike, mode: bindingLike.mode ?? "tool" };
+}
+
+async function buildRetrieverContext(
+  retrievers: LocalAgentConfig["retrievers"],
+  query: string,
+): Promise<string | undefined> {
+  if (!retrievers) return undefined;
+  const blocks: string[] = [];
+  for (const [id, bindingLike] of Object.entries(retrievers)) {
+    const binding = normalizeRetrieverBinding(id, bindingLike);
+    if (!binding.mode.includes("context")) continue;
+    const results = await binding.retriever.retrieve({
+      query,
+      topK: binding.topK,
+      filter: binding.filter,
+      maxChunkCharacters: binding.maxChunkCharacters,
+    });
+    if (results.length === 0) continue;
+    const title = binding.name ?? id;
+    blocks.push(
+      [
+        `Knowledge results from ${title}:`,
+        ...results.map((result, i) => {
+          const source = result.chunk.source.title ?? result.chunk.source.id;
+          const uri = result.chunk.source.uri ? ` (${result.chunk.source.uri})` : "";
+          return `[${i + 1}] source=${source}${uri}\n${result.chunk.text}`;
+        }),
+      ].join("\n\n"),
+    );
+  }
+  if (blocks.length === 0) return undefined;
+  return `Use the following retrieved knowledge when relevant.\n\n${blocks.join("\n\n")}`;
+}
+
+function appendSystemBlock(
+  systemPrompt: AgentLoopConfig["systemPrompt"],
+  block: string | undefined,
+): AgentLoopConfig["systemPrompt"] {
+  if (!block) return systemPrompt;
+  const base = typeof systemPrompt === "string" ? systemPrompt.trim() : "";
+  return base ? `${base}\n\n${block}` : block;
+}
+
+function retrieverToolName(id: string): string {
+  if (id === "default") return "search_knowledge_base";
+  return `search_${id.replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "") || "knowledge"}`;
 }
 
 /**

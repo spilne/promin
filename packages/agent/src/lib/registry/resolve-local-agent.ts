@@ -17,6 +17,7 @@ import type { WorkflowRunner } from "@promin/workflow";
 import { LocalAgent, type LocalAgentConfig } from "../agent/local-agent.ts";
 import type { LLMProvider } from "../llm-provider.ts";
 import type { MemoryStore } from "../memory/types.ts";
+import type { Retriever } from "../rag/types.ts";
 // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
 import type { AgentTool } from "../tool.ts";
 import type { Consolidator } from "../memory/consolidator.ts";
@@ -39,6 +40,7 @@ import { LOAD_SKILL_TOOL_NAME, createLoadSkillTool } from "../skills/load-skill-
 import { resolveSystemPrompt } from "../fragments/resolve-prompt.ts";
 import type { FragmentRegistry } from "../fragments/types.ts";
 import type { RoleDefinition } from "../role/types.ts";
+import type { AgentRetrieverBinding } from "../agent/local-agent.ts";
 
 /** Caller-supplied runtime injectables. */
 export interface ResolveLocalAgentDeps {
@@ -118,6 +120,11 @@ export interface ResolveLocalAgentDeps {
    * opted into the network surface.
    */
   readonly network?: import("../network/runtime.ts").NetworkRuntimeDeps;
+  /**
+   * Runtime retriever registry. Recipe `backend.knowledge[].id` entries are
+   * resolved against this map and auto-attached as tools/context bindings.
+   */
+  readonly retrievers?: Readonly<Record<string, Retriever>>;
   /**
    * Skill registry the auto-attached `loadSkill` tool reads bodies from.
    * Required for skills to work: a recipe's `backend.skills` is ignored
@@ -214,6 +221,7 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
   const autoCompact = mergeAutoCompact(backend.autoCompact, deps.autoCompact);
   const autoDistill = mergeAutoDistill(backend.autoDistill, deps.autoDistill);
   const contextBudget = mergeContextBudget(backend.contextBudget, deps.contextBudget);
+  const retrievers = resolveKnowledgeBindings(backend, deps.retrievers);
 
   const config: LocalAgentConfig = {
     agent: {
@@ -236,6 +244,7 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
     autoCompact,
     autoDistill,
     contextBudget,
+    retrievers,
     // Auto-attach findAgent / callAgent only when both sides opt in:
     // the recipe declares `backend.network` AND the host wired runtime
     // deps. Recipe alone or deps alone is a no-op.
@@ -243,6 +252,33 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
   };
 
   return new LocalAgent(config);
+}
+
+function resolveKnowledgeBindings(
+  backend: LocalAgentBackend,
+  available: Readonly<Record<string, Retriever>> | undefined,
+): Record<string, AgentRetrieverBinding> | undefined {
+  if (!backend.knowledge || backend.knowledge.length === 0) return undefined;
+  const out: Record<string, AgentRetrieverBinding> = {};
+  for (const entry of backend.knowledge) {
+    const retriever = available?.[entry.id];
+    if (!retriever) {
+      throw new Error(
+        `resolveLocalAgent: knowledge retriever "${entry.id}" referenced by the recipe but not provided in deps.retrievers.`,
+      );
+    }
+    out[entry.id] = {
+      retriever,
+      name: entry.name,
+      description: entry.description,
+      topK: entry.topK,
+      includeSources: entry.includeSources,
+      includeScores: entry.includeScores,
+      maxChunkCharacters: entry.maxChunkCharacters,
+      mode: entry.mode,
+    };
+  }
+  return out;
 }
 
 /**

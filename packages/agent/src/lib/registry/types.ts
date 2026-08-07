@@ -103,6 +103,12 @@ export interface LocalAgentBackend {
    * on the agent, not the role.
    */
   readonly mcpServers?: ReadonlyArray<import("../mcp/types.ts").McpServerConfig>;
+  /**
+   * Optional RAG knowledge bindings. The host supplies concrete retrievers
+   * through `resolveLocalAgent({ retrievers })`; the recipe picks which ones
+   * to attach and whether they appear as tools, automatic context, or both.
+   */
+  readonly knowledge?: ReadonlyArray<AgentKnowledgeRecipe>;
   /** Per-turn step cap. Optional, runtime default applies when unset. */
   readonly maxStepsPerTurn?: number;
   /** Max user turns per session before the loop terminates. */
@@ -238,6 +244,20 @@ export interface AutoDistillRecipe {
 export interface ContextBudgetRecipe {
   readonly maxMessageTokens: number;
   readonly maxEpisodeTokens?: number;
+}
+
+export interface AgentKnowledgeRecipe {
+  /** Key into `ResolveLocalAgentDeps.retrievers`. */
+  readonly id: string;
+  /** LLM-facing tool name. Defaults to `search_knowledge_base` or `search_<id>`. */
+  readonly name?: string;
+  readonly description?: string;
+  readonly topK?: number;
+  readonly includeSources?: boolean;
+  readonly includeScores?: boolean;
+  readonly maxChunkCharacters?: number;
+  /** Default `tool`. Use `context` for always-on retrieval. */
+  readonly mode?: "tool" | "context" | "tool-and-context";
 }
 
 /**

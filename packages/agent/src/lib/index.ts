@@ -127,6 +127,7 @@ export type {
   AutoCompactSignals,
   AutoDistillConfig,
   AutoDistillSignals,
+  AgentRetrieverBinding,
 } from "./agent/local-agent.ts";
 
 // Universal Agent interface + LocalAgent backend.
@@ -166,6 +167,7 @@ export type {
   AutoCompactRecipe,
   AutoDistillRecipe,
   ContextBudgetRecipe,
+  AgentKnowledgeRecipe,
 } from "./registry/types.ts";
 export { DEFAULT_AGENT_VERSION, DEFAULT_AGENT_METADATA } from "./registry/types.ts";
 export { InMemoryAgentRegistry } from "./registry/in-memory-agent-registry.ts";

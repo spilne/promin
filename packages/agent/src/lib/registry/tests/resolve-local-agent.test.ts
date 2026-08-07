@@ -16,6 +16,7 @@ import { LocalAgent } from "../../agent/local-agent.ts";
 import type { LLMProvider, LLMResponse } from "../../llm-provider.ts";
 import type { RegisteredAgent } from "../types.ts";
 import { createElevatedTool, tool } from "../../tool.ts";
+import { InMemoryRetriever } from "../../rag/in-memory-retriever.ts";
 import { z } from "zod";
 
 function mockLLM(responses: LLMResponse[]): LLMProvider {
@@ -127,6 +128,57 @@ describe("resolveLocalAgent", () => {
     });
     await agent.invoke({ task: "hi" });
     expect(observedTools).toEqual([]); // silently dropped
+  });
+
+  it("resolves recipe knowledge bindings from deps.retrievers", async () => {
+    let observedTools: string[] = [];
+    const llm: LLMProvider = {
+      chat: async (params) => {
+        observedTools = (params.tools ?? []).map((t) => t.name);
+        return { content: "ok", finishReason: "stop" };
+      },
+    };
+    const row: RegisteredAgent = {
+      ...baseRow(),
+      backend: {
+        ...baseRow().backend,
+        knowledge: [{ id: "docs", name: "search_docs", mode: "tool" }],
+      } as RegisteredAgent["backend"],
+    };
+
+    const agent = resolveLocalAgent(row, {
+      runner: makeRunner(),
+      llm: () => llm,
+      tools: { search: searchTool },
+      namespaceId: "acme",
+      retrievers: {
+        docs: new InMemoryRetriever({
+          documents: [{ id: "returns", text: "Return unopened items within 30 days." }],
+        }),
+      },
+    });
+    await agent.invoke({ task: "returns" });
+
+    expect(observedTools).toEqual(["search", "search_docs"]);
+  });
+
+  it("throws when recipe knowledge references an unwired retriever", () => {
+    const row: RegisteredAgent = {
+      ...baseRow(),
+      backend: {
+        ...baseRow().backend,
+        knowledge: [{ id: "docs" }],
+      } as RegisteredAgent["backend"],
+    };
+
+    expect(() =>
+      resolveLocalAgent(row, {
+        runner: makeRunner(),
+        llm: () => mockLLM([]),
+        tools: { search: searchTool },
+        namespaceId: "acme",
+      }),
+    ).toThrow(/knowledge retriever "docs"/);
   });
 
   it("recipe-level autoCompact / autoDistill / contextBudget override host defaults", async () => {
