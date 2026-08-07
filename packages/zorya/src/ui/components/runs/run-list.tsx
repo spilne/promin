@@ -283,7 +283,14 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
         <div class="join flex-wrap">
           {STATUS_FILTERS.map((s) => {
             const active = status === s;
-            const label = s === "all" ? "All" : WORKFLOW_STATUS_VISUAL[s as WorkflowStatus].label;
+            const label =
+              s === "all"
+                ? "All"
+                : s === "running"
+                  ? "Running"
+                  : s === "pending"
+                    ? "Pending"
+                    : WORKFLOW_STATUS_VISUAL[s as WorkflowStatus].label;
             return (
               <button
                 class={`btn btn-sm join-item ${active ? "btn-primary" : "btn-ghost"}`}

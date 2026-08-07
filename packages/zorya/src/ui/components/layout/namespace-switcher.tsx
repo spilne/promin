@@ -81,10 +81,10 @@ export function NamespaceSwitcher() {
   const label = current || ALL_LABEL;
 
   return (
-    <div ref={wrapRef} class="relative px-3 py-2 border-b border-base-content/10">
+    <div ref={wrapRef} class="relative px-2 py-2 border-b border-base-content/10 lg:px-3">
       <button
         type="button"
-        class="w-full flex items-center gap-2 px-2 py-1.5 rounded-md border border-base-content/15 bg-base-200/40 hover:bg-base-200 transition-colors"
+        class="w-full flex items-center justify-center gap-2 px-2 py-1.5 rounded-md border border-base-content/15 bg-base-200/40 hover:bg-base-200 transition-colors lg:justify-start"
         onClick={() => setOpen((v) => !v)}
         title="Switch namespace"
       >
@@ -95,14 +95,14 @@ export function NamespaceSwitcher() {
         >
           {current ? current.slice(0, 2).toUpperCase() : "∗"}
         </span>
-        <span class="flex-1 text-sm font-medium truncate text-left" title={label}>
+        <span class="hidden flex-1 text-sm font-medium truncate text-left lg:block" title={label}>
           {label}
         </span>
-        <span class="text-base-content/40 text-xs">▾</span>
+        <span class="hidden text-base-content/40 text-xs lg:inline">▾</span>
       </button>
 
       {open && (
-        <div class="absolute left-3 right-3 z-30 mt-1 bg-base-100 border border-base-content/30 rounded-md shadow-lg overflow-hidden">
+        <div class="absolute left-2 z-30 mt-1 w-72 bg-base-100 border border-base-content/30 rounded-md shadow-lg overflow-hidden lg:left-3 lg:right-3 lg:w-auto">
           <div class="p-1.5 border-b border-base-content/15">
             <input
               ref={searchRef}

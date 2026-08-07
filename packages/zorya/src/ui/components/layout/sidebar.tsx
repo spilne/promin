@@ -48,12 +48,12 @@ const SECTIONS: Array<{ title?: string; items: NavItem[] }> = [
 
 export function Sidebar({ route, onNavigate }: SidebarProps) {
   return (
-    <aside class="sticky top-0 h-screen w-60 shrink-0 border-r border-base-content/10 bg-base-300/95 backdrop-blur flex flex-col">
-      <div class="px-4 py-4 flex items-center gap-3 border-b border-base-content/10">
+    <aside class="sticky top-0 h-screen w-16 shrink-0 border-r border-base-content/10 bg-base-300/95 backdrop-blur flex flex-col lg:w-60">
+      <div class="px-3 py-4 flex items-center justify-center gap-3 border-b border-base-content/10 lg:justify-start lg:px-4">
         <span class="grid h-8 w-8 place-items-center rounded bg-primary/15 text-primary font-semibold">
           Z
         </span>
-        <div class="min-w-0">
+        <div class="hidden min-w-0 lg:block">
           <div class="font-semibold tracking-tight text-lg leading-tight">Zorya</div>
           <div class="text-[11px] text-base-content/45 leading-tight">workflow control plane</div>
         </div>
@@ -65,7 +65,7 @@ export function Sidebar({ route, onNavigate }: SidebarProps) {
         {SECTIONS.map((section) => (
           <div>
             {section.title && (
-              <div class="px-4 mb-1 text-[10px] uppercase tracking-[0.12em] text-base-content/40">
+              <div class="hidden px-4 mb-1 text-[10px] uppercase tracking-[0.12em] text-base-content/40 lg:block">
                 {section.title}
               </div>
             )}
@@ -73,9 +73,12 @@ export function Sidebar({ route, onNavigate }: SidebarProps) {
               {section.items.map((item) => (
                 <li>
                   {item.disabled ? (
-                    <span class="opacity-40 cursor-not-allowed flex items-center gap-2 rounded px-2 py-2 text-sm">
+                    <span
+                      class="opacity-40 cursor-not-allowed flex items-center justify-center gap-2 rounded px-2 py-2 text-sm lg:justify-start"
+                      title={item.label}
+                    >
                       <NavIcon label={item.icon} active={false} />
-                      <span>{item.label}</span>
+                      <span class="hidden lg:inline">{item.label}</span>
                     </span>
                   ) : (
                     <a
@@ -84,14 +87,15 @@ export function Sidebar({ route, onNavigate }: SidebarProps) {
                         e.preventDefault();
                         onNavigate(item.path);
                       }}
-                      class={`group flex items-center gap-2 rounded px-2 py-2 text-sm hover:bg-base-100/70 ${
+                      title={item.label}
+                      class={`group flex items-center justify-center gap-2 rounded px-2 py-2 text-sm hover:bg-base-100/70 lg:justify-start ${
                         isActive(route, item.path)
                           ? "bg-primary/12 text-primary border border-primary/20"
                           : "border border-transparent text-base-content/78"
                       }`}
                     >
                       <NavIcon label={item.icon} active={isActive(route, item.path)} />
-                      <span>{item.label}</span>
+                      <span class="hidden lg:inline">{item.label}</span>
                     </a>
                   )}
                 </li>
@@ -141,10 +145,13 @@ function ApiKeyButton() {
   };
   const hasKey = !!localStorage.getItem("zorya_api_key");
   return (
-    <button class="btn btn-ghost btn-sm w-full justify-start gap-2" onClick={setKey}>
+    <button
+      class="btn btn-ghost btn-sm w-full justify-center gap-2 lg:justify-start"
+      onClick={setKey}
+    >
       <span class={`w-2 h-2 rounded-full ${hasKey ? "bg-success" : "bg-base-content/30"}`} />
-      <span class="text-sm">API key</span>
-      <span class="ml-auto text-[10px] uppercase text-base-content/40">
+      <span class="hidden text-sm lg:inline">API key</span>
+      <span class="ml-auto hidden text-[10px] uppercase text-base-content/40 lg:inline">
         {hasKey ? "set" : "none"}
       </span>
     </button>
