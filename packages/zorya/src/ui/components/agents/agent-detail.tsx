@@ -13,7 +13,7 @@ import { MemoryInspector } from "./memory-inspector.tsx";
 import { AgentConfigDrawer } from "./agent-config-drawer.tsx";
 import { AgentTraceModal } from "./agent-trace-modal.tsx";
 import { systemToolsFor, SystemToolChips } from "./system-tools.tsx";
-import { inlineRoleDefinition } from "@promin/agent";
+import { inlineRoleDefinition } from "../../lib/role.ts";
 
 interface AgentDetailProps {
   id: string;

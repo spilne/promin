@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 
 import { useEffect, useMemo, useState } from "preact/hooks";
-import { inlineRoleDefinition } from "@promin/agent";
+import { inlineRoleDefinition } from "../../lib/role.ts";
 import { api, type ModelCatalogEntryDto, type ToolCatalogEntryDto } from "../../api/client.ts";
 import type { RegisteredAgent } from "../../../server/routes/agents.ts";
 import type { SkillCatalogEntry } from "../../../server/routes/agent-catalog.ts";

@@ -5,7 +5,7 @@ import type { RegisteredAgent } from "../../../server/routes/agents.ts";
 import { Page } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { formatRelative } from "../../lib/format.ts";
-import { inlineRoleDefinition } from "@promin/agent";
+import { inlineRoleDefinition } from "../../lib/role.ts";
 import { AgentEditDrawer } from "./agent-edit-drawer.tsx";
 
 interface AgentListProps {

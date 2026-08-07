@@ -18,7 +18,7 @@
 import type * as preact from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
 import type { RegisteredAgent } from "../../../server/routes/agents.ts";
-import { inlineRoleDefinition } from "@promin/agent";
+import { inlineRoleDefinition } from "../../lib/role.ts";
 import { exportRecipeAsTs } from "../../lib/export-recipe-ts.ts";
 import { prompt, toast } from "../../lib/dialogs.ts";
 import { api } from "../../api/client.ts";

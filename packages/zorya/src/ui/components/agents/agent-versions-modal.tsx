@@ -18,7 +18,7 @@ import { useEffect, useMemo, useState } from "preact/hooks";
 import { api } from "../../api/client.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { formatRelative } from "../../lib/format.ts";
-import { inlineRoleDefinition } from "@promin/agent";
+import { inlineRoleDefinition } from "../../lib/role.ts";
 import type { RegisteredAgent } from "../../../server/routes/agents.ts";
 
 interface Props {
