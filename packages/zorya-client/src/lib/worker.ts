@@ -29,10 +29,12 @@ import {
 import type { ZoryaClient } from "./zorya-client.ts";
 import { WorkerControlSocket } from "./worker-control-socket.ts";
 
+type AnyWorkflow = Workflow<any, any>;
+
 export interface ZoryaWorkerConfig {
   client: ZoryaClient;
   /** Workflow definitions this worker will execute. Advertised on start. */
-  workflows: ReadonlyArray<Workflow<unknown, unknown>>;
+  workflows: ReadonlyArray<AnyWorkflow>;
   /** Stable worker id. Default: random UUID. */
   workerId?: string;
   /** Capability tags — server routes tasks whose `needs ⊆ capabilities`. */
@@ -132,6 +134,106 @@ export interface ZoryaWorkerConfig {
         /** Max reconnect delay. Default 30_000ms. */
         maxReconnectDelayMs?: number;
       };
+}
+
+export class ZoryaWorkerBuilder {
+  private config: Partial<ZoryaWorkerConfig> = {};
+
+  client(client: ZoryaClient): this {
+    this.config.client = client;
+    return this;
+  }
+
+  workflows(...workflows: AnyWorkflow[]): this {
+    this.config.workflows = [...(this.config.workflows ?? []), ...workflows];
+    return this;
+  }
+
+  workflow(workflow: AnyWorkflow): this {
+    return this.workflows(workflow);
+  }
+
+  workerId(workerId: string): this {
+    this.config.workerId = workerId;
+    return this;
+  }
+
+  capabilities(capabilities: readonly string[]): this {
+    this.config.capabilities = capabilities;
+    return this;
+  }
+
+  concurrency(concurrency: number): this {
+    this.config.concurrency = concurrency;
+    return this;
+  }
+
+  heartbeatIntervalMs(heartbeatIntervalMs: number): this {
+    this.config.heartbeatIntervalMs = heartbeatIntervalMs;
+    return this;
+  }
+
+  sampleInput(sampleInput: (workflowName: string) => unknown): this {
+    this.config.sampleInput = sampleInput;
+    return this;
+  }
+
+  version(version: string): this {
+    this.config.version = version;
+    return this;
+  }
+
+  labels(labels: Record<string, string>): this {
+    this.config.labels = labels;
+    return this;
+  }
+
+  namespaces(namespaces: readonly string[]): this {
+    this.config.namespaces = namespaces;
+    return this;
+  }
+
+  metadata(metadata: Record<string, unknown>): this {
+    this.config.metadata = metadata;
+    return this;
+  }
+
+  resumeSuspendedRuns(resumeSuspendedRuns: boolean): this {
+    this.config.resumeSuspendedRuns = resumeSuspendedRuns;
+    return this;
+  }
+
+  pollWorkflowStarts(pollWorkflowStarts: ZoryaWorkerConfig["pollWorkflowStarts"]): this {
+    this.config.pollWorkflowStarts = pollWorkflowStarts;
+    return this;
+  }
+
+  mode(mode: ZoryaWorkerConfig["mode"]): this {
+    this.config.mode = mode;
+    return this;
+  }
+
+  stepPolling(stepPolling: ZoryaWorkerConfig["stepPolling"]): this {
+    this.config.stepPolling = stepPolling;
+    return this;
+  }
+
+  controlSocket(controlSocket: ZoryaWorkerConfig["controlSocket"] = true): this {
+    this.config.controlSocket = controlSocket;
+    return this;
+  }
+
+  build(): ZoryaWorker {
+    if (!this.config.client) throw new Error("ZoryaWorkerBuilder.build: client() is required");
+    if (!this.config.workflows || this.config.workflows.length === 0) {
+      throw new Error("ZoryaWorkerBuilder.build: at least one workflow() is required");
+    }
+    return new ZoryaWorker(this.config as ZoryaWorkerConfig);
+  }
+}
+
+export function createZoryaWorkerBuilder(): ZoryaWorkerBuilder {
+  return new ZoryaWorkerBuilder();
 }
 
 export class ZoryaWorker {
@@ -708,10 +810,10 @@ const VERSIONLESS = Symbol("versionless");
  * `name → version → def` lookup.
  */
 function buildVersionIndex(
-  workflows: ReadonlyArray<Workflow<unknown, unknown>>,
+  workflows: ReadonlyArray<AnyWorkflow>,
 ): Map<string, Map<string | typeof VERSIONLESS, Workflow<unknown, unknown>>> {
   const out = new Map<string, Map<string | typeof VERSIONLESS, Workflow<unknown, unknown>>>();
-  const add = (def: Workflow<unknown, unknown>) => {
+  const add = (def: AnyWorkflow) => {
     let inner = out.get(def.name);
     if (!inner) {
       inner = new Map();

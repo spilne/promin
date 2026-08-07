@@ -30,9 +30,11 @@
 // ---------------------------------------------------------------------------
 
 import { workflow } from "@promin/workflow";
-import { ZoryaClient, ZoryaWorker } from "@promin/zorya-client";
+import { createZoryaWorkerBuilder, ZoryaClient } from "@promin/zorya-client";
+import { createDemoLogger } from "./demo/logger.ts";
 
 const url = process.env["ZORYA_URL"] ?? "http://localhost:4100";
+const logger = createDemoLogger("worker");
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -102,27 +104,25 @@ function sampleInputFor(name: string): unknown {
 }
 
 const client = new ZoryaClient({ url });
-const worker = new ZoryaWorker({
-  client,
-  workflows: workflows as unknown as ReadonlyArray<
-    import("@promin/workflow").Workflow<unknown, unknown>
-  >,
-  sampleInput: sampleInputFor,
-});
+const worker = createZoryaWorkerBuilder()
+  .client(client)
+  .workflows(...workflows)
+  .sampleInput(sampleInputFor)
+  .build();
 
 await worker.start();
 
-console.log(`Worker ${worker.workerId} connected to ${url}`);
-console.log(`  Advertised: ${workflows.map((w) => `${w.name}@${w.version ?? "—"}`).join(", ")}`);
-console.log(`  Trigger from the dashboard or via curl:`);
-console.log(
+logger.log(`Worker ${worker.workerId} connected to ${url}`);
+logger.log(`  Advertised: ${workflows.map((w) => `${w.name}@${w.version ?? "—"}`).join(", ")}`);
+logger.log(`  Trigger from the dashboard or via curl:`);
+logger.log(
   `    curl -X POST ${url}/api/runs/trigger/hello-world \\\n      -H 'content-type: application/json' -d '{"input":{"name":"curl"}}'`,
 );
 
 // Graceful shutdown — unregisters the worker so the demo's Workers page
 // doesn't show stale entries.
 const stop = async () => {
-  console.log("Stopping worker…");
+  logger.log("Stopping worker…");
   await worker.stop();
   process.exit(0);
 };

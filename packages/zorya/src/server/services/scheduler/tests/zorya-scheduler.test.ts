@@ -49,6 +49,31 @@ describe("ZoryaScheduler.fireOnce", () => {
     expect(runs[0]?.runSourceId).toBe("wf-sched");
   });
 
+  it("uses schedule namespace and sampleInput when metadata omits input", async () => {
+    const wfStorage = new InMemoryWorkflowStorage();
+    const schedStorage = new InMemorySchedulerStorage();
+    const workflows = new QueuedWorkflows({ storage: wfStorage, acceptAny: true });
+    const scheduler = new ZoryaScheduler({
+      storage: schedStorage,
+      workflows,
+      sampleInput: (name) => ({ seededFor: name }),
+    });
+
+    await seedSchedule(schedStorage, {
+      id: "wf-default-input",
+      namespace: "tenant-a",
+      metadata: { workflowName: "my-wf", namespace: "legacy-tenant" },
+    });
+
+    await scheduler.fireOnce("wf-default-input");
+
+    const runs = await wfStorage.listWorkflows({ limit: 10 });
+    expect(runs.length).toBe(1);
+    expect(runs[0]?.workflowName).toBe("my-wf");
+    expect(runs[0]?.input).toEqual({ seededFor: "my-wf" });
+    expect(runs[0]?.namespace).toBe("tenant-a");
+  });
+
   it("routes agent schedules through AgentScheduleDispatcher", async () => {
     const wfStorage = new InMemoryWorkflowStorage();
     const schedStorage = new InMemorySchedulerStorage();

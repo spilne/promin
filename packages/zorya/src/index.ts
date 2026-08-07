@@ -7,6 +7,7 @@ export {
   type Logger,
   type RemoteWorkersConfig,
 } from "./server/server.ts";
+export { createZoryaServerBuilder, ZoryaServerBuilder } from "./server/server-builder.ts";
 export {
   ZoryaWorkflows,
   LocalWorkflows,
@@ -56,6 +57,7 @@ export {
 } from "./server/services/namespaces.ts";
 export { Auth, type AuthConfig } from "./server/auth.ts";
 export { RunEventBus } from "./server/run-event-bus.ts";
+export { createSqliteZoryaStack, type SqliteZoryaStackConfig } from "./server/sqlite-stack.ts";
 export { RunPollWatcher, isTerminalStatus } from "./server/run-poll-watcher.ts";
 export { Router, json, jsonError, readJson, type Handler } from "./server/router.ts";
 export { runToDto, runToSummaryDto, stepToDto } from "./server/serialize.ts";

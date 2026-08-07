@@ -27,6 +27,8 @@ export interface ZoryaSchedulerConfig {
   storage: SchedulerStorage;
   /** Workflow service — provides the default trigger. */
   workflows: ZoryaWorkflows;
+  /** Default input for workflow schedules that omit `metadata.input`. */
+  sampleInput?: (workflowName: string) => unknown;
   /**
    * Optional agent dispatcher — when set, ticks where isAgentSchedule()
    * returns true route through `agents.dispatchSchedule()` instead of the
@@ -92,6 +94,7 @@ export class ZoryaScheduler {
       trigger: (name, input, opts) => config.workflows.trigger(name, input, opts),
       fire,
     };
+    if (config.sampleInput !== undefined) loopConfig.sampleInput = config.sampleInput;
     if (config.instanceId !== undefined) loopConfig.instanceId = config.instanceId;
     if (config.pollIntervalMs !== undefined) loopConfig.pollIntervalMs = config.pollIntervalMs;
     if (config.leaderLockTtlMs !== undefined) loopConfig.leaderLockTtlMs = config.leaderLockTtlMs;

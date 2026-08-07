@@ -37,6 +37,12 @@ export interface SchedulerLoopConfig {
    */
   trigger?: RunTrigger;
   /**
+   * Default input for workflow schedules that omit `metadata.input`.
+   * Lets hosts keep sample/default input logic in one place instead of
+   * writing a custom `fire` callback only to fill an input object.
+   */
+  sampleInput?: (workflowName: string) => unknown;
+  /**
    * Optional dispatch hook. Inspect the tick / schedule and either
    * handle it (return `{ handled: true }` or `void` for backward
    * compat) or pass — return `{ handled: false }` and the loop runs
@@ -100,6 +106,7 @@ export class SchedulerLoop {
   readonly instanceId: string;
   private readonly storage: SchedulerStorage;
   private readonly trigger?: RunTrigger;
+  private readonly sampleInput?: (workflowName: string) => unknown;
   private readonly fireOverride?: SchedulerLoopConfig["fire"];
   private readonly pollIntervalMs: number;
   private readonly leaderLockTtlMs: number;
@@ -117,6 +124,7 @@ export class SchedulerLoop {
     }
     this.storage = config.storage;
     this.trigger = config.trigger;
+    this.sampleInput = config.sampleInput;
     this.fireOverride = config.fire;
     this.instanceId = config.instanceId ?? crypto.randomUUID();
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
@@ -392,9 +400,10 @@ export class SchedulerLoop {
     // on workflowId so the second submission is a safe no-op. Same id
     // shape used by `dispatchAgentSchedule` for agent-targeted ticks.
     const workflowId = scheduleTickRunId(tick.scheduleId, tick.tickNumber);
-    await this.trigger(workflowName, meta.input, {
+    const input = meta.input !== undefined ? meta.input : this.sampleInput?.(workflowName);
+    await this.trigger(workflowName, input, {
       workflowId,
-      namespace: meta.namespace ?? schedule.namespace,
+      namespace: schedule.namespace ?? meta.namespace,
       workflowType: meta.workflowType,
       version: meta.version,
       // First-class link back to the schedule. Survives across replays /

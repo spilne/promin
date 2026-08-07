@@ -13,6 +13,8 @@ import type {
   WorkflowHandle,
   WorkflowRunner,
 } from "@promin/workflow";
+
+type AnyWorkflow = Workflow<any, any>;
 import { createWorkflowRunner } from "@promin/workflow";
 import {
   RemoteStepQueue,
@@ -85,7 +87,7 @@ export class ZoryaClient {
    */
   async advertise(
     workerId: string,
-    workflows: ReadonlyArray<Workflow<unknown, unknown>>,
+    workflows: ReadonlyArray<AnyWorkflow>,
     sampleInput?: (workflowName: string) => unknown,
   ): Promise<void> {
     // Advertise the primary definition for each workflow plus every
@@ -105,7 +107,7 @@ export class ZoryaClient {
       sampleInput?: unknown;
     }> = [];
     const seen = new Set<string>();
-    const add = (wf: Workflow<unknown, unknown>) => {
+    const add = (wf: AnyWorkflow) => {
       const key = `${wf.name}@${wf.version ?? ""}`;
       if (seen.has(key)) return;
       seen.add(key);
