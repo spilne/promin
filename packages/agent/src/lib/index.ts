@@ -97,6 +97,30 @@ export type { InMemoryMemoryStoreConfig } from "./memory/in-memory-memory-store.
 export { resolveContext } from "./memory/resolve-context.ts";
 export type { ResolveContextInput } from "./memory/resolve-context.ts";
 
+// RAG / knowledge retrieval primitives.
+export {
+  FlatTextChunker,
+  createFlatTextChunker,
+  InMemoryRetriever,
+  createInMemoryRetriever,
+  createRetrieverTool,
+} from "./rag/index.ts";
+export type {
+  FlatTextChunkerConfig,
+  InMemoryRetrieverConfig,
+  KnowledgeChunk,
+  KnowledgeChunker,
+  KnowledgeIngestDocument,
+  KnowledgeSource,
+  RetrieveRequest,
+  RetrieveResult,
+  Retriever,
+  RetrieverFilter,
+  RetrieverToolConfig,
+  RetrieverToolInput,
+  RetrieverToolOutput,
+} from "./rag/index.ts";
+
 // Auto-compaction + auto-distillation config — exposed alongside Consolidator for demos that wire them.
 export type {
   AutoCompactConfig,
