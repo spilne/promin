@@ -2,7 +2,7 @@ import { useMemo, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api } from "../../api/client.ts";
 import type { RegisteredAgent } from "../../../server/routes/agents.ts";
-import { Page } from "../ui/page.tsx";
+import { Page, PageHeader } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { formatRelative } from "../../lib/format.ts";
 import { inlineRoleDefinition } from "../../lib/role.ts";
@@ -55,10 +55,7 @@ export function AgentList({ onOpen }: AgentListProps) {
   if (loading && !data) {
     return (
       <Page>
-        <div>
-          <h2 class="text-xl font-semibold">Agents</h2>
-          <p class="text-xs text-base-content/50">Loading…</p>
-        </div>
+        <PageHeader title="Agents" eyebrow="Agent runtime" description="Loading registry..." />
         <div class="card bg-base-100 shadow overflow-hidden">
           <table class="table">
             <thead>
@@ -91,28 +88,39 @@ export function AgentList({ onOpen }: AgentListProps) {
 
   return (
     <Page>
-      <div class="flex items-end justify-between">
-        <div>
-          <h2 class="text-xl font-semibold">Agents</h2>
-          <p class="text-xs text-base-content/50">
-            {configured
-              ? `${agents.length} registered · auto-refreshes every 30s`
-              : "Agent gateway not configured on this server"}
-          </p>
-        </div>
-        <div class="flex items-center gap-2">
-          <button class="btn btn-sm btn-ghost gap-1" onClick={() => refresh()}>
-            <span>↻</span>
-            Refresh
-          </button>
-          {configured && (
-            <button class="btn btn-sm btn-primary gap-1" onClick={() => setCreating(true)}>
-              <span>+</span>
-              New agent
+      <PageHeader
+        title="Agents"
+        eyebrow="Agent runtime"
+        description={
+          configured
+            ? "Registered agent recipes, models, tools, capabilities, and file-managed definitions."
+            : "Agent gateway is not configured on this server."
+        }
+        meta={
+          configured ? (
+            <>
+              <span class="font-mono">{agents.length}</span>
+              <span>registered</span>
+              <span class="h-3 w-px bg-base-content/15" />
+              <span>auto-refresh 30s</span>
+            </>
+          ) : undefined
+        }
+        actions={
+          <>
+            <button class="btn btn-sm btn-ghost gap-1" onClick={() => refresh()}>
+              <span aria-hidden="true">↻</span>
+              Refresh
             </button>
-          )}
-        </div>
-      </div>
+            {configured && (
+              <button class="btn btn-sm btn-primary gap-1" onClick={() => setCreating(true)}>
+                <span aria-hidden="true">+</span>
+                New agent
+              </button>
+            )}
+          </>
+        }
+      />
 
       {agents.length === 0 && (
         <div class="card bg-base-100 shadow">
@@ -124,7 +132,11 @@ export function AgentList({ onOpen }: AgentListProps) {
       )}
 
       {agents.length > 0 && (
-        <div class="flex items-center justify-end">
+        <div class="flex items-center justify-between gap-3 rounded border border-base-content/10 bg-base-300/45 p-3">
+          <div class="text-xs text-base-content/55">
+            Showing <span class="font-mono">{filtered.length}</span> of{" "}
+            <span class="font-mono">{agents.length}</span>
+          </div>
           <input
             class="input input-bordered input-sm w-full max-w-md font-mono"
             placeholder="Search by id, capability, tag, model…"
@@ -143,10 +155,10 @@ export function AgentList({ onOpen }: AgentListProps) {
       )}
 
       {filtered.length > 0 && (
-        <div class="card bg-base-100 shadow overflow-hidden">
+        <div class="card bg-base-100/95 shadow overflow-hidden border border-base-content/10">
           <div class="overflow-x-auto">
-            <table class="table">
-              <thead>
+            <table class="table table-sm">
+              <thead class="sticky top-0 z-10">
                 <tr class="bg-base-200 text-xs uppercase tracking-wider text-base-content/50">
                   <th>Agent</th>
                   <th>Model</th>

@@ -19,6 +19,14 @@ export interface PageProps {
   className?: string;
 }
 
+export interface PageHeaderProps {
+  title: string;
+  eyebrow?: string;
+  description?: ComponentChildren;
+  meta?: ComponentChildren;
+  actions?: ComponentChildren;
+}
+
 const SPACE_CLASS: Record<NonNullable<PageProps["space"]>, string> = {
   default: "space-y-4",
   none: "",
@@ -27,9 +35,29 @@ const SPACE_CLASS: Record<NonNullable<PageProps["space"]>, string> = {
 export function Page({ children, space = "default", className = "" }: PageProps) {
   return (
     <div
-      class={`anim-page pt-8 px-4 pb-4 max-w-[1400px] mx-auto ${SPACE_CLASS[space]} ${className}`}
+      class={`anim-page pt-6 px-4 pb-4 max-w-[1480px] mx-auto ${SPACE_CLASS[space]} ${className}`}
     >
       {children}
+    </div>
+  );
+}
+
+export function PageHeader({ title, eyebrow, description, meta, actions }: PageHeaderProps) {
+  return (
+    <div class="flex flex-col gap-3 border-b border-base-content/10 pb-4 md:flex-row md:items-end md:justify-between">
+      <div class="min-w-0">
+        {eyebrow && (
+          <div class="mb-1 text-[11px] font-medium uppercase tracking-[0.14em] text-primary/80">
+            {eyebrow}
+          </div>
+        )}
+        <div class="flex flex-wrap items-center gap-3">
+          <h2 class="text-2xl font-semibold tracking-tight leading-tight">{title}</h2>
+          {meta && <div class="flex items-center gap-2 text-xs text-base-content/55">{meta}</div>}
+        </div>
+        {description && <div class="mt-1 text-sm text-base-content/55">{description}</div>}
+      </div>
+      {actions && <div class="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>}
     </div>
   );
 }

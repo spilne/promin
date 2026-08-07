@@ -13,9 +13,12 @@ interface EmptyStateProps {
 
 export function EmptyState({ message, hint, children, pad = "py-8" }: EmptyStateProps) {
   return (
-    <div class={`text-center text-base-content/50 ${pad}`}>
-      <div class="text-sm">{message}</div>
-      {hint && <div class="text-xs mt-1 text-base-content/40">{hint}</div>}
+    <div class={`flex flex-col items-center text-center text-base-content/55 ${pad}`}>
+      <div class="mb-3 grid h-9 w-9 place-items-center rounded border border-base-content/10 bg-base-300/70 text-base-content/35">
+        -
+      </div>
+      <div class="text-sm font-medium text-base-content/70">{message}</div>
+      {hint && <div class="mt-1 max-w-md text-xs text-base-content/45">{hint}</div>}
       {children && <div class="mt-3 flex justify-center">{children}</div>}
     </div>
   );

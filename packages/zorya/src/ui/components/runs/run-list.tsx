@@ -17,7 +17,7 @@ import {
   type ParsedSearchQuery,
 } from "../../lib/smart-search.ts";
 import { SmartSearchInput } from "./smart-search-input.tsx";
-import { Page } from "../ui/page.tsx";
+import { Page, PageHeader } from "../ui/page.tsx";
 
 interface SuggestionPools {
   name: string[];
@@ -251,16 +251,23 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
 
   return (
     <Page>
-      <div class="flex items-end justify-between">
-        <div>
-          <h2 class="text-xl font-semibold">Runs</h2>
-          <p class="text-sm text-base-content/50">Live · auto-refreshes every 5s</p>
-        </div>
-        <button class="btn btn-sm btn-ghost gap-1" onClick={() => refresh()}>
-          <span>↻</span>
-          Refresh
-        </button>
-      </div>
+      <PageHeader
+        title="Runs"
+        eyebrow="Operations"
+        description="Live workflow executions, filtered by status, namespace, metadata, and source."
+        meta={
+          <>
+            <span class="h-2 w-2 rounded-full bg-success" />
+            <span>auto-refresh 5s</span>
+          </>
+        }
+        actions={
+          <button class="btn btn-sm btn-ghost gap-1" onClick={() => refresh()}>
+            <span aria-hidden="true">↻</span>
+            Refresh
+          </button>
+        }
+      />
 
       <StatsBar
         onPickStatus={(s) => {
@@ -272,8 +279,8 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
           search so the most-common filter stays a single click away.
           Source filtering lives in the smart-search row below as
           `source:schedule` / `sourceId:orders-every-15s` clauses. */}
-      <div class="flex items-center gap-2 justify-end">
-        <div class="join">
+      <div class="flex flex-col gap-3 rounded border border-base-content/10 bg-base-300/45 p-3 lg:flex-row lg:items-start lg:justify-between">
+        <div class="join flex-wrap">
           {STATUS_FILTERS.map((s) => {
             const active = status === s;
             const label = s === "all" ? "All" : WORKFLOW_STATUS_VISUAL[s as WorkflowStatus].label;
@@ -287,69 +294,70 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
             );
           })}
         </div>
-      </div>
 
-      {/* Smart search row: one input handles id, name, type, version,
+        {/* Smart search row: one input handles id, name, type, version,
           namespace, and metadata via `field:value` / `key=value` syntax;
           bare text falls back to id-or-name lookup on submit. Inline
           suggestions fire while the cursor is inside a name:/type:/
           namespace: clause. */}
-      <div class="flex items-start gap-2">
-        <div class="flex-1 min-w-0">
-          <SmartSearchInput
-            value={searchInput}
-            onChange={setSearchInput}
-            onSubmit={() => void submitSearch()}
-            onBlurCommit={() => {
-              if (searchInput.trim() !== "") void submitSearch();
-            }}
-            pools={pools}
-            placeholder={
-              hasAnyFilter(appliedFilters)
-                ? "Add another clause… (Enter to apply)"
-                : 'Search id, or "name:foo type:bar version:v2 userId=u_42"'
-            }
-            title={
-              "One field replaces id/name/type/version/namespace/metadata.\n" +
-              "Examples:\n" +
-              "  wf-abc123                        — find run by id (jumps if exact)\n" +
-              "  onboarding                       — name shortcut\n" +
-              "  name:onboarding type:webhook     — structured field filter\n" +
-              'name:"my workflow" version:v2     — quote values with spaces\n' +
-              "  userId=u_42 retries=3 dryRun=true — metadata (JSON values parse)\n" +
-              "Tab / Enter to accept a suggestion · Press Enter to apply."
-            }
-            onClearInput={() => setSearchInput("")}
-          />
-          {/* Active filter chips — click the × to drop one. Sourced from
+        <div class="flex min-w-0 flex-1 items-start gap-2 lg:max-w-3xl">
+          <div class="flex-1 min-w-0">
+            <SmartSearchInput
+              value={searchInput}
+              onChange={setSearchInput}
+              onSubmit={() => void submitSearch()}
+              onBlurCommit={() => {
+                if (searchInput.trim() !== "") void submitSearch();
+              }}
+              pools={pools}
+              placeholder={
+                hasAnyFilter(appliedFilters)
+                  ? "Add another clause... (Enter to apply)"
+                  : 'Search id, or "name:foo type:bar version:v2 userId=u_42"'
+              }
+              title={
+                "One field replaces id/name/type/version/namespace/metadata.\n" +
+                "Examples:\n" +
+                "  wf-abc123                        — find run by id (jumps if exact)\n" +
+                "  onboarding                       — name shortcut\n" +
+                "  name:onboarding type:webhook     — structured field filter\n" +
+                'name:"my workflow" version:v2     — quote values with spaces\n' +
+                "  userId=u_42 retries=3 dryRun=true — metadata (JSON values parse)\n" +
+                "Tab / Enter to accept a suggestion · Press Enter to apply."
+              }
+              onClearInput={() => setSearchInput("")}
+            />
+            {/* Active filter chips — click the × to drop one. Sourced from
               `appliedFilters`, not the input, so chips are the canonical
               representation once the user commits. */}
-          {hasAnyFilter(appliedFilters) && (
-            <div class="flex items-center gap-1 flex-wrap mt-2">
-              {(["name", "type", "version", "namespace", "id", "source", "sourceId"] as const).map(
-                (f) =>
+            {hasAnyFilter(appliedFilters) && (
+              <div class="flex items-center gap-1 flex-wrap mt-2">
+                {(
+                  ["name", "type", "version", "namespace", "id", "source", "sourceId"] as const
+                ).map((f) =>
                   appliedFilters[f] ? (
                     <FilterChip
                       label={`${f}: ${appliedFilters[f]}`}
                       onRemove={() => removeClause(f)}
                     />
                   ) : null,
-              )}
-              {appliedFilters.metadata &&
-                Object.entries(appliedFilters.metadata).map(([k, v]) => (
-                  <FilterChip
-                    label={`${k}=${typeof v === "string" ? v : JSON.stringify(v)}`}
-                    onRemove={() => removeClause("metadata", k)}
-                  />
-                ))}
-            </div>
+                )}
+                {appliedFilters.metadata &&
+                  Object.entries(appliedFilters.metadata).map(([k, v]) => (
+                    <FilterChip
+                      label={`${k}=${typeof v === "string" ? v : JSON.stringify(v)}`}
+                      onRemove={() => removeClause("metadata", k)}
+                    />
+                  ))}
+              </div>
+            )}
+          </div>
+          {hasFilters && (
+            <button class="btn btn-sm btn-ghost anim-fade-in" onClick={clearAllFilters}>
+              Clear
+            </button>
           )}
         </div>
-        {hasFilters && (
-          <button class="btn btn-sm btn-ghost anim-fade-in" onClick={clearAllFilters}>
-            Clear
-          </button>
-        )}
       </div>
 
       {error && (
@@ -358,10 +366,10 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
         </div>
       )}
 
-      <div class="card bg-base-100 shadow overflow-hidden">
+      <div class="card bg-base-100/95 shadow overflow-hidden border border-base-content/10">
         <div class="overflow-x-auto">
-          <table class="table">
-            <thead>
+          <table class="table table-sm">
+            <thead class="sticky top-0 z-10">
               <tr class="bg-base-200 text-xs uppercase tracking-wider text-base-content/50">
                 <th>ID</th>
                 <SortableTh col="name" label="Name" sort={sort} onClick={cycleSort} />
@@ -383,9 +391,14 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
                 </tr>
               )}
               {data?.runs.map((r) => (
-                <tr class="hover:bg-base-200 cursor-pointer" onClick={() => onOpen(r.workflowId)}>
-                  <td class="font-mono text-sm">{r.workflowId}</td>
-                  <td>{r.workflowName}</td>
+                <tr
+                  class="hover:bg-base-200/80 cursor-pointer"
+                  onClick={() => onOpen(r.workflowId)}
+                >
+                  <td class="font-mono text-xs max-w-[18rem] truncate" title={r.workflowId}>
+                    {r.workflowId}
+                  </td>
+                  <td class="font-medium">{r.workflowName}</td>
                   <td>
                     <Sparkline runs={sparklines[r.workflowName] ?? []} />
                   </td>

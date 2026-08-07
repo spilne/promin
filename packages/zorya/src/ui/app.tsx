@@ -44,9 +44,11 @@ export function App() {
   };
 
   return (
-    <div class="flex min-h-screen">
+    <div class="flex min-h-screen bg-base-200 text-base-content">
       <Sidebar route={route} onNavigate={navigate} />
-      <main class="flex-1 min-w-0">{renderRoute(route, navigate)}</main>
+      <main class="flex-1 min-w-0 bg-[radial-gradient(circle_at_top_left,rgba(125,211,252,0.06),transparent_30rem)]">
+        {renderRoute(route, navigate)}
+      </main>
       <DialogHost />
       <ToastHost />
     </div>
