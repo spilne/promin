@@ -11,7 +11,7 @@ Write SQL logic, declare dependencies. The compiler builds a DAG, runs models in
 ### Basic pipeline: staging → fact table
 
 ```typescript
-import { compileSqlProject } from "@promin/workflow";
+import { compileSqlProject, createWorkflowRunner } from "@promin/workflow";
 
 const project = {
   name: "analytics",
@@ -41,8 +41,9 @@ const project = {
   ],
 };
 
-const wf = compileSqlProject({ project, storage, executeSql: (sql) => db.query(sql) });
-await wf.run({ workflowId: "analytics-daily", input: {} });
+const wf = compileSqlProject({ project, executeSql: (sql) => db.query(sql) });
+const runner = createWorkflowRunner({ storage });
+await runner.run({ workflow: wf, workflowId: "analytics-daily", input: {} });
 ```
 
 Execution order: `stg_orders` and `stg_users` run in parallel, then `fct_revenue`.
@@ -70,20 +71,24 @@ Tests run after the model is materialized. Failures are reported in the result.
 ### Parameterized runs
 
 ```typescript
-const wf = compileSqlProject({ project, storage, executeSql });
+const wf = compileSqlProject({ project, executeSql });
 
 // Input is available as {{ date }} in SQL
-await wf.run({ workflowId: "analytics-2026-04-06", input: { date: "2026-04-06" } });
+await runner.run({
+  workflow: wf,
+  workflowId: "analytics-2026-04-06",
+  input: { date: "2026-04-06" },
+});
 ```
 
 ### Crash recovery
 
 ```typescript
 // If this crashes after stg_orders but before fct_revenue...
-await wf.run({ workflowId: "run-1", input: {} });
+await runner.run({ workflow: wf, workflowId: "run-1", input: {} });
 
 // ...re-running with the same workflowId skips completed models
-await wf.run({ workflowId: "run-1", input: {} });
+await runner.run({ workflow: wf, workflowId: "run-1", input: {} });
 // Only fct_revenue runs — stg_orders and stg_users are checkpointed
 ```
 

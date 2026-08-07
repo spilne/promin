@@ -11,23 +11,27 @@ bun add @promin/workflow
 ## Quick Example
 
 ```typescript
-import { workflow } from "@promin/workflow";
+import { createWorkflowRunner, workflow } from "@promin/workflow";
 import { Pipeline } from "@promin/core";
 import { migrate, PostgresWorkflowStorage } from "@promin/postgres";
 
 await migrate(db);
 const storage = await PostgresWorkflowStorage.create({ db });
+const runner = createWorkflowRunner({ storage });
 
-const result = await workflow<{ userId: string }>({
-  name: "onboard-user",
-  storage,
-})
+const onboardUser = workflow<{ userId: string }>({ name: "onboard-user" })
   .step("fetch", ({ input }) => api.get(`/users/${input.userId}`, UserSchema))
   .step("enrich", { dependsOn: ["fetch"] }, ({ deps }) => enrichUser(deps.fetch))
   .step("notify", { dependsOn: ["enrich"] }, ({ deps }) =>
     Pipeline.succeed(`Welcome ${deps.enrich.name}!`),
   )
-  .run({ workflowId: "wf_1", input: { userId: "u_42" } });
+  .build();
+
+const result = await runner.run({
+  workflow: onboardUser,
+  workflowId: "wf_1",
+  input: { userId: "u_42" },
+});
 ```
 
 Steps with independent dependencies run in parallel automatically. Each step is checkpointed — if the process crashes, the workflow resumes from the last completed step.

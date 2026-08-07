@@ -115,8 +115,8 @@ export type WorkflowSchemaValidationError = z.ZodError;
  * // In an API route handler
  * try {
  *   const schema = validateWorkflowSchema(req.body);
- *   const definition = compileWorkflow({ schema, storage, registry });
- *   await definition.run({ workflowId: "wf-1", input: req.query });
+ *   const definition = compileWorkflow({ schema, registry });
+ *   await runner.run({ workflow: definition, workflowId: "wf-1", input: req.query });
  * } catch (e) {
  *   if (e instanceof ZodError) {
  *     return res.status(400).json({ errors: e.issues });

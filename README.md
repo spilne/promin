@@ -38,7 +38,7 @@ bun install
 ```typescript
 import { Pipeline, StreamPipeline } from "@promin/core";
 import { DataFrame, col } from "@promin/data";
-import { workflow } from "@promin/workflow";
+import { createWorkflowRunner, workflow } from "@promin/workflow";
 
 // Pipeline — composable async operations with retry, timeout, concurrency
 const result = await Pipeline.fromPromise(() => fetch("/api/data"))
@@ -66,15 +66,16 @@ const topRegions = await DataFrame.fromArray(sales)
   .collect();
 
 // Durable workflow — survives crashes, supports signals
-const kyc = workflow<KycInput>({ name: "kyc", storage })
+const runner = createWorkflowRunner({ storage });
+const kyc = workflow<KycInput>({ name: "kyc" })
   .stepAsync("validate", async ({ input }) => validate(input))
   .stepAsync("submit-check", async ({ input }) => submitCheck(input))
   .waitForSignal<CheckResult>("result", { signalName: "check-done", timeoutMs: 30 * 60_000 })
   .stepAsync("decide", async ({ prev }) => prev.passed ? approve() : reject())
   .build();
 
-await kyc.runSafe({ workflowId: "kyc-123", input });
-const status = await kyc.getStatus("kyc-123");
+await runner.runSafe({ workflow: kyc, workflowId: "kyc-123", input });
+const status = await runner.getStatus("kyc-123");
 ```
 
 ## Development

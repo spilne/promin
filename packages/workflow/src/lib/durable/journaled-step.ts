@@ -1730,7 +1730,7 @@ export async function completeSignal(params: {
  * ```ts
  * const due = await completeDueSleeps({ storage, now, limit: 100 });
  * for (const { workflowId } of due) {
- *   await workflow.run({ workflowId }); // re-drive to consume completion
+ *   await runner.run({ workflow, workflowId, input }); // re-drive to consume completion
  * }
  * ```
  */

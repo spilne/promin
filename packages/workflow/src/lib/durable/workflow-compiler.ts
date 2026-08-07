@@ -97,16 +97,18 @@ export class WorkflowCompilationError extends Error {
  *         activityRef: "transform.uppercase" },
  *     ],
  *   },
- *   storage,
  *   registry,
  * });
  *
  * // 3. Execute
- * const result = await definition.run({ workflowId: "wf-1", input: {} });
+ * const runner = createWorkflowRunner({ storage });
+ * const result = await runner.run({ workflow: definition, workflowId: "wf-1", input: {} });
  *
  * // 4. Or wire to a stream trigger
  * eventStream.through(trigger({
  *   workflow: definition,
+ *   runner,
+ *   storage,
  *   toInput: (event) => event.payload,
  *   toWorkflowId: (event) => `wf-${event.id}`,
  * }));

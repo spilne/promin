@@ -49,7 +49,7 @@ export interface WebhookHmacConfig {
 export interface WebhookTriggerConfig<Input, Output> {
   /** Workflow to start when a valid webhook arrives. */
   readonly workflow: Workflow<Input, Output>;
-  /** Runner that drives `workflow.run` when a request arrives. */
+  /** Runner that drives `runner.run({ workflow, ... })` when a request arrives. */
   readonly runner: WorkflowRunner;
   /**
    * Storage used for dedup lookup (is this workflowId already present?).

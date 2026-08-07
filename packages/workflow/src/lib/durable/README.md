@@ -30,24 +30,29 @@ const report = await flow<{ text: string }>("analyze")
   .execute({ text: "..." });
 
 // Error handling
-const { data, error } = await flow<{ url: string }>("fetch")
-  .step("download", ({ input }) => httpClient.get(input.url, Schema))
-  .executeSafe({ url: "https://example.com" });
+try {
+  await flow<{ url: string }>("fetch")
+    .step("download", ({ input }) => httpClient.get(input.url, Schema))
+    .execute({ url: "https://example.com" });
+} catch (error) {
+  console.error(error);
+}
 ```
 
-To make it durable later, change `flow("name")` to `workflow({ name }).bind(storage)` and `.execute(input)` to `.run({ workflowId, input })`.
+To make it durable later, change `flow("name")` to `workflow({ name }).build()`, create a `WorkflowRunner` with your storage backend, and call `runner.run({ workflow, workflowId, input })`.
 
 ### `workflow()` — durable (survives crashes, resumes from checkpoints)
 
 ```typescript
-import { workflow } from "@promin/workflow";
+import { createWorkflowRunner, workflow } from "@promin/workflow";
 import { Pipeline } from "@promin/core";
 import { migrate, PostgresWorkflowStorage } from "@promin/postgres";
 
 await migrate(db);
 const storage = await PostgresWorkflowStorage.create({ db });
+const runner = createWorkflowRunner({ storage });
 
-const result = await workflow<{ userId: string }>({
+const onboardUser = workflow<{ userId: string }>({
   name: "onboard-user",
   type: "onboarding",
   metadata: { team: "growth" },
@@ -58,8 +63,13 @@ const result = await workflow<{ userId: string }>({
     await mailer.send(prev.email, "Welcome!");
     return { notified: true };
   })
-  .bind(storage)
-  .run({ workflowId: "onboard-123", input: { userId: "u_42" } });
+  .build();
+
+const result = await runner.run({
+  workflow: onboardUser,
+  workflowId: "onboard-123",
+  input: { userId: "u_42" },
+});
 ```
 
 ## Features (implemented)
@@ -123,19 +133,22 @@ await storage.deliverSignal(workflowId, "manager-approved", { approved: true });
 ### build + trigger — Stream → Workflow
 
 ```typescript
-import { workflow, trigger, WorkflowResult } from "@promin/workflow";
+import { createWorkflowRunner, workflow, trigger, WorkflowResult } from "@promin/workflow";
+
+const runner = createWorkflowRunner({ storage });
 
 const analyzeArticle = workflow<{ url: string }>({ name: "analyze" })
   .step("scrape", ({ input }) => scraper.get(input.url))
   .step("summarize", ({ prev }) => ai.summarize(prev))
-  .build()
-  .bind(storage);
+  .build();
 
 // Trigger from any stream
 await eventStream
   .through(
     trigger({
       workflow: analyzeArticle,
+      runner,
+      storage,
       toInput: (event) => ({ url: event.data }),
       toWorkflowId: (event) => `analyze-${event.id}`,
       concurrency: 5,
@@ -173,7 +186,7 @@ workflow<Input>({
 })
   .step("step-1", fn) // runs once, checkpointed
   .step("step-2", fn) // if this fails, workflow retries from here
-  .bind(storage);
+  .build();
 ```
 
 ### Idempotency & Singleflight
@@ -181,7 +194,9 @@ workflow<Input>({
 Prevent duplicate executions and control what happens when a workflow is called again.
 
 ```typescript
-import { workflow } from "@promin/workflow";
+import { createWorkflowRunner, workflow } from "@promin/workflow";
+
+const runner = createWorkflowRunner({ storage });
 
 const processOrder = workflow<{ orderId: string }>({
   name: "process-order",
@@ -194,17 +209,25 @@ const processOrder = workflow<{ orderId: string }>({
       onInFlight: "join", // concurrent calls join the running execution (singleflight)
       onExpiry: "fresh-run", // after TTL: re-execute with fresh run counter
     },
-  })
-  .bind(storage);
+  });
 
 // First call — executes the workflow
-const result1 = await processOrder.run({ workflowId: "order-42", input: { orderId: "42" } });
+const result1 = await runner.run({
+  workflow: processOrder,
+  workflowId: "order-42",
+  input: { orderId: "42" },
+});
 
 // Second call within TTL — returns cached result instantly (no re-execution)
-const result2 = await processOrder.run({ workflowId: "order-42", input: { orderId: "42" } });
+const result2 = await runner.run({
+  workflow: processOrder,
+  workflowId: "order-42",
+  input: { orderId: "42" },
+});
 
 // Force re-execution regardless of TTL
-const result3 = await processOrder.run({
+const result3 = await runner.run({
+  workflow: processOrder,
   workflowId: "order-42",
   input: { orderId: "42" },
   force: true,
@@ -236,10 +259,12 @@ idempotency: { ttl: { success: 3_600_000, failure: 10_000 } }
 When a step fails, automatically undo completed steps in reverse order.
 
 ```typescript
-import { workflow } from "@promin/workflow";
+import { createWorkflowRunner, workflow } from "@promin/workflow";
 import { Pipeline } from "@promin/core";
 
-workflow<{ from: string; to: string; amount: number }>({
+const runner = createWorkflowRunner({ storage });
+
+const transfer = workflow<{ from: string; to: string; amount: number }>({
   name: "transfer",
   retry: { maxRetries: 2, baseDelayMs: 5000 },
   compensate: {
@@ -257,8 +282,13 @@ workflow<{ from: string; to: string; amount: number }>({
     compensate: ({ result }) => bankClient.reverseCredit(result.txId),
   })
   .step("notify", ({ prev }) => emailClient.send(prev.receipt))
-  .bind(storage)
-  .run({ workflowId: "transfer-1", input: { from: "A", to: "B", amount: 100 } });
+  .build();
+
+await runner.run({
+  workflow: transfer,
+  workflowId: "transfer-1",
+  input: { from: "A", to: "B", amount: 100 },
+});
 ```
 
 **Full failure cascade:**
@@ -292,7 +322,7 @@ workflow<Input>({
     onWorkflowComplete: ({ workflowId, durationMs }) => log.info("done", { durationMs }),
     onWorkflowFailure: ({ workflowId, error }) => log.error("failed", { error }),
   },
-}).bind(storage);
+}).build();
 
 // Query workflows
 await storage.listWorkflows({ status: "failed", type: "onboarding", limit: 10 });
@@ -309,8 +339,10 @@ const dot = dagToDot(dag); // digraph "name" { ... }
 Compile JSON workflows from a node-based UI into executable WorkflowDefinitions:
 
 ```typescript
-import { compileWorkflow, MapActivityRegistry } from "@promin/workflow";
+import { compileWorkflow, createWorkflowRunner, MapActivityRegistry } from "@promin/workflow";
 import { Pipeline } from "@promin/core";
+
+const runner = createWorkflowRunner({ storage });
 
 const registry = new MapActivityRegistry({
   "http.get": (config) => () => httpClient.get({ url: config?.url as string }),
@@ -340,11 +372,10 @@ const definition = compileWorkflow({
       },
     ],
   },
-  storage,
   registry,
 });
 
-await definition.run({ workflowId: "wf-1", input: {} });
+await runner.run({ workflow: definition, workflowId: "wf-1", input: {} });
 ```
 
 Validate untrusted schema JSON from APIs:
@@ -360,37 +391,29 @@ const schema = validateWorkflowSchema(req.body); // throws ZodError on invalid
 Child workflow composition with parent-child tracking.
 
 ```typescript
-import { workflow } from "@promin/workflow";
+import { createWorkflowRunner, workflow } from "@promin/workflow";
 import { Pipeline } from "@promin/core";
+
+const runner = createWorkflowRunner({ storage });
 
 const enrichUser = workflow<{ userId: string }>({ name: "enrich" })
   .step("fetch", ({ input }) => api.get(`/profiles/${input.userId}`))
-  .build()
-  .bind(storage);
+  .build();
 
-// .subworkflow() — builder sugar
-workflow<{ userId: string }>({ name: "onboard" })
+const onboard = workflow<{ userId: string }>({ name: "onboard" })
   .step("create", ({ input }) => api.post("/accounts", { json: input }))
   .subworkflow("enrich", enrichUser, {
     input: (prev) => ({ userId: prev.id }),
     workflowId: (prev) => `enrich-${prev.id}`,
   })
   .step("notify", ({ prev }) => Pipeline.succeed(`Score: ${prev.score}`))
-  .bind(storage)
-  .run({ workflowId: "onboard-1", input: { userId: "u_42" } });
+  .build();
 
-// .invoke() — primitive for use inside any step
-.step("enrich", ({ prev }) =>
-  enrichUser.invoke({
-    workflowId: `enrich-${prev.id}`,
-    input: { userId: prev.id },
-  })
-)
-
-// Fan-out — mapOver + invoke
-.mapOver("process-all", { array: "get-items", concurrency: 10 }, (itemId) =>
-  processItem.invoke({ workflowId: `item-${itemId}`, input: { itemId } })
-)
+await runner.run({
+  workflow: onboard,
+  workflowId: "onboard-1",
+  input: { userId: "u_42" },
+});
 
 // Parent-child tracking
 const children = await storage.listWorkflows({ parentId: "onboard-1" });
@@ -402,20 +425,26 @@ await storage.cancelWorkflow("onboard-1", { cascade: true }); // cancels childre
 Failed workflows (after all retries + compensation) are published to a configurable DLQ. Works with any `Sinkable<FailedWorkflowRecord>` — PgQueue, PgmqQueue, or custom.
 
 ```typescript
-import { workflow } from "@promin/workflow";
+import { createWorkflowRunner, workflow } from "@promin/workflow";
 import { PgQueue } from "@promin/postgres";
 
+const runner = createWorkflowRunner({ storage });
 const dlq = await PgQueue.create<FailedWorkflowRecord>(db, "workflow-dlq");
 
-workflow<{ orderId: string }>({
+const processOrder = workflow<{ orderId: string }>({
   name: "process-order",
   retry: { maxRetries: 3 },
   dlq,
 })
   .step("charge", fn)
   .step("fulfill", fn)
-  .bind(storage)
-  .run({ workflowId: "order-1", input: { orderId: "ord_42" } });
+  .build();
+
+await runner.run({
+  workflow: processOrder,
+  workflowId: "order-1",
+  input: { orderId: "ord_42" },
+});
 
 // Failed workflow record includes:
 // - workflowId, workflowName, input, error, failedAt
@@ -426,7 +455,8 @@ workflow<{ orderId: string }>({
 // Replay from DLQ
 await dlq.subscribeAck().forEach(async (envelope) => {
   const failed = envelope.value;
-  await processOrder.run({
+  await runner.run({
+    workflow: processOrder,
     workflowId: `${failed.workflowId}-retry`,
     input: failed.input as { orderId: string },
   });
@@ -439,9 +469,10 @@ await dlq.subscribeAck().forEach(async (envelope) => {
 Run multiple workflow versions simultaneously. New workflows use the latest version; existing workflows resume with the version they started on.
 
 ```typescript
-import { workflow, WorkflowVersionRegistry } from "@promin/workflow";
+import { createWorkflowRunner, WorkflowVersionRegistry, workflow } from "@promin/workflow";
 
 const registry = new WorkflowVersionRegistry({ storage });
+const runner = createWorkflowRunner({ storage, registry });
 
 // Register versioned definitions (must have a version)
 const v1 = workflow({ name: "order", version: "1" })
@@ -463,10 +494,10 @@ registry.register(v2);
 
 ```typescript
 // New workflow -> uses latest (v2)
-await registry.run({ workflowId: "order-new", name: "order", input: { orderId: "42" } });
+await runner.run({ workflowId: "order-new", name: "order", input: { orderId: "42" } });
 
 // Existing v1 workflow -> resumes with v1 definition
-await registry.run({ workflowId: "order-old", name: "order", input: { orderId: "7" } });
+await runner.run({ workflowId: "order-old", name: "order", input: { orderId: "7" } });
 ```
 
 The registry checks storage for the workflow's version, then resolves the matching definition. If the stored version is no longer registered, it throws with a clear error listing available versions.

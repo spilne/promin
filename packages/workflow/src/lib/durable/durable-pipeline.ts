@@ -376,8 +376,9 @@ export interface StepOptions<T> {
   /**
    * Dispatch priority for distributed execution. Higher numbers claim
    * ahead of lower. Honoured by both `coordinator.submit`'s enqueueReady
-   * and `wf.run`'s DispatchConfig-backed path. Ignored by pure in-process
-   * `.run()` (no queue involved there). Range 0–10, default 5.
+   * and `runner.run({ workflow })`'s DispatchConfig-backed path. Ignored
+   * by pure in-process execution with no dispatch queue. Range 0–10,
+   * default 5.
    */
   readonly priority?: number;
   /**
@@ -1020,7 +1021,7 @@ export class WorkflowBuilder<
    * or via `WorkflowTripwireError` thrown from `run()`.
    *
    * ```typescript
-   * workflow({ name: "charge", storage })
+   * workflow({ name: "charge" })
    *   .step("load", ({ input }) => Pipeline.succeed(input))
    *   .tripwire("fraud-check", {
    *     when: (order) => order.riskScore > 0.9,
@@ -1087,7 +1088,7 @@ export class WorkflowBuilder<
    * `LoopLimitExceededError` as a typed step failure.
    *
    * ```typescript
-   * workflow({ name: "drain", storage })
+   * workflow({ name: "drain" })
    *   .dowhile(
    *     "process-batch",
    *     (ctx, iter) => processNextBatch(ctx.prev),
@@ -1123,7 +1124,7 @@ export class WorkflowBuilder<
    * tradeoff.
    *
    * ```typescript
-   * workflow({ name: "poll", storage })
+   * workflow({ name: "poll" })
    *   .dountil(
    *     "wait-ready",
    *     ({ prev }) => checkStatus(prev.jobId),
@@ -1323,7 +1324,7 @@ export class WorkflowBuilder<
    * names scoped under the block don't collide with unrelated siblings.
    *
    * ```typescript
-   * workflow({ name: "signup", storage })
+   * workflow({ name: "signup" })
    *   .step("load", ({ input }) => Pipeline.succeed(input))
    *   .parallelSteps("enrich", {
    *     user: ({ prev }) => Pipeline.fromPromise(() => fetchUser(prev)),
@@ -1498,7 +1499,7 @@ export class WorkflowBuilder<
    * PostgresWorkflowStorage do). `.build()` throws otherwise.
    *
    * ```typescript
-   * workflow({ name: "signup", storage })
+   * workflow({ name: "signup" })
    *   .step("load", ({ input }) => Pipeline.succeed(input))
    *   .journaled("create-and-notify", function*(ctx, prev) {
    *     const user = yield* ctx.activity("create", () => createUser(prev))

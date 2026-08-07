@@ -6,13 +6,14 @@ Run workflow steps on different machines. A coordinator dispatches steps to work
 
 There are two ways to execute workflows:
 
-### In-process engine (`workflow.run()`)
+### In-process engine (`WorkflowRunner.run()`)
 
 All steps run in the same process. The engine handles the full DAG execution loop, including retry, compensation, DLQ, and workflow-level retry.
 
 ```typescript
 // Everything runs here — one process
-const result = await processVideo.run({
+const result = await runner.run({
+  workflow: processVideo,
   workflowId: "v1",
   input: { videoId: "abc" },
 });
@@ -72,17 +73,18 @@ Horizontal scaling        ✗                     ✓ add more workers
 The same `WorkflowDefinition` works in both modes. No code changes — only deployment changes:
 
 ```typescript
-import { workflow, createCoordinator } from "@promin/workflow";
+import { createCoordinator, createWorkflowRunner, workflow } from "@promin/workflow";
 
 // Define once
-const processVideo = workflow<{ videoId: string }>({ name: "process-video", storage })
+const processVideo = workflow<{ videoId: string }>({ name: "process-video" })
   .step("download", fn)
   .step("transcribe", { dependsOn: ["download"] }, fn)
   .step("summarize", { dependsOn: ["transcribe"] }, fn)
   .build();
 
 // Dev: run in-process
-await processVideo.run({ workflowId: "v1", input: { videoId: "abc" } });
+const runner = createWorkflowRunner({ storage });
+await runner.run({ workflow: processVideo, workflowId: "v1", input: { videoId: "abc" } });
 
 // Prod: distribute across machines
 await coordinator.submit({ workflow: processVideo, workflowId: "v1", input: { videoId: "abc" } });
@@ -164,17 +166,18 @@ const coordinator = createCoordinator({
 Routing is deployment config, not code. The same workflow definition works in-process (dev) and distributed (prod):
 
 ```typescript
-import { workflow } from "@promin/workflow";
+import { createWorkflowRunner, workflow } from "@promin/workflow";
 
 // Same workflow — runs locally in dev, distributed in prod
-const processVideo = workflow<{ videoId: string }>({ name: "process-video", storage })
+const processVideo = workflow<{ videoId: string }>({ name: "process-video" })
   .step("download", ({ input }) => downloadVideo(input.videoId))
   .step("transcribe", { dependsOn: ["download"] }, ({ deps }) => transcribe(deps.download))
   .step("summarize", { dependsOn: ["transcribe"] }, ({ deps }) => summarize(deps.transcribe))
   .build();
 
 // Dev: run in-process
-await processVideo.run({ workflowId: "v1", input: { videoId: "abc" } });
+const runner = createWorkflowRunner({ storage });
+await runner.run({ workflow: processVideo, workflowId: "v1", input: { videoId: "abc" } });
 
 // Prod: submit to coordinator, workers execute steps
 await coordinator.submit({ workflow: processVideo, workflowId: "v1", input: { videoId: "abc" } });

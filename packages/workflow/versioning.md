@@ -34,12 +34,12 @@ Add `version` to your workflow config. Attempts to resume an older-version row
 fail loudly with `WorkflowVersionMismatchError`.
 
 ```typescript
-workflow({ name: "billing", storage, version: "1" }).step("charge", ({ input }) =>
-  Pipeline.succeed({ charged: input.amount }),
-);
+const billingV1 = workflow({ name: "billing", version: "1" })
+  .step("charge", ({ input }) => Pipeline.succeed({ charged: input.amount }))
+  .build();
 ```
 
-If you deploy v2 and try to `.run({ workflowId })` on an existing v1 row,
+If you deploy v2 and try to `runner.run({ workflow: v2, workflowId })` on an existing v1 row,
 you get:
 
 ```
@@ -64,20 +64,21 @@ For a 2-version deploy (the common case), v2's config lists v1 in
 definition while using v2's code for fresh workflows.
 
 ```typescript
-const v1 = workflow({ name: "billing", storage, version: "1" })
+const v1 = workflow({ name: "billing", version: "1" })
   .step("charge", ({ input }) => Pipeline.succeed({ charged: input.amount, v: "1" }))
   .build();
 
 const v2 = workflow({
   name: "billing",
-  storage,
   version: "2",
   onVersionMismatch: "drain",
   previousVersions: [v1],
-}).step("charge", ({ input }) => Pipeline.succeed({ charged: input.amount * 1.1, v: "2" }));
+})
+  .step("charge", ({ input }) => Pipeline.succeed({ charged: input.amount * 1.1, v: "2" }))
+  .build();
 
-// v2.run() against an existing v1 row → runs v1's code
-// v2.run() against a new workflowId   → runs v2's code
+// runner.run({ workflow: v2 }) against an existing v1 row → runs v1's code
+// runner.run({ workflow: v2 }) against a new workflowId   → runs v2's code
 ```
 
 v1's definition stays in the codebase until all v1 workflows complete. Use
@@ -103,8 +104,10 @@ const registry = WorkflowVersionRegistry.for("job", {
   .register(v2)
   .register(v3);
 
+const runner = createWorkflowRunner({ storage, registry });
+
 // New workflows use the latest (v3). Resumes delegate to the stored version.
-await registry.run({ workflowId: "j-42", input: { x: 1 } });
+await runner.run({ workflowId: "j-42", name: "job", input: { x: 1 } });
 
 // Operational monitoring:
 const counts = await registry.countByVersion({ storage });
@@ -134,19 +137,20 @@ const calculateTotal = function* (ctx, prev) {
 };
 
 // v1 — patches empty, takes the legacy branch
-const v1 = workflow({ name: "billing", storage, version: "1", patches: [] })
+const v1 = workflow({ name: "billing", version: "1", patches: [] })
   .journaled("calculate", calculateTotal)
   .build();
 
 // v2 — patches active, takes the new branch
 const v2 = workflow({
   name: "billing",
-  storage,
   version: "2",
   onVersionMismatch: "drain",
   previousVersions: [v1],
   patches: ["new-pricing"],
-}).journaled("calculate", calculateTotal);
+})
+  .journaled("calculate", calculateTotal)
+  .build();
 ```
 
 ### How `ctx.patched()` decides
