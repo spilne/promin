@@ -103,6 +103,10 @@ export {
   createFlatTextChunker,
   InMemoryRetriever,
   createInMemoryRetriever,
+  RerankingRetriever,
+  createRerankingRetriever,
+  RouterRetriever,
+  createRouterRetriever,
   createRetrieverTool,
 } from "./rag/index.ts";
 export type {
@@ -116,6 +120,10 @@ export type {
   RetrieveResult,
   Retriever,
   RetrieverFilter,
+  RerankingRetrieverConfig,
+  RetrieveReranker,
+  RouterRetrieverConfig,
+  RetrieverRoute,
   RetrieverToolConfig,
   RetrieverToolInput,
   RetrieverToolOutput,

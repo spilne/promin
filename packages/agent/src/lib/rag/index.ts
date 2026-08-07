@@ -2,6 +2,10 @@ export { FlatTextChunker, createFlatTextChunker } from "./chunking.ts";
 export type { FlatTextChunkerConfig } from "./chunking.ts";
 export { InMemoryRetriever, createInMemoryRetriever } from "./in-memory-retriever.ts";
 export type { InMemoryRetrieverConfig } from "./in-memory-retriever.ts";
+export { RerankingRetriever, createRerankingRetriever } from "./reranking-retriever.ts";
+export type { RerankingRetrieverConfig, RetrieveReranker } from "./reranking-retriever.ts";
+export { RouterRetriever, createRouterRetriever } from "./router-retriever.ts";
+export type { RouterRetrieverConfig, RetrieverRoute } from "./router-retriever.ts";
 export { createRetrieverTool } from "./retriever-tool.ts";
 export type {
   RetrieverToolConfig,

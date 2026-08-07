@@ -1,6 +1,13 @@
 import { describe, expect, it } from "bun:test";
-import { FlatTextChunker, InMemoryRetriever, createRetrieverTool } from "../index.ts";
+import {
+  FlatTextChunker,
+  InMemoryRetriever,
+  RerankingRetriever,
+  RouterRetriever,
+  createRetrieverTool,
+} from "../index.ts";
 import type { EmbeddingProvider } from "../../memory-index.ts";
+import type { RetrieveRequest, RetrieveResult, Retriever } from "../types.ts";
 
 describe("FlatTextChunker", () => {
   it("chunks text with overlap and source metadata", () => {
@@ -117,3 +124,92 @@ describe("createRetrieverTool", () => {
     ]);
   });
 });
+
+describe("RerankingRetriever", () => {
+  it("fetches extra candidates and applies the reranker", async () => {
+    let observedTopK: number | undefined;
+    const upstream: Retriever = {
+      retrieve: async (request: RetrieveRequest) => {
+        observedTopK = request.topK;
+        return [result("a", "alpha", 0.2), result("b", "beta", 0.9), result("c", "gamma", 0.1)];
+      },
+    };
+    const retriever = new RerankingRetriever({
+      retriever: upstream,
+      candidateMultiplier: 3,
+      rerank: async (_request, results) =>
+        [...results].sort((a, b) => a.chunk.id.localeCompare(b.chunk.id)),
+    });
+
+    const results = await retriever.retrieve({ query: "anything", topK: 1 });
+
+    expect(observedTopK).toBe(3);
+    expect(results.map((r) => r.chunk.id)).toEqual(["a"]);
+  });
+});
+
+describe("RouterRetriever", () => {
+  it("routes by request tags and merges duplicate chunks by best score", async () => {
+    const policy = new StaticRetriever([
+      result("shared", "policy shared", 0.3),
+      result("policy", "policy only", 0.8),
+    ]);
+    const engineering = new StaticRetriever([
+      result("shared", "engineering shared", 0.9),
+      result("eng", "engineering only", 0.7),
+    ]);
+    const retriever = new RouterRetriever({
+      routes: [
+        { id: "policy", tags: ["policy"], retriever: policy },
+        { id: "engineering", tags: ["engineering"], retriever: engineering },
+      ],
+    });
+
+    const policyResults = await retriever.retrieve({
+      query: "shared",
+      filter: { tags: ["policy"] },
+      topK: 5,
+    });
+    const allResults = await retriever.retrieve({ query: "shared", topK: 5 });
+
+    expect(policyResults.map((r) => r.chunk.id)).toEqual(["policy", "shared"]);
+    expect(allResults.map((r) => r.chunk.id)).toEqual(["shared", "policy", "eng"]);
+    expect(allResults[0]?.score).toBe(0.9);
+  });
+
+  it("supports custom route selection", async () => {
+    const primary = new StaticRetriever([result("primary", "primary", 0.5)]);
+    const secondary = new StaticRetriever([result("secondary", "secondary", 0.6)]);
+    const retriever = new RouterRetriever({
+      routes: [
+        { id: "primary", retriever: primary },
+        { id: "secondary", retriever: secondary },
+      ],
+      selectRoutes: (_request, routes) => routes.filter((route) => route.id === "secondary"),
+    });
+
+    const results = await retriever.retrieve({ query: "anything" });
+
+    expect(results.map((r) => r.chunk.id)).toEqual(["secondary"]);
+  });
+});
+
+class StaticRetriever implements Retriever {
+  constructor(private readonly results: ReadonlyArray<RetrieveResult>) {}
+
+  async retrieve(): Promise<RetrieveResult[]> {
+    return [...this.results];
+  }
+}
+
+function result(id: string, text: string, score: number): RetrieveResult {
+  return {
+    chunk: {
+      id,
+      text,
+      index: 0,
+      source: { id: `source-${id}` },
+    },
+    score,
+  };
+}
