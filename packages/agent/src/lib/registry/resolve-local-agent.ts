@@ -18,6 +18,7 @@ import { LocalAgent, type LocalAgentConfig } from "../agent/local-agent.ts";
 import type { LLMProvider } from "../llm-provider.ts";
 import type { MemoryStore } from "../memory/types.ts";
 import type { Retriever } from "../rag/types.ts";
+import { isRetrieverRegistry, type RetrieverRegistry } from "../rag/retriever-registry.ts";
 // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
 import type { AgentTool } from "../tool.ts";
 import type { Consolidator } from "../memory/consolidator.ts";
@@ -124,7 +125,7 @@ export interface ResolveLocalAgentDeps {
    * Runtime retriever registry. Recipe `backend.knowledge[].id` entries are
    * resolved against this map and auto-attached as tools/context bindings.
    */
-  readonly retrievers?: Readonly<Record<string, Retriever>>;
+  readonly retrievers?: Readonly<Record<string, Retriever>> | RetrieverRegistry;
   /**
    * Skill registry the auto-attached `loadSkill` tool reads bodies from.
    * Required for skills to work: a recipe's `backend.skills` is ignored
@@ -256,12 +257,12 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
 
 function resolveKnowledgeBindings(
   backend: LocalAgentBackend,
-  available: Readonly<Record<string, Retriever>> | undefined,
+  available: ResolveLocalAgentDeps["retrievers"],
 ): Record<string, AgentRetrieverBinding> | undefined {
   if (!backend.knowledge || backend.knowledge.length === 0) return undefined;
   const out: Record<string, AgentRetrieverBinding> = {};
   for (const entry of backend.knowledge) {
-    const retriever = available?.[entry.id];
+    const retriever = getRetriever(available, entry.id);
     if (!retriever) {
       throw new Error(
         `resolveLocalAgent: knowledge retriever "${entry.id}" referenced by the recipe but not provided in deps.retrievers.`,
@@ -279,6 +280,15 @@ function resolveKnowledgeBindings(
     };
   }
   return out;
+}
+
+function getRetriever(
+  available: ResolveLocalAgentDeps["retrievers"],
+  id: string,
+): Retriever | undefined {
+  if (!available) return undefined;
+  if (isRetrieverRegistry(available)) return available.get(id)?.retriever;
+  return available[id];
 }
 
 /**

@@ -6,6 +6,17 @@ export { RerankingRetriever, createRerankingRetriever } from "./reranking-retrie
 export type { RerankingRetrieverConfig, RetrieveReranker } from "./reranking-retriever.ts";
 export { RouterRetriever, createRouterRetriever } from "./router-retriever.ts";
 export type { RouterRetrieverConfig, RetrieverRoute } from "./router-retriever.ts";
+export {
+  InMemoryRetrieverRegistry,
+  createInMemoryRetrieverRegistry,
+  isRetrieverRegistry,
+} from "./retriever-registry.ts";
+export type {
+  ListRetrieversParams,
+  RegisteredRetriever,
+  RegisterRetrieverInput,
+  RetrieverRegistry,
+} from "./retriever-registry.ts";
 export { createRetrieverTool } from "./retriever-tool.ts";
 export type {
   RetrieverToolConfig,

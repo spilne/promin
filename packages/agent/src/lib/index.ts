@@ -107,6 +107,9 @@ export {
   createRerankingRetriever,
   RouterRetriever,
   createRouterRetriever,
+  InMemoryRetrieverRegistry,
+  createInMemoryRetrieverRegistry,
+  isRetrieverRegistry,
   createRetrieverTool,
 } from "./rag/index.ts";
 export type {
@@ -124,6 +127,10 @@ export type {
   RetrieveReranker,
   RouterRetrieverConfig,
   RetrieverRoute,
+  ListRetrieversParams,
+  RegisteredRetriever,
+  RegisterRetrieverInput,
+  RetrieverRegistry,
   RetrieverToolConfig,
   RetrieverToolInput,
   RetrieverToolOutput,

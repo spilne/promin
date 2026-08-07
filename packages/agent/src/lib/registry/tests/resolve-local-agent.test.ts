@@ -17,6 +17,7 @@ import type { LLMProvider, LLMResponse } from "../../llm-provider.ts";
 import type { RegisteredAgent } from "../types.ts";
 import { createElevatedTool, tool } from "../../tool.ts";
 import { InMemoryRetriever } from "../../rag/in-memory-retriever.ts";
+import { InMemoryRetrieverRegistry } from "../../rag/retriever-registry.ts";
 import { z } from "zod";
 
 function mockLLM(responses: LLMResponse[]): LLMProvider {
@@ -156,6 +157,42 @@ describe("resolveLocalAgent", () => {
           documents: [{ id: "returns", text: "Return unopened items within 30 days." }],
         }),
       },
+    });
+    await agent.invoke({ task: "returns" });
+
+    expect(observedTools).toEqual(["search", "search_docs"]);
+  });
+
+  it("resolves recipe knowledge bindings from a RetrieverRegistry", async () => {
+    let observedTools: string[] = [];
+    const llm: LLMProvider = {
+      chat: async (params) => {
+        observedTools = (params.tools ?? []).map((t) => t.name);
+        return { content: "ok", finishReason: "stop" };
+      },
+    };
+    const row: RegisteredAgent = {
+      ...baseRow(),
+      backend: {
+        ...baseRow().backend,
+        knowledge: [{ id: "docs", name: "search_docs", mode: "tool" }],
+      } as RegisteredAgent["backend"],
+    };
+    const retrievers = new InMemoryRetrieverRegistry([
+      {
+        id: "docs",
+        retriever: new InMemoryRetriever({
+          documents: [{ id: "returns", text: "Return unopened items within 30 days." }],
+        }),
+      },
+    ]);
+
+    const agent = resolveLocalAgent(row, {
+      runner: makeRunner(),
+      llm: () => llm,
+      tools: { search: searchTool },
+      namespaceId: "acme",
+      retrievers,
     });
     await agent.invoke({ task: "returns" });
 
