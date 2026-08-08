@@ -71,12 +71,45 @@ function authHeader(): HeadersInit {
 }
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    ...init,
-    headers: { ...(init?.headers ?? {}), ...authHeader() },
-  });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
-  return (await res.json()) as T;
+  const method = (init?.method ?? "GET").toUpperCase();
+  const maxAttempts = method === "GET" ? 3 : 1;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const res = await fetch(`${BASE}${path}`, {
+        ...init,
+        headers: { ...(init?.headers ?? {}), ...authHeader() },
+      });
+      if (res.ok) return (await res.json()) as T;
+
+      // A hot-reloading server can briefly return a gateway-style failure.
+      // Retry only idempotent reads; never replay mutations from the browser.
+      if (attempt < maxAttempts && isRetryableStatus(res.status)) {
+        await delay(50 * 2 ** (attempt - 1));
+        continue;
+      }
+      throw new ApiError(res.status, await res.text());
+    } catch (err) {
+      if (attempt >= maxAttempts || !isRetryableNetworkError(err)) throw err;
+      await delay(50 * 2 ** (attempt - 1));
+    }
+  }
+
+  throw new Error("unreachable: request retry loop exhausted");
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 502 || status === 503 || status === 504;
+}
+
+function isRetryableNetworkError(err: unknown): boolean {
+  if (err instanceof ApiError) return false;
+  const message = err instanceof Error ? err.message : String(err);
+  return /fetch failed|network|econnreset|econnrefused|etimedout|socket/i.test(message);
 }
 
 export class ApiError extends Error {

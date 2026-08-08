@@ -120,7 +120,7 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
         .then((r) => !cancelled && setSparklines(r))
         .catch(() => {});
     load();
-    const h = setInterval(load, 5000);
+    const h = setInterval(load, 15_000);
     return () => {
       cancelled = true;
       clearInterval(h);

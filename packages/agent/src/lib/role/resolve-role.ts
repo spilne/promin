@@ -19,7 +19,10 @@ import type { RoleBinding, RoleDefinition, RoleRegistry } from "./types.ts";
  * via `resolveRoleBinding`. Handy for read-only, sync contexts (listings,
  * tool-ref reconciliation, UI) that shouldn't do I/O.
  */
-export function inlineRoleDefinition(binding: RoleBinding): RoleDefinition | undefined {
+export function inlineRoleDefinition(
+  binding: RoleBinding | null | undefined,
+): RoleDefinition | undefined {
+  if (!binding || typeof binding !== "object") return undefined;
   return "inline" in binding ? binding.inline : undefined;
 }
 

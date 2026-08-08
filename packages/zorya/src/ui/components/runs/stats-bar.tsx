@@ -20,7 +20,7 @@ interface StatsBarProps {
 }
 
 export function StatsBar({ onPickStatus }: StatsBarProps = {}) {
-  const { data } = useFetch(() => api.getMetrics(), [], 5000);
+  const { data } = useFetch(() => api.getMetrics(), [], 15_000);
   const { data: health } = useFetch(() => api.getHealth(), [], 10_000);
 
   if (!data) {

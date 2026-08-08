@@ -4,10 +4,15 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { resolveRoleBinding } from "../resolve-role.ts";
+import { inlineRoleDefinition, resolveRoleBinding } from "../resolve-role.ts";
 import { InMemoryRoleRegistry } from "../in-memory-role-registry.ts";
 
 describe("resolveRoleBinding", () => {
+  it("returns undefined for a missing inline binding", () => {
+    expect(inlineRoleDefinition(undefined)).toBeUndefined();
+    expect(inlineRoleDefinition(null)).toBeUndefined();
+  });
+
   it("returns the embedded definition for an inline binding (no registry needed)", async () => {
     const def = { systemPrompt: "inline persona", tools: ["bash"] };
     const out = await resolveRoleBinding({ inline: def });

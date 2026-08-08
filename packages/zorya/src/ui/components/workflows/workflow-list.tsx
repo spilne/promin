@@ -31,13 +31,22 @@ interface WorkflowListProps {
 export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: WorkflowListProps) {
   const [namespace] = useNamespace();
   const { data, loading, error, refresh } = useFetch(() => api.listWorkflowDefs(), [], 30_000);
-  const { data: sparklines } = useFetch<SparklinesResponse>(() => api.getSparklines(14), [], 5000);
+  // Sparklines are secondary decoration. Avoid repeatedly scanning the run
+  // summary table while the operator is browsing the definition directory.
+  const { data: sparklines } = useFetch<SparklinesResponse>(
+    () => api.getSparklines(14),
+    [],
+    15_000,
+  );
   // Names of workflows that have run in the currently-selected namespace.
   // Used to filter the registry view so users see only the workflows
   // relevant to their tenant. When namespace is unset the filter is
   // skipped — the registry is the union of all definitions.
   const { data: runNamesInNs } = useFetch(
-    () => api.listWorkflowNames({ namespace: namespace || undefined }),
+    () =>
+      namespace
+        ? api.listWorkflowNames({ namespace })
+        : Promise.resolve<{ names: string[] }>({ names: [] }),
     [namespace],
     30_000,
   );

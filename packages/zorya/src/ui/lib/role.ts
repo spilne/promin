@@ -20,6 +20,9 @@ import type { RoleBinding, RoleDefinition } from "@promin/agent";
  * `undefined` for refs. See `inlineRoleDefinition` in
  * `packages/agent/src/lib/role/resolve-role.ts`.
  */
-export function inlineRoleDefinition(binding: RoleBinding): RoleDefinition | undefined {
+export function inlineRoleDefinition(
+  binding: RoleBinding | null | undefined,
+): RoleDefinition | undefined {
+  if (!binding || typeof binding !== "object") return undefined;
   return "inline" in binding ? binding.inline : undefined;
 }

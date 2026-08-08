@@ -123,6 +123,24 @@ describe("reconcileToolReferences", () => {
     expect(a?.missing).toEqual([]);
   });
 
+  it("does not fail when a legacy local recipe has no role binding", async () => {
+    const catalog = new DefaultAgentToolCatalog({ inProcess: { search } });
+    const registry = new InMemoryAgentRegistry();
+    await registry.register({
+      id: "legacy-bot",
+      backend: {
+        type: "local",
+        model: { provider: "anthropic", id: "claude-sonnet-4-6" },
+        role: undefined,
+      } as never,
+    });
+
+    await expect(reconcileToolReferences({ catalog, registry })).resolves.toEqual({
+      recipes: [],
+      orphans: [],
+    });
+  });
+
   it("orphan output is stably ordered (alphabetical tool names, then recipe ids)", async () => {
     const { catalog, registry } = await setup({
       recipes: {
