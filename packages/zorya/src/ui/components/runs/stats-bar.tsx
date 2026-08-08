@@ -71,13 +71,21 @@ export function StatsBar({ onPickStatus }: StatsBarProps = {}) {
       <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8">
         {stats.map((s) => {
           const clickable = !!s.filter && !!onPickStatus;
-          return (
-            <div
-              class={`min-h-[5.75rem] border-b border-r border-base-content/10 p-3 xl:border-b-0 ${
+          return clickable ? (
+            <button
+              type="button"
+              class={`block w-full text-left min-h-[5.75rem] border-b border-r border-base-content/10 p-3 xl:border-b-0 ${
                 clickable ? "cursor-pointer hover:bg-base-100/70" : ""
               }`}
-              onClick={() => clickable && onPickStatus?.(s.filter)}
+              onClick={() => onPickStatus?.(s.filter!)}
             >
+              <div class="text-[11px] uppercase tracking-[0.12em] text-base-content/45">
+                {s.label}
+              </div>
+              <div class={`mt-2 text-2xl font-semibold leading-none ${s.color}`}>{s.value}</div>
+            </button>
+          ) : (
+            <div class="min-h-[5.75rem] border-b border-r border-base-content/10 p-3 xl:border-b-0">
               <div class="text-[11px] uppercase tracking-[0.12em] text-base-content/45">
                 {s.label}
               </div>

@@ -15,7 +15,7 @@ import { useEffect, useMemo, useState } from "preact/hooks";
 import { confirm } from "../../lib/dialogs.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { secretsApi, type SecretScopeWire } from "../../api/client.ts";
-import { Page } from "../ui/page.tsx";
+import { Page, PageHeader } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 
 type ScopeKind = "global" | "namespace" | "resource";
@@ -35,13 +35,16 @@ export function SecretsPage() {
 
   return (
     <Page>
-      <div>
-        <h2 class="text-xl font-semibold">Secrets</h2>
-        <p class="text-xs text-base-content/50">
-          API keys, tokens, and credentials. Values are encrypted at rest. Never readable through
-          the API — only key names are returned.
-        </p>
-      </div>
+      <PageHeader
+        title="Secrets"
+        eyebrow="Settings"
+        description={
+          <>
+            API keys, tokens, and credentials. Values are encrypted at rest. Never readable through
+            the API — only key names are returned.
+          </>
+        }
+      />
 
       <div role="tablist" class="tabs tabs-boxed w-fit">
         <button

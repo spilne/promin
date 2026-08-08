@@ -9,7 +9,7 @@ import { useMemo, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api } from "../../api/client.ts";
 import type { RegisteredRole } from "../../../server/routes/roles.ts";
-import { Page } from "../ui/page.tsx";
+import { Page, PageHeader } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { formatRelative } from "../../lib/format.ts";
 import { RoleEditDrawer } from "./role-edit-drawer.tsx";
@@ -62,23 +62,26 @@ export function RolesPage(_props: RolesPageProps) {
 
   return (
     <Page>
-      <div class="flex items-start justify-between gap-2">
-        <div>
-          <h2 class="text-xl font-semibold">Roles</h2>
-          <p class="text-xs text-base-content/50 max-w-2xl">
+      <PageHeader
+        title="Roles"
+        eyebrow="Agent runtime"
+        description={
+          <>
             The behavioral bundle an agent binds — persona prompt (plain or layered over fragments)
             plus tools, skills, and capabilities. Agents bind a role by ref (shared, live) or
             inline.
-          </p>
-        </div>
-        <button
-          type="button"
-          class="btn btn-sm btn-primary whitespace-nowrap"
-          onClick={() => setEditing({ role: blankRole(), mode: "create" })}
-        >
-          + New role
-        </button>
-      </div>
+          </>
+        }
+        actions={
+          <button
+            type="button"
+            class="btn btn-sm btn-primary whitespace-nowrap"
+            onClick={() => setEditing({ role: blankRole(), mode: "create" })}
+          >
+            + New role
+          </button>
+        }
+      />
 
       {error && <div class="alert alert-error text-xs">{error.message}</div>}
 

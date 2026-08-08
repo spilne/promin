@@ -29,7 +29,7 @@ import { useNamespace } from "../../hooks/use-namespace.ts";
 import { toast } from "../../lib/dialogs.ts";
 import { formatRelative } from "../../lib/format.ts";
 import type { MintTokenResponse } from "../../../server/routes/signal-tokens.ts";
-import { Page } from "../ui/page.tsx";
+import { Page, PageHeader } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { SchemaForm } from "./schema-form.tsx";
 
@@ -170,21 +170,24 @@ export function SignalList({ onOpenRun }: Props) {
 
   return (
     <Page>
-      <div class="flex items-end justify-between flex-wrap gap-2 mb-4">
-        <div>
-          <h2 class="text-xl font-semibold">Signals</h2>
-          <p class="text-xs text-base-content/50">
+      <PageHeader
+        title="Signals"
+        eyebrow="Human-in-the-loop"
+        description={
+          <>
             Workflows currently suspended on an external signal — tool-call approvals (
             <code class="font-mono">approve:&lt;callId&gt;</code>) and any custom-named signal a
             workflow is waiting for. Approve / Reject are shortcuts for approval-shaped signals;
             <code class="font-mono">Deliver…</code> works for any signal with any JSON payload.
-          </p>
-        </div>
-        <button class="btn btn-sm btn-ghost gap-1" onClick={() => refresh()}>
-          <span>↻</span>
-          Refresh
-        </button>
-      </div>
+          </>
+        }
+        actions={
+          <button class="btn btn-sm btn-ghost gap-1" onClick={() => refresh()}>
+            <span>↻</span>
+            Refresh
+          </button>
+        }
+      />
 
       {error && (
         <div class="alert alert-error text-sm mb-3">

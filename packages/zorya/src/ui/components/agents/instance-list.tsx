@@ -14,7 +14,7 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { useNamespace } from "../../hooks/use-namespace.ts";
 import { instancesApi, type AgentInstanceDto } from "../../api/client.ts";
-import { Page } from "../ui/page.tsx";
+import { Page, PageHeader } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { formatRelative } from "../../lib/format.ts";
 
@@ -66,18 +66,17 @@ export function InstanceList({ onOpenAgent }: Props) {
 
   return (
     <Page>
-      <div class="flex items-end justify-between flex-wrap gap-2">
-        <div>
-          <h2 class="text-xl font-semibold">All instances</h2>
-          <p class="text-xs text-base-content/50">
-            Long-lived per-owner agent instances across all agents in this namespace.
-          </p>
-        </div>
-        <button class="btn btn-sm btn-ghost gap-1" onClick={() => setRefreshTick((t) => t + 1)}>
-          <span>↻</span>
-          Refresh
-        </button>
-      </div>
+      <PageHeader
+        title="Instances"
+        eyebrow="Agent runtime"
+        description={<>Long-lived per-owner agent instances across all agents in this namespace.</>}
+        actions={
+          <button class="btn btn-sm btn-ghost gap-1" onClick={() => setRefreshTick((t) => t + 1)}>
+            <span>↻</span>
+            Refresh
+          </button>
+        }
+      />
 
       <div class="card bg-base-100 shadow">
         <div class="card-body gap-3">

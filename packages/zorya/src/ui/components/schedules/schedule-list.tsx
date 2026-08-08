@@ -9,7 +9,7 @@ import { CreateScheduleModal } from "./create-schedule-modal.tsx";
 import { ScheduleDrawer } from "./schedule-drawer.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { Pagination } from "../ui/pagination.tsx";
-import { Page } from "../ui/page.tsx";
+import { Page, PageHeader } from "../ui/page.tsx";
 import { Combobox } from "../ui/combobox.tsx";
 
 const PAGE_SIZE = 20;
@@ -116,10 +116,11 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
   if (loading && !data) {
     return (
       <Page>
-        <div>
-          <h2 class="text-xl font-semibold">Schedules</h2>
-          <p class="text-xs text-base-content/50">Loading…</p>
-        </div>
+        <PageHeader
+          title="Schedules"
+          eyebrow="Automation"
+          description="Loading schedule definitions…"
+        />
         <div class="card bg-base-100 shadow overflow-hidden">
           <table class="table">
             <thead>
@@ -193,27 +194,28 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
 
   return (
     <Page>
-      <div class="flex items-end justify-between">
-        <div>
-          <h2 class="text-xl font-semibold">Schedules</h2>
-          <p class="text-xs text-base-content/50">
-            {configured
-              ? `${data?.total ?? 0} configured · auto-refreshes every 10s`
-              : "Scheduler storage not configured on this server"}
-          </p>
-        </div>
-        <div class="flex gap-2">
-          {configured && (
-            <button class="btn btn-sm btn-primary gap-1" onClick={() => setShowCreate(true)}>
-              + New schedule
+      <PageHeader
+        title="Schedules"
+        eyebrow="Automation"
+        description={
+          configured
+            ? `${data?.total ?? 0} configured · auto-refreshes every 10s`
+            : "Scheduler storage not configured on this server"
+        }
+        actions={
+          <>
+            {configured && (
+              <button class="btn btn-sm btn-primary gap-1" onClick={() => setShowCreate(true)}>
+                + New schedule
+              </button>
+            )}
+            <button class="btn btn-sm btn-ghost gap-1" onClick={() => refresh()}>
+              <span>↻</span>
+              Refresh
             </button>
-          )}
-          <button class="btn btn-sm btn-ghost gap-1" onClick={() => refresh()}>
-            <span>↻</span>
-            Refresh
-          </button>
-        </div>
-      </div>
+          </>
+        }
+      />
 
       {!configured && (
         <div class="alert alert-warning text-sm">

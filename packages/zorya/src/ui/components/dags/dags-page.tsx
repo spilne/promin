@@ -12,7 +12,7 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api, type DagDto, type DagRunResultDto } from "../../api/client.ts";
-import { Page } from "../ui/page.tsx";
+import { Page, PageHeader } from "../ui/page.tsx";
 
 export function DagsPage() {
   const { data, loading, error, refresh } = useFetch(() => api.listDags(), [], 0);
@@ -34,21 +34,22 @@ export function DagsPage() {
 
   return (
     <Page>
-      <div class="flex items-end justify-between">
-        <div>
-          <h2 class="text-xl font-semibold">DAGs</h2>
-          <p class="text-xs text-base-content/50">
-            {loading && !data
-              ? "Loading…"
-              : dags.length === 0
-                ? "No DAGs registered. Wire ZoryaDags into your server config + register graphs via POST /api/dags."
-                : `${dags.length} registered`}
-          </p>
-        </div>
-        <button class="btn btn-sm btn-ghost gap-1" onClick={() => refresh()}>
-          <span>↻</span> Refresh
-        </button>
-      </div>
+      <PageHeader
+        title="DAGs"
+        eyebrow="Agent runtime"
+        description={
+          loading && !data
+            ? "Loading…"
+            : dags.length === 0
+              ? "No DAGs registered. Wire ZoryaDags into your server config + register graphs via POST /api/dags."
+              : `${dags.length} registered`
+        }
+        actions={
+          <button class="btn btn-sm btn-ghost gap-1" onClick={() => refresh()}>
+            <span>↻</span> Refresh
+          </button>
+        }
+      />
 
       <div class="grid grid-cols-1 md:grid-cols-[280px_1fr] gap-4 min-h-[60vh]">
         <aside class="card bg-base-100 shadow overflow-hidden">

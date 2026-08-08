@@ -17,7 +17,7 @@ import {
   type ToolCatalogHealthDto,
   type ToolCatalogSourceDto,
 } from "../../api/client.ts";
-import { Page } from "../ui/page.tsx";
+import { Page, PageHeader } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 
 export function ToolsPage() {
@@ -58,28 +58,29 @@ export function ToolsPage() {
 
   return (
     <Page>
-      <div class="flex items-end justify-between">
-        <div>
-          <h2 class="text-xl font-semibold">Tools</h2>
-          <p class="text-xs text-base-content/50">
-            {loading && !data
-              ? "Loading…"
-              : tools.length === 0
-                ? "Tool catalog not configured on this server"
-                : `${tools.length} available · ${counts["in-process"]} in-process · ${counts.file} file · ${counts.mcp} MCP`}
-          </p>
-        </div>
-        <button
-          class="btn btn-sm btn-ghost gap-1"
-          onClick={() => {
-            refresh();
-            refreshHealth();
-          }}
-        >
-          <span>↻</span>
-          Refresh
-        </button>
-      </div>
+      <PageHeader
+        title="Tools"
+        eyebrow="Agent runtime"
+        description={
+          loading && !data
+            ? "Loading tool catalog…"
+            : tools.length === 0
+              ? "Tool catalog not configured on this server."
+              : `${tools.length} available · ${counts["in-process"]} in-process · ${counts.file} file · ${counts.mcp} MCP`
+        }
+        actions={
+          <button
+            class="btn btn-sm btn-ghost gap-1"
+            onClick={() => {
+              refresh();
+              refreshHealth();
+            }}
+          >
+            <span aria-hidden="true">↻</span>
+            Refresh
+          </button>
+        }
+      />
 
       {orphans.length > 0 && <OrphansPanel orphans={orphans} />}
 

@@ -4,7 +4,7 @@ import { api } from "../../api/client.ts";
 import type { WorkerDto } from "../../../server/api-types.ts";
 import { formatDuration, formatRelative } from "../../lib/format.ts";
 import { Skeleton } from "../ui/skeleton.tsx";
-import { Page } from "../ui/page.tsx";
+import { Page, PageHeader } from "../ui/page.tsx";
 import { Card } from "../ui/card.tsx";
 
 interface WorkerGridProps {
@@ -22,7 +22,11 @@ export function WorkerGrid({ onOpenRun }: WorkerGridProps = {}) {
   if (loading && !data) {
     return (
       <Page>
-        <h2 class="text-xl font-semibold">Workers</h2>
+        <PageHeader
+          title="Workers"
+          eyebrow="Infrastructure"
+          description="Connected execution workers and the workflows they advertise."
+        />
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           {Array.from({ length: 2 }).map(() => (
             <Card bodyClassName="space-y-2">
@@ -62,26 +66,41 @@ export function WorkerGrid({ onOpenRun }: WorkerGridProps = {}) {
 
   return (
     <Page>
-      <div class="flex items-center gap-3 flex-wrap">
-        <h2 class="text-xl font-semibold">Workers</h2>
-        <span class="text-base-content/60 text-sm">
-          {online} online
-          {offline > 0 && `, ${offline} offline`}
-          {retired > 0 && `, ${retired} retired`}
-        </span>
-        <div class="flex-1" />
-        <div class="join">
-          {filters.map((f) => (
-            <button
-              type="button"
-              class={`btn btn-xs join-item ${filter === f.id ? "btn-primary" : "btn-ghost"}`}
-              onClick={() => setFilter(f.id)}
-            >
-              {f.label}
-            </button>
-          ))}
-        </div>
-      </div>
+      <PageHeader
+        title="Workers"
+        eyebrow="Infrastructure"
+        description="Connected execution workers and the workflows they advertise."
+        meta={
+          <>
+            <span class="font-mono">{online}</span> online
+            {offline > 0 && (
+              <>
+                <span class="h-3 w-px bg-base-content/15" />
+                {offline} offline
+              </>
+            )}
+            {retired > 0 && (
+              <>
+                <span class="h-3 w-px bg-base-content/15" />
+                {retired} retired
+              </>
+            )}
+          </>
+        }
+        actions={
+          <div class="join">
+            {filters.map((f) => (
+              <button
+                type="button"
+                class={`btn btn-xs join-item ${filter === f.id ? "btn-primary" : "btn-ghost"}`}
+                onClick={() => setFilter(f.id)}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+        }
+      />
 
       {workers.length === 0 && (
         <Card bodyClassName="py-8 text-center text-base-content/50" padding="none">
