@@ -1,7 +1,8 @@
 // ---------------------------------------------------------------------------
 // System (auto-injected) tools — the tools the resolver attaches to a live
 // agent that DON'T live in `backend.tools`: `loadSkill` (when the agent has
-// skills) and `findAgent` / `callAgent` (when `backend.network` is set).
+// skills), RAG search tools (when `backend.knowledge` exposes retrievers as
+// tools), and `findAgent` / `callAgent` (when `backend.network` is set).
 //
 // These are per-agent and conditional, so they're a computed view of the
 // recipe / form state — not entries in the host-wide tool catalog. Surfaced
@@ -16,6 +17,7 @@ export interface SystemTool {
 
 export function systemToolsFor(opts: {
   readonly skillCount: number;
+  readonly knowledgeToolCount?: number;
   readonly hasNetwork: boolean;
 }): SystemTool[] {
   const out: SystemTool[] = [];
@@ -25,6 +27,14 @@ export function systemToolsFor(opts: {
       reason: `Auto-injected because this agent has ${opts.skillCount} skill${
         opts.skillCount === 1 ? "" : "s"
       }. The model calls it to load a skill's instructions on demand.`,
+    });
+  }
+  if ((opts.knowledgeToolCount ?? 0) > 0) {
+    out.push({
+      name: "search_knowledge_base",
+      reason: `Auto-injected because this agent has ${opts.knowledgeToolCount} knowledge binding${
+        opts.knowledgeToolCount === 1 ? "" : "s"
+      } exposed as a tool. Exact tool names are derived from each binding unless overridden.`,
     });
   }
   if (opts.hasNetwork) {

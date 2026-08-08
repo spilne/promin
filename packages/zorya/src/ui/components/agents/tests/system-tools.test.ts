@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // system-tools — which auto-injected ("system") tools a recipe surfaces in
-// the agent UI. Pins the loadSkill (skill-count) + network (findAgent /
-// callAgent) derivation and the empty case.
+// the agent UI. Pins the loadSkill (skill-count), RAG search-tool,
+// network (findAgent / callAgent) derivation, and the empty case.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
@@ -27,6 +27,16 @@ describe("systemToolsFor", () => {
   it("surfaces findAgent + callAgent when network is enabled", () => {
     const tools = systemToolsFor({ skillCount: 0, hasNetwork: true });
     expect(tools.map((t) => t.name)).toEqual(["findAgent", "callAgent"]);
+  });
+
+  it("surfaces retrieval search when knowledge is exposed as a tool", () => {
+    const tools = systemToolsFor({
+      skillCount: 0,
+      knowledgeToolCount: 2,
+      hasNetwork: false,
+    });
+    expect(tools.map((t) => t.name)).toEqual(["search_knowledge_base"]);
+    expect(tools[0]!.reason).toContain("2 knowledge bindings");
   });
 
   it("combines skills + network", () => {

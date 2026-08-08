@@ -34,6 +34,21 @@ import {
   type RunMode,
 } from "../../lib/recipe-memory-form.ts";
 
+type KnowledgeMode = "tool" | "context" | "tool-and-context";
+type LocalAgentBackend = Extract<RegisteredAgent["backend"], { type: "local" }>;
+type AgentKnowledgeBinding = NonNullable<LocalAgentBackend["knowledge"]>[number];
+
+interface KnowledgeForm {
+  id: string;
+  name: string;
+  description: string;
+  topK: string;
+  includeSources: boolean;
+  includeScores: boolean;
+  maxChunkCharacters: string;
+  mode: KnowledgeMode;
+}
+
 interface Props {
   agent: RegisteredAgent;
   /**
@@ -134,6 +149,9 @@ export function AgentEditDrawer({
     initContextBudget(isLocal ? agent.backend.contextBudget : undefined),
   );
   const [showMemory, setShowMemory] = useState(false);
+  const [knowledge, setKnowledge] = useState<ReadonlyArray<KnowledgeForm>>(() =>
+    initKnowledge(isLocal ? agent.backend.knowledge : undefined),
+  );
 
   // Tool selection (local backends only).
   const [selectedTools, setSelectedTools] = useState<ReadonlySet<string>>(
@@ -216,6 +234,7 @@ export function AgentEditDrawer({
       autoCompact: _stripAutoCompact,
       autoDistill: _stripAutoDistill,
       contextBudget: _stripContextBudget,
+      knowledge: _stripKnowledge,
       role: _stripRole,
       ...backendBase
     } = agent.backend;
@@ -253,6 +272,7 @@ export function AgentEditDrawer({
       ...(autoCompactValue !== undefined ? { autoCompact: autoCompactValue } : {}),
       ...(autoDistillValue !== undefined ? { autoDistill: autoDistillValue } : {}),
       ...(contextBudgetValue !== undefined ? { contextBudget: contextBudgetValue } : {}),
+      ...(buildKnowledge(knowledge).length > 0 ? { knowledge: buildKnowledge(knowledge) } : {}),
     } as typeof agent.backend;
     return { backend, metadata };
   };
@@ -519,10 +539,14 @@ export function AgentEditDrawer({
             />
           )}
 
+          {isLocal && <KnowledgePicker bindings={knowledge} onChange={setKnowledge} />}
+
           {isLocal && (
             <SystemToolsSection
               tools={systemToolsFor({
                 skillCount: selectedSkills.size,
+                knowledgeToolCount: knowledge.filter((k) => k.id.trim() && k.mode !== "context")
+                  .length,
                 hasNetwork: agent.backend.type === "local" && agent.backend.network !== undefined,
               })}
             />
@@ -906,6 +930,49 @@ function parseList(raw: string): string[] {
     .filter((s) => s.length > 0);
 }
 
+function initKnowledge(bindings: LocalAgentBackend["knowledge"] | undefined): KnowledgeForm[] {
+  return (bindings ?? []).map((k) => ({
+    id: k.id,
+    name: k.name ?? "",
+    description: k.description ?? "",
+    topK: k.topK !== undefined ? String(k.topK) : "",
+    includeSources: k.includeSources !== false,
+    includeScores: k.includeScores === true,
+    maxChunkCharacters: k.maxChunkCharacters !== undefined ? String(k.maxChunkCharacters) : "",
+    mode: k.mode ?? "tool",
+  }));
+}
+
+function buildKnowledge(bindings: ReadonlyArray<KnowledgeForm>): AgentKnowledgeBinding[] {
+  return bindings
+    .filter((k) => k.id.trim().length > 0)
+    .map((k) => {
+      const id = k.id.trim();
+      const name = k.name.trim();
+      const description = k.description.trim();
+      const topK = parsePositiveInt(k.topK);
+      const maxChunkCharacters = parsePositiveInt(k.maxChunkCharacters);
+      const row: AgentKnowledgeBinding = {
+        id,
+        ...(name ? { name } : {}),
+        ...(description ? { description } : {}),
+        ...(topK !== undefined ? { topK } : {}),
+        ...(k.includeSources === false ? { includeSources: false } : {}),
+        ...(k.includeScores ? { includeScores: true } : {}),
+        ...(maxChunkCharacters !== undefined ? { maxChunkCharacters } : {}),
+        ...(k.mode !== "tool" ? { mode: k.mode } : {}),
+      };
+      return row;
+    });
+}
+
+function parsePositiveInt(raw: string): number | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  const n = Number.parseInt(trimmed, 10);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
 /** Compact labelled number input — blank means "unset / inherit". */
 function NumField({
   label,
@@ -1075,6 +1142,179 @@ function LayersSection({ fragments, selected, onChange }: LayersSectionProps) {
           </select>
         </div>
       )}
+    </div>
+  );
+}
+
+interface KnowledgePickerProps {
+  bindings: ReadonlyArray<KnowledgeForm>;
+  onChange: (next: ReadonlyArray<KnowledgeForm>) => void;
+}
+
+function KnowledgePicker({ bindings, onChange }: KnowledgePickerProps) {
+  const update = (index: number, patch: Partial<KnowledgeForm>) => {
+    const next = bindings.map((k, i) => (i === index ? { ...k, ...patch } : k));
+    onChange(next);
+  };
+  const remove = (index: number) => {
+    const next = [...bindings];
+    next.splice(index, 1);
+    onChange(next);
+  };
+  const add = () => {
+    onChange([
+      ...bindings,
+      {
+        id: "",
+        name: "",
+        description: "",
+        topK: "",
+        includeSources: true,
+        includeScores: false,
+        maxChunkCharacters: "",
+        mode: "tool",
+      },
+    ]);
+  };
+
+  return (
+    <div class="form-control">
+      <div class="flex items-center justify-between mb-1 gap-2">
+        <span class="text-xs text-base-content/60 uppercase tracking-wider">
+          Knowledge / RAG
+          <span class="ml-2 text-[10px] text-base-content/40 normal-case tracking-normal">
+            {bindings.filter((k) => k.id.trim()).length} bound · resolved by host retrievers
+          </span>
+        </span>
+        <button type="button" class="btn btn-xs btn-ghost" onClick={add}>
+          Add retriever
+        </button>
+      </div>
+
+      {bindings.length === 0 ? (
+        <div class="text-xs text-base-content/40 border border-dashed border-base-300 rounded p-3">
+          No knowledge retrievers attached. Add a retriever id to expose host-wired RAG as a search
+          tool, automatic context, or both.
+        </div>
+      ) : (
+        <div class="space-y-2">
+          {bindings.map((k, i) => (
+            <div class="rounded border border-base-300 bg-base-100 p-3 space-y-2">
+              <div class="grid grid-cols-1 sm:grid-cols-[1fr_150px_auto] gap-2 items-end">
+                <label class="form-control">
+                  <span class="text-[10px] text-base-content/50 mb-1">Retriever id</span>
+                  <input
+                    class={`input input-bordered input-xs font-mono ${
+                      k.id.trim() ? "" : "input-warning"
+                    }`}
+                    placeholder="docs"
+                    value={k.id}
+                    onInput={(e) => update(i, { id: (e.target as HTMLInputElement).value })}
+                  />
+                </label>
+                <label class="form-control">
+                  <span class="text-[10px] text-base-content/50 mb-1">Mode</span>
+                  <select
+                    class="select select-bordered select-xs"
+                    value={k.mode}
+                    onChange={(e) =>
+                      update(i, { mode: (e.target as HTMLSelectElement).value as KnowledgeMode })
+                    }
+                  >
+                    <option value="tool">tool</option>
+                    <option value="context">context</option>
+                    <option value="tool-and-context">tool + context</option>
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  class="btn btn-xs btn-ghost text-error"
+                  title="Remove retriever binding"
+                  onClick={() => remove(i)}
+                >
+                  Remove
+                </button>
+              </div>
+
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <label class="form-control">
+                  <span class="text-[10px] text-base-content/50 mb-1">Tool name override</span>
+                  <input
+                    class="input input-bordered input-xs font-mono"
+                    placeholder={k.id.trim() ? `search_${k.id.trim()}` : "search_knowledge_base"}
+                    value={k.name}
+                    onInput={(e) => update(i, { name: (e.target as HTMLInputElement).value })}
+                  />
+                </label>
+                <label class="form-control">
+                  <span class="text-[10px] text-base-content/50 mb-1">Top K</span>
+                  <input
+                    class="input input-bordered input-xs font-mono"
+                    type="number"
+                    min="1"
+                    placeholder="retriever default"
+                    value={k.topK}
+                    onInput={(e) => update(i, { topK: (e.target as HTMLInputElement).value })}
+                  />
+                </label>
+                <label class="form-control sm:col-span-2">
+                  <span class="text-[10px] text-base-content/50 mb-1">Description override</span>
+                  <input
+                    class="input input-bordered input-xs"
+                    placeholder="Shown to the model when this retriever is exposed as a tool"
+                    value={k.description}
+                    onInput={(e) =>
+                      update(i, { description: (e.target as HTMLInputElement).value })
+                    }
+                  />
+                </label>
+                <label class="form-control">
+                  <span class="text-[10px] text-base-content/50 mb-1">Max chunk characters</span>
+                  <input
+                    class="input input-bordered input-xs font-mono"
+                    type="number"
+                    min="1"
+                    placeholder="unlimited"
+                    value={k.maxChunkCharacters}
+                    onInput={(e) =>
+                      update(i, { maxChunkCharacters: (e.target as HTMLInputElement).value })
+                    }
+                  />
+                </label>
+                <div class="flex items-end gap-3 pb-1">
+                  <label class="cursor-pointer label justify-start gap-2 px-0 py-0">
+                    <input
+                      type="checkbox"
+                      class="checkbox checkbox-xs"
+                      checked={k.includeSources}
+                      onChange={(e) =>
+                        update(i, { includeSources: (e.target as HTMLInputElement).checked })
+                      }
+                    />
+                    <span class="text-[10px] text-base-content/60">sources</span>
+                  </label>
+                  <label class="cursor-pointer label justify-start gap-2 px-0 py-0">
+                    <input
+                      type="checkbox"
+                      class="checkbox checkbox-xs"
+                      checked={k.includeScores}
+                      onChange={(e) =>
+                        update(i, { includeScores: (e.target as HTMLInputElement).checked })
+                      }
+                    />
+                    <span class="text-[10px] text-base-content/60">scores</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <span class="text-[10px] text-base-content/40 mt-1">
+        The recipe stores retriever ids only. Runtime objects are provided by resolveLocalAgent(
+        {"{ retrievers }"}); unresolved ids fail fast when the agent is invoked.
+      </span>
     </div>
   );
 }

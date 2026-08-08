@@ -59,9 +59,13 @@ const KEY_PRIORITY: Readonly<Record<string, number>> = {
   inline: 5,
   systemPrompt: 6,
   tools: 7,
-  description: 8,
-  capabilities: 9,
-  tags: 10,
+  skills: 8,
+  knowledge: 9,
+  name: 10,
+  mode: 11,
+  description: 12,
+  capabilities: 13,
+  tags: 14,
 };
 
 function orderedKeyCompare(a: string, b: string): number {
