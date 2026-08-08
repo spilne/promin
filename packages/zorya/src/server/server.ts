@@ -125,6 +125,7 @@ import {
   getToolCatalogHealth,
   listCatalogFragments,
   listCatalogModels,
+  listCatalogRetrievers,
   listCatalogSkills,
   listCatalogTools,
   listToolHistory,
@@ -540,6 +541,12 @@ export class ZoryaServer {
           this.agents.toolCatalog
             ? listCatalogTools({ tools: this.agents.toolCatalog })
             : async () => new Response(JSON.stringify({ tools: [] }), { status: 200 }),
+        )
+        .get(
+          "/api/agents/_catalog/retrievers",
+          this.agents.retrievers
+            ? listCatalogRetrievers({ retrievers: this.agents.retrievers })
+            : async () => new Response(JSON.stringify({ retrievers: [] }), { status: 200 }),
         )
         // Reconciliation health: which recipe tool refs don't resolve?
         // Pure query at view time — no persistence, no audit trail.

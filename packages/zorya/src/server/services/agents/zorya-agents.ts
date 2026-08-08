@@ -17,6 +17,7 @@ import type {
   MemoryStore,
   ModelCatalog,
   RegisteredAgent,
+  RetrieverRegistry,
   RoleRegistry,
   ToolHistoryStore,
 } from "@promin/agent";
@@ -75,6 +76,13 @@ export interface ZoryaAgentsConfig {
    */
   toolCatalog?: AgentToolCatalog;
   /**
+   * Optional retriever registry. When set, the server exposes
+   * `GET /api/agents/_catalog/retrievers` so the agent editor's RAG picker
+   * can show host-wired knowledge bases before recipes reference them.
+   * Concrete Retriever instances never cross the wire.
+   */
+  retrievers?: RetrieverRegistry;
+  /**
    * Optional fragment registry. When set, the server exposes
    * `GET /api/agents/_catalog/fragments` so the agent editor's
    * layered-prompt editor can populate its layer picker (and so the
@@ -126,6 +134,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   readonly instances?: AgentInstanceRegistry;
   readonly models?: ModelCatalog;
   readonly toolCatalog?: AgentToolCatalog;
+  readonly retrievers?: RetrieverRegistry;
   readonly fragments?: FragmentRegistry;
   readonly roles?: RoleRegistry;
   readonly toolHistory?: ToolHistoryStore;
@@ -146,6 +155,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
     if (config.instances) this.instances = config.instances;
     if (config.models) this.models = config.models;
     if (config.toolCatalog) this.toolCatalog = config.toolCatalog;
+    if (config.retrievers) this.retrievers = config.retrievers;
     if (config.fragments) this.fragments = config.fragments;
     if (config.roles) this.roles = config.roles;
     if (config.toolHistory) this.toolHistory = config.toolHistory;

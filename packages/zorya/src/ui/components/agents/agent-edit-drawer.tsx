@@ -13,7 +13,12 @@
 
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { inlineRoleDefinition } from "../../lib/role.ts";
-import { api, type ModelCatalogEntryDto, type ToolCatalogEntryDto } from "../../api/client.ts";
+import {
+  api,
+  type ModelCatalogEntryDto,
+  type RetrieverCatalogEntryDto,
+  type ToolCatalogEntryDto,
+} from "../../api/client.ts";
 import type { RegisteredAgent } from "../../../server/routes/agents.ts";
 import type { SkillCatalogEntry } from "../../../server/routes/agent-catalog.ts";
 import { systemToolsFor, SystemToolsSection } from "./system-tools.tsx";
@@ -177,6 +182,8 @@ export function AgentEditDrawer({
   const tools = useMemo(() => toolsData?.tools ?? [], [toolsData]);
   const { data: skillsData } = useFetch(() => api.listCatalogSkills(), [], 0);
   const catalogSkills = useMemo(() => skillsData?.skills ?? [], [skillsData]);
+  const { data: retrieversData } = useFetch(() => api.listCatalogRetrievers(), [], 0);
+  const catalogRetrievers = useMemo(() => retrieversData?.retrievers ?? [], [retrieversData]);
   // Self-fetch which agent recipes are file-managed. When THIS one is, Save
   // would be silently overwritten by the next scan tick — show a warning +
   // disable Save (Publish stays enabled; a new version is operator-managed
@@ -375,7 +382,7 @@ export function AgentEditDrawer({
         class={
           embed
             ? "flex flex-col"
-            : "fixed top-0 right-0 h-screen w-full max-w-2xl bg-base-100 shadow-2xl z-40 flex flex-col anim-drawer-in"
+            : "fixed top-0 right-0 h-screen w-full max-w-4xl bg-base-100 shadow-2xl z-40 flex flex-col anim-drawer-in"
         }
         {...(embed ? {} : { role: "dialog", "aria-label": "Edit agent" })}
       >
@@ -409,9 +416,11 @@ export function AgentEditDrawer({
         >
           {!isCreate && fileManaged && (
             <div class="alert alert-warning text-xs">
-              📄 This agent recipe is defined by a file on disk. Saving in place is disabled — edit
-              the source file, or use <span class="font-mono">Publish new version</span> to create
-              an operator-managed copy. The next scan would overwrite any in-place change.
+              <span>
+                📄 This agent recipe is defined by a file on disk. Saving in place is disabled —
+                edit the source file, or use <span class="font-mono">Publish new version</span> to
+                create an operator-managed copy. The next scan would overwrite any in-place change.
+              </span>
             </div>
           )}
           {isCreate && (
@@ -431,6 +440,17 @@ export function AgentEditDrawer({
               )}
             </label>
           )}
+
+          <EditorSummary
+            backendType={agent.backend.type}
+            modelKey={isLocal ? modelKey : null}
+            toolCount={selectedTools.size}
+            skillCount={selectedSkills.size}
+            knowledgeCount={knowledge.filter((k) => k.id.trim()).length}
+            enabled={enabled}
+            fileManaged={!isCreate && fileManaged}
+          />
+
           <label class="form-control">
             <span class="text-xs text-base-content/60 mb-1 uppercase tracking-wider">
               Description
@@ -539,7 +559,13 @@ export function AgentEditDrawer({
             />
           )}
 
-          {isLocal && <KnowledgePicker bindings={knowledge} onChange={setKnowledge} />}
+          {isLocal && (
+            <KnowledgePicker
+              retrievers={catalogRetrievers}
+              bindings={knowledge}
+              onChange={setKnowledge}
+            />
+          )}
 
           {isLocal && (
             <SystemToolsSection
@@ -836,7 +862,7 @@ export function AgentEditDrawer({
             </div>
           )}
 
-          <div class="flex justify-end gap-2 pt-2">
+          <div class="sticky bottom-0 z-10 -mx-4 flex flex-wrap justify-end gap-2 border-t border-base-300 bg-base-100/95 px-4 py-3 backdrop-blur">
             <button type="button" class="btn btn-sm btn-ghost" onClick={onClose}>
               Cancel
             </button>
@@ -971,6 +997,40 @@ function parsePositiveInt(raw: string): number | undefined {
   if (!trimmed) return undefined;
   const n = Number.parseInt(trimmed, 10);
   return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function EditorSummary({
+  backendType,
+  modelKey,
+  toolCount,
+  skillCount,
+  knowledgeCount,
+  enabled,
+  fileManaged,
+}: {
+  backendType: RegisteredAgent["backend"]["type"];
+  modelKey: string | null;
+  toolCount: number;
+  skillCount: number;
+  knowledgeCount: number;
+  enabled: boolean;
+  fileManaged: boolean;
+}) {
+  return (
+    <div class="rounded border border-base-300 bg-base-200/45 px-3 py-2">
+      <div class="flex items-center gap-1.5 flex-wrap text-xs">
+        <span class="badge badge-sm badge-outline font-mono">{backendType}</span>
+        {modelKey && <span class="badge badge-sm badge-ghost font-mono">{modelKey}</span>}
+        <span class="badge badge-sm badge-ghost">{toolCount} tools</span>
+        <span class="badge badge-sm badge-ghost">{skillCount} skills</span>
+        <span class="badge badge-sm badge-ghost">{knowledgeCount} retrievers</span>
+        <span class={`badge badge-sm ${enabled ? "badge-success badge-outline" : "badge-error"}`}>
+          {enabled ? "enabled" : "disabled"}
+        </span>
+        {fileManaged && <span class="badge badge-sm badge-warning">file-managed</span>}
+      </div>
+    </div>
+  );
 }
 
 /** Compact labelled number input — blank means "unset / inherit". */
@@ -1147,11 +1207,32 @@ function LayersSection({ fragments, selected, onChange }: LayersSectionProps) {
 }
 
 interface KnowledgePickerProps {
+  retrievers: ReadonlyArray<RetrieverCatalogEntryDto>;
   bindings: ReadonlyArray<KnowledgeForm>;
   onChange: (next: ReadonlyArray<KnowledgeForm>) => void;
 }
 
-function KnowledgePicker({ bindings, onChange }: KnowledgePickerProps) {
+function KnowledgePicker({ retrievers, bindings, onChange }: KnowledgePickerProps) {
+  const catalogById = useMemo(() => {
+    const m = new Map<string, RetrieverCatalogEntryDto>();
+    for (const r of retrievers) m.set(r.id, r);
+    return m;
+  }, [retrievers]);
+  const selectedIds = useMemo(
+    () => new Set(bindings.map((k) => k.id.trim()).filter(Boolean)),
+    [bindings],
+  );
+  const availableToAdd = useMemo(
+    () => retrievers.filter((r) => !selectedIds.has(r.id)),
+    [retrievers, selectedIds],
+  );
+  const unresolved = useMemo(
+    () =>
+      retrievers.length === 0
+        ? []
+        : bindings.map((k) => k.id.trim()).filter((id) => id && !catalogById.has(id)),
+    [bindings, catalogById, retrievers.length],
+  );
   const update = (index: number, patch: Partial<KnowledgeForm>) => {
     const next = bindings.map((k, i) => (i === index ? { ...k, ...patch } : k));
     onChange(next);
@@ -1176,6 +1257,23 @@ function KnowledgePicker({ bindings, onChange }: KnowledgePickerProps) {
       },
     ]);
   };
+  const addFromCatalog = (id: string) => {
+    if (!id || selectedIds.has(id)) return;
+    const entry = catalogById.get(id);
+    onChange([
+      ...bindings,
+      {
+        id,
+        name: "",
+        description: entry?.description ?? "",
+        topK: "",
+        includeSources: true,
+        includeScores: false,
+        maxChunkCharacters: "",
+        mode: "tool",
+      },
+    ]);
+  };
 
   return (
     <div class="form-control">
@@ -1183,18 +1281,51 @@ function KnowledgePicker({ bindings, onChange }: KnowledgePickerProps) {
         <span class="text-xs text-base-content/60 uppercase tracking-wider">
           Knowledge / RAG
           <span class="ml-2 text-[10px] text-base-content/40 normal-case tracking-normal">
-            {bindings.filter((k) => k.id.trim()).length} bound · resolved by host retrievers
+            {bindings.filter((k) => k.id.trim()).length} bound · {retrievers.length} available
           </span>
         </span>
-        <button type="button" class="btn btn-xs btn-ghost" onClick={add}>
-          Add retriever
-        </button>
+        <div class="flex items-center gap-1">
+          {availableToAdd.length > 0 && (
+            <select
+              class="select select-bordered select-xs max-w-48 font-mono"
+              value=""
+              title="Add a host-wired retriever"
+              onChange={(e) => {
+                const v = (e.target as HTMLSelectElement).value;
+                addFromCatalog(v);
+                (e.target as HTMLSelectElement).value = "";
+              }}
+            >
+              <option value="">Add from catalog</option>
+              {availableToAdd.map((r) => (
+                <option value={r.id}>{r.id}</option>
+              ))}
+            </select>
+          )}
+          <button type="button" class="btn btn-xs btn-ghost" onClick={add}>
+            Manual id
+          </button>
+        </div>
       </div>
+
+      {unresolved.length > 0 && (
+        <div class="alert alert-warning py-2 mb-2 text-xs">
+          <span class="font-semibold">
+            {unresolved.length} retriever{unresolved.length === 1 ? "" : "s"} not in catalog:
+          </span>
+          <div class="flex flex-wrap gap-1 mt-1">
+            {unresolved.map((id) => (
+              <span class="badge badge-sm badge-warning font-mono">{id}</span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {bindings.length === 0 ? (
         <div class="text-xs text-base-content/40 border border-dashed border-base-300 rounded p-3">
-          No knowledge retrievers attached. Add a retriever id to expose host-wired RAG as a search
-          tool, automatic context, or both.
+          {retrievers.length > 0
+            ? "No knowledge retrievers attached. Add one from the catalog to expose it as a search tool, automatic context, or both."
+            : "No retriever catalog is wired on this server. Use Manual id for forward-looking recipes or wire ZoryaAgents.retrievers to enable the picker."}
         </div>
       ) : (
         <div class="space-y-2">
@@ -1205,7 +1336,9 @@ function KnowledgePicker({ bindings, onChange }: KnowledgePickerProps) {
                   <span class="text-[10px] text-base-content/50 mb-1">Retriever id</span>
                   <input
                     class={`input input-bordered input-xs font-mono ${
-                      k.id.trim() ? "" : "input-warning"
+                      k.id.trim() && (retrievers.length === 0 || catalogById.has(k.id.trim()))
+                        ? ""
+                        : "input-warning"
                     }`}
                     placeholder="docs"
                     value={k.id}
@@ -1235,6 +1368,19 @@ function KnowledgePicker({ bindings, onChange }: KnowledgePickerProps) {
                   Remove
                 </button>
               </div>
+
+              {k.id.trim() && catalogById.has(k.id.trim()) && (
+                <div class="flex items-center gap-1 flex-wrap">
+                  {catalogById.get(k.id.trim())!.description && (
+                    <span class="text-[10px] text-base-content/50">
+                      {catalogById.get(k.id.trim())!.description}
+                    </span>
+                  )}
+                  {catalogById.get(k.id.trim())!.tags.map((tag) => (
+                    <span class="badge badge-xs badge-ghost">{tag}</span>
+                  ))}
+                </div>
+              )}
 
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <label class="form-control">

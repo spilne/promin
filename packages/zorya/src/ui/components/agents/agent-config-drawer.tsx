@@ -102,7 +102,7 @@ export function AgentConfigDrawer({
     <>
       <div class="fixed inset-0 bg-black/40 z-30 anim-backdrop-in" onClick={onClose} aria-hidden />
       <aside
-        class="fixed top-0 right-0 h-screen w-full max-w-2xl bg-base-100 shadow-2xl
+        class="fixed top-0 right-0 h-screen w-full max-w-4xl bg-base-100 shadow-2xl
                z-40 flex flex-col anim-drawer-in"
         role="dialog"
         aria-label="Manage agent"

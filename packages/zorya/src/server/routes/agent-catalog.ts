@@ -13,6 +13,7 @@ import type {
   AgentToolCatalog,
   FragmentRegistry,
   ModelCatalog,
+  RetrieverRegistry,
   SerializedModelCatalogItem,
   SkillRegistry,
   ToolCatalogEntry,
@@ -31,6 +32,17 @@ export interface ModelsCatalogResponse {
 
 export interface ToolsCatalogResponse {
   tools: ToolCatalogEntry[];
+}
+
+export interface RetrieverCatalogEntry {
+  readonly id: string;
+  readonly description?: string;
+  readonly tags: ReadonlyArray<string>;
+  readonly metadata: Readonly<Record<string, unknown>>;
+}
+
+export interface RetrieversCatalogResponse {
+  retrievers: RetrieverCatalogEntry[];
 }
 
 /**
@@ -65,6 +77,10 @@ export interface AgentToolCatalogDeps {
   readonly tools: AgentToolCatalog;
 }
 
+export interface AgentRetrieverCatalogDeps {
+  readonly retrievers: RetrieverRegistry;
+}
+
 export function listCatalogModels(deps: AgentCatalogDeps) {
   return async (): Promise<Response> => {
     const body: ModelsCatalogResponse = { models: deps.models.serialize() };
@@ -78,6 +94,27 @@ export function listCatalogTools(deps: AgentToolCatalogDeps) {
       const tools = await deps.tools.listAll();
       const body: ToolsCatalogResponse = { tools };
       return json(200, body);
+    } catch (err) {
+      return jsonError(500, "list_failed", err instanceof Error ? err.message : String(err));
+    }
+  };
+}
+
+/**
+ * List host-wired retrievers for the agent editor's RAG picker. The live
+ * `Retriever` implementation is intentionally omitted; recipes persist only
+ * the retriever id plus per-binding options.
+ */
+export function listCatalogRetrievers(deps: AgentRetrieverCatalogDeps) {
+  return async (): Promise<Response> => {
+    try {
+      const retrievers = deps.retrievers.list().map((r) => ({
+        id: r.id,
+        ...(r.description ? { description: r.description } : {}),
+        tags: r.tags,
+        metadata: r.metadata,
+      }));
+      return json(200, { retrievers } satisfies RetrieversCatalogResponse);
     } catch (err) {
       return jsonError(500, "list_failed", err instanceof Error ? err.message : String(err));
     }

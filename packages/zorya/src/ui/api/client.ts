@@ -461,6 +461,9 @@ export const api = {
   listCatalogModels(): Promise<{ models: ModelCatalogEntryDto[] }> {
     return req<{ models: ModelCatalogEntryDto[] }>(`/api/agents/_catalog/models`);
   },
+  listCatalogRetrievers(): Promise<RetrieversCatalogResponse> {
+    return req<RetrieversCatalogResponse>(`/api/agents/_catalog/retrievers`);
+  },
 
   // ---------------------------------------------------------------------
   // Skills — registry CRUD + the agent editor's picker catalog
@@ -913,6 +916,17 @@ export interface ModelCatalogEntryDto {
   contextLimit?: number;
   capabilities?: string[];
   costTier?: string;
+}
+
+export interface RetrieverCatalogEntryDto {
+  id: string;
+  description?: string;
+  tags: string[];
+  metadata: Record<string, unknown>;
+}
+
+export interface RetrieversCatalogResponse {
+  retrievers: RetrieverCatalogEntryDto[];
 }
 
 export type SecretScopeWire =
