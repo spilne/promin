@@ -124,6 +124,15 @@ export class SqliteWorkflowStorage
       `CREATE UNIQUE INDEX IF NOT EXISTS ${t}_idempotency_key ON ${t} (COALESCE(namespace, ''), workflow_name, idempotency_key) WHERE idempotency_key IS NOT NULL`,
     );
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_status ON ${t} (status)`);
+    // Metrics and dashboard pages filter by status before sorting by recency.
+    // The composite index avoids a temporary B-tree sort over the whole run
+    // table for completed-duration samples.
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_status_started_at ON ${t} (status, started_at DESC)`,
+    );
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_status_completed_at ON ${t} (status, completed_at DESC)`,
+    );
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_parent ON ${t} (parent_workflow_id)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_run_source ON ${t} (run_source, run_source_id)`);
     // Sort-order indexes so listWorkflows ORDER BY clauses can use index
