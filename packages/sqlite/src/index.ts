@@ -23,6 +23,10 @@ export type {
 export { SqliteAgentInstanceRegistry } from "./lib/agent/agent-instance-registry.ts";
 export type { SqliteAgentInstanceRegistryConfig } from "./lib/agent/agent-instance-registry.ts";
 export { SqliteSecretsStorage } from "./lib/agent/secrets-storage.ts";
+export {
+  SqliteKnowledgeBaseStore,
+  type SqliteKnowledgeBaseStoreConfig,
+} from "./lib/agent/knowledge-base-store.ts";
 export type { SqliteSecretsStorageConfig } from "./lib/agent/secrets-storage.ts";
 export { SqliteToolAuditLogger } from "./lib/agent/tool-audit-logger.ts";
 export type {

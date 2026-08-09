@@ -17,6 +17,7 @@ import type { ZoryaAgents } from "./services/agents/index.ts";
 import type { ZoryaSkills } from "./services/skills/index.ts";
 import type { ZoryaFragments } from "./services/fragments/index.ts";
 import type { ZoryaDags } from "./services/dags/index.ts";
+import type { ZoryaKnowledgeBases } from "./services/knowledge-bases.ts";
 
 /**
  * Fluent builder for assembling a `ZoryaServer`.
@@ -75,6 +76,12 @@ export class ZoryaServerBuilder {
   /** Mount DAG registry and DAG execution routes. */
   dags(dags: ZoryaDags): this {
     this.config.dags = dags;
+    return this;
+  }
+
+  /** Mount managed knowledge-base CRUD, ingestion, chunk inspection, and search routes. */
+  knowledgeBases(knowledgeBases: ZoryaKnowledgeBases): this {
+    this.config.knowledgeBases = knowledgeBases;
     return this;
   }
 

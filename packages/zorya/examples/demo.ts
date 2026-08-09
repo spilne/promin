@@ -24,6 +24,7 @@ import {
   ZoryaSkills,
   ZoryaFragments,
   ZoryaDags,
+  ZoryaKnowledgeBases,
   createZoryaServerBuilder,
   RegistryBackedWorkersProvider,
   scanAgentsFolder,
@@ -44,8 +45,6 @@ import {
   applyDiscoveredAgents,
   createDurableSchedulerTools,
   createFileToolRegistry,
-  createInMemoryRetriever,
-  createInMemoryRetrieverRegistry,
   inProcessSchedulerClient,
   InMemoryFragmentRegistry,
   InMemoryModelCatalog,
@@ -85,22 +84,6 @@ import path from "node:path";
 
 const logger = createDemoLogger("zorya");
 
-const retrievers = createInMemoryRetrieverRegistry([
-  {
-    id: "org-handbook",
-    description: "Engineering, on-call, security, and platform reference material.",
-    tags: ["demo", "internal"],
-    retriever: createInMemoryRetriever({
-      documents: [...ORG_KNOWLEDGE_BASE.entries()].map(([id, document]) => ({
-        id,
-        title: document.title,
-        tags: document.tags,
-        text: document.body,
-      })),
-    }),
-  },
-]);
-
 // ---------------------------------------------------------------------------
 // Storage + runner
 //
@@ -134,6 +117,24 @@ const {
   workflowStarts,
   advertisements,
 } = stack;
+
+const knowledgeBases = new ZoryaKnowledgeBases({
+  store: stack.knowledgeBaseStore,
+  initial: [
+    {
+      id: "org-handbook",
+      namespace: "default",
+      description: "Engineering, on-call, security, and platform reference material.",
+      tags: ["demo", "internal"],
+      documents: [...ORG_KNOWLEDGE_BASE.entries()].map(([id, document]) => ({
+        id,
+        title: document.title,
+        tags: document.tags,
+        text: document.body,
+      })),
+    },
+  ],
+});
 
 // Agent registry + memory store — SQLite (shares the db above) by
 // default, or Postgres when ZORYA_PG_URL is set. Postgres mode boots
@@ -869,7 +870,7 @@ const agents = new ZoryaAgents({
   instances: instanceRegistry,
   models: modelCatalog,
   toolCatalog: agentToolCatalog,
-  retrievers,
+  retrievers: knowledgeBases.registry,
   fragments: fragmentRegistry,
   roles: roleRegistry,
   scan: {
@@ -1019,6 +1020,7 @@ const server = createZoryaServerBuilder()
   .skills(skills)
   .fragments(fragments)
   .dags(dags)
+  .knowledgeBases(knowledgeBases)
   .namespaces(namespaceRegistry)
   .secrets(secretsStorage)
   .remoteWorkers()

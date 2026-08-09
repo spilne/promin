@@ -193,11 +193,24 @@ import { ZoryaAgents } from "./services/agents/index.ts";
 import { ZoryaSkills } from "./services/skills/index.ts";
 import { ZoryaFragments } from "./services/fragments/index.ts";
 import { ZoryaDags } from "./services/dags/index.ts";
+import { ZoryaKnowledgeBases } from "./services/knowledge-bases.ts";
 import {
   validateWorkflowRetentionConfig,
   WorkflowRetentionCleaner,
 } from "./services/workflow-retention.ts";
-import { listKnowledgeBases, searchKnowledgeBase } from "./routes/knowledge-bases.ts";
+import {
+  createManagedKnowledgeBase,
+  deleteKnowledgeBaseSource,
+  deleteManagedKnowledgeBase,
+  ingestKnowledgeBaseSource,
+  listKnowledgeBaseChunks,
+  listKnowledgeBaseSources,
+  listKnowledgeBases,
+  listManagedKnowledgeBases,
+  searchKnowledgeBase,
+  searchManagedKnowledgeBase,
+  updateManagedKnowledgeBase,
+} from "./routes/knowledge-bases.ts";
 import {
   createDag,
   deleteDag,
@@ -263,6 +276,8 @@ export interface ZoryaServerConfig extends AuthConfig {
   fragments?: ZoryaFragments;
   /** Optional DAG gateway service. Mounts /api/dags/* routes. */
   dags?: ZoryaDags;
+  /** Optional managed knowledge-base service and CRUD/search routes. */
+  knowledgeBases?: ZoryaKnowledgeBases;
   /**
    * Authoritative namespace registry storage. ZoryaServer wraps it in its
    * NamespaceService policy boundary. Defaults to in-memory storage for
@@ -343,6 +358,7 @@ export class ZoryaServer {
   readonly skills?: ZoryaSkills;
   readonly fragments?: ZoryaFragments;
   readonly dags?: ZoryaDags;
+  readonly knowledgeBases?: ZoryaKnowledgeBases;
   readonly namespaces: NamespaceService;
   readonly versionRegistry: IWorkflowVersionRegistry;
   /**
@@ -374,6 +390,7 @@ export class ZoryaServer {
     if (config.skills) this.skills = config.skills;
     if (config.fragments) this.fragments = config.fragments;
     if (config.dags) this.dags = config.dags;
+    if (config.knowledgeBases) this.knowledgeBases = config.knowledgeBases;
     if (config.secrets) this.secrets = config.secrets;
     this.namespaces = new NamespaceService({ registry: config.namespaces });
     this.versionRegistry = config.versionRegistry ?? new WorkflowVersionRegistry();
@@ -687,7 +704,7 @@ export class ZoryaServer {
           .get("/api/roles/:id/versions", listRoleVersions(roleDeps));
       }
 
-      if (this.agents.retrievers) {
+      if (!this.knowledgeBases && this.agents.retrievers) {
         this.router
           .get("/api/knowledge-bases", listKnowledgeBases({ retrievers: this.agents.retrievers }))
           .post(
@@ -695,6 +712,23 @@ export class ZoryaServer {
             searchKnowledgeBase({ retrievers: this.agents.retrievers }),
           );
       }
+    }
+
+    if (this.knowledgeBases) {
+      const knowledgeDeps = { knowledgeBases: this.knowledgeBases, namespaces: this.namespaces };
+      this.router
+        .get("/api/knowledge-bases", listManagedKnowledgeBases(knowledgeDeps))
+        .post("/api/knowledge-bases", createManagedKnowledgeBase(knowledgeDeps))
+        .patch("/api/knowledge-bases/:id", updateManagedKnowledgeBase(knowledgeDeps))
+        .delete("/api/knowledge-bases/:id", deleteManagedKnowledgeBase(knowledgeDeps))
+        .get("/api/knowledge-bases/:id/sources", listKnowledgeBaseSources(knowledgeDeps))
+        .post("/api/knowledge-bases/:id/sources", ingestKnowledgeBaseSource(knowledgeDeps))
+        .delete(
+          "/api/knowledge-bases/:id/sources/:sourceId",
+          deleteKnowledgeBaseSource(knowledgeDeps),
+        )
+        .get("/api/knowledge-bases/:id/chunks", listKnowledgeBaseChunks(knowledgeDeps))
+        .post("/api/knowledge-bases/:id/search", searchManagedKnowledgeBase(knowledgeDeps));
     }
 
     if (this.skills) {

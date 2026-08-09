@@ -14,3 +14,17 @@ export {
   type NamespaceServiceConfig,
   type NamespaceUpdateInput,
 } from "./namespaces.ts";
+export {
+  InMemoryKnowledgeBaseStore,
+  ZoryaKnowledgeBases,
+  type KnowledgeBaseChunk,
+  type KnowledgeBaseCreateInput,
+  type KnowledgeBaseDefinition,
+  type KnowledgeBaseProvider,
+  type KnowledgeBaseSourceRecord,
+  type KnowledgeBaseStore,
+  type KnowledgeBaseUpdateInput,
+  type KnowledgeSourceInput,
+  type StoredKnowledgeBase,
+  type ZoryaKnowledgeBasesConfig,
+} from "./knowledge-bases.ts";

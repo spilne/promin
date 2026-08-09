@@ -9,6 +9,7 @@ import {
   SqliteDagRegistry,
   SqliteFragmentStore,
   SqliteMemoryStore,
+  SqliteKnowledgeBaseStore,
   SqliteNamespaceRegistry,
   SqliteSchedulerStorage,
   SqliteSecretsStorage,
@@ -78,6 +79,7 @@ export function createSqliteZoryaStack(config: SqliteZoryaStackConfig = {}) {
     dagRegistry: SqliteDagRegistry.make({ db: sqliteDb }),
     instanceRegistry: SqliteAgentInstanceRegistry.make({ db: sqliteDb }),
     memoryStore: SqliteMemoryStore.make({ db: sqliteDb }),
+    knowledgeBaseStore: SqliteKnowledgeBaseStore.make({ db: sqliteDb }),
     secretsStorage: SqliteSecretsStorage.make({
       db: sqliteDb,
       passphrase: config.secretsPassphrase ?? "demo-only-passphrase-change-in-prod",

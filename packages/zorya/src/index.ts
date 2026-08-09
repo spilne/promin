@@ -43,6 +43,20 @@ export {
 } from "./server/services/fragments/index.ts";
 export { ZoryaDags, type ZoryaDagsConfig } from "./server/services/dags/index.ts";
 export {
+  InMemoryKnowledgeBaseStore,
+  ZoryaKnowledgeBases,
+  type KnowledgeBaseChunk,
+  type KnowledgeBaseCreateInput,
+  type KnowledgeBaseDefinition,
+  type KnowledgeBaseProvider,
+  type KnowledgeBaseSourceRecord,
+  type KnowledgeBaseStore,
+  type KnowledgeBaseUpdateInput,
+  type KnowledgeSourceInput,
+  type StoredKnowledgeBase,
+  type ZoryaKnowledgeBasesConfig,
+} from "./server/services/knowledge-bases.ts";
+export {
   DEFAULT_NAMESPACE_ID,
   InMemoryNamespaceRegistry,
   NamespaceArchivedError,

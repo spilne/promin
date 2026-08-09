@@ -498,18 +498,69 @@ export const api = {
     return req<RetrieversCatalogResponse>(`/api/agents/_catalog/retrievers`);
   },
 
-  listKnowledgeBases(): Promise<KnowledgeBasesResponse> {
-    return req<KnowledgeBasesResponse>(`/api/knowledge-bases`);
+  listKnowledgeBases(params: { namespace?: string } = {}): Promise<KnowledgeBasesResponse> {
+    const qs = params.namespace ? `?namespace=${encodeURIComponent(params.namespace)}` : "";
+    return req<KnowledgeBasesResponse>(`/api/knowledge-bases${qs}`);
   },
 
   searchKnowledgeBase(
     id: string,
-    body: { query: string; topK?: number; tags?: string[] },
+    body: { query: string; topK?: number; tags?: string[]; namespace?: string },
   ): Promise<KnowledgeBaseSearchResponse> {
     return req<KnowledgeBaseSearchResponse>(
       `/api/knowledge-bases/${encodeURIComponent(id)}/search`,
       { method: "POST", body: JSON.stringify(body) },
     );
+  },
+
+  createKnowledgeBase(
+    body: KnowledgeBaseCreateRequest,
+  ): Promise<{ knowledgeBase: KnowledgeBaseEntryDto }> {
+    return req(`/api/knowledge-bases`, { method: "POST", body: JSON.stringify(body) });
+  },
+  deleteKnowledgeBase(id: string, namespace?: string): Promise<{ ok: true }> {
+    const qs = namespace ? `?namespace=${encodeURIComponent(namespace)}` : "";
+    return req(`/api/knowledge-bases/${encodeURIComponent(id)}${qs}`, { method: "DELETE" });
+  },
+  ingestKnowledgeBaseSource(
+    id: string,
+    body: KnowledgeSourceCreateRequest,
+  ): Promise<{ source: KnowledgeBaseSourceDto }> {
+    return req(`/api/knowledge-bases/${encodeURIComponent(id)}/sources`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+  listKnowledgeBaseSources(
+    id: string,
+    namespace?: string,
+  ): Promise<{ sources: KnowledgeBaseSourceDto[] }> {
+    const qs = namespace ? `?namespace=${encodeURIComponent(namespace)}` : "";
+    return req(`/api/knowledge-bases/${encodeURIComponent(id)}/sources${qs}`);
+  },
+  deleteKnowledgeBaseSource(
+    id: string,
+    sourceId: string,
+    namespace?: string,
+  ): Promise<{ ok: true }> {
+    const qs = namespace ? `?namespace=${encodeURIComponent(namespace)}` : "";
+    return req(
+      `/api/knowledge-bases/${encodeURIComponent(id)}/sources/${encodeURIComponent(sourceId)}${qs}`,
+      {
+        method: "DELETE",
+      },
+    );
+  },
+  listKnowledgeBaseChunks(
+    id: string,
+    namespace?: string,
+    sourceId?: string,
+  ): Promise<{ chunks: KnowledgeBaseChunkDto[] }> {
+    const params = new URLSearchParams();
+    if (namespace) params.set("namespace", namespace);
+    if (sourceId) params.set("sourceId", sourceId);
+    const qs = params.toString() ? `?${params}` : "";
+    return req(`/api/knowledge-bases/${encodeURIComponent(id)}/chunks${qs}`);
   },
 
   // ---------------------------------------------------------------------
@@ -976,10 +1027,59 @@ export interface RetrieversCatalogResponse {
   retrievers: RetrieverCatalogEntryDto[];
 }
 
-export interface KnowledgeBaseEntryDto extends RetrieverCatalogEntryDto {}
+export interface KnowledgeBaseEntryDto extends RetrieverCatalogEntryDto {
+  namespace?: string;
+  provider?: "memory" | "external";
+  status?: "ready" | "degraded";
+  sourceCount?: number;
+  chunkCount?: number;
+  createdAt?: number;
+  updatedAt?: number;
+}
 
 export interface KnowledgeBasesResponse {
   knowledgeBases: KnowledgeBaseEntryDto[];
+}
+
+export interface KnowledgeBaseCreateRequest {
+  id: string;
+  namespace?: string;
+  description?: string;
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface KnowledgeSourceCreateRequest {
+  id: string;
+  text: string;
+  namespace?: string;
+  title?: string;
+  uri?: string;
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface KnowledgeBaseSourceDto {
+  id: string;
+  title?: string;
+  uri?: string;
+  mimeType?: string;
+  tags: string[];
+  metadata: Record<string, unknown>;
+  status: "ready" | "failed";
+  error?: string;
+  chunkCount: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface KnowledgeBaseChunkDto {
+  id: string;
+  text: string;
+  index: number;
+  parentId?: string;
+  metadata: Record<string, unknown>;
+  source: { id: string; title?: string; uri?: string; tags?: string[] };
 }
 
 export interface KnowledgeBaseSearchResultDto {

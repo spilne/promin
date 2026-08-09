@@ -69,6 +69,13 @@ export class InMemoryRetriever implements Retriever {
     }
   }
 
+  /** Replace all chunks belonging to a source during re-ingestion. */
+  async deleteSource(sourceId: string): Promise<void> {
+    for (let index = this.chunks.length - 1; index >= 0; index -= 1) {
+      if (this.chunks[index]!.chunk.source.id === sourceId) this.chunks.splice(index, 1);
+    }
+  }
+
   async retrieve(request: RetrieveRequest): Promise<RetrieveResult[]> {
     const query = request.query.trim();
     if (!query) return [];
