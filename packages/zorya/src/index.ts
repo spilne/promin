@@ -8,6 +8,7 @@ export {
   type RemoteWorkersConfig,
 } from "./server/server.ts";
 export { createZoryaServerBuilder, ZoryaServerBuilder } from "./server/server-builder.ts";
+export type { WorkflowRetentionConfig } from "./server/server.ts";
 export {
   ZoryaWorkflows,
   LocalWorkflows,

@@ -914,22 +914,6 @@ const scheduler = new ZoryaScheduler({
 
 await seedInitialRuns((name, input, opts) => workflows.trigger(name, input, opts));
 
-// Keep the persistent demo database bounded. The example intentionally fires
-// several schedules frequently, but dashboard history should not grow without
-// limit and eventually make SQLite compete with the API reads.
-const demoRetentionMs = Number(process.env.ZORYA_RETENTION_MS ?? 24 * 60 * 60 * 1000);
-const demoRetentionIntervalMs = Number(process.env.ZORYA_RETENTION_INTERVAL_MS ?? 60 * 60 * 1000);
-const sweepDemoRetention = () => {
-  void storage
-    .purgeCompleted({ olderThanMs: demoRetentionMs, limit: 500 })
-    .then((deleted) => {
-      if (deleted > 0) logger.log(`[zorya] retention: purged ${deleted} completed runs`);
-    })
-    .catch((error) => logger.warn("[zorya] retention sweep failed:", error));
-};
-sweepDemoRetention();
-const demoRetentionHandle = setInterval(sweepDemoRetention, demoRetentionIntervalMs);
-
 // ---------------------------------------------------------------------------
 // Agentic DAG demo wiring — register 3 specialist recipes (planner /
 // researcher / synthesizer) + the diamond-shape research-synthesis DAG
@@ -1023,6 +1007,11 @@ const server = createZoryaServerBuilder()
   .uiDir(uiDir)
   .workers(new RegistryBackedWorkersProvider(workerRegistry))
   .versionRegistry(versionRegistry)
+  .retention({
+    maxAgeDays: Number(process.env.ZORYA_RETENTION_DAYS ?? 1),
+    intervalMs: Number(process.env.ZORYA_RETENTION_INTERVAL_MS ?? 60 * 60 * 1000),
+    batchSize: 500,
+  })
   .logger(logger)
   .build();
 
@@ -1067,7 +1056,6 @@ const shutdown = async (signal: string) => {
   try {
     stopApprovalAutoSignaler();
     clearInterval(heartbeatHandle);
-    clearInterval(demoRetentionHandle);
     await server.stop();
   } catch (e) {
     logger.error("[zorya] server.stop failed:", e);

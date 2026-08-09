@@ -5,6 +5,7 @@ import {
   type ListenOptions,
   type Logger,
   type RemoteWorkersConfig,
+  type WorkflowRetentionConfig,
 } from "./server.ts";
 import type { NamespaceRegistry } from "./services/namespaces.ts";
 import type { MetricsProvider } from "./routes/metrics.ts";
@@ -152,6 +153,12 @@ export class ZoryaServerBuilder {
   /** Mount remote deployment discovery routes backed by this registry. */
   remoteDeployments(remoteDeployments: RemoteDeploymentRegistry): this {
     this.config.remoteDeployments = remoteDeployments;
+    return this;
+  }
+
+  /** Delete completed and failed workflow runs older than the configured age. */
+  retention(config: WorkflowRetentionConfig): this {
+    this.config.retention = config;
     return this;
   }
 

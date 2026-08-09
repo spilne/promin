@@ -194,6 +194,10 @@ import { ZoryaSkills } from "./services/skills/index.ts";
 import { ZoryaFragments } from "./services/fragments/index.ts";
 import { ZoryaDags } from "./services/dags/index.ts";
 import {
+  validateWorkflowRetentionConfig,
+  WorkflowRetentionCleaner,
+} from "./services/workflow-retention.ts";
+import {
   createDag,
   deleteDag,
   getDag,
@@ -227,6 +231,15 @@ export interface Logger {
 export interface RemoteWorkersConfig {
   /** API keys gating access to the worker-protocol endpoints. Open when omitted. */
   apiKeys?: ReadonlyArray<string>;
+}
+
+export interface WorkflowRetentionConfig {
+  /** Delete completed and failed runs older than this many days. */
+  maxAgeDays: number;
+  /** Delay between bounded sweeps. Defaults to one hour. */
+  intervalMs?: number;
+  /** Maximum terminal runs deleted by one sweep. Defaults to 500. */
+  batchSize?: number;
 }
 
 export interface ZoryaServerConfig extends AuthConfig {
@@ -313,6 +326,8 @@ export interface ZoryaServerConfig extends AuthConfig {
    * are not mounted. See promin-21g5 for the design.
    */
   remoteDeployments?: RemoteDeploymentRegistry;
+  /** Optional lifecycle-managed cleanup for old completed/failed workflow runs. */
+  retention?: WorkflowRetentionConfig;
 }
 
 export interface ListenOptions {
@@ -348,6 +363,7 @@ export class ZoryaServer {
   private readonly bus: RunEventBus;
   private readonly router: Router;
   private readonly logger: Logger;
+  private readonly retention?: WorkflowRetentionCleaner;
   private serverHandle?: { stop(): void; port: number; hostname: string };
 
   constructor(config: ZoryaServerConfig) {
@@ -371,6 +387,10 @@ export class ZoryaServer {
     this.agentStreamHub = new AgentStreamHub(this.workerWs);
 
     const storage: WorkflowStorage = this.workflows.storage;
+    if (config.retention) {
+      validateWorkflowRetentionConfig(config.retention);
+      this.retention = new WorkflowRetentionCleaner(storage, config.retention, this.logger);
+    }
     // Walk the workflows chain to find an advertisements registry. The
     // top layer (LocalWorkflows) doesn't expose one, but a Queued or
     // Distributed fallback does — and that's the one workers actually
@@ -874,6 +894,7 @@ export class ZoryaServer {
 
     this.workerWs.start();
     this.agentStreamHub.start();
+    this.retention?.start();
 
     // Fire and forget — services own their own logging on errors.
     void Promise.all([
@@ -899,6 +920,7 @@ export class ZoryaServer {
     this.serverHandle = undefined;
     this.agentStreamHub.stop();
     this.workerWs.stop();
+    this.retention?.stop();
     await Promise.all([
       this.workflows.stop(),
       this.scheduler?.stop(),
