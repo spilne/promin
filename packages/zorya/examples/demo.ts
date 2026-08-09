@@ -44,6 +44,8 @@ import {
   applyDiscoveredAgents,
   createDurableSchedulerTools,
   createFileToolRegistry,
+  createInMemoryRetriever,
+  createInMemoryRetrieverRegistry,
   inProcessSchedulerClient,
   InMemoryFragmentRegistry,
   InMemoryModelCatalog,
@@ -82,6 +84,22 @@ import { ORG_KNOWLEDGE_BASE } from "./kb/org-knowledge-base.ts";
 import path from "node:path";
 
 const logger = createDemoLogger("zorya");
+
+const retrievers = createInMemoryRetrieverRegistry([
+  {
+    id: "org-handbook",
+    description: "Engineering, on-call, security, and platform reference material.",
+    tags: ["demo", "internal"],
+    retriever: createInMemoryRetriever({
+      documents: [...ORG_KNOWLEDGE_BASE.entries()].map(([id, document]) => ({
+        id,
+        title: document.title,
+        tags: document.tags,
+        text: document.body,
+      })),
+    }),
+  },
+]);
 
 // ---------------------------------------------------------------------------
 // Storage + runner
@@ -851,6 +869,7 @@ const agents = new ZoryaAgents({
   instances: instanceRegistry,
   models: modelCatalog,
   toolCatalog: agentToolCatalog,
+  retrievers,
   fragments: fragmentRegistry,
   roles: roleRegistry,
   scan: {

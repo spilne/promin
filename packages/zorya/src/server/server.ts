@@ -197,6 +197,7 @@ import {
   validateWorkflowRetentionConfig,
   WorkflowRetentionCleaner,
 } from "./services/workflow-retention.ts";
+import { listKnowledgeBases, searchKnowledgeBase } from "./routes/knowledge-bases.ts";
 import {
   createDag,
   deleteDag,
@@ -684,6 +685,15 @@ export class ZoryaServer {
           .patch("/api/roles/:id", updateRole(roleDeps))
           .delete("/api/roles/:id", deleteRole(roleDeps))
           .get("/api/roles/:id/versions", listRoleVersions(roleDeps));
+      }
+
+      if (this.agents.retrievers) {
+        this.router
+          .get("/api/knowledge-bases", listKnowledgeBases({ retrievers: this.agents.retrievers }))
+          .post(
+            "/api/knowledge-bases/:id/search",
+            searchKnowledgeBase({ retrievers: this.agents.retrievers }),
+          );
       }
     }
 

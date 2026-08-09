@@ -18,6 +18,7 @@ import { SkillsPage } from "./components/skills/skills-page.tsx";
 import { FragmentsPage } from "./components/fragments/fragments-page.tsx";
 import { RolesPage } from "./components/roles/roles-page.tsx";
 import { DagsPage } from "./components/dags/dags-page.tsx";
+import { KnowledgeBasesPage } from "./components/knowledge/knowledge-bases-page.tsx";
 import { DialogHost, ToastHost } from "./components/ui/dialog-host.tsx";
 
 export function App() {
@@ -100,6 +101,9 @@ function renderRoute(route: string, navigate: (p: string) => void) {
   }
   if (path === "/dags") {
     return <DagsPage />;
+  }
+  if (path === "/knowledge") {
+    return <KnowledgeBasesPage />;
   }
   const scheduleMatch = /^\/schedules\/([^/]+)$/.exec(path ?? "");
   if (scheduleMatch) {

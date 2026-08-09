@@ -498,6 +498,20 @@ export const api = {
     return req<RetrieversCatalogResponse>(`/api/agents/_catalog/retrievers`);
   },
 
+  listKnowledgeBases(): Promise<KnowledgeBasesResponse> {
+    return req<KnowledgeBasesResponse>(`/api/knowledge-bases`);
+  },
+
+  searchKnowledgeBase(
+    id: string,
+    body: { query: string; topK?: number; tags?: string[] },
+  ): Promise<KnowledgeBaseSearchResponse> {
+    return req<KnowledgeBaseSearchResponse>(
+      `/api/knowledge-bases/${encodeURIComponent(id)}/search`,
+      { method: "POST", body: JSON.stringify(body) },
+    );
+  },
+
   // ---------------------------------------------------------------------
   // Skills — registry CRUD + the agent editor's picker catalog
   // ---------------------------------------------------------------------
@@ -960,6 +974,24 @@ export interface RetrieverCatalogEntryDto {
 
 export interface RetrieversCatalogResponse {
   retrievers: RetrieverCatalogEntryDto[];
+}
+
+export interface KnowledgeBaseEntryDto extends RetrieverCatalogEntryDto {}
+
+export interface KnowledgeBasesResponse {
+  knowledgeBases: KnowledgeBaseEntryDto[];
+}
+
+export interface KnowledgeBaseSearchResultDto {
+  id: string;
+  score: number;
+  text: string;
+  source: { id: string; title?: string; uri?: string; tags: string[] };
+  index: number;
+}
+
+export interface KnowledgeBaseSearchResponse {
+  results: KnowledgeBaseSearchResultDto[];
 }
 
 export type SecretScopeWire =
