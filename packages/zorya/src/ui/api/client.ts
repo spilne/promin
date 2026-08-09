@@ -76,9 +76,13 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
+      const headers = new Headers(init?.headers ?? {});
+      if (init?.body !== undefined && !headers.has("content-type")) {
+        headers.set("content-type", "application/json");
+      }
       const res = await fetch(`${BASE}${path}`, {
         ...init,
-        headers: { ...(init?.headers ?? {}), ...authHeader() },
+        headers: { ...Object.fromEntries(headers.entries()), ...authHeader() },
       });
       if (res.ok) return (await res.json()) as T;
 
