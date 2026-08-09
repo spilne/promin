@@ -17,7 +17,6 @@ export class WorkflowRetentionCleaner {
 
   start(): void {
     if (this.timer) return;
-    void this.sweep();
     this.timer = setInterval(
       () => void this.sweep(),
       this.config.intervalMs ?? DEFAULT_INTERVAL_MS,

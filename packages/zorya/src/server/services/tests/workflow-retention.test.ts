@@ -22,7 +22,7 @@ describe("WorkflowRetentionCleaner", () => {
     expect(() => validateWorkflowRetentionConfig({ maxAgeDays: 7, intervalMs: 100 })).not.toThrow();
   });
 
-  it("runs an immediate bounded sweep and stops periodic work", async () => {
+  it("runs a deferred bounded sweep and stops periodic work", async () => {
     const calls: Array<{ olderThanMs: number; limit: number }> = [];
     const storage = {
       purgeCompleted: async (params: { olderThanMs: number; limit: number }) => {
@@ -32,16 +32,18 @@ describe("WorkflowRetentionCleaner", () => {
     } as unknown as WorkflowStorage;
     const cleaner = new WorkflowRetentionCleaner(
       storage,
-      { maxAgeDays: 3, intervalMs: 5, batchSize: 7 },
+      { maxAgeDays: 3, intervalMs: 20, batchSize: 7 },
       logger,
     );
 
     cleaner.start();
-    await Bun.sleep(1);
+    expect(calls).toHaveLength(0);
+    await Bun.sleep(25);
     cleaner.stop();
     const countAfterStop = calls.length;
     await Bun.sleep(10);
 
+    expect(countAfterStop).toBe(1);
     expect(calls.length).toBe(countAfterStop);
     expect(calls[0]).toEqual({ olderThanMs: 3 * 24 * 60 * 60 * 1000, limit: 7 });
   });
