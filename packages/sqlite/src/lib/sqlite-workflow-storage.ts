@@ -1556,6 +1556,11 @@ export class SqliteWorkflowStorage
         this.db.query(`DELETE FROM ${this._t}_locks WHERE workflow_id = ?`).run(workflow_id);
         this.db.query(`DELETE FROM ${this._t}_runs WHERE workflow_id = ?`).run(workflow_id);
         this.db.query(`DELETE FROM ${this._t}_journal WHERE workflow_id = ?`).run(workflow_id);
+        this.db.query(`DELETE FROM ${this._t}_attempts WHERE workflow_id = ?`).run(workflow_id);
+        this.db
+          .query(`DELETE FROM ${this._t}_signal_tokens WHERE workflow_id = ?`)
+          .run(workflow_id);
+        this.db.query(`DELETE FROM ${this._t}_streams WHERE workflow_id = ?`).run(workflow_id);
       }
       return ids.length;
     })();

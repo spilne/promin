@@ -87,12 +87,23 @@ describe("SqliteWorkflowStorage", () => {
     expect(t2).not.toBe(t1);
   });
 
-  it("purgeCompleted removes signals and run history", async () => {
+  it("purgeCompleted removes all per-workflow history", async () => {
     const s = makeStorage();
     const before = new Date();
     await new Promise((r) => setTimeout(r, 10));
     await s.createWorkflow({ workflowId: "purge-sqlite", workflowName: "test", input: {} });
     await s.deliverSignal("purge-sqlite", "done", { ok: true });
+    await s.saveStepAttempt({
+      workflowId: "purge-sqlite",
+      stepName: "step",
+      attempt: 1,
+      type: "execution",
+      status: "completed",
+      result: { ok: true },
+      durationMs: 10,
+      startedAt: new Date(),
+      completedAt: new Date(),
+    });
     await s.completeWorkflow("purge-sqlite", "result");
     await new Promise((r) => setTimeout(r, 10));
     const after = new Date();
@@ -102,6 +113,7 @@ describe("SqliteWorkflowStorage", () => {
     expect(await s.loadWorkflow("purge-sqlite")).toBeNull();
     expect(await s.loadSignals("purge-sqlite")).toEqual([]);
     expect(await s.loadRunHistory("purge-sqlite")).toEqual([]);
+    expect(await s.loadStepAttempts("purge-sqlite")).toEqual([]);
   });
 
   it("countWorkflows returns exact counts per status", async () => {
