@@ -13,7 +13,7 @@ import { Page, PageHeader } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 
 type WorkspaceTab = "search" | "add" | "sources";
-type AddMode = "paste" | "file";
+type AddMode = "paste" | "file" | "url";
 
 export function KnowledgeBasesPage() {
   const [namespace] = useNamespace();
@@ -482,23 +482,37 @@ function AddSourcePanel(props: {
   const [title, setTitle] = useState("");
   const [text, setText] = useState("");
   const [fileName, setFileName] = useState("");
+  const [url, setUrl] = useState("");
 
   const ingest = async (event: Event) => {
     event.preventDefault();
-    if (!sourceId.trim() || !text.trim()) return;
+    if (!sourceId.trim() || (mode === "url" ? !url.trim() : !text.trim())) return;
     setBusy(true);
     setNotice(null);
     try {
-      await api.ingestKnowledgeBaseSource(baseId, {
-        id: sourceId.trim(),
-        text,
-        ...(namespace ? { namespace } : {}),
-        ...(title.trim() ? { title: title.trim() } : {}),
-      });
+      if (mode === "url") {
+        await api.importKnowledgeBaseSource(baseId, {
+          kind: "url",
+          config: {
+            url: url.trim(),
+            id: sourceId.trim(),
+            ...(title.trim() ? { title: title.trim() } : {}),
+          },
+          ...(namespace ? { namespace } : {}),
+        });
+      } else {
+        await api.ingestKnowledgeBaseSource(baseId, {
+          id: sourceId.trim(),
+          text,
+          ...(namespace ? { namespace } : {}),
+          ...(title.trim() ? { title: title.trim() } : {}),
+        });
+      }
       setSourceId("");
       setTitle("");
       setText("");
       setFileName("");
+      setUrl("");
       await onComplete();
     } catch (err) {
       setNotice(errorMessage(err));
@@ -548,6 +562,15 @@ function AddSourcePanel(props: {
             >
               Upload file
             </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "url"}
+              class={`join-item btn btn-sm ${mode === "url" ? "btn-primary" : "btn-ghost"}`}
+              onClick={() => setMode("url")}
+            >
+              Import URL
+            </button>
           </div>
         </div>
         <form class="mt-5 space-y-3" onSubmit={ingest}>
@@ -560,6 +583,18 @@ function AddSourcePanel(props: {
                 type="file"
                 accept=".txt,.md,.markdown,.csv,text/plain,text/markdown,text/csv"
                 onChange={readFile}
+              />
+            </label>
+          )}
+          {mode === "url" && (
+            <label class="form-control">
+              <span class="label-text text-xs">Web page URL</span>
+              <input
+                class="input input-bordered"
+                type="url"
+                placeholder="https://docs.example.com/guide"
+                value={url}
+                onInput={(event) => setUrl((event.target as HTMLInputElement).value)}
               />
             </label>
           )}
@@ -585,26 +620,28 @@ function AddSourcePanel(props: {
               />
             </label>
           </div>
-          <label class="form-control">
-            <span class="label-text text-xs">Content</span>
-            <textarea
-              class="textarea textarea-bordered min-h-48"
-              placeholder={
-                mode === "file"
-                  ? "File content will appear here..."
-                  : "Paste documentation, policies, or runbooks here..."
-              }
-              value={text}
-              onInput={(event) => setText((event.target as HTMLTextAreaElement).value)}
-            />
-          </label>
+          {mode !== "url" && (
+            <label class="form-control">
+              <span class="label-text text-xs">Content</span>
+              <textarea
+                class="textarea textarea-bordered min-h-48"
+                placeholder={
+                  mode === "file"
+                    ? "File content will appear here..."
+                    : "Paste documentation, policies, or runbooks here..."
+                }
+                value={text}
+                onInput={(event) => setText((event.target as HTMLTextAreaElement).value)}
+              />
+            </label>
+          )}
           <div class="flex justify-end">
             <button
               class="btn btn-primary"
               type="submit"
-              disabled={!sourceId.trim() || !text.trim() || busy}
+              disabled={!sourceId.trim() || (mode === "url" ? !url.trim() : !text.trim()) || busy}
             >
-              {busy ? "Indexing..." : "Add source"}
+              {busy ? "Indexing..." : mode === "url" ? "Import and index" : "Add source"}
             </button>
           </div>
         </form>

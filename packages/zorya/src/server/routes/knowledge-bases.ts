@@ -4,6 +4,7 @@ import type {
   KnowledgeBaseCreateInput,
   KnowledgeBaseUpdateInput,
   KnowledgeSourceInput,
+  KnowledgeSourceKind,
   ZoryaKnowledgeBases,
 } from "../services/knowledge-bases.ts";
 import {
@@ -233,6 +234,27 @@ export function ingestKnowledgeBaseSource(deps: ManagedKnowledgeBaseGatewayDeps)
       return json(201, { source: publicSource });
     } catch (error) {
       return managedKnowledgeBaseError(error, "ingest_failed");
+    }
+  };
+}
+
+export function importKnowledgeBaseSource(deps: ManagedKnowledgeBaseGatewayDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const body = await readJson<Record<string, unknown>>(req);
+    if (!body || typeof body.kind !== "string") return jsonError(400, "source_kind_required");
+    try {
+      const namespace = await resolveRequestNamespace(deps, body.namespace);
+      const sources = await deps.knowledgeBases.ingestFrom(
+        namespace,
+        params.id!,
+        body.kind as KnowledgeSourceKind,
+        body.config,
+      );
+      return json(201, {
+        sources: sources.map(({ text: _text, ...source }) => source),
+      });
+    } catch (error) {
+      return managedKnowledgeBaseError(error, "source_import_failed");
     }
   };
 }

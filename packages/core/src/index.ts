@@ -37,6 +37,11 @@ export { Duration, type DurationInput, resolveMs } from "./lib/duration.ts";
 // Schema parser (library-agnostic validation contract)
 export { type SchemaParser } from "./lib/schema-parser.ts";
 export {
+  InMemoryResourceRegistry,
+  type InMemoryResourceRegistryConfig,
+  type ResourceRegistry,
+} from "./lib/resource-registry.ts";
+export {
   DEFAULT_NAMESPACE_ID,
   InMemoryNamespaceRegistry,
   NamespaceArchivedError,

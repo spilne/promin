@@ -24,7 +24,16 @@ export {
   type KnowledgeBaseSourceRecord,
   type KnowledgeBaseStore,
   type KnowledgeBaseUpdateInput,
+  KnowledgeSourceAdapterRegistry,
+  type KnowledgeSourceAdapter,
   type KnowledgeSourceInput,
+  type KnowledgeSourceKind,
   type StoredKnowledgeBase,
   type ZoryaKnowledgeBasesConfig,
 } from "./knowledge-bases.ts";
+export {
+  fileKnowledgeSourceAdapter,
+  urlKnowledgeSourceAdapter,
+  type FileKnowledgeSourceConfig,
+  type UrlKnowledgeSourceConfig,
+} from "./knowledge-source-adapters.ts";

@@ -535,6 +535,15 @@ export const api = {
       body: JSON.stringify(body),
     });
   },
+  importKnowledgeBaseSource(
+    id: string,
+    body: { kind: "file" | "url" | string; config: unknown; namespace?: string },
+  ): Promise<{ sources: KnowledgeBaseSourceDto[] }> {
+    return req(`/api/knowledge-bases/${encodeURIComponent(id)}/sources/import`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
   listKnowledgeBaseSources(
     id: string,
     namespace?: string,

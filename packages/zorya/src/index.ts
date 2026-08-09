@@ -52,10 +52,19 @@ export {
   type KnowledgeBaseSourceRecord,
   type KnowledgeBaseStore,
   type KnowledgeBaseUpdateInput,
+  KnowledgeSourceAdapterRegistry,
+  type KnowledgeSourceAdapter,
   type KnowledgeSourceInput,
+  type KnowledgeSourceKind,
   type StoredKnowledgeBase,
   type ZoryaKnowledgeBasesConfig,
 } from "./server/services/knowledge-bases.ts";
+export {
+  fileKnowledgeSourceAdapter,
+  urlKnowledgeSourceAdapter,
+  type FileKnowledgeSourceConfig,
+  type UrlKnowledgeSourceConfig,
+} from "./server/services/knowledge-source-adapters.ts";
 export {
   DEFAULT_NAMESPACE_ID,
   InMemoryNamespaceRegistry,

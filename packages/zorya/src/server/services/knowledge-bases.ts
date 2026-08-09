@@ -10,6 +10,11 @@ import {
   type Retriever,
   type RetrieverRegistry,
 } from "@promin/agent";
+import { InMemoryResourceRegistry } from "@promin/core";
+import {
+  fileKnowledgeSourceAdapter,
+  urlKnowledgeSourceAdapter,
+} from "./knowledge-source-adapters.ts";
 
 export type KnowledgeBaseProvider = "memory" | "external";
 export type KnowledgeSourceStatus = "ready" | "failed";
@@ -101,6 +106,24 @@ export interface KnowledgeSourceInput {
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
+export type KnowledgeSourceKind = "file" | "url" | (string & {});
+
+export interface KnowledgeSourceAdapter {
+  readonly kind: KnowledgeSourceKind;
+  load(config: unknown): Promise<ReadonlyArray<KnowledgeSourceInput>>;
+}
+
+export class KnowledgeSourceAdapterRegistry extends InMemoryResourceRegistry<KnowledgeSourceAdapter> {
+  constructor(adapters: ReadonlyArray<KnowledgeSourceAdapter> = []) {
+    super({ keyOf: (adapter) => adapter.kind, compare: (a, b) => a.kind.localeCompare(b.kind) });
+    for (const adapter of adapters) this.set(adapter);
+  }
+
+  register(adapter: KnowledgeSourceAdapter): KnowledgeSourceAdapter {
+    return this.set(adapter);
+  }
+}
+
 export interface KnowledgeBaseChunk {
   readonly id: string;
   readonly text: string;
@@ -116,6 +139,7 @@ export interface ZoryaKnowledgeBasesConfig {
   readonly now?: () => number;
   /** Build a live retriever for each managed definition (for example pgvector). */
   readonly retrieverFactory?: (definition: KnowledgeBaseDefinition) => Retriever;
+  readonly sourceAdapters?: KnowledgeSourceAdapterRegistry;
   readonly initial?: ReadonlyArray<
     KnowledgeBaseCreateInput & { documents?: ReadonlyArray<KnowledgeSourceInput> }
   >;
@@ -138,6 +162,7 @@ interface RuntimeBase {
 export class ZoryaKnowledgeBases {
   readonly registry: RetrieverRegistry;
   readonly store: KnowledgeBaseStore;
+  readonly sourceAdapters: KnowledgeSourceAdapterRegistry;
 
   private readonly now: () => number;
   private readonly retrieverFactory?: ZoryaKnowledgeBasesConfig["retrieverFactory"];
@@ -147,6 +172,9 @@ export class ZoryaKnowledgeBases {
   constructor(config: ZoryaKnowledgeBasesConfig = {}) {
     this.registry = config.registry ?? new InMemoryRetrieverRegistry();
     this.store = config.store ?? new InMemoryKnowledgeBaseStore();
+    this.sourceAdapters =
+      config.sourceAdapters ??
+      new KnowledgeSourceAdapterRegistry([fileKnowledgeSourceAdapter, urlKnowledgeSourceAdapter]);
     this.now = config.now ?? (() => Date.now());
     this.retrieverFactory = config.retrieverFactory;
     this.readyPromise = this.load(config.initial ?? []);
@@ -282,6 +310,21 @@ export class ZoryaKnowledgeBases {
       await this.persist(runtime);
       throw error;
     }
+  }
+
+  async ingestFrom(
+    namespace: string,
+    id: string,
+    kind: KnowledgeSourceKind,
+    config: unknown,
+  ): Promise<KnowledgeBaseSourceRecord[]> {
+    await this.ready();
+    const adapter = this.sourceAdapters.get(kind);
+    if (!adapter) throw new Error("source_adapter_not_found");
+    const documents = await adapter.load(config);
+    const sources: KnowledgeBaseSourceRecord[] = [];
+    for (const document of documents) sources.push(await this.ingest(namespace, id, document));
+    return sources;
   }
 
   async removeSource(namespace: string, id: string, sourceId: string): Promise<void> {

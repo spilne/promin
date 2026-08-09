@@ -10,7 +10,11 @@ import {
   searchKnowledgeBase,
   searchManagedKnowledgeBase,
 } from "../knowledge-bases.ts";
-import { InMemoryKnowledgeBaseStore, ZoryaKnowledgeBases } from "../../services/knowledge-bases.ts";
+import {
+  InMemoryKnowledgeBaseStore,
+  KnowledgeSourceAdapterRegistry,
+  ZoryaKnowledgeBases,
+} from "../../services/knowledge-bases.ts";
 import { NamespaceService } from "../../services/namespaces.ts";
 
 function registry() {
@@ -161,6 +165,24 @@ describe("knowledge-base routes", () => {
     expect((await second.search("default", "docs", { query: "alpha" }))[0]?.chunk.source.id).toBe(
       "one",
     );
+  });
+
+  it("ingests through a registered source adapter", async () => {
+    const knowledgeBases = new ZoryaKnowledgeBases({
+      sourceAdapters: new KnowledgeSourceAdapterRegistry([
+        {
+          kind: "fixture",
+          load: async (config) => [{ id: String(config), text: "adapter content" }],
+        },
+      ]),
+    });
+    await knowledgeBases.create({ id: "docs", namespace: "default" });
+    const sources = await knowledgeBases.ingestFrom("default", "docs", "fixture", "source-1");
+    expect(sources[0]?.id).toBe("source-1");
+    expect(
+      (await knowledgeBases.search("default", "docs", { query: "adapter content" }))[0]?.chunk
+        .source.id,
+    ).toBe("source-1");
   });
 });
 

@@ -203,6 +203,7 @@ import {
   deleteKnowledgeBaseSource,
   deleteManagedKnowledgeBase,
   ingestKnowledgeBaseSource,
+  importKnowledgeBaseSource,
   listKnowledgeBaseChunks,
   listKnowledgeBaseSources,
   listKnowledgeBases,
@@ -722,6 +723,7 @@ export class ZoryaServer {
         .patch("/api/knowledge-bases/:id", updateManagedKnowledgeBase(knowledgeDeps))
         .delete("/api/knowledge-bases/:id", deleteManagedKnowledgeBase(knowledgeDeps))
         .get("/api/knowledge-bases/:id/sources", listKnowledgeBaseSources(knowledgeDeps))
+        .post("/api/knowledge-bases/:id/sources/import", importKnowledgeBaseSource(knowledgeDeps))
         .post("/api/knowledge-bases/:id/sources", ingestKnowledgeBaseSource(knowledgeDeps))
         .delete(
           "/api/knowledge-bases/:id/sources/:sourceId",
