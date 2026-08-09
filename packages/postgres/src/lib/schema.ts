@@ -17,7 +17,7 @@ import {
   uniqueIndex,
   primaryKey,
 } from "drizzle-orm/pg-core";
-import { sql } from "drizzle-orm";
+import { desc, sql } from "drizzle-orm";
 import { createLookupTable, type LookupBinding } from "./lookup-table.ts";
 import {
   WorkflowStatusIds,
@@ -80,6 +80,8 @@ export const workflows = pgTable(
   (t) => [
     index("wf_workflows_name_status_idx").on(t.workflowName, t.statusId),
     index("wf_workflows_status_idx").on(t.statusId),
+    index("wf_workflows_status_started_at_idx").on(t.statusId, desc(t.startedAt)),
+    index("wf_workflows_status_completed_at_idx").on(t.statusId, desc(t.completedAt)),
     index("wf_workflows_type_idx").on(t.workflowType),
     index("wf_workflows_namespace_idx").on(t.namespace),
     uniqueIndex("wf_workflows_idempotency_key_idx")

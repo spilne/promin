@@ -330,6 +330,13 @@
       "when": 1743400046000,
       "tag": "0046_zorya_namespace",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1743400047000,
+      "tag": "0047_workflow_metrics_indexes",
+      "breakpoints": true
     }
   ]
 }
