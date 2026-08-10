@@ -646,6 +646,7 @@ async function resolveAgent(
       resolve: resolveAgent,
       instanceRegistry,
     },
+    retrievers: knowledgeBases.registry,
   });
 }
 

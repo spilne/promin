@@ -32,11 +32,15 @@ describe("systemToolsFor", () => {
   it("surfaces retrieval search when knowledge is exposed as a tool", () => {
     const tools = systemToolsFor({
       skillCount: 0,
-      knowledgeToolCount: 2,
+      knowledgeTools: [
+        { id: "org-handbook" },
+        { id: "default", name: "search_default_kb" },
+        { id: "ambient", mode: "context" },
+      ],
       hasNetwork: false,
     });
-    expect(tools.map((t) => t.name)).toEqual(["search_knowledge_base"]);
-    expect(tools[0]!.reason).toContain("2 knowledge bindings");
+    expect(tools.map((t) => t.name)).toEqual(["search_org_handbook", "search_default_kb"]);
+    expect(tools[0]!.reason).toContain("knowledge binding");
   });
 
   it("combines skills + network", () => {

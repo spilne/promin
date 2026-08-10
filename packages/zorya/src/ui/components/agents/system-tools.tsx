@@ -15,9 +15,16 @@ export interface SystemTool {
   readonly reason: string;
 }
 
+export interface KnowledgeSystemToolBinding {
+  readonly id: string;
+  readonly name?: string;
+  readonly mode?: "tool" | "context" | "tool-and-context";
+}
+
 export function systemToolsFor(opts: {
   readonly skillCount: number;
   readonly knowledgeToolCount?: number;
+  readonly knowledgeTools?: ReadonlyArray<KnowledgeSystemToolBinding>;
   readonly hasNetwork: boolean;
 }): SystemTool[] {
   const out: SystemTool[] = [];
@@ -29,12 +36,15 @@ export function systemToolsFor(opts: {
       }. The model calls it to load a skill's instructions on demand.`,
     });
   }
-  if ((opts.knowledgeToolCount ?? 0) > 0) {
+  const knowledgeTools: ReadonlyArray<KnowledgeSystemToolBinding> =
+    opts.knowledgeTools ??
+    Array.from({ length: opts.knowledgeToolCount ?? 0 }, () => ({
+      id: "default",
+    }));
+  for (const binding of knowledgeTools.filter((k) => k.id && k.mode !== "context")) {
     out.push({
-      name: "search_knowledge_base",
-      reason: `Auto-injected because this agent has ${opts.knowledgeToolCount} knowledge binding${
-        opts.knowledgeToolCount === 1 ? "" : "s"
-      } exposed as a tool. Exact tool names are derived from each binding unless overridden.`,
+      name: binding.name?.trim() || retrieverToolName(binding.id),
+      reason: "Auto-injected because this agent exposes this knowledge binding as a tool.",
     });
   }
   if (opts.hasNetwork) {
@@ -48,6 +58,11 @@ export function systemToolsFor(opts: {
     });
   }
   return out;
+}
+
+function retrieverToolName(id: string): string {
+  if (id === "default") return "search_knowledge_base";
+  return `search_${id.replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "") || "knowledge"}`;
 }
 
 /** Read-only chips for the auto-injected system tools. Renders nothing when empty. */

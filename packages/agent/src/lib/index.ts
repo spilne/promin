@@ -101,6 +101,10 @@ export type { ResolveContextInput } from "./memory/resolve-context.ts";
 export {
   FlatTextChunker,
   createFlatTextChunker,
+  CombinedRetriever,
+  createCombinedRetriever,
+  FallbackRetriever,
+  createFallbackRetriever,
   InMemoryRetriever,
   createInMemoryRetriever,
   RerankingRetriever,
@@ -114,6 +118,10 @@ export {
 } from "./rag/index.ts";
 export type {
   FlatTextChunkerConfig,
+  CombinedRetrieverConfig,
+  CombinedRetrieverSource,
+  FallbackRetrieverConfig,
+  FallbackRetrieverSource,
   InMemoryRetrieverConfig,
   KnowledgeChunk,
   KnowledgeChunker,

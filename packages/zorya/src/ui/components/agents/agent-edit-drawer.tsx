@@ -571,8 +571,13 @@ export function AgentEditDrawer({
             <SystemToolsSection
               tools={systemToolsFor({
                 skillCount: selectedSkills.size,
-                knowledgeToolCount: knowledge.filter((k) => k.id.trim() && k.mode !== "context")
-                  .length,
+                knowledgeTools: knowledge
+                  .filter((k) => k.id.trim())
+                  .map((k) => ({
+                    id: k.id.trim(),
+                    ...(k.name.trim() ? { name: k.name.trim() } : {}),
+                    mode: k.mode,
+                  })),
                 hasNetwork: agent.backend.type === "local" && agent.backend.network !== undefined,
               })}
             />

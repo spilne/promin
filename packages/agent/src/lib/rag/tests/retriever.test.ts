@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import {
   FlatTextChunker,
+  CombinedRetriever,
+  FallbackRetriever,
   InMemoryRetriever,
   RerankingRetriever,
   RouterRetriever,
@@ -125,6 +127,51 @@ describe("createRetrieverTool", () => {
   });
 });
 
+describe("CombinedRetriever", () => {
+  it("queries all sources, applies weights, dedupes chunks, and respects topK", async () => {
+    const primary = new StaticRetriever([
+      result("shared", "primary shared", 0.4),
+      result("primary", "primary only", 0.7),
+    ]);
+    const secondary = new StaticRetriever([
+      result("shared", "secondary shared", 0.9),
+      result("secondary", "secondary only", 0.8),
+    ]);
+    const retriever = new CombinedRetriever({
+      sources: [
+        { retriever: primary, weight: 1 },
+        { retriever: secondary, weight: 0.5 },
+      ],
+    });
+
+    const results = await retriever.retrieve({ query: "shared", topK: 3 });
+
+    expect(results.map((r) => r.chunk.id)).toEqual(["primary", "shared", "secondary"]);
+    expect(results[1]?.chunk.text).toBe("secondary shared");
+    expect(results[1]?.score).toBe(0.45);
+  });
+});
+
+describe("FallbackRetriever", () => {
+  it("uses the first source that satisfies the result gate", async () => {
+    const weak = new StaticRetriever([result("weak", "weak", 0.2)]);
+    const strong = new StaticRetriever([result("strong", "strong", 0.8)]);
+    const unused = new CountingRetriever([result("unused", "unused", 1)]);
+    const retriever = new FallbackRetriever({
+      sources: [
+        { retriever: weak, minScore: 0.5 },
+        { retriever: strong, minScore: 0.5 },
+        { retriever: unused, minScore: 0.5 },
+      ],
+    });
+
+    const results = await retriever.retrieve({ query: "policy" });
+
+    expect(results.map((r) => r.chunk.id)).toEqual(["strong"]);
+    expect(unused.calls).toBe(0);
+  });
+});
+
 describe("RerankingRetriever", () => {
   it("fetches extra candidates and applies the reranker", async () => {
     let observedTopK: number | undefined;
@@ -199,6 +246,15 @@ class StaticRetriever implements Retriever {
 
   async retrieve(): Promise<RetrieveResult[]> {
     return [...this.results];
+  }
+}
+
+class CountingRetriever extends StaticRetriever {
+  calls = 0;
+
+  override async retrieve(): Promise<RetrieveResult[]> {
+    this.calls += 1;
+    return super.retrieve();
   }
 }
 
