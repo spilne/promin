@@ -17,6 +17,8 @@ export {
 export {
   InMemoryKnowledgeBaseStore,
   ZoryaKnowledgeBases,
+  ZoryaKnowledgeBasesBuilder,
+  createZoryaKnowledgeBasesBuilder,
   type KnowledgeBaseChunk,
   type KnowledgeBaseCreateInput,
   type KnowledgeBaseDefinition,

@@ -24,7 +24,7 @@ import {
   ZoryaSkills,
   ZoryaFragments,
   ZoryaDags,
-  ZoryaKnowledgeBases,
+  createZoryaKnowledgeBasesBuilder,
   createZoryaServerBuilder,
   RegistryBackedWorkersProvider,
   scanAgentsFolder,
@@ -76,9 +76,9 @@ import { startApprovalAutoSignaler } from "./demo/approval-auto-signaler.ts";
 import { inputFor } from "./demo/input.ts";
 import { createDemoLogger } from "./demo/logger.ts";
 import { seedSchedules } from "./demo/schedules.ts";
-// KB content lives at ./kb/org-knowledge-base.ts; the searchKnowledge +
-// getDocument tools that wrap it are exposed under ./tools/ for the
-// folder-scan registry.
+// KB content lives at ./kb/org-knowledge-base.ts and is seeded into the
+// managed Knowledge Bases service below. Agents attach it through
+// backend.knowledge, which auto-injects retriever tools at resolve time.
 import { ORG_KNOWLEDGE_BASE } from "./kb/org-knowledge-base.ts";
 import path from "node:path";
 
@@ -118,23 +118,21 @@ const {
   advertisements,
 } = stack;
 
-const knowledgeBases = new ZoryaKnowledgeBases({
-  store: stack.knowledgeBaseStore,
-  initial: [
-    {
-      id: "org-handbook",
-      namespace: "default",
-      description: "Engineering, on-call, security, and platform reference material.",
-      tags: ["demo", "internal"],
-      documents: [...ORG_KNOWLEDGE_BASE.entries()].map(([id, document]) => ({
-        id,
-        title: document.title,
-        tags: document.tags,
-        text: document.body,
-      })),
-    },
-  ],
-});
+const knowledgeBases = createZoryaKnowledgeBasesBuilder()
+  .store(stack.knowledgeBaseStore)
+  .initial({
+    id: "org-handbook",
+    namespace: "default",
+    description: "Engineering, on-call, security, and platform reference material.",
+    tags: ["demo", "internal"],
+    documents: [...ORG_KNOWLEDGE_BASE.entries()].map(([id, document]) => ({
+      id,
+      title: document.title,
+      tags: document.tags,
+      text: document.body,
+    })),
+  })
+  .build();
 
 // Agent registry + memory store — SQLite (shares the db above) by
 // default, or Postgres when ZORYA_PG_URL is set. Postgres mode boots
@@ -656,7 +654,7 @@ const SEED_FACT_PREFIX = "Org doc available:";
 
 // Seed namespace memory with KB metadata so any agent in the "acme"
 // tenant has cross-cutting awareness of the org docs without having to
-// call searchKnowledge first. Idempotent: re-running the demo skips
+// inspect the managed KB catalog first. Idempotent: re-running the demo skips
 // when seed facts already exist (we look for the SEED_FACT_PREFIX).
 async function seedNamespaceMemory() {
   const existing = await memoryStore.listNamespaceFacts(DEMO_NAMESPACE);

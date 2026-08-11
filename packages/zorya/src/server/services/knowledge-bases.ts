@@ -139,6 +139,14 @@ export interface ZoryaKnowledgeBasesConfig {
   readonly now?: () => number;
   /** Build a live retriever for each managed definition (for example pgvector). */
   readonly retrieverFactory?: (definition: KnowledgeBaseDefinition) => Retriever;
+  /**
+   * Optional async setup hook for retrievers that need schema/index/bootstrap
+   * work before documents are ingested or queries are served.
+   */
+  readonly retrieverSetup?: (
+    definition: KnowledgeBaseDefinition,
+    retriever: Retriever,
+  ) => Promise<void> | void;
   readonly sourceAdapters?: KnowledgeSourceAdapterRegistry;
   readonly initial?: ReadonlyArray<
     KnowledgeBaseCreateInput & { documents?: ReadonlyArray<KnowledgeSourceInput> }
@@ -166,6 +174,7 @@ export class ZoryaKnowledgeBases {
 
   private readonly now: () => number;
   private readonly retrieverFactory?: ZoryaKnowledgeBasesConfig["retrieverFactory"];
+  private readonly retrieverSetup?: ZoryaKnowledgeBasesConfig["retrieverSetup"];
   private readonly bases = new Map<string, RuntimeBase>();
   private readonly readyPromise: Promise<void>;
 
@@ -177,6 +186,7 @@ export class ZoryaKnowledgeBases {
       new KnowledgeSourceAdapterRegistry([fileKnowledgeSourceAdapter, urlKnowledgeSourceAdapter]);
     this.now = config.now ?? (() => Date.now());
     this.retrieverFactory = config.retrieverFactory;
+    this.retrieverSetup = config.retrieverSetup;
     this.readyPromise = this.load(config.initial ?? []);
   }
 
@@ -223,6 +233,7 @@ export class ZoryaKnowledgeBases {
       sources: new Map(),
       retriever: this.createRetriever(definition),
     };
+    await this.setupRetriever(definition, runtime.retriever);
     this.bases.set(id, runtime);
     this.registry.register(toRegistryInput(definition, runtime.retriever));
     await this.persist(runtime);
@@ -371,7 +382,7 @@ export class ZoryaKnowledgeBases {
     >,
   ): Promise<void> {
     const stored = await this.store.load();
-    for (const record of stored) this.install(record);
+    for (const record of stored) await this.install(record);
     for (const input of initial) {
       if (this.bases.has(key(input.namespace, input.id))) continue;
       const now = this.now();
@@ -393,6 +404,7 @@ export class ZoryaKnowledgeBases {
         sources: new Map(),
         retriever: this.createRetriever(definition),
       };
+      await this.setupRetriever(definition, runtime.retriever);
       this.bases.set(key(input.namespace, input.id), runtime);
       this.registry.register(toRegistryInput(definition, runtime.retriever));
       for (const document of input.documents ?? []) {
@@ -402,11 +414,12 @@ export class ZoryaKnowledgeBases {
     }
   }
 
-  private install(record: StoredKnowledgeBase): void {
+  private async install(record: StoredKnowledgeBase): Promise<void> {
     const retriever = this.createRetriever(
       record.definition,
       record.sources.filter((source) => source.status === "ready").map(toDocument),
     );
+    await this.setupRetriever(record.definition, retriever);
     const runtime: RuntimeBase = {
       definition: record.definition,
       sources: new Map(record.sources.map((source) => [source.id, source])),
@@ -423,6 +436,13 @@ export class ZoryaKnowledgeBases {
     if (this.retrieverFactory) return this.retrieverFactory(definition);
     if (definition.provider === "external") throw new Error("external_retriever_required");
     return new InMemoryRetriever({ documents });
+  }
+
+  private async setupRetriever(
+    definition: KnowledgeBaseDefinition,
+    retriever: Retriever,
+  ): Promise<void> {
+    await this.retrieverSetup?.(definition, retriever);
   }
 
   private async ingestInitial(runtime: RuntimeBase, input: KnowledgeSourceInput): Promise<void> {
@@ -456,6 +476,107 @@ export class ZoryaKnowledgeBases {
       sources: [...runtime.sources.values()],
     });
   }
+}
+
+/**
+ * Fluent setup for managed KBs. Use it to keep the durable store, live
+ * retriever registry, seed data, and retriever bootstrap hooks in one place.
+ *
+ * @example
+ * ```ts
+ * const knowledgeBases = createZoryaKnowledgeBasesBuilder()
+ *   .store(stack.knowledgeBaseStore)
+ *   .registry(sharedRetrievers)
+ *   .retrieverFactory((definition) =>
+ *     createPgVectorRetriever({ db, embeddings, dimensions: 1536, tableName: `kb_${definition.id}` }),
+ *   )
+ *   .retrieverSetup((_definition, retriever) =>
+ *     (retriever as PgVectorRetriever).ensureSchema({ createExtension: true }),
+ *   )
+ *   .build();
+ *
+ * const agents = new ZoryaAgents({ retrievers: knowledgeBases.registry, ... });
+ * ```
+ */
+export class ZoryaKnowledgeBasesBuilder {
+  private config: ZoryaKnowledgeBasesConfig = {};
+  private sourceAdapterRows: KnowledgeSourceAdapter[] = [];
+  private initialRows: Array<
+    KnowledgeBaseCreateInput & { documents?: ReadonlyArray<KnowledgeSourceInput> }
+  > = [];
+
+  registry(registry: RetrieverRegistry): this {
+    this.config = { ...this.config, registry };
+    return this;
+  }
+
+  store(store: KnowledgeBaseStore): this {
+    this.config = { ...this.config, store };
+    return this;
+  }
+
+  now(now: () => number): this {
+    this.config = { ...this.config, now };
+    return this;
+  }
+
+  retrieverFactory(factory: ZoryaKnowledgeBasesConfig["retrieverFactory"]): this {
+    this.config = { ...this.config, retrieverFactory: factory };
+    return this;
+  }
+
+  retrieverSetup(setup: ZoryaKnowledgeBasesConfig["retrieverSetup"]): this {
+    this.config = { ...this.config, retrieverSetup: setup };
+    return this;
+  }
+
+  sourceAdapters(sourceAdapters: KnowledgeSourceAdapterRegistry): this {
+    this.config = { ...this.config, sourceAdapters };
+    this.sourceAdapterRows = [];
+    return this;
+  }
+
+  sourceAdapter(adapter: KnowledgeSourceAdapter): this {
+    this.sourceAdapterRows = [...this.sourceAdapterRows, adapter];
+    return this;
+  }
+
+  initial(
+    input: KnowledgeBaseCreateInput & { documents?: ReadonlyArray<KnowledgeSourceInput> },
+  ): this {
+    this.initialRows = [...this.initialRows, input];
+    return this;
+  }
+
+  initialMany(
+    inputs: ReadonlyArray<
+      KnowledgeBaseCreateInput & { documents?: ReadonlyArray<KnowledgeSourceInput> }
+    >,
+  ): this {
+    this.initialRows = [...this.initialRows, ...inputs];
+    return this;
+  }
+
+  build(): ZoryaKnowledgeBases {
+    const sourceAdapters =
+      this.config.sourceAdapters ??
+      (this.sourceAdapterRows.length > 0
+        ? new KnowledgeSourceAdapterRegistry([
+            fileKnowledgeSourceAdapter,
+            urlKnowledgeSourceAdapter,
+            ...this.sourceAdapterRows,
+          ])
+        : undefined);
+    return new ZoryaKnowledgeBases({
+      ...this.config,
+      ...(sourceAdapters !== undefined && { sourceAdapters }),
+      ...(this.initialRows.length > 0 && { initial: this.initialRows }),
+    });
+  }
+}
+
+export function createZoryaKnowledgeBasesBuilder(): ZoryaKnowledgeBasesBuilder {
+  return new ZoryaKnowledgeBasesBuilder();
 }
 
 function addDocument(

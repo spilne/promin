@@ -45,6 +45,8 @@ export { ZoryaDags, type ZoryaDagsConfig } from "./server/services/dags/index.ts
 export {
   InMemoryKnowledgeBaseStore,
   ZoryaKnowledgeBases,
+  ZoryaKnowledgeBasesBuilder,
+  createZoryaKnowledgeBasesBuilder,
   type KnowledgeBaseChunk,
   type KnowledgeBaseCreateInput,
   type KnowledgeBaseDefinition,

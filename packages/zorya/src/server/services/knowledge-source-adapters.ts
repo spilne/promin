@@ -61,7 +61,7 @@ function parseFileConfig(raw: unknown): FileKnowledgeSourceConfig {
   if (!isRecord(raw) || typeof raw.path !== "string" || !raw.path.trim()) {
     throw new Error("file_source_path_required");
   }
-  return raw as FileKnowledgeSourceConfig;
+  return raw as unknown as FileKnowledgeSourceConfig;
 }
 
 function parseUrlConfig(raw: unknown): UrlKnowledgeSourceConfig {
@@ -70,7 +70,7 @@ function parseUrlConfig(raw: unknown): UrlKnowledgeSourceConfig {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error("url_source_protocol_unsupported");
   }
-  return { ...(raw as UrlKnowledgeSourceConfig), url: url.toString() };
+  return { ...(raw as unknown as UrlKnowledgeSourceConfig), url: url.toString() };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

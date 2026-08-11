@@ -1,9 +1,8 @@
 import type { RegisterAgentInput } from "@promin/agent";
 
-// Live LLM agent — answers questions over a small in-memory org
-// knowledge base. The tools are wired in demo.ts; this recipe just
-// declares the contract. Filtered out of the dashboard when
-// ANTHROPIC_API_KEY is missing (see liveOnlyAgentIds in demo.ts).
+// Live LLM agent — answers questions over the managed org-handbook KB seeded
+// by demo.ts. Filtered out of the dashboard when ANTHROPIC_API_KEY is missing
+// (see liveOnlyAgentIds in demo.ts).
 export const KNOWLEDGE_BOT: RegisterAgentInput = {
   id: "knowledge-bot",
   backend: {
@@ -16,8 +15,8 @@ export const KNOWLEDGE_BOT: RegisterAgentInput = {
           "company policies, runbooks, RFCs, engineering practices, and other internal documents using " +
           "ONLY the knowledge base — never invent facts.\n\n" +
           "Workflow:\n" +
-          "  1. For any factual question, START by searching the knowledge base with 2–4 keywords from " +
-          "the user's question. If a hit looks promising but the snippet is incomplete, fetch the full doc.\n" +
+          "  1. For any factual question, START by calling searchOrgKnowledge with 2–4 keywords from " +
+          "the user's question.\n" +
           "  2. Cite the doc id in your answer (e.g. `(source: oncall-runbook)`). When multiple docs " +
           "contributed, cite all of them.\n" +
           "  3. If the search returns nothing relevant, SAY SO clearly — do not fall back to general " +
@@ -26,9 +25,18 @@ export const KNOWLEDGE_BOT: RegisterAgentInput = {
           "save it via the memory tool with scope='resource' so it persists across sessions.\n\n" +
           "Tone: concise, factual, link-style citations. Avoid fluff. If the user asks something the KB " +
           "doesn't cover, admit it.",
-        tools: ["searchKnowledge", "getDocument"],
       },
     },
+    knowledge: [
+      {
+        id: "org-handbook",
+        name: "searchOrgKnowledge",
+        description:
+          "Search the managed org handbook knowledge base for policies, runbooks, RFCs, deploy guidance, and engineering practices.",
+        topK: 5,
+        includeSources: true,
+      },
+    ],
     requiredEnv: ["ANTHROPIC_API_KEY"],
     autoCompact: {
       contextLimit: 200_000,
@@ -57,8 +65,8 @@ export const KNOWLEDGE_BOT: RegisterAgentInput = {
   metadata: {
     description:
       "Live Claude (sonnet-4-6) grounded in an in-memory org KB (engineering handbook, on-call runbook, " +
-      "security policy, deploy guide, RFCs). Demonstrates retrieval-augmented chat with searchKnowledge " +
-      "+ getDocument tools. Requires ANTHROPIC_API_KEY.",
+      "security policy, deploy guide, RFCs). Demonstrates retrieval-augmented chat through backend.knowledge. " +
+      "Requires ANTHROPIC_API_KEY.",
     capabilities: ["chat", "tools", "live", "rag"],
     tags: ["live", "anthropic", "knowledge-base", "rag"],
   },
