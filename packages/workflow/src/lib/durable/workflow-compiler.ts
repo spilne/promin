@@ -125,6 +125,10 @@ export class WorkflowCompilationError extends Error {
 export function compileWorkflow<Input = unknown>(params: {
   schema: WorkflowSchema;
   registry: ActivityRegistry;
+  /** Runtime workflow version. Used when registering compiled schemas. */
+  version?: string;
+  /** Optional workflow type surfaced in run/workflow views. */
+  type?: string;
 }): Workflow<Input, unknown> {
   const { schema, registry } = params;
 
@@ -150,7 +154,11 @@ export function compileWorkflow<Input = unknown>(params: {
 
   // 4. Build WorkflowBuilder chain
   // Use `any` for the builder — generics can't be tracked across a dynamic loop
-  let builder: any = workflow<Input>({ name: schema.name });
+  let builder: any = workflow<Input>({
+    name: schema.name,
+    ...(params.version !== undefined && { version: params.version }),
+    ...(params.type !== undefined && { type: params.type }),
+  });
 
   for (const stepName of sorted) {
     const step = stepsByName.get(stepName)!;

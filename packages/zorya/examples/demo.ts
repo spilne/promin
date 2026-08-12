@@ -14,7 +14,13 @@
 //   the same runner — so the Schedules page ticks increment live.
 // ---------------------------------------------------------------------------
 
-import { InMemoryWorkerRegistry, RecoveryStrategy, type Workflow } from "@promin/workflow";
+import { Pipeline } from "@promin/core";
+import {
+  createWorkflowStepCatalog,
+  InMemoryWorkerRegistry,
+  RecoveryStrategy,
+  type Workflow,
+} from "@promin/workflow";
 import {
   createSqliteZoryaStack,
   LocalWorkflows,
@@ -24,6 +30,7 @@ import {
   ZoryaSkills,
   ZoryaFragments,
   ZoryaDags,
+  ZoryaWorkflowBuilder,
   createZoryaKnowledgeBasesBuilder,
   createZoryaServerBuilder,
   RegistryBackedWorkersProvider,
@@ -830,6 +837,45 @@ logger.log(
     .join(", ")} (no active until promoted)`,
 );
 
+const workflowStepCatalog = createWorkflowStepCatalog([
+  {
+    id: "transform.identity",
+    title: "Identity",
+    category: "Transform",
+    description: "Pass the previous value through unchanged.",
+    outputSchema: {},
+    activity: () => (ctx) => Pipeline.succeed(ctx.prev),
+  },
+  {
+    id: "transform.uppercase",
+    title: "Uppercase text",
+    category: "Transform",
+    description: "Convert the previous value to uppercase text.",
+    inputSchema: { type: "string" },
+    outputSchema: { type: "string" },
+    activity: () => (ctx) => Pipeline.succeed(String(ctx.prev).toUpperCase()),
+  },
+  {
+    id: "transform.concat",
+    title: "Join dependency outputs",
+    category: "Transform",
+    description: "Join dependency outputs with a configurable separator.",
+    configSchema: {
+      type: "object",
+      properties: { separator: { type: "string", default: " " } },
+    },
+    outputSchema: { type: "string" },
+    activity: (config) => (ctx) => {
+      const separator = typeof config?.separator === "string" ? config.separator : " ";
+      return Pipeline.succeed(Object.values(ctx.deps).map(String).join(separator));
+    },
+  },
+]);
+const workflowBuilder = new ZoryaWorkflowBuilder({
+  catalog: workflowStepCatalog,
+  versionRegistry,
+});
+
 // The hybrid: local for in-process workflows, queued fallback for any
 // workflow only an external worker advertises (e.g. examples/worker.ts).
 const workflows = new LocalWorkflows({
@@ -1019,6 +1065,7 @@ const server = createZoryaServerBuilder()
   .skills(skills)
   .fragments(fragments)
   .dags(dags)
+  .workflowBuilder(workflowBuilder)
   .knowledgeBases(knowledgeBases)
   .namespaces(namespaceRegistry)
   .secrets(secretsStorage)

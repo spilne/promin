@@ -7,6 +7,7 @@ import { ScheduleList } from "./components/schedules/schedule-list.tsx";
 import { ScheduleDetail } from "./components/schedules/schedule-detail.tsx";
 import { WorkflowList } from "./components/workflows/workflow-list.tsx";
 import { WorkflowDetail } from "./components/workflows/workflow-detail.tsx";
+import { WorkflowBuilderPage } from "./components/workflows/workflow-builder-page.tsx";
 import { AgentList } from "./components/agents/agent-list.tsx";
 import { AgentDetail } from "./components/agents/agent-detail.tsx";
 import { InstanceList } from "./components/agents/instance-list.tsx";
@@ -137,6 +138,13 @@ function renderRoute(route: string, navigate: (p: string) => void) {
         onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)}
         onOpenWorkflow={(name) => navigate(`/workflows/${encodeURIComponent(name)}`)}
         onOpenWorkflowRuns={(name) => navigate(`/?name=${encodeURIComponent(name)}`)}
+      />
+    );
+  }
+  if (path === "/workflow-builder") {
+    return (
+      <WorkflowBuilderPage
+        onOpenWorkflow={(name) => navigate(`/workflows/${encodeURIComponent(name)}`)}
       />
     );
   }

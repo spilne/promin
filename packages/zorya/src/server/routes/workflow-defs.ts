@@ -4,7 +4,7 @@
 // sample inputs.
 // ---------------------------------------------------------------------------
 
-import type { Workflow } from "@promin/workflow";
+import type { IWorkflowVersionRegistry, Workflow } from "@promin/workflow";
 import { json, jsonError } from "../router.ts";
 import type { WorkflowAdvertisementRegistry } from "../workflow-advertisements.ts";
 
@@ -48,6 +48,12 @@ export interface WorkflowDefsDeps {
    * an advertised entry exist for the same name, the static one wins.
    */
   advertisements?: WorkflowAdvertisementRegistry;
+  /**
+   * Published authored workflows live in the version registry. Merge them
+   * into the same definitions directory so trigger/detail pages don't need
+   * a separate path for builder-created workflows.
+   */
+  versionRegistry?: IWorkflowVersionRegistry;
 }
 
 function toDto(name: string, wf: Workflow<unknown, unknown>, sample?: unknown): WorkflowDefDto {
@@ -102,6 +108,23 @@ export function listWorkflowDefs(deps: WorkflowDefsDeps) {
         if (set.size > 0) dto.versions = [...set].sort();
       }
     }
+
+    if (deps.versionRegistry) {
+      for (const name of await deps.versionRegistry.names()) {
+        const versions = await deps.versionRegistry.versions(name);
+        const existing = byName.get(name);
+        if (existing) {
+          annotateVersions(existing, versions);
+          continue;
+        }
+        const wf = await resolveRegisteredWorkflow(deps.versionRegistry, name);
+        if (!wf) continue;
+        const dto = toDto(name, wf, deps.sampleInput?.(name));
+        annotateVersions(dto, versions);
+        byName.set(name, dto);
+      }
+    }
+
     const dtos = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
     const response: WorkflowDefsResponse = { workflows: dtos };
     return json(200, response);
@@ -114,6 +137,16 @@ export function getWorkflowDef(deps: WorkflowDefsDeps) {
     if (!name) return jsonError(400, "missing_name");
     const wf = deps.workflows?.[name];
     if (wf) return json(200, toDto(name, wf, deps.sampleInput?.(name)));
+
+    if (deps.versionRegistry) {
+      const registered = await resolveRegisteredWorkflow(deps.versionRegistry, name);
+      if (registered) {
+        const dto = toDto(name, registered, deps.sampleInput?.(name));
+        const versions = await deps.versionRegistry.versions(name);
+        annotateVersions(dto, versions);
+        return json(200, dto);
+      }
+    }
 
     // Fall back to remote advertisements.
     if (deps.advertisements) {
@@ -134,4 +167,20 @@ export function getWorkflowDef(deps: WorkflowDefsDeps) {
     }
     return jsonError(404, "not_found");
   };
+}
+
+async function resolveRegisteredWorkflow(
+  registry: IWorkflowVersionRegistry,
+  name: string,
+): Promise<Workflow<unknown, unknown> | undefined> {
+  const active = await registry.findActive?.(name);
+  if (active) return registry.resolve(name, active.version);
+  const latest = await registry.latest(name);
+  return latest ? registry.resolve(name, latest) : undefined;
+}
+
+function annotateVersions(dto: WorkflowDefDto, versions: readonly string[]): void {
+  const set = new Set([...(dto.versions ?? []), ...versions]);
+  if (dto.version) set.add(dto.version);
+  if (set.size > 0) dto.versions = [...set].sort();
 }

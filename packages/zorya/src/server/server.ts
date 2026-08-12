@@ -27,7 +27,7 @@ import {
 } from "@promin/workflow";
 import { createWorkerApiHandler, createWorkflowStorageHandler } from "@promin/workflow-remote";
 import { Auth, type AuthConfig } from "./auth.ts";
-import { Router, jsonError } from "./router.ts";
+import { Router, json, jsonError } from "./router.ts";
 import { NamespaceService, type NamespaceRegistry } from "./services/namespaces.ts";
 import type { WorkflowStartQueue } from "./workflow-starts.ts";
 import { WorkerWebSocketServer } from "./services/worker-ws-server.ts";
@@ -97,6 +97,14 @@ import {
 import { getStreamChunks, sendStreamChunk, streamChunks } from "./routes/streams.ts";
 import { getSparklines, getWorkflowGrid, getWorkflowHistory } from "./routes/grid.ts";
 import { getWorkflowDef, listWorkflowDefs } from "./routes/workflow-defs.ts";
+import {
+  deleteAuthoredWorkflow,
+  getAuthoredWorkflow,
+  listAuthoredWorkflows,
+  listWorkflowStepCatalog,
+  publishAuthoredWorkflow,
+  saveAuthoredWorkflow,
+} from "./routes/workflow-builder.ts";
 import {
   cloneAgent,
   compactThread,
@@ -194,6 +202,7 @@ import { ZoryaSkills } from "./services/skills/index.ts";
 import { ZoryaFragments } from "./services/fragments/index.ts";
 import { ZoryaDags } from "./services/dags/index.ts";
 import { ZoryaKnowledgeBases } from "./services/knowledge-bases.ts";
+import { ZoryaWorkflowBuilder } from "./services/workflow-builder.ts";
 import {
   validateWorkflowRetentionConfig,
   WorkflowRetentionCleaner,
@@ -279,6 +288,8 @@ export interface ZoryaServerConfig extends AuthConfig {
   dags?: ZoryaDags;
   /** Optional managed knowledge-base service and CRUD/search routes. */
   knowledgeBases?: ZoryaKnowledgeBases;
+  /** Optional visual workflow-builder service. Mounts step catalog + authored schema routes. */
+  workflowBuilder?: ZoryaWorkflowBuilder;
   /**
    * Authoritative namespace registry storage. ZoryaServer wraps it in its
    * NamespaceService policy boundary. Defaults to in-memory storage for
@@ -360,6 +371,7 @@ export class ZoryaServer {
   readonly fragments?: ZoryaFragments;
   readonly dags?: ZoryaDags;
   readonly knowledgeBases?: ZoryaKnowledgeBases;
+  readonly workflowBuilder?: ZoryaWorkflowBuilder;
   readonly namespaces: NamespaceService;
   readonly versionRegistry: IWorkflowVersionRegistry;
   /**
@@ -392,6 +404,7 @@ export class ZoryaServer {
     if (config.fragments) this.fragments = config.fragments;
     if (config.dags) this.dags = config.dags;
     if (config.knowledgeBases) this.knowledgeBases = config.knowledgeBases;
+    if (config.workflowBuilder) this.workflowBuilder = config.workflowBuilder;
     if (config.secrets) this.secrets = config.secrets;
     this.namespaces = new NamespaceService({ registry: config.namespaces });
     this.versionRegistry = config.versionRegistry ?? new WorkflowVersionRegistry();
@@ -482,6 +495,7 @@ export class ZoryaServer {
           ...(definitions !== undefined && { workflows: definitions }),
           ...(config.sampleInput !== undefined && { sampleInput: config.sampleInput }),
           ...(advertisements !== undefined && { advertisements }),
+          ...(this.versionRegistry !== undefined && { versionRegistry: this.versionRegistry }),
         }),
       )
       .get("/api/workflows/:name/grid", getWorkflowGrid(storage))
@@ -492,7 +506,44 @@ export class ZoryaServer {
           ...(definitions !== undefined && { workflows: definitions }),
           ...(config.sampleInput !== undefined && { sampleInput: config.sampleInput }),
           ...(advertisements !== undefined && { advertisements }),
+          ...(this.versionRegistry !== undefined && { versionRegistry: this.versionRegistry }),
         }),
+      )
+      .get(
+        "/api/workflow-builder/steps",
+        this.workflowBuilder
+          ? listWorkflowStepCatalog({ builder: this.workflowBuilder })
+          : async () => json(200, { steps: [] }),
+      )
+      .get(
+        "/api/workflow-builder/workflows",
+        this.workflowBuilder
+          ? listAuthoredWorkflows({ builder: this.workflowBuilder })
+          : async () => json(200, { workflows: [] }),
+      )
+      .post(
+        "/api/workflow-builder/workflows",
+        this.workflowBuilder
+          ? saveAuthoredWorkflow({ builder: this.workflowBuilder })
+          : async () => jsonError(404, "workflow_builder_not_configured"),
+      )
+      .get(
+        "/api/workflow-builder/workflows/:name",
+        this.workflowBuilder
+          ? getAuthoredWorkflow({ builder: this.workflowBuilder })
+          : async () => jsonError(404, "workflow_builder_not_configured"),
+      )
+      .delete(
+        "/api/workflow-builder/workflows/:name",
+        this.workflowBuilder
+          ? deleteAuthoredWorkflow({ builder: this.workflowBuilder })
+          : async () => jsonError(404, "workflow_builder_not_configured"),
+      )
+      .post(
+        "/api/workflow-builder/workflows/:name/publish",
+        this.workflowBuilder
+          ? publishAuthoredWorkflow({ builder: this.workflowBuilder })
+          : async () => jsonError(404, "workflow_builder_not_configured"),
       )
       .post("/api/runs/trigger/:name", triggerRun(deps))
       .post("/api/runs/:id/cancel", cancelRun(deps))

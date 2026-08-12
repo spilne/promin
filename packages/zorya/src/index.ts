@@ -10,6 +10,14 @@ export {
 export { createZoryaServerBuilder, ZoryaServerBuilder } from "./server/server-builder.ts";
 export type { WorkflowRetentionConfig } from "./server/server.ts";
 export {
+  InMemoryAuthoredWorkflowStore,
+  ZoryaWorkflowBuilder,
+  type AuthoredWorkflowRecord,
+  type AuthoredWorkflowSaveInput,
+  type AuthoredWorkflowStore,
+  type ZoryaWorkflowBuilderConfig,
+} from "./server/services/workflow-builder.ts";
+export {
   ZoryaWorkflows,
   LocalWorkflows,
   DistributedWorkflows,

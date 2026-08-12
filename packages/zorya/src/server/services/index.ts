@@ -39,3 +39,11 @@ export {
   type FileKnowledgeSourceConfig,
   type UrlKnowledgeSourceConfig,
 } from "./knowledge-source-adapters.ts";
+export {
+  InMemoryAuthoredWorkflowStore,
+  ZoryaWorkflowBuilder,
+  type AuthoredWorkflowRecord,
+  type AuthoredWorkflowSaveInput,
+  type AuthoredWorkflowStore,
+  type ZoryaWorkflowBuilderConfig,
+} from "./workflow-builder.ts";

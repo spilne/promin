@@ -26,6 +26,11 @@ import type {
 } from "../../server/routes/grid.ts";
 import type { WorkflowDefDto, WorkflowDefsResponse } from "../../server/routes/workflow-defs.ts";
 import type {
+  AuthoredWorkflowDto,
+  AuthoredWorkflowsResponse,
+  WorkflowStepCatalogResponse,
+} from "../../server/routes/workflow-builder.ts";
+import type {
   AgentsListResponse,
   AgentSourcesResponse,
   AgentThreadsResponse,
@@ -219,6 +224,40 @@ export const api = {
   },
   getWorkflowDef(name: string): Promise<WorkflowDefDto> {
     return req(`/api/workflows/${encodeURIComponent(name)}/definition`);
+  },
+  listWorkflowStepCatalog(): Promise<WorkflowStepCatalogResponse> {
+    return req(`/api/workflow-builder/steps`);
+  },
+  listAuthoredWorkflows(): Promise<AuthoredWorkflowsResponse> {
+    return req(`/api/workflow-builder/workflows`);
+  },
+  getAuthoredWorkflow(name: string, version?: string): Promise<{ workflow: AuthoredWorkflowDto }> {
+    const qs = version ? `?version=${encodeURIComponent(version)}` : "";
+    return req(`/api/workflow-builder/workflows/${encodeURIComponent(name)}${qs}`);
+  },
+  saveAuthoredWorkflow(body: {
+    schema: unknown;
+    version?: string;
+  }): Promise<{ workflow: AuthoredWorkflowDto }> {
+    return req(`/api/workflow-builder/workflows`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+  publishAuthoredWorkflow(
+    name: string,
+    body: { version?: string; promote?: boolean } = {},
+  ): Promise<{ workflow: AuthoredWorkflowDto }> {
+    return req(`/api/workflow-builder/workflows/${encodeURIComponent(name)}/publish`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+  deleteAuthoredWorkflow(name: string, version: string): Promise<{ ok: true }> {
+    return req(
+      `/api/workflow-builder/workflows/${encodeURIComponent(name)}?version=${encodeURIComponent(version)}`,
+      { method: "DELETE" },
+    );
   },
   triggerWorkflow(
     name: string,

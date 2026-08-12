@@ -18,6 +18,7 @@ import type { ZoryaSkills } from "./services/skills/index.ts";
 import type { ZoryaFragments } from "./services/fragments/index.ts";
 import type { ZoryaDags } from "./services/dags/index.ts";
 import type { ZoryaKnowledgeBases } from "./services/knowledge-bases.ts";
+import type { ZoryaWorkflowBuilder } from "./services/workflow-builder.ts";
 
 /**
  * Fluent builder for assembling a `ZoryaServer`.
@@ -82,6 +83,12 @@ export class ZoryaServerBuilder {
   /** Mount managed knowledge-base CRUD, ingestion, chunk inspection, and search routes. */
   knowledgeBases(knowledgeBases: ZoryaKnowledgeBases): this {
     this.config.knowledgeBases = knowledgeBases;
+    return this;
+  }
+
+  /** Mount visual workflow-builder catalog, authored-schema, and publish routes. */
+  workflowBuilder(workflowBuilder: ZoryaWorkflowBuilder): this {
+    this.config.workflowBuilder = workflowBuilder;
     return this;
   }
 

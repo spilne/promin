@@ -185,6 +185,14 @@ export {
   type ActivityContext,
   MapActivityRegistry,
 } from "./activity-registry.ts";
+export {
+  MapWorkflowStepCatalog,
+  createWorkflowStepCatalog,
+  type WorkflowStepCatalog,
+  type WorkflowStepCatalogEntry,
+  type WorkflowStepDefinition,
+  type WorkflowStepTemplateKind,
+} from "./step-catalog.ts";
 export { compileWorkflow, WorkflowCompilationError } from "./workflow-compiler.ts";
 
 // State machine

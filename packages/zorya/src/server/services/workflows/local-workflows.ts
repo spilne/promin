@@ -126,11 +126,22 @@ export class LocalWorkflows extends ZoryaWorkflows {
         if (resolved) return resolved;
       }
     }
+    if (this.versionRegistry) {
+      const latest = await this.versionRegistry.latest(name);
+      if (latest !== undefined) {
+        const resolved = await this.versionRegistry.resolve(name, latest);
+        if (resolved) return resolved;
+      }
+    }
     return this.definitions[name];
   }
 
-  protected canHandle(name: string): boolean {
-    return name in this.definitions;
+  protected async canHandle(name: string): Promise<boolean> {
+    if (name in this.definitions) return true;
+    if (!this.versionRegistry) return false;
+    const active = await this.versionRegistry.findActive?.(name);
+    if (active) return true;
+    return (await this.versionRegistry.latest(name)) !== undefined;
   }
 
   protected async dispatch(
@@ -138,7 +149,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
     input: unknown,
     opts?: TriggerOptions,
   ): Promise<TriggerResult> {
-    const def = await this.resolveDefinition(name);
+    const def = await this.resolveDefinition(name, opts?.version);
     if (!def) throw new Error(`LocalWorkflows.dispatch: missing definition for "${name}"`);
 
     const workflowId = opts?.workflowId ?? crypto.randomUUID();
@@ -176,7 +187,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
       if (this.fallback) return this.fallback.rerun(workflowId);
       throw new Error(`rerun: workflow "${workflowId}" not found`);
     }
-    const def = this.definitions[state.workflowName];
+    const def = await this.resolveDefinition(state.workflowName, state.version);
     if (!def) {
       if (this.fallback) return this.fallback.rerun(workflowId);
       throw new Error(
@@ -236,7 +247,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
           for (let i = 0; i < page.length; i += concurrency) {
             const batch = page.slice(i, i + concurrency);
             for (const wf of batch) {
-              const def = this.definitions[wf.workflowName];
+              const def = await this.resolveDefinition(wf.workflowName, wf.version);
               if (!def) continue; // unknown to this layer; nothing to resume
               void this.runner.runSafe({
                 workflow: def,
