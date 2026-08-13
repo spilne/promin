@@ -8,7 +8,7 @@ import { z } from "zod";
 // JSON Schema (loose — we validate structure, not full JSON Schema spec)
 // ---------------------------------------------------------------------------
 
-const JsonSchemaZ: z.ZodType<Record<string, unknown>> = z.record(z.unknown());
+const JsonSchemaZ: z.ZodType<Record<string, unknown>> = z.record(z.string(), z.unknown());
 
 // ---------------------------------------------------------------------------
 // Step options
@@ -37,7 +37,7 @@ const SingleStepSchemaZ = z.object({
   name: z.string().min(1),
   dependsOn: z.array(z.string()),
   activityRef: z.string().min(1),
-  config: z.record(z.unknown()).optional(),
+  config: z.record(z.string(), z.unknown()).optional(),
   options: StepSchemaOptionsZ.optional(),
   outputSchema: JsonSchemaZ.optional(),
 });
@@ -47,7 +47,7 @@ const MapStepSchemaZ = z.object({
   name: z.string().min(1),
   arrayFrom: z.string().min(1),
   activityRef: z.string().min(1),
-  config: z.record(z.unknown()).optional(),
+  config: z.record(z.string(), z.unknown()).optional(),
   options: MapStepSchemaOptionsZ.optional(),
   outputSchema: JsonSchemaZ.optional(),
 });
@@ -79,7 +79,7 @@ const ApprovalStepSchemaZ = z.object({
 
 const BranchArmSchemaZ = z.object({
   activityRef: z.string().min(1),
-  config: z.record(z.unknown()).optional(),
+  config: z.record(z.string(), z.unknown()).optional(),
 });
 
 const BranchStepSchemaZ = z.object({
@@ -97,7 +97,7 @@ const ParallelStepSchemaZ = z.object({
   type: z.literal("parallel"),
   name: z.string().min(1),
   dependsOn: z.array(z.string()),
-  branches: z.record(BranchArmSchemaZ),
+  branches: z.record(z.string(), BranchArmSchemaZ),
   options: StepSchemaOptionsZ.optional(),
   outputSchema: JsonSchemaZ.optional(),
 });
@@ -151,7 +151,7 @@ export const WorkflowSchemaZ = z.object({
   name: z.string().min(1),
   inputSchema: JsonSchemaZ.optional(),
   steps: z.array(StepSchemaZ).min(1, "Workflow must have at least one step"),
-  ui: z.record(NodeUiMetaZ).optional(),
+  ui: z.record(z.string(), NodeUiMetaZ).optional(),
 });
 
 // ---------------------------------------------------------------------------

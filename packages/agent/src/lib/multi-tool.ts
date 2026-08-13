@@ -54,23 +54,24 @@ function buildFlatSchema(commands: Record<string, AnyCommandDef>): z.ZodObject<z
   const names = Object.keys(commands);
   if (names.length === 0) throw new Error("multiTool: commands must not be empty");
 
-  const shape: z.ZodRawShape = {
+  const shape: Record<string, any> = {
     command: z.enum(names as [string, ...string[]]).describe("Which operation to perform"),
   };
 
   for (const def of Object.values(commands)) {
-    for (const [field, fieldSchema] of Object.entries(def.parameters.shape as z.ZodRawShape)) {
+    const paramsShape = { ...def.parameters.shape } as Record<string, any>;
+    for (const [field, fieldSchema] of Object.entries(paramsShape)) {
       if (field in shape) continue;
       // All non-command fields are optional at the top-level schema; per-command
       // required checks happen inside execute() via each command's own schema.
       shape[field] =
         fieldSchema instanceof z.ZodOptional || fieldSchema instanceof z.ZodDefault
           ? fieldSchema
-          : (fieldSchema as z.ZodTypeAny).optional();
+          : fieldSchema.optional();
     }
   }
 
-  return z.object(shape);
+  return z.object(shape as z.ZodRawShape);
 }
 
 function buildDescription(description: string, commands: Record<string, AnyCommandDef>): string {

@@ -10,7 +10,7 @@
 //
 // Parameter schemas: the MCP spec uses JSON Schema; promin's AgentTool
 // expects a Zod schema. Rather than introduce a JSON-Schema → Zod
-// converter (extra dep, conversion gaps), we use `z.record(z.unknown())`
+// converter (extra dep, conversion gaps), we use `z.record(z.string(), z.unknown())`
 // as the AgentTool parameters and inline the JSON Schema text into the
 // description so the LLM sees the field-level shape. The MCP server is
 // the source of truth for validation; if the LLM passes garbage, the
@@ -48,9 +48,9 @@ function mountedName(serverName: string, toolName: string): string {
 function wrapMcpTool(client: McpClient, mountedName: string, def: McpToolDefinition): AgentTool {
   const description = composeDescription(def);
   // Parameters: accept anything (validated server-side). Using
-  // `z.record(z.unknown())` keeps the AgentTool runtime happy without
+  // `z.record(z.string(), z.unknown())` keeps the AgentTool runtime happy without
   // a JSON-Schema → Zod conversion step.
-  const parameters = z.record(z.unknown());
+  const parameters = z.record(z.string(), z.unknown());
   return {
     name: mountedName,
     description,
