@@ -145,6 +145,7 @@ function renderRoute(route: string, navigate: (p: string) => void) {
     return (
       <WorkflowBuilderPage
         onOpenWorkflow={(name) => navigate(`/workflows/${encodeURIComponent(name)}`)}
+        onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)}
       />
     );
   }

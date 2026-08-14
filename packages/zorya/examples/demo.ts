@@ -874,6 +874,7 @@ const workflowStepCatalog = createWorkflowStepCatalog([
 const workflowBuilder = new ZoryaWorkflowBuilder({
   catalog: workflowStepCatalog,
   versionRegistry,
+  store: stack.authoredWorkflowStore,
 });
 
 // The hybrid: local for in-process workflows, queued fallback for any

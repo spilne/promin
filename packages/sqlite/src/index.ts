@@ -15,6 +15,8 @@ export { SqliteFragmentStore } from "./lib/agent/fragment-store.ts";
 export type { SqliteFragmentStoreConfig } from "./lib/agent/fragment-store.ts";
 export { SqliteDagRegistry } from "./lib/agent/dag-registry.ts";
 export type { SqliteDagRegistryConfig } from "./lib/agent/dag-registry.ts";
+export { SqliteAuthoredWorkflowStore } from "./lib/agent/authored-workflow-store.ts";
+export type { SqliteAuthoredWorkflowStoreConfig } from "./lib/agent/authored-workflow-store.ts";
 export { createVersionedRecipeStore } from "./lib/agent/versioned-recipe-store.ts";
 export type {
   VersionedRecipeStore,

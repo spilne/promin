@@ -6,6 +6,7 @@ import {
   type SqliteDatabase,
   SqliteAgentInstanceRegistry,
   SqliteAgentRegistry,
+  SqliteAuthoredWorkflowStore,
   SqliteDagRegistry,
   SqliteFragmentStore,
   SqliteMemoryStore,
@@ -80,6 +81,7 @@ export function createSqliteZoryaStack(config: SqliteZoryaStackConfig = {}) {
     instanceRegistry: SqliteAgentInstanceRegistry.make({ db: sqliteDb }),
     memoryStore: SqliteMemoryStore.make({ db: sqliteDb }),
     knowledgeBaseStore: SqliteKnowledgeBaseStore.make({ db: sqliteDb }),
+    authoredWorkflowStore: SqliteAuthoredWorkflowStore.make({ db: sqliteDb }),
     secretsStorage: SqliteSecretsStorage.make({
       db: sqliteDb,
       passphrase: config.secretsPassphrase ?? "demo-only-passphrase-change-in-prod",
