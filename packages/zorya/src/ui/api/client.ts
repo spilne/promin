@@ -89,7 +89,20 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
         ...init,
         headers: { ...Object.fromEntries(headers.entries()), ...authHeader() },
       });
-      if (res.ok) return (await res.json()) as T;
+      if (res.ok) {
+        const contentType = res.headers.get("content-type") ?? "";
+        if (!contentType.includes("application/json")) {
+          const body = await res.text();
+          throw new ApiError(
+            res.status,
+            `Expected JSON from ${path}, got ${contentType || "unknown content type"}: ${body.slice(
+              0,
+              120,
+            )}`,
+          );
+        }
+        return (await res.json()) as T;
+      }
 
       // A hot-reloading server can briefly return a gateway-style failure.
       // Retry only idempotent reads; never replay mutations from the browser.

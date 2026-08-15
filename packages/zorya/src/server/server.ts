@@ -1071,6 +1071,7 @@ export class ZoryaServer {
   private buildStaticHandler(dir: string) {
     return async (req: Request): Promise<Response> => {
       const url = new URL(req.url);
+      if (url.pathname.startsWith("/api/")) return jsonError(404, "not_found");
       const path = url.pathname === "/" ? "/index.html" : url.pathname;
       const file = Bun.file(`${dir}${path}`);
       if (await file.exists()) return new Response(file);

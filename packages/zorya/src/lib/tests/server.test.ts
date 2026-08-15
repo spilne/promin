@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach } from "bun:test";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
+import { mkdtemp } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { ZoryaServer } from "../../server/server.ts";
 import { LocalWorkflows, QueuedWorkflows } from "../../index.ts";
 
@@ -50,6 +53,21 @@ describe("ZoryaServer", () => {
       const res = await server.handle(new Request("http://x/api/health"));
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ ok: true });
+    });
+
+    it("does not serve the SPA fallback for missing API routes", async () => {
+      const uiDir = await mkdtemp(join(tmpdir(), "zorya-ui-"));
+      await Bun.write(join(uiDir, "index.html"), "<!doctype html><div>ui</div>");
+      const serverWithUi = new ZoryaServer({ workflows: makeWorkflows(storage), uiDir });
+
+      const api = await serverWithUi.handle(new Request("http://x/api/does-not-exist"));
+      expect(api.status).toBe(404);
+      expect(api.headers.get("content-type")).toContain("application/json");
+      expect(await api.json()).toEqual({ error: "not_found" });
+
+      const app = await serverWithUi.handle(new Request("http://x/workflow-builder"));
+      expect(app.status).toBe(200);
+      expect(await app.text()).toContain("<!doctype html>");
     });
   });
 
