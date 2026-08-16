@@ -264,9 +264,7 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
         </div>
       )}
 
-      <div class="grid grid-cols-1 gap-4 xl:grid-cols-[340px_1fr_340px]">
-        <StepCatalogPanel loading={catalogLoading && !catalog} steps={steps} onAdd={addStep} />
-
+      <div class="space-y-4">
         <section class="card bg-base-100/95 border border-base-content/10 shadow overflow-hidden">
           <div class="flex flex-col gap-3 border-b border-base-content/10 p-4 lg:flex-row lg:items-end lg:justify-between">
             <div class="grid flex-1 grid-cols-1 gap-2 md:grid-cols-[1fr_10rem]">
@@ -308,22 +306,12 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
           </div>
 
           {mode === "canvas" ? (
-            <div class="grid grid-cols-1 gap-0 lg:grid-cols-[1fr_280px]">
-              <div class="min-h-[34rem] border-b border-base-content/10 bg-base-200/45 p-4 lg:border-b-0 lg:border-r">
-                <WorkflowCanvas
-                  schema={schema}
-                  stepById={stepById}
-                  selected={selectedStep}
-                  onSelect={setSelectedStep}
-                />
-              </div>
-              <StepInspector
-                step={activeStep}
+            <div class="bg-base-200/45 p-4">
+              <WorkflowCanvas
                 schema={schema}
-                catalog={steps}
-                issues={issues}
-                onUpdate={updateStep}
-                onRemove={removeStep}
+                stepById={stepById}
+                selected={selectedStep}
+                onSelect={setSelectedStep}
               />
             </div>
           ) : (
@@ -358,70 +346,91 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
             )}
             {error && <div class="mb-3 alert alert-error text-xs">{error}</div>}
             {message && <div class="mb-3 alert alert-success text-xs">{message}</div>}
-            <label class="form-control mb-3">
-              <span class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">
-                Test Input JSON
-              </span>
-              <textarea
-                class="textarea textarea-bordered min-h-20 font-mono text-xs"
-                value={testInputJson}
-                onInput={(e) => setTestInputJson((e.target as HTMLTextAreaElement).value)}
-              />
-            </label>
-            <div class="flex flex-wrap justify-end gap-2">
-              <button
-                class="btn btn-sm btn-ghost"
-                onClick={() => {
-                  setSchema(structuredClone(SAMPLE_SCHEMA));
-                  setSchemaJson(JSON.stringify(SAMPLE_SCHEMA, null, 2));
-                  setVersion("v1");
-                  setSelected(null);
-                  setSelectedStep("upper");
-                  setError(null);
-                  setMessage(null);
-                }}
-              >
-                New
-              </button>
-              <button class="btn btn-sm btn-outline" disabled={busy !== null} onClick={save}>
-                {busy === "save" ? "Saving..." : "Save Draft"}
-              </button>
-              <button class="btn btn-sm btn-primary" disabled={busy !== null} onClick={publish}>
-                {busy === "publish" ? "Publishing..." : "Publish"}
-              </button>
-              <button class="btn btn-sm btn-secondary" disabled={busy !== null} onClick={testRun}>
-                {busy === "run" ? "Running..." : "Test Run"}
-              </button>
+            <div class="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+              <label class="form-control">
+                <span class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">
+                  Test Input JSON
+                </span>
+                <textarea
+                  class="textarea textarea-bordered min-h-20 font-mono text-xs"
+                  value={testInputJson}
+                  onInput={(e) => setTestInputJson((e.target as HTMLTextAreaElement).value)}
+                />
+              </label>
+              <div class="flex flex-wrap justify-end gap-2">
+                <button
+                  class="btn btn-sm btn-ghost"
+                  onClick={() => {
+                    setSchema(structuredClone(SAMPLE_SCHEMA));
+                    setSchemaJson(JSON.stringify(SAMPLE_SCHEMA, null, 2));
+                    setVersion("v1");
+                    setSelected(null);
+                    setSelectedStep("upper");
+                    setError(null);
+                    setMessage(null);
+                  }}
+                >
+                  New
+                </button>
+                <button class="btn btn-sm btn-outline" disabled={busy !== null} onClick={save}>
+                  {busy === "save" ? "Saving..." : "Save Draft"}
+                </button>
+                <button class="btn btn-sm btn-primary" disabled={busy !== null} onClick={publish}>
+                  {busy === "publish" ? "Publishing..." : "Publish"}
+                </button>
+                <button class="btn btn-sm btn-secondary" disabled={busy !== null} onClick={testRun}>
+                  {busy === "run" ? "Running..." : "Test Run"}
+                </button>
+              </div>
             </div>
           </div>
         </section>
 
-        <AuthoredPanel
-          workflows={workflows}
-          loading={authoredLoading && !authored}
-          selected={selected}
-          busy={busy !== null}
-          onLoad={loadWorkflow}
-          onOpenWorkflow={onOpenWorkflow}
-          onPublish={async (workflow) => {
-            loadWorkflow(workflow);
-            setBusy("publish");
-            setError(null);
-            try {
-              const res = await api.publishAuthoredWorkflow(workflow.name, {
-                version: workflow.version,
-                promote: true,
-              });
-              setSelected(res.workflow);
-              setMessage(`Published ${res.workflow.name}@${res.workflow.version}`);
-              refreshAuthored();
-            } catch (e) {
-              setError(e instanceof Error ? e.message : String(e));
-            } finally {
-              setBusy(null);
-            }
-          }}
-        />
+        <div class="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.4fr)_360px_340px]">
+          <StepCatalogPanel loading={catalogLoading && !catalog} steps={steps} onAdd={addStep} />
+          <section class="card bg-base-100/95 border border-base-content/10 shadow overflow-hidden">
+            <div class="border-b border-base-content/10 px-4 py-3">
+              <div class="text-xs uppercase tracking-wider text-base-content/55">Inspector</div>
+            </div>
+            <div class="max-h-[42rem] overflow-auto">
+              <StepInspector
+                step={activeStep}
+                schema={schema}
+                catalog={steps}
+                issues={issues}
+                onUpdate={updateStep}
+                onRemove={removeStep}
+              />
+            </div>
+          </section>
+
+          <AuthoredPanel
+            workflows={workflows}
+            loading={authoredLoading && !authored}
+            selected={selected}
+            busy={busy !== null}
+            onLoad={loadWorkflow}
+            onOpenWorkflow={onOpenWorkflow}
+            onPublish={async (workflow) => {
+              loadWorkflow(workflow);
+              setBusy("publish");
+              setError(null);
+              try {
+                const res = await api.publishAuthoredWorkflow(workflow.name, {
+                  version: workflow.version,
+                  promote: true,
+                });
+                setSelected(res.workflow);
+                setMessage(`Published ${res.workflow.name}@${res.workflow.version}`);
+                refreshAuthored();
+              } catch (e) {
+                setError(e instanceof Error ? e.message : String(e));
+              } finally {
+                setBusy(null);
+              }
+            }}
+          />
+        </div>
       </div>
     </Page>
   );
@@ -436,43 +445,76 @@ function StepCatalogPanel({
   steps: CatalogStep[];
   onAdd: (step: CatalogStep) => void;
 }) {
+  const [query, setQuery] = useState("");
+  const visibleSteps = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return steps;
+    return steps.filter((step) =>
+      [step.id, step.title, step.description, step.category, ...(step.tags ?? [])]
+        .filter(Boolean)
+        .some((value) => String(value).toLowerCase().includes(needle)),
+    );
+  }, [query, steps]);
+
   return (
     <section class="card bg-base-100/95 border border-base-content/10 shadow overflow-hidden">
-      <div class="border-b border-base-content/10 px-4 py-3">
-        <div class="text-xs uppercase tracking-wider text-base-content/55">Step Library</div>
+      <div class="flex flex-col gap-3 border-b border-base-content/10 px-4 py-3 md:flex-row md:items-end md:justify-between">
+        <div>
+          <div class="text-xs uppercase tracking-wider text-base-content/55">Step Registry</div>
+          <div class="mt-1 text-xs text-base-content/45">
+            {visibleSteps.length} of {steps.length} available
+          </div>
+        </div>
+        <label class="form-control md:w-72">
+          <span class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">Search</span>
+          <input
+            class="input input-bordered input-sm"
+            value={query}
+            onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
+          />
+        </label>
       </div>
-      <div class="divide-y divide-base-300">
+      <div class="max-h-[42rem] overflow-auto p-3">
         {loading ? (
           <div class="p-4 text-sm text-base-content/45">Loading...</div>
-        ) : steps.length === 0 ? (
+        ) : visibleSteps.length === 0 ? (
           <div class="p-4">
             <EmptyState message="No step templates registered." />
           </div>
         ) : (
-          steps.map((step) => (
-            <button
-              class="w-full p-4 text-left hover:bg-base-200"
-              onClick={() => onAdd(step)}
-              title="Add this step to the workflow"
-            >
-              <div class="flex items-start justify-between gap-2">
-                <div class="min-w-0">
-                  <div class="font-medium leading-tight">{step.title}</div>
-                  <div class="mt-1 font-mono text-[11px] text-base-content/45 truncate">
-                    {step.id}
+          <div class="grid grid-cols-1 gap-2 md:grid-cols-2 2xl:grid-cols-3">
+            {visibleSteps.map((step) => (
+              <button
+                class="min-h-28 rounded border border-base-content/10 bg-base-100 p-3 text-left hover:border-primary/40 hover:bg-base-200"
+                onClick={() => onAdd(step)}
+                title="Add this step to the workflow"
+              >
+                <div class="flex items-start justify-between gap-2">
+                  <div class="min-w-0">
+                    <div class="text-sm font-medium leading-tight">{step.title}</div>
+                    <div class="mt-1 font-mono text-[11px] text-base-content/45 truncate">
+                      {step.id}
+                    </div>
                   </div>
+                  <span class="badge badge-sm badge-outline shrink-0">
+                    {step.category ?? step.kind ?? "step"}
+                  </span>
                 </div>
-                <span class="badge badge-sm badge-outline">
-                  {step.category ?? step.kind ?? "step"}
-                </span>
-              </div>
-              {step.description && (
-                <div class="mt-2 text-xs leading-relaxed text-base-content/60">
-                  {step.description}
-                </div>
-              )}
-            </button>
-          ))
+                {step.description && (
+                  <div class="mt-2 line-clamp-2 text-xs leading-relaxed text-base-content/60">
+                    {step.description}
+                  </div>
+                )}
+                {step.capabilities && step.capabilities.length > 0 && (
+                  <div class="mt-2 flex flex-wrap gap-1">
+                    {step.capabilities.map((capability) => (
+                      <span class="badge badge-xs badge-ghost">{capability}</span>
+                    ))}
+                  </div>
+                )}
+              </button>
+            ))}
+          </div>
         )}
       </div>
     </section>
@@ -496,15 +538,15 @@ function WorkflowCanvas({
   });
   const bounds = nodes.reduce(
     (acc, node) => ({
-      width: Math.max(acc.width, node.x + 180),
-      height: Math.max(acc.height, node.y + 120),
+      width: Math.max(acc.width, node.x + 220),
+      height: Math.max(acc.height, node.y + 140),
     }),
-    { width: 720, height: 360 },
+    { width: 900, height: 440 },
   );
 
   return (
     <svg
-      class="h-[34rem] w-full rounded border border-base-content/10 bg-base-100"
+      class="h-[28rem] w-full rounded border border-base-content/10 bg-base-100 lg:h-[42rem]"
       viewBox={`0 0 ${bounds.width} ${bounds.height}`}
       role="img"
     >
@@ -520,10 +562,10 @@ function WorkflowCanvas({
               if (!from) return null;
               return (
                 <line
-                  x1={from.x + 148}
-                  y1={from.y + 38}
+                  x1={from.x + 180}
+                  y1={from.y + 44}
                   x2={node.x}
-                  y2={node.y + 38}
+                  y2={node.y + 44}
                   stroke="currentColor"
                   class="text-base-content/30"
                   stroke-width="2"
@@ -543,22 +585,22 @@ function WorkflowCanvas({
             onClick={() => onSelect(node.step.name)}
           >
             <rect
-              width="148"
-              height="76"
+              width="180"
+              height="88"
               rx="6"
               class={
                 active ? "fill-primary/15 stroke-primary" : "fill-base-100 stroke-base-content/20"
               }
               stroke-width={active ? 2 : 1}
             />
-            <text x="12" y="24" class="fill-current text-[12px] font-semibold">
+            <text x="14" y="28" class="fill-current text-[13px] font-semibold">
               {node.step.name}
             </text>
-            <text x="12" y="44" class="fill-current text-[10px] opacity-60">
+            <text x="14" y="52" class="fill-current text-[11px] opacity-60">
               {entry?.title ??
                 ("activityRef" in node.step ? node.step.activityRef : node.step.type)}
             </text>
-            <text x="12" y="62" class="fill-current text-[9px] opacity-45">
+            <text x="14" y="72" class="fill-current text-[10px] opacity-45">
               {node.step.type}
             </text>
           </g>

@@ -14,13 +14,7 @@
 //   the same runner — so the Schedules page ticks increment live.
 // ---------------------------------------------------------------------------
 
-import { Pipeline } from "@promin/core";
-import {
-  createWorkflowStepCatalog,
-  InMemoryWorkerRegistry,
-  RecoveryStrategy,
-  type Workflow,
-} from "@promin/workflow";
+import { InMemoryWorkerRegistry, RecoveryStrategy, type Workflow } from "@promin/workflow";
 import {
   createSqliteZoryaStack,
   LocalWorkflows,
@@ -83,6 +77,7 @@ import { startApprovalAutoSignaler } from "./demo/approval-auto-signaler.ts";
 import { inputFor } from "./demo/input.ts";
 import { createDemoLogger } from "./demo/logger.ts";
 import { seedSchedules } from "./demo/schedules.ts";
+import { createDemoWorkflowStepCatalog } from "./workflow-steps/index.ts";
 // KB content lives at ./kb/org-knowledge-base.ts and is seeded into the
 // managed Knowledge Bases service below. Agents attach it through
 // backend.knowledge, which auto-injects retriever tools at resolve time.
@@ -837,120 +832,7 @@ logger.log(
     .join(", ")} (no active until promoted)`,
 );
 
-const workflowStepCatalog = createWorkflowStepCatalog([
-  {
-    id: "transform.identity",
-    title: "Identity",
-    category: "Transform",
-    description: "Pass the previous value through unchanged.",
-    outputSchema: {},
-    activity: () => (ctx) => Pipeline.succeed(ctx.prev),
-  },
-  {
-    id: "transform.uppercase",
-    title: "Uppercase text",
-    category: "Transform",
-    description: "Convert the previous value to uppercase text.",
-    inputSchema: { type: "string" },
-    outputSchema: { type: "string" },
-    activity: () => (ctx) => Pipeline.succeed(String(ctx.prev).toUpperCase()),
-  },
-  {
-    id: "transform.template",
-    title: "Template text",
-    category: "Transform",
-    description: "Wrap the previous value with a configurable prefix and suffix.",
-    configSchema: {
-      type: "object",
-      required: ["prefix"],
-      properties: {
-        prefix: {
-          type: "string",
-          default: "Result: ",
-          description: "Text placed before the previous value.",
-        },
-        suffix: {
-          type: "string",
-          default: "",
-          description: "Text placed after the previous value.",
-        },
-      },
-    },
-    inputSchema: { type: "string" },
-    outputSchema: { type: "string" },
-    activity: (config) => (ctx) => {
-      const prefix = typeof config?.prefix === "string" ? config.prefix : "";
-      const suffix = typeof config?.suffix === "string" ? config.suffix : "";
-      return Pipeline.succeed(`${prefix}${String(ctx.prev)}${suffix}`);
-    },
-  },
-  {
-    id: "transform.truncate",
-    title: "Truncate text",
-    category: "Transform",
-    description: "Limit text length and optionally append an ellipsis.",
-    configSchema: {
-      type: "object",
-      properties: {
-        maxLength: { type: "integer", default: 80 },
-        ellipsis: { type: "boolean", default: true },
-      },
-    },
-    inputSchema: { type: "string" },
-    outputSchema: { type: "string" },
-    activity: (config) => (ctx) => {
-      const maxLength =
-        typeof config?.maxLength === "number" && Number.isFinite(config.maxLength)
-          ? Math.max(0, Math.floor(config.maxLength))
-          : 80;
-      const text = String(ctx.prev);
-      if (text.length <= maxLength) return Pipeline.succeed(text);
-      const suffix = config?.ellipsis === false ? "" : "...";
-      return Pipeline.succeed(`${text.slice(0, Math.max(0, maxLength - suffix.length))}${suffix}`);
-    },
-  },
-  {
-    id: "transform.case",
-    title: "Change case",
-    category: "Transform",
-    description: "Convert text using an enum-backed mode.",
-    configSchema: {
-      type: "object",
-      properties: {
-        mode: {
-          type: "string",
-          enum: ["upper", "lower", "title"],
-          default: "upper",
-        },
-      },
-    },
-    inputSchema: { type: "string" },
-    outputSchema: { type: "string" },
-    activity: (config) => (ctx) => {
-      const text = String(ctx.prev);
-      if (config?.mode === "lower") return Pipeline.succeed(text.toLowerCase());
-      if (config?.mode === "title") {
-        return Pipeline.succeed(text.replace(/\b\w/g, (char) => char.toUpperCase()));
-      }
-      return Pipeline.succeed(text.toUpperCase());
-    },
-  },
-  {
-    id: "transform.concat",
-    title: "Join dependency outputs",
-    category: "Transform",
-    description: "Join dependency outputs with a configurable separator.",
-    configSchema: {
-      type: "object",
-      properties: { separator: { type: "string", default: " " } },
-    },
-    outputSchema: { type: "string" },
-    activity: (config) => (ctx) => {
-      const separator = typeof config?.separator === "string" ? config.separator : " ";
-      return Pipeline.succeed(Object.values(ctx.deps).map(String).join(separator));
-    },
-  },
-]);
+const workflowStepCatalog = createDemoWorkflowStepCatalog({ now: () => new Date() });
 const workflowBuilder = new ZoryaWorkflowBuilder({
   catalog: workflowStepCatalog,
   versionRegistry,
