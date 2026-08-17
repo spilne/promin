@@ -1,5 +1,5 @@
 import type { JsonSchema, WorkflowSchema } from "@promin/workflow";
-import { useEffect, useMemo, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api } from "../../api/client.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { useNamespace } from "../../hooks/use-namespace.ts";
@@ -12,6 +12,7 @@ import { Page, PageHeader } from "../ui/page.tsx";
 
 type CatalogStep = WorkflowStepCatalogResponse["steps"][number];
 type BuilderStep = WorkflowSchema["steps"][number];
+type DependableStep = Extract<BuilderStep, { dependsOn: string[] }>;
 type EditableStep = Extract<BuilderStep, { activityRef: string; dependsOn: readonly string[] }>;
 type BuilderMode = "canvas" | "json";
 
@@ -56,6 +57,7 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
   const [selectedStep, setSelectedStep] = useState("upper");
   const [mode, setMode] = useState<BuilderMode>("canvas");
   const [selected, setSelected] = useState<AuthoredWorkflowDto | null>(null);
+  const [connectingFrom, setConnectingFrom] = useState<string | null>(null);
   const [busy, setBusy] = useState<"save" | "publish" | "run" | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -154,20 +156,47 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
   function addStep(entry: CatalogStep): void {
     const baseName = toStepName(entry.id);
     const name = uniqueStepName(schema, baseName);
-    const prev = schema.steps.at(-1)?.name;
-    const nextStep: BuilderStep = {
-      type: entry.kind ?? "step",
-      name,
-      dependsOn: prev ? [prev] : [],
-      activityRef: entry.id,
-      ...(entry.defaultConfig ? { config: entry.defaultConfig } : {}),
-    } as BuilderStep;
+    const nextStep =
+      entry.kind === "branch"
+        ? ({
+            type: "branch",
+            name,
+            dependsOn: [],
+            conditionRef: String(entry.defaultConfig?.conditionRef ?? "predicate.long"),
+            ifTrue: {
+              activityRef: String(entry.defaultConfig?.ifTrueActivityRef ?? "transform.uppercase"),
+            },
+            ifFalse: {
+              activityRef: String(entry.defaultConfig?.ifFalseActivityRef ?? "transform.identity"),
+            },
+          } as BuilderStep)
+        : entry.kind === "parallel"
+          ? ({
+              type: "parallel",
+              name,
+              dependsOn: [],
+              branches: {
+                upper: { activityRef: "transform.uppercase" },
+                length: { activityRef: "text.length" },
+              },
+            } as BuilderStep)
+          : ({
+              type: entry.kind ?? "step",
+              name,
+              dependsOn: [],
+              activityRef: entry.id,
+              ...(entry.defaultConfig ? { config: entry.defaultConfig } : {}),
+            } as BuilderStep);
     updateSchema({
       ...schema,
       steps: [...schema.steps, nextStep],
       ui: {
         ...(schema.ui ?? {}),
-        [name]: { x: 80 + schema.steps.length * 180, y: 120, label: entry.title },
+        [name]: {
+          x: 80 + (schema.steps.length % 4) * 240,
+          y: 120 + Math.floor(schema.steps.length / 4) * 150,
+          label: entry.title,
+        },
       },
     });
     setSelectedStep(name);
@@ -177,14 +206,14 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
     updateSchema({ ...schema, name });
   }
 
-  function updateStep(name: string, patch: Partial<EditableStep> & { name?: string }): void {
+  function updateStep(name: string, patch: Partial<BuilderStep> & { name?: string }): void {
     const old = schema.steps.find((step) => step.name === name);
-    if (!old || !isEditableStep(old)) return;
+    if (!old) return;
     const nextName = patch.name?.trim() || old.name;
     const renamed = nextName !== old.name;
     const steps = schema.steps.map((step) => {
       if (step.name === old.name) return { ...old, ...patch, name: nextName } as BuilderStep;
-      if (!renamed || !("dependsOn" in step)) return step;
+      if (!renamed || !hasDependsOn(step)) return step;
       return {
         ...step,
         dependsOn: step.dependsOn.map((dep) => (dep === old.name ? nextName : dep)),
@@ -203,13 +232,56 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
     const steps = schema.steps
       .filter((step) => step.name !== name)
       .map((step) =>
-        "dependsOn" in step
+        hasDependsOn(step)
           ? ({ ...step, dependsOn: step.dependsOn.filter((d) => d !== name) } as BuilderStep)
           : step,
       );
     const ui = { ...(schema.ui ?? {}) };
     delete ui[name];
     updateSchema({ ...schema, steps, ui });
+  }
+
+  function moveStep(name: string, x: number, y: number): void {
+    updateSchema({
+      ...schema,
+      ui: {
+        ...(schema.ui ?? {}),
+        [name]: { ...(schema.ui?.[name] ?? {}), x: Math.max(0, x), y: Math.max(0, y) },
+      },
+    });
+    setSelectedStep(name);
+  }
+
+  function connectStep(from: string, to: string): void {
+    if (from === to) return;
+    const target = schema.steps.find((step) => step.name === to);
+    if (!target || !hasDependsOn(target) || target.dependsOn.includes(from)) return;
+    if (wouldCreateCycle(schema, from, to)) {
+      setError(`Cannot connect ${from} to ${to}: that would create a dependency cycle.`);
+      setConnectingFrom(null);
+      return;
+    }
+    updateStepDependsOn(to, [...target.dependsOn, from]);
+    setConnectingFrom(null);
+    setSelectedStep(to);
+  }
+
+  function disconnectStep(from: string, to: string): void {
+    const target = schema.steps.find((step) => step.name === to);
+    if (!target || !hasDependsOn(target)) return;
+    updateStepDependsOn(
+      to,
+      target.dependsOn.filter((dep) => dep !== from),
+    );
+  }
+
+  function updateStepDependsOn(name: string, dependsOn: string[]): void {
+    updateSchema({
+      ...schema,
+      steps: schema.steps.map((step) =>
+        step.name === name && hasDependsOn(step) ? ({ ...step, dependsOn } as BuilderStep) : step,
+      ),
+    });
   }
 
   function applyJson(): void {
@@ -311,7 +383,13 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
                 schema={schema}
                 stepById={stepById}
                 selected={selectedStep}
+                connectingFrom={connectingFrom}
                 onSelect={setSelectedStep}
+                onMove={moveStep}
+                onDelete={removeStep}
+                onConnectStart={(name) => setConnectingFrom(connectingFrom === name ? null : name)}
+                onConnectEnd={connectStep}
+                onDisconnect={disconnectStep}
               />
             </div>
           ) : (
@@ -525,13 +603,27 @@ function WorkflowCanvas({
   schema,
   stepById,
   selected,
+  connectingFrom,
   onSelect,
+  onMove,
+  onDelete,
+  onConnectStart,
+  onConnectEnd,
+  onDisconnect,
 }: {
   schema: WorkflowSchema;
   stepById: Map<string, CatalogStep>;
   selected: string;
+  connectingFrom: string | null;
   onSelect: (name: string) => void;
+  onMove: (name: string, x: number, y: number) => void;
+  onDelete: (name: string) => void;
+  onConnectStart: (name: string) => void;
+  onConnectEnd: (from: string, to: string) => void;
+  onDisconnect: (from: string, to: string) => void;
 }) {
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [drag, setDrag] = useState<{ name: string; dx: number; dy: number } | null>(null);
   const nodes = schema.steps.map((step, index) => {
     const pos = schema.ui?.[step.name] ?? { x: 80 + index * 180, y: 120 };
     return { step, x: pos.x, y: pos.y };
@@ -544,69 +636,193 @@ function WorkflowCanvas({
     { width: 900, height: 440 },
   );
 
+  function pointFor(e: MouseEvent): { x: number; y: number } | null {
+    const svg = svgRef.current;
+    const matrix = svg?.getScreenCTM();
+    if (!svg || !matrix) return null;
+    const point = svg.createSVGPoint();
+    point.x = e.clientX;
+    point.y = e.clientY;
+    const transformed = point.matrixTransform(matrix.inverse());
+    return { x: transformed.x, y: transformed.y };
+  }
+
+  function beginDrag(e: MouseEvent, name: string, x: number, y: number): void {
+    if (e.button !== 0) return;
+    const point = pointFor(e);
+    if (!point) return;
+    setDrag({ name, dx: point.x - x, dy: point.y - y });
+    onSelect(name);
+  }
+
+  function moveDrag(e: MouseEvent): void {
+    if (!drag) return;
+    const point = pointFor(e);
+    if (!point) return;
+    onMove(drag.name, Math.round(point.x - drag.dx), Math.round(point.y - drag.dy));
+  }
+
   return (
-    <svg
-      class="h-[28rem] w-full rounded border border-base-content/10 bg-base-100 lg:h-[42rem]"
-      viewBox={`0 0 ${bounds.width} ${bounds.height}`}
-      role="img"
-    >
-      <defs>
-        <marker id="wf-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
-          <path d="M0,0 L8,4 L0,8 Z" class="fill-base-content/35" />
-        </marker>
-      </defs>
-      {nodes.flatMap((node) =>
-        "dependsOn" in node.step
-          ? node.step.dependsOn.map((dep) => {
-              const from = nodes.find((candidate) => candidate.step.name === dep);
-              if (!from) return null;
-              return (
-                <line
-                  x1={from.x + 180}
-                  y1={from.y + 44}
-                  x2={node.x}
-                  y2={node.y + 44}
-                  stroke="currentColor"
-                  class="text-base-content/30"
-                  stroke-width="2"
-                  marker-end="url(#wf-arrow)"
+    <div class="space-y-2">
+      <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-base-content/55">
+        <div>
+          {connectingFrom ? (
+            <span>
+              Connecting from <span class="font-mono text-base-content">{connectingFrom}</span>
+            </span>
+          ) : (
+            <span>Drag nodes. Use right handles to connect, left handles to receive.</span>
+          )}
+        </div>
+        {connectingFrom && (
+          <button class="btn btn-xs btn-ghost" onClick={() => onConnectStart(connectingFrom)}>
+            Cancel Connect
+          </button>
+        )}
+      </div>
+      <svg
+        ref={svgRef}
+        class="h-[28rem] w-full rounded border border-base-content/10 bg-base-100 lg:h-[42rem]"
+        viewBox={`0 0 ${bounds.width} ${bounds.height}`}
+        role="img"
+        onMouseMove={moveDrag}
+        onMouseUp={() => setDrag(null)}
+        onMouseLeave={() => setDrag(null)}
+      >
+        <defs>
+          <marker id="wf-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+            <path d="M0,0 L8,4 L0,8 Z" class="fill-base-content/35" />
+          </marker>
+        </defs>
+        {nodes.flatMap((node) =>
+          "dependsOn" in node.step
+            ? node.step.dependsOn.map((dep) => {
+                const from = nodes.find((candidate) => candidate.step.name === dep);
+                if (!from) return null;
+                return (
+                  <g>
+                    <line
+                      x1={from.x + 180}
+                      y1={from.y + 44}
+                      x2={node.x}
+                      y2={node.y + 44}
+                      stroke="currentColor"
+                      class="text-base-content/30"
+                      stroke-width="2"
+                      marker-end="url(#wf-arrow)"
+                    />
+                    <g
+                      class="cursor-pointer"
+                      transform={`translate(${(from.x + 180 + node.x) / 2}, ${
+                        (from.y + node.y) / 2 + 44
+                      })`}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDisconnect(dep, node.step.name);
+                      }}
+                    >
+                      <circle r="9" class="fill-base-100 stroke-base-content/20" />
+                      <text
+                        x="0"
+                        y="4"
+                        text-anchor="middle"
+                        class="fill-current text-[12px] opacity-70"
+                      >
+                        x
+                      </text>
+                    </g>
+                  </g>
+                );
+              })
+            : [],
+        )}
+        {nodes.map((node) => {
+          const entry =
+            "activityRef" in node.step ? stepById.get(node.step.activityRef) : undefined;
+          const active = selected === node.step.name;
+          const canReceive =
+            connectingFrom !== null &&
+            connectingFrom !== node.step.name &&
+            hasDependsOn(node.step) &&
+            !node.step.dependsOn.includes(connectingFrom);
+          return (
+            <g transform={`translate(${node.x}, ${node.y})`}>
+              <g
+                class="cursor-move"
+                onMouseDown={(e) => beginDrag(e, node.step.name, node.x, node.y)}
+                onClick={() => onSelect(node.step.name)}
+              >
+                <rect
+                  width="180"
+                  height="88"
+                  rx="6"
+                  class={
+                    active
+                      ? "fill-primary/15 stroke-primary"
+                      : "fill-base-100 stroke-base-content/20"
+                  }
+                  stroke-width={active ? 2 : 1}
                 />
-              );
-            })
-          : [],
-      )}
-      {nodes.map((node) => {
-        const entry = "activityRef" in node.step ? stepById.get(node.step.activityRef) : undefined;
-        const active = selected === node.step.name;
-        return (
-          <g
-            class="cursor-pointer"
-            transform={`translate(${node.x}, ${node.y})`}
-            onClick={() => onSelect(node.step.name)}
-          >
-            <rect
-              width="180"
-              height="88"
-              rx="6"
-              class={
-                active ? "fill-primary/15 stroke-primary" : "fill-base-100 stroke-base-content/20"
-              }
-              stroke-width={active ? 2 : 1}
-            />
-            <text x="14" y="28" class="fill-current text-[13px] font-semibold">
-              {node.step.name}
-            </text>
-            <text x="14" y="52" class="fill-current text-[11px] opacity-60">
-              {entry?.title ??
-                ("activityRef" in node.step ? node.step.activityRef : node.step.type)}
-            </text>
-            <text x="14" y="72" class="fill-current text-[10px] opacity-45">
-              {node.step.type}
-            </text>
-          </g>
-        );
-      })}
-    </svg>
+                <text x="14" y="28" class="select-none fill-current text-[13px] font-semibold">
+                  {node.step.name}
+                </text>
+                <text x="14" y="52" class="select-none fill-current text-[11px] opacity-60">
+                  {entry?.title ??
+                    ("activityRef" in node.step ? node.step.activityRef : node.step.type)}
+                </text>
+                <text x="14" y="72" class="select-none fill-current text-[10px] opacity-45">
+                  {node.step.type}
+                </text>
+              </g>
+
+              <g
+                class={`cursor-pointer ${canReceive ? "text-primary" : "text-base-content/45"}`}
+                transform="translate(0, 44)"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (connectingFrom) onConnectEnd(connectingFrom, node.step.name);
+                  else onSelect(node.step.name);
+                }}
+              >
+                <circle r="8" class="fill-base-100 stroke-current" stroke-width="2" />
+              </g>
+
+              <g
+                class={`cursor-pointer ${
+                  connectingFrom === node.step.name ? "text-primary" : "text-base-content/45"
+                }`}
+                transform="translate(180, 44)"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onConnectStart(node.step.name);
+                }}
+              >
+                <circle r="8" class="fill-base-100 stroke-current" stroke-width="2" />
+                <circle r="3" class="fill-current" />
+              </g>
+
+              <g
+                class="cursor-pointer text-error"
+                transform="translate(166, 14)"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete(node.step.name);
+                }}
+              >
+                <circle r="10" class="fill-base-100 stroke-current" />
+                <text x="0" y="4" text-anchor="middle" class="select-none fill-current text-[12px]">
+                  x
+                </text>
+              </g>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
   );
 }
 
@@ -622,23 +838,27 @@ function StepInspector({
   schema: WorkflowSchema;
   catalog: CatalogStep[];
   issues: string[];
-  onUpdate: (name: string, patch: Partial<EditableStep> & { name?: string }) => void;
+  onUpdate: (name: string, patch: Partial<BuilderStep> & { name?: string }) => void;
   onRemove: (name: string) => void;
 }) {
   if (!step) {
     return <div class="p-4 text-sm text-base-content/45">Select a node.</div>;
   }
-  const editable = isEditableStep(step);
-  const catalogEntry = editable
+  const editableActivity = isEditableStep(step);
+  const catalogEntry = editableActivity
     ? catalog.find((entry) => entry.id === step.activityRef)
     : undefined;
+  const activityOptions = catalog.filter((entry) => entry.category !== "Control");
+  const predicateOptions = catalog.filter(
+    (entry) => entry.outputSchema?.type === "boolean" || entry.category === "Predicate",
+  );
   return (
     <aside class="space-y-3 p-4">
       <div>
         <div class="text-xs uppercase tracking-wider text-base-content/55">Node</div>
         <div class="mt-1 font-mono text-sm">{step.name}</div>
       </div>
-      {editable ? (
+      {editableActivity ? (
         <>
           <label class="form-control">
             <span class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">Name</span>
@@ -666,38 +886,132 @@ function StepInspector({
               ))}
             </select>
           </label>
-          <div>
-            <div class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">
-              Dependencies
-            </div>
-            <div class="max-h-36 space-y-1 overflow-auto rounded border border-base-content/10 p-2">
-              {schema.steps
-                .filter((candidate) => candidate.name !== step.name)
-                .map((candidate) => (
-                  <label class="flex cursor-pointer items-center gap-2 text-xs">
-                    <input
-                      type="checkbox"
-                      class="checkbox checkbox-xs"
-                      checked={step.dependsOn.includes(candidate.name)}
-                      onChange={(e) => {
-                        const checked = (e.target as HTMLInputElement).checked;
-                        const next = checked
-                          ? [...step.dependsOn, candidate.name]
-                          : step.dependsOn.filter((dep) => dep !== candidate.name);
-                        onUpdate(step.name, { dependsOn: next });
-                      }}
-                    />
-                    <span class="font-mono">{candidate.name}</span>
-                  </label>
-                ))}
-            </div>
-          </div>
+          <DependencyEditor step={step} schema={schema} onUpdate={onUpdate} />
           <ConfigEditor
             stepName={step.name}
             value={step.config ?? {}}
             schema={catalogEntry?.configSchema}
             onApply={(config) => onUpdate(step.name, { config })}
           />
+          <button
+            class="btn btn-sm btn-error btn-outline w-full"
+            onClick={() => onRemove(step.name)}
+          >
+            Delete Node
+          </button>
+        </>
+      ) : step.type === "branch" ? (
+        <>
+          <label class="form-control">
+            <span class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">Name</span>
+            <input
+              class="input input-bordered input-sm font-mono"
+              value={step.name}
+              onInput={(e) => onUpdate(step.name, { name: (e.target as HTMLInputElement).value })}
+            />
+          </label>
+          <DependencyEditor step={step} schema={schema} onUpdate={onUpdate} />
+          <label class="form-control">
+            <span class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">
+              Predicate
+            </span>
+            <select
+              class="select select-bordered select-sm font-mono"
+              value={step.conditionRef}
+              onChange={(e) =>
+                onUpdate(step.name, {
+                  conditionRef: (e.target as HTMLSelectElement).value,
+                })
+              }
+            >
+              {predicateOptions.map((entry) => (
+                <option value={entry.id}>{entry.id}</option>
+              ))}
+            </select>
+          </label>
+          <label class="form-control">
+            <span class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">
+              True Activity
+            </span>
+            <select
+              class="select select-bordered select-sm font-mono"
+              value={step.ifTrue.activityRef}
+              onChange={(e) =>
+                onUpdate(step.name, {
+                  ifTrue: { ...step.ifTrue, activityRef: (e.target as HTMLSelectElement).value },
+                })
+              }
+            >
+              {activityOptions.map((entry) => (
+                <option value={entry.id}>{entry.id}</option>
+              ))}
+            </select>
+          </label>
+          <label class="form-control">
+            <span class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">
+              False Activity
+            </span>
+            <select
+              class="select select-bordered select-sm font-mono"
+              value={step.ifFalse.activityRef}
+              onChange={(e) =>
+                onUpdate(step.name, {
+                  ifFalse: { ...step.ifFalse, activityRef: (e.target as HTMLSelectElement).value },
+                })
+              }
+            >
+              {activityOptions.map((entry) => (
+                <option value={entry.id}>{entry.id}</option>
+              ))}
+            </select>
+          </label>
+          <button
+            class="btn btn-sm btn-error btn-outline w-full"
+            onClick={() => onRemove(step.name)}
+          >
+            Delete Node
+          </button>
+        </>
+      ) : step.type === "parallel" ? (
+        <>
+          <label class="form-control">
+            <span class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">Name</span>
+            <input
+              class="input input-bordered input-sm font-mono"
+              value={step.name}
+              onInput={(e) => onUpdate(step.name, { name: (e.target as HTMLInputElement).value })}
+            />
+          </label>
+          <DependencyEditor step={step} schema={schema} onUpdate={onUpdate} />
+          <div class="space-y-2">
+            <div class="text-[10px] uppercase tracking-wider text-base-content/50">
+              Branch Activities
+            </div>
+            {Object.entries(step.branches).map(([branchName, branch]) => (
+              <label class="form-control">
+                <span class="mb-1 font-mono text-[11px] text-base-content/50">{branchName}</span>
+                <select
+                  class="select select-bordered select-sm font-mono"
+                  value={branch.activityRef}
+                  onChange={(e) =>
+                    onUpdate(step.name, {
+                      branches: {
+                        ...step.branches,
+                        [branchName]: {
+                          ...branch,
+                          activityRef: (e.target as HTMLSelectElement).value,
+                        },
+                      },
+                    })
+                  }
+                >
+                  {activityOptions.map((entry) => (
+                    <option value={entry.id}>{entry.id}</option>
+                  ))}
+                </select>
+              </label>
+            ))}
+          </div>
           <button
             class="btn btn-sm btn-error btn-outline w-full"
             onClick={() => onRemove(step.name)}
@@ -723,6 +1037,55 @@ function StepInspector({
         )}
       </div>
     </aside>
+  );
+}
+
+function DependencyEditor({
+  step,
+  schema,
+  onUpdate,
+}: {
+  step: DependableStep;
+  schema: WorkflowSchema;
+  onUpdate: (name: string, patch: Partial<BuilderStep> & { name?: string }) => void;
+}) {
+  const candidates = schema.steps.filter((candidate) => candidate.name !== step.name);
+  return (
+    <div>
+      <div class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">Dependencies</div>
+      <div class="max-h-36 space-y-1 overflow-auto rounded border border-base-content/10 p-2">
+        {candidates.length === 0 ? (
+          <div class="text-xs text-base-content/45">No other nodes.</div>
+        ) : (
+          candidates.map((candidate) => {
+            const checked = step.dependsOn.includes(candidate.name);
+            const cyclic = !checked && wouldCreateCycle(schema, candidate.name, step.name);
+            return (
+              <label
+                class={`flex cursor-pointer items-center gap-2 text-xs ${
+                  cyclic ? "opacity-45" : ""
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  class="checkbox checkbox-xs"
+                  checked={checked}
+                  disabled={cyclic}
+                  onChange={(e) => {
+                    const nextChecked = (e.target as HTMLInputElement).checked;
+                    const next = nextChecked
+                      ? [...step.dependsOn, candidate.name]
+                      : step.dependsOn.filter((dep) => dep !== candidate.name);
+                    onUpdate(step.name, { dependsOn: next });
+                  }}
+                />
+                <span class="font-mono">{candidate.name}</span>
+              </label>
+            );
+          })
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -1000,6 +1363,28 @@ function validateDraft(schema: WorkflowSchema, stepById: Map<string, CatalogStep
     if ("activityRef" in step && !stepById.has(step.activityRef)) {
       issues.push(`Unknown activityRef on ${step.name}: ${step.activityRef}`);
     }
+    if (step.type === "branch") {
+      if (!stepById.has(step.conditionRef)) {
+        issues.push(`Unknown predicate on ${step.name}: ${step.conditionRef}`);
+      }
+      if (!stepById.has(step.ifTrue.activityRef)) {
+        issues.push(`Unknown true activity on ${step.name}: ${step.ifTrue.activityRef}`);
+      }
+      if (!stepById.has(step.ifFalse.activityRef)) {
+        issues.push(`Unknown false activity on ${step.name}: ${step.ifFalse.activityRef}`);
+      }
+    }
+    if (step.type === "parallel") {
+      const branchNames = Object.keys(step.branches);
+      if (branchNames.length === 0) issues.push(`Parallel node ${step.name} needs a branch.`);
+      for (const [branchName, branch] of Object.entries(step.branches)) {
+        if (!stepById.has(branch.activityRef)) {
+          issues.push(
+            `Unknown parallel branch activity on ${step.name}.${branchName}: ${branch.activityRef}`,
+          );
+        }
+      }
+    }
   }
   for (const step of schema.steps) {
     if (!("dependsOn" in step)) continue;
@@ -1007,11 +1392,47 @@ function validateDraft(schema: WorkflowSchema, stepById: Map<string, CatalogStep
       if (!names.has(dep)) issues.push(`${step.name} depends on missing step ${dep}`);
     }
   }
+  if (hasDependencyCycle(schema)) issues.push("Workflow graph contains a dependency cycle.");
   return issues;
 }
 
 function isEditableStep(step: BuilderStep): step is EditableStep {
   return "activityRef" in step && "dependsOn" in step;
+}
+
+function hasDependsOn(step: BuilderStep): step is DependableStep {
+  return "dependsOn" in step;
+}
+
+function wouldCreateCycle(schema: WorkflowSchema, from: string, to: string): boolean {
+  const steps = schema.steps.map((step) =>
+    step.name === to && hasDependsOn(step)
+      ? ({ ...step, dependsOn: [...new Set([...step.dependsOn, from])] } as BuilderStep)
+      : step,
+  );
+  return hasDependencyCycle({ ...schema, steps });
+}
+
+function hasDependencyCycle(schema: WorkflowSchema): boolean {
+  const depsByName = new Map(
+    schema.steps.map((step) => [step.name, hasDependsOn(step) ? step.dependsOn : []]),
+  );
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+
+  function visit(name: string): boolean {
+    if (visited.has(name)) return false;
+    if (visiting.has(name)) return true;
+    visiting.add(name);
+    for (const dep of depsByName.get(name) ?? []) {
+      if (depsByName.has(dep) && visit(dep)) return true;
+    }
+    visiting.delete(name);
+    visited.add(name);
+    return false;
+  }
+
+  return [...depsByName.keys()].some((name) => visit(name));
 }
 
 function toStepName(id: string): string {

@@ -21,6 +21,9 @@ describe("demo workflow step libraries", () => {
     expect(ids).toContain("transform.uppercase");
     expect(ids).toContain("text.template");
     expect(ids).toContain("transform.concat");
+    expect(ids).toContain("control.if");
+    expect(ids).toContain("control.parallel");
+    expect(ids).toContain("predicate.long");
     expect(ids).toContain("system.now");
   });
 
@@ -57,5 +60,7 @@ describe("demo workflow step libraries", () => {
     expect(res.status).toBe(200);
     expect(body.steps.map((step) => step.id)).toContain("source.input");
     expect(body.steps.map((step) => step.id)).toContain("text.template");
+    expect(body.steps.map((step) => step.id)).toContain("control.if");
+    expect(body.steps.map((step) => step.id)).toContain("control.parallel");
   });
 });
