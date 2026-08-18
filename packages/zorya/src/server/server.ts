@@ -407,7 +407,10 @@ export class ZoryaServer {
     if (config.workflowBuilder) this.workflowBuilder = config.workflowBuilder;
     if (config.secrets) this.secrets = config.secrets;
     this.namespaces = new NamespaceService({ registry: config.namespaces });
-    this.versionRegistry = config.versionRegistry ?? new WorkflowVersionRegistry();
+    this.versionRegistry =
+      config.versionRegistry ??
+      config.workflowBuilder?.versionRegistry ??
+      new WorkflowVersionRegistry();
 
     this.logger = config.logger ?? console;
     this.auth = new Auth(config);

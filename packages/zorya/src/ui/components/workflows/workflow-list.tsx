@@ -58,7 +58,7 @@ export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: 
   // namespaced, so this lets the user see "everything that could be
   // triggered into this tenant" rather than just "everything that has
   // already run here".
-  const [showAll, setShowAll] = useState(false);
+  const [showAll, setShowAll] = useState(true);
 
   const filtered = useMemo(() => {
     const all = data?.workflows ?? [];

@@ -87,6 +87,17 @@ export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }:
     };
   }, [id]);
 
+  useEffect(() => {
+    if (!run || isTerminalRunStatus(run.status)) return;
+    const handle = setInterval(() => {
+      api
+        .getRun(id)
+        .then((r) => setRun(r))
+        .catch((e) => setError(String(e)));
+    }, 1_000);
+    return () => clearInterval(handle);
+  }, [id, run?.status]);
+
   useSse<RunEvent>(api.eventsUrl(id), (ev) => {
     setRun((prev) => applyEvent(prev, ev));
   });
@@ -401,6 +412,10 @@ function applyEvent(prev: RunDto | undefined, ev: RunEvent): RunDto | undefined 
   if (ev.type === "status") return { ...prev, status: ev.status };
   if (ev.type === "step") return { ...prev, steps: mergeStep(prev.steps, ev.stepName, ev.step) };
   return prev;
+}
+
+function isTerminalRunStatus(status: RunDto["status"]): boolean {
+  return status === "completed" || status === "failed";
 }
 
 /**

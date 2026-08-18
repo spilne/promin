@@ -1,10 +1,17 @@
 import { describe, it, expect, beforeEach } from "bun:test";
-import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
+import {
+  InMemoryWorkflowStorage,
+  createWorkflowRunner,
+  createWorkflowStepCatalog,
+  WorkflowVersionRegistry,
+} from "@promin/workflow";
+import { Pipeline } from "@promin/core";
 import { mkdtemp } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ZoryaServer } from "../../server/server.ts";
 import { LocalWorkflows, QueuedWorkflows } from "../../index.ts";
+import { ZoryaWorkflowBuilder } from "../../server/services/workflow-builder.ts";
 
 function makeWorkflows(storage: InMemoryWorkflowStorage) {
   return new LocalWorkflows({
@@ -68,6 +75,48 @@ describe("ZoryaServer", () => {
       const app = await serverWithUi.handle(new Request("http://x/workflow-builder"));
       expect(app.status).toBe(200);
       expect(await app.text()).toContain("<!doctype html>");
+    });
+  });
+
+  describe("workflow builder registry wiring", () => {
+    it("uses the workflow builder registry for workflow definitions when no server registry is passed", async () => {
+      const registry = new WorkflowVersionRegistry();
+      const builder = new ZoryaWorkflowBuilder({
+        versionRegistry: registry,
+        catalog: createWorkflowStepCatalog([
+          {
+            id: "transform.uppercase",
+            title: "Uppercase",
+            activity: () => (ctx) => Pipeline.succeed(String(ctx.prev).toUpperCase()),
+          },
+        ]),
+      });
+      await builder.save({
+        version: "v1",
+        schema: {
+          version: 1,
+          name: "authored-upper",
+          steps: [
+            {
+              type: "step",
+              name: "upper",
+              dependsOn: [],
+              activityRef: "transform.uppercase",
+            },
+          ],
+        },
+      });
+      await builder.publish("authored-upper");
+
+      const s = new ZoryaServer({
+        workflows: makeWorkflows(storage),
+        workflowBuilder: builder,
+      });
+      const res = await s.handle(new Request("http://x/api/workflows/definitions"));
+      const body = (await res.json()) as { workflows: Array<{ name: string }> };
+
+      expect(res.status).toBe(200);
+      expect(body.workflows.map((workflow) => workflow.name)).toContain("authored-upper");
     });
   });
 

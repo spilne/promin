@@ -8,6 +8,7 @@ import {
 } from "@promin/workflow";
 import { ZoryaWorkflowBuilder } from "../workflow-builder.ts";
 import { LocalWorkflows } from "../workflows/local-workflows.ts";
+import { ZoryaServer } from "../../server.ts";
 
 describe("ZoryaWorkflowBuilder", () => {
   it("saves, publishes, promotes, and dispatches an authored workflow", async () => {
@@ -54,5 +55,76 @@ describe("ZoryaWorkflowBuilder", () => {
     expect(await versionRegistry.findActive("authored-upper")).toMatchObject({ version: "v1" });
     expect(state?.status).toBe("completed");
     expect(state?.result).toBe("HELLO");
+  });
+
+  it("executes a builder-published workflow through the HTTP trigger route", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const versionRegistry = new WorkflowVersionRegistry();
+    const catalog = createWorkflowStepCatalog([
+      {
+        id: "transform.uppercase",
+        title: "Uppercase",
+        activity: () => (ctx) => Pipeline.succeed(String(ctx.prev).toUpperCase()),
+      },
+    ]);
+    const workflowBuilder = new ZoryaWorkflowBuilder({
+      catalog,
+      versionRegistry,
+      now: () => 1_000,
+    });
+    const workflows = new LocalWorkflows({
+      storage,
+      runner: createWorkflowRunner({ storage, registry: versionRegistry }),
+      definitions: {},
+      versionRegistry,
+      sleepScanIntervalMs: 0,
+      signalScanIntervalMs: 0,
+    });
+    const server = new ZoryaServer({ workflows, workflowBuilder });
+
+    await server.handle(
+      new Request("http://x/api/workflow-builder/workflows", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          version: "v1",
+          schema: {
+            version: 1,
+            name: "http-authored-upper",
+            steps: [
+              {
+                type: "step",
+                name: "upper",
+                dependsOn: [],
+                activityRef: "transform.uppercase",
+              },
+            ],
+          },
+        }),
+      }),
+    );
+    await server.handle(
+      new Request("http://x/api/workflow-builder/workflows/http-authored-upper/publish", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ version: "v1", promote: true }),
+      }),
+    );
+    const trigger = await server.handle(
+      new Request("http://x/api/runs/trigger/http-authored-upper", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ input: "hello", version: "v1" }),
+      }),
+    );
+    const body = (await trigger.json()) as { workflowId: string };
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const detail = await server.handle(new Request(`http://x/api/runs/${body.workflowId}`));
+    const run = (await detail.json()) as { status: string; steps: Array<{ stepName: string }> };
+
+    expect(trigger.status).toBe(200);
+    expect(detail.status).toBe(200);
+    expect(run.status).toBe("completed");
+    expect(run.steps.map((step) => step.stepName)).toContain("upper");
   });
 });
