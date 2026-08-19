@@ -61,7 +61,10 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
   const [busy, setBusy] = useState<"save" | "publish" | "run" | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [testInputJson, setTestInputJson] = useState("{}");
+  const [testInputJson, setTestInputJson] = useState(() =>
+    JSON.stringify("hello workflow", null, 2),
+  );
+  const [testInputTouched, setTestInputTouched] = useState(false);
 
   const steps = catalog?.steps ?? [];
   const workflows = authored?.workflows ?? [];
@@ -69,6 +72,16 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
   const stepById = useMemo(() => new Map(steps.map((step) => [step.id, step])), [steps]);
   const issues = useMemo(() => validateDraft(schema, stepById), [schema, stepById]);
   const activeStep = schema.steps.find((step) => step.name === selectedStep);
+  const suggestedTestInput = useMemo(() => inferTestInput(schema, stepById), [schema, stepById]);
+  const suggestedTestInputJson = useMemo(
+    () => JSON.stringify(suggestedTestInput, null, 2),
+    [suggestedTestInput],
+  );
+  const rootInputLabel = useMemo(() => describeWorkflowInput(schema, stepById), [schema, stepById]);
+
+  useEffect(() => {
+    if (!testInputTouched) setTestInputJson(suggestedTestInputJson);
+  }, [suggestedTestInputJson, testInputTouched]);
 
   function updateSchema(
     next: WorkflowSchema,
@@ -151,6 +164,7 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
     updateSchema(structuredClone(workflow.schema), { preserveSelectedWorkflow: true });
     setSelected(workflow);
     setSelectedStep(workflow.schema.steps[0]?.name ?? "");
+    setTestInputTouched(false);
   }
 
   function addStep(entry: CatalogStep): void {
@@ -426,16 +440,31 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
             {message && <div class="mb-3 alert alert-success text-xs">{message}</div>}
             <div class="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
               <label class="form-control">
-                <span class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">
-                  Test Input JSON
+                <span class="mb-1 flex flex-wrap items-center justify-between gap-2">
+                  <span class="text-[10px] uppercase tracking-wider text-base-content/50">
+                    Test Input JSON
+                  </span>
+                  <span class="font-mono text-[11px] text-base-content/45">{rootInputLabel}</span>
                 </span>
                 <textarea
                   class="textarea textarea-bordered min-h-20 font-mono text-xs"
                   value={testInputJson}
-                  onInput={(e) => setTestInputJson((e.target as HTMLTextAreaElement).value)}
+                  onInput={(e) => {
+                    setTestInputTouched(true);
+                    setTestInputJson((e.target as HTMLTextAreaElement).value);
+                  }}
                 />
               </label>
               <div class="flex flex-wrap justify-end gap-2">
+                <button
+                  class="btn btn-sm btn-ghost"
+                  onClick={() => {
+                    setTestInputTouched(false);
+                    setTestInputJson(suggestedTestInputJson);
+                  }}
+                >
+                  Use Sample
+                </button>
                 <button
                   class="btn btn-sm btn-ghost"
                   onClick={() => {
@@ -444,6 +473,7 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
                     setVersion("v1");
                     setSelected(null);
                     setSelectedStep("upper");
+                    setTestInputTouched(false);
                     setError(null);
                     setMessage(null);
                   }}
@@ -1051,40 +1081,56 @@ function DependencyEditor({
 }) {
   const candidates = schema.steps.filter((candidate) => candidate.name !== step.name);
   return (
-    <div>
-      <div class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">Dependencies</div>
-      <div class="max-h-36 space-y-1 overflow-auto rounded border border-base-content/10 p-2">
-        {candidates.length === 0 ? (
-          <div class="text-xs text-base-content/45">No other nodes.</div>
+    <div class="space-y-2">
+      <div class="rounded border border-base-content/10 bg-base-200/40 p-3">
+        <div class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">Inputs</div>
+        {step.dependsOn.length === 0 ? (
+          <div class="text-xs text-base-content/55">Workflow input</div>
         ) : (
-          candidates.map((candidate) => {
-            const checked = step.dependsOn.includes(candidate.name);
-            const cyclic = !checked && wouldCreateCycle(schema, candidate.name, step.name);
-            return (
-              <label
-                class={`flex cursor-pointer items-center gap-2 text-xs ${
-                  cyclic ? "opacity-45" : ""
-                }`}
-              >
-                <input
-                  type="checkbox"
-                  class="checkbox checkbox-xs"
-                  checked={checked}
-                  disabled={cyclic}
-                  onChange={(e) => {
-                    const nextChecked = (e.target as HTMLInputElement).checked;
-                    const next = nextChecked
-                      ? [...step.dependsOn, candidate.name]
-                      : step.dependsOn.filter((dep) => dep !== candidate.name);
-                    onUpdate(step.name, { dependsOn: next });
-                  }}
-                />
-                <span class="font-mono">{candidate.name}</span>
-              </label>
-            );
-          })
+          <div class="flex flex-wrap gap-1">
+            {step.dependsOn.map((dep) => (
+              <span class="badge badge-sm badge-outline font-mono">{dep}</span>
+            ))}
+          </div>
         )}
       </div>
+      <details class="rounded border border-base-content/10">
+        <summary class="cursor-pointer px-3 py-2 text-xs text-base-content/60">
+          Advanced wiring
+        </summary>
+        <div class="max-h-36 space-y-1 overflow-auto border-t border-base-content/10 p-2">
+          {candidates.length === 0 ? (
+            <div class="text-xs text-base-content/45">No other nodes.</div>
+          ) : (
+            candidates.map((candidate) => {
+              const checked = step.dependsOn.includes(candidate.name);
+              const cyclic = !checked && wouldCreateCycle(schema, candidate.name, step.name);
+              return (
+                <label
+                  class={`flex cursor-pointer items-center gap-2 text-xs ${
+                    cyclic ? "opacity-45" : ""
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    class="checkbox checkbox-xs"
+                    checked={checked}
+                    disabled={cyclic}
+                    onChange={(e) => {
+                      const nextChecked = (e.target as HTMLInputElement).checked;
+                      const next = nextChecked
+                        ? [...step.dependsOn, candidate.name]
+                        : step.dependsOn.filter((dep) => dep !== candidate.name);
+                      onUpdate(step.name, { dependsOn: next });
+                    }}
+                  />
+                  <span class="font-mono">{candidate.name}</span>
+                </label>
+              );
+            })
+          )}
+        </div>
+      </details>
     </div>
   );
 }
@@ -1394,6 +1440,69 @@ function validateDraft(schema: WorkflowSchema, stepById: Map<string, CatalogStep
   }
   if (hasDependencyCycle(schema)) issues.push("Workflow graph contains a dependency cycle.");
   return issues;
+}
+
+function inferTestInput(schema: WorkflowSchema, stepById: Map<string, CatalogStep>): unknown {
+  if (schema.inputSchema) return sampleFromSchema(schema.inputSchema);
+  const rootSchema = firstRootInputSchema(schema, stepById);
+  if (rootSchema) return sampleFromSchema(rootSchema);
+  return { text: "hello workflow" };
+}
+
+function describeWorkflowInput(schema: WorkflowSchema, stepById: Map<string, CatalogStep>): string {
+  if (schema.inputSchema) return `workflow: ${schemaTypeLabel(schema.inputSchema)}`;
+  const root = firstRootInput(schema, stepById);
+  if (!root) return "input: inferred sample";
+  return `${root.step.name}: ${schemaTypeLabel(root.entry.inputSchema)}`;
+}
+
+function firstRootInputSchema(
+  schema: WorkflowSchema,
+  stepById: Map<string, CatalogStep>,
+): JsonSchema | undefined {
+  return firstRootInput(schema, stepById)?.entry.inputSchema;
+}
+
+function firstRootInput(
+  schema: WorkflowSchema,
+  stepById: Map<string, CatalogStep>,
+): { step: DependableStep; entry: CatalogStep & { inputSchema: JsonSchema } } | undefined {
+  for (const step of schema.steps) {
+    if (!hasDependsOn(step) || step.dependsOn.length > 0 || !("activityRef" in step)) continue;
+    const entry = stepById.get(step.activityRef);
+    if (entry?.inputSchema) {
+      return { step, entry: entry as CatalogStep & { inputSchema: JsonSchema } };
+    }
+  }
+  return undefined;
+}
+
+function sampleFromSchema(schema: JsonSchema | undefined): unknown {
+  if (!schema) return { text: "hello workflow" };
+  if (schema.default !== undefined) return schema.default;
+  if (schema.enum?.length) return schema.enum[0];
+  if (schema.type === "string") return "hello workflow";
+  if (schema.type === "number" || schema.type === "integer") return 1;
+  if (schema.type === "boolean") return true;
+  if (schema.type === "array") return [sampleFromSchema(schema.items)];
+  if (schema.type === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [name, property] of Object.entries(schema.properties ?? {})) {
+      out[name] = sampleFromSchema(property);
+    }
+    return out;
+  }
+  return { text: "hello workflow" };
+}
+
+function schemaTypeLabel(schema: JsonSchema | undefined): string {
+  if (!schema) return "unknown";
+  if (schema.type === "object" && schema.properties) {
+    const keys = Object.keys(schema.properties);
+    return keys.length > 0 ? `object { ${keys.join(", ")} }` : "object";
+  }
+  if (schema.type === "array") return "array";
+  return schema.type ?? "value";
 }
 
 function isEditableStep(step: BuilderStep): step is EditableStep {
