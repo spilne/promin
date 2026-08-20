@@ -4,9 +4,15 @@
 // sample inputs.
 // ---------------------------------------------------------------------------
 
-import type { IWorkflowVersionRegistry, Workflow } from "@promin/workflow";
+import type {
+  IWorkflowVersionRegistry,
+  JsonSchema,
+  Workflow,
+  WorkflowSchema,
+} from "@promin/workflow";
 import { json, jsonError } from "../router.ts";
 import type { WorkflowAdvertisementRegistry } from "../workflow-advertisements.ts";
+import type { ZoryaWorkflowBuilder } from "../services/workflow-builder.ts";
 
 export interface WorkflowStepDefDto {
   name: string;
@@ -54,6 +60,8 @@ export interface WorkflowDefsDeps {
    * a separate path for builder-created workflows.
    */
   versionRegistry?: IWorkflowVersionRegistry;
+  /** Optional authored-workflow source used to infer samples for builder-published workflows. */
+  workflowBuilder?: ZoryaWorkflowBuilder;
 }
 
 function toDto(name: string, wf: Workflow<unknown, unknown>, sample?: unknown): WorkflowDefDto {
@@ -119,7 +127,7 @@ export function listWorkflowDefs(deps: WorkflowDefsDeps) {
         }
         const wf = await resolveRegisteredWorkflow(deps.versionRegistry, name);
         if (!wf) continue;
-        const dto = toDto(name, wf, deps.sampleInput?.(name));
+        const dto = toDto(name, wf, await resolveSampleInput(name, wf.version, deps));
         annotateVersions(dto, versions);
         byName.set(name, dto);
       }
@@ -141,7 +149,11 @@ export function getWorkflowDef(deps: WorkflowDefsDeps) {
     if (deps.versionRegistry) {
       const registered = await resolveRegisteredWorkflow(deps.versionRegistry, name);
       if (registered) {
-        const dto = toDto(name, registered, deps.sampleInput?.(name));
+        const dto = toDto(
+          name,
+          registered,
+          await resolveSampleInput(name, registered.version, deps),
+        );
         const versions = await deps.versionRegistry.versions(name);
         annotateVersions(dto, versions);
         return json(200, dto);
@@ -177,6 +189,48 @@ async function resolveRegisteredWorkflow(
   if (active) return registry.resolve(name, active.version);
   const latest = await registry.latest(name);
   return latest ? registry.resolve(name, latest) : undefined;
+}
+
+async function resolveSampleInput(
+  name: string,
+  version: string | undefined,
+  deps: WorkflowDefsDeps,
+): Promise<unknown> {
+  const configured = deps.sampleInput?.(name);
+  if (configured !== undefined) return configured;
+  if (!deps.workflowBuilder) return undefined;
+  const record = await deps.workflowBuilder.get(name, version);
+  if (!record) return undefined;
+  return inferSampleInput(record.schema, deps.workflowBuilder);
+}
+
+function inferSampleInput(schema: WorkflowSchema, builder: ZoryaWorkflowBuilder): unknown {
+  if (schema.inputSchema) return sampleFromSchema(schema.inputSchema);
+  const catalog = new Map(builder.steps().map((entry) => [entry.id, entry]));
+  for (const step of schema.steps) {
+    if (!("dependsOn" in step) || step.dependsOn.length > 0 || !("activityRef" in step)) continue;
+    const entry = catalog.get(step.activityRef);
+    if (entry?.inputSchema) return sampleFromSchema(entry.inputSchema);
+  }
+  return undefined;
+}
+
+function sampleFromSchema(schema: JsonSchema | undefined): unknown {
+  if (!schema) return undefined;
+  if (schema.default !== undefined) return schema.default;
+  if (schema.enum?.length) return schema.enum[0];
+  if (schema.type === "string") return "hello workflow";
+  if (schema.type === "number" || schema.type === "integer") return 1;
+  if (schema.type === "boolean") return true;
+  if (schema.type === "array") return [sampleFromSchema(schema.items)];
+  if (schema.type === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [name, property] of Object.entries(schema.properties ?? {})) {
+      out[name] = sampleFromSchema(property);
+    }
+    return out;
+  }
+  return undefined;
 }
 
 function annotateVersions(dto: WorkflowDefDto, versions: readonly string[]): void {

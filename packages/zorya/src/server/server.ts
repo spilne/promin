@@ -499,6 +499,7 @@ export class ZoryaServer {
           ...(config.sampleInput !== undefined && { sampleInput: config.sampleInput }),
           ...(advertisements !== undefined && { advertisements }),
           ...(this.versionRegistry !== undefined && { versionRegistry: this.versionRegistry }),
+          ...(this.workflowBuilder !== undefined && { workflowBuilder: this.workflowBuilder }),
         }),
       )
       .get("/api/workflows/:name/grid", getWorkflowGrid(storage))
@@ -510,6 +511,7 @@ export class ZoryaServer {
           ...(config.sampleInput !== undefined && { sampleInput: config.sampleInput }),
           ...(advertisements !== undefined && { advertisements }),
           ...(this.versionRegistry !== undefined && { versionRegistry: this.versionRegistry }),
+          ...(this.workflowBuilder !== undefined && { workflowBuilder: this.workflowBuilder }),
         }),
       )
       .get(

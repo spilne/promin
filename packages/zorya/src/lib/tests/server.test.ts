@@ -96,6 +96,13 @@ describe("ZoryaServer", () => {
         schema: {
           version: 1,
           name: "authored-upper",
+          inputSchema: {
+            type: "object",
+            properties: {
+              text: { type: "string", default: "hello builder" },
+              urgent: { type: "boolean", default: false },
+            },
+          },
           steps: [
             {
               type: "step",
@@ -113,10 +120,14 @@ describe("ZoryaServer", () => {
         workflowBuilder: builder,
       });
       const res = await s.handle(new Request("http://x/api/workflows/definitions"));
-      const body = (await res.json()) as { workflows: Array<{ name: string }> };
+      const body = (await res.json()) as {
+        workflows: Array<{ name: string; sampleInput?: unknown }>;
+      };
+      const authored = body.workflows.find((workflow) => workflow.name === "authored-upper");
 
       expect(res.status).toBe(200);
       expect(body.workflows.map((workflow) => workflow.name)).toContain("authored-upper");
+      expect(authored?.sampleInput).toEqual({ text: "hello builder", urgent: false });
     });
   });
 
