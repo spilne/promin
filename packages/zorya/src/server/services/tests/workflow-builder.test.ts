@@ -127,4 +127,70 @@ describe("ZoryaWorkflowBuilder", () => {
     expect(run.status).toBe("completed");
     expect(run.steps.map((step) => step.stepName)).toContain("upper");
   });
+
+  it("marks a published workflow draft again when saved content changes", async () => {
+    const versionRegistry = new WorkflowVersionRegistry();
+    const catalog = createWorkflowStepCatalog([
+      {
+        id: "transform.uppercase",
+        title: "Uppercase",
+        activity: () => (ctx) => Pipeline.succeed(String(ctx.prev).toUpperCase()),
+      },
+      {
+        id: "transform.identity",
+        title: "Identity",
+        activity: () => (ctx) => Pipeline.succeed(ctx.prev),
+      },
+    ]);
+    const builder = new ZoryaWorkflowBuilder({ catalog, versionRegistry, now: () => 1_000 });
+    await builder.save({
+      version: "v1",
+      schema: {
+        version: 1,
+        name: "edited-after-publish",
+        steps: [{ type: "step", name: "upper", dependsOn: [], activityRef: "transform.uppercase" }],
+      },
+    });
+    await builder.publish("edited-after-publish", "v1");
+
+    const edited = await builder.save({
+      version: "v1",
+      schema: {
+        version: 1,
+        name: "edited-after-publish",
+        steps: [
+          { type: "step", name: "identity", dependsOn: [], activityRef: "transform.identity" },
+        ],
+      },
+    });
+
+    expect(edited.status).toBe("draft");
+    expect(edited.publishedAt).toBeUndefined();
+  });
+
+  it("deletes authored record and deregisters its workflow version", async () => {
+    const versionRegistry = new WorkflowVersionRegistry();
+    const catalog = createWorkflowStepCatalog([
+      {
+        id: "transform.uppercase",
+        title: "Uppercase",
+        activity: () => (ctx) => Pipeline.succeed(String(ctx.prev).toUpperCase()),
+      },
+    ]);
+    const builder = new ZoryaWorkflowBuilder({ catalog, versionRegistry });
+    await builder.save({
+      version: "v1",
+      schema: {
+        version: 1,
+        name: "delete-authored",
+        steps: [{ type: "step", name: "upper", dependsOn: [], activityRef: "transform.uppercase" }],
+      },
+    });
+    await builder.publish("delete-authored", "v1");
+
+    await builder.delete("delete-authored", "v1");
+
+    expect(await builder.get("delete-authored", "v1")).toBeNull();
+    expect(await versionRegistry.resolve("delete-authored", "v1")).toBeUndefined();
+  });
 });

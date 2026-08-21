@@ -98,18 +98,31 @@ export class ZoryaWorkflowBuilder {
     const version = input.version ?? "v1";
     const existing = await this.store.get(input.schema.name, version);
     const now = this.now();
+    const contentHash = hashSchema(input.schema);
+    const status =
+      existing?.status === "published" && existing.contentHash === contentHash
+        ? "published"
+        : "draft";
     const record: AuthoredWorkflowRecord = {
       name: input.schema.name,
       version,
       schema: structuredClone(input.schema),
-      status: existing?.status ?? "draft",
-      contentHash: hashSchema(input.schema),
+      status,
+      contentHash,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
-      ...(existing?.publishedAt !== undefined && { publishedAt: existing.publishedAt }),
+      ...(status === "published" && existing?.publishedAt !== undefined
+        ? { publishedAt: existing.publishedAt }
+        : {}),
     };
     await this.store.save(record);
     return clone(record);
+  }
+
+  async delete(name: string, version: string): Promise<void> {
+    const existing = await this.store.get(name, version);
+    await this.store.delete(name, version);
+    if (existing) await this.versionRegistry.deregister(name, version);
   }
 
   async publish(

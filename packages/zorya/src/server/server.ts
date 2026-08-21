@@ -89,6 +89,7 @@ import {
   mintSignalToken,
 } from "./routes/signal-tokens.ts";
 import {
+  deleteWorkflowVersion,
   getActiveWorkflowVersion,
   listWorkflowVersions,
   promoteWorkflowVersion,
@@ -581,6 +582,10 @@ export class ZoryaServer {
       .post(
         "/api/workflows/:name/versions/:version/promote",
         promoteWorkflowVersion({ registry: this.versionRegistry }),
+      )
+      .delete(
+        "/api/workflows/:name/versions/:version",
+        deleteWorkflowVersion({ registry: this.versionRegistry }),
       )
       .post("/api/workflows/:name/rollback", rollbackWorkflow({ registry: this.versionRegistry }))
       // Streams — generic typed channels per workflow. Output (workflow →

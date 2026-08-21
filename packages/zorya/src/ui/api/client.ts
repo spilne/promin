@@ -272,6 +272,15 @@ export const api = {
       { method: "DELETE" },
     );
   },
+  deleteWorkflowVersion(name: string, version: string, force = false): Promise<{ ok: true }> {
+    const qs = force ? "?force=true" : "";
+    return req(
+      `/api/workflows/${encodeURIComponent(name)}/versions/${encodeURIComponent(version)}${qs}`,
+      {
+        method: "DELETE",
+      },
+    );
+  },
   triggerWorkflow(
     name: string,
     body: { input?: unknown; workflowId?: string; namespace?: string; version?: string },

@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it } from "bun:test";
 import { Pipeline } from "@promin/core";
 import { workflow, WorkflowVersionRegistry } from "@promin/workflow";
 import {
+  deleteWorkflowVersion,
   getActiveWorkflowVersion,
   listWorkflowVersions,
   promoteWorkflowVersion,
@@ -135,5 +136,38 @@ describe("workflow versions routes — registry lifecycle surface", () => {
     const rollback = rollbackWorkflow({ registry });
     const res = await rollback(jsonReq({}), { name: "compute" });
     expect(res.status).toBe(400);
+  });
+
+  it("deleteWorkflowVersion refuses active version without force", async () => {
+    registry.promote("compute", "v2");
+    const handler = deleteWorkflowVersion({ registry });
+    const res = await handler(new Request("http://x/api/workflows/compute/versions/v2"), {
+      name: "compute",
+      version: "v2",
+    });
+
+    expect(res.status).toBe(409);
+    expect(registry.resolve("compute", "v2")).toBeDefined();
+  });
+
+  it("deleteWorkflowVersion deregisters inactive or forced versions", async () => {
+    registry.promote("compute", "v2");
+    const handler = deleteWorkflowVersion({ registry });
+    const inactive = await handler(new Request("http://x/api/workflows/compute/versions/v1"), {
+      name: "compute",
+      version: "v1",
+    });
+    const active = await handler(
+      new Request("http://x/api/workflows/compute/versions/v2?force=true"),
+      {
+        name: "compute",
+        version: "v2",
+      },
+    );
+
+    expect(inactive.status).toBe(200);
+    expect(active.status).toBe(200);
+    expect(registry.resolve("compute", "v1")).toBeUndefined();
+    expect(registry.resolve("compute", "v2")).toBeUndefined();
   });
 });

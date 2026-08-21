@@ -68,7 +68,7 @@ export function deleteAuthoredWorkflow(deps: { builder: ZoryaWorkflowBuilder }) 
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const version = new URL(req.url).searchParams.get("version");
     if (!version) return jsonError(400, "version_required");
-    await deps.builder.store.delete(params.name!, version);
+    await deps.builder.delete(params.name!, version);
     return json(200, { ok: true });
   };
 }

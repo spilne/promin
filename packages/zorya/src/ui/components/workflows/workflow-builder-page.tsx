@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api } from "../../api/client.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { useNamespace } from "../../hooks/use-namespace.ts";
+import { confirm, toast } from "../../lib/dialogs.ts";
 import type {
   AuthoredWorkflowDto,
   WorkflowStepCatalogResponse,
@@ -138,6 +139,10 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
   }
 
   async function testRun(): Promise<void> {
+    if (issues.length > 0) {
+      setError("Resolve validation issues before running a test.");
+      return;
+    }
     setBusy("run");
     setError(null);
     setMessage(null);
@@ -165,6 +170,33 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
     setSelected(workflow);
     setSelectedStep(workflow.schema.steps[0]?.name ?? "");
     setTestInputTouched(false);
+  }
+
+  async function deleteAuthored(workflow: AuthoredWorkflowDto): Promise<void> {
+    const ok = await confirm({
+      title: `Delete ${workflow.name}@${workflow.version}?`,
+      message:
+        workflow.status === "published"
+          ? "This deletes the authored workflow and unpublishes the matching version."
+          : "This deletes the authored workflow draft.",
+      confirmLabel: "Delete",
+      variant: "danger",
+    });
+    if (!ok) return;
+    setBusy("save");
+    setError(null);
+    try {
+      await api.deleteAuthoredWorkflow(workflow.name, workflow.version);
+      if (selected?.name === workflow.name && selected.version === workflow.version) {
+        setSelected(null);
+      }
+      refreshAuthored();
+      toast(`Deleted ${workflow.name}@${workflow.version}`, { variant: "success" });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
   }
 
   function addStep(entry: CatalogStep): void {
@@ -483,10 +515,20 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
                 <button class="btn btn-sm btn-outline" disabled={busy !== null} onClick={save}>
                   {busy === "save" ? "Saving..." : "Save Draft"}
                 </button>
-                <button class="btn btn-sm btn-primary" disabled={busy !== null} onClick={publish}>
+                <button
+                  class="btn btn-sm btn-primary"
+                  disabled={busy !== null || issues.length > 0}
+                  onClick={publish}
+                  title={issues.length > 0 ? "Resolve validation issues before publishing" : ""}
+                >
                   {busy === "publish" ? "Publishing..." : "Publish"}
                 </button>
-                <button class="btn btn-sm btn-secondary" disabled={busy !== null} onClick={testRun}>
+                <button
+                  class="btn btn-sm btn-secondary"
+                  disabled={busy !== null || issues.length > 0}
+                  onClick={testRun}
+                  title={issues.length > 0 ? "Resolve validation issues before testing" : ""}
+                >
                   {busy === "run" ? "Running..." : "Test Run"}
                 </button>
               </div>
@@ -519,6 +561,7 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
             busy={busy !== null}
             onLoad={loadWorkflow}
             onOpenWorkflow={onOpenWorkflow}
+            onDelete={deleteAuthored}
             onPublish={async (workflow) => {
               loadWorkflow(workflow);
               setBusy("publish");
@@ -1326,6 +1369,7 @@ function AuthoredPanel({
   busy,
   onLoad,
   onOpenWorkflow,
+  onDelete,
   onPublish,
 }: {
   workflows: AuthoredWorkflowDto[];
@@ -1334,6 +1378,7 @@ function AuthoredPanel({
   busy: boolean;
   onLoad: (workflow: AuthoredWorkflowDto) => void;
   onOpenWorkflow: (name: string) => void;
+  onDelete: (workflow: AuthoredWorkflowDto) => void;
   onPublish: (workflow: AuthoredWorkflowDto) => void;
 }) {
   return (
@@ -1383,6 +1428,13 @@ function AuthoredPanel({
                     View
                   </button>
                 )}
+                <button
+                  class="btn btn-xs btn-error btn-outline"
+                  disabled={busy}
+                  onClick={() => onDelete(workflow)}
+                >
+                  Delete
+                </button>
                 <button
                   class="btn btn-xs btn-outline"
                   disabled={busy}

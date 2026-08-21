@@ -10,6 +10,7 @@
 //   POST /api/workflows/:name/versions/:version/promote
 //                                                     — promote to active.
 //   POST /api/workflows/:name/rollback                — rollback (body: { toVersion }).
+//   DELETE /api/workflows/:name/versions/:version     — deregister/unpublish.
 // ---------------------------------------------------------------------------
 
 import type { IWorkflowVersionRegistry, VersionRecord } from "@promin/workflow";
@@ -131,5 +132,27 @@ export function rollbackWorkflow(deps: WorkflowVersionsRoutesDeps) {
       const message = err instanceof Error ? err.message : String(err);
       return jsonError(500, "rollback_failed", message);
     }
+  };
+}
+
+export function deleteWorkflowVersion(deps: WorkflowVersionsRoutesDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const name = params.name;
+    const version = params.version;
+    if (!name) return jsonError(400, "missing_name");
+    if (!version) return jsonError(400, "missing_version");
+    const active = await deps.registry.findActive?.(name);
+    const force = new URL(req.url).searchParams.get("force") === "true";
+    if (active?.version === version && !force) {
+      return jsonError(
+        409,
+        "active_version",
+        "Refusing to delete the active workflow version without force=true.",
+      );
+    }
+    const before = await deps.registry.resolve(name, version);
+    if (!before) return jsonError(404, "version_not_registered");
+    await deps.registry.deregister(name, version);
+    return json(200, { ok: true });
   };
 }
