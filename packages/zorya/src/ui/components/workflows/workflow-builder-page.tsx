@@ -697,6 +697,15 @@ function WorkflowCanvas({
 }) {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [drag, setDrag] = useState<{ name: string; dx: number; dy: number } | null>(null);
+  const [connectionDrag, setConnectionDrag] = useState<{
+    from: string;
+    startX: number;
+    startY: number;
+    x: number;
+    y: number;
+    moved: boolean;
+  } | null>(null);
+  const suppressNextConnectClick = useRef(false);
   const nodes = schema.steps.map((step, index) => {
     const pos = schema.ui?.[step.name] ?? { x: 80 + index * 180, y: 120 };
     return { step, x: pos.x, y: pos.y };
@@ -729,10 +738,39 @@ function WorkflowCanvas({
   }
 
   function moveDrag(e: MouseEvent): void {
-    if (!drag) return;
     const point = pointFor(e);
     if (!point) return;
+    if (connectionDrag) {
+      const moved =
+        connectionDrag.moved ||
+        Math.abs(point.x - connectionDrag.startX) > 4 ||
+        Math.abs(point.y - connectionDrag.startY) > 4;
+      suppressNextConnectClick.current = suppressNextConnectClick.current || moved;
+      setConnectionDrag({ ...connectionDrag, x: point.x, y: point.y, moved });
+      return;
+    }
+    if (!drag) return;
     onMove(drag.name, Math.round(point.x - drag.dx), Math.round(point.y - drag.dy));
+  }
+
+  function beginConnectionDrag(e: MouseEvent, name: string, x: number, y: number): void {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    const point = pointFor(e) ?? { x, y };
+    suppressNextConnectClick.current = false;
+    setConnectionDrag({ from: name, startX: point.x, startY: point.y, x, y, moved: false });
+    onConnectStart(name);
+  }
+
+  function endConnectionDrag(to?: string): void {
+    const current = connectionDrag;
+    setConnectionDrag(null);
+    if (!current) return;
+    if (to) {
+      onConnectEnd(current.from, to);
+      return;
+    }
+    if (current.moved) onConnectStart(current.from);
   }
 
   return (
@@ -759,8 +797,14 @@ function WorkflowCanvas({
         viewBox={`0 0 ${bounds.width} ${bounds.height}`}
         role="img"
         onMouseMove={moveDrag}
-        onMouseUp={() => setDrag(null)}
-        onMouseLeave={() => setDrag(null)}
+        onMouseUp={() => {
+          setDrag(null);
+          endConnectionDrag();
+        }}
+        onMouseLeave={() => {
+          setDrag(null);
+          endConnectionDrag();
+        }}
       >
         <defs>
           <marker id="wf-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
@@ -814,11 +858,12 @@ function WorkflowCanvas({
           const entry =
             "activityRef" in node.step ? stepById.get(node.step.activityRef) : undefined;
           const active = selected === node.step.name;
+          const activeConnectionFrom = connectionDrag?.from ?? connectingFrom;
           const canReceive =
-            connectingFrom !== null &&
-            connectingFrom !== node.step.name &&
+            activeConnectionFrom !== null &&
+            activeConnectionFrom !== node.step.name &&
             hasDependsOn(node.step) &&
-            !node.step.dependsOn.includes(connectingFrom);
+            !node.step.dependsOn.includes(activeConnectionFrom);
           return (
             <g transform={`translate(${node.x}, ${node.y})`}>
               <g
@@ -853,6 +898,11 @@ function WorkflowCanvas({
                 class={`cursor-pointer ${canReceive ? "text-primary" : "text-base-content/45"}`}
                 transform="translate(0, 44)"
                 onMouseDown={(e) => e.stopPropagation()}
+                onMouseUp={(e) => {
+                  if (!connectionDrag) return;
+                  e.stopPropagation();
+                  endConnectionDrag(canReceive ? node.step.name : undefined);
+                }}
                 onClick={(e) => {
                   e.stopPropagation();
                   if (connectingFrom) onConnectEnd(connectingFrom, node.step.name);
@@ -864,12 +914,18 @@ function WorkflowCanvas({
 
               <g
                 class={`cursor-pointer ${
-                  connectingFrom === node.step.name ? "text-primary" : "text-base-content/45"
+                  activeConnectionFrom === node.step.name ? "text-primary" : "text-base-content/45"
                 }`}
                 transform="translate(180, 44)"
-                onMouseDown={(e) => e.stopPropagation()}
+                onMouseDown={(e) =>
+                  beginConnectionDrag(e, node.step.name, node.x + 180, node.y + 44)
+                }
                 onClick={(e) => {
                   e.stopPropagation();
+                  if (suppressNextConnectClick.current) {
+                    suppressNextConnectClick.current = false;
+                    return;
+                  }
                   onConnectStart(node.step.name);
                 }}
               >
@@ -894,6 +950,19 @@ function WorkflowCanvas({
             </g>
           );
         })}
+        {connectionDrag && (
+          <line
+            x1={connectionDrag.startX}
+            y1={connectionDrag.startY}
+            x2={connectionDrag.x}
+            y2={connectionDrag.y}
+            stroke="currentColor"
+            class="pointer-events-none text-primary"
+            stroke-width="2"
+            stroke-dasharray="6 4"
+            marker-end="url(#wf-arrow)"
+          />
+        )}
       </svg>
     </div>
   );
