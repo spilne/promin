@@ -17,6 +17,8 @@ type DependableStep = Extract<BuilderStep, { dependsOn: string[] }>;
 type EditableStep = Extract<BuilderStep, { activityRef: string; dependsOn: readonly string[] }>;
 type BuilderMode = "canvas" | "json";
 
+const INPUT_NODE_ID = "__workflow_input__";
+
 const SAMPLE_SCHEMA: WorkflowSchema = {
   version: 1,
   name: "authored-uppercase",
@@ -72,7 +74,10 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
   const configured = catalogLoading || steps.length > 0 || workflows.length > 0;
   const stepById = useMemo(() => new Map(steps.map((step) => [step.id, step])), [steps]);
   const issues = useMemo(() => validateDraft(schema, stepById), [schema, stepById]);
-  const activeStep = schema.steps.find((step) => step.name === selectedStep);
+  const activeStep =
+    selectedStep === INPUT_NODE_ID
+      ? undefined
+      : schema.steps.find((step) => step.name === selectedStep);
   const suggestedTestInput = useMemo(() => inferTestInput(schema, stepById), [schema, stepById]);
   const suggestedTestInputJson = useMemo(
     () => JSON.stringify(suggestedTestInput, null, 2),
@@ -93,7 +98,7 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
     setError(null);
     setMessage(null);
     if (!options.preserveSelectedWorkflow) setSelected(null);
-    if (!next.steps.some((step) => step.name === selectedStep)) {
+    if (selectedStep !== INPUT_NODE_ID && !next.steps.some((step) => step.name === selectedStep)) {
       setSelectedStep(next.steps[0]?.name ?? "");
     }
   }
@@ -252,6 +257,15 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
     updateSchema({ ...schema, name });
   }
 
+  function updateWorkflowInputSchema(inputSchema: JsonSchema | undefined): void {
+    if (inputSchema === undefined) {
+      const { inputSchema: _inputSchema, ...withoutInputSchema } = schema;
+      updateSchema(withoutInputSchema);
+      return;
+    }
+    updateSchema({ ...schema, inputSchema });
+  }
+
   function updateStep(name: string, patch: Partial<BuilderStep> & { name?: string }): void {
     const old = schema.steps.find((step) => step.name === name);
     if (!old) return;
@@ -301,7 +315,14 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
   function connectStep(from: string, to: string): void {
     if (from === to) return;
     const target = schema.steps.find((step) => step.name === to);
-    if (!target || !hasDependsOn(target) || target.dependsOn.includes(from)) return;
+    if (!target || !hasDependsOn(target)) return;
+    if (from === INPUT_NODE_ID) {
+      updateStepDependsOn(to, []);
+      setConnectingFrom(null);
+      setSelectedStep(to);
+      return;
+    }
+    if (target.dependsOn.includes(from)) return;
     if (wouldCreateCycle(schema, from, to)) {
       setError(`Cannot connect ${from} to ${to}: that would create a dependency cycle.`);
       setConnectingFrom(null);
@@ -428,6 +449,7 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
               <WorkflowCanvas
                 schema={schema}
                 stepById={stepById}
+                inputLabel={rootInputLabel}
                 selected={selectedStep}
                 connectingFrom={connectingFrom}
                 onSelect={setSelectedStep}
@@ -548,7 +570,10 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
                 schema={schema}
                 catalog={steps}
                 issues={issues}
+                inputSelected={selectedStep === INPUT_NODE_ID}
+                inputSchema={schema.inputSchema}
                 onUpdate={updateStep}
+                onUpdateInputSchema={updateWorkflowInputSchema}
                 onRemove={removeStep}
               />
             </div>
@@ -675,6 +700,7 @@ function StepCatalogPanel({
 function WorkflowCanvas({
   schema,
   stepById,
+  inputLabel,
   selected,
   connectingFrom,
   onSelect,
@@ -686,6 +712,7 @@ function WorkflowCanvas({
 }: {
   schema: WorkflowSchema;
   stepById: Map<string, CatalogStep>;
+  inputLabel: string;
   selected: string;
   connectingFrom: string | null;
   onSelect: (name: string) => void;
@@ -710,13 +737,23 @@ function WorkflowCanvas({
     const pos = schema.ui?.[step.name] ?? { x: 80 + index * 180, y: 120 };
     return { step, x: pos.x, y: pos.y };
   });
-  const bounds = nodes.reduce(
-    (acc, node) => ({
-      width: Math.max(acc.width, node.x + 220),
-      height: Math.max(acc.height, node.y + 140),
-    }),
-    { width: 900, height: 440 },
+  const minNodeX = nodes.reduce((min, node) => Math.min(min, node.x), 280);
+  const minNodeY = nodes.reduce((min, node) => Math.min(min, node.y), 120);
+  const inputNode = {
+    x: minNodeX - 240,
+    y: Math.max(40, minNodeY),
+  };
+  const right = nodes.reduce(
+    (max, node) => Math.max(max, node.x + 220),
+    Math.max(900, inputNode.x + 200),
   );
+  const bottom = nodes.reduce((max, node) => Math.max(max, node.y + 140), 440);
+  const viewBox = {
+    x: Math.min(0, inputNode.x - 24),
+    y: 0,
+    width: right - Math.min(0, inputNode.x - 24),
+    height: Math.max(bottom, inputNode.y + 120),
+  };
 
   function pointFor(e: MouseEvent): { x: number; y: number } | null {
     const svg = svgRef.current;
@@ -779,7 +816,10 @@ function WorkflowCanvas({
         <div>
           {connectingFrom ? (
             <span>
-              Connecting from <span class="font-mono text-base-content">{connectingFrom}</span>
+              Connecting from{" "}
+              <span class="font-mono text-base-content">
+                {connectingFrom === INPUT_NODE_ID ? "Input" : connectingFrom}
+              </span>
             </span>
           ) : (
             <span>Drag nodes. Use right handles to connect, left handles to receive.</span>
@@ -794,7 +834,7 @@ function WorkflowCanvas({
       <svg
         ref={svgRef}
         class="h-[28rem] w-full rounded border border-base-content/10 bg-base-100 lg:h-[42rem]"
-        viewBox={`0 0 ${bounds.width} ${bounds.height}`}
+        viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`}
         role="img"
         onMouseMove={moveDrag}
         onMouseUp={() => {
@@ -854,6 +894,65 @@ function WorkflowCanvas({
               })
             : [],
         )}
+        {nodes
+          .filter((node) => hasDependsOn(node.step) && node.step.dependsOn.length === 0)
+          .map((node) => (
+            <line
+              x1={inputNode.x + 160}
+              y1={inputNode.y + 36}
+              x2={node.x}
+              y2={node.y + 44}
+              stroke="currentColor"
+              class="text-success/55"
+              stroke-width="2"
+              marker-end="url(#wf-arrow)"
+            />
+          ))}
+        <g
+          class="cursor-pointer"
+          transform={`translate(${inputNode.x}, ${inputNode.y})`}
+          onClick={() => onSelect(INPUT_NODE_ID)}
+        >
+          <rect
+            width="160"
+            height="72"
+            rx="6"
+            class={
+              selected === INPUT_NODE_ID
+                ? "fill-success/20 stroke-success"
+                : "fill-success/10 stroke-success/60"
+            }
+            stroke-width={selected === INPUT_NODE_ID ? 2 : 1.5}
+          />
+          <text x="14" y="28" class="select-none fill-current text-[13px] font-semibold">
+            Input
+          </text>
+          <text x="14" y="50" class="select-none fill-current text-[10px] opacity-55">
+            {inputLabel}
+          </text>
+          <g
+            class={`cursor-pointer ${
+              (connectionDrag?.from ?? connectingFrom) === INPUT_NODE_ID
+                ? "text-primary"
+                : "text-success"
+            }`}
+            transform="translate(160, 36)"
+            onMouseDown={(e) =>
+              beginConnectionDrag(e, INPUT_NODE_ID, inputNode.x + 160, inputNode.y + 36)
+            }
+            onClick={(e) => {
+              e.stopPropagation();
+              if (suppressNextConnectClick.current) {
+                suppressNextConnectClick.current = false;
+                return;
+              }
+              onConnectStart(INPUT_NODE_ID);
+            }}
+          >
+            <circle r="8" class="fill-base-100 stroke-current" stroke-width="2" />
+            <circle r="3" class="fill-current" />
+          </g>
+        </g>
         {nodes.map((node) => {
           const entry =
             "activityRef" in node.step ? stepById.get(node.step.activityRef) : undefined;
@@ -863,7 +962,9 @@ function WorkflowCanvas({
             activeConnectionFrom !== null &&
             activeConnectionFrom !== node.step.name &&
             hasDependsOn(node.step) &&
-            !node.step.dependsOn.includes(activeConnectionFrom);
+            (activeConnectionFrom === INPUT_NODE_ID
+              ? node.step.dependsOn.length > 0
+              : !node.step.dependsOn.includes(activeConnectionFrom));
           return (
             <g transform={`translate(${node.x}, ${node.y})`}>
               <g
@@ -973,16 +1074,31 @@ function StepInspector({
   schema,
   catalog,
   issues,
+  inputSelected,
+  inputSchema,
   onUpdate,
+  onUpdateInputSchema,
   onRemove,
 }: {
   step: BuilderStep | undefined;
   schema: WorkflowSchema;
   catalog: CatalogStep[];
   issues: string[];
+  inputSelected: boolean;
+  inputSchema: JsonSchema | undefined;
   onUpdate: (name: string, patch: Partial<BuilderStep> & { name?: string }) => void;
+  onUpdateInputSchema: (schema: JsonSchema | undefined) => void;
   onRemove: (name: string) => void;
 }) {
+  if (inputSelected) {
+    return (
+      <InputInspector
+        inputSchema={inputSchema}
+        issues={issues}
+        onUpdateInputSchema={onUpdateInputSchema}
+      />
+    );
+  }
   if (!step) {
     return <div class="p-4 text-sm text-base-content/45">Select a node.</div>;
   }
@@ -1166,6 +1282,81 @@ function StepInspector({
           This step kind can be edited from JSON until the canvas supports its full control surface.
         </div>
       )}
+      <div class="rounded border border-base-content/10 bg-base-200/50 p-3">
+        <div class="mb-2 text-[10px] uppercase tracking-wider text-base-content/50">Validation</div>
+        {issues.length === 0 ? (
+          <div class="text-xs text-success">Ready to save and publish.</div>
+        ) : (
+          <ul class="space-y-1 text-xs text-warning">
+            {issues.map((issue) => (
+              <li>{issue}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </aside>
+  );
+}
+
+function InputInspector({
+  inputSchema,
+  issues,
+  onUpdateInputSchema,
+}: {
+  inputSchema: JsonSchema | undefined;
+  issues: string[];
+  onUpdateInputSchema: (schema: JsonSchema | undefined) => void;
+}) {
+  const [json, setJson] = useState(() =>
+    JSON.stringify(inputSchema ?? { type: "object", properties: {} }, null, 2),
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setJson(JSON.stringify(inputSchema ?? { type: "object", properties: {} }, null, 2));
+    setError(null);
+  }, [inputSchema]);
+
+  function apply(): void {
+    try {
+      const parsed = JSON.parse(json) as JsonSchema;
+      onUpdateInputSchema(parsed);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  return (
+    <aside class="space-y-3 p-4">
+      <div>
+        <div class="text-xs uppercase tracking-wider text-base-content/55">Node</div>
+        <div class="mt-1 font-mono text-sm">Input</div>
+        <div class="mt-1 text-xs text-base-content/55">{schemaTypeLabel(inputSchema)}</div>
+      </div>
+      <label class="form-control">
+        <span class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">
+          Workflow Input Schema
+        </span>
+        <textarea
+          class="textarea textarea-bordered min-h-52 font-mono text-xs leading-relaxed"
+          spellcheck={false}
+          value={json}
+          onInput={(e) => {
+            setJson((e.target as HTMLTextAreaElement).value);
+            setError(null);
+          }}
+        />
+      </label>
+      {error && <div class="alert alert-error text-xs">{error}</div>}
+      <div class="flex flex-wrap justify-end gap-2">
+        <button class="btn btn-sm btn-ghost" onClick={() => onUpdateInputSchema(undefined)}>
+          Clear
+        </button>
+        <button class="btn btn-sm btn-primary" onClick={apply}>
+          Apply Schema
+        </button>
+      </div>
       <div class="rounded border border-base-content/10 bg-base-200/50 p-3">
         <div class="mb-2 text-[10px] uppercase tracking-wider text-base-content/50">Validation</div>
         {issues.length === 0 ? (
