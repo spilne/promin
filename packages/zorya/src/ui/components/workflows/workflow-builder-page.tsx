@@ -19,6 +19,14 @@ type BuilderMode = "canvas" | "json";
 
 const INPUT_NODE_ID = "__workflow_input__";
 
+const DEFAULT_INPUT_SCHEMA_TEMPLATE: JsonSchema = {
+  type: "object",
+  properties: {
+    text: { type: "string" },
+  },
+  required: ["text"],
+};
+
 const SAMPLE_SCHEMA: WorkflowSchema = {
   version: 1,
   name: "authored-uppercase",
@@ -1307,13 +1315,14 @@ function InputInspector({
   issues: string[];
   onUpdateInputSchema: (schema: JsonSchema | undefined) => void;
 }) {
+  const schemaTemplate = JSON.stringify(DEFAULT_INPUT_SCHEMA_TEMPLATE, null, 2);
   const [json, setJson] = useState(() =>
-    JSON.stringify(inputSchema ?? { type: "object", properties: {} }, null, 2),
+    JSON.stringify(inputSchema ?? DEFAULT_INPUT_SCHEMA_TEMPLATE, null, 2),
   );
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setJson(JSON.stringify(inputSchema ?? { type: "object", properties: {} }, null, 2));
+    setJson(JSON.stringify(inputSchema ?? DEFAULT_INPUT_SCHEMA_TEMPLATE, null, 2));
     setError(null);
   }, [inputSchema]);
 
@@ -1341,6 +1350,7 @@ function InputInspector({
         <textarea
           class="textarea textarea-bordered min-h-52 font-mono text-xs leading-relaxed"
           spellcheck={false}
+          placeholder={schemaTemplate}
           value={json}
           onInput={(e) => {
             setJson((e.target as HTMLTextAreaElement).value);
@@ -1352,6 +1362,9 @@ function InputInspector({
       <div class="flex flex-wrap justify-end gap-2">
         <button class="btn btn-sm btn-ghost" onClick={() => onUpdateInputSchema(undefined)}>
           Clear
+        </button>
+        <button class="btn btn-sm btn-outline" onClick={() => setJson(schemaTemplate)}>
+          Use Template
         </button>
         <button class="btn btn-sm btn-primary" onClick={apply}>
           Apply Schema
