@@ -16,6 +16,7 @@ type BuilderStep = WorkflowSchema["steps"][number];
 type DependableStep = Extract<BuilderStep, { dependsOn: string[] }>;
 type EditableStep = Extract<BuilderStep, { activityRef: string; dependsOn: readonly string[] }>;
 type BuilderMode = "canvas" | "json";
+type BuilderView = "list" | "editor";
 
 const INPUT_NODE_ID = "__workflow_input__";
 
@@ -67,8 +68,10 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
   const [version, setVersion] = useState("v1");
   const [selectedStep, setSelectedStep] = useState("upper");
   const [mode, setMode] = useState<BuilderMode>("canvas");
+  const [view, setView] = useState<BuilderView>("list");
   const [selected, setSelected] = useState<AuthoredWorkflowDto | null>(null);
   const [connectingFrom, setConnectingFrom] = useState<string | null>(null);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [busy, setBusy] = useState<"save" | "publish" | "run" | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -182,7 +185,22 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
     updateSchema(structuredClone(workflow.schema), { preserveSelectedWorkflow: true });
     setSelected(workflow);
     setSelectedStep(workflow.schema.steps[0]?.name ?? "");
+    setView("editor");
+    setInspectorOpen(false);
     setTestInputTouched(false);
+  }
+
+  function startNewWorkflow(): void {
+    setSchema(structuredClone(SAMPLE_SCHEMA));
+    setSchemaJson(JSON.stringify(SAMPLE_SCHEMA, null, 2));
+    setVersion("v1");
+    setSelected(null);
+    setSelectedStep("upper");
+    setInspectorOpen(false);
+    setView("editor");
+    setTestInputTouched(false);
+    setError(null);
+    setMessage(null);
   }
 
   async function deleteAuthored(workflow: AuthoredWorkflowDto): Promise<void> {
@@ -411,182 +429,21 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
         </div>
       )}
 
-      <div class="space-y-4">
-        <section class="card bg-base-100/95 border border-base-content/10 shadow overflow-hidden">
-          <div class="flex flex-col gap-3 border-b border-base-content/10 p-4 lg:flex-row lg:items-end lg:justify-between">
-            <div class="grid flex-1 grid-cols-1 gap-2 md:grid-cols-[1fr_10rem]">
-              <label class="form-control">
-                <span class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">
-                  Workflow
-                </span>
-                <input
-                  class="input input-bordered input-sm font-mono"
-                  value={schema.name}
-                  onInput={(e) => updateWorkflowName((e.target as HTMLInputElement).value)}
-                />
-              </label>
-              <label class="form-control">
-                <span class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">
-                  Version
-                </span>
-                <input
-                  class="input input-bordered input-sm font-mono"
-                  value={version}
-                  onInput={(e) => setVersion((e.target as HTMLInputElement).value)}
-                />
-              </label>
-            </div>
-            <div class="join">
-              <button
-                class={`btn join-item btn-sm ${mode === "canvas" ? "btn-primary" : "btn-ghost"}`}
-                onClick={() => setMode("canvas")}
-              >
-                Canvas
-              </button>
-              <button
-                class={`btn join-item btn-sm ${mode === "json" ? "btn-primary" : "btn-ghost"}`}
-                onClick={() => setMode("json")}
-              >
-                JSON
-              </button>
-            </div>
-          </div>
-
-          {mode === "canvas" ? (
-            <div class="bg-base-200/45 p-4">
-              <WorkflowCanvas
-                schema={schema}
-                stepById={stepById}
-                inputLabel={rootInputLabel}
-                selected={selectedStep}
-                connectingFrom={connectingFrom}
-                onSelect={setSelectedStep}
-                onMove={moveStep}
-                onDelete={removeStep}
-                onConnectStart={(name) => setConnectingFrom(connectingFrom === name ? null : name)}
-                onConnectEnd={connectStep}
-                onDisconnect={disconnectStep}
-              />
-            </div>
-          ) : (
-            <div class="space-y-3 p-4">
-              <textarea
-                class="textarea textarea-bordered min-h-[34rem] w-full resize-y font-mono text-xs leading-relaxed"
-                spellcheck={false}
-                value={schemaJson}
-                onInput={(e) => {
-                  setSchemaJson((e.target as HTMLTextAreaElement).value);
-                  setError(null);
-                  setMessage(null);
-                }}
-              />
-              <div class="flex justify-end">
-                <button class="btn btn-sm btn-outline" onClick={applyJson}>
-                  Apply JSON
-                </button>
-              </div>
-            </div>
-          )}
-
-          <div class="border-t border-base-content/10 p-4">
-            {issues.length > 0 && (
-              <div class="mb-3 alert alert-warning text-xs">
-                <div>
-                  {issues.map((issue) => (
-                    <div>{issue}</div>
-                  ))}
+      {view === "list" ? (
+        <div class="space-y-4">
+          <section class="card bg-base-100/95 border border-base-content/10 shadow">
+            <div class="flex flex-col gap-3 p-4 md:flex-row md:items-center md:justify-between">
+              <div>
+                <div class="text-xs uppercase tracking-wider text-base-content/55">Workflows</div>
+                <div class="mt-1 text-sm text-base-content/65">
+                  Start from an authored workflow or create a new one.
                 </div>
               </div>
-            )}
-            {error && <div class="mb-3 alert alert-error text-xs">{error}</div>}
-            {message && <div class="mb-3 alert alert-success text-xs">{message}</div>}
-            <div class="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
-              <label class="form-control">
-                <span class="mb-1 flex flex-wrap items-center justify-between gap-2">
-                  <span class="text-[10px] uppercase tracking-wider text-base-content/50">
-                    Test Input JSON
-                  </span>
-                  <span class="font-mono text-[11px] text-base-content/45">{rootInputLabel}</span>
-                </span>
-                <textarea
-                  class="textarea textarea-bordered min-h-20 font-mono text-xs"
-                  value={testInputJson}
-                  onInput={(e) => {
-                    setTestInputTouched(true);
-                    setTestInputJson((e.target as HTMLTextAreaElement).value);
-                  }}
-                />
-              </label>
-              <div class="flex flex-wrap justify-end gap-2">
-                <button
-                  class="btn btn-sm btn-ghost"
-                  onClick={() => {
-                    setTestInputTouched(false);
-                    setTestInputJson(suggestedTestInputJson);
-                  }}
-                >
-                  Use Sample
-                </button>
-                <button
-                  class="btn btn-sm btn-ghost"
-                  onClick={() => {
-                    setSchema(structuredClone(SAMPLE_SCHEMA));
-                    setSchemaJson(JSON.stringify(SAMPLE_SCHEMA, null, 2));
-                    setVersion("v1");
-                    setSelected(null);
-                    setSelectedStep("upper");
-                    setTestInputTouched(false);
-                    setError(null);
-                    setMessage(null);
-                  }}
-                >
-                  New
-                </button>
-                <button class="btn btn-sm btn-outline" disabled={busy !== null} onClick={save}>
-                  {busy === "save" ? "Saving..." : "Save Draft"}
-                </button>
-                <button
-                  class="btn btn-sm btn-primary"
-                  disabled={busy !== null || issues.length > 0}
-                  onClick={publish}
-                  title={issues.length > 0 ? "Resolve validation issues before publishing" : ""}
-                >
-                  {busy === "publish" ? "Publishing..." : "Publish"}
-                </button>
-                <button
-                  class="btn btn-sm btn-secondary"
-                  disabled={busy !== null || issues.length > 0}
-                  onClick={testRun}
-                  title={issues.length > 0 ? "Resolve validation issues before testing" : ""}
-                >
-                  {busy === "run" ? "Running..." : "Test Run"}
-                </button>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <div class="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.4fr)_360px_340px]">
-          <StepCatalogPanel loading={catalogLoading && !catalog} steps={steps} onAdd={addStep} />
-          <section class="card bg-base-100/95 border border-base-content/10 shadow overflow-hidden">
-            <div class="border-b border-base-content/10 px-4 py-3">
-              <div class="text-xs uppercase tracking-wider text-base-content/55">Inspector</div>
-            </div>
-            <div class="max-h-[42rem] overflow-auto">
-              <StepInspector
-                step={activeStep}
-                schema={schema}
-                catalog={steps}
-                issues={issues}
-                inputSelected={selectedStep === INPUT_NODE_ID}
-                inputSchema={schema.inputSchema}
-                onUpdate={updateStep}
-                onUpdateInputSchema={updateWorkflowInputSchema}
-                onRemove={removeStep}
-              />
+              <button class="btn btn-sm btn-primary" onClick={startNewWorkflow}>
+                New Workflow
+              </button>
             </div>
           </section>
-
           <AuthoredPanel
             workflows={workflows}
             loading={authoredLoading && !authored}
@@ -615,7 +472,192 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
             }}
           />
         </div>
-      </div>
+      ) : (
+        <div class="space-y-4">
+          <section class="card bg-base-100/95 border border-base-content/10 shadow overflow-hidden">
+            <div class="flex flex-col gap-3 border-b border-base-content/10 p-4 lg:flex-row lg:items-end lg:justify-between">
+              <div class="grid flex-1 grid-cols-1 gap-2 md:grid-cols-[1fr_10rem]">
+                <label class="form-control">
+                  <span class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">
+                    Workflow
+                  </span>
+                  <input
+                    class="input input-bordered input-sm font-mono"
+                    value={schema.name}
+                    onInput={(e) => updateWorkflowName((e.target as HTMLInputElement).value)}
+                  />
+                </label>
+                <label class="form-control">
+                  <span class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">
+                    Version
+                  </span>
+                  <input
+                    class="input input-bordered input-sm font-mono"
+                    value={version}
+                    onInput={(e) => setVersion((e.target as HTMLInputElement).value)}
+                  />
+                </label>
+              </div>
+              <div class="join">
+                <button class="btn join-item btn-sm btn-ghost" onClick={() => setView("list")}>
+                  Workflows
+                </button>
+                <button
+                  class={`btn join-item btn-sm ${mode === "canvas" ? "btn-primary" : "btn-ghost"}`}
+                  onClick={() => setMode("canvas")}
+                >
+                  Canvas
+                </button>
+                <button
+                  class={`btn join-item btn-sm ${mode === "json" ? "btn-primary" : "btn-ghost"}`}
+                  onClick={() => setMode("json")}
+                >
+                  JSON
+                </button>
+                <button
+                  class="btn join-item btn-sm btn-ghost"
+                  onClick={() => setInspectorOpen(true)}
+                >
+                  Inspector
+                </button>
+              </div>
+            </div>
+
+            {mode === "canvas" ? (
+              <div class="bg-base-200/45 p-4">
+                <WorkflowCanvas
+                  schema={schema}
+                  stepById={stepById}
+                  inputLabel={rootInputLabel}
+                  selected={selectedStep}
+                  connectingFrom={connectingFrom}
+                  onSelect={setSelectedStep}
+                  onInspect={(name) => {
+                    setSelectedStep(name);
+                    setInspectorOpen(true);
+                  }}
+                  onMove={moveStep}
+                  onDelete={removeStep}
+                  onConnectStart={(name) =>
+                    setConnectingFrom(connectingFrom === name ? null : name)
+                  }
+                  onConnectEnd={connectStep}
+                  onDisconnect={disconnectStep}
+                />
+              </div>
+            ) : (
+              <div class="space-y-3 p-4">
+                <textarea
+                  class="textarea textarea-bordered min-h-[34rem] w-full resize-y font-mono text-xs leading-relaxed"
+                  spellcheck={false}
+                  value={schemaJson}
+                  onInput={(e) => {
+                    setSchemaJson((e.target as HTMLTextAreaElement).value);
+                    setError(null);
+                    setMessage(null);
+                  }}
+                />
+                <div class="flex justify-end">
+                  <button class="btn btn-sm btn-outline" onClick={applyJson}>
+                    Apply JSON
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div class="border-t border-base-content/10 p-4">
+              {issues.length > 0 && (
+                <div class="mb-3 alert alert-warning text-xs">
+                  <div>
+                    {issues.map((issue) => (
+                      <div>{issue}</div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {error && <div class="mb-3 alert alert-error text-xs">{error}</div>}
+              {message && <div class="mb-3 alert alert-success text-xs">{message}</div>}
+              <div class="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+                <label class="form-control">
+                  <span class="mb-1 flex flex-wrap items-center justify-between gap-2">
+                    <span class="text-[10px] uppercase tracking-wider text-base-content/50">
+                      Test Input JSON
+                    </span>
+                    <span class="font-mono text-[11px] text-base-content/45">{rootInputLabel}</span>
+                  </span>
+                  <textarea
+                    class="textarea textarea-bordered min-h-20 font-mono text-xs"
+                    value={testInputJson}
+                    onInput={(e) => {
+                      setTestInputTouched(true);
+                      setTestInputJson((e.target as HTMLTextAreaElement).value);
+                    }}
+                  />
+                </label>
+                <div class="flex flex-wrap justify-end gap-2">
+                  <button
+                    class="btn btn-sm btn-ghost"
+                    onClick={() => {
+                      setTestInputTouched(false);
+                      setTestInputJson(suggestedTestInputJson);
+                    }}
+                  >
+                    Use Sample
+                  </button>
+                  <button
+                    class="btn btn-sm btn-ghost"
+                    onClick={() => {
+                      startNewWorkflow();
+                    }}
+                  >
+                    New
+                  </button>
+                  <button class="btn btn-sm btn-outline" disabled={busy !== null} onClick={save}>
+                    {busy === "save" ? "Saving..." : "Save Draft"}
+                  </button>
+                  <button
+                    class="btn btn-sm btn-primary"
+                    disabled={busy !== null || issues.length > 0}
+                    onClick={publish}
+                    title={issues.length > 0 ? "Resolve validation issues before publishing" : ""}
+                  >
+                    {busy === "publish" ? "Publishing..." : "Publish"}
+                  </button>
+                  <button
+                    class="btn btn-sm btn-secondary"
+                    disabled={busy !== null || issues.length > 0}
+                    onClick={testRun}
+                    title={issues.length > 0 ? "Resolve validation issues before testing" : ""}
+                  >
+                    {busy === "run" ? "Running..." : "Test Run"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <div class="grid grid-cols-1 gap-4">
+            <StepCatalogPanel loading={catalogLoading && !catalog} steps={steps} onAdd={addStep} />
+          </div>
+        </div>
+      )}
+      {inspectorOpen && view === "editor" && (
+        <InspectorDrawer
+          step={activeStep}
+          schema={schema}
+          catalog={steps}
+          issues={issues}
+          inputSelected={selectedStep === INPUT_NODE_ID}
+          inputSchema={schema.inputSchema}
+          onClose={() => setInspectorOpen(false)}
+          onUpdate={updateStep}
+          onUpdateInputSchema={updateWorkflowInputSchema}
+          onRemove={(name) => {
+            removeStep(name);
+            setInspectorOpen(false);
+          }}
+        />
+      )}
     </Page>
   );
 }
@@ -639,6 +681,14 @@ function StepCatalogPanel({
         .some((value) => String(value).toLowerCase().includes(needle)),
     );
   }, [query, steps]);
+  const groupedSteps = useMemo(() => {
+    const groups = new Map<string, CatalogStep[]>();
+    for (const step of visibleSteps) {
+      const category = step.category ?? step.kind ?? "Other";
+      groups.set(category, [...(groups.get(category) ?? []), step]);
+    }
+    return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
+  }, [visibleSteps]);
 
   return (
     <section class="card bg-base-100/95 border border-base-content/10 shadow overflow-hidden">
@@ -666,37 +716,46 @@ function StepCatalogPanel({
             <EmptyState message="No step templates registered." />
           </div>
         ) : (
-          <div class="grid grid-cols-1 gap-2 md:grid-cols-2 2xl:grid-cols-3">
-            {visibleSteps.map((step) => (
-              <button
-                class="min-h-28 rounded border border-base-content/10 bg-base-100 p-3 text-left hover:border-primary/40 hover:bg-base-200"
-                onClick={() => onAdd(step)}
-                title="Add this step to the workflow"
-              >
-                <div class="flex items-start justify-between gap-2">
-                  <div class="min-w-0">
-                    <div class="text-sm font-medium leading-tight">{step.title}</div>
-                    <div class="mt-1 font-mono text-[11px] text-base-content/45 truncate">
-                      {step.id}
-                    </div>
-                  </div>
-                  <span class="badge badge-sm badge-outline shrink-0">
-                    {step.category ?? step.kind ?? "step"}
-                  </span>
+          <div class="space-y-3">
+            {groupedSteps.map(([category, categorySteps]) => (
+              <details class="rounded border border-base-content/10 bg-base-100" open>
+                <summary class="cursor-pointer px-3 py-2 text-xs font-medium uppercase tracking-wider text-base-content/55">
+                  {category} <span class="font-mono opacity-45">{categorySteps.length}</span>
+                </summary>
+                <div class="grid grid-cols-1 gap-2 border-t border-base-content/10 p-3 md:grid-cols-2 2xl:grid-cols-3">
+                  {categorySteps.map((step) => (
+                    <button
+                      class="min-h-28 rounded border border-base-content/10 bg-base-100 p-3 text-left hover:border-primary/40 hover:bg-base-200"
+                      onClick={() => onAdd(step)}
+                      title="Add this step to the workflow"
+                    >
+                      <div class="flex items-start justify-between gap-2">
+                        <div class="min-w-0">
+                          <div class="text-sm font-medium leading-tight">{step.title}</div>
+                          <div class="mt-1 font-mono text-[11px] text-base-content/45 truncate">
+                            {step.id}
+                          </div>
+                        </div>
+                        <span class="badge badge-sm badge-outline shrink-0">
+                          {step.kind ?? "step"}
+                        </span>
+                      </div>
+                      {step.description && (
+                        <div class="mt-2 line-clamp-2 text-xs leading-relaxed text-base-content/60">
+                          {step.description}
+                        </div>
+                      )}
+                      {step.capabilities && step.capabilities.length > 0 && (
+                        <div class="mt-2 flex flex-wrap gap-1">
+                          {step.capabilities.map((capability) => (
+                            <span class="badge badge-xs badge-ghost">{capability}</span>
+                          ))}
+                        </div>
+                      )}
+                    </button>
+                  ))}
                 </div>
-                {step.description && (
-                  <div class="mt-2 line-clamp-2 text-xs leading-relaxed text-base-content/60">
-                    {step.description}
-                  </div>
-                )}
-                {step.capabilities && step.capabilities.length > 0 && (
-                  <div class="mt-2 flex flex-wrap gap-1">
-                    {step.capabilities.map((capability) => (
-                      <span class="badge badge-xs badge-ghost">{capability}</span>
-                    ))}
-                  </div>
-                )}
-              </button>
+              </details>
             ))}
           </div>
         )}
@@ -712,6 +771,7 @@ function WorkflowCanvas({
   selected,
   connectingFrom,
   onSelect,
+  onInspect,
   onMove,
   onDelete,
   onConnectStart,
@@ -724,6 +784,7 @@ function WorkflowCanvas({
   selected: string;
   connectingFrom: string | null;
   onSelect: (name: string) => void;
+  onInspect: (name: string) => void;
   onMove: (name: string, x: number, y: number) => void;
   onDelete: (name: string) => void;
   onConnectStart: (name: string) => void;
@@ -864,13 +925,15 @@ function WorkflowCanvas({
             ? node.step.dependsOn.map((dep) => {
                 const from = nodes.find((candidate) => candidate.step.name === dep);
                 if (!from) return null;
+                const sourceX = from.x + 180;
+                const sourceY = from.y + 44;
+                const targetX = node.x;
+                const targetY = node.y + 44;
                 return (
                   <g>
-                    <line
-                      x1={from.x + 180}
-                      y1={from.y + 44}
-                      x2={node.x}
-                      y2={node.y + 44}
+                    <path
+                      d={edgePath(sourceX, sourceY, targetX, targetY)}
+                      fill="none"
                       stroke="currentColor"
                       class="text-base-content/30"
                       stroke-width="2"
@@ -905,11 +968,9 @@ function WorkflowCanvas({
         {nodes
           .filter((node) => hasDependsOn(node.step) && node.step.dependsOn.length === 0)
           .map((node) => (
-            <line
-              x1={inputNode.x + 160}
-              y1={inputNode.y + 36}
-              x2={node.x}
-              y2={node.y + 44}
+            <path
+              d={edgePath(inputNode.x + 160, inputNode.y + 36, node.x, node.y + 44)}
+              fill="none"
               stroke="currentColor"
               class="text-success/55"
               stroke-width="2"
@@ -920,6 +981,10 @@ function WorkflowCanvas({
           class="cursor-pointer"
           transform={`translate(${inputNode.x}, ${inputNode.y})`}
           onClick={() => onSelect(INPUT_NODE_ID)}
+          onDblClick={(e) => {
+            e.stopPropagation();
+            onInspect(INPUT_NODE_ID);
+          }}
         >
           <rect
             width="160"
@@ -979,6 +1044,10 @@ function WorkflowCanvas({
                 class="cursor-move"
                 onMouseDown={(e) => beginDrag(e, node.step.name, node.x, node.y)}
                 onClick={() => onSelect(node.step.name)}
+                onDblClick={(e) => {
+                  e.stopPropagation();
+                  onInspect(node.step.name);
+                }}
               >
                 <rect
                   width="180"
@@ -1073,6 +1142,65 @@ function WorkflowCanvas({
           />
         )}
       </svg>
+    </div>
+  );
+}
+
+function edgePath(sourceX: number, sourceY: number, targetX: number, targetY: number): string {
+  const dx = Math.max(80, Math.abs(targetX - sourceX) * 0.5);
+  return `M ${sourceX} ${sourceY} C ${sourceX + dx} ${sourceY}, ${targetX - dx} ${targetY}, ${targetX} ${targetY}`;
+}
+
+function InspectorDrawer({
+  step,
+  schema,
+  catalog,
+  issues,
+  inputSelected,
+  inputSchema,
+  onClose,
+  onUpdate,
+  onUpdateInputSchema,
+  onRemove,
+}: {
+  step: BuilderStep | undefined;
+  schema: WorkflowSchema;
+  catalog: CatalogStep[];
+  issues: string[];
+  inputSelected: boolean;
+  inputSchema: JsonSchema | undefined;
+  onClose: () => void;
+  onUpdate: (name: string, patch: Partial<BuilderStep> & { name?: string }) => void;
+  onUpdateInputSchema: (schema: JsonSchema | undefined) => void;
+  onRemove: (name: string) => void;
+}) {
+  return (
+    <div class="fixed inset-0 z-40 flex justify-end bg-black/20" onClick={onClose}>
+      <aside
+        class="h-full w-full max-w-[28rem] overflow-auto border-l border-base-content/10 bg-base-100 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div class="sticky top-0 z-10 flex items-center justify-between border-b border-base-content/10 bg-base-100 px-4 py-3">
+          <div>
+            <div class="text-xs uppercase tracking-wider text-base-content/55">Inspector</div>
+            <div class="mt-1 text-xs text-base-content/45">Double-click a node to inspect it.</div>
+          </div>
+          <button class="btn btn-sm btn-ghost" onClick={onClose}>
+            Close
+          </button>
+        </div>
+        <StepInspector
+          step={step}
+          schema={schema}
+          catalog={catalog}
+          issues={issues}
+          inputSelected={inputSelected}
+          inputSchema={inputSchema}
+          onUpdate={onUpdate}
+          onUpdateInputSchema={onUpdateInputSchema}
+          onRemove={onRemove}
+        />
+      </aside>
     </div>
   );
 }
