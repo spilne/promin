@@ -144,6 +144,17 @@ function renderRoute(route: string, navigate: (p: string) => void) {
   if (path === "/workflow-builder") {
     return (
       <WorkflowBuilderPage
+        initialWorkflowName={params.get("name") ?? undefined}
+        initialWorkflowVersion={params.get("version") ?? undefined}
+        onBuilderRouteChange={(name, version) => {
+          if (!name) {
+            navigate("/workflow-builder");
+            return;
+          }
+          const qs = new URLSearchParams({ name });
+          if (version) qs.set("version", version);
+          navigate(`/workflow-builder?${qs.toString()}`);
+        }}
         onOpenWorkflow={(name) => navigate(`/workflows/${encodeURIComponent(name)}`)}
         onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)}
       />

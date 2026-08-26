@@ -45,11 +45,20 @@ const SAMPLE_SCHEMA: WorkflowSchema = {
 };
 
 interface WorkflowBuilderPageProps {
+  initialWorkflowName?: string;
+  initialWorkflowVersion?: string;
+  onBuilderRouteChange: (name?: string, version?: string) => void;
   onOpenWorkflow: (name: string) => void;
   onOpenRun: (id: string) => void;
 }
 
-export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuilderPageProps) {
+export function WorkflowBuilderPage({
+  initialWorkflowName,
+  initialWorkflowVersion,
+  onBuilderRouteChange,
+  onOpenWorkflow,
+  onOpenRun,
+}: WorkflowBuilderPageProps) {
   const [namespace] = useNamespace();
   const {
     data: catalog,
@@ -95,10 +104,30 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
     [suggestedTestInput],
   );
   const rootInputLabel = useMemo(() => describeWorkflowInput(schema, stepById), [schema, stepById]);
+  const rootInputSchema = useMemo(() => firstRootInputSchema(schema, stepById), [schema, stepById]);
 
   useEffect(() => {
     if (!testInputTouched) setTestInputJson(suggestedTestInputJson);
   }, [suggestedTestInputJson, testInputTouched]);
+
+  useEffect(() => {
+    if (!initialWorkflowName || !authored?.workflows) return;
+    const target =
+      authored.workflows.find(
+        (workflow) =>
+          workflow.name === initialWorkflowName &&
+          (!initialWorkflowVersion || workflow.version === initialWorkflowVersion),
+      ) ?? authored.workflows.find((workflow) => workflow.name === initialWorkflowName);
+    if (!target) return;
+    if (
+      selected?.name === target.name &&
+      selected.version === target.version &&
+      view === "editor"
+    ) {
+      return;
+    }
+    loadWorkflow(target, { updateRoute: false });
+  }, [authored, initialWorkflowName, initialWorkflowVersion]);
 
   function updateSchema(
     next: WorkflowSchema,
@@ -180,7 +209,10 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
     }
   }
 
-  function loadWorkflow(workflow: AuthoredWorkflowDto): void {
+  function loadWorkflow(
+    workflow: AuthoredWorkflowDto,
+    options: { updateRoute?: boolean } = {},
+  ): void {
     setVersion(workflow.version);
     updateSchema(structuredClone(workflow.schema), { preserveSelectedWorkflow: true });
     setSelected(workflow);
@@ -188,6 +220,7 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
     setView("editor");
     setInspectorOpen(false);
     setTestInputTouched(false);
+    if (options.updateRoute !== false) onBuilderRouteChange(workflow.name, workflow.version);
   }
 
   function startNewWorkflow(): void {
@@ -198,6 +231,7 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
     setSelectedStep("upper");
     setInspectorOpen(false);
     setView("editor");
+    onBuilderRouteChange();
     setTestInputTouched(false);
     setError(null);
     setMessage(null);
@@ -652,6 +686,7 @@ export function WorkflowBuilderPage({ onOpenWorkflow, onOpenRun }: WorkflowBuild
           onClose={() => setInspectorOpen(false)}
           onUpdate={updateStep}
           onUpdateInputSchema={updateWorkflowInputSchema}
+          inputSchemaTemplate={rootInputSchema}
           onRemove={(name) => {
             removeStep(name);
             setInspectorOpen(false);
@@ -1158,6 +1193,7 @@ function InspectorDrawer({
   issues,
   inputSelected,
   inputSchema,
+  inputSchemaTemplate,
   onClose,
   onUpdate,
   onUpdateInputSchema,
@@ -1169,6 +1205,7 @@ function InspectorDrawer({
   issues: string[];
   inputSelected: boolean;
   inputSchema: JsonSchema | undefined;
+  inputSchemaTemplate: JsonSchema | undefined;
   onClose: () => void;
   onUpdate: (name: string, patch: Partial<BuilderStep> & { name?: string }) => void;
   onUpdateInputSchema: (schema: JsonSchema | undefined) => void;
@@ -1196,6 +1233,7 @@ function InspectorDrawer({
           issues={issues}
           inputSelected={inputSelected}
           inputSchema={inputSchema}
+          inputSchemaTemplate={inputSchemaTemplate}
           onUpdate={onUpdate}
           onUpdateInputSchema={onUpdateInputSchema}
           onRemove={onRemove}
@@ -1212,6 +1250,7 @@ function StepInspector({
   issues,
   inputSelected,
   inputSchema,
+  inputSchemaTemplate,
   onUpdate,
   onUpdateInputSchema,
   onRemove,
@@ -1222,6 +1261,7 @@ function StepInspector({
   issues: string[];
   inputSelected: boolean;
   inputSchema: JsonSchema | undefined;
+  inputSchemaTemplate: JsonSchema | undefined;
   onUpdate: (name: string, patch: Partial<BuilderStep> & { name?: string }) => void;
   onUpdateInputSchema: (schema: JsonSchema | undefined) => void;
   onRemove: (name: string) => void;
@@ -1230,6 +1270,7 @@ function StepInspector({
     return (
       <InputInspector
         inputSchema={inputSchema}
+        inputSchemaTemplate={inputSchemaTemplate}
         issues={issues}
         onUpdateInputSchema={onUpdateInputSchema}
       />
@@ -1436,23 +1477,24 @@ function StepInspector({
 
 function InputInspector({
   inputSchema,
+  inputSchemaTemplate,
   issues,
   onUpdateInputSchema,
 }: {
   inputSchema: JsonSchema | undefined;
+  inputSchemaTemplate: JsonSchema | undefined;
   issues: string[];
   onUpdateInputSchema: (schema: JsonSchema | undefined) => void;
 }) {
-  const schemaTemplate = JSON.stringify(DEFAULT_INPUT_SCHEMA_TEMPLATE, null, 2);
-  const [json, setJson] = useState(() =>
-    JSON.stringify(inputSchema ?? DEFAULT_INPUT_SCHEMA_TEMPLATE, null, 2),
-  );
+  const template = inputSchemaTemplate ?? DEFAULT_INPUT_SCHEMA_TEMPLATE;
+  const schemaTemplate = JSON.stringify(template, null, 2);
+  const [json, setJson] = useState(() => JSON.stringify(inputSchema ?? template, null, 2));
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    setJson(JSON.stringify(inputSchema ?? DEFAULT_INPUT_SCHEMA_TEMPLATE, null, 2));
+    setJson(JSON.stringify(inputSchema ?? template, null, 2));
     setError(null);
-  }, [inputSchema]);
+  }, [inputSchema, schemaTemplate]);
 
   function apply(): void {
     try {
@@ -1469,7 +1511,9 @@ function InputInspector({
       <div>
         <div class="text-xs uppercase tracking-wider text-base-content/55">Node</div>
         <div class="mt-1 font-mono text-sm">Input</div>
-        <div class="mt-1 text-xs text-base-content/55">{schemaTypeLabel(inputSchema)}</div>
+        <div class="mt-1 text-xs text-base-content/55">
+          {schemaTypeLabel(inputSchema ?? template)}
+        </div>
       </div>
       <label class="form-control">
         <span class="mb-1 text-[10px] uppercase tracking-wider text-base-content/50">
@@ -1862,6 +1906,19 @@ function validateDraft(schema: WorkflowSchema, stepById: Map<string, CatalogStep
     if ("activityRef" in step && !stepById.has(step.activityRef)) {
       issues.push(`Unknown activityRef on ${step.name}: ${step.activityRef}`);
     }
+    if (
+      schema.inputSchema &&
+      hasDependsOn(step) &&
+      step.dependsOn.length === 0 &&
+      "activityRef" in step
+    ) {
+      const expected = stepById.get(step.activityRef)?.inputSchema;
+      if (expected && !jsonSchemaTypeCompatible(schema.inputSchema, expected)) {
+        issues.push(
+          `Workflow input schema (${schemaTypeLabel(schema.inputSchema)}) does not match root step ${step.name} input (${schemaTypeLabel(expected)}).`,
+        );
+      }
+    }
     if (step.type === "branch") {
       if (!stepById.has(step.conditionRef)) {
         issues.push(`Unknown predicate on ${step.name}: ${step.conditionRef}`);
@@ -1956,6 +2013,12 @@ function schemaTypeLabel(schema: JsonSchema | undefined): string {
   }
   if (schema.type === "array") return "array";
   return schema.type ?? "value";
+}
+
+function jsonSchemaTypeCompatible(actual: JsonSchema, expected: JsonSchema): boolean {
+  if (!actual.type || !expected.type) return true;
+  if (actual.type === expected.type) return true;
+  return false;
 }
 
 function isEditableStep(step: BuilderStep): step is EditableStep {
