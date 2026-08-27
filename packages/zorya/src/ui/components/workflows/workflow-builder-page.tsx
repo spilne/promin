@@ -19,6 +19,7 @@ type BuilderMode = "canvas" | "json";
 type BuilderView = "list" | "editor";
 
 const INPUT_NODE_ID = "__workflow_input__";
+const STEP_DRAG_MIME = "application/x-zorya-step-id";
 
 const DEFAULT_INPUT_SCHEMA_TEMPLATE: JsonSchema = {
   type: "object",
@@ -264,7 +265,7 @@ export function WorkflowBuilderPage({
     }
   }
 
-  function addStep(entry: CatalogStep): void {
+  function addStep(entry: CatalogStep, position?: { x: number; y: number }): void {
     const baseName = toStepName(entry.id);
     const name = uniqueStepName(schema, baseName);
     const nextStep =
@@ -304,8 +305,8 @@ export function WorkflowBuilderPage({
       ui: {
         ...(schema.ui ?? {}),
         [name]: {
-          x: 80 + (schema.steps.length % 4) * 240,
-          y: 120 + Math.floor(schema.steps.length / 4) * 150,
+          x: position?.x ?? 80 + (schema.steps.length % 4) * 240,
+          y: position?.y ?? 120 + Math.floor(schema.steps.length / 4) * 150,
           label: entry.title,
         },
       },
@@ -565,10 +566,16 @@ export function WorkflowBuilderPage({
                   inputLabel={rootInputLabel}
                   selected={selectedStep}
                   connectingFrom={connectingFrom}
+                  issues={issues}
                   onSelect={setSelectedStep}
                   onInspect={(name) => {
                     setSelectedStep(name);
                     setInspectorOpen(true);
+                  }}
+                  onDropStep={(stepId, x, y) => {
+                    const entry = steps.find((step) => step.id === stepId);
+                    if (!entry) return;
+                    addStep(entry, { x, y });
                   }}
                   onMove={moveStep}
                   onDelete={removeStep}
@@ -731,7 +738,7 @@ function StepCatalogPanel({
         <div>
           <div class="text-xs uppercase tracking-wider text-base-content/55">Step Registry</div>
           <div class="mt-1 text-xs text-base-content/45">
-            {visibleSteps.length} of {steps.length} available
+            {visibleSteps.length} of {steps.length} available · drag onto canvas or click to add
           </div>
         </div>
         <label class="form-control md:w-72">
@@ -761,6 +768,11 @@ function StepCatalogPanel({
                   {categorySteps.map((step) => (
                     <button
                       class="min-h-28 rounded border border-base-content/10 bg-base-100 p-3 text-left hover:border-primary/40 hover:bg-base-200"
+                      draggable
+                      onDragStart={(e) => {
+                        e.dataTransfer?.setData(STEP_DRAG_MIME, step.id);
+                        if (e.dataTransfer) e.dataTransfer.effectAllowed = "copy";
+                      }}
                       onClick={() => onAdd(step)}
                       title="Add this step to the workflow"
                     >
@@ -805,8 +817,10 @@ function WorkflowCanvas({
   inputLabel,
   selected,
   connectingFrom,
+  issues,
   onSelect,
   onInspect,
+  onDropStep,
   onMove,
   onDelete,
   onConnectStart,
@@ -818,8 +832,10 @@ function WorkflowCanvas({
   inputLabel: string;
   selected: string;
   connectingFrom: string | null;
+  issues: string[];
   onSelect: (name: string) => void;
   onInspect: (name: string) => void;
+  onDropStep: (stepId: string, x: number, y: number) => void;
   onMove: (name: string, x: number, y: number) => void;
   onDelete: (name: string) => void;
   onConnectStart: (name: string) => void;
@@ -858,8 +874,29 @@ function WorkflowCanvas({
     width: right - Math.min(0, inputNode.x - 24),
     height: Math.max(bottom, inputNode.y + 120),
   };
+  const issuesByNode = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const issue of issues) {
+      for (const step of schema.steps) {
+        if (issue.includes(step.name)) {
+          map.set(step.name, [...(map.get(step.name) ?? []), issue]);
+        }
+      }
+      if (issue.startsWith("Workflow input schema")) {
+        map.set(INPUT_NODE_ID, [...(map.get(INPUT_NODE_ID) ?? []), issue]);
+      }
+    }
+    return map;
+  }, [issues, schema.steps]);
+  const inputIssues = issuesByNode.get(INPUT_NODE_ID) ?? [];
+  const inputRectClass =
+    selected === INPUT_NODE_ID
+      ? "fill-success/20 stroke-success"
+      : inputIssues.length > 0
+        ? "fill-warning/15 stroke-warning"
+        : "fill-success/10 stroke-success/60";
 
-  function pointFor(e: MouseEvent): { x: number; y: number } | null {
+  function pointFor(e: { clientX: number; clientY: number }): { x: number; y: number } | null {
     const svg = svgRef.current;
     const matrix = svg?.getScreenCTM();
     if (!svg || !matrix) return null;
@@ -914,6 +951,19 @@ function WorkflowCanvas({
     if (current.moved) onConnectStart(current.from);
   }
 
+  function dropStep(e: DragEvent): void {
+    const stepId = e.dataTransfer?.getData(STEP_DRAG_MIME);
+    if (!stepId) return;
+    e.preventDefault();
+    const point = pointFor(e);
+    if (!point) return;
+    onDropStep(
+      stepId,
+      Math.max(0, Math.round(point.x - 90)),
+      Math.max(0, Math.round(point.y - 44)),
+    );
+  }
+
   return (
     <div class="space-y-2">
       <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-base-content/55">
@@ -949,6 +999,12 @@ function WorkflowCanvas({
           setDrag(null);
           endConnectionDrag();
         }}
+        onDragOver={(e) => {
+          if (!e.dataTransfer?.types.includes(STEP_DRAG_MIME)) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "copy";
+        }}
+        onDrop={dropStep}
       >
         <defs>
           <marker id="wf-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
@@ -1021,15 +1077,12 @@ function WorkflowCanvas({
             onInspect(INPUT_NODE_ID);
           }}
         >
+          {inputIssues.length > 0 ? <title>{inputIssues.join("\n")}</title> : null}
           <rect
             width="160"
             height="72"
             rx="6"
-            class={
-              selected === INPUT_NODE_ID
-                ? "fill-success/20 stroke-success"
-                : "fill-success/10 stroke-success/60"
-            }
+            class={inputRectClass}
             stroke-width={selected === INPUT_NODE_ID ? 2 : 1.5}
           />
           <text x="14" y="28" class="select-none fill-current text-[13px] font-semibold">
@@ -1038,6 +1091,19 @@ function WorkflowCanvas({
           <text x="14" y="50" class="select-none fill-current text-[10px] opacity-55">
             {inputLabel}
           </text>
+          {inputIssues.length > 0 ? (
+            <g transform="translate(142, 16)">
+              <circle r="8" class="fill-warning stroke-base-100" stroke-width="1.5" />
+              <text
+                x="0"
+                y="4"
+                text-anchor="middle"
+                class="select-none fill-warning-content text-[11px]"
+              >
+                !
+              </text>
+            </g>
+          ) : null}
           <g
             class={`cursor-pointer ${
               (connectionDrag?.from ?? connectingFrom) === INPUT_NODE_ID
@@ -1065,6 +1131,7 @@ function WorkflowCanvas({
           const entry =
             "activityRef" in node.step ? stepById.get(node.step.activityRef) : undefined;
           const active = selected === node.step.name;
+          const nodeIssues = issuesByNode.get(node.step.name) ?? [];
           const activeConnectionFrom = connectionDrag?.from ?? connectingFrom;
           const canReceive =
             activeConnectionFrom !== null &&
@@ -1075,6 +1142,7 @@ function WorkflowCanvas({
               : !node.step.dependsOn.includes(activeConnectionFrom));
           return (
             <g transform={`translate(${node.x}, ${node.y})`}>
+              {nodeIssues.length ? <title>{nodeIssues.join("\n")}</title> : null}
               <g
                 class="cursor-move"
                 onMouseDown={(e) => beginDrag(e, node.step.name, node.x, node.y)}
@@ -1089,9 +1157,11 @@ function WorkflowCanvas({
                   height="88"
                   rx="6"
                   class={
-                    active
-                      ? "fill-primary/15 stroke-primary"
-                      : "fill-base-100 stroke-base-content/20"
+                    nodeIssues.length > 0
+                      ? "fill-warning/15 stroke-warning"
+                      : active
+                        ? "fill-primary/15 stroke-primary"
+                        : "fill-base-100 stroke-base-content/20"
                   }
                   stroke-width={active ? 2 : 1}
                 />
@@ -1105,6 +1175,19 @@ function WorkflowCanvas({
                 <text x="14" y="72" class="select-none fill-current text-[10px] opacity-45">
                   {node.step.type}
                 </text>
+                {nodeIssues.length > 0 && (
+                  <g transform="translate(150, 24)">
+                    <circle r="8" class="fill-warning stroke-base-100" stroke-width="1.5" />
+                    <text
+                      x="0"
+                      y="4"
+                      text-anchor="middle"
+                      class="select-none fill-warning-content text-[11px]"
+                    >
+                      !
+                    </text>
+                  </g>
+                )}
               </g>
 
               <g
