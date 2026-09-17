@@ -7,8 +7,7 @@
 // method. No routing, no middleware, no auth (put auth in front of it).
 // ---------------------------------------------------------------------------
 
-import type { StepQueue } from "@promin/workflow";
-import type { WorkflowStorage } from "@promin/workflow";
+import type { StepQueue, WorkerRegistry, WorkflowStorage } from "@promin/workflow";
 import {
   WORKER_WIRE_CODEC,
   type WorkerMethod,
@@ -33,10 +32,24 @@ import {
 export function createWorkerApiHandler(config: {
   stepQueue: StepQueue;
   storage: WorkflowStorage;
+  /**
+   * Optional WorkerRegistry. When provided, the handler dispatches
+   * register/heartbeat/drain/deregister/list methods to it. Without one,
+   * those methods return a "worker_registry_not_configured" error.
+   */
+  workerRegistry?: WorkerRegistry;
 }): (req: Request) => Promise<Response> {
-  const { stepQueue, storage } = config;
+  const { stepQueue, storage, workerRegistry } = config;
+
+  const requireRegistry = async <T>(fn: (r: WorkerRegistry) => Promise<T>): Promise<T> => {
+    if (!workerRegistry) {
+      throw new Error("worker_registry_not_configured");
+    }
+    return fn(workerRegistry);
+  };
 
   const dispatchers: Record<WorkerMethod, (params: any) => Promise<unknown>> = {
+    // StepQueue
     claim: (p) =>
       stepQueue.claim({
         capabilities: p.capabilities,
@@ -46,23 +59,42 @@ export function createWorkerApiHandler(config: {
     complete: (p) =>
       stepQueue.complete({
         taskId: p.taskId,
+        claimToken: p.claimToken,
         result: p.result,
         durationMs: p.durationMs,
       }),
     fail: (p) =>
       stepQueue.fail({
         taskId: p.taskId,
+        claimToken: p.claimToken,
         error: p.error,
         durationMs: p.durationMs,
       }),
-    heartbeat: (p) => stepQueue.heartbeat({ taskId: p.taskId }),
+    heartbeat: (p) => stepQueue.heartbeat({ taskId: p.taskId, claimToken: p.claimToken }),
     requeueStuck: (p) =>
       stepQueue.requeueStuck({
         claimedBy: p.claimedBy,
         staleTimeoutMs: p.staleTimeoutMs,
       }),
+    // Storage shortcuts
     saveStepResult: (p) => storage.saveStepResult(p),
     saveStepFailure: (p) => storage.saveStepFailure(p),
+    // WorkerRegistry
+    registerWorker: (p) =>
+      requireRegistry((r) =>
+        r.register({
+          workerId: p.workerId,
+          capabilities: p.capabilities ?? [],
+          concurrency: p.concurrency ?? 1,
+          metadata: p.metadata,
+        }),
+      ),
+    heartbeatWorker: (p) => requireRegistry((r) => r.heartbeat(p.workerId)),
+    drainWorker: (p) => requireRegistry((r) => r.drain(p.workerId)),
+    deregisterWorker: (p) => requireRegistry((r) => r.deregister(p.workerId)),
+    listWorkers: (p) => requireRegistry((r) => r.list({ status: p?.status })),
+    detectDeadWorkers: (p) => requireRegistry((r) => r.detectDead(p?.timeoutMs ?? 30_000)),
+    gcWorkers: (p) => requireRegistry((r) => r.gc({ retainMs: p.retainMs })),
   };
 
   return async (req) => {

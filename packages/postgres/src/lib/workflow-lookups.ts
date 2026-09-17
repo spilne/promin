@@ -12,6 +12,7 @@ export const WorkflowStatusIds = defineLookup<WorkflowStatus>({
   failed: 3,
   suspended: 4,
   compensating: 5,
+  tripwire: 6,
 });
 
 export const StepStatusIds = defineLookup<StepStatus>({

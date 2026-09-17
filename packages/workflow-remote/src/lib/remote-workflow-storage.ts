@@ -13,9 +13,16 @@ import type {
   WorkflowStorage,
   WorkflowState,
   WorkflowStatus,
+  WorkflowOrderBy,
   WorkflowRunSummary,
   SignalState,
   FenceGuard,
+  JournalEntry,
+  JournaledSuspendStorage,
+  StepAttemptStorage,
+  StepAttemptRecord,
+  SignalTokenRecord,
+  StreamChunk,
 } from "@promin/workflow";
 import { WIRE_CODEC, type RpcResponse, type StorageMethod } from "./wire.ts";
 
@@ -38,7 +45,9 @@ export interface RemoteWorkflowStorageConfig {
   readonly headers?: Record<string, string>;
 }
 
-export class RemoteWorkflowStorage implements WorkflowStorage {
+export class RemoteWorkflowStorage
+  implements WorkflowStorage, JournaledSuspendStorage, StepAttemptStorage
+{
   private readonly url: string;
   private readonly fetch: FetchLike;
   private readonly headers: Record<string, string>;
@@ -108,10 +117,25 @@ export class RemoteWorkflowStorage implements WorkflowStorage {
     type?: string;
     parentId?: string;
     namespace?: string;
+    metadata?: Record<string, unknown>;
     limit?: number;
     offset?: number;
+    orderBy?: WorkflowOrderBy;
+    orderDir?: "asc" | "desc";
   }): Promise<WorkflowState[]> {
     return this.call("listWorkflows", params ?? {});
+  }
+
+  distinctWorkflowNames(params?: { namespace?: string }): Promise<string[]> {
+    return this.call("distinctWorkflowNames", params ?? {});
+  }
+
+  distinctWorkflowTypes(params?: { namespace?: string }): Promise<string[]> {
+    return this.call("distinctWorkflowTypes", params ?? {});
+  }
+
+  distinctNamespaces(): Promise<string[]> {
+    return this.call("distinctNamespaces", {});
   }
 
   cancelWorkflow(
@@ -131,8 +155,19 @@ export class RemoteWorkflowStorage implements WorkflowStorage {
     namespace?: string;
     metadata?: Record<string, unknown>;
     version?: string;
+    idempotencyKey?: string;
+    idempotencyExpiresAt?: Date;
   }): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
     return this.call("createWorkflow", params);
+  }
+
+  findWorkflowByIdempotencyKey(params: {
+    workflowName: string;
+    namespace?: string;
+    idempotencyKey: string;
+    now: Date;
+  }): Promise<{ workflowId: string } | null> {
+    return this.call("findWorkflowByIdempotencyKey", params);
   }
 
   saveStepResult(
@@ -209,6 +244,10 @@ export class RemoteWorkflowStorage implements WorkflowStorage {
     return this.call("failWorkflow", { workflowId, error, guard });
   }
 
+  tripwireWorkflow(workflowId: string, reason: unknown, guard?: FenceGuard): Promise<void> {
+    return this.call("tripwireWorkflow", { workflowId, reason, guard });
+  }
+
   suspendWorkflow(
     workflowId: string,
     stepName: string,
@@ -224,6 +263,63 @@ export class RemoteWorkflowStorage implements WorkflowStorage {
 
   loadSignals(workflowId: string): Promise<SignalState[]> {
     return this.call("loadSignals", { workflowId });
+  }
+
+  setWorkflowMetadata(workflowId: string, patch: Record<string, unknown>): Promise<void> {
+    return this.call("setWorkflowMetadata", { workflowId, patch });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Signal tokens — public-bearer authz; remoted as plain RPC.
+  // ---------------------------------------------------------------------------
+
+  createSignalToken(params: {
+    tokenId: string;
+    workflowId: string;
+    signalName: string;
+    bearer: string;
+    tags: ReadonlyArray<string>;
+    idempotencyKey?: string | null;
+    expiresAt: Date;
+  }): Promise<{ record: SignalTokenRecord; isCached: boolean }> {
+    return this.call("createSignalToken", params);
+  }
+
+  findSignalTokenById(tokenId: string): Promise<SignalTokenRecord | null> {
+    return this.call("findSignalTokenById", { tokenId });
+  }
+
+  markSignalTokenCompleted(params: {
+    tokenId: string;
+    value: unknown;
+    now: Date;
+  }): Promise<
+    | { outcome: "delivered"; record: SignalTokenRecord }
+    | { outcome: "already_completed"; record: SignalTokenRecord }
+  > {
+    return this.call("markSignalTokenCompleted", params);
+  }
+
+  listSignalTokensForWorkflow(workflowId: string): Promise<ReadonlyArray<SignalTokenRecord>> {
+    return this.call("listSignalTokensForWorkflow", { workflowId });
+  }
+
+  appendStreamChunk(params: {
+    workflowId: string;
+    streamId: string;
+    payload: unknown;
+    appendedBy: "workflow" | "external";
+  }): Promise<{ chunkIndex: number }> {
+    return this.call("appendStreamChunk", params);
+  }
+
+  readStreamChunks(params: {
+    workflowId: string;
+    streamId: string;
+    since?: number;
+    limit?: number;
+  }): Promise<ReadonlyArray<StreamChunk>> {
+    return this.call("readStreamChunks", params);
   }
 
   tryLock(
@@ -259,9 +355,103 @@ export class RemoteWorkflowStorage implements WorkflowStorage {
     return this.call("loadRunHistory", { workflowId, params });
   }
 
+  /**
+   * Reset the listed steps so a resumed run re-executes them. Forwarded
+   * over the wire; the server feature-detects on the backing storage and
+   * surfaces a clear error if that storage doesn't implement `resetSteps`.
+   */
+  resetSteps(workflowId: string, stepNames: readonly string[]): Promise<void> {
+    return this.call("resetSteps", { workflowId, stepNames });
+  }
+
   purgeCompleted(
     params: { olderThanMs: number; limit: number } | { from: Date; to: Date; limit: number },
   ): Promise<number> {
     return this.call("purgeCompleted", params);
+  }
+
+  // -------------------------------------------------------------------------
+  // ActivityJournalStorage / JournaledSuspendStorage. Forwarded over the wire
+  // so .journaled() workflows (with ctx.activity / ctx.sleep / ctx.signal)
+  // can run against a remote storage. The runtime detects support via
+  // function-presence checks (`isActivityJournalStorage`, `isJournaledSuspendStorage`),
+  // so wiring these methods is enough — no extra plumbing on the engine side.
+  // -------------------------------------------------------------------------
+
+  loadJournal(workflowId: string, stepName: string): Promise<JournalEntry[]> {
+    return this.call("loadJournal", { workflowId, stepName });
+  }
+
+  appendEntry(params: {
+    readonly workflowId: string;
+    readonly stepName: string;
+    readonly activityIndex: number;
+    readonly branchPath?: string;
+    readonly activityName: string;
+    readonly payloadHash?: string;
+    readonly exit: NonNullable<JournalEntry["exit"]>;
+  }): Promise<void> {
+    return this.call("appendEntry", params);
+  }
+
+  appendPendingEntry(params: {
+    readonly workflowId: string;
+    readonly stepName: string;
+    readonly activityIndex: number;
+    readonly branchPath?: string;
+    readonly activityName: string;
+    readonly payloadHash?: string;
+    readonly stepType: "sleep" | "signal" | "activity" | "compensation" | "child";
+    readonly wakeAt?: Date;
+  }): Promise<void> {
+    return this.call("appendPendingEntry", params);
+  }
+
+  completePendingEntry(params: {
+    readonly workflowId: string;
+    readonly stepName: string;
+    readonly activityIndex: number;
+    readonly branchPath?: string;
+    readonly exit: NonNullable<JournalEntry["exit"]>;
+  }): Promise<void> {
+    return this.call("completePendingEntry", params);
+  }
+
+  findDueSleeps(params: { now: Date; limit: number }): Promise<
+    Array<{
+      workflowId: string;
+      stepName: string;
+      activityIndex: number;
+      branchPath: string;
+      wakeAt: Date;
+    }>
+  > {
+    return this.call("findDueSleeps", params);
+  }
+
+  findPendingSignal(params: {
+    workflowId: string;
+    stepName: string;
+    signalName: string;
+  }): Promise<JournalEntry | null> {
+    return this.call("findPendingSignal", params);
+  }
+
+  // -------------------------------------------------------------------------
+  // StepAttemptStorage
+  //
+  // The runner feature-detects via `isStepAttemptStorage(storage)` and
+  // calls saveStepAttempt after each step result. By proxying it over RPC
+  // here, remote workers (whose effective storage IS this RemoteWorkflowStorage)
+  // get the audit trail written on the central server's storage — surfacing
+  // workerId per attempt to the dashboard's run-detail / graph views.
+  // -------------------------------------------------------------------------
+
+  saveStepAttempt(record: StepAttemptRecord, guard?: FenceGuard): Promise<void> {
+    return this.call("saveStepAttempt", { record, guard });
+  }
+
+  loadStepAttempts(workflowId: string, stepName?: string): Promise<StepAttemptRecord[]> {
+    return this.call("loadStepAttempts", { workflowId, stepName });
   }
 }

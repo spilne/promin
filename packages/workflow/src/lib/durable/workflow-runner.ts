@@ -12,7 +12,7 @@
 
 import { Effect } from "effect";
 import { Pipeline, type Sinkable, type TaggedError } from "@promin/core";
-import { LosslessJsonCodec, SystemClock, type Clock } from "@promin/core";
+import { SystemClock, type Clock } from "@promin/core";
 import type {
   Workflow,
   CompensateConfig,
@@ -21,10 +21,23 @@ import type {
   WorkflowHandle,
   WorkflowStatusInfo,
 } from "./durable-pipeline.ts";
-import type { WorkflowHooks, IdempotencyConfig } from "./durable-pipeline.ts";
-import { isStepAttemptStorage, type WorkflowStorage, type FenceGuard } from "./workflow-storage.ts";
+import type { WorkflowHooks, IdempotencyConfig, WorkflowQueueConfig } from "./durable-pipeline.ts";
+import {
+  isStepAttemptStorage,
+  isSubscribableStorage,
+  isTripwireCapableStorage,
+  type WorkflowStorage,
+  type FenceGuard,
+} from "./workflow-storage.ts";
+import { createWorkflowEventStream } from "./workflow-event-stream.ts";
+import type { StepState } from "./workflow-state.ts";
 import { computeReadySet, type DagNode } from "./workflow-dag.ts";
-import type { FailedWorkflowRecord, WorkflowState } from "./workflow-state.ts";
+import type {
+  FailedWorkflowRecord,
+  WorkflowState,
+  WorkflowRunEvent,
+  WorkflowStatus,
+} from "./workflow-state.ts";
 import {
   StepError,
   WorkflowError,
@@ -32,11 +45,18 @@ import {
   WorkflowVersionMismatchError,
   StepTimeoutError,
   WorkflowLockError,
+  WorkflowTripwireError,
+  TripwireStorageMissingError,
 } from "./durable-pipeline-error.ts";
 import { withLock } from "./with-lock.ts";
 import { topologicalSort } from "./workflow-dag.ts";
 import type { RetryPolicy } from "@promin/core";
-import type { WorkflowSuspendedError, WorkflowTimeoutError } from "./durable-pipeline-error.ts";
+import {
+  WorkflowContinueAsNewError,
+  type WorkflowSuspendedError,
+  type WorkflowTimeoutError,
+} from "./durable-pipeline-error.ts";
+import { clearQueryHandlers } from "./query-registry.ts";
 import type {
   IWorkflowVersionRegistry,
   WorkflowVersionRegistry,
@@ -62,6 +82,58 @@ export interface StepExecutionRequest {
   readonly needs?: readonly string[];
   readonly priority?: number;
   readonly version?: string;
+  /**
+   * Resolved per-task concurrency cap, computed by the coordinator from
+   * the workflow / step queue config (step-level wins over workflow-level).
+   * Forwarded to the step queue so `claim()` can enforce against currently-
+   * running tasks with the same `(scope, key)` tuple.
+   */
+  readonly concurrencyKey?: string;
+  readonly concurrencyScope?: string;
+  readonly concurrencyLimit?: number;
+}
+
+/**
+ * Resolve a step task's concurrency triple from the workflow + step queue
+ * config. Step-level wins over workflow-level. The key function is
+ * evaluated against the step ctx (input + prev/deps + workflowId), and the
+ * resolved string is what `claim()` counts against.
+ *
+ * Returns `null` when neither level configures concurrency — the caller
+ * stamps no concurrency fields on the task and `claim()` skips the count
+ * check entirely.
+ */
+function resolveStepConcurrency(params: {
+  workflowName?: string;
+  workflowQueue?: WorkflowQueueConfig<unknown>;
+  stepDef: StepDefinition;
+  workflowInput: unknown;
+  stepInput: unknown;
+  workflowId: string;
+  attempt: number;
+  results: Record<string, unknown>;
+}): { readonly scope: string; readonly key: string; readonly limit: number } | null {
+  const stepQueue = params.stepDef.queue;
+  if (stepQueue) {
+    const ctx = {
+      input: params.stepInput,
+      prev: params.stepInput,
+      deps: params.results,
+      workflowId: params.workflowId,
+      attempt: params.attempt,
+    };
+    const key = stepQueue.concurrencyKey ? stepQueue.concurrencyKey(ctx as never) : "__all__";
+    const scope = `${params.workflowName ?? ""}::${params.stepDef.name}`;
+    return { scope, key, limit: stepQueue.concurrencyLimit };
+  }
+  if (params.workflowQueue) {
+    const key = params.workflowQueue.concurrencyKey
+      ? params.workflowQueue.concurrencyKey(params.workflowInput)
+      : "__all__";
+    const scope = params.workflowName ?? "";
+    return { scope, key, limit: params.workflowQueue.concurrencyLimit };
+  }
+  return null;
 }
 
 export type StepExecutionResult =
@@ -102,6 +174,8 @@ export type WorkflowRunSafeError =
   | WorkflowTimeoutError
   | StepTimeoutError
   | WorkflowDeadlineError
+  | WorkflowTripwireError
+  | TripwireStorageMissingError
   | TaggedError;
 
 /**
@@ -120,6 +194,24 @@ export type WorkflowRunnerRunParams =
       readonly workflowId: string;
       readonly input: unknown;
       readonly force?: boolean;
+      /** Optional namespace used for workflow creation and idempotency-key scoping. */
+      readonly namespace?: string;
+      /**
+       * Per-call dedup key. The runner first looks up an existing workflow
+       * by `(namespace, workflow.name, idempotencyKey)`; if a non-expired match
+       * exists, the run redirects to that workflow's id and the supplied
+       * `workflowId` is ignored. On miss, the new workflow is created with
+       * the key attached. Solves the auto-mint case where the caller can't
+       * encode dedup intent into a fresh UUID workflowId.
+       */
+      readonly idempotencyKey?: string;
+      /**
+       * How long the key resolves to this run (ms). Required when
+       * `idempotencyKey` is set; ignored otherwise. After expiry the key
+       * is reclaimable by a future call (the workflow row is untouched —
+       * only the `(name, key)` mapping lapses).
+       */
+      readonly idempotencyKeyTTL?: number;
     }
   | {
       readonly name: string;
@@ -127,6 +219,10 @@ export type WorkflowRunnerRunParams =
       readonly workflowId: string;
       readonly input: unknown;
       readonly force?: boolean;
+      /** Optional namespace used for workflow creation and idempotency-key scoping. */
+      readonly namespace?: string;
+      readonly idempotencyKey?: string;
+      readonly idempotencyKeyTTL?: number;
     };
 
 /** Config for `createWorkflowRunner` / `DefaultWorkflowRunner`. */
@@ -162,6 +258,144 @@ export interface WorkflowRunnerConfig {
    * pass a `FakeClock` to advance time deterministically.
    */
   readonly clock?: Clock;
+  /**
+   * Identifier of whatever entity is running this runner — a Zorya
+   * worker, an in-process app, a script, the scheduler-loop, etc.
+   * Stamped onto every `StepAttemptRecord` so the dashboard can answer
+   * "which executor handled this step?". Optional; leave undefined and
+   * the field stays empty in the audit trail.
+   */
+  readonly executorId?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Recovery
+// ---------------------------------------------------------------------------
+
+export interface RecoveryResult {
+  /** Workflows terminated as stale (cancelled or failed). */
+  terminated: number;
+  /** Workflows resumed (fire-and-forget runs kicked off). */
+  resumed: number;
+  /** Workflows that could not be resumed (missing registry, unknown definition, etc.). */
+  skipped: Array<{ workflowId: string; name: string; reason: string }>;
+}
+
+export type StaleTerminationAction =
+  | { readonly kind: "cancel" }
+  | { readonly kind: "fail"; readonly error: string };
+
+interface RecoveryStrategyOpts {
+  readonly staleThresholdMs: number | undefined;
+  readonly staleStatuses: Array<"pending" | "running" | "suspended">;
+  readonly staleAction: StaleTerminationAction;
+  readonly resumeRecent: boolean;
+  readonly resumeConcurrency: number;
+}
+
+/**
+ * Encapsulates the recovery actions `WorkflowRunner.recover()` should take.
+ * Build one via `RecoveryStrategy.builder()`.
+ *
+ * ```ts
+ * const strategy = RecoveryStrategy.builder()
+ *   .cancelStale({ olderThanMs: 60 * 60 * 1000 })
+ *   .resumeRecent()
+ *   .build();
+ *
+ * await runner.recover(strategy);
+ * ```
+ */
+export class RecoveryStrategy {
+  /** @internal */
+  readonly _opts: RecoveryStrategyOpts;
+
+  constructor(opts: RecoveryStrategyOpts) {
+    this._opts = opts;
+  }
+
+  static builder(): RecoveryStrategyBuilder {
+    return new RecoveryStrategyBuilder();
+  }
+}
+
+/**
+ * Fluent builder for `RecoveryStrategy`. Call `.build()` when done.
+ */
+export class RecoveryStrategyBuilder {
+  private _staleThresholdMs: number | undefined;
+  private _staleStatuses: Array<"pending" | "running" | "suspended"> = ["pending", "running"];
+  private _staleAction: StaleTerminationAction = { kind: "cancel" };
+  private _resumeRecent = false;
+  private _resumeConcurrency = 10;
+
+  /**
+   * Terminate pending/running workflows whose `createdAt` is older than
+   * `olderThanMs`. Uses `cancelWorkflow` — the run ends up `failed` with
+   * error `"Stale run cancelled on restart"`.
+   *
+   * When the configured storage exposes a bulk `cancelStaleWorkflows` method
+   * (e.g. `SqliteWorkflowStorage`), a single `UPDATE` is issued; otherwise
+   * the runner pages through matching rows and cancels them one-by-one.
+   */
+  cancelStale(params: {
+    olderThanMs: number;
+    statuses?: Array<"pending" | "running" | "suspended">;
+  }): this {
+    this._staleThresholdMs = params.olderThanMs;
+    if (params.statuses) this._staleStatuses = params.statuses;
+    this._staleAction = { kind: "cancel" };
+    return this;
+  }
+
+  /**
+   * Terminate stale runs via `failWorkflow` with a custom `error` message.
+   * Same age-cutoff logic as `cancelStale` but lets you control the error
+   * string recorded on the workflow row and visible in the dashboard.
+   */
+  failStale(params: {
+    olderThanMs: number;
+    error?: string;
+    statuses?: Array<"pending" | "running" | "suspended">;
+  }): this {
+    this._staleThresholdMs = params.olderThanMs;
+    if (params.statuses) this._staleStatuses = params.statuses;
+    this._staleAction = {
+      kind: "fail",
+      error: params.error ?? "Stale run auto-failed on restart",
+    };
+    return this;
+  }
+
+  /**
+   * Resume all pending/running workflows that survived stale termination.
+   * Each is re-launched as a fire-and-forget run via the runner's registry.
+   * The runner must have been configured with a `registry`; throws otherwise.
+   *
+   * `concurrent` controls how many runs are submitted per event-loop tick
+   * (default: 10) to avoid thundering-herd on large backlogs.
+   */
+  resumeRecent(params?: { concurrent?: number }): this {
+    this._resumeRecent = true;
+    if (params?.concurrent != null) this._resumeConcurrency = params.concurrent;
+    return this;
+  }
+
+  build(): RecoveryStrategy {
+    if (this._staleThresholdMs === undefined && !this._resumeRecent) {
+      throw new Error(
+        "RecoveryStrategy.builder() must include at least one action: " +
+          "cancelStale(), failStale(), or resumeRecent().",
+      );
+    }
+    return new RecoveryStrategy({
+      staleThresholdMs: this._staleThresholdMs,
+      staleStatuses: this._staleStatuses,
+      staleAction: this._staleAction,
+      resumeRecent: this._resumeRecent,
+      resumeConcurrency: this._resumeConcurrency,
+    });
+  }
 }
 
 /**
@@ -192,11 +426,63 @@ export interface WorkflowRunner {
    * `WorkflowLockError` if a run is already active; `"join"` returns a handle
    * to the running workflow without starting a second execution.
    */
-  start(params: {
-    readonly workflow: Workflow<unknown, unknown>;
+  start<Input = unknown, Output = unknown>(params: {
+    readonly workflow: Workflow<Input, Output>;
     readonly workflowId: string;
-    readonly input: unknown;
-  }): Promise<WorkflowHandle<unknown>>;
+    readonly input: Input;
+  }): Promise<WorkflowHandle<Output>>;
+  /**
+   * Build a `WorkflowHandle` for a workflow that is *already running* — does
+   * not enqueue or start anything. Useful when execution lives elsewhere
+   * (a remote worker fleet, a separate coordinator process) and the caller
+   * just wants to observe / signal / cancel a known `workflowId`.
+   *
+   * The returned handle is functionally identical to the one returned by
+   * `start()`: same `status` / `signal` / `result` / `cancel` / `events`
+   * surface, same polling/subscribe semantics under the hood.
+   */
+  handle<Output = unknown>(workflowId: string): WorkflowHandle<Output>;
+  /**
+   * Rewind a workflow to `fromStep` and continue executing. Resets that
+   * step + everything downstream of it (transitively in the DAG) back to
+   * pending; preserves all upstream completed step results so they are
+   * not re-executed. Used as a debugging primitive for incident response:
+   *
+   *   "Step 47 failed because of a bad payload. Patch the payload, reset
+   *    to step 47, and let the workflow continue from there."
+   *
+   * Requires the configured storage to implement `resetSteps`. Throws a
+   * clear error if not. Throws `StepNotFoundError` if `fromStep` isn't
+   * a step on the workflow's DAG.
+   *
+   * NOT a control-flow primitive — meant for one-off debugging /
+   * recovery, not for normal application logic. For programmatic restart,
+   * use `ctx.continueAsNew` (clean restart with fresh history) or
+   * `runner.run` with `force: true` (full re-execute).
+   */
+  resume<Input = unknown, Output = unknown>(params: {
+    readonly workflow: Workflow<Input, Output>;
+    readonly workflowId: string;
+    readonly fromStep: string;
+  }): Promise<Output>;
+  /**
+   * Subscribe to live step/workflow-lifecycle events for a single run.
+   * Returns an async iterable that yields every `WorkflowRunEvent` as it
+   * happens and closes on the first terminal event
+   * (`workflow-completed`, `workflow-failed`, `workflow-tripwire`) or when
+   * the supplied `AbortSignal` fires.
+   *
+   * Works against every storage. When the configured storage implements
+   * `subscribeToWorkflow` (InMemoryWorkflowStorage today; Postgres via
+   * `pg_notify` later) the runner uses the native push path; otherwise it
+   * falls back to polling `loadWorkflow` on `pollIntervalMs` (default
+   * 500ms) and synthesizing events from the step-state diff. User code
+   * doesn't need to branch on the backend.
+   */
+  subscribe(
+    workflowId: string,
+    options?: { signal?: AbortSignal; pollIntervalMs?: number },
+  ): AsyncIterable<WorkflowRunEvent>;
   /**
    * Snapshot of a workflow's current status: active step, suspended reason,
    * per-step summary, timestamps. Returns `null` when the workflow doesn't
@@ -206,6 +492,28 @@ export interface WorkflowRunner {
     workflowId: string,
     params?: { readonly includeStepResults?: boolean },
   ): Promise<WorkflowStatusInfo<unknown> | null>;
+
+  /**
+   * Apply a `RecoveryStrategy` to the runner's storage — typically called once
+   * at process startup to clean up stale runs and resume orphaned ones.
+   *
+   * Two phases, both optional (driven by the strategy):
+   *
+   * 1. **Terminate stale runs** (`cancelStale` / `failStale`): marks pending/
+   *    running/suspended workflows whose `createdAt` is older than the
+   *    configured threshold as `failed`. Uses a single bulk `UPDATE` when the
+   *    storage supports `cancelStaleWorkflows` (e.g. `SqliteWorkflowStorage`);
+   *    falls back to paginated per-row calls otherwise.
+   *
+   * 2. **Resume recent runs** (`resumeRecent`): paginates all remaining
+   *    pending/running workflows (those not stale), looks up their definition
+   *    in the runner's registry, and fires each one off as a non-blocking
+   *    `runSafe` call. Requires the runner to have been configured with a
+   *    `registry`; throws otherwise.
+   *
+   * @returns counts of terminated / resumed / skipped workflows.
+   */
+  recover(strategy: RecoveryStrategy): Promise<RecoveryResult>;
 }
 
 /**
@@ -222,6 +530,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   private readonly hooks?: WorkflowHooks;
   private readonly stepExecutor?: StepExecutor;
   private readonly clock: Clock;
+  private readonly executorId?: string;
 
   constructor(config: WorkflowRunnerConfig) {
     this.storage = config.storage;
@@ -229,14 +538,51 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     this.hooks = config.hooks;
     this.stepExecutor = config.stepExecutor;
     this.clock = config.clock ?? SystemClock;
+    if (config.executorId !== undefined) this.executorId = config.executorId;
   }
 
   async run(params: WorkflowRunnerRunParams): Promise<unknown> {
     const storage = this.storage;
-    const { workflowId, input, force } = params;
+    const { input, force, namespace, idempotencyKey, idempotencyKeyTTL } = params;
+
+    // Per-call idempotency key: resolve to an existing workflowId before
+    // dispatching. The supplied workflowId is the create-fallback when the
+    // key is fresh; if it resolves, the caller's id is ignored. Key + TTL
+    // flow into createWorkflow so a fresh create attaches the key
+    // atomically — the partial-unique index resolves any concurrent-create
+    // race by returning the canonical row in the conflict path.
+    const workflowName = "workflow" in params ? params.workflow.name : params.name;
+    const idempotencyExpiresAt =
+      idempotencyKey && idempotencyKeyTTL !== undefined
+        ? new Date(this.clock.currentTimeMs() + idempotencyKeyTTL)
+        : undefined;
+    let workflowId = params.workflowId;
+    if (idempotencyKey) {
+      if (idempotencyKeyTTL === undefined) {
+        throw new Error(
+          `WorkflowRunner.run: \`idempotencyKey\` requires \`idempotencyKeyTTL\`. ` +
+            `Pass a TTL in milliseconds — there is no default.`,
+        );
+      }
+      const hit = await storage.findWorkflowByIdempotencyKey({
+        workflowName,
+        ...(namespace !== undefined && { namespace }),
+        idempotencyKey,
+        now: this.clock.now(),
+      });
+      if (hit) workflowId = hit.workflowId;
+    }
 
     if ("workflow" in params) {
-      return this._runWorkflow({ workflow: params.workflow, storage, workflowId, input, force });
+      return this._runWorkflow({
+        workflow: params.workflow,
+        storage,
+        workflowId,
+        input,
+        force,
+        ...(namespace !== undefined && { namespace }),
+        ...(idempotencyKey && idempotencyExpiresAt ? { idempotencyKey, idempotencyExpiresAt } : {}),
+      });
     }
 
     // Name-based — resolve via registry, implement version-drain-resume:
@@ -249,11 +595,27 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
           `Pass \`createWorkflowRunner({ storage, registry })\`.`,
       );
     }
-    const latestDef = await registry.resolve(params.name, params.version);
+
+    // Resolution order when the caller doesn't supply a version:
+    //   1. `findActive(name)` — explicit `promote()` target if any.
+    //   2. `latest(name)` (the registry's existing fallback inside
+    //      `resolve(name, undefined)`) — last-registered version.
+    //
+    // The first call lets `promote/rollback` actually shift dispatch
+    // without breaking pre-promote workflows: when nothing's been
+    // promoted, `findActive` returns null and we drop through to the
+    // legacy path. When the caller passes an explicit version, neither
+    // hook fires — the explicit version always wins.
+    let resolvedVersion = params.version;
+    if (!resolvedVersion && typeof registry.findActive === "function") {
+      const active = await registry.findActive(params.name);
+      if (active) resolvedVersion = active.version;
+    }
+    const latestDef = await registry.resolve(params.name, resolvedVersion);
     if (!latestDef) {
       const allNames = await registry.names();
       throw new Error(
-        `No workflow "${params.name}"${params.version ? ` version "${params.version}"` : ""} in registry. ` +
+        `No workflow "${params.name}"${resolvedVersion ? ` version "${resolvedVersion}"` : ""} in registry. ` +
           `Registered: ${(allNames as string[]).join(", ") || "(none)"}.`,
       );
     }
@@ -269,10 +631,26 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
             `Keep old definitions registered until in-flight workflows drain.`,
         );
       }
-      return this._runWorkflow({ workflow: storedDef, storage, workflowId, input, force });
+      return this._runWorkflow({
+        workflow: storedDef,
+        storage,
+        workflowId,
+        input,
+        force,
+        ...(namespace !== undefined && { namespace }),
+        ...(idempotencyKey && idempotencyExpiresAt ? { idempotencyKey, idempotencyExpiresAt } : {}),
+      });
     }
 
-    return this._runWorkflow({ workflow: latestDef, storage, workflowId, input, force });
+    return this._runWorkflow({
+      workflow: latestDef,
+      storage,
+      workflowId,
+      input,
+      force,
+      ...(namespace !== undefined && { namespace }),
+      ...(idempotencyKey && idempotencyExpiresAt ? { idempotencyKey, idempotencyExpiresAt } : {}),
+    });
   }
 
   async runSafe(
@@ -286,11 +664,11 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     }
   }
 
-  async start(params: {
-    readonly workflow: Workflow<unknown, unknown>;
+  async start<Input = unknown, Output = unknown>(params: {
+    readonly workflow: Workflow<Input, Output>;
     readonly workflowId: string;
-    readonly input: unknown;
-  }): Promise<WorkflowHandle<unknown>> {
+    readonly input: Input;
+  }): Promise<WorkflowHandle<Output>> {
     const storage = this.storage;
     const { workflow, workflowId, input } = params;
 
@@ -317,11 +695,87 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       await new Promise((r) => setTimeout(r, 0));
     }
 
+    return this.handle<Output>(workflowId);
+  }
+
+  async resume<Input = unknown, Output = unknown>(params: {
+    readonly workflow: Workflow<Input, Output>;
+    readonly workflowId: string;
+    readonly fromStep: string;
+  }): Promise<Output> {
+    const { workflow, workflowId, fromStep } = params;
+    const storage = this.storage;
+
+    if (typeof storage.resetSteps !== "function") {
+      throw new Error(
+        `WorkflowRunner.resume requires storage that implements resetSteps. ` +
+          `Got ${storage.constructor.name}. (InMemoryWorkflowStorage supports it; ` +
+          `Postgres / SQLite / Remote backends are tracked separately.)`,
+      );
+    }
+
+    const state = await storage.loadWorkflow(workflowId);
+    if (!state) {
+      throw new Error(`Cannot resume workflow "${workflowId}" — not found in storage.`);
+    }
+
+    // Validate fromStep exists on the DAG. Step-name lookup is on the
+    // workflow's _definition (storage doesn't know topology).
+    const def = workflow._definition;
+    const fromStepDef = def.steps.find((s) => s.name === fromStep);
+    if (!fromStepDef) {
+      const known = def.steps.map((s) => s.name).join(", ");
+      throw new Error(
+        `Cannot resume "${workflowId}" — step "${fromStep}" not found on workflow ` +
+          `"${workflow.name}". Known steps: ${known}.`,
+      );
+    }
+
+    // Walk the DAG to compute the downstream set: every step whose
+    // `dependsOn` reaches fromStep transitively. Reset the union of
+    // {fromStep, downstream} so the runner re-executes from there.
+    const downstream = new Set<string>([fromStep]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const step of def.steps) {
+        if (downstream.has(step.name)) continue;
+        if (step.dependsOn.some((dep) => downstream.has(dep))) {
+          downstream.add(step.name);
+          grew = true;
+        }
+      }
+    }
+
+    await storage.resetSteps(workflowId, [...downstream]);
+
+    // Re-run with `force: true` so idempotency caching doesn't
+    // short-circuit "already completed" — we just reverted the terminal
+    // status so it shouldn't trip, but `force` makes that explicit.
+    return (await this.run({
+      workflow,
+      workflowId,
+      input: state.input as Input,
+      force: true,
+    })) as Output;
+  }
+
+  handle<Output = unknown>(workflowId: string): WorkflowHandle<Output> {
+    const storage = this.storage;
     const clock = this.clock;
+    const self = this;
     return {
       workflowId,
-      status: (p) => this.getStatus(workflowId, p),
+      status: (p) => self.getStatus(workflowId, p) as Promise<WorkflowStatusInfo<Output> | null>,
       signal: (signalName, payload) => storage.deliverSignal(workflowId, signalName, payload),
+      cancel: (_reason) => {
+        // `reason` is reserved for future use — when storage.cancelWorkflow
+        // grows a reason field it'll thread through here without breaking
+        // existing callers. Today we just invoke cancellation; the caller's
+        // reason is observable via their own logs / audit trail.
+        return storage.cancelWorkflow(workflowId);
+      },
+      events: (opts) => self.subscribe(workflowId, opts),
       result: async (p) => {
         const intervalMs = p?.intervalMs ?? 1_000;
         const timeoutMs = p?.timeoutMs ?? 60_000;
@@ -329,15 +783,150 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
 
         while (clock.currentTimeMs() < deadline) {
           const state = await storage.loadWorkflow(workflowId);
-          if (state?.status === "completed") return state.result;
+          if (state?.status === "completed") return state.result as Output;
           if (state?.status === "failed") {
             throw new Error(state.error ?? `Workflow ${workflowId} failed`);
+          }
+          if (state?.status === "tripwire") {
+            // Look up which step fired. Tripwire steps record
+            // `metadata.tripwireFired = true` on their step row at save
+            // time; find that row to report the step name in the error.
+            const firedStep = Object.values(state.steps).find(
+              (s) =>
+                s.metadata !== undefined &&
+                (s.metadata as { tripwireFired?: boolean }).tripwireFired === true,
+            );
+            throw new WorkflowTripwireError({
+              workflowId,
+              stepName: firedStep?.stepName ?? "unknown",
+              reason: state.tripwire,
+              message: `Workflow "${workflowId}" ended via tripwire`,
+            });
           }
           await new Promise((r) => clock.setTimeout(() => r(undefined), intervalMs));
         }
         throw new Error(`Workflow ${workflowId} did not complete within ${timeoutMs}ms`);
       },
     };
+  }
+
+  subscribe(
+    workflowId: string,
+    options?: { signal?: AbortSignal; pollIntervalMs?: number },
+  ): AsyncIterable<WorkflowRunEvent> {
+    // Fast path: storage has native push support (EventBus / pg_notify).
+    if (isSubscribableStorage(this.storage)) {
+      return this.storage.subscribeToWorkflow(workflowId, options);
+    }
+    // Fallback: poll loadWorkflow, diff step-state map, synthesize events.
+    // Works against any storage so user code doesn't have to branch on the
+    // backend. Default cadence 500ms is a reasonable tradeoff between
+    // perceived latency and read load — callers can dial it via
+    // `pollIntervalMs`.
+    return this._pollSubscribe(workflowId, options);
+  }
+
+  private _pollSubscribe(
+    workflowId: string,
+    options?: { signal?: AbortSignal; pollIntervalMs?: number },
+  ): AsyncIterable<WorkflowRunEvent> {
+    const storage = this.storage;
+    const clock = this.clock;
+    const pollMs = options?.pollIntervalMs ?? 500;
+
+    return createWorkflowEventStream((producer) => {
+      let stopped = false;
+      let prevSteps: Record<string, StepState> = {};
+      let prevStatus: string | null = null;
+
+      const stop = (): void => {
+        stopped = true;
+        producer.end();
+      };
+      const onAbort = (): void => stop();
+      options?.signal?.addEventListener("abort", onAbort, { once: true });
+
+      const tick = async (): Promise<void> => {
+        while (!stopped && !producer.done) {
+          let state;
+          try {
+            state = await storage.loadWorkflow(workflowId);
+          } catch {
+            // Transient storage error — keep polling; the workflow may still
+            // materialize. Swallowing here keeps the stream alive in face
+            // of network blips on remote storages.
+            await new Promise<void>((r) => clock.setTimeout(() => r(), pollMs));
+            continue;
+          }
+          if (state) {
+            // Emit step transitions vs the last observed snapshot. Using
+            // completedAt as the event timestamp so the ordering is stable
+            // across polls; falls back to now when a storage omits it.
+            for (const [stepName, step] of Object.entries(state.steps)) {
+              const before = prevSteps[stepName];
+              if (step.status === "completed" && (!before || before.status !== "completed")) {
+                producer.push({
+                  type: "step-completed",
+                  stepName,
+                  result: step.result,
+                  durationMs: step.durationMs ?? 0,
+                  at: step.completedAt ?? clock.now(),
+                });
+              } else if (step.status === "failed" && (!before || before.status !== "failed")) {
+                producer.push({
+                  type: "step-failed",
+                  stepName,
+                  error: step.error ?? "",
+                  at: step.completedAt ?? clock.now(),
+                });
+              }
+            }
+            // Workflow-terminal transitions close the stream.
+            if (state.status !== prevStatus) {
+              if (state.status === "completed") {
+                producer.push({
+                  type: "workflow-completed",
+                  result: state.result,
+                  at: state.completedAt ?? clock.now(),
+                });
+                stop();
+                return;
+              } else if (state.status === "failed") {
+                producer.push({
+                  type: "workflow-failed",
+                  error: state.error ?? "",
+                  at: state.completedAt ?? clock.now(),
+                });
+                stop();
+                return;
+              } else if (state.status === "tripwire") {
+                const fired = Object.values(state.steps).find(
+                  (s) =>
+                    (s.metadata as { tripwireFired?: boolean } | undefined)?.tripwireFired === true,
+                );
+                producer.push({
+                  type: "workflow-tripwire",
+                  stepName: fired?.stepName ?? "unknown",
+                  reason: state.tripwire,
+                  at: state.completedAt ?? clock.now(),
+                });
+                stop();
+                return;
+              }
+            }
+            prevSteps = state.steps;
+            prevStatus = state.status;
+          }
+          await new Promise<void>((r) => clock.setTimeout(() => r(), pollMs));
+        }
+      };
+      void tick();
+
+      return () => {
+        stopped = true;
+        options?.signal?.removeEventListener("abort", onAbort);
+      };
+    });
   }
 
   async getStatus(
@@ -377,6 +966,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       state: state.status === "compensating" ? "failed" : state.status,
       result: state.status === "completed" ? state.result : undefined,
       error: state.error,
+      tripwire: state.status === "tripwire" ? state.tripwire : undefined,
       currentStep,
       suspendedReason,
       steps,
@@ -386,12 +976,118 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     };
   }
 
+  async recover(strategy: RecoveryStrategy): Promise<RecoveryResult> {
+    const opts = strategy._opts;
+    let terminated = 0;
+    let resumed = 0;
+    const skipped: RecoveryResult["skipped"] = [];
+
+    // ---- Phase 1: terminate stale runs ----
+    if (opts.staleThresholdMs !== undefined) {
+      const errorMsg =
+        opts.staleAction.kind === "fail"
+          ? opts.staleAction.error
+          : "Stale run cancelled on restart";
+
+      // Fast path: storage exposes a bulk cancelStaleWorkflows (e.g. SQLite).
+      const storageAny = this.storage as any;
+      if (typeof storageAny.cancelStaleWorkflows === "function") {
+        terminated = storageAny.cancelStaleWorkflows({
+          olderThanMs: opts.staleThresholdMs,
+          error: errorMsg,
+          statuses: opts.staleStatuses,
+        });
+      } else {
+        // Slow path: page through, cancel stale rows one-by-one.
+        // Ordered by createdAt ASC so stale rows surface first; we break
+        // once the first non-stale row appears in a page.
+        const cutoff = this.clock.currentTimeMs() - opts.staleThresholdMs;
+        const PAGE = 200;
+        for (const status of opts.staleStatuses as WorkflowStatus[]) {
+          while (true) {
+            const page = await this.storage.listWorkflows({
+              status,
+              limit: PAGE,
+              offset: 0,
+              orderBy: "createdAt",
+              orderDir: "asc",
+            });
+            if (page.length === 0) break;
+            let anyStale = false;
+            for (const wf of page) {
+              if (wf.createdAt.getTime() >= cutoff) break;
+              anyStale = true;
+              if (opts.staleAction.kind === "cancel") {
+                await this.storage.cancelWorkflow(wf.workflowId);
+              } else {
+                await this.storage.failWorkflow(wf.workflowId, opts.staleAction.error);
+              }
+              terminated++;
+            }
+            if (!anyStale) break;
+          }
+        }
+      }
+    }
+
+    // ---- Phase 2: resume recent runs ----
+    if (opts.resumeRecent) {
+      if (!this.registry) {
+        throw new Error(
+          "WorkflowRunner.recover() with resumeRecent() requires a registry. " +
+            "Pass createWorkflowRunner({ storage, registry }) to enable name-based resume.",
+        );
+      }
+      const PAGE = 200;
+      for (const status of ["pending", "running"] as const) {
+        let offset = 0;
+        while (true) {
+          const page = await this.storage.listWorkflows({ status, limit: PAGE, offset });
+          if (page.length === 0) break;
+
+          // Fire in batches to avoid thundering-herd on large backlogs.
+          for (let i = 0; i < page.length; i += opts.resumeConcurrency) {
+            const batch = page.slice(i, i + opts.resumeConcurrency);
+            for (const wf of batch) {
+              const def = await this.registry!.resolve(wf.workflowName, wf.version);
+              if (!def) {
+                skipped.push({
+                  workflowId: wf.workflowId,
+                  name: wf.workflowName,
+                  reason:
+                    `No definition found for "${wf.workflowName}"` +
+                    (wf.version ? ` v${wf.version}` : "") +
+                    " in registry",
+                });
+                continue;
+              }
+              void this.runSafe({ workflow: def, workflowId: wf.workflowId, input: wf.input });
+              resumed++;
+            }
+            // Yield to the event loop between batches.
+            if (i + opts.resumeConcurrency < page.length) {
+              await new Promise<void>((r) => this.clock.setTimeout(() => r(), 0));
+            }
+          }
+
+          if (page.length < PAGE) break;
+          offset += PAGE;
+        }
+      }
+    }
+
+    return { terminated, resumed, skipped };
+  }
+
   private _runWorkflow(params: {
     workflow: Workflow<unknown, unknown>;
     storage: WorkflowStorage;
     workflowId: string;
     input: unknown;
     force?: boolean;
+    namespace?: string;
+    idempotencyKey?: string;
+    idempotencyExpiresAt?: Date;
   }): Promise<unknown> {
     const def = params.workflow._definition;
     const ctx: WorkflowOrchestrationContext = {
@@ -410,13 +1106,22 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       onVersionMismatch: def.onVersionMismatch,
       previousVersions: def.previousVersions,
       hooks: this.hooks ?? def.hooks,
+      queue: def.queue,
       stepExecutor: this.stepExecutor,
       clock: this.clock,
+      ...(this.executorId !== undefined && { executorId: this.executorId }),
     };
     return runWorkflowOrchestration(ctx, {
       workflowId: params.workflowId,
       input: params.input,
       force: params.force,
+      namespace: params.namespace,
+      ...(params.idempotencyKey && params.idempotencyExpiresAt
+        ? {
+            idempotencyKey: params.idempotencyKey,
+            idempotencyExpiresAt: params.idempotencyExpiresAt,
+          }
+        : {}),
     });
   }
 }
@@ -459,6 +1164,11 @@ export interface WorkflowOrchestrationContext {
   readonly previousVersions?: ReadonlyArray<Workflow<unknown, unknown>>;
   readonly hooks?: WorkflowHooks;
   /**
+   * Workflow-level queue concurrency cap. Stamped onto every dispatched
+   * step task; step-level `StepDefinition.queue` overrides for that step.
+   */
+  readonly queue?: WorkflowQueueConfig<unknown>;
+  /**
    * Pluggable step executor. Threaded through to `DagExecutionContext` so
    * the DAG loop delegates step bodies to the configured executor.
    */
@@ -471,6 +1181,12 @@ export interface WorkflowOrchestrationContext {
    * for tests.
    */
   readonly clock?: Clock;
+  /**
+   * Identifier of the executor running this orchestration (worker id,
+   * process id, "in-process", etc.). Stamped on each StepAttemptRecord
+   * so the audit trail attributes the attempt to who actually ran it.
+   */
+  readonly executorId?: string;
 }
 
 /** Default lock TTL. Re-declared here for the runner's own withLock call. */
@@ -495,9 +1211,80 @@ const DEFAULT_LOCK_DURATION_MS = 120_000;
  */
 export async function runWorkflowOrchestration(
   ctx: WorkflowOrchestrationContext,
-  params: { workflowId: string; input: unknown; force?: boolean },
+  params: {
+    workflowId: string;
+    input: unknown;
+    force?: boolean;
+    namespace?: string;
+    idempotencyKey?: string;
+    idempotencyExpiresAt?: Date;
+  },
 ): Promise<unknown> {
-  const { workflowId, input, force } = params;
+  // Continue-as-new wrapper: catch WorkflowContinueAsNewError thrown out
+  // of withLock, archive the current run via startFreshRun, then re-run
+  // under the same workflowId with the carried input. Hard cap at 1024
+  // chained continue-as-new calls to catch infinite loops in user code.
+  //
+  // Query-handler lifecycle: clear ONLY on terminal exit (success or
+  // non-suspension failure). Suspension means "still hosting, just
+  // paused" — the next resume re-runs the body and replay re-registers
+  // handlers, so we want them to survive the wait. Skipping the clear
+  // on WorkflowSuspendedError keeps handlers alive across signal /
+  // sleep waits.
+  let currentInput = params.input;
+  for (let chain = 0; chain < 1024; chain++) {
+    try {
+      const result = await runOneOrchestrationCycle(ctx, {
+        workflowId: params.workflowId,
+        input: currentInput,
+        force: chain > 0 ? true : params.force,
+        namespace: params.namespace,
+        // Only thread the key on the first cycle. Continue-as-new chains
+        // are internal restarts; they shouldn't re-stamp the key onto the
+        // archived row.
+        ...(chain === 0 && params.idempotencyKey && params.idempotencyExpiresAt
+          ? {
+              idempotencyKey: params.idempotencyKey,
+              idempotencyExpiresAt: params.idempotencyExpiresAt,
+            }
+          : {}),
+      });
+      clearQueryHandlers(params.workflowId);
+      return result;
+    } catch (err) {
+      if (err instanceof WorkflowContinueAsNewError) {
+        await ctx.storage.startFreshRun(params.workflowId);
+        clearQueryHandlers(params.workflowId);
+        currentInput = err.nextInput;
+        continue;
+      }
+      // Suspension — keep handlers alive. Other errors are terminal.
+      const tag = (err as { _tag?: string } | undefined)?._tag;
+      if (tag !== "WorkflowSuspendedError") {
+        clearQueryHandlers(params.workflowId);
+      }
+      throw err;
+    }
+  }
+  clearQueryHandlers(params.workflowId);
+  throw new Error(
+    `Workflow "${params.workflowId}" exceeded continue-as-new chain limit (1024). ` +
+      `Likely an infinite continue-as-new loop in the workflow body.`,
+  );
+}
+
+async function runOneOrchestrationCycle(
+  ctx: WorkflowOrchestrationContext,
+  params: {
+    workflowId: string;
+    input: unknown;
+    force?: boolean;
+    namespace?: string;
+    idempotencyKey?: string;
+    idempotencyExpiresAt?: Date;
+  },
+): Promise<unknown> {
+  const { workflowId, input, force, namespace } = params;
   const clock = ctx.clock ?? SystemClock;
   const workflowStartTime = clock.currentTimeMs();
   const compensateTrigger = ctx.compensateConfig?.trigger ?? "after-retries";
@@ -544,9 +1331,10 @@ export async function runWorkflowOrchestration(
         onVersionMismatch: prevDef.onVersionMismatch,
         previousVersions: prevDef.previousVersions,
         hooks: ctx.hooks ?? prevDef.hooks,
+        queue: prevDef.queue,
         clock,
       };
-      return runWorkflowOrchestration(prevCtx, { workflowId, input, force });
+      return runWorkflowOrchestration(prevCtx, { workflowId, input, force, namespace });
     }
   }
 
@@ -606,11 +1394,21 @@ export async function runWorkflowOrchestration(
           workflowName: ctx.name,
           input,
           workflowType: ctx.type,
+          ...(namespace !== undefined ? { namespace } : {}),
           metadata: ctx.metadata,
           version: ctx.version,
+          ...(params.idempotencyKey && params.idempotencyExpiresAt
+            ? {
+                idempotencyKey: params.idempotencyKey,
+                idempotencyExpiresAt: params.idempotencyExpiresAt,
+              }
+            : {}),
         });
         if (!createResult.created) {
-          // Race: another caller created the workflow between our load and create
+          // Race: another caller created the workflow between load and
+          // create — could be the same workflowId (PK collision) or a
+          // concurrent create under the same idempotency key (partial
+          // unique-index collision). Either way, attach to whoever won.
           state = createResult.existing;
         } else {
           state = await ctx.storage.loadWorkflow(workflowId);
@@ -654,6 +1452,9 @@ export async function runWorkflowOrchestration(
         stepExecutor: ctx.stepExecutor,
         guard,
         clock,
+        workflowName: ctx.name,
+        workflowQueue: ctx.queue,
+        ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
       };
 
       for (let workflowAttempt = 0; workflowAttempt <= maxWorkflowRetries; workflowAttempt++) {
@@ -685,8 +1486,49 @@ export async function runWorkflowOrchestration(
           return finalResult;
         }
 
-        // DAG failed — suspension errors always propagate immediately
+        // Tripwire — intentional early exit. Skip compensation + DLQ since
+        // this is not a failure. Mark the workflow with `status: "tripwire"`
+        // and throw a typed error carrying the reason so callers using
+        // `run()` can `instanceof`-check it; `runSafe()` surfaces it as
+        // `{ data: null, error }`.
+        if ("tripwire" in dagResult) {
+          const stepName = dagResult.stepName;
+          const reason = dagResult.reason;
+          if (!isTripwireCapableStorage(ctx.storage)) {
+            throw new TripwireStorageMissingError({
+              workflowId,
+              stepName,
+              message:
+                `Tripwire step "${stepName}" fired but the configured ` +
+                `WorkflowStorage does not implement tripwireWorkflow. Use a ` +
+                `storage backend that supports tripwire (InMemory, Postgres) ` +
+                `or remove the .tripwire() step.`,
+            });
+          }
+          await ctx.storage.tripwireWorkflow(workflowId, reason, guard);
+          await ctx.hooks?.onWorkflowTripwire?.({
+            workflowId,
+            stepName,
+            reason,
+            durationMs: clock.currentTimeMs() - workflowStartTime,
+          });
+          throw new WorkflowTripwireError({
+            workflowId,
+            stepName,
+            reason,
+            message: `Workflow "${workflowId}" ended via tripwire at step "${stepName}"`,
+          });
+        }
+
+        // DAG failed — suspension errors always propagate immediately.
+        // Continue-as-new is also a clean unwind (no compensation, no
+        // failure recording) — throw it out of withLock so the lock is
+        // released by withLock's finally, then the outer wrapper catches
+        // it and recurses with the carried input under the same workflowId.
         if (dagResult.suspension) {
+          throw dagResult.error;
+        }
+        if ("continueAsNew" in dagResult && dagResult.continueAsNew) {
           throw dagResult.error;
         }
 
@@ -716,6 +1558,7 @@ export async function runWorkflowOrchestration(
         dagNodes,
         guard,
         clock,
+        ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
       });
 
       // Fire workflow-level onComplete callback
@@ -780,6 +1623,14 @@ export interface DagExecutionContext {
   readonly timeoutMs?: number;
   readonly dispatch?: DispatchConfig;
   /**
+   * Workflow name + workflow-level queue config — needed to derive a
+   * task's `(concurrencyScope, concurrencyKey, concurrencyLimit)` triple
+   * at enqueue time. The DAG context is the lowest layer that still has
+   * both the input under run and the workflow-level config in scope.
+   */
+  readonly workflowName?: string;
+  readonly workflowQueue?: WorkflowQueueConfig<unknown>;
+  /**
    * Fence guard for mutating writes. Captured by the orchestration loop
    * after `tryLock` and threaded into every `saveStepResult` /
    * `saveStepFailure` / `saveStepAttempt` call so a stale holder that
@@ -796,6 +1647,13 @@ export interface DagExecutionContext {
   readonly stepExecutor?: StepExecutor;
   /** Time source. Drives deadline checks, step durations, dispatch poll waits. Default: `SystemClock`. */
   readonly clock?: Clock;
+  /**
+   * Identifier of the executor running this DAG execution. Stamped on each
+   * `StepAttemptRecord` so the audit trail attributes the attempt to who
+   * actually ran it (worker id, in-process pid, etc.). Threaded down from
+   * `WorkflowOrchestrationContext.executorId`.
+   */
+  readonly executorId?: string;
 }
 
 /**
@@ -825,7 +1683,9 @@ export async function executeWorkflowDag(
     deadlineMs?: number;
   },
 ): Promise<
-  { success: true; result: unknown } | { success: false; error: unknown; suspension: boolean }
+  | { success: true; result: unknown }
+  | { success: false; error: unknown; suspension: boolean; continueAsNew?: boolean }
+  | { success: false; tripwire: true; stepName: string; reason: unknown }
 > {
   const { workflowId, input, dagNodes, state } = params;
   const clock = ctx.clock ?? SystemClock;
@@ -834,14 +1694,17 @@ export async function executeWorkflowDag(
   // Load previously completed step results. The stored shape is always the
   // codec's encoded form (written by saveStepResult above), so we decode
   // through the step's codec here so downstream steps see the same shape
-  // they would on a fresh run.
+  // they would on a fresh run. Skip step rows that aren't declared in the
+  // DAG — e.g., synthetic `<loop>.iter.<n>` rows written by `.dowhile()`,
+  // or orphans from a prior version's topology. Those rows stay in
+  // storage for observability but must not count as DAG progress, or the
+  // `completed.size < ctx.steps.length` gate would skip the real step.
   if (state) {
     for (const [stepName, stepState] of Object.entries(state.steps)) {
-      if (stepState.status === "completed") {
-        const stepDef = ctx.steps.find((s) => s.name === stepName);
-        const codec = stepDef?.codec ?? LosslessJsonCodec;
-        results[stepName] = codec.decode(stepState.result);
-      }
+      if (stepState.status !== "completed") continue;
+      const stepDef = ctx.steps.find((s) => s.name === stepName);
+      if (!stepDef) continue;
+      results[stepName] = stepDef.codec.decode(stepState.result);
     }
   }
 
@@ -949,6 +1812,22 @@ export async function executeWorkflowDag(
     // Execute local ready steps in parallel, with per-step retry and failure handling
     const readySteps = localReady.map((name) => ctx.steps.find((s) => s.name === name)!);
 
+    // Emit `step-started` events to any subscribers before kicking the
+    // batch off. Storages without the optional hook are silently skipped —
+    // polling-only callers don't see step-started (no reliable signal
+    // from snapshot diffs).
+    if (typeof ctx.storage.notifyStepStarted === "function") {
+      for (const stepDef of readySteps) {
+        // Swallow errors from the notify path — subscription is advisory,
+        // not load-bearing. A broken event bus must not fail a workflow.
+        try {
+          await ctx.storage.notifyStepStarted(workflowId, stepDef.name);
+        } catch {
+          // ignore
+        }
+      }
+    }
+
     // Per-parallel-batch audit metadata map. `.match()` writes its chosen
     // case here via metadataRef; the failure path reads it back by step
     // name to persist metadata even when a match branch throws.
@@ -969,6 +1848,21 @@ export async function executeWorkflowDag(
     if (ctx.stepExecutor) {
       // Executor path — delegates step body to the pluggable executor.
       // skipWhen and attempt tracking remain the runner's responsibility.
+      //
+      // Eager save: each step's `saveStepResult` (+ optional
+      // `saveStepAttempt`) fires inside its own async closure, the moment
+      // the body resolves, instead of being deferred to a post-wave
+      // serial loop. Three benefits over the old "wait for the slowest in
+      // the wave, then sequentially save" pattern:
+      //   - `completedAt` reflects real wall-clock completion (the
+      //     timeline used to draw a wide gap between work-end and save
+      //     because the slowest sibling stalled the loop).
+      //   - Concurrent writes against storage instead of N sequential
+      //     awaits (every backend handles per-step row isolation).
+      //   - Partial-wave failures persist more progress: if A throws
+      //     while B already finished, B's save lands; on resume B is
+      //     `completed` and gets skipped instead of re-run.
+      // Skipped steps still don't persist (today's behavior preserved).
       try {
         batchResults = await Promise.all(
           readySteps.map(async (stepDef): Promise<LocalStepResult> => {
@@ -992,6 +1886,24 @@ export async function executeWorkflowDag(
             const currentAttempt = (params.stepAttempts.get(stepDef.name) ?? 0) + 1;
             params.stepAttempts.set(stepDef.name, currentAttempt);
 
+            // Resolve per-task concurrency cap. Step-level wins over the
+            // workflow-level default. The key fn is evaluated against the
+            // step's input ctx; the resolved string + scope + limit are
+            // stamped on the dispatched task so workers don't re-evaluate.
+            const concurrency = resolveStepConcurrency({
+              workflowName: ctx.workflowName,
+              workflowQueue: ctx.workflowQueue,
+              stepDef,
+              workflowInput: input,
+              stepInput: (() => {
+                const prevStepName = stepDef.dependsOn[0];
+                return prevStepName != null ? results[prevStepName] : input;
+              })(),
+              workflowId,
+              attempt: currentAttempt,
+              results,
+            });
+
             const req: StepExecutionRequest = {
               workflowId,
               stepName: stepDef.name,
@@ -1000,17 +1912,61 @@ export async function executeWorkflowDag(
               attempt: currentAttempt,
               needs: stepDef.needs,
               priority: stepDef.priority,
+              ...(concurrency
+                ? {
+                    concurrencyKey: concurrency.key,
+                    concurrencyScope: concurrency.scope,
+                    concurrencyLimit: concurrency.limit,
+                  }
+                : {}),
             };
             const res = await ctx.stepExecutor!.executeStep(req);
             if (!res.ok) {
               throw new StepError({ workflowId, stepName: stepDef.name, message: res.error });
             }
+            const durationMs = clock.currentTimeMs() - startTime;
+
+            // Eager save fires here unless the executor already wrote the
+            // step row (Postgres step-queue / coordinator path sets
+            // `storageAlreadyCheckpointed`). Returns the same shape as
+            // before with that flag set so the post-wave loop knows to
+            // skip its (now redundant) save.
+            if (!res.storageAlreadyCheckpointed) {
+              await ctx.storage.saveStepResult(
+                {
+                  workflowId,
+                  stepName: stepDef.name,
+                  result: res.result,
+                  metadata: res.metadata,
+                  durationMs,
+                  startedAt,
+                },
+                ctx.guard,
+              );
+              if (isStepAttemptStorage(ctx.storage)) {
+                await ctx.storage.saveStepAttempt(
+                  {
+                    workflowId,
+                    stepName: stepDef.name,
+                    attempt: currentAttempt,
+                    type: "execution",
+                    status: "completed",
+                    result: res.result,
+                    durationMs,
+                    startedAt,
+                    completedAt: clock.now(),
+                    ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
+                  },
+                  ctx.guard,
+                );
+              }
+            }
             return {
               name: stepDef.name,
               result: res.result,
               metadata: res.metadata,
-              storageAlreadyCheckpointed: res.storageAlreadyCheckpointed,
-              durationMs: clock.currentTimeMs() - startTime,
+              storageAlreadyCheckpointed: true,
+              durationMs,
               startedAt,
             };
           }),
@@ -1114,21 +2070,71 @@ export async function executeWorkflowDag(
             raw = raw.handleError((err) => fallbackFn(err));
           }
 
-          // Map to step result
-          return raw.map((result) => {
-            const encoded = stepDef.codec.encode(result);
-            return {
-              name: stepDef.name,
-              result: encoded,
-              metadata: metadataRef.current,
-              durationMs: clock.currentTimeMs() - startTime,
-              startedAt,
-            };
-          });
+          // Map to step result + eager save. Without flatMap-ing the
+          // save into the pipeline, the legacy path has the same wave-
+          // tail lag the executor path used to: `Pipeline.all` waits
+          // for every parallel step, then a post-wave for-loop saves
+          // them serially. Pulling the save into the per-step
+          // pipeline collapses the lag the same way the executor path
+          // does — completedAt becomes truthful per step.
+          return raw
+            .map((result) => {
+              const encoded = stepDef.codec.encode(result);
+              return {
+                name: stepDef.name,
+                result: encoded,
+                metadata: metadataRef.current,
+                durationMs: clock.currentTimeMs() - startTime,
+                startedAt,
+              };
+            })
+            .flatMap((stepResult) =>
+              Pipeline.fromPromise(async () => {
+                await ctx.storage.saveStepResult(
+                  {
+                    workflowId,
+                    stepName: stepResult.name,
+                    result: stepResult.result,
+                    metadata: stepResult.metadata,
+                    durationMs: stepResult.durationMs,
+                    startedAt: stepResult.startedAt,
+                  },
+                  ctx.guard,
+                );
+                if (isStepAttemptStorage(ctx.storage)) {
+                  await ctx.storage.saveStepAttempt(
+                    {
+                      workflowId,
+                      stepName: stepResult.name,
+                      attempt: params.stepAttempts.get(stepResult.name) ?? 1,
+                      type: "execution",
+                      status: "completed",
+                      result: stepResult.result,
+                      durationMs: stepResult.durationMs,
+                      startedAt: stepResult.startedAt,
+                      completedAt: clock.now(),
+                      ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
+                    },
+                    ctx.guard,
+                  );
+                }
+                return { ...stepResult, storageAlreadyCheckpointed: true };
+              }),
+            );
         }),
       );
 
-      const { data, error } = await pipeline.runSafe();
+      // `catchAll: true` converts Effect defects (including rejections
+      // from `Pipeline.fromPromise` → `Effect.promise`) into typed errors
+      // that runSafe returns through the `error` channel. Without it, any
+      // user step that throws synchronously — common with `.stepAsync()`
+      // or user code that builds its own `Pipeline.fromPromise(...)` —
+      // escapes `runSafe` unobserved, skips the `saveStepFailure` path
+      // below, and leaves the workflow stuck in `pending`. See
+      // promin-4ace. The extra `catchAll` changes what classes of error
+      // reach `batchError` but not what the downstream code does with it:
+      // the fallback branch already handles arbitrary Error instances.
+      const { data, error } = await pipeline.runSafe({ catchAll: true });
       batchResults = data as LocalStepResult[] | null;
       batchError = error ?? null;
     }
@@ -1139,6 +2145,13 @@ export async function executeWorkflowDag(
       // Suspension errors propagate without failing the workflow
       if (tag === "WorkflowSuspendedError") {
         return { success: false, error: batchError, suspension: true };
+      }
+
+      // Continue-as-new requests also unwind cleanly — no compensation,
+      // no failure recording. The orchestration wrapper catches the
+      // thrown error and chains a fresh run.
+      if (tag === "WorkflowContinueAsNewError") {
+        return { success: false, error: batchError, suspension: false, continueAsNew: true };
       }
 
       // Record step failure
@@ -1176,6 +2189,7 @@ export async function executeWorkflowDag(
             durationMs: 0,
             startedAt: failStartedAt,
             completedAt: clock.now(),
+            ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
           },
           ctx.guard,
         );
@@ -1194,6 +2208,7 @@ export async function executeWorkflowDag(
     // form; storage keeps that shape. Downstream steps and the
     // onStepComplete hook see the round-tripped decoded form so fresh-run
     // and replay paths are identical.
+    let tripwireFire: { stepName: string; reason: unknown } | null = null;
     for (const stepResult of batchResults!) {
       const { name, result, durationMs, startedAt } = stepResult;
       const metadata = "metadata" in stepResult ? stepResult.metadata : undefined;
@@ -1227,6 +2242,7 @@ export async function executeWorkflowDag(
               durationMs,
               startedAt,
               completedAt: clock.now(),
+              ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
             },
             ctx.guard,
           );
@@ -1243,6 +2259,26 @@ export async function executeWorkflowDag(
       results[name] = decoded;
       completed.add(name);
       running.delete(name);
+
+      // Tripwire detection: a `.tripwire()` step signals termination by
+      // writing `{ tripwireFired: true, reason }` to its metadata. Captured
+      // here after save so the step row shows `status: completed` with the
+      // reason as its result — ops can still query the step history.
+      // Breaks out of DAG execution after the batch settles.
+      if (
+        stepDef?.kind === "tripwire" &&
+        metadata &&
+        (metadata as { tripwireFired?: boolean }).tripwireFired === true
+      ) {
+        tripwireFire = {
+          stepName: name,
+          reason: (metadata as { reason: unknown }).reason,
+        };
+      }
+    }
+
+    if (tripwireFire) {
+      return { success: false, tripwire: true, ...tripwireFire };
     }
 
     // Check workflow-level deadline after steps complete
@@ -1303,11 +2339,13 @@ export async function compensateWorkflow(params: {
   guard?: FenceGuard;
   /** Time source. Drives compensation retry backoff + attempt timestamps. Default: SystemClock. */
   clock?: Clock;
+  /** Executor id stamped onto each compensation StepAttemptRecord. */
+  executorId?: string;
 }): Promise<{
   compensated: string[];
   failed: { stepName: string; error: unknown }[];
 }> {
-  const { storage, steps, compensateConfig, workflowId, input, guard } = params;
+  const { storage, steps, compensateConfig, workflowId, input, guard, executorId } = params;
   const clock = params.clock ?? SystemClock;
   const compensated: string[] = [];
   const failed: { stepName: string; error: unknown }[] = [];
@@ -1361,6 +2399,7 @@ export async function compensateWorkflow(params: {
               durationMs: clock.currentTimeMs() - compStartedAt.getTime(),
               startedAt: compStartedAt,
               completedAt: clock.now(),
+              ...(executorId !== undefined && { executorId }),
             },
             guard,
           );
@@ -1379,6 +2418,7 @@ export async function compensateWorkflow(params: {
               durationMs: clock.currentTimeMs() - compStartedAt.getTime(),
               startedAt: compStartedAt,
               completedAt: clock.now(),
+              ...(executorId !== undefined && { executorId }),
             },
             guard,
           );

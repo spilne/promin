@@ -5,7 +5,7 @@
 // No polling. No setInterval. No busy-wait. Event loop stays free.
 // ---------------------------------------------------------------------------
 
-import { Effect, Stream, Duration, Option } from "effect";
+import { Effect, Stream, Duration, Option, Queue } from "effect";
 import { Cron } from "croner";
 import { RRule } from "rrule";
 import { StreamPipeline } from "@promin/core";
@@ -51,7 +51,7 @@ import type { ScheduleConfig, ScheduleTick } from "./types.ts";
  *   }))
  *   .drain();
  *
- * // Stream all schedules merged
+ * // Stream all schedules merged — picks up schedules registered after subscribe() is called
  * StreamPipeline.fromSource(scheduler)
  *   .forEach((tick) => console.log(`${tick.scheduleId} fired at ${tick.firedAt}`));
  *
@@ -65,6 +65,7 @@ import type { ScheduleConfig, ScheduleTick } from "./types.ts";
  */
 export class InMemoryScheduler implements Scheduler {
   private schedules = new Map<string, ScheduleConfig & { paused: boolean }>();
+  private readonly _registerCallbacks = new Set<(id: string) => void>();
   readonly codec: Codec<ScheduleTick> = JsonCodec as Codec<ScheduleTick>;
 
   /**
@@ -98,6 +99,8 @@ export class InMemoryScheduler implements Scheduler {
       }
     }
     this.schedules.set(config.id, { ...config, paused: config.enabled === false });
+    // Notify any active subscribe() streams so they pick up the new schedule immediately.
+    for (const cb of this._registerCallbacks) cb(config.id);
   }
 
   /** Remove a schedule. Its stream will end. */
@@ -127,7 +130,10 @@ export class InMemoryScheduler implements Scheduler {
 
   /**
    * Stream ticks from a specific schedule, or all schedules merged.
-   * Non-blocking — each schedule sleeps until its next fire time.
+   *
+   * Single-schedule: sleeps until the next fire time — no polling, no busy-wait.
+   * All-schedules: same per-schedule sleep approach, with schedules registered
+   * after the stream starts picked up automatically via a register callback.
    *
    * @param scheduleId - If provided, stream only this schedule. Otherwise merge all.
    */
@@ -135,17 +141,54 @@ export class InMemoryScheduler implements Scheduler {
     if (scheduleId) {
       return this.createScheduleStream(scheduleId);
     }
-    const ids = [...this.schedules.keys()];
-    if (ids.length === 0) {
-      return StreamPipeline.from(Stream.empty);
-    }
-    const streams = ids.map((id) => this.createScheduleStream(id).stream);
-    const merged = streams.reduce((acc, s) => Stream.merge(acc, s));
-    return StreamPipeline.from(merged);
+    return this.createAllSchedulesStream();
   }
 
-  subscribe(params?: { group?: string }): StreamPipeline<ScheduleTick, never> {
-    return this.stream();
+  subscribe(_params?: { group?: string }): StreamPipeline<ScheduleTick, never> {
+    return this.createAllSchedulesStream();
+  }
+
+  // ---------------------------------------------------------------------------
+  // All-schedules stream — dynamic merge on register
+  //
+  // Uses Effect's Queue<Stream> as the outer channel so take()/interrupt()
+  // propagates cleanly. The async-generator approach used a never-resolving
+  // Promise for backpressure, which caused generator.return() to hang when
+  // Effect tried to interrupt the stream after take(N) completed.
+  // ---------------------------------------------------------------------------
+
+  private createAllSchedulesStream(): StreamPipeline<ScheduleTick, never> {
+    const self = this;
+
+    const s = Stream.unwrapScoped(
+      Effect.gen(function* () {
+        const q = yield* Queue.unbounded<Stream.Stream<ScheduleTick, never>>();
+
+        // Seed with schedules already registered at call time.
+        for (const id of self.schedules.keys()) {
+          yield* Queue.offer(q, self.createScheduleStream(id).stream);
+        }
+
+        // Forward future registrations into the queue.
+        const onRegister = (id: string) => {
+          Effect.runFork(Queue.offer(q, self.createScheduleStream(id).stream));
+        };
+        self._registerCallbacks.add(onRegister);
+
+        // Remove the callback when the stream scope is released (interrupted or done).
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => self._registerCallbacks.delete(onRegister)),
+        );
+
+        // Stream.fromQueue with shutdown:false keeps the stream open indefinitely;
+        // take() / interrupt() will terminate it via Effect's interrupt mechanism.
+        return Stream.flatMap(Stream.fromQueue(q, { shutdown: false }), (inner) => inner, {
+          concurrency: "unbounded",
+        });
+      }),
+    );
+
+    return StreamPipeline.from(s) as StreamPipeline<ScheduleTick, never>;
   }
 
   // ---------------------------------------------------------------------------
@@ -169,19 +212,13 @@ export class InMemoryScheduler implements Scheduler {
         }
 
         if (config.paused) {
-          // Sleep 1s, then re-check — emit nothing, keep same tickNumber
           return Effect.sleep(Duration.seconds(1)).pipe(
             Effect.flatMap(() => {
-              // Re-check after sleep
               const rechecked = self.schedules.get(scheduleId);
               if (!rechecked) return Effect.succeed(Option.none());
               if (rechecked.paused) {
-                // Still paused — use recursion via a sentinel: return a "skip" tick
-                // Actually, unfoldEffect can't skip. Use a wrapper stream with filter.
-                // Simplest: just return a tick with a negative tickNumber as skip marker.
                 return Effect.succeed(Option.some([SKIP_MARKER, tickNumber] as const));
               }
-              // Resumed — fall through to normal scheduling
               return computeAndSleep(rechecked, tickNumber);
             }),
           );
@@ -191,9 +228,7 @@ export class InMemoryScheduler implements Scheduler {
       }),
     );
 
-    // Filter out skip markers
     const filtered = Stream.filter(s, (tick) => tick !== SKIP_MARKER);
-
     return StreamPipeline.from(filtered);
   }
 }
@@ -212,7 +247,6 @@ function computeAndSleep(
 ): Effect.Effect<Option.Option<readonly [ScheduleTick, number]>> {
   const now = new Date();
 
-  // startAt: if schedule hasn't started yet, sleep until startAt then retry
   if (config.startAt && now < config.startAt) {
     const waitMs = config.startAt.getTime() - now.getTime();
     return Effect.sleep(Duration.millis(waitMs)).pipe(
@@ -220,7 +254,6 @@ function computeAndSleep(
     );
   }
 
-  // endAt: if schedule has expired, stop emitting
   if (config.endAt && now >= config.endAt) {
     return Effect.succeed(Option.none());
   }
@@ -231,7 +264,6 @@ function computeAndSleep(
       ? getNextRruleTime(config.rrule, now)
       : new Date(now.getTime() + (config.intervalMs ?? 1000));
 
-  // endAt: if next fire would be after endAt, stop
   if (config.endAt && nextFireTime >= config.endAt) {
     return Effect.succeed(Option.none());
   }

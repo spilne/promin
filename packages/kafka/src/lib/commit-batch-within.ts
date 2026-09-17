@@ -64,25 +64,32 @@ export function commitBatchWithin<T>(
     let pendingCount = 0;
     let lastFlush = Date.now();
     let flushTimer: ReturnType<typeof setInterval> | undefined;
+    let flushing = false;
 
     const flush = async () => {
-      const committable = tracker.committable();
-      if (committable.size === 0) return;
-
-      const offsets: KafkaOffsetCommit[] = [...committable.entries()].map(
-        ([partition, offset]) => ({
-          topic: config.topic,
-          partition,
-          offset: offset.toString(),
-        }),
-      );
-
+      // Re-entrancy guard: a count-triggered flush and the timer can overlap;
+      // two in-flight commitOffsets could land out of order. Skip if busy.
+      if (flushing) return;
+      flushing = true;
       try {
+        const committable = tracker.committable();
+        if (committable.size === 0) return;
+
+        const offsets: KafkaOffsetCommit[] = [...committable.entries()].map(
+          ([partition, offset]) => ({
+            topic: config.topic,
+            partition,
+            offset: offset.toString(),
+          }),
+        );
+
         await config.consumer.commitOffsets(offsets);
         pendingCount = 0;
         lastFlush = Date.now();
       } catch {
         // Commit failed — will retry on next flush
+      } finally {
+        flushing = false;
       }
     };
 
@@ -101,6 +108,9 @@ export function commitBatchWithin<T>(
         const partition = (env.metadata.partition as number) ?? 0;
         const offset = Number(env.metadata.offset ?? 0);
 
+        // Seed the frontier from the lowest offset seen (reordering-safe) so
+        // commits start at the right place on a non-zero resume / rewind.
+        tracker.observe(partition, offset);
         tracker.complete(partition, offset);
         pendingCount++;
 
@@ -142,18 +152,27 @@ export function autoCommitBatchWithin<T>(
     let pendingCount = 0;
     let lastFlush = Date.now();
     let flushTimer: ReturnType<typeof setInterval> | undefined;
+    let flushing = false;
 
     // Capture ack functions and batch them
     const pendingAcks: (() => Promise<void>)[] = [];
 
     const flush = async () => {
-      // Ack all pending envelopes — the tracker ensures contiguous commit
-      for (const ack of pendingAcks) {
-        await ack();
+      // Re-entrancy guard so the count- and timer-triggered flushes can't
+      // drain `pendingAcks` concurrently.
+      if (flushing) return;
+      flushing = true;
+      try {
+        // Ack all pending envelopes — the tracker ensures contiguous commit
+        const batch = pendingAcks.splice(0, pendingAcks.length);
+        for (const ack of batch) {
+          await ack();
+        }
+        pendingCount = 0;
+        lastFlush = Date.now();
+      } finally {
+        flushing = false;
       }
-      pendingAcks.length = 0;
-      pendingCount = 0;
-      lastFlush = Date.now();
     };
 
     flushTimer = setInterval(

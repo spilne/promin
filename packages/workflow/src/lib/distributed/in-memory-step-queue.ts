@@ -12,6 +12,7 @@ type MutableTask = {
   error?: string;
   claimedBy?: string;
   claimedAt?: Date;
+  claimToken?: string;
   heartbeatAt?: Date;
   completedAt?: Date;
   durationMs?: number;
@@ -52,6 +53,10 @@ export class InMemoryStepQueue implements StepQueue {
     priority?: number;
     namespace?: string;
     version?: string;
+    metadata?: Record<string, unknown>;
+    concurrencyKey?: string;
+    concurrencyScope?: string;
+    concurrencyLimit?: number;
   }): Promise<string> {
     const key = this.activeKey(params.namespace, params.workflowId, params.stepName);
     const existing = this.activeByKey.get(key);
@@ -71,6 +76,10 @@ export class InMemoryStepQueue implements StepQueue {
       createdAt: this.clock.now(),
       version: params.version,
       namespace: params.namespace,
+      metadata: params.metadata,
+      concurrencyKey: params.concurrencyKey,
+      concurrencyScope: params.concurrencyScope,
+      concurrencyLimit: params.concurrencyLimit,
     });
     this.activeByKey.set(key, id);
     return id;
@@ -140,47 +149,77 @@ export class InMemoryStepQueue implements StepQueue {
         ordered = pending;
     }
 
+    // Per-(scope,key) running counter — built once per claim() call so we
+    // can decide if claiming a task would push past its concurrencyLimit.
+    // Counts both already-running tasks and tasks claimed earlier in this
+    // same batch (so a single claim call can't itself violate the cap).
+    const runningPerKey = new Map<string, number>();
+    for (const t of this.tasks.values()) {
+      if (t.status !== "running") continue;
+      if (!t.concurrencyKey || !t.concurrencyScope) continue;
+      const k = `${t.concurrencyScope}::${t.concurrencyKey}`;
+      runningPerKey.set(k, (runningPerKey.get(k) ?? 0) + 1);
+    }
+
     const claimed: StepTask[] = [];
     for (const task of ordered) {
       if (claimed.length >= params.limit) break;
       if (task.status !== "pending") continue;
       if (params.filter && !params.filter({ ...task } as StepTask)) continue;
+      // Concurrency cap check — only when all three fields are set.
+      if (task.concurrencyKey && task.concurrencyScope && task.concurrencyLimit !== undefined) {
+        const k = `${task.concurrencyScope}::${task.concurrencyKey}`;
+        const running = runningPerKey.get(k) ?? 0;
+        if (running >= task.concurrencyLimit) continue;
+        runningPerKey.set(k, running + 1);
+      }
       task.status = "running";
       task.claimedBy = this.workerId;
       task.claimedAt = this.clock.now();
+      task.claimToken = `claim-${this.workerId}-${++this.counter}`;
       claimed.push({ ...task });
     }
 
     return claimed;
   }
 
-  async complete(params: { taskId: string; result: unknown; durationMs: number }): Promise<void> {
+  async complete(params: {
+    taskId: string;
+    claimToken?: string;
+    result: unknown;
+    durationMs: number;
+  }): Promise<boolean> {
     const task = this.tasks.get(params.taskId);
-    if (task) {
-      task.status = "completed";
-      task.result = params.result;
-      task.durationMs = params.durationMs;
-      task.completedAt = this.clock.now();
-      this.activeByKey.delete(this.activeKey(task.namespace, task.workflowId, task.stepName));
-    }
+    if (!this.isCurrentClaim(task, params.claimToken)) return false;
+    task.status = "completed";
+    task.result = params.result;
+    task.durationMs = params.durationMs;
+    task.completedAt = this.clock.now();
+    this.activeByKey.delete(this.activeKey(task.namespace, task.workflowId, task.stepName));
+    return true;
   }
 
-  async heartbeat(params: { taskId: string }): Promise<void> {
+  async heartbeat(params: { taskId: string; claimToken?: string }): Promise<boolean> {
     const task = this.tasks.get(params.taskId);
-    if (task?.status === "running") {
-      task.heartbeatAt = this.clock.now();
-    }
+    if (!this.isCurrentClaim(task, params.claimToken)) return false;
+    task.heartbeatAt = this.clock.now();
+    return true;
   }
 
-  async fail(params: { taskId: string; error: string; durationMs: number }): Promise<void> {
+  async fail(params: {
+    taskId: string;
+    claimToken?: string;
+    error: string;
+    durationMs: number;
+  }): Promise<boolean> {
     const task = this.tasks.get(params.taskId);
-    if (task) {
-      task.status = "failed";
-      task.error = params.error;
-      task.durationMs = params.durationMs;
-      task.completedAt = this.clock.now();
-      this.activeByKey.delete(this.activeKey(task.namespace, task.workflowId, task.stepName));
-    }
+    if (!this.isCurrentClaim(task, params.claimToken)) return false;
+    task.status = "failed";
+    task.error = params.error;
+    task.durationMs = params.durationMs;
+    task.completedAt = this.clock.now();
+    this.activeByKey.delete(this.activeKey(task.namespace, task.workflowId, task.stepName));
+    return true;
   }
 
   async requeueStuck(params: { claimedBy?: string; staleTimeoutMs?: number }): Promise<number> {
@@ -200,6 +239,7 @@ export class InMemoryStepQueue implements StepQueue {
         task.status = "pending";
         task.claimedBy = undefined;
         task.claimedAt = undefined;
+        task.claimToken = undefined;
         count++;
       }
     }
@@ -272,6 +312,14 @@ export class InMemoryStepQueue implements StepQueue {
   /** Test helper: get all tasks. */
   getAllTasks(): StepTask[] {
     return [...this.tasks.values()];
+  }
+
+  private isCurrentClaim(
+    task: MutableTask | undefined,
+    claimToken: string | undefined,
+  ): task is MutableTask {
+    if (!task || task.status !== "running") return false;
+    return claimToken === undefined || task.claimToken === claimToken;
   }
 }
 

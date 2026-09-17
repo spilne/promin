@@ -28,7 +28,7 @@ import { LosslessJsonCodec } from "@promin/core";
 import type { Show } from "@promin/core";
 import type { Sinkable } from "@promin/core";
 import type { FailedWorkflowRecord } from "./workflow-state.ts";
-import type { WorkflowStorage } from "./workflow-storage.ts";
+import { type WorkflowStorage, isStepAttemptStorage } from "./workflow-storage.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
 import { runWorkflowOrchestration } from "./workflow-runner.ts";
 import {
@@ -37,6 +37,7 @@ import {
   WorkflowSuspendedError,
   WorkflowTimeoutError,
   GuardError,
+  LoopLimitExceededError,
 } from "./durable-pipeline-error.ts";
 
 // ---------------------------------------------------------------------------
@@ -65,6 +66,83 @@ export interface MapStepContext<Input> {
   readonly workflowId: string;
   readonly taskIndex: number;
   readonly attempt: number;
+}
+
+/** Options for `.dowhile()` / `.dountil()` loops. */
+export interface LoopOptions<T> {
+  /**
+   * Safety cap on the number of iterations. When the loop runs this many
+   * times without the exit condition being satisfied, the loop step fails
+   * with `LoopLimitExceededError`. Default: 100.
+   */
+  readonly maxIterations?: number;
+  /** Override the codec used for the loop's iteration results. */
+  readonly codec?: Codec<T>;
+  /** Per-step timeout applied to the outer loop (not per-iteration). */
+  readonly timeoutMs?: number;
+  /** Retry policy applied to the outer loop step (not per-iteration). */
+  readonly retry?: RetryPolicy<TaggedError>;
+  /** Capabilities required by the loop step (forwarded when dispatched). */
+  readonly needs?: readonly string[];
+  /** Dispatch priority for the loop step. */
+  readonly priority?: number;
+}
+
+/** Extract the success type from a parallel branch function. */
+export type BranchOutput<B> = B extends (ctx: any) => Pipeline<infer T, any> ? T : never;
+
+/** Union of all branch error types — flows into the builder's typed Error channel. */
+export type BranchError<Branches extends Record<string, unknown>> = {
+  [K in keyof Branches]: Branches[K] extends (ctx: any) => Pipeline<any, infer E>
+    ? E extends TaggedError
+      ? E
+      : never
+    : never;
+}[keyof Branches];
+
+// ---------------------------------------------------------------------------
+// Queue concurrency config
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-workflow concurrency cap. Each step task this workflow enqueues
+ * carries the resolved key + limit; the step queue's `claim()` enforces
+ * the cap by counting currently-running tasks with the same
+ * `(workflowName, key)` tuple.
+ *
+ * Set `concurrencyKey` to a function of input — typical "cap per tenant"
+ * usage:
+ *
+ * ```ts
+ * workflow<{ tenantId: string }>({
+ *   name: "send-email",
+ *   queue: {
+ *     concurrencyLimit: 5,
+ *     concurrencyKey: (input) => input.tenantId,
+ *   },
+ * });
+ * ```
+ *
+ * Without `concurrencyKey`, the limit applies globally to every running
+ * step of this workflow regardless of input.
+ */
+export interface WorkflowQueueConfig<Input> {
+  readonly concurrencyLimit: number;
+  readonly concurrencyKey?: (input: Input) => string;
+}
+
+/**
+ * Per-step concurrency cap — same shape as workflow-level but scoped to
+ * just one step's tasks. Step-level wins over workflow-level for that
+ * specific step. Useful when one step is rate-limited by an external API
+ * (e.g. `concurrencyLimit: 3` on a "send-email" step that hits a vendor
+ * with a 3-rps cap, while the rest of the workflow has no cap).
+ */
+export interface StepQueueOption<T> {
+  readonly concurrencyLimit: number;
+  readonly concurrencyKey?: (
+    ctx: StepContext<T, unknown> | DagStepContext<T, Record<string, unknown>>,
+  ) => string;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +227,12 @@ export interface WorkflowDefinitionInternals {
   readonly onVersionMismatch: "strict" | "drain";
   readonly previousVersions?: ReadonlyArray<Workflow<unknown, unknown>>;
   readonly hooks?: WorkflowHooks;
+  /**
+   * Workflow-level concurrency cap — applied as a default to every step's
+   * dispatched task. Step-level `StepOptions.queue` wins for steps that
+   * declare their own. See `WorkflowQueueConfig`.
+   */
+  readonly queue?: WorkflowQueueConfig<unknown>;
 }
 
 /**
@@ -165,12 +249,36 @@ export interface WorkflowHandle<Output> {
 
   /** Wait for the workflow to complete. Resumes suspended workflows on each poll. */
   result(params?: { intervalMs?: number; timeoutMs?: number }): Promise<Output>;
+
+  /**
+   * Cancel the workflow. Marks it `failed` with the given reason and skips
+   * any in-flight steps. Idempotent — cancelling an already-terminal
+   * workflow is a no-op (matches storage.cancelWorkflow semantics).
+   */
+  cancel(reason?: string): Promise<void>;
+
+  /**
+   * Subscribe to live step / lifecycle events for this workflow. Closes on
+   * the first terminal event (`workflow-completed`, `workflow-failed`,
+   * `workflow-tripwire`) or when `options.signal` fires. Delegates to
+   * `runner.subscribe(workflowId, options)` — uses the storage's native
+   * push path when available, falls back to polling otherwise.
+   */
+  events(options?: {
+    signal?: AbortSignal;
+    pollIntervalMs?: number;
+  }): AsyncIterable<import("./workflow-state.ts").WorkflowRunEvent>;
 }
 
 export interface WorkflowStatusInfo<Output> {
-  readonly state: "pending" | "running" | "completed" | "failed" | "suspended";
+  readonly state: "pending" | "running" | "completed" | "failed" | "suspended" | "tripwire";
   readonly result?: Output;
   readonly error?: string;
+  /**
+   * Structured tripwire reason — present only when `state === "tripwire"`.
+   * Opaque payload returned by the firing `.tripwire()` step's `reason(prev)`.
+   */
+  readonly tripwire?: unknown;
   /** Which step is currently active or blocked. */
   readonly currentStep?: string;
   /** Why the workflow is suspended (if applicable). */
@@ -207,6 +315,17 @@ export interface WorkflowHooks {
   onWorkflowFailure?: (params: {
     workflowId: string;
     error: string;
+    durationMs: number;
+  }) => void | Promise<void>;
+  /**
+   * Fired when a `.tripwire()` step terminates the workflow. Not a failure —
+   * intentional short-circuit with a structured reason. `stepName` names the
+   * tripwire step; `reason` is the opaque payload it returned.
+   */
+  onWorkflowTripwire?: (params: {
+    workflowId: string;
+    stepName: string;
+    reason: unknown;
     durationMs: number;
   }) => void | Promise<void>;
 }
@@ -269,6 +388,12 @@ export interface StepOptions<T> {
    * a cache miss.
    */
   readonly cache?: StepCacheOption;
+  /**
+   * Per-step concurrency cap. Step-level wins over workflow-level — set
+   * this when one step is rate-limited by an external API while the rest
+   * of the workflow has no cap. See `WorkflowQueueConfig` for the shape.
+   */
+  readonly queue?: StepQueueOption<T>;
 }
 
 export interface StepCacheOption {
@@ -471,7 +596,10 @@ export type StepKind =
   | "sleep"
   | "signal"
   | "journaled"
-  | "guard";
+  | "guard"
+  | "tripwire"
+  | "parallel"
+  | "loop";
 
 export interface StepDefinition {
   readonly name: string;
@@ -493,6 +621,15 @@ export interface StepDefinition {
   readonly needs?: readonly string[];
   /** Dispatch priority copied onto the dispatched task. */
   readonly priority?: number;
+  /**
+   * Per-step concurrency cap. The coordinator evaluates `queue.concurrencyKey`
+   * against the step ctx at enqueue time and stamps the result on the
+   * dispatched task. The step queue's `claim()` counts currently-running
+   * tasks with the same `(scope, key)` and refuses to claim past the limit.
+   * When set, takes precedence over the workflow's queue config for this
+   * specific step.
+   */
+  readonly queue?: StepQueueOption<unknown>;
   /**
    * Static metadata for visualization/documentation. Currently set by `.match()`
    * to expose its case labels so the DAG can render decision branches; future
@@ -589,6 +726,12 @@ export class WorkflowBuilder<
      * one SHA-256 per activity invocation.
      */
     private readonly _defaultPayloadHash?: boolean,
+    /**
+     * Workflow-level concurrency cap. Stamped onto every dispatched step
+     * task at coordinator-enqueue time, scoped to the workflow name; a
+     * step-level `StepOptions.queue` overrides this for its specific step.
+     */
+    private readonly _queue?: WorkflowQueueConfig<Input>,
   ) {}
 
   /** Resolve the codec a step or activity should use when no explicit override is set. */
@@ -617,6 +760,7 @@ export class WorkflowBuilder<
       this._patches,
       this._defaultCodec,
       this._defaultPayloadHash,
+      this._queue,
     );
   }
 
@@ -858,6 +1002,448 @@ export class WorkflowBuilder<
   }
 
   // ---------------------------------------------------------------------------
+  // tripwire — short-circuit early exit with a structured reason
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Add a tripwire step — a predicate that ends the workflow early with a
+   * structured outcome when it fires. Not a failure; an intentional short
+   * circuit. When `when(prev)` returns `false`, the step passes `prev`
+   * through unchanged and execution continues. When it returns `true`, the
+   * runner stops the DAG, persists the reason, and marks the workflow with
+   * `status: "tripwire"`.
+   *
+   * Use for business short-circuits that are not errors: a fraud check that
+   * decides the transaction is fraudulent, a validation step that finds
+   * nothing to do, a rate-limit decision to drop the request. Callers
+   * inspect the outcome via `handle.status()` (reads `tripwire` from state)
+   * or via `WorkflowTripwireError` thrown from `run()`.
+   *
+   * ```typescript
+   * workflow({ name: "charge", storage })
+   *   .step("load", ({ input }) => Pipeline.succeed(input))
+   *   .tripwire("fraud-check", {
+   *     when: (order) => order.riskScore > 0.9,
+   *     reason: (order) => ({ code: "fraud", score: order.riskScore }),
+   *   })
+   *   .step("charge", (ctx) => chargeCard(ctx.prev))
+   * ```
+   *
+   * Requires the configured `WorkflowStorage` to implement
+   * `tripwireWorkflow`. The runner raises `TripwireStorageMissingError`
+   * at the fire site for storages that don't support it, rather than
+   * silently falling back to `failed`.
+   */
+  tripwire<Name extends string>(
+    name: Name,
+    params: {
+      when: (prev: Current) => boolean;
+      reason: (prev: Current) => unknown;
+    },
+    options?: StepOptions<Current>,
+  ): WorkflowBuilder<Input, Steps & Record<Name, Current>, Current, Error> {
+    this._validateName(name);
+
+    const dependsOn = this._lastStepName ? [this._lastStepName] : [];
+    const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
+
+    const stepDef: StepDefinition = {
+      name,
+      dependsOn,
+      kind: "tripwire",
+      codec,
+      execute: (execParams) => {
+        const prevStepName = dependsOn[0];
+        const prev = prevStepName != null ? execParams.results[prevStepName] : execParams.input;
+        if (params.when(prev as Current)) {
+          const reason = params.reason(prev as Current);
+          // Signal the runner: workflow should terminate with tripwire status.
+          // Runner reads this off `metadataRef.current` after execute returns.
+          execParams.metadataRef.current = { tripwireFired: true, reason };
+          return Pipeline.succeed(reason);
+        }
+        return Pipeline.succeed(prev);
+      },
+    };
+
+    return this._derive([...this._steps, stepDef], name) as any;
+  }
+
+  // ---------------------------------------------------------------------------
+  // dowhile / dountil — durable iteration loops
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Add a step-based loop — iterates `body` while `condition(result, iter)`
+   * stays `true`. Each iteration is persisted as its own step row (named
+   * `"<name>.iter.<n>"`) via `saveStepResult`, with its own duration /
+   * timestamps / attempt record — useful when each pass represents
+   * meaningful work you want visible in dashboards, logs, and attempt
+   * history (`loadStepAttempts`). The outer loop step also completes as a
+   * normal DAG node; `onStepComplete` fires for it.
+   *
+   * Body always runs at least once. Exits when the condition flips or
+   * when `maxIterations` (default 100) is exceeded — overflow raises
+   * `LoopLimitExceededError` as a typed step failure.
+   *
+   * ```typescript
+   * workflow({ name: "drain", storage })
+   *   .dowhile(
+   *     "process-batch",
+   *     (ctx, iter) => processNextBatch(ctx.prev),
+   *     (batch) => batch.length > 0,
+   *   )
+   * ```
+   *
+   * **Choosing vs `ctx.dowhile`:** this form is for workflow-level loops
+   * where each iteration is a discrete unit of work worth making visible.
+   * For tight in-process polling (activity-journal durability, single
+   * queue entry, no per-iter step rows), use `ctx.dowhile` inside a
+   * `.journaled()` body instead.
+   *
+   * **Crash recovery:** iteration step rows double as a durability
+   * checkpoint. On restart, the loop replays completed `<name>.iter.<n>`
+   * rows in order, re-evaluating the condition against each persisted
+   * result, and resumes from the first missing iteration. Already-run
+   * iterations are never re-executed.
+   */
+  dowhile<Name extends string, T>(
+    name: Name,
+    body: (ctx: StepContext<Input, Current>, iter: number) => T | Promise<T>,
+    condition: (result: T, iter: number) => boolean,
+    options?: LoopOptions<T>,
+  ): WorkflowBuilder<Input, Steps & Record<Name, T>, T, Error | LoopLimitExceededError> {
+    return this._buildLoop(name, body, condition, options);
+  }
+
+  /**
+   * Inverse polarity of `.dowhile()` — iterate `body` until the condition
+   * becomes `true`. Same step-row-per-iteration semantics. Body always
+   * runs at least once. See `.dowhile()` for the step-vs-journaled
+   * tradeoff.
+   *
+   * ```typescript
+   * workflow({ name: "poll", storage })
+   *   .dountil(
+   *     "wait-ready",
+   *     ({ prev }) => checkStatus(prev.jobId),
+   *     (status) => status === "ready",
+   *     { maxIterations: 60 },
+   *   )
+   * ```
+   */
+  dountil<Name extends string, T>(
+    name: Name,
+    body: (ctx: StepContext<Input, Current>, iter: number) => T | Promise<T>,
+    condition: (result: T, iter: number) => boolean,
+    options?: LoopOptions<T>,
+  ): WorkflowBuilder<Input, Steps & Record<Name, T>, T, Error | LoopLimitExceededError> {
+    // `dountil(cond) ≡ dowhile(!cond)` — inverting the predicate is the
+    // only difference, so we reuse the same implementation rather than
+    // fork a parallel loop body.
+    return this._buildLoop(name, body, (r, i) => !condition(r, i), options);
+  }
+
+  private _buildLoop<Name extends string, T>(
+    name: Name,
+    body: (ctx: StepContext<Input, Current>, iter: number) => T | Promise<T>,
+    condition: (result: T, iter: number) => boolean,
+    options: LoopOptions<T> | undefined,
+  ): WorkflowBuilder<Input, Steps & Record<Name, T>, T, Error | LoopLimitExceededError> {
+    this._validateName(name);
+
+    const maxIterations = options?.maxIterations ?? 100;
+    if (maxIterations < 1) {
+      throw new WorkflowError({
+        workflowId: "",
+        message: `.dowhile / .dountil("${name}", ...): maxIterations must be >= 1`,
+      });
+    }
+
+    const dependsOn = this._lastStepName ? [this._lastStepName] : [];
+    const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
+    const iterCodec = (options?.codec ?? this._codec()) as Codec<unknown>;
+
+    const stepDef: StepDefinition = {
+      name,
+      dependsOn,
+      kind: "loop",
+      codec,
+      timeoutMs: options?.timeoutMs,
+      retry: options?.retry as RetryPolicy<TaggedError> | undefined,
+      needs: options?.needs,
+      priority: options?.priority,
+      execute: (execParams) => {
+        const prevStepName = dependsOn[0];
+        const prev = prevStepName != null ? execParams.results[prevStepName] : execParams.input;
+        const stepCtx: StepContext<unknown, unknown> = {
+          input: execParams.input,
+          prev,
+          workflowId: execParams.workflowId,
+          attempt: execParams.attemptRef.current,
+        };
+
+        // Run iterations in-process. Each iteration writes its own step
+        // row (`<name>.iter.<n>`) via saveStepResult so the DAG view,
+        // onStepComplete hook, and step-attempt history all see the
+        // iteration. Failing iterations propagate as typed errors via
+        // Pipeline.tryPromise so the runner's saveStepFailure path
+        // applies normally — unlike .journaled which routes throws as
+        // defects.
+        const storage = execParams.storage;
+        const storageAttempts = isStepAttemptStorage(storage) ? storage : undefined;
+        return Pipeline.from(
+          Effect.tryPromise({
+            try: async (): Promise<T> => {
+              let result: T = undefined as unknown as T;
+              let iter = 0;
+
+              // Crash resume: look for completed `<name>.iter.<n>` rows
+              // in storage and replay loop state from them. Walk
+              // iter=0,1,2,... decoding each persisted result,
+              // re-evaluating the condition, and resuming from the first
+              // missing iteration. Cheap (O(iters) reads) and avoids
+              // re-running already-completed iterations on restart.
+              const state = await storage.loadWorkflow(execParams.workflowId);
+              if (state) {
+                while (iter < maxIterations) {
+                  const replayName = `${name}.iter.${iter}`;
+                  const row = state.steps[replayName];
+                  if (!row || row.status !== "completed") break;
+                  result = iterCodec.decode(row.result) as T;
+                  iter++;
+                  // If the replayed condition would have exited here, the
+                  // previous run already decided to stop — return without
+                  // touching storage or the body.
+                  if (!condition(result, iter - 1)) return result;
+                }
+              }
+
+              while (true) {
+                if (iter >= maxIterations) {
+                  throw new LoopLimitExceededError({
+                    workflowId: execParams.workflowId,
+                    stepName: name,
+                    maxIterations,
+                    message: `Loop "${name}" exceeded ${maxIterations} iterations without converging`,
+                  });
+                }
+                const iterName = `${name}.iter.${iter}`;
+                const startedAt = new Date();
+                const iterStart = Date.now();
+                const currentIter = iter;
+                try {
+                  result = await body(stepCtx as StepContext<Input, Current>, currentIter);
+                } catch (err) {
+                  const durationMs = Date.now() - iterStart;
+                  const message = err instanceof Error ? err.message : String(err);
+                  await storage.saveStepFailure({
+                    workflowId: execParams.workflowId,
+                    stepName: iterName,
+                    error: message,
+                    durationMs,
+                    startedAt,
+                  });
+                  if (storageAttempts) {
+                    await storageAttempts.saveStepAttempt({
+                      workflowId: execParams.workflowId,
+                      stepName: iterName,
+                      attempt: 1,
+                      type: "execution",
+                      status: "failed",
+                      error: message,
+                      durationMs,
+                      startedAt,
+                      completedAt: new Date(),
+                    });
+                  }
+                  throw err;
+                }
+                const durationMs = Date.now() - iterStart;
+                const encoded = iterCodec.encode(result);
+                await storage.saveStepResult({
+                  workflowId: execParams.workflowId,
+                  stepName: iterName,
+                  result: encoded,
+                  durationMs,
+                  startedAt,
+                });
+                if (storageAttempts) {
+                  await storageAttempts.saveStepAttempt({
+                    workflowId: execParams.workflowId,
+                    stepName: iterName,
+                    attempt: 1,
+                    type: "execution",
+                    status: "completed",
+                    result: encoded,
+                    durationMs,
+                    startedAt,
+                    completedAt: new Date(),
+                  });
+                }
+                iter++;
+                if (!condition(result, currentIter)) break;
+              }
+              return result;
+            },
+            catch: (err) => err as TaggedError,
+          }),
+        ) as Pipeline<unknown, TaggedError>;
+      },
+    };
+
+    return this._derive([...this._steps, stepDef], name) as unknown as WorkflowBuilder<
+      Input,
+      Steps & Record<Name, T>,
+      T,
+      Error | LoopLimitExceededError
+    >;
+  }
+
+  // ---------------------------------------------------------------------------
+  // parallelSteps — fluent fork/join over multiple named DAG steps
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Add a parallel-steps block — forks from the current head into N
+   * branches that run concurrently as **distinct DAG steps** (each
+   * distributable to workers and retriable independently), then joins them
+   * into a keyed record that downstream steps consume via `prev`.
+   *
+   * Named `parallelSteps` rather than `parallel` to disambiguate from
+   * `ctx.parallel()` on `JournaledContext`, which fans out **activities
+   * in-process** inside a single journaled step. This one operates at the
+   * DAG level — each branch is a separate queue entry that can land on a
+   * different worker.
+   *
+   * Follows the house style from `.branch()` and `.match()`: the outer
+   * block takes a `name`; branch labels are keys in a record rather than
+   * top-level step names. Each branch becomes a physical step named
+   * `"<block-name>.<label>"` in storage and the step queue, so branch
+   * names scoped under the block don't collide with unrelated siblings.
+   *
+   * ```typescript
+   * workflow({ name: "signup", storage })
+   *   .step("load", ({ input }) => Pipeline.succeed(input))
+   *   .parallelSteps("enrich", {
+   *     user: ({ prev }) => Pipeline.fromPromise(() => fetchUser(prev)),
+   *     perms: ({ prev }) => Pipeline.fromPromise(() => fetchPerms(prev)),
+   *   })
+   *   .step("join", ({ prev }) => Pipeline.succeed({ ...prev.user, ...prev.perms }))
+   * ```
+   *
+   * Semantics match the existing DAG executor: branches run concurrently
+   * within a ready-set batch and the block fails on the first branch
+   * failure (remaining branches' results are not preserved; compensation
+   * cascades via the usual saga path).
+   */
+  parallelSteps<
+    Name extends string,
+    Branches extends Record<
+      string,
+      (ctx: StepContext<Input, Current>) => Pipeline<unknown, TaggedError>
+    >,
+  >(
+    name: Name,
+    branches: Branches,
+    options?: StepOptions<{ [K in keyof Branches]: BranchOutput<Branches[K]> }>,
+  ): WorkflowBuilder<
+    Input,
+    Steps & Record<Name, { [K in keyof Branches]: BranchOutput<Branches[K]> }>,
+    { [K in keyof Branches]: BranchOutput<Branches[K]> },
+    Error | BranchError<Branches>
+  > {
+    this._validateName(name);
+    const branchKeys = Object.keys(branches);
+    if (branchKeys.length === 0) {
+      throw new WorkflowError({
+        workflowId: "",
+        message: `.parallelSteps("${name}", ...) requires at least one branch`,
+      });
+    }
+
+    const parentStep = this._lastStepName;
+    const parentDepends = parentStep ? [parentStep] : [];
+    const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
+    const workflowName = this._name;
+
+    // One StepDefinition per branch. Scoped names (block.branch) keep the
+    // label record free for TypeScript while the physical queue rows stay
+    // globally unique per workflow.
+    const takenNames = new Set(this._steps.map((s) => s.name));
+    takenNames.add(name);
+    const branchSteps: StepDefinition[] = [];
+    const scopedNames: string[] = [];
+
+    for (const key of branchKeys) {
+      const scopedName = `${name}.${key}`;
+      if (takenNames.has(scopedName)) {
+        throw new WorkflowError({
+          workflowId: "",
+          message: `Duplicate step name: "${scopedName}"`,
+        });
+      }
+      takenNames.add(scopedName);
+      scopedNames.push(scopedName);
+
+      const branchFn = branches[key] as (
+        ctx: StepContext<Input, Current>,
+      ) => Pipeline<unknown, TaggedError>;
+
+      branchSteps.push({
+        name: scopedName,
+        dependsOn: parentDepends,
+        kind: "normal",
+        codec,
+        timeoutMs: options?.timeoutMs,
+        retry: options?.retry as RetryPolicy<TaggedError> | undefined,
+        onFailure: options?.onFailure as StepFailureStrategy<unknown> | undefined,
+        needs: options?.needs,
+        priority: options?.priority,
+        execute: (execParams) => {
+          const prevName = parentDepends[0];
+          const prev = prevName != null ? execParams.results[prevName] : execParams.input;
+          const ctx: StepContext<unknown, unknown> = {
+            input: execParams.input,
+            prev,
+            workflowId: execParams.workflowId,
+            attempt: execParams.attemptRef.current,
+          };
+          const cacheOption = options?.cache;
+          if (!cacheOption) return branchFn(ctx as StepContext<Input, Current>);
+          return wrapWithStepCache(
+            cacheOption,
+            ctx as StepContext<unknown, unknown>,
+            () => branchFn(ctx as StepContext<Input, Current>),
+            cacheOption.namespace ?? workflowName,
+          );
+        },
+      });
+    }
+
+    // Synthetic join. Kind "parallel" marks it for visualization; its
+    // body is a zero-effort assembler that reads the branch results and
+    // shapes them into { [label]: result } using the original (unscoped)
+    // keys. Inherits the default codec so downstream consumers see the
+    // normal round-tripped shape.
+    const joinStepDef: StepDefinition = {
+      name,
+      dependsOn: scopedNames,
+      kind: "parallel",
+      codec,
+      execute: (execParams) => {
+        const out: Record<string, unknown> = {};
+        for (let i = 0; i < branchKeys.length; i++) {
+          out[branchKeys[i]!] = execParams.results[scopedNames[i]!];
+        }
+        return Pipeline.succeed(out);
+      },
+    };
+
+    return this._derive([...this._steps, ...branchSteps, joinStepDef], name) as any;
+  }
+
+  // ---------------------------------------------------------------------------
   // branch — conditional paths
   // ---------------------------------------------------------------------------
 
@@ -964,57 +1550,70 @@ export class WorkflowBuilder<
         const builderVersion = this._version;
         const builderPatches = this._patches;
         const runtimeStorage = execParams.storage;
-        return Pipeline.fromPromise(() =>
-          runJournaledStep<Input, Current, Output>({
-            input: execParams.input as Input,
-            prev: prev as Current,
-            workflowId: execParams.workflowId,
-            stepName: name,
-            storage: getJournalStorage(runtimeStorage),
-            workflowStorage: runtimeStorage,
-            workflowVersion: builderVersion,
-            patches: builderPatches,
-            codec,
-            payloadHash: this._defaultPayloadHash,
-            runChild: async ({
-              workflow: childWorkflow,
-              workflowId: childId,
-              input: childInput,
-            }) => {
-              const childDef = (childWorkflow as any)._definition as any;
-              await runtimeStorage
-                .createWorkflow({
+        // Use Effect.tryPromise (not Pipeline.fromPromise/Effect.promise)
+        // so any `throw` from the generator body surfaces as a TYPED
+        // pipeline failure. Without this, thrown TaggedErrors like
+        // WorkflowSuspendedError or LoopLimitExceededError land as
+        // Die-tagged defects; `pipeline.runSafe()` (no catchAll) rejects
+        // instead of returning, and the runner's saveStepFailure path
+        // never fires — workflows hang in "pending". `catch: err => err`
+        // preserves the original error instance so downstream tag checks
+        // (WorkflowSuspendedError handling, etc.) keep working.
+        return Pipeline.from(
+          Effect.tryPromise({
+            try: () =>
+              runJournaledStep<Input, Current, Output>({
+                input: execParams.input as Input,
+                prev: prev as Current,
+                workflowId: execParams.workflowId,
+                stepName: name,
+                storage: getJournalStorage(runtimeStorage),
+                workflowStorage: runtimeStorage,
+                workflowVersion: builderVersion,
+                patches: builderPatches,
+                codec,
+                payloadHash: this._defaultPayloadHash,
+                runChild: async ({
+                  workflow: childWorkflow,
                   workflowId: childId,
-                  workflowName: childWorkflow.name,
                   input: childInput,
-                  parentWorkflowId: execParams.workflowId,
-                  version: childWorkflow.version,
-                  workflowType: childDef.type,
-                  metadata: childDef.metadata,
-                })
-                .catch(() => undefined); // no-op on conflict (idempotent re-run)
-              return runWorkflowOrchestration(
-                {
-                  storage: runtimeStorage,
-                  name: childWorkflow.name,
-                  version: childWorkflow.version,
-                  idempotency: childWorkflow.idempotency,
-                  type: childDef.type,
-                  metadata: childDef.metadata,
-                  steps: childDef.steps,
-                  retry: childDef.retry,
-                  compensateConfig: childDef.compensateConfig,
-                  dlq: childDef.dlq,
-                  dispatch: childDef.dispatch,
-                  timeoutMs: childDef.timeoutMs,
-                  onVersionMismatch: childDef.onVersionMismatch,
-                  previousVersions: childDef.previousVersions,
-                  hooks: childDef.hooks,
+                }) => {
+                  const childDef = (childWorkflow as any)._definition as any;
+                  await runtimeStorage
+                    .createWorkflow({
+                      workflowId: childId,
+                      workflowName: childWorkflow.name,
+                      input: childInput,
+                      parentWorkflowId: execParams.workflowId,
+                      version: childWorkflow.version,
+                      workflowType: childDef.type,
+                      metadata: childDef.metadata,
+                    })
+                    .catch(() => undefined); // no-op on conflict (idempotent re-run)
+                  return runWorkflowOrchestration(
+                    {
+                      storage: runtimeStorage,
+                      name: childWorkflow.name,
+                      version: childWorkflow.version,
+                      idempotency: childWorkflow.idempotency,
+                      type: childDef.type,
+                      metadata: childDef.metadata,
+                      steps: childDef.steps,
+                      retry: childDef.retry,
+                      compensateConfig: childDef.compensateConfig,
+                      dlq: childDef.dlq,
+                      dispatch: childDef.dispatch,
+                      timeoutMs: childDef.timeoutMs,
+                      onVersionMismatch: childDef.onVersionMismatch,
+                      previousVersions: childDef.previousVersions,
+                      hooks: childDef.hooks,
+                    },
+                    { workflowId: childId, input: childInput },
+                  );
                 },
-                { workflowId: childId, input: childInput },
-              );
-            },
-            body,
+                body,
+              }),
+            catch: (err) => err as TaggedError,
           }),
         ) as Pipeline<unknown, TaggedError>;
       },
@@ -1433,6 +2032,7 @@ export class WorkflowBuilder<
       onVersionMismatch: this._onVersionMismatch,
       previousVersions: this._previousVersions,
       hooks: this._hooks,
+      queue: this._queue as WorkflowQueueConfig<unknown> | undefined,
     };
   }
 
@@ -1484,6 +2084,7 @@ export class WorkflowBuilder<
       this._patches,
       this._defaultCodec,
       this._defaultPayloadHash,
+      this._queue,
     );
   }
 
@@ -1509,6 +2110,7 @@ export class WorkflowBuilder<
       this._patches,
       this._defaultCodec,
       this._defaultPayloadHash,
+      this._queue,
     );
   }
 
@@ -1547,6 +2149,7 @@ export class WorkflowBuilder<
       skipValue: params.options?.skipValue as StepDefinition["skipValue"],
       needs: params.options?.needs,
       priority: params.options?.priority,
+      queue: params.options?.queue as StepQueueOption<unknown> | undefined,
       execute: (execParams) => {
         let ctx: StepContext<unknown, unknown> | DagStepContext<unknown, Record<string, unknown>>;
         if (params.isLinear) {
@@ -1692,6 +2295,21 @@ export function workflow<Input>(params: {
    * which is cheap but not free.
    */
   payloadHash?: boolean;
+  /**
+   * Workflow-level concurrency cap. Stamped onto every dispatched step
+   * task; the step queue's `claim()` enforces. Caller's
+   * `concurrencyKey(input)` runs once at coordinator-enqueue time and the
+   * resolved string is stored on each task so workers don't re-evaluate.
+   * A step's own `StepOptions.queue` overrides this for that step.
+   *
+   * ```ts
+   * workflow<{ tenantId: string }>({
+   *   name: "send-email",
+   *   queue: { concurrencyLimit: 5, concurrencyKey: (input) => input.tenantId },
+   * });
+   * ```
+   */
+  queue?: WorkflowQueueConfig<Input>;
 }): WorkflowBuilder<Input> {
   if (params.onVersionMismatch === "drain" && !params.previousVersions?.length) {
     throw new WorkflowError({
@@ -1729,6 +2347,7 @@ export function workflow<Input>(params: {
     params.patches,
     params.codec,
     params.payloadHash,
+    params.queue as WorkflowQueueConfig<Input> | undefined,
   );
 }
 

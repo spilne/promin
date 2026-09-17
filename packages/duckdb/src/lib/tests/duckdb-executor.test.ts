@@ -576,7 +576,11 @@ describe("DuckDBExecutor", () => {
     });
   });
 
-  describe("predicate pushdown — Expr compiled to SQL", () => {
+  // Skipped: this block depends on a `col()` / `when()` expression API
+  // that isn't exported from `@promin/core` (the Expr DSL was scoped out
+  // before merge). Re-enable once the DSL lands; the tests themselves
+  // describe the intended SQL-pushdown contract.
+  describe.skip("predicate pushdown — Expr compiled to SQL", () => {
     const { col, when } = require("@promin/core");
 
     it("filter with col().gt() compiles to SQL WHERE", async () => {

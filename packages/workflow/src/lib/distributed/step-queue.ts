@@ -25,11 +25,37 @@ export interface StepTask {
   readonly status: "pending" | "running" | "completed" | "failed";
   readonly createdAt: Date;
   /**
+   * Opaque token minted by claim(). Workers must pass it to heartbeat,
+   * complete, and fail so a stale worker cannot commit after the task has
+   * been requeued and claimed by someone else.
+   */
+  readonly claimToken?: string;
+  /**
    * Workflow version that enqueued this task, if any. Enables rolling deploys
    * where v1 and v2 workflows run concurrently but workers filter by the
    * versions they support. Undefined for unversioned workflows.
    */
   readonly version?: string;
+  /**
+   * Search-attribute payload set at enqueue time. See `enqueue` for the
+   * convention. Round-trips unchanged; never read by the platform.
+   */
+  readonly metadata?: Record<string, unknown>;
+  /**
+   * Per-task concurrency cap. When set, `claim()` only claims this task
+   * when fewer than `concurrencyLimit` tasks with the same
+   * `(concurrencyScope, concurrencyKey)` are currently `running`.
+   *
+   * Scope conventions:
+   *   `<workflowName>`              — workflow-level (caps any step).
+   *   `<workflowName>::<stepName>`  — step-level (caps just one step).
+   *
+   * `concurrencyKey` is the user-evaluated string (e.g. `payload.tenantId`).
+   * Null on any of the three disables enforcement for this task.
+   */
+  readonly concurrencyKey?: string;
+  readonly concurrencyScope?: string;
+  readonly concurrencyLimit?: number;
 }
 
 /**
@@ -80,6 +106,28 @@ export interface StepQueue {
      * can filter by supported versions during rolling deploys.
      */
     version?: string;
+    /**
+     * Arbitrary search-attribute payload — mirrors `wf_workflows.metadata`.
+     * The platform never reads keys here for control flow; it's a generic
+     * place for callers (agents, scheduling, custom workloads) to attach
+     * scope / labels / tags / experiment IDs that downstream observability
+     * + queries can filter by. Conventions (documented, not enforced):
+     *   `metadata.userId`     — end-user actor (agent dispatch sets this)
+     *   `metadata.subject`    — generic actor when not a user
+     *   `metadata.tags`       — string[] for free-form labeling
+     *   `metadata.experiment` — A/B / rollout flag
+     * Round-trips through `claim` unchanged.
+     */
+    metadata?: Record<string, unknown>;
+    /**
+     * Per-task concurrency cap — see `StepTask.concurrencyKey` for the
+     * shape. Resolved by the coordinator from the workflow / step queue
+     * config (step-level overrides workflow-level). Stored on the row
+     * verbatim; `claim()` does the count check.
+     */
+    concurrencyKey?: string;
+    concurrencyScope?: string;
+    concurrencyLimit?: number;
   }): Promise<string>;
 
   /**
@@ -107,18 +155,34 @@ export interface StepQueue {
     filter?: (task: StepTask) => boolean;
   }): Promise<StepTask[]>;
 
-  /** Mark a task as completed with a result. */
-  complete(params: { taskId: string; result: unknown; durationMs: number }): Promise<void>;
+  /**
+   * Mark a task as completed with a result. Returns false when the task is no
+   * longer held by this claim, letting workers skip stale workflow checkpoints.
+   */
+  complete(params: {
+    taskId: string;
+    claimToken?: string;
+    result: unknown;
+    durationMs: number;
+  }): Promise<boolean>;
 
-  /** Mark a task as failed with an error. */
-  fail(params: { taskId: string; error: string; durationMs: number }): Promise<void>;
+  /**
+   * Mark a task as failed with an error. Returns false when the task is no
+   * longer held by this claim.
+   */
+  fail(params: {
+    taskId: string;
+    claimToken?: string;
+    error: string;
+    durationMs: number;
+  }): Promise<boolean>;
 
   /**
    * Extend the running lease on a task. Workers call this periodically while
    * executing a long step so `requeueStuck` doesn't reclaim it prematurely.
    * No-op if the task is not in `running` state.
    */
-  heartbeat(params: { taskId: string }): Promise<void>;
+  heartbeat(params: { taskId: string; claimToken?: string }): Promise<boolean>;
 
   /**
    * Re-enqueue tasks stuck in "running" state. Returns count re-enqueued.

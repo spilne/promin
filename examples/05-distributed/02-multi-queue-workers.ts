@@ -78,7 +78,7 @@ const aiWorker = createWorker({
 });
 
 // Start all processes
-await coordinator.start();
+void coordinator.startLoop();
 await defaultWorker.start();
 await gpuWorker.start();
 await aiWorker.start();

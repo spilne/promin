@@ -46,6 +46,21 @@
     },
     {
       "path": "./packages/workflow-remote"
+    },
+    {
+      "path": "./packages/agent"
+    },
+    {
+      "path": "./packages/evals"
+    },
+    {
+      "path": "./packages/sqlite"
+    },
+    {
+      "path": "./packages/zorya"
+    },
+    {
+      "path": "./packages/zorya-client"
     }
   ]
 }

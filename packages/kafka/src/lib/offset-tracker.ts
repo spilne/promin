@@ -21,11 +21,31 @@ export class OffsetTracker {
   private frontier = new Map<number, number>();
 
   /**
-   * Record that a message at the given partition + offset was processed.
+   * Seed/lower the per-partition frontier from a delivered offset. Call once
+   * per delivered record (before `complete`).
+   *
+   * Sets the frontier to the LOWEST offset observed for the partition. This
+   * fixes two bugs that a fixed `frontier=0` causes:
+   *
+   *  - **Non-zero resume stall:** a group resuming from a committed offset
+   *    (e.g. 5000) would never advance from 0 → commits stall forever. Seeding
+   *    from the first delivered offset starts the frontier in the right place.
+   *  - **Rebalance / seek rewind:** if a partition is revoked then reassigned
+   *    (or seeked), the broker redelivers from the last *committed* offset,
+   *    which can be BELOW our advanced frontier. Lowering to it lets commits
+   *    resume — no driver rebalance callback required. Reordering-safe (we take
+   *    the min, never clear), so it's correct downstream of parallel maps too.
    */
+  observe(partition: number, offset: number): void {
+    const front = this.frontier.get(partition);
+    if (front === undefined || offset < front) {
+      this.frontier.set(partition, offset);
+    }
+  }
+
   /**
-   * Set the starting frontier for a partition.
-   * Call this when the consumer starts from a known offset (e.g., after commit recovery).
+   * Set the starting frontier for a partition explicitly (e.g. after commit
+   * recovery). Prefer {@link observe}, which seeds automatically in delivery order.
    */
   setFrontier(partition: number, offset: number): void {
     this.frontier.set(partition, offset);
@@ -37,7 +57,8 @@ export class OffsetTracker {
     }
     this.completed.get(partition)!.add(offset);
 
-    // Initialize frontier at 0 for new partitions — Kafka offsets start at 0
+    // Fallback only — real callers seed via `observe()` (in delivery order)
+    // BEFORE the first `complete()`, so this `0` is overridden in practice.
     if (!this.frontier.has(partition)) {
       this.frontier.set(partition, 0);
     }

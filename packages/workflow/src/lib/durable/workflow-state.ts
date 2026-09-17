@@ -8,7 +8,8 @@ export type WorkflowStatus =
   | "completed"
   | "failed"
   | "suspended"
-  | "compensating";
+  | "compensating"
+  | "tripwire";
 
 export type CompensationStatus = "none" | "compensating" | "compensated" | "partial";
 
@@ -25,6 +26,46 @@ export type StepStatus =
 
 export type StepType = "single" | "map" | "sleep" | "signal";
 
+/**
+ * Why this workflow run was started. Stored on the workflow row so the
+ * dashboard can filter by source (e.g., "show only manual triggers") and
+ * link runs back to whatever produced them without parsing workflow ids
+ * or chasing through metadata. `runSourceId` is the id of the producer:
+ *  - `"schedule"`  → the `scheduleId`
+ *  - `"parent"`    → the parent workflow id
+ *  - `"webhook"`   → the webhook name
+ *  - `"agent"`     → the agent or thread id
+ *  - `"manual"` / `"api"` → no source id (or an operator-supplied tag)
+ *
+ * String for ergonomics in app code; backends encode as a small int via
+ * `RUN_SOURCE_CODES` so the on-disk footprint and index density match a
+ * native enum column.
+ */
+export type RunSource = "manual" | "schedule" | "api" | "webhook" | "parent" | "agent";
+
+export const RUN_SOURCE_CODES = {
+  manual: 0,
+  schedule: 1,
+  api: 2,
+  webhook: 3,
+  parent: 4,
+  agent: 5,
+} as const satisfies Record<RunSource, number>;
+
+const RUN_SOURCE_BY_CODE_MAP = new Map<number, RunSource>(
+  Object.entries(RUN_SOURCE_CODES).map(([k, v]) => [v, k as RunSource]),
+);
+
+export function encodeRunSource(source: RunSource | undefined): number | null {
+  if (source === undefined) return null;
+  return RUN_SOURCE_CODES[source];
+}
+
+export function decodeRunSource(code: number | null | undefined): RunSource | undefined {
+  if (code == null) return undefined;
+  return RUN_SOURCE_BY_CODE_MAP.get(code);
+}
+
 export interface WorkflowState<Input = unknown, Result = unknown> {
   readonly workflowId: string;
   readonly workflowName: string;
@@ -37,10 +78,49 @@ export interface WorkflowState<Input = unknown, Result = unknown> {
   readonly input: Input;
   readonly result?: Result;
   readonly error?: string;
+  /**
+   * Structured reason attached when the workflow ended via a `.tripwire()`
+   * step. Present only when `status === "tripwire"`. Opaque payload — the
+   * shape is whatever the tripwire step's `reason(prev)` returned.
+   */
+  readonly tripwire?: unknown;
+  /**
+   * What kicked this run off (`"schedule"`, `"manual"`, …). See `RunSource`.
+   * Stored as a small int on disk for index density.
+   */
+  readonly runSource?: RunSource;
+  /** Producer id corresponding to `runSource`. See `RunSource` for shape. */
+  readonly runSourceId?: string;
   readonly metadata?: Record<string, unknown>;
   readonly steps: Record<string, StepState>;
   readonly workflowAttempt?: number;
   readonly compensationStatus?: CompensationStatus;
+  readonly createdAt: Date;
+  readonly startedAt?: Date;
+  readonly updatedAt: Date;
+  readonly completedAt?: Date;
+}
+
+/**
+ * Lightweight workflow header returned by `listWorkflowSummaries`. Contains
+ * every field needed for list-view UIs (status badges, timing columns, filter
+ * facets) but omits the large blob fields — `steps`, `input`, `result`,
+ * `error` — so the query can skip deserialising those JSON columns entirely.
+ *
+ * Every `WorkflowState` satisfies this type, so in-memory backends can
+ * trivially implement `listWorkflowSummaries` by delegating to `listWorkflows`.
+ */
+export interface WorkflowSummary {
+  readonly workflowId: string;
+  readonly workflowName: string;
+  readonly workflowType?: string;
+  readonly namespace?: string;
+  readonly status: WorkflowStatus;
+  readonly version?: string;
+  readonly run: number;
+  readonly runSource?: RunSource;
+  readonly runSourceId?: string;
+  readonly metadata?: Record<string, unknown>;
   readonly createdAt: Date;
   readonly startedAt?: Date;
   readonly updatedAt: Date;
@@ -54,6 +134,8 @@ export interface WorkflowRunSummary {
   readonly status: WorkflowStatus;
   readonly result?: unknown;
   readonly error?: string;
+  /** Tripwire reason — present only when `status === "tripwire"`. */
+  readonly tripwire?: unknown;
   readonly steps: Record<string, StepState>;
   readonly createdAt: Date;
   readonly startedAt?: Date;
@@ -76,6 +158,19 @@ export interface StepState {
   readonly wakeAt?: Date;
   readonly signalName?: string;
   readonly signalTimeoutAt?: Date;
+  /**
+   * JSON Schema snapshot the suspend point waited on, written by
+   * `ctx.validatedSignal(sig)` / `ctx.approval(id)` from
+   * `sig.schema.jsonSchema`. The server reads this before delivering
+   * any inbound payload and rejects 400 if the payload doesn't match
+   * (POST /api/runs/:id/signal + the public signal-token complete
+   * route). Stays `undefined` for plain `ctx.signal()` callers — those
+   * keep the existing pass-through semantics. Persisted on the suspend
+   * record (not on the journal entry) so a SignalType definition
+   * change between suspend and delivery doesn't retro-break workflows
+   * already waiting.
+   */
+  readonly signalJsonSchema?: unknown;
   readonly compensationStatus?: "pending" | "compensated" | "compensation_failed";
   readonly compensationError?: string;
   readonly compensatedAt?: Date;
@@ -108,6 +203,53 @@ export interface SignalState {
   readonly payload: unknown;
   readonly deliveredAt: Date;
 }
+
+// ---------------------------------------------------------------------------
+// Run-scoped workflow events
+// ---------------------------------------------------------------------------
+
+/**
+ * Event emitted by `WorkflowStorage.subscribeToWorkflow()` for a specific
+ * workflow run. Subscribers receive these as they happen so UIs / CLIs can
+ * stream live progress without polling `loadWorkflow`.
+ *
+ * Emission points:
+ *   - `notifyStepStarted` → `step-started` (runner calls this before each
+ *     local step body runs; storages without the method emit nothing for
+ *     this event)
+ *   - `saveStepResult` → `step-completed`
+ *   - `saveStepFailure` → `step-failed`
+ *   - `completeWorkflow` → `workflow-completed` (terminal — stream closes)
+ *   - `failWorkflow` → `workflow-failed` (terminal — stream closes)
+ *   - `tripwireWorkflow` → `workflow-tripwire` (terminal — stream closes)
+ *
+ * The runner's polling fallback (used when the storage lacks native push)
+ * can only synthesize completion events from step-row transitions, so
+ * `step-started` is only observable on the push path.
+ */
+export type WorkflowRunEvent =
+  | { readonly type: "step-started"; readonly stepName: string; readonly at: Date }
+  | {
+      readonly type: "step-completed";
+      readonly stepName: string;
+      readonly result: unknown;
+      readonly durationMs: number;
+      readonly at: Date;
+    }
+  | {
+      readonly type: "step-failed";
+      readonly stepName: string;
+      readonly error: string;
+      readonly at: Date;
+    }
+  | { readonly type: "workflow-completed"; readonly result: unknown; readonly at: Date }
+  | { readonly type: "workflow-failed"; readonly error: string; readonly at: Date }
+  | {
+      readonly type: "workflow-tripwire";
+      readonly stepName: string;
+      readonly reason: unknown;
+      readonly at: Date;
+    };
 
 // ---------------------------------------------------------------------------
 // Step attempt history
@@ -147,12 +289,14 @@ export interface StepAttemptRecord {
   readonly startedAt: Date;
   readonly completedAt: Date;
   /**
-   * ID of the worker that processed this attempt, when known. Set by the
-   * distributed worker from its own workerId. In-process runs
-   * (`wf.run(...)`) leave this undefined — there is no distinct worker.
-   * Use for operational queries like "which worker handled the failed
-   * retry of order-123's charge step?" or for per-worker error rates
+   * ID of the entity that processed this attempt — a Zorya worker, an
+   * in-process runner, an embedded test harness, etc. Generic naming so
+   * non-worker contexts (in-process `runner.run(...)`, scheduler-loop
+   * dispatch, scripted tools) can populate it too. Stamped from
+   * `WorkflowRunnerConfig.executorId` when the runner has one.
+   * Use for operational queries like "which executor handled the failed
+   * retry of order-123's charge step?" or per-executor error rates
    * across a rolling deploy.
    */
-  readonly workerId?: string;
+  readonly executorId?: string;
 }

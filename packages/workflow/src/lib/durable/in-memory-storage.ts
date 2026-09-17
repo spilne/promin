@@ -17,7 +17,12 @@ import type {
   StepAttemptStorage,
   FenceGuard,
   FenceToken,
+  WorkflowOrderBy,
+  SignalTokenRecord,
+  StreamChunk,
 } from "./workflow-storage.ts";
+import { workflowMetadataMatches } from "./workflow-storage.ts";
+import { createWorkflowEventStream } from "./workflow-event-stream.ts";
 import type {
   ActivityJournalStorage,
   JournaledSuspendStorage,
@@ -27,13 +32,59 @@ import type {
   WorkflowState,
   WorkflowStatus,
   WorkflowRunSummary,
+  WorkflowRunEvent,
   StepState,
   StepTaskState,
   SignalState,
   StepAttemptRecord,
+  RunSource,
 } from "./workflow-state.ts";
 import { FenceTokenMismatchError } from "./durable-pipeline-error.ts";
 import { SystemClock, type Clock } from "@promin/core";
+
+/**
+ * Comparator factory for sortable `listWorkflows` columns. NULL/undefined
+ * values always sort last (regardless of direction) so still-running rows
+ * with no `startedAt` / no `completedAt` / no `duration` don't push real
+ * data off the first page. Status sorts on the lookup name alphabetically
+ * to match how Postgres exposes it.
+ */
+function makeWorkflowComparator(
+  orderBy: WorkflowOrderBy,
+  dir: "asc" | "desc",
+): (a: MutableWorkflow, b: MutableWorkflow) => number {
+  const sign = dir === "asc" ? 1 : -1;
+  return (a, b) => {
+    const av = workflowSortKey(a, orderBy);
+    const bv = workflowSortKey(b, orderBy);
+    if (av === undefined && bv === undefined) return 0;
+    if (av === undefined) return 1;
+    if (bv === undefined) return -1;
+    if (av < bv) return -1 * sign;
+    if (av > bv) return 1 * sign;
+    return 0;
+  };
+}
+
+function workflowSortKey(
+  wf: MutableWorkflow,
+  orderBy: WorkflowOrderBy,
+): number | string | undefined {
+  switch (orderBy) {
+    case "createdAt":
+      return wf.createdAt.getTime();
+    case "startedAt":
+      return wf.startedAt?.getTime();
+    case "completedAt":
+      return wf.completedAt?.getTime();
+    case "duration":
+      return wf.completedAt ? wf.completedAt.getTime() - wf.createdAt.getTime() : undefined;
+    case "status":
+      return wf.status;
+    case "name":
+      return wf.workflowName;
+  }
+}
 
 /** Mutable internal workflow state — avoids spread-copy on every mutation. */
 interface MutableWorkflow {
@@ -48,7 +99,12 @@ interface MutableWorkflow {
   input: unknown;
   result?: unknown;
   error?: string;
+  tripwire?: unknown;
+  runSource?: RunSource;
+  runSourceId?: string;
   metadata?: Record<string, unknown>;
+  idempotencyKey?: string;
+  idempotencyExpiresAt?: Date;
   steps: Map<string, StepState>;
   createdAt: Date;
   startedAt?: Date;
@@ -78,6 +134,19 @@ export class InMemoryWorkflowStorage
   private runHistory = new Map<string, WorkflowRunSummary[]>();
   /** Activity journal keyed by `${workflowId}::${stepName}` → ordered entries. */
   private journal = new Map<string, JournalEntry[]>();
+  /** Signal tokens keyed by tokenId — public-bearer auth for deliverSignal. */
+  private signalTokens = new Map<string, MutableSignalToken>();
+  /** Stream chunks keyed by `${workflowId}::${streamId}` → ordered by chunk_index. */
+  private streamChunks = new Map<string, StreamChunk[]>();
+  /**
+   * Per-workflow event subscribers. Each active call to `subscribeToWorkflow`
+   * registers a push function keyed by workflowId; the mutating storage
+   * methods fan out to every registered sub. Passing `null` signals
+   * terminal — the iterator resolves `{ done: true }` and the sub is
+   * removed. Fresh map on every workflowId so one subscriber's terminal
+   * doesn't starve another subscriber attached to a different run.
+   */
+  private subscribers = new Map<string, Set<(event: WorkflowRunEvent | null) => void>>();
   private readonly namespace: string | null;
   /**
    * Time source. Every timestamp + lock-expiry check routes through here
@@ -96,6 +165,24 @@ export class InMemoryWorkflowStorage
     return workflowNamespace ?? this.namespace ?? undefined;
   }
 
+  /**
+   * Fan an event out to every subscriber for this workflow. `terminal`
+   * indicates the run is ending — after delivering the event, each sub is
+   * signalled done (null) and the subscriber set is cleared. Called
+   * synchronously from the save/fail/complete/tripwire methods so
+   * subscribers observe events in the same order as the underlying state
+   * transitions.
+   */
+  private emitEvent(workflowId: string, event: WorkflowRunEvent, terminal: boolean): void {
+    const subs = this.subscribers.get(workflowId);
+    if (!subs || subs.size === 0) return;
+    for (const push of subs) {
+      push(event);
+      if (terminal) push(null);
+    }
+    if (terminal) this.subscribers.delete(workflowId);
+  }
+
   private toState(wf: MutableWorkflow): WorkflowState {
     const steps: Record<string, StepState> = {};
     for (const [k, v] of wf.steps) steps[k] = v;
@@ -111,6 +198,9 @@ export class InMemoryWorkflowStorage
       input: wf.input,
       result: wf.result,
       error: wf.error,
+      tripwire: wf.tripwire,
+      runSource: wf.runSource,
+      runSourceId: wf.runSourceId,
       metadata: wf.metadata,
       steps,
       createdAt: wf.createdAt,
@@ -131,29 +221,92 @@ export class InMemoryWorkflowStorage
     type?: string;
     parentId?: string;
     namespace?: string;
+    runSource?: RunSource;
+    runSourceId?: string;
+    metadata?: Record<string, unknown>;
     limit?: number;
     offset?: number;
+    orderBy?: WorkflowOrderBy;
+    orderDir?: "asc" | "desc";
   }): Promise<WorkflowState[]> {
     const ns = params?.namespace ?? this.namespace;
-    const results: WorkflowState[] = [];
-    let skipped = 0;
-    const offset = params?.offset ?? 0;
-    const limit = params?.limit ?? Infinity;
+    const metadataFilter = params?.metadata;
 
+    // Filter pass first — sort needs the full filtered set before we can
+    // apply offset/limit, so we can't short-circuit inside the loop the way
+    // unordered scans did.
+    const filtered: MutableWorkflow[] = [];
     for (const wf of this.workflows.values()) {
       if (ns && wf.namespace !== ns) continue;
       if (params?.status && wf.status !== params.status) continue;
       if (params?.name && wf.workflowName !== params.name) continue;
       if (params?.type && wf.workflowType !== params.type) continue;
       if (params?.parentId && wf.parentWorkflowId !== params.parentId) continue;
-      if (skipped < offset) {
-        skipped++;
-        continue;
-      }
-      if (results.length >= limit) break;
-      results.push(this.toState(wf));
+      if (params?.runSource !== undefined && wf.runSource !== params.runSource) continue;
+      if (params?.runSourceId !== undefined && wf.runSourceId !== params.runSourceId) continue;
+      if (metadataFilter && !workflowMetadataMatches(wf.metadata, metadataFilter)) continue;
+      filtered.push(wf);
     }
-    return results;
+
+    const orderBy = params?.orderBy ?? "startedAt";
+    const orderDir = params?.orderDir ?? "desc";
+    filtered.sort(makeWorkflowComparator(orderBy, orderDir));
+
+    const offset = params?.offset ?? 0;
+    const limit = params?.limit ?? Infinity;
+    const page = filtered.slice(offset, offset + limit);
+    return page.map((wf) => this.toState(wf));
+  }
+
+  // In-memory: WorkflowState already satisfies WorkflowSummary — delegate.
+  listWorkflowSummaries: InMemoryWorkflowStorage["listWorkflows"] = this.listWorkflows.bind(this);
+
+  async countWorkflows(params?: {
+    status?: WorkflowStatus;
+    name?: string;
+    type?: string;
+    parentId?: string;
+    namespace?: string;
+  }): Promise<number> {
+    const ns = params?.namespace ?? this.namespace;
+    let count = 0;
+    for (const wf of this.workflows.values()) {
+      if (ns && wf.namespace !== ns) continue;
+      if (params?.status && wf.status !== params.status) continue;
+      if (params?.name && wf.workflowName !== params.name) continue;
+      if (params?.type && wf.workflowType !== params.type) continue;
+      if (params?.parentId && wf.parentWorkflowId !== params.parentId) continue;
+      count++;
+    }
+    return count;
+  }
+
+  async distinctWorkflowNames(params?: { namespace?: string }): Promise<string[]> {
+    const ns = params?.namespace ?? this.namespace;
+    const seen = new Set<string>();
+    for (const wf of this.workflows.values()) {
+      if (ns && wf.namespace !== ns) continue;
+      seen.add(wf.workflowName);
+    }
+    return [...seen].sort();
+  }
+
+  async distinctWorkflowTypes(params?: { namespace?: string }): Promise<string[]> {
+    const ns = params?.namespace ?? this.namespace;
+    const seen = new Set<string>();
+    for (const wf of this.workflows.values()) {
+      if (ns && wf.namespace !== ns) continue;
+      if (wf.workflowType) seen.add(wf.workflowType);
+    }
+    return [...seen].sort();
+  }
+
+  async distinctNamespaces(): Promise<string[]> {
+    const seen = new Set<string>();
+    for (const wf of this.workflows.values()) {
+      if (wf.namespace) seen.add(wf.namespace);
+    }
+    return [...seen].sort();
   }
 
   async cancelWorkflow(
@@ -171,6 +324,7 @@ export class InMemoryWorkflowStorage
     wf.error = "Cancelled";
     wf.completedAt = now;
     wf.updatedAt = now;
+    this.emitEvent(workflowId, { type: "workflow-failed", error: "Cancelled", at: now }, true);
 
     if (options?.cascade) {
       for (const [childId, child] of this.workflows) {
@@ -190,7 +344,31 @@ export class InMemoryWorkflowStorage
     namespace?: string;
     metadata?: Record<string, unknown>;
     version?: string;
+    runSource?: RunSource;
+    runSourceId?: string;
+    idempotencyKey?: string;
+    idempotencyExpiresAt?: Date;
   }): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
+    // Idempotency-key path: if `(namespace, workflowName, idempotencyKey)` is already
+    // claimed by an unexpired row, return that row instead. Mirrors the
+    // partial-unique-index conflict resolution that postgres does
+    // natively, which is what makes the redirect race-safe.
+    if (params.idempotencyKey) {
+      const now = this.clock.now();
+      const namespace = this.resolveNamespace(params.namespace);
+      for (const wf of this.workflows.values()) {
+        if (
+          wf.namespace === namespace &&
+          wf.workflowName === params.workflowName &&
+          wf.idempotencyKey === params.idempotencyKey &&
+          wf.idempotencyExpiresAt &&
+          wf.idempotencyExpiresAt.getTime() > now.getTime()
+        ) {
+          return { created: false, existing: this.toState(wf) };
+        }
+      }
+    }
+
     const existing = this.workflows.get(params.workflowId);
     if (existing) return { created: false, existing: this.toState(existing) };
 
@@ -206,11 +384,36 @@ export class InMemoryWorkflowStorage
       run: 1,
       input: params.input,
       metadata: params.metadata,
+      runSource: params.runSource,
+      runSourceId: params.runSourceId,
+      idempotencyKey: params.idempotencyKey,
+      idempotencyExpiresAt: params.idempotencyExpiresAt,
       steps: new Map(),
       createdAt: now,
       updatedAt: now,
     });
     return { created: true };
+  }
+
+  async findWorkflowByIdempotencyKey(params: {
+    workflowName: string;
+    namespace?: string;
+    idempotencyKey: string;
+    now: Date;
+  }): Promise<{ workflowId: string } | null> {
+    const namespace = this.resolveNamespace(params.namespace);
+    for (const wf of this.workflows.values()) {
+      if (
+        wf.namespace === namespace &&
+        wf.workflowName === params.workflowName &&
+        wf.idempotencyKey === params.idempotencyKey &&
+        wf.idempotencyExpiresAt &&
+        wf.idempotencyExpiresAt.getTime() > params.now.getTime()
+      ) {
+        return { workflowId: wf.workflowId };
+      }
+    }
+    return null;
   }
 
   /** Transition pending → running on first step activity. */
@@ -254,6 +457,17 @@ export class InMemoryWorkflowStorage
       tasks: existing?.tasks,
     });
     wf.updatedAt = now;
+    this.emitEvent(
+      params.workflowId,
+      {
+        type: "step-completed",
+        stepName: params.stepName,
+        result: params.result,
+        durationMs: params.durationMs,
+        at: now,
+      },
+      false,
+    );
   }
 
   async batchSaveStepResults(
@@ -306,6 +520,16 @@ export class InMemoryWorkflowStorage
       attempt: (existing?.attempt ?? 0) + 1,
       tasks: existing?.tasks,
     });
+    this.emitEvent(
+      params.workflowId,
+      {
+        type: "step-failed",
+        stepName: params.stepName,
+        error: params.error,
+        at: now,
+      },
+      false,
+    );
     wf.updatedAt = now;
   }
 
@@ -406,6 +630,7 @@ export class InMemoryWorkflowStorage
     wf.result = result;
     wf.completedAt = now;
     wf.updatedAt = now;
+    this.emitEvent(workflowId, { type: "workflow-completed", result, at: now }, true);
   }
 
   async failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void> {
@@ -417,6 +642,32 @@ export class InMemoryWorkflowStorage
     wf.error = error;
     wf.completedAt = now;
     wf.updatedAt = now;
+    this.emitEvent(workflowId, { type: "workflow-failed", error, at: now }, true);
+  }
+
+  async tripwireWorkflow(workflowId: string, reason: unknown, guard?: FenceGuard): Promise<void> {
+    this.checkFence(workflowId, guard);
+    const wf = this.workflows.get(workflowId);
+    if (!wf) return;
+    const now = this.clock.now();
+    wf.status = "tripwire";
+    wf.tripwire = reason;
+    wf.completedAt = now;
+    wf.updatedAt = now;
+    // Locate the firing step (runner writes tripwireFired metadata on it).
+    const firedStep = [...wf.steps.values()].find(
+      (s) => (s.metadata as { tripwireFired?: boolean } | undefined)?.tripwireFired === true,
+    );
+    this.emitEvent(
+      workflowId,
+      {
+        type: "workflow-tripwire",
+        stepName: firedStep?.stepName ?? "unknown",
+        reason,
+        at: now,
+      },
+      true,
+    );
   }
 
   async suspendWorkflow(
@@ -444,6 +695,59 @@ export class InMemoryWorkflowStorage
     wf.updatedAt = now;
   }
 
+  notifyStepStarted(workflowId: string, stepName: string): void {
+    // Event-bus only — no persistence. The runner calls this before each
+    // local step body runs; here we fan out `step-started` to any active
+    // subscribers for this workflowId. Storages without subscribers or
+    // without this method entirely silently drop the signal.
+    this.emitEvent(workflowId, { type: "step-started", stepName, at: this.clock.now() }, false);
+  }
+
+  /**
+   * Stream step/workflow-lifecycle events for a single run. Returns an
+   * async iterable closed by any terminal event or by the supplied
+   * `AbortSignal`. Each call registers its own push function — multiple
+   * concurrent subscribers to the same workflowId each see every event.
+   * Subscribers started after the run has already terminated receive
+   * immediate end-of-stream.
+   *
+   * Implementation uses a single-producer, single-consumer queue per
+   * subscriber: events arrive synchronously from storage mutators and the
+   * iterator drains them asynchronously. Overlap between production and
+   * consumption is handled by a waiter slot — if the consumer is idle when
+   * a new event arrives, the resolver fires directly; otherwise the event
+   * sits in the queue until the next `next()`.
+   */
+  subscribeToWorkflow(
+    workflowId: string,
+    options?: { signal?: AbortSignal },
+  ): AsyncIterable<WorkflowRunEvent> {
+    return createWorkflowEventStream((producer) => {
+      // Adapter: storage's internal subscriber set uses `(event|null) =>
+      // void` so `null` signals terminal. The shared stream's producer has
+      // separate `push` / `end` methods — adapt both shapes here.
+      const adapt = (event: WorkflowRunEvent | null): void => {
+        if (event === null) producer.end();
+        else producer.push(event);
+      };
+      const subs = this.subscribers.get(workflowId) ?? new Set();
+      subs.add(adapt);
+      this.subscribers.set(workflowId, subs);
+
+      const onAbort = (): void => producer.end();
+      options?.signal?.addEventListener("abort", onAbort, { once: true });
+
+      return () => {
+        const cur = this.subscribers.get(workflowId);
+        if (cur) {
+          cur.delete(adapt);
+          if (cur.size === 0) this.subscribers.delete(workflowId);
+        }
+        options?.signal?.removeEventListener("abort", onAbort);
+      };
+    });
+  }
+
   async deliverSignal(workflowId: string, signalName: string, payload: unknown): Promise<void> {
     const existing = this.signals.get(workflowId) ?? [];
     existing.push({ signalName, payload, deliveredAt: this.clock.now() });
@@ -452,6 +756,19 @@ export class InMemoryWorkflowStorage
 
   async loadSignals(workflowId: string): Promise<SignalState[]> {
     return this.signals.get(workflowId) ?? [];
+  }
+
+  async setWorkflowMetadata(workflowId: string, patch: Record<string, unknown>): Promise<void> {
+    const wf = this.workflows.get(workflowId);
+    if (!wf) return; // silent no-op on missing workflow — scrubs don't need to fail
+    const current = wf.metadata ?? {};
+    const merged: Record<string, unknown> = { ...current };
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === null) delete merged[k];
+      else merged[k] = v;
+    }
+    wf.metadata = merged;
+    wf.updatedAt = this.clock.now();
   }
 
   async tryLock(
@@ -557,6 +874,7 @@ export class InMemoryWorkflowStorage
       status: wf.status,
       result: wf.result,
       error: wf.error,
+      tripwire: wf.tripwire,
       steps,
       createdAt: wf.createdAt,
       startedAt: wf.startedAt,
@@ -568,11 +886,50 @@ export class InMemoryWorkflowStorage
     wf.status = "pending";
     wf.result = undefined;
     wf.error = undefined;
+    wf.tripwire = undefined;
     wf.startedAt = undefined;
     wf.completedAt = undefined;
     wf.steps = new Map();
     wf.updatedAt = this.clock.now();
+    // Clear activity journal entries — a fresh run must re-execute all
+    // activities from scratch, otherwise replay reads stale entries from
+    // the prior run and never re-fires the side effects. Required for
+    // continue-as-new and any other rerun path that should re-execute
+    // from zero.
+    const journalPrefix = `${workflowId}::`;
+    for (const key of this.journal.keys()) {
+      if (key.startsWith(journalPrefix)) this.journal.delete(key);
+    }
     return wf.run;
+  }
+
+  async resetSteps(workflowId: string, stepNames: readonly string[]): Promise<void> {
+    const wf = this.workflows.get(workflowId);
+    if (!wf) throw new Error(`Workflow ${workflowId} not found`);
+    if (stepNames.length === 0) return;
+
+    // Drop the listed steps from the workflow's step map. The DAG executor
+    // re-creates them on the next run() — we don't keep "pending" stubs
+    // because the running flag is implicit (a step is pending iff it's
+    // not in `wf.steps`). This matches how brand-new workflows look.
+    for (const name of stepNames) {
+      wf.steps.delete(name);
+      // Clear journal entries for the step. Journaled bodies key by
+      // (workflowId, stepName) so we delete the matching journal Map slot.
+      this.journal.delete(this.journalKey(workflowId, name));
+    }
+
+    // Flip the workflow back into a runnable state. Terminal statuses
+    // (completed / failed / tripwire) become "running" so the runner
+    // picks it up; suspended / running stay as-is.
+    if (wf.status === "completed" || wf.status === "failed" || wf.status === "tripwire") {
+      wf.status = "running";
+      wf.result = undefined;
+      wf.error = undefined;
+      wf.tripwire = undefined;
+      wf.completedAt = undefined;
+    }
+    wf.updatedAt = this.clock.now();
   }
 
   async loadRunHistory(
@@ -593,6 +950,7 @@ export class InMemoryWorkflowStorage
         status: wf.status,
         result: wf.result,
         error: wf.error,
+        tripwire: wf.tripwire,
         steps: currentSteps,
         createdAt: wf.createdAt,
         startedAt: wf.startedAt,
@@ -733,7 +1091,7 @@ export class InMemoryWorkflowStorage
     branchPath?: string;
     activityName: string;
     payloadHash?: string;
-    stepType: "sleep" | "signal" | "activity" | "compensation";
+    stepType: "sleep" | "signal" | "activity" | "compensation" | "child";
     wakeAt?: Date;
   }): Promise<void> {
     const branchPath = params.branchPath ?? "";
@@ -831,6 +1189,113 @@ export class InMemoryWorkflowStorage
     return hit ?? null;
   }
 
+  // ---------------------------------------------------------------------------
+  // Signal tokens — public-bearer authorization for deliverSignal
+  // ---------------------------------------------------------------------------
+
+  async createSignalToken(params: {
+    tokenId: string;
+    workflowId: string;
+    signalName: string;
+    bearer: string;
+    tags: ReadonlyArray<string>;
+    idempotencyKey?: string | null;
+    expiresAt: Date;
+  }): Promise<{ record: SignalTokenRecord; isCached: boolean }> {
+    if (params.idempotencyKey) {
+      for (const t of this.signalTokens.values()) {
+        if (t.workflowId === params.workflowId && t.idempotencyKey === params.idempotencyKey) {
+          return { record: snapshotSignalToken(t), isCached: true };
+        }
+      }
+    }
+    const record: MutableSignalToken = {
+      tokenId: params.tokenId,
+      workflowId: params.workflowId,
+      signalName: params.signalName,
+      bearer: params.bearer,
+      tags: [...params.tags],
+      idempotencyKey: params.idempotencyKey ?? null,
+      expiresAt: params.expiresAt,
+      completedAt: null,
+      completedValue: null,
+      createdAt: this.clock.now(),
+    };
+    this.signalTokens.set(params.tokenId, record);
+    return { record: snapshotSignalToken(record), isCached: false };
+  }
+
+  async findSignalTokenById(tokenId: string): Promise<SignalTokenRecord | null> {
+    const t = this.signalTokens.get(tokenId);
+    return t ? snapshotSignalToken(t) : null;
+  }
+
+  async markSignalTokenCompleted(params: {
+    tokenId: string;
+    value: unknown;
+    now: Date;
+  }): Promise<
+    | { outcome: "delivered"; record: SignalTokenRecord }
+    | { outcome: "already_completed"; record: SignalTokenRecord }
+  > {
+    const t = this.signalTokens.get(params.tokenId);
+    if (!t) {
+      throw new Error(`signal token ${params.tokenId} not found`);
+    }
+    if (t.completedAt !== null) {
+      return { outcome: "already_completed", record: snapshotSignalToken(t) };
+    }
+    t.completedAt = params.now;
+    t.completedValue = params.value;
+    return { outcome: "delivered", record: snapshotSignalToken(t) };
+  }
+
+  async listSignalTokensForWorkflow(workflowId: string): Promise<ReadonlyArray<SignalTokenRecord>> {
+    const out: MutableSignalToken[] = [];
+    for (const t of this.signalTokens.values()) {
+      if (t.workflowId === workflowId) out.push(t);
+    }
+    out.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    return out.map(snapshotSignalToken);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Streams — append-only chunks per (workflow, stream).
+  // ---------------------------------------------------------------------------
+
+  async appendStreamChunk(params: {
+    workflowId: string;
+    streamId: string;
+    payload: unknown;
+    appendedBy: "workflow" | "external";
+  }): Promise<{ chunkIndex: number }> {
+    const key = `${params.workflowId}::${params.streamId}`;
+    const existing = this.streamChunks.get(key) ?? [];
+    const chunkIndex = existing.length;
+    const chunk: StreamChunk = {
+      chunkIndex,
+      payload: params.payload,
+      appendedBy: params.appendedBy,
+      appendedAt: this.clock.now(),
+    };
+    existing.push(chunk);
+    this.streamChunks.set(key, existing);
+    return { chunkIndex };
+  }
+
+  async readStreamChunks(params: {
+    workflowId: string;
+    streamId: string;
+    since?: number;
+    limit?: number;
+  }): Promise<ReadonlyArray<StreamChunk>> {
+    const key = `${params.workflowId}::${params.streamId}`;
+    const all = this.streamChunks.get(key) ?? [];
+    const filtered =
+      params.since !== undefined ? all.filter((c) => c.chunkIndex > params.since!) : all;
+    return params.limit !== undefined ? filtered.slice(0, params.limit) : filtered;
+  }
+
   /** Test helper: delete a specific journal entry (simulates crash-before-append). */
   deleteJournalEntry(workflowId: string, stepName: string, activityIndex: number): void {
     const key = this.journalKey(workflowId, stepName);
@@ -856,5 +1321,34 @@ export class InMemoryWorkflowStorage
     this.attempts.clear();
     this.runHistory.clear();
     this.journal.clear();
+    this.signalTokens.clear();
   }
+}
+
+interface MutableSignalToken {
+  tokenId: string;
+  workflowId: string;
+  signalName: string;
+  bearer: string;
+  tags: string[];
+  idempotencyKey: string | null;
+  expiresAt: Date;
+  completedAt: Date | null;
+  completedValue: unknown;
+  createdAt: Date;
+}
+
+function snapshotSignalToken(t: MutableSignalToken): SignalTokenRecord {
+  return {
+    tokenId: t.tokenId,
+    workflowId: t.workflowId,
+    signalName: t.signalName,
+    bearer: t.bearer,
+    tags: [...t.tags],
+    idempotencyKey: t.idempotencyKey,
+    expiresAt: new Date(t.expiresAt.getTime()),
+    completedAt: t.completedAt ? new Date(t.completedAt.getTime()) : null,
+    completedValue: t.completedValue,
+    createdAt: new Date(t.createdAt.getTime()),
+  };
 }

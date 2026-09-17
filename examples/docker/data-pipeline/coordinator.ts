@@ -33,7 +33,7 @@ const coordinator = createCoordinator({
 });
 
 console.log("[coordinator] starting");
-coordinator.start().catch((err) => {
+coordinator.startLoop().catch((err) => {
   console.error("[coordinator] loop crashed", err);
   process.exit(1);
 });
@@ -77,7 +77,7 @@ console.log(`[coordinator] running — new dataset every ${SUBMIT_INTERVAL_MS}ms
 const shutdown = async (): Promise<void> => {
   console.log("[coordinator] shutting down");
   clearInterval(submitTimer);
-  await coordinator.stop();
+  await coordinator.stopLoop();
   await close();
   process.exit(0);
 };

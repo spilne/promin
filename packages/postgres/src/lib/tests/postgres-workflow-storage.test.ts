@@ -38,7 +38,7 @@ postgresDescribe("migrate", { migrate }, (pg) => {
 
   it("seeds lookup tables", async () => {
     const statuses = await pg.sql`SELECT * FROM wf_workflow_status ORDER BY id`;
-    expect(statuses.length).toBe(6); // pending, running, completed, failed, suspended, compensating
+    expect(statuses.length).toBe(7); // pending, running, completed, failed, suspended, compensating, tripwire
     expect(statuses[0]!.name).toBe("pending");
 
     const stepStatuses = await pg.sql`SELECT * FROM wf_step_status ORDER BY id`;

@@ -1,6 +1,7 @@
 // Core pipeline
 export { Pipeline, type TaggedError, type PipelineDefaults } from "./lib/pipeline.ts";
 export { StreamPipeline } from "./lib/stream-pipeline.ts";
+export { createGracefulShutdown, type GracefulShutdown } from "./lib/graceful-shutdown.ts";
 export { OptimizedStreamPipeline } from "./lib/optimized-stream-pipeline.ts";
 export { RawStream } from "./lib/raw-stream.ts";
 export { type FusibleOp, SKIP, compileFused, hasFilterOps, fuseOpsToStream } from "./lib/fusion.ts";

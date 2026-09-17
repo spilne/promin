@@ -43,6 +43,38 @@ For non-durable use cases (scripts, request handlers), use `flow()` with the sam
 - **State machines** — model complex stateful processes
 - **Type-safe** — full TypeScript inference across steps and dependencies
 
+## Proxy-style activity binding
+
+For journaled steps with a static set of activities, `ctx.proxy()` collapses the per-call `ctx.activity("name", () => fn(args))` boilerplate. The proxy returns a typed binder where each method names itself from the property key and forwards arguments into a journal-recorded call:
+
+```typescript
+.journaled("checkout", function* (ctx) {
+  const acts = ctx.proxy({
+    validate: (orderId: number) => api.validate(orderId),
+    charge:   (validated: Order)  => api.charge(validated),
+    ship:     (charged: Charge)   => api.ship(charged),
+  });
+
+  const order   = yield* acts.validate(ctx.input.orderId);
+  const charged = yield* acts.charge(order);
+  return yield* acts.ship(charged);
+});
+```
+
+Each call expands to `ctx.activity(<key>, () => fn(...args))` — same journal entries, same replay semantics, same retry/compensation surface. Pass `defaultOptions` for retry/codec/idempotent that should apply across the proxy, or `optionsByName` for per-key overrides:
+
+```typescript
+const acts = ctx.proxy(
+  { fetch: api.fetch, mutate: api.mutate },
+  {
+    defaultOptions: { idempotent: true },
+    optionsByName: { mutate: { idempotent: false } },
+  },
+);
+```
+
+The longhand `ctx.activity(...)` form stays available for cases the proxy doesn't fit — dynamic activity names, the 3-arg form for payload-hash determinism checks.
+
 ## Documentation
 
 - **[Versioning guide](./versioning.md)** — strict / drain / `ctx.patched()` / rolling worker deploys, with runnable examples in [`examples/versioning/`](./examples/versioning)

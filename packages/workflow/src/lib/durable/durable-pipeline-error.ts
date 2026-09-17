@@ -50,6 +50,22 @@ export class WorkflowSuspendedError extends Data.TaggedError("WorkflowSuspendedE
   readonly message: string;
 }> {}
 
+/**
+ * Signal that the workflow body is requesting a "continue-as-new" — terminate
+ * the current execution and start a fresh run under the same workflowId with
+ * new input. Thrown by `ctx.continueAsNew(input)` inside a journaled step
+ * body. The runner catches it, calls `storage.startFreshRun(workflowId)`,
+ * and re-runs the workflow from scratch with the carried input.
+ *
+ * Not a failure — the original execution terminates cleanly. Compensations
+ * do NOT run (continue-as-new is a clean restart, not rollback).
+ */
+export class WorkflowContinueAsNewError extends Data.TaggedError("WorkflowContinueAsNewError")<{
+  readonly workflowId: string;
+  readonly nextInput: unknown;
+  readonly message: string;
+}> {}
+
 /** Signal wait timed out. */
 export class WorkflowTimeoutError extends Data.TaggedError("WorkflowTimeoutError")<{
   readonly workflowId: string;
@@ -128,4 +144,45 @@ export class TerminalError extends Data.TaggedError("TerminalError")<{
 export class RetryableError extends Data.TaggedError("RetryableError")<{
   readonly message: string;
   readonly cause?: unknown;
+}> {}
+
+/**
+ * A `.tripwire()` step fired — the workflow ended early with a structured
+ * reason. Not a failure; an intentional short-circuit. `reason` carries the
+ * payload returned by the tripwire step's `reason(prev)` function.
+ *
+ * Thrown from `run()` so callers who want typed access to the reason can
+ * check `error instanceof WorkflowTripwireError`. Callers that prefer a
+ * non-throwing interface use `runSafe()` and inspect `.error`.
+ */
+export class WorkflowTripwireError extends Data.TaggedError("WorkflowTripwireError")<{
+  readonly workflowId: string;
+  readonly stepName: string;
+  readonly reason: unknown;
+  readonly message: string;
+}> {}
+
+/**
+ * A `.tripwire()` step fired but the configured `WorkflowStorage` does not
+ * implement `tripwireWorkflow`. Surfaces the capability gap at the fire
+ * site instead of silently corrupting state or falling back to `failed`.
+ */
+export class TripwireStorageMissingError extends Data.TaggedError("TripwireStorageMissingError")<{
+  readonly workflowId: string;
+  readonly stepName: string;
+  readonly message: string;
+}> {}
+
+/**
+ * A `.dowhile()` / `.dountil()` loop exceeded its configured maximum
+ * iteration count without the exit condition being satisfied. Default cap
+ * is 100 iterations; override with the `maxIterations` option. Thrown as a
+ * step failure so the surrounding workflow retry / compensation policy
+ * applies.
+ */
+export class LoopLimitExceededError extends Data.TaggedError("LoopLimitExceededError")<{
+  readonly workflowId: string;
+  readonly stepName: string;
+  readonly maxIterations: number;
+  readonly message: string;
 }> {}

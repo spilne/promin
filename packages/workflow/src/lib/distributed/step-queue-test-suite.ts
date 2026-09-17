@@ -387,6 +387,38 @@ export function stepQueueTestSuite(factory: () => StepQueue | Promise<StepQueue>
         expect(requeued).toBe(0);
       });
 
+      it("rejects stale claim completion after requeue", async () => {
+        const q = await getQueue();
+        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
+        const [first] = await q.claim({ limit: 1 });
+        expect(first?.claimToken).toBeDefined();
+
+        await new Promise((r) => setTimeout(r, 10));
+        expect(await q.requeueStuck({ staleTimeoutMs: 1 })).toBe(1);
+
+        const [second] = await q.claim({ limit: 1 });
+        expect(second?.claimToken).toBeDefined();
+        expect(second!.claimToken).not.toBe(first!.claimToken);
+
+        await expect(
+          q.complete({
+            taskId: first!.id,
+            claimToken: first!.claimToken,
+            result: "stale",
+            durationMs: 1,
+          }),
+        ).resolves.toBe(false);
+
+        await expect(
+          q.complete({
+            taskId: second!.id,
+            claimToken: second!.claimToken,
+            result: "fresh",
+            durationMs: 1,
+          }),
+        ).resolves.toBe(true);
+      });
+
       it("does not requeue completed or failed tasks", async () => {
         const q = await getQueue();
         await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
@@ -574,6 +606,185 @@ export function stepQueueTestSuite(factory: () => StepQueue | Promise<StepQueue>
         const [task] = await q.claim({ limit: 1 });
         expect(task).toBeDefined();
         expect(task!.version).toBeUndefined();
+      });
+    });
+
+    describe("metadata search attributes", () => {
+      it("round-trips arbitrary metadata through enqueue → claim", async () => {
+        const q = await getQueue();
+        const meta = {
+          userId: "user-42",
+          tags: ["urgent", "experiment-A"],
+          experiment: "ramp-7",
+          customField: { nested: { value: 1 } },
+        };
+        await q.enqueue({
+          workflowId: "m-1",
+          stepName: "s",
+          input: {},
+          prevResults: {},
+          metadata: meta,
+        });
+
+        const [task] = await q.claim({ limit: 1 });
+        expect(task).toBeDefined();
+        expect(task!.metadata).toEqual(meta);
+      });
+
+      it("tasks without metadata have undefined metadata (backward compat)", async () => {
+        const q = await getQueue();
+        await q.enqueue({ workflowId: "no-meta", stepName: "s", input: {}, prevResults: {} });
+
+        const [task] = await q.claim({ limit: 1 });
+        expect(task).toBeDefined();
+        expect(task!.metadata).toBeUndefined();
+      });
+
+      it("metadata coexists with namespace + version + needs (no field collision)", async () => {
+        const q = await getQueue();
+        await q.enqueue({
+          workflowId: "all-fields",
+          stepName: "s",
+          input: { x: 1 },
+          prevResults: {},
+          namespace: "tenant-a",
+          version: "2",
+          needs: ["gpu"],
+          priority: 7,
+          metadata: { userId: "u-9" },
+        });
+
+        const [task] = await q.claim({ limit: 1, capabilities: ["gpu"] });
+        expect(task).toBeDefined();
+        expect(task!.version).toBe("2");
+        expect(task!.priority).toBe(7);
+        expect([...task!.needs]).toEqual(["gpu"]);
+        expect(task!.metadata).toEqual({ userId: "u-9" });
+      });
+    });
+
+    describe("concurrency keys", () => {
+      it("caps concurrent running tasks per (scope, key)", async () => {
+        const q = await getQueue();
+        // Enqueue 4 tasks for tenant A (limit 2) and 3 for tenant B (limit 1).
+        for (let i = 0; i < 4; i++) {
+          await q.enqueue({
+            workflowId: `wf-A-${i}`,
+            stepName: "send",
+            input: {},
+            prevResults: {},
+            concurrencyKey: "tenant-A",
+            concurrencyScope: "send-email",
+            concurrencyLimit: 2,
+          });
+        }
+        for (let i = 0; i < 3; i++) {
+          await q.enqueue({
+            workflowId: `wf-B-${i}`,
+            stepName: "send",
+            input: {},
+            prevResults: {},
+            concurrencyKey: "tenant-B",
+            concurrencyScope: "send-email",
+            concurrencyLimit: 1,
+          });
+        }
+
+        // Claim everything claimable. A: 2 max running, B: 1 max running.
+        const claimed = await q.claim({ limit: 100 });
+        const byKey = new Map<string, number>();
+        for (const t of claimed) {
+          const k = t.concurrencyKey ?? "(none)";
+          byKey.set(k, (byKey.get(k) ?? 0) + 1);
+        }
+        expect(byKey.get("tenant-A")).toBe(2);
+        expect(byKey.get("tenant-B")).toBe(1);
+        // Total claimed = sum of caps.
+        expect(claimed).toHaveLength(3);
+      });
+
+      it("releases capacity when a task completes — next claim picks up the queued one", async () => {
+        const q = await getQueue();
+        for (let i = 0; i < 3; i++) {
+          await q.enqueue({
+            workflowId: `wf-${i}`,
+            stepName: "send",
+            input: {},
+            prevResults: {},
+            concurrencyKey: "shared",
+            concurrencyScope: "send",
+            concurrencyLimit: 1,
+          });
+        }
+
+        const first = await q.claim({ limit: 100 });
+        expect(first).toHaveLength(1);
+
+        // Completing the running task frees the (scope, key) slot.
+        await q.complete({ taskId: first[0]!.id, result: { ok: true }, durationMs: 1 });
+
+        const second = await q.claim({ limit: 100 });
+        expect(second).toHaveLength(1);
+        expect(second[0]!.id).not.toBe(first[0]!.id);
+      });
+
+      it("does not cap tasks without concurrency config (backward compat)", async () => {
+        const q = await getQueue();
+        for (let i = 0; i < 5; i++) {
+          await q.enqueue({
+            workflowId: `wf-${i}`,
+            stepName: "s",
+            input: {},
+            prevResults: {},
+          });
+        }
+        const claimed = await q.claim({ limit: 100 });
+        expect(claimed).toHaveLength(5);
+      });
+
+      it("scopes are independent — same key in different scopes don't share the limit", async () => {
+        const q = await getQueue();
+        // Both tasks use key "X" but different scopes; each scope has limit 1.
+        await q.enqueue({
+          workflowId: "wf-1",
+          stepName: "send-email",
+          input: {},
+          prevResults: {},
+          concurrencyKey: "X",
+          concurrencyScope: "send-email",
+          concurrencyLimit: 1,
+        });
+        await q.enqueue({
+          workflowId: "wf-2",
+          stepName: "send-sms",
+          input: {},
+          prevResults: {},
+          concurrencyKey: "X",
+          concurrencyScope: "send-sms",
+          concurrencyLimit: 1,
+        });
+
+        const claimed = await q.claim({ limit: 100 });
+        expect(claimed).toHaveLength(2);
+      });
+
+      it("a single claim() call doesn't itself violate the limit", async () => {
+        const q = await getQueue();
+        // 5 pending tasks, limit 2 — claim(limit=10) shouldn't return more
+        // than 2 even though SKIP LOCKED would otherwise grab all 5.
+        for (let i = 0; i < 5; i++) {
+          await q.enqueue({
+            workflowId: `wf-${i}`,
+            stepName: "s",
+            input: {},
+            prevResults: {},
+            concurrencyKey: "single",
+            concurrencyScope: "s",
+            concurrencyLimit: 2,
+          });
+        }
+        const claimed = await q.claim({ limit: 10 });
+        expect(claimed.length).toBeLessThanOrEqual(2);
       });
     });
   });

@@ -46,6 +46,9 @@ export class StepQueueExecutor implements StepExecutor {
       needs: req.needs,
       priority: req.priority,
       version: req.version,
+      ...(req.concurrencyKey !== undefined && { concurrencyKey: req.concurrencyKey }),
+      ...(req.concurrencyScope !== undefined && { concurrencyScope: req.concurrencyScope }),
+      ...(req.concurrencyLimit !== undefined && { concurrencyLimit: req.concurrencyLimit }),
     });
 
     const requeueEveryNPolls = Math.ceil(this.staleTimeoutMs / this.pollIntervalMs);

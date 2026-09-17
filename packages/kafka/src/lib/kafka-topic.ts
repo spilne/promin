@@ -14,6 +14,7 @@ import type {
   KafkaBatchPayload,
   KafkaClient,
   KafkaConsumer,
+  KafkaConsumerOptions,
   KafkaProducer,
   KafkaMessage,
 } from "./kafka-types.ts";
@@ -55,6 +56,13 @@ export interface KafkaTopicConfig<T> {
    * Default: `false` (per-message eachMessage, unchanged behaviour).
    */
   batchEmit?: boolean;
+  /**
+   * Consumer timeout tuning (sessionTimeout / maxPollInterval /
+   * heartbeatInterval), passed to every consumer this topic creates. Raise
+   * `maxPollInterval` when handlers do slow I/O — a handler that outlives it
+   * gets the consumer kicked → rebalance → redelivery loop.
+   */
+  consumerOptions?: Omit<KafkaConsumerOptions, "groupId">;
 }
 
 export class KafkaTopic<T>
@@ -70,6 +78,7 @@ export class KafkaTopic<T>
   private readonly topic: string;
   private readonly groupId: string;
   private readonly batchEmit: boolean;
+  private readonly consumerOptions?: Omit<KafkaConsumerOptions, "groupId">;
 
   private consumer?: KafkaConsumer;
   private producer?: KafkaProducer;
@@ -81,6 +90,7 @@ export class KafkaTopic<T>
     this.groupId = config.groupId;
     this.codec = config.codec ?? (JsonCodec as Codec<T>);
     this.batchEmit = config.batchEmit ?? false;
+    this.consumerOptions = config.consumerOptions;
   }
 
   /** Partition count — fetched from broker on first access. */
@@ -167,27 +177,36 @@ export class KafkaTopic<T>
     const topic = this.topic;
     const groupId = params?.group ?? this.groupId;
     const commitIntervalMs = params?.commitIntervalMs ?? 1000;
+    const consumerOptions = this.consumerOptions;
 
     const stream = Stream.async<Envelope<T>, never>((emit) => {
-      const consumer = kafka.consumer({ groupId });
+      const consumer = kafka.consumer({ groupId, ...consumerOptions });
       const tracker = new OffsetTracker();
       let commitTimer: ReturnType<typeof setInterval> | undefined;
       let stopped = false;
+      let flushing = false;
 
       const flushCommits = async () => {
-        const committable = tracker.committable();
-        if (committable.size === 0) return;
-
-        const offsets = [...committable.entries()].map(([partition, offset]) => ({
-          topic,
-          partition,
-          offset: offset.toString(),
-        }));
-
+        // Re-entrancy guard: the interval can fire again while a slow
+        // commitOffsets is still in flight; overlapping commits could land
+        // out of order. Skipping is safe — committable() recomputes next tick.
+        if (flushing) return;
+        flushing = true;
         try {
+          const committable = tracker.committable();
+          if (committable.size === 0) return;
+
+          const offsets = [...committable.entries()].map(([partition, offset]) => ({
+            topic,
+            partition,
+            offset: offset.toString(),
+          }));
+
           await consumer.commitOffsets(offsets);
         } catch {
           // Commit failed — will retry on next interval
+        } finally {
+          flushing = false;
         }
       };
 
@@ -197,6 +216,11 @@ export class KafkaTopic<T>
         const value = codec.decode(JSON.parse(str));
         const offset = Number(msg.message.offset);
         const partition = msg.partition;
+
+        // Seed the frontier in delivery order (before any concurrent acks),
+        // so commits resume from the right offset on a non-zero start or a
+        // rebalance/seek rewind.
+        tracker.observe(partition, offset);
 
         return {
           value,
@@ -298,9 +322,10 @@ export class KafkaTopic<T>
     const kafka = this.kafka;
     const topic = this.topic;
     const groupId = group ?? this.groupId;
+    const consumerOptions = this.consumerOptions;
 
     const stream = Stream.async<T, never>((emit) => {
-      const consumer = kafka.consumer({ groupId });
+      const consumer = kafka.consumer({ groupId, ...consumerOptions });
       let stopped = false;
 
       const decodeMessage = (msg: KafkaMessage): T => {

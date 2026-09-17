@@ -1,0 +1,35 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact"
+  },
+  "files": [],
+  "include": [],
+  "references": [
+    {
+      "path": "../workflow-remote"
+    },
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../zorya-client"
+    },
+    {
+      "path": "../postgres"
+    },
+    {
+      "path": "../sqlite"
+    },
+    {
+      "path": "../workflow"
+    },
+    {
+      "path": "../agent"
+    },
+    {
+      "path": "./tsconfig.lib.json"
+    }
+  ]
+}

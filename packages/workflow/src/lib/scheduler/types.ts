@@ -64,3 +64,17 @@ export interface ScheduleTick {
   /** Metadata from the ScheduleConfig. */
   readonly metadata?: Record<string, unknown>;
 }
+
+/**
+ * Deterministic id for the run a schedule tick produces — workflow id for
+ * workflow-targeted ticks, agent run id for agent-targeted ticks. Keeps a
+ * duplicate tick (TTL-window leader race) from creating two rows: the
+ * second dispatch lands on the same id and `createWorkflow` (or the
+ * agent runtime's equivalent) is idempotent.
+ *
+ * Both the scheduler loop's workflow-trigger path and
+ * `dispatchAgentSchedule`'s agent path use this — single source of truth.
+ */
+export function scheduleTickRunId(scheduleId: string, tickNumber: number): string {
+  return `${scheduleId}.${tickNumber}`;
+}

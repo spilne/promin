@@ -2,13 +2,14 @@
 // PostgresWorkflowStorage — production-grade WorkflowStorage backed by Postgres
 // ---------------------------------------------------------------------------
 
-import { eq, and, sql, desc, inArray, gte, lt } from "drizzle-orm";
+import { eq, and, sql, desc, asc, inArray, gte, lt } from "drizzle-orm";
 import type {
   WorkflowStorage,
   StepAttemptStorage,
   WorkflowState,
   WorkflowRunSummary,
   WorkflowStatus,
+  WorkflowOrderBy,
   StepStatus,
   StepType,
   StepState,
@@ -19,6 +20,8 @@ import type {
   JournaledSuspendStorage,
   JournalEntry,
   FenceGuard,
+  SignalTokenRecord,
+  StreamChunk,
 } from "@promin/workflow";
 import { FenceTokenMismatchError } from "@promin/workflow";
 import {
@@ -31,6 +34,8 @@ import {
   stepAttempts,
   stepQueue,
   activityJournal,
+  signalTokens,
+  workflowStreams,
   LOOKUP_BINDINGS,
 } from "./schema.ts";
 import {
@@ -139,6 +144,7 @@ export class PostgresWorkflowStorage
       input: row.input,
       result: row.result ?? undefined,
       error: row.error ?? undefined,
+      tripwire: row.tripwire ?? undefined,
       metadata: row.metadata ?? undefined,
       steps: stepMap,
       createdAt: row.createdAt,
@@ -165,6 +171,7 @@ export class PostgresWorkflowStorage
       wakeAt: row.wakeAt ?? undefined,
       signalName: row.signalName ?? undefined,
       signalTimeoutAt: row.signalTimeoutAt ?? undefined,
+      signalJsonSchema: row.signalJsonSchema ?? undefined,
       metadata: (row.metadata as Record<string, unknown> | null) ?? undefined,
     };
   }
@@ -220,8 +227,11 @@ export class PostgresWorkflowStorage
     name?: string;
     type?: string;
     namespace?: string;
+    metadata?: Record<string, unknown>;
     limit?: number;
     offset?: number;
+    orderBy?: WorkflowOrderBy;
+    orderDir?: "asc" | "desc";
   }): Promise<WorkflowState[]> {
     const conditions = [];
     // Scope to constructor namespace if set and no explicit namespace filter
@@ -231,16 +241,61 @@ export class PostgresWorkflowStorage
       conditions.push(eq(workflows.statusId, WorkflowStatusIds.toId(params.status)));
     if (params?.name) conditions.push(eq(workflows.workflowName, params.name));
     if (params?.type) conditions.push(eq(workflows.workflowType, params.type));
+    // jsonb `@>` containment: rows where `metadata` contains every supplied
+    // key/value pair. A GIN index on `metadata` (`USING GIN (metadata)`) or
+    // an expression index (`((metadata->>'<key>'))`) makes this index-driven
+    // — the storage doesn't ship one by default; users opt in based on
+    // their query patterns.
+    if (params?.metadata && Object.keys(params.metadata).length > 0) {
+      conditions.push(sql`${workflows.metadata} @> ${JSON.stringify(params.metadata)}::jsonb`);
+    }
 
     const query = this.db.select().from(workflows).$dynamic();
     if (conditions.length > 0)
       query.where(conditions.length === 1 ? conditions[0] : and(...conditions));
-    query.orderBy(desc(workflows.createdAt));
+    query.orderBy(postgresOrderByClause(params?.orderBy, params?.orderDir));
     if (params?.limit) query.limit(params.limit);
     if (params?.offset) query.offset(params.offset);
 
     const rows = await query;
     return rows.map((row: any) => this.rowToWorkflowState(row, []));
+  }
+
+  async distinctWorkflowNames(params?: { namespace?: string }): Promise<string[]> {
+    const ns = params?.namespace ?? this.config.namespace;
+    const query = this.db
+      .selectDistinct({ workflowName: workflows.workflowName })
+      .from(workflows)
+      .$dynamic();
+    if (ns) query.where(eq(workflows.namespace, ns));
+    query.orderBy(workflows.workflowName);
+    const rows = await query;
+    return rows.map((r) => r.workflowName);
+  }
+
+  async distinctWorkflowTypes(params?: { namespace?: string }): Promise<string[]> {
+    const ns = params?.namespace ?? this.config.namespace;
+    const query = this.db
+      .selectDistinct({ workflowType: workflows.workflowType })
+      .from(workflows)
+      .$dynamic();
+    if (ns) {
+      query.where(and(eq(workflows.namespace, ns), sql`${workflows.workflowType} IS NOT NULL`));
+    } else {
+      query.where(sql`${workflows.workflowType} IS NOT NULL`);
+    }
+    query.orderBy(workflows.workflowType);
+    const rows = await query;
+    return rows.map((r) => r.workflowType!).filter((t): t is string => t != null);
+  }
+
+  async distinctNamespaces(): Promise<string[]> {
+    const rows = await this.db
+      .selectDistinct({ namespace: workflows.namespace })
+      .from(workflows)
+      .where(sql`${workflows.namespace} IS NOT NULL`)
+      .orderBy(workflows.namespace);
+    return rows.map((r) => r.namespace!).filter((n): n is string => n != null);
   }
 
   async cancelWorkflow(
@@ -274,6 +329,8 @@ export class PostgresWorkflowStorage
     namespace?: string;
     metadata?: Record<string, unknown>;
     version?: string;
+    idempotencyKey?: string;
+    idempotencyExpiresAt?: Date;
   }): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
     const ns = this.resolveNamespace(params.namespace);
     const [inserted] = await this.db
@@ -287,15 +344,60 @@ export class PostgresWorkflowStorage
         statusId: WorkflowStatusIds.id.pending,
         input: params.input,
         metadata: params.metadata,
+        idempotencyKey: params.idempotencyKey,
+        idempotencyExpiresAt: params.idempotencyExpiresAt,
       })
       .onConflictDoNothing()
       .returning({ workflowId: workflows.workflowId });
 
     if (!inserted) {
-      const existing = await this.loadWorkflow(params.workflowId);
-      return { created: false, existing: existing! };
+      // Conflict: either workflowId PK matched (caller's id was already
+      // taken) or the partial-unique idempotency_key index matched
+      // (another caller registered the key first). Resolve to whichever
+      // row exists by id first, then by key.
+      const existingById = await this.loadWorkflow(params.workflowId);
+      if (existingById) return { created: false, existing: existingById };
+
+      if (params.idempotencyKey) {
+        const hit = await this.findWorkflowByIdempotencyKey({
+          workflowName: params.workflowName,
+          ...(params.namespace !== undefined && { namespace: params.namespace }),
+          idempotencyKey: params.idempotencyKey,
+          now: this.config.clock.now(),
+        });
+        if (hit) {
+          const existing = await this.loadWorkflow(hit.workflowId);
+          if (existing) return { created: false, existing };
+        }
+      }
+      throw new Error(
+        `createWorkflow: insert conflict for "${params.workflowId}" but neither workflow_id nor idempotency_key resolved.`,
+      );
     }
     return { created: true };
+  }
+
+  async findWorkflowByIdempotencyKey(params: {
+    workflowName: string;
+    namespace?: string;
+    idempotencyKey: string;
+    now: Date;
+  }): Promise<{ workflowId: string } | null> {
+    const ns = this.resolveNamespace(params.namespace);
+    const [row] = await this.db
+      .select({ workflowId: workflows.workflowId })
+      .from(workflows)
+      .where(
+        and(
+          ns === null ? sql`${workflows.namespace} IS NULL` : eq(workflows.namespace, ns),
+          eq(workflows.workflowName, params.workflowName),
+          eq(workflows.idempotencyKey, params.idempotencyKey),
+          sql`${workflows.idempotencyExpiresAt} IS NOT NULL`,
+          sql`${workflows.idempotencyExpiresAt} > ${params.now.toISOString()}::timestamptz`,
+        ),
+      )
+      .limit(1);
+    return row ? { workflowId: row.workflowId } : null;
   }
 
   /** Transition pending → running on first step activity. */
@@ -367,20 +469,24 @@ export class PostgresWorkflowStorage
     await this.db.transaction(async (tx) => {
       const runsByWf = new Map<string, number>();
       for (const wfId of byWf.keys()) {
-        // markRunning + run lookup need to go through the tx so nested
-        // rows see a consistent run counter. markRunning is idempotent
-        // (only flips pending→running; no-op if already running).
+        // pending → running: record startedAt on the first transition.
         await tx
           .update(workflows)
-          .set({
-            statusId: WorkflowStatusIds.id.running,
-            startedAt: now,
-            updatedAt: now,
-          })
+          .set({ statusId: WorkflowStatusIds.id.running, startedAt: now, updatedAt: now })
           .where(
             and(
               eq(workflows.workflowId, wfId),
               eq(workflows.statusId, WorkflowStatusIds.id.pending),
+            ),
+          );
+        // suspended → running: resume without overwriting startedAt.
+        await tx
+          .update(workflows)
+          .set({ statusId: WorkflowStatusIds.id.running, updatedAt: now })
+          .where(
+            and(
+              eq(workflows.workflowId, wfId),
+              eq(workflows.statusId, WorkflowStatusIds.id.suspended),
             ),
           );
         const [row] = await tx
@@ -599,6 +705,20 @@ export class PostgresWorkflowStorage
       .where(eq(workflows.workflowId, workflowId));
   }
 
+  async tripwireWorkflow(workflowId: string, reason: unknown, guard?: FenceGuard): Promise<void> {
+    await this.checkFence(workflowId, guard);
+    const now = this.config.clock.now();
+    await this.db
+      .update(workflows)
+      .set({
+        statusId: WorkflowStatusIds.id.tripwire,
+        tripwire: reason,
+        completedAt: now,
+        updatedAt: now,
+      })
+      .where(eq(workflows.workflowId, workflowId));
+  }
+
   async suspendWorkflow(
     workflowId: string,
     stepName: string,
@@ -621,6 +741,9 @@ export class PostgresWorkflowStorage
       wakeAt: (stepUpdate.wakeAt as Date) ?? undefined,
       signalName: (stepUpdate.signalName as string) ?? undefined,
       signalTimeoutAt: (stepUpdate.signalTimeoutAt as Date) ?? undefined,
+      // Schema snapshot for `ctx.validatedSignal` / `ctx.approval` suspends.
+      // Null for plain `ctx.signal()` — those keep the pass-through path.
+      signalJsonSchema: stepUpdate.signalJsonSchema ?? undefined,
     };
 
     await this.db
@@ -644,6 +767,30 @@ export class PostgresWorkflowStorage
         target: [workflowSignals.workflowId, workflowSignals.signalName],
         set: { payload, deliveredAt: this.config.clock.now() },
       });
+  }
+
+  async setWorkflowMetadata(workflowId: string, patch: Record<string, unknown>): Promise<void> {
+    // Postgres jsonb merge on the row's metadata column. `||` shallow-merges
+    // top-level keys; null-valued entries in the patch are stripped via a
+    // second `- text[]` op so callers can use `null` to remove a key.
+    const removeKeys = Object.entries(patch)
+      .filter(([, v]) => v === null)
+      .map(([k]) => k);
+    const writePatch: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(patch)) {
+      if (v !== null) writePatch[k] = v;
+    }
+    await this.db
+      .update(workflows)
+      .set({
+        metadata: sql`COALESCE(${workflows.metadata}, '{}'::jsonb) || ${JSON.stringify(writePatch)}::jsonb${
+          removeKeys.length > 0
+            ? sql` - ${sql.raw(`ARRAY[${removeKeys.map((k) => `'${k.replace(/'/g, "''")}'`).join(",")}]::text[]`)}`
+            : sql``
+        }`,
+        updatedAt: this.config.clock.now(),
+      })
+      .where(eq(workflows.workflowId, workflowId));
   }
 
   async loadSignals(workflowId: string): Promise<SignalState[]> {
@@ -786,6 +933,7 @@ export class PostgresWorkflowStorage
           statusId: current.statusId,
           result: current.result,
           error: current.error,
+          tripwire: current.tripwire,
           createdAt: current.createdAt,
           startedAt: current.startedAt,
           completedAt: current.completedAt,
@@ -800,6 +948,7 @@ export class PostgresWorkflowStorage
         statusId: WorkflowStatusIds.id.pending,
         result: null,
         error: null,
+        tripwire: null,
         startedAt: null,
         completedAt: null,
         updatedAt: now,
@@ -807,6 +956,74 @@ export class PostgresWorkflowStorage
       .where(eq(workflows.workflowId, workflowId))
       .returning({ run: workflows.run });
     return row?.run ?? 1;
+  }
+
+  async resetSteps(workflowId: string, stepNames: readonly string[]): Promise<void> {
+    if (stepNames.length === 0) return;
+    const names = [...stepNames];
+    await this.db.transaction(async (tx) => {
+      // Step / task rows are keyed per `run`; only the live run resets.
+      // Unknown workflow → throw, matching InMemoryWorkflowStorage so
+      // every backend shares one contract (the runner guards existence
+      // before calling, so this is a defensive check).
+      const [wf] = await tx
+        .select({ run: workflows.run })
+        .from(workflows)
+        .where(eq(workflows.workflowId, workflowId));
+      if (!wf) throw new Error(`Workflow ${workflowId} not found`);
+
+      // Delete the listed steps + their map tasks — a deleted row reads
+      // back as "never ran" (same shape as InMemoryWorkflowStorage,
+      // which drops the entries from its step map). The DAG executor
+      // re-creates them on the resumed run.
+      await tx
+        .delete(workflowSteps)
+        .where(
+          and(
+            eq(workflowSteps.workflowId, workflowId),
+            eq(workflowSteps.run, wf.run),
+            inArray(workflowSteps.stepName, names),
+          ),
+        );
+      await tx
+        .delete(workflowStepTasks)
+        .where(
+          and(
+            eq(workflowStepTasks.workflowId, workflowId),
+            eq(workflowStepTasks.run, wf.run),
+            inArray(workflowStepTasks.stepName, names),
+          ),
+        );
+      // Clear journal entries so the activities re-fire on replay rather
+      // than returning stale recorded values.
+      await tx
+        .delete(activityJournal)
+        .where(
+          and(eq(activityJournal.workflowId, workflowId), inArray(activityJournal.stepName, names)),
+        );
+      // Flip a terminal workflow back to running so the runner resumes
+      // it; a still-running / suspended workflow is left as-is.
+      await tx
+        .update(workflows)
+        .set({
+          statusId: WorkflowStatusIds.id.running,
+          result: null,
+          error: null,
+          tripwire: null,
+          completedAt: null,
+          updatedAt: this.config.clock.now(),
+        })
+        .where(
+          and(
+            eq(workflows.workflowId, workflowId),
+            inArray(workflows.statusId, [
+              WorkflowStatusIds.id.completed,
+              WorkflowStatusIds.id.failed,
+              WorkflowStatusIds.id.tripwire,
+            ]),
+          ),
+        );
+    });
   }
 
   async loadRunHistory(
@@ -841,6 +1058,7 @@ export class PostgresWorkflowStorage
       statusId: number;
       result: unknown;
       error: string | null;
+      tripwire?: unknown;
       createdAt: Date;
       startedAt: Date | null;
       completedAt: Date | null;
@@ -854,6 +1072,7 @@ export class PostgresWorkflowStorage
         statusId: wfRow.statusId,
         result: wfRow.result,
         error: wfRow.error,
+        tripwire: wfRow.tripwire ?? undefined,
         createdAt: wfRow.createdAt,
         startedAt: wfRow.startedAt,
         completedAt: wfRow.completedAt,
@@ -866,6 +1085,7 @@ export class PostgresWorkflowStorage
         statusId: ar.statusId,
         result: ar.result,
         error: ar.error,
+        tripwire: ar.tripwire ?? undefined,
         createdAt: ar.createdAt,
         startedAt: ar.startedAt,
         completedAt: ar.completedAt,
@@ -895,6 +1115,7 @@ export class PostgresWorkflowStorage
       status: WorkflowStatusIds.toName(meta.statusId),
       result: meta.result ?? undefined,
       error: meta.error ?? undefined,
+      tripwire: meta.tripwire,
       steps: stepsByRun.get(meta.run) ?? {},
       createdAt: meta.createdAt,
       startedAt: meta.startedAt ?? undefined,
@@ -922,7 +1143,7 @@ export class PostgresWorkflowStorage
       .from(workflows)
       .where(
         and(
-          sql`${workflows.statusId} IN (${WorkflowStatusIds.id.completed}, ${WorkflowStatusIds.id.failed})`,
+          sql`${workflows.statusId} IN (${WorkflowStatusIds.id.completed}, ${WorkflowStatusIds.id.failed}, ${WorkflowStatusIds.id.tripwire})`,
           gte(workflows.completedAt, from),
           lt(workflows.completedAt, to),
         ),
@@ -1014,7 +1235,11 @@ export class PostgresWorkflowStorage
       durationMs: record.durationMs,
       startedAt: record.startedAt,
       completedAt: record.completedAt,
-      workerId: record.workerId,
+      // Schema column is still named `worker_id` (drizzle field
+      // `workerId`); the StepAttemptRecord interface renamed
+      // `workerId` → `executorId` so non-worker executors (in-process
+      // runner, embedded ZoryaWorkflows) read naturally too.
+      workerId: record.executorId,
     });
   }
 
@@ -1044,7 +1269,7 @@ export class PostgresWorkflowStorage
       durationMs: Number(r.durationMs ?? 0),
       startedAt: r.startedAt,
       completedAt: r.completedAt,
-      workerId: r.workerId ?? undefined,
+      executorId: r.workerId ?? undefined,
     }));
   }
 
@@ -1111,7 +1336,7 @@ export class PostgresWorkflowStorage
     branchPath?: string;
     activityName: string;
     payloadHash?: string;
-    stepType: "sleep" | "signal" | "activity" | "compensation";
+    stepType: "sleep" | "signal" | "activity" | "compensation" | "child" | "waitpoint";
     wakeAt?: Date;
   }): Promise<void> {
     await this.db
@@ -1218,6 +1443,188 @@ export class PostgresWorkflowStorage
       .limit(1);
     return row ? rowToJournalEntry(row) : null;
   }
+
+  // ---------------------------------------------------------------------------
+  // SignalToken — public-bearer authorization for storage.deliverSignal
+  // ---------------------------------------------------------------------------
+
+  async createSignalToken(params: {
+    tokenId: string;
+    workflowId: string;
+    signalName: string;
+    bearer: string;
+    tags: ReadonlyArray<string>;
+    idempotencyKey?: string | null;
+    expiresAt: Date;
+  }): Promise<{ record: SignalTokenRecord; isCached: boolean }> {
+    if (params.idempotencyKey) {
+      const [existing] = await this.db
+        .select()
+        .from(signalTokens)
+        .where(
+          and(
+            eq(signalTokens.workflowId, params.workflowId),
+            eq(signalTokens.idempotencyKey, params.idempotencyKey),
+          ),
+        )
+        .limit(1);
+      if (existing) {
+        return { record: rowToSignalToken(existing), isCached: true };
+      }
+    }
+    const [inserted] = await this.db
+      .insert(signalTokens)
+      .values({
+        tokenId: params.tokenId,
+        workflowId: params.workflowId,
+        signalName: params.signalName,
+        bearer: params.bearer,
+        tags: [...params.tags],
+        idempotencyKey: params.idempotencyKey ?? null,
+        expiresAt: params.expiresAt,
+      })
+      .returning();
+    return { record: rowToSignalToken(inserted!), isCached: false };
+  }
+
+  async findSignalTokenById(tokenId: string): Promise<SignalTokenRecord | null> {
+    const [row] = await this.db
+      .select()
+      .from(signalTokens)
+      .where(eq(signalTokens.tokenId, tokenId))
+      .limit(1);
+    return row ? rowToSignalToken(row) : null;
+  }
+
+  async markSignalTokenCompleted(params: {
+    tokenId: string;
+    value: unknown;
+    now: Date;
+  }): Promise<
+    | { outcome: "delivered"; record: SignalTokenRecord }
+    | { outcome: "already_completed"; record: SignalTokenRecord }
+  > {
+    // Atomic: only update rows still pending; UPDATE ... RETURNING tells us
+    // whether we won the race or lost to a concurrent completer.
+    const [won] = await this.db
+      .update(signalTokens)
+      .set({ completedAt: params.now, completedValue: params.value as never })
+      .where(
+        and(eq(signalTokens.tokenId, params.tokenId), sql`${signalTokens.completedAt} IS NULL`),
+      )
+      .returning();
+    if (won) {
+      return { outcome: "delivered", record: rowToSignalToken(won) };
+    }
+    const current = await this.findSignalTokenById(params.tokenId);
+    if (!current) {
+      throw new Error(`signal token ${params.tokenId} not found`);
+    }
+    return { outcome: "already_completed", record: current };
+  }
+
+  async listSignalTokensForWorkflow(workflowId: string): Promise<ReadonlyArray<SignalTokenRecord>> {
+    const rows = await this.db
+      .select()
+      .from(signalTokens)
+      .where(eq(signalTokens.workflowId, workflowId))
+      .orderBy(desc(signalTokens.createdAt));
+    return rows.map(rowToSignalToken);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Streams — append-only chunks per (workflow, stream).
+  // ---------------------------------------------------------------------------
+
+  async appendStreamChunk(params: {
+    workflowId: string;
+    streamId: string;
+    payload: unknown;
+    appendedBy: "workflow" | "external";
+  }): Promise<{ chunkIndex: number }> {
+    // Compute next index in a single statement via subquery — atomic
+    // against concurrent appends, no read-then-write race.
+    const inserted = await this.db.execute(sql`
+      INSERT INTO wf_streams (workflow_id, stream_id, chunk_index, payload, appended_by)
+      VALUES (
+        ${params.workflowId},
+        ${params.streamId},
+        COALESCE(
+          (SELECT MAX(chunk_index) + 1 FROM wf_streams
+           WHERE workflow_id = ${params.workflowId} AND stream_id = ${params.streamId}),
+          0
+        ),
+        ${JSON.stringify(params.payload)}::jsonb,
+        ${params.appendedBy}
+      )
+      RETURNING chunk_index
+    `);
+    const rows =
+      (inserted as unknown as { rows?: Array<{ chunk_index: number }> }).rows ??
+      (inserted as unknown as Array<{ chunk_index: number }>);
+    const chunkIndex = Array.isArray(rows) ? rows[0]?.chunk_index : undefined;
+    if (chunkIndex === undefined) {
+      throw new Error("appendStreamChunk: no row returned from INSERT");
+    }
+    return { chunkIndex };
+  }
+
+  async readStreamChunks(params: {
+    workflowId: string;
+    streamId: string;
+    since?: number;
+    limit?: number;
+  }): Promise<ReadonlyArray<StreamChunk>> {
+    const conditions = [
+      eq(workflowStreams.workflowId, params.workflowId),
+      eq(workflowStreams.streamId, params.streamId),
+    ];
+    if (params.since !== undefined) {
+      conditions.push(sql`${workflowStreams.chunkIndex} > ${params.since}`);
+    }
+    const baseQuery = this.db
+      .select()
+      .from(workflowStreams)
+      .where(and(...conditions))
+      .orderBy(asc(workflowStreams.chunkIndex));
+    const rows = await (params.limit !== undefined ? baseQuery.limit(params.limit) : baseQuery);
+    return rows.map((r) => ({
+      chunkIndex: r.chunkIndex,
+      payload: r.payload,
+      appendedBy: r.appendedBy as "workflow" | "external",
+      appendedAt: r.appendedAt,
+    }));
+  }
+}
+
+/**
+ * Build the ORDER BY expression for `listWorkflows`. NULL values always
+ * sort last so still-running rows (no `started_at` / `completed_at` /
+ * `duration`) don't push real data off the first page in either direction.
+ * `status` orders by status_id (the integer enum) — alphabetizing requires
+ * a join with the lookup table, and the cost isn't justified for a
+ * dropdown-driven sort. Default: `started_at DESC NULLS LAST` so dashboards
+ * lead with the most-recently-started run; pending rows that haven't
+ * picked up a worker yet fall to the bottom.
+ */
+function postgresOrderByClause(orderBy?: WorkflowOrderBy, orderDir?: "asc" | "desc") {
+  const direction = orderDir === "asc" ? sql.raw("ASC") : sql.raw("DESC");
+  const nullsLast = sql.raw("NULLS LAST");
+  switch (orderBy) {
+    case "createdAt":
+      return orderDir === "asc" ? asc(workflows.createdAt) : desc(workflows.createdAt);
+    case "completedAt":
+      return sql`${workflows.completedAt} ${direction} ${nullsLast}`;
+    case "duration":
+      return sql`(${workflows.completedAt} - ${workflows.createdAt}) ${direction} ${nullsLast}`;
+    case "status":
+      return orderDir === "asc" ? asc(workflows.statusId) : desc(workflows.statusId);
+    case "name":
+      return orderDir === "asc" ? asc(workflows.workflowName) : desc(workflows.workflowName);
+    case "startedAt":
+    default:
+      return sql`${workflows.startedAt} ${direction} ${nullsLast}`;
+  }
 }
 
 function rowToJournalEntry(row: {
@@ -1240,6 +1647,32 @@ function rowToJournalEntry(row: {
     payloadHash: row.payloadHash ?? undefined,
     wakeAt: row.wakeAt ?? undefined,
     exit: (row.exit ?? undefined) as JournalEntry["exit"],
+    createdAt: row.createdAt,
+  };
+}
+
+function rowToSignalToken(row: {
+  tokenId: string;
+  workflowId: string;
+  signalName: string;
+  bearer: string;
+  tags: string[];
+  idempotencyKey: string | null;
+  expiresAt: Date;
+  completedAt: Date | null;
+  completedValue: unknown;
+  createdAt: Date;
+}): SignalTokenRecord {
+  return {
+    tokenId: row.tokenId,
+    workflowId: row.workflowId,
+    signalName: row.signalName,
+    bearer: row.bearer,
+    tags: row.tags,
+    idempotencyKey: row.idempotencyKey,
+    expiresAt: row.expiresAt,
+    completedAt: row.completedAt,
+    completedValue: row.completedValue,
     createdAt: row.createdAt,
   };
 }

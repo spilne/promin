@@ -181,6 +181,7 @@ export class PgSchedulerStorage implements SchedulerStorage {
   // -------------------------------------------------------------------------
 
   async upsertSchedule(config: DurableScheduleConfig): Promise<void> {
+    const enabled = config.enabled !== false;
     const values = {
       id: config.id,
       namespace: config.namespace ?? null,
@@ -192,17 +193,29 @@ export class PgSchedulerStorage implements SchedulerStorage {
       overlapPolicy: config.overlapPolicy ?? "allow",
       maxCatchUp: config.maxCatchUp ?? 0,
       jitterMs: config.jitterMs ?? 0,
-      enabled: config.enabled !== false,
+      enabled,
       startAt: config.startAt,
       endAt: config.endAt,
       metadata: config.metadata,
     };
+    // Seed `nextRun` on INSERT only (when enabled) so `findDue` picks the
+    // schedule up without a separate `setNextRun` call — matches the
+    // in-memory and sqlite contracts. Honor `startAt` so a deferred
+    // schedule isn't immediately reported as due. On UPDATE, leave the
+    // existing `nextRun` alone; the caller recomputes it when the
+    // trigger changes.
+    const now = this.clock.now();
+    const seededNextRun = enabled
+      ? config.startAt && config.startAt > now
+        ? config.startAt
+        : now
+      : null;
     await this.db
       .insert(durableSchedules)
-      .values(values)
+      .values({ ...values, nextRun: seededNextRun })
       .onConflictDoUpdate({
         target: durableSchedules.id,
-        set: { ...values, updatedAt: this.clock.now() },
+        set: { ...values, updatedAt: now },
       });
   }
 
@@ -220,16 +233,11 @@ export class PgSchedulerStorage implements SchedulerStorage {
   async listSchedules(params?: {
     enabled?: boolean;
     namespace?: string;
+    metadata?: Record<string, unknown>;
     limit?: number;
     offset?: number;
   }): Promise<DurableScheduleConfig[]> {
-    const filters: SQL[] = [];
-    if (params?.enabled !== undefined) {
-      filters.push(eq(durableSchedules.enabled, params.enabled));
-    }
-    if (params?.namespace !== undefined) {
-      filters.push(eq(durableSchedules.namespace, params.namespace));
-    }
+    const filters = this.buildScheduleFilters(params);
     const limit = params?.limit ?? 100;
     const offset = params?.offset ?? 0;
     const rows = await this.db
@@ -241,7 +249,30 @@ export class PgSchedulerStorage implements SchedulerStorage {
     return rows.map(rowToConfig);
   }
 
-  async countSchedules(params?: { enabled?: boolean; namespace?: string }): Promise<number> {
+  async countSchedules(params?: {
+    enabled?: boolean;
+    namespace?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<number> {
+    const filters = this.buildScheduleFilters(params);
+    const [row] = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(durableSchedules)
+      .where(filters.length > 0 ? and(...filters) : undefined);
+    return Number(row?.count ?? 0);
+  }
+
+  /**
+   * Shared filter assembly so list / count don't drift on predicate
+   * semantics. Mirrors the same containment-`@>` shape that
+   * `PostgresWorkflowStorage.listWorkflows` uses for its metadata filter,
+   * and the in-memory / sqlite scheduler storages' equivalents.
+   */
+  private buildScheduleFilters(params?: {
+    enabled?: boolean;
+    namespace?: string;
+    metadata?: Record<string, unknown>;
+  }): SQL[] {
     const filters: SQL[] = [];
     if (params?.enabled !== undefined) {
       filters.push(eq(durableSchedules.enabled, params.enabled));
@@ -249,11 +280,10 @@ export class PgSchedulerStorage implements SchedulerStorage {
     if (params?.namespace !== undefined) {
       filters.push(eq(durableSchedules.namespace, params.namespace));
     }
-    const [row] = await this.db
-      .select({ count: sql<number>`count(*)::int` })
-      .from(durableSchedules)
-      .where(filters.length > 0 ? and(...filters) : undefined);
-    return Number(row?.count ?? 0);
+    if (params?.metadata && Object.keys(params.metadata).length > 0) {
+      filters.push(sql`${durableSchedules.metadata} @> ${JSON.stringify(params.metadata)}::jsonb`);
+    }
+    return filters;
   }
 
   // -------------------------------------------------------------------------
@@ -274,6 +304,36 @@ export class PgSchedulerStorage implements SchedulerStorage {
       sql`SELECT pg_try_advisory_lock(${lockId}) as acquired`,
     );
     return result?.acquired === true;
+  }
+
+  async findDueAcross(params: {
+    now: Date;
+    limit: number;
+    namespaces?: readonly (string | undefined)[];
+  }): Promise<readonly { id: string; namespace?: string }[]> {
+    // Single index scan over (namespace, next_run). The namespace filter,
+    // when supplied, becomes an IN list (with optional NULL for global).
+    const filters: SQL[] = [
+      isNotNull(durableSchedules.nextRun),
+      lte(durableSchedules.nextRun, params.now),
+    ];
+    if (params.namespaces) {
+      const named = params.namespaces.filter((n): n is string => n !== undefined);
+      const includeGlobal = params.namespaces.some((n) => n === undefined);
+      const branches: SQL[] = [];
+      if (named.length > 0) branches.push(inArray(durableSchedules.namespace, named));
+      if (includeGlobal) branches.push(sql`${durableSchedules.namespace} IS NULL`);
+      // Empty list (no global, no named) — match nothing.
+      if (branches.length === 0) return [];
+      filters.push(branches.length === 1 ? branches[0]! : sql`(${branches[0]} OR ${branches[1]})`);
+    }
+    const rows = await this.db
+      .select({ id: durableSchedules.id, namespace: durableSchedules.namespace })
+      .from(durableSchedules)
+      .where(and(...filters))
+      .orderBy(asc(durableSchedules.nextRun))
+      .limit(params.limit);
+    return rows.map((r) => ({ id: r.id, namespace: r.namespace ?? undefined }));
   }
 }
 

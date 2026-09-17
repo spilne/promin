@@ -290,6 +290,51 @@ export class RedisSchedulerStorage implements SchedulerStorage {
     }
     return false;
   }
+
+  async findDueAcross(params: {
+    now: Date;
+    limit: number;
+    namespaces?: readonly (string | undefined)[];
+  }): Promise<readonly { id: string; namespace?: string }[]> {
+    // Redis layout has one due-ZSET per namespace, so we either union an
+    // explicit list (when supplied) or SCAN to discover. SCAN is one
+    // round trip on key cardinality = tenant count, which is cheap in
+    // practice — and only happens here, not on the per-tenant fast path.
+    let dueKeys: Array<{ key: string; namespace?: string }>;
+    if (params.namespaces) {
+      dueKeys = params.namespaces.map((ns) => ({
+        key: this.dueKey(ns),
+        namespace: ns,
+      }));
+    } else {
+      // KEYS pattern over the per-namespace `:due` keys. Cardinality =
+      // tenant count (low thousands at most), well within KEYS' budget.
+      // The RedisClient abstraction here doesn't expose SCAN; if a higher-
+      // throughput discovery path becomes necessary we add a SCAN method
+      // to the interface and switch.
+      const pattern = `${this.prefix}:ns:*:due`;
+      const keys = await this.redis.keys(pattern);
+      dueKeys = keys.map((key) => {
+        const stripped = key.slice(`${this.prefix}:ns:`.length, -":due".length);
+        return { key, namespace: stripped === GLOBAL_NS ? undefined : stripped };
+      });
+    }
+    // Score-bounded zrange across each due-set. Run in parallel — the
+    // client pipelines them on a single connection.
+    const nowMs = params.now.getTime();
+    const lists = await Promise.all(
+      dueKeys.map(async ({ key, namespace }) => {
+        const ids = await this.redis.zrangebyscore(key, "-inf", nowMs, "LIMIT", 0, params.limit);
+        return ids.map((id) => ({ id, namespace }));
+      }),
+    );
+    // Flatten then trim to the global limit. We do not score-merge across
+    // namespaces — order within a namespace stays score-ascending, but
+    // cross-namespace ordering is undefined. Acceptable: the caller
+    // groups by namespace anyway and tickOnce processes one namespace at
+    // a time.
+    return lists.flat().slice(0, params.limit);
+  }
 }
 
 // ---------------------------------------------------------------------------

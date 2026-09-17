@@ -14,9 +14,27 @@
 // Client — entry point for creating producers, consumers, admins
 // ---------------------------------------------------------------------------
 
+/**
+ * Consumer config. Beyond `groupId`, the timeout knobs guard the
+ * slow-handler → rebalance-loop failure mode: if a message handler runs longer
+ * than `maxPollInterval`, the broker considers the consumer dead and
+ * rebalances → the message redelivers → you can get a reprocess loop that
+ * never commits. Raise these when handlers do slow I/O (or bound the handler).
+ * Fields are optional; drivers ignore knobs they don't support.
+ */
+export interface KafkaConsumerOptions {
+  groupId: string;
+  /** Max time (ms) a handler may run before the broker rebalances the group. */
+  maxPollInterval?: number;
+  /** Group session timeout (ms). */
+  sessionTimeout?: number;
+  /** Heartbeat interval (ms). */
+  heartbeatInterval?: number;
+}
+
 export interface KafkaClient {
   producer(): KafkaProducer;
-  consumer(config: { groupId: string }): KafkaConsumer;
+  consumer(config: KafkaConsumerOptions): KafkaConsumer;
   admin(): KafkaAdmin;
 }
 

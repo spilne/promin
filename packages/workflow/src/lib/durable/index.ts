@@ -23,23 +23,47 @@ export {
 export {
   type WorkflowStorage,
   type StepAttemptStorage,
+  type TripwireCapableStorage,
+  type SubscribableStorage,
   type FenceGuard,
   type FenceToken,
+  type WorkflowOrderBy,
+  type SignalTokenRecord,
+  type StreamChunk,
+  workflowMetadataMatches,
   isStepAttemptStorage,
+  isTripwireCapableStorage,
+  isSubscribableStorage,
 } from "./workflow-storage.ts";
 export {
+  type StreamDescriptor,
+  type StreamKind,
+  type DefineStreamOptions,
+  defineStream,
+  defineInputStream,
+  appendStreamChunk,
+  appendExternalStreamChunk,
+  peekStreamChunk,
+} from "./streams.ts";
+export {
   type WorkflowState,
+  type WorkflowSummary,
   type WorkflowRunSummary,
   type StepState,
   type StepTaskState,
   type SignalState,
   type WorkflowStatus,
+  type RunSource,
+  RUN_SOURCE_CODES,
+  encodeRunSource,
+  decodeRunSource,
   type StepStatus,
   type StepType,
   type CompensationStatus,
   type StepAttemptRecord,
   type StepAttemptType,
   type FailedWorkflowRecord,
+  type WorkflowRunEvent,
 } from "./workflow-state.ts";
 export { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
 export {
@@ -48,6 +72,8 @@ export {
   createWorkflowVersionRegistry,
   type WorkflowVersionRegistryConfig,
   type IWorkflowVersionRegistry,
+  type VersionRecord,
+  type VersionStatus,
 } from "./workflow-version-registry.ts";
 export {
   WorkflowError,
@@ -55,18 +81,24 @@ export {
   StorageError,
   WorkflowLockError,
   WorkflowSuspendedError,
+  WorkflowContinueAsNewError,
   WorkflowTimeoutError,
   StepTimeoutError,
   WorkflowDeadlineError,
   WorkflowVersionMismatchError,
   FenceTokenMismatchError,
   GuardError,
+  WorkflowTripwireError,
+  TripwireStorageMissingError,
+  LoopLimitExceededError,
 } from "./durable-pipeline-error.ts";
 export { topologicalSort, computeReadySet, type DagNode } from "./workflow-dag.ts";
 export {
   DefaultWorkflowRunner,
   InProcessStepExecutor,
   createWorkflowRunner,
+  RecoveryStrategy,
+  RecoveryStrategyBuilder,
   type WorkflowRunner,
   type WorkflowRunnerConfig,
   type WorkflowRunnerRunParams,
@@ -74,6 +106,8 @@ export {
   type StepExecutor,
   type StepExecutionRequest,
   type StepExecutionResult,
+  type RecoveryResult,
+  type StaleTerminationAction,
 } from "./workflow-runner.ts";
 export { trigger, WorkflowResult } from "./workflow-trigger.ts";
 export {
@@ -105,6 +139,12 @@ export {
   type ActivityYield,
   type ActivityOptions,
 } from "./journaled-step.ts";
+export {
+  invokeQueryHandler,
+  hasQueryHandlers,
+  listQueryHandlers,
+  clearQueryHandlers,
+} from "./query-registry.ts";
 
 // Visual editor schema — serializable DAG representation for authoring UIs
 export {

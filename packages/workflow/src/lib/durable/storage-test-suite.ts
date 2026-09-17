@@ -28,6 +28,12 @@ export interface StorageTestSuiteOptions {
    * `findPendingSignal`). Implies `hasJournal: true`.
    */
   hasJournaledSuspend?: boolean;
+  /**
+   * Opt in to the `resetSteps` conformance section. Defaults to `false`.
+   * When `true`, the factory must return a storage that implements the
+   * optional `resetSteps` method (backs `WorkflowRunner.resume`).
+   */
+  hasResetSteps?: boolean;
 }
 
 /**
@@ -121,6 +127,58 @@ export function storageTestSuite(
           expect(result2.existing.workflowId).toBe("dup-1");
           expect(result2.existing.input).toEqual({ a: 1 }); // original input preserved
         }
+      });
+
+      it("scopes idempotency-key creates by namespace", async () => {
+        const s = await getStorage();
+        const expires = new Date(Date.now() + 60_000);
+
+        const first = await s.createWorkflow({
+          workflowId: "idem-ns-a1",
+          workflowName: "compute",
+          namespace: "team-a",
+          input: { n: 1 },
+          idempotencyKey: "shared",
+          idempotencyExpiresAt: expires,
+        });
+        const sameNamespace = await s.createWorkflow({
+          workflowId: "idem-ns-a2",
+          workflowName: "compute",
+          namespace: "team-a",
+          input: { n: 2 },
+          idempotencyKey: "shared",
+          idempotencyExpiresAt: expires,
+        });
+        const otherNamespace = await s.createWorkflow({
+          workflowId: "idem-ns-b1",
+          workflowName: "compute",
+          namespace: "team-b",
+          input: { n: 3 },
+          idempotencyKey: "shared",
+          idempotencyExpiresAt: expires,
+        });
+
+        expect(first.created).toBe(true);
+        expect(sameNamespace.created).toBe(false);
+        if (!sameNamespace.created) expect(sameNamespace.existing.workflowId).toBe("idem-ns-a1");
+        expect(otherNamespace.created).toBe(true);
+
+        await expect(
+          s.findWorkflowByIdempotencyKey({
+            workflowName: "compute",
+            namespace: "team-a",
+            idempotencyKey: "shared",
+            now: new Date(),
+          }),
+        ).resolves.toEqual({ workflowId: "idem-ns-a1" });
+        await expect(
+          s.findWorkflowByIdempotencyKey({
+            workflowName: "compute",
+            namespace: "team-b",
+            idempotencyKey: "shared",
+            now: new Date(),
+          }),
+        ).resolves.toEqual({ workflowId: "idem-ns-b1" });
       });
 
       it("returns null for non-existent workflow", async () => {
@@ -401,6 +459,20 @@ export function storageTestSuite(
         expect(state!.status).toBe("failed");
         expect(state!.error).toBe("total failure");
       });
+
+      it("tripwires a workflow with a structured reason", async () => {
+        const s = await getStorage();
+        if (typeof s.tripwireWorkflow !== "function") return;
+        await s.createWorkflow({ workflowId: "trip-1", workflowName: "test", input: {} });
+        await s.tripwireWorkflow("trip-1", { code: "fraud", score: 0.97 });
+
+        const state = await s.loadWorkflow("trip-1");
+        expect(state!.status).toBe("tripwire");
+        expect(state!.tripwire).toEqual({ code: "fraud", score: 0.97 });
+        expect(state!.completedAt).toBeInstanceOf(Date);
+        // Tripwire is distinct from failed — error field stays unset.
+        expect(state!.error).toBeUndefined();
+      });
     });
 
     // -------------------------------------------------------------------
@@ -435,6 +507,372 @@ export function storageTestSuite(
 
         const page = await s.listWorkflows({ limit: 2 });
         expect(page.length).toBeLessThanOrEqual(2);
+      });
+
+      it("default order is startedAt desc, NULLS LAST — most-recently-started first, pending last", async () => {
+        const s = await getStorage();
+        // Three workflows created in order; first two get a step (which
+        // marks them running and sets startedAt). Third stays pending.
+        await s.createWorkflow({ workflowId: "ord-default-1", workflowName: "t", input: {} });
+        await s.saveStepResult({
+          workflowId: "ord-default-1",
+          stepName: "go",
+          result: "ok",
+          durationMs: 1,
+          startedAt: new Date(),
+        });
+        await new Promise((r) => setTimeout(r, 10));
+        await s.createWorkflow({ workflowId: "ord-default-2", workflowName: "t", input: {} });
+        await s.saveStepResult({
+          workflowId: "ord-default-2",
+          stepName: "go",
+          result: "ok",
+          durationMs: 1,
+          startedAt: new Date(),
+        });
+        await s.createWorkflow({ workflowId: "ord-default-3", workflowName: "t", input: {} });
+
+        const rows = await s.listWorkflows({ name: "t" });
+        const ids = rows.map((r) => r.workflowId);
+        // 2 started after 1, both before 3 (which never started).
+        expect(ids[0]).toBe("ord-default-2");
+        expect(ids[1]).toBe("ord-default-1");
+        expect(ids[2]).toBe("ord-default-3");
+      });
+
+      it("orderBy=name asc returns alphabetical order", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "ord-name-1", workflowName: "gamma", input: {} });
+        await s.createWorkflow({ workflowId: "ord-name-2", workflowName: "alpha", input: {} });
+        await s.createWorkflow({ workflowId: "ord-name-3", workflowName: "beta", input: {} });
+
+        const rows = await s.listWorkflows({ orderBy: "name", orderDir: "asc" });
+        expect(rows.map((r) => r.workflowName)).toEqual(["alpha", "beta", "gamma"]);
+      });
+
+      it("orderBy=duration sorts NULL (still-running) last in both directions", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "ord-dur-running", workflowName: "dur", input: {} });
+        await s.createWorkflow({ workflowId: "ord-dur-fast", workflowName: "dur", input: {} });
+        await new Promise((r) => setTimeout(r, 30));
+        await s.completeWorkflow("ord-dur-fast", "ok");
+        await s.createWorkflow({ workflowId: "ord-dur-slow", workflowName: "dur", input: {} });
+        await new Promise((r) => setTimeout(r, 60));
+        await s.completeWorkflow("ord-dur-slow", "ok");
+
+        const ascRows = await s.listWorkflows({
+          name: "dur",
+          orderBy: "duration",
+          orderDir: "asc",
+        });
+        const ascIds = ascRows.map((r) => r.workflowId);
+        // Running row sorts last regardless of direction.
+        expect(ascIds[ascIds.length - 1]).toBe("ord-dur-running");
+        // Among completed: shorter duration first when asc.
+        const completedAsc = ascIds.filter((id) => id !== "ord-dur-running");
+        expect(completedAsc).toEqual(["ord-dur-fast", "ord-dur-slow"]);
+
+        const descRows = await s.listWorkflows({
+          name: "dur",
+          orderBy: "duration",
+          orderDir: "desc",
+        });
+        const descIds = descRows.map((r) => r.workflowId);
+        expect(descIds[descIds.length - 1]).toBe("ord-dur-running");
+        const completedDesc = descIds.filter((id) => id !== "ord-dur-running");
+        expect(completedDesc).toEqual(["ord-dur-slow", "ord-dur-fast"]);
+      });
+
+      it("orderBy=startedAt sorts NULL (pending) last in both directions", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "ord-st-pending", workflowName: "st", input: {} });
+        await s.createWorkflow({ workflowId: "ord-st-started", workflowName: "st", input: {} });
+        await s.saveStepResult({
+          workflowId: "ord-st-started",
+          stepName: "go",
+          result: "ok",
+          durationMs: 1,
+          startedAt: new Date(),
+        });
+
+        const asc = await s.listWorkflows({ name: "st", orderBy: "startedAt", orderDir: "asc" });
+        expect(asc.map((r) => r.workflowId)).toEqual(["ord-st-started", "ord-st-pending"]);
+
+        const desc = await s.listWorkflows({ name: "st", orderBy: "startedAt", orderDir: "desc" });
+        expect(desc.map((r) => r.workflowId)).toEqual(["ord-st-started", "ord-st-pending"]);
+      });
+
+      it("orderBy + limit + offset compose for paginated sorted results", async () => {
+        const s = await getStorage();
+        for (const n of ["delta", "alpha", "echo", "beta", "charlie"]) {
+          await s.createWorkflow({ workflowId: `ord-pg-${n}`, workflowName: n, input: {} });
+        }
+        const page1 = await s.listWorkflows({
+          orderBy: "name",
+          orderDir: "asc",
+          limit: 2,
+          offset: 0,
+        });
+        const page2 = await s.listWorkflows({
+          orderBy: "name",
+          orderDir: "asc",
+          limit: 2,
+          offset: 2,
+        });
+        expect(page1.map((r) => r.workflowName)).toEqual(["alpha", "beta"]);
+        expect(page2.map((r) => r.workflowName)).toEqual(["charlie", "delta"]);
+      });
+
+      it("filters by a single metadata key/value pair", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "md-1",
+          workflowName: "meta",
+          input: {},
+          metadata: { userId: "u_42" },
+        });
+        await s.createWorkflow({
+          workflowId: "md-2",
+          workflowName: "meta",
+          input: {},
+          metadata: { userId: "u_99" },
+        });
+        await s.createWorkflow({ workflowId: "md-3", workflowName: "meta", input: {} });
+
+        const hits = await s.listWorkflows({ metadata: { userId: "u_42" } });
+        expect(hits.map((r) => r.workflowId)).toEqual(["md-1"]);
+      });
+
+      it("filters by multiple metadata pairs (AND semantics)", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "md-and-1",
+          workflowName: "meta",
+          input: {},
+          metadata: { userId: "u_42", priority: "high" },
+        });
+        await s.createWorkflow({
+          workflowId: "md-and-2",
+          workflowName: "meta",
+          input: {},
+          metadata: { userId: "u_42", priority: "low" },
+        });
+
+        const hits = await s.listWorkflows({
+          metadata: { userId: "u_42", priority: "high" },
+        });
+        expect(hits.map((r) => r.workflowId)).toEqual(["md-and-1"]);
+      });
+
+      it("returns empty when no workflow matches the metadata filter", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "md-none",
+          workflowName: "meta",
+          input: {},
+          metadata: { userId: "u_42" },
+        });
+        const hits = await s.listWorkflows({ metadata: { userId: "u_999" } });
+        expect(hits).toEqual([]);
+      });
+
+      it("workflows without metadata are excluded from metadata queries", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "md-empty", workflowName: "meta", input: {} });
+        const hits = await s.listWorkflows({ metadata: { userId: "u_42" } });
+        expect(hits).toEqual([]);
+      });
+
+      it("composes metadata filter with status filter", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "md-c-1",
+          workflowName: "meta",
+          input: {},
+          metadata: { region: "us-east" },
+        });
+        await s.completeWorkflow("md-c-1", "ok");
+        await s.createWorkflow({
+          workflowId: "md-c-2",
+          workflowName: "meta",
+          input: {},
+          metadata: { region: "us-east" },
+        });
+
+        const hits = await s.listWorkflows({
+          metadata: { region: "us-east" },
+          status: "completed",
+        });
+        expect(hits.map((r) => r.workflowId)).toEqual(["md-c-1"]);
+      });
+
+      it("filters by numeric and boolean metadata values", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "md-num-1",
+          workflowName: "m",
+          input: {},
+          metadata: { retries: 3, dryRun: true },
+        });
+        await s.createWorkflow({
+          workflowId: "md-num-2",
+          workflowName: "m",
+          input: {},
+          metadata: { retries: 5, dryRun: false },
+        });
+
+        expect(
+          (await s.listWorkflows({ metadata: { retries: 3 } })).map((r) => r.workflowId),
+        ).toEqual(["md-num-1"]);
+        expect(
+          (await s.listWorkflows({ metadata: { dryRun: true } })).map((r) => r.workflowId),
+        ).toEqual(["md-num-1"]);
+      });
+
+      it("filters by nested object metadata values (deep equality)", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "md-nest-1",
+          workflowName: "m",
+          input: {},
+          metadata: { actor: { id: "u_1", role: "admin" } },
+        });
+        await s.createWorkflow({
+          workflowId: "md-nest-2",
+          workflowName: "m",
+          input: {},
+          metadata: { actor: { id: "u_1", role: "guest" } },
+        });
+
+        const hits = await s.listWorkflows({
+          metadata: { actor: { id: "u_1", role: "admin" } },
+        });
+        expect(hits.map((r) => r.workflowId)).toEqual(["md-nest-1"]);
+      });
+    });
+
+    // -------------------------------------------------------------------
+    // distinctWorkflowNames / distinctWorkflowTypes / distinctNamespaces
+    // -------------------------------------------------------------------
+
+    describe("distinct values", () => {
+      it("returns distinct workflow names sorted alphabetically", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "dn-1", workflowName: "alpha", input: {} });
+        await s.createWorkflow({ workflowId: "dn-2", workflowName: "alpha", input: {} });
+        await s.createWorkflow({ workflowId: "dn-3", workflowName: "beta", input: {} });
+        await s.createWorkflow({ workflowId: "dn-4", workflowName: "gamma", input: {} });
+
+        const names = await s.distinctWorkflowNames();
+        expect(names).toEqual(["alpha", "beta", "gamma"]);
+      });
+
+      it("returns distinct workflow types, excluding undefined, sorted", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "dt-1",
+          workflowName: "wf",
+          input: {},
+          workflowType: "ingest",
+        });
+        await s.createWorkflow({
+          workflowId: "dt-2",
+          workflowName: "wf",
+          input: {},
+          workflowType: "ingest",
+        });
+        await s.createWorkflow({
+          workflowId: "dt-3",
+          workflowName: "wf",
+          input: {},
+          workflowType: "report",
+        });
+        await s.createWorkflow({ workflowId: "dt-4", workflowName: "wf", input: {} });
+
+        const types = await s.distinctWorkflowTypes();
+        expect(types).toEqual(["ingest", "report"]);
+      });
+
+      it("returns distinct namespaces, excluding undefined, sorted", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "dns-1",
+          workflowName: "wf",
+          input: {},
+          namespace: "team-a",
+        });
+        await s.createWorkflow({
+          workflowId: "dns-2",
+          workflowName: "wf",
+          input: {},
+          namespace: "team-a",
+        });
+        await s.createWorkflow({
+          workflowId: "dns-3",
+          workflowName: "wf",
+          input: {},
+          namespace: "team-b",
+        });
+        await s.createWorkflow({ workflowId: "dns-4", workflowName: "wf", input: {} });
+
+        const namespaces = await s.distinctNamespaces();
+        expect(namespaces).toEqual(["team-a", "team-b"]);
+      });
+
+      it("scopes distinct names by namespace when provided", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "dn-ns-1",
+          workflowName: "alpha",
+          input: {},
+          namespace: "team-a",
+        });
+        await s.createWorkflow({
+          workflowId: "dn-ns-2",
+          workflowName: "beta",
+          input: {},
+          namespace: "team-a",
+        });
+        await s.createWorkflow({
+          workflowId: "dn-ns-3",
+          workflowName: "gamma",
+          input: {},
+          namespace: "team-b",
+        });
+
+        const teamA = await s.distinctWorkflowNames({ namespace: "team-a" });
+        expect(teamA).toEqual(["alpha", "beta"]);
+
+        const teamB = await s.distinctWorkflowNames({ namespace: "team-b" });
+        expect(teamB).toEqual(["gamma"]);
+      });
+
+      it("scopes distinct types by namespace when provided", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "dt-ns-1",
+          workflowName: "wf",
+          input: {},
+          namespace: "team-a",
+          workflowType: "ingest",
+        });
+        await s.createWorkflow({
+          workflowId: "dt-ns-2",
+          workflowName: "wf",
+          input: {},
+          namespace: "team-b",
+          workflowType: "report",
+        });
+
+        expect(await s.distinctWorkflowTypes({ namespace: "team-a" })).toEqual(["ingest"]);
+        expect(await s.distinctWorkflowTypes({ namespace: "team-b" })).toEqual(["report"]);
+      });
+
+      it("returns empty arrays when storage has no workflows", async () => {
+        const s = await getStorage();
+        expect(await s.distinctWorkflowNames()).toEqual([]);
+        expect(await s.distinctWorkflowTypes()).toEqual([]);
+        expect(await s.distinctNamespaces()).toEqual([]);
       });
     });
 
@@ -1005,6 +1443,98 @@ export function storageTestSuite(
         expect(await s.loadRunHistory("purge-cascade")).toEqual([]);
       });
     });
+
+    // -------------------------------------------------------------------
+    // resetSteps (opt-in) — backs WorkflowRunner.resume
+    // -------------------------------------------------------------------
+
+    if (options.hasResetSteps) {
+      describe("resetSteps", () => {
+        // A workflow with three completed steps, then completed overall.
+        async function seedCompleted(s: WorkflowStorage, id: string): Promise<void> {
+          await s.createWorkflow({ workflowId: id, workflowName: "reset-wf", input: {} });
+          for (const name of ["s1", "s2", "s3"]) {
+            await s.saveStepResult({
+              workflowId: id,
+              stepName: name,
+              result: `${name}-result`,
+              durationMs: 5,
+              startedAt: new Date(),
+            });
+          }
+          await s.completeWorkflow(id, "final");
+        }
+
+        it("clears the listed steps and flips a completed workflow to running", async () => {
+          const s = await getStorage();
+          if (!s.resetSteps) throw new Error("factory storage lacks resetSteps");
+          await seedCompleted(s, "reset-1");
+          expect((await s.loadWorkflow("reset-1"))!.status).toBe("completed");
+
+          await s.resetSteps("reset-1", ["s2", "s3"]);
+
+          const state = (await s.loadWorkflow("reset-1"))!;
+          expect(state.status).toBe("running");
+          // Reset steps read back as never-run; the unlisted step is kept.
+          expect(state.steps["s1"]?.result).toBe("s1-result");
+          expect(state.steps["s2"]).toBeUndefined();
+          expect(state.steps["s3"]).toBeUndefined();
+          // Terminal fields are cleared.
+          expect(state.result).toBeUndefined();
+          expect(state.completedAt).toBeUndefined();
+        });
+
+        it("an empty step list is a no-op", async () => {
+          const s = await getStorage();
+          if (!s.resetSteps) throw new Error("factory storage lacks resetSteps");
+          await seedCompleted(s, "reset-empty");
+          await s.resetSteps("reset-empty", []);
+          const state = (await s.loadWorkflow("reset-empty"))!;
+          expect(state.status).toBe("completed");
+          expect(state.steps["s1"]?.result).toBe("s1-result");
+        });
+
+        it("leaves a non-terminal workflow's status untouched", async () => {
+          const s = await getStorage();
+          if (!s.resetSteps) throw new Error("factory storage lacks resetSteps");
+          await s.createWorkflow({
+            workflowId: "reset-running",
+            workflowName: "reset-wf",
+            input: {},
+          });
+          await s.saveStepResult({
+            workflowId: "reset-running",
+            stepName: "s1",
+            result: "ok",
+            durationMs: 5,
+            startedAt: new Date(),
+          });
+          expect((await s.loadWorkflow("reset-running"))!.status).toBe("running");
+
+          await s.resetSteps("reset-running", ["s1"]);
+
+          const state = (await s.loadWorkflow("reset-running"))!;
+          expect(state.status).toBe("running");
+          expect(state.steps["s1"]).toBeUndefined();
+        });
+
+        it("is idempotent on step names that aren't present", async () => {
+          const s = await getStorage();
+          if (!s.resetSteps) throw new Error("factory storage lacks resetSteps");
+          await seedCompleted(s, "reset-missing-step");
+          await s.resetSteps("reset-missing-step", ["s2", "never-existed"]);
+          const state = (await s.loadWorkflow("reset-missing-step"))!;
+          expect(state.steps["s2"]).toBeUndefined();
+          expect(state.steps["s1"]?.result).toBe("s1-result");
+        });
+
+        it("throws when the workflow doesn't exist", async () => {
+          const s = await getStorage();
+          if (!s.resetSteps) throw new Error("factory storage lacks resetSteps");
+          await expect(s.resetSteps("ghost-workflow", ["s1"])).rejects.toThrow();
+        });
+      });
+    }
 
     // -------------------------------------------------------------------
     // ActivityJournalStorage (opt-in)

@@ -1,11 +1,11 @@
 import { describe, it, expect } from "bun:test";
+import { Pipeline } from "@promin/core";
 import {
-  Pipeline,
   MapStepRegistry,
   InMemoryWorkflowStorage,
   InMemoryStepQueue,
   createWorker,
-} from "@promin/core";
+} from "@promin/workflow";
 import { LocalProcessRuntime } from "../local-process-runtime.ts";
 import { containerStep } from "../container-step.ts";
 

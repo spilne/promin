@@ -44,9 +44,9 @@ const coordinator = createCoordinator({
 });
 
 console.log("[coordinator] starting");
-// coordinator.start() runs its own poll loop and never resolves until
+// coordinator.startLoop() runs its own poll loop and never resolves until
 // .stop(). Don't await it — fire and continue so the submit timer can run.
-coordinator.start().catch((err) => {
+coordinator.startLoop().catch((err) => {
   console.error("[coordinator] loop crashed", err);
   process.exit(1);
 });
@@ -80,7 +80,7 @@ console.log(`[coordinator] running — new workflow every ${SUBMIT_INTERVAL_MS}m
 const shutdown = async (): Promise<void> => {
   console.log("[coordinator] shutting down");
   clearInterval(submitTimer);
-  await coordinator.stop();
+  await coordinator.stopLoop();
   await close();
   process.exit(0);
 };

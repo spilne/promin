@@ -63,6 +63,7 @@ Thumbs.db
 
 
 .target
+target/
 .source
 package-lock.json
 .direnv

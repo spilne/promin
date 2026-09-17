@@ -1,9 +1,55 @@
-// Drizzle DB type
+// Drizzle DB type + connection helper
 export type { DrizzleDb } from "./lib/drizzle-db.ts";
+export { createPostgresDb } from "./lib/drizzle-db.ts";
 
 // Storage
 export { PostgresWorkflowStorage } from "./lib/postgres-workflow-storage.ts";
 export { PostgresWorkflowVersionRegistry } from "./lib/postgres-workflow-version-registry.ts";
+export { PostgresWorkerRegistry } from "./lib/postgres-worker-registry.ts";
+export {
+  PostgresAgentRegistry,
+  type PostgresAgentRegistryConfig,
+} from "./lib/agent/agent-registry.ts";
+export {
+  PostgresRoleRegistry,
+  type PostgresRoleRegistryConfig,
+} from "./lib/agent/role-registry.ts";
+export {
+  PostgresSkillRegistry,
+  type PostgresSkillRegistryConfig,
+} from "./lib/agent/skill-registry.ts";
+export {
+  PostgresFragmentStore,
+  type PostgresFragmentStoreConfig,
+} from "./lib/agent/fragment-store.ts";
+export { PostgresMemoryStore, type PostgresMemoryStoreConfig } from "./lib/agent/memory-store.ts";
+export { PostgresLeaseStore, type PostgresLeaseStoreConfig } from "./lib/agent/lease-store.ts";
+export {
+  PostgresSecretsStorage,
+  type PostgresSecretsStorageConfig,
+} from "./lib/agent/secrets-storage.ts";
+export {
+  PostgresToolAuditLogger,
+  type PostgresToolAuditLoggerConfig,
+  type ToolAuditLogQuery,
+} from "./lib/agent/tool-audit-logger.ts";
+export {
+  PostgresToolHistoryStore,
+  type PostgresToolHistoryStoreConfig,
+} from "./lib/agent/tool-history-store.ts";
+export {
+  PostgresAgentInstanceRegistry,
+  type PostgresAgentInstanceRegistryConfig,
+} from "./lib/agent/agent-instance-registry.ts";
+export { PostgresDagRegistry, type PostgresDagRegistryConfig } from "./lib/agent/dag-registry.ts";
+export {
+  PostgresEvalRunStore,
+  type PostgresEvalRunStoreConfig,
+} from "./lib/evals/eval-run-store.ts";
+export {
+  PostgresEvalDatasetStore,
+  type PostgresEvalDatasetStoreConfig,
+} from "./lib/evals/eval-dataset-store.ts";
 export { type PostgresStorageConfig } from "./lib/config.ts";
 export { migrate, type MigrateOptions } from "./lib/migrate.ts";
 
@@ -43,6 +89,18 @@ export { PgChangeStream, type PgChangeStreamConfig } from "./lib/pg-change-strea
 // Distributed step queue (SKIP LOCKED)
 export { PgStepQueue, type PgStepQueueConfig } from "./lib/pg-step-queue.ts";
 
+// Workflow advertisements + start queue — Postgres-backed for multi-replica
+// coordination. Same `WorkflowAdvertisementRegistry` / `WorkflowStartQueue`
+// interfaces the in-memory + sqlite backends implement.
+export {
+  PgWorkflowAdvertisementRegistry,
+  type PgWorkflowAdvertisementRegistryConfig,
+} from "./lib/pg-workflow-advertisements.ts";
+export {
+  PgWorkflowStartQueue,
+  type PgWorkflowStartQueueConfig,
+} from "./lib/pg-workflow-start-queue.ts";
+
 // Leader election (advisory lock)
 export { PgLeaderElection, type PgLeaderElectionConfig } from "./lib/pg-leader-election.ts";
 
@@ -66,6 +124,7 @@ export {
   stepQueue,
   stepAttempts,
   attemptTypeTable,
+  workerRegistry,
   machines,
   machineEvents,
   LOOKUP_BINDINGS,
@@ -75,3 +134,17 @@ export { createTopologyStateTable, topologyState } from "./lib/pg-state-schema.t
 
 // Schema utilities
 export { ensureTable } from "./lib/schema-utils.ts";
+
+// Concurrency primitives
+export { PgRateLimiter, type PgRateLimiterConfig } from "./lib/pg-rate-limiter.ts";
+export { PgThrottle, type PgThrottleConfig } from "./lib/pg-throttle.ts";
+export { PgSingleflight, type PgSingleflightConfig } from "./lib/pg-singleflight.ts";
+export { PgRef, type PgRefConfig } from "./lib/pg-ref.ts";
+
+// Metrics
+export {
+  PgWorkflowMetrics,
+  type WorkflowMetrics,
+  type MetricsQuery,
+  type WorkflowMetricsSummary,
+} from "./lib/pg-workflow-metrics.ts";

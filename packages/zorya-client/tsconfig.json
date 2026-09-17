@@ -1,0 +1,22 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "files": [],
+  "include": [],
+  "references": [
+    {
+      "path": "../workflow-remote"
+    },
+    {
+      "path": "../workflow"
+    },
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../agent"
+    },
+    {
+      "path": "./tsconfig.lib.json"
+    }
+  ]
+}

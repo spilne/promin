@@ -1,0 +1,206 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Smooth page transitions via Tailwind color/bg/border defaults. DaisyUI
+     components already transition; this extends the coverage to cards and
+     generic elements so changing routes and selecting steps feels seamless. */
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    /* Inter loads via index.html's Google Fonts link; fallback chain
+       matches modern UI stacks so the dashboard reads cleanly even if
+       the network drops out before the font hits the cache. */
+    font-family:
+      "Inter",
+      ui-sans-serif,
+      system-ui,
+      -apple-system,
+      BlinkMacSystemFont,
+      "Segoe UI",
+      Roboto,
+      "Helvetica Neue",
+      Arial,
+      sans-serif;
+    /* `cv01..cv11` are Inter character variants (curved letterforms,
+       single-storey g/a, etc). They no-op gracefully on the fallback
+       fonts, but only matter once Inter is actually present. */
+    font-feature-settings: "cv01", "cv02", "cv03", "cv11";
+    /* Crisp greyscale anti-aliasing on macOS / iOS — without this Chrome
+       falls back to subpixel AA, which on dark backgrounds can read as
+       slightly chunky / blurry compared to shadcn defaults. */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  /* Mono utilities (badges, IDs, durations) — pin to JetBrains Mono with
+     a system fallback so the workflow IDs in the timeline render at the
+     same width across machines. */
+  .font-mono,
+  code,
+  pre,
+  kbd {
+    font-family:
+      "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
+      monospace;
+    font-feature-settings: "calt" 0; /* keep ligatures off in IDs */
+  }
+  .card,
+  .badge,
+  .btn,
+  tr,
+  .tab,
+  a,
+  button {
+    transition-property:
+      background-color, border-color, color, fill, stroke, opacity, box-shadow, transform;
+    transition-timing-function: cubic-bezier(0.2, 0.7, 0.2, 1);
+    transition-duration: 140ms;
+  }
+}
+
+@layer utilities {
+  /* DaisyUI's .skeleton already shimmers; this is a plainer pulse we use
+     when an element isn't full-width enough for a shimmer to read well. */
+  .skeleton {
+    animation: pulse 1.6s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  @keyframes pulse {
+    0%,
+    100% {
+      opacity: 0.8;
+    }
+    50% {
+      opacity: 0.45;
+    }
+  }
+  .anim-page {
+    animation: page-in 180ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+  .anim-pop {
+    animation: pop-in 140ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+  @keyframes page-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @keyframes pop-in {
+    from {
+      opacity: 0;
+      transform: scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+  .anim-fade-in {
+    /* Generic content-swap animation. Slight upward slide reads as
+       "new content arrived" without the horizontal jolt the chip-row
+       version used. Used by run-detail's tab + step-view swaps so
+       clicking a step doesn't snap-replace the right panel. */
+    animation: fade-in 160ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+
+  /* Card surface — lighter than DaisyUI's `bg-base-300` so cards pop
+     against the page bg without bumping into either of the inner-tile
+     surface colors (base-100 / base-200). DaisyUI doesn't ship a
+     base-400; mix base-300 with a few percent white in OKLCH so it
+     respects the active theme. Hover variant `.surface-card-hover`
+     is applied alongside for the brightening on pointer-over. */
+  .surface-card {
+    background-color: color-mix(in oklch, var(--color-base-300) 88%, white 12%);
+  }
+  .surface-card-hover:hover {
+    background-color: color-mix(in oklch, var(--color-base-300) 80%, white 20%);
+  }
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+      transform: translateY(2px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  /* Slide a fixed/right-anchored panel in from off-screen. Used by the
+     schedule drawer; the timing curve matches the rest of the app's
+     transitions so it doesn't feel out of place. */
+  .anim-drawer-in {
+    animation: drawer-in 220ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+  @keyframes drawer-in {
+    from {
+      transform: translateX(100%);
+    }
+    to {
+      transform: translateX(0);
+    }
+  }
+  .anim-backdrop-in {
+    animation: backdrop-in 180ms ease-out;
+  }
+  @keyframes backdrop-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  /* Chat-pane swap when the user picks a different thread / agent /
+     tenant. Slightly slower than `.anim-fade-in` (220ms vs 160ms) and a
+     larger translate so the swap reads as "new thread loaded" rather
+     than a generic content tween. The horizontal nudge mirrors the
+     left-to-right reading direction of the sidebar list above it. */
+  .anim-thread-swap {
+    animation: thread-swap 220ms cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+  @keyframes thread-swap {
+    from {
+      opacity: 0;
+      transform: translateX(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(0);
+    }
+  }
+}
+
+/* Custom: Gantt bar hatching for sleeping / waiting steps */
+.gantt-hatched {
+  background-image: repeating-linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.12) 0,
+    rgba(255, 255, 255, 0.12) 4px,
+    transparent 4px,
+    transparent 8px
+  );
+}
+
+.gantt-grid-line {
+  background: linear-gradient(
+    to right,
+    transparent 0,
+    transparent calc(100% - 1px),
+    rgba(255, 255, 255, 0.08) calc(100% - 1px),
+    rgba(255, 255, 255, 0.08) 100%
+  );
+}
+
+/* Gantt bars get longer transitions so live step updates slide smoothly. */
+.gantt-bar {
+  transition-property: left, width, background-color, opacity;
+  transition-duration: 280ms;
+  transition-timing-function: cubic-bezier(0.2, 0.7, 0.2, 1);
+}

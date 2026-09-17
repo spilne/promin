@@ -4,8 +4,10 @@
 
 import type {
   WorkflowState,
+  WorkflowSummary,
   WorkflowStatus,
   WorkflowRunSummary,
+  WorkflowRunEvent,
   SignalState,
   StepAttemptRecord,
 } from "./workflow-state.ts";
@@ -36,20 +38,151 @@ export interface FenceGuard {
   readonly fenceToken?: FenceToken;
 }
 
+/**
+ * Sortable columns on `WorkflowStorage.listWorkflows`. `duration` is
+ * computed as `completedAt - createdAt` and sorts NULL-last for runs that
+ * haven't finished yet.
+ */
+export type WorkflowOrderBy =
+  | "createdAt"
+  | "startedAt"
+  | "completedAt"
+  | "duration"
+  | "status"
+  | "name";
+
+/**
+ * A single row from the public-bearer signal-token table. Issued via
+ * `createSignalToken`, consumed via the public completion endpoint, and
+ * surfaced in the dashboard via `listSignalTokensForWorkflow`.
+ *
+ * `bearer` is the plaintext credential — short-lived, single-use, bounded
+ * by `expiresAt`. Compared with constant-time equality at completion time.
+ */
+/**
+ * One chunk of a workflow stream. Returned by `readStreamChunks`. The
+ * `payload` is whatever the appender wrote — the type comes from the
+ * caller's `defineStream<T>` declaration; storage stores it as JSONB.
+ */
+export interface StreamChunk {
+  readonly chunkIndex: number;
+  readonly payload: unknown;
+  readonly appendedBy: "workflow" | "external";
+  readonly appendedAt: Date;
+}
+
+export interface SignalTokenRecord {
+  readonly tokenId: string;
+  readonly workflowId: string;
+  readonly signalName: string;
+  readonly bearer: string;
+  readonly tags: ReadonlyArray<string>;
+  readonly idempotencyKey: string | null;
+  readonly expiresAt: Date;
+  readonly completedAt: Date | null;
+  readonly completedValue: unknown;
+  readonly createdAt: Date;
+}
+
 export interface WorkflowStorage {
   /** Load the full workflow state. Returns null if workflow doesn't exist. */
   loadWorkflow(workflowId: string): Promise<WorkflowState | null>;
 
-  /** List workflows, optionally filtered by status, name, type, or namespace. */
+  /**
+   * List workflows, optionally filtered by status, name, type, or namespace.
+   *
+   * `orderBy` defaults to `startedAt`, `orderDir` defaults to `desc` —
+   * the most-recently-started run is what dashboards usually want, even
+   * when some pending runs were created later but haven't picked up a
+   * worker yet. Sort fields with NULL values (e.g. `startedAt` on a
+   * still-pending row, `duration` on a still-running row) sort last
+   * regardless of direction so the most-relevant rows surface first in
+   * both views.
+   *
+   * `status` orders by the underlying enum/id ordering — not alphabetical —
+   * to keep the cost a single column read across backends. Callers that
+   * need alphabetical can sort the returned page client-side.
+   */
   listWorkflows(params?: {
     status?: WorkflowStatus;
     name?: string;
     type?: string;
     parentId?: string;
     namespace?: string;
+    /**
+     * Filter by what kicked the run off (`"schedule"`, `"manual"`, …).
+     * Stored as an integer column, so this is a single index lookup —
+     * unlike the previous `metadata.scheduleId` heuristic, which had to
+     * scan/JSON-extract.
+     */
+    runSource?: import("./workflow-state.ts").RunSource;
+    /** Optional producer id; only meaningful with `runSource`. */
+    runSourceId?: string;
+    /**
+     * Filter by metadata key/value pairs. A row matches when its metadata
+     * contains every supplied key with a deep-equal value. Backends with
+     * native JSON support (Postgres `@>`) push the filter to the database;
+     * others apply it after loading. Index strategy is the user's call —
+     * Postgres ships with no metadata index by default.
+     */
+    metadata?: Record<string, unknown>;
     limit?: number;
     offset?: number;
+    orderBy?: WorkflowOrderBy;
+    orderDir?: "asc" | "desc";
   }): Promise<WorkflowState[]>;
+
+  /**
+   * Lean variant of `listWorkflows` that skips the heavy blob columns
+   * (`steps`, `input`, `result`, `error`). Returns `WorkflowSummary` —
+   * everything dashboards need for list-view rows without deserialising
+   * step JSON on every poll.
+   *
+   * Optional — backends that don't implement this fall back to
+   * `listWorkflows`. Callers should prefer it wherever `steps`/`input`/
+   * `result` are not needed (e.g. the runs list, sparklines).
+   */
+  listWorkflowSummaries?(
+    params?: Parameters<WorkflowStorage["listWorkflows"]>[0],
+  ): Promise<WorkflowSummary[]>;
+
+  /**
+   * Count workflows matching the given filters without loading rows. Backends
+   * that support this skip all blob deserialization and return a single integer
+   * from a `SELECT COUNT(*)` (or equivalent) query.
+   *
+   * Optional — falls back to `listWorkflows` counting in JS when absent.
+   */
+  countWorkflows?(params?: {
+    status?: WorkflowStatus;
+    name?: string;
+    type?: string;
+    parentId?: string;
+    namespace?: string;
+    runSource?: import("./workflow-state.ts").RunSource;
+    runSourceId?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<number>;
+
+  /**
+   * Distinct workflow names ever observed in storage, optionally scoped to
+   * a namespace. Returned alphabetically sorted. Used by dashboard filter
+   * dropdowns so a workflow that hasn't run recently still appears.
+   */
+  distinctWorkflowNames(params?: { namespace?: string }): Promise<string[]>;
+
+  /**
+   * Distinct workflow types ever observed in storage, optionally scoped to
+   * a namespace. Returned alphabetically sorted; null/undefined types are
+   * excluded.
+   */
+  distinctWorkflowTypes(params?: { namespace?: string }): Promise<string[]>;
+
+  /**
+   * Distinct namespaces ever observed in storage. Returned alphabetically
+   * sorted; null/undefined namespaces are excluded.
+   */
+  distinctNamespaces(): Promise<string[]>;
 
   /** Cancel a running or suspended workflow. With cascade, also cancels children. */
   cancelWorkflow(
@@ -68,7 +201,40 @@ export interface WorkflowStorage {
     namespace?: string;
     metadata?: Record<string, unknown>;
     version?: string;
+    /**
+     * What kicked this run off — stored as a small int column so backends
+     * can filter / sort by source efficiently. See `RunSource`.
+     */
+    runSource?: import("./workflow-state.ts").RunSource;
+    /** Producer id corresponding to `runSource` (e.g. `scheduleId`). */
+    runSourceId?: string;
+    /**
+     * Per-call idempotency key + expiry. Lets the auto-mint path
+     * (`workflows.trigger()` minting workflowId via `crypto.randomUUID`)
+     * dedup without the caller knowing the workflowId ahead of time. The
+     * partial-unique index on `(namespace, workflowName, idempotencyKey)` guarantees
+     * concurrent creates with the same key resolve to the same row —
+     * `created: false; existing` returns the canonical workflowId.
+     */
+    idempotencyKey?: string;
+    idempotencyExpiresAt?: Date;
   }): Promise<{ created: true } | { created: false; existing: WorkflowState }>;
+
+  /**
+   * Resolve a `(namespace, workflowName, idempotencyKey)` tuple to its workflow row,
+   * if still unexpired. Returns null when no matching key exists or the
+   * key's TTL has passed (expired keys are reclaimable by future creates).
+   *
+   * Used by the runner before the main start path: a hit means the run
+   * redirects to the existing workflowId rather than creating a new one,
+   * even if the caller passed a different (e.g. auto-minted) workflowId.
+   */
+  findWorkflowByIdempotencyKey(params: {
+    readonly workflowName: string;
+    readonly namespace?: string;
+    readonly idempotencyKey: string;
+    readonly now: Date;
+  }): Promise<{ readonly workflowId: string } | null>;
 
   /** Save a completed step result. */
   saveStepResult(
@@ -167,6 +333,19 @@ export interface WorkflowStorage {
   /** Mark the entire workflow as failed. */
   failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void>;
 
+  /**
+   * Mark the entire workflow as ended by a tripwire — an intentional early
+   * exit distinct from `failed`. `reason` is the opaque payload returned by
+   * the firing `.tripwire()` step's `reason(prev)`; backends persist it
+   * verbatim alongside `status = "tripwire"` so callers can inspect why.
+   *
+   * Optional. Storages that don't implement this don't support the
+   * `.tripwire()` builder primitive — the runner raises
+   * `TripwireStorageMissingError` at the fire site rather than silently
+   * falling back to `failed`.
+   */
+  tripwireWorkflow?(workflowId: string, reason: unknown, guard?: FenceGuard): Promise<void>;
+
   /** Suspend the workflow (sleeping or waiting for signal). */
   suspendWorkflow(
     workflowId: string,
@@ -175,11 +354,142 @@ export interface WorkflowStorage {
     guard?: FenceGuard,
   ): Promise<void>;
 
+  /**
+   * Notify subscribers that a step is about to execute. Fired by the
+   * runner before each local step body runs so subscribers can observe
+   * `step-started` events. Optional — storages without subscription
+   * support or without this method are skipped silently by the runner.
+   * Persists nothing; this is purely an event-bus hook.
+   */
+  notifyStepStarted?(workflowId: string, stepName: string): Promise<void> | void;
+
+  /**
+   * Subscribe to step/workflow-lifecycle events for a single workflow run.
+   * Returns an async iterable; the stream closes on the first terminal
+   * event (`workflow-completed`, `workflow-failed`, `workflow-tripwire`) or
+   * when the caller aborts via `options.signal`.
+   *
+   * Optional. Storages that don't implement this don't support live
+   * subscriptions — callers must fall back to polling `loadWorkflow`.
+   * Backends typically implement this by tapping the same code paths that
+   * write the state transitions (in-memory: an in-process EventBus;
+   * Postgres: `pg_notify` on relevant tables).
+   *
+   * Subscribers that attach before the workflow starts receive every event;
+   * subscribers that attach mid-execution receive from-now onwards.
+   */
+  subscribeToWorkflow?(
+    workflowId: string,
+    options?: { signal?: AbortSignal },
+  ): AsyncIterable<WorkflowRunEvent>;
+
   /** Deliver a signal to a workflow. */
   deliverSignal(workflowId: string, signalName: string, payload: unknown): Promise<void>;
 
   /** Load signals delivered to a workflow. */
   loadSignals(workflowId: string): Promise<SignalState[]>;
+
+  /**
+   * Merge `patch` into the workflow row's metadata column. Used by
+   * `ctx.metadata.set/merge` from inside a journaled body to surface live
+   * progress/state to the dashboard. Shallow merge: top-level keys in
+   * `patch` overwrite the same keys on the existing metadata; keys not in
+   * `patch` are left untouched. Pass `null` for a key to remove it.
+   *
+   * Idempotent on identical patches — replay safely re-applies the same
+   * writes without journaling. Cheap to call frequently (one row update).
+   */
+  setWorkflowMetadata(workflowId: string, patch: Record<string, unknown>): Promise<void>;
+
+  // -------------------------------------------------------------------------
+  // Signal tokens — public-bearer authorization for `deliverSignal`.
+  //
+  // A signal token grants one-shot delivery rights to an external completer
+  // (no Zorya auth) for a specific (workflowId, signalName). The completion
+  // route validates the bearer, then calls `deliverSignal` to resume the
+  // workflow through the existing path. Tokens don't change suspend
+  // semantics — they're an authz sidecar, not a new primitive.
+  //
+  // Stored bearer is plaintext (short-lived, single-use, bounded by
+  // `expiresAt`), compared with constant-time equality on completion.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Insert a signal token or return the existing row when an idempotency
+   * key matches. `isCached: true` indicates the caller hit a dedup —
+   * the original `(tokenId, bearer)` pair is reused so retries see the
+   * same credentials.
+   */
+  createSignalToken(params: {
+    readonly tokenId: string;
+    readonly workflowId: string;
+    readonly signalName: string;
+    readonly bearer: string;
+    readonly tags: ReadonlyArray<string>;
+    readonly idempotencyKey?: string | null;
+    readonly expiresAt: Date;
+  }): Promise<{ readonly record: SignalTokenRecord; readonly isCached: boolean }>;
+
+  /** Lookup by token id — used by the public completion endpoint. */
+  findSignalTokenById(tokenId: string): Promise<SignalTokenRecord | null>;
+
+  /**
+   * Atomic completion: marks the token as completed (`completedAt` +
+   * `completedValue`) only if it was still pending. Returns the prior
+   * state so the caller can decide between 200 (delivered) and 410
+   * (already completed). Doesn't itself call `deliverSignal` — the
+   * route does that after a successful claim.
+   */
+  markSignalTokenCompleted(params: {
+    readonly tokenId: string;
+    readonly value: unknown;
+    readonly now: Date;
+  }): Promise<
+    | { readonly outcome: "delivered"; readonly record: SignalTokenRecord }
+    | { readonly outcome: "already_completed"; readonly record: SignalTokenRecord }
+  >;
+
+  /**
+   * List every token issued for one workflow — drives
+   * `runs.retrieve(workflowId).signalTokens[]` in the dashboard.
+   * Ordered by `createdAt DESC`.
+   */
+  listSignalTokensForWorkflow(workflowId: string): Promise<ReadonlyArray<SignalTokenRecord>>;
+
+  // -------------------------------------------------------------------------
+  // Generic typed streams — bidirectional append-only channels per workflow.
+  //
+  // Output streams: workflow appends, external subscribers read.
+  // Input streams: external subscribers append, workflow peeks/waits.
+  // Storage doesn't distinguish — `appendedBy` records direction so the
+  // SSE dashboard / consumer can render workflow-vs-external chunks
+  // differently.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Append one chunk to a workflow's stream. Returns the assigned
+   * `chunkIndex` (monotonic per `(workflowId, streamId)`). Atomic against
+   * concurrent appends — backends assign the index via `MAX+1` in a
+   * single statement so two callers can't claim the same slot.
+   */
+  appendStreamChunk(params: {
+    readonly workflowId: string;
+    readonly streamId: string;
+    readonly payload: unknown;
+    readonly appendedBy: "workflow" | "external";
+  }): Promise<{ readonly chunkIndex: number }>;
+
+  /**
+   * Read chunks from a stream. Pass `since` (exclusive) to replay from
+   * the last index observed (SSE reconnect). `limit` caps the page;
+   * default limits per backend (in-memory: 1000, postgres: 1000).
+   */
+  readStreamChunks(params: {
+    readonly workflowId: string;
+    readonly streamId: string;
+    readonly since?: number;
+    readonly limit?: number;
+  }): Promise<ReadonlyArray<StreamChunk>>;
 
   /**
    * Acquire a lock on a workflow. On success returns `{ acquired: true,
@@ -244,6 +554,27 @@ export interface WorkflowStorage {
   startFreshRun(workflowId: string): Promise<number>;
 
   /**
+   * Reset specific step rows back to `pending`, clearing their result /
+   * error / completedAt. Also clears any journal entries for those steps
+   * so journaled bodies re-execute from zero. The workflow's overall
+   * status flips back to `running` so the runner picks it up.
+   *
+   * Used by `WorkflowRunner.resume(workflowId, fromStep)` for the
+   * "rewind to step N and continue" debugging primitive — storage is the
+   * primitive, runner walks the DAG to compute the downstream set.
+   *
+   * Optional: backends opt in by implementing it. The runner type-guards
+   * at first use and throws a clear error if the configured storage
+   * doesn't support reset. Steps not present on the workflow row are
+   * silently skipped (idempotent on missing names).
+   *
+   * @param workflowId — the workflow whose steps to reset.
+   * @param stepNames — explicit set to reset (caller computes downstream
+   *   from the DAG; storage doesn't know topology).
+   */
+  resetSteps?(workflowId: string, stepNames: readonly string[]): Promise<void>;
+
+  /**
    * Load run history for a workflow — all runs with their step results.
    * Ordered by run number descending (newest first).
    */
@@ -264,6 +595,49 @@ export interface WorkflowStorage {
   purgeCompleted(
     params: { olderThanMs: number; limit: number } | { from: Date; to: Date; limit: number },
   ): Promise<number>;
+}
+
+/**
+ * Deep-equality predicate matching Postgres jsonb `@>` containment for the
+ * `listWorkflows({ metadata })` filter. Returns true when, for every key/
+ * value pair in `filter`, `actual?.[key]` deep-equals the filter value.
+ * Missing or undefined `actual` matches an empty filter only.
+ */
+export function workflowMetadataMatches(
+  actual: Record<string, unknown> | undefined | null,
+  filter: Record<string, unknown>,
+): boolean {
+  const keys = Object.keys(filter);
+  if (keys.length === 0) return true;
+  if (!actual) return false;
+  for (const k of keys) {
+    if (!deepEqual(actual[k], filter[k])) return false;
+  }
+  return true;
+}
+
+function deepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== typeof b) return false;
+  if (a === null || b === null) return false;
+  if (typeof a !== "object") return false;
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (!deepEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  if (Array.isArray(b)) return false;
+  const ar = a as Record<string, unknown>;
+  const br = b as Record<string, unknown>;
+  const ak = Object.keys(ar);
+  const bk = Object.keys(br);
+  if (ak.length !== bk.length) return false;
+  for (const k of ak) {
+    if (!deepEqual(ar[k], br[k])) return false;
+  }
+  return true;
 }
 
 /**
@@ -337,4 +711,29 @@ export function isStepAttemptStorage(
   storage: WorkflowStorage,
 ): storage is WorkflowStorage & StepAttemptStorage {
   return "saveStepAttempt" in storage && typeof (storage as any).saveStepAttempt === "function";
+}
+
+/**
+ * Storage with tripwire support — the optional `tripwireWorkflow` method
+ * is present. Use the type guard to narrow before calling from the runner.
+ */
+export type TripwireCapableStorage = WorkflowStorage &
+  Required<Pick<WorkflowStorage, "tripwireWorkflow">>;
+
+/** Runtime check for whether a storage implementation supports tripwire termination. */
+export function isTripwireCapableStorage(
+  storage: WorkflowStorage,
+): storage is TripwireCapableStorage {
+  return "tripwireWorkflow" in storage && typeof (storage as any).tripwireWorkflow === "function";
+}
+
+/** Storage with `subscribeToWorkflow` — supports live per-run event streams. */
+export type SubscribableStorage = WorkflowStorage &
+  Required<Pick<WorkflowStorage, "subscribeToWorkflow">>;
+
+/** Runtime check for whether a storage implementation supports run subscriptions. */
+export function isSubscribableStorage(storage: WorkflowStorage): storage is SubscribableStorage {
+  return (
+    "subscribeToWorkflow" in storage && typeof (storage as any).subscribeToWorkflow === "function"
+  );
 }

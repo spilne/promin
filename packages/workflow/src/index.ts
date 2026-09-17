@@ -19,7 +19,20 @@ export {
   type WorkflowStorage,
   type FenceGuard,
   type FenceToken,
+  type WorkflowOrderBy,
+  type SignalTokenRecord,
+  type StreamChunk,
+  type StreamDescriptor,
+  type StreamKind,
+  type DefineStreamOptions,
+  defineStream,
+  defineInputStream,
+  appendStreamChunk,
+  appendExternalStreamChunk,
+  peekStreamChunk,
+  workflowMetadataMatches,
   type WorkflowState,
+  type WorkflowSummary,
   type WorkflowRunSummary,
   type StepState,
   type StepTaskState,
@@ -27,23 +40,33 @@ export {
   type WorkflowStatus,
   type StepStatus,
   type StepType,
+  type RunSource,
+  RUN_SOURCE_CODES,
+  encodeRunSource,
+  decodeRunSource,
   InMemoryWorkflowStorage,
   WorkflowVersionRegistry,
   ScopedWorkflowVersionRegistry,
   createWorkflowVersionRegistry,
   type WorkflowVersionRegistryConfig,
   type IWorkflowVersionRegistry,
+  type VersionRecord,
+  type VersionStatus,
   WorkflowError,
   StepError,
   StorageError,
   WorkflowLockError,
   WorkflowSuspendedError,
+  WorkflowContinueAsNewError,
   WorkflowTimeoutError,
   StepTimeoutError,
   WorkflowDeadlineError,
   WorkflowVersionMismatchError,
   FenceTokenMismatchError,
   GuardError,
+  WorkflowTripwireError,
+  TripwireStorageMissingError,
+  LoopLimitExceededError,
   MatchError,
   type MatchParams,
   topologicalSort,
@@ -52,6 +75,8 @@ export {
   DefaultWorkflowRunner,
   InProcessStepExecutor,
   createWorkflowRunner,
+  RecoveryStrategy,
+  RecoveryStrategyBuilder,
   type WorkflowRunner,
   type WorkflowRunnerConfig,
   type WorkflowRunnerRunParams,
@@ -59,6 +84,8 @@ export {
   type StepExecutor,
   type StepExecutionRequest,
   type StepExecutionResult,
+  type RecoveryResult,
+  type StaleTerminationAction,
   trigger,
   WorkflowResult,
   webhookTrigger,
@@ -76,6 +103,10 @@ export {
   runJournaledStep,
   completeSignal,
   completeDueSleeps,
+  invokeQueryHandler,
+  hasQueryHandlers,
+  listQueryHandlers,
+  clearQueryHandlers,
   JournalNonDeterminismError,
   JournalStorageMissingError,
   type JournaledContext,
@@ -89,6 +120,11 @@ export {
   type StepAttemptType,
   type StepAttemptStorage,
   isStepAttemptStorage,
+  type TripwireCapableStorage,
+  isTripwireCapableStorage,
+  type SubscribableStorage,
+  isSubscribableStorage,
+  type WorkflowRunEvent,
   type FailedWorkflowRecord,
   type WorkflowSchema,
   type StepSchema,
@@ -148,6 +184,7 @@ export {
   type ScheduleTick,
   type Scheduler,
   type SchedulerStorage,
+  isTickLogStorage,
   InMemoryScheduler,
   createScheduler,
   DurableScheduler,
@@ -157,6 +194,9 @@ export {
   computeDueTicks,
   computeNextRun,
   validateScheduleConfig,
+  scheduleMetadataContains,
+  flattenLeafPaths,
+  scheduleTickRunId,
 } from "./lib/scheduler/index.ts";
 
 // Distributed workflow execution
@@ -170,13 +210,18 @@ export {
   type StepTask,
   type FairnessPolicy,
   InMemoryStepQueue,
+  DistributedWorkflowRunner,
+  createDistributedWorkflowRunner,
+  type DistributedRunnerConfig,
   type WorkflowCoordinator,
   type CoordinatorConfig,
   DefaultCoordinator,
   createCoordinator,
+  buildStubWorkflow,
   type WorkflowWorker,
   type WorkerConfig,
   type WorkerInfo,
+  type WorkerStatus,
   type WorkerRegistry,
   InMemoryWorkerRegistry,
   type LeaderElection,
@@ -185,6 +230,10 @@ export {
   type SleepScannerConfig,
   DefaultSleepScanner,
   createSleepScanner,
+  type SignalScanner,
+  type SignalScannerConfig,
+  DefaultSignalScanner,
+  createSignalScanner,
   DefaultWorker,
   createWorker,
   type WorkerHooks,
@@ -195,6 +244,16 @@ export {
   loggingMiddleware,
   metricsMiddleware,
   StepQueueExecutor,
+  type WorkflowAdvertisementRegistry,
+  type AdvertisedWorkflow,
+  type AdvertisementEntry,
+  InMemoryWorkflowAdvertisementRegistry,
+  workflowAdvertisementRegistryTestSuite,
+  type WorkflowStartQueue,
+  type WorkflowStartRecord,
+  type WorkerWorkflowSpec,
+  InMemoryWorkflowStartQueue,
+  workflowStartQueueTestSuite,
 } from "./lib/distributed/index.ts";
 
 // SQL Models (dbt-style)
@@ -207,3 +266,50 @@ export {
   compileSqlProject,
   type SqlCompilerConfig,
 } from "./lib/sql-models/index.ts";
+
+// Filesystem-based discovery — share a single configured scanner across
+// the dashboard server and any worker / agent process that also imports
+// workflow definitions from disk.
+export {
+  WorkflowScanner,
+  ScheduleScanner,
+  applyDiscoveredSchedules,
+  type WorkflowScannerOptions,
+  type WorkflowScanResult,
+  type ScheduleScannerOptions,
+  type ScheduleScanResult,
+  type ApplyDiscoveredSchedulesOptions,
+  type ApplyDiscoveredSchedulesResult,
+} from "./lib/discovery/index.ts";
+
+// Zero-dep JSON-Schema-native schema builder + validator. Used by
+// `defineSignal` to type signal payloads and snapshot validation rules
+// onto suspended steps.
+//
+// The builder's `JsonSchema` is exported as `SignalPayloadSchema` to
+// avoid colliding with the existing workflow-IR `JsonSchema` interface
+// (a permissive open-shape type for activity I/O annotations, not the
+// tagged union the schema builder produces).
+export {
+  s,
+  type Schema,
+  type OptionalSchema,
+  type JsonSchema as SignalPayloadSchema,
+  type Infer,
+} from "./lib/schema/builder.ts";
+export { validate, type ValidationError, type ValidationResult } from "./lib/schema/validator.ts";
+
+// First-class signal types — `defineSignal` returns an addressable
+// artifact (name + schema) callers import wherever they suspend on /
+// deliver to / inspect the signal. Mirrors how `tool({...})` works for
+// tools. `approvalSignal` is the canonical preset over `ctx.signal` with
+// the canonical approval shape and the `approve:` name prefix.
+export {
+  defineSignal,
+  approvalSignal,
+  ApprovalSchema,
+  APPROVAL_NAME_PREFIX,
+  type SignalType,
+  type SignalPayload,
+  type ApprovalDecision,
+} from "./lib/signals/define-signal.ts";

@@ -1,6 +1,21 @@
 import { describe, it, expect } from "bun:test";
 import { createScheduler } from "../in-memory-scheduler.ts";
+import { scheduleTickRunId } from "../types.ts";
 import { StreamPipeline } from "@promin/core";
+
+// ---------------------------------------------------------------------------
+// scheduleTickRunId — shared id format
+// ---------------------------------------------------------------------------
+
+describe("scheduleTickRunId", () => {
+  it("formats `${scheduleId}.${tickNumber}` so a duplicate fire collides on the same run row", () => {
+    expect(scheduleTickRunId("daily-summary", 0)).toBe("daily-summary.0");
+    expect(scheduleTickRunId("daily-summary", 42)).toBe("daily-summary.42");
+    // Same inputs → same output: this is the property both the
+    // workflow-trigger and agent-dispatch paths rely on for idempotency.
+    expect(scheduleTickRunId("x", 7)).toBe(scheduleTickRunId("x", 7));
+  });
+});
 
 // ---------------------------------------------------------------------------
 // InMemoryScheduler — construction & config

@@ -15,8 +15,12 @@ import { LosslessJsonCodec } from "@promin/core";
 export type StorageMethod =
   | "loadWorkflow"
   | "listWorkflows"
+  | "distinctWorkflowNames"
+  | "distinctWorkflowTypes"
+  | "distinctNamespaces"
   | "cancelWorkflow"
   | "createWorkflow"
+  | "findWorkflowByIdempotencyKey"
   | "saveStepResult"
   | "batchSaveStepResults"
   | "saveStepFailure"
@@ -24,16 +28,42 @@ export type StorageMethod =
   | "saveTaskFailure"
   | "completeWorkflow"
   | "failWorkflow"
+  | "tripwireWorkflow"
   | "suspendWorkflow"
   | "deliverSignal"
   | "loadSignals"
+  | "setWorkflowMetadata"
   | "tryLock"
   | "tryLockAndLoad"
   | "releaseLock"
   | "heartbeat"
   | "startFreshRun"
   | "loadRunHistory"
-  | "purgeCompleted";
+  | "resetSteps"
+  | "purgeCompleted"
+  // ActivityJournalStorage / JournaledSuspendStorage — forwarded only when
+  // the underlying storage implements them. Lets `.journaled()` workflows
+  // (with ctx.activity / ctx.sleep / ctx.signal) run over the wire.
+  | "loadJournal"
+  | "appendEntry"
+  | "appendPendingEntry"
+  | "completePendingEntry"
+  | "findDueSleeps"
+  | "findPendingSignal"
+  // StepAttemptStorage — forwarded only when the underlying storage
+  // implements it. Lets remote workers populate the audit trail
+  // (workerId per attempt) on the central server's storage.
+  | "saveStepAttempt"
+  | "loadStepAttempts"
+  // Signal tokens — public-bearer authz for deliverSignal. Forwarded so
+  // remote workers can surface tokens through their parent storage.
+  | "createSignalToken"
+  | "findSignalTokenById"
+  | "markSignalTokenCompleted"
+  | "listSignalTokensForWorkflow"
+  // Streams — generic typed channels per workflow.
+  | "appendStreamChunk"
+  | "readStreamChunks";
 
 export interface RpcRequest {
   readonly method: StorageMethod;
