@@ -1,8 +1,6 @@
 {
   "title": "Integrations",
   "pages": [
-    "http-client",
-    "kafka",
     "postgres",
     "redis"
   ]

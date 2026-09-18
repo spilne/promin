@@ -11,13 +11,11 @@ Project-level instructions for AI agents working on this codebase.
 ```
 packages/
   core/                # Effect-based Pipeline<T,E> and StreamPipeline<T,E> primitives
-  http/                # Effect-based HTTP client with pipelines, streaming, retry
-  kafka/               # Kafka topic abstraction with consumer groups and offset tracking
   postgres/            # Postgres state backend, step queue, change streams
   redis/               # Redis state backend and cache store
   duckdb/              # DuckDB executor for analytical queries
   container/           # DI container
-  integration/         # Integration tests (testcontainers: Kafka, Redis, Postgres)
+  integration/         # Integration tests (testcontainers: Redis, Postgres)
 ```
 
 ## TypeScript Conventions
@@ -36,9 +34,9 @@ function searchVideos(params: { query: string; order: string; videoDuration?: st
 
 ### Naming Conventions
 
-- **Files**: kebab-case with suffix (`http-client.ts`, `stream-pipeline.ts`)
-- **Classes**: PascalCase, prefix `Default` for implementations (`DefaultHttpClient`)
-- **Interfaces**: PascalCase, no `I` prefix (`HttpClient`, not `IHttpClient`)
+- **Files**: kebab-case with suffix (`workflow-runner.ts`, `stream-pipeline.ts`)
+- **Classes**: PascalCase, prefix `Default` for implementations (`DefaultWorkflowRunner`)
+- **Interfaces**: PascalCase, no `I` prefix (`WorkflowRunner`, not `IWorkflowRunner`)
 - **Functions**: camelCase, prefix `create` for factories
 - **Constants**: UPPER_SNAKE_CASE
 - **Schemas**: PascalCase with `Schema` suffix (`GenerateRequestSchema`)
@@ -118,7 +116,7 @@ Use nx to run typecheck (this is what CI does):
 
 ```bash
 bun nx run @promin/core:typecheck
-bun nx run @promin/http:typecheck
+bun nx run @promin/workflow:typecheck
 ```
 
 ## Key Libraries
@@ -128,7 +126,6 @@ bun nx run @promin/http:typecheck
 | Runtime | Bun |
 | Validation | Zod |
 | FP/Concurrency | Effect |
-| HTTP Client | @effect/platform |
 | Monorepo | Nx |
 | Linting | oxlint |
 | Formatting | oxfmt |

@@ -11,16 +11,10 @@
       "path": "../workflow"
     },
     {
-      "path": "../topology"
-    },
-    {
       "path": "../redis"
     },
     {
       "path": "../postgres"
-    },
-    {
-      "path": "../kafka"
     },
     {
       "path": "../data"

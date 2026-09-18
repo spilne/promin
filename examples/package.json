@@ -7,10 +7,8 @@
     "@promin/container": "workspace:*",
     "@promin/core": "workspace:*",
     "@promin/data": "workspace:*",
-    "@promin/kafka": "workspace:*",
     "@promin/postgres": "workspace:*",
     "@promin/redis": "workspace:*",
-    "@promin/topology": "workspace:*",
     "@promin/workflow": "workspace:*",
     "effect": "catalog:"
   },

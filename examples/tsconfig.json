@@ -13,12 +13,6 @@
       "path": "../packages/container"
     },
     {
-      "path": "../packages/topology"
-    },
-    {
-      "path": "../packages/kafka"
-    },
-    {
       "path": "../packages/duckdb"
     },
     {
