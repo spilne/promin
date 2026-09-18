@@ -10,9 +10,6 @@
       "path": "../workflow"
     },
     {
-      "path": "../core"
-    },
-    {
       "path": "../agent"
     },
     {

@@ -41,7 +41,6 @@
   },
   "dependencies": {
     "@promin/agent": "workspace:*",
-    "@promin/core": "workspace:*",
     "@promin/workflow": "workspace:*",
     "@promin/workflow-remote": "workspace:*"
   },

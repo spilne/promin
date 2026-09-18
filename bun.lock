@@ -57,7 +57,6 @@
         "@promin/core": "workspace:*",
         "@promin/workflow": "workspace:*",
         "cli-highlight": "^2.1.11",
-        "effect": "catalog:",
         "zod": "catalog:",
       },
       "devDependencies": {
@@ -102,7 +101,6 @@
       "name": "@promin/duckdb",
       "version": "0.1.0",
       "dependencies": {
-        "@promin/core": "workspace:*",
         "@promin/data": "workspace:*",
         "apache-arrow": "^21.1.0",
         "duckdb-async": "^1.4.2",
@@ -238,7 +236,6 @@
       "version": "0.1.0",
       "dependencies": {
         "@promin/agent": "workspace:*",
-        "@promin/core": "workspace:*",
         "@promin/workflow": "workspace:*",
         "@promin/workflow-remote": "workspace:*",
       },

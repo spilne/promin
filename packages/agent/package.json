@@ -52,7 +52,6 @@
     "@promin/core": "workspace:*",
     "@promin/workflow": "workspace:*",
     "cli-highlight": "^2.1.11",
-    "effect": "catalog:",
     "zod": "catalog:"
   },
   "devDependencies": {
