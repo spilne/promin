@@ -12,16 +12,10 @@
       "path": "./packages/core"
     },
     {
-      "path": "./packages/http"
-    },
-    {
       "path": "./packages/postgres"
     },
     {
       "path": "./packages/container"
-    },
-    {
-      "path": "./packages/kafka"
     },
     {
       "path": "./packages/redis"
@@ -34,9 +28,6 @@
     },
     {
       "path": "./examples"
-    },
-    {
-      "path": "./packages/topology"
     },
     {
       "path": "./packages/workflow"

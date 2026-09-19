@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { DataFrame, CsvFile, JsonFile } from "@promin/data";
+import { DataFrame, CsvFile, JsonFile, col, when } from "@promin/data";
 import { DuckDBExecutor } from "../duckdb-executor.ts";
 import { rowsToArrow, arrowToRows } from "../arrow-bridge.ts";
 
@@ -576,13 +576,7 @@ describe("DuckDBExecutor", () => {
     });
   });
 
-  // Skipped: this block depends on a `col()` / `when()` expression API
-  // that isn't exported from `@promin/core` (the Expr DSL was scoped out
-  // before merge). Re-enable once the DSL lands; the tests themselves
-  // describe the intended SQL-pushdown contract.
-  describe.skip("predicate pushdown — Expr compiled to SQL", () => {
-    const { col, when } = require("@promin/core");
-
+  describe("predicate pushdown — Expr compiled to SQL", () => {
     it("filter with col().gt() compiles to SQL WHERE", async () => {
       const data = Array.from({ length: 100 }, (_, i) => ({ id: i, score: i * 10 }));
       const result = await df(data).filter(col("score").gt(500)).collect();

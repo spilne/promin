@@ -31,14 +31,6 @@ Ordered from fundamentals to advanced. Each file is a real-world scenario — no
 | 02-data-quality    | Profile dataset, check for anomalies      |
 | 03-sql-models      | dbt-style SQL pipeline with quality tests |
 
-## 04-streaming — Kafka and stream topology
-
-| File                     | Scenario                                       |
-| ------------------------ | ---------------------------------------------- |
-| 01-kafka-consume-produce | Enrich payment events, produce to output topic |
-| 02-click-analytics       | Real-time click counts per user per minute     |
-| 03-distributed-shuffle   | Multi-instance stream processing with shuffle  |
-
 ## 05-distributed — Multi-machine workers
 
 | File                   | Scenario                                                       |

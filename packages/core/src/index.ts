@@ -129,11 +129,11 @@ export { MemoryStream } from "./lib/adapters/memory/index.ts";
 export { IterableSource, fromIterable } from "./lib/adapters/memory/index.ts";
 export { InMemoryState } from "./lib/adapters/memory/index.ts";
 
-// NOTE: Durable execution, DataFrame, and Stream topology have been moved to
-// dedicated packages. Import from:
+// NOTE: Durable execution and DataFrame have been moved to dedicated
+// packages. Import from:
 //   @promin/workflow  — workflows, state machines, distributed workers, scheduler, sql-models
 //   @promin/data      — DataFrame, data quality, profiling, diff, contracts
-//   @promin/topology  — stream topology builder and runners
+// Stateful stream topology lives in @spilne/perfect-topology.
 
 // Stream pipes — reusable through() transformations
 export {

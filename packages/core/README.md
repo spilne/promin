@@ -46,4 +46,3 @@ await StreamPipeline.fromAsyncIterable(messages, onError)
 | ----------------------------------------- | ------------------------------------------------------ |
 | [@promin/workflow](../workflow/README.md) | Durable workflows, distributed workers, state machines |
 | [@promin/data](../data/README.md)         | DataFrame, data quality, profiling, diff, contracts    |
-| [@promin/topology](../topology/README.md) | Stateful stream processing: windows, joins, shuffle    |

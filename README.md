@@ -9,10 +9,9 @@ Production services need retry, timeout, circuit breakers, backpressure, crash r
 - **Pipeline** — retry, timeout, circuit breaker, race, cache in one chainable API. No more nested try/catch with manual backoff.
 - **StreamPipeline** — parallel transforms, batching, deduplication with automatic operator fusion. Not just `for await...of`.
 - **Durable workflows** — DAG-based steps that survive crashes. Compensation (sagas), signals, sleep. Not just a job queue.
-- **StreamTopology** — keyed state, time windows, joins, distributed shuffle. Kafka Streams semantics in TypeScript.
 - **DataFrame** — lazy analytics with expression builder. Array executor for small data, DuckDB for large. Not just `Array.filter().map()`.
 
-All of these compose. A workflow step can use a Pipeline with retry. A StreamTopology can trigger workflows. A DataFrame query can run inside a durable step. One type system, one runtime.
+All of these compose. A workflow step can use a Pipeline with retry. A DataFrame query can run inside a durable step. One type system, one runtime.
 
 ## Packages
 
@@ -21,13 +20,12 @@ All of these compose. A workflow step can use a Pipeline with retry. A StreamTop
 | **[@promin/core](./packages/core/)** | Pipeline, StreamPipeline, concurrency primitives |
 | **[@promin/workflow](./packages/workflow/)** | Durable workflows, distributed workers, state machines, scheduler |
 | **[@promin/data](./packages/data/)** | DataFrame, data quality, profiling, diff, contracts |
-| **[@promin/topology](./packages/topology/)** | Stateful stream processing: windows, joins, shuffle |
-| **[@promin/http](./packages/http/)** | HTTP client with retry, streaming (SSE/NDJSON), circuit breaker |
 | **[@promin/duckdb](./packages/duckdb/)** | DuckDB executor for DataFrame — SQL compilation, file sources |
-| **[@promin/kafka](./packages/kafka/)** | Kafka transport adapter (Partitionable, Acknowledgeable) |
 | **[@promin/postgres](./packages/postgres/)** | Postgres workflow storage, step queue (SKIP LOCKED), durable scheduler |
 | **[@promin/redis](./packages/redis/)** | Redis stream transport adapter |
 | **[@promin/container](./packages/container/)** | Container step executor (Docker, K8s, local process) |
+
+HTTP client, Kafka transport, and stateful stream topology live in [perfect](https://github.com/spilne/perfect): `@spilne/perfect-http`, `@spilne/perfect-kafka`, `@spilne/perfect-topology`.
 
 ## Quick Start
 
@@ -90,10 +88,10 @@ bun run bench:all    # all benchmark suites
 
 | Command | Description |
 |---|---|
-| `bun run test` | Unit tests (core, http, kafka, postgres) |
-| `bun run test:integration` | Integration tests (Kafka, Redis, Postgres) |
+| `bun run test` | Unit tests (core, workflow, data, postgres) |
+| `bun run test:integration` | Integration tests (Redis, Postgres) |
 | `bun run bench` | Cross-language benchmarks (Promin vs Pandas vs Polars) |
-| `bun run bench:all` | All benchmarks (stream, pipeline, dataframe, topology, cross-language) |
+| `bun run bench:all` | All benchmarks (stream, pipeline, dataframe, workflow, cross-language) |
 | `bun nx run-many -t typecheck` | Typecheck all packages |
 | `bun nx run-many -t lint` | Lint all packages |
 
@@ -106,17 +104,13 @@ bun run bench:all    # all benchmark suites
   RawStream<T>           — zero-overhead stream (no Effect)
   DataFrame<T>           — lazy analytics with pluggable executors
   workflow()             — durable workflows with DAG, signals, sleep
-  StreamTopology         — stateful stream processing (windows, joins)
   Distributed            — coordinator + workers via Postgres SKIP LOCKED
 
 @promin/duckdb (optional, adds DuckDB)
   DuckDBExecutor         — compiles DataFrame plans to SQL
   AutoExecutor           — smart routing: Array for small, DuckDB for large
 
-@promin/http
-  HttpClient             — retry, circuit breaker, SSE/NDJSON streaming
-
-@promin/kafka, @promin/redis, @promin/postgres
+@promin/redis, @promin/postgres
   Transport adapters implementing Streamable/Sinkable/Partitionable
 ```
 

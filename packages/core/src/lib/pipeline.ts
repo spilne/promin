@@ -31,13 +31,14 @@ export type TaggedError = { readonly _tag: string };
 
 /**
  * Configurable defaults that flow through the pipeline chain.
- * Injected at construction time (e.g., by HttpClient) and propagated
- * through every chained method.
+ * Injected at construction time (e.g., by a client library that wraps its
+ * calls in pipelines) and propagated through every chained method.
  *
  * @example
  * ```ts
- * const defaults: PipelineDefaults<HttpClientError> = {
- *   retryWhen: (e) => e._tag === "HttpTimeoutError" || e._tag === "HttpNetworkError",
+ * type ApiError = { _tag: "TimeoutError" } | { _tag: "NetworkError" } | { _tag: "BadRequest" };
+ * const defaults: PipelineDefaults<ApiError> = {
+ *   retryWhen: (e) => e._tag === "TimeoutError" || e._tag === "NetworkError",
  * };
  * Pipeline.from(effect, { defaults });
  * ```

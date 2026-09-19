@@ -45,8 +45,6 @@ Promin:    Postgres only. Coordinator + workers are Bun processes.
 | Promin                       | Kafka Streams                | Flink            | Spark Streaming | Description                              |
 | ---------------------------- | ---------------------------- | ---------------- | --------------- | ---------------------------------------- |
 | **StreamPipeline**           | KStream                      | DataStream       | DStream         | A stream of elements with operators      |
-| **StreamTopology**           | Topology                     | JobGraph         | —               | Stateful stream processing DAG           |
-| **TopologyRunner**           | KafkaStreams.start()         | env.execute()    | ssc.start()     | Compiles and runs a topology             |
 | **keyBy**                    | selectKey/groupByKey         | keyBy            | —               | Partition stream by key                  |
 | **tumbling/sliding/session** | TimeWindows/SessionWindows   | window()         | window()        | Time-based windowing                     |
 | **aggregate**                | aggregate()                  | reduce/aggregate | reduceByWindow  | Reduce items within windows              |
@@ -66,8 +64,8 @@ Kafka Streams:  Embedded library, Kafka is the infrastructure
 Flink:          Cluster (JobManager + TaskManagers), custom network stack
 Spark:          Cluster (Driver + Executors), batch-oriented micro-batching
 ──────────────────────────────────────────────────────────────────────────
-Promin:         Single process, Kafka consumer groups for partition assignment.
-                StreamTopology runs in-process. No cluster, no JVM.
+Promin:         Single process. StreamPipeline runs in-process. No cluster, no JVM.
+                Stateful stream topology lives in @spilne/perfect-topology.
 ```
 
 ---

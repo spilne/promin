@@ -7,7 +7,7 @@
     "typecheck": "bunx nx run-many -t typecheck",
     "lint": "bunx nx run-many -t lint",
     "lci": "bunx nx affected -t ci --base=origin/main",
-    "test": "bun --conditions=@promin/source test packages/core packages/workflow packages/data packages/topology packages/http packages/kafka packages/postgres",
+    "test": "bun --conditions=@promin/source test packages/core packages/workflow packages/data packages/postgres",
     "test:integration": "bun --conditions=@promin/source test packages/integration",
     "test:all": "bun --conditions=@promin/source test packages/",
     "fmt": "bunx nx run-many -t format",
@@ -18,10 +18,8 @@
     "bench:stream": "bun run packages/core/src/lib/stream-pipeline.bench.ts",
     "bench:pipeline": "bun run packages/core/src/lib/pipeline.bench.ts",
     "bench:dataframe": "bun run packages/data/src/lib/dataframe/dataframe.bench.ts",
-    "bench:topology": "bun run packages/topology/src/lib/stream-topology/topology-runner.bench.ts",
-    "bench:http": "bun --conditions=@promin/source run packages/http/src/lib/client/http-client.bench.ts",
     "bench:workflow": "bun --conditions=@promin/source run packages/workflow/src/lib/durable/journaled-step.bench.ts",
-    "bench:all": "bun run bench:stream && bun run bench:pipeline && bun run bench:dataframe && bun run bench:topology && bun run bench:http && bun run bench:workflow && bun run bench",
+    "bench:all": "bun run bench:stream && bun run bench:pipeline && bun run bench:dataframe && bun run bench:workflow && bun run bench",
     "zorya": "bun --conditions=@promin/source run packages/zorya/scripts/dev.ts",
     "zorya:build": "bun --conditions=@promin/source run packages/zorya/scripts/build-ui.ts",
     "demo": "bun --conditions=@promin/source run packages/zorya/examples/start-all.ts",
@@ -52,7 +50,6 @@
     ],
     "catalog": {
       "@types/bun": "^1.3.3",
-      "@effect/platform": "^0.93.0",
       "effect": "^3.19.10",
       "zod": "^3.24.1"
     }

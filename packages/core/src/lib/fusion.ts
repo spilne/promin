@@ -2,7 +2,7 @@
 // Operator fusion — shared utilities for fusing adjacent pure operators
 // (map, filter, filterMap, tap) into a single function call per element.
 //
-// Used by: OptimizedStreamPipeline, RawStream, TopologyRunner
+// Used by: OptimizedStreamPipeline, RawStream
 // ---------------------------------------------------------------------------
 
 import { Stream, Chunk } from "effect";

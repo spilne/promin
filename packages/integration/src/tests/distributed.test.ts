@@ -1,22 +1,18 @@
-import { describe, it, expect, setDefaultTimeout } from "bun:test";
+import { it, expect, setDefaultTimeout } from "bun:test";
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
-import { withPostgres, withAll, eventually, uniqueName } from "../infra.ts";
-import { Pipeline, InMemoryState } from "@promin/core";
-import { StreamTopology, TopologyRunner } from "@promin/topology";
+import { withPostgres, eventually } from "../infra.ts";
+import { Pipeline } from "@promin/core";
 import {
   workflow,
   InMemoryWorkflowStorage,
   DefaultCoordinator,
   DefaultWorker,
   MapStepRegistry,
-  InMemoryStepQueue,
   InMemoryWorkerRegistry,
 } from "@promin/workflow";
 import { PgStepQueue } from "@promin/postgres";
 import type { DrizzleDb } from "@promin/postgres";
-import { KafkaTopic } from "@promin/kafka";
-import { createKafkajsClient, createTopic } from "../adapters/kafkajs-adapter.ts";
 
 setDefaultTimeout(300_000);
 
@@ -459,169 +455,5 @@ withPostgres("Queue routing — GPU vs CPU workers", (ctx) => {
     expect(cpuProcessed).toEqual(["preprocess", "postprocess"]);
 
     await close();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Scenario 6: StreamTopology with checkpointing
-//
-// Business flow: Tumbling window aggregation with state that survives
-// "restart" (checkpoint + restore cycle).
-// ---------------------------------------------------------------------------
-
-describe("StreamTopology — windowed aggregation with checkpoint/restore", () => {
-  it("window state survives checkpoint and restore", async () => {
-    const stateBackend = new InMemoryState<string, unknown>();
-
-    // Simulated source
-    const source = {
-      codec: { encode: (v: any) => v, decode: (v: any) => v },
-      subscribe: () => {
-        throw new Error("not used");
-      },
-      subscribeAck: () => {
-        const { StreamPipeline } = require("@promin/core");
-        return StreamPipeline.fromIterable(
-          Array.from({ length: 10 }, (_, i) => ({
-            value: { userId: `u${i % 3}`, amount: (i + 1) * 10, ts: i * 100 },
-            ack: async () => {},
-            nack: async () => {},
-            metadata: {},
-          })),
-        );
-      },
-    };
-
-    const topology = StreamTopology.source(source as any)
-      .keyBy((e: any) => e.userId)
-      .tumbling(500) // 500ms windows
-      .aggregate({
-        init: () => ({ total: 0, count: 0 }),
-        add: (state, event: any) => ({
-          total: state.total + event.amount,
-          count: state.count + 1,
-        }),
-        emit: (key, window, state) => ({
-          userId: key,
-          windowStart: window.start,
-          total: state.total,
-          count: state.count,
-        }),
-      })
-      .build();
-
-    const handle = await TopologyRunner.run(topology, {
-      group: "test-window",
-      stateBackend,
-      checkpointIntervalMs: 50,
-    });
-
-    await new Promise((r) => setTimeout(r, 500));
-
-    const metrics = handle.metrics();
-    expect(metrics.itemsProcessed).toBeGreaterThan(0);
-
-    await handle.shutdown();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Scenario 7: Kafka → distributed workflow — end-to-end
-//
-// Business flow: Orders arrive via Kafka, each triggers a distributed
-// workflow through the coordinator → worker pipeline.
-// ---------------------------------------------------------------------------
-
-withAll("E2E: Kafka orders → distributed workflow → completion", (ctx) => {
-  it("Kafka messages trigger distributed workflows processed by workers", async () => {
-    const topic = uniqueName("orders");
-    await createTopic(ctx.kafka.broker, topic);
-
-    const client = createKafkajsClient(ctx.kafka.broker);
-    const kt = new KafkaTopic<{ orderId: string; amount: number }>({
-      kafka: client,
-      topic,
-      groupId: uniqueName("g"),
-    });
-
-    const storage = new InMemoryWorkflowStorage();
-    const stepQueue = new InMemoryStepQueue();
-
-    const orderWorkflow = workflow<{ orderId: string; amount: number }>({
-      name: "process-order",
-      storage,
-    })
-      .step("validate", (c) =>
-        Pipeline.succeed({ valid: c.input.amount > 0, orderId: c.input.orderId }),
-      )
-      .step("charge", (c) => Pipeline.succeed({ charged: true, amount: c.input.amount }))
-      .build();
-
-    const coordinator = new DefaultCoordinator({
-      storage,
-      stepQueue,
-      pollIntervalMs: 50,
-    });
-
-    const registry = new MapStepRegistry();
-    const processed: string[] = [];
-
-    registry.register("validate", async (stepCtx) => {
-      processed.push(`validate:${(stepCtx.input as any).orderId}`);
-      return { valid: true, orderId: (stepCtx.input as any).orderId };
-    });
-    registry.register("charge", async (stepCtx) => {
-      processed.push(`charge:${(stepCtx.input as any).orderId}`);
-      return { charged: true };
-    });
-
-    const worker = new DefaultWorker({
-      storage,
-      stepQueue,
-      registry,
-      capabilities: ["default"],
-      concurrency: 5,
-      pollIntervalMs: 50,
-    });
-
-    // Publish 5 orders to Kafka
-    for (let i = 0; i < 5; i++) {
-      await kt.publish({ orderId: `ORD-${i}`, amount: (i + 1) * 100 });
-    }
-
-    // Start coordinator and worker
-    void coordinator.startLoop();
-    worker.start();
-
-    // Consume from Kafka and submit each order as a workflow
-    await kt
-      .subscribeAck({ group: uniqueName("g"), fromBeginning: true })
-      .take(5)
-      .forEach(async (env) => {
-        await coordinator.submit({
-          workflow: orderWorkflow,
-          workflowId: `wf-${env.value.orderId}`,
-          input: env.value,
-        });
-        await env.ack();
-      });
-
-    // Wait for all workflows to complete
-    await eventually(
-      async () => {
-        expect(processed.length).toBe(10); // 5 orders × 2 steps
-      },
-      { timeoutMs: 10_000, intervalMs: 100 },
-    );
-
-    await coordinator.stopLoop();
-    await worker.stop();
-    await kt.disconnect();
-
-    // Verify all orders processed both steps
-    const validates = processed.filter((p) => p.startsWith("validate:"));
-    const charges = processed.filter((p) => p.startsWith("charge:"));
-    expect(validates.length).toBe(5);
-    expect(charges.length).toBe(5);
   });
 });
