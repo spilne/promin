@@ -9,10 +9,14 @@
 // surprises.
 // ---------------------------------------------------------------------------
 
-import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { InMemoryWorkflowStorage, type WorkflowStorage } from "@promin/workflow";
 import { storageTestSuite } from "@promin/workflow/testing";
 import { RemoteWorkflowStorage } from "../remote-workflow-storage.ts";
 import { createWorkflowStorageHandler } from "../storage-http-handler.ts";
+
+// Peers are second clients against the same handler — two workers talking
+// to one storage server.
+const handlers = new WeakMap<WorkflowStorage, ReturnType<typeof createWorkflowStorageHandler>>();
 
 storageTestSuite(
   () => {
@@ -21,10 +25,19 @@ storageTestSuite(
     // backend, the remote closes over the handler, and nothing leaks across.
     const backing = new InMemoryWorkflowStorage();
     const handler = createWorkflowStorageHandler(backing);
-    return new RemoteWorkflowStorage({
+    const remote = new RemoteWorkflowStorage({
       url: "http://test.local/storage",
       fetch: handler,
     });
+    handlers.set(remote, handler);
+    return remote;
   },
-  { hasResetSteps: true },
+  {
+    hasResetSteps: true,
+    createPeer: (storage) =>
+      new RemoteWorkflowStorage({
+        url: "http://test.local/storage",
+        fetch: handlers.get(storage)!,
+      }),
+  },
 );

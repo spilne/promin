@@ -6,7 +6,7 @@
 // (e.g. PgWorkflowMetrics) can override via ZoryaServerConfig.metrics.
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage, WorkflowStatus } from "@promin/workflow";
+import { WORKFLOW_STATUSES, type WorkflowStatus, type WorkflowStorage } from "@promin/workflow";
 import { json } from "../router.ts";
 import type { MetricsDto } from "../api-types.ts";
 
@@ -14,15 +14,7 @@ export interface MetricsProvider {
   getMetrics(): Promise<MetricsDto>;
 }
 
-const ALL_STATUSES: WorkflowStatus[] = [
-  "pending",
-  "running",
-  "suspended",
-  "completed",
-  "failed",
-  "compensating",
-  "tripwire",
-];
+const ALL_STATUSES = WORKFLOW_STATUSES;
 
 export class StorageMetricsProvider implements MetricsProvider {
   private readonly storage: WorkflowStorage;

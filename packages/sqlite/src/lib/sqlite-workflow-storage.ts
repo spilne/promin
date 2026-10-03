@@ -58,7 +58,6 @@ export class SqliteWorkflowStorage
   implements WorkflowStorage, ActivityJournalStorage, JournaledSuspendStorage, StepAttemptStorage
 {
   private readonly _t: string;
-  private _nextToken = 1;
 
   private constructor(
     private readonly db: SqliteDatabase,
@@ -149,6 +148,15 @@ export class SqliteWorkflowStorage
         workflow_id TEXT    NOT NULL PRIMARY KEY,
         expires_at  INTEGER NOT NULL,
         token       TEXT    NOT NULL
+      )
+    `);
+    // Fence tokens come from one shared counter row so every storage
+    // instance on the database mints strictly increasing, never-reused
+    // tokens — a per-instance counter would hand out the same token twice.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS ${t}_fence (
+        id    INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+        value INTEGER NOT NULL
       )
     `);
     this.db.run(`
@@ -257,15 +265,23 @@ export class SqliteWorkflowStorage
       const msg = String(e);
       if (!msg.includes("no such column") && !msg.includes("already exists")) throw e;
     }
-    // Restore fence token counter from max stored token
+    // Seed the counter past any token minted before the counter table
+    // existed, so upgraded databases never reissue a live token.
+    this.db.run(
+      `INSERT OR IGNORE INTO ${t}_fence (id, value)
+       SELECT 1, COALESCE(MAX(CAST(token AS INTEGER)), 0) FROM ${t}_locks`,
+    );
+  }
+
+  /** Mint the next fence token. Call inside the lock transaction. */
+  private _nextFenceToken(): string {
     const row = this.db
-      .query<{ maxToken: string | null }>(
-        `SELECT MAX(CAST(token AS INTEGER)) AS maxToken FROM ${t}_locks`,
+      .query<{ value: number }>(
+        `UPDATE ${this._t}_fence SET value = value + 1 WHERE id = 1 RETURNING value`,
       )
       .get();
-    if (row?.maxToken != null) {
-      this._nextToken = parseInt(row.maxToken, 10) + 1;
-    }
+    if (!row) throw new Error("SqliteWorkflowStorage: fence counter row missing");
+    return String(row.value);
   }
 
   // ---------------------------------------------------------------------------
@@ -746,6 +762,16 @@ export class SqliteWorkflowStorage
             )
             .get(params.namespace ?? null, params.workflowName, params.idempotencyKey, now);
           if (keyHit) return { created: false, existing: this._rowToState(keyHit) };
+          // An expired key no longer owns its slot in the unique index —
+          // release it so this create can claim the key.
+          this.db
+            .query(
+              `UPDATE ${this._t} SET idempotency_key = NULL
+               WHERE COALESCE(namespace, '') = COALESCE(?, '')
+                 AND workflow_name = ? AND idempotency_key = ?
+                 AND (idempotency_expires_at IS NULL OR idempotency_expires_at <= ?)`,
+            )
+            .run(params.namespace ?? null, params.workflowName, params.idempotencyKey, now);
         }
 
         const existing = this.db
@@ -1039,7 +1065,7 @@ export class SqliteWorkflowStorage
       .query(
         `UPDATE ${this._t}
          SET status = 'completed', result = ?, completed_at = ?, updated_at = ?
-         WHERE workflow_id = ?`,
+         WHERE workflow_id = ? AND status NOT IN ('completed', 'failed', 'tripwire')`,
       )
       .run(JSON.stringify(result), now, now, workflowId);
   }
@@ -1051,7 +1077,7 @@ export class SqliteWorkflowStorage
       .query(
         `UPDATE ${this._t}
          SET status = 'failed', error = ?, completed_at = ?, updated_at = ?
-         WHERE workflow_id = ?`,
+         WHERE workflow_id = ? AND status NOT IN ('completed', 'failed', 'tripwire')`,
       )
       .run(error, now, now, workflowId);
   }
@@ -1097,12 +1123,18 @@ export class SqliteWorkflowStorage
   // ---------------------------------------------------------------------------
 
   async deliverSignal(workflowId: string, signalName: string, payload: unknown): Promise<void> {
-    this.db
-      .query(
-        `INSERT INTO ${this._t}_signals (workflow_id, signal_name, payload, delivered_at)
-         VALUES (?, ?, ?, ?)`,
-      )
-      .run(workflowId, signalName, JSON.stringify(payload), Date.now());
+    // Last delivery per name wins (one row per (workflow, name)).
+    this.db.transaction((): void => {
+      this.db
+        .query(`DELETE FROM ${this._t}_signals WHERE workflow_id = ? AND signal_name = ?`)
+        .run(workflowId, signalName);
+      this.db
+        .query(
+          `INSERT INTO ${this._t}_signals (workflow_id, signal_name, payload, delivered_at)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run(workflowId, signalName, JSON.stringify(payload), Date.now());
+    })();
   }
 
   async setWorkflowMetadata(workflowId: string, patch: Record<string, unknown>): Promise<void> {
@@ -1327,7 +1359,7 @@ export class SqliteWorkflowStorage
 
       if (existing && existing.expires_at > now) return { acquired: false };
 
-      const token = String(this._nextToken++);
+      const token = this._nextFenceToken();
       const expiresAt = now + lockDurationMs;
 
       if (existing) {
@@ -1419,6 +1451,10 @@ export class SqliteWorkflowStorage
            WHERE workflow_id = ?`,
         )
         .run(newRun, now, workflowId);
+      // The new run replays from nothing: drop the old run's journal and
+      // its delivered signals in the same transaction as the run bump.
+      this.db.query(`DELETE FROM ${this._t}_journal WHERE workflow_id = ?`).run(workflowId);
+      this.db.query(`DELETE FROM ${this._t}_signals WHERE workflow_id = ?`).run(workflowId);
       return newRun;
     })();
   }
@@ -1531,7 +1567,7 @@ export class SqliteWorkflowStorage
       const ids = this.db
         .query<{ workflow_id: string }>(
           `SELECT workflow_id FROM ${this._t}
-           WHERE status IN ('completed', 'failed')
+           WHERE status IN ('completed', 'failed', 'tripwire')
              AND completed_at IS NOT NULL
              AND completed_at >= ? AND completed_at < ?
            LIMIT ?`,
@@ -1544,6 +1580,11 @@ export class SqliteWorkflowStorage
         this.db.query(`DELETE FROM ${this._t}_locks WHERE workflow_id = ?`).run(workflow_id);
         this.db.query(`DELETE FROM ${this._t}_runs WHERE workflow_id = ?`).run(workflow_id);
         this.db.query(`DELETE FROM ${this._t}_journal WHERE workflow_id = ?`).run(workflow_id);
+        this.db.query(`DELETE FROM ${this._t}_attempts WHERE workflow_id = ?`).run(workflow_id);
+        this.db
+          .query(`DELETE FROM ${this._t}_signal_tokens WHERE workflow_id = ?`)
+          .run(workflow_id);
+        this.db.query(`DELETE FROM ${this._t}_streams WHERE workflow_id = ?`).run(workflow_id);
       }
       return ids.length;
     })();

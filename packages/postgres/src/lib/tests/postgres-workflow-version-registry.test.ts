@@ -1,6 +1,7 @@
 import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect, beforeEach } from "bun:test";
 import { workflow } from "@promin/workflow";
+import { versionRegistryTestSuite } from "@promin/workflow/testing";
 import { PostgresWorkflowVersionRegistry } from "../postgres-workflow-version-registry.ts";
 import { migrate } from "../migrate.ts";
 import { postgresDescribe } from "../test-utils.ts";
@@ -118,5 +119,12 @@ postgresDescribe("PostgresWorkflowVersionRegistry", { migrate }, (pg) => {
         .build();
       await expect(registry.register(noVersion)).rejects.toThrow("must have a version");
     });
+  });
+});
+
+postgresDescribe("PostgresWorkflowVersionRegistry conformance", { migrate }, (pg) => {
+  versionRegistryTestSuite(async () => {
+    await pg.sql`TRUNCATE wf_workflow_registry`;
+    return new PostgresWorkflowVersionRegistry(pg.db);
   });
 });

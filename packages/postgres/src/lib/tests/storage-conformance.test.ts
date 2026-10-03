@@ -16,15 +16,25 @@ postgresDescribe("PostgresWorkflowStorage conformance", { migrate }, (pg) => {
       wf_workflow_signals,
       wf_workflow_locks,
       wf_workflow_runs,
+      wf_activity_journal,
+      wf_signal_tokens,
+      wf_streams,
       wf_workflows,
       wf_step_queue
     RESTART IDENTITY CASCADE`;
   });
 
+  // Peers share the connection pool but are separate storage instances
+  // (own instance id) — the shape of two workers on one database.
   storageTestSuite(
     async () => {
       return PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false });
     },
-    { hasJournal: true, hasJournaledSuspend: true, hasResetSteps: true },
+    {
+      hasJournal: true,
+      hasJournaledSuspend: true,
+      hasResetSteps: true,
+      createPeer: () => PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false }),
+    },
   );
 });

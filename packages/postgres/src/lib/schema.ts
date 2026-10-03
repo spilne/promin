@@ -6,6 +6,7 @@ import {
   pgTable,
   text,
   integer,
+  smallint,
   jsonb,
   timestamp,
   bigint,
@@ -15,6 +16,8 @@ import {
   index,
   uniqueIndex,
   primaryKey,
+  foreignKey,
+  check,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createLookupTable, type LookupBinding } from "./lookup-table.ts";
@@ -57,6 +60,11 @@ export const workflows = pgTable(
     workflowType: text("workflow_type"),
     namespace: text("namespace"),
     version: text("version"),
+    // Lineage: the parent run (child workflows) and what started this run.
+    // `run_source` holds the small-int `RUN_SOURCE_CODES` value.
+    parentWorkflowId: text("parent_workflow_id"),
+    runSource: smallint("run_source"),
+    runSourceId: text("run_source_id"),
     run: integer("run").notNull().default(1),
     statusId: integer("status_id").notNull().default(WorkflowStatusIds.id.pending),
     input: jsonb("input").notNull(),
@@ -80,7 +88,27 @@ export const workflows = pgTable(
     index("wf_workflows_name_status_idx").on(t.workflowName, t.statusId),
     index("wf_workflows_status_idx").on(t.statusId),
     index("wf_workflows_type_idx").on(t.workflowType),
-    index("wf_workflows_namespace_idx").on(t.namespace),
+    // Default `listWorkflows` order, unscoped and namespace-scoped.
+    index("wf_workflows_started_at_idx").on(t.startedAt.desc().nullsLast()),
+    index("wf_workflows_namespace_started_at_idx").on(t.namespace, t.startedAt.desc().nullsLast()),
+    // `purgeCompleted` scans terminal rows (completed, failed, tripwire).
+    index("wf_workflows_purge_idx")
+      .on(t.completedAt)
+      .where(
+        sql`${t.statusId} IN (${sql.raw(
+          [
+            WorkflowStatusIds.id.completed,
+            WorkflowStatusIds.id.failed,
+            WorkflowStatusIds.id.tripwire,
+          ].join(", "),
+        )})`,
+      ),
+    index("wf_workflows_parent_idx")
+      .on(t.parentWorkflowId)
+      .where(sql`${t.parentWorkflowId} IS NOT NULL`),
+    index("wf_workflows_run_source_idx")
+      .on(t.runSource, t.runSourceId)
+      .where(sql`${t.runSource} IS NOT NULL`),
     uniqueIndex("wf_workflows_idempotency_key_idx")
       .on(sql`COALESCE(${t.namespace}, '')`, t.workflowName, t.idempotencyKey)
       .where(sql`${t.idempotencyKey} IS NOT NULL`),
@@ -169,10 +197,7 @@ export const workflowSignals = pgTable(
     payload: jsonb("payload").notNull(),
     deliveredAt: timestamp("delivered_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [
-    index("wf_signals_workflow_idx").on(t.workflowId),
-    uniqueIndex("wf_signals_workflow_signal_idx").on(t.workflowId, t.signalName),
-  ],
+  (t) => [uniqueIndex("wf_signals_workflow_signal_idx").on(t.workflowId, t.signalName)],
 );
 
 export const workflowLocks = pgTable("wf_workflow_locks", {
@@ -299,7 +324,24 @@ export const activityJournal = pgTable(
   },
   (t) => [
     primaryKey({ columns: [t.workflowId, t.stepName, t.activityIndex, t.branchPath] }),
-    index("wf_activity_journal_step_idx").on(t.workflowId, t.stepName),
+    foreignKey({
+      name: "wf_activity_journal_workflow_id_fkey",
+      columns: [t.workflowId],
+      foreignColumns: [workflows.workflowId],
+    }).onDelete("cascade"),
+    // Mirrors `JOURNAL_STEP_TYPES` in @promin/workflow.
+    check(
+      "wf_activity_journal_step_type_check",
+      sql`${t.stepType} IN ('activity', 'sleep', 'signal', 'compensation', 'child')`,
+    ),
+    // Sleep scanner hot path — pending sleeps whose wake time has passed.
+    index("wf_activity_journal_due_sleeps_idx")
+      .on(t.wakeAt)
+      .where(sql`${t.stepType} = 'sleep' AND ${t.phase} = 'pending'`),
+    // Signal delivery lookup by (workflow, step, signal name).
+    index("wf_activity_journal_pending_signals_idx")
+      .on(t.workflowId, t.stepName, t.activityName)
+      .where(sql`${t.stepType} = 'signal' AND ${t.phase} = 'pending'`),
   ],
 );
 
@@ -489,6 +531,17 @@ export const machineEvents = pgTable(
   (t) => [index("sm_machine_events_machine_idx").on(t.machineId)],
 );
 
+/**
+ * Lease rows for `PgStateMachineStorage.tryLock`. A row is held while
+ * `expires_at` is in the future (server clock); an expired row is taken
+ * over by the next `tryLock`.
+ */
+export const machineLocks = pgTable("sm_machine_locks", {
+  machineId: text("machine_id").primaryKey(),
+  lockedBy: text("locked_by").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+});
+
 // ---------------------------------------------------------------------------
 // Public-bearer signal tokens — authorization sidecar for deliverSignal.
 //
@@ -517,6 +570,11 @@ export const signalTokens = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    foreignKey({
+      name: "wf_signal_tokens_workflow_id_fkey",
+      columns: [t.workflowId],
+      foreignColumns: [workflows.workflowId],
+    }).onDelete("cascade"),
     uniqueIndex("wf_signal_tokens_idempotency_key_idx")
       .on(t.workflowId, t.idempotencyKey)
       .where(sql`${t.idempotencyKey} IS NOT NULL`),
@@ -524,6 +582,7 @@ export const signalTokens = pgTable(
     index("wf_signal_tokens_expired_idx")
       .on(t.expiresAt)
       .where(sql`${t.completedAt} IS NULL`),
+    index("wf_signal_tokens_tags_gin_idx").using("gin", t.tags),
   ],
 );
 
@@ -545,8 +604,11 @@ export const workflowStreams = pgTable(
   },
   (t) => [
     primaryKey({ columns: [t.workflowId, t.streamId, t.chunkIndex] }),
-    index("wf_streams_workflow_idx").on(t.workflowId),
-    index("wf_streams_workflow_stream_idx").on(t.workflowId, t.streamId, t.chunkIndex),
+    foreignKey({
+      name: "wf_streams_workflow_id_fkey",
+      columns: [t.workflowId],
+      foreignColumns: [workflows.workflowId],
+    }).onDelete("cascade"),
   ],
 );
 

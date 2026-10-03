@@ -184,14 +184,23 @@ export interface WorkflowStorage {
    */
   distinctNamespaces(): Promise<string[]>;
 
-  /** Cancel a running or suspended workflow. With cascade, also cancels children. */
+  /**
+   * Cancel a pending, running or suspended workflow: status becomes
+   * `failed` with error `"Cancelled"`. A terminal run is left untouched.
+   * With `cascade`, every descendant created with `parentWorkflowId`
+   * pointing at this run (transitively) is cancelled the same way.
+   */
   cancelWorkflow(
     workflowId: string,
     options?: { cascade?: boolean },
     guard?: FenceGuard,
   ): Promise<void>;
 
-  /** Create a new workflow record. Returns `{ created: false, existing }` on conflict. */
+  /**
+   * Create a new workflow record. Returns `{ created: false, existing }` on
+   * conflict. `parentWorkflowId`, `runSource` and `runSourceId` are persisted
+   * and round-trip through `loadWorkflow` and the list filters.
+   */
   createWorkflow(params: {
     workflowId: string;
     workflowName: string;
@@ -215,6 +224,9 @@ export interface WorkflowStorage {
      * partial-unique index on `(namespace, workflowName, idempotencyKey)` guarantees
      * concurrent creates with the same key resolve to the same row —
      * `created: false; existing` returns the canonical workflowId.
+     *
+     * Once a key's `idempotencyExpiresAt` has passed it no longer claims the
+     * slot: a create with the same key succeeds and the new row owns it.
      */
     idempotencyKey?: string;
     idempotencyExpiresAt?: Date;
@@ -327,10 +339,15 @@ export interface WorkflowStorage {
     guard?: FenceGuard,
   ): Promise<void>;
 
-  /** Mark the entire workflow as completed. */
+  /**
+   * Mark the entire workflow as completed. Terminal transitions only apply
+   * to a non-terminal run: when the run is already `completed`, `failed`
+   * (including cancelled) or `tripwire`, the call is a silent no-op, so a
+   * cancel is never overwritten by a late completion.
+   */
   completeWorkflow(workflowId: string, result: unknown, guard?: FenceGuard): Promise<void>;
 
-  /** Mark the entire workflow as failed. */
+  /** Mark the entire workflow as failed. No-op on a terminal run (see `completeWorkflow`). */
   failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void>;
 
   /**
@@ -338,6 +355,8 @@ export interface WorkflowStorage {
    * exit distinct from `failed`. `reason` is the opaque payload returned by
    * the firing `.tripwire()` step's `reason(prev)`; backends persist it
    * verbatim alongside `status = "tripwire"` so callers can inspect why.
+   *
+   * No-op on a terminal run (see `completeWorkflow`).
    *
    * Optional. Storages that don't implement this don't support the
    * `.tripwire()` builder primitive — the runner raises
@@ -383,10 +402,15 @@ export interface WorkflowStorage {
     options?: { signal?: AbortSignal },
   ): AsyncIterable<WorkflowRunEvent>;
 
-  /** Deliver a signal to a workflow. */
+  /**
+   * Deliver a signal to a workflow. Signals are scoped to the current run
+   * and keyed by name: a second delivery under the same name replaces the
+   * first (last delivery wins), and `startFreshRun` drops every delivered
+   * signal so a new run never sees the previous run's deliveries.
+   */
   deliverSignal(workflowId: string, signalName: string, payload: unknown): Promise<void>;
 
-  /** Load signals delivered to a workflow. */
+  /** Load the signals delivered to the current run — at most one per name. */
   loadSignals(workflowId: string): Promise<SignalState[]>;
 
   /**
@@ -398,6 +422,7 @@ export interface WorkflowStorage {
    *
    * Idempotent on identical patches — replay safely re-applies the same
    * writes without journaling. Cheap to call frequently (one row update).
+   * Atomic per call: concurrent patches touching different keys all land.
    */
   setWorkflowMetadata(workflowId: string, patch: Record<string, unknown>): Promise<void>;
 
@@ -469,8 +494,8 @@ export interface WorkflowStorage {
   /**
    * Append one chunk to a workflow's stream. Returns the assigned
    * `chunkIndex` (monotonic per `(workflowId, streamId)`). Atomic against
-   * concurrent appends — backends assign the index via `MAX+1` in a
-   * single statement so two callers can't claim the same slot.
+   * concurrent appends: every call gets a distinct index and the indices
+   * of a stream stay gap-free (0, 1, 2, …).
    */
   appendStreamChunk(params: {
     readonly workflowId: string;
@@ -497,6 +522,10 @@ export interface WorkflowStorage {
    * backend can reject stale writes after the lock expires + someone else
    * picks it up. Backends that don't support fencing omit the `token`
    * (callers treat that as "no fencing", same as passing no token).
+   *
+   * The lock is exclusive and not re-entrant: while it is held and
+   * unexpired, every other `tryLock` for the same workflow fails — from
+   * this storage instance or any other instance on the same backend.
    */
   tryLock(
     workflowId: string,
@@ -546,9 +575,16 @@ export interface WorkflowStorage {
   heartbeat(workflowId: string, lockDurationMs: number, guard?: FenceGuard): Promise<void>;
 
   /**
-   * Reset a completed workflow for a fresh re-execution.
-   * Increments the `run` counter, resets status to `running`, clears result/error.
-   * Old step results (from previous runs) remain in storage for history.
+   * Reset a workflow for a fresh re-execution (continue-as-new, idempotency
+   * `onExpiry: "fresh-run"`). Archives the current run, increments the `run`
+   * counter, resets status to `pending` and clears result/error/timestamps.
+   *
+   * Everything the new run replays from is cleared in the same atomic
+   * operation: the activity journal (every step) and the delivered signals.
+   * Otherwise run N+1 would replay run N's activity results or consume its
+   * signals. Old step results remain in run history. Signal tokens and
+   * streams are workflow-scoped and survive.
+   *
    * Returns the new run number.
    */
   startFreshRun(workflowId: string): Promise<number>;

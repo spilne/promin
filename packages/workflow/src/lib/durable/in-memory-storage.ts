@@ -22,6 +22,7 @@ import type {
   StreamChunk,
 } from "./workflow-storage.ts";
 import { workflowMetadataMatches } from "./workflow-storage.ts";
+import { isTerminalWorkflowStatus } from "./workflow-state.ts";
 import { createWorkflowEventStream } from "./workflow-event-stream.ts";
 import type {
   ActivityJournalStorage,
@@ -267,6 +268,9 @@ export class InMemoryWorkflowStorage
     type?: string;
     parentId?: string;
     namespace?: string;
+    runSource?: RunSource;
+    runSourceId?: string;
+    metadata?: Record<string, unknown>;
   }): Promise<number> {
     const ns = params?.namespace ?? this.namespace;
     let count = 0;
@@ -276,6 +280,9 @@ export class InMemoryWorkflowStorage
       if (params?.name && wf.workflowName !== params.name) continue;
       if (params?.type && wf.workflowType !== params.type) continue;
       if (params?.parentId && wf.parentWorkflowId !== params.parentId) continue;
+      if (params?.runSource !== undefined && wf.runSource !== params.runSource) continue;
+      if (params?.runSourceId !== undefined && wf.runSourceId !== params.runSourceId) continue;
+      if (params?.metadata && !workflowMetadataMatches(wf.metadata, params.metadata)) continue;
       count++;
     }
     return count;
@@ -624,7 +631,7 @@ export class InMemoryWorkflowStorage
   async completeWorkflow(workflowId: string, result: unknown, guard?: FenceGuard): Promise<void> {
     this.checkFence(workflowId, guard);
     const wf = this.workflows.get(workflowId);
-    if (!wf) return;
+    if (!wf || isTerminalWorkflowStatus(wf.status)) return;
     const now = this.clock.now();
     wf.status = "completed";
     wf.result = result;
@@ -636,7 +643,7 @@ export class InMemoryWorkflowStorage
   async failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void> {
     this.checkFence(workflowId, guard);
     const wf = this.workflows.get(workflowId);
-    if (!wf) return;
+    if (!wf || isTerminalWorkflowStatus(wf.status)) return;
     const now = this.clock.now();
     wf.status = "failed";
     wf.error = error;
@@ -648,7 +655,7 @@ export class InMemoryWorkflowStorage
   async tripwireWorkflow(workflowId: string, reason: unknown, guard?: FenceGuard): Promise<void> {
     this.checkFence(workflowId, guard);
     const wf = this.workflows.get(workflowId);
-    if (!wf) return;
+    if (!wf || isTerminalWorkflowStatus(wf.status)) return;
     const now = this.clock.now();
     wf.status = "tripwire";
     wf.tripwire = reason;
@@ -749,13 +756,15 @@ export class InMemoryWorkflowStorage
   }
 
   async deliverSignal(workflowId: string, signalName: string, payload: unknown): Promise<void> {
-    const existing = this.signals.get(workflowId) ?? [];
-    existing.push({ signalName, payload, deliveredAt: this.clock.now() });
-    this.signals.set(workflowId, existing);
+    // Last delivery per name wins — same shape as the keyed rows the
+    // networked backends keep.
+    const others = (this.signals.get(workflowId) ?? []).filter((s) => s.signalName !== signalName);
+    others.push({ signalName, payload, deliveredAt: this.clock.now() });
+    this.signals.set(workflowId, others);
   }
 
   async loadSignals(workflowId: string): Promise<SignalState[]> {
-    return this.signals.get(workflowId) ?? [];
+    return [...(this.signals.get(workflowId) ?? [])];
   }
 
   async setWorkflowMetadata(workflowId: string, patch: Record<string, unknown>): Promise<void> {
@@ -896,10 +905,10 @@ export class InMemoryWorkflowStorage
     // the prior run and never re-fires the side effects. Required for
     // continue-as-new and any other rerun path that should re-execute
     // from zero.
-    const journalPrefix = `${workflowId}::`;
-    for (const key of this.journal.keys()) {
-      if (key.startsWith(journalPrefix)) this.journal.delete(key);
-    }
+    this.deleteJournal(workflowId);
+    // Signals are run-scoped: a delivery meant for the previous run must
+    // not satisfy a wait in the new one.
+    this.signals.delete(workflowId);
     return wf.run;
   }
 
@@ -983,7 +992,7 @@ export class InMemoryWorkflowStorage
 
     for (const [id, wf] of this.workflows) {
       if (deleted >= params.limit) break;
-      if (wf.status !== "completed" && wf.status !== "failed") continue;
+      if (!isTerminalWorkflowStatus(wf.status)) continue;
       if (!wf.completedAt) continue;
       const t = wf.completedAt.getTime();
       if (t < fromMs || t >= toMs) continue;
@@ -993,10 +1002,27 @@ export class InMemoryWorkflowStorage
       this.signals.delete(id);
       this.attempts.delete(id);
       this.runHistory.delete(id);
+      this.subscribers.delete(id);
+      this.deleteJournal(id);
+      for (const [tokenId, token] of this.signalTokens) {
+        if (token.workflowId === id) this.signalTokens.delete(tokenId);
+      }
+      const streamPrefix = `${id}::`;
+      for (const key of this.streamChunks.keys()) {
+        if (key.startsWith(streamPrefix)) this.streamChunks.delete(key);
+      }
       deleted++;
     }
 
     return deleted;
+  }
+
+  /** Drop every journal entry of one workflow, across all steps. */
+  private deleteJournal(workflowId: string): void {
+    const journalPrefix = `${workflowId}::`;
+    for (const key of this.journal.keys()) {
+      if (key.startsWith(journalPrefix)) this.journal.delete(key);
+    }
   }
 
   /** Get step history across all runs for a workflow. */
@@ -1322,6 +1348,7 @@ export class InMemoryWorkflowStorage
     this.runHistory.clear();
     this.journal.clear();
     this.signalTokens.clear();
+    this.streamChunks.clear();
   }
 }
 

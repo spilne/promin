@@ -51,6 +51,9 @@ export class PostgresWorkflowVersionRegistry implements IWorkflowVersionRegistry
           : null,
         contentHash: options?.contentHash ?? null,
       })
+      // Re-registering refreshes the DAG but keeps `registered_at` and the
+      // lifecycle status: a restarted worker that still ships an older
+      // version must not flip `latest()` back to it fleet-wide.
       .onConflictDoUpdate({
         target: [workflowRegistry.name, workflowRegistry.version],
         set: {
@@ -68,22 +71,22 @@ export class PostgresWorkflowVersionRegistry implements IWorkflowVersionRegistry
       const rows = await this.db
         .select()
         .from(workflowRegistry)
-        .where(eq(workflowRegistry.name, name) && (eq(workflowRegistry.version, version) as any))
+        .where(and(eq(workflowRegistry.name, name), eq(workflowRegistry.version, version)))
         .limit(1);
       const row = rows[0];
       if (!row) return undefined;
       return rowToWorkflow(row);
     }
 
-    // No version — pick latest by registered_at DESC
+    // No version — pick the most recently registered one.
     const rows = await this.db
       .select()
       .from(workflowRegistry)
       .where(eq(workflowRegistry.name, name))
-      .orderBy(workflowRegistry.registeredAt)
-      .limit(100);
-    if (rows.length === 0) return undefined;
-    return rowToWorkflow(rows[rows.length - 1]!);
+      .orderBy(desc(workflowRegistry.registeredAt))
+      .limit(1);
+    const row = rows[0];
+    return row ? rowToWorkflow(row) : undefined;
   }
 
   async versions(name: string): Promise<readonly string[]> {
@@ -100,9 +103,9 @@ export class PostgresWorkflowVersionRegistry implements IWorkflowVersionRegistry
       .select({ version: workflowRegistry.version })
       .from(workflowRegistry)
       .where(eq(workflowRegistry.name, name))
-      .orderBy(workflowRegistry.registeredAt)
-      .limit(100);
-    return rows.length > 0 ? rows[rows.length - 1]!.version : undefined;
+      .orderBy(desc(workflowRegistry.registeredAt))
+      .limit(1);
+    return rows[0]?.version;
   }
 
   async names(): Promise<readonly string[]> {
@@ -116,7 +119,7 @@ export class PostgresWorkflowVersionRegistry implements IWorkflowVersionRegistry
   async deregister(name: string, version: string): Promise<void> {
     await this.db
       .delete(workflowRegistry)
-      .where(eq(workflowRegistry.name, name) && (eq(workflowRegistry.version, version) as any));
+      .where(and(eq(workflowRegistry.name, name), eq(workflowRegistry.version, version)));
   }
 
   // ---------------------------------------------------------------------------

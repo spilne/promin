@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
 import { storageTestSuite } from "@promin/workflow/testing";
+import type { WorkflowStorage } from "@promin/workflow";
 import { SqliteWorkflowStorage } from "../sqlite-workflow-storage.ts";
 
 function makeStorage() {
@@ -9,11 +10,23 @@ function makeStorage() {
 
 // ---- conformance suite (core + journal + suspend) ----
 
-storageTestSuite(makeStorage, {
-  hasJournal: true,
-  hasJournaledSuspend: true,
-  hasResetSteps: true,
-});
+// Peers share the database handle — a second storage instance in the same
+// process (or a second process on the same file) sees the same tables.
+const dbs = new WeakMap<WorkflowStorage, Database>();
+storageTestSuite(
+  () => {
+    const db = new Database(":memory:");
+    const storage = SqliteWorkflowStorage.make({ db });
+    dbs.set(storage, db);
+    return storage;
+  },
+  {
+    hasJournal: true,
+    hasJournaledSuspend: true,
+    hasResetSteps: true,
+    createPeer: (storage) => SqliteWorkflowStorage.make({ db: dbs.get(storage)! }),
+  },
+);
 
 // ---- SQLite-specific tests ----
 

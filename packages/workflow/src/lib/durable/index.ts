@@ -55,6 +55,9 @@ export {
   type WorkflowStatus,
   type RunSource,
   RUN_SOURCE_CODES,
+  WORKFLOW_STATUSES,
+  TERMINAL_WORKFLOW_STATUSES,
+  isTerminalWorkflowStatus,
   encodeRunSource,
   decodeRunSource,
   type StepStatus,
@@ -122,6 +125,7 @@ export {
 export {
   type JournalEntry,
   type JournalStepType,
+  JOURNAL_STEP_TYPES,
   type JournalPhase,
   type ActivityJournalStorage,
   type JournaledSuspendStorage,
