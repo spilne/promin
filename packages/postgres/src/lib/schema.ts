@@ -706,6 +706,8 @@ export const agentFact = pgTable(
     factText: text("text").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+    /** Insertion order; breaks ties between facts with the same `createdAt`. */
+    seq: bigserial("seq", { mode: "number" }).notNull(),
   },
   (t) => [
     index("agent_fact_ns_idx").on(t.scope, t.namespaceId, t.createdAt),

@@ -150,7 +150,7 @@ export class PostgresMemoryStore implements MemoryStore {
       .select()
       .from(agentFact)
       .where(and(eq(agentFact.scope, SCOPE_NS), eq(agentFact.namespaceId, namespaceId)))
-      .orderBy(asc(agentFact.createdAt), asc(agentFact.id));
+      .orderBy(asc(agentFact.createdAt), asc(agentFact.seq));
     return rows.map(toFact);
   }
 
@@ -292,7 +292,7 @@ export class PostgresMemoryStore implements MemoryStore {
           eq(agentFact.resourceId, key.resourceId),
         ),
       )
-      .orderBy(asc(agentFact.createdAt), asc(agentFact.id));
+      .orderBy(asc(agentFact.createdAt), asc(agentFact.seq));
     return rows.map(toFact);
   }
 
@@ -571,7 +571,7 @@ export class PostgresMemoryStore implements MemoryStore {
           eq(agentFact.threadId, key.threadId),
         ),
       )
-      .orderBy(asc(agentFact.createdAt), asc(agentFact.id));
+      .orderBy(asc(agentFact.createdAt), asc(agentFact.seq));
     return rows.map(toFact);
   }
 
