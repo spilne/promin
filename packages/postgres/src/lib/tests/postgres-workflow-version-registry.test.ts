@@ -1,5 +1,5 @@
+import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect, beforeEach } from "bun:test";
-import { Pipeline } from "@promin/core";
 import { workflow } from "@promin/workflow";
 import { PostgresWorkflowVersionRegistry } from "../postgres-workflow-version-registry.ts";
 import { migrate } from "../migrate.ts";
@@ -19,12 +19,12 @@ postgresDescribe("PostgresWorkflowVersionRegistry", { migrate }, (pg) => {
   });
 
   const wfV1 = workflow<{ x: number }>({ name: "my-wf", version: "1" })
-    .step("double", ({ input }) => Pipeline.succeed(input.x * 2))
+    .step("double", ({ input }) => succeed(input.x * 2))
     .build();
 
   const wfV2 = workflow<{ x: number }>({ name: "my-wf", version: "2" })
-    .step("double", ({ input }) => Pipeline.succeed(input.x * 2))
-    .step("add", ({ prev }) => Pipeline.succeed(prev + 1))
+    .step("double", ({ input }) => succeed(input.x * 2))
+    .step("add", ({ prev }) => succeed(prev + 1))
     .build();
 
   describe("register + resolve", () => {
@@ -84,7 +84,7 @@ postgresDescribe("PostgresWorkflowVersionRegistry", { migrate }, (pg) => {
 
     it("names() returns distinct workflow names", async () => {
       const other = workflow<void>({ name: "other-wf", version: "1" })
-        .step("noop", () => Pipeline.succeed(undefined))
+        .step("noop", () => succeed(undefined))
         .build();
       await registry.register(wfV1);
       await registry.register(other);
@@ -114,7 +114,7 @@ postgresDescribe("PostgresWorkflowVersionRegistry", { migrate }, (pg) => {
 
     it("throws on version without version field", async () => {
       const noVersion = workflow<void>({ name: "no-ver" })
-        .step("noop", () => Pipeline.succeed(undefined))
+        .step("noop", () => succeed(undefined))
         .build();
       await expect(registry.register(noVersion)).rejects.toThrow("must have a version");
     });

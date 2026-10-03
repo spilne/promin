@@ -72,45 +72,13 @@ export async function searchRelevantMemories(
 
 // ---- agent error surfacing ----
 
-// Effect wraps thrown errors inside journaled steps in a FiberFailure.
-// WorkflowSuspendedError is a normal signal — not a real failure. Validated
-// against Effect 3.x; the cause symbol is a stable public API.
-const FIBER_FAILURE_CAUSE = Symbol.for("effect/Runtime/FiberFailure/Cause");
-
-type FiberFailureCause =
-  | { _tag: "Die"; defect: unknown }
-  | { _tag: "Fail"; error: unknown }
-  | { _tag: string };
-
-function getFiberFailureCause(error: unknown): FiberFailureCause | undefined {
-  if (!error || typeof error !== "object") return undefined;
-  return (error as Record<symbol, FiberFailureCause | undefined>)[FIBER_FAILURE_CAUSE];
-}
-
 /**
- * Unwrap an Effect FiberFailure to the underlying thrown error. Returns the
- * input unchanged when there's no FiberFailure cause.
- */
-export function unwrapFiberFailure(error: unknown): unknown {
-  const cause = getFiberFailureCause(error);
-  if (cause?._tag === "Die") return (cause as { defect: unknown }).defect;
-  if (cause?._tag === "Fail") return (cause as { error: unknown }).error;
-  return error;
-}
-
-/**
- * `true` when the error is a `WorkflowSuspendedError` — either as a direct
- * tagged error or wrapped in an Effect FiberFailure defect. Suspension is a
+ * `true` when the error is a `WorkflowSuspendedError`. Suspension is a
  * normal control signal; callers typically swallow it instead of propagating.
  */
 export function isWorkflowSuspension(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
-  if ((error as { _tag?: string })._tag === "WorkflowSuspendedError") return true;
-  const cause = getFiberFailureCause(error);
-  return (
-    cause?._tag === "Die" &&
-    (cause as { defect?: { _tag?: string } }).defect?._tag === "WorkflowSuspendedError"
-  );
+  return (error as { _tag?: string })._tag === "WorkflowSuspendedError";
 }
 
 /**
@@ -122,7 +90,7 @@ export function isWorkflowSuspension(error: unknown): boolean {
  * - `user-error`: thrown by user code, a tool, a hook, or
  *   `TerminalError` — won't succeed on retry.
  * - `infra-error`: framework / transient failures
- *   (`RetryableError`, FiberFailure with a non-Error defect, etc.).
+ *   (`RetryableError`, a thrown non-Error value, etc.).
  */
 export type SurfacedAgentErrorKind = "suspended" | "step-limit" | "user-error" | "infra-error";
 
@@ -143,11 +111,10 @@ function toError(err: unknown): Error {
 }
 
 /**
- * Classify and unwrap an error from any agent primitive (agentLoop /
- * agentAction / agentTown). Strips Effect FiberFailure wrappers so callers
- * see the original thrown value, and tags the kind so call sites can
- * branch (suspend vs surface to user vs infra-retry) without re-implementing
- * the same `instanceof` chain.
+ * Classify an error from any agent primitive (agentLoop / agentAction /
+ * agentTown). The workflow runner rejects with the original thrown value,
+ * so this only tags the kind — call sites can branch (suspend vs surface to
+ * user vs infra-retry) without re-implementing the same `instanceof` chain.
  *
  * Preserves tagged-error metadata: a `TerminalError` keeps its `_tag`, the
  * underlying `MaxStepsError` keeps its `maxSteps`. The returned `error.name`
@@ -155,13 +122,12 @@ function toError(err: unknown): Error {
  */
 export function surfaceAgentError(err: unknown): SurfacedAgentError {
   if (isWorkflowSuspension(err)) return { kind: "suspended", error: toError(err) };
-  const unwrapped = unwrapFiberFailure(err);
-  const tag = (unwrapped as { _tag?: string } | null | undefined)?._tag;
-  if (tag === "MaxStepsError") return { kind: "step-limit", error: toError(unwrapped) };
-  if (tag === "TerminalError") return { kind: "user-error", error: toError(unwrapped) };
-  if (tag === "RetryableError") return { kind: "infra-error", error: toError(unwrapped) };
-  if (unwrapped instanceof Error) return { kind: "user-error", error: unwrapped };
-  return { kind: "infra-error", error: toError(unwrapped) };
+  const tag = (err as { _tag?: string } | null | undefined)?._tag;
+  if (tag === "MaxStepsError") return { kind: "step-limit", error: toError(err) };
+  if (tag === "TerminalError") return { kind: "user-error", error: toError(err) };
+  if (tag === "RetryableError") return { kind: "infra-error", error: toError(err) };
+  if (err instanceof Error) return { kind: "user-error", error: err };
+  return { kind: "infra-error", error: toError(err) };
 }
 
 // ---- tool error formatting ----

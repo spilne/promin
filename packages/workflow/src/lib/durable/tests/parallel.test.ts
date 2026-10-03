@@ -1,6 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { TaggedError } from "@spilne/perfect-core";
-import { Pipeline } from "@promin/core";
+import { TaggedError, succeed, fail, tryPromise } from "@spilne/perfect-core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
@@ -13,14 +12,12 @@ describe("parallel", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<{ userId: string }>({ name: "par-basic" })
-      .step("load", ({ input }) => Pipeline.succeed(input))
+      .step("load", ({ input }) => succeed(input))
       .parallelSteps("enrich", {
-        user: ({ prev }) => Pipeline.succeed({ name: `U:${prev.userId}` }),
-        perms: ({ prev }) => Pipeline.succeed({ roles: [`R:${prev.userId}`] }),
+        user: ({ prev }) => succeed({ name: `U:${prev.userId}` }),
+        perms: ({ prev }) => succeed({ roles: [`R:${prev.userId}`] }),
       })
-      .step("combine", ({ prev }) =>
-        Pipeline.succeed({ name: prev.user.name, roles: prev.perms.roles }),
-      )
+      .step("combine", ({ prev }) => succeed({ name: prev.user.name, roles: prev.perms.roles }))
       .build();
 
     const result = await runner.run({
@@ -38,8 +35,8 @@ describe("parallel", () => {
 
     const wf = workflow<{ a: number; b: number }>({ name: "par-first" })
       .parallelSteps("ops", {
-        sum: ({ input }) => Pipeline.succeed(input.a + input.b),
-        prod: ({ input }) => Pipeline.succeed(input.a * input.b),
+        sum: ({ input }) => succeed(input.a + input.b),
+        prod: ({ input }) => succeed(input.a * input.b),
       })
       .build();
 
@@ -57,10 +54,10 @@ describe("parallel", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "par-persist" })
-      .step("in", ({ input }) => Pipeline.succeed(input))
+      .step("in", ({ input }) => succeed(input))
       .parallelSteps("fork", {
-        x: ({ prev }) => Pipeline.succeed(prev * 10),
-        y: ({ prev }) => Pipeline.succeed(prev * 100),
+        x: ({ prev }) => succeed(prev * 10),
+        y: ({ prev }) => succeed(prev * 100),
       })
       .build();
 
@@ -79,8 +76,8 @@ describe("parallel", () => {
 
     const wf = workflow<string>({ name: "par-join-result" })
       .parallelSteps("f", {
-        upper: ({ input }) => Pipeline.succeed(input.toUpperCase()),
-        len: ({ input }) => Pipeline.succeed(input.length),
+        upper: ({ input }) => succeed(input.toUpperCase()),
+        len: ({ input }) => succeed(input.length),
       })
       .build();
 
@@ -96,9 +93,9 @@ describe("parallel", () => {
 
     const wf = workflow<number>({ name: "par-3" })
       .parallelSteps("triple", {
-        a: ({ input }) => Pipeline.succeed(input + 1),
-        b: ({ input }) => Pipeline.succeed(input + 2),
-        c: ({ input }) => Pipeline.succeed(input + 3),
+        a: ({ input }) => succeed(input + 1),
+        b: ({ input }) => succeed(input + 2),
+        c: ({ input }) => succeed(input + 3),
       })
       .build();
 
@@ -112,8 +109,8 @@ describe("parallel", () => {
 
     const wf = workflow<number>({ name: "par-fail" })
       .parallelSteps("fork", {
-        ok: ({ input }) => Pipeline.succeed(input),
-        bad: () => Pipeline.fail(new BranchFailed({ message: "boom" })),
+        ok: ({ input }) => succeed(input),
+        bad: () => fail(new BranchFailed({ message: "boom" })),
       })
       .build();
 
@@ -138,9 +135,9 @@ describe("parallel", () => {
   it("rejects duplicate block name", () => {
     expect(() =>
       workflow<number>({ name: "par-dup" })
-        .step("foo", ({ input }) => Pipeline.succeed(input))
+        .step("foo", ({ input }) => succeed(input))
         .parallelSteps("foo", {
-          a: ({ prev }) => Pipeline.succeed(prev),
+          a: ({ prev }) => succeed(prev),
         })
         .build(),
     ).toThrow(/Duplicate step name/);
@@ -149,9 +146,9 @@ describe("parallel", () => {
   it("rejects scoped-branch name collision with an existing step", () => {
     expect(() =>
       workflow<number>({ name: "par-col" })
-        .step("fork.a", ({ input }) => Pipeline.succeed(input))
+        .step("fork.a", ({ input }) => succeed(input))
         .parallelSteps("fork", {
-          a: ({ prev }) => Pipeline.succeed(prev),
+          a: ({ prev }) => succeed(prev),
         })
         .build(),
     ).toThrow(/Duplicate step name: "fork\.a"/);
@@ -163,11 +160,11 @@ describe("parallel", () => {
 
     const wf = workflow<number>({ name: "par-chain" })
       .parallelSteps("split", {
-        dbl: ({ input }) => Pipeline.succeed(input * 2),
-        trp: ({ input }) => Pipeline.succeed(input * 3),
+        dbl: ({ input }) => succeed(input * 2),
+        trp: ({ input }) => succeed(input * 3),
       })
-      .step("combine", ({ prev }) => Pipeline.succeed(prev.dbl + prev.trp))
-      .step("format", ({ prev }) => Pipeline.succeed(`total:${prev}`))
+      .step("combine", ({ prev }) => succeed(prev.dbl + prev.trp))
+      .step("format", ({ prev }) => succeed(`total:${prev}`))
       .build();
 
     const result = await runner.run({
@@ -180,10 +177,10 @@ describe("parallel", () => {
 
   it("DAG exports branches and join node", () => {
     const wf = workflow<number>({ name: "par-dag" })
-      .step("start", ({ input }) => Pipeline.succeed(input))
+      .step("start", ({ input }) => succeed(input))
       .parallelSteps("fork", {
-        left: ({ prev }) => Pipeline.succeed(prev + 1),
-        right: ({ prev }) => Pipeline.succeed(prev + 2),
+        left: ({ prev }) => succeed(prev + 1),
+        right: ({ prev }) => succeed(prev + 2),
       })
       .build();
 
@@ -208,15 +205,21 @@ describe("parallel", () => {
     const wf = workflow<number>({ name: "par-concurrent" })
       .parallelSteps("sleep", {
         a: () =>
-          Pipeline.fromPromise(async () => {
-            await new Promise((r) => setTimeout(r, 40));
-            return "a";
-          }),
+          tryPromise(
+            async () => {
+              await new Promise((r) => setTimeout(r, 40));
+              return "a";
+            },
+            (e) => e,
+          ).orDie(),
         b: () =>
-          Pipeline.fromPromise(async () => {
-            await new Promise((r) => setTimeout(r, 40));
-            return "b";
-          }),
+          tryPromise(
+            async () => {
+              await new Promise((r) => setTimeout(r, 40));
+              return "b";
+            },
+            (e) => e,
+          ).orDie(),
       })
       .build();
 

@@ -1,26 +1,31 @@
 /**
- * Process a batch of images with bounded concurrency.
- * mapOver fans out over the array — each item runs as a separate task.
+ * Batch processing with mapOver — fan-out with per-element retry.
+ *
  * If the workflow crashes, only unprocessed items are retried.
  */
 
+import { TaggedError, succeed, tryPromise } from "@spilne/perfect-core";
 import { flow } from "@promin/workflow";
-import { Pipeline } from "@promin/core";
 
 interface Image {
   id: string;
   url: string;
 }
 
+class ResizeError extends TaggedError("ResizeError")<{ message: string }>() {}
+
 const processImages = flow<{ images: Image[] }>("image-batch")
   .step("validate", ({ input }) =>
-    Pipeline.succeed(input.images.filter((img) => img.url.startsWith("https://"))),
+    succeed(input.images.filter((img) => img.url.startsWith("https://"))),
   )
   .mapOver("resize", { array: "validate", concurrency: 10 }, (image) =>
-    Pipeline.fn(async () => {
-      const resized = await resizeImage(image.url, { width: 800 });
-      return { id: image.id, resizedUrl: resized.url };
-    }).retry(2),
+    tryPromise(
+      async () => {
+        const resized = await resizeImage(image.url, { width: 800 });
+        return { id: image.id, resizedUrl: resized.url };
+      },
+      (e) => new ResizeError({ message: String(e) }),
+    ).retry({ times: 2 }),
   );
 
 const results = await processImages.execute({

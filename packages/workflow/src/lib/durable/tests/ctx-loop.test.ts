@@ -1,5 +1,5 @@
+import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
-import { Pipeline } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
@@ -136,7 +136,7 @@ describe("ctx.dowhile / ctx.dountil (inside journaled body)", () => {
           (n) => n >= 2,
         );
       })
-      .step("format", ({ prev }) => Pipeline.succeed(`done:${prev}`))
+      .step("format", ({ prev }) => succeed(`done:${prev}`))
       .build();
 
     const result = await runner.run({ workflow: wf, workflowId: "jw-chain-1", input: 0 });

@@ -546,9 +546,8 @@ interface SessionState {
  * ## Error contract
  *
  * `session.send()` / `session.stream()` throw a plain `Error` with the
- * underlying cause. Every error path goes through `surfaceAgentError` so
- * Effect FiberFailure wrappers are unwrapped before they leave this
- * module — what you catch is what your tool / hook actually threw.
+ * underlying cause. Every error path goes through `surfaceAgentError` —
+ * what you catch is what your tool / hook actually threw.
  * `WorkflowSuspendedError` (the workflow waiting for a signal / sleep)
  * never escapes — it's classified as `suspended` and swallowed.
  * Step-limit truncation is signalled separately via `HooksAfterTurnParams.truncated`

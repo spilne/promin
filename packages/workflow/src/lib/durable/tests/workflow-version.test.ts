@@ -1,5 +1,5 @@
+import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
-import { Pipeline } from "@promin/core";
 import { workflow, WorkflowVersionMismatchError } from "../index.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
@@ -9,7 +9,7 @@ describe("workflow versioning", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow<{ x: number }>({ name: "test" })
-      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .step("add", ({ input }) => succeed(input.x + 1))
       .build();
 
     await runner.run({ workflow: wf, workflowId: "v-default", input: { x: 1 } });
@@ -22,7 +22,7 @@ describe("workflow versioning", () => {
     const runner = createWorkflowRunner({ storage });
     const wf = workflow<{ x: number }>({ name: "test" })
       .version("2")
-      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .step("add", ({ input }) => succeed(input.x + 1))
       .build();
 
     await runner.run({ workflow: wf, workflowId: "v-explicit", input: { x: 1 } });
@@ -34,7 +34,7 @@ describe("workflow versioning", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow<{ x: number }>({ name: "test", version: "3" })
-      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .step("add", ({ input }) => succeed(input.x + 1))
       .build();
 
     await runner.run({ workflow: wf, workflowId: "v-params", input: { x: 1 } });
@@ -46,7 +46,7 @@ describe("workflow versioning", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow<{ x: number }>({ name: "test", version: "2" })
-      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .step("add", ({ input }) => succeed(input.x + 1))
       .build();
 
     const result1 = await runner.run({ workflow: wf, workflowId: "v-match", input: { x: 1 } });
@@ -63,13 +63,13 @@ describe("workflow versioning", () => {
 
     // Create workflow with explicit version
     const v1 = workflow<{ x: number }>({ name: "test", version: "1" })
-      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .step("add", ({ input }) => succeed(input.x + 1))
       .build();
     await runner.run({ workflow: v1, workflowId: "v-skip", input: { x: 1 } });
 
     // Resume with no version set — should succeed (no check)
     const noVersion = workflow<{ x: number }>({ name: "test" })
-      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .step("add", ({ input }) => succeed(input.x + 1))
       .build();
     const result = await runner.run({ workflow: noVersion, workflowId: "v-skip", input: { x: 1 } });
     expect(result).toBe(2);
@@ -81,13 +81,13 @@ describe("workflow versioning", () => {
 
     // Create workflow with v1
     const v1 = workflow<{ x: number }>({ name: "test", version: "1" })
-      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .step("add", ({ input }) => succeed(input.x + 1))
       .build();
     await runner.run({ workflow: v1, workflowId: "v-mismatch", input: { x: 1 } });
 
     // Try to resume with v2 — should throw
     const v2 = workflow<{ x: number }>({ name: "test", version: "2" })
-      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .step("add", ({ input }) => succeed(input.x + 1))
       .build();
 
     try {
@@ -108,13 +108,13 @@ describe("workflow versioning", () => {
 
     // Create workflow without version
     const noVer = workflow<{ x: number }>({ name: "test" })
-      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .step("add", ({ input }) => succeed(input.x + 1))
       .build();
     await runner.run({ workflow: noVer, workflowId: "v-upgrade", input: { x: 1 } });
 
     // Try to resume with explicit version — should throw
     const v2 = workflow<{ x: number }>({ name: "test", version: "2" })
-      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .step("add", ({ input }) => succeed(input.x + 1))
       .build();
 
     try {
@@ -132,7 +132,7 @@ describe("workflow versioning", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow<{ x: number }>({ name: "test", version: "5" })
-      .step("add", ({ input }) => Pipeline.succeed(input.x + 1))
+      .step("add", ({ input }) => succeed(input.x + 1))
       .build();
 
     await runner.run({ workflow: wf, workflowId: "v-new", input: { x: 1 } });
@@ -151,7 +151,7 @@ describe("workflow versioning", () => {
 
       // v1 — logic produces input * 10
       const v1 = workflow<{ x: number }>({ name: "test", version: "1" })
-        .step("compute", ({ input }) => Pipeline.succeed(input.x * 10))
+        .step("compute", ({ input }) => succeed(input.x * 10))
         .build();
 
       // Create a v1 workflow, don't run it to completion (we'll pretend it's in flight).
@@ -166,7 +166,7 @@ describe("workflow versioning", () => {
         onVersionMismatch: "drain",
         previousVersions: [v1],
       })
-        .step("compute", ({ input }) => Pipeline.succeed(input.x * 100))
+        .step("compute", ({ input }) => succeed(input.x * 100))
         .build();
 
       // Running v2 against the v1 workflow should delegate to v1's def.
@@ -183,13 +183,13 @@ describe("workflow versioning", () => {
       const runner = createWorkflowRunner({ storage });
 
       const v1 = workflow<{ x: number }>({ name: "test", version: "1" })
-        .step("compute", ({ input }) => Pipeline.succeed(input.x * 10))
+        .step("compute", ({ input }) => succeed(input.x * 10))
         .build();
       await runner.run({ workflow: v1, workflowId: "drain-missing", input: { x: 1 } });
 
       // v3 with drain policy but only v2 in previousVersions (not v1).
       const v2 = workflow<{ x: number }>({ name: "test", version: "2" })
-        .step("compute", ({ input }) => Pipeline.succeed(input.x * 100))
+        .step("compute", ({ input }) => succeed(input.x * 100))
         .build();
 
       const v3 = workflow<{ x: number }>({
@@ -198,7 +198,7 @@ describe("workflow versioning", () => {
         onVersionMismatch: "drain",
         previousVersions: [v2], // missing v1
       })
-        .step("compute", ({ input }) => Pipeline.succeed(input.x * 1000))
+        .step("compute", ({ input }) => succeed(input.x * 1000))
         .build();
 
       try {
@@ -224,7 +224,7 @@ describe("workflow versioning", () => {
 
     it("throws at construction when previousVersions entries lack `version`", () => {
       const unversioned = workflow<{ x: number }>({ name: "test" })
-        .step("x", ({ input }) => Pipeline.succeed(input))
+        .step("x", ({ input }) => succeed(input))
         .build();
 
       expect(() =>
@@ -241,7 +241,7 @@ describe("workflow versioning", () => {
       const storage = new InMemoryWorkflowStorage();
       const runner = createWorkflowRunner({ storage });
       const v1 = workflow<{ x: number }>({ name: "test", version: "1" })
-        .step("compute", ({ input }) => Pipeline.succeed(input))
+        .step("compute", ({ input }) => succeed(input))
         .build();
       await runner.run({ workflow: v1, workflowId: "strict-with-prev", input: { x: 1 } });
 
@@ -251,7 +251,7 @@ describe("workflow versioning", () => {
         version: "2",
         previousVersions: [v1], // present but ignored without "drain"
       })
-        .step("compute", ({ input }) => Pipeline.succeed(input))
+        .step("compute", ({ input }) => succeed(input))
         .build();
 
       await expect(
@@ -263,7 +263,7 @@ describe("workflow versioning", () => {
       const storage = new InMemoryWorkflowStorage();
       const runner = createWorkflowRunner({ storage });
       const v1 = workflow<{ x: number }>({ name: "test", version: "1" })
-        .step("c", ({ input }) => Pipeline.succeed(input.x * 10))
+        .step("c", ({ input }) => succeed(input.x * 10))
         .build();
 
       const v2 = workflow<{ x: number }>({
@@ -272,7 +272,7 @@ describe("workflow versioning", () => {
         onVersionMismatch: "drain",
         previousVersions: [v1],
       })
-        .step("c", ({ input }) => Pipeline.succeed(input.x * 100))
+        .step("c", ({ input }) => succeed(input.x * 100))
         .build();
 
       // Brand new workflowId — drain should NOT kick in.

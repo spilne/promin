@@ -1,6 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { TaggedError } from "@spilne/perfect-core";
-import { Pipeline } from "@promin/core";
+import { TaggedError, succeed, fail } from "@spilne/perfect-core";
 import { workflow, WorkflowSuspendedError, InMemoryWorkflowStorage } from "../index.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 
@@ -21,12 +20,12 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
     const wf = workflow<string>({ name: "basic-sleep" })
       .step("before", ({ input }) => {
         log.push("before");
-        return Pipeline.succeed(input);
+        return succeed(input);
       })
       .sleep("nap", 60_000)
       .step("after", ({ prev }) => {
         log.push("after");
-        return Pipeline.succeed(prev);
+        return succeed(prev);
       })
       .build();
 
@@ -53,12 +52,12 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
       workflow<number>({ name: "resume-sleep" })
         .step("double", ({ input }) => {
           log.push("double");
-          return Pipeline.succeed(input * 2);
+          return succeed(input * 2);
         })
         .sleep("nap", 1)
         .step("add-100", ({ prev }) => {
           log.push("add-100");
-          return Pipeline.succeed(prev + 100);
+          return succeed(prev + 100);
         })
         .build();
 
@@ -90,17 +89,17 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
       workflow<string>({ name: "multi-sleep" })
         .step("step-1", ({ input }) => {
           log.push("step-1");
-          return Pipeline.succeed(input);
+          return succeed(input);
         })
         .sleep("sleep-1", 1)
         .step("step-2", () => {
           log.push("step-2");
-          return Pipeline.succeed("after-sleep-1");
+          return succeed("after-sleep-1");
         })
         .sleep("sleep-2", 1)
         .step("step-3", () => {
           log.push("step-3");
-          return Pipeline.succeed("after-sleep-2");
+          return succeed("after-sleep-2");
         })
         .build();
 
@@ -138,9 +137,9 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
 
     const buildWf = () =>
       workflow<string>({ name: "no-re-suspend" })
-        .step("before", () => Pipeline.succeed("ok"))
+        .step("before", () => succeed("ok"))
         .sleep("nap", 1) // 1ms
-        .step("after", () => Pipeline.succeed("done"))
+        .step("after", () => succeed("done"))
         .build();
 
     // Suspend
@@ -165,10 +164,10 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
       workflow<number>({ name: "no-reexec" })
         .step("expensive", ({ input }) => {
           step1Calls++;
-          return Pipeline.succeed(input * 100);
+          return succeed(input * 100);
         })
         .sleep("nap", 1)
-        .step("cheap", () => Pipeline.succeed("done"))
+        .step("cheap", () => succeed("done"))
         .build();
 
     await runner.runSafe({ workflow: buildWf(), workflowId: "s-5", input: 5 });
@@ -197,19 +196,19 @@ describe("Sleep + compensation — rollback pre-sleep work if post-sleep step fa
           "create",
           () => {
             log.push("create");
-            return Pipeline.succeed("resource-1");
+            return succeed("resource-1");
           },
           {
             compensate: ({ result }) => {
               log.push(`compensate-create(${result})`);
-              return Pipeline.succeed(undefined as void);
+              return succeed(undefined as void);
             },
           },
         )
         .sleep("nap", 1)
         .step("use", () => {
           log.push("use-fails");
-          return Pipeline.fail(new TestError({ message: "post-sleep failure" }));
+          return fail(new TestError({ message: "post-sleep failure" }));
         })
         .build();
 
@@ -245,16 +244,16 @@ describe("Sleep + workflow retry — resume from where the workflow left off", (
       })
         .step("before", () => {
           log.push("before");
-          return Pipeline.succeed("ok");
+          return succeed("ok");
         })
         .sleep("nap", 1)
         .step("flaky", () => {
           step2Calls++;
           log.push(`flaky-${step2Calls}`);
           if (step2Calls < 2) {
-            return Pipeline.fail(new TestError({ message: "transient" }));
+            return fail(new TestError({ message: "transient" }));
           }
-          return Pipeline.succeed("recovered");
+          return succeed("recovered");
         })
         .build();
 
@@ -283,7 +282,7 @@ describe("Long sleep durations — schedule workflows days or months in the futu
     const before = Date.now();
 
     const wf = workflow<string>({ name: "long-sleep" })
-      .step("start", () => Pipeline.succeed("ok"))
+      .step("start", () => succeed("ok"))
       .sleep("30-days", 30 * 24 * 60 * 60 * 1000)
       .build();
 
@@ -306,7 +305,7 @@ describe("Long sleep durations — schedule workflows days or months in the futu
     const before = Date.now();
 
     const wf = workflow<string>({ name: "year-sleep" })
-      .step("start", () => Pipeline.succeed("ok"))
+      .step("start", () => succeed("ok"))
       .sleep("1-year", 365 * 24 * 60 * 60 * 1000)
       .build();
 

@@ -16,7 +16,7 @@
 // Run: bun run packages/workflow/examples/versioning/04-ctx-patched.ts
 // ---------------------------------------------------------------------------
 
-import { Pipeline } from "@promin/core";
+import { succeed } from "@spilne/perfect-core";
 import {
   workflow,
   InMemoryWorkflowStorage,
@@ -54,7 +54,7 @@ async function main(): Promise<void> {
     version: "1",
     patches: [],
   })
-    .step("load", ({ input }) => Pipeline.succeed(input))
+    .step("load", ({ input }) => succeed(input))
     .journaled("calculate", calculateTotal)
     .build();
 
@@ -66,7 +66,7 @@ async function main(): Promise<void> {
     previousVersions: [v1],
     patches: ["new-pricing"],
   })
-    .step("load", ({ input }) => Pipeline.succeed(input))
+    .step("load", ({ input }) => succeed(input))
     .journaled("calculate", calculateTotal)
     .build();
 

@@ -3,8 +3,8 @@
 // workers filter claims by registered step names + supportedVersions.
 // ---------------------------------------------------------------------------
 
+import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
-import { Pipeline } from "@promin/core";
 import { workflow, InMemoryWorkflowStorage } from "../../durable/index.ts";
 import { createWorkflowRunner } from "../../durable/workflow-runner.ts";
 import { MapStepRegistry } from "../step-registry.ts";
@@ -17,7 +17,7 @@ describe("versioned dispatch", () => {
     const stepQueue = new InMemoryStepQueue();
 
     const registry = new MapStepRegistry();
-    registry.register("remote-step", (ctx) => Pipeline.succeed(`done-${ctx.prev}`));
+    registry.register("remote-step", (ctx) => succeed(`done-${ctx.prev}`));
 
     const worker = createWorker({
       storage,
@@ -33,10 +33,8 @@ describe("versioned dispatch", () => {
       version: "2",
       dispatch: { stepQueue, remoteSteps: ["remote-step"], pollIntervalMs: 25 },
     })
-      .step("load", ({ input }) => Pipeline.succeed(input.id))
-      .step("remote-step", { dependsOn: ["load"] }, ({ deps }) =>
-        Pipeline.succeed(`x-${deps.load}`),
-      )
+      .step("load", ({ input }) => succeed(input.id))
+      .step("remote-step", { dependsOn: ["load"] }, ({ deps }) => succeed(`x-${deps.load}`))
       .build();
     const runner = createWorkflowRunner({ storage });
     await runner.run({ workflow: wf, workflowId: "vd-1-a", input: { id: "abc" } });
@@ -67,7 +65,7 @@ describe("versioned dispatch", () => {
 
     // Worker supports only "known-step".
     const registry = new MapStepRegistry();
-    registry.register("known-step", () => Pipeline.succeed("ok"));
+    registry.register("known-step", () => succeed("ok"));
 
     // Claim directly — avoid spinning the worker loop.
     const claimed = await stepQueue.claim({
@@ -110,7 +108,7 @@ describe("versioned dispatch", () => {
     });
 
     const registry = new MapStepRegistry();
-    registry.register("s", () => Pipeline.succeed("ok"));
+    registry.register("s", () => succeed("ok"));
 
     // Worker supports v1 + v2 only. Unversioned is always accepted for
     // backward compat. v3 is rejected.
@@ -136,7 +134,7 @@ describe("versioned dispatch", () => {
     const stepQueue = new InMemoryStepQueue();
 
     const v2Registry = new MapStepRegistry();
-    v2Registry.register("step-a", (ctx) => Pipeline.succeed(`A-${(ctx.input as any).x}`));
+    v2Registry.register("step-a", (ctx) => succeed(`A-${(ctx.input as any).x}`));
 
     // Worker declares it supports both versions during the rolling deploy.
     const worker = createWorker({
@@ -157,7 +155,7 @@ describe("versioned dispatch", () => {
       version: "1",
       dispatch: { stepQueue, remoteSteps: ["step-a"], pollIntervalMs: 25 },
     })
-      .step("step-a", ({ input }) => Pipeline.succeed(`v1-${input.x}`))
+      .step("step-a", ({ input }) => succeed(`v1-${input.x}`))
       .build();
     const v1Result = await runner.run({
       workflow: v1,
@@ -172,7 +170,7 @@ describe("versioned dispatch", () => {
       version: "2",
       dispatch: { stepQueue, remoteSteps: ["step-a"], pollIntervalMs: 25 },
     })
-      .step("step-a", ({ input }) => Pipeline.succeed(`v2-${input.x}`))
+      .step("step-a", ({ input }) => succeed(`v2-${input.x}`))
       .build();
     const v2Result = await runner.run({
       workflow: v2,
@@ -202,7 +200,7 @@ describe("versioned dispatch", () => {
     });
 
     const v2OnlyRegistry = new MapStepRegistry();
-    v2OnlyRegistry.register("step-a", () => Pipeline.succeed("v2-result"));
+    v2OnlyRegistry.register("step-a", () => succeed("v2-result"));
 
     // Worker only supports v2 — declares drain complete on its side.
     const worker = createWorker({

@@ -1,6 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { TaggedError } from "@spilne/perfect-core";
-import { Pipeline } from "@promin/core";
+import { TaggedError, succeed, fail } from "@spilne/perfect-core";
 import { workflow, dagToMermaid, dagToDot } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
@@ -22,11 +21,11 @@ describe("WorkflowStorage.listWorkflows", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const wfA = workflow<{}>({ name: "a" })
-      .step("s", () => Pipeline.succeed(1))
+      .step("s", () => succeed(1))
       .build();
     await runner.run({ workflow: wfA, workflowId: "wf-1", input: {} });
     const wfB = workflow<{}>({ name: "b" })
-      .step("s", () => Pipeline.succeed(2))
+      .step("s", () => succeed(2))
       .build();
     await runner.run({ workflow: wfB, workflowId: "wf-2", input: {} });
 
@@ -38,11 +37,11 @@ describe("WorkflowStorage.listWorkflows", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const okWf = workflow<{}>({ name: "ok" })
-      .step("s", () => Pipeline.succeed(1))
+      .step("s", () => succeed(1))
       .build();
     await runner.run({ workflow: okWf, workflowId: "wf-ok", input: {} });
     const failWf = workflow<{}>({ name: "fail" })
-      .step("s", () => Pipeline.fail(new TestError({ message: "x" })))
+      .step("s", () => fail(new TestError({ message: "x" })))
       .build();
     await runner.runSafe({ workflow: failWf, workflowId: "wf-fail", input: {} });
 
@@ -59,11 +58,11 @@ describe("WorkflowStorage.listWorkflows", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const alphaWf = workflow<{}>({ name: "alpha" })
-      .step("s", () => Pipeline.succeed(1))
+      .step("s", () => succeed(1))
       .build();
     await runner.run({ workflow: alphaWf, workflowId: "wf-a", input: {} });
     const betaWf = workflow<{}>({ name: "beta" })
-      .step("s", () => Pipeline.succeed(2))
+      .step("s", () => succeed(2))
       .build();
     await runner.run({ workflow: betaWf, workflowId: "wf-b", input: {} });
 
@@ -77,7 +76,7 @@ describe("WorkflowStorage.listWorkflows", () => {
     const runner = createWorkflowRunner({ storage });
     for (let i = 0; i < 5; i++) {
       const wf = workflow<{}>({ name: "paginated" })
-        .step("s", () => Pipeline.succeed(i))
+        .step("s", () => succeed(i))
         .build();
       await runner.run({ workflow: wf, workflowId: `wf-${i}`, input: {} });
     }
@@ -157,8 +156,8 @@ describe("WorkflowHooks", () => {
         },
       },
     })
-      .step("add", ({ input }) => Pipeline.succeed(input.n + 1))
-      .step("double", ({ prev }) => Pipeline.succeed(prev * 2))
+      .step("add", ({ input }) => succeed(input.n + 1))
+      .step("double", ({ prev }) => succeed(prev * 2))
       .build();
     const runner = createWorkflowRunner({ storage });
     await runner.run({ workflow: wf, workflowId: "wf-hooks-1", input: { n: 5 } });
@@ -181,7 +180,7 @@ describe("WorkflowHooks", () => {
         },
       },
     })
-      .step("compute", () => Pipeline.succeed(42))
+      .step("compute", () => succeed(42))
       .build();
     const runner = createWorkflowRunner({ storage });
     await runner.run({ workflow: wf, workflowId: "wf-hooks-2", input: {} });
@@ -203,7 +202,7 @@ describe("WorkflowHooks", () => {
         },
       },
     })
-      .step("boom", () => Pipeline.fail(new TestError({ message: "kaboom" })))
+      .step("boom", () => fail(new TestError({ message: "kaboom" })))
       .build();
     const runner = createWorkflowRunner({ storage });
     await runner.runSafe({ workflow: wf, workflowId: "wf-hooks-3", input: {} });
@@ -224,7 +223,7 @@ describe("WorkflowHooks", () => {
         },
       },
     })
-      .step("boom", () => Pipeline.fail(new TestError({ message: "fail" })))
+      .step("boom", () => fail(new TestError({ message: "fail" })))
       .build();
     const runner = createWorkflowRunner({ storage });
     await runner.runSafe({ workflow: wf, workflowId: "wf-hooks-4", input: {} });
@@ -273,8 +272,8 @@ describe("WorkflowHooks", () => {
         },
       },
     })
-      .step("a", () => Pipeline.succeed(1))
-      .step("b", () => Pipeline.succeed(2))
+      .step("a", () => succeed(1))
+      .step("b", () => succeed(2))
       .build();
     const runner = createWorkflowRunner({ storage });
     await runner.run({ workflow: wf, workflowId: "wf-hooks-6", input: {} });
@@ -292,8 +291,8 @@ describe("DAG visualization", () => {
     it("exports the DAG structure", () => {
       const storage = new InMemoryWorkflowStorage();
       const dag = workflow<{}>({ name: "my-wf" })
-        .step("a", () => Pipeline.succeed(1))
-        .step("b", { dependsOn: ["a"] }, () => Pipeline.succeed(2))
+        .step("a", () => succeed(1))
+        .step("b", { dependsOn: ["a"] }, () => succeed(2))
         .toJSON();
 
       expect(dag.name).toBe("my-wf");
@@ -307,9 +306,9 @@ describe("DAG visualization", () => {
     it("generates Mermaid for linear chain", () => {
       const storage = new InMemoryWorkflowStorage();
       const dag = workflow<{}>({ name: "linear" })
-        .step("fetch", () => Pipeline.succeed(1))
-        .step("process", () => Pipeline.succeed(2))
-        .step("save", () => Pipeline.succeed(3))
+        .step("fetch", () => succeed(1))
+        .step("process", () => succeed(2))
+        .step("save", () => succeed(3))
         .toJSON();
 
       const mermaid = dagToMermaid(dag);
@@ -322,10 +321,10 @@ describe("DAG visualization", () => {
     it("generates Mermaid for DAG", () => {
       const storage = new InMemoryWorkflowStorage();
       const dag = workflow<{}>({ name: "dag" })
-        .step("scrape", () => Pipeline.succeed("html"))
-        .step("summarize", { dependsOn: ["scrape"] }, () => Pipeline.succeed("summary"))
-        .step("keywords", { dependsOn: ["scrape"] }, () => Pipeline.succeed(["kw"]))
-        .step("publish", { dependsOn: ["summarize", "keywords"] }, () => Pipeline.succeed("done"))
+        .step("scrape", () => succeed("html"))
+        .step("summarize", { dependsOn: ["scrape"] }, () => succeed("summary"))
+        .step("keywords", { dependsOn: ["scrape"] }, () => succeed(["kw"]))
+        .step("publish", { dependsOn: ["summarize", "keywords"] }, () => succeed("done"))
         .toJSON();
 
       const mermaid = dagToMermaid(dag);
@@ -338,8 +337,8 @@ describe("DAG visualization", () => {
     it("handles step names with special characters", () => {
       const storage = new InMemoryWorkflowStorage();
       const dag = workflow<{}>({ name: "special" })
-        .step("fetch-data", () => Pipeline.succeed(1))
-        .step("process_result", () => Pipeline.succeed(2))
+        .step("fetch-data", () => succeed(1))
+        .step("process_result", () => succeed(2))
         .toJSON();
 
       const mermaid = dagToMermaid(dag);
@@ -352,10 +351,10 @@ describe("DAG visualization", () => {
     it("generates DOT for DAG", () => {
       const storage = new InMemoryWorkflowStorage();
       const dag = workflow<{}>({ name: "my-workflow" })
-        .step("a", () => Pipeline.succeed(1))
-        .step("b", { dependsOn: ["a"] }, () => Pipeline.succeed(2))
-        .step("c", { dependsOn: ["a"] }, () => Pipeline.succeed(3))
-        .step("d", { dependsOn: ["b", "c"] }, () => Pipeline.succeed(4))
+        .step("a", () => succeed(1))
+        .step("b", { dependsOn: ["a"] }, () => succeed(2))
+        .step("c", { dependsOn: ["a"] }, () => succeed(3))
+        .step("d", { dependsOn: ["b", "c"] }, () => succeed(4))
         .toJSON();
 
       const dot = dagToDot(dag);
@@ -374,15 +373,15 @@ describe("DAG visualization", () => {
     it("toJSON exposes case labels for selector-mode match", () => {
       const storage = new InMemoryWorkflowStorage();
       const dag = workflow<Order>({ name: "shipping" })
-        .step("load", ({ input }) => Pipeline.succeed(input))
+        .step("load", ({ input }) => succeed(input))
         .match("route", {
           on: (o) => o.type,
           cases: {
-            express: () => Pipeline.succeed("E"),
-            standard: () => Pipeline.succeed("S"),
-            freight: () => Pipeline.succeed("F"),
+            express: () => succeed("E"),
+            standard: () => succeed("S"),
+            freight: () => succeed("F"),
           },
-          default: () => Pipeline.succeed("D"),
+          default: () => succeed("D"),
         })
         .toJSON();
 
@@ -395,14 +394,14 @@ describe("DAG visualization", () => {
     it("toJSON exposes labels for predicate-mode match (uses provided labels)", () => {
       const storage = new InMemoryWorkflowStorage();
       const dag = workflow<Order>({ name: "shipping-pred" })
-        .step("load", ({ input }) => Pipeline.succeed(input))
+        .step("load", ({ input }) => succeed(input))
         .match("route", {
           cases: [
-            { label: "vip", when: (o) => o.total > 10_000, then: () => Pipeline.succeed("V") },
+            { label: "vip", when: (o) => o.total > 10_000, then: () => succeed("V") },
             {
               label: "express",
               when: (o) => o.type === "express",
-              then: () => Pipeline.succeed("E"),
+              then: () => succeed("E"),
             },
           ],
         })
@@ -416,11 +415,11 @@ describe("DAG visualization", () => {
     it("toJSON falls back to case[N] for unlabeled predicate cases", () => {
       const storage = new InMemoryWorkflowStorage();
       const dag = workflow<Order>({ name: "shipping-unlabeled" })
-        .step("load", ({ input }) => Pipeline.succeed(input))
+        .step("load", ({ input }) => succeed(input))
         .match("route", {
           cases: [
-            { when: (o) => o.total > 10_000, then: () => Pipeline.succeed("V") },
-            { when: (o) => o.type === "express", then: () => Pipeline.succeed("E") },
+            { when: (o) => o.total > 10_000, then: () => succeed("V") },
+            { when: (o) => o.type === "express", then: () => succeed("E") },
           ],
         })
         .toJSON();
@@ -432,14 +431,14 @@ describe("DAG visualization", () => {
     it("dagToMermaid renders match as decision node with labeled outgoing edges", () => {
       const storage = new InMemoryWorkflowStorage();
       const dag = workflow<Order>({ name: "viz-mermaid" })
-        .step("load", ({ input }) => Pipeline.succeed(input))
+        .step("load", ({ input }) => succeed(input))
         .match("route", {
           on: (o) => o.type,
           cases: {
-            express: () => Pipeline.succeed("E"),
-            standard: () => Pipeline.succeed("S"),
+            express: () => succeed("E"),
+            standard: () => succeed("S"),
           },
-          default: () => Pipeline.succeed("D"),
+          default: () => succeed("D"),
         })
         .toJSON();
 
@@ -457,12 +456,12 @@ describe("DAG visualization", () => {
     it("dagToDot renders match as diamond with labeled edges", () => {
       const storage = new InMemoryWorkflowStorage();
       const dag = workflow<Order>({ name: "viz-dot" })
-        .step("load", ({ input }) => Pipeline.succeed(input))
+        .step("load", ({ input }) => succeed(input))
         .match("route", {
           on: (o) => o.type,
           cases: {
-            express: () => Pipeline.succeed("E"),
-            standard: () => Pipeline.succeed("S"),
+            express: () => succeed("E"),
+            standard: () => succeed("S"),
           },
         })
         .toJSON();
@@ -477,8 +476,8 @@ describe("DAG visualization", () => {
     it("non-match steps render as plain rectangles, not diamonds", () => {
       const storage = new InMemoryWorkflowStorage();
       const dag = workflow<{}>({ name: "no-match" })
-        .step("a", () => Pipeline.succeed(1))
-        .step("b", () => Pipeline.succeed(2))
+        .step("a", () => succeed(1))
+        .step("b", () => succeed(2))
         .toJSON();
 
       const mermaid = dagToMermaid(dag);

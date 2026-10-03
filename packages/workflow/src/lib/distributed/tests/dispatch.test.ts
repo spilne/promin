@@ -1,5 +1,5 @@
+import { succeed, fail } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
-import { Pipeline } from "@promin/core";
 import { workflow, InMemoryWorkflowStorage } from "../../durable/index.ts";
 import { createWorkflowRunner } from "../../durable/workflow-runner.ts";
 import { MapStepRegistry } from "../step-registry.ts";
@@ -20,7 +20,7 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
     const gpuRegistry = new MapStepRegistry();
     gpuRegistry.register("transcribe", (ctx) => {
       log.push("transcribe:remote");
-      return Pipeline.succeed(`transcribed: ${ctx.prev}`);
+      return succeed(`transcribed: ${ctx.prev}`);
     });
 
     const gpuWorker = createWorker({
@@ -43,17 +43,17 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
     })
       .step("download", ({ input }) => {
         log.push("download:local");
-        return Pipeline.succeed(`video-${input.videoId}`);
+        return succeed(`video-${input.videoId}`);
       })
       .step(
         "transcribe",
         { dependsOn: ["download"] },
-        ({ deps }) => Pipeline.succeed(`transcribed: ${deps.download}`),
+        ({ deps }) => succeed(`transcribed: ${deps.download}`),
         { needs: ["gpu"] },
       )
       .step("format", { dependsOn: ["transcribe"] }, ({ deps }) => {
         log.push("format:local");
-        return Pipeline.succeed(`formatted: ${deps.transcribe}`);
+        return succeed(`formatted: ${deps.transcribe}`);
       })
       .build();
     const runner = createWorkflowRunner({ storage });
@@ -84,8 +84,8 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
         "flaky",
         ({ input }) => {
           attempts++;
-          if (attempts < 3) return Pipeline.fail(new Error("transient") as never);
-          return Pipeline.succeed(input * 2);
+          if (attempts < 3) return fail(new Error("transient") as never);
+          return succeed(input * 2);
         },
         {
           retry: { maxRetries: 5 },
@@ -103,8 +103,8 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
     const storage = new InMemoryWorkflowStorage();
 
     const wf = workflow<number>({ name: "no-dispatch" })
-      .step("double", ({ input }) => Pipeline.succeed(input * 2))
-      .step("add", ({ prev }) => Pipeline.succeed(prev + 100))
+      .step("double", ({ input }) => succeed(input * 2))
+      .step("add", ({ prev }) => succeed(prev + 100))
       .build();
     const runner = createWorkflowRunner({ storage });
     const result = await runner.run({ workflow: wf, workflowId: "nd-1", input: 5 });
@@ -139,13 +139,10 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
         pollIntervalMs: 100,
       },
     })
-      .step("local-ok", () => Pipeline.succeed("ok"))
-      .step(
-        "bad-step",
-        { dependsOn: ["local-ok"] },
-        () => Pipeline.succeed("should not run locally"),
-        { needs: ["remote"] },
-      )
+      .step("local-ok", () => succeed("ok"))
+      .step("bad-step", { dependsOn: ["local-ok"] }, () => succeed("should not run locally"), {
+        needs: ["remote"],
+      })
       .build();
     const runner = createWorkflowRunner({ storage });
     const { error } = await runner.runSafe({

@@ -69,8 +69,8 @@
       "version": "0.1.0",
       "dependencies": {
         "@kubernetes/client-node": "^1.4.0",
-        "@promin/core": "workspace:*",
         "@promin/workflow": "workspace:*",
+        "@spilne/perfect-core": "catalog:",
       },
       "devDependencies": {
         "@types/bun": "catalog:",
@@ -125,7 +125,6 @@
       "version": "0.1.0",
       "dependencies": {
         "@promin/agent": "workspace:*",
-        "@promin/core": "workspace:*",
         "@promin/evals": "workspace:*",
         "@promin/workflow": "workspace:*",
         "@spilne/perfect-core": "catalog:",
@@ -175,10 +174,8 @@
       "name": "@promin/workflow",
       "version": "0.1.0",
       "dependencies": {
-        "@promin/core": "workspace:*",
         "@spilne/perfect-core": "catalog:",
         "croner": "^10.0.1",
-        "effect": "catalog:",
         "rrule": "^2.8.1",
       },
       "devDependencies": {
@@ -193,7 +190,6 @@
         "@spilne/perfect-core": "catalog:",
       },
       "devDependencies": {
-        "@promin/core": "workspace:*",
         "@types/bun": "catalog:",
       },
     },
@@ -207,10 +203,10 @@
         "marked": "^18.0.2",
       },
       "devDependencies": {
-        "@promin/core": "workspace:*",
         "@promin/postgres": "workspace:*",
         "@promin/sqlite": "workspace:*",
         "@promin/zorya-client": "workspace:*",
+        "@spilne/perfect-core": "catalog:",
         "@spilne/perfect-postgres": "catalog:",
         "@types/bun": "catalog:",
         "daisyui": "^4.12.14",

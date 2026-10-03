@@ -3,8 +3,11 @@
   "files": [],
   "include": [],
   "references": [
-    { "path": "../core" },
-    { "path": "./tsconfig.lib.json" },
-    { "path": "./tsconfig.examples.json" }
+    {
+      "path": "./tsconfig.lib.json"
+    },
+    {
+      "path": "./tsconfig.examples.json"
+    }
   ]
 }

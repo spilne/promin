@@ -17,9 +17,6 @@
       "path": "../workflow-remote/tsconfig.lib.json"
     },
     {
-      "path": "../core/tsconfig.lib.json"
-    },
-    {
       "path": "../zorya-client/tsconfig.lib.json"
     },
     {

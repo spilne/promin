@@ -627,7 +627,7 @@ function makeCtx<Input, Prev>(params: {
    */
   defaultCodec?: Codec<unknown>;
   /**
-   * Pipeline-level default for `ActivityOptions.payloadHash`. When `true`,
+   * Workflow-level default for `ActivityOptions.payloadHash`. When `true`,
    * 3-arg `ctx.activity(name, input, fn)` calls hash by default; per-call
    * `payloadHash: false` overrides. The 2-arg form is unaffected.
    */
@@ -738,7 +738,7 @@ function makeCtx<Input, Prev>(params: {
     // pipeline default.
     //   * Explicit `options.payloadHash: true` on the 2-arg form throws —
     //     the caller asked for something they can't have, surface it.
-    //   * Pipeline-level default on a 2-arg call silently skips instead.
+    //   * Workflow-level default on a 2-arg call silently skips instead.
     //     The pipeline flag means "hash where you can"; forcing every
     //     existing 2-arg activity to migrate would make the flag
     //     impractical to enable in a real codebase.
@@ -1802,7 +1802,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
    */
   codec?: Codec<unknown>;
   /**
-   * Pipeline-level default for `ActivityOptions.payloadHash`. When `true`,
+   * Workflow-level default for `ActivityOptions.payloadHash`. When `true`,
    * every 3-arg `ctx.activity(name, input, fn)` in this step's body
    * fingerprints its input by default; per-activity `payloadHash: false`
    * still opts out. The 2-arg form is unaffected (no reified input to hash).
@@ -1894,7 +1894,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
 }
 
 // ---------------------------------------------------------------------------
-// Local retry runner — intentionally small; mirrors @promin/core pattern.
+// Local retry runner — intentionally small.
 // ---------------------------------------------------------------------------
 
 async function runWithRetry<T>(fn: () => Promise<T>, policy: RetryPolicy<unknown>): Promise<T> {

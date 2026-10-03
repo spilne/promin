@@ -11,7 +11,6 @@ import {
   InMemoryWorkflowStorage,
   InMemoryStepQueue,
 } from "@promin/workflow";
-import { Pipeline } from "@promin/core";
 
 const storage = new InMemoryWorkflowStorage();
 const stepQueue = new InMemoryStepQueue();
@@ -26,12 +25,10 @@ const coordinator = createCoordinator({ storage, stepQueue });
 // --- Default worker (download, general tasks) ---
 
 const defaultRegistry = new MapStepRegistry();
-defaultRegistry.register("download", (ctx) =>
-  Pipeline.fn(async () => {
-    const videoId = (ctx.input as any).videoId;
-    return { path: `/tmp/${videoId}.mp4` };
-  }),
-);
+defaultRegistry.register("download", async (ctx) => {
+  const videoId = (ctx.input as any).videoId;
+  return { path: `/tmp/${videoId}.mp4` };
+});
 
 const defaultWorker = createWorker({
   storage,
@@ -44,12 +41,10 @@ const defaultWorker = createWorker({
 // --- GPU worker (transcription) ---
 
 const gpuRegistry = new MapStepRegistry();
-gpuRegistry.register("transcribe", (ctx) =>
-  Pipeline.fn(async () => {
-    const path = (ctx.prev as any).path;
-    return { text: `Transcription of ${path}` };
-  }),
-);
+gpuRegistry.register("transcribe", async (ctx) => {
+  const path = (ctx.prev as any).path;
+  return { text: `Transcription of ${path}` };
+});
 
 const gpuWorker = createWorker({
   storage,
@@ -62,12 +57,10 @@ const gpuWorker = createWorker({
 // --- AI worker (summarization) ---
 
 const aiRegistry = new MapStepRegistry();
-aiRegistry.register("summarize", (ctx) =>
-  Pipeline.fn(async () => {
-    const text = (ctx.prev as any).text;
-    return { summary: `Summary: ${text.slice(0, 50)}` };
-  }),
-);
+aiRegistry.register("summarize", async (ctx) => {
+  const text = (ctx.prev as any).text;
+  return { summary: `Summary: ${text.slice(0, 50)}` };
+});
 
 const aiWorker = createWorker({
   storage,

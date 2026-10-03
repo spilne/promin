@@ -17,7 +17,7 @@
 // would use these directly.
 // ---------------------------------------------------------------------------
 
-import { Pipeline } from "@promin/core";
+import { tryPromise } from "@spilne/perfect-core";
 import { workflow, type StepHandler } from "@promin/workflow";
 
 export interface VideoInput {
@@ -112,56 +112,71 @@ function sleep(ms: number): Promise<void> {
 
 /** `decode` handler — default queue. */
 export const decodeHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    const { videoId } = ctx.input as VideoInput;
-    console.log(`[decode] ${ctx.workflowId} — probing ${videoId}`);
-    await sleep(150);
-    return { format: "mp4", durationSec: 90 } satisfies DecodeResult;
-  });
+  tryPromise(
+    async () => {
+      const { videoId } = ctx.input as VideoInput;
+      console.log(`[decode] ${ctx.workflowId} — probing ${videoId}`);
+      await sleep(150);
+      return { format: "mp4", durationSec: 90 } satisfies DecodeResult;
+    },
+    (e) => e,
+  ).orDie();
 
 /** `transcode` handler — GPU queue. */
 export const transcodeHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    console.log(`[transcode] ${ctx.workflowId} — encoding 3 resolutions on GPU`);
-    await sleep(800);
-    return {
-      resolutions: [
-        { label: "1080p", path: "/out/1080p.mp4" },
-        { label: "720p", path: "/out/720p.mp4" },
-        { label: "480p", path: "/out/480p.mp4" },
-      ],
-    } satisfies TranscodeResult;
-  });
+  tryPromise(
+    async () => {
+      console.log(`[transcode] ${ctx.workflowId} — encoding 3 resolutions on GPU`);
+      await sleep(800);
+      return {
+        resolutions: [
+          { label: "1080p", path: "/out/1080p.mp4" },
+          { label: "720p", path: "/out/720p.mp4" },
+          { label: "480p", path: "/out/480p.mp4" },
+        ],
+      } satisfies TranscodeResult;
+    },
+    (e) => e,
+  ).orDie();
 
 /** `thumbnail` handler — CPU queue. */
 export const thumbnailHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    const transcode = (ctx.deps as { transcode?: TranscodeResult }).transcode ?? {
-      resolutions: [],
-    };
-    console.log(
-      `[thumbnail] ${ctx.workflowId} — extracting thumbs for ${transcode.resolutions.length} renditions`,
-    );
-    await sleep(250);
-    return {
-      thumbnails: transcode.resolutions.map((r) => `/thumbs/${r.label}.jpg`),
-    } satisfies ThumbnailResult;
-  });
+  tryPromise(
+    async () => {
+      const transcode = (ctx.deps as { transcode?: TranscodeResult }).transcode ?? {
+        resolutions: [],
+      };
+      console.log(
+        `[thumbnail] ${ctx.workflowId} — extracting thumbs for ${transcode.resolutions.length} renditions`,
+      );
+      await sleep(250);
+      return {
+        thumbnails: transcode.resolutions.map((r) => `/thumbs/${r.label}.jpg`),
+      } satisfies ThumbnailResult;
+    },
+    (e) => e,
+  ).orDie();
 
 /** `metadata` handler — default queue. */
 export const metadataHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    const { videoId } = ctx.input as VideoInput;
-    console.log(`[metadata] ${ctx.workflowId} — tagging ${videoId}`);
-    await sleep(200);
-    return { tags: ["demo", "promin"], title: `Video ${videoId}` } satisfies MetadataResult;
-  });
+  tryPromise(
+    async () => {
+      const { videoId } = ctx.input as VideoInput;
+      console.log(`[metadata] ${ctx.workflowId} — tagging ${videoId}`);
+      await sleep(200);
+      return { tags: ["demo", "promin"], title: `Video ${videoId}` } satisfies MetadataResult;
+    },
+    (e) => e,
+  ).orDie();
 
 /** `notify` handler — default queue. */
 export const notifyHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    const { videoId } = ctx.input as VideoInput;
-    console.log(`[notify] ${ctx.workflowId} — video ready: ${videoId}`);
-    await sleep(50);
-    return { videoId, deliveredAt: new Date().toISOString() } satisfies NotifyResult;
-  });
+  tryPromise(
+    async () => {
+      const { videoId } = ctx.input as VideoInput;
+      console.log(`[notify] ${ctx.workflowId} — video ready: ${videoId}`);
+      await sleep(50);
+      return { videoId, deliveredAt: new Date().toISOString() } satisfies NotifyResult;
+    },
+    (e) => e,
+  ).orDie();

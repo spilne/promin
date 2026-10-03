@@ -1,16 +1,15 @@
 import { describe, it, expect } from "bun:test";
-import { Pipeline } from "@promin/core";
+import { tryPromise } from "@spilne/perfect-core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 
 // Reproducer for promin-4ace: a workflow whose `.stepAsync()` body throws
 // used to leave the workflow row stuck in `status = "pending"` with no
-// step rows and no error recorded. The runner wrapped the step pipeline
-// via `Pipeline.fromPromise`, which routes rejections as Effect defects;
-// the runner's `pipeline.runSafe()` (no `catchAll`) let the defect escape
-// past the `saveStepFailure` path. Fixed by running with
-// `runSafe({ catchAll: true })`.
+// step rows and no error recorded. `.stepAsync()` lifts its body with
+// defect semantics (a rejection is a defect, not a typed failure), and
+// settling the step batch without catching defects let the failure escape
+// past the `saveStepFailure` path. Fixed by catching defects there too.
 
 describe("stepAsync throwing body — promin-4ace reproducer", () => {
   it("lands the workflow in status=failed when stepAsync throws", async () => {
@@ -40,18 +39,21 @@ describe("stepAsync throwing body — promin-4ace reproducer", () => {
     expect(state?.steps["boom"]?.error).toContain("boom");
   });
 
-  it("handles user code that builds Pipeline.fromPromise and rejects", async () => {
-    // Any user step that threads Pipeline.fromPromise with a throwing
-    // body would hit the same defect-escape path. The runner-level
-    // catchAll fix covers this case too.
+  it("handles user code that lifts a rejecting promise as a defect", async () => {
+    // Any user step that lifts a throwing body with `.orDie()` would hit
+    // the same defect-escape path. The runner-level defect handling
+    // covers this case too.
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "raw-from-promise" })
       .step("boom", () =>
-        Pipeline.fromPromise(async () => {
-          throw new Error("raw rejection");
-        }),
+        tryPromise(
+          async () => {
+            throw new Error("raw rejection");
+          },
+          (e) => e,
+        ).orDie(),
       )
       .build();
 

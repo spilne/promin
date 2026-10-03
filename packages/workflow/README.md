@@ -12,7 +12,7 @@ bun add @promin/workflow
 
 ```typescript
 import { workflow } from "@promin/workflow";
-import { Pipeline } from "@promin/core";
+import { succeed } from "@spilne/perfect-core";
 import { migrate, PostgresWorkflowStorage } from "@promin/postgres";
 
 await migrate(db);
@@ -24,15 +24,30 @@ const result = await workflow<{ userId: string }>({
 })
   .step("fetch", ({ input }) => api.get(`/users/${input.userId}`, UserSchema))
   .step("enrich", { dependsOn: ["fetch"] }, ({ deps }) => enrichUser(deps.fetch))
-  .step("notify", { dependsOn: ["enrich"] }, ({ deps }) =>
-    Pipeline.succeed(`Welcome ${deps.enrich.name}!`),
-  )
+  .step("notify", { dependsOn: ["enrich"] }, ({ deps }) => succeed(`Welcome ${deps.enrich.name}!`))
   .run({ workflowId: "wf_1", input: { userId: "u_42" } });
 ```
 
 Steps with independent dependencies run in parallel automatically. Each step is checkpointed — if the process crashes, the workflow resumes from the last completed step.
 
 For non-durable use cases (scripts, request handlers), use `flow()` with the same API but no storage requirement.
+
+## Step bodies
+
+`.step()` takes a function returning a [perfect](https://github.com/spilne/perfect) `Eff<A, Throws<E>>`. Typed failures (`E`) are what step `retry` and `onFailure` act on. `.stepAsync()` takes a Promise-returning function instead; its rejections are defects, so they fail the step without being retried.
+
+```typescript
+import { tryPromise } from "@spilne/perfect-core";
+
+wf.step("charge", (ctx) => tryPromise(() => stripe.charge(ctx.input), toPaymentError), {
+  retry: { maxRetries: 3, when: isTransient },
+});
+wf.stepAsync("notify", async (ctx) => {
+  await mailer.send(ctx.input.email);
+});
+```
+
+`runner.run()` rejects with the step's own error (or the thrown value for a defect) — never a wrapper.
 
 ## Features
 

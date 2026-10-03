@@ -10,7 +10,7 @@
 // Run: bun run packages/workflow/examples/versioning/03-drain-registry.ts
 // ---------------------------------------------------------------------------
 
-import { Pipeline } from "@promin/core";
+import { succeed } from "@spilne/perfect-core";
 import {
   workflow,
   InMemoryWorkflowStorage,
@@ -23,15 +23,15 @@ async function main(): Promise<void> {
 
   // Each version is a full workflow definition, built and kept around.
   const v1 = workflow<{ x: number }>({ name: "job", version: "1" })
-    .step("run", ({ input }) => Pipeline.succeed(`v1-${input.x}`))
+    .step("run", ({ input }) => succeed(`v1-${input.x}`))
     .build();
 
   const v2 = workflow<{ x: number }>({ name: "job", version: "2" })
-    .step("run", ({ input }) => Pipeline.succeed(`v2-${input.x}`))
+    .step("run", ({ input }) => succeed(`v2-${input.x}`))
     .build();
 
   const v3 = workflow<{ x: number }>({ name: "job", version: "3" })
-    .step("run", ({ input }) => Pipeline.succeed(`v3-${input.x}`))
+    .step("run", ({ input }) => succeed(`v3-${input.x}`))
     .build();
 
   // Registry carries the (name, version) catalog. The runner holds storage

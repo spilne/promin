@@ -14,7 +14,6 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { Pipeline } from "@promin/core";
 import {
   workflow,
   InMemoryWorkflowStorage,

@@ -6,7 +6,6 @@
 // run data quality tests.
 // ---------------------------------------------------------------------------
 
-import { Pipeline } from "@promin/core";
 import { workflow } from "../durable/durable-pipeline.ts";
 import type { Workflow } from "../durable/durable-pipeline.ts";
 import { topologicalSort } from "../durable/workflow-dag.ts";
@@ -59,13 +58,11 @@ export function compileSqlProject(
 
     if (model.dependsOn.length === 0) {
       // Root model — no dependencies
-      builder = builder.step(model.name, () =>
-        Pipeline.fromPromise(() => executeModel(model, executeSql)),
-      );
+      builder = builder.stepAsync(model.name, () => executeModel(model, executeSql));
     } else {
       // DAG model — depends on other models
-      builder = builder.step(model.name, { dependsOn: model.dependsOn }, () =>
-        Pipeline.fromPromise(() => executeModel(model, executeSql)),
+      builder = builder.stepAsync(model.name, { dependsOn: model.dependsOn }, () =>
+        executeModel(model, executeSql),
       );
     }
   }

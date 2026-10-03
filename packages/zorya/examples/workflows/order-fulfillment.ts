@@ -8,39 +8,45 @@
 // the workflow ends in the compensating/failed path.
 // ---------------------------------------------------------------------------
 
+import { TaggedError, fail, sleep, succeed, type Eff, type Throws } from "@spilne/perfect-core";
 import { workflow } from "@promin/workflow";
-import { Pipeline } from "@promin/core";
 
 export interface OrderFulfillmentInput {
   orderId: number;
   items?: string[];
 }
 
+/** A simulated downstream rejection (declined card, refused shipment). */
+export class FulfillmentError extends TaggedError("FulfillmentError")<{
+  readonly message: string;
+}>() {}
+
 function delay(minMs: number, maxMs: number): number {
   return minMs + Math.floor(Math.random() * (maxMs - minMs));
 }
 
-function pSleep(ms: number): Pipeline<void, never> {
-  return Pipeline.fromPromise(() => new Promise<void>((r) => setTimeout(r, ms)));
+function pSleep(ms: number): Eff<void, never> {
+  return sleep(ms);
 }
 
-function pSuccess<T>(v: T, minMs: number, maxMs: number): Pipeline<T, never> {
+function pSuccess<T>(v: T, minMs: number, maxMs: number): Eff<T, never> {
   return pSleep(delay(minMs, maxMs)).map(() => v);
 }
 
 /**
- * Simulates a side effect that can fail. Returns a Pipeline<T> that either
+ * Simulates a side effect that can fail. Returns an Eff that either
  * resolves after a random delay or fails with `msg`. The fail rate is
  * passed in so individual callsites can tune it.
  */
 function pMaybeFail<T>(
   ok: T,
   opts: { minMs: number; maxMs: number; failRate: number; msg: string },
-): Pipeline<T, Error> {
-  return pSleep(delay(opts.minMs, opts.maxMs)).flatMap(() =>
-    Math.random() < opts.failRate
-      ? (Pipeline.fail(new Error(opts.msg)) as Pipeline<T, Error>)
-      : Pipeline.succeed(ok),
+): Eff<T, Throws<FulfillmentError>> {
+  return pSleep(delay(opts.minMs, opts.maxMs)).flatMap(
+    (): Eff<T, Throws<FulfillmentError>> =>
+      Math.random() < opts.failRate
+        ? fail(new FulfillmentError({ message: opts.msg }))
+        : succeed(ok),
   );
 }
 

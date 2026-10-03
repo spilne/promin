@@ -1,7 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { TaggedError } from "@spilne/perfect-core";
-import { Pipeline } from "@promin/core";
-import { workflow } from "../durable-pipeline.ts";
+import { TaggedError, succeed, fail } from "@spilne/perfect-core";
+import { workflow, type StepEff } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 
@@ -49,12 +48,12 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
         "step-1",
         ({ input }) => {
           t.track("step-1:execute");
-          return Pipeline.succeed(input.n * 2);
+          return succeed(input.n * 2);
         },
         {
           compensate: ({ result }) => {
             t.track(`step-1:compensate(${result})`);
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
@@ -62,18 +61,18 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
         "step-2",
         ({ prev }) => {
           t.track("step-2:execute");
-          return Pipeline.succeed(prev + 1);
+          return succeed(prev + 1);
         },
         {
           compensate: ({ result }) => {
             t.track(`step-2:compensate(${result})`);
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
       .step("step-3", () => {
         t.track("step-3:execute");
-        return Pipeline.fail(new TestError({ message: "boom" }));
+        return fail(new TestError({ message: "boom" }));
       })
       .build();
 
@@ -100,12 +99,12 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
         "ok",
         () => {
           t.track("ok:execute");
-          return Pipeline.succeed("done");
+          return succeed("done");
         },
         {
           compensate: () => {
             t.track("ok:compensate");
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
@@ -113,12 +112,12 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
         "fail",
         () => {
           t.track("fail:execute");
-          return Pipeline.fail(new TestError({ message: "fail" }));
+          return fail(new TestError({ message: "fail" }));
         },
         {
           compensate: () => {
             t.track("fail:compensate");
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
@@ -145,23 +144,23 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
         "step-1",
         () => {
           t.track("step-1:execute");
-          return Pipeline.succeed("a");
+          return succeed("a");
         },
         {
           compensate: () => {
             t.track("step-1:compensate");
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
       .step("step-2", () => {
         t.track("step-2:execute");
-        return Pipeline.succeed("b");
+        return succeed("b");
       })
       // step-2 has no compensate
       .step("step-3", () => {
         t.track("step-3:execute");
-        return Pipeline.fail(new TestError({ message: "fail" }));
+        return fail(new TestError({ message: "fail" }));
       })
       .build();
 
@@ -191,12 +190,12 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
         "step-1",
         () => {
           t.track("step-1:execute");
-          return Pipeline.succeed("a");
+          return succeed("a");
         },
         {
           compensate: () => {
             t.track("step-1:compensate");
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
@@ -204,7 +203,7 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
         "step-2",
         () => {
           t.track("step-2:execute");
-          return Pipeline.succeed("b");
+          return succeed("b");
         },
         {
           compensate: () => {
@@ -215,7 +214,7 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
       )
       .step("step-3", () => {
         t.track("step-3:execute");
-        return Pipeline.fail(new TestError({ message: "fail" }));
+        return fail(new TestError({ message: "fail" }));
       })
       .build();
 
@@ -238,13 +237,13 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
     let receivedParams: any = null;
 
     const wf = workflow<{ userId: string }>({ name: "comp-params" })
-      .step("create", ({ input }) => Pipeline.succeed({ id: "acc_123", user: input.userId }), {
+      .step("create", ({ input }) => succeed({ id: "acc_123", user: input.userId }), {
         compensate: (params) => {
           receivedParams = params;
-          return Pipeline.succeed(undefined as void);
+          return succeed(undefined as void);
         },
       })
-      .step("fail", () => Pipeline.fail(new TestError({ message: "fail" })))
+      .step("fail", () => fail(new TestError({ message: "fail" })))
       .build();
 
     const { error } = await runner.runSafe({
@@ -270,7 +269,7 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
         "step-1",
         () => {
           t.track("step-1:execute");
-          return Pipeline.succeed("done");
+          return succeed("done");
         },
         {
           compensate: async () => {
@@ -278,7 +277,7 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
           },
         },
       )
-      .step("fail", () => Pipeline.fail(new TestError({ message: "fail" })))
+      .step("fail", () => fail(new TestError({ message: "fail" })))
       .build();
 
     const { error } = await runner.runSafe({
@@ -297,10 +296,10 @@ describe("Saga rollback — undo completed work when a later step fails", () => 
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "no-comp" })
-      .step("step-1", ({ input }) => Pipeline.succeed(input + 1), {
+      .step("step-1", ({ input }) => succeed(input + 1), {
         compensate: () => {
           t.track("should-not-run");
-          return Pipeline.succeed(undefined as void);
+          return succeed(undefined as void);
         },
       })
       .build();
@@ -327,12 +326,12 @@ describe("Failure strategy interaction — skip or fallback avoids unnecessary r
         "step-1",
         () => {
           t.track("step-1:execute");
-          return Pipeline.succeed("a");
+          return succeed("a");
         },
         {
           compensate: () => {
             t.track("step-1:compensate");
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
@@ -340,7 +339,7 @@ describe("Failure strategy interaction — skip or fallback avoids unnecessary r
         "step-2",
         () => {
           t.track("step-2:execute");
-          return Pipeline.fail(new TestError({ message: "skip me" }));
+          return fail(new TestError({ message: "skip me" }));
         },
         {
           onFailure: "skip",
@@ -348,7 +347,7 @@ describe("Failure strategy interaction — skip or fallback avoids unnecessary r
       )
       .step("step-3", ({ prev }) => {
         t.track("step-3:execute");
-        return Pipeline.succeed("ok");
+        return succeed("ok");
       })
       .build();
 
@@ -370,19 +369,19 @@ describe("Failure strategy interaction — skip or fallback avoids unnecessary r
         "step-1",
         () => {
           t.track("step-1:execute");
-          return Pipeline.succeed("a");
+          return succeed("a");
         },
         {
           compensate: () => {
             t.track("step-1:compensate");
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
       .step(
         "step-2",
         () => {
-          return Pipeline.fail(new TestError({ message: "use fallback" }));
+          return fail(new TestError({ message: "use fallback" }));
         },
         {
           onFailure: { fallback: () => "fallback-value" },
@@ -406,16 +405,16 @@ describe("Failure strategy interaction — skip or fallback avoids unnecessary r
         "step-1",
         () => {
           t.track("step-1:execute");
-          return Pipeline.succeed("a");
+          return succeed("a");
         },
         {
           compensate: () => {
             t.track("step-1:compensate");
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
-      .step("step-2", () => Pipeline.fail(new TestError({ message: "fail" })))
+      .step("step-2", () => fail(new TestError({ message: "fail" })))
       .build();
 
     const { error } = await runner.runSafe({ workflow: wf, workflowId: "fail-comp-1", input: "x" });
@@ -442,15 +441,15 @@ describe("Workflow-level retry — recover from transient failures before giving
     })
       .step("step-1", ({ input }) => {
         t.track("step-1:execute");
-        return Pipeline.succeed(input * 2);
+        return succeed(input * 2);
       })
       .step("step-2", ({ prev }) => {
         attempt++;
         t.track(`step-2:execute(attempt=${attempt})`);
         if (attempt < 2) {
-          return Pipeline.fail(new TestError({ message: `fail-${attempt}` }));
+          return fail(new TestError({ message: `fail-${attempt}` }));
         }
-        return Pipeline.succeed(prev + 100);
+        return succeed(prev + 100);
       })
       .build();
 
@@ -480,19 +479,19 @@ describe("Workflow-level retry — recover from transient failures before giving
         "step-1",
         () => {
           t.track("step-1:execute");
-          return Pipeline.succeed("done");
+          return succeed("done");
         },
         {
           compensate: () => {
             t.track("step-1:compensate");
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
       .step("step-2", () => {
         attempt++;
         t.track(`step-2:execute(attempt=${attempt})`);
-        return Pipeline.fail(new TestError({ message: `always-fail-${attempt}` }));
+        return fail(new TestError({ message: `always-fail-${attempt}` }));
       })
       .build();
 
@@ -527,12 +526,12 @@ describe("Workflow-level retry — recover from transient failures before giving
         "step-1",
         () => {
           t.track("step-1:execute");
-          return Pipeline.succeed("ok");
+          return succeed("ok");
         },
         {
           compensate: () => {
             t.track("step-1:compensate");
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
@@ -541,7 +540,7 @@ describe("Workflow-level retry — recover from transient failures before giving
         () => {
           totalAttempts++;
           t.track(`step-2:attempt=${totalAttempts}`);
-          return Pipeline.fail(new TestError({ message: `fail-${totalAttempts}` }));
+          return fail(new TestError({ message: `fail-${totalAttempts}` }));
         },
         {
           retry: { maxRetries: 1 },
@@ -572,18 +571,18 @@ describe("Workflow-level retry — recover from transient failures before giving
         "step-1",
         () => {
           t.track("step-1:execute");
-          return Pipeline.succeed("ok");
+          return succeed("ok");
         },
         {
           compensate: () => {
             t.track("step-1:compensate");
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
       .step("step-2", () => {
         t.track("step-2:execute");
-        return Pipeline.fail(new TestError({ message: "fail" }));
+        return fail(new TestError({ message: "fail" }));
       })
       .build();
 
@@ -614,19 +613,19 @@ describe("Post-rollback hook — notify ops team after saga compensation", () =>
       compensate: {
         onComplete: (params) => {
           report = params;
-          return Pipeline.succeed(undefined as void);
+          return succeed(undefined as void);
         },
       },
     })
-      .step("step-1", () => Pipeline.succeed("a"), {
-        compensate: () => Pipeline.succeed(undefined as void),
+      .step("step-1", () => succeed("a"), {
+        compensate: () => succeed(undefined as void),
       })
-      .step("step-2", () => Pipeline.succeed("b"), {
+      .step("step-2", () => succeed("b"), {
         compensate: () => {
           throw new Error("comp-failed");
         },
       })
-      .step("fail", () => Pipeline.fail(new TestError({ message: "boom" })))
+      .step("fail", () => fail(new TestError({ message: "boom" })))
       .build();
 
     const { error } = await runner.runSafe({ workflow: wf, workflowId: "oncomp-1", input: "x" });
@@ -651,10 +650,10 @@ describe("Post-rollback hook — notify ops team after saga compensation", () =>
         },
       },
     })
-      .step("step-1", () => Pipeline.succeed("a"), {
-        compensate: () => Pipeline.succeed(undefined as void),
+      .step("step-1", () => succeed("a"), {
+        compensate: () => succeed(undefined as void),
       })
-      .step("fail", () => Pipeline.fail(new TestError({ message: "original error" })))
+      .step("fail", () => fail(new TestError({ message: "original error" })))
       .build();
 
     const { error } = await runner.runSafe({
@@ -681,8 +680,8 @@ describe("Post-rollback hook — notify ops team after saga compensation", () =>
         },
       },
     })
-      .step("step-1", () => Pipeline.succeed("a"))
-      .step("fail", () => Pipeline.fail(new TestError({ message: "fail" })))
+      .step("step-1", () => succeed("a"))
+      .step("fail", () => fail(new TestError({ message: "fail" })))
       .build();
 
     await runner.runSafe({ workflow: wf, workflowId: "oncomp-async-1", input: "x" });
@@ -706,12 +705,12 @@ describe("DAG rollback order — undo dependent steps before their prerequisites
         "a",
         () => {
           t.track("a:execute");
-          return Pipeline.succeed("A");
+          return succeed("A");
         },
         {
           compensate: () => {
             t.track("a:compensate");
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
@@ -720,12 +719,12 @@ describe("DAG rollback order — undo dependent steps before their prerequisites
         { dependsOn: ["a"] },
         () => {
           t.track("b:execute");
-          return Pipeline.succeed("B");
+          return succeed("B");
         },
         {
           compensate: () => {
             t.track("b:compensate");
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
@@ -734,18 +733,18 @@ describe("DAG rollback order — undo dependent steps before their prerequisites
         { dependsOn: ["a"] },
         () => {
           t.track("c:execute");
-          return Pipeline.succeed("C");
+          return succeed("C");
         },
         {
           compensate: () => {
             t.track("c:compensate");
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
       .step("d", { dependsOn: ["b", "c"] }, () => {
         t.track("d:execute");
-        return Pipeline.fail(new TestError({ message: "fail" }));
+        return fail(new TestError({ message: "fail" }));
       })
       .build();
 
@@ -774,7 +773,7 @@ describe("Full recovery cascade — step retry, workflow retry, then rollback", 
       compensate: {
         onComplete: ({ compensatedSteps }) => {
           t.track(`onCompensate:[${compensatedSteps.join(",")}]`);
-          return Pipeline.succeed(undefined as void);
+          return succeed(undefined as void);
         },
       },
     })
@@ -782,12 +781,12 @@ describe("Full recovery cascade — step retry, workflow retry, then rollback", 
         "step-1",
         () => {
           t.track("step-1:execute");
-          return Pipeline.succeed("done");
+          return succeed("done");
         },
         {
           compensate: () => {
             t.track("step-1:compensate");
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
@@ -796,7 +795,7 @@ describe("Full recovery cascade — step retry, workflow retry, then rollback", 
         () => {
           step2Calls++;
           t.track(`step-2:call=${step2Calls}`);
-          return Pipeline.fail(new TestError({ message: `fail-${step2Calls}` }));
+          return fail(new TestError({ message: `fail-${step2Calls}` }));
         },
         {
           retry: { maxRetries: 1 },
@@ -836,7 +835,7 @@ describe("Full recovery cascade — step retry, workflow retry, then rollback", 
       name: "transient-recovery",
       retry: { maxRetries: 2, baseDelayMs: 10 },
     })
-      .step("step-1", ({ input }) => Pipeline.succeed(input + 1), {
+      .step("step-1", ({ input }) => succeed(input + 1), {
         compensate: () => {
           throw new Error("should not compensate");
         },
@@ -844,9 +843,9 @@ describe("Full recovery cascade — step retry, workflow retry, then rollback", 
       .step("step-2", ({ prev }) => {
         step2Calls++;
         if (step2Calls < 3) {
-          return Pipeline.fail(new TestError({ message: "transient" }));
+          return fail(new TestError({ message: "transient" }));
         }
-        return Pipeline.succeed(prev * 10);
+        return succeed(prev * 10);
       })
       .build();
 
@@ -874,11 +873,11 @@ describe("Edge cases — boundary conditions for compensation logic", () => {
       compensate: {
         onComplete: () => {
           t.track("onCompensate");
-          return Pipeline.succeed(undefined as void);
+          return succeed(undefined as void);
         },
       },
     })
-      .step("only-step", () => Pipeline.fail(new TestError({ message: "fail" })))
+      .step("only-step", () => fail(new TestError({ message: "fail" })))
       .build();
 
     const { error } = await runner.runSafe({
@@ -898,10 +897,10 @@ describe("Edge cases — boundary conditions for compensation logic", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<string>({ name: "first-fail" })
-      .step("step-1", () => Pipeline.fail(new TestError({ message: "fail" })), {
+      .step("step-1", () => fail(new TestError({ message: "fail" })), {
         compensate: () => {
           t.track("should-not-run");
-          return Pipeline.succeed(undefined as void);
+          return succeed(undefined as void);
         },
       })
       .build();
@@ -924,19 +923,19 @@ describe("Edge cases — boundary conditions for compensation logic", () => {
       compensate: {
         onComplete: () => {
           t.track("onCompensate");
-          return Pipeline.succeed(undefined as void);
+          return succeed(undefined as void);
         },
       },
     })
-      .step("step-1", () => Pipeline.succeed("ok"), {
+      .step("step-1", () => succeed("ok"), {
         compensate: () => {
           t.track("step-1:compensate");
-          return Pipeline.succeed(undefined as void);
+          return succeed(undefined as void);
         },
       })
       .step("step-2", () => {
         step2Calls++;
-        return Pipeline.fail(new TestError({ message: `fail-${step2Calls}` }));
+        return fail(new TestError({ message: `fail-${step2Calls}` }));
       })
       .build();
 
@@ -978,19 +977,19 @@ describe("Selective retry — only retry transient errors, fail fast on permanen
         "step-1",
         () => {
           t.track("step-1:execute");
-          return Pipeline.succeed("ok");
+          return succeed("ok");
         },
         {
           compensate: () => {
             t.track("step-1:compensate");
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
       .step("step-2", () => {
         step2Calls++;
         t.track(`step-2:call=${step2Calls}`);
-        return Pipeline.fail(new TestError({ message: "non-retryable" }));
+        return fail(new TestError({ message: "non-retryable" }));
       })
       .build();
 
@@ -1019,13 +1018,13 @@ describe("Selective retry — only retry transient errors, fail fast on permanen
         when: (err: any) => err._tag === "RetryableError",
       },
     })
-      .step("step-1", () => Pipeline.succeed("ok"))
-      .step("step-2", (): Pipeline<never, TestError | RetryableError> => {
+      .step("step-1", () => succeed("ok"))
+      .step("step-2", (): StepEff<never, TestError | RetryableError> => {
         step2Calls++;
         if (step2Calls < 3) {
-          return Pipeline.fail(new RetryableError({ message: "transient" }));
+          return fail(new RetryableError({ message: "transient" }));
         }
-        return Pipeline.fail(new TestError({ message: "permanent" }));
+        return fail(new TestError({ message: "permanent" }));
       })
       .build();
 
@@ -1059,9 +1058,9 @@ describe("Attempt tracking — steps know which try they are on for backoff deci
         (ctx) => {
           attempts.push(ctx.attempt);
           if (attempts.length < 3) {
-            return Pipeline.fail(new TestError({ message: "transient" }));
+            return fail(new TestError({ message: "transient" }));
           }
-          return Pipeline.succeed("ok");
+          return succeed("ok");
         },
         {
           retry: { maxRetries: 5 },
@@ -1089,14 +1088,14 @@ describe("Attempt tracking — steps know which try they are on for backoff deci
       name: "attempt-wf",
       retry: { maxRetries: 2, baseDelayMs: 10 },
     })
-      .step("step-1", () => Pipeline.succeed("ok"))
+      .step("step-1", () => succeed("ok"))
       .step("step-2", (ctx) => {
         totalCalls++;
         attempts.push(ctx.attempt);
         if (totalCalls < 3) {
-          return Pipeline.fail(new TestError({ message: "transient" }));
+          return fail(new TestError({ message: "transient" }));
         }
-        return Pipeline.succeed("done");
+        return succeed("done");
       })
       .build();
 
@@ -1116,12 +1115,12 @@ describe("Attempt tracking — steps know which try they are on for backoff deci
       name: "attempt-combined",
       retry: { maxRetries: 1, baseDelayMs: 10 },
     })
-      .step("step-1", () => Pipeline.succeed("ok"))
+      .step("step-1", () => succeed("ok"))
       .step(
         "step-2",
         (ctx) => {
           attempts.push(ctx.attempt);
-          return Pipeline.fail(new TestError({ message: `fail-${ctx.attempt}` }));
+          return fail(new TestError({ message: `fail-${ctx.attempt}` }));
         },
         {
           retry: { maxRetries: 1 },
@@ -1166,19 +1165,19 @@ describe("Immediate rollback — undo right away without retrying the workflow",
         "step-1",
         () => {
           t.track("step-1:execute");
-          return Pipeline.succeed("ok");
+          return succeed("ok");
         },
         {
           compensate: () => {
             t.track("step-1:compensate");
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
       .step("step-2", () => {
         step2Calls++;
         t.track(`step-2:call=${step2Calls}`);
-        return Pipeline.fail(new TestError({ message: "fail" }));
+        return fail(new TestError({ message: "fail" }));
       })
       .build();
 
@@ -1205,12 +1204,12 @@ describe("Immediate rollback — undo right away without retrying the workflow",
         "step-1",
         () => {
           t.track("step-1:execute");
-          return Pipeline.succeed("ok");
+          return succeed("ok");
         },
         {
           compensate: () => {
             t.track("step-1:compensate");
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
@@ -1219,7 +1218,7 @@ describe("Immediate rollback — undo right away without retrying the workflow",
         () => {
           step2Calls++;
           t.track(`step-2:call=${step2Calls}`);
-          return Pipeline.fail(new TestError({ message: "fail" }));
+          return fail(new TestError({ message: "fail" }));
         },
         {
           retry: { maxRetries: 2 },
@@ -1256,19 +1255,19 @@ describe("After-retries rollback (default) — exhaust all retries before compen
         "step-1",
         () => {
           t.track("step-1:execute");
-          return Pipeline.succeed("ok");
+          return succeed("ok");
         },
         {
           compensate: () => {
             t.track("step-1:compensate");
-            return Pipeline.succeed(undefined as void);
+            return succeed(undefined as void);
           },
         },
       )
       .step("step-2", () => {
         step2Calls++;
         t.track(`step-2:call=${step2Calls}`);
-        return Pipeline.fail(new TestError({ message: "fail" }));
+        return fail(new TestError({ message: "fail" }));
       })
       .build();
 
@@ -1302,17 +1301,17 @@ describe("Compensation retry — retry the rollback itself if the undo API is fl
         retry: { maxRetries: 2, baseDelayMs: 10 },
       },
     })
-      .step("step-1", () => Pipeline.succeed("ok"), {
+      .step("step-1", () => succeed("ok"), {
         compensate: () => {
           compAttempts++;
           t.track(`step-1:compensate-attempt=${compAttempts}`);
           if (compAttempts < 3) {
             throw new Error(`comp-fail-${compAttempts}`);
           }
-          return Pipeline.succeed(undefined as void);
+          return succeed(undefined as void);
         },
       })
-      .step("fail", () => Pipeline.fail(new TestError({ message: "fail" })))
+      .step("fail", () => fail(new TestError({ message: "fail" })))
       .build();
 
     const { error } = await runner.runSafe({
@@ -1342,16 +1341,16 @@ describe("Compensation retry — retry the rollback itself if the undo API is fl
         retry: { maxRetries: 1, baseDelayMs: 10 },
         onComplete: (params) => {
           report = params;
-          return Pipeline.succeed(undefined as void);
+          return succeed(undefined as void);
         },
       },
     })
-      .step("step-1", () => Pipeline.succeed("ok"), {
+      .step("step-1", () => succeed("ok"), {
         compensate: () => {
           throw new Error("always fails");
         },
       })
-      .step("fail", () => Pipeline.fail(new TestError({ message: "fail" })))
+      .step("fail", () => fail(new TestError({ message: "fail" })))
       .build();
 
     const { error } = await runner.runSafe({
@@ -1378,17 +1377,17 @@ describe("Compensation retry — retry the rollback itself if the undo API is fl
       compensate: {
         onComplete: (params) => {
           report = params;
-          return Pipeline.succeed(undefined as void);
+          return succeed(undefined as void);
         },
       },
     })
-      .step("step-1", () => Pipeline.succeed("ok"), {
+      .step("step-1", () => succeed("ok"), {
         compensate: () => {
           compAttempts++;
           throw new Error("fail");
         },
       })
-      .step("fail", () => Pipeline.fail(new TestError({ message: "fail" })))
+      .step("fail", () => fail(new TestError({ message: "fail" })))
       .build();
 
     const { error } = await runner.runSafe({

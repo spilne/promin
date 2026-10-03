@@ -13,8 +13,8 @@
 //   and the signal history is visible there.
 // ---------------------------------------------------------------------------
 
+import { sleep, type Eff } from "@spilne/perfect-core";
 import { workflow } from "@promin/workflow";
-import { Pipeline } from "@promin/core";
 
 export interface ApprovalFlowInput {
   requestId: number;
@@ -25,8 +25,8 @@ function delay(minMs: number, maxMs: number): number {
   return minMs + Math.floor(Math.random() * (maxMs - minMs));
 }
 
-function pSleep(ms: number): Pipeline<void, never> {
-  return Pipeline.fromPromise(() => new Promise<void>((r) => setTimeout(r, ms)));
+function pSleep(ms: number): Eff<void, never> {
+  return sleep(ms);
 }
 
 export const approvalFlowWorkflow = workflow<ApprovalFlowInput>({

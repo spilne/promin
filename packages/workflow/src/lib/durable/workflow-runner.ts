@@ -10,10 +10,11 @@
 // fills that seam in).
 // ---------------------------------------------------------------------------
 
-import { Effect } from "effect";
-import { Pipeline } from "@promin/core";
+import { all, succeed, suspend, sync, type Eff, type Throws } from "@spilne/perfect-core";
 import type { Sinkable } from "../shared/streamable.ts";
 import type { TaggedError } from "../shared/tagged-error.ts";
+import { promiseOrDie, runEffSafe, runHookResult } from "../shared/eff.ts";
+import { retryWithPolicy, type RetryPolicy } from "../shared/retry-policy.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import type {
   Workflow,
@@ -52,7 +53,6 @@ import {
 } from "./durable-pipeline-error.ts";
 import { withLock } from "./with-lock.ts";
 import { topologicalSort } from "./workflow-dag.ts";
-import type { RetryPolicy } from "../shared/retry-policy.ts";
 import {
   WorkflowContinueAsNewError,
   type WorkflowSuspendedError,
@@ -247,7 +247,7 @@ export interface WorkflowRunnerConfig {
   readonly hooks?: WorkflowHooks;
   /**
    * Pluggable step executor. When provided, step bodies run through this
-   * executor instead of the default inline Effect pipeline. Use
+   * executor instead of the default inline Eff execution. Use
    * `InProcessStepExecutor` for in-process execution with explicit
    * storage/clock wiring, or `StepQueueExecutor` for queue-backed dispatch.
    * Defaults to the inline pipeline when omitted.
@@ -1572,11 +1572,7 @@ async function runOneOrchestrationCycle(
             compensatedSteps: compensationReport.compensated,
             failedCompensations: compensationReport.failed,
           });
-          if (result instanceof Pipeline) {
-            await result.runPromise();
-          } else if (result && typeof (result as Promise<void>).then === "function") {
-            await result;
-          }
+          await runHookResult(result);
         } catch {
           // onComplete failure is swallowed — the original error is more important
         }
@@ -1643,8 +1639,8 @@ export interface DagExecutionContext {
   readonly guard?: FenceGuard;
   /**
    * Pluggable step executor. When set, step bodies run through this executor
-   * instead of the inline Effect pipeline. `undefined` preserves the existing
-   * Pipeline.all in-process path.
+   * instead of the inline Eff execution. `undefined` preserves the existing
+   * in-process path.
    */
   readonly stepExecutor?: StepExecutor;
   /** Time source. Drives deadline checks, step durations, dispatch poll waits. Default: `SystemWallClock`. */
@@ -1977,17 +1973,17 @@ export async function executeWorkflowDag(
         batchError = err;
       }
     } else {
-      // Pipeline.all path — existing inline Effect execution.
-      const pipeline = Pipeline.all(
-        ...readySteps.map((stepDef) => {
-          // Evaluate skipWhen before entering the step execution pipeline
+      // Inline path — every ready step runs as one Eff, concurrently.
+      const batch = all(
+        readySteps.map((stepDef): Eff<LocalStepResult, Throws<TaggedError>> => {
+          // Evaluate skipWhen before entering the step execution Eff
           if (stepDef.skipWhen) {
             const prevStepName = stepDef.dependsOn[0];
             const prev = prevStepName != null ? results[prevStepName] : input;
             if (stepDef.skipWhen(prev)) {
               const skipResult = stepDef.skipValue ? stepDef.skipValue(prev) : prev;
               const encoded = stepDef.codec.encode(skipResult);
-              return Pipeline.succeed({
+              return succeed({
                 name: stepDef.name,
                 result: encoded,
                 durationMs: 0,
@@ -2011,8 +2007,11 @@ export async function executeWorkflowDag(
           // Raw step execution — wrapped in suspend so retry re-invokes the step fn.
           // attemptRef tracks the attempt number; incremented each invocation so
           // step retries and workflow retries both see monotonically increasing attempts.
-          let raw: Pipeline<unknown, TaggedError> = Pipeline.from(
-            Effect.suspend(() => {
+          const raw = applyStepPolicies({
+            stepDef,
+            workflowId,
+            clock,
+            invoke: () => {
               const currentAttempt = attemptRef.current;
               attemptRef.current = currentAttempt + 1;
               // Write back to shared map so workflow retries pick up the right count
@@ -2027,58 +2026,22 @@ export async function executeWorkflowDag(
               });
               // Kinds that set metadata synchronously in their execute (e.g.
               // `.match()` after selector resolution) surface it here BEFORE
-              // the branch pipeline runs. The failure path can then read
-              // the map by step name even when the branch throws.
+              // the branch Eff runs. The failure path can then read the
+              // map by step name even when the branch throws.
               if (metadataRef.current) {
                 stepMetadata.set(stepDef.name, metadataRef.current);
               }
-              return executed.effect;
-            }),
-          ) as Pipeline<unknown, TaggedError>;
-
-          // Per-step activity timeout — wraps the user's function with a deadline
-          if (stepDef.timeoutMs != null) {
-            const stepTimeoutMs = stepDef.timeoutMs;
-            const stepName = stepDef.name;
-            const timeoutEffect = Effect.sleep(stepTimeoutMs).pipe(
-              Effect.andThen(
-                Effect.fail(
-                  new StepTimeoutError({
-                    workflowId,
-                    stepName,
-                    timeoutMs: stepTimeoutMs,
-                    message: `Step "${stepName}" timed out after ${stepTimeoutMs}ms`,
-                  }),
-                ),
-              ),
-            );
-            raw = Pipeline.from(Effect.raceFirst(raw.effect, timeoutEffect)) as Pipeline<
-              unknown,
-              TaggedError
-            >;
-          }
-
-          // Step-level retry (before mapping to result shape)
-          if (stepDef.retry) {
-            raw = raw.retry(stepDef.retry);
-          }
-
-          // Step-level failure strategy
-          const strategy = stepDef.onFailure ?? "fail";
-          if (strategy === "skip") {
-            raw = raw.handleError(() => undefined);
-          } else if (strategy !== "fail" && "fallback" in strategy) {
-            const fallbackFn = strategy.fallback;
-            raw = raw.handleError((err) => fallbackFn(err));
-          }
+              return executed;
+            },
+          });
 
           // Map to step result + eager save. Without flatMap-ing the
-          // save into the pipeline, the legacy path has the same wave-
-          // tail lag the executor path used to: `Pipeline.all` waits
-          // for every parallel step, then a post-wave for-loop saves
-          // them serially. Pulling the save into the per-step
-          // pipeline collapses the lag the same way the executor path
-          // does — completedAt becomes truthful per step.
+          // save into the step Eff, this path has the same wave-tail
+          // lag the executor path used to: `all` waits for every
+          // parallel step, then a post-wave for-loop saves them
+          // serially. Pulling the save into the per-step Eff collapses
+          // the lag the same way the executor path does — completedAt
+          // becomes truthful per step.
           return raw
             .map((result) => {
               const encoded = stepDef.codec.encode(result);
@@ -2091,7 +2054,7 @@ export async function executeWorkflowDag(
               };
             })
             .flatMap((stepResult) =>
-              Pipeline.fromPromise(async () => {
+              promiseOrDie(async () => {
                 await ctx.storage.saveStepResult(
                   {
                     workflowId,
@@ -2126,17 +2089,13 @@ export async function executeWorkflowDag(
         }),
       );
 
-      // `catchAll: true` converts Effect defects (including rejections
-      // from `Pipeline.fromPromise` → `Effect.promise`) into typed errors
-      // that runSafe returns through the `error` channel. Without it, any
-      // user step that throws synchronously — common with `.stepAsync()`
-      // or user code that builds its own `Pipeline.fromPromise(...)` —
-      // escapes `runSafe` unobserved, skips the `saveStepFailure` path
-      // below, and leaves the workflow stuck in `pending`. See
-      // promin-4ace. The extra `catchAll` changes what classes of error
-      // reach `batchError` but not what the downstream code does with it:
-      // the fallback branch already handles arbitrary Error instances.
-      const { data, error } = await pipeline.runSafe({ catchAll: true });
+      // `catchDefects` lands defects (a `.stepAsync()` rejection, a
+      // synchronous throw in a step body) in the `error` channel next to
+      // typed failures. Without it they would escape unobserved, skip the
+      // `saveStepFailure` path below, and leave the workflow stuck in
+      // `pending`. The fallback branch already handles arbitrary Error
+      // instances, so both kinds share one failure path.
+      const { data, error } = await runEffSafe(batch, { catchDefects: true });
       batchResults = data as LocalStepResult[] | null;
       batchError = error ?? null;
     }
@@ -2317,7 +2276,7 @@ export interface CompensatableStep {
     result: unknown;
     input: unknown;
     workflowId: string;
-  }) => Pipeline<void, TaggedError> | Promise<void>;
+  }) => Eff<unknown, Throws<unknown>> | Promise<void>;
 }
 
 /**
@@ -2380,15 +2339,7 @@ export async function compensateWorkflow(params: {
             clock.setTimeout(() => r(undefined), compRetryDelayMs * Math.pow(2, attempt - 1)),
           );
         }
-        const compensateResult = stepDef.compensate!({ result, input, workflowId });
-        if (compensateResult instanceof Pipeline) {
-          await compensateResult.runPromise();
-        } else if (
-          compensateResult &&
-          typeof (compensateResult as Promise<void>).then === "function"
-        ) {
-          await compensateResult;
-        }
+        await runHookResult(stepDef.compensate!({ result, input, workflowId }));
         compensated.push(stepDef.name);
         if (recordsAttempts) {
           await (storage as any).saveStepAttempt(
@@ -2502,6 +2453,53 @@ export function getIdempotencyTtl(
   return undefined;
 }
 
+/**
+ * Wrap one step invocation with the step's own policies, in order:
+ * per-attempt timeout, retry on typed failures, then the `onFailure`
+ * strategy. `invoke` runs again on every retry. A step that does not settle
+ * within `timeoutMs` fails with `StepTimeoutError`; the abandoned attempt is
+ * interrupted. Retry backoff sleeps on `clock`.
+ */
+function applyStepPolicies(params: {
+  stepDef: StepDefinition;
+  workflowId: string;
+  clock: WallClock;
+  invoke: () => Eff<unknown, Throws<TaggedError>>;
+}): Eff<unknown, Throws<TaggedError>> {
+  const { stepDef, workflowId, clock } = params;
+  let raw: Eff<unknown, Throws<TaggedError>> = suspend(params.invoke);
+
+  if (stepDef.timeoutMs != null) {
+    const stepTimeoutMs = stepDef.timeoutMs;
+    const stepName = stepDef.name;
+    raw = raw.timeoutFail(
+      stepTimeoutMs,
+      () =>
+        new StepTimeoutError({
+          workflowId,
+          stepName,
+          timeoutMs: stepTimeoutMs,
+          message: `Step "${stepName}" timed out after ${stepTimeoutMs}ms`,
+        }),
+    );
+  }
+
+  if (stepDef.retry) {
+    raw = retryWithPolicy({ eff: raw, policy: stepDef.retry, clock });
+  }
+
+  // `onFailure` handles typed failures only; defects still fail the step.
+  const strategy = stepDef.onFailure ?? "fail";
+  if (strategy === "skip") {
+    raw = raw.catch(() => succeed(undefined));
+  } else if (strategy !== "fail" && "fallback" in strategy) {
+    const fallbackFn = strategy.fallback;
+    raw = raw.catch((err) => sync(() => fallbackFn(err)));
+  }
+
+  return raw;
+}
+
 // ---------------------------------------------------------------------------
 // InProcessStepExecutor — runs a single step body in-process.
 //
@@ -2523,10 +2521,19 @@ export function getIdempotencyTtl(
 export class InProcessStepExecutor implements StepExecutor {
   private readonly workflow: Workflow<unknown, unknown>;
   private readonly storage: WorkflowStorage;
+  private readonly clock: WallClock;
 
-  constructor(workflow: Workflow<unknown, unknown>, config: { storage: WorkflowStorage }) {
+  constructor(
+    workflow: Workflow<unknown, unknown>,
+    config: {
+      storage: WorkflowStorage;
+      /** Time source for step retry backoff. Default: `SystemWallClock`. */
+      clock?: WallClock;
+    },
+  ) {
     this.workflow = workflow;
     this.storage = config.storage;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   async executeStep(req: StepExecutionRequest): Promise<StepExecutionResult> {
@@ -2541,11 +2548,14 @@ export class InProcessStepExecutor implements StepExecutor {
     const attemptRef = { current: req.attempt };
     const metadataRef: { current?: Record<string, unknown> } = { current: undefined };
 
-    let raw: Pipeline<unknown, TaggedError> = Pipeline.from(
-      Effect.suspend(() => {
+    const raw = applyStepPolicies({
+      stepDef,
+      workflowId: req.workflowId,
+      clock: this.clock,
+      invoke: () => {
         const currentAttempt = attemptRef.current;
         attemptRef.current = currentAttempt + 1;
-        const executed = stepDef.execute({
+        return stepDef.execute({
           input: req.input,
           results: req.prevResults,
           workflowId: req.workflowId,
@@ -2553,45 +2563,12 @@ export class InProcessStepExecutor implements StepExecutor {
           attemptRef: { current: currentAttempt },
           metadataRef,
         });
-        return executed.effect;
-      }),
-    ) as Pipeline<unknown, TaggedError>;
+      },
+    });
 
-    if (stepDef.timeoutMs != null) {
-      const stepTimeoutMs = stepDef.timeoutMs;
-      const stepName = stepDef.name;
-      const workflowId = req.workflowId;
-      const timeoutEffect = Effect.sleep(stepTimeoutMs).pipe(
-        Effect.andThen(
-          Effect.fail(
-            new StepTimeoutError({
-              workflowId,
-              stepName,
-              timeoutMs: stepTimeoutMs,
-              message: `Step "${stepName}" timed out after ${stepTimeoutMs}ms`,
-            }),
-          ),
-        ),
-      );
-      raw = Pipeline.from(Effect.raceFirst(raw.effect, timeoutEffect)) as Pipeline<
-        unknown,
-        TaggedError
-      >;
-    }
-
-    if (stepDef.retry) {
-      raw = raw.retry(stepDef.retry);
-    }
-
-    const strategy = stepDef.onFailure ?? "fail";
-    if (strategy === "skip") {
-      raw = raw.handleError(() => undefined);
-    } else if (strategy !== "fail" && "fallback" in strategy) {
-      const fallbackFn = strategy.fallback;
-      raw = raw.handleError((err) => fallbackFn(err));
-    }
-
-    const { data, error } = await raw.map((result) => stepDef.codec.encode(result)).runSafe();
+    // Defects (a rejected `.stepAsync()` body, a synchronous throw) reject
+    // here rather than landing in `{ ok: false }`.
+    const { data, error } = await runEffSafe(raw.map((result) => stepDef.codec.encode(result)));
 
     if (error) {
       if ((error as TaggedError)._tag === "WorkflowSuspendedError") {

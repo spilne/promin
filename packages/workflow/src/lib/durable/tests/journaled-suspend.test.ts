@@ -5,7 +5,6 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, beforeEach } from "bun:test";
-import { Pipeline } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
@@ -368,9 +367,8 @@ describe("end-to-end workflow with suspend/resume", () => {
 
     const runner = createWorkflowRunner({ storage });
 
-    // Kick off — suspends at sleep. The workflow engine wraps our
-    // WorkflowSuspendedError in a FiberFailure at the outer boundary; match
-    // on the human-readable "sleeping until" message.
+    // Kick off — suspends at sleep. `run()` rejects with the plain
+    // WorkflowSuspendedError; match on its human-readable message.
     await expect(
       runner.run({ workflow: wfBuilder, workflowId: "apr-1", input: { draftId: "d-1" } }),
     ).rejects.toThrow(/sleeping until/);

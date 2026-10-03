@@ -1,5 +1,5 @@
+import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect, beforeEach } from "bun:test";
-import { Pipeline } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { webhookTrigger } from "../webhook-trigger.ts";
@@ -16,8 +16,8 @@ interface OrderEvent {
 
 function buildOrderWorkflow() {
   return workflow<OrderEvent>({ name: "order-flow" })
-    .step("load", ({ input }) => Pipeline.succeed(input))
-    .step("process", ({ prev }) => Pipeline.succeed(`processed-${prev.orderId}`))
+    .step("load", ({ input }) => succeed(input))
+    .step("process", ({ prev }) => succeed(`processed-${prev.orderId}`))
     .build();
 }
 

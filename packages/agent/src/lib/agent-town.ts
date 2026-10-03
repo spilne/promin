@@ -442,10 +442,10 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
         } catch (err) {
           config.onAgentActivity?.({ agent: name, state: "idle" });
           // On error, unblock the sender with a structured agent-error
-          // envelope. `surfaceAgentError` strips Effect FiberFailure
-          // wrappers and tags the kind so downstream consumers can
-          // branch (e.g. retry on `infra-error`, surface to user on
-          // `user-error`) without re-implementing the unwrap chain.
+          // envelope. `surfaceAgentError` tags the kind so downstream
+          // consumers can branch (e.g. retry on `infra-error`, surface to
+          // user on `user-error`) without re-implementing the
+          // classification.
           if (inboxes.has(msg.from)) {
             const surfaced = surfaceAgentError(err);
             inboxes.get(msg.from)!.push({

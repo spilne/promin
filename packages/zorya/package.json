@@ -52,10 +52,10 @@
     "marked": "^18.0.2"
   },
   "devDependencies": {
-    "@promin/core": "workspace:*",
     "@promin/postgres": "workspace:*",
     "@promin/sqlite": "workspace:*",
     "@promin/zorya-client": "workspace:*",
+    "@spilne/perfect-core": "catalog:",
     "@spilne/perfect-postgres": "catalog:",
     "@types/bun": "catalog:",
     "daisyui": "^4.12.14",

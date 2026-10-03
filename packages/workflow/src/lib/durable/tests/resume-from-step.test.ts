@@ -13,8 +13,8 @@
 //   - Storage missing resetSteps throws a clear error.
 // ---------------------------------------------------------------------------
 
+import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
-import { Pipeline } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
@@ -28,23 +28,23 @@ describe("runner.resume — replay from a specific step", () => {
     const wf = workflow<{ x: number }>({ name: "linear" })
       .step("s1", ({ input }) => {
         calls.s1++;
-        return Pipeline.succeed(input.x + 1);
+        return succeed(input.x + 1);
       })
       .step("s2", { dependsOn: ["s1"] }, ({ deps }) => {
         calls.s2++;
-        return Pipeline.succeed((deps.s1 as number) + 1);
+        return succeed((deps.s1 as number) + 1);
       })
       .step("s3", { dependsOn: ["s2"] }, ({ deps }) => {
         calls.s3++;
-        return Pipeline.succeed((deps.s2 as number) + 1);
+        return succeed((deps.s2 as number) + 1);
       })
       .step("s4", { dependsOn: ["s3"] }, ({ deps }) => {
         calls.s4++;
-        return Pipeline.succeed((deps.s3 as number) + 1);
+        return succeed((deps.s3 as number) + 1);
       })
       .step("s5", { dependsOn: ["s4"] }, ({ deps }) => {
         calls.s5++;
-        return Pipeline.succeed((deps.s4 as number) + 1);
+        return succeed((deps.s4 as number) + 1);
       })
       .build();
 
@@ -72,19 +72,19 @@ describe("runner.resume — replay from a specific step", () => {
     const wf = workflow<number>({ name: "diamond" })
       .step("root", ({ input }) => {
         calls.root++;
-        return Pipeline.succeed(input + 1);
+        return succeed(input + 1);
       })
       .step("left", { dependsOn: ["root"] }, ({ deps }) => {
         calls.left++;
-        return Pipeline.succeed((deps.root as number) * 10);
+        return succeed((deps.root as number) * 10);
       })
       .step("right", { dependsOn: ["root"] }, ({ deps }) => {
         calls.right++;
-        return Pipeline.succeed((deps.root as number) * 100);
+        return succeed((deps.root as number) * 100);
       })
       .step("sink", { dependsOn: ["left", "right"] }, ({ deps }) => {
         calls.sink++;
-        return Pipeline.succeed((deps.left as number) + (deps.right as number));
+        return succeed((deps.left as number) + (deps.right as number));
       })
       .build();
 
@@ -101,7 +101,7 @@ describe("runner.resume — replay from a specific step", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "tiny" })
-      .step("only", ({ input }) => Pipeline.succeed(input))
+      .step("only", ({ input }) => succeed(input))
       .build();
 
     await runner.run({ workflow: wf, workflowId: "tiny-1", input: 1 });
@@ -118,7 +118,7 @@ describe("runner.resume — replay from a specific step", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "no-reset" })
-      .step("a", ({ input }) => Pipeline.succeed(input))
+      .step("a", ({ input }) => succeed(input))
       .build();
 
     await expect(
@@ -131,7 +131,7 @@ describe("runner.resume — replay from a specific step", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "ghost" })
-      .step("x", ({ input }) => Pipeline.succeed(input))
+      .step("x", ({ input }) => succeed(input))
       .build();
 
     await expect(

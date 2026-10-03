@@ -20,8 +20,8 @@
 // after demo boot via the scheduler's never-fired-yet kickstart.
 // ---------------------------------------------------------------------------
 
+import { sleep, type Eff } from "@spilne/perfect-core";
 import { composeApprovalSignal } from "@promin/agent";
-import { Pipeline } from "@promin/core";
 import { workflow } from "@promin/workflow";
 
 export interface ManualApprovalInput {
@@ -30,8 +30,8 @@ export interface ManualApprovalInput {
   description?: string;
 }
 
-function pSleep(ms: number): Pipeline<void, never> {
-  return Pipeline.fromPromise(() => new Promise<void>((r) => setTimeout(r, ms)));
+function pSleep(ms: number): Eff<void, never> {
+  return sleep(ms);
 }
 
 export const manualApprovalWorkflow = workflow<ManualApprovalInput>({

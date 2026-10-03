@@ -1,5 +1,5 @@
+import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
-import { Pipeline } from "@promin/core";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { MapActivityRegistry } from "../activity-registry.ts";
 import { compileWorkflow, WorkflowCompilationError } from "../workflow-compiler.ts";
@@ -18,25 +18,24 @@ const storage = new InMemoryWorkflowStorage();
 const runner = createWorkflowRunner({ storage });
 
 const registry = new MapActivityRegistry({
-  "transform.uppercase": () => (ctx) => Pipeline.succeed(String(ctx.prev).toUpperCase()),
+  "transform.uppercase": () => (ctx) => succeed(String(ctx.prev).toUpperCase()),
 
-  "transform.reverse": () => (ctx) =>
-    Pipeline.succeed(String(ctx.prev).split("").reverse().join("")),
+  "transform.reverse": () => (ctx) => succeed(String(ctx.prev).split("").reverse().join("")),
 
   "transform.concat": (config) => (ctx) => {
     const deps = ctx.deps as Record<string, string>;
     const separator = (config?.separator as string) ?? " ";
-    return Pipeline.succeed(Object.values(deps).join(separator));
+    return succeed(Object.values(deps).join(separator));
   },
 
   "data.split": (config) => (ctx) => {
     const separator = (config?.separator as string) ?? " ";
-    return Pipeline.succeed(String(ctx.prev).split(separator));
+    return succeed(String(ctx.prev).split(separator));
   },
 
-  "transform.exclaim": () => (ctx) => Pipeline.succeed(`${ctx.prev}!`),
+  "transform.exclaim": () => (ctx) => succeed(`${ctx.prev}!`),
 
-  "transform.identity": () => (ctx) => Pipeline.succeed(ctx.prev),
+  "transform.identity": () => (ctx) => succeed(ctx.prev),
 });
 
 // ---------------------------------------------------------------------------
@@ -371,7 +370,7 @@ describe("MapActivityRegistry", () => {
   it("register() adds new activities", () => {
     const r = new MapActivityRegistry({});
     expect(r.has("test")).toBe(false);
-    r.register("test", () => () => Pipeline.succeed("ok"));
+    r.register("test", () => () => succeed("ok"));
     expect(r.has("test")).toBe(true);
   });
 });

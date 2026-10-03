@@ -41,8 +41,8 @@
   },
   "dependencies": {
     "@kubernetes/client-node": "^1.4.0",
-    "@promin/core": "workspace:*",
-    "@promin/workflow": "workspace:*"
+    "@promin/workflow": "workspace:*",
+    "@spilne/perfect-core": "catalog:"
   },
   "devDependencies": {
     "@types/bun": "catalog:"
