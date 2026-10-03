@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
+import { succeed } from "@spilne/perfect-core";
 import { MemoryCache, type CacheStore } from "../../shared/cache-store.ts";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
@@ -382,5 +383,153 @@ describe("step cache — namespace keeps different workflows isolated", () => {
     await runner.run({ workflow: wf2, workflowId: "2", input: {} });
 
     expect(c.box.value).toBe(1); // shared namespace → second run hits the cache
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Keys are scoped by step name — no cross-step / cross-branch collisions
+// ---------------------------------------------------------------------------
+
+/** MemoryCache that records the keys it was asked to write. */
+class RecordingCache extends MemoryCache<string, unknown> {
+  readonly setKeys: string[] = [];
+  constructor() {
+    super({ ttlMs: 60_000 });
+  }
+  override async set(key: string, value: unknown, ttlMs?: number): Promise<void> {
+    this.setKeys.push(key);
+    return super.set(key, value, ttlMs);
+  }
+}
+
+describe("step cache — keys include the step name", () => {
+  it("one cache config shared by two steps does not return the other step's result", async () => {
+    const store = new RecordingCache();
+    const cache = { key: (ctx: { input: unknown }) => String(ctx.input), ttlMs: 60_000, store };
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const wf = workflow<string>({ name: "shared-cfg" })
+      .step("a", () => succeed("A"), { cache })
+      .step("b", ({ prev }) => succeed(`B after ${prev}`), { cache })
+      .build();
+
+    const r1 = await runner.run({ workflow: wf, workflowId: "sc-1", input: "x" });
+    const r2 = await runner.run({ workflow: wf, workflowId: "sc-2", input: "x" });
+
+    expect(r1).toBe("B after A");
+    expect(r2).toBe("B after A");
+    expect(store.setKeys).toEqual(["shared-cfg:a:x", "shared-cfg:b:x"]);
+  });
+
+  it("parallelSteps cache option keeps each branch's entry separate", async () => {
+    const store = new RecordingCache();
+    const calls = { a: 0, b: 0 };
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const wf = workflow<string>({ name: "par-cache" })
+      .parallelSteps(
+        "fan",
+        {
+          a: () => {
+            calls.a++;
+            return succeed("A");
+          },
+          b: () => {
+            calls.b++;
+            return succeed("B");
+          },
+        },
+        { cache: { key: ({ input }) => String(input), ttlMs: 60_000, store } },
+      )
+      .build();
+
+    const r1 = await runner.run({ workflow: wf, workflowId: "pc-1", input: "x" });
+    const r2 = await runner.run({ workflow: wf, workflowId: "pc-2", input: "x" });
+
+    expect(r1).toEqual({ a: "A", b: "B" });
+    expect(r2).toEqual({ a: "A", b: "B" });
+    expect(calls).toEqual({ a: 1, b: 1 }); // second run served from cache
+    expect([...store.setKeys].sort()).toEqual(["par-cache:fan.a:x", "par-cache:fan.b:x"]);
+  });
+});
+
+describe("step cache — values round-trip through the step codec", () => {
+  it("a cache hit has the same shape as a fresh result (Date, BigInt)", async () => {
+    const store = new MemoryCache<string, unknown>({ ttlMs: 60_000 });
+    const c = counter();
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const wf = workflow({ name: "codec-cache" })
+      .stepAsync(
+        "load",
+        async () => {
+          c.bump();
+          return { at: new Date("2026-01-01T00:00:00.000Z"), big: 10n };
+        },
+        { cache: { key: () => "k", ttlMs: 60_000, store } },
+      )
+      .build();
+
+    await runner.run({ workflow: wf, workflowId: "cc-1", input: {} });
+    const hit = (await runner.run({ workflow: wf, workflowId: "cc-2", input: {} })) as {
+      at: Date;
+      big: bigint;
+    };
+
+    expect(c.box.value).toBe(1);
+    expect(hit.at).toBeInstanceOf(Date);
+    expect(hit.at.toISOString()).toBe("2026-01-01T00:00:00.000Z");
+    expect(hit.big).toBe(10n);
+  });
+
+  it("a cached undefined result is a hit, not a miss", async () => {
+    const store = new MemoryCache<string, unknown>({ ttlMs: 60_000 });
+    const c = counter();
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const wf = workflow({ name: "undef-cache" })
+      .stepAsync(
+        "noop",
+        async () => {
+          c.bump();
+          return undefined;
+        },
+        { cache: { key: () => "k", ttlMs: 60_000, store } },
+      )
+      .build();
+
+    await runner.run({ workflow: wf, workflowId: "uc-1", input: {} });
+    await runner.run({ workflow: wf, workflowId: "uc-2", input: {} });
+    expect(c.box.value).toBe(1);
+  });
+
+  it("an undecodable entry falls through to a miss", async () => {
+    const store = new MemoryCache<string, unknown>({ ttlMs: 60_000 });
+    const c = counter();
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const failingCodec = {
+      encode: (v: number) => v,
+      decode: (raw: unknown): number => {
+        if (typeof raw !== "number") throw new Error("not a number");
+        return raw;
+      },
+    };
+    await store.set("bad-entry:compute:k", "garbage");
+    const wf = workflow({ name: "bad-entry" })
+      .stepAsync(
+        "compute",
+        async () => {
+          c.bump();
+          return 7;
+        },
+        { cache: { key: () => "k", ttlMs: 60_000, store }, codec: failingCodec },
+      )
+      .build();
+
+    const r = await runner.run({ workflow: wf, workflowId: "be-1", input: {} });
+    expect(r).toBe(7);
+    expect(c.box.value).toBe(1);
+    expect(await store.get("bad-entry:compute:k")).toBe(7);
   });
 });

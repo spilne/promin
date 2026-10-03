@@ -968,7 +968,7 @@ describe("WorkflowBuilder", () => {
 
       // Resume: should complete
       const result = await runner.run({ workflow: wf, workflowId: "wf-sleep-resume", input: {} });
-      expect(result).toBe("done: undefined");
+      expect(result).toBe("done: ready");
     });
   });
 

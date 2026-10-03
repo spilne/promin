@@ -61,8 +61,7 @@ describe(".waitForSignal() — timeout follows the runner clock", () => {
       "2026-01-01T00:00:05.000Z",
     );
 
-    // No re-entry before the deadline here: a pre-deadline re-entry re-arms
-    // the timeout from the re-entry time, so jump straight to the deadline.
+    // Re-entry before the deadline keeps it (see wait-for-signal.test.ts).
     clock.advance(5_000);
     const late = await runner.runSafe({ workflow: build(), workflowId: "csig-1", input: 1 });
     expect(late.error?._tag).toBe("WorkflowTimeoutError");

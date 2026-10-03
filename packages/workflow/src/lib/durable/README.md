@@ -120,6 +120,17 @@ const result = await workflow<{ userId: string }>({
 await storage.deliverSignal(workflowId, "manager-approved", { approved: true });
 ```
 
+- `.sleep()` passes its predecessor's value through: the step after it gets
+  the pre-sleep value as `prev`.
+- Wake time and signal timeout are computed once, on the step's first
+  execution, and stored. Resuming early (e.g. `handle.result()` polling) does
+  not move them.
+- A signal is a named value on the run, not a queued event. Re-delivering a
+  name replaces the payload (last wins), signals are cleared when a fresh run
+  starts, and they are not consumed: every `waitForSignal` on the same
+  `signalName` is satisfied by one delivery. Use distinct names (e.g.
+  `approve-1`, `approve-2`) to wait for distinct events.
+
 ### build + trigger — Stream → Workflow
 
 ```typescript
