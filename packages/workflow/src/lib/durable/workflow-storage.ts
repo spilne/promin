@@ -611,6 +611,21 @@ export interface WorkflowStorage {
   resetSteps?(workflowId: string, stepNames: readonly string[]): Promise<void>;
 
   /**
+   * Bulk-fail every workflow in `statuses` (default: pending, running,
+   * suspended) whose `createdAt` is older than `olderThanMs`, recording
+   * `error` on each. Returns the number of rows updated.
+   *
+   * Optional: `WorkflowRunner.recover()` uses it as a single-statement fast
+   * path for stale-run termination and otherwise pages through
+   * `listWorkflows` and cancels rows one by one.
+   */
+  cancelStaleWorkflows?(params: {
+    olderThanMs: number;
+    error?: string;
+    statuses?: Array<"pending" | "running" | "suspended">;
+  }): number | Promise<number>;
+
+  /**
    * Load run history for a workflow — all runs with their step results.
    * Ordered by run number descending (newest first).
    */
