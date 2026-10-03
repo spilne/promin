@@ -59,8 +59,8 @@ import {
   SqliteMemoryStore,
   SqliteSecretsStorage,
 } from "@promin/sqlite";
+import { createPostgresDb } from "@spilne/perfect-postgres";
 import {
-  createPostgresDb,
   migrate as migratePostgres,
   PostgresAgentRegistry,
   PostgresSkillRegistry,

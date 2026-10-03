@@ -1,7 +1,3 @@
-// Drizzle DB type + connection helper
-export type { DrizzleDb } from "./lib/drizzle-db.ts";
-export { createPostgresDb } from "./lib/drizzle-db.ts";
-
 // Storage
 export { PostgresWorkflowStorage } from "./lib/postgres-workflow-storage.ts";
 export { PostgresWorkflowVersionRegistry } from "./lib/postgres-workflow-version-registry.ts";
@@ -80,12 +76,6 @@ export {
 } from "./lib/durable-scheduler.ts";
 export { durableSchedules, durableScheduleTicks } from "./lib/scheduler-schema.ts";
 
-// SKIP LOCKED queue (no extension required)
-export { PgQueue, type PgQueueConfig } from "./lib/pg-queue.ts";
-
-// LISTEN/NOTIFY change stream (CDC)
-export { PgChangeStream, type PgChangeStreamConfig } from "./lib/pg-change-stream.ts";
-
 // Distributed step queue (SKIP LOCKED)
 export { PgStepQueue, type PgStepQueueConfig } from "./lib/pg-step-queue.ts";
 
@@ -100,12 +90,6 @@ export {
   PgWorkflowStartQueue,
   type PgWorkflowStartQueueConfig,
 } from "./lib/pg-workflow-start-queue.ts";
-
-// Leader election (advisory lock)
-export { PgLeaderElection, type PgLeaderElectionConfig } from "./lib/pg-leader-election.ts";
-
-// State backend (topology checkpoints)
-export { PgStateBackend, type PgStateBackendConfig } from "./lib/pg-state-backend.ts";
 
 // State machine storage
 export { PgStateMachineStorage } from "./lib/pg-state-machine-storage.ts";
@@ -129,17 +113,6 @@ export {
   machineEvents,
   LOOKUP_BINDINGS,
 } from "./lib/schema.ts";
-export { createQueueTable, type QueueTable } from "./lib/pg-queue-schema.ts";
-export { createTopologyStateTable, topologyState } from "./lib/pg-state-schema.ts";
-
-// Schema utilities
-export { ensureTable } from "./lib/schema-utils.ts";
-
-// Concurrency primitives
-export { PgRateLimiter, type PgRateLimiterConfig } from "./lib/pg-rate-limiter.ts";
-export { PgThrottle, type PgThrottleConfig } from "./lib/pg-throttle.ts";
-export { PgSingleflight, type PgSingleflightConfig } from "./lib/pg-singleflight.ts";
-export { PgRef, type PgRefConfig } from "./lib/pg-ref.ts";
 
 // Metrics
 export {

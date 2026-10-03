@@ -6,12 +6,9 @@
   "dependencies": {
     "@promin/core": "workspace:*",
     "@promin/data": "workspace:*",
-    "@promin/postgres": "workspace:*",
     "@promin/redis": "workspace:*",
     "@promin/workflow": "workspace:*",
-    "drizzle-orm": "^0.44.0",
-    "ioredis": "^5.6.1",
-    "postgres": "^3.4.5"
+    "ioredis": "^5.6.1"
   },
   "devDependencies": {
     "@types/bun": "catalog:",

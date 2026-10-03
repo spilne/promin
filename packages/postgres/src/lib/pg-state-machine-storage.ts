@@ -1,18 +1,8 @@
 import { eq, and, sql } from "drizzle-orm";
 import type { StateMachineStorage, MachineState, TransitionEvent } from "@promin/workflow";
 import { machines, machineEvents } from "./schema.ts";
-import type { DrizzleDb } from "./drizzle-db.ts";
-import { execRaw } from "./drizzle-db.ts";
-
-function hashToInt32(str: string): number {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = (hash << 5) - hash + char;
-    hash |= 0;
-  }
-  return hash;
-}
+import { type DrizzleDb, hashToInt32 } from "@spilne/perfect-postgres";
+import { execRaw } from "./exec-raw.ts";
 
 export class PgStateMachineStorage implements StateMachineStorage {
   constructor(private readonly db: DrizzleDb) {}

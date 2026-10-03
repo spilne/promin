@@ -14,7 +14,7 @@
 
 import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import type { ToolAuditEntry, ToolAuditLogger, ToolAuditRecord } from "@promin/agent";
-import type { DrizzleDb } from "../drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { agentAuditLog } from "../schema.ts";
 
 export interface PostgresToolAuditLoggerConfig {

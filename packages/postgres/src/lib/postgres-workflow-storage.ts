@@ -47,21 +47,12 @@ import {
 import { seedLookupEnums, validateLookupEnums } from "./lookup-table.ts";
 import type { PostgresStorageConfig } from "./config.ts";
 import { resolveConfig } from "./config.ts";
-import { execRaw } from "./drizzle-db.ts";
+import { hashToInt32 } from "@spilne/perfect-postgres";
+import { execRaw } from "./exec-raw.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function hashToInt32(str: string): number {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = (hash << 5) - hash + char;
-    hash |= 0;
-  }
-  return hash;
-}
 
 // ---------------------------------------------------------------------------
 // PostgresWorkflowStorage

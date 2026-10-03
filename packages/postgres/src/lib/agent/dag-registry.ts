@@ -18,7 +18,7 @@ import {
   type RegisterDagInput,
   type RegisteredDag,
 } from "@promin/agent";
-import type { DrizzleDb } from "../drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { agentDag } from "../schema.ts";
 
 export interface PostgresDagRegistryConfig {

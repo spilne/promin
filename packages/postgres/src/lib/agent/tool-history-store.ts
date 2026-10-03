@@ -18,7 +18,7 @@ import type {
   ToolHistoryStore,
   ToolObservation,
 } from "@promin/agent";
-import type { DrizzleDb } from "../drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { agentToolHistory } from "../schema.ts";
 
 export interface PostgresToolHistoryStoreConfig {

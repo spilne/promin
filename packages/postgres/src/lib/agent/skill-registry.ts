@@ -17,7 +17,7 @@ import type {
   SkillRegistry,
 } from "@promin/agent";
 import { DEFAULT_SKILL_VERSION } from "@promin/agent";
-import type { DrizzleDb } from "../drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { skillRegistry } from "../schema.ts";
 
 export interface PostgresSkillRegistryConfig {

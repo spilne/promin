@@ -40,7 +40,7 @@ import type {
   ThreadSummary,
   TokenBudget,
 } from "@promin/agent";
-import type { DrizzleDb } from "../drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 import {
   agentEpisode,
   agentFact,

@@ -10,7 +10,7 @@
 import { and, desc, eq } from "drizzle-orm";
 import { composeRunId } from "@promin/evals";
 import type { EvalRunQuery, EvalRunStore, EvalRunSummary, StoredEvalRun } from "@promin/evals";
-import type { DrizzleDb } from "../drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { evalRun } from "../schema.ts";
 
 export interface PostgresEvalRunStoreConfig {

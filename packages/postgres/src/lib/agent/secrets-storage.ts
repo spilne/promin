@@ -20,7 +20,7 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { ResolvedSecret, SecretScope, SecretsStorage } from "@promin/agent";
-import type { DrizzleDb } from "../drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { agentSecret } from "../schema.ts";
 
 export interface PostgresSecretsStorageConfig {

@@ -23,7 +23,7 @@ import type {
   VersionRecord,
   VersionStatus,
 } from "@promin/workflow";
-import type { DrizzleDb } from "./drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { workflowRegistry } from "./schema.ts";
 
 export class PostgresWorkflowVersionRegistry implements IWorkflowVersionRegistry {

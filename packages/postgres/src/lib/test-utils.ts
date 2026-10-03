@@ -6,7 +6,7 @@ import { describe, beforeAll, afterAll } from "bun:test";
 import { GenericContainer, Wait, type StartedTestContainer } from "testcontainers";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
-import type { DrizzleDb } from "./drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 
 const POSTGRES_IMAGE = "postgres:17-alpine";
 

@@ -14,7 +14,7 @@ Optional packages for specific use cases:
 bun add @promin/workflow     # Durable workflows with compensation (sagas)
 bun add @promin/data         # DataFrame, profiling, diff, quality checks
 bun add @promin/redis        # Redis state backend and cache store
-bun add @promin/postgres     # Postgres state backend, step queue, change streams
+bun add @promin/postgres     # Postgres workflow storage, step queue, scheduler
 bun add @promin/duckdb       # DuckDB executor for analytical queries
 ```
 
@@ -26,7 +26,7 @@ bun add @promin/duckdb       # DuckDB executor for analytical queries
 | `@promin/workflow` | Durable workflows, DAG steps, compensation, distributed workers |
 | `@promin/data` | DataFrame, data profiler, diff, quality, contracts, SQL models |
 | `@promin/redis` | Redis state backend and cache store |
-| `@promin/postgres` | Postgres state backend, step queue, change streams |
+| `@promin/postgres` | Postgres workflow storage, step queue, scheduler |
 | `@promin/duckdb` | DuckDB executor for analytical queries |
 
 ## Your first Pipeline

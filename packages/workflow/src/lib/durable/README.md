@@ -403,13 +403,14 @@ await storage.cancelWorkflow("onboard-1", { cascade: true }); // cancels childre
 
 ### Dead Letter Queue
 
-Failed workflows (after all retries + compensation) are published to a configurable DLQ. Works with any `Sinkable<FailedWorkflowRecord>` — PgQueue, PgmqQueue, or custom.
+Failed workflows (after all retries + compensation) are published to a configurable DLQ. Works with any `Sinkable<FailedWorkflowRecord>` — an object with a `codec` and `publish(record): Promise<void>`, e.g. an adapter over a perfect-postgres `PgQueue`.
 
 ```typescript
 import { workflow } from "@promin/workflow";
-import { PgQueue } from "@promin/postgres";
+import { PgQueue } from "@spilne/perfect-postgres";
 
-const dlq = await PgQueue.create<FailedWorkflowRecord>(db, "workflow-dlq");
+const queue = await PgQueue.create<FailedWorkflowRecord>(db, "workflow-dlq");
+const dlq = { codec: queue.codec, publish: (record) => queue.publish(record).orDie().run() };
 
 workflow<{ orderId: string }>({
   name: "process-order",

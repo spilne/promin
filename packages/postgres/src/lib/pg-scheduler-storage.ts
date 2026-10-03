@@ -3,14 +3,14 @@
 //
 // Heavy lifting (cron/rrule/catch-up/jitter/leader loop) lives in the generic
 // DurableScheduler shell in @promin/workflow. This file is the storage-only
-// adapter — schedule CRUD, due-row lookup, and pg_advisory_lock-based leader
-// election.
+// adapter — schedule CRUD, due-row lookup, and advisory-lock leader election
+// (perfect-postgres PgLeaderElection, one lock per namespace).
 // ---------------------------------------------------------------------------
 
 import { and, asc, eq, inArray, isNotNull, lte, sql, type SQL } from "drizzle-orm";
 import type { DurableScheduleConfig, SchedulerStorage } from "@promin/workflow";
 import { durableSchedules, durableScheduleTicks } from "./scheduler-schema.ts";
-import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
+import { type DrizzleDb, hashToInt32, PgLeaderElection } from "@spilne/perfect-postgres";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 
 export interface PgSchedulerStorageConfig {
@@ -299,11 +299,7 @@ export class PgSchedulerStorage implements SchedulerStorage {
     const lockId = params.namespace
       ? this.leaderLockId ^ hashToInt32(params.namespace)
       : this.leaderLockId;
-    const [result] = await execRaw(
-      this.db,
-      sql`SELECT pg_try_advisory_lock(${lockId}) as acquired`,
-    );
-    return result?.acquired === true;
+    return new PgLeaderElection({ db: this.db, lockId }).tryAcquire();
   }
 
   async findDueAcross(params: {
@@ -358,14 +354,4 @@ function rowToConfig(row: any): DurableScheduleConfig {
     endAt: row.endAt ?? undefined,
     metadata: row.metadata as Record<string, unknown> | undefined,
   };
-}
-
-function hashToInt32(str: string): number {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = (hash << 5) - hash + char;
-    hash |= 0;
-  }
-  return hash;
 }
