@@ -69,7 +69,7 @@ await migrate(db, {
 
 Postgres-backed, distributed-safe cron scheduler. Persistent schedules, catch-up for missed runs, overlap policies, leader election via `pg_advisory_lock`, jitter, and backfill.
 
-Implements `Streamable<ScheduleTick>` — works with `trigger()` and all StreamPipeline combinators.
+Implements `Streamable<ScheduleTick>` — works with `trigger()` and all perfect `Stream` combinators.
 
 ```typescript
 import { createDurableScheduler, migrate } from "@promin/postgres";

@@ -4,17 +4,24 @@ Project-level instructions for AI agents working on this codebase.
 
 ## Project Overview
 
-**Nx monorepo** with **Bun** runtime, **Effect** for functional programming, and **Zod** validation. Linting via **oxlint**, formatting via **oxfmt**.
+**Nx monorepo** with **Bun** runtime, **perfect** (`@spilne/perfect-core`) for effects, streams and concurrency, and **Zod** validation. Linting via **oxlint**, formatting via **oxfmt**.
 
 ### Directory Layout
 
 ```
 packages/
-  core/                # Effect-based Pipeline<T,E> and StreamPipeline<T,E> primitives
-  postgres/            # Postgres state backend, step queue, change streams
-  redis/               # Redis state backend and cache store
+  workflow/            # Durable workflows, DAG steps, distributed workers, scheduler, state machines
+  data/                # Lazy DataFrame, expression builder, data quality, profiling, diff
   duckdb/              # DuckDB executor for analytical queries
-  container/           # DI container
+  postgres/            # Postgres workflow storage, step queue, scheduler, change streams
+  redis/               # Redis workflow storage, step queue, scheduler
+  sqlite/              # SQLite backends for rate limiter, throttle and queue
+  container/           # Docker / Kubernetes step execution
+  agent/               # Durable AI agent loops and tool orchestration
+  evals/               # Agent evaluation framework
+  workflow-remote/     # HTTP/RPC adapters for remote workflow storage and workers
+  zorya/               # Self-hostable workflow platform server + dashboard
+  zorya-client/        # Zorya client SDK
 ```
 
 ## TypeScript Conventions
@@ -117,8 +124,8 @@ the pattern.
 Use nx to run typecheck (this is what CI does):
 
 ```bash
-bun nx run @promin/core:typecheck
 bun nx run @promin/workflow:typecheck
+bun nx run @promin/data:typecheck
 ```
 
 ## Key Libraries
@@ -127,7 +134,7 @@ bun nx run @promin/workflow:typecheck
 |---------|---------|
 | Runtime | Bun |
 | Validation | Zod |
-| FP/Concurrency | Effect |
+| FP/Concurrency | perfect (`@spilne/perfect-core`) |
 | Monorepo | Nx |
 | Linting | oxlint |
 | Formatting | oxfmt |

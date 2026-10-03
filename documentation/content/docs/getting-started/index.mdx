@@ -2,16 +2,15 @@
 title: Getting Started
 ---
 
-Install the core package:
+Install the workflow package:
 
 ```bash
-bun add @promin/core
+bun add @promin/workflow     # Durable workflows with compensation (sagas)
 ```
 
 Optional packages for specific use cases:
 
 ```bash
-bun add @promin/workflow     # Durable workflows with compensation (sagas)
 bun add @promin/data         # DataFrame, profiling, diff, quality checks
 bun add @promin/redis        # Redis workflow storage, step queue, scheduler
 bun add @promin/postgres     # Postgres workflow storage, step queue, scheduler
@@ -20,57 +19,15 @@ bun add @promin/duckdb       # DuckDB executor for analytical queries
 
 ## Package overview
 
+Promin is built on [perfect](https://github.com/spilne/perfect). For resilient async actions, streams with backpressure, and concurrency primitives, use `@spilne/perfect-core` directly.
+
 | Package | What it provides |
 |---------|-----------------|
-| `@promin/core` | Pipeline, StreamPipeline, RawStream, semaphore, circuit breaker, cache |
 | `@promin/workflow` | Durable workflows, DAG steps, compensation, distributed workers |
 | `@promin/data` | DataFrame, data profiler, diff, quality, contracts, SQL models |
 | `@promin/redis` | Redis workflow storage, step queue, scheduler, state machine storage |
 | `@promin/postgres` | Postgres workflow storage, step queue, scheduler |
 | `@promin/duckdb` | DuckDB executor for analytical queries |
-
-## Your first Pipeline
-
-A `Pipeline` is a lazy, composable async action. Chain retry, timeout, and transforms — nothing runs until you call a terminal.
-
-```typescript
-import { Pipeline } from "@promin/core";
-
-const user = await Pipeline.fn(() => fetch("/api/user").then((r) => r.json()))
-  .map((data) => ({ ...data, name: data.name.toUpperCase() }))
-  .retry({ maxRetries: 3, jitter: true })
-  .timeout(5_000)
-  .runPromise();
-```
-
-Error handling without exceptions:
-
-```typescript
-const { data, error } = await Pipeline.fn(() => fetchUser(id))
-  .retry(3)
-  .timeout(5_000)
-  .runSafe();
-
-if (error) console.error(error._tag);
-else console.log(data);
-```
-
-## Your first StreamPipeline
-
-A `StreamPipeline` processes sequences of items with backpressure. Adjacent pure operators are automatically fused for performance.
-
-```typescript
-import { StreamPipeline } from "@promin/core";
-
-const emails = await StreamPipeline.fromIterable(users)
-  .filter((u) => u.active)
-  .map((u) => u.email)
-  .parAsyncMap(5, async (email) => {
-    const profile = await fetchProfile(email);
-    return { email, profile };
-  })
-  .collect();
-```
 
 ## Your first Workflow
 
@@ -94,8 +51,6 @@ If "ship" fails, the workflow automatically runs the "charge" compensation (refu
 
 ## Next steps
 
-- [Pipeline](/docs/guide/pipeline) — full API for resilient async operations
-- [Workflows](/docs/guide/workflows) — durable execution, compensation, distributed workers
-- [DataFrame](/docs/guide/dataframe) — lazy analytics with expression builder
-- [StreamPipeline](/docs/guide/stream-pipeline) — stream processing with backpressure
-- [Comparison with other tools](/docs/getting-started/comparison)
+- [Workflows](/docs/workflow/workflows) — durable execution, compensation, distributed workers
+- [DataFrame](/docs/data/dataframe) — lazy analytics with expression builder
+- [perfect](https://github.com/spilne/perfect) — the effect runtime promin is built on: `Eff`, streams, retry, timeout, and concurrency primitives (`@spilne/perfect-core`)

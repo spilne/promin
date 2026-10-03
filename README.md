@@ -1,23 +1,20 @@
 # Promin
 
-TypeScript toolkit for resilient async operations, durable workflows, stream processing, and analytics. Built on Effect, Bun, and Postgres.
+TypeScript toolkit for resilient async operations, durable workflows, stream processing, and analytics. Built on [perfect](https://github.com/spilne/perfect), Bun, and Postgres.
 
 ## Why Promin?
 
 Production services need retry, timeout, circuit breakers, backpressure, crash recovery, and observability. Most TypeScript tools solve one of these — Promin composes them all:
 
-- **Pipeline** — retry, timeout, circuit breaker, race, cache in one chainable API. No more nested try/catch with manual backoff.
-- **StreamPipeline** — parallel transforms, batching, deduplication with automatic operator fusion. Not just `for await...of`.
 - **Durable workflows** — DAG-based steps that survive crashes. Compensation (sagas), signals, sleep. Not just a job queue.
 - **DataFrame** — lazy analytics with expression builder. Array executor for small data, DuckDB for large. Not just `Array.filter().map()`.
 
-All of these compose. A workflow step can use a Pipeline with retry. A DataFrame query can run inside a durable step. One type system, one runtime.
+All of these compose on [perfect](https://github.com/spilne/perfect) (`@spilne/perfect-core`) — the effect runtime that provides retry, timeout, circuit breakers, streams with backpressure, and concurrency primitives. A workflow step can be a perfect `Eff` with retry. A DataFrame query can run inside a durable step. One type system, one runtime.
 
 ## Packages
 
 | Package | Description |
 |---|---|
-| **[@promin/core](./packages/core/)** | Pipeline, StreamPipeline, concurrency primitives |
 | **[@promin/workflow](./packages/workflow/)** | Durable workflows, distributed workers, state machines, scheduler |
 | **[@promin/data](./packages/data/)** | DataFrame, data quality, profiling, diff, contracts |
 | **[@promin/duckdb](./packages/duckdb/)** | DuckDB executor for DataFrame — SQL compilation, file sources |
@@ -25,7 +22,7 @@ All of these compose. A workflow step can use a Pipeline with retry. A DataFrame
 | **[@promin/redis](./packages/redis/)** | Redis workflow storage, step queue, scheduler |
 | **[@promin/container](./packages/container/)** | Container step executor (Docker, K8s, local process) |
 
-HTTP client, Kafka transport, and stateful stream topology live in [perfect](https://github.com/spilne/perfect): `@spilne/perfect-http`, `@spilne/perfect-kafka`, `@spilne/perfect-topology`.
+The effect runtime, streams and concurrency primitives come from [perfect](https://github.com/spilne/perfect) (`@spilne/perfect-core`); HTTP client, Kafka transport, and stateful stream topology live there too: `@spilne/perfect-http`, `@spilne/perfect-kafka`, `@spilne/perfect-topology`.
 
 ## Quick Start
 
@@ -34,25 +31,16 @@ bun install
 ```
 
 ```typescript
-import { Pipeline, StreamPipeline } from "@promin/core";
+import { tryPromise } from "@spilne/perfect-core";
 import { DataFrame, col } from "@promin/data";
 import { workflow } from "@promin/workflow";
 
-// Pipeline — composable async operations with retry, timeout, concurrency
-const result = await Pipeline.fromPromise(() => fetch("/api/data"))
-  .map(r => r.json())
-  .retry(3)
-  .timeout(5_000)
-  .runPromise();
-
-// StreamPipeline — streaming with automatic operator fusion
-await StreamPipeline.fromAsyncIterable(events)
-  .map(transform)       // ┐
-  .filter(isValid)       // ├ fused into single mapChunks (2x faster)
-  .tap(log)              // ┘
-  .parAsyncMap(10, enrich)
-  .groupWithin(500, 1_000)
-  .forEach(batch => db.bulkInsert(batch));
+// perfect — typed async effects with retry and timeout
+const result = await tryPromise(() => fetch("/api/data").then((r) => r.json()), (e) => new FetchError(e))
+  .retry({ times: 3, backoff: "exponential" })
+  .timeoutFail(5_000, () => new TimeoutError())
+  .orDie()
+  .run();
 
 // DataFrame — analytics with pluggable executors
 const topRegions = await DataFrame.fromArray(sales)
@@ -88,22 +76,24 @@ bun run bench:all    # all benchmark suites
 
 | Command | Description |
 |---|---|
-| `bun run test` | Tests (core, workflow, data, postgres, redis; store tests use testcontainers) |
+| `bun run test` | Tests (workflow, data, postgres, redis; store tests use testcontainers) |
 | `bun run bench` | Cross-language benchmarks (Promin vs Pandas vs Polars) |
-| `bun run bench:all` | All benchmarks (stream, pipeline, dataframe, workflow, cross-language) |
+| `bun run bench:all` | All benchmarks (dataframe, workflow, cross-language) |
 | `bun nx run-many -t typecheck` | Typecheck all packages |
 | `bun nx run-many -t lint` | Lint all packages |
 
 ## Architecture
 
 ```
-@promin/core (no native deps)
-  Pipeline<T,E>          — composable async operations
-  StreamPipeline<T,E>    — streaming with operator fusion
-  RawStream<T>           — zero-overhead stream (no Effect)
-  DataFrame<T>           — lazy analytics with pluggable executors
+@spilne/perfect-core (external)
+  Eff<A,S>, Stream<A,S>  — effect runtime, streams, retry, concurrency primitives
+
+@promin/workflow
   workflow()             — durable workflows with DAG, signals, sleep
   Distributed            — coordinator + workers via Postgres SKIP LOCKED
+
+@promin/data (no native deps)
+  DataFrame<T>           — lazy analytics with pluggable executors
 
 @promin/duckdb (optional, adds DuckDB)
   DuckDBExecutor         — compiles DataFrame plans to SQL
@@ -119,7 +109,7 @@ bun run bench:all    # all benchmark suites
 |---|---|
 | Runtime | Bun |
 | Language | TypeScript |
-| FP/Concurrency | Effect |
+| FP/Concurrency | perfect (`@spilne/perfect-core`) |
 | Validation | Zod |
 | Monorepo | Nx |
 | Linting | oxlint |
@@ -129,7 +119,7 @@ bun run bench:all    # all benchmark suites
 
 ## Documentation
 
-- **[Book](./book/)** — full documentation (build with `bun run docs`)
+- **[Docs](./documentation/)** — full documentation (build with `bun run docs`)
 - **[Examples](./examples/)** — real-world scenarios, ordered simple → advanced
-- **[Comparison](./packages/core/COMPARISON.md)** — Pipeline vs Promise vs raw Effect
-- **[Glossary](./packages/core/GLOSSARY.md)** — Promin concepts mapped to Temporal, Airflow, Kafka Streams, Flink
+- **[Glossary](./documentation/content/docs/reference/glossary.mdx)** — Promin concepts mapped to Temporal, Airflow, Spark, Pandas/Polars
+- **[perfect](https://github.com/spilne/perfect)** — the effect runtime promin is built on, with its own guide and examples

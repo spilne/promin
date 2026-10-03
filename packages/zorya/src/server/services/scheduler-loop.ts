@@ -4,7 +4,7 @@
 //
 // Why embedded vs `scheduler.stream().forEach(...)`:
 //   - Lifecycle. A while-loop with a flag stops cleanly on `server.stop()`;
-//     `Effect.runPromise(stream...)` doesn't expose interruption.
+//     draining the stream only stops via fiber interruption.
 //   - Tests. Driving one tick at a time via `tickOnce()` lets specs avoid
 //     real timers.
 //

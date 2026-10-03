@@ -1,5 +1,5 @@
 {
-  description = "Promin — Effect-based pipeline platform";
+  description = "Promin — durable workflows and analytics on perfect";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

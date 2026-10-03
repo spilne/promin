@@ -1,48 +1,23 @@
 ---
 title: Promin
-description: TypeScript toolkit for resilient async operations, durable workflows, stream processing, and analytics. Built on Effect.
+description: TypeScript toolkit for resilient async operations, durable workflows, stream processing, and analytics. Built on perfect.
 ---
 
-TypeScript toolkit for resilient async operations, durable workflows, stream processing, and analytics. Built on [Effect](https://effect.website).
+TypeScript toolkit for resilient async operations, durable workflows, stream processing, and analytics. Built on [perfect](https://github.com/spilne/perfect) (`@spilne/perfect-core`).
 
 ## Packages
 
 | Package | What it does |
 | --- | --- |
-| [`@promin/core`](/docs/core/pipeline) | Pipeline, StreamPipeline, concurrency primitives |
 | [`@promin/workflow`](/docs/workflow/workflows) | Durable workflows, state machines, distributed workers, scheduler |
 | [`@promin/data`](/docs/data/dataframe) | DataFrame, data quality, profiling, diff |
 | [`@promin/redis`](/docs/integrations/redis) | Redis workflow storage, step queue, scheduler |
 | [`@promin/postgres`](/docs/integrations/postgres) | Postgres stores — workflow storage, step queue, scheduler |
 | [`@promin/duckdb`](/docs/data/dataframe) | DuckDB executor for DataFrame — SQL, Arrow IPC |
 
-HTTP client, Kafka transport, and stateful stream topology live in [perfect](https://github.com/spilne/perfect): `@spilne/perfect-http`, `@spilne/perfect-kafka`, `@spilne/perfect-topology`.
+The effect runtime, streams, retry/timeout, and concurrency primitives (semaphore, queue, circuit breaker, rate limiter, cache) come from [perfect](https://github.com/spilne/perfect) — `@spilne/perfect-core`. HTTP client, Kafka transport, and stateful stream topology live there too: `@spilne/perfect-http`, `@spilne/perfect-kafka`, `@spilne/perfect-topology`.
 
 ## Highlights
-
-### [Pipeline](/docs/core/pipeline) — Async actions with resilience
-
-Chainable, lazily-evaluated wrapper over Effect. Retry, timeout, circuit breaker, caching, polling — without Effect expertise.
-
-```typescript
-const result = await Pipeline.fn(() => callService())
-  .map((data) => transform(data))
-  .retry({ maxRetries: 3, jitter: true })
-  .timeout(5_000)
-  .runPromise();
-```
-
-### [StreamPipeline](/docs/core/stream-pipeline) — Stream processing with backpressure
-
-Parallel transforms, batching, deduplication, windowing. Automatic operator fusion.
-
-```typescript
-await StreamPipeline.fromAsyncIterable(messages, onError)
-  .filter((msg) => msg.topic === "events")
-  .parAsyncMap(10, (msg) => enrichFromDb(msg.payload))
-  .groupWithin(500, 1_000)
-  .forEach((batch) => db.bulkInsert(batch));
-```
 
 ### [Durable Workflows](/docs/workflow/workflows) — Crash-recoverable execution
 
@@ -84,9 +59,6 @@ const result = await DataFrame.fromRows(sales)
 
 | Module | Description |
 | --- | --- |
-| [Concurrency Primitives](/docs/core/primitives) | Semaphore, Ref, Channel, Queue, Deferred, Signal, Throttle, and more |
-| [Stream Pipes](/docs/core/stream-pipes) | Reusable `through()` transforms: CSV, JSONL, XML, base64, length-prefixed |
-| RawStream | Zero-overhead stream for hot paths (~4x faster than StreamPipeline) |
 | [Data Quality](/docs/data/quality) | Profiling, expectations, diff, contracts |
 | [SQL Models](/docs/workflow/sql-models) | dbt-style SQL model DAG with materialization |
 | [Scheduler](/docs/workflow/scheduler) | Cron + rrule-based workflow scheduling |

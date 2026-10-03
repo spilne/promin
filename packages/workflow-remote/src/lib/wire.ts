@@ -77,7 +77,7 @@ export type RpcResponse =
       readonly ok: false;
       readonly error: string;
       /**
-       * Optional tag for Effect `Data.TaggedError` subclasses (e.g.
+       * Optional tag for `TaggedError` subclasses (e.g.
        * `"FenceTokenMismatchError"`). When present, the client rehydrates
        * a plain object carrying `_tag`, `message`, and the other public
        * fields so downstream code can branch on `_tag` the same way it
