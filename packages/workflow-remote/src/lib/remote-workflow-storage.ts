@@ -114,6 +114,7 @@ export class RemoteWorkflowStorage
   listWorkflows(params?: {
     status?: WorkflowStatus;
     name?: string;
+    version?: string;
     type?: string;
     parentId?: string;
     namespace?: string;

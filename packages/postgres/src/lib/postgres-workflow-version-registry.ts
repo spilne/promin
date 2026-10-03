@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 
 import { fail } from "@spilne/perfect-core";
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, sql } from "drizzle-orm";
 import type { TaggedError } from "@promin/workflow";
 import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
 import type {
@@ -156,7 +156,8 @@ export class PostgresWorkflowVersionRegistry implements IWorkflowVersionRegistry
       }
       if (target.status === "active") return rowToVersionRecord(target);
 
-      const now = new Date();
+      // Server clock, like `registered_at`, so lifecycle timestamps order together.
+      const now = sql`NOW()`;
       // Demote any current active to inactive — the partial unique index
       // would otherwise reject the promote.
       await tx
@@ -199,7 +200,8 @@ export class PostgresWorkflowVersionRegistry implements IWorkflowVersionRegistry
       if (!currentActive || currentActive.version === params.toVersion) {
         throw new Error(`rollback: no different active version for "${params.name}"`);
       }
-      const now = new Date();
+      // Server clock, like `registered_at`, so lifecycle timestamps order together.
+      const now = sql`NOW()`;
       const [previous] = await tx
         .update(workflowRegistry)
         .set({ status: "archived", archivedAt: now })

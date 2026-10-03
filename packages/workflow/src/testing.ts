@@ -1,5 +1,8 @@
 export { storageTestSuite } from "./lib/durable/storage-test-suite.ts";
-export { versionRegistryTestSuite } from "./lib/durable/version-registry-test-suite.ts";
+export {
+  versionRegistryTestSuite,
+  versionDrainTestSuite,
+} from "./lib/durable/version-registry-test-suite.ts";
 export {
   journalReplayTestSuite,
   type JournalReplayTestSuiteOptions,
@@ -13,3 +16,7 @@ export {
   type SchedulerTestHarness,
 } from "./lib/scheduler/scheduler-test-suite.ts";
 export { schedulerStorageTestSuite } from "./lib/scheduler/scheduler-storage-test-suite.ts";
+export {
+  stateMachineStorageTestSuite,
+  type StateMachineStorageTestSuiteOptions,
+} from "./lib/durable/state-machine-storage-test-suite.ts";

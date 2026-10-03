@@ -4,6 +4,7 @@
 
 import type { Workflow } from "./durable-pipeline.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
+import { WORKFLOW_STATUSES, type WorkflowStatus } from "./workflow-state.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 
 // ---------------------------------------------------------------------------
@@ -118,14 +119,17 @@ export interface IWorkflowVersionRegistry {
 export interface WorkflowVersionRegistryConfig {
   /**
    * Automatically deregister versions whose in-flight count hits zero.
-   * Polled when `countByVersion()` is called; also triggered via
-   * `checkDrained()`. Default: false (manual deregistration).
+   * Checked when `countByVersion()` is called. The latest registered and
+   * the promoted active version are never removed. Default: false (manual
+   * deregistration).
    */
   autoDeregister?: boolean;
   /**
-   * Callback fired when a version finishes draining (running + suspended
-   * count reaches zero). Fires regardless of `autoDeregister`; useful for
-   * logging/alerting even when you want to keep the version registered.
+   * Callback fired when a version finishes draining (no pending, running,
+   * suspended or compensating runs left). Fires once per drain, again if
+   * runs reappear and drain later. Fires regardless of `autoDeregister`;
+   * useful for logging/alerting even when you want to keep the version
+   * registered.
    */
   onDrained?: (name: string, version: string) => void | Promise<void>;
   /**
@@ -133,6 +137,27 @@ export interface WorkflowVersionRegistryConfig {
    * registration-desc order of `listRecords`). Default: `SystemWallClock`.
    */
   clock?: WallClock;
+}
+
+/** Per-version run counts returned by `countByVersion`. */
+export interface VersionRunCounts {
+  /** Non-terminal runs: pending, running, suspended or compensating. */
+  running: number;
+  completed: number;
+  failed: number;
+  tripwire: number;
+}
+
+function addRunCount(params: {
+  counts: VersionRunCounts;
+  status: WorkflowStatus;
+  n: number;
+}): void {
+  const { counts, status, n } = params;
+  if (status === "completed") counts.completed += n;
+  else if (status === "failed") counts.failed += n;
+  else if (status === "tripwire") counts.tripwire += n;
+  else counts.running += n;
 }
 
 /** Internal record holding lifecycle metadata alongside the definition. */
@@ -364,61 +389,80 @@ export class WorkflowVersionRegistry {
   }
 
   /**
-   * Count in-flight (pending/running/suspended) workflows per version
-   * using the supplied storage. Useful for monitoring drain progress
-   * before deregistering old versions.
+   * Count runs per registered version using the supplied storage. `running`
+   * is every non-terminal run (pending, running, suspended, compensating);
+   * terminal runs (`completed`, `failed`, `tripwire`) never hold a version
+   * open. Useful for monitoring drain progress before deregistering old
+   * versions.
+   *
+   * Uses `storage.countWorkflows({ name, version, status })` when the
+   * backend has it, so no rows are loaded; otherwise lists the lean
+   * summaries for the name once.
+   *
+   * Drain detection: a registered version with no in-flight runs fires
+   * `onDrained` once (re-armed when runs appear again) and, with
+   * `autoDeregister`, is deregistered unless it is the latest or the
+   * promoted active version.
    */
   async countByVersion(params: {
     name: string;
     storage: WorkflowStorage;
-  }): Promise<Map<string, { running: number; completed: number; failed: number }>> {
-    const result = new Map<string, { running: number; completed: number; failed: number }>();
-
-    // Query storage once for all workflows with this name
-    const workflows = await params.storage.listWorkflows({
-      name: params.name,
-    });
-
-    // Initialize counters for all registered versions
-    for (const version of this.versions(params.name)) {
-      result.set(version, { running: 0, completed: 0, failed: 0 });
+  }): Promise<Map<string, VersionRunCounts>> {
+    const { name, storage } = params;
+    const registered = this.versions(name);
+    const result = new Map<string, VersionRunCounts>();
+    for (const version of registered) {
+      result.set(version, { running: 0, completed: 0, failed: 0, tripwire: 0 });
     }
 
-    // Count by version (filter in JS since storage has no version filter)
-    for (const wf of workflows) {
-      const version = wf.version;
-      if (!version) continue;
-
-      let counts = result.get(version);
-      if (!counts) {
-        counts = { running: 0, completed: 0, failed: 0 };
-        result.set(version, counts);
+    if (storage.countWorkflows) {
+      const count = storage.countWorkflows.bind(storage);
+      await Promise.all(
+        registered.flatMap((version) =>
+          WORKFLOW_STATUSES.map(async (status) => {
+            const n = await count({ name, version, status });
+            if (n > 0) addRunCount({ counts: result.get(version)!, status, n });
+          }),
+        ),
+      );
+    } else {
+      const list =
+        storage.listWorkflowSummaries?.bind(storage) ?? storage.listWorkflows.bind(storage);
+      for (const wf of await list({ name })) {
+        const counts = wf.version ? result.get(wf.version) : undefined;
+        if (counts) addRunCount({ counts, status: wf.status, n: 1 });
       }
-
-      if (wf.status === "completed") counts.completed++;
-      else if (wf.status === "failed") counts.failed++;
-      else counts.running++; // pending, running, suspended, compensating
     }
 
-    // Drain detection: if a registered version has zero in-flight (no
-    // running counter) AND we haven't already notified, fire onDrained and
-    // optionally deregister.
-    for (const version of this.versions(params.name)) {
-      const counts = result.get(version) ?? { running: 0, completed: 0, failed: 0 };
-      if (counts.running === 0) {
-        const key = `${params.name}::${version}`;
-        if (!this.drainedNotified.has(key)) {
-          this.drainedNotified.add(key);
-          if (this.onDrained) await this.onDrained(params.name, version);
-          // Don't deregister the latest version — new workflows need it.
-          if (this.autoDeregister && this.latestVersions.get(params.name) !== version) {
-            this.deregister(params.name, version);
-          }
-        }
+    for (const version of registered) {
+      // A hook awaited below may have deregistered it meanwhile.
+      if (!this.definitions.get(name)?.has(version)) continue;
+      const key = `${name}::${version}`;
+      if (result.get(version)!.running > 0) {
+        // In flight again — the next drain notifies afresh.
+        this.drainedNotified.delete(key);
+        continue;
+      }
+      if (this.drainedNotified.has(key)) continue;
+      this.drainedNotified.add(key);
+      if (this.onDrained) await this.onDrained(name, version);
+      if (this.autoDeregister && !this.isRoutable(name, version)) {
+        this.deregister(name, version);
       }
     }
 
     return result;
+  }
+
+  /**
+   * True for the versions new runs can be routed to: the latest registered
+   * and the promoted active one. Auto-deregistration never removes them —
+   * dropping the active version after a rollback would silently route new
+   * runs back to the latest.
+   */
+  private isRoutable(name: string, version: string): boolean {
+    if (this.latestVersions.get(name) === version) return true;
+    return this.definitions.get(name)?.get(version)?.status === "active";
   }
 
   /**
@@ -482,9 +526,7 @@ export class ScopedWorkflowVersionRegistry {
   }
 
   /** Count in-flight workflows per version; see base registry. */
-  countByVersion(params: {
-    storage: WorkflowStorage;
-  }): Promise<Map<string, { running: number; completed: number; failed: number }>> {
+  countByVersion(params: { storage: WorkflowStorage }): Promise<Map<string, VersionRunCounts>> {
     return this.registry.countByVersion({ ...params, name: this.name });
   }
 

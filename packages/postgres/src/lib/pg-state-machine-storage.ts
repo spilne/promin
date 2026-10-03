@@ -1,14 +1,36 @@
 import { eq, and, sql } from "drizzle-orm";
-import type { StateMachineStorage, MachineState, TransitionEvent } from "@promin/workflow";
+import {
+  SystemWallClock,
+  type StateMachineStorage,
+  type MachineState,
+  type TransitionEvent,
+  type WallClock,
+} from "@promin/workflow";
 import { machines, machineEvents, machineLocks } from "./schema.ts";
 import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { execRaw } from "./exec-raw.ts";
 
+export interface PgStateMachineStorageOptions {
+  /**
+   * Time source for `createdAt` / `updatedAt` and event timestamps. The
+   * state machine compares `updatedAt` against its own clock for due
+   * timeouts, so both sides read the same clock. Default: `SystemWallClock`.
+   * Lock expiry stays on the database clock.
+   */
+  clock?: WallClock;
+}
+
 export class PgStateMachineStorage implements StateMachineStorage {
   /** Lock owner id — `releaseLock` only frees leases this instance holds. */
   private readonly instanceId = crypto.randomUUID();
+  private readonly clock: WallClock;
 
-  constructor(private readonly db: DrizzleDb) {}
+  constructor(
+    private readonly db: DrizzleDb,
+    options?: PgStateMachineStorageOptions,
+  ) {
+    this.clock = options?.clock ?? SystemWallClock;
+  }
 
   async create(params: {
     id: string;
@@ -20,6 +42,7 @@ export class PgStateMachineStorage implements StateMachineStorage {
     version?: string;
     metadata?: Record<string, unknown>;
   }): Promise<void> {
+    const now = this.clock.now();
     await this.db.insert(machines).values({
       id: params.id,
       name: params.name,
@@ -29,6 +52,8 @@ export class PgStateMachineStorage implements StateMachineStorage {
       context: params.context,
       version: params.version,
       metadata: params.metadata,
+      createdAt: now,
+      updatedAt: now,
     });
   }
 
@@ -55,29 +80,34 @@ export class PgStateMachineStorage implements StateMachineStorage {
     to: string;
     event: string;
     context: unknown;
+    eventData?: unknown;
     metadata?: unknown;
   }): Promise<void> {
-    const now = new Date();
+    const now = this.clock.now();
 
-    // Update current state — validate we're in expected state
-    const [updated] = await this.db
-      .update(machines)
-      .set({ current: params.to, context: params.context, updatedAt: now })
-      .where(and(eq(machines.id, params.id), eq(machines.current, params.from)))
-      .returning({ id: machines.id });
+    // State update and audit row commit together: a crash between them
+    // must not leave a transition without its event.
+    await this.db.transaction(async (tx) => {
+      // Compare-and-set on the expected source state.
+      const [updated] = await tx
+        .update(machines)
+        .set({ current: params.to, context: params.context, updatedAt: now })
+        .where(and(eq(machines.id, params.id), eq(machines.current, params.from)))
+        .returning({ id: machines.id });
 
-    if (!updated) {
-      throw new Error(`Machine ${params.id} is not in state "${params.from}"`);
-    }
+      if (!updated) {
+        throw new Error(`Machine ${params.id} is not in state "${params.from}"`);
+      }
 
-    // Append event
-    await this.db.insert(machineEvents).values({
-      machineId: params.id,
-      event: params.event,
-      fromState: params.from,
-      toState: params.to,
-      context: params.context,
-      metadata: params.metadata,
+      await tx.insert(machineEvents).values({
+        machineId: params.id,
+        event: params.event,
+        fromState: params.from,
+        toState: params.to,
+        context: params.context,
+        metadata: params.metadata,
+        createdAt: now,
+      });
     });
   }
 

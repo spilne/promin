@@ -54,6 +54,7 @@ export {
   type WorkflowVersionRegistryConfig,
   type IWorkflowVersionRegistry,
   type VersionRecord,
+  type VersionRunCounts,
   type VersionStatus,
   WorkflowError,
   StepError,

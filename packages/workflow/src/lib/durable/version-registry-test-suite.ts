@@ -9,7 +9,11 @@
 import { describe, it, expect } from "bun:test";
 import { succeed } from "@spilne/perfect-core";
 import { workflow, type Workflow } from "./durable-pipeline.ts";
-import type { IWorkflowVersionRegistry } from "./workflow-version-registry.ts";
+import {
+  createWorkflowVersionRegistry,
+  type IWorkflowVersionRegistry,
+} from "./workflow-version-registry.ts";
+import type { WorkflowStorage } from "./workflow-storage.ts";
 
 export interface VersionRegistryTestSuiteOptions {
   /**
@@ -219,5 +223,169 @@ export function versionRegistryTestSuite(
         });
       });
     }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Drain conformance — `WorkflowVersionRegistry.countByVersion` over a
+// `WorkflowStorage`. Run it against every storage backend: drain detection
+// reads run counts per (name, version, status) from the store.
+// ---------------------------------------------------------------------------
+
+let drainSeq = 0;
+function freshName(label: string): string {
+  drainSeq += 1;
+  return `drain-${label}-${drainSeq}-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+async function createRun(params: {
+  storage: WorkflowStorage;
+  name: string;
+  version?: string;
+}): Promise<string> {
+  const workflowId = `${params.name}-${crypto.randomUUID()}`;
+  await params.storage.createWorkflow({
+    workflowId,
+    workflowName: params.name,
+    input: {},
+    version: params.version,
+  });
+  return workflowId;
+}
+
+/**
+ * Run the version-drain conformance suite against a `WorkflowStorage`.
+ * Each test uses fresh workflow names, so a shared database needs no
+ * truncation between tests.
+ */
+export function versionDrainTestSuite(
+  factory: () => WorkflowStorage | Promise<WorkflowStorage>,
+): void {
+  describe("WorkflowVersionRegistry drain conformance", () => {
+    it("listWorkflows and countWorkflows filter by version", async () => {
+      const storage = await factory();
+      const name = freshName("filter");
+      await createRun({ storage, name, version: "1" });
+      await createRun({ storage, name, version: "1" });
+      await createRun({ storage, name, version: "2" });
+      await createRun({ storage, name });
+
+      expect(await storage.listWorkflows({ name, version: "1" })).toHaveLength(2);
+      expect((await storage.listWorkflows({ name, version: "2" })).map((w) => w.version)).toEqual([
+        "2",
+      ]);
+      expect(await storage.listWorkflows({ name, version: "9" })).toEqual([]);
+      if (storage.countWorkflows) {
+        expect(await storage.countWorkflows({ name, version: "1" })).toBe(2);
+        expect(await storage.countWorkflows({ name, version: "1", status: "pending" })).toBe(2);
+        expect(await storage.countWorkflows({ name, version: "2" })).toBe(1);
+        expect(await storage.countWorkflows({ name, version: "9" })).toBe(0);
+        expect(await storage.countWorkflows({ name })).toBe(4);
+      }
+    });
+
+    it("counts runs per version by status; terminal runs are not in flight", async () => {
+      const storage = await factory();
+      const name = freshName("counts");
+      const registry = createWorkflowVersionRegistry();
+      registry.register(def({ name, version: "1" }));
+      registry.register(def({ name, version: "2" }));
+
+      const done = await createRun({ storage, name, version: "1" });
+      await storage.completeWorkflow(done, "ok");
+      const failed = await createRun({ storage, name, version: "1" });
+      await storage.failWorkflow(failed, "boom");
+      await createRun({ storage, name, version: "2" });
+      if (storage.tripwireWorkflow) {
+        const tripped = await createRun({ storage, name, version: "1" });
+        await storage.tripwireWorkflow(tripped, { reason: "halt" });
+      }
+
+      const counts = await registry.countByVersion({ name, storage });
+      expect(counts.get("1")).toEqual({
+        running: 0,
+        completed: 1,
+        failed: 1,
+        tripwire: storage.tripwireWorkflow ? 1 : 0,
+      });
+      expect(counts.get("2")).toEqual({ running: 1, completed: 0, failed: 0, tripwire: 0 });
+    });
+
+    it("a version whose only runs tripwired drains", async () => {
+      const storage = await factory();
+      if (!storage.tripwireWorkflow) return;
+      const name = freshName("tripwire");
+      const drained: string[] = [];
+      const registry = createWorkflowVersionRegistry({
+        autoDeregister: true,
+        onDrained: (_n, version) => void drained.push(version),
+      });
+      registry.register(def({ name, version: "1" }));
+      registry.register(def({ name, version: "2" }));
+
+      const tripped = await createRun({ storage, name, version: "1" });
+      await storage.tripwireWorkflow(tripped, { reason: "halt" });
+      await createRun({ storage, name, version: "2" });
+
+      await registry.countByVersion({ name, storage });
+      expect(drained).toEqual(["1"]);
+      expect(registry.versions(name)).toEqual(["2"]);
+    });
+
+    it("an in-flight run keeps its version registered", async () => {
+      const storage = await factory();
+      const name = freshName("inflight");
+      const drained: string[] = [];
+      const registry = createWorkflowVersionRegistry({
+        autoDeregister: true,
+        onDrained: (_n, version) => void drained.push(version),
+      });
+      registry.register(def({ name, version: "1" }));
+      registry.register(def({ name, version: "2" }));
+      await createRun({ storage, name, version: "1" });
+
+      await registry.countByVersion({ name, storage });
+      expect(drained).toEqual(["2"]);
+      expect([...registry.versions(name)].sort()).toEqual(["1", "2"]);
+    });
+
+    it("autoDeregister never removes the promoted active version", async () => {
+      const storage = await factory();
+      const name = freshName("active");
+      const registry = createWorkflowVersionRegistry({ autoDeregister: true });
+      registry.register(def({ name, version: "1" }));
+      registry.register(def({ name, version: "2" }));
+      registry.register(def({ name, version: "3" }));
+      registry.promote(name, "3");
+      // Roll back: 1 becomes active while 3 stays the latest registered.
+      registry.rollback({ name, toVersion: "1" });
+
+      await registry.countByVersion({ name, storage });
+
+      expect([...registry.versions(name)].sort()).toEqual(["1", "3"]);
+      expect(registry.findActive(name)?.version).toBe("1");
+    });
+
+    it("onDrained fires again after a drained version gets new runs and drains", async () => {
+      const storage = await factory();
+      const name = freshName("renotify");
+      const drained: string[] = [];
+      const registry = createWorkflowVersionRegistry({
+        onDrained: (_n, version) => void drained.push(version),
+      });
+      registry.register(def({ name, version: "1" }));
+
+      await registry.countByVersion({ name, storage });
+      await registry.countByVersion({ name, storage });
+      expect(drained).toEqual(["1"]);
+
+      const run = await createRun({ storage, name, version: "1" });
+      await registry.countByVersion({ name, storage });
+      expect(drained).toEqual(["1"]);
+
+      await storage.completeWorkflow(run, "ok");
+      await registry.countByVersion({ name, storage });
+      expect(drained).toEqual(["1", "1"]);
+    });
   });
 }

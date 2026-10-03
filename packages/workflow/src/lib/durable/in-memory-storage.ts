@@ -219,6 +219,7 @@ export class InMemoryWorkflowStorage
   async listWorkflows(params?: {
     status?: WorkflowStatus;
     name?: string;
+    version?: string;
     type?: string;
     parentId?: string;
     namespace?: string;
@@ -241,6 +242,7 @@ export class InMemoryWorkflowStorage
       if (ns && wf.namespace !== ns) continue;
       if (params?.status && wf.status !== params.status) continue;
       if (params?.name && wf.workflowName !== params.name) continue;
+      if (params?.version !== undefined && wf.version !== params.version) continue;
       if (params?.type && wf.workflowType !== params.type) continue;
       if (params?.parentId && wf.parentWorkflowId !== params.parentId) continue;
       if (params?.runSource !== undefined && wf.runSource !== params.runSource) continue;
@@ -265,6 +267,7 @@ export class InMemoryWorkflowStorage
   async countWorkflows(params?: {
     status?: WorkflowStatus;
     name?: string;
+    version?: string;
     type?: string;
     parentId?: string;
     namespace?: string;
@@ -278,6 +281,7 @@ export class InMemoryWorkflowStorage
       if (ns && wf.namespace !== ns) continue;
       if (params?.status && wf.status !== params.status) continue;
       if (params?.name && wf.workflowName !== params.name) continue;
+      if (params?.version !== undefined && wf.version !== params.version) continue;
       if (params?.type && wf.workflowType !== params.type) continue;
       if (params?.parentId && wf.parentWorkflowId !== params.parentId) continue;
       if (params?.runSource !== undefined && wf.runSource !== params.runSource) continue;

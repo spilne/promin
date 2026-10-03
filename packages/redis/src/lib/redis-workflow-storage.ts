@@ -760,6 +760,7 @@ export class RedisWorkflowStorage
   async listWorkflows(params?: {
     status?: WorkflowStatus;
     name?: string;
+    version?: string;
     type?: string;
     parentId?: string;
     namespace?: string;
@@ -771,6 +772,53 @@ export class RedisWorkflowStorage
     orderBy?: WorkflowOrderBy;
     orderDir?: "asc" | "desc";
   }): Promise<WorkflowState[]> {
+    // We need the full filtered set in memory before sorting + paginating;
+    // streaming-with-early-exit doesn't compose with order-by.
+    const all: WorkflowState[] = [];
+    for (const raw of await this.filteredWorkflowHashes(params)) {
+      all.push(await this.assembleWorkflow(raw));
+    }
+
+    const orderBy = params?.orderBy ?? "startedAt";
+    const orderDir = params?.orderDir ?? "desc";
+    all.sort(makeWorkflowStateComparator(orderBy, orderDir));
+
+    const offset = params?.offset ?? 0;
+    const limit = params?.limit ?? all.length;
+    return all.slice(offset, offset + limit);
+  }
+
+  /** Count over the same filters as `listWorkflows`, without assembling steps. */
+  async countWorkflows(params?: {
+    status?: WorkflowStatus;
+    name?: string;
+    version?: string;
+    type?: string;
+    parentId?: string;
+    namespace?: string;
+    runSource?: RunSource;
+    runSourceId?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<number> {
+    return (await this.filteredWorkflowHashes(params)).length;
+  }
+
+  /**
+   * Workflow hashes matching the list filters: candidates come from the
+   * status / name / parent index sets, the remaining filters are applied
+   * to each hash.
+   */
+  private async filteredWorkflowHashes(params?: {
+    status?: WorkflowStatus;
+    name?: string;
+    version?: string;
+    type?: string;
+    parentId?: string;
+    namespace?: string;
+    runSource?: RunSource;
+    runSourceId?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<Record<string, string>[]> {
     // Collect candidate ID sets based on filters
     const indexKeys: string[] = [];
 
@@ -801,14 +849,14 @@ export class RedisWorkflowStorage
     const ns = params?.namespace ?? this.namespace;
     const metadataFilter = params?.metadata;
 
-    // Load + apply filters not covered by indexes (namespace, type, parentId,
-    // metadata). We need the full filtered set in memory before sorting +
-    // paginating; streaming-with-early-exit doesn't compose with order-by.
-    const all: WorkflowState[] = [];
+    // Load + apply filters not covered by indexes (namespace, version, type,
+    // parentId, run source, metadata).
+    const matched: Record<string, string>[] = [];
     for (const id of candidateIds) {
       const raw = await this.redis.hgetall(this.wfKey(id));
       if (!raw || !raw.id) continue;
       if (ns && raw.namespace !== ns) continue;
+      if (params?.version !== undefined && (raw.version || undefined) !== params.version) continue;
       if (params?.type && raw.workflowType !== params.type) continue;
       if (params?.parentId && raw.parentWorkflowId !== params.parentId) continue;
       if (
@@ -818,18 +866,13 @@ export class RedisWorkflowStorage
         continue;
       }
       if (params?.runSourceId !== undefined && raw.runSourceId !== params.runSourceId) continue;
-      const wf = await this.assembleWorkflow(raw);
-      if (metadataFilter && !workflowMetadataMatches(wf.metadata, metadataFilter)) continue;
-      all.push(wf);
+      if (metadataFilter) {
+        const metadata = raw.metadata ? JSON.parse(raw.metadata) : undefined;
+        if (!workflowMetadataMatches(metadata, metadataFilter)) continue;
+      }
+      matched.push(raw);
     }
-
-    const orderBy = params?.orderBy ?? "startedAt";
-    const orderDir = params?.orderDir ?? "desc";
-    all.sort(makeWorkflowStateComparator(orderBy, orderDir));
-
-    const offset = params?.offset ?? 0;
-    const limit = params?.limit ?? all.length;
-    return all.slice(offset, offset + limit);
+    return matched;
   }
 
   async cancelWorkflow(

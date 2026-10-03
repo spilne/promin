@@ -78,6 +78,7 @@ export {
   type WorkflowVersionRegistryConfig,
   type IWorkflowVersionRegistry,
   type VersionRecord,
+  type VersionRunCounts,
   type VersionStatus,
 } from "./workflow-version-registry.ts";
 export {

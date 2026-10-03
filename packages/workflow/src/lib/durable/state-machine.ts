@@ -319,9 +319,14 @@ export class StateMachineBuilder<S, Events = void> {
 // Runtime
 // ---------------------------------------------------------------------------
 
+/** Sweep idle rate-limit windows once this many machine ids are tracked. */
+const RATE_WINDOW_SWEEP_THRESHOLD = 1024;
+
 export class StateMachineInstance<S, Events = void> {
-  private recentSendTimestamps: number[] = [];
-  private timers = new Map<string, TimerHandle>();
+  /** Per-machine send timestamps (clock ms) inside the last second. */
+  private recentSendTimestamps = new Map<string, number[]>();
+  /** Pending in-process timeout per machine, with its due time on `clock`. */
+  private timers = new Map<string, { handle: TimerHandle; dueAtMs: number }>();
 
   constructor(
     private readonly name: string,
@@ -358,7 +363,7 @@ export class StateMachineInstance<S, Events = void> {
       metadata: params.metadata,
     });
 
-    this.scheduleTimeoutIfAny(params.id, this.initialState);
+    this.scheduleTimeoutIfAny({ id: params.id, stateName: this.initialState });
   }
 
   async send(params: SendParams<Events>): Promise<void> {
@@ -383,8 +388,12 @@ export class StateMachineInstance<S, Events = void> {
     const locked = await this.storage.tryLock(id, 30_000);
     if (!locked) throw new Error(`Machine ${id} is locked`);
 
-    // Cancel any pending timeout — this transition supersedes it.
-    this.cancelTimeout(id);
+    // The pending timeout stays armed until the transition commits: a send
+    // rejected by a guard, a missing transition or a failing action leaves
+    // the machine where it was, so its timeout must still fire.
+    const pendingTimeoutDueAt = this.timers.get(id)?.dueAtMs;
+    let fromState: string | undefined;
+    let committedTo: string | undefined;
 
     try {
       const machine = await this.storage.load(id);
@@ -410,15 +419,9 @@ export class StateMachineInstance<S, Events = void> {
       }
 
       if (this.limits?.maxTransitionsPerSecond) {
-        const now = this.clock.currentTimeMs();
-        this.recentSendTimestamps = this.recentSendTimestamps.filter((t) => t > now - 1000);
-        if (this.recentSendTimestamps.length >= this.limits.maxTransitionsPerSecond) {
-          throw new Error(
-            `Machine ${id} exceeded rate limit (${this.limits.maxTransitionsPerSecond}/sec)`,
-          );
-        }
-        this.recentSendTimestamps.push(now);
+        this.checkRateLimit(id, this.limits.maxTransitionsPerSecond);
       }
+      fromState = machine.current;
 
       // Find matching transition
       const transition = this.transitions.find((t) => {
@@ -506,24 +509,30 @@ export class StateMachineInstance<S, Events = void> {
         metadata,
       };
 
-      // Core transition: onExit → persist → onEnter
+      // Core transition: onExit → persist → onEnter. Once persisted, a
+      // re-run by retrying middleware only repeats onEnter: re-running
+      // onExit and the compare-and-set from the old state would fail
+      // against the state that was just saved.
       const executeTransition = async () => {
-        const currentStateConfig = this.states.get(txCtx.from);
-        if (currentStateConfig?.onExit) {
-          await currentStateConfig.onExit(machine.context, data);
+        if (committedTo === undefined) {
+          const currentStateConfig = this.states.get(txCtx.from);
+          if (currentStateConfig?.onExit) {
+            await currentStateConfig.onExit(machine.context, data);
+          }
+
+          await this.storage.transition({
+            id,
+            from: txCtx.from,
+            to: txCtx.to,
+            event,
+            context: txCtx.context,
+            eventData: txCtx.eventData,
+            metadata: txCtx.metadata,
+          });
+          committedTo = txCtx.to;
         }
 
-        await this.storage.transition({
-          id,
-          from: txCtx.from,
-          to: txCtx.to,
-          event,
-          context: txCtx.context,
-          eventData: txCtx.eventData,
-          metadata: txCtx.metadata,
-        });
-
-        const targetStateConfig = this.states.get(txCtx.to);
+        const targetStateConfig = this.states.get(committedTo);
         if (targetStateConfig?.onEnter) {
           await targetStateConfig.onEnter(txCtx.context, data);
         }
@@ -535,12 +544,56 @@ export class StateMachineInstance<S, Events = void> {
       } else {
         await executeTransition();
       }
-
-      // Schedule a fresh timeout for the new state if it has one.
-      this.scheduleTimeoutIfAny(id, txCtx.to);
     } finally {
+      this.settleTimeoutAfterSend({ id, fromState, committedTo, pendingTimeoutDueAt });
       await this.storage.releaseLock(id);
     }
+  }
+
+  /**
+   * Count one send against `id`'s per-second window. The window is per
+   * machine id: one busy machine never throttles the others.
+   */
+  private checkRateLimit(id: string, maxPerSecond: number): void {
+    const now = this.clock.currentTimeMs();
+    const cutoff = now - 1000;
+    if (this.recentSendTimestamps.size > RATE_WINDOW_SWEEP_THRESHOLD) {
+      for (const [key, stamps] of this.recentSendTimestamps) {
+        if (stamps.every((t) => t <= cutoff)) this.recentSendTimestamps.delete(key);
+      }
+    }
+    const recent = (this.recentSendTimestamps.get(id) ?? []).filter((t) => t > cutoff);
+    if (recent.length >= maxPerSecond) {
+      this.recentSendTimestamps.set(id, recent);
+      throw new Error(`Machine ${id} exceeded rate limit (${maxPerSecond}/sec)`);
+    }
+    recent.push(now);
+    this.recentSendTimestamps.set(id, recent);
+  }
+
+  /**
+   * Re-arm timeouts once a send settles. A committed transition replaces
+   * the old state's timeout with the new state's, even when onEnter threw
+   * afterwards. A send that did not commit keeps the old timeout; if that
+   * timer fired while this send held the lock (so the firing was skipped),
+   * re-arm it for the time it had left.
+   */
+  private settleTimeoutAfterSend(params: {
+    id: string;
+    fromState: string | undefined;
+    committedTo: string | undefined;
+    pendingTimeoutDueAt: number | undefined;
+  }): void {
+    const { id, fromState, committedTo, pendingTimeoutDueAt } = params;
+    if (committedTo !== undefined) {
+      this.cancelTimeout(id);
+      this.scheduleTimeoutIfAny({ id, stateName: committedTo });
+      return;
+    }
+    if (fromState === undefined || pendingTimeoutDueAt === undefined) return;
+    if (this.timers.has(id)) return;
+    const delayMs = Math.max(0, pendingTimeoutDueAt - this.clock.currentTimeMs());
+    this.scheduleTimeoutIfAny({ id, stateName: fromState, delayMs });
   }
 
   // ---------------------------------------------------------------------------
@@ -564,30 +617,33 @@ export class StateMachineInstance<S, Events = void> {
 
   /** Cancel all pending in-process timers — call before discarding the instance. */
   cancelAllTimeouts(): void {
-    for (const handle of this.timers.values()) handle.clear();
+    for (const timer of this.timers.values()) timer.handle.clear();
     this.timers.clear();
   }
 
-  private scheduleTimeoutIfAny(id: string, stateName: string): void {
+  /** Arm `stateName`'s timeout for `id` (default delay: the state's `ms`). */
+  private scheduleTimeoutIfAny(params: { id: string; stateName: string; delayMs?: number }): void {
+    const { id, stateName } = params;
     if (!this.autoScheduleTimeouts) return;
     const cfg = this.states.get(stateName)?.timeout;
     if (!cfg) return;
     this.cancelTimeout(id);
+    const delayMs = params.delayMs ?? cfg.ms;
     const handle = this.clock.setTimeout(() => {
-      this.timers.delete(id);
+      if (this.timers.get(id)?.handle === handle) this.timers.delete(id);
       // Errors are swallowed — timeout firing must not crash the host process.
       // Callers that need failure visibility should use checkTimeouts() directly.
       this.fireTimeout(id, stateName).catch(() => {});
-    }, cfg.ms);
+    }, delayMs);
     // Don't keep the event loop alive for pending state-machine timeouts.
     handle.unref?.();
-    this.timers.set(id, handle);
+    this.timers.set(id, { handle, dueAtMs: this.clock.currentTimeMs() + delayMs });
   }
 
   private cancelTimeout(id: string): void {
-    const handle = this.timers.get(id);
-    if (handle) {
-      handle.clear();
+    const timer = this.timers.get(id);
+    if (timer) {
+      timer.handle.clear();
       this.timers.delete(id);
     }
   }
@@ -625,29 +681,39 @@ export class StateMachineInstance<S, Events = void> {
         metadata: undefined,
       };
 
+      // Same retry rule as `send`: once saved, only onEnter re-runs.
+      let committed = false;
       const executeTransition = async () => {
-        const fromConfig = this.states.get(fromState);
-        if (fromConfig?.onExit) await fromConfig.onExit(machine.context, undefined);
+        if (!committed) {
+          const fromConfig = this.states.get(fromState);
+          if (fromConfig?.onExit) await fromConfig.onExit(machine.context, undefined);
 
-        await this.storage.transition({
-          id,
-          from: fromState,
-          to: cfg.target,
-          event: eventName,
-          context: machine.context,
-        });
+          await this.storage.transition({
+            id,
+            from: fromState,
+            to: cfg.target,
+            event: eventName,
+            context: machine.context,
+          });
+          committed = true;
+        }
 
         const toConfig = this.states.get(cfg.target);
         if (toConfig?.onEnter) await toConfig.onEnter(machine.context, undefined);
       };
 
-      if (this.middleware) {
-        await this.middleware(txCtx, executeTransition);
-      } else {
-        await executeTransition();
+      try {
+        if (this.middleware) {
+          await this.middleware(txCtx, executeTransition);
+        } else {
+          await executeTransition();
+        }
+      } finally {
+        if (committed) {
+          this.cancelTimeout(id);
+          this.scheduleTimeoutIfAny({ id, stateName: cfg.target });
+        }
       }
-
-      this.scheduleTimeoutIfAny(id, cfg.target);
       return true;
     } finally {
       await this.storage.releaseLock(id);
