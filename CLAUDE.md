@@ -113,11 +113,13 @@ clock.advance(500);
 await done;
 ```
 
-When time sensitivity crosses a client/server boundary (e.g. Postgres
-`created_at` vs app-side `until`), prefer letting the server clock decide
-— embed `NOW()` directly in the SQL rather than binding a client-side
-`new Date()` that can skew by a few ms. See `PgStepQueue.metrics` for
-the pattern.
+When time sensitivity crosses a client/server boundary, compare
+timestamps from the same clock: a column the app stamps with its clock
+(e.g. `completed_at`) must not be bounded by the database's `NOW()`, and
+a column the database stamps (e.g. `created_at` defaulting to `NOW()`)
+must not be bounded by an app-side `new Date()` — the two clocks skew by
+milliseconds or more. When no bound is needed, leave the window open
+rather than picking either clock. See `PgStepQueue.metrics`.
 
 ## Running Typecheck
 

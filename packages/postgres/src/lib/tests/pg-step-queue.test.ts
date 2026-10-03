@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { PostgresTestContainer } from "../test-utils.ts";
 import { PgStepQueue } from "../pg-step-queue.ts";
+import { FakeWallClock } from "@promin/workflow";
 import { stepQueueTestSuite } from "@promin/workflow/testing";
 
 // ---------------------------------------------------------------------------
@@ -137,6 +138,75 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
 
     const metrics = await queue.metrics({ since: new Date(Date.now() - 60_000) });
     expect(metrics.completed).toBe(1);
+  });
+
+  it("metrics count a just-completed step when the app clock runs ahead of the DB clock", async () => {
+    // claimed_at / completed_at are stamped by the app clock, created_at by
+    // the DB. A default window bounded by the DB's NOW() drops the row
+    // whenever the app clock is even a few ms ahead (a Docker VM clock lags
+    // the host under load) — exaggerate the skew to make it certain.
+    const clock = FakeWallClock.create(Date.now() + 5_000);
+    const queue = new PgStepQueue({ db: pg.db, clock });
+
+    const id = await queue.enqueue({
+      workflowId: "wf-skew",
+      stepName: "s",
+      needs: ["skew"],
+      input: {},
+      prevResults: {},
+    });
+    await queue.claim({ capabilities: ["skew"], limit: 1 });
+    await queue.complete({ taskId: id, result: null, durationMs: 1 });
+
+    const metrics = await queue.metrics({ since: new Date(Date.now() - 60_000) });
+    expect(metrics.completed).toBe(1);
+  });
+
+  it("metrics count just-claimed and just-enqueued steps when the app clock runs behind", async () => {
+    const clock = FakeWallClock.create(Date.now() - 5_000);
+    const queue = new PgStepQueue({ db: pg.db, clock });
+
+    for (const stepName of ["claimed", "pending"]) {
+      await queue.enqueue({
+        workflowId: "wf-skew",
+        stepName,
+        needs: [stepName],
+        input: {},
+        prevResults: {},
+      });
+    }
+    await queue.claim({ capabilities: ["claimed"], limit: 1 });
+
+    const metrics = await queue.metrics({ since: new Date(clock.currentTimeMs() - 60_000) });
+    expect(metrics.running).toBe(1);
+    expect(metrics.pending).toBe(1);
+  });
+
+  it("an explicit until still bounds the window", async () => {
+    const clock = FakeWallClock.create(Date.now());
+    const queue = new PgStepQueue({ db: pg.db, clock });
+
+    const id = await queue.enqueue({
+      workflowId: "wf-until",
+      stepName: "s",
+      needs: ["until"],
+      input: {},
+      prevResults: {},
+    });
+    await queue.claim({ capabilities: ["until"], limit: 1 });
+    clock.advance(10_000);
+    await queue.complete({ taskId: id, result: null, durationMs: 1 });
+
+    const before = await queue.metrics({
+      since: new Date(clock.currentTimeMs() - 60_000),
+      until: new Date(clock.currentTimeMs() - 5_000),
+    });
+    expect(before.completed).toBe(0);
+    const after = await queue.metrics({
+      since: new Date(clock.currentTimeMs() - 60_000),
+      until: clock.now(),
+    });
+    expect(after.completed).toBe(1);
   });
 
   it("step fails — error message persisted and failure metrics updated", async () => {
