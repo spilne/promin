@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 jobs:
-  # Fast: typecheck + lint + unit tests (no Docker needed)
+  # Typecheck + lint + tests (Postgres/Redis store tests use testcontainers)
   unit:
     runs-on: ubuntu-latest
     steps:
@@ -46,10 +46,16 @@ jobs:
       - name: Lint
         run: bunx nx run-many -t lint
 
-      - name: Unit tests
+      - name: Pre-pull test container images
+        run: |
+          docker pull redis:7-alpine &
+          docker pull postgres:17-alpine &
+          wait
+
+      - name: Tests
         run: bun run test
 
-  # Benchmarks: runs in parallel with unit + integration
+  # Benchmarks: runs in parallel with unit
   benchmarks:
     runs-on: ubuntu-latest
     steps:
@@ -113,34 +119,3 @@ jobs:
           name: benchmark-reports
           path: .target/reports/
           if-no-files-found: ignore
-
-  # Slower: integration tests with testcontainers (Redis, Postgres)
-  integration:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          filter: tree:0
-          fetch-depth: 0
-
-      - uses: oven-sh/setup-bun@v1
-        with:
-          bun-version: latest
-
-      - uses: actions/cache@v4
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-${{ runner.os }}-
-
-      - run: bun install
-
-      - name: Pre-pull test container images
-        run: |
-          docker pull redis:7-alpine &
-          docker pull postgres:17-alpine &
-          docker pull ghcr.io/pgmq/pg17-pgmq:latest &
-          wait
-
-      - name: Integration tests
-        run: bun run test:integration

@@ -13,24 +13,92 @@
 //   {prefix}:schedule:{id}        — HASH with config + state (namespace-tagged)
 // ---------------------------------------------------------------------------
 
-import type { DurableScheduleConfig, SchedulerStorage } from "@promin/workflow";
-import type { RedisClient } from "./redis-client.ts";
+import {
+  scheduleMetadataContains,
+  SystemWallClock,
+  type DurableScheduleConfig,
+  type SchedulerStorage,
+  type WallClock,
+} from "@promin/workflow";
+import type { RedisStoreClient } from "./redis-client.ts";
 
 export interface RedisSchedulerStorageConfig {
-  redis: RedisClient;
+  redis: RedisStoreClient;
   /** Key prefix for all scheduler keys. Default: "sched". */
   prefix?: string;
+  /** Time source for the initial next-run of new schedules. Default: `SystemWallClock`. */
+  clock?: WallClock;
 }
 
 const GLOBAL_NS = "_";
 
+/**
+ * Insert or replace a schedule hash atomically.
+ *
+ * - Fire state (`lastFiredAt`, `tickCount`) survives a replace.
+ * - A namespace change moves the id between the per-namespace `all` sets and
+ *   carries any pending next-run over to the new due set.
+ * - A brand-new enabled schedule is seeded into the due set at ARGV[4]
+ *   (now, or `startAt` when that is later). Updates leave next-run alone.
+ *
+ * KEYS: [schedule_key, all_key, due_key]
+ * ARGV: [id, namespace_key_base, namespace, seed_ms, enabled('1'|'0'),
+ *        global_ns, field1, value1, ...]
+ */
+const UPSERT_LUA = `
+local schedule_key = KEYS[1]
+local all_key = KEYS[2]
+local due_key = KEYS[3]
+local id = ARGV[1]
+local ns_base = ARGV[2]
+local ns = ARGV[3]
+local seed_ms = ARGV[4]
+local enabled = ARGV[5]
+local global_ns = ARGV[6]
+
+local existed = redis.call('HEXISTS', schedule_key, 'id') == 1
+local last_fired = false
+local tick_count = false
+local old_ns = false
+if existed then
+  last_fired = redis.call('HGET', schedule_key, 'lastFiredAt')
+  tick_count = redis.call('HGET', schedule_key, 'tickCount')
+  old_ns = redis.call('HGET', schedule_key, 'namespace') or global_ns
+end
+
+local fields = {}
+for i = 7, #ARGV do fields[#fields + 1] = ARGV[i] end
+redis.call('DEL', schedule_key)
+redis.call('HSET', schedule_key, unpack(fields))
+if last_fired then redis.call('HSET', schedule_key, 'lastFiredAt', last_fired) end
+if tick_count then redis.call('HSET', schedule_key, 'tickCount', tick_count) end
+redis.call('SADD', all_key, id)
+
+if existed and old_ns ~= ns then
+  local old_due = ns_base .. old_ns .. ':due'
+  redis.call('SREM', ns_base .. old_ns .. ':all', id)
+  local score = redis.call('ZSCORE', old_due, id)
+  if score then
+    redis.call('ZREM', old_due, id)
+    redis.call('ZADD', due_key, score, id)
+  end
+end
+
+if not existed and enabled == '1' then
+  redis.call('ZADD', due_key, 'NX', seed_ms, id)
+end
+return existed and 0 or 1
+`;
+
 export class RedisSchedulerStorage implements SchedulerStorage {
-  private readonly redis: RedisClient;
+  private readonly redis: RedisStoreClient;
   private readonly prefix: string;
+  private readonly clock: WallClock;
 
   constructor(config: RedisSchedulerStorageConfig) {
     this.redis = config.redis;
     this.prefix = config.prefix ?? "sched";
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   // -------------------------------------------------------------------------
@@ -213,10 +281,21 @@ export class RedisSchedulerStorage implements SchedulerStorage {
     if (config.endAt) fields.endAt = String(config.endAt.getTime());
     if (config.metadata) fields.metadata = JSON.stringify(config.metadata);
 
-    // Blow away the old hash so removed fields don't linger across upserts.
-    await this.redis.del(this.scheduleKey(config.id));
-    await this.redis.hset(this.scheduleKey(config.id), fields);
-    await this.redis.sadd(this.allKey(ns), config.id);
+    const seedMs = Math.max(this.clock.currentTimeMs(), config.startAt?.getTime() ?? 0);
+    await this.redis.eval(
+      UPSERT_LUA,
+      3,
+      this.scheduleKey(config.id),
+      this.allKey(ns),
+      this.dueKey(ns),
+      config.id,
+      `${this.prefix}:ns:`,
+      this.nsKey(ns),
+      seedMs,
+      fields.enabled!,
+      GLOBAL_NS,
+      ...Object.entries(fields).flat(),
+    );
   }
 
   async deleteSchedule(id: string): Promise<void> {
@@ -233,40 +312,60 @@ export class RedisSchedulerStorage implements SchedulerStorage {
   async listSchedules(params?: {
     enabled?: boolean;
     namespace?: string;
+    metadata?: Record<string, unknown>;
     limit?: number;
     offset?: number;
   }): Promise<DurableScheduleConfig[]> {
-    const ids = await this.redis.smembers(this.allKey(params?.namespace));
-    const out: DurableScheduleConfig[] = [];
-    // SMEMBERS isn't ordered; sort by id for stable pagination.
-    ids.sort();
     const offset = params?.offset ?? 0;
     const limit = params?.limit ?? 100;
-    for (const id of ids) {
-      const cfg = await this.loadSchedule(id);
-      if (!cfg) continue;
-      if (params?.enabled !== undefined && (cfg.enabled ?? true) !== params.enabled) continue;
-      out.push(cfg);
-      if (out.length >= offset + limit) break;
-    }
-    return out.slice(offset, offset + limit);
+    const filtered = await this.filterSchedules(params);
+    return filtered.slice(offset, offset + limit);
   }
 
-  async countSchedules(params?: { enabled?: boolean; namespace?: string }): Promise<number> {
-    if (params?.enabled === undefined) {
-      // Cheap path: SCARD is O(1).
-      return await this.redis.zcard(this.allKey(params?.namespace)).catch(async () => {
-        // SCARD missing on the type — fall back to SMEMBERS length.
-        const ids = await this.redis.smembers(this.allKey(params?.namespace));
-        return ids.length;
-      });
+  async countSchedules(params?: {
+    enabled?: boolean;
+    namespace?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<number> {
+    if (
+      params?.namespace !== undefined &&
+      params.enabled === undefined &&
+      params.metadata === undefined
+    ) {
+      return await this.redis.scard(this.allKey(params.namespace));
     }
-    const all = await this.listSchedules({
-      namespace: params.namespace,
-      enabled: params.enabled,
-      limit: Number.MAX_SAFE_INTEGER,
-    });
-    return all.length;
+    return (await this.filterSchedules(params)).length;
+  }
+
+  /**
+   * Shared filter pass for list / count. An omitted namespace covers every
+   * namespace. Results are sorted by id for stable pagination; metadata
+   * containment is applied after loading (Redis has no JSON index here).
+   */
+  private async filterSchedules(params?: {
+    enabled?: boolean;
+    namespace?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<DurableScheduleConfig[]> {
+    const ids = await this.scheduleIds(params?.namespace);
+    ids.sort();
+    const configs = await this.loadSchedules(ids);
+    const out: DurableScheduleConfig[] = [];
+    for (const id of ids) {
+      const cfg = configs.get(id);
+      if (!cfg) continue;
+      if (params?.enabled !== undefined && (cfg.enabled ?? true) !== params.enabled) continue;
+      if (params?.metadata && !scheduleMetadataContains(cfg.metadata, params.metadata)) continue;
+      out.push(cfg);
+    }
+    return out;
+  }
+
+  private async scheduleIds(namespace: string | undefined): Promise<string[]> {
+    if (namespace !== undefined) return await this.redis.smembers(this.allKey(namespace));
+    const allKeys = await this.redis.keys(`${this.prefix}:ns:*:all`);
+    const sets = await Promise.all(allKeys.map((key) => this.redis.smembers(key)));
+    return [...new Set(sets.flat())];
   }
 
   // -------------------------------------------------------------------------
@@ -309,9 +408,8 @@ export class RedisSchedulerStorage implements SchedulerStorage {
     } else {
       // KEYS pattern over the per-namespace `:due` keys. Cardinality =
       // tenant count (low thousands at most), well within KEYS' budget.
-      // The RedisClient abstraction here doesn't expose SCAN; if a higher-
-      // throughput discovery path becomes necessary we add a SCAN method
-      // to the interface and switch.
+      // Switch to the client's SCAN if discovery ever needs to scale
+      // beyond that.
       const pattern = `${this.prefix}:ns:*:due`;
       const keys = await this.redis.keys(pattern);
       dueKeys = keys.map((key) => {

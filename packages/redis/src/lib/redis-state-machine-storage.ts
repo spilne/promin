@@ -1,28 +1,79 @@
-import type { StateMachineStorage } from "@promin/workflow";
-import type { MachineState, TransitionEvent } from "@promin/workflow";
-import type { RedisClient } from "./redis-client.ts";
+// ---------------------------------------------------------------------------
+// RedisStateMachineStorage — Redis adapter for StateMachineStorage
+//
+// Key layout:
+//   {prefix}:machine:{id}   — HASH with the machine snapshot
+//   {prefix}:events:{id}    — LIST of JSON transition events (append-only)
+//   {prefix}:lock:{id}      — STRING lock token with PX expiry
+// ---------------------------------------------------------------------------
 
-export interface RedisStateMachineConfig {
+import {
+  SystemWallClock,
+  type MachineState,
+  type StateMachineStorage,
+  type TransitionEvent,
+  type WallClock,
+} from "@promin/workflow";
+import type { RedisStoreClient } from "./redis-client.ts";
+
+export interface RedisStateMachineStorageConfig {
+  redis: RedisStoreClient;
+  /** Key prefix for all machine keys. Default: "sm". */
   prefix?: string;
   /** TTL for machine keys after reaching a terminal state. Default: no expiry. */
   terminalTtlMs?: number;
   /** TTL for machine keys in non-terminal states — catches stuck/abandoned machines. Default: no expiry. */
   activeTtlMs?: number;
+  /** Time source for `createdAt` / `updatedAt`. Default: `SystemWallClock`. */
+  clock?: WallClock;
 }
 
+/**
+ * Compare-and-set transition: only applies when the machine is still in
+ * `from`, updating the snapshot, appending the event and refreshing TTLs in
+ * one step. Returns the current state on mismatch, nil when missing, and
+ * `true` on success.
+ *
+ * KEYS: [machine_key, events_key]
+ * ARGV: [from, to, context_json, updated_at, event_json, ttl_ms ('' = none)]
+ */
+const TRANSITION_LUA = `
+local current = redis.call('HGET', KEYS[1], 'current')
+if not current then return nil end
+if current ~= ARGV[1] then return {current} end
+redis.call('HSET', KEYS[1], 'current', ARGV[2], 'context', ARGV[3], 'updatedAt', ARGV[4])
+redis.call('RPUSH', KEYS[2], ARGV[5])
+if ARGV[6] ~= '' then
+  redis.call('PEXPIRE', KEYS[1], ARGV[6])
+  redis.call('PEXPIRE', KEYS[2], ARGV[6])
+end
+return 1
+`;
+
+/** Delete the lock only while it still holds our token. */
+const RELEASE_LOCK_LUA = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+`;
+
 export class RedisStateMachineStorage implements StateMachineStorage {
+  private readonly redis: RedisStoreClient;
   private readonly prefix: string;
   private readonly terminalTtlMs?: number;
   private readonly activeTtlMs?: number;
-  private terminalStates = new Set<string>();
+  private readonly clock: WallClock;
+  private readonly terminalStates = new Set<string>();
+  /** Tokens of locks this instance holds, so release never frees someone else's lock. */
+  private readonly lockTokens = new Map<string, string>();
 
-  constructor(
-    private readonly redis: RedisClient,
-    config?: RedisStateMachineConfig,
-  ) {
-    this.prefix = config?.prefix ?? "sm";
-    this.terminalTtlMs = config?.terminalTtlMs;
-    this.activeTtlMs = config?.activeTtlMs;
+  constructor(config: RedisStateMachineStorageConfig) {
+    this.redis = config.redis;
+    this.prefix = config.prefix ?? "sm";
+    this.terminalTtlMs = config.terminalTtlMs;
+    this.activeTtlMs = config.activeTtlMs;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   /** Register terminal states so storage knows when to set TTL. */
@@ -38,6 +89,10 @@ export class RedisStateMachineStorage implements StateMachineStorage {
     return `${this.prefix}:events:${id}`;
   }
 
+  private lockKey(id: string): string {
+    return `${this.prefix}:lock:${id}`;
+  }
+
   async create(params: {
     id: string;
     name: string;
@@ -48,7 +103,7 @@ export class RedisStateMachineStorage implements StateMachineStorage {
     version?: string;
     metadata?: Record<string, unknown>;
   }): Promise<void> {
-    const now = new Date().toISOString();
+    const now = this.clock.now().toISOString();
     const state: Record<string, string> = {
       id: params.id,
       name: params.name,
@@ -62,12 +117,12 @@ export class RedisStateMachineStorage implements StateMachineStorage {
     if (params.version) state.version = params.version;
     if (params.metadata) state.metadata = JSON.stringify(params.metadata);
 
+    // A re-created machine starts with a fresh snapshot and history.
+    await this.redis.del(this.machineKey(params.id), this.eventsKey(params.id));
     await this.redis.hset(this.machineKey(params.id), state);
 
-    // Set active TTL for stuck machine detection
     if (this.activeTtlMs) {
       await this.redis.pexpire(this.machineKey(params.id), this.activeTtlMs);
-      await this.redis.pexpire(this.eventsKey(params.id), this.activeTtlMs);
     }
   }
 
@@ -76,15 +131,15 @@ export class RedisStateMachineStorage implements StateMachineStorage {
     if (!raw || !raw.id) return null;
     return {
       id: raw.id,
-      name: raw.name,
+      name: raw.name ?? "",
       type: raw.type ?? undefined,
       namespace: raw.namespace ?? undefined,
-      current: raw.current,
-      context: JSON.parse(raw.context),
+      current: raw.current ?? "",
+      context: raw.context !== undefined ? JSON.parse(raw.context) : undefined,
       version: raw.version ?? undefined,
       metadata: raw.metadata ? JSON.parse(raw.metadata) : undefined,
-      createdAt: new Date(raw.createdAt),
-      updatedAt: new Date(raw.updatedAt),
+      createdAt: new Date(raw.createdAt ?? 0),
+      updatedAt: new Date(raw.updatedAt ?? 0),
     };
   }
 
@@ -94,40 +149,39 @@ export class RedisStateMachineStorage implements StateMachineStorage {
     to: string;
     event: string;
     context: unknown;
+    eventData?: unknown;
     metadata?: unknown;
   }): Promise<void> {
-    const currentState = await this.redis.hget(this.machineKey(params.id), "current");
-    if (currentState !== params.from) {
-      throw new Error(`Machine ${params.id} is in state "${currentState}", not "${params.from}"`);
-    }
-
-    const now = new Date().toISOString();
-
-    await this.redis.hset(this.machineKey(params.id), {
-      current: params.to,
-      context: JSON.stringify(params.context),
-      updatedAt: now,
-    });
-
+    const now = this.clock.now();
     const event: TransitionEvent = {
       id: crypto.randomUUID(),
       event: params.event,
       from: params.from,
       to: params.to,
       context: params.context,
-      metadata: params.metadata as Record<string, unknown> | undefined,
-      createdAt: new Date(now),
+      eventData: params.eventData,
+      metadata: params.metadata,
+      createdAt: now,
     };
-    await this.redis.rpush(this.eventsKey(params.id), JSON.stringify(event));
+    const ttlMs = this.terminalStates.has(params.to) ? this.terminalTtlMs : this.activeTtlMs;
 
-    // Set TTL based on target state
-    if (this.terminalStates.has(params.to) && this.terminalTtlMs) {
-      await this.redis.pexpire(this.machineKey(params.id), this.terminalTtlMs);
-      await this.redis.pexpire(this.eventsKey(params.id), this.terminalTtlMs);
-    } else if (this.activeTtlMs) {
-      // Refresh active TTL — machine is still alive
-      await this.redis.pexpire(this.machineKey(params.id), this.activeTtlMs);
-      await this.redis.pexpire(this.eventsKey(params.id), this.activeTtlMs);
+    const result = await this.redis.eval(
+      TRANSITION_LUA,
+      2,
+      this.machineKey(params.id),
+      this.eventsKey(params.id),
+      params.from,
+      params.to,
+      JSON.stringify(params.context),
+      now.toISOString(),
+      JSON.stringify(event),
+      ttlMs ? String(ttlMs) : "",
+    );
+    if (result === null || result === undefined) {
+      throw new Error(`Machine ${params.id} not found`);
+    }
+    if (Array.isArray(result)) {
+      throw new Error(`Machine ${params.id} is in state "${result[0]}", not "${params.from}"`);
     }
   }
 
@@ -136,31 +190,28 @@ export class RedisStateMachineStorage implements StateMachineStorage {
     params?: { limit?: number; offset?: number },
   ): Promise<TransitionEvent[]> {
     const start = params?.offset ?? 0;
-    const end = params?.limit ? start + params.limit - 1 : -1;
+    if (params?.limit !== undefined && params.limit <= 0) return [];
+    const end = params?.limit !== undefined ? start + params.limit - 1 : -1;
 
-    const result = await this.redis.eval(
-      `return redis.call('LRANGE', KEYS[1], ARGV[1], ARGV[2])`,
-      1,
-      this.eventsKey(id),
-      start,
-      end,
-    );
-
-    const items = (result as string[]) ?? [];
+    const items = await this.redis.lrange(this.eventsKey(id), start, end);
     return items.map((raw) => {
-      const e = JSON.parse(raw);
+      const e = JSON.parse(raw) as TransitionEvent & { createdAt: string };
       return { ...e, createdAt: new Date(e.createdAt) };
     });
   }
 
   async tryLock(id: string, durationMs: number): Promise<boolean> {
-    const lockKey = `${this.prefix}:lock:${id}`;
-    const result = await this.redis.set(lockKey, "1", "NX", "PX", durationMs);
-    return !!result;
+    const token = crypto.randomUUID();
+    const result = await this.redis.set(this.lockKey(id), token, "PX", durationMs, "NX");
+    if (result !== "OK") return false;
+    this.lockTokens.set(id, token);
+    return true;
   }
 
   async releaseLock(id: string): Promise<void> {
-    const lockKey = `${this.prefix}:lock:${id}`;
-    await this.redis.del(lockKey);
+    const token = this.lockTokens.get(id);
+    if (token === undefined) return;
+    this.lockTokens.delete(id);
+    await this.redis.eval(RELEASE_LOCK_LUA, 1, this.lockKey(id), token);
   }
 }

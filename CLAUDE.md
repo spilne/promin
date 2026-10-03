@@ -15,7 +15,6 @@ packages/
   redis/               # Redis state backend and cache store
   duckdb/              # DuckDB executor for analytical queries
   container/           # DI container
-  integration/         # Integration tests (testcontainers: Redis, Postgres)
 ```
 
 ## TypeScript Conventions

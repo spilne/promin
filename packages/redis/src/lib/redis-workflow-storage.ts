@@ -29,11 +29,11 @@ import type {
   StepAttemptRecord,
 } from "@promin/workflow";
 import { FenceTokenMismatchError, workflowMetadataMatches } from "@promin/workflow";
-import type { RedisClient } from "./redis-client.ts";
+import type { RedisStoreClient } from "./redis-client.ts";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 
 export interface RedisWorkflowStorageConfig {
-  redis: RedisClient;
+  redis: RedisStoreClient;
   prefix?: string;
   namespace?: string | null;
   instanceId?: string;
@@ -169,7 +169,7 @@ return 1
 export class RedisWorkflowStorage
   implements WorkflowStorage, StepAttemptStorage, ActivityJournalStorage, JournaledSuspendStorage
 {
-  private readonly redis: RedisClient;
+  private readonly redis: RedisStoreClient;
   private readonly prefix: string;
   private readonly namespace: string | null;
   private readonly instanceId: string;

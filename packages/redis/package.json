@@ -1,12 +1,12 @@
 {
   "name": "@promin/redis",
   "version": "0.1.0",
-  "description": "Redis backends for promin — distributed primitives, workflow storage, caching, and pub/sub.",
+  "description": "Redis backends for promin workflows — workflow storage, step queue, scheduler and state machine storage.",
   "keywords": [
     "distributed",
-    "queue",
     "redis",
-    "semaphore",
+    "scheduler",
+    "step-queue",
     "typescript",
     "workflow-storage"
   ],
@@ -41,12 +41,13 @@
     "access": "public"
   },
   "dependencies": {
-    "@promin/core": "workspace:*",
-    "@promin/workflow": "workspace:*"
+    "@promin/workflow": "workspace:*",
+    "@spilne/perfect-redis": "catalog:"
   },
   "devDependencies": {
     "@types/bun": "catalog:",
-    "ioredis": "^5.6.1"
+    "ioredis": "^5.6.1",
+    "testcontainers": "^11.13.0"
   },
   "peerDependencies": {
     "ioredis": ">=5.0.0"
