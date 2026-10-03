@@ -49,7 +49,7 @@ describe("createWorkerApiHandler", () => {
   it("claim returns available tasks", async () => {
     await queue.enqueue({ workflowId: "wf-1", stepName: "step-a", input: {}, prevResults: {} });
 
-    const res = await post(handler, "claim", { limit: 5 });
+    const res = await post(handler, "claim", { workerId: "w-1", limit: 5 });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
@@ -60,7 +60,7 @@ describe("createWorkerApiHandler", () => {
 
   it("complete marks task completed", async () => {
     await queue.enqueue({ workflowId: "wf-1", stepName: "step-a", input: {}, prevResults: {} });
-    const [task] = await queue.claim({ limit: 1 });
+    const [task] = await queue.claim({ workerId: "w-1", limit: 1 });
 
     const res = await post(handler, "complete", {
       taskId: task!.id,
@@ -74,7 +74,7 @@ describe("createWorkerApiHandler", () => {
 
   it("fail marks task failed", async () => {
     await queue.enqueue({ workflowId: "wf-1", stepName: "step-a", input: {}, prevResults: {} });
-    const [task] = await queue.claim({ limit: 1 });
+    const [task] = await queue.claim({ workerId: "w-1", limit: 1 });
 
     const res = await post(handler, "fail", {
       taskId: task!.id,
@@ -87,7 +87,7 @@ describe("createWorkerApiHandler", () => {
 
   it("heartbeat succeeds for a running task", async () => {
     await queue.enqueue({ workflowId: "wf-1", stepName: "step-a", input: {}, prevResults: {} });
-    const [task] = await queue.claim({ limit: 1 });
+    const [task] = await queue.claim({ workerId: "w-1", limit: 1 });
 
     const res = await post(handler, "heartbeat", { taskId: task!.id });
     const body = await res.json();
@@ -95,16 +95,59 @@ describe("createWorkerApiHandler", () => {
     expect(res.status).toBe(200);
   });
 
-  it("requeueStuck requeues stale tasks", async () => {
-    await queue.enqueue({ workflowId: "wf-1", stepName: "step-a", input: {}, prevResults: {} });
-    await queue.claim({ limit: 1 });
+  it("claim routes by step name and version and records the worker id", async () => {
+    await queue.enqueue({
+      workflowId: "wf-1",
+      stepName: "foreign",
+      input: {},
+      prevResults: {},
+      priority: 9,
+    });
+    await queue.enqueue({
+      workflowId: "wf-2",
+      stepName: "step-a",
+      input: {},
+      prevResults: {},
+      version: "1",
+    });
 
-    await new Promise((r) => setTimeout(r, 15));
-    const res = await post(handler, "requeueStuck", { staleTimeoutMs: 1 });
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    const count = WORKER_WIRE_CODEC.decode(body.result);
-    expect(count).toBe(1);
+    const res = await post(handler, "claim", {
+      workerId: "remote-7",
+      limit: 1,
+      stepNames: ["step-a"],
+      versions: ["1"],
+    });
+    const tasks = WORKER_WIRE_CODEC.decode((await res.json()).result) as any[];
+    expect(tasks.map((t) => t.stepName)).toEqual(["step-a"]);
+    expect((await queue.get(tasks[0].id))?.claimedBy).toBe("remote-7");
+    expect((await queue.requeueStuck({ mode: "worker", workerId: "remote-7" })).requeued).toBe(1);
+  });
+
+  it("claim without a workerId is rejected", async () => {
+    const res = await post(handler, "claim", { limit: 5 });
+    expect(res.status).toBe(500);
+    expect((await res.json()).ok).toBe(false);
+  });
+
+  it("release gives a claimed task back", async () => {
+    const id = await queue.enqueue({
+      workflowId: "wf-1",
+      stepName: "step-a",
+      input: {},
+      prevResults: {},
+    });
+    const [task] = await queue.claim({ workerId: "w-1", limit: 1 });
+
+    const res = await post(handler, "release", { taskId: id, claimToken: task!.claimToken });
+    expect(WORKER_WIRE_CODEC.decode((await res.json()).result)).toBe(true);
+    const record = await queue.get(id);
+    expect(record?.status).toBe("pending");
+    expect(record?.deliveries).toBe(0);
+  });
+
+  it("requeueStuck is not on the worker wire", async () => {
+    const res = await post(handler, "requeueStuck", { mode: "stale", olderThanMs: 0 });
+    expect(res.status).toBe(404);
   });
 
   it("saveStepResult writes to storage", async () => {

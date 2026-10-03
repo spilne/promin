@@ -3,13 +3,13 @@ import { Database } from "bun:sqlite";
 import { stepQueueTestSuite } from "@promin/workflow/testing";
 import { SqliteStepQueue } from "../sqlite-step-queue.ts";
 
-function makeQueue() {
-  return SqliteStepQueue.make({ db: new Database(":memory:") });
+function makeQueue(options: { maxDeliveries?: number } = {}) {
+  return SqliteStepQueue.make({ db: new Database(":memory:"), ...options });
 }
 
 // ---- conformance suite ----
 
-stepQueueTestSuite(makeQueue);
+stepQueueTestSuite(({ maxDeliveries }) => makeQueue({ maxDeliveries }));
 
 // ---- SQLite-specific tests ----
 
@@ -25,7 +25,7 @@ describe("SqliteStepQueue", () => {
     });
 
     const q2 = SqliteStepQueue.make({ db });
-    const tasks = await q2.claim({ limit: 10 });
+    const tasks = await q2.claim({ workerId: "w-1", limit: 10 });
     expect(tasks).toHaveLength(1);
     expect(tasks[0]!.id).toBe(id);
   });
@@ -36,8 +36,8 @@ describe("SqliteStepQueue", () => {
     const b = SqliteStepQueue.make({ db, table: "tasks_b" });
 
     await a.enqueue({ workflowId: "wf", stepName: "s", input: {}, prevResults: {} });
-    const tasksA = await a.claim({ limit: 10 });
-    const tasksB = await b.claim({ limit: 10 });
+    const tasksA = await a.claim({ workerId: "w-1", limit: 10 });
+    const tasksB = await b.claim({ workerId: "w-1", limit: 10 });
 
     expect(tasksA).toHaveLength(1);
     expect(tasksB).toHaveLength(0);
@@ -46,14 +46,42 @@ describe("SqliteStepQueue", () => {
   it("heartbeat resets the stale timeout", async () => {
     const q = makeQueue();
     await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
-    const [task] = await q.claim({ limit: 1 });
+    const [task] = await q.claim({ workerId: "w-1", limit: 1 });
 
     await new Promise((r) => setTimeout(r, 20));
     await q.heartbeat({ taskId: task!.id });
 
     // Cutoff = 500ms ago — heartbeat was <500ms ago, should NOT requeue
-    const requeued = await q.requeueStuck({ staleTimeoutMs: 500 });
+    const { requeued } = await q.requeueStuck({ mode: "stale", olderThanMs: 500 });
     expect(requeued).toBe(0);
+  });
+
+  it("upgrades a table created before claimed_by / deliveries and namespace-free active keys", async () => {
+    const db = new Database(":memory:");
+    db.run(`
+      CREATE TABLE promin_step_tasks (
+        id TEXT NOT NULL PRIMARY KEY, workflow_id TEXT NOT NULL, step_name TEXT NOT NULL,
+        needs TEXT NOT NULL DEFAULT '[]', priority INTEGER NOT NULL DEFAULT 5,
+        input TEXT NOT NULL, prev_results TEXT NOT NULL DEFAULT '{}',
+        attempt INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'pending',
+        version TEXT, namespace TEXT, created_at INTEGER NOT NULL, claimed_at INTEGER,
+        completed_at INTEGER, result TEXT, error TEXT, duration_ms INTEGER,
+        last_heartbeat INTEGER, active_key TEXT
+      )
+    `);
+    db.run(
+      `INSERT INTO promin_step_tasks (id, workflow_id, step_name, input, created_at, active_key)
+       VALUES ('old-1', 'wf', 's', '{}', 1, 'ns::wf::s')`,
+    );
+
+    const q = SqliteStepQueue.make({ db });
+    // The pre-existing active task still dedupes under the new key.
+    expect(await q.enqueue({ workflowId: "wf", stepName: "s", input: {}, prevResults: {} })).toBe(
+      "old-1",
+    );
+    const [task] = await q.claim({ workerId: "w-9", limit: 1 });
+    expect(task?.deliveries).toBe(1);
+    expect((await q.get("old-1"))?.claimedBy).toBe("w-9");
   });
 
   it("metrics returns zero counts for empty queue", async () => {
@@ -77,7 +105,7 @@ describe("SqliteStepQueue", () => {
       prevResults: {},
       version: "3",
     });
-    const [task] = await q.claim({ limit: 1 });
+    const [task] = await q.claim({ workerId: "w-1", limit: 1 });
     expect(task!.version).toBe("3");
   });
 
@@ -90,7 +118,7 @@ describe("SqliteStepQueue", () => {
       prevResults: {},
       needs: ["gpu", "nvme"],
     });
-    const [task] = await q.claim({ capabilities: ["gpu", "nvme"], limit: 1 });
+    const [task] = await q.claim({ workerId: "w-1", capabilities: ["gpu", "nvme"], limit: 1 });
     expect(task!.needs).toEqual(["gpu", "nvme"]);
   });
 });

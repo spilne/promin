@@ -46,7 +46,7 @@ export class StepQueueExecutor implements StepExecutor {
   }
 
   async executeStep(req: StepExecutionRequest): Promise<StepExecutionResult> {
-    await this.stepQueue.enqueue({
+    const taskId = await this.stepQueue.enqueue({
       workflowId: req.workflowId,
       stepName: req.stepName,
       input: req.input,
@@ -54,6 +54,7 @@ export class StepQueueExecutor implements StepExecutor {
       needs: req.needs,
       priority: req.priority,
       version: req.version,
+      attempt: req.attempt,
       ...(req.concurrencyKey !== undefined && { concurrencyKey: req.concurrencyKey }),
       ...(req.concurrencyScope !== undefined && { concurrencyScope: req.concurrencyScope }),
       ...(req.concurrencyLimit !== undefined && { concurrencyLimit: req.concurrencyLimit }),
@@ -76,8 +77,9 @@ export class StepQueueExecutor implements StepExecutor {
       tick: async () => {
         polls++;
         if (polls === 0) return "idle";
-        if (polls % requeueEveryNPolls === 0) {
-          await this.stepQueue.requeueStuck({ staleTimeoutMs: this.staleTimeoutMs });
+        const sweep = polls % requeueEveryNPolls === 0;
+        if (sweep) {
+          await this.stepQueue.requeueStuck({ mode: "stale", olderThanMs: this.staleTimeoutMs });
         }
 
         const state = await this.storage.loadWorkflow(req.workflowId);
@@ -90,6 +92,16 @@ export class StepQueueExecutor implements StepExecutor {
         if (stepState?.status === "failed") {
           outcome = { ok: false, error: stepState.error ?? "step failed" };
           return "stop";
+        }
+        // A task that failed in the queue without a storage write was
+        // dead-lettered (it used up its deliveries); workers always write
+        // storage before settling the task, so nothing else will.
+        if (sweep) {
+          const task = await this.stepQueue.get(taskId);
+          if (task?.status === "failed") {
+            outcome = { ok: false, error: task.error ?? "step task failed" };
+            return "stop";
+          }
         }
         return "idle";
       },

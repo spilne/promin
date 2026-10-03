@@ -108,7 +108,6 @@ describe("Worker + registry integration — automatic lifecycle management", () 
     await queue.enqueue({
       workflowId: "drain-1",
       stepName: "slow",
-      queue: "default",
       input: {},
       prevResults: {},
     });
@@ -148,26 +147,25 @@ describe("Worker + registry integration — automatic lifecycle management", () 
 
 describe("Dead worker recovery — requeue stuck tasks after a worker crash", () => {
   it("tasks claimed by a crashed worker are returned to the queue for another worker", async () => {
-    const queue = new InMemoryStepQueue({ workerId: "dead-worker" });
+    const queue = new InMemoryStepQueue();
 
     await queue.enqueue({
       workflowId: "wf-1",
       stepName: "stuck-step",
-      queue: "default",
       input: {},
       prevResults: {},
     });
 
     // Claim — sets claimedBy to "dead-worker"
-    const tasks = await queue.claim({ capabilities: [], limit: 1 });
+    const tasks = await queue.claim({ workerId: "dead-worker", capabilities: [], limit: 1 });
     expect(tasks).toHaveLength(1);
 
     // Task is now "running" claimed by "dead-worker" — simulate worker death
-    const requeued = await queue.requeueStuck({ claimedBy: "dead-worker" });
+    const { requeued } = await queue.requeueStuck({ mode: "worker", workerId: "dead-worker" });
     expect(requeued).toBe(1);
 
     // Task should be claimable again
-    const reclaimed = await queue.claim({ capabilities: [], limit: 1 });
+    const reclaimed = await queue.claim({ workerId: "live-worker", capabilities: [], limit: 1 });
     expect(reclaimed).toHaveLength(1);
     expect(reclaimed[0]!.stepName).toBe("stuck-step");
   });

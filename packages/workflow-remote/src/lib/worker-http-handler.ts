@@ -50,12 +50,19 @@ export function createWorkerApiHandler(config: {
 
   const dispatchers: Record<WorkerMethod, (params: any) => Promise<unknown>> = {
     // StepQueue
-    claim: (p) =>
-      stepQueue.claim({
-        capabilities: p.capabilities,
+    claim: (p) => {
+      if (typeof p?.workerId !== "string" || p.workerId === "") {
+        throw new Error("claim requires a workerId");
+      }
+      return stepQueue.claim({
+        workerId: p.workerId,
         limit: p.limit,
-        fairness: p.fairness,
-      }),
+        capabilities: p.capabilities,
+        stepNames: p.stepNames,
+        versions: p.versions,
+      });
+    },
+    release: (p) => stepQueue.release({ taskId: p.taskId, claimToken: p.claimToken }),
     complete: (p) =>
       stepQueue.complete({
         taskId: p.taskId,
@@ -71,11 +78,6 @@ export function createWorkerApiHandler(config: {
         durationMs: p.durationMs,
       }),
     heartbeat: (p) => stepQueue.heartbeat({ taskId: p.taskId, claimToken: p.claimToken }),
-    requeueStuck: (p) =>
-      stepQueue.requeueStuck({
-        claimedBy: p.claimedBy,
-        staleTimeoutMs: p.staleTimeoutMs,
-      }),
     // Storage shortcuts
     saveStepResult: (p) => storage.saveStepResult(p),
     saveStepFailure: (p) => storage.saveStepFailure(p),

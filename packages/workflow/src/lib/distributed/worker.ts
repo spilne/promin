@@ -61,10 +61,11 @@ export interface WorkerConfig {
   /** Worker metadata (hostname, labels, etc). */
   metadata?: Record<string, unknown>;
   /**
-   * Workflow versions this worker is willing to process. When set, tasks
-   * whose `version` is not in this list are skipped (left in the queue for
-   * a compatible worker). Unversioned tasks (`version === undefined`) are
-   * always accepted for backward compat with pre-versioning workflows.
+   * Workflow versions this worker is willing to process. When set, only
+   * tasks whose `version` is in this list are claimed (the filter runs
+   * inside the queue's claim, so other versions are never taken).
+   * Unversioned tasks (`version === undefined`) are always accepted for
+   * backward compat with pre-versioning workflows.
    *
    * Typical use during a rolling deploy: a worker running both v1 and v2
    * handlers sets `supportedVersions: ["1", "2"]`; after v1 drains, the
@@ -72,11 +73,12 @@ export interface WorkerConfig {
    */
   supportedVersions?: readonly string[];
   /**
-   * Custom claim-time filter predicate. Overrides the default filter
-   * (which accepts tasks the registry has a handler for). Use when the
-   * registry-based default isn't enough (e.g. routing by priority,
-   * task metadata, dynamic policy). Takes precedence over
-   * `supportedVersions` if both are supplied.
+   * Extra post-claim predicate, on top of the registry's step names and
+   * `supportedVersions` (which the queue applies inside the claim). A task
+   * it rejects is given back with `release()` for another worker. Because
+   * the rejection happens after the claim, a rejected task at the head of
+   * the queue is claimed again on the next poll — prefer `capabilities`,
+   * the registry and `supportedVersions` for routing.
    */
   taskFilter?: (task: StepTask) => boolean;
   /**
@@ -109,6 +111,11 @@ export type WorkerErrorPhase =
   | "commit"
   /** A `WorkerHooks` callback threw; the step outcome is unaffected. */
   | "hook"
+  /**
+   * Giving a `taskFilter`-rejected task back failed; it is redelivered
+   * once its lease goes stale.
+   */
+  | "release"
   /** Anything else that escaped a task — reported, never rethrown. */
   | "task";
 
@@ -168,7 +175,8 @@ export class DefaultWorker implements WorkflowWorker {
   private readonly workerRegistry?: WorkerRegistry;
   private readonly heartbeatIntervalMs: number;
   private readonly workerMetadata?: Record<string, unknown>;
-  private readonly claimFilter: (task: StepTask) => boolean;
+  private readonly supportedVersions?: readonly string[];
+  private readonly taskFilter?: (task: StepTask) => boolean;
   private readonly clock: WallClock;
   private readonly onError: (event: WorkerErrorEvent) => void;
   private readonly pollLoop: PollLoop;
@@ -193,22 +201,8 @@ export class DefaultWorker implements WorkflowWorker {
     this.clock = config.clock ?? SystemWallClock;
     this.onError = config.onError ?? defaultOnError;
 
-    // Build the claim-time filter. Explicit `taskFilter` wins; otherwise
-    // compose registry-has-handler + optional version allow-list.
-    if (config.taskFilter) {
-      this.claimFilter = config.taskFilter;
-    } else {
-      const supported = config.supportedVersions;
-      this.claimFilter = (task) => {
-        if (!this.registry.has(task.stepName)) return false;
-        if (supported) {
-          // Unversioned tasks always accepted (backward compat). Versioned
-          // tasks must be in the allow-list.
-          if (task.version !== undefined && !supported.includes(task.version)) return false;
-        }
-        return true;
-      };
-    }
+    this.supportedVersions = config.supportedVersions;
+    this.taskFilter = config.taskFilter;
 
     this.pollLoop = new PollLoop({
       name: "worker",
@@ -273,17 +267,40 @@ export class DefaultWorker implements WorkflowWorker {
     const free = this.concurrency - this.activeCount;
     if (free <= 0) return "idle";
 
-    const tasks = await this.stepQueue.claim({
-      capabilities: this.capabilities,
+    // Routing is pushed into the claim: the queue only hands out tasks for
+    // steps this worker hosts (and versions it supports), so tasks for
+    // other workers never block the ones behind them.
+    const claimed = await this.stepQueue.claim({
+      workerId: this.workerId,
       limit: free,
-      filter: this.claimFilter,
+      capabilities: this.capabilities,
+      stepNames: this.registry.list(),
+      ...(this.supportedVersions !== undefined && { versions: this.supportedVersions }),
     });
+    const tasks = this.taskFilter ? await this.applyTaskFilter(claimed) : claimed;
     for (const task of tasks) this.launch(task);
 
     // Every free slot is now busy, so the next claim waits for one to
     // free up: `launch` wakes the loop as each task settles.
-    this.backlogLikely = tasks.length >= free;
+    this.backlogLikely = claimed.length >= free;
     return "idle";
+  }
+
+  /** Keep the tasks `taskFilter` accepts; give the rest back to the queue. */
+  private async applyTaskFilter(tasks: StepTask[]): Promise<StepTask[]> {
+    const accepted: StepTask[] = [];
+    for (const task of tasks) {
+      if (this.taskFilter!(task)) {
+        accepted.push(task);
+        continue;
+      }
+      try {
+        await this.stepQueue.release({ taskId: task.id, claimToken: task.claimToken ?? "" });
+      } catch (error) {
+        this.report({ phase: "release", error, task });
+      }
+    }
+    return accepted;
   }
 
   private launch(task: StepTask): void {

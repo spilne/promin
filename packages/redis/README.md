@@ -57,7 +57,12 @@ await queue.enqueue({
   concurrencyLimit: 2,
 });
 
-const [task] = await queue.claim({ capabilities: ["smtp"], limit: 10 });
+const [task] = await queue.claim({
+  workerId: "mailer-1",
+  limit: 10,
+  capabilities: ["smtp"],
+  stepNames: ["send-email"],
+});
 await queue.complete({
   taskId: task.id,
   claimToken: task.claimToken,
@@ -66,11 +71,17 @@ await queue.complete({
 });
 // Or: await queue.fail({ taskId: task.id, claimToken: task.claimToken, error: "SMTP timeout", durationMs: 5000 });
 
-await queue.requeueStuck({ staleTimeoutMs: 60_000 });
+// Coordinator sweeps: stale leases, and every task of a dead worker. Tasks
+// past `maxDeliveries` (default 10) are dead-lettered instead.
+await queue.requeueStuck({ mode: "stale", olderThanMs: 60_000 });
+await queue.requeueStuck({ mode: "worker", workerId: "mailer-1" });
+
+// Delete settled tasks older than a day.
+await queue.purge({ completedBefore: new Date(Date.now() - 24 * 60 * 60 * 1000) });
 ```
 
-- **Routing**: a worker claims a task only when the task's `needs` are a subset of its `capabilities`.
-- **Concurrency keys**: tasks sharing `(concurrencyScope, concurrencyKey)` are capped at `concurrencyLimit` running at once, across all workers. The running count is a Redis set updated in the same script as the claim, and the slot is released on complete, fail, requeue, and when a claim `filter` rejects the task.
+- **Routing**: a worker claims a task only when the task's `needs` are a subset of its `capabilities`, its step is in `stepNames` and its version in `versions` (when given). The checks run in the claim script, so tasks a worker can't run never block the ones behind them.
+- **Concurrency keys**: tasks sharing `(concurrencyScope, concurrencyKey)` are capped at `concurrencyLimit` running at once, across all workers. The running count is a Redis set updated in the same script as the claim, and the slot is released on complete, fail, requeue and `release()`.
 - **Claim scan**: one `claim()` examines at most `claimScanLimit` (default 1000) pending tasks while skipping ones it can't take, which bounds how long a backlog of blocked tasks can hold Redis.
 - **Idempotent enqueue**: while a task for `(workflowId, stepName)` is pending or running, `enqueue()` returns its id instead of adding another.
 

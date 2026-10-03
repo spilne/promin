@@ -2,12 +2,19 @@
 // RemoteStepQueue — client-side StepQueue that forwards worker-side calls
 // over HTTP to a server running `createWorkerApiHandler`.
 //
-// Only implements the worker-facing subset of StepQueue: claim, complete,
-// fail, heartbeat, requeueStuck. `enqueue` throws — workers never enqueue,
-// that's the coordinator's job on the server.
+// Only implements the worker-facing subset of StepQueue: claim, release,
+// complete, fail, heartbeat. The coordinator-side calls (enqueue,
+// requeueStuck, get, purge, metrics) throw — they run against the server's
+// queue directly.
 // ---------------------------------------------------------------------------
 
-import type { FairnessPolicy, StepQueue, StepTask } from "@promin/workflow";
+import type {
+  StepQueue,
+  StepQueueClaimParams,
+  StepQueueRequeueResult,
+  StepTask,
+  StepTaskRecord,
+} from "@promin/workflow";
 import type { FetchLike } from "./remote-workflow-storage.ts";
 import { WORKER_WIRE_CODEC, type WorkerMethod, type WorkerRpcResponse } from "./worker-wire.ts";
 
@@ -63,19 +70,35 @@ export class RemoteStepQueue implements StepQueue {
     );
   }
 
-  claim(params: {
-    capabilities?: readonly string[];
-    limit: number;
-    fairness?: FairnessPolicy;
-    filter?: (task: StepTask) => boolean;
-  }): Promise<StepTask[]> {
-    // The `filter` predicate is client-local and can't cross the wire —
-    // we strip it from the server call and apply it to the returned tasks.
-    // Tasks the filter rejects are lost (no way to release them from here);
-    // workers that need strict routing should use `capabilities` instead.
-    const { filter, ...forWire } = params;
-    return this.call<StepTask[]>("claim", forWire).then((tasks) =>
-      filter ? tasks.filter(filter) : tasks,
+  /**
+   * Claim on the server's queue. `workerId`, `stepNames` and `versions`
+   * travel with the call, so routing happens inside the server-side claim
+   * and the server records which worker holds each task (dead-worker
+   * reclaim works for remote workers too).
+   */
+  claim(params: StepQueueClaimParams): Promise<StepTask[]> {
+    return this.call<StepTask[]>("claim", {
+      workerId: params.workerId,
+      limit: params.limit,
+      capabilities: params.capabilities,
+      stepNames: params.stepNames,
+      versions: params.versions,
+    });
+  }
+
+  release(params: { taskId: string; claimToken: string }): Promise<boolean> {
+    return this.call("release", params);
+  }
+
+  get(): Promise<StepTaskRecord | undefined> {
+    throw new Error(
+      "RemoteStepQueue.get is not exposed over the worker wire — query the server-side queue directly.",
+    );
+  }
+
+  purge(): Promise<number> {
+    throw new Error(
+      "RemoteStepQueue.purge is not exposed over the worker wire — purge the server-side queue directly.",
     );
   }
 
@@ -101,8 +124,12 @@ export class RemoteStepQueue implements StepQueue {
     return this.call("heartbeat", params);
   }
 
-  requeueStuck(params: { claimedBy?: string; staleTimeoutMs?: number }): Promise<number> {
-    return this.call<number>("requeueStuck", params);
+  // Requeueing stuck tasks is the coordinator's sweep (it knows which
+  // workers are dead); a worker calling it could requeue everyone's tasks.
+  requeueStuck(): Promise<StepQueueRequeueResult> {
+    throw new Error(
+      "RemoteStepQueue.requeueStuck is not exposed over the worker wire — the server-side coordinator sweeps stuck tasks.",
+    );
   }
 
   // Queue metrics aren't on the worker wire yet — queue-level observability

@@ -28,6 +28,9 @@ function wrapQueue(inner: InMemoryStepQueue, overrides: Partial<StepQueue>): Ste
   return {
     enqueue: (p) => inner.enqueue(p),
     claim: (p) => inner.claim(p),
+    release: (p) => inner.release(p),
+    get: (id) => inner.get(id),
+    purge: (p) => inner.purge(p),
     complete: (p) => inner.complete(p),
     fail: (p) => inner.fail(p),
     heartbeat: (p) => inner.heartbeat(p),
@@ -326,7 +329,7 @@ describe("DefaultWorker — storage first, then queue", () => {
 
   it("a lost claim skips the commit entirely", async () => {
     const clock = FakeWallClock.create(0);
-    const queue = new InMemoryStepQueue({ clock, workerId: "queue-a" });
+    const queue = new InMemoryStepQueue({ clock });
     await queue.enqueue({ workflowId: "wf", stepName: "s", input: {}, prevResults: {} });
     const storage = new InMemoryWorkflowStorage({ clock });
     await storage.createWorkflow({ workflowId: "wf", workflowName: "x", input: {} });
@@ -339,12 +342,21 @@ describe("DefaultWorker — storage first, then queue", () => {
       await gate;
       return "stale";
     });
-    const worker = new DefaultWorker({ storage, stepQueue: queue, registry, clock });
+    const worker = new DefaultWorker({
+      storage,
+      stepQueue: queue,
+      registry,
+      clock,
+      workerId: "worker-a",
+    });
 
     void worker.start();
     await waitFor(() => started);
     // A dead-worker sweep reclaims the task while the handler still runs.
-    expect(await queue.requeueStuck({ claimedBy: "queue-a" })).toBe(1);
+    expect(await queue.requeueStuck({ mode: "worker", workerId: "worker-a" })).toEqual({
+      requeued: 1,
+      deadLettered: 0,
+    });
     release();
     await worker.stop();
 

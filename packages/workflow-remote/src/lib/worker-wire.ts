@@ -10,12 +10,13 @@ import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
 
 /** Every method a worker can call over HTTP. */
 export type WorkerMethod =
-  // StepQueue — task lifecycle
+  // StepQueue — task lifecycle. Requeueing stuck tasks is a coordinator
+  // sweep, not a worker call, so it isn't on the wire.
   | "claim"
+  | "release"
   | "complete"
   | "fail"
   | "heartbeat"
-  | "requeueStuck"
   // WorkflowStorage — result/failure shortcuts (used by cross-language
   // workers that don't also speak the storage wire)
   | "saveStepResult"
