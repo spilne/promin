@@ -9,6 +9,15 @@
 import type { DurableScheduleConfig, ScheduleTick } from "./types.ts";
 import type { SchedulerStorage } from "./scheduler-storage.ts";
 import { scheduleMetadataContains } from "./metadata-filter.ts";
+import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
+
+export interface InMemorySchedulerStorageConfig {
+  /**
+   * Time source for the initial next-run of new schedules and leader-lock
+   * expiry. Default: `SystemWallClock`.
+   */
+  clock?: WallClock;
+}
 
 interface ScheduleState {
   lastFired: Date | null;
@@ -30,6 +39,11 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
   /** Per-schedule tick log. Inner array is append-order; queries reverse it
    *  for newest-first. */
   private ticks = new Map<string, ScheduleTick[]>();
+  private readonly clock: WallClock;
+
+  constructor(config?: InMemorySchedulerStorageConfig) {
+    this.clock = config?.clock ?? SystemWallClock;
+  }
 
   // -------------------------------------------------------------------------
   // Hot path
@@ -162,7 +176,7 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     // On UPDATE, leave the existing nextRun untouched — the caller
     // (registerAsync, patchSchedule) is responsible for recomputing.
     if (isNew && !this.nextRun.has(config.id) && config.enabled !== false) {
-      const now = Date.now();
+      const now = this.clock.currentTimeMs();
       const startAtMs = config.startAt ? config.startAt.getTime() : 0;
       this.nextRun.set(config.id, Math.max(now, startAtMs));
     }
@@ -236,7 +250,7 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     ttlMs: number;
   }): Promise<boolean> {
     const key = params.namespace ?? "__global__";
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     const existing = this.leaders.get(key);
     if (existing && existing.expiresAt > now && existing.instanceId !== params.instanceId) {
       return false;

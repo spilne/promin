@@ -9,6 +9,7 @@
 import {
   DurableScheduler as GenericDurableScheduler,
   type DurableSchedulerConfig as GenericConfig,
+  type WallClock,
 } from "@promin/workflow";
 import {
   RedisSchedulerStorage,
@@ -32,6 +33,11 @@ export interface RedisDurableSchedulerConfig {
   namespace?: string;
   /** Max schedules claimed per poll cycle. Default: 100. */
   batchSize?: number;
+  /**
+   * Time source for both the scheduler (due ticks, next runs, poll cadence)
+   * and its storage. Default: `SystemWallClock`.
+   */
+  clock?: WallClock;
 }
 
 /**
@@ -44,6 +50,7 @@ export class RedisDurableScheduler extends GenericDurableScheduler {
     const storageConfig: RedisSchedulerStorageConfig = {
       redis: config.redis,
       prefix: config.prefix,
+      clock: config.clock,
     };
     const storage = new RedisSchedulerStorage(storageConfig);
     const cfg: GenericConfig = {
@@ -53,6 +60,7 @@ export class RedisDurableScheduler extends GenericDurableScheduler {
       leaderLockTtlMs: config.leaderLockTtlMs,
       namespace: config.namespace,
       batchSize: config.batchSize,
+      clock: config.clock,
     };
     super(cfg);
   }
