@@ -17,6 +17,7 @@
 // ---------------------------------------------------------------------------
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { pathInBranch, type JournalFormatVersion } from "./journal-format.ts";
 
 interface JournaledBodyContext {
   readonly stepName: string;
@@ -37,10 +38,11 @@ export function currentJournaledStepName(): string | undefined {
 // ---------------------------------------------------------------------------
 // activityScope — "am I inside a ctx.parallel branch?"
 //
-// Set by ctx.parallel() around each branch driver so activities yielded from
-// that branch get the parallel's activity_index + a deterministic branch
-// path. When the store is `undefined`, execution is at the top of the body
-// and activities draw from the top-level counter the runner owns directly.
+// Set by ctx.parallel() around each branch driver so every yield from that
+// branch (activity, nested parallel, sleep, signal, child) gets the
+// parallel's activity_index + a deterministic branch path. When the store is
+// `undefined`, execution is at the top of the body and yields draw from the
+// top-level counter the runner owns directly.
 // ---------------------------------------------------------------------------
 
 export interface ActivityScope {
@@ -49,26 +51,21 @@ export interface ActivityScope {
    * yield in the same parallel. Frozen at the parallel's call-time position.
    */
   readonly parallelActivityIndex: number;
-  /**
-   * Path from the step's body root to the branch this scope represents.
-   * The FIRST yield in this scope is journaled with this exact prefix; each
-   * subsequent yield appends `.1`, `.2`, ... via `localCounter` so two
-   * sequential activities in the same branch stay uniquely identified.
-   */
+  /** Path of this branch; each yield's path extends it via `pathInBranch`. */
   readonly pathPrefix: string;
   /** Mutable, scope-local yield counter. `{ next: 0 }` at branch entry. */
   readonly localCounter: { next: number };
+  /** Branch-path grammar of the journal this scope reads and writes. */
+  readonly format: JournalFormatVersion;
 }
 
 export const activityScope = new AsyncLocalStorage<ActivityScope>();
 
 /**
  * Consume the next (branchPath) slot in the current scope. Mutates the
- * scope's local counter. Returns "" when there's no scope (top-level body);
- * callers handle the top-level activity_index themselves.
+ * scope's local counter. See `journal-format.ts` for the path grammar.
  */
 export function nextPathInScope(scope: ActivityScope): string {
-  const n = scope.localCounter.next++;
-  if (n === 0) return scope.pathPrefix;
-  return scope.pathPrefix ? `${scope.pathPrefix}.${n}` : String(n);
+  const seq = scope.localCounter.next++;
+  return pathInBranch({ format: scope.format, prefix: scope.pathPrefix, seq });
 }

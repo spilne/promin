@@ -103,7 +103,7 @@ describe("ctx.parallel — journal indexing", () => {
     // Parallel branches all share the parallel's slot (activity_index = 1)
     const branches = ["b", "c", "d"].map((n) => journal.find((e) => e.activityName === n)!);
     expect(branches.every((e) => e.activityIndex === 1)).toBe(true);
-    expect(branches.map((e) => e.branchPath).sort()).toEqual(["0", "1", "2"]);
+    expect(branches.map((e) => e.branchPath).sort()).toEqual(["/0.0", "/1.0", "/2.0"]);
   });
 
   it("top-level yield AFTER a parallel resumes counter at the next index", async () => {
@@ -122,7 +122,7 @@ describe("ctx.parallel — journal indexing", () => {
 
     const journal = await storage.loadJournal("wf-resume", "s");
     const after = journal.find((e) => e.activityName === "after")!;
-    // Parallel consumed slot 0; its two branches share 0 with paths "0"/"1";
+    // Parallel consumed slot 0; its two branches share 0 with paths "/0.0"/"/1.0";
     // the next top-level yield takes slot 1.
     expect(after.activityIndex).toBe(1);
     expect(after.branchPath).toBe("");
@@ -157,11 +157,11 @@ describe("ctx.parallel — nested parallel", () => {
     for (const name of ["outer0", "inner0", "inner1"]) {
       expect(byName.get(name)!.activityIndex).toBe(0);
     }
-    // outer0 lives at "0"; inner parallel holds slot "1"; its children get
-    // "1.0" and "1.1".
-    expect(byName.get("outer0")!.branchPath).toBe("0");
-    expect(byName.get("inner0")!.branchPath).toBe("1.0");
-    expect(byName.get("inner1")!.branchPath).toBe("1.1");
+    // outer0 lives at "/0.0"; the inner parallel holds slot "/1.0"; its
+    // branches get "/1.0/0.0" and "/1.0/1.0".
+    expect(byName.get("outer0")!.branchPath).toBe("/0.0");
+    expect(byName.get("inner0")!.branchPath).toBe("/1.0/0.0");
+    expect(byName.get("inner1")!.branchPath).toBe("/1.0/1.0");
   });
 });
 
@@ -187,11 +187,11 @@ describe("ctx.parallel — sub-generator branches with multiple yields", () => {
     const journal = await storage.loadJournal("wf-sub", "s");
     const byName = new Map(journal.map((e) => [e.activityName, e]));
 
-    // multiStep runs in branch 0: first yield → "0", second → "0.1".
-    expect(byName.get("m0")!.branchPath).toBe("0");
-    expect(byName.get("m1")!.branchPath).toBe("0.1");
+    // multiStep runs in branch 0: first yield → "/0.0", second → "/0.1".
+    expect(byName.get("m0")!.branchPath).toBe("/0.0");
+    expect(byName.get("m1")!.branchPath).toBe("/0.1");
     // solo runs in branch 1.
-    expect(byName.get("solo")!.branchPath).toBe("1");
+    expect(byName.get("solo")!.branchPath).toBe("/1.0");
   });
 });
 

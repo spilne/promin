@@ -44,6 +44,13 @@ import {
   nextPathInScope,
   type ActivityScope,
 } from "./journaled-body-scope.ts";
+import {
+  JOURNAL_FORMAT_LEGACY,
+  branchPrefix,
+  detectJournalFormat,
+  resolveUndecidedJournalFormat,
+  type JournalFormatVersion,
+} from "./journal-format.ts";
 import { registerQueryHandler } from "./query-registry.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
 import {
@@ -100,6 +107,15 @@ export interface ActivityOptions<T = unknown> {
    * Receives the activity's successful return value for easy "create here,
    * cancel here" patterns. Does NOT run if this activity itself fails —
    * nothing was done to roll back.
+   *
+   * Compensations run only for genuine failures. Control-flow and
+   * engine-integrity exits propagate without running them: suspension
+   * (`ctx.sleep` / `ctx.signal`), `ctx.continueAsNew`, tripwire,
+   * `JournalNonDeterminismError` (the code drifted from the journal — a
+   * deploy problem, not a business failure), `AmbiguousActivityOutcome`
+   * (an operator must inspect the external system first) and lock loss
+   * (`WorkflowLockError` / `FenceTokenMismatchError` — another worker owns
+   * the workflow now). Completed work and the journal are left as they are.
    *
    * ```ts
    * yield* ctx.activity("createOrder", () => api.create(), {
@@ -313,6 +329,12 @@ export interface JournaledContext<Input, Prev> {
    * without racing for the shared activity_index counter.
    *
    * Nesting is supported: a branch can itself be `ctx.parallel([...])`.
+   * `ctx.sleep`, `ctx.signal` and `ctx.child` inside a branch take their
+   * journal slot from the branch, so a slot depends only on the branch's
+   * own control flow, never on how fast sibling branches complete. A
+   * branch that suspends rejects the whole parallel with
+   * `WorkflowSuspendedError`; the step resumes from the journal later.
+   * See `journal-format.ts` for the branch-path grammar.
    *
    * ```ts
    * const [user, perms] = yield* ctx.parallel([
@@ -338,7 +360,9 @@ export interface JournaledContext<Input, Prev> {
    *
    * The child `workflowId` defaults to
    * `"${parentWorkflowId}.${stepName}.${activityIndex}"` so replay always
-   * locates the same child record without extra bookkeeping.
+   * locates the same child record without extra bookkeeping. Inside a
+   * `ctx.parallel` branch the branch path is appended, with "/" written as
+   * "~" (e.g. `"wf.step.2~0.1"`).
    *
    * ```ts
    * .journaled("signup", function*(ctx, input) {
@@ -435,10 +459,9 @@ export interface JournaledContext<Input, Prev> {
    * - **Compensations do NOT run.** Continue-as-new is a clean restart,
    *   not a failure — the activities that already succeeded stay
    *   succeeded in the run history.
-   * - Replay-safe: a worker restart that resumes a workflow whose journal
-   *   ends in continueAsNew picks up the LATEST run, not the prior chain
-   *   link (`startFreshRun` already archives the journal under the old
-   *   run number).
+   * - Replay-safe: `startFreshRun` deletes the current run's activity
+   *   journal, so the next run starts from an empty journal and never
+   *   replays the previous chain link's activity results.
    *
    * Returns `never` because control unwinds — the call site is the last
    * thing the body executes.
@@ -679,14 +702,38 @@ function makeCtx<Input, Prev>(params: {
   // activities and compensations each had their own 0-based counter.
   const indexRef = { next: 0 };
   // Journal lookups use the composite key `${activityIndex}:${branchPath}`.
-  // At top level (no ctx.parallel yet) branchPath is always `""`, so this
-  // degrades gracefully to a plain integer lookup. The string key is the
-  // same shape the parallel-aware ctx will use once promin-plif-b lands.
+  // At top level branchPath is always `""`, so this degrades to a plain
+  // integer lookup.
   const journalKey = (activityIndex: number, branchPath: string): string =>
     `${activityIndex}:${branchPath}`;
   const journalByKey = new Map<string, JournalEntry>(
     journal.map((e) => [journalKey(e.activityIndex, e.branchPath), e]),
   );
+  // Branch-path grammar for this step's journal. `undefined` until the
+  // first top-level ctx.parallel when the loaded journal has only top-level
+  // entries — see `journal-format.ts`.
+  const formatRef: { current: JournalFormatVersion | undefined } = {
+    current: detectJournalFormat(journal),
+  };
+
+  /**
+   * Allocate the journal slot for one yield. Inside a parallel branch the
+   * branch scope supplies it; at top level the step's counter does.
+   *
+   * `ctx.sleep` / `ctx.signal` / `ctx.child` pass `suspendOrChild: true`:
+   * a format 1 journal recorded those on the top-level counter even inside
+   * a branch, so replaying one keeps that allocation.
+   */
+  function allocateSlot(params: { suspendOrChild: boolean }): {
+    activityIndex: number;
+    branchPath: string;
+  } {
+    const scope = activityScope.getStore();
+    if (scope && !(params.suspendOrChild && scope.format === JOURNAL_FORMAT_LEGACY)) {
+      return { activityIndex: scope.parallelActivityIndex, branchPath: nextPathInScope(scope) };
+    }
+    return { activityIndex: indexRef.next++, branchPath: "" };
+  }
 
   interface Compensation {
     readonly activityIndex: number; // reserved at registration time
@@ -733,8 +780,7 @@ function makeCtx<Input, Prev>(params: {
     // shared activityIndex + branch path; at top level we consume from the
     // step's flat counter with empty branch path.
     const scope = activityScope.getStore();
-    const activityIndex = scope ? scope.parallelActivityIndex : indexRef.next++;
-    const branchPath = scope ? nextPathInScope(scope) : "";
+    const { activityIndex, branchPath } = allocateSlot({ suspendOrChild: false });
     const codec = options?.codec ?? stepCodec;
     const idempotent = options?.idempotent === true;
     const compensate = options?.compensate;
@@ -981,11 +1027,11 @@ function makeCtx<Input, Prev>(params: {
 
   function* sleep(duration: number | Date): Generator<ActivityYield, Date, Date> {
     const suspendStorage = requireSuspendStorage("sleep");
-    const activityIndex = indexRef.next++;
+    const { activityIndex, branchPath } = allocateSlot({ suspendOrChild: true });
     const name = "sleep";
 
     const promise = (async (): Promise<Date> => {
-      const recorded = journalByKey.get(journalKey(activityIndex, ""));
+      const recorded = journalByKey.get(journalKey(activityIndex, branchPath));
       const recordedType = recorded?.stepType ?? "activity";
       if (recorded && recordedType !== "sleep") {
         throw new JournalNonDeterminismError(
@@ -1015,6 +1061,7 @@ function makeCtx<Input, Prev>(params: {
           workflowId,
           stepName,
           activityIndex,
+          branchPath,
           activityName: name,
           stepType: "sleep",
           wakeAt,
@@ -1030,6 +1077,7 @@ function makeCtx<Input, Prev>(params: {
           workflowId,
           stepName,
           activityIndex,
+          branchPath,
           exit: { tag: "Success", value: wakeAt.toISOString() },
         });
         return wakeAt;
@@ -1075,11 +1123,11 @@ function makeCtx<Input, Prev>(params: {
     },
   ): Generator<ActivityYield, T | TimedSignalOutcome<T>, unknown> {
     const suspendStorage = requireSuspendStorage("signal");
-    const activityIndex = indexRef.next++;
+    const { activityIndex, branchPath } = allocateSlot({ suspendOrChild: true });
     const hasTimeout = options?.timeout !== undefined;
 
     const promise = (async (): Promise<T | TimedSignalOutcome<T>> => {
-      const recorded = journalByKey.get(journalKey(activityIndex, ""));
+      const recorded = journalByKey.get(journalKey(activityIndex, branchPath));
       const recordedType = recorded?.stepType ?? "activity";
       if (recorded && recordedType !== "signal") {
         throw new JournalNonDeterminismError(
@@ -1146,6 +1194,7 @@ function makeCtx<Input, Prev>(params: {
           workflowId,
           stepName,
           activityIndex,
+          branchPath,
           activityName: signalName,
           stepType: "signal",
           ...(wakeAt && { wakeAt }),
@@ -1161,6 +1210,7 @@ function makeCtx<Input, Prev>(params: {
           workflowId,
           stepName,
           activityIndex,
+          branchPath,
           exit: { tag: "Success", value: { ok: false, error: "timeout" } },
         });
         return { ok: false, error: "timeout" } as TimedSignalOutcome<T>;
@@ -1258,20 +1308,26 @@ function makeCtx<Input, Prev>(params: {
     // Compute parallel's own position the same way ctx.activity does: if
     // we're already inside a parallel branch, bump that scope's counter;
     // otherwise take a slot from the step-level counter.
-    const enclosing = activityScope.getStore();
-    const parallelActivityIndex = enclosing ? enclosing.parallelActivityIndex : indexRef.next++;
-    const parallelPath = enclosing ? nextPathInScope(enclosing) : "";
+    const { activityIndex: parallelActivityIndex, branchPath: parallelPath } = allocateSlot({
+      suspendOrChild: false,
+    });
+    // A journal with only top-level entries settles its format at the first
+    // top-level parallel; nested parallels inherit it from their scope.
+    const format = (formatRef.current ??= resolveUndecidedJournalFormat({
+      journal,
+      parallelIndex: parallelActivityIndex,
+    }));
 
     // Drive each branch sub-generator in its own ActivityScope so its
     // yields consume slots from a branch-local counter with a branch-
     // specific path prefix.
     const promise = Promise.all(
       branches.map((branchGen, i) => {
-        const branchPrefix = parallelPath ? `${parallelPath}.${i}` : String(i);
         const branchScope: ActivityScope = {
           parallelActivityIndex,
-          pathPrefix: branchPrefix,
+          pathPrefix: branchPrefix({ format, parallelPath, branch: i }),
           localCounter: { next: 0 },
+          format,
         };
         return activityScope.run(branchScope, () => driveSubGenerator(branchGen));
       }),
@@ -1288,13 +1344,18 @@ function makeCtx<Input, Prev>(params: {
     workflow: Workflow<unknown, Output>,
     options?: { readonly input?: unknown; readonly workflowId?: string },
   ): Generator<ActivityYield, Output, Output> {
-    const activityIndex = indexRef.next++;
-    const childWorkflowId = options?.workflowId ?? `${workflowId}.${stepName}.${activityIndex}`;
+    const { activityIndex, branchPath } = allocateSlot({ suspendOrChild: true });
+    // Inside a parallel branch the default id also carries the branch path
+    // ("/" mapped to "~" so the id stays URL-safe); top-level ids keep the
+    // `${workflowId}.${stepName}.${activityIndex}` shape.
+    const childWorkflowId =
+      options?.workflowId ??
+      `${workflowId}.${stepName}.${activityIndex}${branchPath.replaceAll("/", "~")}`;
     const childInput = options?.input;
     const activityName = workflow.name;
 
     const promise = (async (): Promise<Output> => {
-      const recorded = journalByKey.get(journalKey(activityIndex, ""));
+      const recorded = journalByKey.get(journalKey(activityIndex, branchPath));
 
       if (recorded) {
         const recordedType = recorded.stepType ?? "activity";
@@ -1345,7 +1406,7 @@ function makeCtx<Input, Prev>(params: {
           workflowId,
           stepName,
           activityIndex,
-          branchPath: "",
+          branchPath,
           activityName,
           stepType: "child",
         });
@@ -1368,6 +1429,7 @@ function makeCtx<Input, Prev>(params: {
             workflowId,
             stepName,
             activityIndex,
+            branchPath,
             exit: failureExit,
           });
         } else {
@@ -1375,7 +1437,7 @@ function makeCtx<Input, Prev>(params: {
             workflowId,
             stepName,
             activityIndex,
-            branchPath: "",
+            branchPath,
             activityName,
             exit: failureExit,
           });
@@ -1390,6 +1452,7 @@ function makeCtx<Input, Prev>(params: {
           workflowId,
           stepName,
           activityIndex,
+          branchPath,
           exit: successExit,
         });
       } else {
@@ -1397,7 +1460,7 @@ function makeCtx<Input, Prev>(params: {
           workflowId,
           stepName,
           activityIndex,
-          branchPath: "",
+          branchPath,
           activityName,
           exit: successExit,
         });
@@ -1725,6 +1788,7 @@ export async function completeSignal(params: {
     workflowId: params.workflowId,
     stepName: params.stepName,
     activityIndex: hit.activityIndex,
+    branchPath: hit.branchPath,
     exit: { tag: "Success", value: params.value },
   });
   return true;
@@ -1897,14 +1961,47 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
   };
 
   try {
-    return await driveBody();
+    // Drive outside any enclosing parallel-branch scope: a child workflow
+    // started from a branch (ctx.child → runChild → runJournaledStep) must
+    // allocate its slots from its own top-level counter, not the parent's
+    // branch.
+    return await activityScope.exit(() => driveBody());
   } catch (bodyError) {
-    // Body failed. Suspend errors (ctx.sleep, ctx.signal) are NOT saga failures
-    // — they should propagate without triggering intra-step compensation.
-    if (bodyError instanceof WorkflowSuspendedError) throw bodyError;
-    await unwind(bodyError);
+    if (runsCompensations(bodyError)) await unwind(bodyError);
     throw bodyError;
   }
+}
+
+/**
+ * Exits that are NOT business failures and so must not trigger the
+ * intra-step compensation unwind. Matched by `_tag` so an error thrown from
+ * another copy of this module is still recognised.
+ *
+ *  - `WorkflowSuspendedError`: ctx.sleep / ctx.signal parked the workflow.
+ *  - `WorkflowContinueAsNewError`: a clean restart, not a rollback.
+ *  - `WorkflowTripwireError`: an intentional early end.
+ *  - `JournalNonDeterminismError`: code drifted from the journal; rolling
+ *    back completed work would turn a deploy problem into data loss.
+ *  - `AmbiguousActivityOutcome`: the workflow halts so an operator can
+ *    inspect the external system before anything else runs.
+ *  - `WorkflowLockError` / `FenceTokenMismatchError`: this worker lost the
+ *    workflow; the new owner re-drives it from storage.
+ */
+const NON_COMPENSATING_EXITS: ReadonlySet<string> = new Set([
+  "WorkflowSuspendedError",
+  "WorkflowContinueAsNewError",
+  "WorkflowTripwireError",
+  "JournalNonDeterminismError",
+  "AmbiguousActivityOutcome",
+  "WorkflowLockError",
+  "FenceTokenMismatchError",
+]);
+
+/** Whether a body error is a genuine failure that unwinds compensations. */
+function runsCompensations(bodyError: unknown): boolean {
+  if (typeof bodyError !== "object" || bodyError === null) return true;
+  const tag = (bodyError as { readonly _tag?: unknown })._tag;
+  return !(typeof tag === "string" && NON_COMPENSATING_EXITS.has(tag));
 }
 
 // ---------------------------------------------------------------------------
