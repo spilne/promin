@@ -2,6 +2,9 @@
 // WorkerRegistry — tracks workers, heartbeats, dead detection, retirement
 // ---------------------------------------------------------------------------
 
+import { SystemWallClock } from "../shared/wall-clock.ts";
+import type { WallClock } from "../shared/wall-clock.ts";
+
 /**
  * Worker lifecycle status.
  *  - `active`   — registered, heartbeating, accepting work.
@@ -70,8 +73,22 @@ export interface WorkerRegistry {
   gc(params: { retainMs: number }): Promise<number>;
 }
 
+export interface InMemoryWorkerRegistryConfig {
+  /**
+   * Time source for `startedAt` / `lastHeartbeat` / `retiredAt` stamps and
+   * the `detectDead` / `gc` cutoffs. Default: `SystemWallClock`. Tests pass
+   * a `FakeWallClock`.
+   */
+  clock?: WallClock;
+}
+
 export class InMemoryWorkerRegistry implements WorkerRegistry {
   private workers = new Map<string, WorkerInfo>();
+  private readonly clock: WallClock;
+
+  constructor(config: InMemoryWorkerRegistryConfig = {}) {
+    this.clock = config.clock ?? SystemWallClock;
+  }
 
   async register(params: {
     workerId: string;
@@ -79,7 +96,7 @@ export class InMemoryWorkerRegistry implements WorkerRegistry {
     concurrency: number;
     metadata?: Record<string, unknown>;
   }): Promise<void> {
-    const now = new Date();
+    const now = this.clock.now();
     this.workers.set(params.workerId, {
       workerId: params.workerId,
       capabilities: params.capabilities,
@@ -94,7 +111,7 @@ export class InMemoryWorkerRegistry implements WorkerRegistry {
   async heartbeat(workerId: string): Promise<void> {
     const w = this.workers.get(workerId);
     if (w) {
-      this.workers.set(workerId, { ...w, lastHeartbeat: new Date() });
+      this.workers.set(workerId, { ...w, lastHeartbeat: this.clock.now() });
     }
   }
 
@@ -109,7 +126,7 @@ export class InMemoryWorkerRegistry implements WorkerRegistry {
     // Retire, don't delete — the row stays for forensics until `gc`.
     const w = this.workers.get(workerId);
     if (w) {
-      this.workers.set(workerId, { ...w, status: "retired", retiredAt: new Date() });
+      this.workers.set(workerId, { ...w, status: "retired", retiredAt: this.clock.now() });
     }
   }
 
@@ -120,7 +137,7 @@ export class InMemoryWorkerRegistry implements WorkerRegistry {
   }
 
   async detectDead(timeoutMs: number): Promise<WorkerInfo[]> {
-    const cutoff = Date.now() - timeoutMs;
+    const cutoff = this.clock.currentTimeMs() - timeoutMs;
     const dead: WorkerInfo[] = [];
 
     for (const [id, w] of this.workers) {
@@ -137,7 +154,7 @@ export class InMemoryWorkerRegistry implements WorkerRegistry {
   }
 
   async gc(params: { retainMs: number }): Promise<number> {
-    const cutoff = Date.now() - params.retainMs;
+    const cutoff = this.clock.currentTimeMs() - params.retainMs;
     let reaped = 0;
     for (const [id, w] of this.workers) {
       // Reap on the most-recent activity: when the worker retired, that;

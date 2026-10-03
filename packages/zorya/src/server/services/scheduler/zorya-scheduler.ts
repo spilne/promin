@@ -10,7 +10,12 @@
 // need to special-case agent schedules in the server config.
 // ---------------------------------------------------------------------------
 
-import type { DurableScheduleConfig, ScheduleTick, SchedulerStorage } from "@promin/workflow";
+import type {
+  DurableScheduleConfig,
+  ScheduleTick,
+  SchedulerStorage,
+  WallClock,
+} from "@promin/workflow";
 import { isAgentSchedule } from "@promin/agent";
 import { SchedulerLoop } from "../scheduler-loop.ts";
 import type { ZoryaWorkflows } from "../workflows/index.ts";
@@ -58,6 +63,8 @@ export interface ZoryaSchedulerConfig {
     tick: ScheduleTick,
     schedule: DurableScheduleConfig,
   ) => Promise<{ handled: boolean } | void>;
+  /** Time source for the embedded tick loop. Default: `SystemWallClock`. */
+  clock?: WallClock;
 }
 
 export class ZoryaScheduler {
@@ -101,6 +108,7 @@ export class ZoryaScheduler {
     if (config.batchSize !== undefined) loopConfig.batchSize = config.batchSize;
     if (config.dispatchConcurrency !== undefined)
       loopConfig.dispatchConcurrency = config.dispatchConcurrency;
+    if (config.clock !== undefined) loopConfig.clock = config.clock;
 
     this.loop = new SchedulerLoop(loopConfig);
   }

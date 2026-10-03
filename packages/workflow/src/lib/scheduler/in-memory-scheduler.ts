@@ -1,23 +1,37 @@
 // ---------------------------------------------------------------------------
 // InMemoryScheduler — non-blocking, in-process cron/interval scheduler
 //
-// Per schedule: compute next fire time → sleep(delta) → emit → repeat
+// Per schedule: compute next fire time → wait(delta) → emit → repeat
 // No polling. No setInterval. No busy-wait. Event loop stays free.
+// Every time read and wait goes through the injected `WallClock`.
 // ---------------------------------------------------------------------------
 
 import { Cron } from "croner";
 import { RRule } from "rrule";
-import { Stream, sleep, succeed, suspend, sync, type Eff } from "@spilne/perfect-core";
+import { Stream, succeed, suspend, sync, type Eff } from "@spilne/perfect-core";
 import { JsonCodec } from "@spilne/perfect-core/connect";
+import { SystemWallClock } from "../shared/wall-clock.ts";
+import { wallClockSleep } from "./wall-clock-sleep.ts";
+import type { WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
 import type { Scheduler } from "./scheduler.ts";
 import type { ScheduleConfig, ScheduleTick } from "./types.ts";
 
+export interface InMemorySchedulerConfig {
+  /**
+   * Time source. Drives "now" for next-fire computation, each tick's
+   * `firedAt`, the wait until the next fire time, and the paused-schedule
+   * recheck. Default: `SystemWallClock`. Tests pass a `FakeWallClock`.
+   */
+  clock?: WallClock;
+}
+
 /**
  * Non-blocking, in-process scheduler for cron expressions and fixed intervals.
  *
- * Uses perfect's `sleep()` to yield the fiber until the next fire time — no polling,
- * no `setInterval`, no busy-wait. The event loop stays completely free between ticks.
+ * Waits on a one-shot timer from the configured `WallClock` until the next fire
+ * time — no polling, no `setInterval`, no busy-wait. The event loop stays
+ * completely free between ticks.
  *
  * Implements `Streamable<ScheduleTick>`: `stream()` and `subscribe()` return a
  * fresh perfect `Stream` on every call.
@@ -71,6 +85,11 @@ export class InMemoryScheduler implements Scheduler {
   private schedules = new Map<string, ScheduleConfig & { paused: boolean }>();
   private readonly _registerCallbacks = new Set<(id: string) => void>();
   readonly codec: Codec<ScheduleTick> = JsonCodec as Codec<ScheduleTick>;
+  private readonly clock: WallClock;
+
+  constructor(config: InMemorySchedulerConfig = {}) {
+    this.clock = config.clock ?? SystemWallClock;
+  }
 
   /**
    * Register a schedule. Validates cron expression eagerly.
@@ -135,12 +154,13 @@ export class InMemoryScheduler implements Scheduler {
   /**
    * Stream ticks from a specific schedule, or all schedules merged.
    *
-   * Single-schedule: sleeps until the next fire time — no polling, no busy-wait.
+   * Single-schedule: waits until the next fire time — no polling, no busy-wait.
    * All-schedules: same per-schedule sleep approach, with schedules registered
    * after the stream starts picked up automatically via a register callback.
    *
    * Every call builds a fresh stream. Stopping the consumer interrupts the
-   * pending sleeps and removes the register callback.
+   * pending waits (clearing their clock timers) and removes the register
+   * callback.
    *
    * @param scheduleId - If provided, stream only this schedule. Otherwise merge all.
    */
@@ -193,21 +213,22 @@ export class InMemoryScheduler implements Scheduler {
   private createScheduleStream(scheduleId: string): Stream<ScheduleTick> {
     // `suspend` defers each step to its pull, so "now" is read when the
     // consumer asks for the next tick rather than when the stream is built.
+    const clock = this.clock;
     const step = (tickNumber: number): Eff<ScheduleStep> =>
       suspend(() => {
         const config = this.schedules.get(scheduleId);
         if (!config) return succeed(null);
 
         if (config.paused) {
-          return sleep(PAUSED_RECHECK_MS).flatMap((): Eff<ScheduleStep> => {
+          return wallClockSleep({ clock, ms: PAUSED_RECHECK_MS }).flatMap((): Eff<ScheduleStep> => {
             const rechecked = this.schedules.get(scheduleId);
             if (!rechecked) return succeed(null);
             if (rechecked.paused) return succeed([null, tickNumber]);
-            return computeAndSleep(rechecked, tickNumber);
+            return computeAndSleep({ config: rechecked, tickNumber, clock });
           });
         }
 
-        return computeAndSleep(config, tickNumber);
+        return computeAndSleep({ config, tickNumber, clock });
       });
 
     return Stream.unfoldEffect(0, step).unNone();
@@ -220,15 +241,17 @@ const PAUSED_RECHECK_MS = 1000;
 /** One unfold step: a tick (or nothing yet) plus the next tick number, or end. */
 type ScheduleStep = [ScheduleTick | null, number] | null;
 
-function computeAndSleep(
-  config: ScheduleConfig & { paused: boolean },
-  tickNumber: number,
-): Eff<ScheduleStep> {
-  const now = new Date();
+function computeAndSleep(params: {
+  config: ScheduleConfig & { paused: boolean };
+  tickNumber: number;
+  clock: WallClock;
+}): Eff<ScheduleStep> {
+  const { config, tickNumber, clock } = params;
+  const now = clock.now();
 
   if (config.startAt && now < config.startAt) {
     const waitMs = config.startAt.getTime() - now.getTime();
-    return sleep(waitMs).map((): ScheduleStep => [null, tickNumber]);
+    return wallClockSleep({ clock, ms: waitMs }).map((): ScheduleStep => [null, tickNumber]);
   }
 
   if (config.endAt && now >= config.endAt) {
@@ -247,14 +270,14 @@ function computeAndSleep(
 
   const sleepMs = Math.max(0, nextFireTime.getTime() - now.getTime());
 
-  return sleep(sleepMs).map((): ScheduleStep => {
+  return wallClockSleep({ clock, ms: sleepMs }).map((): ScheduleStep => {
     const jitterMs = config.jitterMs ?? 0;
     const jitter = jitterMs > 0 ? Math.random() * jitterMs : 0;
     const tick: ScheduleTick = {
       scheduleId: config.id,
       scheduleName: config.name,
       scheduledAt: nextFireTime,
-      firedAt: new Date(Date.now() + jitter),
+      firedAt: new Date(clock.currentTimeMs() + jitter),
       tickNumber,
       metadata: config.metadata,
     };
@@ -301,6 +324,6 @@ function getNextRruleTime(rruleStr: string, after: Date): Date {
  *   .run();
  * ```
  */
-export function createScheduler(): InMemoryScheduler {
-  return new InMemoryScheduler();
+export function createScheduler(config?: InMemorySchedulerConfig): InMemoryScheduler {
+  return new InMemoryScheduler(config);
 }

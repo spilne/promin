@@ -5,6 +5,7 @@ import { InMemoryStepQueue } from "../in-memory-step-queue.ts";
 import { MapStepRegistry } from "../step-registry.ts";
 import { createWorker } from "../worker.ts";
 import { workerRegistryConformance } from "../worker-registry-conformance.ts";
+import { FakeWallClock } from "../../shared/wall-clock.ts";
 
 // ---------------------------------------------------------------------------
 // WorkerRegistry semantics — conformance suite
@@ -169,5 +170,65 @@ describe("Dead worker recovery — requeue stuck tasks after a worker crash", ()
     const reclaimed = await queue.claim({ capabilities: [], limit: 1 });
     expect(reclaimed).toHaveLength(1);
     expect(reclaimed[0]!.stepName).toBe("stuck-step");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Timestamps and cutoffs follow the injected WallClock
+// ---------------------------------------------------------------------------
+
+describe("InMemoryWorkerRegistry — injected WallClock", () => {
+  const T0 = Date.parse("2026-01-01T00:00:00Z");
+
+  it("stamps startedAt / lastHeartbeat / retiredAt from the clock", async () => {
+    const clock = FakeWallClock.create(T0);
+    const registry = new InMemoryWorkerRegistry({ clock });
+
+    await registry.register({ workerId: "w", capabilities: [], concurrency: 1 });
+    clock.advance(5_000);
+    await registry.heartbeat("w");
+    clock.advance(2_000);
+    await registry.deregister("w");
+
+    const [w] = await registry.list();
+    expect(w!.startedAt.getTime()).toBe(T0);
+    expect(w!.lastHeartbeat.getTime()).toBe(T0 + 5_000);
+    expect(w!.retiredAt!.getTime()).toBe(T0 + 7_000);
+  });
+
+  it("detectDead measures heartbeat staleness on the clock", async () => {
+    const clock = FakeWallClock.create(T0);
+    const registry = new InMemoryWorkerRegistry({ clock });
+    await registry.register({ workerId: "stale", capabilities: [], concurrency: 1 });
+    await registry.register({ workerId: "fresh", capabilities: [], concurrency: 1 });
+
+    clock.advance(10_000);
+    await registry.heartbeat("fresh");
+    // Exactly at the timeout boundary: not yet dead.
+    expect(await registry.detectDead(10_000)).toEqual([]);
+
+    clock.advance(1);
+    const dead = await registry.detectDead(10_000);
+    expect(dead.map((w) => w.workerId)).toEqual(["stale"]);
+    expect((await registry.list({ status: "active" })).map((w) => w.workerId)).toEqual(["fresh"]);
+  });
+
+  it("gc reaps on the clock using retiredAt, else lastHeartbeat", async () => {
+    const clock = FakeWallClock.create(T0);
+    const registry = new InMemoryWorkerRegistry({ clock });
+    await registry.register({ workerId: "silent", capabilities: [], concurrency: 1 });
+    await registry.register({ workerId: "retired", capabilities: [], concurrency: 1 });
+    clock.advance(30_000);
+    await registry.deregister("retired");
+
+    // silent was last active at T0, retired at T0+30s. Retain 60s.
+    clock.advance(30_000);
+    expect(await registry.gc({ retainMs: 60_000 })).toBe(0);
+    clock.advance(1);
+    expect(await registry.gc({ retainMs: 60_000 })).toBe(1);
+    expect((await registry.list()).map((w) => w.workerId)).toEqual(["retired"]);
+    clock.advance(30_000);
+    expect(await registry.gc({ retainMs: 60_000 })).toBe(1);
+    expect(await registry.list()).toEqual([]);
   });
 });
