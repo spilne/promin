@@ -162,6 +162,7 @@ export async function executeWorkflowDag(
       results,
       stepAttempts: params.stepAttempts,
       clock,
+      stepStates: state?.steps ?? {},
     };
     const { batchResults, batchError }: WaveOutcome = ctx.stepExecutor
       ? await runExecutorWave(waveParams)

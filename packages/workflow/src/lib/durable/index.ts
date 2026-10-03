@@ -19,6 +19,8 @@ export {
   type DispatchConfig,
   MatchError,
   type MatchParams,
+  type StepRuntime,
+  type RunChildWorkflow,
 } from "./durable-pipeline.ts";
 export {
   type WorkflowStorage,

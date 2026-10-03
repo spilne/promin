@@ -1,17 +1,19 @@
 // ---------------------------------------------------------------------------
 // DAG execution types — the context the DAG executor and its waves run
-// against, the per-step wave result, and the executor's result union.
-// Type-only so every wave module can share them without importing the
-// executor itself.
+// against, the per-step wave result, and the executor's result union, plus
+// the per-step runtime both waves hand to step bodies.
 // ---------------------------------------------------------------------------
 
 import type { WallClock } from "../../shared/wall-clock.ts";
 import type {
   DispatchConfig,
+  RunChildWorkflow,
   StepDefinition,
+  StepRuntime,
   WorkflowHooks,
   WorkflowQueueConfig,
 } from "../durable-pipeline.ts";
+import type { StepState } from "../workflow-state.ts";
 import type { FenceGuard, WorkflowStorage } from "../workflow-storage.ts";
 import type { StepExecutor } from "./step-executor.ts";
 
@@ -59,6 +61,38 @@ export interface DagExecutionContext {
    * `WorkflowOrchestrationContext.executorId`.
    */
   readonly executorId?: string;
+  /**
+   * Version of the definition driving this run. Handed to steps
+   * (`ExecuteParams.workflowVersion`) and stamped on executor requests
+   * (`StepExecutionRequest.version`) so version-pinned workers filter on it.
+   */
+  readonly workflowVersion?: string;
+  /** Patch names active in the definition driving this run (`ExecuteParams.patches`). */
+  readonly patches?: readonly string[];
+  /** Runs a child workflow of this run on its runtime (`ExecuteParams.runChild`). */
+  readonly runChild?: RunChildWorkflow;
+}
+
+/**
+ * The runtime fields of `ExecuteParams` for one step of a wave: the run's
+ * clock, fence guard, child runner, version and patches, plus the step's
+ * stored row as of the last load of the run.
+ */
+export function stepRuntimeFor(params: {
+  readonly ctx: DagExecutionContext;
+  readonly clock: WallClock;
+  readonly stepStates: Readonly<Record<string, StepState>>;
+  readonly stepName: string;
+}): StepRuntime {
+  const { ctx, clock } = params;
+  return {
+    clock,
+    stepState: params.stepStates[params.stepName] ?? null,
+    ...(ctx.guard !== undefined && { guard: ctx.guard }),
+    ...(ctx.runChild !== undefined && { runChild: ctx.runChild }),
+    ...(ctx.workflowVersion !== undefined && { workflowVersion: ctx.workflowVersion }),
+    ...(ctx.patches !== undefined && { patches: ctx.patches }),
+  };
 }
 
 /** Result of one locally run step within a wave. `result` is codec-encoded. */
@@ -89,6 +123,8 @@ export interface WaveParams {
   /** Tracks attempt numbers per step — shared across workflow retries so counters keep incrementing. */
   readonly stepAttempts: Map<string, number>;
   readonly clock: WallClock;
+  /** Stored step rows as of the run's last load, keyed by step name. */
+  readonly stepStates: Readonly<Record<string, StepState>>;
 }
 
 /** Failure outcome of `executeWorkflowDag` (suspension and continue-as-new included). */

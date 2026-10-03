@@ -4,7 +4,16 @@
 // `InProcessStepExecutor` so both paths apply the same semantics.
 // ---------------------------------------------------------------------------
 
-import { succeed, suspend, sync, type Eff, type Throws } from "@spilne/perfect-core";
+import {
+  async,
+  fail,
+  race,
+  succeed,
+  suspend,
+  sync,
+  type Eff,
+  type Throws,
+} from "@spilne/perfect-core";
 import type { TaggedError } from "../../shared/tagged-error.ts";
 import { retryWithPolicy } from "../../shared/retry-policy.ts";
 import type { WallClock } from "../../shared/wall-clock.ts";
@@ -15,8 +24,8 @@ import { StepTimeoutError } from "../durable-pipeline-error.ts";
  * Wrap one step invocation with the step's own policies, in order:
  * per-attempt timeout, retry on typed failures, then the `onFailure`
  * strategy. `invoke` runs again on every retry. A step that does not settle
- * within `timeoutMs` fails with `StepTimeoutError`; the abandoned attempt is
- * interrupted. Retry backoff sleeps on `clock`.
+ * within `timeoutMs` (measured on `clock`) fails with `StepTimeoutError`;
+ * the abandoned attempt is interrupted. Retry backoff sleeps on `clock`.
  */
 export function applyStepPolicies(params: {
   stepDef: StepDefinition;
@@ -30,16 +39,22 @@ export function applyStepPolicies(params: {
   if (stepDef.timeoutMs != null) {
     const stepTimeoutMs = stepDef.timeoutMs;
     const stepName = stepDef.name;
-    raw = raw.timeoutFail(
-      stepTimeoutMs,
-      () =>
-        new StepTimeoutError({
-          workflowId,
-          stepName,
-          timeoutMs: stepTimeoutMs,
-          message: `Step "${stepName}" timed out after ${stepTimeoutMs}ms`,
-        }),
-    );
+    // Raced against a timer on the injected WallClock (not perfect's own
+    // Clock service), so a FakeWallClock drives step timeouts too. The loser
+    // is interrupted: a body that settles first clears the timer.
+    raw = race([
+      raw,
+      wallClockSleep({ clock, ms: stepTimeoutMs }).flatMap(() =>
+        fail(
+          new StepTimeoutError({
+            workflowId,
+            stepName,
+            timeoutMs: stepTimeoutMs,
+            message: `Step "${stepName}" timed out after ${stepTimeoutMs}ms`,
+          }),
+        ),
+      ),
+    ]);
   }
 
   if (stepDef.retry) {
@@ -56,4 +71,15 @@ export function applyStepPolicies(params: {
   }
 
   return raw;
+}
+
+/**
+ * Wait `ms` on a `WallClock` timer. Interruption clears the timer, so a
+ * step that settles first leaves nothing pending on the clock.
+ */
+function wallClockSleep(params: { clock: WallClock; ms: number }): Eff<void> {
+  return async<void>((resume) => {
+    const handle = params.clock.setTimeout(() => resume(succeed(undefined)), params.ms);
+    return () => handle.clear();
+  }).orDie();
 }

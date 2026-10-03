@@ -9,8 +9,10 @@
 import type { TaggedError } from "../../shared/tagged-error.ts";
 import { runEffSafe } from "../../shared/eff.ts";
 import { SystemWallClock, type WallClock } from "../../shared/wall-clock.ts";
-import type { Workflow } from "../durable-pipeline.ts";
+import type { StepRuntime, Workflow } from "../durable-pipeline.ts";
 import type { WorkflowStorage } from "../workflow-storage.ts";
+import type { OrchestrationRuntime } from "./orchestration-context.ts";
+import { runChildWorkflow } from "./orchestrate.ts";
 import { applyStepPolicies } from "./step-policies.ts";
 
 export interface StepExecutionRequest {
@@ -22,6 +24,10 @@ export interface StepExecutionRequest {
   /** Capabilities the step requires — forwarded to capability-aware workers. */
   readonly needs?: readonly string[];
   readonly priority?: number;
+  /**
+   * Version of the definition driving the run. Forwarded to the step queue
+   * so version-pinned workers (`supportedVersions`) only claim their own.
+   */
   readonly version?: string;
   /**
    * Resolved per-task concurrency cap, computed by the coordinator from
@@ -32,6 +38,13 @@ export interface StepExecutionRequest {
   readonly concurrencyKey?: string;
   readonly concurrencyScope?: string;
   readonly concurrencyLimit?: number;
+  /**
+   * In-process runtime of the run that issued the request: clock, fence
+   * guard, child runner, stored step row, version and patches. Set by the
+   * runner; never serialized, so queue-backed executors ignore it and
+   * `InProcessStepExecutor` falls back to its own config without it.
+   */
+  readonly runtime?: StepRuntime;
 }
 
 export type StepExecutionResult =
@@ -57,6 +70,14 @@ export interface StepExecutor {
    * and remote executors.
    */
   executeStep(req: StepExecutionRequest): Promise<StepExecutionResult>;
+  /**
+   * Executors bound to one definition (like `InProcessStepExecutor`)
+   * return an executor for `workflow` with the same configuration. The
+   * runner calls it when the executor drives a different definition: a
+   * version-drained run or a child workflow. Definition-agnostic
+   * executors (queue-backed) leave it out and are reused as-is.
+   */
+  forWorkflow?(workflow: Workflow<unknown, unknown>): StepExecutor;
 }
 
 /**
@@ -64,6 +85,11 @@ export interface StepExecutor {
  * onFailure strategy, then returns the encoded result. Used by the
  * distributed worker so each worker node executes only the steps it claims
  * from the queue, without running the full orchestration loop.
+ *
+ * Step bodies get the request's `runtime` when the runner supplies one.
+ * Without it (a worker running a claimed task), they get this executor's
+ * clock, the bound definition's version and patches, and a child runner on
+ * this executor's storage and clock; storage writes are then unfenced.
  *
  * Re-throws `WorkflowSuspendedError` directly rather than wrapping it in
  * `{ ok: false }` so the caller can distinguish suspension from failure.
@@ -86,6 +112,11 @@ export class InProcessStepExecutor implements StepExecutor {
     this.clock = config.clock ?? SystemWallClock;
   }
 
+  forWorkflow(workflow: Workflow<unknown, unknown>): StepExecutor {
+    if (workflow === this.workflow) return this;
+    return new InProcessStepExecutor(workflow, { storage: this.storage, clock: this.clock });
+  }
+
   async executeStep(req: StepExecutionRequest): Promise<StepExecutionResult> {
     const stepDef = this.workflow._definition.steps.find((s) => s.name === req.stepName);
     if (!stepDef) {
@@ -98,21 +129,24 @@ export class InProcessStepExecutor implements StepExecutor {
     const attemptRef = { current: req.attempt };
     const metadataRef: { current?: Record<string, unknown> } = { current: undefined };
 
+    const runtime = this.runtimeFor(req);
+    const clock = runtime.clock ?? this.clock;
     const raw = applyStepPolicies({
       stepDef,
       workflowId: req.workflowId,
-      clock: this.clock,
+      clock,
       invoke: () => {
         const currentAttempt = attemptRef.current;
         attemptRef.current = currentAttempt + 1;
         return stepDef.execute({
+          ...runtime,
+          clock,
           input: req.input,
           results: req.prevResults,
           workflowId: req.workflowId,
           storage: this.storage,
           attemptRef: { current: currentAttempt },
           metadataRef,
-          clock: this.clock,
         });
       },
     });
@@ -130,5 +164,19 @@ export class InProcessStepExecutor implements StepExecutor {
     }
 
     return { ok: true, result: data!, metadata: metadataRef.current };
+  }
+
+  /** The request's runtime, or this executor's own when the runner sent none. */
+  private runtimeFor(req: StepExecutionRequest): StepRuntime {
+    if (req.runtime) return req.runtime;
+    const def = this.workflow._definition;
+    const runtime: OrchestrationRuntime = { storage: this.storage, clock: this.clock };
+    return {
+      clock: this.clock,
+      ...(this.workflow.version !== undefined && { workflowVersion: this.workflow.version }),
+      ...(def.patches !== undefined && { patches: def.patches }),
+      runChild: (child) =>
+        runChildWorkflow({ runtime, parentWorkflowId: req.workflowId, ...child }),
+    };
   }
 }

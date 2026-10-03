@@ -20,6 +20,7 @@ import { clearQueryHandlers } from "../query-registry.ts";
 import { withLock } from "../with-lock.ts";
 import { topologicalSort, type DagNode } from "../workflow-dag.ts";
 import { isTripwireCapableStorage } from "../workflow-storage.ts";
+import type { Workflow } from "../durable-pipeline.ts";
 import { compensateWorkflow } from "./compensation.ts";
 import type { DagExecutionContext } from "./dag-context.ts";
 import { executeWorkflowDag } from "./dag-executor.ts";
@@ -27,7 +28,12 @@ import { resolveDrainContext } from "./definition-resolver.ts";
 import { publishDlqRecord } from "./dlq.ts";
 import { fireHook } from "./hooks.ts";
 import { getIdempotencyTtl } from "./idempotency.ts";
-import type { WorkflowOrchestrationContext } from "./orchestration-context.ts";
+import {
+  orchestrationContextFor,
+  runtimeOf,
+  type OrchestrationRuntime,
+  type WorkflowOrchestrationContext,
+} from "./orchestration-context.ts";
 
 /**
  * Default lock extension for orchestration runs. Matches `withLock`'s
@@ -110,6 +116,40 @@ export async function runWorkflowOrchestration(
   );
 }
 
+/**
+ * Run a child workflow on its parent's runtime (`.subworkflow()`, journaled
+ * `ctx.child`). The child row is created first, with the parent pointer and
+ * the child's version, so `listWorkflows({ parentId })` and recovery see
+ * the relationship. Creation is create-if-absent: a row that already exists
+ * (a re-run of the parent step) is resumed as-is. Any other create failure
+ * propagates. The child then runs under its own lock through the same
+ * orchestration loop, inheriting storage, clock, step executor, executor id
+ * and runner-level hooks.
+ */
+export async function runChildWorkflow(params: {
+  readonly runtime: OrchestrationRuntime;
+  readonly parentWorkflowId: string;
+  readonly workflow: Workflow<unknown, unknown>;
+  readonly workflowId: string;
+  readonly input: unknown;
+}): Promise<unknown> {
+  const { runtime, workflow, workflowId, input } = params;
+  const def = workflow._definition;
+  await runtime.storage.createWorkflow({
+    workflowId,
+    workflowName: workflow.name,
+    input,
+    workflowType: def.type,
+    parentWorkflowId: params.parentWorkflowId,
+    metadata: def.metadata,
+    version: workflow.version,
+  });
+  return runWorkflowOrchestration(orchestrationContextFor({ workflow, runtime }), {
+    workflowId,
+    input,
+  });
+}
+
 async function runOneOrchestrationCycle(
   ctx: WorkflowOrchestrationContext,
   params: {
@@ -131,7 +171,7 @@ async function runOneOrchestrationCycle(
 
   // Version drain — a run stored under an older version is driven by the
   // matching previousVersion definition.
-  const drainCtx = await resolveDrainContext({ ctx, workflowId, clock });
+  const drainCtx = await resolveDrainContext({ ctx, workflowId });
   if (drainCtx) {
     return runWorkflowOrchestration(drainCtx, { workflowId, input, force, namespace });
   }
@@ -253,6 +293,10 @@ async function runOneOrchestrationCycle(
         workflowName: ctx.name,
         workflowQueue: ctx.queue,
         ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
+        ...(ctx.version !== undefined && { workflowVersion: ctx.version }),
+        ...(ctx.patches !== undefined && { patches: ctx.patches }),
+        runChild: (child) =>
+          runChildWorkflow({ runtime: runtimeOf(ctx), parentWorkflowId: workflowId, ...child }),
       };
 
       for (let workflowAttempt = 0; workflowAttempt <= maxWorkflowRetries; workflowAttempt++) {

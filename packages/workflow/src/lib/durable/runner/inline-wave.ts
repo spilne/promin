@@ -8,7 +8,12 @@ import { all, succeed, type Eff, type Throws } from "@spilne/perfect-core";
 import type { TaggedError } from "../../shared/tagged-error.ts";
 import { promiseOrDie, runEffSafe } from "../../shared/eff.ts";
 import { isStepAttemptStorage } from "../workflow-storage.ts";
-import type { LocalStepResult, WaveOutcome, WaveParams } from "./dag-context.ts";
+import {
+  stepRuntimeFor,
+  type LocalStepResult,
+  type WaveOutcome,
+  type WaveParams,
+} from "./dag-context.ts";
 import { applyStepPolicies } from "./step-policies.ts";
 
 /**
@@ -24,7 +29,7 @@ import { applyStepPolicies } from "./step-policies.ts";
 export async function runInlineWave(
   params: WaveParams & { readonly stepMetadata: Map<string, Record<string, unknown>> },
 ): Promise<WaveOutcome> {
-  const { ctx, workflowId, input, readySteps, results, clock, stepMetadata } = params;
+  const { ctx, workflowId, input, readySteps, results, clock, stepMetadata, stepStates } = params;
 
   const batch = all(
     readySteps.map((stepDef): Eff<LocalStepResult, Throws<TaggedError>> => {
@@ -69,13 +74,13 @@ export async function runInlineWave(
           // Write back to shared map so workflow retries pick up the right count
           params.stepAttempts.set(stepDef.name, currentAttempt);
           const executed = stepDef.execute({
+            ...stepRuntimeFor({ ctx, clock, stepStates, stepName: stepDef.name }),
             input,
             results,
             workflowId,
             storage: ctx.storage,
             attemptRef: { current: currentAttempt },
             metadataRef,
-            clock,
           });
           // Kinds that set metadata synchronously in their execute (e.g.
           // `.match()` after selector resolution) surface it here BEFORE
