@@ -13,3 +13,7 @@ export {
   type RedisSchedulerStorageConfig,
   type DurableScheduleConfig,
 } from "./redis-durable-scheduler.ts";
+export {
+  RedisLeaderLeaseStore,
+  type RedisLeaderLeaseStoreConfig,
+} from "./redis-leader-lease-store.ts";

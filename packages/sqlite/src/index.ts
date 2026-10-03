@@ -38,6 +38,7 @@ export { SqliteWorkflowStorage } from "./lib/sqlite-workflow-storage.ts";
 export { SqliteStepQueue } from "./lib/sqlite-step-queue.ts";
 export { SqliteWorkerRegistry } from "./lib/sqlite-worker-registry.ts";
 export { SqliteSchedulerStorage } from "./lib/sqlite-scheduler-storage.ts";
+export { SqliteLeaderLeaseStore } from "./lib/sqlite-leader-lease-store.ts";
 export {
   SqliteWorkflowAdvertisementRegistry,
   type SqliteWorkflowAdvertisementRegistryOptions,

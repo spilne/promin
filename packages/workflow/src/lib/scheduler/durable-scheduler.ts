@@ -16,16 +16,23 @@ import type { WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
 import type { Scheduler } from "./scheduler.ts";
 import type { DurableScheduleConfig, ScheduleConfig, ScheduleTick } from "./types.ts";
-import type { ScheduleCommit, SchedulerStorage } from "./scheduler-storage.ts";
+import type { CommitPollResult, ScheduleCommit, SchedulerStorage } from "./scheduler-storage.ts";
+import { schedulerLeaderKey, type LeaderLease } from "./leader-lease.ts";
 
 /** Where a `DurableScheduler` error happened. */
 export type SchedulerErrorPhase =
   /** Leader election, `findDue` or the bulk loads failed; the poll is retried with backoff. */
   | "poll"
-  /** `commitPoll` (or disabling an invalid schedule) failed; uncommitted ticks are redelivered. */
+  /**
+   * `commitPoll` (or disabling an invalid schedule) failed; uncommitted ticks
+   * are redelivered. A `StaleLeaseError` here means leadership moved to
+   * another instance mid-poll and the new leader redelivers them.
+   */
   | "commit"
   /** One stored schedule could not be evaluated; it is disabled and skipped. */
-  | "schedule";
+  | "schedule"
+  /** Releasing the leader lease on stop failed; it then expires after its TTL. */
+  | "release";
 
 /** Passed to `DurableSchedulerConfig.onError`. */
 export interface SchedulerErrorEvent {
@@ -42,11 +49,17 @@ export interface DurableSchedulerConfig {
   instanceId?: string;
   /** Poll interval in ms. Default: 1000. */
   pollIntervalMs?: number;
-  /** Leader-lock TTL. Default: 3 × pollIntervalMs. */
+  /**
+   * Leader-lease TTL. The lease is refreshed at every poll, so it must
+   * cover one poll interval plus the time the consumer takes to pull one
+   * poll's ticks; if it lapses mid-batch another instance can take over and
+   * this instance's commit is then rejected (the ticks are redelivered by
+   * the new leader). Default: 3 × pollIntervalMs.
+   */
   leaderLockTtlMs?: number;
   /**
    * Scope this scheduler instance to a single namespace. `findDue`,
-   * `list`, and the leader lock are all filtered by this value.
+   * `list`, and the leader lease are all scoped by this value.
    * Default: undefined (global namespace).
    */
   namespace?: string;
@@ -57,10 +70,17 @@ export interface DurableSchedulerConfig {
   batchSize?: number;
   /**
    * Hash-based partitioning for horizontal scaling. When set, this instance
-   * only fires schedules whose `hashCode(id) mod count == index`. Run N
-   * scheduler processes with `{ index: 0, count: N } ... { index: N-1, count: N }`
-   * to spread load. Storage findDue still returns all due IDs; partitioning
-   * happens in the scheduler shell so any storage backend works without changes.
+   * only fires schedules with `schedulePartition({ id, count }) == index`, and it
+   * elects a leader among the instances of its own partition (one lease per
+   * namespace and partition), so the N partitions fire in parallel. Run N
+   * scheduler processes (or N per partition, for failover) with
+   * `{ index: 0, count: N } ... { index: N-1, count: N }`.
+   *
+   * Filtering happens in the scheduler shell, so storage `findDue` is asked
+   * for `batchSize × count` ids to leave room for the other partitions' due
+   * schedules. Run every partition: a partition with no live instance leaves
+   * its due schedules at the head of the due index, and once that backlog
+   * exceeds `batchSize × count` it crowds the other partitions out.
    */
   partition?: { index: number; count: number };
   /**
@@ -126,6 +146,12 @@ export class DurableScheduler implements Scheduler {
   private readonly onError: (event: SchedulerErrorEvent) => void;
   private readonly maxErrorBackoffMs: number;
   private readonly random: () => number;
+  /** Lease key: one leader per namespace and partition. */
+  private readonly leaderKey: string;
+  /** The lease from the latest successful acquire, released when the last stream stops. */
+  private heldLease: LeaderLease | null = null;
+  /** Streams of this instance currently running; they share the lease. */
+  private activeStreams = 0;
 
   constructor(config: DurableSchedulerConfig) {
     this.storage = config.storage;
@@ -150,6 +176,7 @@ export class DurableScheduler implements Scheduler {
       }
       this.partition = config.partition;
     }
+    this.leaderKey = schedulerLeaderKey({ namespace: this.namespace, partition: this.partition });
   }
 
   // -------------------------------------------------------------------------
@@ -248,83 +275,102 @@ export class DurableScheduler implements Scheduler {
     });
   }
 
-  /** Preview next N fire times for a schedule. Pure cron/rrule math, no I/O. */
+  /**
+   * Preview the next `count` fire times of a schedule, within its
+   * `startAt`/`endAt` window. Cron and RRULE schedules list their trigger's
+   * occurrences; interval schedules continue the cadence from the last fire
+   * (or start now / at `startAt` when they have never fired).
+   */
   async nextFireTimes(scheduleId: string, count: number): Promise<Date[]> {
     const config = await this.storage.loadSchedule(scheduleId);
     if (!config) return [];
-
-    if (config.cron) {
-      const cron = new Cron(config.cron, { timezone: config.timezone ?? "UTC" });
-      const times: Date[] = [];
-      let cursor = this.clock.now();
-      for (let i = 0; i < count; i++) {
-        const next = cron.nextRun(cursor);
-        if (!next) break;
-        times.push(next);
-        cursor = new Date(next.getTime() + 1);
-      }
-      return times;
-    }
-    if (config.rrule) {
-      const rule = RRule.fromString(config.rrule);
-      const now = this.clock.now();
-      const occurrences = rule.between(
-        now,
-        new Date(now.getTime() + 365 * 24 * 60 * 60 * 1000),
-        true,
-      );
-      return occurrences.slice(0, count);
-    }
-    return [];
+    const state =
+      config.intervalMs !== undefined ? await this.storage.loadScheduleState(scheduleId) : null;
+    return previewFireTimes({
+      config,
+      lastFired: state?.lastFired ?? null,
+      count,
+      now: this.clock.now(),
+    });
   }
 
-  /** Manually fire a schedule now, regardless of cron. */
+  /**
+   * Manually fire a schedule now, regardless of its trigger. The tick takes
+   * the next `tickNumber` atomically (a compare-and-set on `tickCount`), so
+   * it never shares a number with a committed poll tick or another manual
+   * fire. Returns `null` for an unknown schedule.
+   */
   async triggerNow(scheduleId: string): Promise<ScheduleTick | null> {
-    const config = await this.storage.loadSchedule(scheduleId);
-    if (!config) return null;
-    const state = await this.storage.loadScheduleState(scheduleId);
-    const now = this.clock.now();
-    const tickNumber = state?.tickCount ?? 0;
-    const tick: ScheduleTick = {
+    const ticks = await this.fireManually({
       scheduleId,
-      scheduleName: config.name,
-      scheduledAt: now,
-      firedAt: now,
-      tickNumber,
-      metadata: config.metadata,
-    };
-    await this.storage.recordFire(scheduleId, now);
-    return tick;
+      occurrences: () => [this.clock.now()],
+    });
+    return ticks?.[0] ?? null;
   }
 
-  /** Backfill ticks across a historical date range. */
+  /**
+   * Emit ticks for the occurrences in `[from, to)` and record them as fired.
+   * Like `triggerNow`, the tick numbers are taken atomically.
+   */
   async backfill(scheduleId: string, params: { from: Date; to: Date }): Promise<ScheduleTick[]> {
-    const config = await this.storage.loadSchedule(scheduleId);
-    if (!config) return [];
-    const state = await this.storage.loadScheduleState(scheduleId);
-    let tickNumber = state?.tickCount ?? 0;
+    const ticks = await this.fireManually({
+      scheduleId,
+      occurrences: (config) =>
+        config.cron
+          ? backfillCron(config.cron, config.timezone ?? "UTC", params.from, params.to)
+          : config.rrule
+            ? RRule.fromString(config.rrule).between(params.from, params.to, false)
+            : [],
+    });
+    return ticks ?? [];
+  }
 
-    const occurrences = config.cron
-      ? backfillCron(config.cron, config.timezone ?? "UTC", params.from, params.to)
-      : config.rrule
-        ? RRule.fromString(config.rrule).between(params.from, params.to, false)
-        : [];
-
-    const ticks: ScheduleTick[] = [];
-    for (const scheduledAt of occurrences) {
+  /**
+   * Record manual fires for `occurrences`, numbered from the current
+   * `tickCount`, with a compare-and-set commit that is retried when a poll
+   * or another manual fire advanced the count in between. `null` when the
+   * schedule doesn't exist.
+   */
+  private async fireManually(params: {
+    scheduleId: string;
+    occurrences: (config: DurableScheduleConfig) => Date[];
+  }): Promise<ScheduleTick[] | null> {
+    const { scheduleId } = params;
+    for (let attempt = 0; attempt < MANUAL_FIRE_ATTEMPTS; attempt++) {
+      const [config, state] = await Promise.all([
+        this.storage.loadSchedule(scheduleId),
+        this.storage.loadScheduleState(scheduleId),
+      ]);
+      if (!config || !state) return null;
+      const occurrences = params.occurrences(config);
+      if (occurrences.length === 0) return [];
       const now = this.clock.now();
-      ticks.push({
-        scheduleId,
-        scheduleName: config.name,
-        scheduledAt,
-        firedAt: now,
-        tickNumber,
-        metadata: config.metadata,
+      const ticks = occurrences.map(
+        (scheduledAt, i): ScheduleTick => ({
+          scheduleId,
+          scheduleName: config.name,
+          scheduledAt,
+          firedAt: now,
+          tickNumber: state.tickCount + i,
+          metadata: config.metadata,
+        }),
+      );
+      const { conflicts } = await this.storage.commitPoll({
+        updates: [
+          {
+            id: scheduleId,
+            firedAt: now,
+            tickIncrement: ticks.length,
+            expectedTickCount: state.tickCount,
+            ticks,
+          },
+        ],
       });
-      await this.storage.recordFire(scheduleId, now);
-      tickNumber++;
+      if (conflicts.length === 0) return ticks;
     }
-    return ticks;
+    throw new Error(
+      `Schedule "${scheduleId}": tickCount kept changing; manual fire gave up after ${MANUAL_FIRE_ATTEMPTS} attempts`,
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -340,10 +386,13 @@ export class DurableScheduler implements Scheduler {
    *
    * Every call builds a fresh stream. Stopping the consumer cancels the
    * pending interval timer and commits the acknowledged part of the current
-   * batch.
+   * batch. When the last running stream of this instance stops, the leader
+   * lease is released so another instance takes over at its next poll
+   * instead of waiting out the TTL.
    */
   stream(scheduleId?: string): Stream<ScheduleTick> {
     return Stream.suspend(() => {
+      this.activeStreams++;
       // The batch that has been emitted (in part) but not committed yet.
       let open: PollBatch | undefined;
 
@@ -384,15 +433,34 @@ export class DurableScheduler implements Scheduler {
           });
         });
 
-      // On early stop, commit what the consumer acknowledged; the rest stays due.
-      const commitOpen = suspend((): Eff<void> => {
+      // On stop, commit what the consumer acknowledged (the rest stays due),
+      // then hand leadership over if no other stream of this instance runs.
+      const finalize = suspend((): Eff<void> => {
         const batch = open;
         open = undefined;
-        return batch ? this.commitEff({ batch, acked: batch.acked }) : succeed(undefined);
+        const commit = batch ? this.commitEff({ batch, acked: batch.acked }) : succeed(undefined);
+        return commit.flatMap(() => {
+          this.activeStreams--;
+          return this.activeStreams === 0 ? this.releaseEff() : succeed(undefined);
+        });
       });
 
       const initial: LoopState = { kind: "poll", failures: 0 };
-      return Stream.unfoldEffect(initial, step).unNone().onFinalize(commitOpen);
+      return Stream.unfoldEffect(initial, step).unNone().onFinalize(finalize);
+    });
+  }
+
+  /** Release the held lease. Never fails: errors are reported. */
+  private releaseEff(): Eff<void> {
+    const lease = this.heldLease;
+    if (!lease) return succeed(undefined);
+    this.heldLease = null;
+    return tryPromise(
+      () => this.storage.releaseLeader({ lease }),
+      (e) => e,
+    ).catch((error) => {
+      this.report({ phase: "release", error });
+      return succeed(undefined);
     });
   }
 
@@ -439,38 +507,46 @@ export class DurableScheduler implements Scheduler {
     const ready = batch.plans.filter((p, i) => p.ticks.length === 0 || batch.tickEnds[i]! <= acked);
     if (ready.length === 0) return succeed(undefined);
     return tryPromise(
-      () => commitPlannedSchedules({ storage: this.storage, plans: ready }),
+      () => commitPlannedSchedules({ storage: this.storage, plans: ready, lease: batch.lease }),
       (e) => e,
-    ).catch((error) => {
-      this.report({ phase: "commit", error });
-      return succeed(undefined);
-    });
+    )
+      .map(() => undefined)
+      .catch((error) => {
+        this.report({ phase: "commit", error });
+        return succeed(undefined);
+      });
   }
 
   /** One leader-gated poll: claim due schedules and compute their ticks. Writes nothing. */
   private async pollOnce(scheduleId: string | undefined): Promise<PollBatch> {
-    const isLeader = await this.storage.tryAcquireLeader({
+    const lease = await this.storage.tryAcquireLeader({
+      key: this.leaderKey,
       instanceId: this.instanceId,
-      namespace: this.namespace,
       ttlMs: this.leaderLockTtlMs,
     });
-    if (!isLeader) return emptyBatch();
+    this.heldLease = lease;
+    if (!lease) return emptyBatch();
 
+    // Partitions filter in the shell, so leave room for the other
+    // partitions' due ids.
+    const fetchLimit = this.batchSize * (this.partition?.count ?? 1);
     const dueIds = await this.storage.findDue({
       now: this.clock.now(),
-      limit: this.batchSize,
+      limit: fetchLimit,
       namespace: this.namespace,
     });
 
     // Apply partitioning + scheduleId filter in the shell so storage
     // backends don't need partition awareness.
-    const targetIds = dueIds.filter((id) => {
-      if (scheduleId && id !== scheduleId) return false;
-      if (this.partition && hashCode(id) % this.partition.count !== this.partition.index) {
-        return false;
-      }
-      return true;
-    });
+    const targetIds = dueIds
+      .filter((id) => {
+        if (scheduleId && id !== scheduleId) return false;
+        return (
+          !this.partition ||
+          schedulePartition({ id, count: this.partition.count }) === this.partition.index
+        );
+      })
+      .slice(0, this.batchSize);
 
     if (targetIds.length === 0) return emptyBatch();
 
@@ -500,12 +576,17 @@ export class DurableScheduler implements Scheduler {
       ticks.push(...plan.ticks);
       tickEnds.push(ticks.length);
     }
-    return { plans, ticks, tickEnds, acked: 0 };
+    return { plans, ticks, tickEnds, acked: 0, lease };
   }
 }
 
+/** Upper bound on compare-and-set retries for `triggerNow` / `backfill`. */
+const MANUAL_FIRE_ATTEMPTS = 10;
+
 /** Ticks of one poll, in emission order, plus what to commit for them. */
 interface PollBatch {
+  /** The lease the poll ran under; fences the commit. */
+  readonly lease?: LeaderLease;
   readonly plans: readonly PlannedSchedule[];
   readonly ticks: readonly ScheduleTick[];
   /** For each plan, the index just past its last tick in `ticks`. */
@@ -589,6 +670,9 @@ export function planDueTicks(params: {
           id,
           firedAt: last?.firedAt,
           tickIncrement: due.length > 0 ? due.length : undefined,
+          // The ticks are numbered from this count; don't commit them over
+          // a fire that took those numbers in the meantime.
+          expectedTickCount: due.length > 0 ? state.tickCount : undefined,
           nextRun,
           ticks: due.length > 0 ? due : undefined,
         },
@@ -602,17 +686,26 @@ export function planDueTicks(params: {
 
 /**
  * Commit planned schedules in one `commitPoll`, then disable the ones whose
- * config could not be evaluated so they show up as paused.
+ * config could not be evaluated so they show up as paused. Pass the lease
+ * the poll ran under: the commit is then rejected with `StaleLeaseError`
+ * (writing nothing) when leadership has moved on since. Schedules whose
+ * `tickCount` changed since planning come back in `conflicts`, uncommitted;
+ * they stay due and the next poll plans them afresh.
  */
 export async function commitPlannedSchedules(params: {
   storage: SchedulerStorage;
   plans: readonly PlannedSchedule[];
-}): Promise<void> {
-  if (params.plans.length === 0) return;
-  await params.storage.commitPoll(params.plans.map((p) => p.commit));
+  lease?: LeaderLease;
+}): Promise<CommitPollResult> {
+  if (params.plans.length === 0) return { conflicts: [] };
+  const result = await params.storage.commitPoll({
+    updates: params.plans.map((p) => p.commit),
+    lease: params.lease,
+  });
   for (const plan of params.plans) {
     if (plan.error !== undefined) await params.storage.setEnabled(plan.id, false);
   }
+  return result;
 }
 
 function jitterNextRun(params: {
@@ -768,14 +861,74 @@ export function computeNextRun(
   return candidate;
 }
 
-/** Stable 32-bit string hash — used for partitioning across scheduler workers. */
-function hashCode(s: string): number {
+/**
+ * The partition (`0 … count-1`) a schedule id belongs to: a stable 32-bit
+ * string hash mod `count`. Every poll loop that partitions schedules must
+ * use this so their partitions line up.
+ */
+export function schedulePartition(params: { id: string; count: number }): number {
+  const { id, count } = params;
   let h = 0;
-  for (let i = 0; i < s.length; i++) {
-    h = (h << 5) - h + s.charCodeAt(i);
+  for (let i = 0; i < id.length; i++) {
+    h = (h << 5) - h + id.charCodeAt(i);
     h |= 0;
   }
-  return Math.abs(h);
+  return Math.abs(h) % count;
+}
+
+/**
+ * Next `count` fire times of `config` after `now`, inside `[startAt, endAt)`.
+ * Interval schedules continue from `lastFired`, or start at the later of
+ * `now` and `startAt` when they have never fired.
+ */
+function previewFireTimes(params: {
+  config: DurableScheduleConfig;
+  lastFired: Date | null;
+  count: number;
+  now: Date;
+}): Date[] {
+  const { config, count } = params;
+  const nowMs = params.now.getTime();
+  const startMs = config.startAt?.getTime() ?? Number.NEGATIVE_INFINITY;
+  const endMs = config.endAt?.getTime() ?? Number.POSITIVE_INFINITY;
+  // Occurrences strictly after `fromMs` (so one exactly at `startAt` counts).
+  const fromMs = Math.max(nowMs, startMs - 1);
+  const times: Date[] = [];
+  const push = (t: Date | null | undefined): boolean => {
+    if (!t || t.getTime() >= endMs || times.length >= count) return false;
+    times.push(t);
+    return times.length < count;
+  };
+  if (count <= 0 || fromMs >= endMs) return times;
+
+  if (config.cron) {
+    const cron = new Cron(config.cron, { timezone: config.timezone ?? "UTC" });
+    let cursor = new Date(fromMs);
+    for (;;) {
+      const next = cron.nextRun(cursor);
+      if (!push(next)) break;
+      cursor = new Date(next!.getTime() + 1);
+    }
+  } else if (config.rrule) {
+    const rule = RRule.fromString(config.rrule);
+    let cursor = new Date(fromMs);
+    for (;;) {
+      const next = rule.after(cursor, false);
+      if (!push(next)) break;
+      cursor = next!;
+    }
+  } else if (config.intervalMs !== undefined && config.intervalMs > 0) {
+    const interval = config.intervalMs;
+    let next: number;
+    if (params.lastFired) {
+      const last = params.lastFired.getTime();
+      next = last + interval * (Math.floor(Math.max(0, fromMs - last) / interval) + 1);
+    } else {
+      next = Math.max(nowMs, startMs);
+    }
+    while (push(new Date(next))) next += interval;
+  }
+  return times;
 }
 
 function backfillCron(cron: string, timezone: string, from: Date, to: Date): Date[] {

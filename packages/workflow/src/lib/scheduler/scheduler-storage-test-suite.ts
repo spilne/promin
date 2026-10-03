@@ -11,8 +11,65 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
+import { Stream } from "@spilne/perfect-core";
 import { isTickLogStorage, type SchedulerStorage } from "./scheduler-storage.ts";
+import { isStaleLeaseError, schedulerLeaderKey } from "./leader-lease.ts";
+import { DurableScheduler, type SchedulerErrorEvent } from "./durable-scheduler.ts";
 import type { ScheduleTick } from "./types.ts";
+
+/** Poll `check` in real time until it holds. */
+async function waitFor(params: { check: () => boolean | Promise<boolean>; what: string }) {
+  const deadline = Date.now() + 15_000;
+  while (!(await params.check())) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${params.what}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+/** Drain a scheduler stream in the background; `stop()` ends it and runs its finalizers. */
+function drainInBackground(scheduler: DurableScheduler) {
+  const seen: ScheduleTick[] = [];
+  let fire: () => void = () => {};
+  const signal = Stream.fromCallback<void>((emit) => {
+    fire = () => emit(undefined);
+  });
+  const done = scheduler
+    .stream()
+    .takeUntil(signal)
+    .tap((tick) => void seen.push(tick))
+    .drain()
+    .run();
+  return {
+    seen,
+    stop: async () => {
+      fire();
+      await done;
+    },
+  };
+}
+
+/** A view of `storage` whose first `commitPoll` blocks until `resume()`. */
+function pauseFirstCommit(storage: SchedulerStorage) {
+  let resume!: () => void;
+  const gate = new Promise<void>((r) => (resume = r));
+  let entered = false;
+  const view = new Proxy(storage, {
+    get(target, prop) {
+      if (prop === "commitPoll") {
+        return async (params: Parameters<SchedulerStorage["commitPoll"]>[0]) => {
+          if (!entered) {
+            entered = true;
+            await gate;
+          }
+          return target.commitPoll(params);
+        };
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { view, resume, entered: () => entered };
+}
 
 /**
  * Run the full SchedulerStorage conformance suite against any implementation.
@@ -237,10 +294,12 @@ export function schedulerStorageTestSuite(
 
         const fireTime = new Date();
         const nextTime = new Date(Date.now() + 1_000);
-        await s.commitPoll([
-          { id: "p1", firedAt: fireTime, tickIncrement: 1, nextRun: nextTime },
-          { id: "p2", firedAt: fireTime, tickIncrement: 2, nextRun: nextTime },
-        ]);
+        await s.commitPoll({
+          updates: [
+            { id: "p1", firedAt: fireTime, tickIncrement: 1, nextRun: nextTime },
+            { id: "p2", firedAt: fireTime, tickIncrement: 2, nextRun: nextTime },
+          ],
+        });
 
         const states = await s.loadScheduleStates(["p1", "p2"]);
         expect(states.get("p1")?.tickCount).toBe(1);
@@ -251,7 +310,7 @@ export function schedulerStorageTestSuite(
         const s = await getStorage();
         await s.upsertSchedule({ id: "clr", intervalMs: 1_000 });
         await s.setNextRun("clr", new Date(Date.now() - 100));
-        await s.commitPoll([{ id: "clr", nextRun: null }]);
+        await s.commitPoll({ updates: [{ id: "clr", nextRun: null }] });
         const due = await s.findDue({ now: new Date(), limit: 10 });
         expect(due).not.toContain("clr");
       });
@@ -462,7 +521,7 @@ export function schedulerStorageTestSuite(
         const s = await getStorage();
         await s.upsertSchedule({ id: "race", intervalMs: 1_000 });
         await s.setEnabled("race", false);
-        await s.commitPoll([{ id: "race", nextRun: past() }]);
+        await s.commitPoll({ updates: [{ id: "race", nextRun: past() }] });
         expect(await s.findDue({ now: new Date(), limit: 10 })).not.toContain("race");
       });
 
@@ -509,46 +568,273 @@ export function schedulerStorageTestSuite(
       });
     });
 
-    describe("tryAcquireLeader — per-namespace lock", () => {
-      // Cross-instance contention ("instance A holds, instance B blocked") is
-      // intentionally NOT in this portable suite — backends differ on what
-      // "instance" means. Postgres uses pg_try_advisory_lock which is
-      // session-scoped (reentrant within one connection); two app instances
-      // contend only when they hold separate DB connections. Redis +
-      // InMemory key the lock by instanceId so same-storage calls contend
-      // even from one process. Each backend tests cross-instance contention
-      // in its own integration tests with realistic connection topology.
+    describe("leader leases", () => {
+      // Leases are keyed by instanceId, not by connection or process, so one
+      // storage object can stand in for several instances. Expiry uses the
+      // backend's own clock (the server clock for Postgres and Redis), so
+      // the TTL cases wait in real time; the waits are lower bounds only.
+      const key = schedulerLeaderKey({ namespace: "ns" });
+      const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-      it("same instance reacquires successfully (TTL refresh, not contention)", async () => {
+      it("a live lease excludes other instances; the holder refreshes it under the same epoch", async () => {
         const s = await getStorage();
-        const a1 = await s.tryAcquireLeader({
-          instanceId: "x",
-          namespace: "ns",
-          ttlMs: 10_000,
-        });
-        const a2 = await s.tryAcquireLeader({
-          instanceId: "x",
-          namespace: "ns",
-          ttlMs: 10_000,
-        });
-        expect(a1).toBe(true);
-        expect(a2).toBe(true);
+        const a1 = await s.tryAcquireLeader({ key, instanceId: "a", ttlMs: 30_000 });
+        const b = await s.tryAcquireLeader({ key, instanceId: "b", ttlMs: 30_000 });
+        const a2 = await s.tryAcquireLeader({ key, instanceId: "a", ttlMs: 30_000 });
+
+        expect(a1).toEqual({ key, instanceId: "a", epoch: expect.any(Number) });
+        expect(b).toBeNull();
+        expect(a2).toEqual(a1);
       });
 
-      it("different namespaces have independent locks (one Zorya can lead many tenants)", async () => {
+      it("only one of many concurrent acquirers wins", async () => {
         const s = await getStorage();
-        const a = await s.tryAcquireLeader({
-          instanceId: "single",
-          namespace: "tenant-a",
-          ttlMs: 10_000,
+        const results = await Promise.all(
+          Array.from({ length: 10 }, (_, i) =>
+            s.tryAcquireLeader({ key, instanceId: `racer-${i}`, ttlMs: 30_000 }),
+          ),
+        );
+        expect(results.filter((r) => r !== null)).toHaveLength(1);
+      });
+
+      it("after the TTL another instance takes over with a higher epoch", async () => {
+        const s = await getStorage();
+        const a = await s.tryAcquireLeader({ key, instanceId: "a", ttlMs: 150 });
+        await sleep(400);
+        const b = await s.tryAcquireLeader({ key, instanceId: "b", ttlMs: 30_000 });
+
+        expect(b).not.toBeNull();
+        expect(b!.epoch).toBeGreaterThan(a!.epoch);
+        expect(await s.tryAcquireLeader({ key, instanceId: "a", ttlMs: 30_000 })).toBeNull();
+      });
+
+      it("re-taking an expired lease starts a new epoch, even for the same holder", async () => {
+        const s = await getStorage();
+        const first = await s.tryAcquireLeader({ key, instanceId: "a", ttlMs: 150 });
+        await sleep(400);
+        const again = await s.tryAcquireLeader({ key, instanceId: "a", ttlMs: 30_000 });
+        expect(again!.epoch).toBeGreaterThan(first!.epoch);
+      });
+
+      it("releaseLeader hands over immediately; releasing a stale lease is a no-op", async () => {
+        const s = await getStorage();
+        const a = await s.tryAcquireLeader({ key, instanceId: "a", ttlMs: 60_000 });
+        await s.releaseLeader({ lease: a! });
+        const b = await s.tryAcquireLeader({ key, instanceId: "b", ttlMs: 60_000 });
+        expect(b).not.toBeNull();
+        expect(b!.epoch).toBeGreaterThan(a!.epoch);
+
+        await s.releaseLeader({ lease: a! });
+        expect(await s.tryAcquireLeader({ key, instanceId: "c", ttlMs: 60_000 })).toBeNull();
+      });
+
+      it("namespaces and partitions have independent leases", async () => {
+        const s = await getStorage();
+        const keys = [
+          schedulerLeaderKey({}),
+          schedulerLeaderKey({ namespace: "tenant-a" }),
+          schedulerLeaderKey({ namespace: "tenant-b" }),
+          schedulerLeaderKey({ namespace: "tenant-a", partition: { index: 0, count: 2 } }),
+          schedulerLeaderKey({ namespace: "tenant-a", partition: { index: 1, count: 2 } }),
+        ];
+        expect(new Set(keys).size).toBe(keys.length);
+        const leases = await Promise.all(
+          keys.map((k, i) => s.tryAcquireLeader({ key: k, instanceId: `i-${i}`, ttlMs: 30_000 })),
+        );
+        expect(leases.every((l) => l !== null)).toBe(true);
+        // One instance can also lead many keys at once.
+        const second = await s.tryAcquireLeader({
+          key: schedulerLeaderKey({ namespace: "tenant-c" }),
+          instanceId: "i-1",
+          ttlMs: 30_000,
         });
-        const b = await s.tryAcquireLeader({
-          instanceId: "single",
-          namespace: "tenant-b",
-          ttlMs: 10_000,
+        expect(second).not.toBeNull();
+      });
+
+      it("a stale lease can't commit — nothing is written — while the current lease can", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "fenced", intervalMs: 1_000 });
+        const before = await s.findDue({ now: new Date(Date.now() + 60_000), limit: 10 });
+        const old = await s.tryAcquireLeader({ key, instanceId: "a", ttlMs: 60_000 });
+        await s.releaseLeader({ lease: old! });
+        const current = await s.tryAcquireLeader({ key, instanceId: "b", ttlMs: 60_000 });
+
+        const stale = await s
+          .commitPoll({
+            updates: [
+              {
+                id: "fenced",
+                firedAt: new Date(1_000),
+                tickIncrement: 1,
+                expectedTickCount: 0,
+                nextRun: null,
+              },
+            ],
+            lease: old!,
+          })
+          .then(
+            () => null,
+            (error: unknown) => error,
+          );
+        expect(isStaleLeaseError(stale)).toBe(true);
+        expect(await s.loadScheduleState("fenced")).toEqual({ lastFired: null, tickCount: 0 });
+        expect(await s.findDue({ now: new Date(Date.now() + 60_000), limit: 10 })).toEqual(before);
+
+        const ok = await s.commitPoll({
+          updates: [
+            {
+              id: "fenced",
+              firedAt: new Date(1_000),
+              tickIncrement: 1,
+              expectedTickCount: 0,
+              nextRun: new Date(2_000),
+            },
+          ],
+          lease: current!,
         });
-        expect(a).toBe(true);
-        expect(b).toBe(true);
+        expect(ok.conflicts).toEqual([]);
+        expect(await s.loadScheduleState("fenced")).toEqual({
+          lastFired: new Date(1_000),
+          tickCount: 1,
+        });
+      });
+
+      it("a lease from another key can't commit", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "x", intervalMs: 1_000 });
+        const other = await s.tryAcquireLeader({
+          key: schedulerLeaderKey({ namespace: "other" }),
+          instanceId: "a",
+          ttlMs: 60_000,
+        });
+        // Forge a lease on `key` that was never granted.
+        const forged = { ...other!, key };
+        const result = await s
+          .commitPoll({ updates: [{ id: "x", nextRun: null }], lease: forged })
+          .then(
+            () => null,
+            (error: unknown) => error,
+          );
+        expect(isStaleLeaseError(result)).toBe(true);
+      });
+    });
+
+    describe("leader failover — two DurableSchedulers", () => {
+      it("a leader paused in its commit past the TTL can't commit: every tick number keeps one occurrence", async () => {
+        const s = await getStorage();
+        const intervalMs = 100;
+        // Deep catch-up makes numbering deterministic: tick k is base + k × interval.
+        await s.upsertSchedule({ id: "failover", intervalMs, maxCatchUp: 10_000 });
+        const base = Date.now() - 1_000;
+        await s.recordFire("failover", new Date(base));
+
+        const paused = pauseFirstCommit(s);
+        const errorsA: SchedulerErrorEvent[] = [];
+        const common = { pollIntervalMs: 50, leaderLockTtlMs: 300, onError: () => {} };
+        const a = new DurableScheduler({
+          ...common,
+          storage: paused.view,
+          instanceId: "A",
+          onError: (e) => void errorsA.push(e),
+        });
+        const b = new DurableScheduler({ ...common, storage: s, instanceId: "B" });
+
+        const runA = drainInBackground(a);
+        await waitFor({ check: () => paused.entered(), what: "A to deliver and start committing" });
+        const runB = drainInBackground(b);
+        // B takes over once A's lease lapses, and commits.
+        await waitFor({
+          check: async () => (await s.loadScheduleState("failover"))!.tickCount > 1,
+          what: "B to take over and commit",
+        });
+
+        paused.resume();
+        await waitFor({ check: () => errorsA.length > 0, what: "A's commit to be rejected" });
+        expect(errorsA[0]!.phase).toBe("commit");
+        expect(isStaleLeaseError(errorsA[0]!.error)).toBe(true);
+
+        // Let B poll a few more times after A's rejected commit.
+        const after = (await s.loadScheduleState("failover"))!.tickCount;
+        await waitFor({
+          check: async () => (await s.loadScheduleState("failover"))!.tickCount >= after + 2,
+          what: "B to keep firing",
+        });
+        await runA.stop();
+        await runB.stop();
+
+        // A's ticks are redelivered by B under the same numbers (at least
+        // once). Beyond that: one occurrence per number, numbers without
+        // gaps, occurrences moving forward with the number, and a tickCount
+        // that A's stale commit didn't inflate.
+        expect(runA.seen.length).toBeGreaterThan(0);
+        const byNumber = new Map<number, number>();
+        for (const t of [...runA.seen, ...runB.seen]) {
+          const at = t.scheduledAt.getTime();
+          expect(byNumber.get(t.tickNumber) ?? at).toBe(at);
+          byNumber.set(t.tickNumber, at);
+        }
+        const numbers = [...byNumber.keys()].sort((x, y) => x - y);
+        expect(numbers).toEqual(numbers.map((_, i) => i + 1));
+        for (let i = 1; i < numbers.length; i++) {
+          expect(byNumber.get(numbers[i]!)!).toBeGreaterThan(byNumber.get(numbers[i - 1]!)!);
+        }
+        expect(new Set(runB.seen.map((t) => t.tickNumber)).size).toBe(runB.seen.length);
+        expect((await s.loadScheduleState("failover"))!.tickCount).toBe(numbers.length + 1);
+      }, 30_000);
+    });
+
+    describe("commitPoll — compare-and-set on tickCount", () => {
+      it("skips and reports entries whose expectedTickCount no longer matches; applies the rest", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "moved", intervalMs: 1_000 });
+        await s.upsertSchedule({ id: "fresh", intervalMs: 1_000 });
+        await s.recordFire("moved", new Date(500));
+
+        const result = await s.commitPoll({
+          updates: [
+            {
+              id: "moved",
+              firedAt: new Date(1_000),
+              tickIncrement: 1,
+              expectedTickCount: 0,
+              nextRun: null,
+            },
+            {
+              id: "fresh",
+              firedAt: new Date(1_000),
+              tickIncrement: 2,
+              expectedTickCount: 0,
+              nextRun: new Date(5_000),
+            },
+            { id: "gone", firedAt: new Date(1_000), tickIncrement: 1, expectedTickCount: 0 },
+          ],
+        });
+
+        expect([...result.conflicts].sort()).toEqual(["gone", "moved"]);
+        expect(await s.loadScheduleState("moved")).toEqual({
+          lastFired: new Date(500),
+          tickCount: 1,
+        });
+        expect(await s.loadScheduleState("fresh")).toEqual({
+          lastFired: new Date(1_000),
+          tickCount: 2,
+        });
+        // The skipped entry's `nextRun: null` was not applied either.
+        expect(await s.findDue({ now: new Date(Date.now() + 60_000), limit: 10 })).toContain(
+          "moved",
+        );
+      });
+
+      it("an entry without nextRun leaves nextRun as it is", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "keep", intervalMs: 1_000 });
+        await s.setNextRun("keep", new Date(10_000));
+        await s.commitPoll({
+          updates: [{ id: "keep", firedAt: new Date(1_000), tickIncrement: 1 }],
+        });
+        expect(await s.findDue({ now: new Date(9_999), limit: 10 })).toEqual([]);
+        expect(await s.findDue({ now: new Date(10_000), limit: 10 })).toEqual(["keep"]);
+        expect((await s.loadScheduleState("keep"))?.tickCount).toBe(1);
       });
     });
 
@@ -573,15 +859,17 @@ export function schedulerStorageTestSuite(
           firedAt: new Date(2_000_010),
           metadata: { foo: "bar" },
         };
-        await s.commitPoll([
-          {
-            id: "log-1",
-            firedAt: t1.firedAt,
-            tickIncrement: 2,
-            nextRun: new Date(3_000_000),
-            ticks: [t0, t1],
-          },
-        ]);
+        await s.commitPoll({
+          updates: [
+            {
+              id: "log-1",
+              firedAt: t1.firedAt,
+              tickIncrement: 2,
+              nextRun: new Date(3_000_000),
+              ticks: [t0, t1],
+            },
+          ],
+        });
         const ticks = await s.listTicks({ scheduleId: "log-1" });
         expect(ticks.length).toBe(2);
         // Newest-first by firedAt.
@@ -605,9 +893,11 @@ export function schedulerStorageTestSuite(
           scheduledAt: new Date(i * 1000),
           firedAt: new Date(i * 1000 + 1),
         }));
-        await s.commitPoll([
-          { id: "page", firedAt: ticks[24]!.firedAt, tickIncrement: 25, nextRun: null, ticks },
-        ]);
+        await s.commitPoll({
+          updates: [
+            { id: "page", firedAt: ticks[24]!.firedAt, tickIncrement: 25, nextRun: null, ticks },
+          ],
+        });
         const page1 = await s.listTicks({ scheduleId: "page", limit: 10, offset: 0 });
         const page2 = await s.listTicks({ scheduleId: "page", limit: 10, offset: 10 });
         expect(page1[0]?.tickNumber).toBe(24);
@@ -627,14 +917,18 @@ export function schedulerStorageTestSuite(
           scheduledAt: new Date(1_000),
           firedAt: new Date(1_001),
         };
-        await s.commitPoll([
-          { id: "retry", firedAt: t.firedAt, tickIncrement: 1, nextRun: null, ticks: [t] },
-        ]);
+        await s.commitPoll({
+          updates: [
+            { id: "retry", firedAt: t.firedAt, tickIncrement: 1, nextRun: null, ticks: [t] },
+          ],
+        });
         // Same tick replayed (e.g., retry after a transient failure). Must
         // be a no-op on the log even if state advances by another count.
-        await s.commitPoll([
-          { id: "retry", firedAt: t.firedAt, tickIncrement: 0, nextRun: null, ticks: [t] },
-        ]);
+        await s.commitPoll({
+          updates: [
+            { id: "retry", firedAt: t.firedAt, tickIncrement: 0, nextRun: null, ticks: [t] },
+          ],
+        });
         expect(await s.countTicks({ scheduleId: "retry" })).toBe(1);
       });
 
@@ -648,9 +942,11 @@ export function schedulerStorageTestSuite(
           scheduledAt: new Date(1_000),
           firedAt: new Date(1_001),
         };
-        await s.commitPoll([
-          { id: "drop", firedAt: t.firedAt, tickIncrement: 1, nextRun: null, ticks: [t] },
-        ]);
+        await s.commitPoll({
+          updates: [
+            { id: "drop", firedAt: t.firedAt, tickIncrement: 1, nextRun: null, ticks: [t] },
+          ],
+        });
         await s.deleteSchedule("drop");
         expect(await s.countTicks({ scheduleId: "drop" })).toBe(0);
       });

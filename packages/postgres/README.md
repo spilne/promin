@@ -67,7 +67,7 @@ await migrate(db, {
 
 ## Durable Scheduler
 
-Postgres-backed, distributed-safe cron scheduler. Persistent schedules, catch-up for missed runs, at-least-once tick delivery, leader election via `pg_advisory_lock`, jitter, and backfill.
+Postgres-backed, distributed-safe cron scheduler. Persistent schedules, catch-up for missed runs, at-least-once tick delivery, leader election via fenced lease rows (`wf_leader_leases`, server-clock TTL), jitter, and backfill.
 
 Implements `Streamable<ScheduleTick>` — works with `trigger()` and all perfect `Stream` combinators.
 

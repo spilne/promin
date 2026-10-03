@@ -6,7 +6,17 @@ export {
   type InMemorySchedulerConfig,
   createScheduler,
 } from "./in-memory-scheduler.ts";
-export type { SchedulerStorage, ScheduleCommit } from "./scheduler-storage.ts";
+export type { SchedulerStorage, ScheduleCommit, CommitPollResult } from "./scheduler-storage.ts";
+export {
+  type LeaderLease,
+  type LeaderLeaseStore,
+  type InMemoryLeaderLeasesConfig,
+  InMemoryLeaderLeases,
+  LeaseLeaderElection,
+  StaleLeaseError,
+  isStaleLeaseError,
+  schedulerLeaderKey,
+} from "./leader-lease.ts";
 export { isTickLogStorage } from "./scheduler-storage.ts";
 export {
   DurableScheduler,
@@ -19,6 +29,7 @@ export {
   computeNextRun,
   planDueTicks,
   commitPlannedSchedules,
+  schedulePartition,
 } from "./durable-scheduler.ts";
 export { validateScheduleConfig } from "./schedule-config.ts";
 export { InMemorySchedulerStorage } from "./in-memory-scheduler-storage.ts";

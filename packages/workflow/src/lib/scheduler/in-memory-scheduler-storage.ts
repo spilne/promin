@@ -7,13 +7,14 @@
 // ---------------------------------------------------------------------------
 
 import type { DurableScheduleConfig, ScheduleTick } from "./types.ts";
-import type { ScheduleCommit, SchedulerStorage } from "./scheduler-storage.ts";
+import type { CommitPollResult, ScheduleCommit, SchedulerStorage } from "./scheduler-storage.ts";
 import { scheduleMetadataContains } from "./metadata-filter.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
+import { InMemoryLeaderLeases, type LeaderLease } from "./leader-lease.ts";
 
 export interface InMemorySchedulerStorageConfig {
   /**
-   * Time source for the initial next-run of new schedules and leader-lock
+   * Time source for the initial next-run of new schedules and leader-lease
    * expiry. Default: `SystemWallClock`.
    */
   clock?: WallClock;
@@ -24,18 +25,13 @@ interface ScheduleState {
   tickCount: number;
 }
 
-interface LeaderLock {
-  instanceId: string;
-  expiresAt: number;
-}
-
 export class InMemorySchedulerStorage implements SchedulerStorage {
   private schedules = new Map<string, DurableScheduleConfig>();
   private state = new Map<string, ScheduleState>();
   /** Per-id nextRun timestamp; missing = not in due-tracking. */
   private nextRun = new Map<string, number>();
-  /** Per-namespace leader locks. Key = namespace ?? "__global__". */
-  private leaders = new Map<string, LeaderLock>();
+  /** Leader leases, keyed by `schedulerLeaderKey`. */
+  private readonly leases: InMemoryLeaderLeases;
   /** Per-schedule tick log. Inner array is append-order; queries reverse it
    *  for newest-first. */
   private ticks = new Map<string, ScheduleTick[]>();
@@ -43,6 +39,7 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
 
   constructor(config?: InMemorySchedulerStorageConfig) {
     this.clock = config?.clock ?? SystemWallClock;
+    this.leases = new InMemoryLeaderLeases({ clock: this.clock });
   }
 
   // -------------------------------------------------------------------------
@@ -104,10 +101,27 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     else this.nextRun.set(id, nextRun.getTime());
   }
 
-  async commitPoll(updates: ScheduleCommit[]): Promise<void> {
-    // Single-process JS — no transaction primitive needed; all mutations
-    // happen inside this synchronous block, which IS the atomic boundary.
-    for (const u of updates) {
+  async commitPoll(params: {
+    updates: readonly ScheduleCommit[];
+    lease?: LeaderLease;
+  }): Promise<CommitPollResult> {
+    // Single-process JS — no transaction primitive needed; the fence check
+    // and all mutations happen inside this synchronous block, which IS the
+    // atomic boundary.
+    if (params.lease) this.leases.assertCurrent(params.lease);
+    const conflicts: string[] = [];
+    for (const u of params.updates) {
+      const cfg = this.schedules.get(u.id);
+      const current = cfg ? (this.state.get(u.id)?.tickCount ?? 0) : null;
+      if (u.expectedTickCount !== undefined && current !== u.expectedTickCount) {
+        conflicts.push(u.id);
+        continue;
+      }
+      // Deleted since the poll loaded it: nothing to update, keep it out of due-tracking.
+      if (!cfg) {
+        this.nextRun.delete(u.id);
+        continue;
+      }
       if (u.firedAt !== undefined && u.tickIncrement && u.tickIncrement > 0) {
         const prev = this.state.get(u.id) ?? { lastFired: null, tickCount: 0 };
         this.state.set(u.id, {
@@ -115,10 +129,9 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
           tickCount: prev.tickCount + u.tickIncrement,
         });
       }
-      // A schedule paused (or deleted) since the poll loaded it stays out of due-tracking.
-      const cfg = this.schedules.get(u.id);
-      if (u.nextRun === null || !cfg || cfg.enabled === false) this.nextRun.delete(u.id);
-      else this.nextRun.set(u.id, u.nextRun.getTime());
+      // A schedule paused since the poll loaded it stays out of due-tracking.
+      if (cfg.enabled === false || u.nextRun === null) this.nextRun.delete(u.id);
+      else if (u.nextRun !== undefined) this.nextRun.set(u.id, u.nextRun.getTime());
       if (u.ticks?.length) {
         const log = this.ticks.get(u.id) ?? [];
         // Dedupe on (scheduleId, tickNumber) so a retried commitPoll doesn't
@@ -130,6 +143,7 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
         this.ticks.set(u.id, log);
       }
     }
+    return { conflicts };
   }
 
   async listTicks(params: {
@@ -240,25 +254,19 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
   }
 
   // -------------------------------------------------------------------------
-  // Leader election — per-namespace lock with TTL.
+  // Leader election — fenced leases on the injected clock.
   // -------------------------------------------------------------------------
 
   async tryAcquireLeader(params: {
+    key: string;
     instanceId: string;
-    namespace?: string;
     ttlMs: number;
-  }): Promise<boolean> {
-    const key = params.namespace ?? "__global__";
-    const now = this.clock.currentTimeMs();
-    const existing = this.leaders.get(key);
-    if (existing && existing.expiresAt > now && existing.instanceId !== params.instanceId) {
-      return false;
-    }
-    this.leaders.set(key, {
-      instanceId: params.instanceId,
-      expiresAt: now + params.ttlMs,
-    });
-    return true;
+  }): Promise<LeaderLease | null> {
+    return this.leases.acquire(params);
+  }
+
+  async releaseLeader(params: { lease: LeaderLease }): Promise<void> {
+    await this.leases.releaseLeader(params);
   }
 
   async findDueAcross(params: {

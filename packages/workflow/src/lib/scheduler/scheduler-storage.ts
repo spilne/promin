@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import type { DurableScheduleConfig, ScheduleTick } from "./types.ts";
+import type { LeaderLease, LeaderLeaseStore } from "./leader-lease.ts";
 
 /** One schedule's entry in a `commitPoll` batch. */
 export interface ScheduleCommit {
@@ -16,8 +17,20 @@ export interface ScheduleCommit {
   readonly firedAt?: Date;
   /** How much to add to `tickCount`. */
   readonly tickIncrement?: number;
-  /** New `nextRun`; `null` removes the schedule from due-tracking. */
-  readonly nextRun: Date | null;
+  /**
+   * New `nextRun`; `null` removes the schedule from due-tracking. Omit it to
+   * leave `nextRun` as it is (manual fires do).
+   */
+  readonly nextRun?: Date | null;
+  /**
+   * Compare-and-set guard: apply this entry only while the stored `tickCount`
+   * still equals this value. A skipped entry is reported in
+   * `CommitPollResult.conflicts` and changes nothing. Planned polls set it to
+   * the `tickCount` their ticks were numbered from, so a manual fire (or any
+   * other writer) that advanced the count in between is never overwritten
+   * and two different fires never get the same `tickNumber` in storage.
+   */
+  readonly expectedTickCount?: number;
   /**
    * Individual ticks fired in this poll cycle. Backends that maintain
    * a tick log persist these IN THE SAME TRANSACTION as the state
@@ -27,7 +40,22 @@ export interface ScheduleCommit {
   readonly ticks?: readonly ScheduleTick[];
 }
 
-export interface SchedulerStorage {
+/** What `commitPoll` did. */
+export interface CommitPollResult {
+  /**
+   * Ids of entries skipped because their `expectedTickCount` no longer
+   * matched or the schedule no longer exists. Entries without
+   * `expectedTickCount` are never reported.
+   */
+  readonly conflicts: readonly string[];
+}
+
+/**
+ * Persistence for `DurableScheduler`. Also a `LeaderLeaseStore`: only the
+ * holder of a key's lease polls and commits, and a commit carrying a stale
+ * lease is rejected.
+ */
+export interface SchedulerStorage extends LeaderLeaseStore {
   // -------------------------------------------------------------------------
   // Hot path — called every poll cycle. Implementations must be fast.
   // -------------------------------------------------------------------------
@@ -78,16 +106,29 @@ export interface SchedulerStorage {
   setNextRun(id: string, nextRun: Date | null): Promise<void>;
 
   /**
-   * Atomic single-round-trip commit for an entire poll cycle. For each entry:
-   * - if `firedAt`/`tickIncrement` are set, update `lastFired`/`tickCount`;
-   * - always update `nextRun` (use `null` to remove from due-tracking).
+   * Atomic commit for an entire poll cycle. For each entry:
+   * - skip it (reporting it in `conflicts`) when `expectedTickCount` is set
+   *   and differs from the stored `tickCount`, or the schedule is gone;
+   * - if `firedAt`/`tickIncrement` are set, update `lastFired`/`tickCount`
+   *   and log `ticks` (backends with a tick log);
+   * - if `nextRun` is present, update it (`null` removes the schedule from
+   *   due-tracking). A schedule disabled since it was loaded stays out of
+   *   due-tracking.
    *
-   * Implementations should collapse this to one network round-trip per poll
-   * (Postgres: `UPDATE … FROM (VALUES …)`; Redis: MULTI/pipeline). Sequential
-   * fallback (loop over single-record methods) is acceptable for in-memory.
-   * A schedule disabled since it was loaded stays out of due-tracking.
+   * Fencing: with `lease`, the whole commit is rejected with
+   * `StaleLeaseError` and nothing is written unless `lease.epoch` is still
+   * the current epoch of `lease.key`. The check runs in the same
+   * transaction (or script) as the writes, so a leader that lost its lease
+   * mid-poll can't commit.
+   *
+   * Implementations should collapse this to one network round-trip
+   * (Postgres: `UPDATE … FROM (VALUES …)` in a transaction; Redis: one Lua
+   * script). In-memory backends apply it synchronously.
    */
-  commitPoll(updates: ScheduleCommit[]): Promise<void>;
+  commitPoll(params: {
+    updates: readonly ScheduleCommit[];
+    lease?: LeaderLease;
+  }): Promise<CommitPollResult>;
 
   // -------------------------------------------------------------------------
   // Admin / CRUD path — used by register, list, pause, etc.
@@ -147,19 +188,10 @@ export interface SchedulerStorage {
   }): Promise<number>;
 
   // -------------------------------------------------------------------------
-  // Leader election — only the leader emits ticks.
+  // Leader election: `tryAcquireLeader` / `releaseLeader` come from
+  // `LeaderLeaseStore`. Poll loops lease one key per namespace and partition
+  // (`schedulerLeaderKey`) and pass the lease to `commitPoll`.
   // -------------------------------------------------------------------------
-
-  /**
-   * Acquire (or refresh) the leader lock for a namespace. Returns true if this
-   * `instanceId` is the leader. Implementations use `pg_advisory_lock` /
-   * `SET NX PX` / etc. Per-namespace locks let tenants run independent workers.
-   */
-  tryAcquireLeader(params: {
-    instanceId: string;
-    namespace?: string;
-    ttlMs: number;
-  }): Promise<boolean>;
 
   /**
    * Cross-namespace `findDue`: returns due schedules along with their

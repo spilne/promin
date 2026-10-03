@@ -1,42 +1,62 @@
 import type {
+  CommitPollResult,
   DurableScheduleConfig,
+  LeaderLease,
   ScheduleCommit,
   SchedulerStorage,
   ScheduleTick,
+  WallClock,
 } from "@promin/workflow";
-import { flattenLeafPaths } from "@promin/workflow";
+import { flattenLeafPaths, SystemWallClock } from "@promin/workflow";
 import type { SqliteDatabase } from "./sqlite-database.ts";
+import { SqliteLeaderLeaseStore } from "./sqlite-leader-lease-store.ts";
 
 /**
  * Persistent `SchedulerStorage` backed by SQLite.
  *
  * State that needs to survive restarts (`lastFiredAt`, `tickCount`,
- * `nextRun`, leader locks) lives on disk so a `bun --hot` reload or a
+ * `nextRun`, leader leases) lives on disk so a `bun --hot` reload or a
  * cold restart picks the schedules up where the previous instance left
  * off, instead of resetting to "first poll" every boot.
  *
  * Schema (auto-created on first use):
  *   promin_wf_schedules        — config + state in one row per schedule
- *   promin_wf_schedule_leaders — TTL'd leader locks per namespace
+ *   promin_wf_schedules_leases — fenced leader leases (`SqliteLeaderLeaseStore`)
+ *   promin_wf_schedules_ticks  — past-fire log
  *
- * Single-file safety: bun:sqlite serializes writes per file via WAL, so
- * two processes opening the same DB get correct CAS on `tryAcquireLeader`.
- * The session-scoped `pg_try_advisory_lock` story doesn't apply — we lean
- * on row-level CAS via `INSERT … ON CONFLICT DO UPDATE WHERE …`.
+ * Single-file safety: SQLite serializes writes per file, and lease
+ * acquisition is one `INSERT … ON CONFLICT DO UPDATE WHERE … RETURNING`, so
+ * two processes on the same file get a correct CAS. Lease expiry uses the
+ * injected clock (SQLite has no server clock).
  */
 export class SqliteSchedulerStorage implements SchedulerStorage {
   private readonly _t: string;
+  private readonly leases: SqliteLeaderLeaseStore;
 
   private constructor(
     private readonly db: SqliteDatabase,
     table: string,
+    private readonly clock: WallClock,
   ) {
     this._t = table;
     this._setup();
+    this.leases = SqliteLeaderLeaseStore.make({ db, table: `${table}_leases`, clock });
   }
 
-  static make(params: { db: SqliteDatabase; tablePrefix?: string }): SqliteSchedulerStorage {
-    return new SqliteSchedulerStorage(params.db, params.tablePrefix ?? "promin_wf_schedules");
+  /**
+   * `clock` drives lease expiry and the `created_at` / `updated_at` /
+   * seeded `next_run` timestamps. Default: `SystemWallClock`.
+   */
+  static make(params: {
+    db: SqliteDatabase;
+    tablePrefix?: string;
+    clock?: WallClock;
+  }): SqliteSchedulerStorage {
+    return new SqliteSchedulerStorage(
+      params.db,
+      params.tablePrefix ?? "promin_wf_schedules",
+      params.clock ?? SystemWallClock,
+    );
   }
 
   private _setup(): void {
@@ -68,17 +88,6 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
     // sortable key.
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_due ON ${t} (next_run, namespace)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_namespace ON ${t} (namespace)`);
-
-    // Leader locks are keyed by namespace string; '' is the sentinel for
-    // the global (undefined) namespace so SQLite's PRIMARY KEY uniqueness
-    // covers it (NULLs would compare unequal).
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS ${t}_leaders (
-        namespace_key TEXT    NOT NULL PRIMARY KEY,
-        instance_id   TEXT    NOT NULL,
-        expires_at    INTEGER NOT NULL
-      )
-    `);
 
     // Past-fire log. Written inside the same transaction as `commitPoll`'s
     // state advance, so `tickCount` and the count of rows here can never
@@ -220,30 +229,36 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
             SET last_fired_at = ?, tick_count = tick_count + ?, updated_at = ?
           WHERE id = ?`,
       )
-      .run(firedAt.getTime(), count, Date.now(), id);
+      .run(firedAt.getTime(), count, this.clock.currentTimeMs(), id);
   }
 
   async setNextRun(id: string, nextRun: Date | null): Promise<void> {
     this.db
       .query(`UPDATE ${this._t} SET next_run = ?, updated_at = ? WHERE id = ?`)
-      .run(nextRun == null ? null : nextRun.getTime(), Date.now(), id);
+      .run(nextRun == null ? null : nextRun.getTime(), this.clock.currentTimeMs(), id);
   }
 
-  async commitPoll(updates: ScheduleCommit[]): Promise<void> {
-    if (updates.length === 0) return;
-    const now = Date.now();
-    // Per-row UPDATEs + tick log inserts in a single transaction. SQLite's
-    // VALUES + UPDATE FROM syntax is supported on 3.33+, but a tight
-    // prepared-statement loop inside a tx is just as fast for the per-poll
-    // batch sizes the scheduler produces (up to `batchSize`, default 100)
-    // and avoids the dialect version dependency.
-    const updateStmt = this.db.query(`
+  async commitPoll(params: {
+    updates: readonly ScheduleCommit[];
+    lease?: LeaderLease;
+  }): Promise<CommitPollResult> {
+    const { updates, lease } = params;
+    if (updates.length === 0 && !lease) return { conflicts: [] };
+    const now = this.clock.currentTimeMs();
+    // Fence check, per-row compare-and-set UPDATEs and tick log inserts in
+    // one transaction. A tight prepared-statement loop is as fast as
+    // UPDATE … FROM (VALUES …) for poll-sized batches and avoids depending
+    // on SQLite 3.33+.
+    const updateStmt = this.db.query<{ id: string }>(`
       UPDATE ${this._t}
          SET last_fired_at = COALESCE(?, last_fired_at),
              tick_count    = tick_count + ?,
-             next_run      = CASE WHEN enabled = 1 THEN ? ELSE NULL END,
+             next_run      = CASE WHEN enabled = 0 THEN NULL
+                                  WHEN ? = 1 THEN ?
+                                  ELSE next_run END,
              updated_at    = ?
-       WHERE id = ?
+       WHERE id = ? AND (? IS NULL OR tick_count = ?)
+       RETURNING id
     `);
     // INSERT OR IGNORE so a retried commitPoll (rare leader-transition
     // edge case) doesn't fail the whole transaction on a duplicate
@@ -254,15 +269,25 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
         (schedule_id, tick_number, scheduled_at, fired_at, schedule_name, metadata)
       VALUES (?, ?, ?, ?, ?, ?)
     `);
-    this.db.transaction(() => {
+    const conflicts = this.db.transaction((): string[] => {
+      if (lease) this.leases.assertCurrent(lease);
+      const skipped: string[] = [];
       for (const u of updates) {
-        updateStmt.run(
+        const expected = u.expectedTickCount ?? null;
+        const applied = updateStmt.get(
           u.firedAt == null ? null : u.firedAt.getTime(),
           u.tickIncrement ?? 0,
+          u.nextRun === undefined ? 0 : 1,
           u.nextRun == null ? null : u.nextRun.getTime(),
           now,
           u.id,
+          expected,
+          expected,
         );
+        if (!applied) {
+          if (expected !== null) skipped.push(u.id);
+          continue;
+        }
         if (u.ticks) {
           for (const t of u.ticks) {
             insertTickStmt.run(
@@ -276,7 +301,9 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
           }
         }
       }
+      return skipped;
     })();
+    return { conflicts };
   }
 
   async listTicks(params: {
@@ -310,7 +337,7 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
   // ---------------------------------------------------------------------------
 
   async upsertSchedule(config: DurableScheduleConfig): Promise<void> {
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     this.db
       .query(
         `
@@ -377,7 +404,7 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
   async setEnabled(id: string, enabled: boolean): Promise<void> {
     // Disabling drops the schedule from due-tracking; enabling one with no
     // next_run seeds it at now (or a later start_at), like an insert.
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     this.db
       .query(
         `UPDATE ${this._t}
@@ -471,43 +498,19 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
   }
 
   // ---------------------------------------------------------------------------
-  // Leader election — TTL'd row CAS keyed by namespace
+  // Leader election — fenced leases (`SqliteLeaderLeaseStore`)
   // ---------------------------------------------------------------------------
 
   async tryAcquireLeader(params: {
+    key: string;
     instanceId: string;
-    namespace?: string;
     ttlMs: number;
-  }): Promise<boolean> {
-    const key = params.namespace ?? "";
-    const now = Date.now();
-    const expiresAt = now + params.ttlMs;
+  }): Promise<LeaderLease | null> {
+    return await this.leases.tryAcquireLeader(params);
+  }
 
-    // CAS in one transaction: take the lock when nobody holds it, the prior
-    // holder's TTL has expired, OR the same instance is refreshing. Returns
-    // the row that ends up winning, so the caller can compare instance ids.
-    return this.db.transaction((): boolean => {
-      const existing = this.db
-        .query<{ instance_id: string; expires_at: number }>(
-          `SELECT instance_id, expires_at FROM ${this._t}_leaders WHERE namespace_key = ?`,
-        )
-        .get(key);
-      if (existing && existing.expires_at > now && existing.instance_id !== params.instanceId) {
-        return false;
-      }
-      this.db
-        .query(
-          `
-        INSERT INTO ${this._t}_leaders (namespace_key, instance_id, expires_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT (namespace_key) DO UPDATE SET
-          instance_id = excluded.instance_id,
-          expires_at  = excluded.expires_at
-        `,
-        )
-        .run(key, params.instanceId, expiresAt);
-      return true;
-    })();
+  async releaseLeader(params: { lease: LeaderLease }): Promise<void> {
+    await this.leases.releaseLeader(params);
   }
 }
 

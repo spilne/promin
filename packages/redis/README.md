@@ -86,7 +86,7 @@ const scheduler = new RedisDurableScheduler({ redis, prefix: "sched", pollInterv
 await scheduler.register({ id: "nightly-report", cron: "0 2 * * *", timezone: "UTC" });
 ```
 
-`RedisSchedulerStorage` can also be passed to the generic `DurableScheduler` directly. Schedules are hashes; each namespace has its own due-time sorted set and leader lock, so tenants poll independently.
+`RedisSchedulerStorage` can also be passed to the generic `DurableScheduler` directly. Schedules are hashes; each namespace has its own due-time sorted set and fenced leader lease (one per partition when partitioned), so tenants poll independently.
 
 ## RedisStateMachineStorage
 

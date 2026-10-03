@@ -31,6 +31,8 @@ export interface RedisDurableSchedulerConfig {
   leaderLockTtlMs?: number;
   /** Scope this scheduler instance to a single namespace. */
   namespace?: string;
+  /** Hash partitioning; each partition elects its own leader. */
+  partition?: GenericConfig["partition"];
   /** Max schedules claimed per poll cycle. Default: 100. */
   batchSize?: number;
   /**
@@ -66,6 +68,7 @@ export class RedisDurableScheduler extends GenericDurableScheduler {
       pollIntervalMs: config.pollIntervalMs,
       leaderLockTtlMs: config.leaderLockTtlMs,
       namespace: config.namespace,
+      partition: config.partition,
       batchSize: config.batchSize,
       clock: config.clock,
       onError: config.onError,

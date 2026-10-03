@@ -74,7 +74,14 @@ export {
   type DurableScheduleConfig,
   type DurableSchedulerConfig,
 } from "./lib/durable-scheduler.ts";
-export { durableSchedules, durableScheduleTicks } from "./lib/scheduler-schema.ts";
+export { durableSchedules, durableScheduleTicks, leaderLeases } from "./lib/scheduler-schema.ts";
+
+// Leader leases (fenced, server-clock TTL) — reusable beyond the scheduler
+export {
+  PgLeaderLeaseStore,
+  type PgLeaderLeaseStoreConfig,
+  assertPgLeaseCurrent,
+} from "./lib/pg-leader-lease-store.ts";
 
 // Distributed step queue (SKIP LOCKED)
 export { PgStepQueue, type PgStepQueueConfig } from "./lib/pg-step-queue.ts";

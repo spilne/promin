@@ -43,6 +43,17 @@ export const durableSchedules = pgTable(
   ],
 );
 
+/**
+ * Leader leases (`PgLeaderLeaseStore`). `holder` is null once released;
+ * `epoch` is the fencing token and only ever increases.
+ */
+export const leaderLeases = pgTable("wf_leader_leases", {
+  leaseKey: text("lease_key").primaryKey(),
+  holder: text("holder"),
+  epoch: bigint("epoch", { mode: "number" }).notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+});
+
 export const durableScheduleTicks = pgTable(
   "wf_schedule_ticks",
   {
