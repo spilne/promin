@@ -15,7 +15,7 @@ import type {
   RegisteredAgent,
   ResolveLocalAgentDeps,
 } from "@promin/agent";
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { EvalCase, EvalTarget } from "../types.ts";
 import { toEvalOutput } from "./to-eval-output.ts";
 
@@ -27,14 +27,14 @@ export interface RecipeTargetConfig {
   readonly costRegistry?: ModelCostRegistry;
   /** Map a case into the agent's input. Default: `{ task: <stringified input> }`. */
   readonly toInput?: (evalCase: EvalCase) => AgentInput;
-  /** Time source for `latencyMs`. Default `SystemClock`. */
-  readonly clock?: Clock;
+  /** Time source for `latencyMs`. Default `SystemWallClock`. */
+  readonly clock?: WallClock;
 }
 
 /** Build an `EvalTarget` that runs an operator-authored agent recipe. */
 export function recipeTarget(config: RecipeTargetConfig): EvalTarget {
   const { recipe, deps, costRegistry } = config;
-  const clock = config.clock ?? SystemClock;
+  const clock = config.clock ?? SystemWallClock;
   const toInput = config.toInput ?? defaultToInput;
   const rates: ModelCostRates | undefined =
     costRegistry !== undefined && recipe.backend.type === "local"

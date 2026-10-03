@@ -35,7 +35,7 @@
 
 import type { FenceToken, WorkflowStorage } from "./workflow-storage.ts";
 import { WorkflowLockError } from "./durable-pipeline-error.ts";
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 
 /**
  * Heartbeat every 30s by default. The previous 10s cadence amplified into
@@ -61,10 +61,10 @@ export interface WithLockOptions {
   lockDurationMs?: number;
   /**
    * Time source. Drives the heartbeat interval via `clock.setInterval`.
-   * Default: real system clock. Tests pass a `FakeClock` so advancing
+   * Default: real system clock. Tests pass a `FakeWallClock` so advancing
    * time fires heartbeats deterministically without real waits.
    */
-  clock?: Clock;
+  clock?: WallClock;
 }
 
 /** Context passed to `withLock`'s callback. */
@@ -109,7 +109,7 @@ export async function withLock<T>(params: {
   const { storage, workflowId, fn } = params;
   const heartbeatMs = params.options?.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   const lockDurationMs = params.options?.lockDurationMs ?? DEFAULT_LOCK_EXTENSION_MS;
-  const clock = params.options?.clock ?? SystemClock;
+  const clock = params.options?.clock ?? SystemWallClock;
 
   const { acquired, token } = await storage.tryLock(workflowId, lockDurationMs);
   if (!acquired) {

@@ -3,8 +3,8 @@
 // ---------------------------------------------------------------------------
 
 import type { StreamPipeline } from "@promin/core";
-import type { Codec } from "@promin/core";
-import type { Streamable } from "@promin/core";
+import type { Codec } from "@spilne/perfect-core/connect";
+import type { Streamable } from "../shared/streamable.ts";
 import type { ScheduleConfig, ScheduleTick } from "./types.ts";
 
 /**

@@ -1,4 +1,4 @@
-import type { Throttle } from "@promin/core";
+import type { Throttle } from "./throttle.ts";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
 /**

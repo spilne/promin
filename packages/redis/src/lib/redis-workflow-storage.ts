@@ -30,7 +30,7 @@ import type {
 } from "@promin/workflow";
 import { FenceTokenMismatchError, workflowMetadataMatches } from "@promin/workflow";
 import type { RedisClient } from "./redis-client.ts";
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 
 export interface RedisWorkflowStorageConfig {
   redis: RedisClient;
@@ -45,9 +45,9 @@ export interface RedisWorkflowStorageConfig {
    * Time source for client-side timestamps (everything the client
    * serializes into the Redis payload before `HSET`: createdAt, startedAt,
    * completedAt, deliveredAt, purge cutoffs, fresh-run archive stamps).
-   * Default: `SystemClock`. Pass a `FakeClock` for deterministic tests.
+   * Default: `SystemWallClock`. Pass a `FakeWallClock` for deterministic tests.
    */
-  clock?: Clock;
+  clock?: WallClock;
 }
 
 // -- Lua scripts ----------------------------------------------------------
@@ -175,7 +175,7 @@ export class RedisWorkflowStorage
   private readonly instanceId: string;
   private readonly completedTtlMs?: number;
   private readonly maxRunsPerWorkflow: number;
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
 
   constructor(config: RedisWorkflowStorageConfig) {
     this.redis = config.redis;
@@ -184,7 +184,7 @@ export class RedisWorkflowStorage
     this.instanceId = config.instanceId ?? crypto.randomUUID();
     this.completedTtlMs = config.retention?.completedTtlMs;
     this.maxRunsPerWorkflow = config.retention?.maxRunsPerWorkflow ?? 5;
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   // -- Key helpers ----------------------------------------------------------

@@ -4,7 +4,7 @@
 // types, so getting started is a few lines without losing seam purity.
 // ---------------------------------------------------------------------------
 
-import type { Clock } from "@promin/core";
+import type { WallClock } from "@promin/workflow";
 import { inlineDataset } from "./datasets/inline.ts";
 import { runEval } from "./runner.ts";
 import { fnTarget } from "./targets/fn-target.ts";
@@ -27,7 +27,7 @@ export interface DefineEvalConfig {
   readonly samplesPerCase?: number;
   readonly concurrency?: number;
   readonly passThreshold?: number;
-  readonly clock?: Clock;
+  readonly clock?: WallClock;
 }
 
 export interface DefinedEval {

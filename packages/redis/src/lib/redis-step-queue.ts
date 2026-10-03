@@ -17,7 +17,7 @@
 
 import type { StepQueue, StepTask, FairnessPolicy } from "@promin/workflow";
 import type { RedisClient } from "./redis-client.ts";
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 
 // -- Lua scripts -------------------------------------------------------------
 
@@ -220,20 +220,20 @@ return 1
 export class RedisStepQueue implements StepQueue {
   private readonly prefix: string;
   private readonly workerId: string;
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
 
   constructor(
     private readonly redis: RedisClient,
     config?: {
       prefix?: string;
       workerId?: string;
-      /** Time source for client-side timestamps. Default: `SystemClock`. */
-      clock?: Clock;
+      /** Time source for client-side timestamps. Default: `SystemWallClock`. */
+      clock?: WallClock;
     },
   ) {
     this.prefix = config?.prefix ?? "sq";
     this.workerId = config?.workerId ?? crypto.randomUUID();
-    this.clock = config?.clock ?? SystemClock;
+    this.clock = config?.clock ?? SystemWallClock;
   }
 
   // -- Key helpers -----------------------------------------------------------

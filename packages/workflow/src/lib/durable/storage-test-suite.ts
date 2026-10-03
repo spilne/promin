@@ -2,7 +2,7 @@
 // Portable WorkflowStorage test suite
 //
 // Usage:
-//   import { storageTestSuite } from "@promin/core/testing";
+//   import { storageTestSuite } from "@promin/workflow/testing";
 //   storageTestSuite(() => new MyCustomStorage());
 // ---------------------------------------------------------------------------
 

@@ -1,4 +1,4 @@
-import type { AsyncQueue } from "@promin/core";
+import type { AsyncQueue } from "./async-queue.ts";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
 /**

@@ -12,7 +12,8 @@ import {
   type MachineMiddleware,
 } from "../state-machine.ts";
 import { InMemoryStateMachineStorage } from "../state-machine-storage.ts";
-import { FakeClock, type SchemaParser } from "@promin/core";
+import { FakeWallClock } from "../../shared/wall-clock.ts";
+import type { SchemaParser } from "@spilne/perfect-core";
 
 // ---------------------------------------------------------------------------
 // Test state definitions
@@ -436,11 +437,11 @@ describe("StateMachine", () => {
   });
 
   // -------------------------------------------------------------------------
-  // FakeClock
+  // FakeWallClock
   // -------------------------------------------------------------------------
 
-  it("uses FakeClock for deterministic timestamps", async () => {
-    const clock = FakeClock.create("2026-01-01T00:00:00Z");
+  it("uses FakeWallClock for deterministic timestamps", async () => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
     const clockStorage = new InMemoryStateMachineStorage({ clock });
     const machine = createTrafficLight(clockStorage);
 
@@ -1374,7 +1375,7 @@ describe("StateMachine", () => {
     };
 
     function buildApprovalMachine(opts?: {
-      clock?: FakeClock;
+      clock?: FakeWallClock;
       autoScheduleTimeouts?: boolean;
     }): StateMachineInstance<ApprovalStates> {
       return stateMachine<ApprovalStates>({
@@ -1391,8 +1392,8 @@ describe("StateMachine", () => {
         .build();
     }
 
-    it("checkTimeouts() fires due timeout deterministically with FakeClock", async () => {
-      const clock = FakeClock.create("2026-01-01T00:00:00Z");
+    it("checkTimeouts() fires due timeout deterministically with FakeWallClock", async () => {
+      const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
       const clockStorage = new InMemoryStateMachineStorage({ clock });
       storage = clockStorage;
 
@@ -1417,7 +1418,7 @@ describe("StateMachine", () => {
     });
 
     it("custom event label appears in history instead of TIMEOUT_EVENT default", async () => {
-      const clock = FakeClock.create("2026-01-01T00:00:00Z");
+      const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
       const clockStorage = new InMemoryStateMachineStorage({ clock });
       storage = clockStorage;
 
@@ -1445,7 +1446,7 @@ describe("StateMachine", () => {
     });
 
     it("explicit transition cancels pending timeout", async () => {
-      const clock = FakeClock.create("2026-01-01T00:00:00Z");
+      const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
       const clockStorage = new InMemoryStateMachineStorage({ clock });
       storage = clockStorage;
 
@@ -1464,7 +1465,7 @@ describe("StateMachine", () => {
     });
 
     it("timeout guard can veto firing — stays in source state", async () => {
-      const clock = FakeClock.create("2026-01-01T00:00:00Z");
+      const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
       const clockStorage = new InMemoryStateMachineStorage({ clock });
       storage = clockStorage;
 
@@ -1517,7 +1518,7 @@ describe("StateMachine", () => {
     });
 
     it("chained timeouts — entering a state with timeout reschedules", async () => {
-      const clock = FakeClock.create("2026-01-01T00:00:00Z");
+      const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
       const clockStorage = new InMemoryStateMachineStorage({ clock });
       storage = clockStorage;
 

@@ -8,14 +8,14 @@
 // at now, an existing one advances last_seen_at and refreshes the
 // description.
 //
-// first/last_seen_at come from an injectable `Clock` (default
-// `SystemClock`). SQLite is in-process, so the app clock is the database
-// clock; the `Clock` keeps it `FakeClock`-testable.
+// first/last_seen_at come from an injectable `WallClock` (default
+// `SystemWallClock`). SQLite is in-process, so the app clock is the database
+// clock; the `WallClock` keeps it `FakeWallClock`-testable.
 //
 // Schema (auto-created on first use): one row per identity tuple.
 // ---------------------------------------------------------------------------
 
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type {
   ToolHistoryQuery,
   ToolHistoryRecord,
@@ -28,8 +28,8 @@ export interface SqliteToolHistoryStoreConfig {
   readonly db: SqliteDatabase;
   /** Override the table name (default: `agent_tool_history`). */
   readonly table?: string;
-  /** Time source. Default: `SystemClock`. Tests pass a `FakeClock`. */
-  readonly clock?: Clock;
+  /** Time source. Default: `SystemWallClock`. Tests pass a `FakeWallClock`. */
+  readonly clock?: WallClock;
 }
 
 interface DbRow {
@@ -45,12 +45,12 @@ interface DbRow {
 export class SqliteToolHistoryStore implements ToolHistoryStore {
   private readonly db: SqliteDatabase;
   private readonly table: string;
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
 
   private constructor(config: SqliteToolHistoryStoreConfig) {
     this.db = config.db;
     this.table = config.table ?? "agent_tool_history";
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
     this._setup();
   }
 

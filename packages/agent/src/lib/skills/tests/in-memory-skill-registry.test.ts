@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { FakeClock } from "@promin/core";
+import { FakeWallClock } from "@promin/workflow";
 import { skillRegistryTestSuite } from "../skill-registry-test-suite.ts";
 import { InMemorySkillRegistry } from "../in-memory-skill-registry.ts";
 
@@ -7,7 +7,7 @@ skillRegistryTestSuite(() => new InMemorySkillRegistry());
 
 describe("InMemorySkillRegistry — clock", () => {
   it("stamps createdAt/updatedAt from the injected clock", async () => {
-    const clock = FakeClock.create(1000);
+    const clock = FakeWallClock.create(1000);
     const r = new InMemorySkillRegistry({ clock });
     const created = await r.register({
       id: "structured-debugging",

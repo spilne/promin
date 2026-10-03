@@ -35,6 +35,18 @@ export {
   isFileSource,
   type FileSourceDescriptor,
 } from "./file-source.ts";
+export {
+  type Frameable,
+  isFrameable,
+  type FrameSchema,
+  type PushdownFilterable,
+  isPushdownFilterable,
+  type Predicate,
+  type ColumnSelectable,
+  isColumnSelectable,
+  type SourceSortable,
+  isSourceSortable,
+} from "./frameable.ts";
 export { type DataFrameSink, CsvSink, JsonlSink } from "./sink.ts";
 export { classifyPlan, type PlanStreamability } from "./plan-classifier.ts";
 export { executeChunked } from "./chunked-executor.ts";

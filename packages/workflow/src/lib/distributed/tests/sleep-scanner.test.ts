@@ -1,8 +1,9 @@
 import { describe, it, expect } from "bun:test";
 // Aliased: `TaggedError` is also the name of the structural `{ _tag }`
-// constraint imported from `@promin/core` below.
+// constraint imported from `shared/tagged-error.ts` below.
 import { TaggedError as PerfectTaggedError } from "@spilne/perfect-core";
-import { Pipeline, type TaggedError } from "@promin/core";
+import { Pipeline } from "@promin/core";
+import type { TaggedError } from "../../shared/tagged-error.ts";
 import { workflow, InMemoryWorkflowStorage } from "../../durable/index.ts";
 import { createWorkflowRunner } from "../../durable/workflow-runner.ts";
 import { createSleepScanner } from "../sleep-scanner.ts";

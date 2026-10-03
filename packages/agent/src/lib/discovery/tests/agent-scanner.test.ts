@@ -15,7 +15,7 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdir, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { FakeClock } from "@promin/core";
+import { FakeWallClock } from "@promin/workflow";
 import { AgentScanner, applyDiscoveredAgents, startAgentScanLoop } from "../agent-scanner.ts";
 import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
 
@@ -136,7 +136,7 @@ describe("startAgentScanLoop", () => {
     await mkdir(root, { recursive: true });
     try {
       const registry = new InMemoryAgentRegistry();
-      const clock = FakeClock.create(0);
+      const clock = FakeWallClock.create(0);
       const loop = startAgentScanLoop({ registry, root, intervalMs: 1_000, clock });
 
       // First tick: empty folder.
@@ -168,7 +168,7 @@ describe("startAgentScanLoop", () => {
     );
     try {
       const registry = new InMemoryAgentRegistry();
-      const clock = FakeClock.create(0);
+      const clock = FakeWallClock.create(0);
       const loop = startAgentScanLoop({
         registry,
         root,
@@ -199,7 +199,7 @@ describe("startAgentScanLoop", () => {
     );
     try {
       const registry = new InMemoryAgentRegistry();
-      const clock = FakeClock.create(0);
+      const clock = FakeWallClock.create(0);
       const loop = startAgentScanLoop({
         registry,
         root,
@@ -225,7 +225,7 @@ describe("startAgentScanLoop", () => {
     );
     try {
       const registry = new InMemoryAgentRegistry();
-      const clock = FakeClock.create(0);
+      const clock = FakeWallClock.create(0);
       const loop = startAgentScanLoop({ registry, root, intervalMs: 1_000, clock });
       // Two parallel ticks should resolve to the same in-flight scan.
       const [a, b] = await Promise.all([loop.tick(), loop.tick()]);

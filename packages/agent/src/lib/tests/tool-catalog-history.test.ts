@@ -1,10 +1,10 @@
 // ---------------------------------------------------------------------------
 // Tool catalog history — InMemoryToolHistoryStore (conformance + exact
-// FakeClock timing) and the AgentToolCatalogHistory snapshot loop.
+// FakeWallClock timing) and the AgentToolCatalogHistory snapshot loop.
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import { FakeClock } from "@promin/core";
+import { FakeWallClock } from "@promin/workflow";
 import { toolHistoryStoreTestSuite } from "../tool-history/tool-history-store-test-suite.ts";
 import { InMemoryToolHistoryStore } from "../tool-history/in-memory-tool-history-store.ts";
 import { AgentToolCatalogHistory } from "../tool-history/agent-tool-catalog-history.ts";
@@ -20,9 +20,9 @@ const observation = {
   description: "Search",
 };
 
-describe("InMemoryToolHistoryStore — FakeClock timing", () => {
+describe("InMemoryToolHistoryStore — FakeWallClock timing", () => {
   it("stamps firstSeenAt and lastSeenAt with the clock at insert time", async () => {
-    const clock = FakeClock.create(1_000);
+    const clock = FakeWallClock.create(1_000);
     const store = new InMemoryToolHistoryStore({ clock });
     await store.recordSnapshot([observation]);
 
@@ -32,7 +32,7 @@ describe("InMemoryToolHistoryStore — FakeClock timing", () => {
   });
 
   it("advances lastSeenAt on re-record but holds firstSeenAt", async () => {
-    const clock = FakeClock.create(1_000);
+    const clock = FakeWallClock.create(1_000);
     const store = new InMemoryToolHistoryStore({ clock });
     await store.recordSnapshot([observation]);
 
@@ -127,7 +127,7 @@ describe("AgentToolCatalogHistory", () => {
   });
 
   it("start() drives periodic snapshots; stop() halts them", async () => {
-    const clock = FakeClock.create(0);
+    const clock = FakeWallClock.create(0);
     const catalog = new FakeCatalog();
     catalog.entries = [entry()];
     const store = new InMemoryToolHistoryStore({ clock });

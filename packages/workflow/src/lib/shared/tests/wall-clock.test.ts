@@ -1,14 +1,14 @@
 // ---------------------------------------------------------------------------
-// Clock tests — FakeClock time semantics + FakeClock scheduling (setTimeout /
+// WallClock tests — FakeWallClock time semantics + scheduling (setTimeout /
 // setInterval advance deterministically alongside the clock).
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { FakeClock, SystemClock } from "../clock.ts";
+import { FakeWallClock, SystemWallClock } from "../wall-clock.ts";
 
-describe("FakeClock — time source", () => {
+describe("FakeWallClock — time source", () => {
   it("starts at the configured time and advances only when told", () => {
-    const clock = FakeClock.create("2026-01-01T00:00:00Z");
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
     const start = clock.currentTimeMs();
     expect(clock.now().toISOString()).toBe("2026-01-01T00:00:00.000Z");
 
@@ -18,7 +18,7 @@ describe("FakeClock — time source", () => {
   });
 
   it("set() jumps to an absolute time without firing pending callbacks", () => {
-    const clock = FakeClock.create(0);
+    const clock = FakeWallClock.create(0);
     let fired = false;
     clock.setTimeout(() => (fired = true), 100);
 
@@ -29,18 +29,18 @@ describe("FakeClock — time source", () => {
     expect(fired).toBe(false);
   });
 
-  it("SystemClock tracks wall time (within tolerance)", () => {
+  it("SystemWallClock tracks wall time (within tolerance)", () => {
     const before = Date.now();
-    const mid = SystemClock.currentTimeMs();
+    const mid = SystemWallClock.currentTimeMs();
     const after = Date.now();
     expect(mid).toBeGreaterThanOrEqual(before);
     expect(mid).toBeLessThanOrEqual(after);
   });
 });
 
-describe("FakeClock — scheduler", () => {
+describe("FakeWallClock — scheduler", () => {
   it("setTimeout fires exactly once at the due time", () => {
-    const clock = FakeClock.create(0);
+    const clock = FakeWallClock.create(0);
     let fired = 0;
     clock.setTimeout(() => fired++, 100);
 
@@ -57,7 +57,7 @@ describe("FakeClock — scheduler", () => {
   });
 
   it("setInterval fires every `ms` and re-arms within a single advance", () => {
-    const clock = FakeClock.create(0);
+    const clock = FakeWallClock.create(0);
     let ticks = 0;
     clock.setInterval(() => ticks++, 100);
 
@@ -70,7 +70,7 @@ describe("FakeClock — scheduler", () => {
   });
 
   it("clear() cancels a scheduled timeout before it fires", () => {
-    const clock = FakeClock.create(0);
+    const clock = FakeWallClock.create(0);
     let fired = false;
     const handle = clock.setTimeout(() => (fired = true), 100);
     handle.clear();
@@ -80,7 +80,7 @@ describe("FakeClock — scheduler", () => {
   });
 
   it("clear() cancels an interval mid-stream", () => {
-    const clock = FakeClock.create(0);
+    const clock = FakeWallClock.create(0);
     let ticks = 0;
     const handle = clock.setInterval(() => ticks++, 100);
 
@@ -93,7 +93,7 @@ describe("FakeClock — scheduler", () => {
   });
 
   it("callbacks observe the clock at their due time, not at advance start", () => {
-    const clock = FakeClock.create(0);
+    const clock = FakeWallClock.create(0);
     const observed: number[] = [];
     clock.setTimeout(() => observed.push(clock.currentTimeMs()), 100);
     clock.setTimeout(() => observed.push(clock.currentTimeMs()), 250);
@@ -104,7 +104,7 @@ describe("FakeClock — scheduler", () => {
   });
 
   it("concurrent timeouts fire in due-time order", () => {
-    const clock = FakeClock.create(0);
+    const clock = FakeWallClock.create(0);
     const order: string[] = [];
     clock.setTimeout(() => order.push("c"), 300);
     clock.setTimeout(() => order.push("a"), 100);
@@ -115,7 +115,7 @@ describe("FakeClock — scheduler", () => {
   });
 
   it("pendingCount reflects still-scheduled callbacks", () => {
-    const clock = FakeClock.create(0);
+    const clock = FakeWallClock.create(0);
     clock.setTimeout(() => {}, 100);
     clock.setInterval(() => {}, 50);
     expect(clock.pendingCount()).toBe(2);
@@ -125,17 +125,17 @@ describe("FakeClock — scheduler", () => {
   });
 });
 
-describe("SystemClock — real timers", () => {
+describe("SystemWallClock — real timers", () => {
   it("setTimeout fires via the real event loop", async () => {
     let fired = false;
-    SystemClock.setTimeout(() => (fired = true), 5);
+    SystemWallClock.setTimeout(() => (fired = true), 5);
     await new Promise((r) => globalThis.setTimeout(r, 25));
     expect(fired).toBe(true);
   });
 
   it("setInterval handle.clear stops real ticks", async () => {
     let ticks = 0;
-    const handle = SystemClock.setInterval(() => ticks++, 5);
+    const handle = SystemWallClock.setInterval(() => ticks++, 5);
     await new Promise((r) => globalThis.setTimeout(r, 25));
     handle.clear();
     const afterClear = ticks;

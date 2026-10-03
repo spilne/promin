@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // State machine type utilities — core type-safety layer
 // ---------------------------------------------------------------------------
-import type { SchemaParser } from "@promin/core";
+import type { SchemaParser } from "@spilne/perfect-core";
 //
 // Users declare a state definition type to define their machine:
 //

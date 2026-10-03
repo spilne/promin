@@ -49,8 +49,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@promin/core": "workspace:*",
     "@promin/workflow": "workspace:*",
+    "@spilne/perfect-core": "catalog:",
     "cli-highlight": "^2.1.11",
     "zod": "catalog:"
   },

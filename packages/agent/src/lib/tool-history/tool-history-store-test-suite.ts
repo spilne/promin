@@ -9,7 +9,7 @@
 // Timestamps are not asserted exactly — a server-clock backend (Postgres)
 // can't take an injected clock, so the suite checks relative invariants
 // (firstSeenAt stable, lastSeenAt non-decreasing) only. Exact-time
-// behaviour is covered by the in-memory store's own FakeClock tests.
+// behaviour is covered by the in-memory store's own FakeWallClock tests.
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";

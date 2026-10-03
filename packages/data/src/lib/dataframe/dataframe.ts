@@ -6,7 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { Effect, Stream, Chunk } from "effect";
-import type { Frameable } from "@promin/core";
+import type { Frameable } from "./frameable.ts";
 import { StreamPipeline } from "@promin/core";
 import type { LogicalPlan, WindowFn, AggFn, RollingFn } from "./logical-plan.ts";
 import { executeChunked } from "./chunked-executor.ts";
@@ -108,7 +108,7 @@ export class DataFrame<T> {
    *
    * @example
    * ```ts
-   * import { CsvFile, ParquetFile } from "@promin/core";
+   * import { CsvFile, ParquetFile } from "@promin/data";
    *
    * // Executor with registered CSV loader reads natively
    * DataFrame.fromFile(CsvFile("sales.csv")).withExecutor(myExecutor)

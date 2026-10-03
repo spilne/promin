@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import type { DrizzleDb } from "./drizzle-db.ts";
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 
 export interface PostgresStorageConfig {
   /** Drizzle database instance. User provides their own connection. */
@@ -36,10 +36,10 @@ export interface PostgresStorageConfig {
   /**
    * Time source for client-side timestamps (lock expiry, purge cutoffs,
    * completion/failure/update stamps the client generates before handing
-   * to Postgres). Default: `SystemClock`. Pass a `FakeClock` for
+   * to Postgres). Default: `SystemWallClock`. Pass a `FakeWallClock` for
    * deterministic tests.
    */
-  clock?: Clock;
+  clock?: WallClock;
 }
 
 export const DEFAULT_CONFIG = {
@@ -63,6 +63,6 @@ export function resolveConfig(config: PostgresStorageConfig): Required<PostgresS
     autoSeedLookups: config.autoSeedLookups ?? DEFAULT_CONFIG.autoSeedLookups,
     logger: config.logger ?? DEFAULT_CONFIG.logger,
     recordAttempts: config.recordAttempts ?? DEFAULT_CONFIG.recordAttempts,
-    clock: config.clock ?? SystemClock,
+    clock: config.clock ?? SystemWallClock,
   };
 }

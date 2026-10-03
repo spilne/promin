@@ -7,7 +7,7 @@
       "path": "../agent"
     },
     {
-      "path": "../core"
+      "path": "../workflow"
     },
     {
       "path": "./tsconfig.lib.json"

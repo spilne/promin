@@ -766,8 +766,8 @@ describe("LocalAgent — autoDistill", () => {
   });
 
   it("intervalMs gates re-fire by wall-clock gap from last distill", async () => {
-    const { FakeClock } = await import("@promin/core");
-    const clock = FakeClock.create(1_000_000);
+    const { FakeWallClock } = await import("@promin/workflow");
+    const clock = FakeWallClock.create(1_000_000);
     const { runner } = makeRunner();
     // Memory store must share the clock so episode.createdAt is in
     // the same domain as the trigger's "now".
@@ -836,10 +836,10 @@ describe("LocalAgent — autoDistill", () => {
   });
 
   it("rate-limited consolidator: auto-trigger swallows ConsolidatorRateLimitError silently", async () => {
-    const { FakeClock } = await import("@promin/core");
+    const { FakeWallClock } = await import("@promin/workflow");
     const { DefaultConsolidator } = await import("../../memory/consolidator.ts");
     const { RateLimitedConsolidator } = await import("../../memory/rate-limited-consolidator.ts");
-    const clock = FakeClock.create(1_000_000);
+    const clock = FakeWallClock.create(1_000_000);
     const { runner } = makeRunner();
     const memory = new InMemoryMemoryStore({ clock });
 

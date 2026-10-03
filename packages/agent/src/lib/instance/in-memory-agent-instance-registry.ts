@@ -4,7 +4,7 @@
 // every persistent backend must match.
 // ---------------------------------------------------------------------------
 
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
   composeAgentInstanceId,
   type AgentInstance,
@@ -15,16 +15,16 @@ import {
 } from "./types.ts";
 
 export interface InMemoryAgentInstanceRegistryConfig {
-  /** Time source. Default: `SystemClock`. Tests pass a `FakeClock`. */
-  readonly clock?: Clock;
+  /** Time source. Default: `SystemWallClock`. Tests pass a `FakeWallClock`. */
+  readonly clock?: WallClock;
 }
 
 export class InMemoryAgentInstanceRegistry implements AgentInstanceRegistry {
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
   private readonly rows = new Map<string, AgentInstance>();
 
   constructor(config: InMemoryAgentInstanceRegistryConfig = {}) {
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   private now(): number {

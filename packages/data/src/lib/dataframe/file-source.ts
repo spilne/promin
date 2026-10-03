@@ -13,8 +13,8 @@
 // No executor changes needed.
 // ---------------------------------------------------------------------------
 
-import type { Frameable, FrameSchema } from "@promin/core";
-import type { Codec } from "@promin/core";
+import type { Frameable, FrameSchema } from "./frameable.ts";
+import type { Codec } from "@spilne/perfect-core/connect";
 import { streamingCsvRows } from "./csv-stream.ts";
 
 /** Source descriptor that can provide data + optional executor hint. */

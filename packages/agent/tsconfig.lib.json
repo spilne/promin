@@ -10,8 +10,5 @@
   },
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts", "src/**/*.bench.ts", "src/examples/tools/**"],
-  "references": [
-    { "path": "../core/tsconfig.lib.json" },
-    { "path": "../workflow/tsconfig.lib.json" }
-  ]
+  "references": [{ "path": "../workflow/tsconfig.lib.json" }]
 }

@@ -1,4 +1,4 @@
-import { RateLimitExceeded, type RateLimiter } from "@promin/core";
+import { RateLimitExceeded, type RateLimiter } from "./rate-limiter.ts";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
 /**

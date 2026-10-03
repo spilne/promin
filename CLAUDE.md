@@ -52,26 +52,29 @@ function searchVideos(params: { query: string; order: string; videoDuration?: st
   `src/lib/durable/foo.ts`). Bench files (`*.bench.ts`) and type-fixture
   files (`*.type-fixture.ts`) stay co-located with source.
 
-### Time-sensitive code: use `Clock`, never `Date.now()` or `setTimeout`
+### Time-sensitive code: use `WallClock`, never `Date.now()` or `setTimeout`
 
 Any new subsystem that does time math — duration tracking, deadline
 checks, retry backoff, heartbeats, periodic polls, expiry windows —
-takes a `clock?: Clock` config field, defaults to `SystemClock`, and
-funnels every time read or scheduled callback through it:
+takes a `clock?: WallClock` config field, defaults to `SystemWallClock`, and
+funnels every time read or scheduled callback through it. `WallClock`
+lives in `@promin/workflow` (inside workflow, import it relatively from
+`src/lib/shared/wall-clock.ts`); it is a callback-based clock and is not
+perfect's fiber-level `Clock` service:
 
 ```ts
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 
 export interface FooConfig {
   // ...
-  /** Time source. Default: `SystemClock`. Tests pass a `FakeClock`. */
-  clock?: Clock;
+  /** Time source. Default: `SystemWallClock`. Tests pass a `FakeWallClock`. */
+  clock?: WallClock;
 }
 
 export class Foo {
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
   constructor(config: FooConfig) {
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   async run() {
@@ -79,7 +82,7 @@ export class Foo {
     await something();
     const duration = this.clock.currentTimeMs() - start;
 
-    // Interval + timeout go through the clock too so FakeClock.advance(ms)
+    // Interval + timeout go through the clock too so FakeWallClock.advance(ms)
     // can drive them deterministically in tests.
     const handle = this.clock.setInterval(() => tick(), 1_000);
     await new Promise<void>((r) => this.clock.setTimeout(() => r(), 500));
@@ -88,13 +91,13 @@ export class Foo {
 }
 ```
 
-Tests swap in `FakeClock` and call `clock.advance(ms)` to both move time
+Tests swap in `FakeWallClock` and call `clock.advance(ms)` to both move time
 and fire any due callbacks, synchronously:
 
 ```ts
-import { FakeClock } from "@promin/core";
+import { FakeWallClock } from "@promin/workflow";
 
-const clock = FakeClock.create(0);
+const clock = FakeWallClock.create(0);
 const foo = new Foo({ clock });
 const done = foo.run();
 

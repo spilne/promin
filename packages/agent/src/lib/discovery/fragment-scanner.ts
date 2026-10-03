@@ -13,7 +13,7 @@
 
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { type Clock, SystemClock } from "@promin/core";
+import { type WallClock, SystemWallClock } from "@promin/workflow";
 import type { FragmentRegistry } from "../fragments/types.ts";
 
 export interface FragmentSpec {
@@ -197,7 +197,7 @@ export interface FragmentScanLoopOptions {
   /** Pass through to `applyDiscoveredFragments` — sweeps removed files. Default: `false`. */
   readonly sync?: boolean;
   readonly onTick?: (event: FragmentScanLoopTick) => void;
-  readonly clock?: Clock;
+  readonly clock?: WallClock;
   readonly scanner?: FragmentScannerOptions;
 }
 
@@ -215,7 +215,7 @@ export interface FragmentScanLoopHandle {
 }
 
 export function startFragmentScanLoop(options: FragmentScanLoopOptions): FragmentScanLoopHandle {
-  const clock = options.clock ?? SystemClock;
+  const clock = options.clock ?? SystemWallClock;
   const intervalMs = options.intervalMs ?? 5_000;
   const scanner = new FragmentScanner(options.scanner ?? {});
 

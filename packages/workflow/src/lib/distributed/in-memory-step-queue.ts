@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import type { StepQueue, StepTask, FairnessPolicy } from "./step-queue.ts";
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 
 type MutableTask = {
   -readonly [K in keyof StepTask]: StepTask[K];
@@ -33,11 +33,11 @@ export class InMemoryStepQueue implements StepQueue {
   private counter = 0;
   private readonly workerId: string;
   /** Time source — drives createdAt/claimedAt/completedAt + metrics window. */
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
 
-  constructor(params?: { workerId?: string; clock?: Clock }) {
+  constructor(params?: { workerId?: string; clock?: WallClock }) {
     this.workerId = params?.workerId ?? "in-memory";
-    this.clock = params?.clock ?? SystemClock;
+    this.clock = params?.clock ?? SystemWallClock;
   }
 
   private activeKey(namespace: string | undefined, workflowId: string, stepName: string): string {

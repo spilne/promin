@@ -6,12 +6,12 @@
 // don't have to upsert first. `createThread` is strict — throws if the
 // thread already exists. Use `getThread` first when uncertain.
 //
-// Pluggable `Clock` (defaults to `SystemClock`) so tests can drive
+// Pluggable `WallClock` (defaults to `SystemWallClock`) so tests can drive
 // `createdAt` / `updatedAt` deterministically.
 // ---------------------------------------------------------------------------
 
 import { randomUUID } from "node:crypto";
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { Message } from "../message.ts";
 import { resolveContext } from "./resolve-context.ts";
 import type {
@@ -37,12 +37,12 @@ import type {
 } from "./types.ts";
 
 export interface InMemoryMemoryStoreConfig {
-  /** Time source. Default: `SystemClock`. Tests pass a `FakeClock`. */
-  readonly clock?: Clock;
+  /** Time source. Default: `SystemWallClock`. Tests pass a `FakeWallClock`. */
+  readonly clock?: WallClock;
 }
 
 export class InMemoryMemoryStore implements MemoryStore {
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
   private readonly namespaces = new Map<string, NamespaceRow>();
   private readonly resources = new Map<string, ResourceRow>();
   private readonly threads = new Map<string, ThreadRow>();
@@ -57,7 +57,7 @@ export class InMemoryMemoryStore implements MemoryStore {
   private readonly threadEpisodes = new Map<string, EpisodicRecord[]>();
 
   constructor(config: InMemoryMemoryStoreConfig = {}) {
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   private now(): number {

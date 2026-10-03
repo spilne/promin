@@ -5,7 +5,7 @@
 // preserves `createdAt` across version re-writes.
 // ---------------------------------------------------------------------------
 
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
   DEFAULT_EVAL_SPEC_VERSION,
   type EvalSpec,
@@ -14,15 +14,15 @@ import {
 } from "./types.ts";
 
 export interface InMemoryEvalSpecRegistryConfig {
-  readonly clock?: Clock;
+  readonly clock?: WallClock;
 }
 
 export class InMemoryEvalSpecRegistry implements EvalSpecRegistry {
   private readonly specs = new Map<string, EvalSpec>();
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
 
   constructor(config: InMemoryEvalSpecRegistryConfig = {}) {
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   async register(input: RegisterEvalSpecInput): Promise<EvalSpec> {

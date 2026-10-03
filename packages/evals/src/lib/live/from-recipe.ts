@@ -8,7 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Agent } from "@promin/agent";
-import type { Clock } from "@promin/core";
+import type { WallClock } from "@promin/workflow";
 import type { Scorer } from "../types.ts";
 import { liveScored } from "./live-scored.ts";
 import type { LiveScoreSink } from "./types.ts";
@@ -25,7 +25,7 @@ export interface LiveScoredFromRecipeDeps {
   readonly scorerCatalog: Readonly<Record<string, Scorer>>;
   readonly sink: LiveScoreSink;
   readonly agentId?: string;
-  readonly clock?: Clock;
+  readonly clock?: WallClock;
   readonly onError?: (err: unknown) => void;
 }
 

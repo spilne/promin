@@ -110,7 +110,7 @@ export type WorkflowSchemaValidationError = z.ZodError;
  *
  * @example
  * ```ts
- * import { validateWorkflowSchema } from "@promin/core";
+ * import { validateWorkflowSchema } from "@promin/workflow";
  *
  * // In an API route handler
  * try {
@@ -136,7 +136,7 @@ export function validateWorkflowSchema(input: unknown) {
  *
  * @example
  * ```ts
- * import { validateWorkflowSchemaSafe } from "@promin/core";
+ * import { validateWorkflowSchemaSafe } from "@promin/workflow";
  *
  * const result = validateWorkflowSchemaSafe(jsonFromUi);
  * if (!result.success) {

@@ -9,7 +9,7 @@
 // codegen. If WorkflowStorage grows a method, both sides auto-pick it up.
 // ---------------------------------------------------------------------------
 
-import { LosslessJsonCodec } from "@promin/core";
+import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
 
 /** Every name on the WorkflowStorage interface we can dispatch through. */
 export type StorageMethod =

@@ -8,8 +8,8 @@
 // ---------------------------------------------------------------------------
 
 import type { WorkflowStorage } from "@promin/workflow";
-import type { Clock } from "@promin/core";
-import { SystemClock } from "@promin/core";
+import type { WallClock } from "@promin/workflow";
+import { SystemWallClock } from "@promin/workflow";
 import { runToDto, stepToDto } from "./serialize.ts";
 import type { RunEventBus } from "./run-event-bus.ts";
 import type { StepDto } from "./api-types.ts";
@@ -22,7 +22,7 @@ export interface RunPollWatcherConfig {
   workflowId: string;
   /** Poll interval in ms. Default 1000. */
   intervalMs?: number;
-  clock?: Clock;
+  clock?: WallClock;
 }
 
 export class RunPollWatcher {
@@ -30,8 +30,8 @@ export class RunPollWatcher {
   private readonly bus: RunEventBus;
   private readonly workflowId: string;
   private readonly intervalMs: number;
-  private readonly clock: Clock;
-  private handle?: ReturnType<Clock["setInterval"]>;
+  private readonly clock: WallClock;
+  private handle?: ReturnType<WallClock["setInterval"]>;
   private lastSteps = new Map<string, StepDto>();
   private lastStatus?: string;
 
@@ -40,7 +40,7 @@ export class RunPollWatcher {
     this.bus = config.bus;
     this.workflowId = config.workflowId;
     this.intervalMs = config.intervalMs ?? 1000;
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   /** Emit an initial snapshot and start polling. Returns initial RunDto. */

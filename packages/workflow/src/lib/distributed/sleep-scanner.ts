@@ -12,7 +12,7 @@
 import type { WorkflowStorage } from "../durable/workflow-storage.ts";
 import type { Workflow } from "../durable/durable-pipeline.ts";
 import type { WorkflowRunner } from "../durable/workflow-runner.ts";
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 
 export interface SleepScannerConfig {
   /** Workflow storage to scan for expired sleeps. */
@@ -37,11 +37,11 @@ export interface SleepScannerConfig {
   onError?: (workflowId: string, error: unknown) => void;
   /**
    * Time source. Drives the scan-loop cadence + the `wakeAt <= now`
-   * check for expired sleeps. Default: `SystemClock`. Tests pass a
-   * `FakeClock` so `advance(ms)` both moves the wake-threshold and
+   * check for expired sleeps. Default: `SystemWallClock`. Tests pass a
+   * `FakeWallClock` so `advance(ms)` both moves the wake-threshold and
    * re-ticks the scan loop deterministically.
    */
-  clock?: Clock;
+  clock?: WallClock;
 }
 
 export interface SleepScanner {
@@ -58,7 +58,7 @@ export class DefaultSleepScanner implements SleepScanner {
   private readonly resolveWorkflow: SleepScannerConfig["resolveWorkflow"];
   private readonly onResume?: SleepScannerConfig["onResume"];
   private readonly onError?: SleepScannerConfig["onError"];
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
   private running = false;
 
   constructor(config: SleepScannerConfig) {
@@ -68,7 +68,7 @@ export class DefaultSleepScanner implements SleepScanner {
     this.resolveWorkflow = config.resolveWorkflow;
     this.onResume = config.onResume;
     this.onError = config.onError;
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   async start(): Promise<void> {

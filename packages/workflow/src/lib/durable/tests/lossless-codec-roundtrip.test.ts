@@ -14,7 +14,7 @@ import { describe, it, expect } from "bun:test";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
-import { JsonCodec } from "@promin/core";
+import { JsonCodec } from "@spilne/perfect-core/connect";
 
 /**
  * Wraps an InMemoryWorkflowStorage so every step result round-trips through
@@ -214,7 +214,7 @@ describe("workflow — pipeline-level default codec", () => {
       .stepAsync(
         "lossless",
         async ({ prev: _ }: { prev: unknown }) => new Date("2026-05-01T00:00:00Z"),
-        { codec: (await import("@promin/core")).LosslessJsonCodec },
+        { codec: (await import("@spilne/perfect-core/connect")).LosslessJsonCodec },
       )
       .build();
 

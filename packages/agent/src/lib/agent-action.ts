@@ -1,6 +1,7 @@
 import { workflow } from "@promin/workflow";
 import type { Workflow } from "@promin/workflow";
-import type { RateLimiter, Clock } from "@promin/core";
+import type { RateLimiter } from "./agent-shared.ts";
+import type { WallClock } from "@promin/workflow";
 import { z } from "zod";
 import type { LLMProvider } from "./llm-provider.ts";
 import type { AgentTool, ApprovalDecision, AutoApprove } from "./tool.ts";
@@ -97,7 +98,7 @@ export interface AgentActionConfig<TOutput = any> {
   maxSteps?: number;
   systemPrompt?: string;
   rateLimiter?: RateLimiter;
-  clock?: Clock;
+  clock?: WallClock;
   memory?: AgentActionMemoryConfig;
   /**
    * When set, forces the LLM to return a structured response matching this Zod schema.

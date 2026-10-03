@@ -5,7 +5,7 @@
 // must match.
 // ---------------------------------------------------------------------------
 
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
   DEFAULT_SKILL_METADATA,
   DEFAULT_SKILL_VERSION,
@@ -17,16 +17,16 @@ import {
 } from "./types.ts";
 
 export interface InMemorySkillRegistryConfig {
-  /** Time source. Default: `SystemClock`. Tests pass a `FakeClock`. */
-  readonly clock?: Clock;
+  /** Time source. Default: `SystemWallClock`. Tests pass a `FakeWallClock`. */
+  readonly clock?: WallClock;
 }
 
 export class InMemorySkillRegistry implements SkillRegistry {
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
   private readonly rows = new Map<string, RegisteredSkill>();
 
   constructor(config: InMemorySkillRegistryConfig = {}) {
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   private now(): number {

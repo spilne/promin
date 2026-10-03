@@ -9,8 +9,8 @@ import { Effect, Stream, Duration, Option, Queue } from "effect";
 import { Cron } from "croner";
 import { RRule } from "rrule";
 import { StreamPipeline } from "@promin/core";
-import { JsonCodec } from "@promin/core";
-import type { Codec } from "@promin/core";
+import { JsonCodec } from "@spilne/perfect-core/connect";
+import type { Codec } from "@spilne/perfect-core/connect";
 import type { Scheduler } from "./scheduler.ts";
 import type { ScheduleConfig, ScheduleTick } from "./types.ts";
 
@@ -27,7 +27,8 @@ import type { ScheduleConfig, ScheduleTick } from "./types.ts";
  *
  * @example
  * ```ts
- * import { createScheduler, StreamPipeline } from "@promin/core";
+ * import { StreamPipeline } from "@promin/core";
+ * import { createScheduler } from "@promin/workflow";
  *
  * const scheduler = createScheduler();
  *

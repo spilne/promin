@@ -4,7 +4,7 @@
 // every other implementation must match.
 // ---------------------------------------------------------------------------
 
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
   DEFAULT_AGENT_METADATA,
   DEFAULT_AGENT_VERSION,
@@ -17,16 +17,16 @@ import {
 } from "./types.ts";
 
 export interface InMemoryAgentRegistryConfig {
-  /** Time source. Default: `SystemClock`. Tests pass a `FakeClock`. */
-  readonly clock?: Clock;
+  /** Time source. Default: `SystemWallClock`. Tests pass a `FakeWallClock`. */
+  readonly clock?: WallClock;
 }
 
 export class InMemoryAgentRegistry implements AgentRegistry {
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
   private readonly rows = new Map<string, RegisteredAgent>();
 
   constructor(config: InMemoryAgentRegistryConfig = {}) {
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   private now(): number {

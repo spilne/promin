@@ -9,7 +9,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import type { Codec } from "@promin/core";
+import type { Codec } from "@spilne/perfect-core/connect";
 import { runJournaledStep } from "../journaled-step.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import type { ActivityJournalStorage, JournalEntry } from "../activity-journal.ts";

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { FakeClock } from "@promin/core";
+import { FakeWallClock } from "@promin/workflow";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { agentLoop } from "../agent-loop.ts";
 import type { LLMResponse } from "../llm-provider.ts";
@@ -23,7 +23,7 @@ async function makeSession(config: Parameters<typeof agentLoop>[0], sessionId = 
 
 describe("agentLoop onIdle hook", () => {
   it("fires onIdle after idleTimeoutMs with no new send()", async () => {
-    const clock = FakeClock.create(0);
+    const clock = FakeWallClock.create(0);
     const idleFires: number[] = [];
 
     const session = await makeSession({
@@ -51,7 +51,7 @@ describe("agentLoop onIdle hook", () => {
   });
 
   it("does not fire if send() arrives before timeout", async () => {
-    const clock = FakeClock.create(0);
+    const clock = FakeWallClock.create(0);
     const idleFires: number[] = [];
 
     const session = await makeSession({
@@ -80,7 +80,7 @@ describe("agentLoop onIdle hook", () => {
   });
 
   it("close() cancels the idle timer", async () => {
-    const clock = FakeClock.create(0);
+    const clock = FakeWallClock.create(0);
     const idleFires: number[] = [];
 
     const session = await makeSession({
@@ -104,7 +104,7 @@ describe("agentLoop onIdle hook", () => {
   });
 
   it("onIdle fires once per idle window, not repeatedly", async () => {
-    const clock = FakeClock.create(0);
+    const clock = FakeWallClock.create(0);
     const idleFires: number[] = [];
 
     const session = await makeSession({
@@ -130,7 +130,7 @@ describe("agentLoop onIdle hook", () => {
   });
 
   it("no timer is set when hooks.onIdle is not provided", async () => {
-    const clock = FakeClock.create(0);
+    const clock = FakeWallClock.create(0);
 
     const session = await makeSession({
       name: "no-idle-hook",

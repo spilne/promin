@@ -2,8 +2,8 @@
 // Heartbeat injection — verifies the agent loop emits keepalive events
 // when no other event has fired for `heartbeatMs` while a turn is in
 // flight. Uses real timers with a short interval (50ms) — driving this
-// via FakeClock against the real workflow runner is fragile because
-// the runner's promise resolution doesn't synchronize with FakeClock
+// via FakeWallClock against the real workflow runner is fragile because
+// the runner's promise resolution doesn't synchronize with FakeWallClock
 // advances.
 // ---------------------------------------------------------------------------
 

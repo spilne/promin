@@ -41,10 +41,11 @@
     "access": "public"
   },
   "dependencies": {
-    "@promin/core": "workspace:*",
-    "@promin/workflow": "workspace:*"
+    "@promin/workflow": "workspace:*",
+    "@spilne/perfect-core": "catalog:"
   },
   "devDependencies": {
+    "@promin/core": "workspace:*",
     "@types/bun": "catalog:"
   },
   "nx": {

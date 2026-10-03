@@ -9,8 +9,9 @@ import type {
   JournaledSuspendStorage,
   ActivityJournalStorage,
 } from "@promin/workflow";
-import { SystemClock } from "@promin/core";
-import type { RateLimiter, Clock, TimerHandle } from "@promin/core";
+import { SystemWallClock } from "@promin/workflow";
+import type { RateLimiter } from "./agent-shared.ts";
+import type { WallClock, TimerHandle } from "@promin/workflow";
 import type { LLMProvider } from "./llm-provider.ts";
 import type { AgentTool, AutoApprove, ApprovalDecision } from "./tool.ts";
 import { shouldAutoApprove } from "./tool.ts";
@@ -231,8 +232,8 @@ export interface AgentLoopConfig {
    * but not persisted.
    */
   toolAuditLogger?: import("./tool-audit/types.ts").ToolAuditLogger;
-  /** Time source. Default: SystemClock. Pass FakeClock in tests to drive idle timers. */
-  clock?: Clock;
+  /** Time source. Default: SystemWallClock. Pass FakeWallClock in tests to drive idle timers. */
+  clock?: WallClock;
   /**
    * Separate LLM used only for context compaction (summarising dropped messages).
    * Useful for routing summaries to a cheaper or locally-hosted model.
@@ -593,7 +594,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
       const journalStorage = runner.storage as unknown as JournaledSuspendStorage;
       const activityStorage = runner.storage as unknown as ActivityJournalStorage;
 
-      const clock = config.clock ?? SystemClock;
+      const clock = config.clock ?? SystemWallClock;
       // Multi-subscriber event bus. The legacy `config.logger` (if provided)
       // is wired in as one subscriber so existing `session.eventLog()` callers
       // keep working unchanged. New subscribers attach via `session.subscribe`

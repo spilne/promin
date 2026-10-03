@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
-import { queueTestSuite } from "@promin/core/testing";
+import { queueTestSuite } from "../queue-test-suite.ts";
 import { SqliteQueue } from "../sqlite-queue.ts";
 
 function makeDb() {

@@ -14,7 +14,9 @@ import type {
 } from "./state-machine-types.ts";
 import { transitionTo } from "./state-machine-types.ts";
 import { type StateMachineStorage, InMemoryStateMachineStorage } from "./state-machine-storage.ts";
-import { type Clock, SystemClock, type RetryPolicy, type SchemaParser } from "@promin/core";
+import type { RetryPolicy } from "../shared/retry-policy.ts";
+import { type WallClock, SystemWallClock } from "../shared/wall-clock.ts";
+import type { SchemaParser } from "@spilne/perfect-core";
 
 // ---------------------------------------------------------------------------
 // Internal config types
@@ -172,7 +174,7 @@ export class StateMachineBuilder<S, Events = void> {
     private readonly limits?: MachineLimits,
     private readonly type?: string,
     private readonly namespace?: string,
-    private readonly clock?: Clock,
+    private readonly clock?: WallClock,
     private readonly autoScheduleTimeouts?: boolean,
   ) {}
 
@@ -298,7 +300,7 @@ export class StateMachineBuilder<S, Events = void> {
       this.type,
       this.namespace,
       this.strictSchemas,
-      this.clock ?? SystemClock,
+      this.clock ?? SystemWallClock,
       this.autoScheduleTimeouts ?? true,
     );
   }
@@ -324,7 +326,7 @@ export class StateMachineInstance<S, Events = void> {
     private readonly type?: string,
     private readonly namespace?: string,
     private readonly strictSchemas?: Record<string, SchemaParser<unknown>>,
-    private readonly clock: Clock = SystemClock,
+    private readonly clock: WallClock = SystemWallClock,
     private readonly autoScheduleTimeouts: boolean = true,
   ) {}
 
@@ -534,7 +536,7 @@ export class StateMachineInstance<S, Events = void> {
 
   /**
    * Manually check whether the machine `id` has a due timeout and fire it if so.
-   * Returns `true` if a transition fired. Useful for FakeClock-driven tests and
+   * Returns `true` if a transition fired. Useful for FakeWallClock-driven tests and
    * future distributed scanners that need to drive timeouts externally.
    */
   async checkTimeouts(id: string): Promise<boolean> {
@@ -697,8 +699,8 @@ export function stateMachine<S, Events = void>(params: {
   limits?: MachineLimits;
   type?: string;
   namespace?: string;
-  /** Time source for due-timeout calculations. Default: SystemClock. */
-  clock?: Clock;
+  /** Time source for due-timeout calculations. Default: SystemWallClock. */
+  clock?: WallClock;
   /**
    * Whether to schedule in-process setTimeout for state timeouts. Default: true.
    * Set false for distributed mode where an external scanner drives `checkTimeouts()`.
@@ -870,7 +872,7 @@ export function pureStateMachine<S, Events = void>(params: {
   limits?: MachineLimits;
   type?: string;
   namespace?: string;
-  clock?: Clock;
+  clock?: WallClock;
   autoScheduleTimeouts?: boolean;
 }): PureStateMachineBuilder<S, Events> {
   return stateMachine<S, Events>(params) as unknown as PureStateMachineBuilder<S, Events>;

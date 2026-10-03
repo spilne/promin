@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { Effect, Stream } from "effect";
-import type { TaggedError } from "@promin/core";
+import type { TaggedError } from "../shared/tagged-error.ts";
 import { StreamPipeline } from "@promin/core";
 import type { Workflow } from "./durable-pipeline.ts";
 import type { WorkflowRunner } from "./workflow-runner.ts";

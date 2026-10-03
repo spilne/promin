@@ -6,7 +6,7 @@
 // whose `wakeAt` has passed; SignalScanner wakes workflows whose
 // `waiting_for_signal` step has a matching signal row in
 // `storage.loadSignals`. Both share the same shape — periodic poll,
-// resolveWorkflow hook, onResume/onError, FakeClock-driven cadence in
+// resolveWorkflow hook, onResume/onError, FakeWallClock-driven cadence in
 // tests.
 //
 // Why a scanner instead of caller responsibility
@@ -29,7 +29,7 @@
 // don't cause double resumes or false-negatives.
 // ---------------------------------------------------------------------------
 
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import { isActivityJournalStorage } from "../durable/activity-journal.ts";
 import { isJournaledSuspendStorage } from "../durable/activity-journal.ts";
 import type { Workflow } from "../durable/durable-pipeline.ts";
@@ -52,8 +52,8 @@ export interface SignalScannerConfig {
   readonly resolveWorkflow: (workflowName: string) => Workflow<unknown, unknown> | undefined;
   readonly onResume?: (workflowId: string) => void;
   readonly onError?: (workflowId: string, error: unknown) => void;
-  /** Time source. Default `SystemClock`. Tests pass `FakeClock`. */
-  readonly clock?: Clock;
+  /** Time source. Default `SystemWallClock`. Tests pass `FakeWallClock`. */
+  readonly clock?: WallClock;
 }
 
 export interface SignalScanner {
@@ -68,7 +68,7 @@ export class DefaultSignalScanner implements SignalScanner {
   private readonly resolveWorkflow: SignalScannerConfig["resolveWorkflow"];
   private readonly onResume?: SignalScannerConfig["onResume"];
   private readonly onError?: SignalScannerConfig["onError"];
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
   private running = false;
 
   constructor(config: SignalScannerConfig) {
@@ -78,7 +78,7 @@ export class DefaultSignalScanner implements SignalScanner {
     this.resolveWorkflow = config.resolveWorkflow;
     this.onResume = config.onResume;
     this.onError = config.onError;
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   async start(): Promise<void> {

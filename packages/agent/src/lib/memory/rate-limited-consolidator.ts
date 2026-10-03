@@ -17,7 +17,7 @@
 // design — capping only auto leaves a hole.
 // ---------------------------------------------------------------------------
 
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { Consolidator, DistillThreadOptions } from "./consolidator.ts";
 import type { EpisodicRecord, MemoryStore, ThreadKey } from "./types.ts";
 
@@ -43,8 +43,8 @@ export interface ConsolidatorRateLimitConfig {
    * throws (`scope.kind` tells the caller which).
    */
   readonly maxDistillsPerNamespacePerWindow?: number;
-  /** Time source. Default: `SystemClock`. Tests pass `FakeClock`. */
-  readonly clock?: Clock;
+  /** Time source. Default: `SystemWallClock`. Tests pass `FakeWallClock`. */
+  readonly clock?: WallClock;
 }
 
 /**
@@ -100,14 +100,14 @@ export class ConsolidatorRateLimitError extends Error {
 }
 
 export class RateLimitedConsolidator implements Consolidator {
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
 
   constructor(
     private readonly inner: Consolidator,
     private readonly memory: MemoryStore,
     private readonly config: ConsolidatorRateLimitConfig,
   ) {
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   compactThread(...args: Parameters<Consolidator["compactThread"]>) {

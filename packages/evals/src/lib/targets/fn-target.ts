@@ -5,7 +5,7 @@
 // transform, a prompt template, or a stub while wiring a suite.
 // ---------------------------------------------------------------------------
 
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { EvalCase, EvalTarget } from "../types.ts";
 
 export interface FnTargetConfig {
@@ -13,8 +13,8 @@ export interface FnTargetConfig {
   readonly id?: string;
   /** Optional version, feeds run identity. */
   readonly version?: string;
-  /** Time source for `latencyMs`. Default `SystemClock`. */
-  readonly clock?: Clock;
+  /** Time source for `latencyMs`. Default `SystemWallClock`. */
+  readonly clock?: WallClock;
 }
 
 /** Build an `EvalTarget` from a function of the case input. */
@@ -22,7 +22,7 @@ export function fnTarget(
   fn: (input: unknown) => Promise<unknown> | unknown,
   config: FnTargetConfig = {},
 ): EvalTarget {
-  const clock = config.clock ?? SystemClock;
+  const clock = config.clock ?? SystemWallClock;
   return {
     id: config.id ?? "fn",
     ...(config.version !== undefined && { version: config.version }),

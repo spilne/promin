@@ -14,7 +14,7 @@
 
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
-import { FakeClock } from "@promin/core";
+import { FakeWallClock } from "@promin/workflow";
 import { createElevatedTool } from "../tool.ts";
 import { InMemoryToolAuditLogger } from "../tool-audit/in-memory-tool-audit-logger.ts";
 import type { ToolAuditLogger } from "../tool-audit/types.ts";
@@ -24,7 +24,7 @@ const scope = { namespaceId: "acme", resourceId: "alice", agentId: "billing-agen
 
 describe("createElevatedTool — audit log emission", () => {
   it("emits one record per ctx.audit() call, carrying caller scope + toolName", async () => {
-    const clock = FakeClock.create(1_700_000);
+    const clock = FakeWallClock.create(1_700_000);
     const logger = new InMemoryToolAuditLogger({ clock });
     const refund = createElevatedTool({
       name: "issue_refund",

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { TaggedError } from "@spilne/perfect-core";
-import { Pipeline, FakeClock } from "@promin/core";
+import { Pipeline } from "@promin/core";
+import { FakeWallClock } from "../../shared/wall-clock.ts";
 import { workflow, flow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
@@ -1734,9 +1735,9 @@ describe("InMemoryWorkflowStorage", () => {
   });
 
   it("expired lock can be re-acquired", async () => {
-    // FakeClock advances time deterministically — no real wait, no flake.
+    // FakeWallClock advances time deterministically — no real wait, no flake.
     // Before clock injection this test slept 10ms to clear a 1ms lock.
-    const clock = FakeClock.create("2026-01-01T00:00:00Z");
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
     const storage = new InMemoryWorkflowStorage({ clock });
     await storage.tryLock("l3", 1);
     clock.advance(10);

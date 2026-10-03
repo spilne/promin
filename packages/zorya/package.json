@@ -47,12 +47,12 @@
   },
   "dependencies": {
     "@promin/agent": "workspace:*",
-    "@promin/core": "workspace:*",
     "@promin/workflow": "workspace:*",
     "@promin/workflow-remote": "workspace:*",
     "marked": "^18.0.2"
   },
   "devDependencies": {
+    "@promin/core": "workspace:*",
     "@promin/postgres": "workspace:*",
     "@promin/sqlite": "workspace:*",
     "@promin/zorya-client": "workspace:*",

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
-import { throttleTestSuite } from "@promin/core/testing";
+import { throttleTestSuite } from "../throttle-test-suite.ts";
 import { SqliteThrottle } from "../sqlite-throttle.ts";
 
 function makeDb() {

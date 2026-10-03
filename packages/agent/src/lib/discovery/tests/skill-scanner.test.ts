@@ -16,7 +16,7 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdir, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { FakeClock } from "@promin/core";
+import { FakeWallClock } from "@promin/workflow";
 import { SkillScanner, applyDiscoveredSkills, startSkillScanLoop } from "../skill-scanner.ts";
 import { InMemorySkillRegistry } from "../../skills/in-memory-skill-registry.ts";
 
@@ -179,7 +179,7 @@ describe("startSkillScanLoop", () => {
     await mkdir(root, { recursive: true });
     try {
       const registry = new InMemorySkillRegistry();
-      const clock = FakeClock.create(0);
+      const clock = FakeWallClock.create(0);
       const loop = startSkillScanLoop({ registry, root, intervalMs: 1_000, clock });
 
       const t1 = await loop.tick();
@@ -209,7 +209,7 @@ describe("startSkillScanLoop", () => {
     );
     try {
       const registry = new InMemorySkillRegistry();
-      const clock = FakeClock.create(0);
+      const clock = FakeWallClock.create(0);
       const loop = startSkillScanLoop({ registry, root, intervalMs: 1_000, sync: true, clock });
       const t1 = await loop.tick();
       expect(t1.added).toEqual(["live-only"]);
@@ -233,7 +233,7 @@ describe("startSkillScanLoop", () => {
     );
     try {
       const registry = new InMemorySkillRegistry();
-      const clock = FakeClock.create(0);
+      const clock = FakeWallClock.create(0);
       const loop = startSkillScanLoop({ registry, root, intervalMs: 1_000, clock });
       const [a, b] = await Promise.all([loop.tick(), loop.tick()]);
       expect(a).toBe(b);

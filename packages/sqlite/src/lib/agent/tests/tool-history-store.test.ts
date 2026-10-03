@@ -1,12 +1,12 @@
 // ---------------------------------------------------------------------------
 // SqliteToolHistoryStore — runs the @promin/agent toolHistoryStoreTestSuite
 // against an in-memory SQLite database, plus SQLite-specific checks
-// (FakeClock exact timing, custom table name).
+// (FakeWallClock exact timing, custom table name).
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
-import { FakeClock } from "@promin/core";
+import { FakeWallClock } from "@promin/workflow";
 import { toolHistoryStoreTestSuite } from "@promin/agent/testing";
 import type { ToolObservation } from "@promin/agent";
 import { SqliteToolHistoryStore } from "../tool-history-store.ts";
@@ -23,7 +23,7 @@ const observation: ToolObservation = {
 
 describe("SqliteToolHistoryStore — SQLite-specific", () => {
   it("stamps first/last seen with the clock, holding firstSeenAt on re-record", async () => {
-    const clock = FakeClock.create(1_000);
+    const clock = FakeWallClock.create(1_000);
     const store = SqliteToolHistoryStore.make({ db: new Database(":memory:"), clock });
     await store.recordSnapshot([observation]);
 

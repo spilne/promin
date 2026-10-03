@@ -57,12 +57,12 @@
     "@promin/core": "workspace:*",
     "@promin/evals": "workspace:*",
     "@promin/workflow": "workspace:*",
+    "@spilne/perfect-core": "catalog:",
     "drizzle-orm": "^0.44.0",
     "postgres": "^3.4.5",
     "rrule": "^2.8.1"
   },
   "devDependencies": {
-    "@spilne/perfect-core": "catalog:",
     "@types/bun": "catalog:",
     "testcontainers": "^11.13.0"
   },

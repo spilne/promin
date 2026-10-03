@@ -12,7 +12,8 @@
 // drift becomes a concrete problem.
 // ---------------------------------------------------------------------------
 
-import { payloadHash, SystemClock, type Clock, type TimerHandle } from "@promin/core";
+import { SystemWallClock, type WallClock, type TimerHandle } from "@promin/workflow";
+import { payloadHash } from "@spilne/perfect-core/connect";
 import type { AgentToolCatalog, ToolCatalogEntry } from "../tool-catalog.ts";
 import type { ToolHistoryStore, ToolObservation } from "./types.ts";
 
@@ -21,8 +22,8 @@ export interface AgentToolCatalogHistoryConfig {
   readonly catalog: AgentToolCatalog;
   /** Where snapshots are persisted. */
   readonly store: ToolHistoryStore;
-  /** Time source for the interval loop. Default: `SystemClock`. */
-  readonly clock?: Clock;
+  /** Time source for the interval loop. Default: `SystemWallClock`. */
+  readonly clock?: WallClock;
 }
 
 /**
@@ -48,13 +49,13 @@ export function toObservation(entry: ToolCatalogEntry): ToolObservation {
 export class AgentToolCatalogHistory {
   private readonly catalog: AgentToolCatalog;
   private readonly store: ToolHistoryStore;
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
   private timer: TimerHandle | null = null;
 
   constructor(config: AgentToolCatalogHistoryConfig) {
     this.catalog = config.catalog;
     this.store = config.store;
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   /** List the live catalog once and persist every entry. */

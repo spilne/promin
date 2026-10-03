@@ -8,7 +8,7 @@
 
 import type { DurableScheduleConfig, SchedulerStorage, WorkflowStorage } from "@promin/workflow";
 import { computeNextRun, isTickLogStorage, scheduleTickRunId } from "@promin/workflow";
-import type { Clock } from "@promin/core";
+import type { WallClock } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 
 export interface ScheduleDto {
@@ -119,7 +119,7 @@ function iso(d?: Date | null): string | undefined {
   return d ? d.toISOString() : undefined;
 }
 
-function fakeClockAt(when: Date): Clock {
+function fakeClockAt(when: Date): WallClock {
   return {
     currentTimeMs: () => when.getTime(),
     now: () => new Date(when.getTime()),

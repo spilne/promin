@@ -6,7 +6,7 @@
 // only the trigger (a real run, not a dataset case) and the sink differ.
 // ---------------------------------------------------------------------------
 
-import type { Clock } from "@promin/core";
+import type { WallClock } from "@promin/workflow";
 import type { Score, Scorer } from "../types.ts";
 
 /** One run's live-scoring result. */
@@ -34,7 +34,7 @@ export interface LiveScoringConfig {
   readonly decide?: (runId: string) => boolean;
   /** Label attached to every `LiveScore`. Default `"agent"`. */
   readonly agentId?: string;
-  readonly clock?: Clock;
+  readonly clock?: WallClock;
   /** Sink for scorer / scoring faults — they never reach the production run. */
   readonly onError?: (err: unknown) => void;
 }

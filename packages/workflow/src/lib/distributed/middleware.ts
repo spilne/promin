@@ -2,7 +2,7 @@
 // Worker middleware — composable wrappers around step execution
 // ---------------------------------------------------------------------------
 
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import type { StepTask } from "./step-queue.ts";
 import type { StepContext } from "./step-registry.ts";
 
@@ -37,15 +37,18 @@ export function composeMiddleware(middleware: WorkerMiddleware[], handler: NextF
 /**
  * Timeout middleware — fails the step if it takes longer than `ms`.
  *
- * Pass `clock` to drive the deadline off an injected `Clock` — tests can
- * advance a `FakeClock` to trigger the timeout without a real wait.
+ * Pass `clock` to drive the deadline off an injected `WallClock` — tests can
+ * advance a `FakeWallClock` to trigger the timeout without a real wait.
  *
  * @example
  * ```ts
  * createWorker({ middleware: [timeoutMiddleware(30_000)] })
  * ```
  */
-export function timeoutMiddleware(ms: number, clock: Clock = SystemClock): WorkerMiddleware {
+export function timeoutMiddleware(
+  ms: number,
+  clock: WallClock = SystemWallClock,
+): WorkerMiddleware {
   return async ({ ctx, next }) => {
     return Promise.race([
       next(ctx),
@@ -68,11 +71,11 @@ export function retryMiddleware(params: {
   maxRetries: number;
   baseDelayMs?: number;
   when?: (error: unknown) => boolean;
-  /** Time source for backoff waits. Default: `SystemClock`. */
-  clock?: Clock;
+  /** Time source for backoff waits. Default: `SystemWallClock`. */
+  clock?: WallClock;
 }): WorkerMiddleware {
   return async ({ ctx, next }) => {
-    const { maxRetries, baseDelayMs = 500, when, clock = SystemClock } = params;
+    const { maxRetries, baseDelayMs = 500, when, clock = SystemWallClock } = params;
     let lastError: unknown;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -102,7 +105,7 @@ export function retryMiddleware(params: {
  */
 export function loggingMiddleware(
   log: (message: string, meta?: Record<string, unknown>) => void = console.log,
-  clock: Clock = SystemClock,
+  clock: WallClock = SystemWallClock,
 ): WorkerMiddleware {
   return async ({ task, ctx, next }) => {
     const start = clock.currentTimeMs();
@@ -149,7 +152,7 @@ export function metricsMiddleware(
     status: "completed" | "failed";
     durationMs: number;
   }) => void,
-  clock: Clock = SystemClock,
+  clock: WallClock = SystemWallClock,
 ): WorkerMiddleware {
   return async ({ task, ctx, next }) => {
     const start = clock.currentTimeMs();

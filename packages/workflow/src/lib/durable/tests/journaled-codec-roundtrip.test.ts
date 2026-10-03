@@ -8,7 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { JsonCodec } from "@promin/core";
+import { JsonCodec } from "@spilne/perfect-core/connect";
 import type { ActivityJournalStorage, JournalEntry } from "../activity-journal.ts";
 import { runJournaledStep } from "../journaled-step.ts";
 

@@ -1,4 +1,4 @@
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import type { WorkflowStorage } from "../durable/workflow-storage.ts";
 import type {
   StepExecutor,
@@ -19,7 +19,7 @@ export class StepQueueExecutor implements StepExecutor {
   private readonly storage: WorkflowStorage;
   private readonly pollIntervalMs: number;
   private readonly staleTimeoutMs: number;
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
 
   constructor(config: {
     stepQueue: StepQueue;
@@ -28,13 +28,13 @@ export class StepQueueExecutor implements StepExecutor {
     pollIntervalMs?: number;
     /** Re-enqueue tasks stuck in 'running' longer than this. Default: 30000ms. */
     staleTimeoutMs?: number;
-    clock?: Clock;
+    clock?: WallClock;
   }) {
     this.stepQueue = config.stepQueue;
     this.storage = config.storage;
     this.pollIntervalMs = config.pollIntervalMs ?? 500;
     this.staleTimeoutMs = config.staleTimeoutMs ?? 30_000;
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   async executeStep(req: StepExecutionRequest): Promise<StepExecutionResult> {

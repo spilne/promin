@@ -259,7 +259,7 @@ export interface AutoCompactConfig {
    */
   readonly compressAt?: number;
   /**
-   * Custom predicate. Mirrors `RetryPolicy.when` from `@promin/core`:
+   * Custom predicate. Mirrors `RetryPolicy.when` from `@promin/workflow`:
    * receives a signals envelope and returns `true` to fire on this
    * turn. When set, REPLACES both built-in thresholds. Use this for
    * compound rules.

@@ -15,7 +15,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { FakeClock } from "@promin/core";
+import { FakeWallClock } from "@promin/workflow";
 import { InMemoryMemoryStore } from "../in-memory-memory-store.ts";
 import {
   RateLimitedConsolidator,
@@ -71,7 +71,7 @@ const SCOPE = { namespaceId: "acme", resourceId: "alice" };
 
 describe("RateLimitedConsolidator", () => {
   it("delegates when under the cap", async () => {
-    const clock = FakeClock.create(1_000_000);
+    const clock = FakeWallClock.create(1_000_000);
     const memory = new InMemoryMemoryStore({ clock });
     const { inner, counts } = makeStubConsolidator();
     const rl = new RateLimitedConsolidator(inner, memory, {
@@ -86,7 +86,7 @@ describe("RateLimitedConsolidator", () => {
   });
 
   it("throws ConsolidatorRateLimitError at the cap; inner not invoked", async () => {
-    const clock = FakeClock.create(1_000_000);
+    const clock = FakeWallClock.create(1_000_000);
     const memory = new InMemoryMemoryStore({ clock });
     const { inner, counts } = makeStubConsolidator();
     const rl = new RateLimitedConsolidator(inner, memory, {
@@ -118,7 +118,7 @@ describe("RateLimitedConsolidator", () => {
   });
 
   it("window slides — old episodes age out and re-allow distill", async () => {
-    const clock = FakeClock.create(1_000_000);
+    const clock = FakeWallClock.create(1_000_000);
     const memory = new InMemoryMemoryStore({ clock });
     const { inner, counts } = makeStubConsolidator();
     const rl = new RateLimitedConsolidator(inner, memory, {
@@ -138,7 +138,7 @@ describe("RateLimitedConsolidator", () => {
   });
 
   it("compactThread + distillResource always delegate (no rate limit on those)", async () => {
-    const clock = FakeClock.create(1_000_000);
+    const clock = FakeWallClock.create(1_000_000);
     const memory = new InMemoryMemoryStore({ clock });
     const { inner, counts } = makeStubConsolidator();
     const rl = new RateLimitedConsolidator(inner, memory, {
@@ -154,7 +154,7 @@ describe("RateLimitedConsolidator", () => {
   });
 
   it("no-resourceId calls bypass the limit (delegate to inner)", async () => {
-    const clock = FakeClock.create(1_000_000);
+    const clock = FakeWallClock.create(1_000_000);
     const memory = new InMemoryMemoryStore({ clock });
     const { inner, counts } = makeStubConsolidator();
     const rl = new RateLimitedConsolidator(inner, memory, {
@@ -169,7 +169,7 @@ describe("RateLimitedConsolidator", () => {
   });
 
   it("force: true does NOT bypass the rate limit (limit is cost-based, not dedup-based)", async () => {
-    const clock = FakeClock.create(1_000_000);
+    const clock = FakeWallClock.create(1_000_000);
     const memory = new InMemoryMemoryStore({ clock });
     const { inner, counts } = makeStubConsolidator();
     const rl = new RateLimitedConsolidator(inner, memory, {
@@ -186,7 +186,7 @@ describe("RateLimitedConsolidator", () => {
   });
 
   it("counts only kind=='distill' episodes, ignoring other resource episodes", async () => {
-    const clock = FakeClock.create(1_000_000);
+    const clock = FakeWallClock.create(1_000_000);
     const memory = new InMemoryMemoryStore({ clock });
     const { inner, counts } = makeStubConsolidator();
     const rl = new RateLimitedConsolidator(inner, memory, {
@@ -216,7 +216,7 @@ describe("RateLimitedConsolidator", () => {
   });
 
   it("per-namespace cap throttles tenant-wide spend under generous per-resource caps", async () => {
-    const clock = FakeClock.create(1_000_000);
+    const clock = FakeWallClock.create(1_000_000);
     const memory = new InMemoryMemoryStore({ clock });
     const { inner, counts } = makeStubConsolidator();
     const rl = new RateLimitedConsolidator(inner, memory, {
@@ -249,7 +249,7 @@ describe("RateLimitedConsolidator", () => {
   });
 
   it("per-namespace cap allows distill while the namespace total is under it", async () => {
-    const clock = FakeClock.create(1_000_000);
+    const clock = FakeWallClock.create(1_000_000);
     const memory = new InMemoryMemoryStore({ clock });
     const { inner, counts } = makeStubConsolidator();
     const rl = new RateLimitedConsolidator(inner, memory, {
@@ -267,7 +267,7 @@ describe("RateLimitedConsolidator", () => {
   });
 
   it("checks the per-resource cap first when both caps would trip", async () => {
-    const clock = FakeClock.create(1_000_000);
+    const clock = FakeWallClock.create(1_000_000);
     const memory = new InMemoryMemoryStore({ clock });
     const { inner } = makeStubConsolidator();
     const rl = new RateLimitedConsolidator(inner, memory, {

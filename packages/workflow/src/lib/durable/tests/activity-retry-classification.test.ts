@@ -4,7 +4,7 @@
 // Three levers control whether the retry loop re-attempts a failed activity:
 //   1. TerminalError   — always stops the loop; `retry.when` isn't consulted.
 //   2. RetryableError  — always forces retry; `retry.when` isn't consulted.
-//   3. RetryPolicy.when (from @promin/core) — the predicate on the retry
+//   3. RetryPolicy.when (from @promin/workflow) — the predicate on the retry
 //      config itself. Consulted for any other error; return false to bail.
 //
 // Point (3) intentionally reuses the existing `when` from RetryPolicy rather

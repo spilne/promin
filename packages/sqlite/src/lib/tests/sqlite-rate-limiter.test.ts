@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
-import { rateLimiterTestSuite } from "@promin/core/testing";
+import { rateLimiterTestSuite } from "../rate-limiter-test-suite.ts";
 import { SqliteRateLimiter } from "../sqlite-rate-limiter.ts";
+import { RateLimitExceeded } from "../rate-limiter.ts";
 
 function makeDb() {
   return new Database(":memory:");
@@ -62,6 +63,19 @@ describe("SqliteRateLimiter", () => {
     await a.acquireAsync();
     expect(await a.tryAcquireAsync()).toBe(false);
     expect(await b.tryAcquireAsync()).toBe(true);
+  });
+
+  it("rejects with a tagged RateLimitExceeded carrying retryAfterMs", async () => {
+    const l = SqliteRateLimiter.make({ db: makeDb(), key: "k", limit: 1, windowMs: 1_000 });
+    await l.acquireAsync();
+    const err = await l.acquireAsync().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RateLimitExceeded);
+    expect(err).toBeInstanceOf(Error);
+    const rle = err as RateLimitExceeded;
+    expect(rle._tag).toBe("RateLimitExceeded");
+    expect(rle.name).toBe("RateLimitExceeded");
+    expect(rle.message).toBe("");
+    expect(rle.retryAfterMs).toBeGreaterThan(0);
   });
 
   it("custom table name works", async () => {

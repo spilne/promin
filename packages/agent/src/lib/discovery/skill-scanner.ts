@@ -14,7 +14,7 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { type Clock, SystemClock } from "@promin/core";
+import { type WallClock, SystemWallClock } from "@promin/workflow";
 import { parseMarkdownSkill } from "../skills/parse-markdown-skill.ts";
 import type { RegisterSkillInput, SkillRegistry } from "../skills/types.ts";
 
@@ -357,8 +357,8 @@ export interface SkillScanLoopOptions {
   readonly filterSkills?: (skills: ReadonlyArray<RegisterSkillInput>) => RegisterSkillInput[];
   /** Fired after each tick. Surfaces deltas + warnings to the host. */
   readonly onTick?: (event: SkillScanLoopTick) => void;
-  /** Time source. Default: `SystemClock`. Tests pass `FakeClock`. */
-  readonly clock?: Clock;
+  /** Time source. Default: `SystemWallClock`. Tests pass `FakeWallClock`. */
+  readonly clock?: WallClock;
   /** Forwarded to the underlying scanner. `cacheBust` defaults to `true` for the loop. */
   readonly scanner?: Omit<SkillScannerOptions, "cacheBust" | "onSkill">;
 }
@@ -379,7 +379,7 @@ export interface SkillScanLoopHandle {
 }
 
 export function startSkillScanLoop(options: SkillScanLoopOptions): SkillScanLoopHandle {
-  const clock = options.clock ?? SystemClock;
+  const clock = options.clock ?? SystemWallClock;
   const intervalMs = options.intervalMs ?? 5_000;
   const scanner = new SkillScanner({
     ...options.scanner,

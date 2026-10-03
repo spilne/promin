@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { StepQueue, StepTask, FairnessPolicy } from "@promin/workflow";
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
 /**
@@ -35,12 +35,12 @@ import type { SqliteDatabase } from "./sqlite-database.ts";
  */
 export class SqliteStepQueue implements StepQueue {
   private readonly _table: string;
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
 
   private constructor(
     private readonly db: SqliteDatabase,
     table: string,
-    clock: Clock,
+    clock: WallClock,
   ) {
     this._table = table;
     this.clock = clock;
@@ -53,15 +53,15 @@ export class SqliteStepQueue implements StepQueue {
     table?: string;
     /**
      * Time source for `created_at` / `claimed_at` / heartbeat / completion
-     * timestamps. Defaults to `SystemClock`. Tests pass a `FakeClock` so
+     * timestamps. Defaults to `SystemWallClock`. Tests pass a `FakeWallClock` so
      * `clock.advance(ms)` drives the queue's time math deterministically.
      */
-    clock?: Clock;
+    clock?: WallClock;
   }): SqliteStepQueue {
     return new SqliteStepQueue(
       params.db,
       params.table ?? "promin_step_tasks",
-      params.clock ?? SystemClock,
+      params.clock ?? SystemWallClock,
     );
   }
 

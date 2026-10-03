@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Agent, AgentInvokeOpts, AgentRunOutput, AgentThread } from "@promin/agent";
-import { SystemClock } from "@promin/core";
+import { SystemWallClock } from "@promin/workflow";
 import { toEvalOutput } from "../targets/to-eval-output.ts";
 import type { Score } from "../types.ts";
 import type { LiveScore, LiveScoringConfig } from "./types.ts";
@@ -22,7 +22,7 @@ export function liveScored<Input, Output>(
   agent: Agent<Input, Output>,
   config: LiveScoringConfig,
 ): Agent<Input, Output> {
-  const clock = config.clock ?? SystemClock;
+  const clock = config.clock ?? SystemWallClock;
   const rate = config.sampling?.rate ?? 1;
   const agentId = config.agentId ?? "agent";
   const onError = config.onError ?? noop;

@@ -1,13 +1,13 @@
 import { describe, it, expect } from "bun:test";
 import { TaggedError } from "@spilne/perfect-core";
 import { Pipeline } from "@promin/core";
-import { JsonCodec } from "@promin/core";
+import { JsonCodec } from "@spilne/perfect-core/connect";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 import type { FailedWorkflowRecord } from "../workflow-state.ts";
-import type { Sinkable } from "@promin/core";
-import type { Codec } from "@promin/core";
+import type { Sinkable } from "../../shared/streamable.ts";
+import type { Codec } from "@spilne/perfect-core/connect";
 
 // ---------------------------------------------------------------------------
 // Test error

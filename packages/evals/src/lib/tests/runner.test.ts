@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { FakeClock } from "@promin/core";
+import { FakeWallClock } from "@promin/workflow";
 import { inlineDataset } from "../datasets/inline.ts";
 import { diffRuns } from "../diff.ts";
 import { runEval, runMatrix } from "../runner.ts";
@@ -19,7 +19,7 @@ describe("runEval", () => {
       dataset: inlineDataset(cases, "ds"),
       target: fnTarget((input) => String(input).toUpperCase()),
       scorers: [exactMatch],
-      clock: FakeClock.create(5000),
+      clock: FakeWallClock.create(5000),
     });
     expect(summary.totalCases).toBe(2);
     expect(summary.passRate).toBe(1);

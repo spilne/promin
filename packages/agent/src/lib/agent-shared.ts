@@ -1,4 +1,3 @@
-import type { RateLimiter } from "@promin/core";
 import type { AgentTool } from "./tool.ts";
 import type { ToolCall, ToolResultMessage, Message } from "./message.ts";
 import type {
@@ -259,6 +258,14 @@ export async function executeToolCall(
 }
 
 // ---- shared LLM call helper ----
+
+/**
+ * Gate for outbound LLM calls. Any limiter whose `withLimitAsync` runs (or
+ * rejects) the wrapped call fits — e.g. `SqliteRateLimiter`.
+ */
+export interface RateLimiter {
+  withLimitAsync<T>(fn: () => Promise<T>): Promise<T>;
+}
 
 export interface RunLlmCallParams {
   llm: LLMProvider;

@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import type { MachineState, TransitionEvent } from "./state-machine-types.ts";
-import { type Clock, SystemClock } from "@promin/core";
+import { type WallClock, SystemWallClock } from "../shared/wall-clock.ts";
 
 export interface StateMachineStorage {
   create(params: {
@@ -43,10 +43,10 @@ export class InMemoryStateMachineStorage implements StateMachineStorage {
   private machines = new Map<string, MachineState>();
   private events = new Map<string, TransitionEvent[]>();
   private locks = new Map<string, { expiresAt: number }>();
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
 
-  constructor(config?: { clock?: Clock }) {
-    this.clock = config?.clock ?? SystemClock;
+  constructor(config?: { clock?: WallClock }) {
+    this.clock = config?.clock ?? SystemWallClock;
   }
 
   async create(params: {

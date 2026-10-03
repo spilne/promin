@@ -11,7 +11,7 @@ import type { StepQueue, StepTask, FairnessPolicy } from "@promin/workflow";
 import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
 import { stepQueue } from "./schema.ts";
 import { ensureTable as ensureTableFromSchema } from "./schema-utils.ts";
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 
 /**
  * Render a JS string[] as a Postgres `text[]` literal:
@@ -37,24 +37,24 @@ export interface PgStepQueueConfig {
   namespace?: string | null;
   /**
    * Time source for client-side timestamps — claimedAt on claim, completedAt
-   * on complete/fail, staleTimeoutMs cutoff on requeue. Default: `SystemClock`.
+   * on complete/fail, staleTimeoutMs cutoff on requeue. Default: `SystemWallClock`.
    * The `metrics()` default `until` stays server-side (`NOW()` in SQL) so it
    * remains skew-immune independent of this clock.
    */
-  clock?: Clock;
+  clock?: WallClock;
 }
 
 export class PgStepQueue implements StepQueue {
   private readonly db: DrizzleDb;
   private readonly workerId: string;
   private readonly namespace: string | null;
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
 
   constructor(config: PgStepQueueConfig) {
     this.db = config.db;
     this.workerId = config.workerId ?? crypto.randomUUID();
     this.namespace = config.namespace ?? null;
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   /**

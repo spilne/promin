@@ -12,15 +12,15 @@
 // `recorded_at` is logger-assigned, never carried on the `ToolAuditEntry` —
 // an audit trail must not be back-datable by the caller. SQLite is
 // in-process, so the app clock *is* the database clock (no client/server
-// skew to defend against, unlike Postgres); it stays a `Clock` so tests
-// can drive it with a `FakeClock`.
+// skew to defend against, unlike Postgres); it stays a `WallClock` so tests
+// can drive it with a `FakeWallClock`.
 //
 // Schema (auto-created on first use): one append-only table, INTEGER
 // PRIMARY KEY for a strictly monotonic id, `meta` JSON-encoded as TEXT
 // (SQLite has no jsonb).
 // ---------------------------------------------------------------------------
 
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { ToolAuditEntry, ToolAuditLogger, ToolAuditRecord } from "@promin/agent";
 import type { SqliteDatabase } from "../sqlite-database.ts";
 
@@ -28,8 +28,8 @@ export interface SqliteToolAuditLoggerConfig {
   readonly db: SqliteDatabase;
   /** Override the table name (default: `agent_audit_log`). */
   readonly table?: string;
-  /** Time source. Default: `SystemClock`. Tests pass a `FakeClock`. */
-  readonly clock?: Clock;
+  /** Time source. Default: `SystemWallClock`. Tests pass a `FakeWallClock`. */
+  readonly clock?: WallClock;
 }
 
 /** Filters for the audit-log read path. All fields are optional. */
@@ -61,12 +61,12 @@ interface DbRow {
 export class SqliteToolAuditLogger implements ToolAuditLogger {
   private readonly db: SqliteDatabase;
   private readonly table: string;
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
 
   private constructor(config: SqliteToolAuditLoggerConfig) {
     this.db = config.db;
     this.table = config.table ?? "agent_audit_log";
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
     this._setup();
   }
 

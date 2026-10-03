@@ -705,8 +705,9 @@ export type { LlamaCppOptions } from "./adapters/llamacpp.ts";
 export { twoSpeedLLM } from "./adapters/two-speed-llm.ts";
 export type { TwoSpeedLLMConfig } from "./adapters/two-speed-llm.ts";
 
-export { SystemClock, FakeClock } from "@promin/core";
-export type { Clock, TimerHandle } from "@promin/core";
+export { SystemWallClock, FakeWallClock } from "@promin/workflow";
+export type { WallClock, TimerHandle } from "@promin/workflow";
+export type { RateLimiter } from "./agent-shared.ts";
 
 export { broadcast } from "./broadcast.ts";
 

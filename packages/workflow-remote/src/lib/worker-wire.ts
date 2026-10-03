@@ -6,7 +6,7 @@
 // heartbeat, and write results without importing the TypeScript SDK.
 // ---------------------------------------------------------------------------
 
-import { LosslessJsonCodec } from "@promin/core";
+import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
 
 /** Every method a worker can call over HTTP. */
 export type WorkerMethod =

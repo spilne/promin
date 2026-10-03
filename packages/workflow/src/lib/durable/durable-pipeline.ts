@@ -16,7 +16,7 @@
 
 import { Effect } from "effect";
 // Aliased: `TaggedError` is also the name of the structural `{ _tag }`
-// constraint imported from `@promin/core` below.
+// constraint imported from `shared/tagged-error.ts` below.
 import { TaggedError as PerfectTaggedError } from "@spilne/perfect-core";
 import { isActivityJournalStorage, type ActivityJournalStorage } from "./activity-journal.ts";
 import {
@@ -24,12 +24,14 @@ import {
   JournalStorageMissingError,
   type JournaledStepBody,
 } from "./journaled-step.ts";
-import { Pipeline, type TaggedError } from "@promin/core";
-import type { RetryPolicy } from "@promin/core";
-import type { CacheStore, Codec } from "@promin/core";
-import { LosslessJsonCodec } from "@promin/core";
-import type { Show } from "@promin/core";
-import type { Sinkable } from "@promin/core";
+import { Pipeline } from "@promin/core";
+import type { TaggedError } from "../shared/tagged-error.ts";
+import type { RetryPolicy } from "../shared/retry-policy.ts";
+import type { CacheStore } from "../shared/cache-store.ts";
+import type { Codec } from "@spilne/perfect-core/connect";
+import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
+import type { Show } from "@spilne/perfect-core";
+import type { Sinkable } from "../shared/streamable.ts";
 import type { FailedWorkflowRecord } from "./workflow-state.ts";
 import { type WorkflowStorage, isStepAttemptStorage } from "./workflow-storage.ts";
 import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";

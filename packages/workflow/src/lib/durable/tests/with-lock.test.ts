@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "bun:test";
-import { FakeClock } from "@promin/core";
+import { FakeWallClock } from "../../shared/wall-clock.ts";
 import { withLock } from "../with-lock.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 
@@ -64,10 +64,10 @@ describe("withLock", () => {
   });
 
   it("heartbeat extends lock during execution", async () => {
-    // FakeClock drives both the heartbeat interval and fn's own sleep, so
+    // FakeWallClock drives both the heartbeat interval and fn's own sleep, so
     // advancing time fires callbacks deterministically — no real 150ms wait,
     // no flake on slow CI boxes.
-    const clock = FakeClock.create(0);
+    const clock = FakeWallClock.create(0);
     const clockedStorage = new InMemoryWorkflowStorage({ clock });
     const heartbeatCalls: number[] = [];
     const original = clockedStorage.heartbeat.bind(clockedStorage);
@@ -96,7 +96,7 @@ describe("withLock", () => {
   });
 
   it("heartbeat failure does not crash workflow", async () => {
-    const clock = FakeClock.create(0);
+    const clock = FakeWallClock.create(0);
     const clockedStorage = new InMemoryWorkflowStorage({ clock });
     clockedStorage.heartbeat = async () => {
       throw new Error("heartbeat storage error");
@@ -155,7 +155,7 @@ describe("withLock", () => {
   });
 
   it("heartbeat from wrong instance is rejected", async () => {
-    const clock = FakeClock.create(0);
+    const clock = FakeWallClock.create(0);
     const instance1 = new InMemoryWorkflowStorage({ instanceId: "node-1", clock });
     const instance2 = new InMemoryWorkflowStorage({ instanceId: "node-2", clock });
     // Shared state: point instance2's locks at instance1's internal map
@@ -177,7 +177,7 @@ describe("withLock", () => {
     // in a unit test — the point of the default change is that at any
     // sub-30s duration the heartbeat loop stays quiet. Instrument the count
     // to prove the defaults are wired through (no explicit options).
-    const clock = FakeClock.create(0);
+    const clock = FakeWallClock.create(0);
     const clockedStorage = new InMemoryWorkflowStorage({ clock });
     const calls: number[] = [];
     clockedStorage.heartbeat = async () => {

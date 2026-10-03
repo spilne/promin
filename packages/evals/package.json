@@ -48,7 +48,7 @@
   },
   "dependencies": {
     "@promin/agent": "workspace:*",
-    "@promin/core": "workspace:*"
+    "@promin/workflow": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "catalog:"

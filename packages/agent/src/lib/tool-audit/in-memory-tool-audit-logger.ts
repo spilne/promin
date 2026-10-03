@@ -6,20 +6,20 @@
 // compliance use.
 // ---------------------------------------------------------------------------
 
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { ToolAuditEntry, ToolAuditLogger, ToolAuditRecord } from "./types.ts";
 
 export interface InMemoryToolAuditLoggerConfig {
-  /** Time source. Default: `SystemClock`. Tests pass a `FakeClock`. */
-  readonly clock?: Clock;
+  /** Time source. Default: `SystemWallClock`. Tests pass a `FakeWallClock`. */
+  readonly clock?: WallClock;
 }
 
 export class InMemoryToolAuditLogger implements ToolAuditLogger {
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
   private readonly entries: ToolAuditRecord[] = [];
 
   constructor(config: InMemoryToolAuditLoggerConfig = {}) {
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   async record(entry: ToolAuditEntry): Promise<void> {

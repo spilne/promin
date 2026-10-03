@@ -12,7 +12,9 @@
 // ---------------------------------------------------------------------------
 
 import { eq, and, desc } from "drizzle-orm";
-import { Pipeline, LosslessJsonCodec, type TaggedError } from "@promin/core";
+import { Pipeline } from "@promin/core";
+import type { TaggedError } from "@promin/workflow";
+import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
 import type {
   Workflow,
   WorkflowDAG,

@@ -8,8 +8,11 @@
 import { Effect, Stream, Duration, Schedule } from "effect";
 import { Cron } from "croner";
 import { RRule } from "rrule";
-import { StreamPipeline, JsonCodec, SystemClock } from "@promin/core";
-import type { Codec, Clock } from "@promin/core";
+import { StreamPipeline } from "@promin/core";
+import { SystemWallClock } from "../shared/wall-clock.ts";
+import { JsonCodec } from "@spilne/perfect-core/connect";
+import type { WallClock } from "../shared/wall-clock.ts";
+import type { Codec } from "@spilne/perfect-core/connect";
 import type { Scheduler } from "./scheduler.ts";
 import type { DurableScheduleConfig, ScheduleConfig, ScheduleTick } from "./types.ts";
 import type { SchedulerStorage } from "./scheduler-storage.ts";
@@ -45,9 +48,9 @@ export interface DurableSchedulerConfig {
   /**
    * Time source. Drives nextRun seeding, due-computation cursor advances,
    * leader-lock acquisition timestamps, jitter `firedAt`, and the poll-
-   * loop tick cadence. Default: `SystemClock`.
+   * loop tick cadence. Default: `SystemWallClock`.
    */
-  clock?: Clock;
+  clock?: WallClock;
 }
 
 /**
@@ -68,7 +71,7 @@ export class DurableScheduler implements Scheduler {
   private readonly namespace?: string;
   private readonly batchSize: number;
   private readonly partition?: { index: number; count: number };
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
 
   constructor(config: DurableSchedulerConfig) {
     this.storage = config.storage;
@@ -77,7 +80,7 @@ export class DurableScheduler implements Scheduler {
     this.leaderLockTtlMs = config.leaderLockTtlMs ?? this.pollIntervalMs * 3;
     this.namespace = config.namespace;
     this.batchSize = config.batchSize ?? 100;
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
     if (config.partition) {
       if (
         config.partition.count < 1 ||
@@ -400,7 +403,7 @@ export function computeDueTicks(
   config: DurableScheduleConfig,
   lastFired: Date | null,
   tickCount: number,
-  clock: Clock = SystemClock,
+  clock: WallClock = SystemWallClock,
 ): ScheduleTick[] {
   const now = clock.now();
   if (config.startAt && now < config.startAt) return [];
@@ -508,7 +511,7 @@ function makeTick(
   scheduledAt: Date,
   jitterMs: number,
   tickNumber: number,
-  clock: Clock = SystemClock,
+  clock: WallClock = SystemWallClock,
 ): ScheduleTick {
   const jitter = jitterMs > 0 ? Math.random() * jitterMs : 0;
   return {
@@ -524,7 +527,7 @@ function makeTick(
 /** Compute the next time a schedule will fire — used to update the due index. */
 export function computeNextRun(
   config: DurableScheduleConfig,
-  clock: Clock = SystemClock,
+  clock: WallClock = SystemWallClock,
 ): Date | null {
   const now = clock.now();
   if (config.endAt && now >= config.endAt) return null;

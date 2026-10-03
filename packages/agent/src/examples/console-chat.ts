@@ -17,8 +17,8 @@ import {
   InMemoryWorkflowStorage,
   createWorkflowRunner,
 } from "@promin/workflow";
-import { PipelineRateLimiter } from "@promin/core";
 import { anthropic } from "../lib/adapters/anthropic.ts";
+import type { RateLimiter } from "../lib/agent-shared.ts";
 import { agentLoop } from "../lib/agent-loop.ts";
 import { InMemoryMemoryIndex } from "../lib/memory-index.ts";
 import { CompositeSecretStore, EnvSecretStore, InMemorySecretStore } from "../lib/secret-store.ts";
@@ -206,8 +206,25 @@ const runner = createWorkflowRunner({ storage });
 
 const rateLimitRpm = process.env.RATE_LIMIT_RPM ? Number(process.env.RATE_LIMIT_RPM) : null;
 const rateLimiter = rateLimitRpm
-  ? PipelineRateLimiter.make({ limit: rateLimitRpm, windowMs: 60_000, strategy: "sliding-window" })
+  ? slidingWindowLimiter({ limit: rateLimitRpm, windowMs: 60_000 })
   : undefined;
+
+/** In-process sliding-window limiter: rejects calls over `limit` per `windowMs`. */
+function slidingWindowLimiter(params: { limit: number; windowMs: number }): RateLimiter {
+  const calls: number[] = [];
+  return {
+    async withLimitAsync(fn) {
+      const now = Date.now();
+      while (calls.length > 0 && calls[0]! <= now - params.windowMs) calls.shift();
+      if (calls.length >= params.limit) {
+        const retryAfterMs = calls[0]! + params.windowMs - now;
+        throw new Error(`Rate limit of ${params.limit}/min reached; retry in ${retryAfterMs}ms`);
+      }
+      calls.push(now);
+      return fn();
+    },
+  };
+}
 
 // ---- usage + spinner trackers ----
 const usage = new UsageTracker();

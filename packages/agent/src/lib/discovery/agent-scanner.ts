@@ -15,7 +15,7 @@
 import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { type Clock, SystemClock } from "@promin/core";
+import { type WallClock, SystemWallClock } from "@promin/workflow";
 import type { AgentBackend, AgentRegistry, RegisterAgentInput } from "../registry/types.ts";
 
 /**
@@ -296,8 +296,8 @@ export interface AgentScanLoopOptions {
   readonly filterAgents?: (agents: ReadonlyArray<RegisterAgentInput>) => RegisterAgentInput[];
   /** Fired after each tick. Surfaces deltas + warnings to the host. */
   readonly onTick?: (event: AgentScanLoopTick) => void;
-  /** Time source. Default: `SystemClock`. Tests pass `FakeClock`. */
-  readonly clock?: Clock;
+  /** Time source. Default: `SystemWallClock`. Tests pass `FakeWallClock`. */
+  readonly clock?: WallClock;
   /** Forwarded to the underlying scanner. `cacheBust` defaults to `true` for the loop. */
   readonly scanner?: Omit<AgentScannerOptions, "cacheBust" | "onAgent">;
 }
@@ -318,7 +318,7 @@ export interface AgentScanLoopHandle {
 }
 
 export function startAgentScanLoop(options: AgentScanLoopOptions): AgentScanLoopHandle {
-  const clock = options.clock ?? SystemClock;
+  const clock = options.clock ?? SystemWallClock;
   const intervalMs = options.intervalMs ?? 5_000;
   const scanner = new AgentScanner({
     ...options.scanner,

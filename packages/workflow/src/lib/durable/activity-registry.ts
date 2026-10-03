@@ -6,7 +6,8 @@
 // at compile time.
 // ---------------------------------------------------------------------------
 
-import type { Pipeline, TaggedError } from "@promin/core";
+import type { Pipeline } from "@promin/core";
+import type { TaggedError } from "../shared/tagged-error.ts";
 
 // ---------------------------------------------------------------------------
 // Activity types
@@ -139,7 +140,8 @@ export interface ActivityRegistry {
  *
  * @example
  * ```ts
- * import { MapActivityRegistry, Pipeline } from "@promin/core";
+ * import { Pipeline } from "@promin/core";
+ * import { MapActivityRegistry } from "@promin/workflow";
  *
  * const registry = new MapActivityRegistry({
  *   // Simple transform

@@ -19,7 +19,7 @@ import type {
 import type { ActivityRegistry, ActivityContext } from "./activity-registry.ts";
 import { validateWorkflowSchema } from "./workflow-schema-validator.ts";
 import { topologicalSort } from "./workflow-dag.ts";
-import type { RetryPolicy } from "@promin/core";
+import type { RetryPolicy } from "../shared/retry-policy.ts";
 
 // ---------------------------------------------------------------------------
 // Compiler errors
@@ -73,7 +73,8 @@ export class WorkflowCompilationError extends Error {
  *
  * @example
  * ```ts
- * import { compileWorkflow, MapActivityRegistry, Pipeline } from "@promin/core";
+ * import { Pipeline } from "@promin/core";
+ * import { compileWorkflow, MapActivityRegistry } from "@promin/workflow";
  * import { PostgresWorkflowStorage, migrate } from "@promin/postgres";
  *
  * // 1. Set up storage + registry

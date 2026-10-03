@@ -73,7 +73,7 @@ describe("ctx.sleep — durable mid-step sleep", () => {
     expect(postSleepCalls).toBe(0); // post-sleep activity didn't run yet
 
     // Simulate scanner firing 10s later: complete all due sleeps.
-    // (FakeClock isn't wired in here yet; we fast-forward by completing
+    // (FakeWallClock isn't wired in here yet; we fast-forward by completing
     // manually. In production the sleep scanner does this automatically.)
     const future = new Date(Date.now() + 60_000);
     const completed = await completeDueSleeps({ storage, now: future, limit: 10 });

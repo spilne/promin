@@ -5,8 +5,9 @@
 // steps by name; workers resolve them from their local registry.
 // ---------------------------------------------------------------------------
 
-import type { Pipeline, TaggedError } from "@promin/core";
-import type { RetryPolicy } from "@promin/core";
+import type { Pipeline } from "@promin/core";
+import type { TaggedError } from "../shared/tagged-error.ts";
+import type { RetryPolicy } from "../shared/retry-policy.ts";
 
 export interface StepContext {
   readonly input: unknown;

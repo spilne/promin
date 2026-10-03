@@ -20,7 +20,7 @@
 
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { WorkerWorkflowSpec, WorkflowStartQueue, WorkflowStartRecord } from "@promin/workflow";
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { DrizzleDb } from "./drizzle-db.ts";
 import { workflowStarts } from "./schema.ts";
 import { ensureTable as ensureTableFromSchema } from "./schema-utils.ts";
@@ -30,10 +30,10 @@ export interface PgWorkflowStartQueueConfig {
   /** Worker stuck mid-execution — re-claimable after this many ms. Default 60s. */
   reclaimAfterMs?: number;
   /**
-   * Time source. Default: `SystemClock`. Tests pass a `FakeClock` for
+   * Time source. Default: `SystemWallClock`. Tests pass a `FakeWallClock` for
    * deterministic stale-recovery scenarios.
    */
-  clock?: Clock;
+  clock?: WallClock;
 }
 
 export class PgWorkflowStartQueue implements WorkflowStartQueue {
@@ -42,12 +42,12 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
 
   private readonly db: DrizzleDb;
   private readonly reclaimAfterMs: number;
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
 
   constructor(config: PgWorkflowStartQueueConfig) {
     this.db = config.db;
     this.reclaimAfterMs = config.reclaimAfterMs ?? 60_000;
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   /**

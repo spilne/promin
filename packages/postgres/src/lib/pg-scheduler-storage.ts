@@ -11,7 +11,7 @@ import { and, asc, eq, inArray, isNotNull, lte, sql, type SQL } from "drizzle-or
 import type { DurableScheduleConfig, SchedulerStorage } from "@promin/workflow";
 import { durableSchedules, durableScheduleTicks } from "./scheduler-schema.ts";
 import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 
 export interface PgSchedulerStorageConfig {
   db: DrizzleDb;
@@ -23,9 +23,9 @@ export interface PgSchedulerStorageConfig {
   leaderLockId?: number;
   /**
    * Time source for client-side `updatedAt` timestamps on schedule CRUD.
-   * Default: `SystemClock`. Pass a `FakeClock` for deterministic tests.
+   * Default: `SystemWallClock`. Pass a `FakeWallClock` for deterministic tests.
    */
-  clock?: Clock;
+  clock?: WallClock;
 }
 
 export class PgSchedulerStorage implements SchedulerStorage {
@@ -37,12 +37,12 @@ export class PgSchedulerStorage implements SchedulerStorage {
 
   private readonly db: DrizzleDb;
   private readonly leaderLockId: number;
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
 
   constructor(config: PgSchedulerStorageConfig) {
     this.db = config.db;
     this.leaderLockId = config.leaderLockId ?? hashToInt32("wf-scheduler-leader");
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   // -------------------------------------------------------------------------

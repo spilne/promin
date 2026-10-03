@@ -15,7 +15,7 @@
       "path": "../agent/tsconfig.lib.json"
     },
     {
-      "path": "../core/tsconfig.lib.json"
+      "path": "../workflow/tsconfig.lib.json"
     }
   ]
 }

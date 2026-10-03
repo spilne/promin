@@ -15,7 +15,7 @@
 import { describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
 import { z } from "zod";
-import { FakeClock } from "@promin/core";
+import { FakeWallClock } from "@promin/workflow";
 import { createElevatedTool } from "@promin/agent";
 import { SqliteToolAuditLogger } from "../tool-audit-logger.ts";
 
@@ -23,7 +23,7 @@ const scope = { namespaceId: "acme", resourceId: "alice", agentId: "billing-agen
 
 describe("SqliteToolAuditLogger", () => {
   it("round-trips a recorded entry, with a clock-assigned timestamp", async () => {
-    const clock = FakeClock.create(1_700_000);
+    const clock = FakeWallClock.create(1_700_000);
     const logger = SqliteToolAuditLogger.make({ db: new Database(":memory:"), clock });
     await logger.record({
       namespaceId: "acme",
@@ -136,7 +136,7 @@ describe("SqliteToolAuditLogger", () => {
   });
 
   it("filters by recorded-at window", async () => {
-    const clock = FakeClock.create(1_000_000);
+    const clock = FakeWallClock.create(1_000_000);
     const logger = SqliteToolAuditLogger.make({ db: new Database(":memory:"), clock });
     await logger.record({
       namespaceId: "acme",

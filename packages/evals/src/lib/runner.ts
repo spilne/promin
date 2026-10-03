@@ -11,7 +11,7 @@
 //            "is recipe v3 better than v2".
 // ---------------------------------------------------------------------------
 
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { diffRuns } from "./diff.ts";
 import type {
   EvalCase,
@@ -41,12 +41,12 @@ export interface EvalRunConfig {
   /** A case passes when its pass-rate is at least this. Default 1. */
   readonly passThreshold?: number;
   readonly signal?: AbortSignal;
-  readonly clock?: Clock;
+  readonly clock?: WallClock;
 }
 
 /** Run one dataset against one target and score every output. */
 export async function runEval(config: EvalRunConfig): Promise<EvalRunSummary> {
-  const clock = config.clock ?? SystemClock;
+  const clock = config.clock ?? SystemWallClock;
   const samplesPerCase = Math.max(1, Math.trunc(config.samplesPerCase ?? 1));
   const concurrency = Math.max(1, Math.trunc(config.concurrency ?? 1));
   const passThreshold = config.passThreshold ?? 1;
@@ -124,7 +124,7 @@ export interface EvalMatrixConfig {
   readonly concurrency?: number;
   readonly passThreshold?: number;
   readonly signal?: AbortSignal;
-  readonly clock?: Clock;
+  readonly clock?: WallClock;
 }
 
 export interface EvalMatrixResult {

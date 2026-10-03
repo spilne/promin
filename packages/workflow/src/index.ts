@@ -313,3 +313,20 @@ export {
   type SignalPayload,
   type ApprovalDecision,
 } from "./lib/signals/define-signal.ts";
+
+// Injectable wall-clock time source + timer scheduler for Promise-based
+// code (stores, scanners, workers). `FakeWallClock` drives it in tests.
+export {
+  type WallClock,
+  type TimerHandle,
+  SystemWallClock,
+  FakeWallClock,
+} from "./lib/shared/wall-clock.ts";
+
+// Plain-data contracts shared by the engine and its storage/transport
+// packages: persisted retry shape, typed-error constraint, step cache,
+// and dead-letter / schedule source contracts.
+export { type RetryPolicy } from "./lib/shared/retry-policy.ts";
+export { type TaggedError } from "./lib/shared/tagged-error.ts";
+export { type CacheStore, MemoryCache, type MemoryCacheConfig } from "./lib/shared/cache-store.ts";
+export { type Streamable, type Sinkable } from "./lib/shared/streamable.ts";

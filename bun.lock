@@ -54,8 +54,8 @@
       "version": "0.1.0",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.0.0",
-        "@promin/core": "workspace:*",
         "@promin/workflow": "workspace:*",
+        "@spilne/perfect-core": "catalog:",
         "cli-highlight": "^2.1.11",
         "zod": "catalog:",
       },
@@ -90,6 +90,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@promin/core": "workspace:*",
+        "@spilne/perfect-core": "catalog:",
         "effect": "catalog:",
         "hyparquet": "^1.25.5",
       },
@@ -114,7 +115,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@promin/agent": "workspace:*",
-        "@promin/core": "workspace:*",
+        "@promin/workflow": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "catalog:",
@@ -146,12 +147,12 @@
         "@promin/core": "workspace:*",
         "@promin/evals": "workspace:*",
         "@promin/workflow": "workspace:*",
+        "@spilne/perfect-core": "catalog:",
         "drizzle-orm": "^0.44.0",
         "postgres": "^3.4.5",
         "rrule": "^2.8.1",
       },
       "devDependencies": {
-        "@spilne/perfect-core": "catalog:",
         "@types/bun": "catalog:",
         "testcontainers": "^11.13.0",
       },
@@ -179,9 +180,9 @@
       "version": "0.1.0",
       "dependencies": {
         "@promin/agent": "workspace:*",
-        "@promin/core": "workspace:*",
         "@promin/evals": "workspace:*",
         "@promin/workflow": "workspace:*",
+        "@spilne/perfect-core": "catalog:",
       },
       "devDependencies": {
         "@types/bun": "catalog:",
@@ -205,10 +206,11 @@
       "name": "@promin/workflow-remote",
       "version": "0.1.0",
       "dependencies": {
-        "@promin/core": "workspace:*",
         "@promin/workflow": "workspace:*",
+        "@spilne/perfect-core": "catalog:",
       },
       "devDependencies": {
+        "@promin/core": "workspace:*",
         "@types/bun": "catalog:",
       },
     },
@@ -217,12 +219,12 @@
       "version": "0.1.0",
       "dependencies": {
         "@promin/agent": "workspace:*",
-        "@promin/core": "workspace:*",
         "@promin/workflow": "workspace:*",
         "@promin/workflow-remote": "workspace:*",
         "marked": "^18.0.2",
       },
       "devDependencies": {
+        "@promin/core": "workspace:*",
         "@promin/postgres": "workspace:*",
         "@promin/sqlite": "workspace:*",
         "@promin/zorya-client": "workspace:*",

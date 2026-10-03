@@ -6,8 +6,9 @@
 // - Global middleware + hooks on the worker itself
 // ---------------------------------------------------------------------------
 
-import { Pipeline, type TaggedError } from "@promin/core";
-import { SystemClock, type Clock, type TimerHandle } from "@promin/core";
+import { Pipeline } from "@promin/core";
+import type { TaggedError } from "../shared/tagged-error.ts";
+import { SystemWallClock, type WallClock, type TimerHandle } from "../shared/wall-clock.ts";
 import type { WorkflowStorage } from "../durable/workflow-storage.ts";
 import { isStepAttemptStorage } from "../durable/workflow-storage.ts";
 import type { StepRegistry, StepContext, StepRegistration } from "./step-registry.ts";
@@ -80,9 +81,9 @@ export interface WorkerConfig {
   /**
    * Time source. Drives the poll-loop cadence, heartbeat interval, step
    * duration tracking, retry backoff, and per-attempt timestamps.
-   * Default: `SystemClock`.
+   * Default: `SystemWallClock`.
    */
-  clock?: Clock;
+  clock?: WallClock;
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +114,7 @@ export class DefaultWorker implements WorkflowWorker {
   private readonly heartbeatIntervalMs: number;
   private readonly workerMetadata?: Record<string, unknown>;
   private readonly claimFilter: (task: StepTask) => boolean;
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
   private running = false;
   private activeCount = 0;
   private heartbeatTimer?: TimerHandle;
@@ -131,7 +132,7 @@ export class DefaultWorker implements WorkflowWorker {
     this.workerRegistry = config.workerRegistry;
     this.heartbeatIntervalMs = config.heartbeatIntervalMs ?? 5000;
     this.workerMetadata = config.metadata;
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
 
     // Build the claim-time filter. Explicit `taskFilter` wins; otherwise
     // compose registry-has-handler + optional version allow-list.

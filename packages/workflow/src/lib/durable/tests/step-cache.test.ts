@@ -13,7 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { MemoryCache, type CacheStore } from "@promin/core";
+import { MemoryCache, type CacheStore } from "../../shared/cache-store.ts";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";

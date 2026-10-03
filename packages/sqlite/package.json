@@ -41,9 +41,9 @@
   },
   "dependencies": {
     "@promin/agent": "workspace:*",
-    "@promin/core": "workspace:*",
     "@promin/evals": "workspace:*",
-    "@promin/workflow": "workspace:*"
+    "@promin/workflow": "workspace:*",
+    "@spilne/perfect-core": "catalog:"
   },
   "devDependencies": {
     "@types/bun": "catalog:"

@@ -11,8 +11,10 @@
 // ---------------------------------------------------------------------------
 
 import { Effect } from "effect";
-import { Pipeline, type Sinkable, type TaggedError } from "@promin/core";
-import { SystemClock, type Clock } from "@promin/core";
+import { Pipeline } from "@promin/core";
+import type { Sinkable } from "../shared/streamable.ts";
+import type { TaggedError } from "../shared/tagged-error.ts";
+import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import type {
   Workflow,
   CompensateConfig,
@@ -50,7 +52,7 @@ import {
 } from "./durable-pipeline-error.ts";
 import { withLock } from "./with-lock.ts";
 import { topologicalSort } from "./workflow-dag.ts";
-import type { RetryPolicy } from "@promin/core";
+import type { RetryPolicy } from "../shared/retry-policy.ts";
 import {
   WorkflowContinueAsNewError,
   type WorkflowSuspendedError,
@@ -255,9 +257,9 @@ export interface WorkflowRunnerConfig {
    * Time source + scheduler. Drives all orchestration-level time math —
    * workflow deadline, step duration tracking, retry backoff, poll waits,
    * heartbeat cadence via `withLock`. Default: real system clock. Tests
-   * pass a `FakeClock` to advance time deterministically.
+   * pass a `FakeWallClock` to advance time deterministically.
    */
-  readonly clock?: Clock;
+  readonly clock?: WallClock;
   /**
    * Identifier of whatever entity is running this runner — a Zorya
    * worker, an in-process app, a script, the scheduler-loop, etc.
@@ -529,7 +531,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   private readonly registry?: WorkflowVersionRegistry | IWorkflowVersionRegistry;
   private readonly hooks?: WorkflowHooks;
   private readonly stepExecutor?: StepExecutor;
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
   private readonly executorId?: string;
 
   constructor(config: WorkflowRunnerConfig) {
@@ -537,7 +539,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     this.registry = config.registry;
     this.hooks = config.hooks;
     this.stepExecutor = config.stepExecutor;
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
     if (config.executorId !== undefined) this.executorId = config.executorId;
   }
 
@@ -1176,11 +1178,11 @@ export interface WorkflowOrchestrationContext {
   /**
    * Time source. Drives workflow start/deadline math, idempotency TTL
    * comparisons, step duration tracking, retry/compensation backoff sleeps,
-   * and the `withLock` heartbeat interval. Defaults to `SystemClock` when
+   * and the `withLock` heartbeat interval. Defaults to `SystemWallClock` when
    * omitted — callers building contexts by hand should only override it
    * for tests.
    */
-  readonly clock?: Clock;
+  readonly clock?: WallClock;
   /**
    * Identifier of the executor running this orchestration (worker id,
    * process id, "in-process", etc.). Stamped on each StepAttemptRecord
@@ -1285,7 +1287,7 @@ async function runOneOrchestrationCycle(
   },
 ): Promise<unknown> {
   const { workflowId, input, force, namespace } = params;
-  const clock = ctx.clock ?? SystemClock;
+  const clock = ctx.clock ?? SystemWallClock;
   const workflowStartTime = clock.currentTimeMs();
   const compensateTrigger = ctx.compensateConfig?.trigger ?? "after-retries";
   const maxWorkflowRetries = compensateTrigger === "immediate" ? 0 : (ctx.retry?.maxRetries ?? 0);
@@ -1645,8 +1647,8 @@ export interface DagExecutionContext {
    * Pipeline.all in-process path.
    */
   readonly stepExecutor?: StepExecutor;
-  /** Time source. Drives deadline checks, step durations, dispatch poll waits. Default: `SystemClock`. */
-  readonly clock?: Clock;
+  /** Time source. Drives deadline checks, step durations, dispatch poll waits. Default: `SystemWallClock`. */
+  readonly clock?: WallClock;
   /**
    * Identifier of the executor running this DAG execution. Stamped on each
    * `StepAttemptRecord` so the audit trail attributes the attempt to who
@@ -1688,7 +1690,7 @@ export async function executeWorkflowDag(
   | { success: false; tripwire: true; stepName: string; reason: unknown }
 > {
   const { workflowId, input, dagNodes, state } = params;
-  const clock = ctx.clock ?? SystemClock;
+  const clock = ctx.clock ?? SystemWallClock;
   const results: Record<string, unknown> = {};
 
   // Load previously completed step results. The stored shape is always the
@@ -2337,8 +2339,8 @@ export async function compensateWorkflow(params: {
   dagNodes: DagNode[];
   /** Optional fence guard — threaded to `saveStepAttempt` writes so a stale holder's compensation rows are rejected. */
   guard?: FenceGuard;
-  /** Time source. Drives compensation retry backoff + attempt timestamps. Default: SystemClock. */
-  clock?: Clock;
+  /** Time source. Drives compensation retry backoff + attempt timestamps. Default: SystemWallClock. */
+  clock?: WallClock;
   /** Executor id stamped onto each compensation StepAttemptRecord. */
   executorId?: string;
 }): Promise<{
@@ -2346,7 +2348,7 @@ export async function compensateWorkflow(params: {
   failed: { stepName: string; error: unknown }[];
 }> {
   const { storage, steps, compensateConfig, workflowId, input, guard, executorId } = params;
-  const clock = params.clock ?? SystemClock;
+  const clock = params.clock ?? SystemWallClock;
   const compensated: string[] = [];
   const failed: { stepName: string; error: unknown }[] = [];
 
@@ -2455,10 +2457,10 @@ export async function publishDlqRecord(params: {
     failed: { stepName: string; error: unknown }[];
   };
   metadata?: Record<string, unknown>;
-  /** Time source for the `failedAt` timestamp. Default: SystemClock. */
-  clock?: Clock;
+  /** Time source for the `failedAt` timestamp. Default: SystemWallClock. */
+  clock?: WallClock;
 }): Promise<void> {
-  const clock = params.clock ?? SystemClock;
+  const clock = params.clock ?? SystemWallClock;
   try {
     const failedState = await params.storage.loadWorkflow(params.workflowId);
     await params.dlq.publish({

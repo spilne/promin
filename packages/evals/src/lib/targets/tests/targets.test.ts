@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentRunOutput, RegisteredAgent, ResolveLocalAgentDeps } from "@promin/agent";
-import { FakeClock } from "@promin/core";
+import { FakeWallClock } from "@promin/workflow";
 import { fnTarget } from "../fn-target.ts";
 import { recipeTarget } from "../recipe-target.ts";
 import { toEvalOutput } from "../to-eval-output.ts";
@@ -68,7 +68,7 @@ describe("fnTarget", () => {
   it("runs the function and carries the configured id", async () => {
     const target = fnTarget((input) => `echo:${String(input)}`, {
       id: "echo",
-      clock: FakeClock.create(1000),
+      clock: FakeWallClock.create(1000),
     });
     expect(target.id).toBe("echo");
     const result = await target.run({ id: "c", input: "hi" });

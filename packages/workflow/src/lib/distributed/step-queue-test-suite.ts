@@ -2,7 +2,7 @@
 // Portable StepQueue test suite
 //
 // Usage:
-//   import { stepQueueTestSuite } from "@promin/core/testing";
+//   import { stepQueueTestSuite } from "@promin/workflow/testing";
 //   stepQueueTestSuite(() => new InMemoryStepQueue());
 //
 // Routing model: tasks declare `needs: string[]`; workers claim via

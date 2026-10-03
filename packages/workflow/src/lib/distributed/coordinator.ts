@@ -19,7 +19,7 @@ import type {
   WorkflowStatusInfo,
   WorkflowHandle,
 } from "../durable/durable-pipeline.ts";
-import { LosslessJsonCodec } from "@promin/core";
+import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
 import type {
   IWorkflowVersionRegistry,
   WorkflowVersionRegistry,

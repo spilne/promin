@@ -4,7 +4,7 @@
 // other implementation must match. Mirrors `InMemoryAgentRegistry`.
 // ---------------------------------------------------------------------------
 
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
   DEFAULT_ROLE_METADATA,
   DEFAULT_ROLE_VERSION,
@@ -16,16 +16,16 @@ import {
 } from "./types.ts";
 
 export interface InMemoryRoleRegistryConfig {
-  /** Time source. Default: `SystemClock`. Tests pass a `FakeClock`. */
-  readonly clock?: Clock;
+  /** Time source. Default: `SystemWallClock`. Tests pass a `FakeWallClock`. */
+  readonly clock?: WallClock;
 }
 
 export class InMemoryRoleRegistry implements RoleRegistry {
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
   private readonly rows = new Map<string, RegisteredRole>();
 
   constructor(config: InMemoryRoleRegistryConfig = {}) {
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   private now(): number {

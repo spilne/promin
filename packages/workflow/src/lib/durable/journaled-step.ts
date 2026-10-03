@@ -19,8 +19,9 @@
 // through `ctx.activity`, which is what makes the journal/replay safe.
 // ---------------------------------------------------------------------------
 
-import type { Codec, RetryPolicy } from "@promin/core";
-import { LosslessJsonCodec, payloadHash as hashPayload } from "@promin/core";
+import type { RetryPolicy } from "../shared/retry-policy.ts";
+import type { Codec } from "@spilne/perfect-core/connect";
+import { LosslessJsonCodec, payloadHash as hashPayload } from "@spilne/perfect-core/connect";
 import {
   isJournaledSuspendStorage,
   type JournalEntry,

@@ -40,7 +40,7 @@ import type {
   RunSource,
 } from "./workflow-state.ts";
 import { FenceTokenMismatchError } from "./durable-pipeline-error.ts";
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 
 /**
  * Comparator factory for sortable `listWorkflows` columns. NULL/undefined
@@ -150,15 +150,15 @@ export class InMemoryWorkflowStorage
   private readonly namespace: string | null;
   /**
    * Time source. Every timestamp + lock-expiry check routes through here
-   * — pass a `FakeClock` in tests to drive deterministic semantics
+   * — pass a `FakeWallClock` in tests to drive deterministic semantics
    * without real waits.
    */
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
 
-  constructor(config?: { namespace?: string | null; instanceId?: string; clock?: Clock }) {
+  constructor(config?: { namespace?: string | null; instanceId?: string; clock?: WallClock }) {
     this.namespace = config?.namespace ?? null;
     this.instanceId = config?.instanceId ?? crypto.randomUUID();
-    this.clock = config?.clock ?? SystemClock;
+    this.clock = config?.clock ?? SystemWallClock;
   }
 
   private resolveNamespace(workflowNamespace?: string): string | undefined {

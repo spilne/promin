@@ -2,22 +2,22 @@
 // InMemoryEvalRunStore — the default, process-local EvalRunStore.
 // ---------------------------------------------------------------------------
 
-import { SystemClock, type Clock } from "@promin/core";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { EvalRunSummary } from "../types.ts";
 import { composeRunId } from "./run-id.ts";
 import type { EvalRunQuery, EvalRunStore, StoredEvalRun } from "./types.ts";
 
 export interface InMemoryEvalRunStoreConfig {
-  /** Time source for `savedAt`. Default `SystemClock`. */
-  readonly clock?: Clock;
+  /** Time source for `savedAt`. Default `SystemWallClock`. */
+  readonly clock?: WallClock;
 }
 
 export class InMemoryEvalRunStore implements EvalRunStore {
   private readonly runs = new Map<string, StoredEvalRun>();
-  private readonly clock: Clock;
+  private readonly clock: WallClock;
 
   constructor(config: InMemoryEvalRunStoreConfig = {}) {
-    this.clock = config.clock ?? SystemClock;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   async save(summary: EvalRunSummary): Promise<string> {
