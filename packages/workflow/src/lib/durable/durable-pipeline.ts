@@ -35,7 +35,7 @@ import {
   type JournaledStepBody,
 } from "./journaled-step.ts";
 import type { TaggedError } from "../shared/tagged-error.ts";
-import { isEff, isThenable, promiseOrDie } from "../shared/eff.ts";
+import { isEff, isThenable, promiseOrDie, promiseOrEff } from "../shared/eff.ts";
 import type { RetryPolicy } from "../shared/retry-policy.ts";
 import type { CacheStore } from "../shared/cache-store.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
@@ -128,12 +128,13 @@ export type BranchError<Branches extends Record<string, unknown>> = {
  * Normalise what a user step function returned into the `Eff` the runner
  * executes. An `Eff` passes through. A Promise (e.g. an `async` function
  * handed to `.step()`) is awaited with `.stepAsync()` semantics — its
- * rejection is a defect. Note that a Promise resolving to an `Eff` has
- * already run it, since `Eff` is thenable. Anything else is a defect.
+ * rejection is a defect. A Promise that resolves to an `Eff` runs that
+ * `Eff` as the step body, so its typed failures stay typed and the step's
+ * retry policy applies to them. Anything else is a defect.
  */
 function asStepEff(result: unknown, stepName: string): StepEff<unknown, TaggedError> {
   if (isEff(result)) return result as StepEff<unknown, TaggedError>;
-  if (isThenable(result)) return promiseOrDie(() => result);
+  if (isThenable(result)) return promiseOrEff(() => result) as StepEff<unknown, TaggedError>;
   return die(
     new TypeError(
       `Step "${stepName}" must return an Eff (got ${result === null ? "null" : typeof result}); ` +

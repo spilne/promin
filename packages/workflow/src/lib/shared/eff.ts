@@ -30,7 +30,7 @@ export function isEff(value: unknown): value is Eff<unknown, unknown> {
   );
 }
 
-/** `true` for any object with a callable `then` (Promises, and `Eff` itself). */
+/** `true` for any object with a callable `then`, e.g. a Promise. */
 export function isThenable(value: unknown): value is PromiseLike<unknown> {
   return (
     value !== null &&
@@ -52,6 +52,20 @@ export function promiseOrDie<A>(thunk: () => PromiseLike<A>): Eff<A, never> {
   ).orDie();
 }
 
+/**
+ * Lift a Promise into an `Eff` like `promiseOrDie`, except that when the
+ * Promise resolves to an `Eff` (an `async` function that returns one), that
+ * `Eff` is then run in its place — its typed failures stay typed. Effects
+ * are not thenable, so a Promise never runs an `Eff` it resolves to.
+ */
+export function promiseOrEff(thunk: () => PromiseLike<unknown>): Eff<unknown, unknown> {
+  // Box the resolved value: perfect would otherwise run a success value
+  // that is itself an `Eff` inside `orDie`, turning its failures into defects.
+  return promiseOrDie(() => Promise.resolve(thunk()).then((value) => ({ value }))).flatMap(
+    ({ value }) => (isEff(value) ? value : succeed(value)),
+  );
+}
+
 /** Sleep `ms` on a `WallClock`, so `FakeWallClock.advance()` drives it. */
 export function sleepOn(clock: WallClock, ms: number): Eff<void, never> {
   return async<void>((resume) => {
@@ -62,11 +76,13 @@ export function sleepOn(clock: WallClock, ms: number): Eff<void, never> {
 
 /**
  * Fiber scheduler for every `Eff` the engine runs. perfect's default
- * scheduler hops through `setImmediate`, and under Bun those callbacks can
- * stall until some unrelated macrotask fires — a long continue-as-new chain
- * slowed from milliseconds to minutes. A `MessageChannel` hop still yields
- * to the event loop between batches but is dispatched promptly. The port is
- * unref'd so an idle engine never keeps the process alive.
+ * scheduler drains on microtasks but falls back to a `setImmediate` hop
+ * after 64 consecutive drains, and under Bun those callbacks can stall until
+ * some unrelated macrotask fires — a long continue-as-new chain slows from
+ * milliseconds to seconds or minutes once other I/O is in flight. A
+ * `MessageChannel` hop still yields to the event loop between batches but
+ * is dispatched promptly. The port is unref'd so an idle engine never keeps
+ * the process alive.
  */
 function createEngineScheduler(): Scheduler {
   if (typeof MessageChannel === "undefined") return new AsyncScheduler();
@@ -142,16 +158,18 @@ export async function runEffSafe<A>(
 
 /**
  * Resolve what a user callback returned — an `Eff`, a Promise, or a plain
- * value. An `Eff` is run; its typed failure or defect rejects as the plain
- * error (never a wrapper).
+ * value. An `Eff` — returned directly or as what a Promise resolves to — is
+ * run; its typed failure or defect rejects as the plain error (never a
+ * wrapper).
  */
 export async function runHookValue(result: unknown): Promise<unknown> {
-  if (isEff(result)) {
-    const exit = await runEngineExit(result);
+  const value = !isEff(result) && isThenable(result) ? await result : result;
+  if (isEff(value)) {
+    const exit = await runEngineExit(value);
     if (exit._tag === "Failure") throw Cause.squash(exit.cause);
     return exit.value;
   }
-  return result;
+  return value;
 }
 
 /** `runHookValue` for callbacks whose value is ignored (compensation, hooks). */

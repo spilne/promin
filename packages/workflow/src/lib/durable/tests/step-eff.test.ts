@@ -57,7 +57,7 @@ describe("step Eff — non-Eff returns", () => {
     expect(await runner.run({ workflow: wf, workflowId: "t-1", input: 21 })).toBe(42);
   });
 
-  it("an async function returning an Eff runs it (Eff is thenable); its failure is a defect", async () => {
+  it("an async function returning an Eff runs it as the step body; its typed failure stays typed and is retried", async () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     let attempts = 0;
@@ -69,13 +69,20 @@ describe("step Eff — non-Eff returns", () => {
           attempts++;
           return fail(err);
         }) as never,
-        // Typed retry never sees it: the Promise already settled the Eff.
         { retry: { maxRetries: 2, baseDelayMs: 1 } },
       )
       .build();
 
     await expect(runner.run({ workflow: wf, workflowId: "t-2", input: 0 })).rejects.toBe(err);
-    expect(attempts).toBe(1);
+    expect(attempts).toBe(3);
+  });
+
+  it("an async function returning a succeeding Eff yields the Eff's value", async () => {
+    const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+    const wf = workflow<number>({ name: "async-eff-ok" })
+      .step("double", (async ({ input }: { input: number }) => succeed(input * 2)) as never)
+      .build();
+    expect(await runner.run({ workflow: wf, workflowId: "t-2b", input: 21 })).toBe(42);
   });
 
   it("a plain value returned from .step() fails the step with a clear message", async () => {
