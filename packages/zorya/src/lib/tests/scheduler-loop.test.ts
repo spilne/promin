@@ -22,7 +22,7 @@ import {
   workflow,
   createWorkflowRunner,
 } from "@promin/workflow";
-import type { ScheduleTick } from "@promin/workflow";
+import type { ScheduleTick, SchedulerErrorEvent } from "@promin/workflow";
 import { ZoryaClient, ZoryaWorker } from "@promin/zorya-client";
 import { ZoryaServer } from "../../server/server.ts";
 import { SchedulerLoop } from "../../server/services/scheduler-loop.ts";
@@ -533,5 +533,88 @@ describe("SchedulerLoop — injected WallClock", () => {
     await loop.stop();
     expect(clock.pendingCount()).toBe(0);
     expect(polls()).toBe(1);
+  });
+});
+
+describe("SchedulerLoop — delivery and isolation", () => {
+  const T0 = Date.parse("2026-01-01T00:00:00Z");
+
+  function setup() {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemorySchedulerStorage({ clock });
+    const fired: ScheduleTick[] = [];
+    const errors: SchedulerErrorEvent[] = [];
+    const loop = new SchedulerLoop({
+      storage,
+      clock,
+      fire: async (tick) => {
+        fired.push(tick);
+      },
+      onError: (e) => void errors.push(e),
+    });
+    return { clock, storage, loop, fired, errors };
+  }
+
+  it("dispatches before committing: a failed commit re-fires the same tick next poll", async () => {
+    const { storage, loop, fired, errors } = setup();
+    await storage.upsertSchedule({ id: "a", intervalMs: 60_000 });
+    const commit = storage.commitPoll.bind(storage);
+    let failNext = true;
+    storage.commitPoll = async (updates) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error("commit blip");
+      }
+      return commit(updates);
+    };
+
+    await loop.tickOnce();
+    await loop.tickOnce();
+    await loop.tickOnce();
+
+    expect(fired.map((t) => [t.scheduleId, t.tickNumber])).toEqual([
+      ["a", 0],
+      ["a", 0],
+    ]);
+    expect(errors.map((e) => e.phase)).toEqual(["commit"]);
+    expect((await storage.loadScheduleState("a"))?.tickCount).toBe(1);
+  });
+
+  it("an invalid stored schedule is reported and disabled; the rest of the poll fires", async () => {
+    const { storage, loop, fired, errors } = setup();
+    await storage.upsertSchedule({ id: "bad", cron: "not a cron" });
+    await storage.recordFire("bad", new Date(T0 - 60_000));
+    await storage.upsertSchedule({ id: "good", intervalMs: 1_000 });
+
+    await loop.tickOnce();
+
+    expect(fired.map((t) => t.scheduleId)).toEqual(["good"]);
+    expect(errors.map((e) => [e.phase, e.scheduleId])).toEqual([["schedule", "bad"]]);
+    expect((await storage.loadSchedule("bad"))?.enabled).toBe(false);
+  });
+
+  it("a storage error in a poll is reported and the loop keeps polling", async () => {
+    const { clock, storage, loop, fired, errors } = setup();
+    await storage.upsertSchedule({ id: "a", intervalMs: 60_000 });
+    const findDue = storage.findDue.bind(storage);
+    let failNext = true;
+    storage.findDue = async (params) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error("db blip");
+      }
+      return findDue(params);
+    };
+
+    loop.start();
+    expect(await pollUntil(() => errors.length === 1 && clock.pendingCount() === 1, 2_000)).toBe(
+      true,
+    );
+    clock.advance(1_000);
+    expect(await pollUntil(() => fired.length === 1, 2_000)).toBe(true);
+    await loop.stop();
+
+    expect(errors.map((e) => e.phase)).toEqual(["poll"]);
+    expect(fired.map((t) => t.scheduleId)).toEqual(["a"]);
   });
 });

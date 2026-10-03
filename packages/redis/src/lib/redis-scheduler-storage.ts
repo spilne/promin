@@ -17,6 +17,7 @@ import {
   scheduleMetadataContains,
   SystemWallClock,
   type DurableScheduleConfig,
+  type ScheduleCommit,
   type SchedulerStorage,
   type WallClock,
 } from "@promin/workflow";
@@ -38,8 +39,9 @@ const GLOBAL_NS = "_";
  * - Fire state (`lastFiredAt`, `tickCount`) survives a replace.
  * - A namespace change moves the id between the per-namespace `all` sets and
  *   carries any pending next-run over to the new due set.
- * - A brand-new enabled schedule is seeded into the due set at ARGV[4]
- *   (now, or `startAt` when that is later). Updates leave next-run alone.
+ * - Due-tracking follows the enabled flag: a disabled schedule is removed
+ *   from the due set; an enabled one keeps its pending next-run, or is
+ *   seeded at ARGV[4] (now, or `startAt` when that is later) if it has none.
  *
  * KEYS: [schedule_key, all_key, due_key]
  * ARGV: [id, namespace_key_base, namespace, seed_ms, enabled('1'|'0'),
@@ -84,10 +86,91 @@ if existed and old_ns ~= ns then
   end
 end
 
-if not existed and enabled == '1' then
+if enabled == '1' then
   redis.call('ZADD', due_key, 'NX', seed_ms, id)
+else
+  redis.call('ZREM', due_key, id)
 end
 return existed and 0 or 1
+`;
+
+/**
+ * Set or clear one schedule's next run, honoring the enabled flag: a
+ * missing or disabled schedule is removed from its due set instead.
+ *
+ * KEYS: [schedule_key]
+ * ARGV: [id, namespace_key_base, global_ns, next_run_ms ('' = clear)]
+ */
+const SET_NEXT_RUN_LUA = `
+local schedule_key = KEYS[1]
+local id = ARGV[1]
+local fields = redis.call('HMGET', schedule_key, 'id', 'namespace', 'enabled')
+local ns = fields[2] or ARGV[3]
+local due_key = ARGV[2] .. ns .. ':due'
+if not fields[1] or fields[3] == '0' or ARGV[4] == '' then
+  redis.call('ZREM', due_key, id)
+else
+  redis.call('ZADD', due_key, ARGV[4], id)
+end
+return 1
+`;
+
+/**
+ * Toggle a schedule's enabled flag. Disabling removes it from its due set;
+ * enabling seeds it at ARGV[5] (now, or a later `startAt`) unless it already
+ * has a pending next run. Unknown ids are left alone.
+ *
+ * KEYS: [schedule_key]
+ * ARGV: [id, namespace_key_base, global_ns, enabled ('1'|'0'), now_ms]
+ */
+const SET_ENABLED_LUA = `
+local schedule_key = KEYS[1]
+local id = ARGV[1]
+local fields = redis.call('HMGET', schedule_key, 'id', 'namespace', 'startAt')
+if not fields[1] then return 0 end
+local ns = fields[2] or ARGV[3]
+local due_key = ARGV[2] .. ns .. ':due'
+redis.call('HSET', schedule_key, 'enabled', ARGV[4])
+if ARGV[4] == '1' then
+  local seed = tonumber(ARGV[5])
+  if fields[3] and tonumber(fields[3]) > seed then seed = tonumber(fields[3]) end
+  redis.call('ZADD', due_key, 'NX', seed, id)
+else
+  redis.call('ZREM', due_key, id)
+end
+return 1
+`;
+
+/**
+ * Due ids from one namespace's due set, skipping (and pruning) entries
+ * whose schedule is missing or disabled so they can't fill the limit.
+ *
+ * KEYS: [due_key]
+ * ARGV: [schedule_key_prefix, now_ms, limit]
+ */
+const FIND_DUE_LUA = `
+local due_key = KEYS[1]
+local prefix = ARGV[1]
+local now_ms = ARGV[2]
+local limit = tonumber(ARGV[3])
+local out = {}
+local stale = {}
+local offset = 0
+while #out < limit do
+  local ids = redis.call('ZRANGEBYSCORE', due_key, '-inf', now_ms, 'LIMIT', offset, limit)
+  if #ids == 0 then break end
+  for _, id in ipairs(ids) do
+    local fields = redis.call('HMGET', prefix .. id, 'id', 'enabled')
+    if fields[1] and fields[2] ~= '0' then
+      if #out < limit then out[#out + 1] = id end
+    else
+      stale[#stale + 1] = id
+    end
+  end
+  offset = offset + #ids
+end
+for _, id in ipairs(stale) do redis.call('ZREM', due_key, id) end
+return out
 `;
 
 export class RedisSchedulerStorage implements SchedulerStorage {
@@ -131,14 +214,21 @@ export class RedisSchedulerStorage implements SchedulerStorage {
   // -------------------------------------------------------------------------
 
   async findDue(params: { now: Date; limit: number; namespace?: string }): Promise<string[]> {
-    return await this.redis.zrangebyscore(
-      this.dueKey(params.namespace),
-      "-inf",
+    return await this.findDueIn({ dueKey: this.dueKey(params.namespace), ...params });
+  }
+
+  /** Enabled due ids from one due set; prunes disabled or deleted leftovers. */
+  private async findDueIn(params: { dueKey: string; now: Date; limit: number }): Promise<string[]> {
+    if (params.limit <= 0) return [];
+    const ids = await this.redis.eval(
+      FIND_DUE_LUA,
+      1,
+      params.dueKey,
+      `${this.prefix}:schedule:`,
       params.now.getTime(),
-      "LIMIT",
-      0,
       params.limit,
     );
+    return (ids as string[] | null) ?? [];
   }
 
   async loadSchedule(id: string): Promise<DurableScheduleConfig | null> {
@@ -200,32 +290,22 @@ export class RedisSchedulerStorage implements SchedulerStorage {
   }
 
   async setNextRun(id: string, nextRun: Date | null): Promise<void> {
-    // Need the schedule's namespace to know which due-ZSET to update.
-    const ns = await this.redis.hget(this.scheduleKey(id), "namespace");
-    const namespace = ns ?? undefined;
-    const dueKey = this.dueKey(namespace);
-    if (nextRun === null) {
-      await this.redis.zrem(dueKey, id);
-    } else {
-      await this.redis.zadd(dueKey, nextRun.getTime(), id);
-    }
+    // The script looks up the schedule's namespace (which due-ZSET) and
+    // keeps disabled or deleted schedules out of due-tracking.
+    await this.redis.eval(
+      SET_NEXT_RUN_LUA,
+      1,
+      this.scheduleKey(id),
+      id,
+      `${this.prefix}:ns:`,
+      GLOBAL_NS,
+      nextRun === null ? "" : nextRun.getTime(),
+    );
   }
 
-  async commitPoll(
-    updates: Array<{
-      id: string;
-      firedAt?: Date;
-      tickIncrement?: number;
-      nextRun: Date | null;
-    }>,
-  ): Promise<void> {
+  async commitPoll(updates: ScheduleCommit[]): Promise<void> {
     if (updates.length === 0) return;
 
-    // Need each id's namespace to pick the right due-ZSET. Fetch them in one
-    // pipelined fan-out (same trick as loadSchedules).
-    const namespaces = await Promise.all(
-      updates.map((u) => this.redis.hget(this.scheduleKey(u.id), "namespace")),
-    );
     // Need current tickCounts for the increments — Redis lacks an HSET-with-add
     // primitive, so fetch + recompute. One pipeline round-trip total.
     const tickCounts = await Promise.all(
@@ -236,8 +316,9 @@ export class RedisSchedulerStorage implements SchedulerStorage {
       ),
     );
 
-    // Build pipeline: HSET fire-state for any update that fired, then
-    // ZADD/ZREM for the next-run change. Single MULTI commits everything.
+    // HSET fire-state for any update that fired, then set the next run
+    // (the script skips schedules paused since the poll). The client
+    // pipelines these concurrent calls on one connection.
     await Promise.all(
       updates.map(async (u, i) => {
         if (u.firedAt !== undefined && u.tickIncrement && u.tickIncrement > 0) {
@@ -247,13 +328,7 @@ export class RedisSchedulerStorage implements SchedulerStorage {
             tickCount: String(next),
           });
         }
-        const ns = namespaces[i] ?? undefined;
-        const dueKey = this.dueKey(ns);
-        if (u.nextRun === null) {
-          await this.redis.zrem(dueKey, u.id);
-        } else {
-          await this.redis.zadd(dueKey, u.nextRun.getTime(), u.id);
-        }
+        await this.setNextRun(u.id, u.nextRun);
       }),
     );
   }
@@ -268,7 +343,6 @@ export class RedisSchedulerStorage implements SchedulerStorage {
       id: config.id,
       timezone: config.timezone ?? "UTC",
       enabled: config.enabled === false ? "0" : "1",
-      overlapPolicy: config.overlapPolicy ?? "allow",
       maxCatchUp: String(config.maxCatchUp ?? 0),
       jitterMs: String(config.jitterMs ?? 0),
     };
@@ -306,7 +380,16 @@ export class RedisSchedulerStorage implements SchedulerStorage {
   }
 
   async setEnabled(id: string, enabled: boolean): Promise<void> {
-    await this.redis.hset(this.scheduleKey(id), { enabled: enabled ? "1" : "0" });
+    await this.redis.eval(
+      SET_ENABLED_LUA,
+      1,
+      this.scheduleKey(id),
+      id,
+      `${this.prefix}:ns:`,
+      GLOBAL_NS,
+      enabled ? "1" : "0",
+      this.clock.currentTimeMs(),
+    );
   }
 
   async listSchedules(params?: {
@@ -419,10 +502,9 @@ export class RedisSchedulerStorage implements SchedulerStorage {
     }
     // Score-bounded zrange across each due-set. Run in parallel — the
     // client pipelines them on a single connection.
-    const nowMs = params.now.getTime();
     const lists = await Promise.all(
       dueKeys.map(async ({ key, namespace }) => {
-        const ids = await this.redis.zrangebyscore(key, "-inf", nowMs, "LIMIT", 0, params.limit);
+        const ids = await this.findDueIn({ dueKey: key, now: params.now, limit: params.limit });
         return ids.map((id) => ({ id, namespace }));
       }),
     );
@@ -452,7 +534,6 @@ function rawToConfig(raw: Record<string, string>): DurableScheduleConfig {
     startAt: raw.startAt ? new Date(Number(raw.startAt)) : undefined,
     endAt: raw.endAt ? new Date(Number(raw.endAt)) : undefined,
     metadata: raw.metadata ? JSON.parse(raw.metadata) : undefined,
-    overlapPolicy: (raw.overlapPolicy as DurableScheduleConfig["overlapPolicy"]) ?? "allow",
     maxCatchUp: raw.maxCatchUp !== undefined ? Number(raw.maxCatchUp) : 0,
     jitterMs: raw.jitterMs !== undefined ? Number(raw.jitterMs) : 0,
   };

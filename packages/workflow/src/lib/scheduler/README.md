@@ -8,12 +8,14 @@ A scheduler manages named schedules and emits `ScheduleTick` events. Each tick c
 
 Perfect streams are single-use, so every `stream()` / `subscribe()` call builds a fresh one. Stopping the consumer (`take(n)`, `interruptAfter`, breaking out of a `for await` over `toAsyncIterable()`) cancels pending timers and removes listeners.
 
+Management methods (`register`, `unregister`, `pause`, `resume`, `list`) are async on every implementation: they resolve once the change is applied and reject on an invalid config or a storage error.
+
 Two implementations:
 
-| Implementation      | Package            | Persistence | Multi-instance                               |
-| ------------------- | ------------------ | ----------- | -------------------------------------------- |
-| `InMemoryScheduler` | `@promin/workflow` | None        | No                                           |
-| `DurableScheduler`  | `@promin/postgres` | Postgres    | Yes (leader election via `pg_advisory_lock`) |
+| Implementation      | Package            | Persistence                                                        | Multi-instance                      |
+| ------------------- | ------------------ | ------------------------------------------------------------------ | ----------------------------------- |
+| `InMemoryScheduler` | `@promin/workflow` | None                                                               | No                                  |
+| `DurableScheduler`  | `@promin/workflow` | Pluggable (`SchedulerStorage`): in-memory, Postgres, Redis, SQLite | Yes (leader election per namespace) |
 
 ## ScheduleConfig
 
@@ -28,6 +30,9 @@ interface ScheduleConfig {
   intervalMs?: number; // Fixed interval in milliseconds
   timezone?: string; // IANA timezone (default: "UTC")
   enabled?: boolean; // Active state (default: true)
+  startAt?: Date; // Don't fire before this time
+  endAt?: Date; // Stop firing after this time
+  jitterMs?: number; // Random [0, jitterMs) delay before each tick is emitted
   metadata?: Record<string, unknown>; // Passed through to ScheduleTick
 }
 ```
@@ -41,8 +46,8 @@ interface ScheduleTick {
   scheduleId: string; // Which schedule fired
   scheduleName?: string; // Human-readable name
   scheduledAt: Date; // Nominal fire time (cron-computed)
-  firedAt: Date; // Actual fire time (may differ due to jitter/load)
-  tickNumber: number; // Monotonic counter (0, 1, 2, ...)
+  firedAt: Date; // When it was emitted (later than scheduledAt under jitter/load)
+  tickNumber: number; // Monotonic counter (0, 1, 2, ...); same on redelivery
   metadata?: Record<string, unknown>;
 }
 ```
@@ -57,7 +62,7 @@ import { createScheduler } from "@promin/workflow";
 const scheduler = createScheduler();
 
 // Cron — every weekday at 9am EST
-scheduler.register({
+await scheduler.register({
   id: "morning-report",
   cron: "0 9 * * MON-FRI",
   timezone: "America/New_York",
@@ -65,10 +70,10 @@ scheduler.register({
 });
 
 // Fixed interval — every 30 seconds
-scheduler.register({ id: "health-check", intervalMs: 30_000 });
+await scheduler.register({ id: "health-check", intervalMs: 30_000 });
 
 // RRULE — biweekly on Tuesday at 10am
-scheduler.register({
+await scheduler.register({
   id: "standup",
   rrule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU;BYHOUR=10",
 });
@@ -103,22 +108,31 @@ for await (const tick of scheduler.subscribe().toAsyncIterable()) {
 ### Runtime control
 
 ```typescript
-scheduler.pause("health-check"); // Stops emitting, keeps config
-scheduler.resume("health-check"); // Resumes emitting
-scheduler.unregister("health-check"); // Removes entirely, stream ends
-scheduler.list(); // All registered ScheduleConfigs
+await scheduler.pause("health-check"); // Stops emitting, keeps config
+await scheduler.resume("health-check"); // Resumes emitting
+await scheduler.unregister("health-check"); // Removes entirely, stream ends
+await scheduler.list(); // All registered ScheduleConfigs
 ```
 
-## Durable Scheduler (Postgres)
+A schedule paused, replaced or removed while a stream waits for its next fire time emits nothing for that wait. The in-memory scheduler has no persistence and no catch-up.
 
-For production multi-instance deployments, use `DurableScheduler` from `@promin/postgres`. It adds:
+## Durable Scheduler
 
-- **Persistent schedules** stored in Postgres
-- **Catch-up** for missed runs (e.g., server was down)
-- **Leader election** via `pg_advisory_lock` so only one instance fires
-- **Jitter** to spread load across time
+`DurableScheduler` polls a `SchedulerStorage`. It adds:
+
+- **Persistent schedules** in the storage backend
+- **Catch-up** for missed runs: when more than one occurrence was missed (the scheduler was down), the newest `max(1, maxCatchUp)` fire, oldest first — for cron, RRULE and interval schedules alike
+- **Leader election** per namespace so only one instance fires
+- **Jitter** (`jitterMs`) delays each next run by a random `[0, jitterMs)`, spreading schedules that share a boundary
 - **Backfill** to generate ticks for past time ranges
-- **Overlap policies** to control concurrent schedule executions
+
+### Delivery guarantee: at least once
+
+Each poll computes the due ticks, emits them, and commits the fire state only after the consumer has pulled past them; then it waits `pollIntervalMs` and polls again. A tick is acknowledged when the consumer pulls the next one. If the consumer stops early (`take(n)`, interruption, crash), schedules whose ticks were all acknowledged are committed and the rest stay due: the next poll emits them again with the **same `tickNumber`**. Derive run ids with `scheduleTickRunId(tick.scheduleId, tick.tickNumber)` (or another id derived only from the tick, like `toWorkflowId` below) so a redelivered tick is a no-op. Zorya's scheduler loop gives the same guarantee: it dispatches a poll's ticks, then commits.
+
+Storage errors never end the stream. A failed poll is reported through `onError` and retried with exponential backoff (on the injected clock, capped by `maxErrorBackoffMs`); a failed commit is reported and its ticks are redelivered; a stored schedule that can't be evaluated (say, an invalid cron written straight to storage) is reported, disabled and skipped while the others keep firing. Paused schedules leave due-tracking (`nextRun = null`), so they never crowd active ones out of a poll batch.
+
+### Postgres
 
 ```typescript
 import { createDurableScheduler, migrate } from "@promin/postgres";
@@ -127,7 +141,7 @@ await migrate(db);
 const scheduler = createDurableScheduler({ db });
 
 // Register persistent schedule
-await scheduler.registerAsync({
+await scheduler.register({
   id: "daily-etl",
   cron: "0 2 * * *",
   timezone: "America/New_York",

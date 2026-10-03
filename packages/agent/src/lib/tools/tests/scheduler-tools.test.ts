@@ -28,7 +28,7 @@ describe("createSchedulerTools", () => {
     expect(reply).toBe('Scheduled "ping": every 20ms');
 
     await firstTick;
-    scheduler.unregister("ping");
+    await scheduler.unregister("ping");
 
     expect(fired[0]!.task).toBe("say hi");
     expect(fired[0]!.tick.scheduleId).toBe("ping");
@@ -39,9 +39,9 @@ describe("createSchedulerTools", () => {
     const tasks: string[] = [];
     createSchedulerTools({ scheduler, onTick: (task) => tasks.push(task) });
 
-    scheduler.register({ id: "raw", intervalMs: 10, metadata: { other: 1 } });
+    await scheduler.register({ id: "raw", intervalMs: 10, metadata: { other: 1 } });
     await new Promise((resolve) => setTimeout(resolve, 60));
-    scheduler.unregister("raw");
+    await scheduler.unregister("raw");
 
     expect(tasks).toEqual([]);
   });

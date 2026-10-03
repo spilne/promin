@@ -83,7 +83,7 @@ import { RedisDurableScheduler } from "@promin/redis";
 
 const scheduler = new RedisDurableScheduler({ redis, prefix: "sched", pollIntervalMs: 1000 });
 
-await scheduler.registerAsync({ id: "nightly-report", cron: "0 2 * * *", timezone: "UTC" });
+await scheduler.register({ id: "nightly-report", cron: "0 2 * * *", timezone: "UTC" });
 ```
 
 `RedisSchedulerStorage` can also be passed to the generic `DurableScheduler` directly. Schedules are hashes; each namespace has its own due-time sorted set and leader lock, so tenants poll independently.

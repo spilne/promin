@@ -80,7 +80,7 @@ export function createSchedulerTools(config: SchedulerToolsConfig) {
           message: "Provide either cron or intervalMs",
         }),
       execute: async ({ id, task, cron, intervalMs, timezone }) => {
-        config.scheduler.register({
+        await config.scheduler.register({
           id,
           ...(cron ? { cron } : {}),
           ...(intervalMs ? { intervalMs } : {}),
@@ -99,7 +99,7 @@ export function createSchedulerTools(config: SchedulerToolsConfig) {
       description: "List all registered schedules and their configurations.",
       parameters: z.object({}),
       execute: async () => {
-        const schedules = config.scheduler.list();
+        const schedules = await config.scheduler.list();
         if (!schedules.length) return "No schedules registered.";
         return schedules
           .map((s) => {
@@ -119,7 +119,7 @@ export function createSchedulerTools(config: SchedulerToolsConfig) {
         id: z.string().describe("The schedule ID to cancel"),
       }),
       execute: async ({ id }) => {
-        config.scheduler.unregister(id);
+        await config.scheduler.unregister(id);
         return `Cancelled schedule "${id}".`;
       },
     }),

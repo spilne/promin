@@ -67,7 +67,7 @@ await migrate(db, {
 
 ## Durable Scheduler
 
-Postgres-backed, distributed-safe cron scheduler. Persistent schedules, catch-up for missed runs, overlap policies, leader election via `pg_advisory_lock`, jitter, and backfill.
+Postgres-backed, distributed-safe cron scheduler. Persistent schedules, catch-up for missed runs, at-least-once tick delivery, leader election via `pg_advisory_lock`, jitter, and backfill.
 
 Implements `Streamable<ScheduleTick>` — works with `trigger()` and all perfect `Stream` combinators.
 
@@ -78,7 +78,7 @@ await migrate(db);
 const scheduler = createDurableScheduler({ db });
 
 // Register persistent schedules
-await scheduler.registerAsync({
+await scheduler.register({
   id: "daily-etl",
   name: "Daily ETL Pipeline",
   cron: "0 2 * * *",
@@ -88,7 +88,7 @@ await scheduler.registerAsync({
   metadata: { pipeline: "etl" },
 });
 
-await scheduler.registerAsync({
+await scheduler.register({
   id: "heartbeat",
   intervalMs: 30_000,
 });
@@ -112,8 +112,8 @@ await scheduler
 const next5 = await scheduler.nextFireTimes("daily-etl", 5);
 await scheduler.triggerNow("daily-etl");
 await scheduler.backfill("daily-etl", { from: new Date("2026-03-01"), to: new Date("2026-03-20") });
-scheduler.pause("daily-etl");
-scheduler.resume("daily-etl");
+await scheduler.pause("daily-etl");
+await scheduler.resume("daily-etl");
 ```
 
 ## Step Queue

@@ -6,15 +6,6 @@ import { migrate } from "../migrate.ts";
 import { createDurableScheduler, DurableScheduler } from "../durable-scheduler.ts";
 import { FakeWallClock } from "@promin/workflow";
 
-/** Poll a condition on real time until it holds (or give up after 5s). */
-async function waitFor(condition: () => boolean): Promise<void> {
-  const deadline = Date.now() + 5_000;
-  while (!condition()) {
-    if (Date.now() > deadline) throw new Error("waitFor: condition not met within 5s");
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-}
-
 // ---------------------------------------------------------------------------
 // DurableScheduler
 // ---------------------------------------------------------------------------
@@ -23,7 +14,7 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
   describe("register + list", () => {
     it("registers a cron schedule", async () => {
       const scheduler = createDurableScheduler({ db: pg.db });
-      await scheduler.registerAsync({
+      await scheduler.register({
         id: "daily-etl",
         name: "Daily ETL",
         cron: "0 2 * * *",
@@ -32,7 +23,7 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
         metadata: { pipeline: "etl" },
       });
 
-      const schedules = await scheduler.listAsync();
+      const schedules = await scheduler.list();
       const found = schedules.find((s) => s.id === "daily-etl");
       expect(found).toBeDefined();
       expect(found!.name).toBe("Daily ETL");
@@ -44,18 +35,18 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
 
     it("registers an interval schedule", async () => {
       const scheduler = createDurableScheduler({ db: pg.db });
-      await scheduler.registerAsync({ id: "heartbeat", intervalMs: 30_000 });
+      await scheduler.register({ id: "heartbeat", intervalMs: 30_000 });
 
-      const schedules = await scheduler.listAsync();
+      const schedules = await scheduler.list();
       expect(schedules.find((s) => s.id === "heartbeat")).toBeDefined();
     });
 
     it("upserts on re-register", async () => {
       const scheduler = createDurableScheduler({ db: pg.db });
-      await scheduler.registerAsync({ id: "upsert-test", cron: "0 * * * *", name: "v1" });
-      await scheduler.registerAsync({ id: "upsert-test", cron: "0 * * * *", name: "v2" });
+      await scheduler.register({ id: "upsert-test", cron: "0 * * * *", name: "v1" });
+      await scheduler.register({ id: "upsert-test", cron: "0 * * * *", name: "v2" });
 
-      const schedules = await scheduler.listAsync();
+      const schedules = await scheduler.list();
       const found = schedules.filter((s) => s.id === "upsert-test");
       expect(found).toHaveLength(1);
       expect(found[0]!.name).toBe("v2");
@@ -63,11 +54,11 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
 
     it("lists only enabled schedules", async () => {
       const scheduler = createDurableScheduler({ db: pg.db });
-      await scheduler.registerAsync({ id: "enabled-1", intervalMs: 1000, enabled: true });
-      await scheduler.registerAsync({ id: "disabled-1", intervalMs: 1000, enabled: false });
+      await scheduler.register({ id: "enabled-1", intervalMs: 1000, enabled: true });
+      await scheduler.register({ id: "disabled-1", intervalMs: 1000, enabled: false });
 
-      const enabled = await scheduler.listAsync({ enabled: true });
-      const disabled = await scheduler.listAsync({ enabled: false });
+      const enabled = await scheduler.list({ enabled: true });
+      const disabled = await scheduler.list({ enabled: false });
 
       expect(enabled.every((s) => s.enabled === true)).toBe(true);
       expect(disabled.every((s) => s.enabled === false)).toBe(true);
@@ -77,7 +68,7 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
   describe("nextFireTimes", () => {
     it("previews next fire times for cron", async () => {
       const scheduler = createDurableScheduler({ db: pg.db });
-      await scheduler.registerAsync({ id: "preview", cron: "0 * * * *" }); // every hour
+      await scheduler.register({ id: "preview", cron: "0 * * * *" }); // every hour
 
       const times = await scheduler.nextFireTimes("preview", 3);
       expect(times).toHaveLength(3);
@@ -89,7 +80,7 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
   describe("triggerNow", () => {
     it("manually fires a schedule", async () => {
       const scheduler = createDurableScheduler({ db: pg.db });
-      await scheduler.registerAsync({ id: "manual", cron: "0 0 1 1 *" }); // yearly
+      await scheduler.register({ id: "manual", cron: "0 0 1 1 *" }); // yearly
 
       const tick = await scheduler.triggerNow("manual");
       expect(tick).not.toBeNull();
@@ -100,7 +91,7 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
 
     it("increments tickNumber on repeated triggers", async () => {
       const scheduler = createDurableScheduler({ db: pg.db });
-      await scheduler.registerAsync({ id: "multi-trigger", cron: "0 0 1 1 *" });
+      await scheduler.register({ id: "multi-trigger", cron: "0 0 1 1 *" });
 
       const t1 = await scheduler.triggerNow("multi-trigger");
       const t2 = await scheduler.triggerNow("multi-trigger");
@@ -121,7 +112,7 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
   describe("backfill", () => {
     it("fires ticks for a date range", async () => {
       const scheduler = createDurableScheduler({ db: pg.db });
-      await scheduler.registerAsync({ id: "backfill", cron: "0 0 * * *" }); // daily at midnight
+      await scheduler.register({ id: "backfill", cron: "0 0 * * *" }); // daily at midnight
 
       const from = new Date("2026-03-01T00:00:00Z");
       const to = new Date("2026-03-05T00:00:00Z");
@@ -137,7 +128,7 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
   describe("stream", () => {
     it("emits ticks from interval schedule via stream", async () => {
       const scheduler = createDurableScheduler({ db: pg.db, pollIntervalMs: 100 });
-      await scheduler.registerAsync({ id: "stream-test", intervalMs: 50 });
+      await scheduler.register({ id: "stream-test", intervalMs: 50 });
 
       const ticks = await scheduler.stream("stream-test").take(2).toArray().run();
 
@@ -149,7 +140,7 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
 
     it("subscribe works like stream", async () => {
       const scheduler = createDurableScheduler({ db: pg.db, pollIntervalMs: 100 });
-      await scheduler.registerAsync({ id: "sub-test", intervalMs: 50 });
+      await scheduler.register({ id: "sub-test", intervalMs: 50 });
 
       const ticks = await scheduler.subscribe().take(1).toArray().run();
       expect(ticks).toHaveLength(1);
@@ -168,13 +159,11 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
         namespace: "fake-clock",
         clock,
       });
-      await scheduler.registerAsync({ id: "fake-clock-tick", intervalMs: 10_000 });
+      await scheduler.register({ id: "fake-clock-tick", intervalMs: 10_000 });
 
-      const result = scheduler.stream("fake-clock-tick").take(1).toArray().run();
-      // The first poll ends by parking on the clock's interval timer.
-      await waitFor(() => clock.pendingCount() > 0);
-      clock.advance(1_000);
-      const [tick] = await result;
+      // The first poll's ticks are delivered right away, before any wait.
+      const [tick] = await scheduler.stream("fake-clock-tick").take(1).toArray().run();
+      expect(clock.pendingCount()).toBe(0);
 
       expect(tick!.scheduledAt.getTime()).toBe(t0);
       expect(tick!.firedAt.getTime()).toBe(t0);
@@ -184,8 +173,8 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
   describe("multiple schedules", () => {
     it("streams ticks from multiple schedules merged", async () => {
       const scheduler = createDurableScheduler({ db: pg.db, pollIntervalMs: 100 });
-      await scheduler.registerAsync({ id: "multi-a", intervalMs: 50, name: "A" });
-      await scheduler.registerAsync({ id: "multi-b", intervalMs: 50, name: "B" });
+      await scheduler.register({ id: "multi-a", intervalMs: 50, name: "A" });
+      await scheduler.register({ id: "multi-b", intervalMs: 50, name: "B" });
 
       const ticks = await scheduler.stream().take(4).toArray().run();
 
@@ -196,8 +185,8 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
 
     it("stream(id) filters to single schedule", async () => {
       const scheduler = createDurableScheduler({ db: pg.db, pollIntervalMs: 100 });
-      await scheduler.registerAsync({ id: "filter-a", intervalMs: 50 });
-      await scheduler.registerAsync({ id: "filter-b", intervalMs: 50 });
+      await scheduler.register({ id: "filter-a", intervalMs: 50 });
+      await scheduler.register({ id: "filter-b", intervalMs: 50 });
 
       const ticks = await scheduler.stream("filter-a").take(2).toArray().run();
 
@@ -207,8 +196,8 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
 
     it("disabled schedule does not emit", async () => {
       const scheduler = createDurableScheduler({ db: pg.db, pollIntervalMs: 100 });
-      await scheduler.registerAsync({ id: "active-sched", intervalMs: 50 });
-      await scheduler.registerAsync({ id: "disabled-sched", intervalMs: 50, enabled: false });
+      await scheduler.register({ id: "active-sched", intervalMs: 50 });
+      await scheduler.register({ id: "disabled-sched", intervalMs: 50, enabled: false });
 
       const ticks = await scheduler.stream().take(3).toArray().run();
 
@@ -228,11 +217,6 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
     const scheduler = createDurableScheduler({ db: pg.db, pollIntervalMs: 25 });
     return {
       scheduler,
-      register: (config) => scheduler.registerAsync(config),
-      unregister: (id, options) => scheduler.unregisterAsync(id, options),
-      pause: (id) => scheduler.pauseAsync(id),
-      resume: (id) => scheduler.resumeAsync(id),
-      list: async () => scheduler.listAsync(),
     };
   });
 
@@ -247,7 +231,7 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
       // the same session can re-acquire. In production, these would be
       // separate connections from separate processes.
       // Here we just verify the lock mechanism doesn't throw.
-      await s1.registerAsync({ id: "leader-test", intervalMs: 1000 });
+      await s1.register({ id: "leader-test", intervalMs: 1000 });
 
       const t1 = await s1.triggerNow("leader-test");
       expect(t1).not.toBeNull();

@@ -7,7 +7,12 @@
 // ---------------------------------------------------------------------------
 
 import type { DurableScheduleConfig, SchedulerStorage, WorkflowStorage } from "@promin/workflow";
-import { computeNextRun, isTickLogStorage, scheduleTickRunId } from "@promin/workflow";
+import {
+  computeNextRun,
+  isTickLogStorage,
+  scheduleTickRunId,
+  validateScheduleConfig,
+} from "@promin/workflow";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 
@@ -24,7 +29,6 @@ export interface ScheduleDto {
   endAt?: string;
   jitterMs?: number;
   metadata?: Record<string, unknown>;
-  overlapPolicy?: "skip" | "queue" | "cancel_previous" | "allow";
   maxCatchUp?: number;
   /** ISO timestamp of last fire. */
   lastFiredAt?: string;
@@ -106,7 +110,6 @@ export interface ScheduleCreateRequest {
   startAt?: string;
   endAt?: string;
   jitterMs?: number;
-  overlapPolicy?: "skip" | "queue" | "cancel_previous" | "allow";
   maxCatchUp?: number;
   /** Optional workflow name to link. Stored in metadata.workflowName. */
   workflowName?: string;
@@ -176,7 +179,6 @@ function toDto(params: {
     endAt: iso(config.endAt),
     jitterMs: config.jitterMs,
     metadata: config.metadata,
-    overlapPolicy: config.overlapPolicy,
     maxCatchUp: config.maxCatchUp,
     lastFiredAt: state?.lastFired ? iso(state.lastFired) : undefined,
     tickCount: state?.tickCount,
@@ -273,20 +275,25 @@ export function createSchedule(deps: ScheduleRoutesDeps) {
       endAt: body.endAt ? new Date(body.endAt) : undefined,
       jitterMs: body.jitterMs,
       metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
-      overlapPolicy: body.overlapPolicy,
       maxCatchUp: body.maxCatchUp,
     };
 
+    // Reject what the scheduler couldn't evaluate (bad cron/RRULE, a
+    // non-positive interval, ...) before it reaches storage.
+    try {
+      validateScheduleConfig(config);
+    } catch (err) {
+      return jsonError(400, "invalid_schedule", err instanceof Error ? err.message : String(err));
+    }
+
     try {
       await storage.upsertSchedule(config);
-      // `upsertSchedule` writes config columns only — `next_run` stays
-      // NULL on insert, which makes the row invisible to `findDue` and
-      // the SchedulerLoop never fires it. Match
-      // `DurableScheduler.registerAsync`'s pattern: seed nextRun = now
-      // so the first poll picks it up (computeDueTicks fires one boot
-      // tick at `now` when `lastFired` is null, then commitPoll advances
-      // nextRun onto the natural cron / interval cadence).
-      await storage.setNextRun(config.id, clock.now());
+      // Match `DurableScheduler.register`: an enabled schedule is due now,
+      // so the first poll picks it up (computeDueTicks fires one boot tick
+      // at `now` when `lastFired` is null, then commitPoll advances nextRun
+      // onto the natural cron / interval cadence). A disabled one stays out
+      // of due-tracking — the upsert already cleared it.
+      if (config.enabled !== false) await storage.setNextRun(config.id, clock.now());
       const state = await storage.loadScheduleState(config.id);
       return json(200, toDto({ config, state, clock }));
     } catch (err) {

@@ -7,7 +7,7 @@
 // ---------------------------------------------------------------------------
 
 import type { DurableScheduleConfig, ScheduleTick } from "./types.ts";
-import type { SchedulerStorage } from "./scheduler-storage.ts";
+import type { ScheduleCommit, SchedulerStorage } from "./scheduler-storage.ts";
 import { scheduleMetadataContains } from "./metadata-filter.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 
@@ -55,7 +55,7 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     for (const [id, ts] of this.nextRun) {
       if (ts > nowMs) continue;
       const cfg = this.schedules.get(id);
-      if (!cfg) continue;
+      if (!cfg || cfg.enabled === false) continue;
       if ((cfg.namespace ?? undefined) !== (params.namespace ?? undefined)) continue;
       due.push({ id, nextRun: ts });
     }
@@ -104,15 +104,7 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     else this.nextRun.set(id, nextRun.getTime());
   }
 
-  async commitPoll(
-    updates: Array<{
-      id: string;
-      firedAt?: Date;
-      tickIncrement?: number;
-      nextRun: Date | null;
-      ticks?: readonly ScheduleTick[];
-    }>,
-  ): Promise<void> {
+  async commitPoll(updates: ScheduleCommit[]): Promise<void> {
     // Single-process JS — no transaction primitive needed; all mutations
     // happen inside this synchronous block, which IS the atomic boundary.
     for (const u of updates) {
@@ -123,7 +115,9 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
           tickCount: prev.tickCount + u.tickIncrement,
         });
       }
-      if (u.nextRun === null) this.nextRun.delete(u.id);
+      // A schedule paused (or deleted) since the poll loaded it stays out of due-tracking.
+      const cfg = this.schedules.get(u.id);
+      if (u.nextRun === null || !cfg || cfg.enabled === false) this.nextRun.delete(u.id);
       else this.nextRun.set(u.id, u.nextRun.getTime());
       if (u.ticks?.length) {
         const log = this.ticks.get(u.id) ?? [];
@@ -162,24 +156,19 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
   // -------------------------------------------------------------------------
 
   async upsertSchedule(config: DurableScheduleConfig): Promise<void> {
-    const isNew = !this.schedules.has(config.id);
     // Normalize: enabled defaults to true.
-    this.schedules.set(config.id, { ...config, enabled: config.enabled !== false });
+    const enabled = config.enabled !== false;
+    this.schedules.set(config.id, { ...config, enabled });
     if (!this.state.has(config.id)) {
       this.state.set(config.id, { lastFired: null, tickCount: 0 });
     }
-    // Seed nextRun on INSERT so findDue picks it up without a separate
-    // setNextRun call. Honor `startAt` if it's in the future — otherwise a
-    // schedule with a deferred start would still be reported as due
-    // immediately, which masks the "not yet" gate for callers that rely
-    // on storage-level filtering (e.g. `findDueAcross` in scaling tests).
-    // On UPDATE, leave the existing nextRun untouched — the caller
-    // (registerAsync, patchSchedule) is responsible for recomputing.
-    if (isNew && !this.nextRun.has(config.id) && config.enabled !== false) {
-      const now = this.clock.currentTimeMs();
-      const startAtMs = config.startAt ? config.startAt.getTime() : 0;
-      this.nextRun.set(config.id, Math.max(now, startAtMs));
-    }
+    // Due-tracking follows the enabled flag. Disabled: out of due-tracking.
+    // Enabled: keep an existing nextRun (the caller recomputes it when the
+    // trigger changes), or seed one so findDue picks the schedule up —
+    // honoring a future `startAt` so a deferred schedule isn't reported as
+    // due immediately.
+    if (!enabled) this.nextRun.delete(config.id);
+    else this.seedNextRun(config);
   }
 
   async deleteSchedule(id: string): Promise<void> {
@@ -193,6 +182,16 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     const cfg = this.schedules.get(id);
     if (!cfg) return;
     this.schedules.set(id, { ...cfg, enabled });
+    if (!enabled) this.nextRun.delete(id);
+    else this.seedNextRun(cfg);
+  }
+
+  /** Put an enabled schedule with no nextRun into due-tracking at now (or a later startAt). */
+  private seedNextRun(config: DurableScheduleConfig): void {
+    if (this.nextRun.has(config.id)) return;
+    const now = this.clock.currentTimeMs();
+    const startAtMs = config.startAt ? config.startAt.getTime() : 0;
+    this.nextRun.set(config.id, Math.max(now, startAtMs));
   }
 
   async listSchedules(params?: {
@@ -273,7 +272,7 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     for (const [id, ts] of this.nextRun) {
       if (ts > nowMs) continue;
       const cfg = this.schedules.get(id);
-      if (!cfg) continue;
+      if (!cfg || cfg.enabled === false) continue;
       if (filter && !filter.has(cfg.namespace)) continue;
       due.push({ id, namespace: cfg.namespace, nextRun: ts });
     }

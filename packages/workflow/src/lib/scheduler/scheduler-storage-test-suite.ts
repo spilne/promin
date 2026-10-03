@@ -428,6 +428,87 @@ export function schedulerStorageTestSuite(
       });
     });
 
+    describe("disabled schedules stay out of due-tracking", () => {
+      const past = () => new Date(Date.now() - 1_000);
+
+      it("findDue and findDueAcross never return a disabled schedule, even with a due nextRun", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "off", intervalMs: 1_000 });
+        await s.setEnabled("off", false);
+        // A stale nextRun written after the pause (e.g. by a poll that loaded
+        // the schedule just before it was paused) must still not surface it.
+        await s.setNextRun("off", past());
+        expect(await s.findDue({ now: new Date(), limit: 10 })).not.toContain("off");
+        const across = await s.findDueAcross({ now: new Date(), limit: 10 });
+        expect(across.map((r) => r.id)).not.toContain("off");
+      });
+
+      it("paused schedules don't fill the limit and starve active ones", async () => {
+        const s = await getStorage();
+        for (let i = 0; i < 5; i++) {
+          await s.upsertSchedule({ id: `paused-${i}`, intervalMs: 60_000 });
+          await s.setNextRun(`paused-${i}`, new Date(Date.now() - 10_000 + i));
+          await s.setEnabled(`paused-${i}`, false);
+        }
+        await s.upsertSchedule({ id: "active", intervalMs: 60_000 });
+        await s.setNextRun("active", past());
+
+        expect(await s.findDue({ now: new Date(), limit: 5 })).toEqual(["active"]);
+        const across = await s.findDueAcross({ now: new Date(), limit: 5 });
+        expect(across.map((r) => r.id)).toEqual(["active"]);
+      });
+
+      it("commitPoll does not put a schedule paused since the poll back into due-tracking", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "race", intervalMs: 1_000 });
+        await s.setEnabled("race", false);
+        await s.commitPoll([{ id: "race", nextRun: past() }]);
+        expect(await s.findDue({ now: new Date(), limit: 10 })).not.toContain("race");
+      });
+
+      it("setEnabled(false) clears nextRun; setEnabled(true) seeds it again at now", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "cycle", intervalMs: 1_000 });
+        await s.setNextRun("cycle", new Date(Date.now() + 60_000));
+        await s.setEnabled("cycle", false);
+        await s.setEnabled("cycle", true);
+        // The stale future nextRun was dropped on pause, so resume seeds "now".
+        expect(await s.findDue({ now: new Date(Date.now() + 1_000), limit: 10 })).toContain(
+          "cycle",
+        );
+      });
+
+      it("setEnabled(true) on an already-enabled schedule keeps its nextRun", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "keep", intervalMs: 1_000 });
+        await s.setNextRun("keep", new Date(Date.now() + 60_000));
+        await s.setEnabled("keep", true);
+        expect(await s.findDue({ now: new Date(Date.now() + 1_000), limit: 10 })).not.toContain(
+          "keep",
+        );
+      });
+
+      it("upsert with enabled: false drops it from due-tracking; enabling via upsert seeds it", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "up", intervalMs: 1_000 });
+        await s.setNextRun("up", past());
+        await s.upsertSchedule({ id: "up", intervalMs: 1_000, enabled: false });
+        expect(await s.findDue({ now: new Date(), limit: 10 })).not.toContain("up");
+
+        await s.upsertSchedule({ id: "up", intervalMs: 1_000, enabled: true });
+        expect(await s.findDue({ now: new Date(Date.now() + 1_000), limit: 10 })).toContain("up");
+      });
+
+      it("setEnabled on an unknown id is a no-op", async () => {
+        const s = await getStorage();
+        await s.setEnabled("ghost", true);
+        expect(await s.loadSchedule("ghost")).toBeNull();
+        expect(await s.findDue({ now: new Date(Date.now() + 1_000), limit: 10 })).not.toContain(
+          "ghost",
+        );
+      });
+    });
+
     describe("tryAcquireLeader — per-namespace lock", () => {
       // Cross-instance contention ("instance A holds, instance B blocked") is
       // intentionally NOT in this portable suite — backends differ on what

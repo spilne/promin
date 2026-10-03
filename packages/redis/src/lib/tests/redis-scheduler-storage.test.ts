@@ -59,4 +59,27 @@ redisDescribe("RedisSchedulerStorage", (redis) => {
       ]);
     });
   });
+
+  describe("due-set leftovers", () => {
+    it("findDue skips and prunes due-set entries for disabled or deleted schedules", async () => {
+      const prefix = uniquePrefix("sched");
+      const client = redis.client();
+      const s = new RedisSchedulerStorage({
+        redis: client,
+        prefix,
+        clock: FakeWallClock.create(0),
+      });
+      for (let i = 0; i < 3; i++) {
+        await s.upsertSchedule({ id: `off-${i}`, intervalMs: 1_000, enabled: false });
+      }
+      await s.upsertSchedule({ id: "on", intervalMs: 1_000 });
+      // Due-set entries left behind by an older writer, sorting before "on".
+      const dueKey = `${prefix}:ns:_:due`;
+      for (let i = 0; i < 3; i++) await client.zadd(dueKey, -10 + i, `off-${i}`);
+      await client.zadd(dueKey, -20, "deleted");
+
+      expect(await s.findDue({ now: new Date(0), limit: 2 })).toEqual(["on"]);
+      expect(await client.zrangebyscore(dueKey, "-inf", "+inf")).toEqual(["on"]);
+    });
+  });
 });

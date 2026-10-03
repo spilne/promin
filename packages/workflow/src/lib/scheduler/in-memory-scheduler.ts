@@ -12,6 +12,7 @@ import { Stream, succeed, suspend, sync, type Eff } from "@spilne/perfect-core";
 import { JsonCodec } from "@spilne/perfect-core/connect";
 import { SystemWallClock } from "../shared/wall-clock.ts";
 import { wallClockSleep } from "./wall-clock-sleep.ts";
+import { jitterDelayMs, validateScheduleConfig } from "./schedule-config.ts";
 import type { WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
 import type { Scheduler } from "./scheduler.ts";
@@ -24,6 +25,8 @@ export interface InMemorySchedulerConfig {
    * recheck. Default: `SystemWallClock`. Tests pass a `FakeWallClock`.
    */
   clock?: WallClock;
+  /** Randomness for `jitterMs`, returning `[0, 1)`. Default: `Math.random`. */
+  random?: () => number;
 }
 
 /**
@@ -36,8 +39,13 @@ export interface InMemorySchedulerConfig {
  * Implements `Streamable<ScheduleTick>`: `stream()` and `subscribe()` return a
  * fresh perfect `Stream` on every call.
  *
- * For production multi-instance deployments, use `DurableScheduler` from `@promin/postgres`
- * which adds persistence, catch-up, overlap policies, and leader election.
+ * Ticks are in-process only: there is no persistence and no catch-up, so a
+ * tick whose fire time passes while nothing is consuming the stream is not
+ * replayed. A schedule paused, replaced or removed while a stream waits for
+ * its next fire time emits nothing for that wait.
+ *
+ * For production multi-instance deployments, use `DurableScheduler`, which
+ * adds persistence, catch-up, at-least-once delivery and leader election.
  *
  * @example
  * ```ts
@@ -46,7 +54,7 @@ export interface InMemorySchedulerConfig {
  * const scheduler = createScheduler();
  *
  * // Cron — every weekday at 9am EST
- * scheduler.register({
+ * await scheduler.register({
  *   id: "morning-report",
  *   cron: "0 9 * * MON-FRI",
  *   timezone: "America/New_York",
@@ -54,7 +62,7 @@ export interface InMemorySchedulerConfig {
  * });
  *
  * // Fixed interval — every 30 seconds
- * scheduler.register({ id: "health-check", intervalMs: 30_000 });
+ * await scheduler.register({ id: "health-check", intervalMs: 30_000 });
  *
  * // Stream a single schedule → workflow trigger
  * scheduler.stream("morning-report")
@@ -74,77 +82,56 @@ export interface InMemorySchedulerConfig {
  * }
  *
  * // Pause / resume at runtime
- * scheduler.pause("health-check");
- * scheduler.resume("health-check");
+ * await scheduler.pause("health-check");
+ * await scheduler.resume("health-check");
  *
  * // Unregister ends the stream
- * scheduler.unregister("health-check");
+ * await scheduler.unregister("health-check");
  * ```
  */
 export class InMemoryScheduler implements Scheduler {
-  private schedules = new Map<string, ScheduleConfig & { paused: boolean }>();
+  private schedules = new Map<string, ScheduleEntry>();
   private readonly _registerCallbacks = new Set<(id: string) => void>();
   readonly codec: Codec<ScheduleTick> = JsonCodec as Codec<ScheduleTick>;
   private readonly clock: WallClock;
+  private readonly random: () => number;
 
   constructor(config: InMemorySchedulerConfig = {}) {
     this.clock = config.clock ?? SystemWallClock;
+    this.random = config.random ?? Math.random;
   }
 
   /**
-   * Register a schedule. Validates cron expression eagerly.
-   * @throws If neither `cron` nor `intervalMs` is provided, or if cron is invalid.
+   * Register (or replace) a schedule. Rejects on an invalid config (see
+   * `validateScheduleConfig`). Replacing a schedule restarts its wait with
+   * the new config in every active stream.
    */
-  register(config: ScheduleConfig): void {
-    const triggers = [config.cron, config.rrule, config.intervalMs].filter(Boolean).length;
-    if (triggers === 0) {
-      throw new Error(`Schedule "${config.id}" must have one of: cron, rrule, or intervalMs`);
-    }
-    if (triggers > 1) {
-      throw new Error(
-        `Schedule "${config.id}" must have exactly one of: cron, rrule, or intervalMs`,
-      );
-    }
-    if (config.cron) {
-      try {
-        new Cron(config.cron, { timezone: config.timezone ?? "UTC" });
-      } catch (e) {
-        throw new Error(
-          `Invalid cron expression "${config.cron}" for schedule "${config.id}": ${e}`,
-        );
-      }
-    }
-    if (config.rrule) {
-      try {
-        RRule.fromString(config.rrule);
-      } catch (e) {
-        throw new Error(`Invalid RRULE "${config.rrule}" for schedule "${config.id}": ${e}`);
-      }
-    }
+  async register(config: ScheduleConfig): Promise<void> {
+    validateScheduleConfig(config);
     this.schedules.set(config.id, { ...config, paused: config.enabled === false });
     // Notify any active subscribe() streams so they pick up the new schedule immediately.
     for (const cb of this._registerCallbacks) cb(config.id);
   }
 
   /** Remove a schedule. Its stream will end. */
-  unregister(scheduleId: string, _options?: { reason?: string }): void {
+  async unregister(scheduleId: string, _options?: { reason?: string }): Promise<void> {
     this.schedules.delete(scheduleId);
   }
 
   /** Pause a schedule — stops emitting ticks but keeps the config. */
-  pause(scheduleId: string): void {
+  async pause(scheduleId: string): Promise<void> {
     const s = this.schedules.get(scheduleId);
     if (s) s.paused = true;
   }
 
   /** Resume a paused schedule. */
-  resume(scheduleId: string): void {
+  async resume(scheduleId: string): Promise<void> {
     const s = this.schedules.get(scheduleId);
     if (s) s.paused = false;
   }
 
   /** List all registered schedules with their current enabled state. */
-  list(): ScheduleConfig[] {
+  async list(): Promise<ScheduleConfig[]> {
     return [...this.schedules.values()].map(({ paused, ...config }) => ({
       ...config,
       enabled: !paused,
@@ -181,24 +168,41 @@ export class InMemoryScheduler implements Scheduler {
   // The outer stream emits schedule ids: those registered when the stream is
   // first pulled, then every later registration via a register callback. Each
   // id becomes its own per-schedule stream and parJoinUnbounded runs them all
-  // concurrently. The callback is removed when the stream terminates.
+  // concurrently. An id that already has a running per-schedule stream is not
+  // started twice (re-registering replaces the config that stream follows).
+  // The callback is removed when the stream terminates.
   // ---------------------------------------------------------------------------
 
   private createAllSchedulesStream(): Stream<ScheduleTick> {
-    const scheduleIds = Stream.async<string, never>(
-      (emit) =>
-        sync(() => {
-          for (const id of this.schedules.keys()) emit(id);
-          const onRegister = (id: string) => emit(id);
-          this._registerCallbacks.add(onRegister);
-          return () => {
-            this._registerCallbacks.delete(onRegister);
-          };
-        }),
-      Infinity,
-    );
+    return Stream.suspend(() => {
+      const running = new Set<string>();
+      const scheduleIds = Stream.async<string, never>(
+        (emit) =>
+          sync(() => {
+            const start = (id: string) => {
+              if (running.has(id)) return;
+              running.add(id);
+              emit(id);
+            };
+            for (const id of this.schedules.keys()) start(id);
+            this._registerCallbacks.add(start);
+            return () => {
+              this._registerCallbacks.delete(start);
+            };
+          }),
+        Infinity,
+      );
 
-    return scheduleIds.map((id) => this.createScheduleStream(id)).parJoinUnbounded();
+      return scheduleIds
+        .map((id) =>
+          this.createScheduleStream(id).onFinalize(
+            sync(() => {
+              running.delete(id);
+            }),
+          ),
+        )
+        .parJoinUnbounded();
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -214,21 +218,21 @@ export class InMemoryScheduler implements Scheduler {
     // `suspend` defers each step to its pull, so "now" is read when the
     // consumer asks for the next tick rather than when the stream is built.
     const clock = this.clock;
+    const random = this.random;
+    const current = () => this.schedules.get(scheduleId);
     const step = (tickNumber: number): Eff<ScheduleStep> =>
       suspend(() => {
-        const config = this.schedules.get(scheduleId);
+        const config = current();
         if (!config) return succeed(null);
 
         if (config.paused) {
-          return wallClockSleep({ clock, ms: PAUSED_RECHECK_MS }).flatMap((): Eff<ScheduleStep> => {
-            const rechecked = this.schedules.get(scheduleId);
-            if (!rechecked) return succeed(null);
-            if (rechecked.paused) return succeed([null, tickNumber]);
-            return computeAndSleep({ config: rechecked, tickNumber, clock });
-          });
+          // Check again after a while; the next step picks up a resume.
+          return wallClockSleep({ clock, ms: PAUSED_RECHECK_MS }).map(
+            (): ScheduleStep => (current() ? [null, tickNumber] : null),
+          );
         }
 
-        return computeAndSleep({ config, tickNumber, clock });
+        return computeAndSleep({ config, tickNumber, clock, random, current });
       });
 
     return Stream.unfoldEffect(0, step).unNone();
@@ -238,15 +242,21 @@ export class InMemoryScheduler implements Scheduler {
 /** How often a paused schedule re-checks whether it has been resumed. */
 const PAUSED_RECHECK_MS = 1000;
 
+/** A registered schedule plus its paused flag (mutated in place by pause/resume). */
+type ScheduleEntry = ScheduleConfig & { paused: boolean };
+
 /** One unfold step: a tick (or nothing yet) plus the next tick number, or end. */
 type ScheduleStep = [ScheduleTick | null, number] | null;
 
 function computeAndSleep(params: {
-  config: ScheduleConfig & { paused: boolean };
+  config: ScheduleEntry;
   tickNumber: number;
   clock: WallClock;
+  random: () => number;
+  /** Reads the schedule's live entry, to re-check it after the wait. */
+  current: () => ScheduleEntry | undefined;
 }): Eff<ScheduleStep> {
-  const { config, tickNumber, clock } = params;
+  const { config, tickNumber, clock, random, current } = params;
   const now = clock.now();
 
   if (config.startAt && now < config.startAt) {
@@ -262,22 +272,27 @@ function computeAndSleep(params: {
     ? getNextCronTime(config.cron, config.timezone ?? "UTC", now)
     : config.rrule
       ? getNextRruleTime(config.rrule, now)
-      : new Date(now.getTime() + (config.intervalMs ?? 1000));
+      : new Date(now.getTime() + config.intervalMs!);
 
   if (config.endAt && nextFireTime >= config.endAt) {
     return succeed(null);
   }
 
-  const sleepMs = Math.max(0, nextFireTime.getTime() - now.getTime());
+  // Jitter delays the emission past the nominal fire time.
+  const sleepMs =
+    Math.max(0, nextFireTime.getTime() - now.getTime()) + jitterDelayMs({ config, random });
 
   return wallClockSleep({ clock, ms: sleepMs }).map((): ScheduleStep => {
-    const jitterMs = config.jitterMs ?? 0;
-    const jitter = jitterMs > 0 ? Math.random() * jitterMs : 0;
+    // Re-check after the wait: a schedule removed, replaced or paused while
+    // waiting must not emit the tick computed from its old state.
+    const live = current();
+    if (!live) return null;
+    if (live !== config || live.paused) return [null, tickNumber];
     const tick: ScheduleTick = {
       scheduleId: config.id,
       scheduleName: config.name,
       scheduledAt: nextFireTime,
-      firedAt: new Date(clock.currentTimeMs() + jitter),
+      firedAt: clock.now(),
       tickNumber,
       metadata: config.metadata,
     };
@@ -315,8 +330,8 @@ function getNextRruleTime(rruleStr: string, after: Date): Date {
  * @example
  * ```ts
  * const scheduler = createScheduler();
- * scheduler.register({ id: "daily", cron: "0 2 * * *", timezone: "America/New_York" });
- * scheduler.register({ id: "heartbeat", intervalMs: 30_000 });
+ * await scheduler.register({ id: "daily", cron: "0 2 * * *", timezone: "America/New_York" });
+ * await scheduler.register({ id: "heartbeat", intervalMs: 30_000 });
  *
  * await scheduler.stream("daily")
  *   .through(trigger({ workflow: etlWorkflow, ... }))

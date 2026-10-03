@@ -38,6 +38,13 @@ export interface RedisDurableSchedulerConfig {
    * and its storage. Default: `SystemWallClock`.
    */
   clock?: WallClock;
+  /**
+   * Called when a poll or commit fails, or a stored schedule can't be
+   * evaluated. The tick stream keeps running. Default: `console.error`.
+   */
+  onError?: GenericConfig["onError"];
+  /** Upper bound for the backoff between failed polls. Default: 30 000. */
+  maxErrorBackoffMs?: number;
 }
 
 /**
@@ -61,6 +68,8 @@ export class RedisDurableScheduler extends GenericDurableScheduler {
       namespace: config.namespace,
       batchSize: config.batchSize,
       clock: config.clock,
+      onError: config.onError,
+      maxErrorBackoffMs: config.maxErrorBackoffMs,
     };
     super(cfg);
   }
