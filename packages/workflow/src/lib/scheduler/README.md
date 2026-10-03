@@ -1,10 +1,12 @@
 # Scheduler
 
-Cron, RRULE, and interval scheduling for workflows. Non-blocking — uses `Effect.sleep()` to yield the fiber between ticks.
+Cron, RRULE, and interval scheduling for workflows. Non-blocking — sleeps on a fiber between ticks.
 
 ## Main Idea
 
-A scheduler manages named schedules and emits `ScheduleTick` events. Each tick contains the schedule ID, nominal fire time, actual fire time, and a monotonic tick number. The scheduler implements `Streamable<ScheduleTick>`, so it plugs directly into StreamPipeline and the `trigger()` combinator.
+A scheduler manages named schedules and emits `ScheduleTick` events. Each tick contains the schedule ID, nominal fire time, actual fire time, and a monotonic tick number. The scheduler implements `Streamable<ScheduleTick>`: `stream()` and `subscribe()` return a perfect `Stream`, so ticks plug directly into stream operators and the `trigger()` pipe.
+
+Perfect streams are single-use, so every `stream()` / `subscribe()` call builds a fresh one. Stopping the consumer (`take(n)`, `interruptAfter`, breaking out of a `for await` over `toAsyncIterable()`) cancels pending timers and removes listeners.
 
 Two implementations:
 
@@ -76,24 +78,26 @@ scheduler.register({
 
 ```typescript
 import { trigger } from "@promin/workflow";
-import { StreamPipeline } from "@promin/core";
 
 // Stream a single schedule into a workflow trigger
-scheduler
+await scheduler
   .stream("morning-report")
   .through(
     trigger({
       workflow: reportWorkflow,
+      runner,
+      storage,
       toInput: (tick) => ({ date: tick.scheduledAt.toISOString().split("T")[0] }),
       toWorkflowId: (tick) => `report-${tick.scheduledAt.toISOString().split("T")[0]}`,
     }),
   )
-  .drain();
+  .drain()
+  .run();
 
-// Stream all schedules merged
-StreamPipeline.fromSource(scheduler).forEach((tick) =>
-  console.log(`${tick.scheduleId} fired at ${tick.firedAt}`),
-);
+// Stream all schedules merged, including schedules registered later
+for await (const tick of scheduler.subscribe().toAsyncIterable()) {
+  console.log(`${tick.scheduleId} fired at ${tick.firedAt}`);
+}
 ```
 
 ### Runtime control
@@ -132,16 +136,19 @@ await scheduler.registerAsync({
 });
 
 // Trigger workflow from schedule
-scheduler
+await scheduler
   .stream("daily-etl")
   .through(
     trigger({
       workflow: etlWorkflow,
+      runner,
+      storage,
       toInput: (tick) => ({ date: tick.scheduledAt.toISOString().split("T")[0] }),
       toWorkflowId: (tick) => `etl-${tick.scheduledAt.toISOString().split("T")[0]}`,
     }),
   )
-  .drain();
+  .drain()
+  .run();
 
 // Management
 const next5 = await scheduler.nextFireTimes("daily-etl", 5);

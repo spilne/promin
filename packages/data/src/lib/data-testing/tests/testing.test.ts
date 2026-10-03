@@ -1,7 +1,8 @@
 import { describe, it, expect } from "bun:test";
 import { DataFrame } from "../../dataframe/dataframe.ts";
 import { generators, generateRows } from "../generators.ts";
-import { dataframeProperties } from "../properties.ts";
+import { Stream } from "@spilne/perfect-core";
+import { dataframeProperties, streamProperties } from "../properties.ts";
 
 // ---------------------------------------------------------------------------
 // Generators — deterministic fake data
@@ -119,5 +120,32 @@ describe("DataFrame properties — invariants that should always hold", () => {
 
   it("select preserves row count", async () => {
     expect(await dataframeProperties.selectPreservesCount(orders, ["id", "region"])).toBe(true);
+  });
+});
+
+describe("Stream properties — invariants over perfect Streams", () => {
+  const items = [1, 2, 2, 3, 3, 3];
+  const createStream = (xs: number[]) => Stream.fromArray(xs);
+
+  it("filter reduces or maintains count", async () => {
+    expect(await streamProperties.filterReducesOrMaintains(items, (n) => n > 1, createStream)).toBe(
+      true,
+    );
+  });
+
+  it("take is bounded", async () => {
+    expect(await streamProperties.takeBounded(items, 2, createStream)).toBe(true);
+  });
+
+  it("map preserves count", async () => {
+    expect(await streamProperties.mapPreservesCount(items, (n) => n * 2, createStream)).toBe(true);
+  });
+
+  it("dedupe reduces or maintains count", async () => {
+    expect(await streamProperties.dedupeReducesOrMaintains(items, createStream)).toBe(true);
+  });
+
+  it("collect matches the source", async () => {
+    expect(await streamProperties.collectMatchesSource(items, createStream)).toBe(true);
   });
 });

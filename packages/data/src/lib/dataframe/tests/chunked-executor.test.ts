@@ -100,7 +100,8 @@ describe("DataFrame.stream()", () => {
       .filter((r: any) => r.id > 2)
       .select("id", "name")
       .stream({ chunkSize: 2 })
-      .collect();
+      .toArray()
+      .run();
 
     expect(rows).toEqual([
       { id: 3, name: "c" },
@@ -116,7 +117,8 @@ describe("DataFrame.stream()", () => {
     const result = await df
       .filter((r: any) => r.v >= 50)
       .stream({ chunkSize: 20 })
-      .collect();
+      .toArray()
+      .run();
 
     expect(result).toHaveLength(50);
     expect(result[0]!.v).toBe(50);
@@ -125,7 +127,7 @@ describe("DataFrame.stream()", () => {
   it("falls back for materializing plans", async () => {
     const df = DataFrame.fromArray([{ v: 3 }, { v: 1 }, { v: 2 }]);
 
-    const result = await df.sort("v", "asc").stream().collect();
+    const result = await df.sort("v", "asc").stream().toArray().run();
 
     expect(result).toEqual([{ v: 1 }, { v: 2 }, { v: 3 }]);
   });
@@ -136,7 +138,8 @@ describe("DataFrame.stream()", () => {
     const result = await df
       .withColumn("doubled", (r: any) => r.x * 2)
       .stream({ chunkSize: 1 })
-      .collect();
+      .toArray()
+      .run();
 
     expect(result).toEqual([
       { x: 1, doubled: 2 },
@@ -148,7 +151,7 @@ describe("DataFrame.stream()", () => {
   it("works with rename", async () => {
     const df = DataFrame.fromArray([{ a: 1 }, { a: 2 }]);
 
-    const result = await df.rename({ a: "b" }).stream({ chunkSize: 1 }).collect();
+    const result = await df.rename({ a: "b" }).stream({ chunkSize: 1 }).toArray().run();
 
     expect(result).toEqual([{ b: 1 }, { b: 2 }]);
   });
@@ -159,7 +162,7 @@ describe("DataFrame.stream()", () => {
       { a: 4, b: 5, c: 6 },
     ]);
 
-    const result = await df.drop("b").stream({ chunkSize: 1 }).collect();
+    const result = await df.drop("b").stream({ chunkSize: 1 }).toArray().run();
 
     expect(result).toEqual([
       { a: 1, c: 3 },
@@ -173,7 +176,8 @@ describe("DataFrame.stream()", () => {
     const result = await df
       .filter((r: any) => r.v > 0)
       .stream({ chunkSize: 10 })
-      .collect();
+      .toArray()
+      .run();
 
     expect(result).toEqual([]);
   });
@@ -182,7 +186,7 @@ describe("DataFrame.stream()", () => {
     const data = Array.from({ length: 5 }, (_, i) => ({ v: i }));
     const df = DataFrame.fromArray(data);
 
-    const result = await df.stream().collect();
+    const result = await df.stream().toArray().run();
 
     expect(result).toEqual(data);
   });
@@ -191,7 +195,7 @@ describe("DataFrame.stream()", () => {
     const data = Array.from({ length: 10 }, (_, i) => ({ v: i }));
     const df = DataFrame.fromArray(data);
 
-    const result = await df.limit(3).stream({ chunkSize: 2 }).collect();
+    const result = await df.limit(3).stream({ chunkSize: 2 }).toArray().run();
 
     expect(result).toEqual([{ v: 0 }, { v: 1 }, { v: 2 }]);
   });
@@ -200,7 +204,7 @@ describe("DataFrame.stream()", () => {
   it("no rows lost or duplicated across chunks", async () => {
     const data = Array.from({ length: 97 }, (_, i) => ({ id: i }));
     const df = DataFrame.fromArray(data);
-    const result = await df.stream({ chunkSize: 10 }).collect();
+    const result = await df.stream({ chunkSize: 10 }).toArray().run();
     expect(result).toHaveLength(97);
     expect(result.map((r: any) => r.id)).toEqual(data.map((d) => d.id));
   });
@@ -218,13 +222,40 @@ describe("DataFrame.stream()", () => {
       .withColumn("doubled", (r: any) => r.score * 2)
       .select("id", "doubled")
       .stream({ chunkSize: 7 })
-      .collect();
+      .toArray()
+      .run();
     expect(result).toHaveLength(30);
     expect(result[0]).toEqual({ id: 20, doubled: 400 });
   });
 
-  // Stream -> StreamPipeline composition
-  it("stream integrates with StreamPipeline operators", async () => {
+  it("stream() builds a fresh stream on every call", async () => {
+    const df = DataFrame.fromArray([{ v: 1 }, { v: 2 }, { v: 3 }]);
+    const first = await df.stream({ chunkSize: 2 }).toArray().run();
+    const second = await df.stream({ chunkSize: 2 }).toArray().run();
+    expect(first).toEqual([{ v: 1 }, { v: 2 }, { v: 3 }]);
+    expect(second).toEqual(first);
+  });
+
+  it("executes chunks only as the consumer pulls them", async () => {
+    let mapped = 0;
+    const data = Array.from({ length: 100 }, (_, i) => ({ v: i }));
+    const result = await DataFrame.fromArray(data)
+      .map((r) => {
+        mapped++;
+        return r;
+      })
+      .stream({ chunkSize: 5 })
+      .take(3)
+      .toArray()
+      .run();
+
+    expect(result).toEqual([{ v: 0 }, { v: 1 }, { v: 2 }]);
+    // Only the first chunk (plus at most one read-ahead) ran — not all 100 rows.
+    expect(mapped).toBeLessThanOrEqual(10);
+  });
+
+  // DataFrame.stream() -> perfect Stream composition
+  it("stream composes with perfect Stream operators", async () => {
     const data = Array.from({ length: 20 }, (_, i) => ({ v: i }));
     const df = DataFrame.fromArray(data);
     const result = await df
@@ -232,7 +263,8 @@ describe("DataFrame.stream()", () => {
       .stream({ chunkSize: 5 })
       .map((r) => ({ ...r, squared: (r as any).v ** 2 }))
       .take(3)
-      .collect();
+      .toArray()
+      .run();
     expect(result).toHaveLength(3);
     expect((result[0] as any).squared).toBe(100);
   });
@@ -320,7 +352,8 @@ describe("streaming groupBy aggregation", () => {
       .groupBy("group")
       .agg({ value: "sum" })
       .stream({ chunkSize: 10 })
-      .collect();
+      .toArray()
+      .run();
 
     const sortByGroup = (a: any, b: any) => a.group.localeCompare(b.group);
     expect(streamed.sort(sortByGroup)).toEqual(regular.sort(sortByGroup));
@@ -334,7 +367,12 @@ describe("streaming groupBy aggregation", () => {
     const df = DataFrame.fromArray(data);
 
     const regular = await df.groupBy("g").agg({ v: "avg" }).collect();
-    const streamed = await df.groupBy("g").agg({ v: "avg" }).stream({ chunkSize: 7 }).collect();
+    const streamed = await df
+      .groupBy("g")
+      .agg({ v: "avg" })
+      .stream({ chunkSize: 7 })
+      .toArray()
+      .run();
 
     const sortByG = (a: any, b: any) => a.g.localeCompare(b.g);
     regular.sort(sortByG);
@@ -351,7 +389,12 @@ describe("streaming groupBy aggregation", () => {
     const df = DataFrame.fromArray(data);
 
     const regular = await df.groupBy("g").agg({ v: "min" }).collect();
-    const streamed = await df.groupBy("g").agg({ v: "min" }).stream({ chunkSize: 15 }).collect();
+    const streamed = await df
+      .groupBy("g")
+      .agg({ v: "min" })
+      .stream({ chunkSize: 15 })
+      .toArray()
+      .run();
 
     const sortByG = (a: any, b: any) => a.g.localeCompare(b.g);
     expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
@@ -365,7 +408,12 @@ describe("streaming groupBy aggregation", () => {
     const df = DataFrame.fromArray(data);
 
     const regular = await df.groupBy("g").agg({ v: "count" }).collect();
-    const streamed = await df.groupBy("g").agg({ v: "count" }).stream({ chunkSize: 9 }).collect();
+    const streamed = await df
+      .groupBy("g")
+      .agg({ v: "count" })
+      .stream({ chunkSize: 9 })
+      .toArray()
+      .run();
 
     const sortByG = (a: any, b: any) => a.g.localeCompare(b.g);
     expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
@@ -385,7 +433,8 @@ describe("streaming groupBy aggregation", () => {
       .groupBy("g")
       .agg({ v: "countDistinct" })
       .stream({ chunkSize: 2 })
-      .collect();
+      .toArray()
+      .run();
     const a = result.find((r: any) => r.g === "a");
     expect(a!.v).toBe(3);
   });
@@ -400,7 +449,12 @@ describe("streaming groupBy aggregation", () => {
       { g: "a", v: 1 },
     ];
     const df = DataFrame.fromArray(data);
-    const result = await df.groupBy("g").agg({ v: "mode" }).stream({ chunkSize: 2 }).collect();
+    const result = await df
+      .groupBy("g")
+      .agg({ v: "mode" })
+      .stream({ chunkSize: 2 })
+      .toArray()
+      .run();
     expect(result[0]!.v).toBe(2); // mode is 2 (appears 3 times)
   });
 
@@ -423,7 +477,8 @@ describe("streaming groupBy aggregation", () => {
       .groupBy("g")
       .agg({ v: sumSquares })
       .stream({ chunkSize: 2 })
-      .collect();
+      .toArray()
+      .run();
 
     const sortByG = (a: any, b: any) => a.g.localeCompare(b.g);
     expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
@@ -446,7 +501,8 @@ describe("streaming groupBy aggregation", () => {
       .groupBy("g")
       .agg({ v: "sum" })
       .stream({ chunkSize: 10 })
-      .collect();
+      .toArray()
+      .run();
 
     const sortByG = (a: any, b: any) => a.g.localeCompare(b.g);
     expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
@@ -472,7 +528,7 @@ describe("streaming exprAgg", () => {
       total: exprAgg({ expr: col("revenue").add(col("tax")), agg: "sum" as const }),
     };
     const regular = await df.groupBy("g").agg(aggDef).collect();
-    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 7 }).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 7 }).toArray().run();
 
     expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
     const total = (regular as any[]).reduce((s, r) => s + Number(r.total), 0);
@@ -490,7 +546,7 @@ describe("streaming exprAgg", () => {
     const aggDef = { m: exprAgg({ expr: col("a").mul(col("b")), agg: "avg" as const }) };
 
     const regular = await df.groupBy("g").agg(aggDef).collect();
-    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 11 }).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 11 }).toArray().run();
 
     regular.sort(sortByG);
     streamed.sort(sortByG);
@@ -514,7 +570,7 @@ describe("streaming exprAgg", () => {
     };
 
     const regular = await df.groupBy("g").agg(aggDef).collect();
-    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 9 }).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 9 }).toArray().run();
 
     expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
   });
@@ -534,7 +590,7 @@ describe("streaming exprAgg", () => {
     };
 
     const regular = await df.groupBy("g").agg(aggDef).collect();
-    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 6 }).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 6 }).toArray().run();
 
     expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
   });
@@ -551,7 +607,7 @@ describe("streaming exprAgg", () => {
     };
 
     const regular = await df.groupBy("g").agg(aggDef).collect();
-    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 8 }).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 8 }).toArray().run();
 
     expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
   });
@@ -573,7 +629,7 @@ describe("streaming exprAgg", () => {
     };
 
     const regular = await df.groupBy("g").agg(aggDef).collect();
-    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 3 }).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 3 }).toArray().run();
 
     expect((regular[0] as any).v).toBeGreaterThanOrEqual(4);
     expect(streamed).toEqual(regular);
@@ -590,7 +646,7 @@ describe("streaming exprAgg", () => {
     };
 
     const regular = await df.groupBy("g").agg(aggDef).collect();
-    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 13 }).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 13 }).toArray().run();
 
     expect((streamed[0] as any).score).toBe((regular[0] as any).score);
     // percentile(0.9) of [2, 4, ..., 200]: idx = ceil(0.9*100)-1 = 89 => value 180
@@ -615,7 +671,7 @@ describe("streaming exprAgg", () => {
     };
 
     const regular = await df.groupBy("g").agg(aggDef).collect();
-    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 1 }).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 1 }).toArray().run();
 
     expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
     const a = (regular as any[]).find((r) => r.g === "a");
@@ -636,7 +692,7 @@ describe("streaming exprAgg", () => {
     };
 
     const regular = await df.groupBy("g").agg(aggDef).collect();
-    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 4 }).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 4 }).toArray().run();
 
     expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
     const a = (regular as any[]).find((r) => r.g === "a");
@@ -656,7 +712,7 @@ describe("streaming exprAgg", () => {
     };
 
     const regular = await df.groupBy("g").agg(aggDef).collect();
-    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 5 }).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 5 }).toArray().run();
 
     expect(streamed).toEqual(regular);
     expect((regular[0] as any).v).toBe(0); // nothing accumulated
@@ -673,7 +729,7 @@ describe("streaming exprAgg", () => {
     };
 
     const regular = await df.groupBy("g").agg(aggDef).collect();
-    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 4 }).collect();
+    const streamed = await df.groupBy("g").agg(aggDef).stream({ chunkSize: 4 }).toArray().run();
 
     expect(streamed.sort(sortByG)).toEqual(regular.sort(sortByG));
   });

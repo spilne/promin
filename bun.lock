@@ -89,9 +89,7 @@
       "name": "@promin/data",
       "version": "0.1.0",
       "dependencies": {
-        "@promin/core": "workspace:*",
         "@spilne/perfect-core": "catalog:",
-        "effect": "catalog:",
         "hyparquet": "^1.25.5",
       },
       "devDependencies": {

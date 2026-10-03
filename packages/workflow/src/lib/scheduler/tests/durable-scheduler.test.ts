@@ -9,6 +9,7 @@ import { describe, it, expect } from "bun:test";
 import { schedulerTestSuite } from "../scheduler-test-suite.ts";
 import { DurableScheduler } from "../durable-scheduler.ts";
 import { InMemorySchedulerStorage } from "../in-memory-scheduler-storage.ts";
+import { FakeWallClock } from "../../shared/wall-clock.ts";
 
 schedulerTestSuite("DurableScheduler+InMemoryStorage", () => {
   const storage = new InMemorySchedulerStorage();
@@ -40,7 +41,7 @@ describe("DurableScheduler scalability features", () => {
       await scheduler.registerAsync({ id: `batch-${i}`, intervalMs: 1000 });
     }
 
-    const ticks = await scheduler.stream().take(20).collect();
+    const ticks = await scheduler.stream().take(20).toArray().run();
     expect(ticks).toHaveLength(20);
     const ids = new Set(ticks.map((t) => t.scheduleId));
     expect(ids.size).toBe(20);
@@ -68,7 +69,7 @@ describe("DurableScheduler scalability features", () => {
 
     await scheduler.registerAsync({ id: "jittered", intervalMs: 50, jitterMs: 200 });
 
-    const tick = (await scheduler.stream("jittered").take(1).collect())[0]!;
+    const tick = (await scheduler.stream("jittered").take(1).toArray().run())[0]!;
     // firedAt should be at most jitterMs ahead of the call time. Lower bound
     // is loose — Date.now() advances during scheduling, so we just check it's
     // a Date that's in the recent past/near future.
@@ -102,8 +103,8 @@ describe("DurableScheduler scalability features", () => {
     // Manually fan out a single fireChunk per partition: instead of relying on
     // both workers' streams (which would race for the shared in-memory leader
     // lock), check the partition-filter logic by running them in series.
-    const w0Ticks = await w0.stream().take(15).collect();
-    const w1Ticks = await w1.stream().take(15).collect();
+    const w0Ticks = await w0.stream().take(15).toArray().run();
+    const w1Ticks = await w1.stream().take(15).toArray().run();
 
     const w0Ids = w0Ticks.map((t) => t.scheduleId);
     const w1Ids = w1Ticks.map((t) => t.scheduleId);
@@ -219,10 +220,120 @@ describe("DurableScheduler scalability features", () => {
     await nsA.registerAsync({ id: "only-a", intervalMs: 50 });
     await nsB.registerAsync({ id: "only-b", intervalMs: 50 });
 
-    const aTicks = await nsA.stream().take(2).collect();
-    const bTicks = await nsB.stream().take(2).collect();
+    const aTicks = await nsA.stream().take(2).toArray().run();
+    const bTicks = await nsB.stream().take(2).toArray().run();
 
     expect(aTicks.every((t) => t.scheduleId === "only-a")).toBe(true);
     expect(bTicks.every((t) => t.scheduleId === "only-b")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Poll cadence — driven by the injected WallClock
+// ---------------------------------------------------------------------------
+
+describe("DurableScheduler poll cadence", () => {
+  /** Storage that counts poll cycles (one leader attempt per poll). */
+  function countingStorage(): { storage: InMemorySchedulerStorage; polls: () => number } {
+    const storage = new InMemorySchedulerStorage();
+    let polls = 0;
+    const acquire = storage.tryAcquireLeader.bind(storage);
+    storage.tryAcquireLeader = (params) => {
+      polls++;
+      return acquire(params);
+    };
+    return { storage, polls: () => polls };
+  }
+
+  /** Let the in-memory storage's promise chain settle. */
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+  it("polls on the first pull and delivers that poll's ticks one interval later", async () => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const { storage, polls } = countingStorage();
+    const scheduler = new DurableScheduler({ storage, pollIntervalMs: 1000, clock });
+    await scheduler.registerAsync({ id: "first", intervalMs: 60_000 });
+
+    let delivered = false;
+    const result = scheduler
+      .stream()
+      .take(1)
+      .toArray()
+      .run()
+      .then((ticks) => {
+        delivered = true;
+        return ticks;
+      });
+
+    await settle();
+    expect(polls()).toBe(1);
+    expect(delivered).toBe(false);
+    expect(clock.pendingCount()).toBe(1);
+
+    clock.advance(999);
+    await settle();
+    expect(delivered).toBe(false);
+
+    clock.advance(1);
+    const ticks = await result;
+    expect(ticks.map((t) => t.scheduleId)).toEqual(["first"]);
+    // take(1) stops before pulling again: no second poll, no timer left behind.
+    expect(polls()).toBe(1);
+    expect(clock.pendingCount()).toBe(0);
+  });
+
+  it("polls again only after the consumer pulls past the previous batch", async () => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const { storage, polls } = countingStorage();
+    const scheduler = new DurableScheduler({ storage, pollIntervalMs: 1000, clock });
+    await scheduler.registerAsync({ id: "a", intervalMs: 60_000 });
+    await scheduler.registerAsync({ id: "b", intervalMs: 60_000 });
+
+    const result = scheduler.stream().take(2).toArray().run();
+    await settle();
+    clock.advance(1000);
+    const ticks = await result;
+
+    // Both schedules were due in the first poll, so one poll covers take(2).
+    expect(ticks.map((t) => t.scheduleId).sort()).toEqual(["a", "b"]);
+    expect(polls()).toBe(1);
+    expect(clock.pendingCount()).toBe(0);
+  });
+
+  it("clears the pending interval timer when the consumer stops mid-wait", async () => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const { storage } = countingStorage();
+    const scheduler = new DurableScheduler({ storage, pollIntervalMs: 1000, clock });
+    await scheduler.registerAsync({ id: "never-delivered", intervalMs: 60_000 });
+
+    // The fake clock never advances, so the stream is parked on the interval
+    // timer when interruptAfter (real time) stops it.
+    const ticks = await scheduler.stream().interruptAfter(30).toArray().run();
+
+    expect(ticks).toEqual([]);
+    expect(clock.pendingCount()).toBe(0);
+  });
+
+  it("clears the pending interval timer when a for-await consumer breaks", async () => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const { storage, polls } = countingStorage();
+    const scheduler = new DurableScheduler({ storage, pollIntervalMs: 1000, clock });
+    await scheduler.registerAsync({ id: "a", intervalMs: 60_000 });
+
+    const consumed = (async () => {
+      const seen: string[] = [];
+      for await (const tick of scheduler.subscribe().toAsyncIterable()) {
+        seen.push(tick.scheduleId);
+        break;
+      }
+      return seen;
+    })();
+
+    await settle();
+    clock.advance(1000);
+
+    expect(await consumed).toEqual(["a"]);
+    expect(polls()).toBe(1);
+    expect(clock.pendingCount()).toBe(0);
   });
 });

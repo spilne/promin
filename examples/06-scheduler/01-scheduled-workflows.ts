@@ -24,12 +24,14 @@ scheduler.register({
   rrule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU;BYHOUR=10",
 });
 
-// Stream ticks from a single schedule
-scheduler.stream("morning-report").forEach((tick) => {
-  const date = tick.scheduledAt.toISOString().split("T")[0];
-  console.log(`Generating report for ${date}`);
-});
-
 // Pause / resume at runtime
 scheduler.pause("health-check");
 scheduler.resume("health-check");
+
+// Stream ticks from a single schedule — stream() returns a perfect Stream,
+// consumed here with for-await. Breaking out of the loop stops the stream
+// and cancels its pending timer.
+for await (const tick of scheduler.stream("morning-report").toAsyncIterable()) {
+  const date = tick.scheduledAt.toISOString().split("T")[0];
+  console.log(`Generating report for ${date}`);
+}

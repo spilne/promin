@@ -90,11 +90,13 @@ const report = await df.profile();
 
 ## Streaming
 
-Convert between DataFrame and StreamPipeline for memory-efficient processing of large datasets.
+Convert between DataFrame and perfect `Stream` (`@spilne/perfect-core`) for memory-efficient processing of large datasets.
 
 ### DataFrame.stream()
 
-Converts a DataFrame to a `StreamPipeline` that yields rows in fixed-size chunks. For streamable plans (filter, map, select, withColumn), rows are processed with constant memory. For materializing plans (sort, groupBy, join), falls back to full execution.
+Converts a DataFrame to a perfect `Stream` that yields rows in fixed-size chunks. For streamable plans (filter, map, select, withColumn), each chunk is executed only when the consumer pulls for it, so rows are processed with constant memory. For materializing plans (sort, groupBy, join), falls back to full execution.
+
+Streams are single-use and lazy: every `stream()` call builds a fresh one, and nothing executes until it is run (`.run()`, `.toAsyncIterable()`).
 
 ```typescript
 // Stream rows in chunks of 1,000
@@ -102,7 +104,14 @@ await df
   .stream({ chunkSize: 1000 })
   .map((row) => transform(row))
   .filter((row) => row.score > 0.5)
-  .forEach((row) => console.log(row));
+  .tap((row) => console.log(row))
+  .drain()
+  .run();
+
+// Or consume with for-await
+for await (const row of df.stream({ chunkSize: 1000 }).toAsyncIterable()) {
+  handle(row);
+}
 ```
 
 The default chunk size is 10,000 rows. Smaller chunks reduce peak memory; larger chunks improve throughput.
@@ -116,27 +125,25 @@ await DataFrame.fromFile(CsvFile("events.csv"))
   .select("userId", "timestamp")
   .stream({ chunkSize: 5000 })
   .map((row) => enrich(row))
-  .drain();
+  .drain()
+  .run();
 ```
 
 ### DataFrame.fromStream()
 
-Creates a DataFrame by collecting all items from a StreamPipeline. This materializes the entire stream into memory.
+Creates a DataFrame by running a perfect `Stream` to completion. This materializes the entire stream into memory. A typed stream failure rejects the returned promise.
 
 ```typescript
 import { DataFrame } from "@promin/data";
-import { StreamPipeline } from "@promin/core";
 
 const df = await DataFrame.fromStream(
-  StreamPipeline.fromSource(kafkaTopic)
-    .map((msg) => msg.value)
+  scheduler
+    .subscribe()
+    .map((tick) => ({ scheduleId: tick.scheduleId, firedAt: tick.firedAt }))
     .take(10_000),
 );
 
-const summary = await df
-  .groupBy("region")
-  .agg({ total: { column: "amount", fn: "sum" } })
-  .collect();
+const firesPerSchedule = await df.groupBy("scheduleId").agg({ firedAt: "count" }).collect();
 ```
 
 ## Operations

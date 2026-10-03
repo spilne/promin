@@ -129,7 +129,7 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
       const scheduler = createDurableScheduler({ db: pg.db, pollIntervalMs: 100 });
       await scheduler.registerAsync({ id: "stream-test", intervalMs: 50 });
 
-      const ticks = await scheduler.stream("stream-test").take(2).collect();
+      const ticks = await scheduler.stream("stream-test").take(2).toArray().run();
 
       expect(ticks).toHaveLength(2);
       expect(ticks[0]!.scheduleId).toBe("stream-test");
@@ -141,7 +141,7 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
       const scheduler = createDurableScheduler({ db: pg.db, pollIntervalMs: 100 });
       await scheduler.registerAsync({ id: "sub-test", intervalMs: 50 });
 
-      const ticks = await scheduler.subscribe().take(1).collect();
+      const ticks = await scheduler.subscribe().take(1).toArray().run();
       expect(ticks).toHaveLength(1);
     }, 10_000);
   });
@@ -152,7 +152,7 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
       await scheduler.registerAsync({ id: "multi-a", intervalMs: 50, name: "A" });
       await scheduler.registerAsync({ id: "multi-b", intervalMs: 50, name: "B" });
 
-      const ticks = await scheduler.stream().take(4).collect();
+      const ticks = await scheduler.stream().take(4).toArray().run();
 
       expect(ticks).toHaveLength(4);
       const ids = new Set(ticks.map((t) => t.scheduleId));
@@ -164,7 +164,7 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
       await scheduler.registerAsync({ id: "filter-a", intervalMs: 50 });
       await scheduler.registerAsync({ id: "filter-b", intervalMs: 50 });
 
-      const ticks = await scheduler.stream("filter-a").take(2).collect();
+      const ticks = await scheduler.stream("filter-a").take(2).toArray().run();
 
       expect(ticks).toHaveLength(2);
       expect(ticks.every((t) => t.scheduleId === "filter-a")).toBe(true);
@@ -175,7 +175,7 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
       await scheduler.registerAsync({ id: "active-sched", intervalMs: 50 });
       await scheduler.registerAsync({ id: "disabled-sched", intervalMs: 50, enabled: false });
 
-      const ticks = await scheduler.stream().take(3).collect();
+      const ticks = await scheduler.stream().take(3).toArray().run();
 
       expect(ticks.every((t) => t.scheduleId !== "disabled-sched")).toBe(true);
     }, 10_000);

@@ -2,12 +2,17 @@
 // Streamable<T> / Sinkable<T> — source and sink contracts
 // ---------------------------------------------------------------------------
 
-import type { StreamPipeline } from "@promin/core";
+import type { Stream } from "@spilne/perfect-core";
 import type { Codec } from "@spilne/perfect-core/connect";
 
-/** "I can produce a stream of T." */
+/**
+ * "I can produce a stream of T."
+ *
+ * Streams are single-use pull cursors, so every `subscribe()` call returns a
+ * fresh stream.
+ */
 export interface Streamable<T> {
-  subscribe(params?: { group?: string }): StreamPipeline<T, never>;
+  subscribe(params?: { group?: string }): Stream<T>;
   codec: Codec<T>;
 }
 

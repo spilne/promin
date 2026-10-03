@@ -351,7 +351,8 @@ describe("streaming pipeline (d) — DataFrame.fromFile(CsvFile).stream() groupB
             avg: exprAgg({ expr: col("value"), agg: "avg" }),
           })
           .stream({ chunkSize: CHUNK })
-          .collect();
+          .toArray()
+          .run();
       },
     );
 

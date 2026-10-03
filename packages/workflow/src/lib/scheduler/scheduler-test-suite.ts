@@ -12,7 +12,6 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { StreamPipeline } from "@promin/core";
 import type { Scheduler } from "./scheduler.ts";
 import type { ScheduleConfig } from "./types.ts";
 
@@ -175,7 +174,7 @@ export function schedulerTestSuite(
     describe("interval ticks", () => {
       it("emits ticks at the configured interval", async () => {
         await reg({ id: "iv-fast", intervalMs: 50 });
-        const ticks = await harness.scheduler.stream("iv-fast").take(3).collect();
+        const ticks = await harness.scheduler.stream("iv-fast").take(3).toArray().run();
 
         expect(ticks).toHaveLength(3);
         expect(ticks[0]!.scheduleId).toBe("iv-fast");
@@ -186,7 +185,7 @@ export function schedulerTestSuite(
 
       it("each tick has scheduledAt and firedAt", async () => {
         await reg({ id: "iv-dates", intervalMs: 50 });
-        const [tick] = await harness.scheduler.stream("iv-dates").take(1).collect();
+        const [tick] = await harness.scheduler.stream("iv-dates").take(1).toArray().run();
 
         expect(tick!.scheduledAt).toBeInstanceOf(Date);
         expect(tick!.firedAt).toBeInstanceOf(Date);
@@ -200,7 +199,7 @@ export function schedulerTestSuite(
           name: "Heartbeat",
           metadata: { env: "test" },
         });
-        const [tick] = await harness.scheduler.stream("iv-meta").take(1).collect();
+        const [tick] = await harness.scheduler.stream("iv-meta").take(1).toArray().run();
 
         expect(tick!.scheduleName).toBe("Heartbeat");
         expect(tick!.metadata).toEqual({ env: "test" });
@@ -222,7 +221,8 @@ export function schedulerTestSuite(
           .stream("cron-1hz")
           .interruptAfter(8000)
           .take(1)
-          .collect();
+          .toArray()
+          .run();
 
         expect(ticks.length).toBeGreaterThanOrEqual(1);
         expect(ticks[0]!.scheduleId).toBe("cron-1hz");
@@ -241,7 +241,8 @@ export function schedulerTestSuite(
           .stream("rrule-1hz")
           .interruptAfter(8000)
           .take(1)
-          .collect();
+          .toArray()
+          .run();
 
         expect(ticks.length).toBeGreaterThanOrEqual(1);
         expect(ticks[0]!.scheduleId).toBe("rrule-1hz");
@@ -259,7 +260,7 @@ export function schedulerTestSuite(
         await reg({ id: "sa-1", intervalMs: 50, startAt });
 
         const before = Date.now();
-        const [tick] = await harness.scheduler.stream("sa-1").take(1).collect();
+        const [tick] = await harness.scheduler.stream("sa-1").take(1).toArray().run();
         const elapsed = Date.now() - before;
 
         expect(elapsed).toBeGreaterThanOrEqual(150);
@@ -272,7 +273,7 @@ export function schedulerTestSuite(
 
         // Use interruptAfter so the assertion works for both stream-ends impls
         // (InMemoryScheduler) and pollers that keep the source open (DurableScheduler).
-        const ticks = await harness.scheduler.stream("ea-1").interruptAfter(1000).collect();
+        const ticks = await harness.scheduler.stream("ea-1").interruptAfter(1000).toArray().run();
 
         // endAt at +250ms with 50ms interval: at most ~5 ticks before cutoff,
         // and zero new ticks fire between 250ms and 1000ms.
@@ -286,7 +287,7 @@ export function schedulerTestSuite(
           endAt: new Date(Date.now() - 10_000),
         });
 
-        const ticks = await harness.scheduler.stream("ea-past").interruptAfter(500).collect();
+        const ticks = await harness.scheduler.stream("ea-past").interruptAfter(500).toArray().run();
         expect(ticks).toHaveLength(0);
       });
 
@@ -299,7 +300,7 @@ export function schedulerTestSuite(
           endAt: new Date(now + 400),
         });
 
-        const ticks = await harness.scheduler.stream("win-1").interruptAfter(1000).collect();
+        const ticks = await harness.scheduler.stream("win-1").interruptAfter(1000).toArray().run();
 
         // Window is 100→400ms with 50ms interval — at most ~6 ticks possible.
         expect(ticks.length).toBeLessThan(20);
@@ -315,7 +316,7 @@ export function schedulerTestSuite(
         await reg({ id: "m-a", intervalMs: 50 });
         await reg({ id: "m-b", intervalMs: 50 });
 
-        const ticks = await harness.scheduler.stream().take(4).collect();
+        const ticks = await harness.scheduler.stream().take(4).toArray().run();
         const ids = new Set(ticks.map((t) => t.scheduleId));
 
         expect(ticks).toHaveLength(4);
@@ -325,7 +326,7 @@ export function schedulerTestSuite(
 
       it("subscribe() behaves the same as stream()", async () => {
         await reg({ id: "sub-1", intervalMs: 50 });
-        const ticks = await harness.scheduler.subscribe().take(2).collect();
+        const ticks = await harness.scheduler.subscribe().take(2).toArray().run();
 
         expect(ticks).toHaveLength(2);
         expect(ticks[0]!.scheduleId).toBe("sub-1");
@@ -333,16 +334,31 @@ export function schedulerTestSuite(
     });
 
     // -----------------------------------------------------------------------
-    // StreamPipeline integration
+    // Stream integration
     // -----------------------------------------------------------------------
 
-    describe("StreamPipeline integration", () => {
-      it("works with StreamPipeline.fromSource()", async () => {
+    describe("Stream integration", () => {
+      it("subscribe() builds a fresh stream on every call", async () => {
         await reg({ id: "src-1", intervalMs: 50 });
-        const ticks = await StreamPipeline.fromSource(harness.scheduler).take(2).collect();
+        const first = await harness.scheduler.subscribe().take(1).toArray().run();
+        const second = await harness.scheduler.subscribe().take(1).toArray().run();
 
-        expect(ticks).toHaveLength(2);
-        expect(ticks[0]!.scheduleId).toBe("src-1");
+        expect(first).toHaveLength(1);
+        expect(second).toHaveLength(1);
+        expect(first[0]!.scheduleId).toBe("src-1");
+        expect(second[0]!.scheduleId).toBe("src-1");
+      });
+
+      it("stops cleanly when a for-await consumer breaks out", async () => {
+        await reg({ id: "iter-1", intervalMs: 50 });
+        const seen: string[] = [];
+
+        for await (const tick of harness.scheduler.subscribe().toAsyncIterable()) {
+          seen.push(tick.scheduleId);
+          if (seen.length === 2) break;
+        }
+
+        expect(seen).toEqual(["iter-1", "iter-1"]);
       });
 
       it("composes with stream operators (filter/map)", async () => {
@@ -353,7 +369,8 @@ export function schedulerTestSuite(
           .stream()
           .filter((t) => t.metadata?.type === "fast")
           .take(2)
-          .collect();
+          .toArray()
+          .run();
 
         expect(fastTicks).toHaveLength(2);
         expect(fastTicks.every((t) => t.scheduleId === "comp-fast")).toBe(true);
@@ -374,7 +391,7 @@ export function schedulerTestSuite(
           void unreg("life-1", { reason: "test cleanup" });
         }, 200);
 
-        const ticks = await harness.scheduler.stream("life-1").interruptAfter(1000).collect();
+        const ticks = await harness.scheduler.stream("life-1").interruptAfter(1000).toArray().run();
 
         // Some ticks fire pre-unregister, then nothing — bounded by what fits in 200ms.
         expect(ticks.length).toBeLessThan(50);

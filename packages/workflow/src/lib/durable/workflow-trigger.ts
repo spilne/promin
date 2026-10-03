@@ -2,9 +2,7 @@
 // Stream → Workflow trigger
 // ---------------------------------------------------------------------------
 
-import { Effect, Stream } from "effect";
-import type { TaggedError } from "../shared/tagged-error.ts";
-import { StreamPipeline } from "@promin/core";
+import { tryPromise, type Eff, type Pipe } from "@spilne/perfect-core";
 import type { Workflow } from "./durable-pipeline.ts";
 import type { WorkflowRunner } from "./workflow-runner.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
@@ -68,19 +66,23 @@ export namespace WorkflowResult {
 /**
  * Bridge a stream to workflow execution.
  * Each stream item triggers a workflow instance.
- * Returns a stream transformer for use with `.through()`.
+ * Returns a perfect `Pipe` for use with `Stream.through()`.
  *
  * @example
  * ```ts
- * eventStream
+ * await eventStream
  *   .through(trigger({
  *     workflow: myWorkflow,
+ *     runner,
+ *     storage,
  *     toInput: (event) => ({ url: event.data }),
  *     toWorkflowId: (event) => `process-${event.id}`,
  *     concurrency: 5,
  *     onDuplicate: "skip",
  *   }))
- *   .forEach((result) => log(result));
+ *   .tap((result) => log(result))
+ *   .drain()
+ *   .run();
  * ```
  */
 export function trigger<T, Input, Output>(params: {
@@ -93,9 +95,7 @@ export function trigger<T, Input, Output>(params: {
   toWorkflowId: (item: T) => string;
   concurrency?: number;
   onDuplicate?: "skip" | "queue" | "fail";
-}): <E extends TaggedError>(
-  stream: StreamPipeline<T, E>,
-) => StreamPipeline<WorkflowResult<Output>, E> {
+}): Pipe<T, WorkflowResult<Output>> {
   const {
     workflow,
     runner,
@@ -106,50 +106,48 @@ export function trigger<T, Input, Output>(params: {
     onDuplicate = "fail",
   } = params;
 
-  return <E extends TaggedError>(
-    stream: StreamPipeline<T, E>,
-  ): StreamPipeline<WorkflowResult<Output>, E> => {
-    const mapped = Stream.mapEffect(
-      stream.stream,
-      (item) =>
-        Effect.promise(async (): Promise<WorkflowResult<Output>> => {
-          const workflowId = toWorkflowId(item);
-          const input = toInput(item);
-          const startTime = Date.now();
+  // A rejected run is a defect, not a typed stream failure: workflow failures
+  // already surface as `WorkflowResult.Failed` via `runSafe`.
+  const runOne = (item: T): Eff<WorkflowResult<Output>> =>
+    tryPromise(
+      async (): Promise<WorkflowResult<Output>> => {
+        const workflowId = toWorkflowId(item);
+        const input = toInput(item);
+        const startTime = Date.now();
 
-          // Dedup check: see if workflow already exists
-          if (onDuplicate === "skip") {
-            const existing = await storage.loadWorkflow(workflowId);
-            if (existing) {
-              if (
-                existing.status === "completed" ||
-                existing.status === "pending" ||
-                existing.status === "running"
-              ) {
-                return WorkflowResult.skipped({ workflowId, reason: "duplicate" });
-              }
+        // Dedup check: see if workflow already exists
+        if (onDuplicate === "skip") {
+          const existing = await storage.loadWorkflow(workflowId);
+          if (existing) {
+            if (
+              existing.status === "completed" ||
+              existing.status === "pending" ||
+              existing.status === "running"
+            ) {
+              return WorkflowResult.skipped({ workflowId, reason: "duplicate" });
             }
           }
+        }
 
-          const { data, error } = await runner.runSafe({ workflow, workflowId, input });
+        const { data, error } = await runner.runSafe({ workflow, workflowId, input });
 
-          if (error) {
-            return WorkflowResult.failed({
-              workflowId,
-              error,
-              durationMs: Date.now() - startTime,
-            });
-          }
-
-          return WorkflowResult.completed({
+        if (error) {
+          return WorkflowResult.failed({
             workflowId,
-            result: data as Output,
+            error,
             durationMs: Date.now() - startTime,
           });
-        }),
-      { concurrency },
-    );
+        }
 
-    return new StreamPipeline(mapped);
-  };
+        return WorkflowResult.completed({
+          workflowId,
+          result: data as Output,
+          durationMs: Date.now() - startTime,
+        });
+      },
+      (e) => e,
+    ).orDie();
+
+  // Ordered: results come out in input order, up to `concurrency` in flight.
+  return (stream) => stream.parEvalMap(concurrency, runOne);
 }

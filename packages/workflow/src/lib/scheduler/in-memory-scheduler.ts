@@ -1,14 +1,13 @@
 // ---------------------------------------------------------------------------
 // InMemoryScheduler — non-blocking, in-process cron/interval scheduler
 //
-// Per schedule: compute next fire time → Effect.sleep(delta) → emit → repeat
+// Per schedule: compute next fire time → sleep(delta) → emit → repeat
 // No polling. No setInterval. No busy-wait. Event loop stays free.
 // ---------------------------------------------------------------------------
 
-import { Effect, Stream, Duration, Option, Queue } from "effect";
 import { Cron } from "croner";
 import { RRule } from "rrule";
-import { StreamPipeline } from "@promin/core";
+import { Stream, sleep, succeed, suspend, sync, type Eff } from "@spilne/perfect-core";
 import { JsonCodec } from "@spilne/perfect-core/connect";
 import type { Codec } from "@spilne/perfect-core/connect";
 import type { Scheduler } from "./scheduler.ts";
@@ -17,18 +16,18 @@ import type { ScheduleConfig, ScheduleTick } from "./types.ts";
 /**
  * Non-blocking, in-process scheduler for cron expressions and fixed intervals.
  *
- * Uses `Effect.sleep()` to yield the fiber until the next fire time — no polling,
+ * Uses perfect's `sleep()` to yield the fiber until the next fire time — no polling,
  * no `setInterval`, no busy-wait. The event loop stays completely free between ticks.
  *
- * Implements `Streamable<ScheduleTick>` so it works with `StreamPipeline.fromSource()`.
+ * Implements `Streamable<ScheduleTick>`: `stream()` and `subscribe()` return a
+ * fresh perfect `Stream` on every call.
  *
  * For production multi-instance deployments, use `DurableScheduler` from `@promin/postgres`
  * which adds persistence, catch-up, overlap policies, and leader election.
  *
  * @example
  * ```ts
- * import { StreamPipeline } from "@promin/core";
- * import { createScheduler } from "@promin/workflow";
+ * import { createScheduler, trigger } from "@promin/workflow";
  *
  * const scheduler = createScheduler();
  *
@@ -47,14 +46,18 @@ import type { ScheduleConfig, ScheduleTick } from "./types.ts";
  * scheduler.stream("morning-report")
  *   .through(trigger({
  *     workflow: reportWorkflow,
+ *     runner,
+ *     storage,
  *     toInput: (tick) => ({ date: tick.scheduledAt.toISOString().split("T")[0] }),
  *     toWorkflowId: (tick) => `report-${tick.scheduledAt.toISOString().split("T")[0]}`,
  *   }))
- *   .drain();
+ *   .drain()
+ *   .run();
  *
  * // Stream all schedules merged — picks up schedules registered after subscribe() is called
- * StreamPipeline.fromSource(scheduler)
- *   .forEach((tick) => console.log(`${tick.scheduleId} fired at ${tick.firedAt}`));
+ * for await (const tick of scheduler.subscribe().toAsyncIterable()) {
+ *   console.log(`${tick.scheduleId} fired at ${tick.firedAt}`);
+ * }
  *
  * // Pause / resume at runtime
  * scheduler.pause("health-check");
@@ -136,127 +139,100 @@ export class InMemoryScheduler implements Scheduler {
    * All-schedules: same per-schedule sleep approach, with schedules registered
    * after the stream starts picked up automatically via a register callback.
    *
+   * Every call builds a fresh stream. Stopping the consumer interrupts the
+   * pending sleeps and removes the register callback.
+   *
    * @param scheduleId - If provided, stream only this schedule. Otherwise merge all.
    */
-  stream(scheduleId?: string): StreamPipeline<ScheduleTick, never> {
+  stream(scheduleId?: string): Stream<ScheduleTick> {
     if (scheduleId) {
       return this.createScheduleStream(scheduleId);
     }
     return this.createAllSchedulesStream();
   }
 
-  subscribe(_params?: { group?: string }): StreamPipeline<ScheduleTick, never> {
+  subscribe(_params?: { group?: string }): Stream<ScheduleTick> {
     return this.createAllSchedulesStream();
   }
 
   // ---------------------------------------------------------------------------
   // All-schedules stream — dynamic merge on register
   //
-  // Uses Effect's Queue<Stream> as the outer channel so take()/interrupt()
-  // propagates cleanly. The async-generator approach used a never-resolving
-  // Promise for backpressure, which caused generator.return() to hang when
-  // Effect tried to interrupt the stream after take(N) completed.
+  // The outer stream emits schedule ids: those registered when the stream is
+  // first pulled, then every later registration via a register callback. Each
+  // id becomes its own per-schedule stream and parJoinUnbounded runs them all
+  // concurrently. The callback is removed when the stream terminates.
   // ---------------------------------------------------------------------------
 
-  private createAllSchedulesStream(): StreamPipeline<ScheduleTick, never> {
-    const self = this;
-
-    const s = Stream.unwrapScoped(
-      Effect.gen(function* () {
-        const q = yield* Queue.unbounded<Stream.Stream<ScheduleTick, never>>();
-
-        // Seed with schedules already registered at call time.
-        for (const id of self.schedules.keys()) {
-          yield* Queue.offer(q, self.createScheduleStream(id).stream);
-        }
-
-        // Forward future registrations into the queue.
-        const onRegister = (id: string) => {
-          Effect.runFork(Queue.offer(q, self.createScheduleStream(id).stream));
-        };
-        self._registerCallbacks.add(onRegister);
-
-        // Remove the callback when the stream scope is released (interrupted or done).
-        yield* Effect.addFinalizer(() =>
-          Effect.sync(() => self._registerCallbacks.delete(onRegister)),
-        );
-
-        // Stream.fromQueue with shutdown:false keeps the stream open indefinitely;
-        // take() / interrupt() will terminate it via Effect's interrupt mechanism.
-        return Stream.flatMap(Stream.fromQueue(q, { shutdown: false }), (inner) => inner, {
-          concurrency: "unbounded",
-        });
-      }),
+  private createAllSchedulesStream(): Stream<ScheduleTick> {
+    const scheduleIds = Stream.async<string, never>(
+      (emit) =>
+        sync(() => {
+          for (const id of this.schedules.keys()) emit(id);
+          const onRegister = (id: string) => emit(id);
+          this._registerCallbacks.add(onRegister);
+          return () => {
+            this._registerCallbacks.delete(onRegister);
+          };
+        }),
+      Infinity,
     );
 
-    return StreamPipeline.from(s) as StreamPipeline<ScheduleTick, never>;
+    return scheduleIds.map((id) => this.createScheduleStream(id)).parJoinUnbounded();
   }
 
   // ---------------------------------------------------------------------------
   // Non-blocking stream per schedule
   //
-  // Uses unfoldEffect with Option:
-  //   Some([tick, nextState]) → emit tick, continue
-  //   None → end stream (schedule unregistered)
-  //
-  // Paused schedules sleep briefly and re-check (no emission).
+  // unfoldEffect step results:
+  //   [tick, next]  → emit tick, continue
+  //   [null, next]  → nothing to emit yet (paused / before startAt), continue
+  //   null          → end stream (schedule unregistered or past endAt)
   // ---------------------------------------------------------------------------
 
-  private createScheduleStream(scheduleId: string): StreamPipeline<ScheduleTick, never> {
-    const self = this;
-
-    const s = Stream.unfoldEffect(0, (tickNumber: number) =>
-      Effect.suspend((): Effect.Effect<Option.Option<readonly [ScheduleTick, number]>> => {
-        const config = self.schedules.get(scheduleId);
-        if (!config) {
-          return Effect.succeed(Option.none());
-        }
+  private createScheduleStream(scheduleId: string): Stream<ScheduleTick> {
+    // `suspend` defers each step to its pull, so "now" is read when the
+    // consumer asks for the next tick rather than when the stream is built.
+    const step = (tickNumber: number): Eff<ScheduleStep> =>
+      suspend(() => {
+        const config = this.schedules.get(scheduleId);
+        if (!config) return succeed(null);
 
         if (config.paused) {
-          return Effect.sleep(Duration.seconds(1)).pipe(
-            Effect.flatMap(() => {
-              const rechecked = self.schedules.get(scheduleId);
-              if (!rechecked) return Effect.succeed(Option.none());
-              if (rechecked.paused) {
-                return Effect.succeed(Option.some([SKIP_MARKER, tickNumber] as const));
-              }
-              return computeAndSleep(rechecked, tickNumber);
-            }),
-          );
+          return sleep(PAUSED_RECHECK_MS).flatMap((): Eff<ScheduleStep> => {
+            const rechecked = this.schedules.get(scheduleId);
+            if (!rechecked) return succeed(null);
+            if (rechecked.paused) return succeed([null, tickNumber]);
+            return computeAndSleep(rechecked, tickNumber);
+          });
         }
 
         return computeAndSleep(config, tickNumber);
-      }),
-    );
+      });
 
-    const filtered = Stream.filter(s, (tick) => tick !== SKIP_MARKER);
-    return StreamPipeline.from(filtered);
+    return Stream.unfoldEffect(0, step).unNone();
   }
 }
 
-// Sentinel for paused ticks that should be filtered out
-const SKIP_MARKER: ScheduleTick = {
-  scheduleId: "__skip__",
-  scheduledAt: new Date(0),
-  firedAt: new Date(0),
-  tickNumber: -1,
-};
+/** How often a paused schedule re-checks whether it has been resumed. */
+const PAUSED_RECHECK_MS = 1000;
+
+/** One unfold step: a tick (or nothing yet) plus the next tick number, or end. */
+type ScheduleStep = [ScheduleTick | null, number] | null;
 
 function computeAndSleep(
   config: ScheduleConfig & { paused: boolean },
   tickNumber: number,
-): Effect.Effect<Option.Option<readonly [ScheduleTick, number]>> {
+): Eff<ScheduleStep> {
   const now = new Date();
 
   if (config.startAt && now < config.startAt) {
     const waitMs = config.startAt.getTime() - now.getTime();
-    return Effect.sleep(Duration.millis(waitMs)).pipe(
-      Effect.map(() => Option.some([SKIP_MARKER, tickNumber] as const)),
-    );
+    return sleep(waitMs).map((): ScheduleStep => [null, tickNumber]);
   }
 
   if (config.endAt && now >= config.endAt) {
-    return Effect.succeed(Option.none());
+    return succeed(null);
   }
 
   const nextFireTime = config.cron
@@ -266,26 +242,24 @@ function computeAndSleep(
       : new Date(now.getTime() + (config.intervalMs ?? 1000));
 
   if (config.endAt && nextFireTime >= config.endAt) {
-    return Effect.succeed(Option.none());
+    return succeed(null);
   }
 
   const sleepMs = Math.max(0, nextFireTime.getTime() - now.getTime());
 
-  return Effect.sleep(Duration.millis(sleepMs)).pipe(
-    Effect.map(() => {
-      const jitterMs = config.jitterMs ?? 0;
-      const jitter = jitterMs > 0 ? Math.random() * jitterMs : 0;
-      const tick: ScheduleTick = {
-        scheduleId: config.id,
-        scheduleName: config.name,
-        scheduledAt: nextFireTime,
-        firedAt: new Date(Date.now() + jitter),
-        tickNumber,
-        metadata: config.metadata,
-      };
-      return Option.some([tick, tickNumber + 1] as const);
-    }),
-  );
+  return sleep(sleepMs).map((): ScheduleStep => {
+    const jitterMs = config.jitterMs ?? 0;
+    const jitter = jitterMs > 0 ? Math.random() * jitterMs : 0;
+    const tick: ScheduleTick = {
+      scheduleId: config.id,
+      scheduleName: config.name,
+      scheduledAt: nextFireTime,
+      firedAt: new Date(Date.now() + jitter),
+      tickNumber,
+      metadata: config.metadata,
+    };
+    return [tick, tickNumber + 1];
+  });
 }
 
 function getNextCronTime(expression: string, timezone: string, after: Date): Date {
@@ -321,9 +295,10 @@ function getNextRruleTime(rruleStr: string, after: Date): Date {
  * scheduler.register({ id: "daily", cron: "0 2 * * *", timezone: "America/New_York" });
  * scheduler.register({ id: "heartbeat", intervalMs: 30_000 });
  *
- * scheduler.stream("daily")
+ * await scheduler.stream("daily")
  *   .through(trigger({ workflow: etlWorkflow, ... }))
- *   .drain();
+ *   .drain()
+ *   .run();
  * ```
  */
 export function createScheduler(): InMemoryScheduler {

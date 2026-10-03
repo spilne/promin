@@ -2,14 +2,15 @@
 // Scheduler interface — core contract for schedule sources
 // ---------------------------------------------------------------------------
 
-import type { StreamPipeline } from "@promin/core";
+import type { Stream } from "@spilne/perfect-core";
 import type { Codec } from "@spilne/perfect-core/connect";
 import type { Streamable } from "../shared/streamable.ts";
 import type { ScheduleConfig, ScheduleTick } from "./types.ts";
 
 /**
  * A scheduler manages named schedules and emits ScheduleTicks.
- * Implements Streamable<ScheduleTick> — use with StreamPipeline.fromSource().
+ * Implements Streamable<ScheduleTick>: `stream()` and `subscribe()` return
+ * perfect `Stream`s, built fresh on every call.
  *
  * Two implementations:
  * - `InMemoryScheduler` (core) — non-blocking, in-process, no persistence
@@ -33,12 +34,14 @@ export interface Scheduler extends Streamable<ScheduleTick> {
 
   /**
    * Stream ticks from a specific schedule (or all if no id given).
-   * Non-blocking — sleeps until next fire time, emits, repeats.
+   * Non-blocking — sleeps until next fire time, emits, repeats. Stopping the
+   * consumer (`take(n)`, leaving a `for await` loop) releases the stream's
+   * timers and listeners.
    */
-  stream(scheduleId?: string): StreamPipeline<ScheduleTick, never>;
+  stream(scheduleId?: string): Stream<ScheduleTick>;
 
   /** Streamable implementation — same as stream() with no filter. */
-  subscribe(params?: { group?: string }): StreamPipeline<ScheduleTick, never>;
+  subscribe(params?: { group?: string }): Stream<ScheduleTick>;
 
   /** Codec for ScheduleTick serialization. */
   codec: Codec<ScheduleTick>;

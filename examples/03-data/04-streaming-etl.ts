@@ -1,6 +1,6 @@
 /**
  * Streaming ETL — process large datasets in constant memory.
- * DataFrame.stream() returns a StreamPipeline, enabling chunked processing.
+ * DataFrame.stream() returns a perfect Stream, enabling chunked processing.
  */
 
 import { DataFrame, col, CsvSink, JsonlSink } from "@promin/data";
@@ -22,9 +22,11 @@ await DataFrame.fromArray(orders)
   .withColumn("tier", (r: any) => (r.amount > 500 ? "premium" : "standard"))
   .select("orderId", "customerId", "region", "amount", "tier")
   .stream({ chunkSize: 10_000 }) // process 10K rows at a time
-  .forEach(async (row) => {
+  .tap((_row) => {
     // Each row flows through without buffering the full dataset
-  });
+  })
+  .drain()
+  .run();
 
 // 2. Streaming aggregation — groupBy works in streaming mode too
 const summary = await DataFrame.fromArray(orders)
@@ -32,7 +34,8 @@ const summary = await DataFrame.fromArray(orders)
   .groupBy("region")
   .agg({ amount: "sum", orderId: "count" })
   .stream({ chunkSize: 20_000 })
-  .collect();
+  .toArray()
+  .run();
 
 console.log("Revenue by region (streamed):", summary);
 

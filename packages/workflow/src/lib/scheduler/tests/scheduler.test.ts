@@ -1,7 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { createScheduler } from "../in-memory-scheduler.ts";
 import { scheduleTickRunId } from "../types.ts";
-import { StreamPipeline } from "@promin/core";
 
 // ---------------------------------------------------------------------------
 // scheduleTickRunId — shared id format
@@ -136,7 +135,7 @@ describe("InMemoryScheduler", () => {
       const scheduler = createScheduler();
       scheduler.register({ id: "fast", intervalMs: 50 });
 
-      const ticks = await scheduler.stream("fast").take(3).collect();
+      const ticks = await scheduler.stream("fast").take(3).toArray().run();
 
       expect(ticks).toHaveLength(3);
       expect(ticks[0]!.scheduleId).toBe("fast");
@@ -149,7 +148,7 @@ describe("InMemoryScheduler", () => {
       const scheduler = createScheduler();
       scheduler.register({ id: "dates", intervalMs: 50 });
 
-      const [tick] = await scheduler.stream("dates").take(1).collect();
+      const [tick] = await scheduler.stream("dates").take(1).toArray().run();
 
       expect(tick!.scheduledAt).toBeInstanceOf(Date);
       expect(tick!.firedAt).toBeInstanceOf(Date);
@@ -165,7 +164,7 @@ describe("InMemoryScheduler", () => {
         metadata: { env: "test" },
       });
 
-      const [tick] = await scheduler.stream("meta").take(1).collect();
+      const [tick] = await scheduler.stream("meta").take(1).toArray().run();
 
       expect(tick!.scheduleName).toBe("Heartbeat");
       expect(tick!.metadata).toEqual({ env: "test" });
@@ -176,7 +175,7 @@ describe("InMemoryScheduler", () => {
       scheduler.register({ id: "timed", intervalMs: 100 });
 
       const start = Date.now();
-      await scheduler.stream("timed").take(3).collect();
+      await scheduler.stream("timed").take(3).toArray().run();
       const elapsed = Date.now() - start;
 
       expect(elapsed).toBeGreaterThanOrEqual(250); // 3 ticks * ~100ms
@@ -193,7 +192,7 @@ describe("InMemoryScheduler", () => {
       // Every second — should fire quickly
       scheduler.register({ id: "every-sec", cron: "* * * * * *" }); // 6-field with seconds
 
-      const ticks = await scheduler.stream("every-sec").take(2).collect();
+      const ticks = await scheduler.stream("every-sec").take(2).toArray().run();
 
       expect(ticks).toHaveLength(2);
       expect(ticks[0]!.scheduleId).toBe("every-sec");
@@ -211,7 +210,7 @@ describe("InMemoryScheduler", () => {
       scheduler.register({ id: "a", intervalMs: 50 });
       scheduler.register({ id: "b", intervalMs: 50 });
 
-      const ticks = await scheduler.stream().take(4).collect();
+      const ticks = await scheduler.stream().take(4).toArray().run();
 
       expect(ticks).toHaveLength(4);
       const ids = new Set(ticks.map((t) => t.scheduleId));
@@ -223,7 +222,7 @@ describe("InMemoryScheduler", () => {
       const scheduler = createScheduler();
       scheduler.register({ id: "sub", intervalMs: 50 });
 
-      const ticks = await scheduler.subscribe().take(2).collect();
+      const ticks = await scheduler.subscribe().take(2).toArray().run();
 
       expect(ticks).toHaveLength(2);
       expect(ticks[0]!.scheduleId).toBe("sub");
@@ -231,18 +230,34 @@ describe("InMemoryScheduler", () => {
   });
 
   // ---------------------------------------------------------------------------
-  // StreamPipeline integration
+  // Stream integration
   // ---------------------------------------------------------------------------
 
-  describe("StreamPipeline integration", () => {
-    it("works with StreamPipeline.fromSource()", async () => {
+  describe("Stream integration", () => {
+    it("subscribe() builds a fresh stream on every call", async () => {
       const scheduler = createScheduler();
       scheduler.register({ id: "src", intervalMs: 50 });
 
-      const ticks = await StreamPipeline.fromSource(scheduler).take(2).collect();
+      const first = await scheduler.subscribe().take(2).toArray().run();
+      const second = await scheduler.subscribe().take(2).toArray().run();
 
-      expect(ticks).toHaveLength(2);
-      expect(ticks[0]!.scheduleId).toBe("src");
+      expect(first.map((t) => t.tickNumber)).toEqual([0, 1]);
+      expect(second.map((t) => t.tickNumber)).toEqual([0, 1]);
+    });
+
+    it("picks up schedules registered after subscribe() started", async () => {
+      const scheduler = createScheduler();
+      scheduler.register({ id: "early", intervalMs: 50 });
+      setTimeout(() => scheduler.register({ id: "late", intervalMs: 20 }), 30);
+
+      const ticks = await scheduler
+        .subscribe()
+        .filter((t) => t.scheduleId === "late")
+        .take(1)
+        .toArray()
+        .run();
+
+      expect(ticks[0]!.scheduleId).toBe("late");
     });
 
     it("composes with stream operators", async () => {
@@ -254,7 +269,8 @@ describe("InMemoryScheduler", () => {
         .stream()
         .filter((t) => t.metadata?.type === "fast")
         .take(2)
-        .collect();
+        .toArray()
+        .run();
 
       expect(fastTicks).toHaveLength(2);
       expect(fastTicks.every((t) => t.scheduleId === "a")).toBe(true);
@@ -271,7 +287,8 @@ describe("InMemoryScheduler", () => {
           date: tick.scheduledAt.toISOString().split("T")[0],
           tickNumber: tick.tickNumber,
         }))
-        .collect();
+        .toArray()
+        .run();
 
       expect(inputs).toHaveLength(2);
       expect(inputs[0]!.tickNumber).toBe(0);
@@ -292,7 +309,7 @@ describe("InMemoryScheduler", () => {
         rrule: "FREQ=SECONDLY;INTERVAL=1",
       });
 
-      const ticks = await scheduler.stream("rrule-fast").take(2).collect();
+      const ticks = await scheduler.stream("rrule-fast").take(2).toArray().run();
 
       expect(ticks).toHaveLength(2);
       expect(ticks[0]!.scheduleId).toBe("rrule-fast");
@@ -312,7 +329,7 @@ describe("InMemoryScheduler", () => {
       scheduler.register({ id: "delayed", intervalMs: 50, startAt });
 
       const before = Date.now();
-      const [tick] = await scheduler.stream("delayed").take(1).collect();
+      const [tick] = await scheduler.stream("delayed").take(1).toArray().run();
       const elapsed = Date.now() - before;
 
       expect(elapsed).toBeGreaterThanOrEqual(150);
@@ -324,7 +341,7 @@ describe("InMemoryScheduler", () => {
       const endAt = new Date(Date.now() + 200);
       scheduler.register({ id: "expiring", intervalMs: 50, endAt });
 
-      const ticks = await scheduler.stream("expiring").collect();
+      const ticks = await scheduler.stream("expiring").toArray().run();
 
       expect(ticks.length).toBeGreaterThanOrEqual(1);
       expect(ticks.length).toBeLessThan(10);
@@ -338,7 +355,7 @@ describe("InMemoryScheduler", () => {
         endAt: new Date(Date.now() - 1000),
       });
 
-      const ticks = await scheduler.stream("expired").collect();
+      const ticks = await scheduler.stream("expired").toArray().run();
       expect(ticks).toHaveLength(0);
     });
 
@@ -353,7 +370,7 @@ describe("InMemoryScheduler", () => {
       });
 
       const before = Date.now();
-      const ticks = await scheduler.stream("windowed").collect();
+      const ticks = await scheduler.stream("windowed").toArray().run();
       const elapsed = Date.now() - before;
 
       expect(elapsed).toBeGreaterThanOrEqual(100);
@@ -374,11 +391,65 @@ describe("InMemoryScheduler", () => {
       // Unregister after a short delay
       setTimeout(() => scheduler.unregister("temp"), 200);
 
-      const ticks = await scheduler.stream("temp").collect();
+      const ticks = await scheduler.stream("temp").toArray().run();
 
       // Should have collected some ticks before ending
       expect(ticks.length).toBeGreaterThanOrEqual(1);
       expect(ticks.length).toBeLessThan(100);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Cleanup when the consumer stops
+  // ---------------------------------------------------------------------------
+
+  describe("cleanup on consumer stop", () => {
+    // The register-callback set is private; bracket access keeps the check
+    // honest without widening the public surface.
+    const registerCallbacks = (s: ReturnType<typeof createScheduler>) => s["_registerCallbacks"];
+
+    it("take(n) removes the register callback", async () => {
+      const scheduler = createScheduler();
+      scheduler.register({ id: "a", intervalMs: 20 });
+
+      let sizeWhileRunning = -1;
+      const ticks = await scheduler
+        .subscribe()
+        .tap(() => {
+          sizeWhileRunning = registerCallbacks(scheduler).size;
+        })
+        .take(2)
+        .toArray()
+        .run();
+
+      expect(ticks).toHaveLength(2);
+      expect(sizeWhileRunning).toBe(1);
+      expect(registerCallbacks(scheduler).size).toBe(0);
+    });
+
+    it("breaking out of for-await removes the register callback", async () => {
+      const scheduler = createScheduler();
+      scheduler.register({ id: "a", intervalMs: 20 });
+
+      for await (const tick of scheduler.subscribe().toAsyncIterable()) {
+        expect(tick.scheduleId).toBe("a");
+        expect(registerCallbacks(scheduler).size).toBe(1);
+        break;
+      }
+
+      expect(registerCallbacks(scheduler).size).toBe(0);
+    });
+
+    it("interrupts a pending sleep instead of waiting for the next fire time", async () => {
+      const scheduler = createScheduler();
+      scheduler.register({ id: "slow", intervalMs: 60_000 });
+
+      const start = Date.now();
+      const ticks = await scheduler.subscribe().interruptAfter(50).toArray().run();
+
+      expect(ticks).toHaveLength(0);
+      expect(Date.now() - start).toBeLessThan(5_000);
+      expect(registerCallbacks(scheduler).size).toBe(0);
     });
   });
 });

@@ -131,19 +131,23 @@ const analyzeArticle = workflow<{ url: string }>({ name: "analyze" })
   .build()
   .bind(storage);
 
-// Trigger from any stream
+// Trigger from any perfect Stream — trigger() returns a Pipe
 await eventStream
   .through(
     trigger({
       workflow: analyzeArticle,
+      runner,
+      storage,
       toInput: (event) => ({ url: event.data }),
       toWorkflowId: (event) => `analyze-${event.id}`,
-      concurrency: 5,
+      concurrency: 5, // results stay in input order
       onDuplicate: "skip",
     }),
   )
   .filter(WorkflowResult.isCompleted)
-  .forEach((r) => log(r.result));
+  .tap((r) => log(r.result))
+  .drain()
+  .run();
 ```
 
 ### Step Failure Strategies

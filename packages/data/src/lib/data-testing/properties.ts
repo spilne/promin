@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import type { DataFrame } from "../dataframe/dataframe.ts";
-import type { StreamPipeline } from "@promin/core";
+import type { Stream } from "@spilne/perfect-core";
 
 export const dataframeProperties = {
   /** filter should never increase row count. */
@@ -45,7 +45,7 @@ export const dataframeProperties = {
 };
 
 // ---------------------------------------------------------------------------
-// StreamPipeline property assertions
+// Stream property assertions (perfect `Stream`)
 // ---------------------------------------------------------------------------
 
 export const streamProperties = {
@@ -53,9 +53,9 @@ export const streamProperties = {
   async filterReducesOrMaintains<T>(
     items: T[],
     predicate: (r: T) => boolean,
-    createStream: (items: T[]) => StreamPipeline<T, never>,
+    createStream: (items: T[]) => Stream<T>,
   ): Promise<boolean> {
-    const result = await createStream(items).filter(predicate).collect();
+    const result = await createStream(items).filter(predicate).toArray().run();
     return result.length <= items.length;
   },
 
@@ -63,9 +63,9 @@ export const streamProperties = {
   async takeBounded<T>(
     items: T[],
     n: number,
-    createStream: (items: T[]) => StreamPipeline<T, never>,
+    createStream: (items: T[]) => Stream<T>,
   ): Promise<boolean> {
-    const result = await createStream(items).take(n).collect();
+    const result = await createStream(items).take(n).toArray().run();
     return result.length <= n;
   },
 
@@ -73,27 +73,27 @@ export const streamProperties = {
   async mapPreservesCount<T, U>(
     items: T[],
     fn: (r: T) => U,
-    createStream: (items: T[]) => StreamPipeline<T, never>,
+    createStream: (items: T[]) => Stream<T>,
   ): Promise<boolean> {
-    const result = await createStream(items).map(fn).collect();
+    const result = await createStream(items).map(fn).toArray().run();
     return result.length === items.length;
   },
 
   /** dedupe should reduce or maintain count. */
   async dedupeReducesOrMaintains<T>(
     items: T[],
-    createStream: (items: T[]) => StreamPipeline<T, never>,
+    createStream: (items: T[]) => Stream<T>,
   ): Promise<boolean> {
-    const result = await createStream(items).dedupe().collect();
+    const result = await createStream(items).dedupe().toArray().run();
     return result.length <= items.length;
   },
 
   /** collect should return all items from the source. */
   async collectMatchesSource<T>(
     items: T[],
-    createStream: (items: T[]) => StreamPipeline<T, never>,
+    createStream: (items: T[]) => Stream<T>,
   ): Promise<boolean> {
-    const result = await createStream(items).collect();
+    const result = await createStream(items).toArray().run();
     return result.length === items.length;
   },
 };
