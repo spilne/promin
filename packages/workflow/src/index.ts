@@ -224,6 +224,7 @@ export {
   DistributedWorkflowRunner,
   createDistributedWorkflowRunner,
   type DistributedRunnerConfig,
+  type DistributedRunnerErrorEvent,
   type WorkflowCoordinator,
   type CoordinatorConfig,
   DefaultCoordinator,
@@ -249,6 +250,7 @@ export {
   DefaultWorker,
   createWorker,
   type WorkerHooks,
+  type WorkerErrorEvent,
   type WorkerMiddleware,
   type NextFn,
   timeoutMiddleware,
@@ -261,13 +263,11 @@ export {
   type AdvertisementEntry,
   InMemoryWorkflowAdvertisementRegistry,
   type InMemoryWorkflowAdvertisementRegistryConfig,
-  workflowAdvertisementRegistryTestSuite,
   type WorkflowStartQueue,
   type WorkflowStartRecord,
   type WorkerWorkflowSpec,
   InMemoryWorkflowStartQueue,
   type InMemoryWorkflowStartQueueConfig,
-  workflowStartQueueTestSuite,
 } from "./lib/distributed/index.ts";
 
 // SQL Models (dbt-style)

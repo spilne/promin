@@ -13,9 +13,7 @@
 // pattern — works as long as the resulting object matches that shape.
 // ---------------------------------------------------------------------------
 
-import { readdir } from "node:fs/promises";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { loadNodeFs } from "./node-fs.ts";
 import type { Workflow } from "../durable/durable-pipeline.ts";
 
 export interface WorkflowScannerOptions {
@@ -75,6 +73,7 @@ export class WorkflowScanner {
     warnings: string[],
   ): Promise<void> {
     if (depth > this.maxDepth) return;
+    const { readdir, join } = await loadNodeFs();
     let entries;
     try {
       entries = await readdir(dir, { withFileTypes: true });
@@ -109,6 +108,7 @@ export class WorkflowScanner {
     sources: Record<string, string>,
     warnings: string[],
   ): Promise<void> {
+    const { pathToFileURL } = await loadNodeFs();
     let mod: Record<string, unknown>;
     try {
       mod = (await import(pathToFileURL(absPath).href)) as Record<string, unknown>;

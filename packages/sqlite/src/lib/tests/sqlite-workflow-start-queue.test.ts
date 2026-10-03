@@ -5,7 +5,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { workflowStartQueueTestSuite } from "@promin/workflow";
+import { workflowStartQueueTestSuite } from "@promin/workflow/testing";
 import { SqliteWorkflowStartQueue } from "../sqlite-workflow-start-queue.ts";
 
 let counter = 0;

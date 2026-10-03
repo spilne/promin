@@ -22,14 +22,6 @@ export type WorkerMiddleware = (params: {
   next: NextFn;
 }) => Promise<unknown>;
 
-/** Compose an array of middleware into a single function that wraps a handler. */
-export function composeMiddleware(middleware: WorkerMiddleware[], handler: NextFn): NextFn {
-  return middleware.reduceRight<NextFn>(
-    (next, mw) => (ctx) => mw({ task: ctx as any, ctx, next }),
-    handler,
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Built-in middleware
 // ---------------------------------------------------------------------------

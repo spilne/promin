@@ -30,6 +30,12 @@
 // ---------------------------------------------------------------------------
 
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
+import {
+  PollLoop,
+  describeError,
+  isNetworkError,
+  type PollLoopErrorInfo,
+} from "../shared/poll-loop.ts";
 import { isActivityJournalStorage } from "../durable/activity-journal.ts";
 import { isJournaledSuspendStorage } from "../durable/activity-journal.ts";
 import type { Workflow } from "../durable/durable-pipeline.ts";
@@ -57,7 +63,13 @@ export interface SignalScannerConfig {
 }
 
 export interface SignalScanner {
+  /**
+   * Start scanning for delivered signals. A failed scan is reported through
+   * `onError` and retried with backoff; it never ends the loop. Resolves
+   * once the scanner has stopped.
+   */
   start(): Promise<void>;
+  /** Stop scanning. Resolves once the in-flight scan (if any) has finished. */
   stop(): Promise<void>;
 }
 
@@ -69,7 +81,7 @@ export class DefaultSignalScanner implements SignalScanner {
   private readonly onResume?: SignalScannerConfig["onResume"];
   private readonly onError?: SignalScannerConfig["onError"];
   private readonly clock: WallClock;
-  private running = false;
+  private readonly loop: PollLoop;
 
   constructor(config: SignalScannerConfig) {
     this.storage = config.storage;
@@ -79,33 +91,39 @@ export class DefaultSignalScanner implements SignalScanner {
     this.onResume = config.onResume;
     this.onError = config.onError;
     this.clock = config.clock ?? SystemWallClock;
+    this.loop = new PollLoop({
+      name: "signal-scanner",
+      intervalMs: this.scanIntervalMs,
+      clock: this.clock,
+      tick: () => this.scan(),
+      onError: (err, info) => this.reportScanError(err, info),
+    });
   }
 
-  async start(): Promise<void> {
-    this.running = true;
-    let consecutiveFailures = 0;
-    while (this.running) {
-      try {
-        await this.scan();
-        consecutiveFailures = 0;
-      } catch (err) {
-        consecutiveFailures += 1;
-        const isNetwork = isNetworkError(err);
-        if (isNetwork) {
-          if (consecutiveFailures <= 3) {
-            console.warn(`[signal-scanner] storage unreachable, retrying — ${describeError(err)}`);
-          }
-        } else {
-          console.error("[signal-scanner] scan failed:", err);
-        }
-        this.onError?.("(scan-loop)", err);
+  start(): Promise<void> {
+    return this.loop.start();
+  }
+
+  /** Stop scanning. Resolves once the in-flight scan (if any) has finished. */
+  stop(): Promise<void> {
+    return this.loop.stop();
+  }
+
+  /**
+   * Scan-loop failure: most often storage is briefly unreachable (dev
+   * hot-reload, restart). Network blips log tersely for the first few
+   * failures, then stay quiet; anything else logs loudly every time.
+   * `onError` gets a synthetic `"(scan-loop)"` id with the real error.
+   */
+  private reportScanError(err: unknown, info: PollLoopErrorInfo): void {
+    if (isNetworkError(err)) {
+      if (info.consecutiveFailures <= 3) {
+        console.warn(`[signal-scanner] storage unreachable, retrying — ${describeError(err)}`);
       }
-      await new Promise<void>((r) => this.clock.setTimeout(() => r(), this.scanIntervalMs));
+    } else {
+      console.error("[signal-scanner] scan failed:", err);
     }
-  }
-
-  async stop(): Promise<void> {
-    this.running = false;
+    this.onError?.("(scan-loop)", err);
   }
 
   private async scan(): Promise<void> {
@@ -119,7 +137,7 @@ export class DefaultSignalScanner implements SignalScanner {
     let offset = 0;
     const pageSize = 100;
 
-    while (this.running) {
+    while (!this.loop.stopRequested) {
       const suspended = await this.storage.listWorkflows({
         status: "suspended",
         limit: pageSize,
@@ -127,6 +145,7 @@ export class DefaultSignalScanner implements SignalScanner {
       });
 
       for (const wf of suspended) {
+        if (this.loop.stopRequested) return;
         const waiting = findWaitingForSignal(wf);
         if (!waiting) continue;
         const signals = await this.storage.loadSignals(wf.workflowId);
@@ -198,19 +217,4 @@ function findWaitingForSignal(wf: WorkflowState): { stepName: string; signalName
     }
   }
   return null;
-}
-
-function isNetworkError(err: unknown): boolean {
-  const code = (err as { code?: string })?.code;
-  if (code === "ConnectionRefused" || code === "ECONNREFUSED") return true;
-  if (code === "ECONNRESET" || code === "ETIMEDOUT") return true;
-  if (code === "ENOTFOUND" || code === "EHOSTUNREACH") return true;
-  const msg = (err as { message?: string })?.message ?? "";
-  return /unable to connect|connection refused|fetch failed|socket hang up/i.test(msg);
-}
-
-function describeError(err: unknown): string {
-  const code = (err as { code?: string })?.code;
-  const msg = (err as { message?: string })?.message ?? String(err);
-  return code ? `${code}: ${msg.split("\n")[0]}` : (msg.split("\n")[0] ?? "");
 }
