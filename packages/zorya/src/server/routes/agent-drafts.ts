@@ -17,6 +17,7 @@
 // ---------------------------------------------------------------------------
 
 import type { AgentRegistry, RegisteredAgent } from "@promin/agent";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 
 /** Reserved id prefix marking a recipe as an ephemeral Designer draft. */
@@ -32,6 +33,8 @@ export function isDraftId(id: string): boolean {
 
 export interface AgentDraftsDeps {
   readonly registry: AgentRegistry;
+  /** Time source for draft ids and the stale-draft TTL cutoff. Default: `SystemWallClock`. */
+  readonly clock?: WallClock;
 }
 
 interface CreateDraftRequest {
@@ -53,11 +56,12 @@ export function createDraft(deps: AgentDraftsDeps) {
 
     // Opportunistic TTL sweep — reap drafts orphaned by a closed browser
     // before adding another. Best-effort; never fails the create.
-    await sweepStaleDrafts(deps.registry);
+    const clock = deps.clock ?? SystemWallClock;
+    await sweepStaleDrafts({ registry: deps.registry, clock });
 
     const sourceId =
       typeof body.sourceId === "string" && body.sourceId.length > 0 ? body.sourceId : "agent";
-    const id = `${DRAFT_PREFIX}${Date.now().toString(36)}__${sourceId}`;
+    const id = `${DRAFT_PREFIX}${clock.currentTimeMs().toString(36)}__${sourceId}`;
     const metadata =
       typeof body.metadata === "object" && body.metadata !== null
         ? (body.metadata as Partial<RegisteredAgent["metadata"]>)
@@ -95,9 +99,13 @@ export function deleteDraft(deps: AgentDraftsDeps) {
   };
 }
 
-async function sweepStaleDrafts(registry: AgentRegistry): Promise<void> {
+async function sweepStaleDrafts(params: {
+  registry: AgentRegistry;
+  clock: WallClock;
+}): Promise<void> {
+  const { registry, clock } = params;
   try {
-    const cutoff = Date.now() - DRAFT_TTL_MS;
+    const cutoff = clock.currentTimeMs() - DRAFT_TTL_MS;
     for (const recipe of await registry.list({})) {
       if (isDraftId(recipe.id) && recipe.createdAt < cutoff) {
         await registry.unregister(recipe.id);

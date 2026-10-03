@@ -15,7 +15,7 @@ import type {
 import { transitionTo } from "./state-machine-types.ts";
 import { type StateMachineStorage, InMemoryStateMachineStorage } from "./state-machine-storage.ts";
 import type { RetryPolicy } from "../shared/retry-policy.ts";
-import { type WallClock, SystemWallClock } from "../shared/wall-clock.ts";
+import { type TimerHandle, type WallClock, SystemWallClock } from "../shared/wall-clock.ts";
 import type { SchemaParser } from "@spilne/perfect-core";
 
 // ---------------------------------------------------------------------------
@@ -88,23 +88,32 @@ export function composeMachineMiddleware(...middlewares: MachineMiddleware[]): M
   };
 }
 
-/** Reusable retry middleware — wraps every transition with retry logic. */
-export function retryMiddleware(policy: RetryPolicy<unknown>): MachineMiddleware {
+/**
+ * Reusable retry middleware — wraps every transition with retry logic.
+ * `clock` drives the backoff waits and the `timeBudgetMs` check; default
+ * `SystemWallClock`.
+ */
+export function retryMiddleware(
+  policy: RetryPolicy<unknown> & { readonly clock?: WallClock },
+): MachineMiddleware {
+  const clock = policy.clock ?? SystemWallClock;
   return async (_ctx, next) => {
-    await executeWithRetryReturn(next, policy);
+    await executeWithRetryReturn({ fn: next, policy, clock });
   };
 }
 
-async function executeWithRetryReturn<T>(
-  fn: () => T | Promise<T>,
-  policy: RetryPolicy<unknown>,
-): Promise<T> {
+async function executeWithRetryReturn<T>(params: {
+  fn: () => T | Promise<T>;
+  policy: RetryPolicy<unknown>;
+  clock: WallClock;
+}): Promise<T> {
+  const { fn, policy, clock } = params;
   const maxRetries = policy.maxRetries ?? 3;
   const baseDelay = policy.baseDelayMs ?? 250;
   const maxDelay = policy.maxDelayMs ?? Infinity;
   const jitter = policy.jitter ?? false;
   const timeBudget = policy.timeBudgetMs ?? Infinity;
-  const start = Date.now();
+  const start = clock.currentTimeMs();
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
@@ -112,11 +121,11 @@ async function executeWithRetryReturn<T>(
     } catch (err) {
       if (attempt >= maxRetries) throw err;
       if (policy.when && !policy.when(err)) throw err;
-      if (Date.now() - start >= timeBudget) throw err;
+      if (clock.currentTimeMs() - start >= timeBudget) throw err;
 
       let delay = Math.min(baseDelay * 2 ** attempt, maxDelay);
       if (jitter) delay *= 0.75 + Math.random() * 0.5;
-      await new Promise((r) => setTimeout(r, delay));
+      await new Promise<void>((r) => clock.setTimeout(() => r(), delay));
     }
   }
   throw new Error("unreachable");
@@ -312,7 +321,7 @@ export class StateMachineBuilder<S, Events = void> {
 
 export class StateMachineInstance<S, Events = void> {
   private recentSendTimestamps: number[] = [];
-  private timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private timers = new Map<string, TimerHandle>();
 
   constructor(
     private readonly name: string,
@@ -401,7 +410,7 @@ export class StateMachineInstance<S, Events = void> {
       }
 
       if (this.limits?.maxTransitionsPerSecond) {
-        const now = Date.now();
+        const now = this.clock.currentTimeMs();
         this.recentSendTimestamps = this.recentSendTimestamps.filter((t) => t > now - 1000);
         if (this.recentSendTimestamps.length >= this.limits.maxTransitionsPerSecond) {
           throw new Error(
@@ -437,7 +446,11 @@ export class StateMachineInstance<S, Events = void> {
 
           const executeAction = () => transition.action!(machine.context, data, helper);
           const result = transition.retry
-            ? await executeWithRetryReturn(executeAction, transition.retry)
+            ? await executeWithRetryReturn({
+                fn: executeAction,
+                policy: transition.retry,
+                clock: this.clock,
+              })
             : await executeAction();
 
           if (
@@ -551,7 +564,7 @@ export class StateMachineInstance<S, Events = void> {
 
   /** Cancel all pending in-process timers — call before discarding the instance. */
   cancelAllTimeouts(): void {
-    for (const handle of this.timers.values()) clearTimeout(handle);
+    for (const handle of this.timers.values()) handle.clear();
     this.timers.clear();
   }
 
@@ -560,23 +573,21 @@ export class StateMachineInstance<S, Events = void> {
     const cfg = this.states.get(stateName)?.timeout;
     if (!cfg) return;
     this.cancelTimeout(id);
-    const handle = setTimeout(() => {
+    const handle = this.clock.setTimeout(() => {
       this.timers.delete(id);
       // Errors are swallowed — timeout firing must not crash the host process.
       // Callers that need failure visibility should use checkTimeouts() directly.
       this.fireTimeout(id, stateName).catch(() => {});
     }, cfg.ms);
     // Don't keep the event loop alive for pending state-machine timeouts.
-    if (typeof (handle as { unref?: () => void }).unref === "function") {
-      (handle as { unref: () => void }).unref();
-    }
+    handle.unref?.();
     this.timers.set(id, handle);
   }
 
   private cancelTimeout(id: string): void {
     const handle = this.timers.get(id);
     if (handle) {
-      clearTimeout(handle);
+      handle.clear();
       this.timers.delete(id);
     }
   }
@@ -699,7 +710,11 @@ export function stateMachine<S, Events = void>(params: {
   limits?: MachineLimits;
   type?: string;
   namespace?: string;
-  /** Time source for due-timeout calculations. Default: SystemWallClock. */
+  /**
+   * Time source for due-timeout checks, the in-process timeout timers, the
+   * per-second rate limit and transition retry backoff. Default:
+   * SystemWallClock.
+   */
   clock?: WallClock;
   /**
    * Whether to schedule in-process setTimeout for state timeouts. Default: true.

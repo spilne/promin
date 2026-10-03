@@ -8,7 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import { beforeEach, describe, expect, it } from "bun:test";
-import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { FakeWallClock, InMemoryWorkflowStorage } from "@promin/workflow";
 import {
   completeSignalToken,
   listSignalTokensForRun,
@@ -275,5 +275,74 @@ describe("signal-tokens routes", () => {
         expect((t as unknown as Record<string, unknown>).bearer).toBeUndefined();
       }
     });
+  });
+});
+
+describe("signal tokens — expiry on an injected clock", () => {
+  it("mints expiresAt from the clock and rejects completion once the clock reaches it", async () => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const workflowId = "wf-clock-token";
+    await storage.createWorkflow({ workflowId, workflowName: "approve-doc", input: {} });
+
+    const mintRes = await mintSignalToken({ storage, clock })(
+      new Request(`http://x/api/runs/${workflowId}/signals/approve/token`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expiresInMs: 60_000 }),
+      }),
+      { id: workflowId, name: "approve" },
+    );
+    const minted = (await mintRes.json()) as MintTokenResponse;
+    expect(minted.expiresAt).toBe("2026-01-01T00:01:00.000Z");
+
+    const completeAt = async (): Promise<Response> =>
+      completeSignalToken({ storage, clock })(
+        new Request(`http://x/api/signal-tokens/${minted.tokenId}/complete`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${minted.bearer}`,
+          },
+          body: JSON.stringify({ value: { approved: true } }),
+        }),
+        { tokenId: minted.tokenId },
+      );
+
+    clock.advance(60_000);
+    const expired = await completeAt();
+    expect(expired.status).toBe(408);
+    expect(((await expired.json()) as { error: string }).error).toBe("token_expired");
+  });
+
+  it("accepts completion one ms before the clock reaches expiresAt", async () => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const workflowId = "wf-clock-token-ok";
+    await storage.createWorkflow({ workflowId, workflowName: "approve-doc", input: {} });
+
+    const mintRes = await mintSignalToken({ storage, clock })(
+      new Request(`http://x/api/runs/${workflowId}/signals/approve/token`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expiresInMs: 1_000 }),
+      }),
+      { id: workflowId, name: "approve" },
+    );
+    const minted = (await mintRes.json()) as MintTokenResponse;
+
+    clock.advance(999);
+    const res = await completeSignalToken({ storage, clock })(
+      new Request(`http://x/api/signal-tokens/${minted.tokenId}/complete`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${minted.bearer}`,
+        },
+        body: JSON.stringify({ value: "ok" }),
+      }),
+      { tokenId: minted.tokenId },
+    );
+    expect(res.status).toBe(201);
   });
 });

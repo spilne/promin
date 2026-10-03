@@ -4,6 +4,7 @@ import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { trigger, WorkflowResult } from "../workflow-trigger.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
+import { FakeWallClock } from "../../shared/wall-clock.ts";
 
 // ---------------------------------------------------------------------------
 // Test error types
@@ -336,5 +337,40 @@ describe("trigger", () => {
       .run();
 
     expect(runCount).toBe(3);
+  });
+});
+
+describe("trigger — durationMs on an injected clock", () => {
+  it("measures completed and failed runs with the clock, not wall time", async () => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
+    const def = workflow<{ ok: boolean }>({ name: "clock-duration-trigger" })
+      .step("work", ({ input }) => {
+        // The run "takes" 750ms of fake time.
+        clock.advance(750);
+        return input.ok ? succeed("done") : fail(new ProcessError({ message: "nope" }));
+      })
+      .build();
+
+    const results = await Stream.fromIterable([true, false])
+      .through(
+        trigger({
+          workflow: def,
+          runner,
+          storage,
+          clock,
+          toInput: (ok) => ({ ok }),
+          toWorkflowId: (ok) => `clock-dur-${ok}`,
+        }),
+      )
+      .toArray()
+      .run();
+
+    const [completed, failed] = results;
+    expect(completed?._tag).toBe("completed");
+    expect(failed?._tag).toBe("failed");
+    if (completed && WorkflowResult.isCompleted(completed)) expect(completed.durationMs).toBe(750);
+    if (failed && WorkflowResult.isFailed(failed)) expect(failed.durationMs).toBe(750);
   });
 });

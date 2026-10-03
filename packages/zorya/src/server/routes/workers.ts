@@ -7,7 +7,8 @@
 // .workerProtocol.workerRegistry (see RegistryBackedWorkersProvider).
 // ---------------------------------------------------------------------------
 
-import type { WorkerInfo, WorkerRegistry } from "@promin/workflow";
+import type { WallClock, WorkerInfo, WorkerRegistry } from "@promin/workflow";
+import { SystemWallClock } from "@promin/workflow";
 import { json } from "../router.ts";
 import type { WorkerDto, WorkersResponse } from "../api-types.ts";
 
@@ -34,16 +35,34 @@ export function listWorkers(provider: WorkersProvider) {
  * sensible defaults when a field isn't present, so workers written by
  * other languages that only send the basics still render.
  */
+export interface RegistryBackedWorkersProviderOptions {
+  /** Age in ms after which a worker is considered offline. Default 30s. */
+  offlineAfterMs?: number;
+  /**
+   * Time source for the online / offline cutoff. Pass the worker
+   * registry's clock so heartbeat stamps and the cutoff share one axis.
+   * Default: `SystemWallClock`.
+   */
+  clock?: WallClock;
+}
+
 export class RegistryBackedWorkersProvider implements WorkersProvider {
+  private readonly offlineAfterMs: number;
+  private readonly clock: WallClock;
+
   constructor(
     private readonly registry: WorkerRegistry,
-    /** Age in ms after which a worker is considered offline. Default 30s. */
-    private readonly offlineAfterMs = 30_000,
-  ) {}
+    /** Options, or (legacy) the offline-after age in ms. */
+    options: RegistryBackedWorkersProviderOptions | number = {},
+  ) {
+    const opts = typeof options === "number" ? { offlineAfterMs: options } : options;
+    this.offlineAfterMs = opts.offlineAfterMs ?? 30_000;
+    this.clock = opts.clock ?? SystemWallClock;
+  }
 
   async listWorkers(): Promise<WorkerDto[]> {
     const entries = await this.registry.list();
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     return entries.map((e) => this.toDto(e, now));
   }
 

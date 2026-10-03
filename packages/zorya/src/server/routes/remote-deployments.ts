@@ -24,12 +24,19 @@ import type {
   RegisteredDeployment,
   RemoteDeploymentRegistry,
 } from "@promin/agent";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 
 export interface RemoteDeploymentsGatewayDeps {
   readonly registry: RemoteDeploymentRegistry;
   readonly agents: AgentRegistry;
-  /** Optional clock for tests. Defaults to `Date.now`. */
+  /**
+   * Time source for the lazy stale-registration sweep. Pass the deployment
+   * registry's clock so heartbeat stamps and the cutoff share one axis.
+   * Default: `SystemWallClock`.
+   */
+  readonly clock?: WallClock;
+  /** Explicit "now" override; takes precedence over `clock`. */
   readonly now?: () => number;
 }
 
@@ -200,7 +207,7 @@ export function listDeployments(deps: RemoteDeploymentsGatewayDeps) {
       // cleans up their recipes. A periodic loop in production
       // deployments would replace this; for Phase 1 single-process
       // demos, lazy GC is enough.
-      const now = (deps.now ?? (() => Date.now()))();
+      const now = deps.now ? deps.now() : (deps.clock ?? SystemWallClock).currentTimeMs();
       const expired = await deps.registry.expireStale({ now });
       for (const dep of expired) {
         await deleteRecipes(deps.agents, dep);

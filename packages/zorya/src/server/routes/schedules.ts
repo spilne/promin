@@ -8,7 +8,7 @@
 
 import type { DurableScheduleConfig, SchedulerStorage, WorkflowStorage } from "@promin/workflow";
 import { computeNextRun, isTickLogStorage, scheduleTickRunId } from "@promin/workflow";
-import type { WallClock } from "@promin/workflow";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 
 export interface ScheduleDto {
@@ -119,35 +119,50 @@ function iso(d?: Date | null): string | undefined {
   return d ? d.toISOString() : undefined;
 }
 
-function fakeClockAt(when: Date): WallClock {
+/**
+ * Dependencies shared by the schedule routes that read the current time
+ * (next-run projection, upcoming ticks, the create-time nextRun seed).
+ */
+export interface ScheduleRoutesDeps {
+  readonly storage: SchedulerStorage;
+  /**
+   * Time source for "now". Pass the scheduler loop's clock so seeded and
+   * projected times line up with its due checks. Default: `SystemWallClock`.
+   */
+  readonly clock?: WallClock;
+}
+
+/** A clock frozen at `when` — `computeNextRun` only reads the time. */
+function frozenClockAt(params: { when: Date; base: WallClock }): WallClock {
+  const { when, base } = params;
   return {
     currentTimeMs: () => when.getTime(),
     now: () => new Date(when.getTime()),
-    setTimeout: (fn, ms) => {
-      const h = setTimeout(fn, ms);
-      return { clear: () => clearTimeout(h) };
-    },
-    setInterval: (fn, ms) => {
-      const h = setInterval(fn, ms);
-      return { clear: () => clearInterval(h) };
-    },
+    setTimeout: (fn, ms) => base.setTimeout(fn, ms),
+    setInterval: (fn, ms) => base.setInterval(fn, ms),
   };
 }
 
-function nextRunIso(config: DurableScheduleConfig): string | undefined {
+function nextRunIso(params: {
+  config: DurableScheduleConfig;
+  clock: WallClock;
+}): string | undefined {
+  const { config, clock } = params;
   if (!(config.enabled ?? true)) return undefined;
   try {
-    const next = computeNextRun(config, fakeClockAt(new Date()));
+    const next = computeNextRun(config, frozenClockAt({ when: clock.now(), base: clock }));
     return next ? next.toISOString() : undefined;
   } catch {
     return undefined;
   }
 }
 
-function toDto(
-  config: DurableScheduleConfig,
-  state?: { lastFired: Date | null; tickCount: number } | null,
-): ScheduleDto {
+function toDto(params: {
+  config: DurableScheduleConfig;
+  state?: { lastFired: Date | null; tickCount: number } | null;
+  clock: WallClock;
+}): ScheduleDto {
+  const { config, state, clock } = params;
   return {
     id: config.id,
     name: config.name,
@@ -165,11 +180,13 @@ function toDto(
     maxCatchUp: config.maxCatchUp,
     lastFiredAt: state?.lastFired ? iso(state.lastFired) : undefined,
     tickCount: state?.tickCount,
-    nextRunAt: nextRunIso(config),
+    nextRunAt: nextRunIso({ config, clock }),
   };
 }
 
-export function listSchedules(storage: SchedulerStorage) {
+export function listSchedules(deps: ScheduleRoutesDeps) {
+  const { storage } = deps;
+  const clock = deps.clock ?? SystemWallClock;
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const enabled = parseBool(url.searchParams.get("enabled"));
@@ -201,24 +218,30 @@ export function listSchedules(storage: SchedulerStorage) {
 
     const ids = configs.map((c) => c.id);
     const states = ids.length > 0 ? await storage.loadScheduleStates(ids) : new Map();
-    const schedules = configs.map((c) => toDto(c, states.get(c.id) ?? null));
+    const schedules = configs.map((c) =>
+      toDto({ config: c, state: states.get(c.id) ?? null, clock }),
+    );
     const response: SchedulesResponse = { schedules, total };
     return json(200, response);
   };
 }
 
-export function getSchedule(storage: SchedulerStorage) {
+export function getSchedule(deps: ScheduleRoutesDeps) {
+  const { storage } = deps;
+  const clock = deps.clock ?? SystemWallClock;
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
     const config = await storage.loadSchedule(id);
     if (!config) return jsonError(404, "not_found");
     const state = await storage.loadScheduleState(id);
-    return json(200, toDto(config, state));
+    return json(200, toDto({ config, state, clock }));
   };
 }
 
-export function createSchedule(storage: SchedulerStorage) {
+export function createSchedule(deps: ScheduleRoutesDeps) {
+  const { storage } = deps;
+  const clock = deps.clock ?? SystemWallClock;
   return async (req: Request): Promise<Response> => {
     const body = await readJson<ScheduleCreateRequest>(req);
     if (!body || !body.id) return jsonError(400, "missing_id");
@@ -263,16 +286,18 @@ export function createSchedule(storage: SchedulerStorage) {
       // so the first poll picks it up (computeDueTicks fires one boot
       // tick at `now` when `lastFired` is null, then commitPoll advances
       // nextRun onto the natural cron / interval cadence).
-      await storage.setNextRun(config.id, new Date());
+      await storage.setNextRun(config.id, clock.now());
       const state = await storage.loadScheduleState(config.id);
-      return json(200, toDto(config, state));
+      return json(200, toDto({ config, state, clock }));
     } catch (err) {
       return jsonError(400, "upsert_failed", err instanceof Error ? err.message : String(err));
     }
   };
 }
 
-export function patchSchedule(storage: SchedulerStorage) {
+export function patchSchedule(deps: ScheduleRoutesDeps) {
+  const { storage } = deps;
+  const clock = deps.clock ?? SystemWallClock;
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
@@ -284,7 +309,7 @@ export function patchSchedule(storage: SchedulerStorage) {
     const config = await storage.loadSchedule(id);
     if (!config) return jsonError(404, "not_found");
     const state = await storage.loadScheduleState(id);
-    return json(200, toDto(config, state));
+    return json(200, toDto({ config, state, clock }));
   };
 }
 
@@ -486,10 +511,12 @@ export function getScheduleHistory(
 
 // ---------------------------------------------------------------------------
 // Upcoming — next N planned ticks. Pure: derives from cron/rrule/interval by
-// stepping `computeNextRun` forward, advancing a fake clock between calls.
+// stepping `computeNextRun` forward, re-freezing the clock one ms past each fire.
 // ---------------------------------------------------------------------------
 
-export function getScheduleUpcoming(storage: SchedulerStorage) {
+export function getScheduleUpcoming(deps: ScheduleRoutesDeps) {
+  const { storage } = deps;
+  const clock = deps.clock ?? SystemWallClock;
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
@@ -510,10 +537,10 @@ export function getScheduleUpcoming(storage: SchedulerStorage) {
     const startTickNumber = state?.tickCount ?? 0;
 
     const upcoming: ScheduleUpcomingTickDto[] = [];
-    let cursor = new Date();
+    let cursor = clock.now();
     let exhausted = false;
     for (let i = 0; i < count; i++) {
-      const next = computeNextRun(config, fakeClockAt(cursor));
+      const next = computeNextRun(config, frozenClockAt({ when: cursor, base: clock }));
       if (!next) {
         exhausted = true;
         break;

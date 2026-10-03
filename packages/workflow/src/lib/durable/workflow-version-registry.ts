@@ -4,6 +4,7 @@
 
 import type { Workflow } from "./durable-pipeline.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
+import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 
 // ---------------------------------------------------------------------------
 // Async registry interface — implemented by both the local in-memory class
@@ -127,6 +128,11 @@ export interface WorkflowVersionRegistryConfig {
    * logging/alerting even when you want to keep the version registered.
    */
   onDrained?: (name: string, version: string) => void | Promise<void>;
+  /**
+   * Time source for `registeredAt` / `activeAt` / `archivedAt` (and so the
+   * registration-desc order of `listRecords`). Default: `SystemWallClock`.
+   */
+  clock?: WallClock;
 }
 
 /** Internal record holding lifecycle metadata alongside the definition. */
@@ -148,10 +154,12 @@ export class WorkflowVersionRegistry {
   private drainedNotified = new Set<string>();
   private readonly autoDeregister: boolean;
   private readonly onDrained?: (name: string, version: string) => void | Promise<void>;
+  private readonly clock: WallClock;
 
   constructor(config?: WorkflowVersionRegistryConfig) {
     this.autoDeregister = config?.autoDeregister ?? false;
     this.onDrained = config?.onDrained;
+    this.clock = config?.clock ?? SystemWallClock;
   }
 
   /** Convert an internal VersionEntry into the public VersionRecord shape. */
@@ -211,7 +219,7 @@ export class WorkflowVersionRegistry {
         definition,
         status: "inactive",
         contentHash: options?.contentHash ?? null,
-        registeredAt: new Date(),
+        registeredAt: this.clock.now(),
         activeAt: null,
         archivedAt: null,
       });
@@ -289,7 +297,7 @@ export class WorkflowVersionRegistry {
     }
     if (target.status === "active") return this.toRecord(name, version, target);
 
-    const now = new Date();
+    const now = this.clock.now();
     // Demote the current active to inactive.
     for (const [v, entry] of versions) {
       if (v !== version && entry.status === "active") {
@@ -331,7 +339,7 @@ export class WorkflowVersionRegistry {
     if (!previousEntry) {
       throw new Error(`rollback: no active version for "${params.name}" to roll back`);
     }
-    const now = new Date();
+    const now = this.clock.now();
     previousEntry.status = "archived";
     previousEntry.archivedAt = now;
     target.status = "active";

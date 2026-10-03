@@ -64,6 +64,7 @@ export {
   type AdvertisedWorkflow,
   type AdvertisementEntry,
   InMemoryWorkflowAdvertisementRegistry,
+  type InMemoryWorkflowAdvertisementRegistryConfig,
 } from "./workflow-advertisements.ts";
 export { workflowAdvertisementRegistryTestSuite } from "./workflow-advertisements-test-suite.ts";
 export {
@@ -71,5 +72,6 @@ export {
   type WorkflowStartRecord,
   type WorkerWorkflowSpec,
   InMemoryWorkflowStartQueue,
+  type InMemoryWorkflowStartQueueConfig,
 } from "./workflow-start-queue.ts";
 export { workflowStartQueueTestSuite } from "./workflow-start-queue-test-suite.ts";

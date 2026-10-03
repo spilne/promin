@@ -11,13 +11,16 @@
 // today and matches the existing `/api/runs/:id/events` pattern.
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage, StreamChunk } from "@promin/workflow";
+import type { WallClock, WorkflowStorage, StreamChunk } from "@promin/workflow";
+import { SystemWallClock } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 
 export interface StreamsRoutesDeps {
   readonly storage: WorkflowStorage;
   /** Poll interval for the SSE handler. Default: 500ms. */
   readonly pollIntervalMs?: number;
+  /** Time source for the SSE poll wait. Default: `SystemWallClock`. */
+  readonly clock?: WallClock;
 }
 
 export interface StreamChunkDto {
@@ -95,6 +98,7 @@ export function getStreamChunks(deps: StreamsRoutesDeps) {
  */
 export function streamChunks(deps: StreamsRoutesDeps) {
   const pollIntervalMs = deps.pollIntervalMs ?? 500;
+  const clock = deps.clock ?? SystemWallClock;
 
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
@@ -144,7 +148,7 @@ export function streamChunks(deps: StreamsRoutesDeps) {
               since = chunk.chunkIndex;
             }
             if (closed) break;
-            await new Promise((r) => setTimeout(r, pollIntervalMs));
+            await new Promise<void>((r) => clock.setTimeout(() => r(), pollIntervalMs));
           }
         } finally {
           close();

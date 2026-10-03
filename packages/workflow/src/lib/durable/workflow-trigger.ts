@@ -6,6 +6,7 @@ import { tryPromise, type Eff, type Pipe } from "@spilne/perfect-core";
 import type { Workflow } from "./durable-pipeline.ts";
 import type { WorkflowRunner } from "./workflow-runner.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
+import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 
 // ---------------------------------------------------------------------------
 // WorkflowResult ADT
@@ -95,6 +96,8 @@ export function trigger<T, Input, Output>(params: {
   toWorkflowId: (item: T) => string;
   concurrency?: number;
   onDuplicate?: "skip" | "queue" | "fail";
+  /** Time source for each result's `durationMs`. Default: `SystemWallClock`. */
+  clock?: WallClock;
 }): Pipe<T, WorkflowResult<Output>> {
   const {
     workflow,
@@ -105,6 +108,7 @@ export function trigger<T, Input, Output>(params: {
     concurrency = 1,
     onDuplicate = "fail",
   } = params;
+  const clock = params.clock ?? SystemWallClock;
 
   // A rejected run is a defect, not a typed stream failure: workflow failures
   // already surface as `WorkflowResult.Failed` via `runSafe`.
@@ -113,7 +117,7 @@ export function trigger<T, Input, Output>(params: {
       async (): Promise<WorkflowResult<Output>> => {
         const workflowId = toWorkflowId(item);
         const input = toInput(item);
-        const startTime = Date.now();
+        const startTime = clock.currentTimeMs();
 
         // Dedup check: see if workflow already exists
         if (onDuplicate === "skip") {
@@ -135,14 +139,14 @@ export function trigger<T, Input, Output>(params: {
           return WorkflowResult.failed({
             workflowId,
             error,
-            durationMs: Date.now() - startTime,
+            durationMs: clock.currentTimeMs() - startTime,
           });
         }
 
         return WorkflowResult.completed({
           workflowId,
           result: data as Output,
-          durationMs: Date.now() - startTime,
+          durationMs: clock.currentTimeMs() - startTime,
         });
       },
       (e) => e,

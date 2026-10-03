@@ -143,4 +143,24 @@ describe("SystemWallClock — real timers", () => {
     expect(ticks).toBe(afterClear);
     expect(ticks).toBeGreaterThanOrEqual(2);
   });
+
+  it("handles expose unref(); an unref'd timer still fires while the loop is alive", async () => {
+    let fired = false;
+    const handle = SystemWallClock.setTimeout(() => (fired = true), 5);
+    expect(typeof handle.unref).toBe("function");
+    handle.unref?.();
+    await new Promise((r) => globalThis.setTimeout(r, 25));
+    expect(fired).toBe(true);
+
+    const interval = SystemWallClock.setInterval(() => {}, 1_000);
+    expect(typeof interval.unref).toBe("function");
+    interval.unref?.();
+    interval.clear();
+  });
+
+  it("FakeWallClock handles omit unref() — fake timers never hold the process", () => {
+    const clock = FakeWallClock.create(0);
+    expect(clock.setTimeout(() => {}, 10).unref).toBeUndefined();
+    expect(clock.setInterval(() => {}, 10).unref).toBeUndefined();
+  });
 });

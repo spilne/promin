@@ -17,12 +17,14 @@ import type { RemoteDeploymentRegistry, SecretsStorage } from "@promin/agent";
 import type {
   IWorkflowVersionRegistry,
   StepQueue,
+  WallClock,
   WorkerRegistry,
   WorkflowStorage,
 } from "@promin/workflow";
 import {
   InMemoryStepQueue,
   InMemoryWorkerRegistry,
+  SystemWallClock,
   WorkflowVersionRegistry,
 } from "@promin/workflow";
 import { createWorkerApiHandler, createWorkflowStorageHandler } from "@promin/workflow-remote";
@@ -298,6 +300,15 @@ export interface ZoryaServerConfig extends AuthConfig {
    * are not mounted. See promin-21g5 for the design.
    */
   remoteDeployments?: RemoteDeploymentRegistry;
+  /**
+   * Time source for the server's own time math: signal-token expiry, draft
+   * TTL sweep, worker online cutoff, worker-socket heartbeats, SSE / stream
+   * polls, query timeouts, schedule next-run projections, and the defaults
+   * it builds (version registry, fallback worker registry). Services passed
+   * in (scheduler, workflows, agents) keep their own clocks. Default:
+   * `SystemWallClock`. Tests pass a `FakeWallClock`.
+   */
+  clock?: WallClock;
 }
 
 export interface ListenOptions {
@@ -332,6 +343,7 @@ export class ZoryaServer {
   private readonly bus: RunEventBus;
   private readonly router: Router;
   private readonly logger: Logger;
+  private readonly clock: WallClock;
   private serverHandle?: { stop(): void; port: number; hostname: string };
 
   constructor(config: ZoryaServerConfig) {
@@ -342,7 +354,9 @@ export class ZoryaServer {
     if (config.fragments) this.fragments = config.fragments;
     if (config.dags) this.dags = config.dags;
     if (config.secrets) this.secrets = config.secrets;
-    this.versionRegistry = config.versionRegistry ?? new WorkflowVersionRegistry();
+    this.clock = config.clock ?? SystemWallClock;
+    const clock = this.clock;
+    this.versionRegistry = config.versionRegistry ?? new WorkflowVersionRegistry({ clock });
 
     this.logger = config.logger ?? console;
     this.auth = new Auth(config);
@@ -350,6 +364,7 @@ export class ZoryaServer {
     this.bus = new RunEventBus();
     this.workerWs = new WorkerWebSocketServer({
       authorize: (req) => this.workerAuth.check(req),
+      clock,
     });
     this.agentStreamHub = new AgentStreamHub(this.workerWs);
 
@@ -367,7 +382,7 @@ export class ZoryaServer {
     const workers =
       config.workers ??
       (this.workflows instanceof DistributedWorkflows && this.workflows.workerRegistry
-        ? new RegistryBackedWorkersProvider(this.workflows.workerRegistry)
+        ? new RegistryBackedWorkersProvider(this.workflows.workerRegistry, { clock })
         : emptyWorkersProvider);
 
     const trigger = (
@@ -436,12 +451,13 @@ export class ZoryaServer {
         "/api/runs/:id/signals/:name/token",
         mintSignalToken({
           storage,
+          clock,
           ...(config.publicBaseUrl !== undefined && { publicBaseUrl: config.publicBaseUrl }),
         }),
       )
       .get("/api/runs/:id/signal-tokens", listSignalTokensForRun({ storage }))
-      .get("/api/signal-tokens/:tokenId/describe", describeSignalToken({ storage }))
-      .post("/api/signal-tokens/:tokenId/complete", completeSignalToken({ storage }))
+      .get("/api/signal-tokens/:tokenId/describe", describeSignalToken({ storage, clock }))
+      .post("/api/signal-tokens/:tokenId/complete", completeSignalToken({ storage, clock }))
       // Workflow versions — thin layer over WorkflowVersionRegistry's
       // lifecycle methods. Versions are a property of a workflow, so the
       // routes nest under /api/workflows/:name/...
@@ -465,6 +481,7 @@ export class ZoryaServer {
         "/api/runs/:id/streams/:streamId",
         streamChunks({
           storage,
+          clock,
           ...(config.sseIntervalMs !== undefined && { pollIntervalMs: config.sseIntervalMs }),
         }),
       )
@@ -475,11 +492,12 @@ export class ZoryaServer {
         streamRunEvents({
           storage,
           bus: this.bus,
+          clock,
           ...(config.sseIntervalMs !== undefined && { pollIntervalMs: config.sseIntervalMs }),
         }),
       )
       .get("/api/runs/:id/agent-stream", streamAgentEvents(this.agentStreamHub))
-      .post("/api/runs/:id/query", queryRun(this.workerWs))
+      .post("/api/runs/:id/query", queryRun({ workerWs: this.workerWs, clock }))
       .get("/api/workers", listWorkers(workers))
       .get("/api/metrics", getMetrics(metrics));
 
@@ -492,6 +510,7 @@ export class ZoryaServer {
         ...(this.agents.turnGate !== undefined && { turnGate: this.agents.turnGate }),
         ...(this.agents.workerId !== undefined && { workerId: this.agents.workerId }),
         ...(this.secrets !== undefined && { secrets: this.secrets }),
+        clock,
       };
       this.router
         .get("/api/agents", listAgents(agentDeps))
@@ -563,7 +582,7 @@ export class ZoryaServer {
         // Draft recipes — test a recipe edit before committing it.
         // Mounted before /api/agents/:id so the literal `_draft` segment
         // isn't shadowed by an agent that happens to be named `_draft`.
-        .post("/api/agents/_draft", createDraft({ registry: this.agents.registry }))
+        .post("/api/agents/_draft", createDraft({ registry: this.agents.registry, clock }))
         .delete("/api/agents/_draft/:id", deleteDraft({ registry: this.agents.registry }))
         // Recipe CRUD — gsze Phase 1. Author/edit/clone agents over HTTP.
         .post("/api/agents", createAgent(agentDeps))
@@ -692,6 +711,7 @@ export class ZoryaServer {
       const remoteDeps: RemoteDeploymentsGatewayDeps = {
         registry: config.remoteDeployments,
         agents: this.agents.registry,
+        clock,
       };
       this.router
         .post("/api/remote-deployments/register", registerDeployment(remoteDeps))
@@ -719,13 +739,13 @@ export class ZoryaServer {
       const sch = this.scheduler.storage;
       const sched = this.scheduler;
       this.router
-        .get("/api/schedules", listSchedules(sch))
-        .post("/api/schedules", createSchedule(sch))
-        .get("/api/schedules/:id", getSchedule(sch))
-        .patch("/api/schedules/:id", patchSchedule(sch))
+        .get("/api/schedules", listSchedules({ storage: sch, clock }))
+        .post("/api/schedules", createSchedule({ storage: sch, clock }))
+        .get("/api/schedules/:id", getSchedule({ storage: sch, clock }))
+        .patch("/api/schedules/:id", patchSchedule({ storage: sch, clock }))
         .delete("/api/schedules/:id", deleteSchedule(sch))
         .get("/api/schedules/:id/history", getScheduleHistory(sch, storage))
-        .get("/api/schedules/:id/upcoming", getScheduleUpcoming(sch))
+        .get("/api/schedules/:id/upcoming", getScheduleUpcoming({ storage: sch, clock }))
         .post(
           "/api/schedules/:id/emit",
           emitScheduleNow(sch, (id) => sched.fireOnce(id)),
@@ -753,7 +773,8 @@ export class ZoryaServer {
       // workers don't poll it but their heartbeats / list calls still need
       // a working endpoint).
       const stepQueueForRpc = remoteDeps.stepQueue ?? new InMemoryStepQueue();
-      const workerRegistryForRpc = remoteDeps.workerRegistry ?? new InMemoryWorkerRegistry();
+      const workerRegistryForRpc =
+        remoteDeps.workerRegistry ?? new InMemoryWorkerRegistry({ clock: this.clock });
       const workerHandler = createWorkerApiHandler({
         stepQueue: stepQueueForRpc,
         storage,

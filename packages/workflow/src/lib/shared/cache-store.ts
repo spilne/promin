@@ -2,6 +2,8 @@
 // CacheStore<K, V> — key-value cache with TTL and eviction
 // ---------------------------------------------------------------------------
 
+import { SystemWallClock, type WallClock } from "./wall-clock.ts";
+
 // ---------------------------------------------------------------------------
 // Interface
 // ---------------------------------------------------------------------------
@@ -29,22 +31,26 @@ export interface MemoryCacheConfig {
   ttlMs: number;
   /** Max entries before LRU eviction. Default: Infinity. */
   maxSize?: number;
+  /** Time source for entry expiry. Default: `SystemWallClock`. */
+  clock?: WallClock;
 }
 
 export class MemoryCache<K, V> implements CacheStore<K, V> {
   private readonly entries = new Map<K, MemoryCacheEntry<V>>();
   private readonly ttlMs: number;
   private readonly maxSize: number;
+  private readonly clock: WallClock;
 
   constructor(config: MemoryCacheConfig) {
     this.ttlMs = config.ttlMs;
     this.maxSize = config.maxSize ?? Infinity;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   async get(key: K): Promise<V | undefined> {
     const entry = this.entries.get(key);
     if (!entry) return undefined;
-    if (Date.now() > entry.expiresAt) {
+    if (this.clock.currentTimeMs() > entry.expiresAt) {
       this.entries.delete(key);
       return undefined;
     }
@@ -62,7 +68,7 @@ export class MemoryCache<K, V> implements CacheStore<K, V> {
     }
     this.entries.set(key, {
       value,
-      expiresAt: Date.now() + (ttlMs ?? this.ttlMs),
+      expiresAt: this.clock.currentTimeMs() + (ttlMs ?? this.ttlMs),
     });
   }
 
@@ -73,7 +79,7 @@ export class MemoryCache<K, V> implements CacheStore<K, V> {
   async has(key: K): Promise<boolean> {
     const entry = this.entries.get(key);
     if (!entry) return false;
-    if (Date.now() > entry.expiresAt) {
+    if (this.clock.currentTimeMs() > entry.expiresAt) {
       this.entries.delete(key);
       return false;
     }
@@ -86,7 +92,7 @@ export class MemoryCache<K, V> implements CacheStore<K, V> {
 
   async size(): Promise<number> {
     // Purge expired before counting
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     for (const [key, entry] of this.entries) {
       if (now > entry.expiresAt) this.entries.delete(key);
     }

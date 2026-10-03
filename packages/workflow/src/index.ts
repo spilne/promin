@@ -250,11 +250,13 @@ export {
   type AdvertisedWorkflow,
   type AdvertisementEntry,
   InMemoryWorkflowAdvertisementRegistry,
+  type InMemoryWorkflowAdvertisementRegistryConfig,
   workflowAdvertisementRegistryTestSuite,
   type WorkflowStartQueue,
   type WorkflowStartRecord,
   type WorkerWorkflowSpec,
   InMemoryWorkflowStartQueue,
+  type InMemoryWorkflowStartQueueConfig,
   workflowStartQueueTestSuite,
 } from "./lib/distributed/index.ts";
 
