@@ -233,6 +233,20 @@ describe("DurableScheduler scalability features", () => {
 // Poll cadence — driven by the injected WallClock
 // ---------------------------------------------------------------------------
 
+/**
+ * Wait (in real time) until the scheduler is parked on a fake-clock timer,
+ * i.e. it has finished the previous poll/delivery and is waiting for time
+ * to move. Advancing before that point would fire nothing and leave the
+ * stream waiting forever, which is what a fixed real-time sleep raced on.
+ */
+async function untilWaiting(clock: FakeWallClock): Promise<void> {
+  const deadline = Date.now() + 4_000;
+  while (clock.pendingCount() === 0) {
+    if (Date.now() > deadline) throw new Error("scheduler never waited on the fake clock");
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+}
+
 describe("DurableScheduler poll cadence", () => {
   /** Storage that counts poll cycles (one leader attempt per poll). */
   function countingStorage(): { storage: InMemorySchedulerStorage; polls: () => number } {
@@ -246,7 +260,7 @@ describe("DurableScheduler poll cadence", () => {
     return { storage, polls: () => polls };
   }
 
-  /** Let the in-memory storage's promise chain settle. */
+  /** Give a wrongly scheduled delivery a chance to happen before asserting it didn't. */
   const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
 
   it("polls on the first pull and delivers that poll's ticks one interval later", async () => {
@@ -266,7 +280,7 @@ describe("DurableScheduler poll cadence", () => {
         return ticks;
       });
 
-    await settle();
+    await untilWaiting(clock);
     expect(polls()).toBe(1);
     expect(delivered).toBe(false);
     expect(clock.pendingCount()).toBe(1);
@@ -291,7 +305,7 @@ describe("DurableScheduler poll cadence", () => {
     await scheduler.registerAsync({ id: "b", intervalMs: 60_000 });
 
     const result = scheduler.stream().take(2).toArray().run();
-    await settle();
+    await untilWaiting(clock);
     clock.advance(1000);
     const ticks = await result;
 
@@ -330,7 +344,7 @@ describe("DurableScheduler poll cadence", () => {
       return seen;
     })();
 
-    await settle();
+    await untilWaiting(clock);
     clock.advance(1000);
 
     expect(await consumed).toEqual(["a"]);
@@ -347,20 +361,6 @@ describe("DurableScheduler due-time math follows the injected WallClock", () => 
   // Fixed in the past, so anything that reads the real clock instead of the
   // fake one sees every schedule as long overdue (or never due again).
   const T0 = Date.parse("2026-01-01T00:00:00Z");
-
-  /**
-   * Wait (in real time) until the scheduler is parked on a fake-clock timer,
-   * i.e. it has finished the previous poll/delivery and is waiting for time
-   * to move. Advancing before that point would fire nothing and leave the
-   * stream waiting forever, which is what a fixed real-time sleep raced on.
-   */
-  async function untilWaiting(clock: FakeWallClock): Promise<void> {
-    const deadline = Date.now() + 4_000;
-    while (clock.pendingCount() === 0) {
-      if (Date.now() > deadline) throw new Error("scheduler never waited on the fake clock");
-      await new Promise((resolve) => setTimeout(resolve, 1));
-    }
-  }
 
   /** Consume `take` ticks in the background, exposing what has arrived so far. */
   function collect(params: { scheduler: DurableScheduler; take: number }) {
