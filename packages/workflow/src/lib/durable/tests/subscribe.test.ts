@@ -1,12 +1,12 @@
 import { describe, it, expect } from "bun:test";
-import { Data } from "effect";
+import { TaggedError } from "@spilne/perfect-core";
 import { Pipeline } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 import type { WorkflowRunEvent } from "../workflow-state.ts";
 
-class StepBoom extends Data.TaggedError("StepBoom")<{ readonly message: string }> {}
+class StepBoom extends TaggedError("StepBoom")<{ readonly message: string }>() {}
 
 async function collect(
   it: AsyncIterable<WorkflowRunEvent>,

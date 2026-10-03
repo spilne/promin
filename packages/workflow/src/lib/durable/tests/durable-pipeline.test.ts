@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { Data } from "effect";
+import { TaggedError } from "@spilne/perfect-core";
 import { Pipeline, FakeClock } from "@promin/core";
 import { workflow, flow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
@@ -17,14 +17,14 @@ import { topologicalSort, computeReadySet } from "../workflow-dag.ts";
 // Test error types
 // ---------------------------------------------------------------------------
 
-class FetchError extends Data.TaggedError("FetchError")<{
+class FetchError extends TaggedError("FetchError")<{
   readonly message: string;
-}> {}
+}>() {}
 
-class HttpStatusError extends Data.TaggedError("HttpStatusError")<{
+class HttpStatusError extends TaggedError("HttpStatusError")<{
   readonly status: number;
   readonly message: string;
-}> {}
+}>() {}
 
 // ---------------------------------------------------------------------------
 // DAG utilities
@@ -741,10 +741,10 @@ describe("WorkflowBuilder", () => {
       // escapes the workflow-level failure path — separate pre-existing
       // limitation, not a metadata bug). The point is: even when the branch
       // rejects, ops should still see `matchCase` on the failed step row.
-      class BranchError extends Data.TaggedError("BranchError")<{
+      class BranchError extends TaggedError("BranchError")<{
         readonly stepName: string;
         readonly message: string;
-      }> {}
+      }>() {}
 
       const storage = new InMemoryWorkflowStorage();
       const runner = createWorkflowRunner({ storage });

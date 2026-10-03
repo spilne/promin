@@ -783,11 +783,11 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
 // Per-step options (retry, onFailure, compensate)
 // ---------------------------------------------------------------------------
 
-import { Data } from "effect";
+import { TaggedError } from "@spilne/perfect-core";
 
-class TestError extends Data.TaggedError("TestError")<{
+class TestError extends TaggedError("TestError")<{
   readonly message: string;
-}> {}
+}>() {}
 
 describe("Per-step options — retry, skip, and fallback at the step level", () => {
   it("flaky API step retries up to 5 times before giving up", async () => {

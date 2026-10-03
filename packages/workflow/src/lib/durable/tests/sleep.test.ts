@@ -1,12 +1,12 @@
 import { describe, it, expect } from "bun:test";
-import { Data } from "effect";
+import { TaggedError } from "@spilne/perfect-core";
 import { Pipeline } from "@promin/core";
 import { workflow, WorkflowSuspendedError, InMemoryWorkflowStorage } from "../index.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 
-class TestError extends Data.TaggedError("TestError")<{
+class TestError extends TaggedError("TestError")<{
   readonly message: string;
-}> {}
+}>() {}
 
 // ---------------------------------------------------------------------------
 // Basic sleep

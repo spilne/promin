@@ -14,7 +14,10 @@
 // used by Effect, Zod, and RxJS for heterogeneous collections.
 // ---------------------------------------------------------------------------
 
-import { Effect, Data } from "effect";
+import { Effect } from "effect";
+// Aliased: `TaggedError` is also the name of the structural `{ _tag }`
+// constraint imported from `@promin/core` below.
+import { TaggedError as PerfectTaggedError } from "@spilne/perfect-core";
 import { isActivityJournalStorage, type ActivityJournalStorage } from "./activity-journal.ts";
 import {
   runJournaledStep,
@@ -471,12 +474,12 @@ export interface DispatchConfig {
  * Carries the step name, mode, and (for selector mode) the resolved key so
  * debugging prod failures doesn't require re-running the workflow.
  */
-export class MatchError extends Data.TaggedError("MatchError")<{
+export class MatchError extends PerfectTaggedError("MatchError")<{
   readonly stepName: string;
   readonly mode: "selector" | "predicate";
   readonly selectorKey?: string;
   readonly message: string;
-}> {}
+}>() {}
 
 type MatchCaseFn<Input, Current, Output, E extends TaggedError> = (
   ctx: StepContext<Input, Current>,

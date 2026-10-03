@@ -1,5 +1,7 @@
 import { describe, it, expect } from "bun:test";
-import { Data } from "effect";
+// Aliased: `TaggedError` is also the name of the structural `{ _tag }`
+// constraint imported from `@promin/core` below.
+import { TaggedError as PerfectTaggedError } from "@spilne/perfect-core";
 import { Pipeline, type TaggedError } from "@promin/core";
 import { workflow, InMemoryWorkflowStorage } from "../../durable/index.ts";
 import { createWorkflowRunner } from "../../durable/workflow-runner.ts";
@@ -155,7 +157,9 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
   });
 
   it("resume fails — error callback fires but scanner keeps running", async () => {
-    class ResumeFailure extends Data.TaggedError("ResumeFailure")<{ readonly message: string }> {}
+    class ResumeFailure extends PerfectTaggedError("ResumeFailure")<{
+      readonly message: string;
+    }>() {}
 
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });

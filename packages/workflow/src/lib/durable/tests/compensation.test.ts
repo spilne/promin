@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { Data } from "effect";
+import { TaggedError } from "@spilne/perfect-core";
 import { Pipeline } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
@@ -9,9 +9,9 @@ import { createWorkflowRunner } from "../workflow-runner.ts";
 // Test error
 // ---------------------------------------------------------------------------
 
-class TestError extends Data.TaggedError("TestError")<{
+class TestError extends TaggedError("TestError")<{
   readonly message: string;
-}> {}
+}>() {}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1007,9 +1007,9 @@ describe("Selective retry — only retry transient errors, fail fast on permanen
     const runner = createWorkflowRunner({ storage });
     let step2Calls = 0;
 
-    class RetryableError extends Data.TaggedError("RetryableError")<{
+    class RetryableError extends TaggedError("RetryableError")<{
       readonly message: string;
-    }> {}
+    }>() {}
 
     const wf = workflow<string>({
       name: "when-mixed",

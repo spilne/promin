@@ -1,11 +1,11 @@
 import { describe, it, expect } from "bun:test";
-import { Data } from "effect";
+import { TaggedError } from "@spilne/perfect-core";
 import { Pipeline } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 
-class BranchFailed extends Data.TaggedError("BranchFailed")<{ readonly message: string }> {}
+class BranchFailed extends TaggedError("BranchFailed")<{ readonly message: string }>() {}
 
 describe("parallel", () => {
   it("runs two branches concurrently and joins into a keyed record", async () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll } from "bun:test";
-import { Data } from "effect";
+import { TaggedError } from "@spilne/perfect-core";
 import { Pipeline } from "@promin/core";
 import { workflow, createWorkflowRunner } from "@promin/workflow";
 import { PostgresWorkflowStorage } from "../postgres-workflow-storage.ts";
@@ -10,9 +10,9 @@ import { postgresDescribe } from "../test-utils.ts";
 // Test error types
 // ---------------------------------------------------------------------------
 
-class TestError extends Data.TaggedError("TestError")<{
+class TestError extends TaggedError("TestError")<{
   readonly message: string;
-}> {}
+}>() {}
 
 // ---------------------------------------------------------------------------
 // migrate()

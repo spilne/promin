@@ -1,30 +1,30 @@
-import { Data } from "effect";
+import { TaggedError } from "@spilne/perfect-core";
 
 /** A workflow-level error (e.g., cycle detected, invalid DAG). */
-export class WorkflowError extends Data.TaggedError("WorkflowError")<{
+export class WorkflowError extends TaggedError("WorkflowError")<{
   readonly workflowId: string;
   readonly message: string;
-}> {}
+}>() {}
 
 /** A step-level execution error. */
-export class StepError extends Data.TaggedError("StepError")<{
+export class StepError extends TaggedError("StepError")<{
   readonly workflowId: string;
   readonly stepName: string;
   readonly message: string;
   readonly cause?: unknown;
-}> {}
+}>() {}
 
 /** A storage backend error. */
-export class StorageError extends Data.TaggedError("StorageError")<{
+export class StorageError extends TaggedError("StorageError")<{
   readonly message: string;
   readonly cause?: unknown;
-}> {}
+}>() {}
 
 /** Could not acquire a lock on the workflow (already running elsewhere). */
-export class WorkflowLockError extends Data.TaggedError("WorkflowLockError")<{
+export class WorkflowLockError extends TaggedError("WorkflowLockError")<{
   readonly workflowId: string;
   readonly message: string;
-}> {}
+}>() {}
 
 /**
  * A mutating call carried a fence token that doesn't match the current
@@ -35,20 +35,20 @@ export class WorkflowLockError extends Data.TaggedError("WorkflowLockError")<{
  * enough to miss its heartbeat; the orchestration should abandon the
  * write and exit — the new holder re-drives the workflow from storage.
  */
-export class FenceTokenMismatchError extends Data.TaggedError("FenceTokenMismatchError")<{
+export class FenceTokenMismatchError extends TaggedError("FenceTokenMismatchError")<{
   readonly workflowId: string;
   readonly expected: string;
   readonly provided: string;
   readonly message: string;
-}> {}
+}>() {}
 
 /** Workflow is suspended (sleeping or waiting for signal). Not a failure — expected state. */
-export class WorkflowSuspendedError extends Data.TaggedError("WorkflowSuspendedError")<{
+export class WorkflowSuspendedError extends TaggedError("WorkflowSuspendedError")<{
   readonly workflowId: string;
   readonly stepName: string;
   readonly reason: "sleep" | "signal";
   readonly message: string;
-}> {}
+}>() {}
 
 /**
  * Signal that the workflow body is requesting a "continue-as-new" — terminate
@@ -60,48 +60,48 @@ export class WorkflowSuspendedError extends Data.TaggedError("WorkflowSuspendedE
  * Not a failure — the original execution terminates cleanly. Compensations
  * do NOT run (continue-as-new is a clean restart, not rollback).
  */
-export class WorkflowContinueAsNewError extends Data.TaggedError("WorkflowContinueAsNewError")<{
+export class WorkflowContinueAsNewError extends TaggedError("WorkflowContinueAsNewError")<{
   readonly workflowId: string;
   readonly nextInput: unknown;
   readonly message: string;
-}> {}
+}>() {}
 
 /** Signal wait timed out. */
-export class WorkflowTimeoutError extends Data.TaggedError("WorkflowTimeoutError")<{
+export class WorkflowTimeoutError extends TaggedError("WorkflowTimeoutError")<{
   readonly workflowId: string;
   readonly stepName: string;
   readonly message: string;
-}> {}
+}>() {}
 
 /** A step exceeded its configured activity timeout. */
-export class StepTimeoutError extends Data.TaggedError("StepTimeoutError")<{
+export class StepTimeoutError extends TaggedError("StepTimeoutError")<{
   readonly workflowId: string;
   readonly stepName: string;
   readonly timeoutMs: number;
   readonly message: string;
-}> {}
+}>() {}
 
 /** The entire workflow exceeded its configured global deadline. */
-export class WorkflowDeadlineError extends Data.TaggedError("WorkflowDeadlineError")<{
+export class WorkflowDeadlineError extends TaggedError("WorkflowDeadlineError")<{
   readonly workflowId: string;
   readonly timeoutMs: number;
   readonly message: string;
-}> {}
+}>() {}
 
 /** Workflow version mismatch — stored version differs from code version. */
-export class WorkflowVersionMismatchError extends Data.TaggedError("WorkflowVersionMismatchError")<{
+export class WorkflowVersionMismatchError extends TaggedError("WorkflowVersionMismatchError")<{
   readonly workflowId: string;
   readonly expected: string;
   readonly actual: string;
   readonly message: string;
-}> {}
+}>() {}
 
 /** A guard precondition failed — the step should not execute. */
-export class GuardError extends Data.TaggedError("GuardError")<{
+export class GuardError extends TaggedError("GuardError")<{
   readonly workflowId: string;
   readonly stepName: string;
   readonly message: string;
-}> {}
+}>() {}
 
 /**
  * A journaled activity was replayed while its journal row is still in the
@@ -113,13 +113,13 @@ export class GuardError extends Data.TaggedError("GuardError")<{
  * Opt in to automatic re-run by passing `idempotent: true` in
  * `ActivityOptions`, which suppresses this error and re-runs the activity.
  */
-export class AmbiguousActivityOutcome extends Data.TaggedError("AmbiguousActivityOutcome")<{
+export class AmbiguousActivityOutcome extends TaggedError("AmbiguousActivityOutcome")<{
   readonly workflowId: string;
   readonly stepName: string;
   readonly activityIndex: number;
   readonly activityName: string;
   readonly message: string;
-}> {}
+}>() {}
 
 /**
  * Marker for errors that MUST NOT be retried by the activity retry loop.
@@ -130,10 +130,10 @@ export class AmbiguousActivityOutcome extends Data.TaggedError("AmbiguousActivit
  *
  * Throw from user code like `throw new TerminalError({ message: "..." })`.
  */
-export class TerminalError extends Data.TaggedError("TerminalError")<{
+export class TerminalError extends TaggedError("TerminalError")<{
   readonly message: string;
   readonly cause?: unknown;
-}> {}
+}>() {}
 
 /**
  * Marker for errors that SHOULD be retried by the activity retry loop —
@@ -141,10 +141,10 @@ export class TerminalError extends Data.TaggedError("TerminalError")<{
  * Useful for transient infra failures (timeouts, 5xx responses, connection
  * drops) the retry loop should always take another shot at.
  */
-export class RetryableError extends Data.TaggedError("RetryableError")<{
+export class RetryableError extends TaggedError("RetryableError")<{
   readonly message: string;
   readonly cause?: unknown;
-}> {}
+}>() {}
 
 /**
  * A `.tripwire()` step fired — the workflow ended early with a structured
@@ -155,23 +155,23 @@ export class RetryableError extends Data.TaggedError("RetryableError")<{
  * check `error instanceof WorkflowTripwireError`. Callers that prefer a
  * non-throwing interface use `runSafe()` and inspect `.error`.
  */
-export class WorkflowTripwireError extends Data.TaggedError("WorkflowTripwireError")<{
+export class WorkflowTripwireError extends TaggedError("WorkflowTripwireError")<{
   readonly workflowId: string;
   readonly stepName: string;
   readonly reason: unknown;
   readonly message: string;
-}> {}
+}>() {}
 
 /**
  * A `.tripwire()` step fired but the configured `WorkflowStorage` does not
  * implement `tripwireWorkflow`. Surfaces the capability gap at the fire
  * site instead of silently corrupting state or falling back to `failed`.
  */
-export class TripwireStorageMissingError extends Data.TaggedError("TripwireStorageMissingError")<{
+export class TripwireStorageMissingError extends TaggedError("TripwireStorageMissingError")<{
   readonly workflowId: string;
   readonly stepName: string;
   readonly message: string;
-}> {}
+}>() {}
 
 /**
  * A `.dowhile()` / `.dountil()` loop exceeded its configured maximum
@@ -180,9 +180,9 @@ export class TripwireStorageMissingError extends Data.TaggedError("TripwireStora
  * step failure so the surrounding workflow retry / compensation policy
  * applies.
  */
-export class LoopLimitExceededError extends Data.TaggedError("LoopLimitExceededError")<{
+export class LoopLimitExceededError extends TaggedError("LoopLimitExceededError")<{
   readonly workflowId: string;
   readonly stepName: string;
   readonly maxIterations: number;
   readonly message: string;
-}> {}
+}>() {}

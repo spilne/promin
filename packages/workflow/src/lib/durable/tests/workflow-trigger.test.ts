@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { Data } from "effect";
+import { TaggedError } from "@spilne/perfect-core";
 import { Pipeline } from "@promin/core";
 import { StreamPipeline } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
@@ -11,9 +11,9 @@ import { createWorkflowRunner } from "../workflow-runner.ts";
 // Test error types
 // ---------------------------------------------------------------------------
 
-class ProcessError extends Data.TaggedError("ProcessError")<{
+class ProcessError extends TaggedError("ProcessError")<{
   readonly message: string;
-}> {}
+}>() {}
 
 // ---------------------------------------------------------------------------
 // WorkflowResult ADT

@@ -57,6 +57,7 @@
   },
   "dependencies": {
     "@promin/core": "workspace:*",
+    "@spilne/perfect-core": "catalog:",
     "croner": "^10.0.1",
     "effect": "catalog:",
     "rrule": "^2.8.1"

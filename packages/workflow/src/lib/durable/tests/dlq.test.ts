@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { Data } from "effect";
+import { TaggedError } from "@spilne/perfect-core";
 import { Pipeline } from "@promin/core";
 import { JsonCodec } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
@@ -13,9 +13,9 @@ import type { Codec } from "@promin/core";
 // Test error
 // ---------------------------------------------------------------------------
 
-class TestError extends Data.TaggedError("TestError")<{
+class TestError extends TaggedError("TestError")<{
   readonly message: string;
-}> {}
+}>() {}
 
 // ---------------------------------------------------------------------------
 // In-memory DLQ for testing

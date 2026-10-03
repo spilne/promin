@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { Data } from "effect";
+import { TaggedError } from "@spilne/perfect-core";
 import { Pipeline } from "@promin/core";
 import { workflow, dagToMermaid, dagToDot } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
@@ -9,9 +9,9 @@ import { createWorkflowRunner } from "../workflow-runner.ts";
 // Test error types
 // ---------------------------------------------------------------------------
 
-class TestError extends Data.TaggedError("TestError")<{
+class TestError extends TaggedError("TestError")<{
   readonly message: string;
-}> {}
+}>() {}
 
 // ---------------------------------------------------------------------------
 // WorkflowStorage — listWorkflows

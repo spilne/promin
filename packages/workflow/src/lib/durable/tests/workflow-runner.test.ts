@@ -4,14 +4,14 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { Data } from "effect";
+import { TaggedError } from "@spilne/perfect-core";
 import { Pipeline } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { InProcessStepExecutor, createWorkflowRunner } from "../workflow-runner.ts";
 import { WorkflowVersionRegistry } from "../workflow-version-registry.ts";
 
-class TestError extends Data.TaggedError("TestError")<{ readonly message: string }> {}
+class TestError extends TaggedError("TestError")<{ readonly message: string }>() {}
 
 describe("WorkflowRunner", () => {
   it("run({ workflow }) drives a pure Workflow through the runner's storage", async () => {

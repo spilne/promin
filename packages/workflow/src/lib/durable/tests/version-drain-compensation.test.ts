@@ -22,17 +22,17 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { Data } from "effect";
+import { TaggedError } from "@spilne/perfect-core";
 import { Pipeline } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 import { createWorkflowVersionRegistry } from "../workflow-version-registry.ts";
 
-class BoomError extends Data.TaggedError("BoomError")<{
+class BoomError extends TaggedError("BoomError")<{
   readonly stepName: string;
   readonly message: string;
-}> {}
+}>() {}
 
 describe("versioning drain — compensation uses the stored version's code", () => {
   it("drain-resolved v1 fires v1's compensation, not v2's", async () => {

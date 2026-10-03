@@ -62,6 +62,7 @@
     "rrule": "^2.8.1"
   },
   "devDependencies": {
+    "@spilne/perfect-core": "catalog:",
     "@types/bun": "catalog:",
     "testcontainers": "^11.13.0"
   },

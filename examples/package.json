@@ -10,7 +10,7 @@
     "@promin/postgres": "workspace:*",
     "@promin/redis": "workspace:*",
     "@promin/workflow": "workspace:*",
-    "effect": "catalog:"
+    "@spilne/perfect-core": "catalog:"
   },
   "devDependencies": {
     "@types/bun": "catalog:"

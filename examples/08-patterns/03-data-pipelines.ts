@@ -14,7 +14,7 @@ import {
   PipelineRef,
   PipelineQueue,
 } from "@promin/core";
-import { Data } from "effect";
+import { TaggedError } from "@spilne/perfect-core";
 
 // ---------------------------------------------------------------------------
 // Rate-limited migration with progress tracking
@@ -51,10 +51,10 @@ async function rateLimitedMigration(
 // Parallel validation — collect ALL errors, don't stop at first
 // ---------------------------------------------------------------------------
 
-class ValidationError extends Data.TaggedError("ValidationError")<{
+class ValidationError extends TaggedError("ValidationError")<{
   readonly field: string;
   readonly message: string;
-}> {}
+}>() {}
 
 async function parallelValidation(input: { title: string; tags: string[]; thumbnailUrl: string }) {
   const validateTitle = (title: string) =>
