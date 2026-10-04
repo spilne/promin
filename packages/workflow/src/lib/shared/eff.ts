@@ -5,7 +5,6 @@
 // ---------------------------------------------------------------------------
 
 import {
-  AsyncScheduler,
   Cause,
   async,
   runExit,
@@ -15,6 +14,7 @@ import {
   type ExitT as Exit,
   type Scheduler,
 } from "@spilne/perfect-core";
+import { createEngineScheduler } from "./engine-scheduler.ts";
 import type { WallClock } from "./wall-clock.ts";
 
 // perfect brands every effect with this registered symbol, so the check
@@ -74,62 +74,13 @@ export function sleepOn(clock: WallClock, ms: number): Eff<void, never> {
   }) as Eff<void, never>;
 }
 
-/**
- * Fiber scheduler for every `Eff` the engine runs. perfect's default
- * scheduler drains on microtasks but falls back to a `setImmediate` hop
- * after 64 consecutive drains, and under Bun those callbacks can stall until
- * some unrelated macrotask fires — a long continue-as-new chain slows from
- * milliseconds to seconds or minutes once other I/O is in flight. A
- * `MessageChannel` hop still yields to the event loop between batches but
- * is dispatched promptly. The port is unref'd so an idle engine never keeps
- * the process alive.
- */
-function createEngineScheduler(): Scheduler {
-  if (typeof MessageChannel === "undefined") return new AsyncScheduler();
-  const queue: (() => void)[] = [];
-  let scheduled = false;
-  const channel = new MessageChannel();
-  const drain = (): void => {
-    scheduled = false;
-    const batch = queue.splice(0);
-    for (const task of batch) task();
-    if (queue.length > 0 && !scheduled) {
-      scheduled = true;
-      channel.port2.postMessage(null);
-    }
-  };
-  (channel.port1 as unknown as { onmessage: () => void }).onmessage = drain;
-  (channel.port1 as { unref?: () => void }).unref?.();
-  (channel.port2 as { unref?: () => void }).unref?.();
-  return {
-    schedule(task) {
-      queue.push(task);
-      if (!scheduled) {
-        scheduled = true;
-        channel.port2.postMessage(null);
-      }
-    },
-    flush() {
-      while (queue.length > 0) {
-        const batch = queue.splice(0);
-        for (const task of batch) task();
-      }
-      scheduled = false;
-    },
-    shutdown() {
-      queue.length = 0;
-      scheduled = false;
-    },
-  };
-}
-
 let engineScheduler: Scheduler | undefined;
 function getEngineScheduler(): Scheduler {
   engineScheduler ??= createEngineScheduler();
   return engineScheduler;
 }
 
-/** `runExit` on the engine scheduler. */
+/** `runExit` on the engine scheduler (see `engine-scheduler.ts`). */
 export function runEngineExit<A>(eff: Eff<A, unknown>): Promise<Exit<unknown, A>> {
   return runExit(eff, getEngineScheduler());
 }

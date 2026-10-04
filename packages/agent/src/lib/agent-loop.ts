@@ -1132,13 +1132,6 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
         const surfaced = surfaceAgentError(startError);
         if (surfaced.kind !== "suspended") throw surfaced.error;
       }
-      // `runSafe` settles inside the workflow engine's scheduler callback.
-      // Hand the session out from a fresh event-loop task instead, so a
-      // caller that blocks on its next call from there (Bun's
-      // `expect(...).resolves` spins a nested event loop) doesn't wait on a
-      // scheduler that can't dispatch until that callback returns. An
-      // event-loop hop, not time math, so it doesn't go through the clock.
-      await new Promise<void>((resolve) => setImmediate(resolve));
 
       // Restore turn counter from the journal so that recreating the session
       // object (e.g. server restart with persistent storage) doesn't re-deliver
