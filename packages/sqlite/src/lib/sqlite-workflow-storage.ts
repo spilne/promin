@@ -40,6 +40,8 @@ import type {
   StepAttemptStorage,
   StepAttemptRecord,
   StepAttemptType,
+  StepCheckpoint,
+  StepCheckpointStorage,
 } from "@promin/workflow";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
@@ -67,7 +69,12 @@ import type { SqliteDatabase } from "./sqlite-database.ts";
  * ```
  */
 export class SqliteWorkflowStorage
-  implements WorkflowStorage, ActivityJournalStorage, StepAttemptStorage, CompensationLedgerStorage
+  implements
+    WorkflowStorage,
+    ActivityJournalStorage,
+    StepAttemptStorage,
+    StepCheckpointStorage,
+    CompensationLedgerStorage
 {
   private readonly _t: string;
   private readonly clock: WallClock;
@@ -429,6 +436,10 @@ export class SqliteWorkflowStorage
   // ---------------------------------------------------------------------------
 
   async loadWorkflowStatus(workflowId: string): Promise<WorkflowStatusSnapshot | null> {
+    return this._loadStatus(workflowId);
+  }
+
+  private _loadStatus(workflowId: string): WorkflowStatusSnapshot | null {
     const row = this.db
       .query<{ status: string; error: string | null; error_tag: string | null }>(
         `SELECT status, error, error_tag FROM ${this._t} WHERE workflow_id = ?`,
@@ -1047,6 +1058,22 @@ export class SqliteWorkflowStorage
     },
     guard?: FenceGuard,
   ): Promise<void> {
+    this._saveStepFailure(params, guard);
+  }
+
+  /** Synchronous body of `saveStepFailure`, so `checkpointStep` can run it in its transaction. */
+  private _saveStepFailure(
+    params: {
+      workflowId: string;
+      stepName: string;
+      error: string;
+      errorTag?: string;
+      durationMs: number;
+      startedAt: Date;
+      metadata?: Record<string, unknown>;
+    },
+    guard?: FenceGuard,
+  ): void {
     const now = this.clock.currentTimeMs();
     this.db.transaction((): void => {
       this._checkFence(params.workflowId, guard);
@@ -2169,10 +2196,55 @@ export class SqliteWorkflowStorage
     this._fenced({
       workflowId: record.workflowId,
       guard,
-      write: () =>
-        this.db
-          .query(
-            `INSERT INTO ${this._t}_attempts
+      write: () => this._insertAttempt(record),
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // StepCheckpointStorage — a settled step's row and attempt rows in one
+  // transaction, behind one fence check.
+  // ---------------------------------------------------------------------------
+
+  async checkpointStep(
+    checkpoint: StepCheckpoint,
+    guard?: FenceGuard,
+  ): Promise<WorkflowStatusSnapshot | null> {
+    const { workflowId, stepName, outcome } = checkpoint;
+    return this._fenced({
+      workflowId,
+      guard,
+      write: (): WorkflowStatusSnapshot | null => {
+        const exists = this.db
+          .query<{ one: number }>(`SELECT 1 AS one FROM ${this._t} WHERE workflow_id = ?`)
+          .get(workflowId);
+        if (!exists) return null;
+        for (const attempt of checkpoint.attempts) this._insertAttempt(attempt);
+        const row = {
+          workflowId,
+          stepName,
+          durationMs: outcome.durationMs,
+          startedAt: outcome.startedAt,
+          ...(outcome.metadata !== undefined && { metadata: outcome.metadata }),
+        };
+        if (outcome.kind === "completed") {
+          this._saveStepResult({ ...row, result: outcome.result });
+        } else {
+          this._saveStepFailure({
+            ...row,
+            error: outcome.error,
+            ...(outcome.errorTag !== undefined && { errorTag: outcome.errorTag }),
+          });
+        }
+        return this._loadStatus(workflowId);
+      },
+    });
+  }
+
+  /** Upsert one attempt row; the caller fences it. */
+  private _insertAttempt(record: StepAttemptRecord): void {
+    this.db
+      .query(
+        `INSERT INTO ${this._t}_attempts
            (workflow_id, step_name, attempt, type, status, result, error,
             duration_ms, started_at, completed_at, executor_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2184,21 +2256,20 @@ export class SqliteWorkflowStorage
            started_at   = excluded.started_at,
            completed_at = excluded.completed_at,
            executor_id  = excluded.executor_id`,
-          )
-          .run(
-            record.workflowId,
-            record.stepName,
-            record.attempt,
-            record.type,
-            record.status,
-            record.result !== undefined ? JSON.stringify(record.result) : null,
-            record.error ?? null,
-            record.durationMs,
-            record.startedAt.getTime(),
-            record.completedAt.getTime(),
-            record.executorId ?? null,
-          ),
-    });
+      )
+      .run(
+        record.workflowId,
+        record.stepName,
+        record.attempt,
+        record.type,
+        record.status,
+        record.result !== undefined ? JSON.stringify(record.result) : null,
+        record.error ?? null,
+        record.durationMs,
+        record.startedAt.getTime(),
+        record.completedAt.getTime(),
+        record.executorId ?? null,
+      );
   }
 
   async loadStepAttempts(workflowId: string, stepName?: string): Promise<StepAttemptRecord[]> {

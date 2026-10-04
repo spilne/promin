@@ -25,6 +25,7 @@ export type {
   StepQueueOption,
   StepQueueContext,
   StepRuntime,
+  WorkflowMetadataRef,
   RunChildWorkflow,
 } from "./step-definition.ts";
 export type { LoopOptions } from "./steps/loop-step.ts";
@@ -32,6 +33,8 @@ export { MatchError, type MatchParams } from "./steps/match-step.ts";
 export {
   type WorkflowStorage,
   type StepAttemptStorage,
+  type StepCheckpoint,
+  type StepCheckpointStorage,
   type TripwireCapableStorage,
   type SubscribableStorage,
   type FenceGuard,
@@ -46,6 +49,7 @@ export {
   isCompensationLedgerStorage,
   workflowMetadataMatches,
   isStepAttemptStorage,
+  isStepCheckpointStorage,
   isTripwireCapableStorage,
   isSubscribableStorage,
 } from "./workflow-storage.ts";

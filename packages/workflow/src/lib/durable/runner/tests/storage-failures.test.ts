@@ -27,6 +27,7 @@ function deferred<T = void>(): { promise: Promise<T>; resolve: (v: T) => void } 
 }
 
 type StorageMethod =
+  | "checkpointStep"
   | "saveStepResult"
   | "saveStepAttempt"
   | "saveStepFailure"
@@ -70,9 +71,17 @@ async function drive<T>(clock: FakeWallClock, p: Promise<T>): Promise<T> {
   return settled;
 }
 
-function setup() {
+/**
+ * A runner on in-memory storage. With `split`, the storage hides
+ * `checkpointStep`, so the runner checkpoints a step with the separate
+ * `saveStepResult` / `saveStepFailure` / `saveStepAttempt` writes.
+ */
+function setup(params?: { split?: boolean }) {
   const clock = FakeWallClock.create(0);
   const storage = new InMemoryWorkflowStorage({ clock });
+  if (params?.split === true) {
+    (storage as unknown as Record<string, unknown>)["checkpointStep"] = undefined;
+  }
   const runner = createWorkflowRunner({ storage, clock });
   return { clock, storage, runner };
 }
@@ -82,8 +91,50 @@ function setup() {
 // ---------------------------------------------------------------------------
 
 describe("a storage write that fails once", () => {
-  it("saveStepResult: the step is not run again and the run completes (no double charge)", async () => {
+  it("checkpointStep: the step is not run again and its rows are written once", async () => {
     const { clock, storage, runner } = setup();
+    const writes = failing(storage, "checkpointStep");
+    let charges = 0;
+    const wf = workflow<number>({
+      name: "blip-checkpoint",
+      retry: { maxRetries: 1, baseDelayMs: 1 },
+    })
+      .stepAsync("charge", async ({ input }) => {
+        charges++;
+        return input;
+      })
+      .build();
+
+    const r = await drive(clock, runner.runSafe({ workflow: wf, workflowId: "b-0", input: 1 }));
+    expect(r.error).toBeNull();
+    expect(charges).toBe(1);
+    expect(writes.failures).toBe(1);
+    const state = (await storage.loadWorkflow("b-0"))!;
+    expect(state.status).toBe("completed");
+    expect(state.steps["charge"]!.status).toBe("completed");
+    const attempts = await storage.loadStepAttempts("b-0", "charge");
+    expect(attempts.map((a) => a.status)).toEqual(["completed"]);
+  });
+
+  it("checkpointStep of a failed step: the step's own failure is what the run reports", async () => {
+    const { clock, storage, runner } = setup();
+    const writes = failing(storage, "checkpointStep");
+    const wf = workflow<number>({ name: "blip-checkpoint-failure" })
+      .step("pay", () => fail(new Boom({ message: "declined" })))
+      .build();
+
+    const r = await drive(clock, runner.runSafe({ workflow: wf, workflowId: "b-0f", input: 1 }));
+    expect(r.error).toBeInstanceOf(Boom);
+    expect(writes.failures).toBe(1);
+    const state = (await storage.loadWorkflow("b-0f"))!;
+    expect(state.status).toBe("failed");
+    expect(state.steps["pay"]!.errorTag).toBe("Boom");
+    const attempts = await storage.loadStepAttempts("b-0f", "pay");
+    expect(attempts.map((a) => a.status)).toEqual(["failed"]);
+  });
+
+  it("saveStepResult: the step is not run again and the run completes (no double charge)", async () => {
+    const { clock, storage, runner } = setup({ split: true });
     const writes = failing(storage, "saveStepResult");
     let charges = 0;
     const wf = workflow<number>({
@@ -106,8 +157,8 @@ describe("a storage write that fails once", () => {
   });
 
   it("saveStepAttempt: the attempt row is written on retry", async () => {
-    const { clock, storage, runner } = setup();
-    failing(storage, "saveStepAttempt");
+    const { clock, storage, runner } = setup({ split: true });
+    const writes = failing(storage, "saveStepAttempt");
     let charges = 0;
     const wf = workflow<number>({ name: "blip-attempt" })
       .stepAsync("charge", async ({ input }) => {
@@ -119,19 +170,21 @@ describe("a storage write that fails once", () => {
     const r = await drive(clock, runner.runSafe({ workflow: wf, workflowId: "b-2", input: 1 }));
     expect(r.error).toBeNull();
     expect(charges).toBe(1);
+    expect(writes.failures).toBe(1);
     const attempts = await storage.loadStepAttempts("b-2", "charge");
     expect(attempts.map((a) => a.status)).toEqual(["completed"]);
   });
 
   it("saveStepFailure: the step's own failure is what the run reports", async () => {
-    const { clock, storage, runner } = setup();
-    failing(storage, "saveStepFailure");
+    const { clock, storage, runner } = setup({ split: true });
+    const writes = failing(storage, "saveStepFailure");
     const wf = workflow<number>({ name: "blip-failure" })
       .step("pay", () => fail(new Boom({ message: "declined" })))
       .build();
 
     const r = await drive(clock, runner.runSafe({ workflow: wf, workflowId: "b-3", input: 1 }));
     expect(r.error).toBeInstanceOf(Boom);
+    expect(writes.failures).toBe(1);
     const state = (await storage.loadWorkflow("b-3"))!;
     expect(state.status).toBe("failed");
     expect(state.steps["pay"]!.status).toBe("failed");
@@ -219,57 +272,63 @@ describe("a storage write that fails once", () => {
 // ---------------------------------------------------------------------------
 
 describe("a checkpoint write that keeps failing", () => {
-  it("rejects with CheckpointError: no compensation, no failWorkflow, no workflow retry", async () => {
-    const { clock, storage, runner } = setup();
-    const writes = failing(storage, "saveStepResult", 4);
-    let charges = 0;
-    let compensated = 0;
-    const failures: string[] = [];
-    const guarded = workflow<number>({
-      name: "checkpoint-down-saga",
-      retry: { maxRetries: 2, baseDelayMs: 1 },
-      hooks: {
-        onWorkflowFailure: ({ error }) => {
-          failures.push(error);
-        },
-      },
-    })
-      .stepAsync("reserve", async ({ input }) => input, {
-        compensate: async () => {
-          compensated++;
+  it.each([
+    { method: "checkpointStep", split: false },
+    { method: "saveStepResult", split: true },
+  ] as const)(
+    "$method: rejects with CheckpointError: no compensation, no failWorkflow, no workflow retry",
+    async ({ method, split }) => {
+      const { clock, storage, runner } = setup({ split });
+      const writes = failing(storage, method, 4);
+      let charges = 0;
+      let compensated = 0;
+      const failures: string[] = [];
+      const guarded = workflow<number>({
+        name: "checkpoint-down-saga",
+        retry: { maxRetries: 2, baseDelayMs: 1 },
+        hooks: {
+          onWorkflowFailure: ({ error }) => {
+            failures.push(error);
+          },
         },
       })
-      .stepAsync("charge", async ({ prev }) => {
-        charges++;
-        return prev as number;
-      })
-      .build();
+        .stepAsync("reserve", async ({ input }) => input, {
+          compensate: async () => {
+            compensated++;
+          },
+        })
+        .stepAsync("charge", async ({ prev }) => {
+          charges++;
+          return prev as number;
+        })
+        .build();
 
-    const r = await drive(
-      clock,
-      runner.runSafe({ workflow: guarded, workflowId: "cp-1", input: 1 }),
-    );
+      const r = await drive(
+        clock,
+        runner.runSafe({ workflow: guarded, workflowId: "cp-1", input: 1 }),
+      );
 
-    expect(r.error).toBeInstanceOf(CheckpointError);
-    const err = r.error as CheckpointError;
-    expect(err.operation).toBe("saveStepResult");
-    expect(err.stepName).toBe("reserve");
-    expect((err.cause as Error).message).toBe("saveStepResult blip");
-    expect(writes.calls).toBe(4); // first try + 3 retries
-    expect(compensated).toBe(0);
-    expect(charges).toBe(0);
-    expect(failures).toEqual([]);
-    const state = (await storage.loadWorkflow("cp-1"))!;
-    expect(state.status).not.toBe("failed");
-    expect(state.steps["reserve"]).toBeUndefined();
+      expect(r.error).toBeInstanceOf(CheckpointError);
+      const err = r.error as CheckpointError;
+      expect(err.operation).toBe(method);
+      expect(err.stepName).toBe("reserve");
+      expect((err.cause as Error).message).toBe(`${method} blip`);
+      expect(writes.calls).toBe(4); // first try + 3 retries
+      expect(compensated).toBe(0);
+      expect(charges).toBe(0);
+      expect(failures).toEqual([]);
+      const state = (await storage.loadWorkflow("cp-1"))!;
+      expect(state.status).not.toBe("failed");
+      expect(state.steps["reserve"]).toBeUndefined();
 
-    // The lock was released; once storage recovers, the run is re-driven
-    // and the unsaved step runs again (at-least-once).
-    const again = await runner.runSafe({ workflow: guarded, workflowId: "cp-1", input: 1 });
-    expect(again.error).toBeNull();
-    expect(charges).toBe(1);
-    expect((await storage.loadWorkflow("cp-1"))!.status).toBe("completed");
-  });
+      // The lock was released; once storage recovers, the run is re-driven
+      // and the unsaved step runs again (at-least-once).
+      const again = await runner.runSafe({ workflow: guarded, workflowId: "cp-1", input: 1 });
+      expect(again.error).toBeNull();
+      expect(charges).toBe(1);
+      expect((await storage.loadWorkflow("cp-1"))!.status).toBe("completed");
+    },
+  );
 
   it("a completion that cannot be saved leaves the run for recovery", async () => {
     const { clock, storage, runner } = setup();

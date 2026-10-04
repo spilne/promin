@@ -84,6 +84,7 @@ describe("scheduling cost", () => {
     expect(dependencyReads).toBeLessThanOrEqual(2 * N);
     for (const method of [
       "notifyStepStarted",
+      "checkpointStep",
       "saveStepResult",
       "saveStepAttempt",
       "loadWorkflowStatus",
@@ -105,8 +106,28 @@ describe("scheduling cost", () => {
     expect(counts.tryLock ?? 0).toBe(0);
     // Only the read-back of the freshly created run.
     expect(counts.loadWorkflow ?? 0).toBeLessThanOrEqual(1);
-    expect(counts.saveStepResult).toBe(N);
+    // One write per step: its row and attempt row together, which also
+    // reads the run's status, so no wave reads it separately. The one
+    // status read is the cancel check after the completion.
+    expect(counts.checkpointStep).toBe(N);
+    expect(counts.saveStepResult ?? 0).toBe(0);
+    expect(counts.saveStepAttempt ?? 0).toBe(0);
+    expect(counts.loadWorkflowStatus ?? 0).toBe(1);
     expect(counts.notifyStepStarted).toBe(N);
+  });
+
+  it("a storage without checkpointStep gets the separate writes and a status read per wave", async () => {
+    const { storage, counts } = countingStorage({ hide: ["checkpointStep"] });
+    const runner = createWorkflowRunner({ storage });
+
+    const result = await runner.run({ workflow: chain(10), workflowId: "split", input: 0 });
+
+    expect(result).toBe(10);
+    expect(counts.checkpointStep ?? 0).toBe(0);
+    expect(counts.saveStepResult).toBe(10);
+    expect(counts.saveStepAttempt).toBe(10);
+    // One per wave after the first, plus the check after the completion.
+    expect(counts.loadWorkflowStatus).toBe(10);
   });
 
   it("falls back to tryLock + loadWorkflow on a storage without tryLockAndLoad", async () => {

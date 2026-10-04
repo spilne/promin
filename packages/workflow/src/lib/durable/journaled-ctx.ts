@@ -18,6 +18,7 @@ import { makeLoops, makeParallel, makeProxy } from "./journaled-ctx-compose.ts";
 import { makeSignalMethods, makeSleep } from "./journaled-ctx-suspend.ts";
 import type { JournaledContext, JournaledCtxEnv, RunChild } from "./journaled-context.ts";
 import { registerQueryHandler } from "./query-registry.ts";
+import type { WorkflowMetadataRef } from "./step-definition.ts";
 import type { FenceGuard, WorkflowStorage } from "./workflow-storage.ts";
 
 /** Build the ctx of one body run, and the compensation stack it fills. */
@@ -55,6 +56,11 @@ export function makeCtx<Input, Prev>(params: {
    * updated as a side effect of those writes via `workflowStorage`.
    */
   initialMetadata?: Record<string, unknown>;
+  /**
+   * The runner's copy of the run's metadata: every `set/merge` replaces its
+   * `current` with the merged metadata, so later steps of the run see it.
+   */
+  metadataRef?: WorkflowMetadataRef;
   /** Time source for sleep / signal deadlines and activity retry backoff. */
   clock?: WallClock;
   /** Fence guard of the run's lock, passed on every journal, suspend and metadata write. */
@@ -93,6 +99,15 @@ export function makeCtx<Input, Prev>(params: {
   // values), idempotent against the storage's merge semantics.
   const metadataState: Record<string, unknown> = { ...initialMetadata };
   const writeMetadataPatch = (patch: Record<string, unknown>): void => {
+    const ref = params.metadataRef;
+    if (ref) {
+      const merged: Record<string, unknown> = { ...ref.current };
+      for (const [k, v] of Object.entries(patch)) {
+        if (v === null) delete merged[k];
+        else merged[k] = v;
+      }
+      ref.current = merged;
+    }
     if (!workflowStorage) return; // tests that drive runJournaledStep without WorkflowStorage skip persistence
     workflowStorage.setWorkflowMetadata(workflowId, patch, guard).catch((err) => {
       console.warn(

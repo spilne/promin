@@ -59,6 +59,7 @@ import { JournalStorageMissingError } from "./journal-errors.ts";
 import { activityScope, journaledBodyScope } from "./journaled-body-scope.ts";
 import type { ActivityYield, JournaledStepBody, RunChild } from "./journaled-context.ts";
 import { makeCtx } from "./journaled-ctx.ts";
+import type { WorkflowMetadataRef } from "./step-definition.ts";
 import type { FenceGuard, WorkflowStorage } from "./workflow-storage.ts";
 
 export type {
@@ -128,6 +129,12 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
    * journal, suspend and metadata writes the step body makes.
    */
   guard?: FenceGuard;
+  /**
+   * The run's metadata as the runner holds it. Seeds `ctx.metadata`
+   * without re-reading the run, and is kept current with the body's
+   * `ctx.metadata` writes. Without it, the run is loaded for its metadata.
+   */
+  workflowMetadata?: WorkflowMetadataRef;
   body: JournaledStepBody<Input, Prev, Output>;
 }): Promise<Output> {
   const {
@@ -144,15 +151,22 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     runChild,
     clock,
     guard,
+    workflowMetadata,
     body,
   } = params;
 
   if (!isActivityJournalStorage(storage)) throw new JournalStorageMissingError(stepName);
   const journal = await storage.loadJournal(workflowId, stepName);
-  // Load workflow metadata snapshot for `ctx.metadata.get()` — reads are
-  // synchronous from the body, so we materialize the snapshot up front.
-  // Writes go through `setWorkflowMetadata` independently.
-  const wfState = workflowStorage ? await workflowStorage.loadWorkflow(workflowId) : null;
+  // Workflow metadata snapshot for `ctx.metadata.get()` — reads are
+  // synchronous from the body, so we materialize the snapshot up front:
+  // the runner's copy when it passed one, else a load of the run. Writes
+  // go through `setWorkflowMetadata` independently.
+  const initialMetadata =
+    workflowMetadata !== undefined
+      ? workflowMetadata.current
+      : workflowStorage
+        ? (await workflowStorage.loadWorkflow(workflowId))?.metadata
+        : undefined;
   const { ctx, compensations } = makeCtx({
     input,
     prev,
@@ -168,7 +182,8 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     runChild,
     ...(clock !== undefined && { clock }),
     ...(guard !== undefined && { guard }),
-    ...(wfState?.metadata !== undefined && { initialMetadata: wfState.metadata }),
+    ...(initialMetadata !== undefined && { initialMetadata }),
+    ...(workflowMetadata !== undefined && { metadataRef: workflowMetadata }),
   });
   const gen = body(ctx, prev);
 

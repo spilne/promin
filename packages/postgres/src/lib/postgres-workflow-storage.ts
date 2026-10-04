@@ -2,15 +2,18 @@
 // PostgresWorkflowStorage — production-grade WorkflowStorage backed by Postgres
 // ---------------------------------------------------------------------------
 
-import { eq, and, or, sql, desc, asc, inArray, gte, lt } from "drizzle-orm";
+import { eq, and, or, sql, desc, asc, inArray, gte, lt, type SQL } from "drizzle-orm";
 import type {
   WorkflowStorage,
   StepAttemptStorage,
+  StepCheckpoint,
+  StepCheckpointStorage,
   CompensationLedgerStorage,
   StepCompensationOutcome,
   RunSource,
   WorkflowState,
   WorkflowStatusSnapshot,
+  WorkflowSummary,
   WorkflowRunSummary,
   WorkflowStatus,
   WorkflowOrderBy,
@@ -112,6 +115,27 @@ function fenceMismatch(params: {
   });
 }
 
+/** A jsonb bind parameter; `undefined` and `null` bind SQL NULL, like a drizzle insert. */
+function jsonbParam(value: unknown): SQL {
+  return value === undefined || value === null
+    ? sql`NULL::jsonb`
+    : sql`${JSON.stringify(value)}::jsonb`;
+}
+
+/** A timestamptz bind parameter (bound as ISO text, like the other raw queries here). */
+function timestampParam(value: Date | undefined | null): SQL {
+  return value == null ? sql`NULL::timestamptz` : sql`${value.toISOString()}::timestamptz`;
+}
+
+/**
+ * A timestamptz column read through `execRaw`: drizzle's postgres-js
+ * driver leaves timestamps as text, which its own column mapping parses.
+ */
+function timestampOf(value: Date | string | null | undefined): Date | null {
+  if (value == null) return null;
+  return value instanceof Date ? value : new Date(value);
+}
+
 /** Parse a jsonb column selected as `::text`; SQL NULL stays `null`. */
 function parseJsonText(text: string | null | undefined): unknown {
   return text == null ? null : JSON.parse(text);
@@ -122,7 +146,12 @@ function parseJsonText(text: string | null | undefined): unknown {
 // ---------------------------------------------------------------------------
 
 export class PostgresWorkflowStorage
-  implements WorkflowStorage, StepAttemptStorage, CompensationLedgerStorage, ActivityJournalStorage
+  implements
+    WorkflowStorage,
+    StepAttemptStorage,
+    StepCheckpointStorage,
+    CompensationLedgerStorage,
+    ActivityJournalStorage
 {
   /**
    * Drizzle schemas for all workflow tables.
@@ -275,32 +304,116 @@ export class PostgresWorkflowStorage
   }
 
   async loadWorkflow(workflowId: string): Promise<WorkflowState | null> {
-    const [wfRow] = await this.db
-      .select()
-      .from(workflows)
-      .where(eq(workflows.workflowId, workflowId));
-    if (!wfRow) return null;
+    // One statement, so one snapshot: the workflow row and the step and
+    // task rows of its current run can't come from different runs when a
+    // `startFreshRun` commits mid-read. The three row kinds share one
+    // column list (`kind` tells them apart; a kind's foreign columns are
+    // NULL), so every row comes back as plain columns, without the
+    // per-row cost of building json.
+    const rows = await execRaw(
+      this.db,
+      sql`WITH w AS (SELECT * FROM wf_workflows WHERE workflow_id = ${workflowId})
+        SELECT 0 AS kind, w.workflow_name AS name, w.workflow_type, w.namespace, w.version,
+          w.parent_workflow_id, w.run_source, w.run_source_id, w.run, w.status_id, w.input,
+          w.metadata, w.result, w.error, w.error_tag, w.tripwire, w.created_at, w.started_at,
+          w.updated_at, w.completed_at,
+          NULL::int AS step_type_id, NULL::jsonb AS depends_on, NULL::float8 AS duration_ms,
+          NULL::int AS attempt, NULL::timestamptz AS wake_at, NULL::text AS signal_name,
+          NULL::timestamptz AS signal_timeout_at, NULL::jsonb AS signal_json_schema,
+          NULL::text AS compensation_status, NULL::text AS compensation_error,
+          NULL::timestamptz AS compensated_at, NULL::int AS task_index
+        FROM w
+        UNION ALL
+        SELECT 1, s.step_name, NULL, NULL, NULL, NULL, NULL, NULL, s.run, s.status_id, NULL,
+          s.metadata, s.result, s.error, s.error_tag, NULL, NULL, s.started_at, NULL,
+          s.completed_at, s.step_type_id, s.depends_on, s.duration_ms::float8, s.attempt,
+          s.wake_at, s.signal_name, s.signal_timeout_at, s.signal_json_schema,
+          s.compensation_status, s.compensation_error, s.compensated_at, NULL
+        FROM wf_workflow_steps s JOIN w ON s.workflow_id = w.workflow_id AND s.run = w.run
+        UNION ALL
+        SELECT 2, t.step_name, NULL, NULL, NULL, NULL, NULL, NULL, t.run, t.status_id, t.input,
+          NULL, t.result, t.error, NULL, NULL, NULL, t.started_at, NULL, t.completed_at, NULL,
+          NULL, NULL, t.attempt, NULL, NULL, NULL, NULL, NULL, NULL, NULL, t.task_index
+        FROM wf_workflow_step_tasks t JOIN w ON t.workflow_id = w.workflow_id AND t.run = w.run`,
+    );
 
-    const currentRun = wfRow.run ?? 1;
-    const stepRows = await this.db
-      .select()
-      .from(workflowSteps)
-      .where(and(eq(workflowSteps.workflowId, workflowId), eq(workflowSteps.run, currentRun)));
-    const taskRows = await this.db
-      .select()
-      .from(workflowStepTasks)
-      .where(
-        and(eq(workflowStepTasks.workflowId, workflowId), eq(workflowStepTasks.run, currentRun)),
-      );
-
+    let wfRow: Record<string, any> | undefined;
+    const stepRows: Array<Record<string, any>> = [];
     const tasksByStep = new Map<string, StepTaskState[]>();
-    for (const tr of taskRows) {
-      if (!tasksByStep.has(tr.stepName)) tasksByStep.set(tr.stepName, []);
-      tasksByStep.get(tr.stepName)!.push(this.rowToTaskState(tr));
+    for (const row of rows) {
+      if (row.kind === 0) wfRow = row;
+      else if (row.kind === 1) stepRows.push(row);
+      else {
+        let bucket = tasksByStep.get(row.name);
+        if (!bucket) tasksByStep.set(row.name, (bucket = []));
+        bucket.push(
+          this.rowToTaskState({
+            taskIndex: row.task_index,
+            statusId: row.status_id,
+            input: row.input,
+            result: row.result,
+            error: row.error,
+            startedAt: timestampOf(row.started_at),
+            completedAt: timestampOf(row.completed_at),
+            attempt: row.attempt,
+          }),
+        );
+      }
     }
+    if (wfRow === undefined) return null;
 
-    const steps = stepRows.map((sr: any) => this.rowToStepState(sr, tasksByStep.get(sr.stepName)));
-    return this.rowToWorkflowState(wfRow, steps);
+    const steps = stepRows.map((row) =>
+      this.rowToStepState(
+        {
+          stepName: row.name,
+          run: row.run,
+          statusId: row.status_id,
+          stepTypeId: row.step_type_id,
+          dependsOn: row.depends_on,
+          result: row.result,
+          error: row.error,
+          errorTag: row.error_tag,
+          startedAt: timestampOf(row.started_at),
+          completedAt: timestampOf(row.completed_at),
+          durationMs: row.duration_ms,
+          attempt: row.attempt,
+          wakeAt: timestampOf(row.wake_at),
+          signalName: row.signal_name,
+          signalTimeoutAt: timestampOf(row.signal_timeout_at),
+          signalJsonSchema: row.signal_json_schema,
+          metadata: row.metadata,
+          compensationStatus: row.compensation_status,
+          compensationError: row.compensation_error,
+          compensatedAt: timestampOf(row.compensated_at),
+        },
+        tasksByStep.get(row.name),
+      ),
+    );
+    return this.rowToWorkflowState(
+      {
+        workflowId,
+        workflowName: wfRow.name,
+        workflowType: wfRow.workflow_type,
+        parentWorkflowId: wfRow.parent_workflow_id,
+        namespace: wfRow.namespace,
+        version: wfRow.version,
+        run: wfRow.run,
+        runSource: wfRow.run_source,
+        runSourceId: wfRow.run_source_id,
+        statusId: wfRow.status_id,
+        input: wfRow.input,
+        result: wfRow.result,
+        error: wfRow.error,
+        errorTag: wfRow.error_tag,
+        tripwire: wfRow.tripwire,
+        metadata: wfRow.metadata,
+        createdAt: timestampOf(wfRow.created_at),
+        startedAt: timestampOf(wfRow.started_at),
+        updatedAt: timestampOf(wfRow.updated_at),
+        completedAt: timestampOf(wfRow.completed_at),
+      },
+      steps,
+    );
   }
 
   async listWorkflows(params?: {
@@ -328,6 +441,59 @@ export class PostgresWorkflowStorage
 
     const rows = await query;
     return rows.map((row: any) => this.rowToWorkflowState(row, []));
+  }
+
+  /**
+   * `listWorkflows` without the blob columns (`input`, `result`, `error`,
+   * `tripwire`, step rows): what list views and the dashboard metrics
+   * read, at the cost of the row headers only.
+   */
+  async listWorkflowSummaries(
+    params?: Parameters<WorkflowStorage["listWorkflows"]>[0],
+  ): Promise<WorkflowSummary[]> {
+    const conditions = this.workflowFilterConditions(params);
+    const query = this.db
+      .select({
+        workflowId: workflows.workflowId,
+        workflowName: workflows.workflowName,
+        workflowType: workflows.workflowType,
+        namespace: workflows.namespace,
+        statusId: workflows.statusId,
+        version: workflows.version,
+        run: workflows.run,
+        runSource: workflows.runSource,
+        runSourceId: workflows.runSourceId,
+        metadata: workflows.metadata,
+        createdAt: workflows.createdAt,
+        startedAt: workflows.startedAt,
+        updatedAt: workflows.updatedAt,
+        completedAt: workflows.completedAt,
+      })
+      .from(workflows)
+      .$dynamic();
+    if (conditions.length > 0)
+      query.where(conditions.length === 1 ? conditions[0] : and(...conditions));
+    query.orderBy(postgresOrderByClause(params?.orderBy, params?.orderDir));
+    if (params?.limit) query.limit(params.limit);
+    if (params?.offset) query.offset(params.offset);
+
+    const rows = await query;
+    return rows.map((row) => ({
+      workflowId: row.workflowId,
+      workflowName: row.workflowName,
+      workflowType: row.workflowType ?? undefined,
+      namespace: row.namespace ?? undefined,
+      status: WorkflowStatusIds.toName(row.statusId),
+      version: row.version ?? undefined,
+      run: row.run ?? 1,
+      runSource: decodeRunSource(row.runSource),
+      runSourceId: row.runSourceId ?? undefined,
+      metadata: (row.metadata as Record<string, unknown> | null) ?? undefined,
+      createdAt: row.createdAt,
+      startedAt: row.startedAt ?? undefined,
+      updatedAt: row.updatedAt,
+      completedAt: row.completedAt ?? undefined,
+    }));
   }
 
   /** `SELECT COUNT(*)` over the same filters as `listWorkflows`. */
@@ -609,29 +775,6 @@ export class PostgresWorkflowStorage
     return row ? { workflowId: row.workflowId } : null;
   }
 
-  /** Transition pending → running on first step activity. */
-  private async markRunning(params: { db: DrizzleDb; workflowId: string }): Promise<void> {
-    const { db, workflowId } = params;
-    const now = this.config.clock.now();
-    await db
-      .update(workflows)
-      .set({ statusId: WorkflowStatusIds.id.running, startedAt: now, updatedAt: now })
-      .where(
-        and(
-          eq(workflows.workflowId, workflowId),
-          eq(workflows.statusId, WorkflowStatusIds.id.pending),
-        ),
-      );
-  }
-
-  private async getCurrentRun(params: { db: DrizzleDb; workflowId: string }): Promise<number> {
-    const [row] = await params.db
-      .select({ run: workflows.run })
-      .from(workflows)
-      .where(eq(workflows.workflowId, params.workflowId));
-    return row?.run ?? 1;
-  }
-
   async saveStepResult(
     params: {
       workflowId: string;
@@ -643,7 +786,123 @@ export class PostgresWorkflowStorage
     },
     guard?: FenceGuard,
   ): Promise<void> {
-    await this.batchSaveStepResults([params], guard);
+    const { workflowId, stepName, ...outcome } = params;
+    await this.writeStep({
+      checkpoint: {
+        workflowId,
+        stepName,
+        outcome: { kind: "completed", ...outcome },
+        attempts: [],
+      },
+      guard,
+    });
+  }
+
+  /**
+   * `saveStepAttempt` for every attempt plus `saveStepResult` /
+   * `saveStepFailure`, as one statement: the fence check, the workflow
+   * row's status move, the step row upsert and the attempt rows, with the
+   * run's status read back from the same statement.
+   */
+  async checkpointStep(
+    checkpoint: StepCheckpoint,
+    guard?: FenceGuard,
+  ): Promise<WorkflowStatusSnapshot | null> {
+    return this.writeStep({ checkpoint, guard });
+  }
+
+  /**
+   * Write a settled step's row (and its attempt rows) in one fenced
+   * statement. `wf` moves the workflow row (pending → running, and for a
+   * completed step suspended → running too) and returns its run and
+   * status; the step upsert and the attempt rows read the run from it, so
+   * nothing is written for a missing workflow. Resolves with the run's
+   * status, or `null` when the workflow does not exist.
+   */
+  private async writeStep(params: {
+    checkpoint: StepCheckpoint;
+    guard?: FenceGuard;
+  }): Promise<WorkflowStatusSnapshot | null> {
+    const { workflowId, stepName, outcome } = params.checkpoint;
+    const now = timestampParam(this.config.clock.now());
+    const ids = WorkflowStatusIds.id;
+    const completed = outcome.kind === "completed";
+    const resumable = completed ? [ids.pending, ids.suspended] : [ids.pending];
+    const stepStatus = completed ? StepStatusIds.id.completed : StepStatusIds.id.failed;
+    const error = completed ? null : outcome.error;
+    const errorTag = completed ? null : (outcome.errorTag ?? null);
+    // A completed step keeps an earlier error text, a failed one overwrites
+    // it, like the separate saveStepResult / saveStepFailure writes did.
+    const onConflict = completed
+      ? sql`result = EXCLUDED.result`
+      : sql`error = EXCLUDED.error, error_tag = EXCLUDED.error_tag`;
+    const attempts = this.config.recordAttempts ? params.checkpoint.attempts : [];
+    const attemptRows =
+      attempts.length === 0
+        ? sql``
+        : sql`, attempts AS (
+            INSERT INTO wf_step_attempts (workflow_id, step_name, attempt, attempt_type_id,
+              status_id, result, error, duration_ms, started_at, completed_at, worker_id)
+            SELECT v.* FROM (VALUES ${sql.join(
+              attempts.map(
+                (a) => sql`(${a.workflowId}::text, ${a.stepName}::text, ${a.attempt}::int,
+                  ${AttemptTypeIds.toId(a.type)}::int,
+                  ${StepStatusIds.toId(a.status === "completed" ? "completed" : "failed")}::int,
+                  ${jsonbParam(a.result)}, ${a.error ?? null}::text, ${a.durationMs}::bigint,
+                  ${timestampParam(a.startedAt)}, ${timestampParam(a.completedAt)},
+                  ${a.executorId ?? null}::text)`,
+              ),
+              sql`, `,
+            )}) AS v
+            WHERE EXISTS (SELECT 1 FROM wf)
+            ON CONFLICT (workflow_id, step_name, run, attempt, attempt_type_id) DO UPDATE SET
+              status_id = EXCLUDED.status_id, result = EXCLUDED.result, error = EXCLUDED.error,
+              duration_ms = EXCLUDED.duration_ms, started_at = EXCLUDED.started_at,
+              completed_at = EXCLUDED.completed_at, worker_id = EXCLUDED.worker_id
+          )`;
+
+    const row = await this.fencedStatement({
+      workflowId,
+      guard: params.guard,
+      statement: (ok) => sql`
+        wf AS (
+          UPDATE wf_workflows SET
+            status_id = CASE WHEN status_id IN (${sql.join(
+              resumable.map((id) => sql`${id}::int`),
+              sql`, `,
+            )}) THEN ${ids.running}::int ELSE status_id END,
+            started_at = CASE WHEN status_id = ${ids.pending}::int THEN ${now} ELSE started_at END,
+            updated_at = ${now}
+          WHERE workflow_id = ${workflowId} AND ${ok}
+          RETURNING run, status_id, error, error_tag
+        ),
+        step AS (
+          INSERT INTO wf_workflow_steps (workflow_id, step_name, run, status_id, result, error,
+            error_tag, metadata, started_at, completed_at, duration_ms, attempt)
+          SELECT ${workflowId}, ${stepName}, wf.run, ${stepStatus}::int,
+            ${jsonbParam(completed ? outcome.result : undefined)}, ${error}::text,
+            ${errorTag}::text, ${jsonbParam(outcome.metadata)},
+            ${timestampParam(outcome.startedAt)}, ${now}, ${outcome.durationMs}::bigint, 1
+          FROM wf
+          ON CONFLICT (workflow_id, step_name, run) DO UPDATE SET
+            status_id = EXCLUDED.status_id,
+            ${onConflict},
+            metadata = COALESCE(EXCLUDED.metadata, wf_workflow_steps.metadata),
+            completed_at = EXCLUDED.completed_at,
+            duration_ms = EXCLUDED.duration_ms,
+            attempt = wf_workflow_steps.attempt + 1
+          RETURNING 1
+        )${attemptRows}`,
+      select: sql`(SELECT status_id FROM wf) AS status_id,
+        (SELECT error FROM wf) AS error,
+        (SELECT error_tag FROM wf) AS error_tag`,
+    });
+    if (row.status_id == null) return null;
+    return {
+      status: WorkflowStatusIds.toName(Number(row.status_id)),
+      ...(row.error != null && { error: row.error as string }),
+      ...(row.error_tag != null && { errorTag: row.error_tag as string }),
+    };
   }
 
   async batchSaveStepResults(
@@ -661,11 +920,11 @@ export class PostgresWorkflowStorage
     const token = this.fenceTokenOf(guard);
     const now = this.config.clock.now();
 
-    // Group by workflowId so we issue at most one markRunning + getCurrentRun
+    // Group by workflowId so we issue at most one status move + run read
     // per workflow regardless of how many step records target it, then fold
-    // everything into one multi-row INSERT inside a transaction. The 4n
-    // round trips the single-row path costs collapse to O(workflows) reads
-    // plus one bulk write.
+    // everything into one multi-row INSERT inside a transaction: O(workflows)
+    // statements plus one bulk write, where looping `saveStepResult` would
+    // cost one statement per record.
     const byWf = new Map<string, Array<(typeof records)[number]>>();
     for (const r of records) {
       const bucket = byWf.get(r.workflowId);
@@ -759,60 +1018,11 @@ export class PostgresWorkflowStorage
     },
     guard?: FenceGuard,
   ): Promise<void> {
-    await this.fenced({
-      workflowId: params.workflowId,
+    const { workflowId, stepName, ...outcome } = params;
+    await this.writeStep({
+      checkpoint: { workflowId, stepName, outcome: { kind: "failed", ...outcome }, attempts: [] },
       guard,
-      write: (db) => this.writeStepFailure({ db, params }),
     });
-  }
-
-  private async writeStepFailure(args: {
-    db: DrizzleDb;
-    params: {
-      workflowId: string;
-      stepName: string;
-      error: string;
-      errorTag?: string;
-      durationMs: number;
-      startedAt: Date;
-      metadata?: Record<string, unknown>;
-    };
-  }): Promise<void> {
-    const { db, params } = args;
-    await this.markRunning({ db, workflowId: params.workflowId });
-    const now = this.config.clock.now();
-    const run = await this.getCurrentRun({ db, workflowId: params.workflowId });
-    await db
-      .insert(workflowSteps)
-      .values({
-        workflowId: params.workflowId,
-        stepName: params.stepName,
-        run,
-        statusId: StepStatusIds.id.failed,
-        error: params.error,
-        errorTag: params.errorTag ?? null,
-        metadata: params.metadata,
-        startedAt: params.startedAt,
-        completedAt: now,
-        durationMs: params.durationMs,
-        attempt: 1,
-      })
-      .onConflictDoUpdate({
-        target: [workflowSteps.workflowId, workflowSteps.stepName, workflowSteps.run],
-        set: {
-          statusId: StepStatusIds.id.failed,
-          error: params.error,
-          errorTag: params.errorTag ?? null,
-          ...(params.metadata !== undefined ? { metadata: params.metadata } : {}),
-          completedAt: now,
-          durationMs: params.durationMs,
-          attempt: sql`${workflowSteps.attempt} + 1`,
-        },
-      });
-    await db
-      .update(workflows)
-      .set({ updatedAt: now })
-      .where(eq(workflows.workflowId, params.workflowId));
   }
 
   async saveTaskResult(
@@ -824,17 +1034,10 @@ export class PostgresWorkflowStorage
     },
     guard?: FenceGuard,
   ): Promise<void> {
-    await this.fenced({
-      workflowId: params.workflowId,
+    await this.writeTask({
+      ...params,
+      outcome: { statusId: StepStatusIds.id.completed, result: params.result },
       guard,
-      write: (db) =>
-        this.writeTask({
-          db,
-          workflowId: params.workflowId,
-          stepName: params.stepName,
-          taskIndex: params.taskIndex,
-          outcome: { statusId: StepStatusIds.id.completed, result: params.result },
-        }),
     });
   }
 
@@ -847,75 +1050,62 @@ export class PostgresWorkflowStorage
     },
     guard?: FenceGuard,
   ): Promise<void> {
-    await this.fenced({
-      workflowId: params.workflowId,
+    await this.writeTask({
+      ...params,
+      outcome: { statusId: StepStatusIds.id.failed, error: params.error },
       guard,
-      write: (db) =>
-        this.writeTask({
-          db,
-          workflowId: params.workflowId,
-          stepName: params.stepName,
-          taskIndex: params.taskIndex,
-          outcome: { statusId: StepStatusIds.id.failed, error: params.error },
-        }),
     });
   }
 
-  /** Upsert one map task row (and its parent step row) with `outcome`. */
+  /**
+   * Upsert one map task row (and its parent step row) with `outcome`, in
+   * one fenced statement. Nothing is written for a missing workflow.
+   */
   private async writeTask(params: {
-    db: DrizzleDb;
     workflowId: string;
     stepName: string;
     taskIndex: number;
     outcome:
       | { statusId: number; result: unknown; error?: undefined }
       | { statusId: number; error: string; result?: undefined };
+    guard?: FenceGuard;
   }): Promise<void> {
-    const { db, workflowId, stepName, taskIndex, outcome } = params;
-    const now = this.config.clock.now();
-    const run = await this.getCurrentRun({ db, workflowId });
-    // Ensure parent step row exists
-    await db
-      .insert(workflowSteps)
-      .values({
-        workflowId,
-        stepName,
-        run,
-        statusId: StepStatusIds.id.running,
-        stepTypeId: StepTypeIds.id.map,
-        attempt: 1,
-        startedAt: now,
-      })
-      .onConflictDoNothing();
-    const fields =
-      outcome.error !== undefined
-        ? { statusId: outcome.statusId, error: outcome.error }
-        : { statusId: outcome.statusId, result: outcome.result };
-    await db
-      .insert(workflowStepTasks)
-      .values({
-        workflowId,
-        stepName,
-        run,
-        taskIndex,
-        ...fields,
-        startedAt: now,
-        completedAt: now,
-        attempt: 1,
-      })
-      .onConflictDoUpdate({
-        target: [
-          workflowStepTasks.workflowId,
-          workflowStepTasks.stepName,
-          workflowStepTasks.run,
-          workflowStepTasks.taskIndex,
-        ],
-        set: {
-          ...fields,
-          completedAt: now,
-          attempt: sql`${workflowStepTasks.attempt} + 1`,
-        },
-      });
+    const { workflowId, stepName, taskIndex, outcome } = params;
+    const now = timestampParam(this.config.clock.now());
+    // The outcome's column is set; the other keeps its stored value.
+    const set =
+      outcome.error !== undefined ? sql`error = EXCLUDED.error` : sql`result = EXCLUDED.result`;
+    await this.fencedStatement({
+      workflowId,
+      guard: params.guard,
+      statement: (ok) => sql`
+        cur AS (
+          SELECT run FROM wf_workflows WHERE workflow_id = ${workflowId} AND ${ok}
+        ),
+        parent AS (
+          INSERT INTO wf_workflow_steps (workflow_id, step_name, run, status_id, step_type_id,
+            attempt, started_at)
+          SELECT ${workflowId}, ${stepName}, cur.run, ${StepStatusIds.id.running}::int,
+            ${StepTypeIds.id.map}::int, 1, ${now}
+          FROM cur
+          ON CONFLICT DO NOTHING
+          RETURNING 1
+        ),
+        task AS (
+          INSERT INTO wf_workflow_step_tasks (workflow_id, step_name, run, task_index, status_id,
+            result, error, started_at, completed_at, attempt)
+          SELECT ${workflowId}, ${stepName}, cur.run, ${taskIndex}::int, ${outcome.statusId}::int,
+            ${jsonbParam(outcome.result)}, ${outcome.error ?? null}::text, ${now}, ${now}, 1
+          FROM cur
+          ON CONFLICT (workflow_id, step_name, run, task_index) DO UPDATE SET
+            status_id = EXCLUDED.status_id,
+            ${set},
+            completed_at = EXCLUDED.completed_at,
+            attempt = wf_workflow_step_tasks.attempt + 1
+          RETURNING 1
+        )`,
+      select: sql`1 AS one`,
+    });
   }
 
   async completeWorkflow(workflowId: string, result: unknown, guard?: FenceGuard): Promise<void> {
@@ -959,22 +1149,30 @@ export class PostgresWorkflowStorage
       tripwire?: unknown;
     };
   }): Promise<void> {
-    const { workflowId } = params;
-    await this.fenced({
+    const { workflowId, set } = params;
+    const now = timestampParam(this.config.clock.now());
+    // Only the columns the transition sets change; an `undefined` value
+    // leaves its column alone, as in a drizzle `.set()`.
+    const columns: SQL[] = [sql`status_id = ${set.statusId}::int`];
+    if (set.result !== undefined) columns.push(sql`result = ${jsonbParam(set.result)}`);
+    if (set.error !== undefined) columns.push(sql`error = ${set.error}::text`);
+    if (set.errorTag !== undefined) columns.push(sql`error_tag = ${set.errorTag}::text`);
+    if (set.tripwire !== undefined) columns.push(sql`tripwire = ${jsonbParam(set.tripwire)}`);
+    await this.fencedStatement({
       workflowId,
       guard: params.guard,
-      write: async (db) => {
-        const now = this.config.clock.now();
-        await db
-          .update(workflows)
-          .set({ ...params.set, completedAt: now, updatedAt: now })
-          .where(
-            and(
-              eq(workflows.workflowId, workflowId),
-              inArray(workflows.statusId, NON_TERMINAL_STATUS_IDS),
-            ),
-          );
-      },
+      statement: (ok) => sql`
+        ended AS (
+          UPDATE wf_workflows SET ${sql.join(columns, sql`, `)}, completed_at = ${now},
+            updated_at = ${now}
+          WHERE workflow_id = ${workflowId} AND ${ok}
+            AND status_id IN (${sql.join(
+              NON_TERMINAL_STATUS_IDS.map((id) => sql`${id}::int`),
+              sql`, `,
+            )})
+          RETURNING 1
+        )`,
+      select: sql`1 AS one`,
     });
   }
 
@@ -984,44 +1182,58 @@ export class PostgresWorkflowStorage
     stepUpdate: Record<string, unknown>,
     guard?: FenceGuard,
   ): Promise<void> {
-    await this.fenced({
+    // One fenced statement, so the step row and the workflow's `suspended`
+    // status land together. Fields `stepUpdate` leaves out keep their
+    // stored value on an existing row (and their default on a new one).
+    const now = timestampParam(this.config.clock.now());
+    const fields: Array<[string, SQL]> = [
+      ["run", sql`cur.run`],
+      ["attempt", sql`1`],
+      ["started_at", now],
+    ];
+    if (stepUpdate.status) {
+      fields.push(["status_id", sql`${StepStatusIds.toId(stepUpdate.status as StepStatus)}::int`]);
+    }
+    if (stepUpdate.stepType) {
+      fields.push(["step_type_id", sql`${StepTypeIds.toId(stepUpdate.stepType as StepType)}::int`]);
+    }
+    if (stepUpdate.wakeAt != null)
+      fields.push(["wake_at", timestampParam(stepUpdate.wakeAt as Date)]);
+    if (stepUpdate.signalName != null) {
+      fields.push(["signal_name", sql`${stepUpdate.signalName as string}::text`]);
+    }
+    if (stepUpdate.signalTimeoutAt != null) {
+      fields.push(["signal_timeout_at", timestampParam(stepUpdate.signalTimeoutAt as Date)]);
+    }
+    // Schema snapshot for `ctx.validatedSignal` / `ctx.approval` suspends.
+    // Absent for plain `ctx.signal()` — those keep the pass-through path.
+    if (stepUpdate.signalJsonSchema != null) {
+      fields.push(["signal_json_schema", jsonbParam(stepUpdate.signalJsonSchema)]);
+    }
+    const columns = sql.raw(fields.map(([c]) => c).join(", "));
+    const updates = sql.raw(fields.map(([c]) => `${c} = EXCLUDED.${c}`).join(", "));
+
+    await this.fencedStatement({
       workflowId,
       guard,
-      write: async (db) => {
-        const now = this.config.clock.now();
-        const run = await this.getCurrentRun({ db, workflowId });
-        const stepValues = {
-          workflowId,
-          stepName,
-          run,
-          attempt: 1,
-          startedAt: now,
-          statusId: stepUpdate.status
-            ? StepStatusIds.toId(stepUpdate.status as StepStatus)
-            : undefined,
-          stepTypeId: stepUpdate.stepType
-            ? StepTypeIds.toId(stepUpdate.stepType as StepType)
-            : undefined,
-          wakeAt: (stepUpdate.wakeAt as Date) ?? undefined,
-          signalName: (stepUpdate.signalName as string) ?? undefined,
-          signalTimeoutAt: (stepUpdate.signalTimeoutAt as Date) ?? undefined,
-          // Schema snapshot for `ctx.validatedSignal` / `ctx.approval` suspends.
-          // Null for plain `ctx.signal()` — those keep the pass-through path.
-          signalJsonSchema: stepUpdate.signalJsonSchema ?? undefined,
-        };
-
-        await db
-          .insert(workflowSteps)
-          .values(stepValues)
-          .onConflictDoUpdate({
-            target: [workflowSteps.workflowId, workflowSteps.stepName, workflowSteps.run],
-            set: stepValues,
-          });
-        await db
-          .update(workflows)
-          .set({ statusId: WorkflowStatusIds.id.suspended, updatedAt: now })
-          .where(eq(workflows.workflowId, workflowId));
-      },
+      statement: (ok) => sql`
+        cur AS (
+          UPDATE wf_workflows SET status_id = ${WorkflowStatusIds.id.suspended}::int,
+            updated_at = ${now}
+          WHERE workflow_id = ${workflowId} AND ${ok}
+          RETURNING run
+        ),
+        step AS (
+          INSERT INTO wf_workflow_steps (workflow_id, step_name, ${columns})
+          SELECT ${workflowId}, ${stepName}, ${sql.join(
+            fields.map(([, v]) => v),
+            sql`, `,
+          )}
+          FROM cur
+          ON CONFLICT (workflow_id, step_name, run) DO UPDATE SET ${updates}
+          RETURNING 1
+        )`,
+      select: sql`1 AS one`,
     });
   }
 
@@ -1237,6 +1449,57 @@ export class PostgresWorkflowStorage
       const db = tx as unknown as DrizzleDb;
       await this.assertFence({ db, workflowId: params.workflowId, token });
       return params.write(db);
+    });
+  }
+
+  /**
+   * Run one fenced write as a single statement:
+   *
+   *   WITH fence AS MATERIALIZED (<live lock row under the token, FOR SHARE>),
+   *        <statement>
+   *   SELECT EXISTS (SELECT 1 FROM fence) AS fenced, <select>
+   *
+   * Every data-modifying CTE of `statement` must be gated on `ok` (true
+   * only when the fence passed), so a rejected token writes nothing. The
+   * share lock is held until the statement commits, so a takeover can't
+   * land between the check and the write, the same guarantee
+   * `assertFence` gives a transaction. Without a token the fence is a
+   * constant row and the write is unfenced. A rejected token throws
+   * `FenceTokenMismatchError`; otherwise resolves with the final row.
+   */
+  private async fencedStatement(params: {
+    workflowId: string;
+    guard?: FenceGuard;
+    statement: (ok: SQL) => SQL;
+    select: SQL;
+  }): Promise<Record<string, any>> {
+    const { workflowId } = params;
+    const token = this.fenceTokenOf(params.guard);
+    const fence =
+      token === undefined
+        ? sql`SELECT 1`
+        : sql`SELECT 1 FROM wf_workflow_locks
+            WHERE workflow_id = ${workflowId} AND fence_token = ${Number(token)}::bigint
+              AND expires_at > NOW()
+            FOR SHARE`;
+    const ok = sql`EXISTS (SELECT 1 FROM fence)`;
+    const [row] = await execRaw(
+      this.db,
+      sql`WITH fence AS MATERIALIZED (${fence}), ${params.statement(ok)}
+          SELECT ${ok} AS fenced, ${params.select}`,
+    );
+    if (row?.fenced === true) return row;
+    // Rejected: read the lock back for the error only.
+    const [lock] = await execRaw(
+      this.db,
+      sql`SELECT fence_token::text AS token, expires_at > NOW() AS live
+          FROM wf_workflow_locks WHERE workflow_id = ${workflowId}`,
+    );
+    throw fenceMismatch({
+      workflowId,
+      provided: token!,
+      current: lock ? String(lock.token) : undefined,
+      expired: lock !== undefined && lock.live !== true,
     });
   }
 
@@ -1842,31 +2105,25 @@ export class PostgresWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     const { workflowId } = params;
-    await this.fenced({
+    const now = timestampParam(this.config.clock.now());
+    await this.fencedStatement({
       workflowId,
       guard,
-      write: async (db) => {
-        const now = this.config.clock.now();
-        const run = await this.getCurrentRun({ db, workflowId });
-        await db
-          .update(workflowSteps)
-          .set({
-            compensationStatus: params.status,
-            compensationError: params.error ?? null,
-            compensatedAt: now,
-          })
-          .where(
-            and(
-              eq(workflowSteps.workflowId, workflowId),
-              eq(workflowSteps.stepName, params.stepName),
-              eq(workflowSteps.run, run),
-            ),
-          );
-        await db
-          .update(workflows)
-          .set({ updatedAt: now })
-          .where(eq(workflows.workflowId, workflowId));
-      },
+      statement: (ok) => sql`
+        wf AS (
+          UPDATE wf_workflows SET updated_at = ${now}
+          WHERE workflow_id = ${workflowId} AND ${ok}
+          RETURNING run
+        ),
+        ledger AS (
+          UPDATE wf_workflow_steps s SET compensation_status = ${params.status}::text,
+            compensation_error = ${params.error ?? null}::text, compensated_at = ${now}
+          FROM wf
+          WHERE s.workflow_id = ${workflowId} AND s.step_name = ${params.stepName}
+            AND s.run = wf.run
+          RETURNING 1
+        )`,
+      select: sql`1 AS one`,
     });
   }
 
@@ -1902,32 +2159,12 @@ export class PostgresWorkflowStorage
     // dropped. Storage-level dedup: the engine may re-call append during a
     // retry that crashes after a successful INSERT but before the caller
     // observes completion.
-    await this.fenced({
-      workflowId: params.workflowId,
+    await this.insertJournalEntry({
+      ...params,
+      stepType: "activity",
+      phase: "completed",
+      exit: params.exit,
       guard,
-      write: async (db) => {
-        await db
-          .insert(activityJournal)
-          .values({
-            workflowId: params.workflowId,
-            stepName: params.stepName,
-            activityIndex: params.activityIndex,
-            branchPath: params.branchPath ?? "",
-            activityName: params.activityName,
-            stepType: "activity",
-            phase: "completed",
-            payloadHash: params.payloadHash,
-            exit: params.exit,
-          })
-          .onConflictDoNothing({
-            target: [
-              activityJournal.workflowId,
-              activityJournal.stepName,
-              activityJournal.activityIndex,
-              activityJournal.branchPath,
-            ],
-          });
-      },
     });
   }
 
@@ -1948,33 +2185,39 @@ export class PostgresWorkflowStorage
     },
     guard?: FenceGuard,
   ): Promise<void> {
-    await this.fenced({
+    await this.insertJournalEntry({ ...params, phase: "pending", exit: null, guard });
+  }
+
+  /** Insert one journal row unless its slot is taken, in one fenced statement. */
+  private async insertJournalEntry(params: {
+    workflowId: string;
+    stepName: string;
+    activityIndex: number;
+    branchPath?: string;
+    activityName: string;
+    payloadHash?: string;
+    stepType: JournalStepType;
+    phase: "pending" | "completed";
+    wakeAt?: Date;
+    exit: JournalExit | null;
+    guard?: FenceGuard;
+  }): Promise<void> {
+    await this.fencedStatement({
       workflowId: params.workflowId,
-      guard,
-      write: async (db) => {
-        await db
-          .insert(activityJournal)
-          .values({
-            workflowId: params.workflowId,
-            stepName: params.stepName,
-            activityIndex: params.activityIndex,
-            branchPath: params.branchPath ?? "",
-            activityName: params.activityName,
-            stepType: params.stepType,
-            phase: "pending",
-            payloadHash: params.payloadHash,
-            wakeAt: params.wakeAt,
-            exit: null,
-          })
-          .onConflictDoNothing({
-            target: [
-              activityJournal.workflowId,
-              activityJournal.stepName,
-              activityJournal.activityIndex,
-              activityJournal.branchPath,
-            ],
-          });
-      },
+      guard: params.guard,
+      statement: (ok) => sql`
+        entry AS (
+          INSERT INTO wf_activity_journal (workflow_id, step_name, activity_index, branch_path,
+            activity_name, step_type, phase, payload_hash, wake_at, exit)
+          SELECT ${params.workflowId}, ${params.stepName}, ${params.activityIndex}::int,
+            ${params.branchPath ?? ""}::text, ${params.activityName}::text,
+            ${params.stepType}::text, ${params.phase}::text, ${params.payloadHash ?? null}::text,
+            ${timestampParam(params.wakeAt)}, ${jsonbParam(params.exit)}
+          WHERE ${ok}
+          ON CONFLICT (workflow_id, step_name, activity_index, branch_path) DO NOTHING
+          RETURNING 1
+        )`,
+      select: sql`1 AS one`,
     });
   }
 
@@ -1994,29 +2237,29 @@ export class PostgresWorkflowStorage
       eq(activityJournal.activityIndex, params.activityIndex),
       eq(activityJournal.branchPath, params.branchPath ?? ""),
     );
-    return this.fenced({
+    // First writer wins: the WHERE clause restricts to still-pending rows,
+    // and a concurrent completer's UPDATE re-checks it after the winner
+    // commits, so exactly one call completes the row.
+    const row = await this.fencedStatement({
       workflowId: params.workflowId,
       guard,
-      write: async (db) => {
-        // First writer wins: the WHERE clause restricts to still-pending
-        // rows, and a concurrent completer's UPDATE re-checks it after the
-        // winner commits, so exactly one call completes the row.
-        const won = await db
-          .update(activityJournal)
-          .set({ phase: "completed", exit: params.exit })
-          .where(and(slot, eq(activityJournal.phase, "pending")))
-          .returning({ exit: activityJournal.exit });
-        if (won.length > 0) return { completed: true, exit: params.exit };
-        // Lost (or no such row). A completed row never changes again, so a
-        // fresh read sees the winner's exit.
-        const [row] = await db
-          .select({ exit: activityJournal.exit })
-          .from(activityJournal)
-          .where(slot)
-          .limit(1);
-        return { completed: false, exit: (row?.exit ?? undefined) as JournalExit | undefined };
-      },
+      statement: (ok) => sql`
+        won AS (
+          UPDATE wf_activity_journal SET phase = 'completed', exit = ${jsonbParam(params.exit)}
+          WHERE ${slot} AND phase = 'pending' AND ${ok}
+          RETURNING 1
+        )`,
+      select: sql`EXISTS (SELECT 1 FROM won) AS won`,
     });
+    if (row.won === true) return { completed: true, exit: params.exit };
+    // Lost (or no such row). A completed row never changes again, so a
+    // fresh read (a new statement, a new snapshot) sees the winner's exit.
+    const [stored] = await this.db
+      .select({ exit: activityJournal.exit })
+      .from(activityJournal)
+      .where(slot)
+      .limit(1);
+    return { completed: false, exit: (stored?.exit ?? undefined) as JournalExit | undefined };
   }
 
   async discardJournalEntries(

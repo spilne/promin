@@ -402,6 +402,20 @@ export interface StepRuntime {
   readonly workflowVersion?: string;
   /** Patch names active in the definition driving this run (`ctx.patched(name)`). */
   readonly patches?: readonly string[];
+  /**
+   * The run's metadata as the runner loaded it, kept current with the
+   * run's own `ctx.metadata` writes. `.journaled()` seeds `ctx.metadata`
+   * from it instead of re-reading the run; without it, it loads the run.
+   */
+  readonly workflowMetadata?: WorkflowMetadataRef;
+}
+
+/**
+ * A run's metadata shared by the steps of one execution: `current` is
+ * replaced (never mutated) on every write.
+ */
+export interface WorkflowMetadataRef {
+  current: Record<string, unknown> | undefined;
 }
 
 export interface ExecuteParams extends StepRuntime {
