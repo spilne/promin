@@ -70,7 +70,7 @@ describe("unwind policy — control-flow exits do not compensate", () => {
     );
     expect(err).toBeInstanceOf(WorkflowContinueAsNewError);
     expect(rolled).toEqual([]);
-    const journal = await storage.loadJournal("can", "s");
+    const journal = await storage.loadJournal({ workflowId: "can", stepName: "s" });
     expect(journal.some((e) => e.stepType === "compensation")).toBe(false);
   });
 
@@ -119,7 +119,7 @@ describe("unwind policy — engine-integrity exits do not compensate", () => {
     );
     expect(err).toBeInstanceOf(JournalNonDeterminismError);
     expect(rolled).toEqual([]);
-    const journal = await storage.loadJournal("nd", "s");
+    const journal = await storage.loadJournal({ workflowId: "nd", stepName: "s" });
     expect(journal.some((e) => e.stepType === "compensation")).toBe(false);
   });
 
@@ -241,7 +241,7 @@ describe("unwind policy — genuine failures still compensate", () => {
     );
     expect((err as Error).message).toBe("warehouse down");
     expect(rolled).toEqual(["refund"]);
-    const journal = await storage.loadJournal("fail", "s");
+    const journal = await storage.loadJournal({ workflowId: "fail", stepName: "s" });
     expect(journal.filter((e) => e.stepType === "compensation")).toHaveLength(1);
   });
 

@@ -167,7 +167,7 @@ describe("parallel wave failure attribution", () => {
     expect(step.startedAt!.getTime()).toBe(1_000);
     expect(step.durationMs).toBe(500);
     expect(hookDurations).toEqual([500]);
-    const [attempt] = await storage.loadStepAttempts("ft-1", "slow-fail");
+    const [attempt] = await storage.loadStepAttempts({ workflowId: "ft-1", stepName: "slow-fail" });
     expect(attempt!.startedAt.getTime()).toBe(1_000);
     expect(attempt!.durationMs).toBe(500);
   });
@@ -193,7 +193,7 @@ describe("one attempt row per step attempt", () => {
 
     await runner.run({ workflow: flaky({ n: 0 }), workflowId: "att-1", input: 1 });
 
-    const rows = await storage.loadStepAttempts("att-1", "flaky");
+    const rows = await storage.loadStepAttempts({ workflowId: "att-1", stepName: "flaky" });
     expect(rows.map((r) => `${r.attempt}:${r.status}:${r.error ?? ""}`)).toEqual([
       "1:failed:x1",
       "2:failed:x2",
@@ -211,7 +211,7 @@ describe("one attempt row per step attempt", () => {
 
     await runner.run({ workflow: wf, workflowId: "att-2", input: 1 });
 
-    const rows = await storage.loadStepAttempts("att-2", "flaky");
+    const rows = await storage.loadStepAttempts({ workflowId: "att-2", stepName: "flaky" });
     expect(rows.map((r) => `${r.attempt}:${r.status}`)).toEqual([
       "1:failed",
       "2:failed",
@@ -230,7 +230,7 @@ describe("one attempt row per step attempt", () => {
 
     await runner.run({ workflow: wf, workflowId: "att-3", input: 1 });
 
-    const rows = await storage.loadStepAttempts("att-3", "s");
+    const rows = await storage.loadStepAttempts({ workflowId: "att-3", stepName: "s" });
     expect(rows.map((r) => `${r.attempt}:${r.status}`)).toEqual(["1:failed"]);
     expect((await storage.loadWorkflow("att-3"))!.steps["s"]!.status).toBe("completed");
   });
@@ -246,7 +246,7 @@ describe("one attempt row per step attempt", () => {
 
     await runner.runSafe({ workflow: wf, workflowId: "att-4", input: 1 });
 
-    const rows = await storage.loadStepAttempts("att-4", "s");
+    const rows = await storage.loadStepAttempts({ workflowId: "att-4", stepName: "s" });
     expect(rows.map((r) => `${r.attempt}:${r.status}`)).toEqual([
       "1:failed",
       "2:failed",

@@ -420,7 +420,7 @@ export interface JournaledContext<Input, Prev> {
    *
    * Semantics:
    * - Throws `WorkflowContinueAsNewError` to unwind the body.
-   * - The runner catches it, calls `storage.startFreshRun(workflowId)` to
+   * - The runner catches it, calls `storage.startFreshRun({ workflowId })` to
    *   archive the current run + reset state, then runs the workflow again
    *   under the same workflowId with `nextInput`.
    * - **Compensations do NOT run.** Continue-as-new is a clean restart,

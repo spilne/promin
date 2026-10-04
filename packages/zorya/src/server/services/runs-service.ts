@@ -68,7 +68,7 @@ export class RunsService {
 
   /** Cancel a running or suspended workflow. */
   async cancel(id: string): Promise<void> {
-    await this.deps.storage.cancelWorkflow(id);
+    await this.deps.storage.cancelWorkflow({ workflowId: id });
     // A cancelled child wakes a parent parked on it.
     const state = await this.deps.storage.loadWorkflow(id);
     if (state) await wakeParentOfEndedRun({ storage: this.deps.storage, state });

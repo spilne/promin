@@ -167,7 +167,7 @@ postgresDescribe("PostgresWorkflowStorage", { migrate }, (pg) => {
   describe("completeWorkflow / failWorkflow", () => {
     it("completes a workflow", async () => {
       await storage.createWorkflow({ workflowId: "complete-1", workflowName: "test", input: {} });
-      await storage.completeWorkflow("complete-1", { final: "result" });
+      await storage.completeWorkflow({ workflowId: "complete-1", result: { final: "result" } });
 
       const state = await storage.loadWorkflow("complete-1");
       expect(state!.status).toBe("completed");
@@ -177,7 +177,7 @@ postgresDescribe("PostgresWorkflowStorage", { migrate }, (pg) => {
 
     it("fails a workflow", async () => {
       await storage.createWorkflow({ workflowId: "fail-1", workflowName: "test", input: {} });
-      await storage.failWorkflow("fail-1", "total failure");
+      await storage.failWorkflow({ workflowId: "fail-1", error: "total failure" });
 
       const state = await storage.loadWorkflow("fail-1");
       expect(state!.status).toBe("failed");
@@ -193,7 +193,7 @@ postgresDescribe("PostgresWorkflowStorage", { migrate }, (pg) => {
 
     it("filters by name", async () => {
       await storage.createWorkflow({ workflowId: "named-1", workflowName: "special", input: {} });
-      await storage.completeWorkflow("named-1", null);
+      await storage.completeWorkflow({ workflowId: "named-1", result: null });
 
       const filtered = await storage.listWorkflows({ name: "special" });
       expect(filtered.length).toBeGreaterThanOrEqual(1);
@@ -214,7 +214,7 @@ postgresDescribe("PostgresWorkflowStorage", { migrate }, (pg) => {
   describe("cancelWorkflow", () => {
     it("cancels a running workflow", async () => {
       await storage.createWorkflow({ workflowId: "cancel-1", workflowName: "test", input: {} });
-      await storage.cancelWorkflow("cancel-1");
+      await storage.cancelWorkflow({ workflowId: "cancel-1" });
 
       const state = await storage.loadWorkflow("cancel-1");
       expect(state!.status).toBe("failed");
@@ -223,8 +223,8 @@ postgresDescribe("PostgresWorkflowStorage", { migrate }, (pg) => {
 
     it("does not cancel a completed workflow", async () => {
       await storage.createWorkflow({ workflowId: "cancel-2", workflowName: "test", input: {} });
-      await storage.completeWorkflow("cancel-2", "done");
-      await storage.cancelWorkflow("cancel-2");
+      await storage.completeWorkflow({ workflowId: "cancel-2", result: "done" });
+      await storage.cancelWorkflow({ workflowId: "cancel-2" });
 
       expect((await storage.loadWorkflow("cancel-2"))!.status).toBe("completed");
     });
@@ -233,10 +233,14 @@ postgresDescribe("PostgresWorkflowStorage", { migrate }, (pg) => {
   describe("suspendWorkflow", () => {
     it("suspends with sleep state", async () => {
       await storage.createWorkflow({ workflowId: "suspend-1", workflowName: "test", input: {} });
-      await storage.suspendWorkflow("suspend-1", "wait", {
-        status: "sleeping",
-        stepType: "sleep",
-        wakeAt: new Date(Date.now() + 60_000),
+      await storage.suspendWorkflow({
+        workflowId: "suspend-1",
+        stepName: "wait",
+        stepUpdate: {
+          status: "sleeping",
+          stepType: "sleep",
+          wakeAt: new Date(Date.now() + 60_000),
+        },
       });
 
       const state = await storage.loadWorkflow("suspend-1");
@@ -248,7 +252,11 @@ postgresDescribe("PostgresWorkflowStorage", { migrate }, (pg) => {
   describe("signals", () => {
     it("delivers and loads signals", async () => {
       await storage.createWorkflow({ workflowId: "sig-1", workflowName: "test", input: {} });
-      await storage.deliverSignal("sig-1", "approval", { approved: true });
+      await storage.deliverSignal({
+        workflowId: "sig-1",
+        signalName: "approval",
+        payload: { approved: true },
+      });
 
       const signals = await storage.loadSignals("sig-1");
       expect(signals).toHaveLength(1);
@@ -258,8 +266,16 @@ postgresDescribe("PostgresWorkflowStorage", { migrate }, (pg) => {
 
     it("upserts on duplicate signal", async () => {
       await storage.createWorkflow({ workflowId: "sig-2", workflowName: "test", input: {} });
-      await storage.deliverSignal("sig-2", "approval", { v: 1 });
-      await storage.deliverSignal("sig-2", "approval", { v: 2 });
+      await storage.deliverSignal({
+        workflowId: "sig-2",
+        signalName: "approval",
+        payload: { v: 1 },
+      });
+      await storage.deliverSignal({
+        workflowId: "sig-2",
+        signalName: "approval",
+        payload: { v: 2 },
+      });
 
       const signals = await storage.loadSignals("sig-2");
       expect(signals).toHaveLength(1);
@@ -269,10 +285,14 @@ postgresDescribe("PostgresWorkflowStorage", { migrate }, (pg) => {
 
   describe("locking", () => {
     it("acquires and releases a lock", async () => {
-      expect((await storage.tryLock("lock-1", 30_000)).acquired).toBe(true);
-      await storage.releaseLock("lock-1");
-      expect((await storage.tryLock("lock-1", 30_000)).acquired).toBe(true);
-      await storage.releaseLock("lock-1");
+      expect(
+        (await storage.tryLock({ workflowId: "lock-1", lockDurationMs: 30_000 })).acquired,
+      ).toBe(true);
+      await storage.releaseLock({ workflowId: "lock-1" });
+      expect(
+        (await storage.tryLock({ workflowId: "lock-1", lockDurationMs: 30_000 })).acquired,
+      ).toBe(true);
+      await storage.releaseLock({ workflowId: "lock-1" });
     });
   });
 });
@@ -490,7 +510,7 @@ postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
     });
 
     // Journal persisted in Postgres with the right shape.
-    const journal = await storage.loadJournal("pg-journal-1", "setup");
+    const journal = await storage.loadJournal({ workflowId: "pg-journal-1", stepName: "setup" });
     expect(journal).toHaveLength(2);
     expect(journal[0]!.activityName).toBe("create");
     expect(journal[0]!.exit).toEqual({
@@ -528,7 +548,7 @@ postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
       exit,
     });
 
-    const journal = await storage.loadJournal("pg-journal-idem", "s");
+    const journal = await storage.loadJournal({ workflowId: "pg-journal-idem", stepName: "s" });
     expect(journal).toHaveLength(1);
     expect(journal[0]!.exit).toEqual(exit);
   });
@@ -557,7 +577,10 @@ postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
     expect(postSleepCalls).toBe(0);
 
     // Journal has a pending sleep entry.
-    const pending = await storage.loadJournal("pg-sleep-1", "wait-then-do");
+    const pending = await storage.loadJournal({
+      workflowId: "pg-sleep-1",
+      stepName: "wait-then-do",
+    });
     expect(pending).toHaveLength(1);
     expect(pending[0]!.stepType).toBe("sleep");
     expect(pending[0]!.phase).toBe("pending");
@@ -575,7 +598,10 @@ postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
     expect(result).toEqual({ ok: true });
     expect(postSleepCalls).toBe(1);
 
-    const completed = await storage.loadJournal("pg-sleep-1", "wait-then-do");
+    const completed = await storage.loadJournal({
+      workflowId: "pg-sleep-1",
+      stepName: "wait-then-do",
+    });
     expect(completed[0]!.phase).toBe("completed");
     expect(completed[0]!.exit).toMatchObject({ tag: "Success" });
   });
@@ -658,7 +684,7 @@ postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
       exit: { tag: "Success", value: { approved: false } },
     });
 
-    const [entry] = await storage.loadJournal("idem-sig", "gate");
+    const [entry] = await storage.loadJournal({ workflowId: "idem-sig", stepName: "gate" });
     expect(entry!.phase).toBe("completed");
     expect(entry!.exit).toEqual({ tag: "Success", value: { approved: true } });
   });
@@ -709,14 +735,17 @@ postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
 
     await runner.run({ workflow: wf, workflowId: "pg-journal-cascade", input: { x: 1 } });
 
-    const before = await storage.loadJournal("pg-journal-cascade", "body");
+    const before = await storage.loadJournal({
+      workflowId: "pg-journal-cascade",
+      stepName: "body",
+    });
     expect(before).toHaveLength(2);
 
     // Cascade via the workflow's FK. purgeCompleted is the public path for
     // deleting a completed workflow row and everything attached to it.
     await storage.purgeCompleted({ olderThanMs: -1, limit: 100 });
 
-    const after = await storage.loadJournal("pg-journal-cascade", "body");
+    const after = await storage.loadJournal({ workflowId: "pg-journal-cascade", stepName: "body" });
     expect(after).toHaveLength(0);
   });
 });

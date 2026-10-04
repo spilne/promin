@@ -59,10 +59,14 @@ describe("RemoteWorkflowStorage scanner queries", () => {
     const clock = FakeWallClock.create(10_000);
     const backing = new InMemoryWorkflowStorage({ clock });
     await backing.createWorkflow({ workflowId: "s1", workflowName: "scan-wf", input: 1 });
-    await backing.suspendWorkflow("s1", "nap", {
-      status: "sleeping",
-      stepType: "sleep",
-      wakeAt: new Date(5_000),
+    await backing.suspendWorkflow({
+      workflowId: "s1",
+      stepName: "nap",
+      stepUpdate: {
+        status: "sleeping",
+        stepType: "sleep",
+        wakeAt: new Date(5_000),
+      },
     });
     const { remote, methods } = recordingRemote(backing);
     const resumed: string[] = [];
@@ -86,12 +90,16 @@ describe("RemoteWorkflowStorage scanner queries", () => {
     const clock = FakeWallClock.create(10_000);
     const backing = new InMemoryWorkflowStorage({ clock });
     await backing.createWorkflow({ workflowId: "w1", workflowName: "scan-wf", input: 1 });
-    await backing.suspendWorkflow("w1", "wait", {
-      status: "waiting_for_signal",
-      stepType: "signal",
-      signalName: "go",
+    await backing.suspendWorkflow({
+      workflowId: "w1",
+      stepName: "wait",
+      stepUpdate: {
+        status: "waiting_for_signal",
+        stepType: "signal",
+        signalName: "go",
+      },
     });
-    await backing.deliverSignal("w1", "go", { ok: true });
+    await backing.deliverSignal({ workflowId: "w1", signalName: "go", payload: { ok: true } });
     const { remote, methods } = recordingRemote(backing);
     const resumed: string[] = [];
     const scanner = createSignalScanner({

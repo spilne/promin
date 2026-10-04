@@ -12,7 +12,7 @@ import { describe, it, expect } from "bun:test";
 import type { Codec } from "@spilne/perfect-core/connect";
 import { runJournaledStep } from "../journaled-step.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
-import type { ActivityJournalStorage, JournalEntry } from "../activity-journal.ts";
+import type { JournalStore, JournalEntry } from "../activity-journal.ts";
 
 // ---------------------------------------------------------------------------
 // A user-defined class — the kind of thing LosslessJsonCodec can't revive

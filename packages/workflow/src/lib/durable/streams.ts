@@ -86,15 +86,13 @@ export async function appendStreamChunk<T>(params: {
   payload: T;
   guard?: FenceGuard;
 }): Promise<{ chunkIndex: number }> {
-  return params.storage.appendStreamChunk(
-    {
-      workflowId: params.workflowId,
-      streamId: params.stream.id,
-      payload: params.payload,
-      appendedBy: "workflow",
-    },
-    params.guard,
-  );
+  return params.storage.appendStreamChunk({
+    workflowId: params.workflowId,
+    streamId: params.stream.id,
+    payload: params.payload,
+    appendedBy: "workflow",
+    guard: params.guard,
+  });
 }
 
 /**

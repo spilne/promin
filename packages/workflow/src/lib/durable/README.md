@@ -136,7 +136,11 @@ unmapped value, and its `skipValue` / `onFailure` fallback are mapped too.
 })
 
 // External system delivers signal:
-await storage.deliverSignal(workflowId, "manager-approved", { approved: true });
+await storage.deliverSignal({
+  workflowId,
+  signalName: "manager-approved",
+  payload: { approved: true },
+});
 ```
 
 - `.sleep()` passes its predecessor's value through: the step after it gets
@@ -372,7 +376,7 @@ workflow<Input>({
 
 // Query workflows
 await storage.listWorkflows({ status: "failed", type: "onboarding", limit: 10 });
-await storage.cancelWorkflow(workflowId);
+await storage.cancelWorkflow({ workflowId });
 
 // DAG visualization
 const dag = builder.toJSON();
@@ -470,7 +474,7 @@ workflow<{ userId: string }>({ name: "onboard" })
 
 // Parent-child tracking
 const children = await storage.listWorkflows({ parentId: "onboard-1" });
-await storage.cancelWorkflow("onboard-1", { cascade: true }); // cancels children too
+await storage.cancelWorkflow({ workflowId: "onboard-1", cascade: true }); // cancels children too
 ```
 
 ### Dead Letter Queue
@@ -516,9 +520,9 @@ await dlq.subscribeAck().forEach(async (envelope) => {
 Run multiple workflow versions simultaneously. New workflows use the latest version; existing workflows resume with the version they started on.
 
 ```typescript
-import { workflow, WorkflowVersionRegistry } from "@promin/workflow";
+import { workflow, InMemoryWorkflowVersionRegistry } from "@promin/workflow";
 
-const registry = new WorkflowVersionRegistry({ storage });
+const registry = new InMemoryWorkflowVersionRegistry();
 
 // Register versioned definitions (must have a version)
 const v1 = workflow({ name: "order", version: "1" })
@@ -532,8 +536,8 @@ const v2 = workflow({ name: "order", version: "2" })
   .step("notify", ({ prev }) => notifyV2(prev))
   .build();
 
-registry.register(v1);
-registry.register(v2);
+await registry.register(v1);
+await registry.register(v2);
 ```
 
 **Running workflows through the registry:**
@@ -565,11 +569,12 @@ if (counts.get("1")!.running === 0) {
 **Inspecting the registry:**
 
 ```typescript
-registry.names(); // ["order", "payment"]
-registry.versions("order"); // ["1", "2"]
-registry.latest("order"); // "2"
-registry.resolve("order", "1"); // Workflow for v1
-registry.resolve("order"); // Workflow for latest
+// Every `WorkflowVersionRegistry` method is async.
+await registry.names(); // ["order", "payment"]
+await registry.versions("order"); // ["1", "2"]
+await registry.latest("order"); // "2"
+await registry.resolve("order", "1"); // Workflow for v1
+await registry.resolve("order"); // Workflow for latest
 ```
 
 ### RRULE Support

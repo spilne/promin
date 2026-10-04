@@ -154,17 +154,17 @@ async function resumeSignal(params: {
       }),
     };
   }
-  await exec.storage.suspendWorkflow(
-    exec.workflowId,
+  await exec.storage.suspendWorkflow({
+    workflowId: exec.workflowId,
     stepName,
-    {
+    stepUpdate: {
       status: "waiting_for_signal",
       stepType: "signal",
       signalName,
       signalTimeoutAt: step.signalTimeoutAt,
     },
-    exec.guard,
-  );
+    guard: exec.guard,
+  });
   return {
     error: new WorkflowSuspendedError({
       workflowId: exec.workflowId,

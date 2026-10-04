@@ -48,12 +48,15 @@ describe("ctx.parallel slots — in-memory specifics", () => {
     });
     expect(result).toEqual([0, 3]);
 
-    const childJournal = await storage.loadJournal("parent.s.0~1.0", "child-step");
+    const childJournal = await storage.loadJournal({
+      workflowId: "parent.s.0~1.0",
+      stepName: "child-step",
+    });
     expect(childJournal.map((e) => [e.activityIndex, e.branchPath, e.activityName])).toEqual([
       [0, "", "c1"],
       [1, "", "c2"],
     ]);
-    const parentJournal = await storage.loadJournal("parent", "s");
+    const parentJournal = await storage.loadJournal({ workflowId: "parent", stepName: "s" });
     expect(
       parentJournal.map((e) => [e.activityIndex, e.branchPath, e.activityName]).sort(),
     ).toEqual([
@@ -88,7 +91,7 @@ describe("ctx.parallel slots — in-memory specifics", () => {
         body,
       }),
     ).toEqual(["pre", "a"]);
-    const journal = await storage.loadJournal("undecided", "s");
+    const journal = await storage.loadJournal({ workflowId: "undecided", stepName: "s" });
     expect(journal.find((e) => e.activityName === "a")).toMatchObject({
       activityIndex: 1,
       branchPath: "/0.0",

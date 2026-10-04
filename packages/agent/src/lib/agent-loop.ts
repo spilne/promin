@@ -1143,7 +1143,10 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
       // Restore turn counter from the journal so that recreating the session
       // object (e.g. server restart with persistent storage) doesn't re-deliver
       // task-0. Count completed emit-N activities — each represents one done turn.
-      const pastEntries = await journalStorage.loadJournal(sessionId, "conversation");
+      const pastEntries = await journalStorage.loadJournal({
+        workflowId: sessionId,
+        stepName: "conversation",
+      });
       const reconstructedTurn = pastEntries.reduce((max, e) => {
         const m = e.activityName.match(/^emit-(\d+)$/);
         return m && e.exit?.tag === "Success" ? Math.max(max, Number(m[1]) + 1) : max;

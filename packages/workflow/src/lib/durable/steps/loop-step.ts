@@ -19,7 +19,7 @@ import {
   type StepOptions,
 } from "../step-definition.ts";
 import { toStepPolicy } from "../step-policy.ts";
-import { isStepAttemptStorage } from "../workflow-storage.ts";
+import { hasCapability } from "../workflow-storage.ts";
 
 /**
  * Options for `.dowhile()` / `.dountil()` loops. The step-level fields
@@ -83,7 +83,7 @@ export function createLoopStep(params: {
     execute: (exec) => {
       const ctx = linearStepContext({ dependsOn, exec });
       const { storage, guard, workflowId } = exec;
-      const attemptStorage = isStepAttemptStorage(storage) ? storage : undefined;
+      const attemptStorage = hasCapability(storage, "stepAttempts") ? storage : undefined;
       const clock = exec.clock ?? SystemWallClock;
 
       /** Write an iteration's step row and (when supported) its attempt row. */
@@ -98,18 +98,26 @@ export function createLoopStep(params: {
           const { stepName, startedAt, outcome } = row;
           const durationMs = clock.currentTimeMs() - startedAt.getTime();
           if (outcome.status === "completed") {
-            await storage.saveStepResult(
-              { workflowId, stepName, result: outcome.result, durationMs, startedAt },
+            await storage.saveStepResult({
+              workflowId,
+              stepName,
+              result: outcome.result,
+              durationMs,
+              startedAt,
               guard,
-            );
+            });
           } else {
-            await storage.saveStepFailure(
-              { workflowId, stepName, error: outcome.error, durationMs, startedAt },
+            await storage.saveStepFailure({
+              workflowId,
+              stepName,
+              error: outcome.error,
+              durationMs,
+              startedAt,
               guard,
-            );
+            });
           }
-          await attemptStorage?.saveStepAttempt(
-            {
+          await attemptStorage?.saveStepAttempt({
+            record: {
               workflowId,
               stepName,
               attempt: 1,
@@ -120,7 +128,7 @@ export function createLoopStep(params: {
               completedAt: clock.now(),
             },
             guard,
-          );
+          });
         });
 
       const runIteration = (iter: number): StepEff<unknown, TaggedError> =>

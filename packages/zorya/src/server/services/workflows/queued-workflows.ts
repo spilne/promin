@@ -104,7 +104,7 @@ export class QueuedWorkflows extends ZoryaWorkflows {
       if (this.fallback) return this.fallback.rerun(workflowId);
       throw new Error(`rerun: workflow "${workflowId}" not found`);
     }
-    await this.storage.startFreshRun(workflowId);
+    await this.storage.startFreshRun({ workflowId });
     await this.workflowStarts.enqueue({
       workflowId,
       workflowName: state.workflowName,

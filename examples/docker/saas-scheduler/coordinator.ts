@@ -12,7 +12,7 @@
 // The execute step duration difference (~500ms vs ~1.5s) shows the SLA gap.
 // ---------------------------------------------------------------------------
 
-import { createCoordinator, WorkflowVersionRegistry } from "@promin/workflow";
+import { createCoordinator, InMemoryWorkflowVersionRegistry } from "@promin/workflow";
 import { buildStack } from "./shared.ts";
 import { buildPremiumJobWorkflow, buildStandardJobWorkflow, type TenantJob } from "./workflow.ts";
 
@@ -20,7 +20,7 @@ const SUBMIT_INTERVAL_MS = Number(process.env["SUBMIT_INTERVAL_MS"] ?? 5_000);
 
 const { storage, stepQueue, close } = await buildStack();
 
-const registry = new WorkflowVersionRegistry();
+const registry = new InMemoryWorkflowVersionRegistry();
 registry.register(buildPremiumJobWorkflow());
 registry.register(buildStandardJobWorkflow());
 

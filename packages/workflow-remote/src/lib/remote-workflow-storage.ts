@@ -12,25 +12,64 @@
 import type {
   WorkflowStorage,
   WorkflowState,
-  WorkflowStatus,
   WorkflowStatusSnapshot,
-  WorkflowOrderBy,
   WorkflowRunSummary,
   SignalState,
-  FenceGuard,
-  ActivityJournalStorage,
+  JournalStore,
   JournalEntry,
-  JournalExit,
-  JournalSlot,
   CompletePendingResult,
-  StepAttemptStorage,
+  StepAttemptStore,
   StepAttemptRecord,
-  CompensationLedgerStorage,
-  StepCompensationOutcome,
+  CompensationLedgerStore,
   SignalTokenRecord,
   StreamChunk,
   WorkflowWakeup,
   OrphanedRun,
+  AppendEntryParams,
+  AppendPendingEntryParams,
+  AppendStreamChunkParams,
+  BatchSaveStepResultsParams,
+  BeginCompensationParams,
+  CancelWorkflowParams,
+  CompletePendingEntryParams,
+  CompleteWorkflowParams,
+  CreateSignalTokenParams,
+  CreateWorkflowParams,
+  CreateWorkflowResult,
+  DeliverSignalParams,
+  DiscardJournalEntriesParams,
+  DueSleep,
+  FailWorkflowParams,
+  FindDueSleepsParams,
+  FindPendingSignalParams,
+  FindWorkflowByIdempotencyKeyParams,
+  HeartbeatParams,
+  ListDueTimersParams,
+  ListOrphanedRunsParams,
+  ListSignalWakeupsParams,
+  ListWorkflowsParams,
+  LoadJournalParams,
+  LoadRunHistoryParams,
+  LoadStepAttemptsParams,
+  MarkSignalTokenCompletedParams,
+  MarkSignalTokenCompletedResult,
+  PurgeCompletedParams,
+  ReadStreamChunksParams,
+  ReleaseLockParams,
+  ResetStepsParams,
+  SaveStepAttemptParams,
+  SaveStepCompensationParams,
+  SaveStepFailureParams,
+  SaveStepResultParams,
+  SaveTaskFailureParams,
+  SaveTaskResultParams,
+  SetWorkflowMetadataParams,
+  StartFreshRunParams,
+  SuspendWorkflowParams,
+  TripwireWorkflowParams,
+  TryLockAndLoadResult,
+  TryLockParams,
+  TryLockResult,
 } from "@promin/workflow";
 import { WIRE_CODEC, type RpcResponse, type StorageMethod } from "./wire.ts";
 
@@ -54,7 +93,7 @@ export interface RemoteWorkflowStorageConfig {
 }
 
 export class RemoteWorkflowStorage
-  implements WorkflowStorage, ActivityJournalStorage, StepAttemptStorage, CompensationLedgerStorage
+  implements WorkflowStorage, JournalStore, StepAttemptStore, CompensationLedgerStore
 {
   private readonly url: string;
   private readonly fetch: FetchLike;
@@ -109,10 +148,11 @@ export class RemoteWorkflowStorage
   }
 
   // -------------------------------------------------------------------------
-  // WorkflowStorage — thin delegates. Each method packs its params into an
-  // object keyed by the target method's own named params, so the server's
-  // dispatcher can unpack them without knowing arity. Keeping this uniform
-  // lets us grow the interface without touching the transport.
+  // Thin delegates. Each method sends its params object as the RPC params,
+  // `guard` included, so the server's dispatcher hands it straight to the
+  // backing storage. Three methods keep their older envelope on the wire
+  // (`cancelWorkflow`, `failWorkflow`, `loadRunHistory`), so clients and
+  // servers of either version keep talking.
   // -------------------------------------------------------------------------
 
   loadWorkflow(workflowId: string): Promise<WorkflowState | null> {
@@ -123,19 +163,7 @@ export class RemoteWorkflowStorage
     return this.call("loadWorkflowStatus", { workflowId });
   }
 
-  listWorkflows(params?: {
-    status?: WorkflowStatus;
-    name?: string;
-    version?: string;
-    type?: string;
-    parentId?: string;
-    namespace?: string;
-    metadata?: Record<string, unknown>;
-    limit?: number;
-    offset?: number;
-    orderBy?: WorkflowOrderBy;
-    orderDir?: "asc" | "desc";
-  }): Promise<WorkflowState[]> {
+  listWorkflows(params?: ListWorkflowsParams): Promise<WorkflowState[]> {
     return this.call("listWorkflows", params ?? {});
   }
 
@@ -151,163 +179,77 @@ export class RemoteWorkflowStorage
     return this.call("distinctNamespaces", {});
   }
 
-  cancelWorkflow(
-    workflowId: string,
-    options?: { cascade?: boolean },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  cancelWorkflow({ workflowId, cascade, guard }: CancelWorkflowParams): Promise<void> {
+    const options = cascade === undefined ? undefined : { cascade };
     return this.call("cancelWorkflow", { workflowId, options, guard });
   }
 
-  createWorkflow(
-    params: {
-      workflowId: string;
-      workflowName: string;
-      input: unknown;
-      workflowType?: string;
-      parentWorkflowId?: string;
-      namespace?: string;
-      metadata?: Record<string, unknown>;
-      version?: string;
-      idempotencyKey?: string;
-      idempotencyExpiresAt?: Date;
-    },
-    guard?: FenceGuard,
-  ): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
-    return this.call("createWorkflow", { ...params, guard });
+  createWorkflow(params: CreateWorkflowParams): Promise<CreateWorkflowResult> {
+    return this.call("createWorkflow", params);
   }
 
-  findWorkflowByIdempotencyKey(params: {
-    workflowName: string;
-    namespace?: string;
-    idempotencyKey: string;
-    now: Date;
-  }): Promise<{ workflowId: string } | null> {
+  findWorkflowByIdempotencyKey(
+    params: FindWorkflowByIdempotencyKeyParams,
+  ): Promise<{ workflowId: string } | null> {
     return this.call("findWorkflowByIdempotencyKey", params);
   }
 
-  saveStepResult(
-    params: {
-      workflowId: string;
-      stepName: string;
-      result: unknown;
-      durationMs: number;
-      startedAt: Date;
-      metadata?: Record<string, unknown>;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
-    return this.call("saveStepResult", { ...params, guard });
+  saveStepResult(params: SaveStepResultParams): Promise<void> {
+    return this.call("saveStepResult", params);
   }
 
-  batchSaveStepResults(
-    records: ReadonlyArray<{
-      workflowId: string;
-      stepName: string;
-      result: unknown;
-      durationMs: number;
-      startedAt: Date;
-      metadata?: Record<string, unknown>;
-    }>,
-    guard?: FenceGuard,
-  ): Promise<void> {
-    return this.call("batchSaveStepResults", { records, guard });
+  batchSaveStepResults(params: BatchSaveStepResultsParams): Promise<void> {
+    return this.call("batchSaveStepResults", params);
   }
 
-  saveStepFailure(
-    params: {
-      workflowId: string;
-      stepName: string;
-      error: string;
-      errorTag?: string;
-      durationMs: number;
-      startedAt: Date;
-      metadata?: Record<string, unknown>;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
-    return this.call("saveStepFailure", { ...params, guard });
+  saveStepFailure(params: SaveStepFailureParams): Promise<void> {
+    return this.call("saveStepFailure", params);
   }
 
-  saveTaskResult(
-    params: {
-      workflowId: string;
-      stepName: string;
-      taskIndex: number;
-      result: unknown;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
-    return this.call("saveTaskResult", { ...params, guard });
+  saveTaskResult(params: SaveTaskResultParams): Promise<void> {
+    return this.call("saveTaskResult", params);
   }
 
-  saveTaskFailure(
-    params: {
-      workflowId: string;
-      stepName: string;
-      taskIndex: number;
-      error: string;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
-    return this.call("saveTaskFailure", { ...params, guard });
+  saveTaskFailure(params: SaveTaskFailureParams): Promise<void> {
+    return this.call("saveTaskFailure", params);
   }
 
-  completeWorkflow(workflowId: string, result: unknown, guard?: FenceGuard): Promise<void> {
-    return this.call("completeWorkflow", { workflowId, result, guard });
+  completeWorkflow(params: CompleteWorkflowParams): Promise<void> {
+    return this.call("completeWorkflow", params);
   }
 
-  failWorkflow(
-    workflowId: string,
-    error: string,
-    guard?: FenceGuard,
-    details?: { readonly errorTag?: string },
-  ): Promise<void> {
+  failWorkflow({ workflowId, error, errorTag, guard }: FailWorkflowParams): Promise<void> {
+    const details = errorTag === undefined ? undefined : { errorTag };
     return this.call("failWorkflow", { workflowId, error, guard, details });
   }
 
-  tripwireWorkflow(workflowId: string, reason: unknown, guard?: FenceGuard): Promise<void> {
-    return this.call("tripwireWorkflow", { workflowId, reason, guard });
+  tripwireWorkflow(params: TripwireWorkflowParams): Promise<void> {
+    return this.call("tripwireWorkflow", params);
   }
 
-  suspendWorkflow(
-    workflowId: string,
-    stepName: string,
-    stepUpdate: Record<string, unknown>,
-    guard?: FenceGuard,
-  ): Promise<void> {
-    return this.call("suspendWorkflow", { workflowId, stepName, stepUpdate, guard });
+  suspendWorkflow(params: SuspendWorkflowParams): Promise<void> {
+    return this.call("suspendWorkflow", params);
   }
 
-  deliverSignal(workflowId: string, signalName: string, payload: unknown): Promise<void> {
-    return this.call("deliverSignal", { workflowId, signalName, payload });
+  deliverSignal(params: DeliverSignalParams): Promise<void> {
+    return this.call("deliverSignal", params);
   }
 
   loadSignals(workflowId: string): Promise<SignalState[]> {
     return this.call("loadSignals", { workflowId });
   }
 
-  setWorkflowMetadata(
-    workflowId: string,
-    patch: Record<string, unknown>,
-    guard?: FenceGuard,
-  ): Promise<void> {
-    return this.call("setWorkflowMetadata", { workflowId, patch, guard });
+  setWorkflowMetadata(params: SetWorkflowMetadataParams): Promise<void> {
+    return this.call("setWorkflowMetadata", params);
   }
 
   // ---------------------------------------------------------------------------
   // Signal tokens — public-bearer authz; remoted as plain RPC.
   // ---------------------------------------------------------------------------
 
-  createSignalToken(params: {
-    tokenId: string;
-    workflowId: string;
-    signalName: string;
-    bearer: string;
-    tags: ReadonlyArray<string>;
-    idempotencyKey?: string | null;
-    expiresAt: Date;
-  }): Promise<{ record: SignalTokenRecord; isCached: boolean }> {
+  createSignalToken(
+    params: CreateSignalTokenParams,
+  ): Promise<{ record: SignalTokenRecord; isCached: boolean }> {
     return this.call("createSignalToken", params);
   }
 
@@ -315,14 +257,9 @@ export class RemoteWorkflowStorage
     return this.call("findSignalTokenById", { tokenId });
   }
 
-  markSignalTokenCompleted(params: {
-    tokenId: string;
-    value: unknown;
-    now: Date;
-  }): Promise<
-    | { outcome: "delivered"; record: SignalTokenRecord }
-    | { outcome: "already_completed"; record: SignalTokenRecord }
-  > {
+  markSignalTokenCompleted(
+    params: MarkSignalTokenCompletedParams,
+  ): Promise<MarkSignalTokenCompletedResult> {
     return this.call("markSignalTokenCompleted", params);
   }
 
@@ -330,72 +267,48 @@ export class RemoteWorkflowStorage
     return this.call("listSignalTokensForWorkflow", { workflowId });
   }
 
-  appendStreamChunk(
-    params: {
-      workflowId: string;
-      streamId: string;
-      payload: unknown;
-      appendedBy: "workflow" | "external";
-    },
-    guard?: FenceGuard,
-  ): Promise<{ chunkIndex: number }> {
-    return this.call("appendStreamChunk", { ...params, guard });
+  appendStreamChunk(params: AppendStreamChunkParams): Promise<{ chunkIndex: number }> {
+    return this.call("appendStreamChunk", params);
   }
 
-  readStreamChunks(params: {
-    workflowId: string;
-    streamId: string;
-    since?: number;
-    limit?: number;
-  }): Promise<ReadonlyArray<StreamChunk>> {
+  readStreamChunks(params: ReadStreamChunksParams): Promise<ReadonlyArray<StreamChunk>> {
     return this.call("readStreamChunks", params);
   }
 
-  tryLock(
-    workflowId: string,
-    lockDurationMs: number,
-  ): Promise<{ acquired: boolean; token?: string }> {
-    return this.call("tryLock", { workflowId, lockDurationMs });
+  tryLock(params: TryLockParams): Promise<TryLockResult> {
+    return this.call("tryLock", params);
   }
 
-  tryLockAndLoad(
-    workflowId: string,
-    lockDurationMs: number,
-  ): Promise<{ locked: boolean; token?: string; state: WorkflowState | null }> {
-    return this.call("tryLockAndLoad", { workflowId, lockDurationMs });
+  tryLockAndLoad(params: TryLockParams): Promise<TryLockAndLoadResult> {
+    return this.call("tryLockAndLoad", params);
   }
 
-  releaseLock(workflowId: string, guard?: FenceGuard): Promise<void> {
-    return this.call("releaseLock", { workflowId, guard });
+  releaseLock(params: ReleaseLockParams): Promise<void> {
+    return this.call("releaseLock", params);
   }
 
-  heartbeat(workflowId: string, lockDurationMs: number, guard?: FenceGuard): Promise<void> {
-    return this.call("heartbeat", { workflowId, lockDurationMs, guard });
+  heartbeat(params: HeartbeatParams): Promise<void> {
+    return this.call("heartbeat", params);
   }
 
-  startFreshRun(workflowId: string, guard?: FenceGuard): Promise<number> {
-    return this.call("startFreshRun", { workflowId, guard });
+  startFreshRun(params: StartFreshRunParams): Promise<number> {
+    return this.call("startFreshRun", params);
   }
 
-  loadRunHistory(
-    workflowId: string,
-    params?: { limit?: number; offset?: number },
-  ): Promise<WorkflowRunSummary[]> {
-    return this.call("loadRunHistory", { workflowId, params });
+  loadRunHistory({ workflowId, ...page }: LoadRunHistoryParams): Promise<WorkflowRunSummary[]> {
+    return this.call("loadRunHistory", { workflowId, params: page });
   }
 
   /**
-   * Reset the listed steps so a resumed run re-executes them. Forwarded
-   * over the wire; the server feature-detects on the backing storage and
-   * surfaces a clear error if that storage doesn't implement `resetSteps`.
+   * Reset the listed steps so a resumed run re-executes them. The server
+   * feature-detects on the backing storage and surfaces a clear error if
+   * that storage doesn't implement `resetSteps`.
    */
-  resetSteps(workflowId: string, stepNames: readonly string[]): Promise<void> {
-    return this.call("resetSteps", { workflowId, stepNames });
+  resetSteps(params: ResetStepsParams): Promise<void> {
+    return this.call("resetSteps", params);
   }
 
-  purgeCompleted(
-    params: { olderThanMs: number; limit: number } | { from: Date; to: Date; limit: number },
-  ): Promise<number> {
+  purgeCompleted(params: PurgeCompletedParams): Promise<number> {
     return this.call("purgeCompleted", params);
   }
 
@@ -407,156 +320,76 @@ export class RemoteWorkflowStorage
   // bundled backend implements all three).
   // -------------------------------------------------------------------------
 
-  listDueTimers(params: {
-    now: Date;
-    limit: number;
-    afterWorkflowId?: string;
-  }): Promise<WorkflowWakeup[]> {
+  listDueTimers(params: ListDueTimersParams): Promise<WorkflowWakeup[]> {
     return this.call("listDueTimers", params);
   }
 
-  listSignalWakeups(params: {
-    limit: number;
-    afterWorkflowId?: string;
-  }): Promise<WorkflowWakeup[]> {
+  listSignalWakeups(params: ListSignalWakeupsParams): Promise<WorkflowWakeup[]> {
     return this.call("listSignalWakeups", params);
   }
 
-  listOrphanedRuns(params: {
-    now: Date;
-    updatedBefore: Date;
-    limit: number;
-    afterWorkflowId?: string;
-  }): Promise<OrphanedRun[]> {
+  listOrphanedRuns(params: ListOrphanedRunsParams): Promise<OrphanedRun[]> {
     return this.call("listOrphanedRuns", params);
   }
 
   // -------------------------------------------------------------------------
-  // ActivityJournalStorage. Forwarded over the wire so .journaled() workflows
-  // (with ctx.activity / ctx.sleep / ctx.signal) can run against a remote
-  // storage. The runtime detects support via function-presence checks
-  // (`isActivityJournalStorage`), so wiring these methods is enough — no
-  // extra plumbing on the engine side.
+  // JournalStore. Forwarded over the wire so .journaled() workflows (with
+  // ctx.activity / ctx.sleep / ctx.signal) can run against a remote storage.
   // -------------------------------------------------------------------------
 
-  loadJournal(workflowId: string, stepName: string): Promise<JournalEntry[]> {
-    return this.call("loadJournal", { workflowId, stepName });
+  loadJournal(params: LoadJournalParams): Promise<JournalEntry[]> {
+    return this.call("loadJournal", params);
   }
 
-  appendEntry(
-    params: {
-      readonly workflowId: string;
-      readonly stepName: string;
-      readonly activityIndex: number;
-      readonly branchPath?: string;
-      readonly activityName: string;
-      readonly payloadHash?: string;
-      readonly exit: NonNullable<JournalEntry["exit"]>;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
-    return this.call("appendEntry", { ...params, guard });
+  appendEntry(params: AppendEntryParams): Promise<void> {
+    return this.call("appendEntry", params);
   }
 
-  appendPendingEntry(
-    params: {
-      readonly workflowId: string;
-      readonly stepName: string;
-      readonly activityIndex: number;
-      readonly branchPath?: string;
-      readonly activityName: string;
-      readonly payloadHash?: string;
-      readonly stepType: "sleep" | "signal" | "activity" | "compensation" | "child";
-      readonly wakeAt?: Date;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
-    return this.call("appendPendingEntry", { ...params, guard });
+  appendPendingEntry(params: AppendPendingEntryParams): Promise<void> {
+    return this.call("appendPendingEntry", params);
   }
 
-  completePendingEntry(
-    params: {
-      readonly workflowId: string;
-      readonly stepName: string;
-      readonly activityIndex: number;
-      readonly branchPath?: string;
-      readonly exit: JournalExit;
-    },
-    guard?: FenceGuard,
-  ): Promise<CompletePendingResult> {
-    return this.call("completePendingEntry", { ...params, guard });
+  completePendingEntry(params: CompletePendingEntryParams): Promise<CompletePendingResult> {
+    return this.call("completePendingEntry", params);
   }
 
-  discardJournalEntries(
-    params: {
-      readonly workflowId: string;
-      readonly stepName: string;
-      readonly slots: readonly JournalSlot[];
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
-    return this.call("discardJournalEntries", { ...params, guard });
+  discardJournalEntries(params: DiscardJournalEntriesParams): Promise<void> {
+    return this.call("discardJournalEntries", params);
   }
 
-  findDueSleeps(params: { now: Date; limit: number }): Promise<
-    Array<{
-      workflowId: string;
-      stepName: string;
-      activityIndex: number;
-      branchPath: string;
-      wakeAt: Date;
-    }>
-  > {
+  findDueSleeps(params: FindDueSleepsParams): Promise<DueSleep[]> {
     return this.call("findDueSleeps", params);
   }
 
-  findPendingSignal(params: {
-    workflowId: string;
-    stepName: string;
-    signalName: string;
-  }): Promise<JournalEntry | null> {
+  findPendingSignal(params: FindPendingSignalParams): Promise<JournalEntry | null> {
     return this.call("findPendingSignal", params);
   }
 
   // -------------------------------------------------------------------------
-  // StepAttemptStorage
-  //
-  // The runner feature-detects via `isStepAttemptStorage(storage)` and
-  // calls saveStepAttempt after each step result. By proxying it over RPC
-  // here, remote workers (whose effective storage IS this RemoteWorkflowStorage)
-  // get the audit trail written on the central server's storage — surfacing
-  // workerId per attempt to the dashboard's run-detail / graph views.
+  // StepAttemptStore. Remote workers (whose effective storage IS this
+  // RemoteWorkflowStorage) get the audit trail written on the central
+  // server's storage — surfacing workerId per attempt to the dashboard's
+  // run-detail / graph views.
   // -------------------------------------------------------------------------
 
-  saveStepAttempt(record: StepAttemptRecord, guard?: FenceGuard): Promise<void> {
-    return this.call("saveStepAttempt", { record, guard });
+  saveStepAttempt(params: SaveStepAttemptParams): Promise<void> {
+    return this.call("saveStepAttempt", params);
   }
 
-  loadStepAttempts(workflowId: string, stepName?: string): Promise<StepAttemptRecord[]> {
-    return this.call("loadStepAttempts", { workflowId, stepName });
+  loadStepAttempts(params: LoadStepAttemptsParams): Promise<StepAttemptRecord[]> {
+    return this.call("loadStepAttempts", params);
   }
 
   // -------------------------------------------------------------------------
-  // CompensationLedgerStorage — forwarded to the server's storage, which
+  // CompensationLedgerStore — forwarded to the server's storage, which
   // must implement it (the handler rejects the call otherwise).
   // -------------------------------------------------------------------------
 
-  beginCompensation(
-    params: { readonly workflowId: string; readonly error: string; readonly errorTag?: string },
-    guard?: FenceGuard,
-  ): Promise<boolean> {
-    return this.call("beginCompensation", { ...params, guard });
+  beginCompensation(params: BeginCompensationParams): Promise<boolean> {
+    return this.call("beginCompensation", params);
   }
 
-  saveStepCompensation(
-    params: {
-      readonly workflowId: string;
-      readonly stepName: string;
-      readonly status: StepCompensationOutcome;
-      readonly error?: string;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
-    return this.call("saveStepCompensation", { ...params, guard });
+  saveStepCompensation(params: SaveStepCompensationParams): Promise<void> {
+    return this.call("saveStepCompensation", params);
   }
 }

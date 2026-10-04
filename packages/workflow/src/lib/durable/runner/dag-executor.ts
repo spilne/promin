@@ -22,6 +22,7 @@ import { fireHook } from "./hooks.ts";
 import { runInlineWave } from "./inline-wave.ts";
 import { assertRunActive } from "./run-status.ts";
 import { errorMessage } from "./step-body.ts";
+import { hasCapability } from "../storage/capabilities.ts";
 
 /**
  * Execute the workflow DAG against its current state. Computes the ready
@@ -260,7 +261,7 @@ function notifyStepsStarted(params: {
 }): ReadonlyMap<string, Promise<void>> | undefined {
   const { ctx, workflowId } = params;
   const storage = ctx.storage;
-  if (typeof storage.notifyStepStarted !== "function") return undefined;
+  if (!hasCapability(storage, "stepStartedEvents")) return undefined;
   const report = (stepName: string, error: unknown): void => {
     console.warn(
       `[workflow] notifyStepStarted failed for step "${stepName}" of "${workflowId}":`,
@@ -271,7 +272,7 @@ function notifyStepsStarted(params: {
   for (const { name } of params.readySteps) {
     let notice: Promise<void>;
     try {
-      notice = Promise.resolve(storage.notifyStepStarted(workflowId, name)).then(
+      notice = Promise.resolve(storage.notifyStepStarted({ workflowId, stepName: name })).then(
         () => undefined,
         (error: unknown) => report(name, error),
       );

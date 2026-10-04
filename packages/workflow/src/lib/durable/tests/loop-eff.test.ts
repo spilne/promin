@@ -89,7 +89,10 @@ describe("loop bodies are Effs", () => {
     expect(state?.steps["poll.iter.0"]?.status).toBe("completed");
     expect(state?.steps["poll.iter.1"]?.status).toBe("failed");
     expect(state?.steps["poll.iter.1"]?.error).toBe("second pass");
-    const attempts = await storage.loadStepAttempts("ef-1", "poll.iter.1");
+    const attempts = await storage.loadStepAttempts({
+      workflowId: "ef-1",
+      stepName: "poll.iter.1",
+    });
     expect(attempts.map((a) => a.status)).toEqual(["failed"]);
   });
 

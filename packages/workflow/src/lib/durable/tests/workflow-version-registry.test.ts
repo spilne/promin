@@ -3,13 +3,13 @@ import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import {
   createWorkflowVersionRegistry,
-  WorkflowVersionRegistry,
+  InMemoryWorkflowVersionRegistry,
 } from "../workflow-version-registry.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
 
 describe("WorkflowVersionRegistry", () => {
-  it("registers and resolves versioned workflows", () => {
+  it("registers and resolves versioned workflows", async () => {
     const registry = createWorkflowVersionRegistry();
 
     const v1 = workflow({ name: "order", version: "1" })
@@ -22,21 +22,21 @@ describe("WorkflowVersionRegistry", () => {
     registry.register(v1);
     registry.register(v2);
 
-    expect(registry.versions("order")).toEqual(["1", "2"]);
-    expect(registry.latest("order")).toBe("2");
-    expect(registry.resolve("order", "1")).toBe(v1);
-    expect(registry.resolve("order", "2")).toBe(v2);
-    expect(registry.resolve("order")).toBe(v2); // latest
+    expect(await registry.versions("order")).toEqual(["1", "2"]);
+    expect(await registry.latest("order")).toBe("2");
+    expect(await registry.resolve("order", "1")).toBe(v1);
+    expect(await registry.resolve("order", "2")).toBe(v2);
+    expect(await registry.resolve("order")).toBe(v2); // latest
   });
 
-  it("throws when registering without version", () => {
+  it("rejects registering without version", async () => {
     const registry = createWorkflowVersionRegistry();
 
     const noVersion = workflow({ name: "order" })
       .stepAsync("step", async () => "done")
       .build();
 
-    expect(() => registry.register(noVersion)).toThrow("must have a version");
+    await expect(registry.register(noVersion)).rejects.toThrow("must have a version");
   });
 
   it("run() creates new workflow with latest version", async () => {
@@ -91,7 +91,7 @@ describe("WorkflowVersionRegistry", () => {
     expect(v1Calls).toBe(1);
 
     // Reset for re-run test — start fresh run
-    await storage.startFreshRun("old-1");
+    await storage.startFreshRun({ workflowId: "old-1" });
 
     // Registry.run should pick v1 for existing workflow
     const result = await runner.run({
@@ -113,7 +113,7 @@ describe("WorkflowVersionRegistry", () => {
       .build();
     const seedRunner = createWorkflowRunner({ storage });
     await seedRunner.run({ workflow: v1, workflowId: "old-1", input: {} });
-    await storage.startFreshRun("old-1");
+    await storage.startFreshRun({ workflowId: "old-1" });
 
     // Only register v2 (v1 not registered)
     const v2 = workflow({ name: "order", version: "2" })
@@ -127,7 +127,7 @@ describe("WorkflowVersionRegistry", () => {
     );
   });
 
-  it("names() lists registered workflows", () => {
+  it("names() lists registered workflows", async () => {
     const registry = createWorkflowVersionRegistry();
 
     registry.register(
@@ -141,7 +141,7 @@ describe("WorkflowVersionRegistry", () => {
         .build(),
     );
 
-    expect(registry.names().sort()).toEqual(["order", "payment"]);
+    expect((await registry.names()).sort()).toEqual(["order", "payment"]);
   });
 
   it("countByVersion reports in-flight workflows per version", async () => {
@@ -195,7 +195,7 @@ describe("WorkflowVersionRegistry", () => {
 
     expect(r1).toBe("order-result");
     expect(r2).toBe("payment-result");
-    expect(registry.names().sort()).toEqual(["order", "payment"]);
+    expect((await registry.names()).sort()).toEqual(["order", "payment"]);
   });
 
   it("re-registering same version overwrites definition", async () => {
@@ -212,18 +212,18 @@ describe("WorkflowVersionRegistry", () => {
     registry.register(v1a);
     registry.register(v1b);
 
-    expect(registry.versions("order")).toEqual(["1"]); // still one version
+    expect(await registry.versions("order")).toEqual(["1"]); // still one version
     const runner = createWorkflowRunner({ storage, registry });
     const result = await runner.run({ workflowId: "r1", name: "order", input: {} });
     expect(result).toBe("replaced"); // uses the latest registration
   });
 
-  it("resolve returns undefined for non-existent workflow name", () => {
+  it("resolve returns undefined for non-existent workflow name", async () => {
     const registry = createWorkflowVersionRegistry();
-    expect(registry.resolve("nonexistent")).toBeUndefined();
-    expect(registry.resolve("nonexistent", "1")).toBeUndefined();
-    expect(registry.latest("nonexistent")).toBeUndefined();
-    expect(registry.versions("nonexistent")).toEqual([]);
+    expect(await registry.resolve("nonexistent")).toBeUndefined();
+    expect(await registry.resolve("nonexistent", "1")).toBeUndefined();
+    expect(await registry.latest("nonexistent")).toBeUndefined();
+    expect(await registry.versions("nonexistent")).toEqual([]);
   });
 
   it("run throws for non-existent workflow name", async () => {
@@ -235,7 +235,7 @@ describe("WorkflowVersionRegistry", () => {
     );
   });
 
-  it("latest is always the last registered version", () => {
+  it("latest is always the last registered version", async () => {
     const registry = createWorkflowVersionRegistry();
 
     registry.register(
@@ -255,7 +255,7 @@ describe("WorkflowVersionRegistry", () => {
     );
 
     // Last registered wins, regardless of version number
-    expect(registry.latest("order")).toBe("2");
+    expect(await registry.latest("order")).toBe("2");
   });
 
   it("different versions can have different step structures", async () => {
@@ -282,7 +282,7 @@ describe("WorkflowVersionRegistry", () => {
 
     // Create a v1 workflow directly, then resume via registry
     await runner.run({ workflow: v1, workflowId: "v1-1", input: {} });
-    await storage.startFreshRun("v1-1");
+    await storage.startFreshRun({ workflowId: "v1-1" });
     const r1 = await runner.run({ workflowId: "v1-1", name: "order", input: {} });
 
     // New workflow gets v2
@@ -322,8 +322,8 @@ describe("WorkflowVersionRegistry", () => {
     await runner.run({ workflow: v1, workflowId: "j2", input: {} });
 
     // Fresh runs to simulate resume
-    await storage.startFreshRun("j1");
-    await storage.startFreshRun("j2");
+    await storage.startFreshRun({ workflowId: "j1" });
+    await storage.startFreshRun({ workflowId: "j2" });
 
     // Run all concurrently — j1,j2 should use v1, j3,j4 use v2 (latest)
     const results = await Promise.all([
@@ -342,8 +342,8 @@ describe("WorkflowVersionRegistry", () => {
   // Fluent scoped builder + drain detection
   // ---------------------------------------------------------------------------
 
-  describe("WorkflowVersionRegistry.for() scoped builder", () => {
-    it("returns a builder scoped to one workflow name", () => {
+  describe("InMemoryWorkflowVersionRegistry.for() scoped builder", () => {
+    it("returns a builder scoped to one workflow name", async () => {
       const v1 = workflow({ name: "order", version: "1" })
         .stepAsync("x", async () => "v1")
         .build();
@@ -351,11 +351,11 @@ describe("WorkflowVersionRegistry", () => {
         .stepAsync("x", async () => "v2")
         .build();
 
-      const scoped = WorkflowVersionRegistry.for("order").register(v1).register(v2);
+      const scoped = InMemoryWorkflowVersionRegistry.for("order").register(v1).register(v2);
 
-      expect(scoped.versions()).toEqual(["1", "2"]);
-      expect(scoped.latest()).toBe("2");
-      expect(scoped.resolve("1")).toBe(v1);
+      expect(await scoped.versions()).toEqual(["1", "2"]);
+      expect(await scoped.latest()).toBe("2");
+      expect(await scoped.resolve("1")).toBe(v1);
     });
 
     it("rejects definitions with a mismatched name", () => {
@@ -363,11 +363,11 @@ describe("WorkflowVersionRegistry", () => {
         .stepAsync("x", async () => "v1")
         .build();
 
-      const scoped = WorkflowVersionRegistry.for("order");
+      const scoped = InMemoryWorkflowVersionRegistry.for("order");
       expect(() => scoped.register(wrongName)).toThrow(/mismatched|name/i);
     });
 
-    it("deregister removes a version", () => {
+    it("deregister removes a version", async () => {
       const v1 = workflow({ name: "order", version: "1" })
         .stepAsync("x", async () => "v1")
         .build();
@@ -375,11 +375,11 @@ describe("WorkflowVersionRegistry", () => {
         .stepAsync("x", async () => "v2")
         .build();
 
-      const scoped = WorkflowVersionRegistry.for("order").register(v1).register(v2);
-      scoped.deregister("1");
+      const scoped = InMemoryWorkflowVersionRegistry.for("order").register(v1).register(v2);
+      await scoped.deregister("1");
 
-      expect(scoped.versions()).toEqual(["2"]);
-      expect(scoped.resolve("1")).toBeUndefined();
+      expect(await scoped.versions()).toEqual(["2"]);
+      expect(await scoped.resolve("1")).toBeUndefined();
     });
   });
 
@@ -435,8 +435,8 @@ describe("WorkflowVersionRegistry", () => {
       await registry.countByVersion({ name: "order", storage });
 
       // v1 should be auto-deregistered; v2 (latest) stays even if drained.
-      expect(registry.versions("order")).toContain("2");
-      expect(registry.versions("order")).not.toContain("1");
+      expect(await registry.versions("order")).toContain("2");
+      expect(await registry.versions("order")).not.toContain("1");
     });
 
     it("doesn't double-fire onDrained for the same version", async () => {
@@ -510,7 +510,7 @@ describe("WorkflowVersionRegistry", () => {
         .build();
       registry.register(v1);
       registry.register(v2);
-      registry.promote("compute", "1"); // override "latest = v2"
+      await registry.promote("compute", "1"); // override "latest = v2"
 
       const runner = createWorkflowRunner({ storage, registry });
       await runner.run({ name: "compute", workflowId: "r2", input: { n: 5 } });
@@ -539,7 +539,7 @@ describe("WorkflowVersionRegistry", () => {
         .build();
       registry.register(v1);
       registry.register(v2);
-      registry.promote("compute", "1");
+      await registry.promote("compute", "1");
 
       const runner = createWorkflowRunner({ storage, registry });
       await runner.run({ name: "compute", version: "2", workflowId: "r3", input: { n: 5 } });
@@ -569,12 +569,12 @@ describe("WorkflowVersionRegistry", () => {
       registry.register(v1);
       registry.register(v2);
 
-      registry.promote("compute", "2");
+      await registry.promote("compute", "2");
       const runner = createWorkflowRunner({ storage, registry });
       await runner.run({ name: "compute", workflowId: "r4a", input: { n: 5 } });
       expect(v2Calls).toBe(1);
 
-      registry.rollback({ name: "compute", toVersion: "1" });
+      await registry.rollback({ name: "compute", toVersion: "1" });
       await runner.run({ name: "compute", workflowId: "r4b", input: { n: 5 } });
       expect(v1Calls).toBe(1);
     });
@@ -582,9 +582,9 @@ describe("WorkflowVersionRegistry", () => {
 });
 
 describe("WorkflowVersionRegistry — lifecycle stamps on an injected clock", () => {
-  it("stamps registeredAt / activeAt / archivedAt from the clock and orders listRecords by it", () => {
+  it("stamps registeredAt / activeAt / archivedAt from the clock and orders listRecords by it", async () => {
     const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
-    const registry = new WorkflowVersionRegistry({ clock });
+    const registry = new InMemoryWorkflowVersionRegistry({ clock });
     const v1 = workflow({ name: "stamped", version: "1" })
       .stepAsync("a", async () => 1)
       .build();
@@ -596,17 +596,17 @@ describe("WorkflowVersionRegistry — lifecycle stamps on an injected clock", ()
     clock.advance(1_000);
     registry.register(v2);
 
-    const records = registry.listRecords("stamped");
+    const records = await registry.listRecords("stamped");
     expect(records.map((r) => r.version)).toEqual(["2", "1"]);
     expect(records[0]!.registeredAt.toISOString()).toBe("2026-01-01T00:00:01.000Z");
     expect(records[1]!.registeredAt.toISOString()).toBe("2026-01-01T00:00:00.000Z");
 
     clock.advance(1_000);
-    const promoted = registry.promote("stamped", "2");
+    const promoted = await registry.promote("stamped", "2");
     expect(promoted.activeAt?.toISOString()).toBe("2026-01-01T00:00:02.000Z");
 
     clock.advance(1_000);
-    const { previous, active } = registry.rollback({ name: "stamped", toVersion: "1" });
+    const { previous, active } = await registry.rollback({ name: "stamped", toVersion: "1" });
     expect(previous.archivedAt?.toISOString()).toBe("2026-01-01T00:00:03.000Z");
     expect(active.activeAt?.toISOString()).toBe("2026-01-01T00:00:03.000Z");
   });

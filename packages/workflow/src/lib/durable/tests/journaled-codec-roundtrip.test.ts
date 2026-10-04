@@ -9,10 +9,10 @@
 
 import { describe, it, expect } from "bun:test";
 import { JsonCodec } from "@spilne/perfect-core/connect";
-import type { CompletePendingResult, JournalExit } from "../activity-journal.ts";
+import type { CompletePendingResult } from "../activity-journal.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { runJournaledStep } from "../journaled-step.ts";
-import type { FenceGuard } from "../workflow-storage.ts";
+import type { CompletePendingEntryParams } from "../workflow-storage.ts";
 
 /**
  * An in-memory journal storage that puts each recorded exit through
@@ -21,17 +21,11 @@ import type { FenceGuard } from "../workflow-storage.ts";
  * hydrates values back to their original types.
  */
 class JsonJournalStorage extends InMemoryWorkflowStorage {
-  override async completePendingEntry(
-    params: {
-      readonly workflowId: string;
-      readonly stepName: string;
-      readonly activityIndex: number;
-      readonly branchPath?: string;
-      readonly exit: JournalExit;
-    },
-    guard?: FenceGuard,
-  ): Promise<CompletePendingResult> {
-    return super.completePendingEntry(JSON.parse(JSON.stringify(params)), guard);
+  override async completePendingEntry({
+    guard,
+    ...params
+  }: CompletePendingEntryParams): Promise<CompletePendingResult> {
+    return super.completePendingEntry({ ...JSON.parse(JSON.stringify(params)), guard });
   }
 }
 

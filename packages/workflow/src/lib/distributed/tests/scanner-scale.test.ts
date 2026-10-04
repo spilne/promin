@@ -36,10 +36,14 @@ async function sleepingRuns(params: {
   for (let i = 0; i < params.count; i++) {
     const workflowId = `run-${String(i).padStart(3, "0")}`;
     await params.storage.createWorkflow({ workflowId, workflowName: "napper", input: { i } });
-    await params.storage.suspendWorkflow(workflowId, "nap", {
-      status: "sleeping",
-      stepType: "sleep",
-      wakeAt: params.wakeAt,
+    await params.storage.suspendWorkflow({
+      workflowId,
+      stepName: "nap",
+      stepUpdate: {
+        status: "sleeping",
+        stepType: "sleep",
+        wakeAt: params.wakeAt,
+      },
     });
     ids.push(workflowId);
   }
@@ -56,7 +60,7 @@ function recordingRunner(params: {
     run: async ({ workflowId }: { workflowId: string }) => {
       resumed.push(workflowId);
       await params.hold?.get(workflowId);
-      await params.storage.completeWorkflow(workflowId, "woke");
+      await params.storage.completeWorkflow({ workflowId, result: "woke" });
       return "woke";
     },
   } as unknown as WorkflowRunner;
@@ -152,10 +156,14 @@ describe("sleep scanner at scale", () => {
     // A stops and releases; B takes over on its next scan.
     await a.scanner.stop();
     await storage.createWorkflow({ workflowId: "late", workflowName: "napper", input: {} });
-    await storage.suspendWorkflow("late", "nap", {
-      status: "sleeping",
-      stepType: "sleep",
-      wakeAt: new Date(0),
+    await storage.suspendWorkflow({
+      workflowId: "late",
+      stepName: "nap",
+      stepUpdate: {
+        status: "sleeping",
+        stepType: "sleep",
+        wakeAt: new Date(0),
+      },
     });
     clock.advance(1_000);
     await waitFor(() => b.resumed.includes("late"));
@@ -183,8 +191,8 @@ describe("signal scanner and repeated signal names", () => {
     await runner.runSafe({ workflow: twoWaits, workflowId: "r", input: 0 });
     expect((await storage.loadWorkflow("r"))?.status).toBe("suspended");
 
-    await storage.deliverSignal("r", "go", 1);
-    await storage.deliverSignal("r", "go", 5);
+    await storage.deliverSignal({ workflowId: "r", signalName: "go", payload: 1 });
+    await storage.deliverSignal({ workflowId: "r", signalName: "go", payload: 5 });
     const wakeups = await storage.listSignalWakeups({ limit: 10 });
     expect(wakeups.map((w) => [w.workflowId, w.stepName, w.signalPayload])).toEqual([
       ["r", "first", 5],
@@ -208,8 +216,8 @@ describe("signal scanner and repeated signal names", () => {
     const storage = new InMemoryWorkflowStorage({ clock });
     const runner = createWorkflowRunner({ storage, clock });
     await runner.runSafe({ workflow: twoWaits, workflowId: "r", input: 0 });
-    await storage.deliverSignal("r", "go", 1);
-    await storage.startFreshRun("r");
+    await storage.deliverSignal({ workflowId: "r", signalName: "go", payload: 1 });
+    await storage.startFreshRun({ workflowId: "r" });
     await runner.runSafe({ workflow: twoWaits, workflowId: "r", input: 0 });
     expect((await storage.loadWorkflow("r"))?.status).toBe("suspended");
     expect(await storage.listSignalWakeups({ limit: 10 })).toEqual([]);

@@ -8,29 +8,22 @@
 
 import { describe, it, expect } from "bun:test";
 import {
-  isCompensationLedgerStorage,
-  isStepAttemptStorage,
-  isStepCheckpointStorage,
-  isTripwireCapableStorage,
-  type CompensationLedgerStorage,
+  hasCapability,
+  type CompensationLedgerStore,
   type FenceGuard,
-  type StepAttemptStorage,
+  type StepAttemptStore,
   type StepCheckpoint,
-  type StepCheckpointStorage,
+  type StepCheckpointStore,
   type WorkflowStorage,
 } from "./workflow-storage.ts";
 import type { StepAttemptRecord, StepState, WorkflowState } from "./workflow-state.ts";
-import {
-  isActivityJournalStorage,
-  JOURNAL_STEP_TYPES,
-  type ActivityJournalStorage,
-} from "./activity-journal.ts";
+import { JOURNAL_STEP_TYPES, type JournalStore } from "./activity-journal.ts";
 
 export interface StorageTestSuiteOptions {
   /**
-   * Opt in to the `ActivityJournalStorage` conformance section for
+   * Opt in to the `JournalStore` conformance section for
    * `loadJournal` / `appendEntry`. Defaults to `false`. When `true`, the
-   * factory must return a storage that implements `ActivityJournalStorage`.
+   * factory must return a storage that implements `JournalStore`.
    */
   hasJournal?: boolean;
   /**
@@ -59,7 +52,7 @@ export interface StorageTestSuiteOptions {
    */
   hasScannerQueries?: boolean;
   /**
-   * Opt in to the `CompensationLedgerStorage` conformance section
+   * Opt in to the `CompensationLedgerStore` conformance section
    * (`beginCompensation` / `saveStepCompensation`). Defaults to `false`.
    * The fenced-write cases run for any storage that implements it.
    */
@@ -96,12 +89,12 @@ export function storageTestSuite(
     return storage;
   }
 
-  async function getJournalStorage(): Promise<WorkflowStorage & ActivityJournalStorage> {
+  async function getJournalStorage(): Promise<WorkflowStorage & JournalStore> {
     const s = await getStorage();
-    if (!isActivityJournalStorage(s)) {
+    if (!hasCapability(s, "journal")) {
       throw new Error(
         "storageTestSuite was invoked with hasJournal: true, but the factory returned " +
-          "a storage that does not implement ActivityJournalStorage.",
+          "a storage that does not implement JournalStore.",
       );
     }
     return s;
@@ -112,7 +105,7 @@ export function storageTestSuite(
     return options.createPeer ? options.createPeer(s) : s;
   }
 
-  async function getSuspendStorage(): Promise<WorkflowStorage & ActivityJournalStorage> {
+  async function getSuspendStorage(): Promise<WorkflowStorage & JournalStore> {
     return getJournalStorage();
   }
 
@@ -314,7 +307,7 @@ export function storageTestSuite(
     });
 
     // -------------------------------------------------------------------
-    // checkpointStep (optional StepCheckpointStorage)
+    // checkpointStep (optional StepCheckpointStore)
     // -------------------------------------------------------------------
 
     describe("checkpointStep", () => {
@@ -342,7 +335,7 @@ export function storageTestSuite(
 
       it("writes the same step row as saveStepResult, plus the attempt rows", async () => {
         const s = await getStorage();
-        if (!isStepCheckpointStorage(s)) return;
+        if (!hasCapability(s, "stepCheckpoint")) return;
         for (const id of ["ck-ok", "ck-ok-split"]) {
           await s.createWorkflow({ workflowId: id, workflowName: "t", input: {} });
         }
@@ -369,7 +362,10 @@ export function storageTestSuite(
         expect(rowOf(state, "s")).toEqual(rowOf(await s.loadWorkflow("ck-ok-split"), "s"));
         expect(state!.steps["s"]!.result).toEqual({ v: 1 });
         if (await recordsAttempts(s)) {
-          const attempts = await attemptsOf(s).loadStepAttempts("ck-ok", "s");
+          const attempts = await attemptsOf(s).loadStepAttempts({
+            workflowId: "ck-ok",
+            stepName: "s",
+          });
           expect(attempts.map((a) => [a.attempt, a.status])).toEqual([
             [1, "failed"],
             [2, "completed"],
@@ -379,7 +375,7 @@ export function storageTestSuite(
 
       it("writes the same step row as saveStepFailure for a failed step", async () => {
         const s = await getStorage();
-        if (!isStepCheckpointStorage(s)) return;
+        if (!hasCapability(s, "stepCheckpoint")) return;
         for (const id of ["ck-fail", "ck-fail-split"]) {
           await s.createWorkflow({ workflowId: id, workflowName: "t", input: {} });
         }
@@ -413,7 +409,7 @@ export function storageTestSuite(
 
       it("bumps the step's attempt counter and keeps its task rows", async () => {
         const s = await getStorage();
-        if (!isStepCheckpointStorage(s)) return;
+        if (!hasCapability(s, "stepCheckpoint")) return;
         await s.createWorkflow({ workflowId: "ck-map", workflowName: "t", input: {} });
         await s.saveTaskResult({ workflowId: "ck-map", stepName: "s", taskIndex: 0, result: 1 });
         const outcome = { kind: "completed" as const, result: [1], durationMs: 1, startedAt: at };
@@ -428,7 +424,7 @@ export function storageTestSuite(
 
       it("reports a cancel that landed before the write", async () => {
         const s = await getStorage();
-        if (!isStepCheckpointStorage(s)) return;
+        if (!hasCapability(s, "stepCheckpoint")) return;
         await s.createWorkflow({ workflowId: "ck-cancel", workflowName: "t", input: {} });
         await s.saveStepResult({
           workflowId: "ck-cancel",
@@ -437,7 +433,7 @@ export function storageTestSuite(
           durationMs: 1,
           startedAt: at,
         });
-        await s.cancelWorkflow("ck-cancel");
+        await s.cancelWorkflow({ workflowId: "ck-cancel" });
 
         const status = await s.checkpointStep({
           workflowId: "ck-cancel",
@@ -456,7 +452,7 @@ export function storageTestSuite(
 
       it("answers null and writes nothing for a missing workflow", async () => {
         const s = await getStorage();
-        if (!isStepCheckpointStorage(s)) return;
+        if (!hasCapability(s, "stepCheckpoint")) return;
         const status = await s.checkpointStep({
           workflowId: "ck-missing",
           stepName: "s",
@@ -466,16 +462,16 @@ export function storageTestSuite(
 
         expect(status).toBeNull();
         expect(await s.loadWorkflow("ck-missing")).toBeNull();
-        if (isStepAttemptStorage(s)) {
-          expect(await s.loadStepAttempts("ck-missing")).toEqual([]);
+        if (hasCapability(s, "stepAttempts")) {
+          expect(await s.loadStepAttempts({ workflowId: "ck-missing" })).toEqual([]);
         }
       });
 
       it("a write under the live lock's token lands", async () => {
         const s = await getStorage();
-        if (!isStepCheckpointStorage(s)) return;
+        if (!hasCapability(s, "stepCheckpoint")) return;
         await s.createWorkflow({ workflowId: "ck-fenced", workflowName: "t", input: {} });
-        const lock = await s.tryLock("ck-fenced", 30_000);
+        const lock = await s.tryLock({ workflowId: "ck-fenced", lockDurationMs: 30_000 });
         const checkpoint: StepCheckpoint = {
           workflowId: "ck-fenced",
           stepName: "s",
@@ -483,11 +479,11 @@ export function storageTestSuite(
           attempts: [],
         };
 
-        const status = await s.checkpointStep(checkpoint, { fenceToken: lock.token });
+        const status = await s.checkpointStep({ ...checkpoint, guard: { fenceToken: lock.token } });
 
         expect(status).toEqual({ status: "running" });
         expect((await s.loadWorkflow("ck-fenced"))!.steps["s"]!.status).toBe("completed");
-        await s.releaseLock("ck-fenced", { fenceToken: lock.token });
+        await s.releaseLock({ workflowId: "ck-fenced", guard: { fenceToken: lock.token } });
       });
     });
 
@@ -500,11 +496,13 @@ export function storageTestSuite(
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "batch-wf", workflowName: "t", input: {} });
         const startedAt = new Date();
-        await s.batchSaveStepResults([
-          { workflowId: "batch-wf", stepName: "a", result: 1, durationMs: 5, startedAt },
-          { workflowId: "batch-wf", stepName: "b", result: 2, durationMs: 6, startedAt },
-          { workflowId: "batch-wf", stepName: "c", result: 3, durationMs: 7, startedAt },
-        ]);
+        await s.batchSaveStepResults({
+          records: [
+            { workflowId: "batch-wf", stepName: "a", result: 1, durationMs: 5, startedAt },
+            { workflowId: "batch-wf", stepName: "b", result: 2, durationMs: 6, startedAt },
+            { workflowId: "batch-wf", stepName: "c", result: 3, durationMs: 7, startedAt },
+          ],
+        });
         const state = (await s.loadWorkflow("batch-wf"))!;
         expect(state.steps["a"]!.result).toBe(1);
         expect(state.steps["b"]!.result).toBe(2);
@@ -517,7 +515,7 @@ export function storageTestSuite(
       it("handles an empty batch as a no-op", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "batch-empty", workflowName: "t", input: {} });
-        await s.batchSaveStepResults([]);
+        await s.batchSaveStepResults({ records: [] });
         const state = (await s.loadWorkflow("batch-empty"))!;
         expect(Object.keys(state.steps)).toHaveLength(0);
       });
@@ -526,24 +524,26 @@ export function storageTestSuite(
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "batch-meta", workflowName: "t", input: {} });
         const startedAt = new Date();
-        await s.batchSaveStepResults([
-          {
-            workflowId: "batch-meta",
-            stepName: "x",
-            result: "ok",
-            durationMs: 1,
-            startedAt,
-            metadata: { chose: "fast" },
-          },
-          {
-            workflowId: "batch-meta",
-            stepName: "y",
-            result: "ok",
-            durationMs: 1,
-            startedAt,
-            metadata: { chose: "slow" },
-          },
-        ]);
+        await s.batchSaveStepResults({
+          records: [
+            {
+              workflowId: "batch-meta",
+              stepName: "x",
+              result: "ok",
+              durationMs: 1,
+              startedAt,
+              metadata: { chose: "fast" },
+            },
+            {
+              workflowId: "batch-meta",
+              stepName: "y",
+              result: "ok",
+              durationMs: 1,
+              startedAt,
+              metadata: { chose: "slow" },
+            },
+          ],
+        });
         const state = (await s.loadWorkflow("batch-meta"))!;
         expect(state.steps["x"]!.metadata).toEqual({ chose: "fast" });
         expect(state.steps["y"]!.metadata).toEqual({ chose: "slow" });
@@ -555,15 +555,17 @@ export function storageTestSuite(
         const pre = (await s.loadWorkflow("batch-running"))!;
         expect(pre.status).toBe("pending");
 
-        await s.batchSaveStepResults([
-          {
-            workflowId: "batch-running",
-            stepName: "go",
-            result: "ok",
-            durationMs: 1,
-            startedAt: new Date(),
-          },
-        ]);
+        await s.batchSaveStepResults({
+          records: [
+            {
+              workflowId: "batch-running",
+              stepName: "go",
+              result: "ok",
+              durationMs: 1,
+              startedAt: new Date(),
+            },
+          ],
+        });
 
         const post = (await s.loadWorkflow("batch-running"))!;
         expect(post.status).toBe("running");
@@ -718,7 +720,7 @@ export function storageTestSuite(
       it("completes a workflow", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "complete-1", workflowName: "test", input: {} });
-        await s.completeWorkflow("complete-1", { final: "result" });
+        await s.completeWorkflow({ workflowId: "complete-1", result: { final: "result" } });
 
         const state = await s.loadWorkflow("complete-1");
         expect(state!.status).toBe("completed");
@@ -729,7 +731,7 @@ export function storageTestSuite(
       it("fails a workflow", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "fail-1", workflowName: "test", input: {} });
-        await s.failWorkflow("fail-1", "total failure");
+        await s.failWorkflow({ workflowId: "fail-1", error: "total failure" });
 
         const state = await s.loadWorkflow("fail-1");
         expect(state!.status).toBe("failed");
@@ -740,7 +742,7 @@ export function storageTestSuite(
         const s = await getStorage();
         if (typeof s.tripwireWorkflow !== "function") return;
         await s.createWorkflow({ workflowId: "trip-1", workflowName: "test", input: {} });
-        await s.tripwireWorkflow("trip-1", { code: "fraud", score: 0.97 });
+        await s.tripwireWorkflow({ workflowId: "trip-1", reason: { code: "fraud", score: 0.97 } });
 
         const state = await s.loadWorkflow("trip-1");
         expect(state!.status).toBe("tripwire");
@@ -759,7 +761,7 @@ export function storageTestSuite(
       it("filters by status", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "list-c1", workflowName: "test", input: {} });
-        await s.completeWorkflow("list-c1", null);
+        await s.completeWorkflow({ workflowId: "list-c1", result: null });
         await s.createWorkflow({ workflowId: "list-r1", workflowName: "test", input: {} });
 
         const completed = await s.listWorkflows({ status: "completed" });
@@ -831,10 +833,10 @@ export function storageTestSuite(
         await s.createWorkflow({ workflowId: "ord-dur-running", workflowName: "dur", input: {} });
         await s.createWorkflow({ workflowId: "ord-dur-fast", workflowName: "dur", input: {} });
         await new Promise((r) => setTimeout(r, 30));
-        await s.completeWorkflow("ord-dur-fast", "ok");
+        await s.completeWorkflow({ workflowId: "ord-dur-fast", result: "ok" });
         await s.createWorkflow({ workflowId: "ord-dur-slow", workflowName: "dur", input: {} });
         await new Promise((r) => setTimeout(r, 60));
-        await s.completeWorkflow("ord-dur-slow", "ok");
+        await s.completeWorkflow({ workflowId: "ord-dur-slow", result: "ok" });
 
         const ascRows = await s.listWorkflows({
           name: "dur",
@@ -967,7 +969,7 @@ export function storageTestSuite(
           input: {},
           metadata: { region: "us-east" },
         });
-        await s.completeWorkflow("md-c-1", "ok");
+        await s.completeWorkflow({ workflowId: "md-c-1", result: "ok" });
         await s.createWorkflow({
           workflowId: "md-c-2",
           workflowName: "meta",
@@ -1160,7 +1162,7 @@ export function storageTestSuite(
       it("cancels a running workflow", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "cancel-1", workflowName: "test", input: {} });
-        await s.cancelWorkflow("cancel-1");
+        await s.cancelWorkflow({ workflowId: "cancel-1" });
 
         const state = await s.loadWorkflow("cancel-1");
         expect(state!.status).toBe("failed");
@@ -1170,8 +1172,8 @@ export function storageTestSuite(
       it("does not cancel a completed workflow", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "cancel-2", workflowName: "test", input: {} });
-        await s.completeWorkflow("cancel-2", "done");
-        await s.cancelWorkflow("cancel-2");
+        await s.completeWorkflow({ workflowId: "cancel-2", result: "done" });
+        await s.cancelWorkflow({ workflowId: "cancel-2" });
 
         expect((await s.loadWorkflow("cancel-2"))!.status).toBe("completed");
       });
@@ -1185,10 +1187,14 @@ export function storageTestSuite(
       it("suspends with sleep state", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "suspend-1", workflowName: "test", input: {} });
-        await s.suspendWorkflow("suspend-1", "wait", {
-          status: "sleeping",
-          stepType: "sleep",
-          wakeAt: new Date(Date.now() + 60_000),
+        await s.suspendWorkflow({
+          workflowId: "suspend-1",
+          stepName: "wait",
+          stepUpdate: {
+            status: "sleeping",
+            stepType: "sleep",
+            wakeAt: new Date(Date.now() + 60_000),
+          },
         });
 
         const state = await s.loadWorkflow("suspend-1");
@@ -1205,7 +1211,11 @@ export function storageTestSuite(
       it("delivers and loads signals", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "sig-1", workflowName: "test", input: {} });
-        await s.deliverSignal("sig-1", "approval", { approved: true });
+        await s.deliverSignal({
+          workflowId: "sig-1",
+          signalName: "approval",
+          payload: { approved: true },
+        });
 
         const signals = await s.loadSignals("sig-1");
         expect(signals).toHaveLength(1);
@@ -1221,26 +1231,36 @@ export function storageTestSuite(
     describe("locking", () => {
       it("acquires and releases a lock", async () => {
         const s = await getStorage();
-        expect((await s.tryLock("lock-1", 30_000)).acquired).toBe(true);
-        await s.releaseLock("lock-1");
-        expect((await s.tryLock("lock-1", 30_000)).acquired).toBe(true);
-        await s.releaseLock("lock-1");
+        expect((await s.tryLock({ workflowId: "lock-1", lockDurationMs: 30_000 })).acquired).toBe(
+          true,
+        );
+        await s.releaseLock({ workflowId: "lock-1" });
+        expect((await s.tryLock({ workflowId: "lock-1", lockDurationMs: 30_000 })).acquired).toBe(
+          true,
+        );
+        await s.releaseLock({ workflowId: "lock-1" });
       });
 
       it("rejects double-lock from the same instance and from a peer", async () => {
         const s = await getStorage();
         const peer = await getPeer(s);
-        const first = await s.tryLock("lock-2", 30_000);
+        const first = await s.tryLock({ workflowId: "lock-2", lockDurationMs: 30_000 });
         expect(first.acquired).toBe(true);
 
-        expect((await s.tryLock("lock-2", 30_000)).acquired).toBe(false);
-        expect((await peer.tryLock("lock-2", 30_000)).acquired).toBe(false);
+        expect((await s.tryLock({ workflowId: "lock-2", lockDurationMs: 30_000 })).acquired).toBe(
+          false,
+        );
+        expect(
+          (await peer.tryLock({ workflowId: "lock-2", lockDurationMs: 30_000 })).acquired,
+        ).toBe(false);
         const concurrent = await Promise.all(
-          Array.from({ length: 5 }, () => peer.tryLock("lock-2", 30_000)),
+          Array.from({ length: 5 }, () =>
+            peer.tryLock({ workflowId: "lock-2", lockDurationMs: 30_000 }),
+          ),
         );
         expect(concurrent.every((r) => !r.acquired)).toBe(true);
 
-        await s.releaseLock("lock-2", { fenceToken: first.token });
+        await s.releaseLock({ workflowId: "lock-2", guard: { fenceToken: first.token } });
       });
 
       it("concurrent tryLock calls produce exactly one winner", async () => {
@@ -1248,76 +1268,97 @@ export function storageTestSuite(
         const peer = await getPeer(s);
         const results = await Promise.all(
           Array.from({ length: 8 }, (_, i) =>
-            (i % 2 === 0 ? s : peer).tryLock("lock-race", 30_000),
+            (i % 2 === 0 ? s : peer).tryLock({ workflowId: "lock-race", lockDurationMs: 30_000 }),
           ),
         );
         expect(results.filter((r) => r.acquired)).toHaveLength(1);
         const winner = results.find((r) => r.acquired)!;
-        await s.releaseLock("lock-race", { fenceToken: winner.token });
+        await s.releaseLock({ workflowId: "lock-race", guard: { fenceToken: winner.token } });
       });
 
       it("releaseLock frees the lock for a peer", async () => {
         const s = await getStorage();
         const peer = await getPeer(s);
-        const a = await s.tryLock("lock-free", 30_000);
+        const a = await s.tryLock({ workflowId: "lock-free", lockDurationMs: 30_000 });
         expect(a.acquired).toBe(true);
-        await s.releaseLock("lock-free", { fenceToken: a.token });
+        await s.releaseLock({ workflowId: "lock-free", guard: { fenceToken: a.token } });
 
-        const b = await peer.tryLock("lock-free", 30_000);
+        const b = await peer.tryLock({ workflowId: "lock-free", lockDurationMs: 30_000 });
         expect(b.acquired).toBe(true);
-        await peer.releaseLock("lock-free", { fenceToken: b.token });
+        await peer.releaseLock({ workflowId: "lock-free", guard: { fenceToken: b.token } });
       });
 
       it("releasing many locks concurrently frees every one of them", async () => {
         const s = await getStorage();
         const peer = await getPeer(s);
         const ids = Array.from({ length: 8 }, (_, i) => `lock-many-${i}`);
-        const held = await Promise.all(ids.map((id) => s.tryLock(id, 30_000)));
+        const held = await Promise.all(
+          ids.map((id) => s.tryLock({ workflowId: id, lockDurationMs: 30_000 })),
+        );
         expect(held.every((r) => r.acquired)).toBe(true);
-        await Promise.all(ids.map((id, i) => s.releaseLock(id, { fenceToken: held[i]!.token })));
+        await Promise.all(
+          ids.map((id, i) =>
+            s.releaseLock({ workflowId: id, guard: { fenceToken: held[i]!.token } }),
+          ),
+        );
 
-        const again = await Promise.all(ids.map((id) => peer.tryLock(id, 30_000)));
+        const again = await Promise.all(
+          ids.map((id) => peer.tryLock({ workflowId: id, lockDurationMs: 30_000 })),
+        );
         expect(again.every((r) => r.acquired)).toBe(true);
         await Promise.all(
-          ids.map((id, i) => peer.releaseLock(id, { fenceToken: again[i]!.token })),
+          ids.map((id, i) =>
+            peer.releaseLock({ workflowId: id, guard: { fenceToken: again[i]!.token } }),
+          ),
         );
       });
 
       it("an expired lock can be re-acquired with a newer token", async () => {
         const s = await getStorage();
         const peer = await getPeer(s);
-        const a = await s.tryLock("lock-exp", 1);
+        const a = await s.tryLock({ workflowId: "lock-exp", lockDurationMs: 1 });
         expect(a.acquired).toBe(true);
         await sleep(30);
-        const b = await peer.tryLock("lock-exp", 30_000);
+        const b = await peer.tryLock({ workflowId: "lock-exp", lockDurationMs: 30_000 });
         expect(b.acquired).toBe(true);
         expect(b.token).toBeDefined();
         expect(b.token).not.toBe(a.token);
-        await peer.releaseLock("lock-exp", { fenceToken: b.token });
+        await peer.releaseLock({ workflowId: "lock-exp", guard: { fenceToken: b.token } });
       });
 
       it("heartbeat extends the lock past its original expiry", async () => {
         const s = await getStorage();
         const peer = await getPeer(s);
-        const a = await s.tryLock("lock-hb", 600);
+        const a = await s.tryLock({ workflowId: "lock-hb", lockDurationMs: 600 });
         expect(a.acquired).toBe(true);
-        await s.heartbeat("lock-hb", 60_000, { fenceToken: a.token });
+        await s.heartbeat({
+          workflowId: "lock-hb",
+          lockDurationMs: 60_000,
+          guard: { fenceToken: a.token },
+        });
         await sleep(900);
-        expect((await peer.tryLock("lock-hb", 30_000)).acquired).toBe(false);
-        await s.releaseLock("lock-hb", { fenceToken: a.token });
+        expect(
+          (await peer.tryLock({ workflowId: "lock-hb", lockDurationMs: 30_000 })).acquired,
+        ).toBe(false);
+        await s.releaseLock({ workflowId: "lock-hb", guard: { fenceToken: a.token } });
       });
 
       it("a stale holder's release does not free the new holder's lock", async () => {
         const s = await getStorage();
         const peer = await getPeer(s);
-        const stale = await s.tryLock("lock-stale-rel", 1);
+        const stale = await s.tryLock({ workflowId: "lock-stale-rel", lockDurationMs: 1 });
         await sleep(30);
-        const fresh = await peer.tryLock("lock-stale-rel", 30_000);
+        const fresh = await peer.tryLock({ workflowId: "lock-stale-rel", lockDurationMs: 30_000 });
         expect(fresh.acquired).toBe(true);
 
-        await s.releaseLock("lock-stale-rel", { fenceToken: stale.token });
-        expect((await s.tryLock("lock-stale-rel", 30_000)).acquired).toBe(false);
-        await peer.releaseLock("lock-stale-rel", { fenceToken: fresh.token });
+        await s.releaseLock({ workflowId: "lock-stale-rel", guard: { fenceToken: stale.token } });
+        expect(
+          (await s.tryLock({ workflowId: "lock-stale-rel", lockDurationMs: 30_000 })).acquired,
+        ).toBe(false);
+        await peer.releaseLock({
+          workflowId: "lock-stale-rel",
+          guard: { fenceToken: fresh.token },
+        });
       });
 
       it("tryLockAndLoad returns lock=true + the current state in one call", async () => {
@@ -1327,20 +1368,20 @@ export function storageTestSuite(
           workflowName: "test",
           input: { amount: 42 },
         });
-        const res = await s.tryLockAndLoad("lal-ok", 30_000);
+        const res = await s.tryLockAndLoad({ workflowId: "lal-ok", lockDurationMs: 30_000 });
         expect(res.locked).toBe(true);
         expect(res.state).not.toBeNull();
         expect(res.state!.workflowId).toBe("lal-ok");
         expect(res.state!.input).toEqual({ amount: 42 });
-        await s.releaseLock("lal-ok");
+        await s.releaseLock({ workflowId: "lal-ok" });
       });
 
       it("tryLockAndLoad returns state=null when the workflow doesn't exist", async () => {
         const s = await getStorage();
-        const res = await s.tryLockAndLoad("lal-missing", 30_000);
+        const res = await s.tryLockAndLoad({ workflowId: "lal-missing", lockDurationMs: 30_000 });
         expect(res.locked).toBe(true);
         expect(res.state).toBeNull();
-        await s.releaseLock("lal-missing");
+        await s.releaseLock({ workflowId: "lal-missing" });
       });
     });
 
@@ -1352,130 +1393,137 @@ export function storageTestSuite(
       it("tryLock returns a token that saveStepResult accepts", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "fence-ok", workflowName: "t", input: {} });
-        const { acquired, token } = await s.tryLock("fence-ok", 30_000);
+        const { acquired, token } = await s.tryLock({
+          workflowId: "fence-ok",
+          lockDurationMs: 30_000,
+        });
         expect(acquired).toBe(true);
         expect(token).toBeDefined();
-        await s.saveStepResult(
-          {
-            workflowId: "fence-ok",
-            stepName: "s1",
-            result: "ok",
-            durationMs: 1,
-            startedAt: new Date(),
-          },
-          { fenceToken: token },
-        );
+        await s.saveStepResult({
+          workflowId: "fence-ok",
+          stepName: "s1",
+          result: "ok",
+          durationMs: 1,
+          startedAt: new Date(),
+          guard: { fenceToken: token },
+        });
         const state = await s.loadWorkflow("fence-ok");
         expect(state?.steps["s1"]?.result).toBe("ok");
-        await s.releaseLock("fence-ok", { fenceToken: token });
+        await s.releaseLock({ workflowId: "fence-ok", guard: { fenceToken: token } });
       });
 
       it("stale-token write is rejected after the lock moves on", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "fence-stale", workflowName: "t", input: {} });
         // A acquires → stale.
-        const { token: staleToken } = await s.tryLock("fence-stale", 1);
+        const { token: staleToken } = await s.tryLock({
+          workflowId: "fence-stale",
+          lockDurationMs: 1,
+        });
         expect(staleToken).toBeDefined();
         await sleep(30);
         // B acquires fresh token for the same workflow.
-        const { acquired: bAcquired, token: freshToken } = await s.tryLock("fence-stale", 30_000);
+        const { acquired: bAcquired, token: freshToken } = await s.tryLock({
+          workflowId: "fence-stale",
+          lockDurationMs: 30_000,
+        });
         expect(bAcquired).toBe(true);
         expect(freshToken).not.toBe(staleToken);
 
         // A tries to write with its stale token — must be rejected.
         await expect(
-          s.saveStepResult(
-            {
-              workflowId: "fence-stale",
-              stepName: "stale-step",
-              result: "should-not-persist",
-              durationMs: 1,
-              startedAt: new Date(),
-            },
-            { fenceToken: staleToken },
-          ),
+          s.saveStepResult({
+            workflowId: "fence-stale",
+            stepName: "stale-step",
+            result: "should-not-persist",
+            durationMs: 1,
+            startedAt: new Date(),
+            guard: { fenceToken: staleToken },
+          }),
         ).rejects.toMatchObject({ _tag: "FenceTokenMismatchError" });
 
         // B's fresh write still works.
-        await s.saveStepResult(
-          {
-            workflowId: "fence-stale",
-            stepName: "fresh-step",
-            result: "kept",
-            durationMs: 1,
-            startedAt: new Date(),
-          },
-          { fenceToken: freshToken },
-        );
+        await s.saveStepResult({
+          workflowId: "fence-stale",
+          stepName: "fresh-step",
+          result: "kept",
+          durationMs: 1,
+          startedAt: new Date(),
+          guard: { fenceToken: freshToken },
+        });
         const state = await s.loadWorkflow("fence-stale");
         expect(state?.steps["stale-step"]).toBeUndefined();
         expect(state?.steps["fresh-step"]?.result).toBe("kept");
-        await s.releaseLock("fence-stale", { fenceToken: freshToken });
+        await s.releaseLock({ workflowId: "fence-stale", guard: { fenceToken: freshToken } });
       });
 
       it("tryLockAndLoad round-trips the token to saveStepResult", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "fence-lal", workflowName: "t", input: {} });
-        const res = await s.tryLockAndLoad("fence-lal", 30_000);
+        const res = await s.tryLockAndLoad({ workflowId: "fence-lal", lockDurationMs: 30_000 });
         expect(res.locked).toBe(true);
         expect(res.token).toBeDefined();
-        await s.saveStepResult(
-          {
-            workflowId: "fence-lal",
-            stepName: "s",
-            result: 1,
-            durationMs: 1,
-            startedAt: new Date(),
-          },
-          { fenceToken: res.token },
-        );
+        await s.saveStepResult({
+          workflowId: "fence-lal",
+          stepName: "s",
+          result: 1,
+          durationMs: 1,
+          startedAt: new Date(),
+          guard: { fenceToken: res.token },
+        });
         const state = await s.loadWorkflow("fence-lal");
         expect(state?.steps["s"]?.result).toBe(1);
-        await s.releaseLock("fence-lal", { fenceToken: res.token });
+        await s.releaseLock({ workflowId: "fence-lal", guard: { fenceToken: res.token } });
       });
 
       it("a stale token cannot complete or fail the workflow", async () => {
         const s = await getStorage();
         const peer = await getPeer(s);
         await s.createWorkflow({ workflowId: "fence-term", workflowName: "t", input: {} });
-        const stale = await s.tryLock("fence-term", 1);
+        const stale = await s.tryLock({ workflowId: "fence-term", lockDurationMs: 1 });
         await sleep(30);
-        const fresh = await peer.tryLock("fence-term", 30_000);
+        const fresh = await peer.tryLock({ workflowId: "fence-term", lockDurationMs: 30_000 });
         expect(fresh.acquired).toBe(true);
 
         await expect(
-          s.completeWorkflow("fence-term", "late", { fenceToken: stale.token }),
+          s.completeWorkflow({
+            workflowId: "fence-term",
+            result: "late",
+            guard: { fenceToken: stale.token },
+          }),
         ).rejects.toMatchObject({ _tag: "FenceTokenMismatchError" });
         await expect(
-          s.failWorkflow("fence-term", "late", { fenceToken: stale.token }),
+          s.failWorkflow({
+            workflowId: "fence-term",
+            error: "late",
+            guard: { fenceToken: stale.token },
+          }),
         ).rejects.toMatchObject({ _tag: "FenceTokenMismatchError" });
         expect((await s.loadWorkflow("fence-term"))!.status).toBe("pending");
-        await peer.releaseLock("fence-term", { fenceToken: fresh.token });
+        await peer.releaseLock({ workflowId: "fence-term", guard: { fenceToken: fresh.token } });
       });
 
       it("tokens are never reused across instances", async () => {
         const s = await getStorage();
         const peer = await getPeer(s);
         await s.createWorkflow({ workflowId: "fence-reuse", workflowName: "t", input: {} });
-        const first = await s.tryLock("fence-reuse", 30_000);
-        await s.releaseLock("fence-reuse", { fenceToken: first.token });
-        const second = await peer.tryLock("fence-reuse", 30_000);
+        const first = await s.tryLock({ workflowId: "fence-reuse", lockDurationMs: 30_000 });
+        await s.releaseLock({ workflowId: "fence-reuse", guard: { fenceToken: first.token } });
+        const second = await peer.tryLock({ workflowId: "fence-reuse", lockDurationMs: 30_000 });
         expect(second.acquired).toBe(true);
         expect(second.token).not.toBe(first.token);
 
         await expect(
-          s.saveStepResult(
-            {
-              workflowId: "fence-reuse",
-              stepName: "late",
-              result: 1,
-              durationMs: 1,
-              startedAt: new Date(),
-            },
-            { fenceToken: first.token },
-          ),
+          s.saveStepResult({
+            workflowId: "fence-reuse",
+            stepName: "late",
+            result: 1,
+            durationMs: 1,
+            startedAt: new Date(),
+            guard: { fenceToken: first.token },
+          }),
         ).rejects.toMatchObject({ _tag: "FenceTokenMismatchError" });
-        await peer.releaseLock("fence-reuse", { fenceToken: second.token });
+        await peer.releaseLock({ workflowId: "fence-reuse", guard: { fenceToken: second.token } });
       });
     });
 
@@ -1484,11 +1532,11 @@ export function storageTestSuite(
     // -------------------------------------------------------------------
 
     const fenceAt = new Date("2026-01-01T00:00:00.000Z");
-    const suspendOf = (s: WorkflowStorage) => s as WorkflowStorage & ActivityJournalStorage;
-    const attemptsOf = (s: WorkflowStorage) => s as WorkflowStorage & StepAttemptStorage;
-    const ledgerOf = (s: WorkflowStorage) => s as WorkflowStorage & CompensationLedgerStorage;
-    const checkpointOf = (s: WorkflowStorage) => s as WorkflowStorage & StepCheckpointStorage;
-    const hasSuspend = (s: WorkflowStorage): boolean => isActivityJournalStorage(s);
+    const suspendOf = (s: WorkflowStorage) => s as WorkflowStorage & JournalStore;
+    const attemptsOf = (s: WorkflowStorage) => s as WorkflowStorage & StepAttemptStore;
+    const ledgerOf = (s: WorkflowStorage) => s as WorkflowStorage & CompensationLedgerStore;
+    const checkpointOf = (s: WorkflowStorage) => s as WorkflowStorage & StepCheckpointStore;
+    const hasSuspend = (s: WorkflowStorage): boolean => hasCapability(s, "journal");
     const attemptFor = (workflowId: string): StepAttemptRecord => ({
       workflowId,
       stepName: "s",
@@ -1502,19 +1550,23 @@ export function storageTestSuite(
     });
     /** Whether `s` records attempts: a probe write must land. */
     async function recordsAttempts(s: WorkflowStorage): Promise<boolean> {
-      if (!isStepAttemptStorage(s)) return false;
-      await s.saveStepAttempt(attemptFor("fw-attempt-probe"));
-      return (await s.loadStepAttempts("fw-attempt-probe")).length > 0;
+      if (!hasCapability(s, "stepAttempts")) return false;
+      await s.saveStepAttempt({ record: attemptFor("fw-attempt-probe") });
+      return (await s.loadStepAttempts({ workflowId: "fw-attempt-probe" })).length > 0;
     }
     /** Everything a fenced write can touch for workflow `id`. */
     async function fencedSnapshot(s: WorkflowStorage, id: string): Promise<unknown> {
       return {
         workflow: await s.loadWorkflow(id),
         child: await s.loadWorkflow(`${id}-child`),
-        journal: isActivityJournalStorage(s) ? await s.loadJournal(id, "j") : [],
+        journal: hasCapability(s, "journal")
+          ? await s.loadJournal({ workflowId: id, stepName: "j" })
+          : [],
         stream: await s.readStreamChunks({ workflowId: id, streamId: "out" }),
-        attempts: isStepAttemptStorage(s) ? await s.loadStepAttempts(id) : [],
-        runs: await s.loadRunHistory(id),
+        attempts: hasCapability(s, "stepAttempts")
+          ? await s.loadStepAttempts({ workflowId: id })
+          : [],
+        runs: await s.loadRunHistory({ workflowId: id }),
       };
     }
     const rejectsStale = (write: () => Promise<unknown>) =>
@@ -1535,102 +1587,143 @@ export function storageTestSuite(
         {
           name: "saveStepResult",
           write: (s, id, g) =>
-            s.saveStepResult(
-              { workflowId: id, stepName: "s", result: 1, durationMs: 1, startedAt: fenceAt },
-              g,
-            ),
+            s.saveStepResult({
+              workflowId: id,
+              stepName: "s",
+              result: 1,
+              durationMs: 1,
+              startedAt: fenceAt,
+              guard: g,
+            }),
         },
         {
           name: "batchSaveStepResults",
           write: (s, id, g) =>
-            s.batchSaveStepResults(
-              [
+            s.batchSaveStepResults({
+              records: [
                 { workflowId: id, stepName: "a", result: 1, durationMs: 1, startedAt: fenceAt },
                 { workflowId: id, stepName: "b", result: 2, durationMs: 1, startedAt: fenceAt },
               ],
-              g,
-            ),
+              guard: g,
+            }),
         },
         {
           name: "saveStepFailure",
           write: (s, id, g) =>
-            s.saveStepFailure(
-              { workflowId: id, stepName: "s", error: "boom", durationMs: 1, startedAt: fenceAt },
-              g,
-            ),
+            s.saveStepFailure({
+              workflowId: id,
+              stepName: "s",
+              error: "boom",
+              durationMs: 1,
+              startedAt: fenceAt,
+              guard: g,
+            }),
         },
         {
           name: "saveTaskResult",
           write: (s, id, g) =>
-            s.saveTaskResult({ workflowId: id, stepName: "m", taskIndex: 0, result: 1 }, g),
+            s.saveTaskResult({ workflowId: id, stepName: "m", taskIndex: 0, result: 1, guard: g }),
         },
         {
           name: "saveTaskFailure",
           write: (s, id, g) =>
-            s.saveTaskFailure({ workflowId: id, stepName: "m", taskIndex: 0, error: "boom" }, g),
+            s.saveTaskFailure({
+              workflowId: id,
+              stepName: "m",
+              taskIndex: 0,
+              error: "boom",
+              guard: g,
+            }),
         },
-        { name: "completeWorkflow", write: (s, id, g) => s.completeWorkflow(id, "done", g) },
-        { name: "failWorkflow", write: (s, id, g) => s.failWorkflow(id, "boom", g) },
+        {
+          name: "completeWorkflow",
+          write: (s, id, g) => s.completeWorkflow({ workflowId: id, result: "done", guard: g }),
+        },
+        {
+          name: "failWorkflow",
+          write: (s, id, g) => s.failWorkflow({ workflowId: id, error: "boom", guard: g }),
+        },
         {
           name: "tripwireWorkflow",
-          supported: isTripwireCapableStorage,
-          write: (s, id, g) => s.tripwireWorkflow!(id, "why", g),
+          supported: (st) => hasCapability(st, "tripwire"),
+          write: (s, id, g) => s.tripwireWorkflow!({ workflowId: id, reason: "why", guard: g }),
         },
-        { name: "cancelWorkflow", write: (s, id, g) => s.cancelWorkflow(id, undefined, g) },
+        {
+          name: "cancelWorkflow",
+          write: (s, id, g) => s.cancelWorkflow({ workflowId: id, guard: g }),
+        },
         {
           name: "suspendWorkflow",
           write: (s, id, g) =>
-            s.suspendWorkflow(id, "s", { status: "sleeping", wakeAt: fenceAt }, g),
+            s.suspendWorkflow({
+              workflowId: id,
+              stepName: "s",
+              stepUpdate: { status: "sleeping", wakeAt: fenceAt },
+              guard: g,
+            }),
         },
         {
           name: "setWorkflowMetadata",
-          write: (s, id, g) => s.setWorkflowMetadata(id, { progress: 1 }, g),
+          write: (s, id, g) =>
+            s.setWorkflowMetadata({ workflowId: id, patch: { progress: 1 }, guard: g }),
         },
-        { name: "startFreshRun", write: (s, id, g) => s.startFreshRun(id, g) },
+        {
+          name: "startFreshRun",
+          write: (s, id, g) => s.startFreshRun({ workflowId: id, guard: g }),
+        },
         {
           name: "appendStreamChunk",
           write: (s, id, g) =>
-            s.appendStreamChunk(
-              { workflowId: id, streamId: "out", payload: 1, appendedBy: "workflow" },
-              g,
-            ),
+            s.appendStreamChunk({
+              workflowId: id,
+              streamId: "out",
+              payload: 1,
+              appendedBy: "workflow",
+              guard: g,
+            }),
         },
         {
           name: "createWorkflow-child",
           write: (s, id, g) =>
-            s.createWorkflow(
-              { workflowId: `${id}-child`, workflowName: "child", input: {}, parentWorkflowId: id },
-              g,
-            ),
+            s.createWorkflow({
+              workflowId: `${id}-child`,
+              workflowName: "child",
+              input: {},
+              parentWorkflowId: id,
+              guard: g,
+            }),
         },
         {
           name: "saveStepAttempt",
           supported: recordsAttempts,
-          write: (s, id, g) => attemptsOf(s).saveStepAttempt(attemptFor(id), g),
+          write: (s, id, g) => attemptsOf(s).saveStepAttempt({ record: attemptFor(id), guard: g }),
         },
         {
           name: "checkpointStep",
-          supported: isStepCheckpointStorage,
+          supported: (st) => hasCapability(st, "stepCheckpoint"),
           write: (s, id, g) =>
-            checkpointOf(s).checkpointStep(
-              {
-                workflowId: id,
-                stepName: "s",
-                outcome: { kind: "completed", result: 1, durationMs: 1, startedAt: fenceAt },
-                attempts: [attemptFor(id)],
-              },
-              g,
-            ),
+            checkpointOf(s).checkpointStep({
+              workflowId: id,
+              stepName: "s",
+              outcome: { kind: "completed", result: 1, durationMs: 1, startedAt: fenceAt },
+              attempts: [attemptFor(id)],
+              guard: g,
+            }),
         },
         {
           name: "beginCompensation",
-          supported: isCompensationLedgerStorage,
+          supported: (st) => hasCapability(st, "compensationLedger"),
           write: (s, id, g) =>
-            ledgerOf(s).beginCompensation({ workflowId: id, error: "boom", errorTag: "Boom" }, g),
+            ledgerOf(s).beginCompensation({
+              workflowId: id,
+              error: "boom",
+              errorTag: "Boom",
+              guard: g,
+            }),
         },
         {
           name: "saveStepCompensation",
-          supported: isCompensationLedgerStorage,
+          supported: (st) => hasCapability(st, "compensationLedger"),
           seed: (s, id) =>
             s.saveStepResult({
               workflowId: id,
@@ -1640,40 +1733,38 @@ export function storageTestSuite(
               startedAt: fenceAt,
             }),
           write: (s, id, g) =>
-            ledgerOf(s).saveStepCompensation(
-              { workflowId: id, stepName: "s", status: "compensated" },
-              g,
-            ),
+            ledgerOf(s).saveStepCompensation({
+              workflowId: id,
+              stepName: "s",
+              status: "compensated",
+              guard: g,
+            }),
         },
         {
           name: "appendEntry",
-          supported: isActivityJournalStorage,
+          supported: (st) => hasCapability(st, "journal"),
           write: (s, id, g) =>
-            suspendOf(s).appendEntry(
-              {
-                workflowId: id,
-                stepName: "j",
-                activityIndex: 0,
-                activityName: "a",
-                exit: { tag: "Success", value: 1 },
-              },
-              g,
-            ),
+            suspendOf(s).appendEntry({
+              workflowId: id,
+              stepName: "j",
+              activityIndex: 0,
+              activityName: "a",
+              exit: { tag: "Success", value: 1 },
+              guard: g,
+            }),
         },
         {
           name: "appendPendingEntry",
           supported: hasSuspend,
           write: (s, id, g) =>
-            suspendOf(s).appendPendingEntry(
-              {
-                workflowId: id,
-                stepName: "j",
-                activityIndex: 0,
-                activityName: "a",
-                stepType: "activity",
-              },
-              g,
-            ),
+            suspendOf(s).appendPendingEntry({
+              workflowId: id,
+              stepName: "j",
+              activityIndex: 0,
+              activityName: "a",
+              stepType: "activity",
+              guard: g,
+            }),
         },
         {
           name: "completePendingEntry",
@@ -1687,15 +1778,13 @@ export function storageTestSuite(
               stepType: "activity",
             }),
           write: (s, id, g) =>
-            suspendOf(s).completePendingEntry(
-              {
-                workflowId: id,
-                stepName: "j",
-                activityIndex: 0,
-                exit: { tag: "Success", value: 1 },
-              },
-              g,
-            ),
+            suspendOf(s).completePendingEntry({
+              workflowId: id,
+              stepName: "j",
+              activityIndex: 0,
+              exit: { tag: "Success", value: 1 },
+              guard: g,
+            }),
         },
         {
           name: "discardJournalEntries",
@@ -1710,10 +1799,12 @@ export function storageTestSuite(
               exit: { tag: "Failure", error: "boom" },
             }),
           write: (s, id, g) =>
-            suspendOf(s).discardJournalEntries!(
-              { workflowId: id, stepName: "j", slots: [{ activityIndex: 0, branchPath: "" }] },
-              g,
-            ),
+            suspendOf(s).discardJournalEntries!({
+              workflowId: id,
+              stepName: "j",
+              slots: [{ activityIndex: 0, branchPath: "" }],
+              guard: g,
+            }),
         },
       ];
 
@@ -1731,11 +1822,14 @@ export function storageTestSuite(
             await s.createWorkflow({ workflowId: id, workflowName: "t", input: {} });
             await c.seed?.(s, id);
 
-            const stale = await s.tryLock(id, 1);
+            const stale = await s.tryLock({ workflowId: id, lockDurationMs: 1 });
             expect(stale.acquired).toBe(true);
             if (stale.token === undefined) return; // backend without fencing
             await sleep(30);
-            const takeover = scenario === "taken-over" ? await peer.tryLock(id, 30_000) : undefined;
+            const takeover =
+              scenario === "taken-over"
+                ? await peer.tryLock({ workflowId: id, lockDurationMs: 30_000 })
+                : undefined;
             if (takeover) expect(takeover.acquired).toBe(true);
 
             const before = await fencedSnapshot(s, id);
@@ -1743,26 +1837,33 @@ export function storageTestSuite(
             expect(await fencedSnapshot(s, id)).toEqual(before);
 
             // The live holder's token passes the same fence.
-            const live = takeover ?? (await peer.tryLock(id, 30_000));
+            const live =
+              takeover ?? (await peer.tryLock({ workflowId: id, lockDurationMs: 30_000 }));
             expect(live.acquired).toBe(true);
             await c.write(peer, id, { fenceToken: live.token });
             expect(await fencedSnapshot(s, id)).not.toEqual(before);
-            await peer.releaseLock(id, { fenceToken: live.token });
+            await peer.releaseLock({ workflowId: id, guard: { fenceToken: live.token } });
           });
         }
       }
 
       it("a fenced heartbeat rejects once its lock expired, before any takeover", async () => {
         const s = await getStorage();
-        const held = await s.tryLock("fw-hb-expired", 1);
+        const held = await s.tryLock({ workflowId: "fw-hb-expired", lockDurationMs: 1 });
         if (held.token === undefined) return; // backend without fencing
         await sleep(30);
-        await rejectsStale(() => s.heartbeat("fw-hb-expired", 30_000, { fenceToken: held.token }));
+        await rejectsStale(() =>
+          s.heartbeat({
+            workflowId: "fw-hb-expired",
+            lockDurationMs: 30_000,
+            guard: { fenceToken: held.token },
+          }),
+        );
         // The expired lease was not revived: another worker can take the run.
         const peer = await getPeer(s);
-        const next = await peer.tryLock("fw-hb-expired", 30_000);
+        const next = await peer.tryLock({ workflowId: "fw-hb-expired", lockDurationMs: 30_000 });
         expect(next.acquired).toBe(true);
-        await peer.releaseLock("fw-hb-expired", { fenceToken: next.token });
+        await peer.releaseLock({ workflowId: "fw-hb-expired", guard: { fenceToken: next.token } });
       });
     });
 
@@ -1779,165 +1880,208 @@ export function storageTestSuite(
         await s.createWorkflow({ workflowId: id, workflowName: "t", input: {} });
 
         // Worker A holds a short lease and makes progress.
-        const a = await s.tryLock(id, 300);
+        const a = await s.tryLock({ workflowId: id, lockDurationMs: 300 });
         if (a.token === undefined) return; // backend without fencing
         const aGuard = { fenceToken: a.token };
-        await s.saveStepResult(
-          { workflowId: id, stepName: "one", result: "a", durationMs: 1, startedAt: fenceAt },
-          aGuard,
-        );
+        await s.saveStepResult({
+          workflowId: id,
+          stepName: "one",
+          result: "a",
+          durationMs: 1,
+          startedAt: fenceAt,
+          guard: aGuard,
+        });
         if (journaled) {
-          await suspendOf(s).appendPendingEntry(
-            {
-              workflowId: id,
-              stepName: "j",
-              activityIndex: 0,
-              activityName: "act",
-              stepType: "activity",
-            },
-            aGuard,
-          );
+          await suspendOf(s).appendPendingEntry({
+            workflowId: id,
+            stepName: "j",
+            activityIndex: 0,
+            activityName: "act",
+            stepType: "activity",
+            guard: aGuard,
+          });
         }
 
         // A stalls past its lease without heartbeating; B takes the run over.
         await sleep(400);
-        const b = await peer.tryLock(id, 30_000);
+        const b = await peer.tryLock({ workflowId: id, lockDurationMs: 30_000 });
         expect(b.acquired).toBe(true);
         const bGuard = { fenceToken: b.token };
-        await peer.saveStepResult(
-          { workflowId: id, stepName: "one", result: "b", durationMs: 1, startedAt: fenceAt },
-          bGuard,
-        );
+        await peer.saveStepResult({
+          workflowId: id,
+          stepName: "one",
+          result: "b",
+          durationMs: 1,
+          startedAt: fenceAt,
+          guard: bGuard,
+        });
         if (journaled) {
-          await suspendOf(peer).completePendingEntry(
-            {
-              workflowId: id,
-              stepName: "j",
-              activityIndex: 0,
-              exit: { tag: "Success", value: "b" },
-            },
-            bGuard,
-          );
+          await suspendOf(peer).completePendingEntry({
+            workflowId: id,
+            stepName: "j",
+            activityIndex: 0,
+            exit: { tag: "Success", value: "b" },
+            guard: bGuard,
+          });
         }
-        await peer.setWorkflowMetadata(id, { owner: "b" }, bGuard);
+        await peer.setWorkflowMetadata({ workflowId: id, patch: { owner: "b" }, guard: bGuard });
         const bState = await fencedSnapshot(s, id);
 
         // A wakes up and carries on as if it still held the run: every
         // write fails.
-        await rejectsStale(() => s.heartbeat(id, 30_000, aGuard));
         await rejectsStale(() =>
-          s.saveStepResult(
-            { workflowId: id, stepName: "two", result: "a", durationMs: 1, startedAt: fenceAt },
-            aGuard,
-          ),
+          s.heartbeat({ workflowId: id, lockDurationMs: 30_000, guard: aGuard }),
         );
         await rejectsStale(() =>
-          s.batchSaveStepResults(
-            [{ workflowId: id, stepName: "one", result: "a2", durationMs: 1, startedAt: fenceAt }],
-            aGuard,
-          ),
+          s.saveStepResult({
+            workflowId: id,
+            stepName: "two",
+            result: "a",
+            durationMs: 1,
+            startedAt: fenceAt,
+            guard: aGuard,
+          }),
         );
         await rejectsStale(() =>
-          s.saveStepFailure(
-            { workflowId: id, stepName: "two", error: "a", durationMs: 1, startedAt: fenceAt },
-            aGuard,
-          ),
+          s.batchSaveStepResults({
+            records: [
+              { workflowId: id, stepName: "one", result: "a2", durationMs: 1, startedAt: fenceAt },
+            ],
+            guard: aGuard,
+          }),
         );
         await rejectsStale(() =>
-          s.saveTaskResult({ workflowId: id, stepName: "m", taskIndex: 0, result: "a" }, aGuard),
+          s.saveStepFailure({
+            workflowId: id,
+            stepName: "two",
+            error: "a",
+            durationMs: 1,
+            startedAt: fenceAt,
+            guard: aGuard,
+          }),
         );
         await rejectsStale(() =>
-          s.saveTaskFailure({ workflowId: id, stepName: "m", taskIndex: 0, error: "a" }, aGuard),
+          s.saveTaskResult({
+            workflowId: id,
+            stepName: "m",
+            taskIndex: 0,
+            result: "a",
+            guard: aGuard,
+          }),
         );
         await rejectsStale(() =>
-          s.suspendWorkflow(id, "two", { status: "sleeping", wakeAt: fenceAt }, aGuard),
+          s.saveTaskFailure({
+            workflowId: id,
+            stepName: "m",
+            taskIndex: 0,
+            error: "a",
+            guard: aGuard,
+          }),
         );
-        await rejectsStale(() => s.setWorkflowMetadata(id, { owner: "a" }, aGuard));
         await rejectsStale(() =>
-          s.appendStreamChunk(
-            { workflowId: id, streamId: "out", payload: "a", appendedBy: "workflow" },
-            aGuard,
-          ),
+          s.suspendWorkflow({
+            workflowId: id,
+            stepName: "two",
+            stepUpdate: { status: "sleeping", wakeAt: fenceAt },
+            guard: aGuard,
+          }),
         );
         await rejectsStale(() =>
-          s.createWorkflow(
-            { workflowId: `${id}-child`, workflowName: "child", input: {}, parentWorkflowId: id },
-            aGuard,
-          ),
+          s.setWorkflowMetadata({ workflowId: id, patch: { owner: "a" }, guard: aGuard }),
+        );
+        await rejectsStale(() =>
+          s.appendStreamChunk({
+            workflowId: id,
+            streamId: "out",
+            payload: "a",
+            appendedBy: "workflow",
+            guard: aGuard,
+          }),
+        );
+        await rejectsStale(() =>
+          s.createWorkflow({
+            workflowId: `${id}-child`,
+            workflowName: "child",
+            input: {},
+            parentWorkflowId: id,
+            guard: aGuard,
+          }),
         );
         if (await recordsAttempts(s)) {
-          await rejectsStale(() => attemptsOf(s).saveStepAttempt(attemptFor(id), aGuard));
+          await rejectsStale(() =>
+            attemptsOf(s).saveStepAttempt({ record: attemptFor(id), guard: aGuard }),
+          );
         }
         if (journaled) {
           const j = suspendOf(s);
           await rejectsStale(() =>
-            j.completePendingEntry(
-              {
-                workflowId: id,
-                stepName: "j",
-                activityIndex: 0,
-                exit: { tag: "Success", value: "a" },
-              },
-              aGuard,
-            ),
+            j.completePendingEntry({
+              workflowId: id,
+              stepName: "j",
+              activityIndex: 0,
+              exit: { tag: "Success", value: "a" },
+              guard: aGuard,
+            }),
           );
           await rejectsStale(() =>
-            j.appendEntry(
-              {
-                workflowId: id,
-                stepName: "j",
-                activityIndex: 1,
-                activityName: "act",
-                exit: { tag: "Success", value: "a" },
-              },
-              aGuard,
-            ),
+            j.appendEntry({
+              workflowId: id,
+              stepName: "j",
+              activityIndex: 1,
+              activityName: "act",
+              exit: { tag: "Success", value: "a" },
+              guard: aGuard,
+            }),
           );
           await rejectsStale(() =>
-            j.appendPendingEntry(
-              {
-                workflowId: id,
-                stepName: "j",
-                activityIndex: 2,
-                activityName: "nap",
-                stepType: "sleep",
-                wakeAt: fenceAt,
-              },
-              aGuard,
-            ),
+            j.appendPendingEntry({
+              workflowId: id,
+              stepName: "j",
+              activityIndex: 2,
+              activityName: "nap",
+              stepType: "sleep",
+              wakeAt: fenceAt,
+              guard: aGuard,
+            }),
           );
           if (typeof j.discardJournalEntries === "function") {
             await rejectsStale(() =>
-              j.discardJournalEntries!(
-                { workflowId: id, stepName: "j", slots: [{ activityIndex: 0, branchPath: "" }] },
-                aGuard,
-              ),
+              j.discardJournalEntries!({
+                workflowId: id,
+                stepName: "j",
+                slots: [{ activityIndex: 0, branchPath: "" }],
+                guard: aGuard,
+              }),
             );
           }
         }
-        await rejectsStale(() => s.startFreshRun(id, aGuard));
-        await rejectsStale(() => s.completeWorkflow(id, "a", aGuard));
-        await rejectsStale(() => s.failWorkflow(id, "a", aGuard));
-        if (isTripwireCapableStorage(s)) {
-          await rejectsStale(() => s.tripwireWorkflow(id, "a", aGuard));
+        await rejectsStale(() => s.startFreshRun({ workflowId: id, guard: aGuard }));
+        await rejectsStale(() =>
+          s.completeWorkflow({ workflowId: id, result: "a", guard: aGuard }),
+        );
+        await rejectsStale(() => s.failWorkflow({ workflowId: id, error: "a", guard: aGuard }));
+        if (hasCapability(s, "tripwire")) {
+          await rejectsStale(() =>
+            s.tripwireWorkflow({ workflowId: id, reason: "a", guard: aGuard }),
+          );
         }
-        await rejectsStale(() => s.cancelWorkflow(id, undefined, aGuard));
+        await rejectsStale(() => s.cancelWorkflow({ workflowId: id, guard: aGuard }));
         // A's release is a no-op: B keeps the lock.
-        await s.releaseLock(id, aGuard);
+        await s.releaseLock({ workflowId: id, guard: aGuard });
 
         expect(await fencedSnapshot(s, id)).toEqual(bState);
-        expect((await s.tryLock(id, 30_000)).acquired).toBe(false);
+        expect((await s.tryLock({ workflowId: id, lockDurationMs: 30_000 })).acquired).toBe(false);
 
         // B is unaffected and finishes the run.
-        await peer.heartbeat(id, 30_000, bGuard);
-        await peer.completeWorkflow(id, "b", bGuard);
+        await peer.heartbeat({ workflowId: id, lockDurationMs: 30_000, guard: bGuard });
+        await peer.completeWorkflow({ workflowId: id, result: "b", guard: bGuard });
         const final = (await s.loadWorkflow(id))!;
         expect(final.status).toBe("completed");
         expect(final.result).toBe("b");
         expect(final.steps["one"]?.result).toBe("b");
         expect(final.steps["two"]).toBeUndefined();
         expect(final.metadata).toEqual({ owner: "b" });
-        await peer.releaseLock(id, bGuard);
+        await peer.releaseLock({ workflowId: id, guard: bGuard });
       });
     });
 
@@ -1951,7 +2095,7 @@ export function storageTestSuite(
         await s.createWorkflow({ workflowId: "fresh-1", workflowName: "test", input: {} });
         expect((await s.loadWorkflow("fresh-1"))!.run).toBe(1);
 
-        const newRun = await s.startFreshRun("fresh-1");
+        const newRun = await s.startFreshRun({ workflowId: "fresh-1" });
         expect(newRun).toBe(2);
 
         const state = await s.loadWorkflow("fresh-1");
@@ -1976,7 +2120,7 @@ export function storageTestSuite(
         expect((await s.loadWorkflow("fresh-2"))!.steps["old-step"]).toBeDefined();
 
         // After fresh run, steps from run 1 are not loaded
-        await s.startFreshRun("fresh-2");
+        await s.startFreshRun({ workflowId: "fresh-2" });
         const state = await s.loadWorkflow("fresh-2");
         expect(state!.run).toBe(2);
         expect(Object.keys(state!.steps)).toHaveLength(0);
@@ -1992,10 +2136,10 @@ export function storageTestSuite(
           durationMs: 10,
           startedAt: new Date(),
         });
-        await s.completeWorkflow("fresh-3", "result-1");
+        await s.completeWorkflow({ workflowId: "fresh-3", result: "result-1" });
 
         // Fresh run → run 2
-        await s.startFreshRun("fresh-3");
+        await s.startFreshRun({ workflowId: "fresh-3" });
         await s.saveStepResult({
           workflowId: "fresh-3",
           stepName: "step-a",
@@ -2003,7 +2147,7 @@ export function storageTestSuite(
           durationMs: 10,
           startedAt: new Date(),
         });
-        await s.completeWorkflow("fresh-3", "result-2");
+        await s.completeWorkflow({ workflowId: "fresh-3", result: "result-2" });
 
         // loadWorkflow returns latest run
         const state = await s.loadWorkflow("fresh-3");
@@ -2028,9 +2172,9 @@ export function storageTestSuite(
           durationMs: 10,
           startedAt: new Date(),
         });
-        await s.completeWorkflow("hist-1", "result-1");
+        await s.completeWorkflow({ workflowId: "hist-1", result: "result-1" });
 
-        await s.startFreshRun("hist-1");
+        await s.startFreshRun({ workflowId: "hist-1" });
         await s.saveStepResult({
           workflowId: "hist-1",
           stepName: "compute",
@@ -2038,9 +2182,9 @@ export function storageTestSuite(
           durationMs: 10,
           startedAt: new Date(),
         });
-        await s.completeWorkflow("hist-1", "result-2");
+        await s.completeWorkflow({ workflowId: "hist-1", result: "result-2" });
 
-        await s.startFreshRun("hist-1");
+        await s.startFreshRun({ workflowId: "hist-1" });
         await s.saveStepResult({
           workflowId: "hist-1",
           stepName: "compute",
@@ -2048,9 +2192,9 @@ export function storageTestSuite(
           durationMs: 10,
           startedAt: new Date(),
         });
-        await s.completeWorkflow("hist-1", "result-3");
+        await s.completeWorkflow({ workflowId: "hist-1", result: "result-3" });
 
-        const history = await s.loadRunHistory("hist-1");
+        const history = await s.loadRunHistory({ workflowId: "hist-1" });
         expect(history).toHaveLength(3);
         expect(history[0]!.run).toBe(3); // newest first
         expect(history[1]!.run).toBe(2);
@@ -2061,7 +2205,7 @@ export function storageTestSuite(
 
       it("returns empty array for non-existent workflow", async () => {
         const s = await getStorage();
-        expect(await s.loadRunHistory("nonexistent")).toEqual([]);
+        expect(await s.loadRunHistory({ workflowId: "nonexistent" })).toEqual([]);
       });
 
       it("supports pagination with limit and offset", async () => {
@@ -2075,8 +2219,8 @@ export function storageTestSuite(
           durationMs: 1,
           startedAt: now,
         });
-        await s.completeWorkflow("hist-2", "r1");
-        await s.startFreshRun("hist-2");
+        await s.completeWorkflow({ workflowId: "hist-2", result: "r1" });
+        await s.startFreshRun({ workflowId: "hist-2" });
         await s.saveStepResult({
           workflowId: "hist-2",
           stepName: "s",
@@ -2084,8 +2228,8 @@ export function storageTestSuite(
           durationMs: 1,
           startedAt: now,
         });
-        await s.completeWorkflow("hist-2", "r2");
-        await s.startFreshRun("hist-2");
+        await s.completeWorkflow({ workflowId: "hist-2", result: "r2" });
+        await s.startFreshRun({ workflowId: "hist-2" });
         await s.saveStepResult({
           workflowId: "hist-2",
           stepName: "s",
@@ -2093,16 +2237,16 @@ export function storageTestSuite(
           durationMs: 1,
           startedAt: now,
         });
-        await s.completeWorkflow("hist-2", "r3");
+        await s.completeWorkflow({ workflowId: "hist-2", result: "r3" });
 
         // First page
-        const page1 = await s.loadRunHistory("hist-2", { limit: 2 });
+        const page1 = await s.loadRunHistory({ workflowId: "hist-2", limit: 2 });
         expect(page1).toHaveLength(2);
         expect(page1[0]!.run).toBe(3);
         expect(page1[1]!.run).toBe(2);
 
         // Second page
-        const page2 = await s.loadRunHistory("hist-2", { limit: 2, offset: 2 });
+        const page2 = await s.loadRunHistory({ workflowId: "hist-2", limit: 2, offset: 2 });
         expect(page2).toHaveLength(1);
         expect(page2[0]!.run).toBe(1);
       });
@@ -2110,14 +2254,14 @@ export function storageTestSuite(
       it("preserves status and result for archived runs", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "hist-meta-1", workflowName: "test", input: {} });
-        await s.completeWorkflow("hist-meta-1", "first-result");
+        await s.completeWorkflow({ workflowId: "hist-meta-1", result: "first-result" });
 
-        await s.startFreshRun("hist-meta-1");
-        await s.failWorkflow("hist-meta-1", "boom");
+        await s.startFreshRun({ workflowId: "hist-meta-1" });
+        await s.failWorkflow({ workflowId: "hist-meta-1", error: "boom" });
 
-        await s.startFreshRun("hist-meta-1");
+        await s.startFreshRun({ workflowId: "hist-meta-1" });
 
-        const history = await s.loadRunHistory("hist-meta-1");
+        const history = await s.loadRunHistory({ workflowId: "hist-meta-1" });
         expect(history).toHaveLength(3);
 
         // Current run (3) — pending, no result
@@ -2140,11 +2284,11 @@ export function storageTestSuite(
       it("preserves completedAt for archived runs", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "hist-meta-2", workflowName: "test", input: {} });
-        await s.completeWorkflow("hist-meta-2", "done");
+        await s.completeWorkflow({ workflowId: "hist-meta-2", result: "done" });
 
-        await s.startFreshRun("hist-meta-2");
+        await s.startFreshRun({ workflowId: "hist-meta-2" });
 
-        const history = await s.loadRunHistory("hist-meta-2");
+        const history = await s.loadRunHistory({ workflowId: "hist-meta-2" });
         expect(history[1]!.run).toBe(1);
         expect(history[1]!.completedAt).toBeInstanceOf(Date);
       });
@@ -2153,7 +2297,7 @@ export function storageTestSuite(
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "hist-3", workflowName: "test", input: {} });
 
-        const history = await s.loadRunHistory("hist-3");
+        const history = await s.loadRunHistory({ workflowId: "hist-3" });
         expect(history).toHaveLength(1);
         expect(history[0]!.run).toBe(1);
         expect(history[0]!.status).toBe("pending");
@@ -2168,7 +2312,7 @@ export function storageTestSuite(
       it("purges completed workflow older than maxAge", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "purge-c1", workflowName: "test", input: {} });
-        await s.completeWorkflow("purge-c1", "done");
+        await s.completeWorkflow({ workflowId: "purge-c1", result: "done" });
 
         // Completed just now — should NOT be purged with 1h threshold
         const deleted = await s.purgeCompleted({ olderThanMs: 3_600_000, limit: 100 });
@@ -2179,7 +2323,7 @@ export function storageTestSuite(
       it("purges failed workflow older than maxAge", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "purge-f1", workflowName: "test", input: {} });
-        await s.failWorkflow("purge-f1", "boom");
+        await s.failWorkflow({ workflowId: "purge-f1", error: "boom" });
 
         const deleted = await s.purgeCompleted({ olderThanMs: 3_600_000, limit: 100 });
         expect(deleted).toBe(0);
@@ -2205,10 +2349,14 @@ export function storageTestSuite(
         const before = new Date();
         await new Promise((r) => setTimeout(r, 10));
         await s.createWorkflow({ workflowId: "purge-s1", workflowName: "test", input: {} });
-        await s.suspendWorkflow("purge-s1", "wait", {
-          status: "sleeping",
-          stepType: "sleep",
-          wakeAt: new Date(Date.now() + 60_000),
+        await s.suspendWorkflow({
+          workflowId: "purge-s1",
+          stepName: "wait",
+          stepUpdate: {
+            status: "sleeping",
+            stepType: "sleep",
+            wakeAt: new Date(Date.now() + 60_000),
+          },
         });
         await new Promise((r) => setTimeout(r, 10));
         const after = new Date();
@@ -2224,11 +2372,11 @@ export function storageTestSuite(
         await new Promise((r) => setTimeout(r, 10));
 
         await s.createWorkflow({ workflowId: "purge-b1", workflowName: "test", input: {} });
-        await s.completeWorkflow("purge-b1", "done");
+        await s.completeWorkflow({ workflowId: "purge-b1", result: "done" });
         await s.createWorkflow({ workflowId: "purge-b2", workflowName: "test", input: {} });
-        await s.completeWorkflow("purge-b2", "done");
+        await s.completeWorkflow({ workflowId: "purge-b2", result: "done" });
         await s.createWorkflow({ workflowId: "purge-b3", workflowName: "test", input: {} });
-        await s.completeWorkflow("purge-b3", "done");
+        await s.completeWorkflow({ workflowId: "purge-b3", result: "done" });
 
         await new Promise((r) => setTimeout(r, 10));
         const after = new Date();
@@ -2250,21 +2398,21 @@ export function storageTestSuite(
         const s = await getStorage();
 
         await s.createWorkflow({ workflowId: "purge-range-1", workflowName: "test", input: {} });
-        await s.completeWorkflow("purge-range-1", "done");
+        await s.completeWorkflow({ workflowId: "purge-range-1", result: "done" });
 
         await new Promise((r) => setTimeout(r, 15));
         const t1 = new Date();
         await new Promise((r) => setTimeout(r, 15));
 
         await s.createWorkflow({ workflowId: "purge-range-2", workflowName: "test", input: {} });
-        await s.completeWorkflow("purge-range-2", "done");
+        await s.completeWorkflow({ workflowId: "purge-range-2", result: "done" });
 
         await new Promise((r) => setTimeout(r, 15));
         const t2 = new Date();
         await new Promise((r) => setTimeout(r, 15));
 
         await s.createWorkflow({ workflowId: "purge-range-3", workflowName: "test", input: {} });
-        await s.completeWorkflow("purge-range-3", "done");
+        await s.completeWorkflow({ workflowId: "purge-range-3", result: "done" });
 
         // Only purge workflows completed in [t1, t2) — should catch range-2 only
         const deleted = await s.purgeCompleted({ from: t1, to: t2, limit: 100 });
@@ -2288,8 +2436,12 @@ export function storageTestSuite(
           durationMs: 10,
           startedAt: new Date(),
         });
-        await s.deliverSignal("purge-cascade", "sig", { data: true });
-        await s.completeWorkflow("purge-cascade", "done");
+        await s.deliverSignal({
+          workflowId: "purge-cascade",
+          signalName: "sig",
+          payload: { data: true },
+        });
+        await s.completeWorkflow({ workflowId: "purge-cascade", result: "done" });
 
         await new Promise((r) => setTimeout(r, 10));
         const after = new Date();
@@ -2300,7 +2452,7 @@ export function storageTestSuite(
         // Workflow and all related data should be gone
         expect(await s.loadWorkflow("purge-cascade")).toBeNull();
         expect(await s.loadSignals("purge-cascade")).toEqual([]);
-        expect(await s.loadRunHistory("purge-cascade")).toEqual([]);
+        expect(await s.loadRunHistory({ workflowId: "purge-cascade" })).toEqual([]);
       });
     });
 
@@ -2312,8 +2464,8 @@ export function storageTestSuite(
       it("a late completeWorkflow does not overwrite a cancel", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "term-cc", workflowName: "t", input: {} });
-        await s.cancelWorkflow("term-cc");
-        await s.completeWorkflow("term-cc", "late");
+        await s.cancelWorkflow({ workflowId: "term-cc" });
+        await s.completeWorkflow({ workflowId: "term-cc", result: "late" });
         const state = (await s.loadWorkflow("term-cc"))!;
         expect(state.status).toBe("failed");
         expect(state.error).toBe("Cancelled");
@@ -2323,25 +2475,29 @@ export function storageTestSuite(
       it("a fenced completion from the lock holder does not resurrect a cancelled run", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "term-fenced", workflowName: "t", input: {} });
-        const { token } = await s.tryLock("term-fenced", 30_000);
-        await s.cancelWorkflow("term-fenced");
-        await s.completeWorkflow("term-fenced", "late", { fenceToken: token });
+        const { token } = await s.tryLock({ workflowId: "term-fenced", lockDurationMs: 30_000 });
+        await s.cancelWorkflow({ workflowId: "term-fenced" });
+        await s.completeWorkflow({
+          workflowId: "term-fenced",
+          result: "late",
+          guard: { fenceToken: token },
+        });
         const state = (await s.loadWorkflow("term-fenced"))!;
         expect(state.status).toBe("failed");
         expect(state.error).toBe("Cancelled");
-        await s.releaseLock("term-fenced", { fenceToken: token });
+        await s.releaseLock({ workflowId: "term-fenced", guard: { fenceToken: token } });
       });
 
       it("failWorkflow does not overwrite a cancel or a completion", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "term-cf", workflowName: "t", input: {} });
-        await s.cancelWorkflow("term-cf");
-        await s.failWorkflow("term-cf", "boom");
+        await s.cancelWorkflow({ workflowId: "term-cf" });
+        await s.failWorkflow({ workflowId: "term-cf", error: "boom" });
         expect((await s.loadWorkflow("term-cf"))!.error).toBe("Cancelled");
 
         await s.createWorkflow({ workflowId: "term-ok", workflowName: "t", input: {} });
-        await s.completeWorkflow("term-ok", "done");
-        await s.failWorkflow("term-ok", "boom");
+        await s.completeWorkflow({ workflowId: "term-ok", result: "done" });
+        await s.failWorkflow({ workflowId: "term-ok", error: "boom" });
         const ok = (await s.loadWorkflow("term-ok"))!;
         expect(ok.status).toBe("completed");
         expect(ok.result).toBe("done");
@@ -2352,13 +2508,13 @@ export function storageTestSuite(
         const s = await getStorage();
         if (typeof s.tripwireWorkflow !== "function") return;
         await s.createWorkflow({ workflowId: "term-tw", workflowName: "t", input: {} });
-        await s.completeWorkflow("term-tw", "done");
-        await s.tripwireWorkflow("term-tw", { why: "late" });
+        await s.completeWorkflow({ workflowId: "term-tw", result: "done" });
+        await s.tripwireWorkflow({ workflowId: "term-tw", reason: { why: "late" } });
         expect((await s.loadWorkflow("term-tw"))!.status).toBe("completed");
 
         await s.createWorkflow({ workflowId: "term-tw2", workflowName: "t", input: {} });
-        await s.tripwireWorkflow("term-tw2", { why: "first" });
-        await s.completeWorkflow("term-tw2", "late");
+        await s.tripwireWorkflow({ workflowId: "term-tw2", reason: { why: "first" } });
+        await s.completeWorkflow({ workflowId: "term-tw2", result: "late" });
         const tw = (await s.loadWorkflow("term-tw2"))!;
         expect(tw.status).toBe("tripwire");
         expect(tw.tripwire).toEqual({ why: "first" });
@@ -2367,12 +2523,16 @@ export function storageTestSuite(
       it("completing a suspended run is allowed", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "term-susp", workflowName: "t", input: {} });
-        await s.suspendWorkflow("term-susp", "wait", {
-          status: "sleeping",
-          stepType: "sleep",
-          wakeAt: new Date(Date.now() + 60_000),
+        await s.suspendWorkflow({
+          workflowId: "term-susp",
+          stepName: "wait",
+          stepUpdate: {
+            status: "sleeping",
+            stepType: "sleep",
+            wakeAt: new Date(Date.now() + 60_000),
+          },
         });
-        await s.completeWorkflow("term-susp", "done");
+        await s.completeWorkflow({ workflowId: "term-susp", result: "done" });
         expect((await s.loadWorkflow("term-susp"))!.status).toBe("completed");
       });
     });
@@ -2409,7 +2569,9 @@ export function storageTestSuite(
       it("failWorkflow stores the errorTag; fresh runs clear it", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "etag-wf", workflowName: "t", input: {} });
-        await s.failWorkflow("etag-wf", "card declined", undefined, {
+        await s.failWorkflow({
+          workflowId: "etag-wf",
+          error: "card declined",
           errorTag: "PaymentDeclined",
         });
         const failed = (await s.loadWorkflow("etag-wf"))!;
@@ -2421,7 +2583,7 @@ export function storageTestSuite(
           errorTag: "PaymentDeclined",
         });
 
-        await s.startFreshRun("etag-wf");
+        await s.startFreshRun({ workflowId: "etag-wf" });
         const fresh = (await s.loadWorkflow("etag-wf"))!;
         expect(fresh.errorTag).toBeUndefined();
         expect(fresh.error).toBeUndefined();
@@ -2430,7 +2592,7 @@ export function storageTestSuite(
       it("cancelWorkflow stores the cancel tag", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "etag-cancel", workflowName: "t", input: {} });
-        await s.cancelWorkflow("etag-cancel");
+        await s.cancelWorkflow({ workflowId: "etag-cancel" });
         expect((await s.loadWorkflow("etag-cancel"))!.errorTag).toBe("WorkflowCancelledError");
         expect(await s.loadWorkflowStatus("etag-cancel")).toEqual({
           status: "failed",
@@ -2443,7 +2605,7 @@ export function storageTestSuite(
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "status-live", workflowName: "t", input: {} });
         expect(await s.loadWorkflowStatus("status-live")).toEqual({ status: "pending" });
-        await s.completeWorkflow("status-live", "done");
+        await s.completeWorkflow({ workflowId: "status-live", result: "done" });
         expect(await s.loadWorkflowStatus("status-live")).toEqual({ status: "completed" });
         expect(await s.loadWorkflowStatus("status-missing")).toBeNull();
       });
@@ -2451,28 +2613,40 @@ export function storageTestSuite(
       it("a fenced heartbeat rejects once the lock is held under another token", async () => {
         const s = await getStorage();
         const peer = await getPeer(s);
-        const stale = await s.tryLock("hb-lost", 1);
+        const stale = await s.tryLock({ workflowId: "hb-lost", lockDurationMs: 1 });
         expect(stale.acquired).toBe(true);
         if (stale.token === undefined) return; // backend without fencing
         await sleep(30);
-        const fresh = await peer.tryLock("hb-lost", 30_000);
+        const fresh = await peer.tryLock({ workflowId: "hb-lost", lockDurationMs: 30_000 });
         expect(fresh.acquired).toBe(true);
 
         await expect(
-          s.heartbeat("hb-lost", 30_000, { fenceToken: stale.token }),
+          s.heartbeat({
+            workflowId: "hb-lost",
+            lockDurationMs: 30_000,
+            guard: { fenceToken: stale.token },
+          }),
         ).rejects.toMatchObject({ _tag: "FenceTokenMismatchError" });
         // The holder's own heartbeat still extends.
-        await peer.heartbeat("hb-lost", 30_000, { fenceToken: fresh.token });
-        await peer.releaseLock("hb-lost", { fenceToken: fresh.token });
+        await peer.heartbeat({
+          workflowId: "hb-lost",
+          lockDurationMs: 30_000,
+          guard: { fenceToken: fresh.token },
+        });
+        await peer.releaseLock({ workflowId: "hb-lost", guard: { fenceToken: fresh.token } });
       });
 
       it("a fenced heartbeat rejects once the lock was released", async () => {
         const s = await getStorage();
-        const held = await s.tryLock("hb-gone", 30_000);
+        const held = await s.tryLock({ workflowId: "hb-gone", lockDurationMs: 30_000 });
         if (held.token === undefined) return; // backend without fencing
-        await s.releaseLock("hb-gone", { fenceToken: held.token });
+        await s.releaseLock({ workflowId: "hb-gone", guard: { fenceToken: held.token } });
         await expect(
-          s.heartbeat("hb-gone", 30_000, { fenceToken: held.token }),
+          s.heartbeat({
+            workflowId: "hb-gone",
+            lockDurationMs: 30_000,
+            guard: { fenceToken: held.token },
+          }),
         ).rejects.toMatchObject({ _tag: "FenceTokenMismatchError" });
       });
     });
@@ -2483,12 +2657,12 @@ export function storageTestSuite(
 
     if (options.hasCompensationLedger) {
       describe("compensation ledger", () => {
-        async function getLedgerStorage(): Promise<WorkflowStorage & CompensationLedgerStorage> {
+        async function getLedgerStorage(): Promise<WorkflowStorage & CompensationLedgerStore> {
           const s = await getStorage();
-          if (!isCompensationLedgerStorage(s)) {
+          if (!hasCapability(s, "compensationLedger")) {
             throw new Error(
               "storageTestSuite was invoked with hasCompensationLedger: true, but the factory " +
-                "returned a storage that does not implement CompensationLedgerStorage.",
+                "returned a storage that does not implement CompensationLedgerStore.",
             );
           }
           return s;
@@ -2553,11 +2727,11 @@ export function storageTestSuite(
         it("beginCompensation never moves an ended run", async () => {
           const s = await getLedgerStorage();
           await runWithSteps(s, "led-done", ["a"]);
-          await s.completeWorkflow("led-done", "ok");
+          await s.completeWorkflow({ workflowId: "led-done", result: "ok" });
           await runWithSteps(s, "led-failed", ["a"]);
-          await s.failWorkflow("led-failed", "nope");
+          await s.failWorkflow({ workflowId: "led-failed", error: "nope" });
           await runWithSteps(s, "led-cancelled", ["a"]);
-          await s.cancelWorkflow("led-cancelled");
+          await s.cancelWorkflow({ workflowId: "led-cancelled" });
 
           for (const id of ["led-done", "led-failed", "led-cancelled"]) {
             const before = await s.loadWorkflowStatus(id);
@@ -2618,10 +2792,10 @@ export function storageTestSuite(
           await runWithSteps(s, "led-end", ["a"]);
           await s.beginCompensation({ workflowId: "led-end", error: "boom", errorTag: "Boom" });
 
-          await s.cancelWorkflow("led-end");
+          await s.cancelWorkflow({ workflowId: "led-end" });
           expect((await s.loadWorkflowStatus("led-end"))?.status).toBe("compensating");
 
-          await s.failWorkflow("led-end", "boom", undefined, { errorTag: "Boom" });
+          await s.failWorkflow({ workflowId: "led-end", error: "boom", errorTag: "Boom" });
           const state = await s.loadWorkflow("led-end");
           expect(state?.status).toBe("failed");
           expect(state?.errorTag).toBe("Boom");
@@ -2637,9 +2811,9 @@ export function storageTestSuite(
             stepName: "a",
             status: "compensated",
           });
-          await s.failWorkflow("led-fresh", "boom");
+          await s.failWorkflow({ workflowId: "led-fresh", error: "boom" });
 
-          await s.startFreshRun("led-fresh");
+          await s.startFreshRun({ workflowId: "led-fresh" });
           await s.saveStepResult({
             workflowId: "led-fresh",
             stepName: "a",
@@ -2664,9 +2838,9 @@ export function storageTestSuite(
                 status: "compensated",
               });
             }
-            await s.failWorkflow("led-reset", "boom");
+            await s.failWorkflow({ workflowId: "led-reset", error: "boom" });
 
-            await s.resetSteps!("led-reset", ["b"]);
+            await s.resetSteps!({ workflowId: "led-reset", stepNames: ["b"] });
             const state = await s.loadWorkflow("led-reset");
             expect(state?.status).toBe("running");
             expect(state?.steps.b).toBeUndefined();
@@ -2785,7 +2959,7 @@ export function storageTestSuite(
       it("cancel without cascade leaves children alone", async () => {
         const s = await getStorage();
         await seedFamily(s);
-        await s.cancelWorkflow("fam-root");
+        await s.cancelWorkflow({ workflowId: "fam-root" });
         expect((await s.loadWorkflow("fam-root"))!.status).toBe("failed");
         expect((await s.loadWorkflow("fam-child"))!.status).toBe("pending");
       });
@@ -2793,7 +2967,7 @@ export function storageTestSuite(
       it("cancel with cascade cancels every descendant and nothing else", async () => {
         const s = await getStorage();
         await seedFamily(s);
-        await s.cancelWorkflow("fam-root", { cascade: true });
+        await s.cancelWorkflow({ workflowId: "fam-root", cascade: true });
         for (const id of ["fam-root", "fam-child", "fam-grandchild"]) {
           const state = (await s.loadWorkflow(id))!;
           expect(state.status).toBe("failed");
@@ -2822,16 +2996,20 @@ export function storageTestSuite(
           durationMs: 1,
           startedAt: new Date(),
         });
-        await s.completeWorkflow("st-completed", "ok");
-        await s.failWorkflow("st-failed", "boom");
-        await s.suspendWorkflow("st-suspended", "wait", {
-          status: "sleeping",
-          stepType: "sleep",
-          wakeAt: new Date(Date.now() + 60_000),
+        await s.completeWorkflow({ workflowId: "st-completed", result: "ok" });
+        await s.failWorkflow({ workflowId: "st-failed", error: "boom" });
+        await s.suspendWorkflow({
+          workflowId: "st-suspended",
+          stepName: "wait",
+          stepUpdate: {
+            status: "sleeping",
+            stepType: "sleep",
+            wakeAt: new Date(Date.now() + 60_000),
+          },
         });
         if (typeof s.tripwireWorkflow === "function") {
           await s.createWorkflow({ workflowId: "st-tripwire", workflowName: "t", input: {} });
-          await s.tripwireWorkflow("st-tripwire", { why: "x" });
+          await s.tripwireWorkflow({ workflowId: "st-tripwire", reason: { why: "x" } });
           expected.push("st-tripwire");
         }
 
@@ -2913,9 +3091,9 @@ export function storageTestSuite(
       it("the last delivery under a name wins", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "sig-lw", workflowName: "t", input: {} });
-        await s.deliverSignal("sig-lw", "a", 1);
-        await s.deliverSignal("sig-lw", "a", 2);
-        await s.deliverSignal("sig-lw", "b", "x");
+        await s.deliverSignal({ workflowId: "sig-lw", signalName: "a", payload: 1 });
+        await s.deliverSignal({ workflowId: "sig-lw", signalName: "a", payload: 2 });
+        await s.deliverSignal({ workflowId: "sig-lw", signalName: "b", payload: "x" });
         const signals = await s.loadSignals("sig-lw");
         const byName = Object.fromEntries(signals.map((x) => [x.signalName, x.payload]));
         expect(signals).toHaveLength(2);
@@ -2925,7 +3103,7 @@ export function storageTestSuite(
       it("reading signals does not consume them", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "sig-read", workflowName: "t", input: {} });
-        await s.deliverSignal("sig-read", "go", { n: 1 });
+        await s.deliverSignal({ workflowId: "sig-read", signalName: "go", payload: { n: 1 } });
         const first = await s.loadSignals("sig-read");
         const second = await s.loadSignals("sig-read");
         expect(first.map((x) => [x.signalName, x.payload])).toEqual([["go", { n: 1 }]]);
@@ -2935,11 +3113,15 @@ export function storageTestSuite(
       it("a delivery made before the wait starts is seen by the waiter", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "sig-early", workflowName: "t", input: {} });
-        await s.deliverSignal("sig-early", "go", "early");
-        await s.suspendWorkflow("sig-early", "wait", {
-          status: "waiting_for_signal",
-          stepType: "signal",
-          signalName: "go",
+        await s.deliverSignal({ workflowId: "sig-early", signalName: "go", payload: "early" });
+        await s.suspendWorkflow({
+          workflowId: "sig-early",
+          stepName: "wait",
+          stepUpdate: {
+            status: "waiting_for_signal",
+            stepType: "signal",
+            signalName: "go",
+          },
         });
         expect((await s.loadSignals("sig-early")).map((x) => x.payload)).toEqual(["early"]);
       });
@@ -2947,12 +3129,20 @@ export function storageTestSuite(
       it("startFreshRun drops the previous run's signals", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "sig-fresh", workflowName: "t", input: {} });
-        await s.deliverSignal("sig-fresh", "go", { approved: true });
-        await s.completeWorkflow("sig-fresh", "done");
-        await s.startFreshRun("sig-fresh");
+        await s.deliverSignal({
+          workflowId: "sig-fresh",
+          signalName: "go",
+          payload: { approved: true },
+        });
+        await s.completeWorkflow({ workflowId: "sig-fresh", result: "done" });
+        await s.startFreshRun({ workflowId: "sig-fresh" });
         expect(await s.loadSignals("sig-fresh")).toEqual([]);
 
-        await s.deliverSignal("sig-fresh", "go", { approved: false });
+        await s.deliverSignal({
+          workflowId: "sig-fresh",
+          signalName: "go",
+          payload: { approved: false },
+        });
         expect((await s.loadSignals("sig-fresh")).map((x) => x.payload)).toEqual([
           { approved: false },
         ]);
@@ -3110,7 +3300,10 @@ export function storageTestSuite(
           input: {},
           metadata: { keep: 1, drop: 2 },
         });
-        await s.setWorkflowMetadata("meta-merge", { drop: null, added: { deep: true } });
+        await s.setWorkflowMetadata({
+          workflowId: "meta-merge",
+          patch: { drop: null, added: { deep: true } },
+        });
         expect((await s.loadWorkflow("meta-merge"))!.metadata).toEqual({
           keep: 1,
           added: { deep: true },
@@ -3121,7 +3314,9 @@ export function storageTestSuite(
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "meta-race", workflowName: "t", input: {} });
         const keys = ["a", "b", "c", "d", "e", "f"];
-        await Promise.all(keys.map((k, i) => s.setWorkflowMetadata("meta-race", { [k]: i })));
+        await Promise.all(
+          keys.map((k, i) => s.setWorkflowMetadata({ workflowId: "meta-race", patch: { [k]: i } })),
+        );
         expect((await s.loadWorkflow("meta-race"))!.metadata).toEqual({
           a: 0,
           b: 1,
@@ -3143,7 +3338,7 @@ export function storageTestSuite(
         if (typeof s.tripwireWorkflow !== "function") return;
         const before = new Date(Date.now() - 1_000);
         await s.createWorkflow({ workflowId: "purge-tw", workflowName: "t", input: {} });
-        await s.tripwireWorkflow("purge-tw", { why: "x" });
+        await s.tripwireWorkflow({ workflowId: "purge-tw", reason: { why: "x" } });
         await sleep(10);
         const deleted = await s.purgeCompleted({ from: before, to: new Date(), limit: 100 });
         expect(deleted).toBe(1);
@@ -3168,7 +3363,7 @@ export function storageTestSuite(
           payload: 1,
           appendedBy: "workflow",
         });
-        await s.completeWorkflow("purge-deps", "done");
+        await s.completeWorkflow({ workflowId: "purge-deps", result: "done" });
         await sleep(10);
 
         await s.purgeCompleted({ from: before, to: new Date(), limit: 100 });
@@ -3218,10 +3413,14 @@ export function storageTestSuite(
             input: { id: params.workflowId },
             version: "v1",
           });
-          await params.s.suspendWorkflow(params.workflowId, params.stepName ?? "nap", {
-            status: "sleeping",
-            stepType: "sleep",
-            wakeAt: params.wakeAt,
+          await params.s.suspendWorkflow({
+            workflowId: params.workflowId,
+            stepName: params.stepName ?? "nap",
+            stepUpdate: {
+              status: "sleeping",
+              stepType: "sleep",
+              wakeAt: params.wakeAt,
+            },
           });
         }
 
@@ -3237,11 +3436,15 @@ export function storageTestSuite(
             workflowName: "scan-wf",
             input: { id: params.workflowId },
           });
-          await params.s.suspendWorkflow(params.workflowId, params.stepName ?? "wait", {
-            status: "waiting_for_signal",
-            stepType: "signal",
-            signalName: params.signalName,
-            ...(params.signalTimeoutAt ? { signalTimeoutAt: params.signalTimeoutAt } : {}),
+          await params.s.suspendWorkflow({
+            workflowId: params.workflowId,
+            stepName: params.stepName ?? "wait",
+            stepUpdate: {
+              status: "waiting_for_signal",
+              stepType: "signal",
+              signalName: params.signalName,
+              ...(params.signalTimeoutAt ? { signalTimeoutAt: params.signalTimeoutAt } : {}),
+            },
           });
         }
 
@@ -3270,9 +3473,9 @@ export function storageTestSuite(
           it("excludes runs that are no longer suspended", async () => {
             const s = await getScannerStorage();
             await createSleeping({ s, workflowId: "due-done", wakeAt: past() });
-            await s.completeWorkflow("due-done", "ok");
+            await s.completeWorkflow({ workflowId: "due-done", result: "ok" });
             await createSleeping({ s, workflowId: "due-failed", wakeAt: past() });
-            await s.failWorkflow("due-failed", "boom");
+            await s.failWorkflow({ workflowId: "due-failed", error: "boom" });
 
             expect(await s.listDueTimers({ now: new Date(), limit: 10 })).toEqual([]);
           });
@@ -3304,10 +3507,14 @@ export function storageTestSuite(
           it("returns one row per run when two of its steps are due", async () => {
             const s = await getScannerStorage();
             await createSleeping({ s, workflowId: "due-two", wakeAt: past(), stepName: "b-nap" });
-            await s.suspendWorkflow("due-two", "a-nap", {
-              status: "sleeping",
-              stepType: "sleep",
-              wakeAt: past(),
+            await s.suspendWorkflow({
+              workflowId: "due-two",
+              stepName: "a-nap",
+              stepUpdate: {
+                status: "sleeping",
+                stepType: "sleep",
+                wakeAt: past(),
+              },
             });
 
             const rows = await s.listDueTimers({ now: new Date(), limit: 10 });
@@ -3337,7 +3544,7 @@ export function storageTestSuite(
               durationMs: 1,
               startedAt: new Date(),
             });
-            await s.completeWorkflow("due-page-1", "ok");
+            await s.completeWorkflow({ workflowId: "due-page-1", result: "ok" });
 
             let after = page1.at(-1)!.workflowId;
             for (;;) {
@@ -3359,9 +3566,17 @@ export function storageTestSuite(
             const s = await getScannerStorage();
             await createWaiting({ s, workflowId: "sw-hit", signalName: "approval" });
             await createWaiting({ s, workflowId: "sw-other-name", signalName: "approval" });
-            await s.deliverSignal("sw-other-name", "rejection", { no: true });
+            await s.deliverSignal({
+              workflowId: "sw-other-name",
+              signalName: "rejection",
+              payload: { no: true },
+            });
             await createWaiting({ s, workflowId: "sw-none", signalName: "approval" });
-            await s.deliverSignal("sw-hit", "approval", { ok: 1 });
+            await s.deliverSignal({
+              workflowId: "sw-hit",
+              signalName: "approval",
+              payload: { ok: 1 },
+            });
 
             const rows = await s.listSignalWakeups({ limit: 10 });
             expect(rows).toHaveLength(1);
@@ -3377,8 +3592,16 @@ export function storageTestSuite(
           it("carries the latest payload after a repeated delivery", async () => {
             const s = await getScannerStorage();
             await createWaiting({ s, workflowId: "sw-latest", signalName: "approval" });
-            await s.deliverSignal("sw-latest", "approval", { n: 1 });
-            await s.deliverSignal("sw-latest", "approval", { n: 2 });
+            await s.deliverSignal({
+              workflowId: "sw-latest",
+              signalName: "approval",
+              payload: { n: 1 },
+            });
+            await s.deliverSignal({
+              workflowId: "sw-latest",
+              signalName: "approval",
+              payload: { n: 2 },
+            });
 
             const rows = await s.listSignalWakeups({ limit: 10 });
             expect(rows).toHaveLength(1);
@@ -3388,8 +3611,8 @@ export function storageTestSuite(
           it("excludes runs that are not suspended", async () => {
             const s = await getScannerStorage();
             await createWaiting({ s, workflowId: "sw-done", signalName: "approval" });
-            await s.deliverSignal("sw-done", "approval", {});
-            await s.completeWorkflow("sw-done", "ok");
+            await s.deliverSignal({ workflowId: "sw-done", signalName: "approval", payload: {} });
+            await s.completeWorkflow({ workflowId: "sw-done", result: "ok" });
 
             expect(await s.listSignalWakeups({ limit: 10 })).toEqual([]);
           });
@@ -3397,13 +3620,17 @@ export function storageTestSuite(
           it("returns one row per run when two waiting steps have deliveries", async () => {
             const s = await getScannerStorage();
             await createWaiting({ s, workflowId: "sw-two", signalName: "b", stepName: "wait-b" });
-            await s.suspendWorkflow("sw-two", "wait-a", {
-              status: "waiting_for_signal",
-              stepType: "signal",
-              signalName: "a",
+            await s.suspendWorkflow({
+              workflowId: "sw-two",
+              stepName: "wait-a",
+              stepUpdate: {
+                status: "waiting_for_signal",
+                stepType: "signal",
+                signalName: "a",
+              },
             });
-            await s.deliverSignal("sw-two", "a", "A");
-            await s.deliverSignal("sw-two", "b", "B");
+            await s.deliverSignal({ workflowId: "sw-two", signalName: "a", payload: "A" });
+            await s.deliverSignal({ workflowId: "sw-two", signalName: "b", payload: "B" });
 
             const rows = await s.listSignalWakeups({ limit: 10 });
             expect(rows).toHaveLength(1);
@@ -3414,12 +3641,20 @@ export function storageTestSuite(
           it("does not return a run whose signals were cleared by startFreshRun", async () => {
             const s = await getScannerStorage();
             await createWaiting({ s, workflowId: "sw-fresh", signalName: "approval" });
-            await s.deliverSignal("sw-fresh", "approval", { stale: true });
-            await s.startFreshRun("sw-fresh");
-            await s.suspendWorkflow("sw-fresh", "wait", {
-              status: "waiting_for_signal",
-              stepType: "signal",
+            await s.deliverSignal({
+              workflowId: "sw-fresh",
               signalName: "approval",
+              payload: { stale: true },
+            });
+            await s.startFreshRun({ workflowId: "sw-fresh" });
+            await s.suspendWorkflow({
+              workflowId: "sw-fresh",
+              stepName: "wait",
+              stepUpdate: {
+                status: "waiting_for_signal",
+                stepType: "signal",
+                signalName: "approval",
+              },
             });
 
             expect(await s.listSignalWakeups({ limit: 10 })).toEqual([]);
@@ -3430,7 +3665,7 @@ export function storageTestSuite(
             const ids = Array.from({ length: 5 }, (_, i) => `sw-page-${i}`);
             for (const id of ids) {
               await createWaiting({ s, workflowId: id, signalName: "go" });
-              await s.deliverSignal(id, "go", id);
+              await s.deliverSignal({ workflowId: id, signalName: "go", payload: id });
             }
 
             const seen: string[] = [];
@@ -3494,9 +3729,9 @@ export function storageTestSuite(
               workflowName: "orph-wf",
               input: {},
             });
-            const live = await s.tryLock("orph-live", 60_000);
+            const live = await s.tryLock({ workflowId: "orph-live", lockDurationMs: 60_000 });
             expect(live.acquired).toBe(true);
-            const expired = await s.tryLock("orph-expired", 1);
+            const expired = await s.tryLock({ workflowId: "orph-expired", lockDurationMs: 1 });
             expect(expired.acquired).toBe(true);
             await sleep(30);
 
@@ -3506,7 +3741,7 @@ export function storageTestSuite(
               limit: 10,
             });
             expect(rows.map((r) => r.workflowId)).toEqual(["orph-expired"]);
-            await s.releaseLock("orph-live", { fenceToken: live.token });
+            await s.releaseLock({ workflowId: "orph-live", guard: { fenceToken: live.token } });
           });
 
           it("excludes suspended and terminal runs", async () => {
@@ -3517,13 +3752,13 @@ export function storageTestSuite(
               workflowName: "orph-wf",
               input: {},
             });
-            await s.completeWorkflow("orph-completed", "ok");
+            await s.completeWorkflow({ workflowId: "orph-completed", result: "ok" });
             await s.createWorkflow({
               workflowId: "orph-failed",
               workflowName: "orph-wf",
               input: {},
             });
-            await s.failWorkflow("orph-failed", "boom");
+            await s.failWorkflow({ workflowId: "orph-failed", error: "boom" });
 
             expect(
               await s.listOrphanedRuns({ now: later(), updatedBefore: later(), limit: 10 }),
@@ -3592,7 +3827,7 @@ export function storageTestSuite(
               startedAt: new Date(),
             });
           }
-          await s.completeWorkflow(id, "final");
+          await s.completeWorkflow({ workflowId: id, result: "final" });
         }
 
         it("clears the listed steps and flips a completed workflow to running", async () => {
@@ -3601,7 +3836,7 @@ export function storageTestSuite(
           await seedCompleted(s, "reset-1");
           expect((await s.loadWorkflow("reset-1"))!.status).toBe("completed");
 
-          await s.resetSteps("reset-1", ["s2", "s3"]);
+          await s.resetSteps({ workflowId: "reset-1", stepNames: ["s2", "s3"] });
 
           const state = (await s.loadWorkflow("reset-1"))!;
           expect(state.status).toBe("running");
@@ -3618,7 +3853,7 @@ export function storageTestSuite(
           const s = await getStorage();
           if (!s.resetSteps) throw new Error("factory storage lacks resetSteps");
           await seedCompleted(s, "reset-empty");
-          await s.resetSteps("reset-empty", []);
+          await s.resetSteps({ workflowId: "reset-empty", stepNames: [] });
           const state = (await s.loadWorkflow("reset-empty"))!;
           expect(state.status).toBe("completed");
           expect(state.steps["s1"]?.result).toBe("s1-result");
@@ -3641,7 +3876,7 @@ export function storageTestSuite(
           });
           expect((await s.loadWorkflow("reset-running"))!.status).toBe("running");
 
-          await s.resetSteps("reset-running", ["s1"]);
+          await s.resetSteps({ workflowId: "reset-running", stepNames: ["s1"] });
 
           const state = (await s.loadWorkflow("reset-running"))!;
           expect(state.status).toBe("running");
@@ -3652,7 +3887,10 @@ export function storageTestSuite(
           const s = await getStorage();
           if (!s.resetSteps) throw new Error("factory storage lacks resetSteps");
           await seedCompleted(s, "reset-missing-step");
-          await s.resetSteps("reset-missing-step", ["s2", "never-existed"]);
+          await s.resetSteps({
+            workflowId: "reset-missing-step",
+            stepNames: ["s2", "never-existed"],
+          });
           const state = (await s.loadWorkflow("reset-missing-step"))!;
           expect(state.steps["s2"]).toBeUndefined();
           expect(state.steps["s1"]?.result).toBe("s1-result");
@@ -3661,30 +3899,32 @@ export function storageTestSuite(
         it("throws when the workflow doesn't exist", async () => {
           const s = await getStorage();
           if (!s.resetSteps) throw new Error("factory storage lacks resetSteps");
-          await expect(s.resetSteps("ghost-workflow", ["s1"])).rejects.toThrow();
+          await expect(
+            s.resetSteps({ workflowId: "ghost-workflow", stepNames: ["s1"] }),
+          ).rejects.toThrow();
         });
 
         it("keeps the delivered signals: a re-run waiter sees the latest delivery", async () => {
           const s = await getStorage();
           if (!s.resetSteps) throw new Error("factory storage lacks resetSteps");
           await seedCompleted(s, "reset-signals");
-          await s.deliverSignal("reset-signals", "go", 1);
-          await s.deliverSignal("reset-signals", "go", 2);
-          await s.resetSteps("reset-signals", ["s2"]);
+          await s.deliverSignal({ workflowId: "reset-signals", signalName: "go", payload: 1 });
+          await s.deliverSignal({ workflowId: "reset-signals", signalName: "go", payload: 2 });
+          await s.resetSteps({ workflowId: "reset-signals", stepNames: ["s2"] });
           expect((await s.loadSignals("reset-signals")).map((x) => x.payload)).toEqual([2]);
         });
       });
     }
 
     // -------------------------------------------------------------------
-    // ActivityJournalStorage (opt-in)
+    // JournalStore (opt-in)
     // -------------------------------------------------------------------
 
     if (options.hasJournal || options.hasJournaledSuspend) {
-      describe("journal — ActivityJournalStorage", () => {
+      describe("journal — JournalStore", () => {
         it("loadJournal returns empty for a non-existent (workflow, step)", async () => {
           const s = await getJournalStorage();
-          expect(await s.loadJournal("missing", "nope")).toEqual([]);
+          expect(await s.loadJournal({ workflowId: "missing", stepName: "nope" })).toEqual([]);
         });
 
         it("appendEntry + loadJournal round-trips success and failure exits", async () => {
@@ -3705,7 +3945,7 @@ export function storageTestSuite(
             exit: { tag: "Failure", error: "boom" },
           });
 
-          const entries = await s.loadJournal("j-rt", "calc");
+          const entries = await s.loadJournal({ workflowId: "j-rt", stepName: "calc" });
           expect(entries).toHaveLength(2);
           expect(entries[0]!.activityIndex).toBe(0);
           expect(entries[0]!.activityName).toBe("fetch");
@@ -3729,7 +3969,7 @@ export function storageTestSuite(
             });
           }
 
-          const entries = await s.loadJournal("j-ord", "calc");
+          const entries = await s.loadJournal({ workflowId: "j-ord", stepName: "calc" });
           expect(entries.map((e) => e.activityIndex)).toEqual([0, 1, 2]);
         });
 
@@ -3752,7 +3992,7 @@ export function storageTestSuite(
             exit: { tag: "Success", value: "v1" },
           });
 
-          const entries = await s.loadJournal("j-idem", "calc");
+          const entries = await s.loadJournal({ workflowId: "j-idem", stepName: "calc" });
           expect(entries).toHaveLength(1);
         });
 
@@ -3782,15 +4022,17 @@ export function storageTestSuite(
             exit: { tag: "Success", value: "C" },
           });
 
-          expect((await s.loadJournal("j-scope-a", "calc")).map((e) => e.exit)).toEqual([
-            { tag: "Success", value: "A" },
-          ]);
-          expect((await s.loadJournal("j-scope-b", "calc")).map((e) => e.exit)).toEqual([
-            { tag: "Success", value: "B" },
-          ]);
-          expect((await s.loadJournal("j-scope-a", "other")).map((e) => e.exit)).toEqual([
-            { tag: "Success", value: "C" },
-          ]);
+          expect(
+            (await s.loadJournal({ workflowId: "j-scope-a", stepName: "calc" })).map((e) => e.exit),
+          ).toEqual([{ tag: "Success", value: "A" }]);
+          expect(
+            (await s.loadJournal({ workflowId: "j-scope-b", stepName: "calc" })).map((e) => e.exit),
+          ).toEqual([{ tag: "Success", value: "B" }]);
+          expect(
+            (await s.loadJournal({ workflowId: "j-scope-a", stepName: "other" })).map(
+              (e) => e.exit,
+            ),
+          ).toEqual([{ tag: "Success", value: "C" }]);
         });
 
         it("startFreshRun clears the journal of every step", async () => {
@@ -3805,12 +4047,12 @@ export function storageTestSuite(
               exit: { tag: "Success", value: stepName },
             });
           }
-          await s.completeWorkflow("j-fresh", "done");
+          await s.completeWorkflow({ workflowId: "j-fresh", result: "done" });
 
-          await s.startFreshRun("j-fresh");
+          await s.startFreshRun({ workflowId: "j-fresh" });
 
-          expect(await s.loadJournal("j-fresh", "calc")).toEqual([]);
-          expect(await s.loadJournal("j-fresh", "other")).toEqual([]);
+          expect(await s.loadJournal({ workflowId: "j-fresh", stepName: "calc" })).toEqual([]);
+          expect(await s.loadJournal({ workflowId: "j-fresh", stepName: "other" })).toEqual([]);
           // The new run journals from a clean slate.
           await s.appendEntry({
             workflowId: "j-fresh",
@@ -3819,9 +4061,9 @@ export function storageTestSuite(
             activityName: "fetch",
             exit: { tag: "Success", value: "run-2" },
           });
-          expect((await s.loadJournal("j-fresh", "calc")).map((e) => e.exit)).toEqual([
-            { tag: "Success", value: "run-2" },
-          ]);
+          expect(
+            (await s.loadJournal({ workflowId: "j-fresh", stepName: "calc" })).map((e) => e.exit),
+          ).toEqual([{ tag: "Success", value: "run-2" }]);
         });
 
         it("purgeCompleted removes the journal of purged runs", async () => {
@@ -3835,10 +4077,10 @@ export function storageTestSuite(
             activityName: "fetch",
             exit: { tag: "Success", value: 1 },
           });
-          await s.completeWorkflow("j-purge", "done");
+          await s.completeWorkflow({ workflowId: "j-purge", result: "done" });
           await sleep(10);
           await s.purgeCompleted({ from: before, to: new Date(), limit: 100 });
-          expect(await s.loadJournal("j-purge", "calc")).toEqual([]);
+          expect(await s.loadJournal({ workflowId: "j-purge", stepName: "calc" })).toEqual([]);
         });
 
         it("startFreshRun leaves other workflows' journals alone", async () => {
@@ -3853,14 +4095,14 @@ export function storageTestSuite(
               exit: { tag: "Success", value: id },
             });
           }
-          await s.startFreshRun("j-keep-a");
-          expect(await s.loadJournal("j-keep-b", "calc")).toHaveLength(1);
+          await s.startFreshRun({ workflowId: "j-keep-a" });
+          expect(await s.loadJournal({ workflowId: "j-keep-b", stepName: "calc" })).toHaveLength(1);
         });
       });
     }
 
     // -------------------------------------------------------------------
-    // ActivityJournalStorage pending entries (opt-in)
+    // JournalStore pending entries (opt-in)
     // -------------------------------------------------------------------
 
     if (options.hasJournaledSuspend) {
@@ -3878,7 +4120,7 @@ export function storageTestSuite(
             wakeAt,
           });
 
-          const entries = await s.loadJournal("j-sleep", "wait");
+          const entries = await s.loadJournal({ workflowId: "j-sleep", stepName: "wait" });
           expect(entries).toHaveLength(1);
           const e = entries[0]!;
           expect(e.stepType).toBe("sleep");
@@ -3905,7 +4147,7 @@ export function storageTestSuite(
             exit: { tag: "Success", value: { approved: true } },
           });
 
-          const entries = await s.loadJournal("j-cp", "sig");
+          const entries = await s.loadJournal({ workflowId: "j-cp", stepName: "sig" });
           expect(entries).toHaveLength(1);
           expect(entries[0]!.phase).toBe("completed");
           expect(entries[0]!.exit).toEqual({ tag: "Success", value: { approved: true } });
@@ -3935,7 +4177,7 @@ export function storageTestSuite(
             exit: { tag: "Success", value: "second" },
           });
 
-          const entries = await s.loadJournal("j-cp2", "sig");
+          const entries = await s.loadJournal({ workflowId: "j-cp2", stepName: "sig" });
           expect(entries[0]!.exit).toEqual({ tag: "Success", value: "first" });
         });
 
@@ -3960,7 +4202,7 @@ export function storageTestSuite(
             wakeAt,
           });
 
-          expect(await s.loadJournal("j-pidem", "wait")).toHaveLength(1);
+          expect(await s.loadJournal({ workflowId: "j-pidem", stepName: "wait" })).toHaveLength(1);
         });
 
         it("findDueSleeps returns pending sleep entries whose wakeAt <= now", async () => {
@@ -4112,7 +4354,9 @@ export function storageTestSuite(
             exit: timedOut,
           });
           expect(second).toEqual({ completed: false, exit: delivered });
-          expect((await s.loadJournal("j-win", "sig"))[0]!.exit).toEqual(delivered);
+          expect((await s.loadJournal({ workflowId: "j-win", stepName: "sig" }))[0]!.exit).toEqual(
+            delivered,
+          );
         });
 
         it("a pending signal keeps its timeout deadline (wakeAt) and stays out of due sleeps", async () => {
@@ -4127,7 +4371,7 @@ export function storageTestSuite(
             stepType: "signal",
             wakeAt,
           });
-          const [entry] = await s.loadJournal("j-sig-wake", "wait");
+          const [entry] = await s.loadJournal({ workflowId: "j-sig-wake", stepName: "wait" });
           expect(entry!.wakeAt?.getTime()).toBe(wakeAt.getTime());
           const due = await s.findDueSleeps({ now: new Date(), limit: 1000 });
           expect(due.map((d) => d.workflowId)).not.toContain("j-sig-wake");
@@ -4143,12 +4387,12 @@ export function storageTestSuite(
             exit: { tag: "Success", value: 1 },
           });
           expect(result).toEqual({ completed: false, exit: undefined });
-          expect(await s.loadJournal("j-miss", "sig")).toEqual([]);
+          expect(await s.loadJournal({ workflowId: "j-miss", stepName: "sig" })).toEqual([]);
         });
 
         it("concurrent completePendingEntry calls have exactly one winner", async () => {
           const s = await getSuspendStorage();
-          const peer = (await getPeer(s)) as WorkflowStorage & ActivityJournalStorage;
+          const peer = (await getPeer(s)) as WorkflowStorage & JournalStore;
           await s.createWorkflow({ workflowId: "j-race", workflowName: "test", input: {} });
           for (let round = 0; round < 5; round++) {
             await s.appendPendingEntry({
@@ -4175,7 +4419,7 @@ export function storageTestSuite(
             );
             const winners = results.filter((r) => r.completed);
             expect(winners).toHaveLength(1);
-            const stored = (await s.loadJournal("j-race", "sig")).find(
+            const stored = (await s.loadJournal({ workflowId: "j-race", stepName: "sig" })).find(
               (e) => e.activityIndex === round,
             )!;
             expect(stored.exit).toEqual(winners[0]!.exit!);
@@ -4215,7 +4459,7 @@ export function storageTestSuite(
             activityName: "single-phase",
             exit: tagged,
           });
-          const entries = await s.loadJournal("j-fail", "body");
+          const entries = await s.loadJournal({ workflowId: "j-fail", stepName: "body" });
           expect(entries.map((e) => e.exit)).toEqual([tagged, named, tagged]);
         });
 
@@ -4232,7 +4476,7 @@ export function storageTestSuite(
               ...(stepType === "sleep" && { wakeAt: new Date(Date.now() + 60_000) }),
             });
           }
-          const entries = await s.loadJournal("j-types", "body");
+          const entries = await s.loadJournal({ workflowId: "j-types", stepName: "body" });
           expect(entries.map((e) => e.stepType)).toEqual([...JOURNAL_STEP_TYPES]);
           expect(entries.every((e) => e.phase === "pending")).toBe(true);
         });
@@ -4256,7 +4500,7 @@ export function storageTestSuite(
             stepType: "signal",
           });
 
-          await s.startFreshRun("j-fresh-p");
+          await s.startFreshRun({ workflowId: "j-fresh-p" });
 
           const due = await s.findDueSleeps({ now: new Date(), limit: 100 });
           expect(due.map((d) => d.workflowId)).not.toContain("j-fresh-p");
@@ -4267,7 +4511,7 @@ export function storageTestSuite(
               signalName: "approval",
             }),
           ).toBeNull();
-          expect(await s.loadJournal("j-fresh-p", "wait")).toEqual([]);
+          expect(await s.loadJournal({ workflowId: "j-fresh-p", stepName: "wait" })).toEqual([]);
         });
       });
     }
@@ -4331,11 +4575,11 @@ export function storageTestSuite(
             ],
           });
 
-          const left = (await s.loadJournal("j-disc", "body")).map(
+          const left = (await s.loadJournal({ workflowId: "j-disc", stepName: "body" })).map(
             (e) => `${e.activityIndex}|${e.branchPath}`,
           );
           expect(left).toEqual(["0|", "1|/0.0"]);
-          expect(await s.loadJournal("j-disc", "other")).toHaveLength(1);
+          expect(await s.loadJournal({ workflowId: "j-disc", stepName: "other" })).toHaveLength(1);
         });
 
         it("a discarded slot can be recorded again", async () => {
@@ -4371,7 +4615,7 @@ export function storageTestSuite(
             exit: { tag: "Success", value: "paid" },
           });
           expect(result.completed).toBe(true);
-          const entries = await s.loadJournal("j-disc2", "body");
+          const entries = await s.loadJournal({ workflowId: "j-disc2", stepName: "body" });
           expect(entries).toHaveLength(1);
           expect(entries[0]!.exit).toEqual({ tag: "Success", value: "paid" });
         });
@@ -4412,7 +4656,7 @@ export function storageTestSuite(
               signalName: "approval",
             }),
           ).toBeNull();
-          expect(await s.loadJournal("j-disc3", "wait")).toEqual([]);
+          expect(await s.loadJournal({ workflowId: "j-disc3", stepName: "wait" })).toEqual([]);
         });
       });
     }

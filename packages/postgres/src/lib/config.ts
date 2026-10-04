@@ -12,9 +12,6 @@ export interface PostgresStorageConfig {
   /** Default namespace for workflow isolation. Null means unscoped. Default: null. */
   namespace?: string | null;
 
-  /** Table name prefix. Default: "wf_". Allows multiple workflow engines in one DB. */
-  tablePrefix?: string;
-
   /** Instance ID for lock ownership tracking. Default: random UUID. */
   instanceId?: string;
 
@@ -56,7 +53,6 @@ export interface PostgresStorageConfig {
 
 export const DEFAULT_CONFIG = {
   namespace: null,
-  tablePrefix: "wf_",
   useAdvisoryLocks: false,
   defaultLockDurationMs: 30_000,
   autoSeedLookups: true,
@@ -68,7 +64,6 @@ export function resolveConfig(config: PostgresStorageConfig): Required<PostgresS
   return {
     db: config.db,
     namespace: config.namespace ?? DEFAULT_CONFIG.namespace,
-    tablePrefix: config.tablePrefix ?? DEFAULT_CONFIG.tablePrefix,
     instanceId: config.instanceId ?? crypto.randomUUID(),
     useAdvisoryLocks: config.useAdvisoryLocks ?? DEFAULT_CONFIG.useAdvisoryLocks,
     defaultLockDurationMs: config.defaultLockDurationMs ?? DEFAULT_CONFIG.defaultLockDurationMs,

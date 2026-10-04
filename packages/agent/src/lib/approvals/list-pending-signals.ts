@@ -10,8 +10,8 @@
 // are a strict superset of `listPendingApprovals`.
 // ---------------------------------------------------------------------------
 
-import type { ActivityJournalStorage, JournalEntry, WorkflowStorage } from "@promin/workflow";
-import { isActivityJournalStorage } from "@promin/workflow";
+import type { JournalStore, JournalEntry, WorkflowStorage } from "@promin/workflow";
+import { hasCapability } from "@promin/workflow";
 import { parseApprovalSignal } from "./approve-signal.ts";
 
 const APPROVAL_START_SUFFIX = "-start";
@@ -71,7 +71,7 @@ export async function listPendingSignals(
     orderDir: "desc",
   });
 
-  const journalStorage = isActivityJournalStorage(storage) ? storage : undefined;
+  const journalStorage = hasCapability(storage, "journal") ? storage : undefined;
 
   const out: PendingSignal[] = [];
   for (const wf of suspended) {
@@ -125,14 +125,14 @@ export async function listPendingSignals(
 }
 
 async function readApprovalStartMetadata(
-  storage: ActivityJournalStorage,
+  storage: JournalStore,
   workflowId: string,
   stepName: string,
   toolCallId: string,
 ): Promise<{ toolName: string | undefined; toolInput: unknown }> {
   let entries: JournalEntry[];
   try {
-    entries = await storage.loadJournal(workflowId, stepName);
+    entries = await storage.loadJournal({ workflowId, stepName });
   } catch {
     return { toolName: undefined, toolInput: undefined };
   }

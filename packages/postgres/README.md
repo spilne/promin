@@ -48,7 +48,6 @@ const result = await workflow<{ userId: string }>({ name: "onboard" })
 ```typescript
 PostgresWorkflowStorage.create({
   db, // DrizzleDb instance (required)
-  tablePrefix: "wf_", // Table name prefix (default: "wf_")
   instanceId: "node-1", // Lock ownership ID (default: random UUID)
   useAdvisoryLocks: false, // row locks + fence tokens (default); `true` is deprecated (unsafe through a pool)
   defaultLockDurationMs: 30_000,

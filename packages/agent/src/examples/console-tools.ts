@@ -15,7 +15,7 @@ import { createSchedulerTools } from "../lib/tools/scheduler-tools.ts";
 import { createAgentTool } from "../lib/tools/agent-tool-factory.ts";
 import { createMemoryTool } from "../lib/tools/memory-tools.ts";
 import { createFileToolRegistry } from "../lib/tool-registry.ts";
-import { InMemoryScheduler, isActivityJournalStorage } from "@promin/workflow";
+import { InMemoryScheduler, hasCapability } from "@promin/workflow";
 import type { WorkflowRunner } from "@promin/workflow";
 import type { MemoryIndex } from "../lib/memory-index.ts";
 import type { ToolRegistry } from "../lib/tool-registry.ts";
@@ -72,8 +72,11 @@ export function createSessionDebugTool(
         }),
         execute: async ({ limit }) => {
           const storage = runner.storage;
-          if (!isActivityJournalStorage(storage)) return "Journal storage not available.";
-          const entries = await storage.loadJournal(sessionIdRef.current, "conversation");
+          if (!hasCapability(storage, "journal")) return "Journal storage not available.";
+          const entries = await storage.loadJournal({
+            workflowId: sessionIdRef.current,
+            stepName: "conversation",
+          });
           const failures = entries.filter((e) => e.exit?.tag === "Failure");
           if (failures.length === 0) return "No errors recorded in current session.";
           return failures

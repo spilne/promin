@@ -5,7 +5,7 @@
 // completed entry and continues past the wait.
 // ---------------------------------------------------------------------------
 
-import type { ActivityJournalStorage, CompletePendingResult } from "./activity-journal.ts";
+import type { JournalStore, CompletePendingResult } from "./activity-journal.ts";
 import { deliveredSignalExitValue } from "./journal-exit.ts";
 
 /**
@@ -24,7 +24,7 @@ import { deliveredSignalExitValue } from "./journal-exit.ts";
  * delivered and the workflow will not see it.
  */
 export async function completeSignal(params: {
-  storage: ActivityJournalStorage;
+  storage: JournalStore;
   workflowId: string;
   stepName: string;
   signalName: string;
@@ -62,7 +62,7 @@ export async function completeSignal(params: {
  * ```
  */
 export async function completeDueSleeps(params: {
-  storage: ActivityJournalStorage;
+  storage: JournalStore;
   now: Date;
   limit: number;
 }): Promise<

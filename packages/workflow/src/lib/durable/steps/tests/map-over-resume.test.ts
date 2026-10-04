@@ -10,7 +10,11 @@ import { InMemoryWorkflowStorage } from "../../in-memory-storage.ts";
 import type { StepEff } from "../../step-definition.ts";
 import { workflow } from "../../workflow-builder.ts";
 import { createWorkflowRunner } from "../../workflow-runner.ts";
-import type { FenceGuard } from "../../workflow-storage.ts";
+import type {
+  FenceGuard,
+  SaveTaskFailureParams,
+  SaveTaskResultParams,
+} from "../../workflow-storage.ts";
 
 class Flaky extends TaggedError("Flaky")<{ readonly message: string }>() {}
 
@@ -205,19 +209,13 @@ describe("mapOver per-element resume", () => {
   it("task rows are written under the run's fence guard", async () => {
     const guards: Array<FenceGuard | undefined> = [];
     class SpyStorage extends InMemoryWorkflowStorage {
-      override async saveTaskResult(
-        params: Parameters<InMemoryWorkflowStorage["saveTaskResult"]>[0],
-        guard?: FenceGuard,
-      ): Promise<void> {
+      override async saveTaskResult({ guard, ...params }: SaveTaskResultParams): Promise<void> {
         guards.push(guard);
-        return super.saveTaskResult(params, guard);
+        return super.saveTaskResult({ ...params, guard });
       }
-      override async saveTaskFailure(
-        params: Parameters<InMemoryWorkflowStorage["saveTaskFailure"]>[0],
-        guard?: FenceGuard,
-      ): Promise<void> {
+      override async saveTaskFailure({ guard, ...params }: SaveTaskFailureParams): Promise<void> {
         guards.push(guard);
-        return super.saveTaskFailure(params, guard);
+        return super.saveTaskFailure({ ...params, guard });
       }
     }
     const storage = new SpyStorage();

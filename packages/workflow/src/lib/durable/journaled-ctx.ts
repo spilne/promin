@@ -8,7 +8,7 @@
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
 import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
-import type { ActivityJournalStorage, JournalEntry } from "./activity-journal.ts";
+import type { JournalStore, JournalEntry } from "./activity-journal.ts";
 import { CompensationStack } from "./compensation-stack.ts";
 import { WorkflowContinueAsNewError } from "./durable-pipeline-error.ts";
 import { JournalCursor } from "./journal-cursor.ts";
@@ -28,7 +28,7 @@ export function makeCtx<Input, Prev>(params: {
   workflowId: string;
   stepName: string;
   journal: JournalEntry[];
-  storage: ActivityJournalStorage;
+  storage: JournalStore;
   /** See `JournaledCtxEnv.workflowStorage`. */
   workflowStorage?: WorkflowStorage;
   /** Stored workflow version — exposed on ctx for user-space logic. */
@@ -109,7 +109,7 @@ export function makeCtx<Input, Prev>(params: {
       ref.current = merged;
     }
     if (!workflowStorage) return; // tests that drive runJournaledStep without WorkflowStorage skip persistence
-    workflowStorage.setWorkflowMetadata(workflowId, patch, guard).catch((err) => {
+    workflowStorage.setWorkflowMetadata({ workflowId, patch, guard }).catch((err) => {
       console.warn(
         `[ctx.metadata] failed to persist for workflow ${workflowId}:`,
         err instanceof Error ? err.message : String(err),

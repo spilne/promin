@@ -234,7 +234,7 @@ describe("LocalWorkflows.start — recovery", () => {
     const pending = await createPending(storage, 450);
     await leaveCompensating(storage, "comp");
     await storage.createWorkflow({ workflowId: "owned", workflowName: "double", input: { n: 1 } });
-    await storage.tryLock("owned", 600_000);
+    await storage.tryLock({ workflowId: "owned", lockDurationMs: 600_000 });
     await storage.createWorkflow({ workflowId: "alien", workflowName: "other", input: {} });
     clock.advance(1);
 

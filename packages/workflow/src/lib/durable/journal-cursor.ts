@@ -9,7 +9,7 @@
 // ---------------------------------------------------------------------------
 
 import type {
-  ActivityJournalStorage,
+  JournalStore,
   CompletePendingResult,
   JournalEntry,
   JournalExit,
@@ -43,7 +43,7 @@ const slotKey = (slot: JournalSlot): string => `${slot.activityIndex}:${slot.bra
 export class JournalCursor {
   readonly workflowId: string;
   readonly stepName: string;
-  private readonly storage: ActivityJournalStorage;
+  private readonly storage: JournalStore;
   private readonly guard: FenceGuard | undefined;
   private readonly journal: readonly JournalEntry[];
   private readonly entries: Map<string, JournalEntry>;
@@ -65,7 +65,7 @@ export class JournalCursor {
     readonly workflowId: string;
     readonly stepName: string;
     readonly journal: readonly JournalEntry[];
-    readonly storage: ActivityJournalStorage;
+    readonly storage: JournalStore;
     readonly guard?: FenceGuard | undefined;
   }) {
     this.workflowId = params.workflowId;
@@ -167,19 +167,17 @@ export class JournalCursor {
     readonly wakeAt?: Date | undefined;
   }): Promise<void> {
     const { slot, kind, name, payloadHash, wakeAt } = params;
-    await this.storage.appendPendingEntry(
-      {
-        workflowId: this.workflowId,
-        stepName: this.stepName,
-        activityIndex: slot.activityIndex,
-        branchPath: slot.branchPath,
-        activityName: name,
-        stepType: kind,
-        ...(payloadHash !== undefined && { payloadHash }),
-        ...(wakeAt !== undefined && { wakeAt }),
-      },
-      this.guard,
-    );
+    await this.storage.appendPendingEntry({
+      workflowId: this.workflowId,
+      stepName: this.stepName,
+      activityIndex: slot.activityIndex,
+      branchPath: slot.branchPath,
+      activityName: name,
+      stepType: kind,
+      ...(payloadHash !== undefined && { payloadHash }),
+      ...(wakeAt !== undefined && { wakeAt }),
+      guard: this.guard,
+    });
   }
 
   /**
@@ -199,16 +197,14 @@ export class JournalCursor {
     readonly readBack: boolean;
   }): Promise<{ won: boolean; exit: JournalExit }> {
     const { slot, exit, readBack } = params;
-    const result: CompletePendingResult | undefined = await this.storage.completePendingEntry(
-      {
-        workflowId: this.workflowId,
-        stepName: this.stepName,
-        activityIndex: slot.activityIndex,
-        branchPath: slot.branchPath,
-        exit,
-      },
-      this.guard,
-    );
+    const result: CompletePendingResult | undefined = await this.storage.completePendingEntry({
+      workflowId: this.workflowId,
+      stepName: this.stepName,
+      activityIndex: slot.activityIndex,
+      branchPath: slot.branchPath,
+      exit,
+      guard: this.guard,
+    });
     if (result) {
       // No stored exit means the entry is gone (purged under us): nothing to
       // follow, keep the local outcome.
@@ -216,9 +212,9 @@ export class JournalCursor {
       return { won: false, exit: result.exit };
     }
     if (!readBack) return { won: true, exit };
-    const stored = (await this.storage.loadJournal(this.workflowId, this.stepName)).find(
-      (e) => e.activityIndex === slot.activityIndex && e.branchPath === slot.branchPath,
-    );
+    const stored = (
+      await this.storage.loadJournal({ workflowId: this.workflowId, stepName: this.stepName })
+    ).find((e) => e.activityIndex === slot.activityIndex && e.branchPath === slot.branchPath);
     if (stored?.exit && (stored.phase ?? "completed") === "completed") {
       return { won: false, exit: stored.exit };
     }

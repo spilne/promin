@@ -33,7 +33,7 @@ import {
   createWorkflowRunner,
   RecoveryStrategy,
   completeSignal,
-  isActivityJournalStorage,
+  hasCapability,
   type Workflow,
 } from "@promin/workflow";
 import {
@@ -1033,8 +1033,8 @@ async function startApprovalAutoSignaler(): Promise<void> {
       // entry, and re-run the workflow so the journaled step picks up the
       // completed entry and continues. The sleep scanner only handles
       // sleep resumption — signal completion needs its own nudge.
-      await storage.deliverSignal(r.workflowId, "approval", payload);
-      if (isActivityJournalStorage(storage)) {
+      await storage.deliverSignal({ workflowId: r.workflowId, signalName: "approval", payload });
+      if (hasCapability(storage, "journal")) {
         await completeSignal({
           storage,
           workflowId: r.workflowId,
@@ -1077,8 +1077,8 @@ const uiDir = process.env.ZORYA_UI_DIR ?? path.join(import.meta.dir, "..", "dist
 // versioned-greeter demo workflow so the UI has something to promote
 // between. Coordinator picks the active version via `findActive` when no
 // explicit version is supplied to `runner.run({ name })`.
-const { WorkflowVersionRegistry } = await import("@promin/workflow");
-const versionRegistry = new WorkflowVersionRegistry();
+const { InMemoryWorkflowVersionRegistry } = await import("@promin/workflow");
+const versionRegistry = new InMemoryWorkflowVersionRegistry();
 const { versionedGreeterVersions } = await import("./workflows/versioned-greeter.ts");
 for (const v of versionedGreeterVersions) versionRegistry.register(v);
 console.log(

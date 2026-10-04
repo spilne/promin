@@ -91,7 +91,7 @@ describe("getScheduleHistory — agent ticks join the workflow row at scheduleTi
       workflowName: "summary-bot",
       input: { task: "Recap email inbox" },
     });
-    await wfs.completeWorkflow(wfId, { ok: true });
+    await wfs.completeWorkflow({ workflowId: wfId, result: { ok: true } });
 
     const { history, total } = await callHistory(sch, wfs, "daily-summary");
 
@@ -126,7 +126,7 @@ describe("getScheduleHistory — agent ticks join the workflow row at scheduleTi
     await logTick(sch, "flaky-bot", 0, firedAt);
     const wfId = scheduleTickRunId("flaky-bot", 0);
     await wfs.createWorkflow({ workflowId: wfId, workflowName: "flaky", input: {} });
-    await wfs.failWorkflow(wfId, "boom");
+    await wfs.failWorkflow({ workflowId: wfId, error: "boom" });
 
     const { history } = await callHistory(sch, wfs, "flaky-bot");
     expect(history[0]!.status).toBe("failed");
@@ -167,7 +167,7 @@ describe("getScheduleHistory — agent ticks join the workflow row at scheduleTi
     await logTick(sch, "nightly", 0, firedAt);
     const wfId = scheduleTickRunId("nightly", 0);
     await wfs.createWorkflow({ workflowId: wfId, workflowName: "send-email", input: {} });
-    await wfs.completeWorkflow(wfId, "sent");
+    await wfs.completeWorkflow({ workflowId: wfId, result: "sent" });
 
     const { history } = await callHistory(sch, wfs, "nightly");
     expect(history[0]!.kind).toBe("workflow");

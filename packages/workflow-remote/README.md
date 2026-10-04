@@ -60,7 +60,7 @@ These are intentional gaps in the HTTP transport. A workflow run against `Remote
 
 JSON-RPC over a single `POST` round-trip can't carry a long-lived event stream. The wire deliberately omits `subscribeToWorkflow`, so `RemoteWorkflowStorage` does not implement it.
 
-The runner detects this (`isSubscribableStorage(storage)` → `false`) and falls back to **polling-subscribe**: it diffs successive `loadWorkflow` snapshots into `WorkflowRunEvent`s on a 500ms (default) cadence. Step-completed and the workflow terminal events flow correctly; only `step-started` is omitted because the polling diff can't observe a step that goes from "not present" to "running" to "completed" within a single tick.
+The runner detects this (`hasCapability(storage, "runEvents")` → `false`) and falls back to **polling-subscribe**: it diffs successive `loadWorkflow` snapshots into `WorkflowRunEvent`s on a 500ms (default) cadence. Step-completed and the workflow terminal events flow correctly; only `step-started` is omitted because the polling diff can't observe a step that goes from "not present" to "running" to "completed" within a single tick.
 
 ```ts
 // Works — runner.subscribe falls back to polling against any non-subscribable storage.
@@ -69,11 +69,11 @@ for await (const ev of runner.subscribe(workflowId, { pollIntervalMs: 100 })) {
 }
 ```
 
-Native push over HTTP (SSE / WebSocket) is a follow-up. Until then, lower `pollIntervalMs` if you need tighter latency, or run a process directly against a `SubscribableStorage` (in-memory, Postgres with notify) for live UIs.
+Native push over HTTP (SSE / WebSocket) is a follow-up. Until then, lower `pollIntervalMs` if you need tighter latency, or run a process directly against a storage with the `runEvents` capability (in-memory, Postgres with notify) for live UIs.
 
 ### `notifyStepStarted` no-ops
 
-The runner publishes `step-started` events via the optional `notifyStepStarted(workflowId, stepName)` storage hook. `RemoteWorkflowStorage` does not implement it, so the runner's `typeof storage.notifyStepStarted === "function"` guard skips the call. No errors, no events. See the polling-subscribe note above for why this currently doesn't matter for HTTP-fronted setups.
+The runner publishes `step-started` events via the optional `notifyStepStarted({ workflowId, stepName })` storage hook. `RemoteWorkflowStorage` does not implement it, so the runner, finding no `stepStartedEvents` capability (`hasCapability(storage, "stepStartedEvents")`), skips the call. No errors, no events. See the polling-subscribe note above for why this currently doesn't matter for HTTP-fronted setups.
 
 ### `RemoteStepQueue.enqueue` throws
 

@@ -8,10 +8,7 @@
 import type { Workflow } from "../durable-pipeline.ts";
 import { WorkflowVersionMismatchError } from "../durable-pipeline-error.ts";
 import type { WorkflowStorage } from "../workflow-storage.ts";
-import type {
-  IWorkflowVersionRegistry,
-  WorkflowVersionRegistry,
-} from "../workflow-version-registry.ts";
+import type { WorkflowVersionRegistry } from "../workflow-version-registry.ts";
 import {
   orchestrationContextFor,
   runtimeOf,
@@ -24,7 +21,7 @@ import {
  * different version, the matching older definition continues the run.
  */
 export async function resolveRunDefinition(params: {
-  registry: WorkflowVersionRegistry | IWorkflowVersionRegistry | undefined;
+  registry: WorkflowVersionRegistry | undefined;
   storage: WorkflowStorage;
   name: string;
   version: string | undefined;

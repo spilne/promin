@@ -17,7 +17,7 @@ import { coordinatorLeaderKey } from "../leader-election.ts";
 import type { StepQueue } from "../step-queue.ts";
 import { InMemoryWorkflowStorage } from "../../durable/in-memory-storage.ts";
 import type { WorkflowStorage } from "../../durable/workflow-storage.ts";
-import { WorkflowVersionRegistry } from "../../durable/workflow-version-registry.ts";
+import { InMemoryWorkflowVersionRegistry } from "../../durable/workflow-version-registry.ts";
 import { workflow } from "../../durable/durable-pipeline.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
 import {
@@ -168,7 +168,7 @@ describe("sleep and signal steps under the distributed runner", () => {
     expect((await storage.loadWorkflow("w"))?.steps["wait"]?.status).toBe("waiting_for_signal");
     expect(queue.getAllTasks().map((t) => t.stepName)).toEqual(["before"]);
 
-    await storage.deliverSignal("w", "go", 7);
+    await storage.deliverSignal({ workflowId: "w", signalName: "go", payload: 7 });
     const scanner = createSignalScanner({
       storage,
       runner,
@@ -221,7 +221,9 @@ describe("leadership-triggered, orphan-only recovery", () => {
     const create = storage.createWorkflow.bind(storage);
     storage.createWorkflow = (p) => (creates++, create(p));
     const lock = storage.tryLock.bind(storage);
-    storage.tryLock = (id, ms) => (locks++, lock(id, ms));
+    storage.tryLock = ({ workflowId: id, lockDurationMs: ms }) => (
+      locks++, lock({ workflowId: id, lockDurationMs: ms })
+    );
 
     const loop = runner.startLoop();
     for (let i = 0; i < 20; i++) {
@@ -250,7 +252,7 @@ describe("leadership-triggered, orphan-only recovery", () => {
       if (workflowId === "locked") clock.advance(60_000);
     }
     // "locked" is still held by a live instance; "fresh" is younger than the grace.
-    await storage.tryLock("locked", 600_000);
+    await storage.tryLock({ workflowId: "locked", lockDurationMs: 600_000 });
 
     let orphanScans = 0;
     const list = storage.listOrphanedRuns.bind(storage);
@@ -328,7 +330,7 @@ describe("recovery without listOrphanedRuns", () => {
     await leaveCompensating(inner, "comp");
     clock.advance(60_000);
 
-    const registry = new WorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
     registry.register(sagaFor(undone) as never);
     const errors: DistributedRunnerErrorEvent[] = [];
     const runner = new DistributedWorkflowRunner({
@@ -368,7 +370,7 @@ describe("recovery without listOrphanedRuns", () => {
     }
     clock.advance(60_000);
 
-    const registry = new WorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
     registry.register(sagaFor(undone) as never);
     const queue = new InMemoryStepQueue({ clock });
     const runner = new DistributedWorkflowRunner({
@@ -424,7 +426,7 @@ describe("result waits", () => {
     expect(settled).toBe("pending");
 
     // Another instance resumes and finishes the run.
-    await storage.completeWorkflow("w", 42);
+    await storage.completeWorkflow({ workflowId: "w", result: 42 });
     clock.advance(100);
     await result;
     expect(settled).toBe(42);
@@ -443,7 +445,7 @@ describe("result waits", () => {
     });
     await storage.createWorkflow({ workflowId: "x", workflowName: "sleepy", input: { n: 1 } });
     // Another instance holds the run's lock.
-    await storage.tryLock("x", 600_000);
+    await storage.tryLock({ workflowId: "x", lockDurationMs: 600_000 });
 
     let settled: unknown = "pending";
     const running = runner.run({ workflow: sleepy, workflowId: "x", input: { n: 1 } }).then(
@@ -453,7 +455,7 @@ describe("result waits", () => {
     await waitFor(() => clock.pendingCount() > 0);
     expect(settled).toBe("pending");
 
-    await storage.completeWorkflow("x", "done-elsewhere");
+    await storage.completeWorkflow({ workflowId: "x", result: "done-elsewhere" });
     clock.advance(100);
     await running;
     expect(settled).toBe("done-elsewhere");

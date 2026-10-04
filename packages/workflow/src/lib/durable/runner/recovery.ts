@@ -8,10 +8,8 @@ import type { WallClock } from "../../shared/wall-clock.ts";
 import type { Workflow } from "../durable-pipeline.ts";
 import type { WorkflowStorage } from "../workflow-storage.ts";
 import type { WorkflowStatus } from "../workflow-state.ts";
-import type {
-  IWorkflowVersionRegistry,
-  WorkflowVersionRegistry,
-} from "../workflow-version-registry.ts";
+import type { WorkflowVersionRegistry } from "../workflow-version-registry.ts";
+import { hasCapability } from "../storage/capabilities.ts";
 
 export interface RecoveryResult {
   /** Workflows terminated as stale (cancelled or failed). */
@@ -185,7 +183,7 @@ interface ResumeCandidate {
 export async function recoverWorkflows(params: {
   strategy: RecoveryStrategy;
   storage: WorkflowStorage;
-  registry: WorkflowVersionRegistry | IWorkflowVersionRegistry | undefined;
+  registry: WorkflowVersionRegistry | undefined;
   clock: WallClock;
   resume: (run: {
     workflow: Workflow<unknown, unknown>;
@@ -248,7 +246,7 @@ async function terminateStaleRuns(params: {
     opts.staleAction.kind === "fail" ? opts.staleAction.error : "Stale run cancelled on restart";
 
   // Fast path: storage exposes a bulk cancelStaleWorkflows (e.g. SQLite).
-  if (typeof storage.cancelStaleWorkflows === "function") {
+  if (hasCapability(storage, "cancelStale")) {
     return await storage.cancelStaleWorkflows({
       olderThanMs: thresholdMs,
       error: errorMsg,
@@ -284,9 +282,9 @@ async function terminateStaleRuns(params: {
         tried.add(wf.workflowId);
         progressed = true;
         if (opts.staleAction.kind === "cancel") {
-          await storage.cancelWorkflow(wf.workflowId);
+          await storage.cancelWorkflow({ workflowId: wf.workflowId });
         } else {
-          await storage.failWorkflow(wf.workflowId, opts.staleAction.error);
+          await storage.failWorkflow({ workflowId: wf.workflowId, error: opts.staleAction.error });
         }
         terminated++;
       }
@@ -310,7 +308,7 @@ async function listResumeCandidates(params: {
 }): Promise<ResumeCandidate[]> {
   const { storage, clock } = params;
   const out: ResumeCandidate[] = [];
-  if (storage.listOrphanedRuns) {
+  if (hasCapability(storage, "orphanedRuns")) {
     const now = clock.now();
     let afterWorkflowId: string | undefined;
     while (true) {

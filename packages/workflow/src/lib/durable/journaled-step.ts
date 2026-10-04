@@ -53,7 +53,8 @@
 
 import type { WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
-import { isActivityJournalStorage, type ActivityJournalStorage } from "./activity-journal.ts";
+import { type JournalStore } from "./activity-journal.ts";
+import { hasCapability } from "./storage/capabilities.ts";
 import { discardFailedAttempt, runsCompensations } from "./compensation-stack.ts";
 import { JournalStorageMissingError } from "./journal-errors.ts";
 import { activityScope, journaledBodyScope } from "./journaled-body-scope.ts";
@@ -89,7 +90,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
   prev: Prev;
   workflowId: string;
   stepName: string;
-  storage: ActivityJournalStorage;
+  storage: JournalStore;
   /**
    * Full WorkflowStorage — when provided, ctx.sleep / ctx.signal / ctx.child
    * call suspendWorkflow() so the scanners resume them, and ctx.metadata
@@ -155,8 +156,8 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     body,
   } = params;
 
-  if (!isActivityJournalStorage(storage)) throw new JournalStorageMissingError(stepName);
-  const journal = await storage.loadJournal(workflowId, stepName);
+  if (!hasCapability(storage, "journal")) throw new JournalStorageMissingError(stepName);
+  const journal = await storage.loadJournal({ workflowId, stepName });
   // Workflow metadata snapshot for `ctx.metadata.get()` — reads are
   // synchronous from the body, so we materialize the snapshot up front:
   // the runner's copy when it passed one, else a load of the run. Writes

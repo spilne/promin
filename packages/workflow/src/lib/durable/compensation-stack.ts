@@ -10,11 +10,12 @@
 //     activities so the next attempt of the step re-executes them.
 // ---------------------------------------------------------------------------
 
-import type { ActivityJournalStorage, JournalExit, JournalSlot } from "./activity-journal.ts";
+import type { JournalStore, JournalExit, JournalSlot } from "./activity-journal.ts";
 import { errorTag, failureExit } from "./journal-exit.ts";
 import type { JournalCursor } from "./journal-cursor.ts";
 import { journaledBodyScope } from "./journaled-body-scope.ts";
 import type { FenceGuard } from "./workflow-storage.ts";
+import { hasCapability } from "./storage/capabilities.ts";
 
 interface Compensation {
   /** Slot index reserved at registration time. */
@@ -162,17 +163,16 @@ export function runsCompensations(bodyError: unknown): boolean {
  * written, the next attempt replays the failure and discards it then.
  */
 export async function discardFailedAttempt(params: {
-  storage: ActivityJournalStorage;
+  storage: JournalStore;
   workflowId: string;
   stepName: string;
   rolledBack: readonly JournalSlot[];
   guard?: FenceGuard;
 }): Promise<void> {
   const { storage, workflowId, stepName, rolledBack, guard } = params;
-  const discard = storage.discardJournalEntries;
-  if (typeof discard !== "function") return;
+  if (!hasCapability(storage, "journalDiscard")) return;
   try {
-    const journal = await storage.loadJournal(workflowId, stepName);
+    const journal = await storage.loadJournal({ workflowId, stepName });
     const slots = new Map<string, JournalSlot>();
     const add = (slot: JournalSlot): void => {
       slots.set(`${slot.activityIndex}:${slot.branchPath}`, slot);
@@ -185,7 +185,12 @@ export async function discardFailedAttempt(params: {
     }
     for (const slot of rolledBack) add(slot);
     if (slots.size === 0) return;
-    await discard.call(storage, { workflowId, stepName, slots: [...slots.values()] }, guard);
+    await storage.discardJournalEntries({
+      workflowId,
+      stepName,
+      slots: [...slots.values()],
+      guard,
+    });
   } catch {
     // Journal unreachable: the body error is what the caller needs to see.
   }

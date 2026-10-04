@@ -1016,7 +1016,11 @@ describe("WorkflowBuilder", () => {
       await runner.runSafe({ workflow: wf, workflowId: "wf-signal-resume", input: {} });
 
       // Deliver signal
-      await storage.deliverSignal("wf-signal-resume", "manager-approved", { approved: true });
+      await storage.deliverSignal({
+        workflowId: "wf-signal-resume",
+        signalName: "manager-approved",
+        payload: { approved: true },
+      });
 
       // Resume: should complete with signal payload
       const result = await runner.run({ workflow: wf, workflowId: "wf-signal-resume", input: {} });
@@ -1224,7 +1228,7 @@ describe("WorkflowBuilder", () => {
     it("rejects concurrent execution", async () => {
       const storage = new InMemoryWorkflowStorage();
       const runner = createWorkflowRunner({ storage });
-      await storage.tryLock("wf-locked", 60_000);
+      await storage.tryLock({ workflowId: "wf-locked", lockDurationMs: 60_000 });
 
       const wf = workflow<{}>({ name: "locked" })
         .step("noop", () => succeed("done"))
@@ -1244,7 +1248,9 @@ describe("WorkflowBuilder", () => {
         .step("noop", () => succeed("ok"))
         .build();
       await runner.run({ workflow: wf, workflowId: "wf-release", input: {} });
-      expect((await storage.tryLock("wf-release", 60_000)).acquired).toBe(true);
+      expect(
+        (await storage.tryLock({ workflowId: "wf-release", lockDurationMs: 60_000 })).acquired,
+      ).toBe(true);
     });
 
     it("releases lock on failure", async () => {
@@ -1254,7 +1260,9 @@ describe("WorkflowBuilder", () => {
         .step("boom", () => fail(new FetchError({ message: "fail" })))
         .build();
       await runner.runSafe({ workflow: wf, workflowId: "wf-fail-release", input: {} });
-      expect((await storage.tryLock("wf-fail-release", 60_000)).acquired).toBe(true);
+      expect(
+        (await storage.tryLock({ workflowId: "wf-fail-release", lockDurationMs: 60_000 })).acquired,
+      ).toBe(true);
     });
   });
 
@@ -1684,7 +1692,7 @@ describe("InMemoryWorkflowStorage", () => {
   it("completes workflow with completedAt", async () => {
     const storage = new InMemoryWorkflowStorage();
     await storage.createWorkflow({ workflowId: "t4", workflowName: "test", input: {} });
-    await storage.completeWorkflow("t4", "result");
+    await storage.completeWorkflow({ workflowId: "t4", result: "result" });
     const state = await storage.loadWorkflow("t4");
     expect(state?.status).toBe("completed");
     expect(state?.completedAt).toBeInstanceOf(Date);
@@ -1693,10 +1701,14 @@ describe("InMemoryWorkflowStorage", () => {
   it("suspends workflow", async () => {
     const storage = new InMemoryWorkflowStorage();
     await storage.createWorkflow({ workflowId: "t-suspend", workflowName: "test", input: {} });
-    await storage.suspendWorkflow("t-suspend", "wait-step", {
-      status: "sleeping",
-      stepType: "sleep",
-      wakeAt: new Date(Date.now() + 60_000),
+    await storage.suspendWorkflow({
+      workflowId: "t-suspend",
+      stepName: "wait-step",
+      stepUpdate: {
+        status: "sleeping",
+        stepType: "sleep",
+        wakeAt: new Date(Date.now() + 60_000),
+      },
     });
 
     const state = await storage.loadWorkflow("t-suspend");
@@ -1706,8 +1718,12 @@ describe("InMemoryWorkflowStorage", () => {
 
   it("delivers and loads signals", async () => {
     const storage = new InMemoryWorkflowStorage();
-    await storage.deliverSignal("wf-1", "approval", { ok: true });
-    await storage.deliverSignal("wf-1", "other", { data: 42 });
+    await storage.deliverSignal({
+      workflowId: "wf-1",
+      signalName: "approval",
+      payload: { ok: true },
+    });
+    await storage.deliverSignal({ workflowId: "wf-1", signalName: "other", payload: { data: 42 } });
 
     const signals = await storage.loadSignals("wf-1");
     expect(signals).toHaveLength(2);
@@ -1717,15 +1733,21 @@ describe("InMemoryWorkflowStorage", () => {
 
   it("lock prevents double acquisition", async () => {
     const storage = new InMemoryWorkflowStorage();
-    expect((await storage.tryLock("l1", 60_000)).acquired).toBe(true);
-    expect((await storage.tryLock("l1", 60_000)).acquired).toBe(false);
+    expect((await storage.tryLock({ workflowId: "l1", lockDurationMs: 60_000 })).acquired).toBe(
+      true,
+    );
+    expect((await storage.tryLock({ workflowId: "l1", lockDurationMs: 60_000 })).acquired).toBe(
+      false,
+    );
   });
 
   it("lock can be released and re-acquired", async () => {
     const storage = new InMemoryWorkflowStorage();
-    await storage.tryLock("l2", 60_000);
-    await storage.releaseLock("l2");
-    expect((await storage.tryLock("l2", 60_000)).acquired).toBe(true);
+    await storage.tryLock({ workflowId: "l2", lockDurationMs: 60_000 });
+    await storage.releaseLock({ workflowId: "l2" });
+    expect((await storage.tryLock({ workflowId: "l2", lockDurationMs: 60_000 })).acquired).toBe(
+      true,
+    );
   });
 
   it("expired lock can be re-acquired", async () => {
@@ -1733,9 +1755,11 @@ describe("InMemoryWorkflowStorage", () => {
     // Before clock injection this test slept 10ms to clear a 1ms lock.
     const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
     const storage = new InMemoryWorkflowStorage({ clock });
-    await storage.tryLock("l3", 1);
+    await storage.tryLock({ workflowId: "l3", lockDurationMs: 1 });
     clock.advance(10);
-    expect((await storage.tryLock("l3", 60_000)).acquired).toBe(true);
+    expect((await storage.tryLock({ workflowId: "l3", lockDurationMs: 60_000 })).acquired).toBe(
+      true,
+    );
   });
 
   it("heartbeat extends the lock", async () => {
@@ -1743,11 +1767,17 @@ describe("InMemoryWorkflowStorage", () => {
     // a FakeWallClock: extend before the original expiry, then move past it.
     const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
     const storage = new InMemoryWorkflowStorage({ clock });
-    const { token } = await storage.tryLock("l4", 1_000);
+    const { token } = await storage.tryLock({ workflowId: "l4", lockDurationMs: 1_000 });
     clock.advance(500);
-    await storage.heartbeat("l4", 60_000, token ? { fenceToken: token } : undefined);
+    await storage.heartbeat({
+      workflowId: "l4",
+      lockDurationMs: 60_000,
+      guard: token ? { fenceToken: token } : undefined,
+    });
     clock.advance(1_000);
-    expect((await storage.tryLock("l4", 60_000)).acquired).toBe(false);
+    expect((await storage.tryLock({ workflowId: "l4", lockDurationMs: 60_000 })).acquired).toBe(
+      false,
+    );
   });
 
   it("clear removes all data", async () => {
@@ -1970,7 +2000,7 @@ describe("Subworkflows", () => {
         parentWorkflowId: "parent-cancel",
       });
 
-      await storage.cancelWorkflow("parent-cancel", { cascade: true });
+      await storage.cancelWorkflow({ workflowId: "parent-cancel", cascade: true });
 
       expect((await storage.loadWorkflow("parent-cancel"))!.status).toBe("failed");
       expect((await storage.loadWorkflow("child-cancel-1"))!.status).toBe("failed");
@@ -1992,7 +2022,7 @@ describe("Subworkflows", () => {
         parentWorkflowId: "parent-nocancel",
       });
 
-      await storage.cancelWorkflow("parent-nocancel");
+      await storage.cancelWorkflow({ workflowId: "parent-nocancel" });
 
       expect((await storage.loadWorkflow("parent-nocancel"))!.status).toBe("failed");
       expect((await storage.loadWorkflow("child-nocancel"))!.status).toBe("pending");

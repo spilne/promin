@@ -29,25 +29,31 @@ postgresDescribe("PostgresWorkflowStorage store correctness", { migrate }, (pg) 
     it("default locks exclude a second caller on the same pool and issue fence tokens", async () => {
       const a = await create();
       const b = await create();
-      const first = await a.tryLock("lk", 30_000);
-      const again = await a.tryLock("lk", 30_000);
-      const other = await b.tryLock("lk", 30_000);
+      const first = await a.tryLock({ workflowId: "lk", lockDurationMs: 30_000 });
+      const again = await a.tryLock({ workflowId: "lk", lockDurationMs: 30_000 });
+      const other = await b.tryLock({ workflowId: "lk", lockDurationMs: 30_000 });
 
       expect(first).toMatchObject({ acquired: true });
       expect(first.token).toBeDefined();
       expect(again.acquired).toBe(false);
       expect(other.acquired).toBe(false);
 
-      await a.releaseLock("lk", { fenceToken: first.token });
-      expect((await b.tryLock("lk", 30_000)).acquired).toBe(true);
+      await a.releaseLock({ workflowId: "lk", guard: { fenceToken: first.token } });
+      expect((await b.tryLock({ workflowId: "lk", lockDurationMs: 30_000 })).acquired).toBe(true);
     });
 
     it("concurrent lock/release pairs leave no lock behind", async () => {
       const s = await create();
       const ids = Array.from({ length: 8 }, (_, i) => `adv-${i}`);
-      const held = await Promise.all(ids.map((id) => s.tryLock(id, 1_000)));
+      const held = await Promise.all(
+        ids.map((id) => s.tryLock({ workflowId: id, lockDurationMs: 1_000 })),
+      );
       expect(held.every((h) => h.acquired)).toBe(true);
-      await Promise.all(ids.map((id, i) => s.releaseLock(id, { fenceToken: held[i]!.token })));
+      await Promise.all(
+        ids.map((id, i) =>
+          s.releaseLock({ workflowId: id, guard: { fenceToken: held[i]!.token } }),
+        ),
+      );
 
       const [{ rows }] = (await pg.sql`
         SELECT (SELECT count(*) FROM wf_workflow_locks)::int
@@ -58,7 +64,7 @@ postgresDescribe("PostgresWorkflowStorage store correctness", { migrate }, (pg) 
 
     it("lease expiry is judged on the server clock", async () => {
       const s = await create();
-      await s.tryLock("srv", 60_000);
+      await s.tryLock({ workflowId: "srv", lockDurationMs: 60_000 });
       const [row] = (await pg.sql`
         SELECT EXTRACT(EPOCH FROM (expires_at - NOW())) AS remaining
         FROM wf_workflow_locks WHERE workflow_id = 'srv'
@@ -89,7 +95,7 @@ postgresDescribe("PostgresWorkflowStorage store correctness", { migrate }, (pg) 
 
       expect(await run()).toBe(1);
       expect(await run()).toBe(1); // replayed, not re-executed
-      await s.startFreshRun("can");
+      await s.startFreshRun({ workflowId: "can" });
       expect(await run()).toBe(2);
       expect(calls).toBe(2);
     });
@@ -156,7 +162,7 @@ postgresDescribe("PostgresWorkflowStorage store correctness", { migrate }, (pg) 
       expect(first).toEqual({ userId: "u1", tags: ["vip"] });
       expect(again).toEqual(first);
       expect(enrichCalls).toBe(1);
-      const journal = await storage.loadJournal("par-1", "setup");
+      const journal = await storage.loadJournal({ workflowId: "par-1", stepName: "setup" });
       expect(journal.map((e) => e.stepType)).toEqual(["child"]);
       const child = await storage.loadWorkflow("enrich-u1");
       expect(child?.parentWorkflowId).toBe("par-1");
@@ -177,7 +183,7 @@ postgresDescribe("PostgresWorkflowStorage store correctness", { migrate }, (pg) 
         input: { x: 1 },
         parentWorkflowId: "root",
       });
-      await storage.cancelWorkflow("root", { cascade: true });
+      await storage.cancelWorkflow({ workflowId: "root", cascade: true });
       expect((await storage.loadWorkflow("kid"))?.error).toBe("Cancelled");
     });
   });

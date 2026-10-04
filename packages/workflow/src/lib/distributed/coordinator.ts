@@ -21,10 +21,7 @@ import type {
   WorkflowStatusInfo,
   WorkflowHandle,
 } from "../durable/durable-pipeline.ts";
-import type {
-  IWorkflowVersionRegistry,
-  WorkflowVersionRegistry,
-} from "../durable/workflow-version-registry.ts";
+import type { WorkflowVersionRegistry } from "../durable/workflow-version-registry.ts";
 import {
   createWorkflowRunner,
   type WorkflowRunner,
@@ -48,6 +45,7 @@ import { buildStubWorkflow } from "./stub-workflow.ts";
 import { isStaleLeaseError } from "../scheduler/leader-lease.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import { PollLoop } from "../shared/poll-loop.ts";
+import { hasCapability } from "../durable/storage/capabilities.ts";
 
 export { buildStubWorkflow } from "./stub-workflow.ts";
 
@@ -86,7 +84,7 @@ export interface DistributedRunnerConfig {
    * orphaned runs with their real definition instead of a stub rebuilt from
    * the stored DAG.
    */
-  registry?: WorkflowVersionRegistry | IWorkflowVersionRegistry;
+  registry?: WorkflowVersionRegistry;
   /**
    * How often the step executor polls storage while waiting for a step to
    * complete. Waits on one run share each read. Default: 500ms.
@@ -190,7 +188,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
   private workerSweepCount = 0;
   private readonly leaderElection: LeaderElection;
   private readonly clock: WallClock;
-  private readonly registry?: WorkflowVersionRegistry | IWorkflowVersionRegistry;
+  private readonly registry?: WorkflowVersionRegistry;
   private readonly recoveryIntervalMs: number;
   private readonly orphanGraceMs: number;
   private readonly sweepLoop: PollLoop;
@@ -639,10 +637,11 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
     const now = new Date(nowMs);
     const updatedBefore = new Date(nowMs - this.orphanGraceMs);
 
-    if (this.storage.listOrphanedRuns) {
+    const storage = this.storage;
+    if (hasCapability(storage, "orphanedRuns")) {
       let afterWorkflowId: string | undefined;
       while (true) {
-        const page = await this.storage.listOrphanedRuns({
+        const page = await storage.listOrphanedRuns({
           now,
           updatedBefore,
           limit: RECOVERY_PAGE_SIZE,

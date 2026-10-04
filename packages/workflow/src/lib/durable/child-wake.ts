@@ -52,16 +52,16 @@ export async function suspendOnChild(params: {
     (params.childError as { reason?: unknown }).reason === "sleep" ? "sleep" : "signal";
   const child = await storage.loadWorkflow(childWorkflowId);
   const wakeAt = child ? earliestWakeOf(child) : undefined;
-  await storage.suspendWorkflow(
+  await storage.suspendWorkflow({
     workflowId,
     stepName,
-    {
+    stepUpdate: {
       status: "waiting_for_signal",
       signalName: childEndedSignalName({ childWorkflowId, run: child?.run ?? 1 }),
       ...(wakeAt && { signalTimeoutAt: wakeAt }),
     },
     guard,
-  );
+  });
   return new WorkflowSuspendedError({
     workflowId,
     stepName,
@@ -85,11 +85,11 @@ export async function wakeParentOfEndedRun(params: {
   const { storage, state } = params;
   if (state.parentWorkflowId === undefined) return;
   if (!isTerminalWorkflowStatus(state.status)) return;
-  await storage.deliverSignal(
-    state.parentWorkflowId,
-    childEndedSignalName({ childWorkflowId: state.workflowId, run: state.run }),
-    null,
-  );
+  await storage.deliverSignal({
+    workflowId: state.parentWorkflowId,
+    signalName: childEndedSignalName({ childWorkflowId: state.workflowId, run: state.run }),
+    payload: null,
+  });
 }
 
 /** The child's earliest sleep wake time or signal deadline. */

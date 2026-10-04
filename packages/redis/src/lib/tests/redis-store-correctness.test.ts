@@ -35,7 +35,7 @@ redisDescribe("RedisWorkflowStorage store correctness", (redis) => {
 
       expect(await run()).toBe(1);
       expect(await run()).toBe(1);
-      await s.startFreshRun("c");
+      await s.startFreshRun({ workflowId: "c" });
       expect(await run()).toBe(2);
       expect(calls).toBe(2);
     });
@@ -73,14 +73,14 @@ redisDescribe("RedisWorkflowStorage store correctness", (redis) => {
         retention: { completedTtlMs: 60_000 },
       });
       await s.createWorkflow({ workflowId: "ttl", workflowName: "w", input: 1 });
-      await s.completeWorkflow("ttl", "done");
+      await s.completeWorkflow({ workflowId: "ttl", result: "done" });
       expect(
         await (client as unknown as { pttl(k: string): Promise<number> }).pttl(
           `${prefix}:{wf:ttl}`,
         ),
       ).toBeGreaterThan(0);
 
-      await s.startFreshRun("ttl");
+      await s.startFreshRun({ workflowId: "ttl" });
       expect(
         await (client as unknown as { pttl(k: string): Promise<number> }).pttl(
           `${prefix}:{wf:ttl}`,
@@ -122,7 +122,7 @@ redisDescribe("RedisWorkflowStorage store correctness", (redis) => {
       await a.createWorkflow({ workflowId: "m", workflowName: "w", input: 1 });
       await Promise.all(
         Array.from({ length: 10 }, (_, i) =>
-          (i % 2 ? a : b).setWorkflowMetadata("m", { [`k${i}`]: i }),
+          (i % 2 ? a : b).setWorkflowMetadata({ workflowId: "m", patch: { [`k${i}`]: i } }),
         ),
       );
       const metadata = (await a.loadWorkflow("m"))!.metadata!;
@@ -133,7 +133,7 @@ redisDescribe("RedisWorkflowStorage store correctness", (redis) => {
 
     it("setWorkflowMetadata on a missing workflow creates nothing", async () => {
       const s = create();
-      await s.setWorkflowMetadata("ghost", { a: 1 });
+      await s.setWorkflowMetadata({ workflowId: "ghost", patch: { a: 1 } });
       expect(await s.loadWorkflow("ghost")).toBeNull();
     });
   });

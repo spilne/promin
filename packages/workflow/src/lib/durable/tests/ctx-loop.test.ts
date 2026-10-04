@@ -28,7 +28,7 @@ describe("ctx.dowhile / ctx.dountil (inside journaled body)", () => {
     // iter 0 → 0 < 3 continue, 1 → continue, 2 → continue, 3 → exit
     expect(result).toBe(3);
 
-    const journal = await storage.loadJournal("jw-loop-1", "poll");
+    const journal = await storage.loadJournal({ workflowId: "jw-loop-1", stepName: "poll" });
     const iterEntries = journal.filter((e) => e.activityName.startsWith("tick-iter-"));
     expect(iterEntries.length).toBe(4); // iter-0..iter-3
   });

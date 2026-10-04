@@ -109,15 +109,15 @@ for (const recordAttempts of [false, true]) {
   const workflowId = nextId();
   await s.createWorkflow({ workflowId, workflowName: "wide", input: {} });
   const startedAt = new Date();
-  await s.batchSaveStepResults(
-    Array.from({ length: 1_000 }, (_, i) => ({
+  await s.batchSaveStepResults({
+    records: Array.from({ length: 1_000 }, (_, i) => ({
       workflowId,
       stepName: `s${i}`,
       result: { i, payload: "x".repeat(64) },
       durationMs: 1,
       startedAt,
     })),
-  );
+  });
   for (let i = 0; i < 1_000; i++) {
     await s.saveTaskResult({ workflowId, stepName: "map", taskIndex: i, result: i });
   }
@@ -151,7 +151,7 @@ for (const recordAttempts of [false, true]) {
       workflowName: "dash",
       input: { payload: "x".repeat(2_048) },
     });
-    await s.completeWorkflow(workflowId, { payload: "y".repeat(2_048) });
+    await s.completeWorkflow({ workflowId, result: { payload: "y".repeat(2_048) } });
   }
   const lister = (
     s as { listWorkflowSummaries?: PostgresWorkflowStorage["listWorkflows"] }

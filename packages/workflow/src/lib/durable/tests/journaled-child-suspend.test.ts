@@ -43,7 +43,7 @@ describe("ctx.child — child suspends", () => {
       .run({ workflow: parent, workflowId: "par-s", input: { v: 21 } })
       .catch(() => undefined);
 
-    const journal = await storage.loadJournal("par-s", "run");
+    const journal = await storage.loadJournal({ workflowId: "par-s", stepName: "run" });
     expect(journal).toHaveLength(1);
     expect(journal[0]!.stepType).toBe("child");
     expect(journal[0]!.phase).toBe("pending");
@@ -64,7 +64,7 @@ describe("ctx.child — child suspends", () => {
     expect(result).toEqual({ doubled: 42, next: 1 });
     expect(childNaps).toBe(1);
     expect((await storage.loadWorkflow("kid-1"))?.status).toBe("completed");
-    const done = await storage.loadJournal("par-s", "run");
+    const done = await storage.loadJournal({ workflowId: "par-s", stepName: "run" });
     expect(done[0]!.exit).toEqual({ tag: "Success", value: 42 });
   });
 });

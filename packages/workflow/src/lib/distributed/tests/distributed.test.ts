@@ -1,5 +1,9 @@
 import { describe, it, expect } from "bun:test";
-import { workflow, InMemoryWorkflowStorage, WorkflowVersionRegistry } from "../../durable/index.ts";
+import {
+  workflow,
+  InMemoryWorkflowStorage,
+  InMemoryWorkflowVersionRegistry,
+} from "../../durable/index.ts";
 import { MapStepRegistry } from "../step-registry.ts";
 import { InMemoryStepQueue } from "../in-memory-step-queue.ts";
 import { createCoordinator } from "../coordinator.ts";
@@ -10,14 +14,14 @@ import { createWorker } from "../worker.ts";
 // ---------------------------------------------------------------------------
 
 describe("Step registry — register reusable step handlers by name", () => {
-  it("register a 'double' handler and look it up by name at runtime", () => {
+  it("register a 'double' handler and look it up by name at runtime", async () => {
     const registry = new MapStepRegistry();
     registry.register("double", (ctx) => succeed((ctx.prev as number) * 2));
 
     expect(registry.has("double")).toBe(true);
     expect(registry.has("missing")).toBe(false);
-    expect(registry.resolve("double")).toBeDefined();
-    expect(registry.resolve("missing")).toBeUndefined();
+    expect(await registry.resolve("double")).toBeDefined();
+    expect(await registry.resolve("missing")).toBeUndefined();
     expect(registry.list()).toEqual(["double"]);
   });
 });
@@ -496,7 +500,7 @@ describe("Coordinator registry-keyed submit — submit by name, not by object", 
       .step("double", ({ input }) => succeed(input.n * 2))
       .build();
 
-    const registry = new WorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
     registry.register(wf as any);
 
     const stepRegistry = new MapStepRegistry();
@@ -533,7 +537,7 @@ describe("Coordinator registry-keyed submit — submit by name, not by object", 
       .step("only", ({ input }) => succeed(input))
       .build();
 
-    const registry = new WorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
     registry.register(wf as any);
 
     const coordinator = createCoordinator({ storage, stepQueue: queue, registry });
@@ -562,7 +566,7 @@ describe("Coordinator registry-keyed submit — submit by name, not by object", 
     const registered = workflow<number>({ name: "registered", version: "1" })
       .step("a", ({ input }) => succeed(input))
       .build();
-    const registry = new WorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
     registry.register(registered as any);
 
     const direct = workflow<number>({ name: "direct" })
@@ -954,7 +958,7 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
   });
 
   it("step execution logged to attempt storage — audit trail for compliance", async () => {
-    const storage = new InMemoryWorkflowStorage(); // implements StepAttemptStorage
+    const storage = new InMemoryWorkflowStorage(); // implements StepAttemptStore
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
 
@@ -980,7 +984,7 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
     await new Promise((r) => setTimeout(r, 200));
     await worker.stop();
 
-    const attempts = await storage.loadStepAttempts("attempt-1");
+    const attempts = await storage.loadStepAttempts({ workflowId: "attempt-1" });
     expect(attempts).toHaveLength(1);
     expect(attempts[0]!.type).toBe("execution");
     expect(attempts[0]!.status).toBe("completed");
@@ -1021,7 +1025,7 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
     await new Promise((r) => setTimeout(r, 200));
     await worker.stop();
 
-    const attempts = await storage.loadStepAttempts("worker-trace");
+    const attempts = await storage.loadStepAttempts({ workflowId: "worker-trace" });
     const okAttempt = attempts.find((a) => a.stepName === "ok");
     const boomAttempt = attempts.find((a) => a.stepName === "boom");
     expect(okAttempt?.executorId).toBe("worker-alpha");

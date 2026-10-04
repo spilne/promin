@@ -627,7 +627,7 @@ export class WorkflowBuilder<
    * recorded value without re-executing; only un-journaled activities run.
    *
    * Requires the configured `WorkflowStorage` to also implement
-   * `ActivityJournalStorage` (InMemoryWorkflowStorage and
+   * `JournalStore` (InMemoryWorkflowStorage and
    * PostgresWorkflowStorage do); otherwise the step fails with
    * `JournalStorageMissingError` when it runs. Options: see
    * `JournaledStepOptions` (no `cache`, no `timeoutMs`).

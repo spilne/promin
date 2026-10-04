@@ -50,7 +50,7 @@ describe("ctx.activity — 3-arg overload", () => {
       },
     });
     expect(result).toBe("hi");
-    const [entry] = await storage.loadJournal("wf-2arg", "s");
+    const [entry] = await storage.loadJournal({ workflowId: "wf-2arg", stepName: "s" });
     expect(entry!.payloadHash).toBeUndefined();
   });
 });
@@ -70,7 +70,7 @@ describe("ctx.activity — payloadHash per-activity opt-in", () => {
         });
       },
     });
-    const [entry] = await storage.loadJournal("wf-hash", "s");
+    const [entry] = await storage.loadJournal({ workflowId: "wf-hash", stepName: "s" });
     expect(entry!.payloadHash).toMatch(/^[0-9a-f]{64}$/);
   });
 
@@ -90,7 +90,7 @@ describe("ctx.activity — payloadHash per-activity opt-in", () => {
           });
         },
       });
-      const [entry] = await storage.loadJournal(wid, "s");
+      const [entry] = await storage.loadJournal({ workflowId: wid, stepName: "s" });
       return entry!.payloadHash;
     };
     const h1 = await run("wf-eq-1");
@@ -114,7 +114,7 @@ describe("ctx.activity — payloadHash per-activity opt-in", () => {
           });
         },
       });
-      const [entry] = await storage.loadJournal(`wf-${orderId}`, "s");
+      const [entry] = await storage.loadJournal({ workflowId: `wf-${orderId}`, stepName: "s" });
       return entry!.payloadHash;
     };
     const a = await hashFor("A");
@@ -156,7 +156,7 @@ describe("ctx.activity — pipeline-level payloadHash default", () => {
         return yield* ctx.activity("b", { v: 2 }, async (x: { v: number }) => x.v);
       },
     });
-    const journal = await storage.loadJournal("wf-pipe", "s");
+    const journal = await storage.loadJournal({ workflowId: "wf-pipe", stepName: "s" });
     expect(journal).toHaveLength(2);
     for (const entry of journal) {
       expect(entry.payloadHash).toMatch(/^[0-9a-f]{64}$/);
@@ -184,7 +184,7 @@ describe("ctx.activity — pipeline-level payloadHash default", () => {
         return b;
       },
     });
-    const journal = await storage.loadJournal("wf-mix", "s");
+    const journal = await storage.loadJournal({ workflowId: "wf-mix", stepName: "s" });
     const twoArg = journal.find((e) => e.activityName === "two-arg")!;
     const threeArg = journal.find((e) => e.activityName === "three-arg")!;
     expect(twoArg.payloadHash).toBeUndefined();
@@ -206,7 +206,7 @@ describe("ctx.activity — pipeline-level payloadHash default", () => {
         });
       },
     });
-    const [entry] = await storage.loadJournal("wf-optout", "s");
+    const [entry] = await storage.loadJournal({ workflowId: "wf-optout", stepName: "s" });
     expect(entry!.payloadHash).toBeUndefined();
   });
 });
@@ -229,7 +229,7 @@ describe("ctx.activity — 3-arg under ctx.parallel", () => {
         return null;
       },
     });
-    const journal = await storage.loadJournal("wf-par", "s");
+    const journal = await storage.loadJournal({ workflowId: "wf-par", stepName: "s" });
     const x = journal.find((e) => e.activityName === "x")!;
     const y = journal.find((e) => e.activityName === "y")!;
     expect(x.payloadHash).toMatch(/^[0-9a-f]{64}$/);
@@ -333,7 +333,9 @@ describe("ctx.activity — replay guard", () => {
         return yield* ctx.activity("a", { v: 1 }, async (i: { v: number }) => i.v);
       },
     });
-    const recorded = (await storage.loadJournal("wf-off-replay", "s"))[0]!;
+    const recorded = (
+      await storage.loadJournal({ workflowId: "wf-off-replay", stepName: "s" })
+    )[0]!;
     expect(recorded.payloadHash).toBeDefined();
 
     // Replay: pipeline default OFF and caller feeds a DIFFERENT input.
@@ -367,7 +369,9 @@ describe("ctx.activity — replay guard", () => {
         return yield* ctx.activity("a", { v: 1 }, async (i: { v: number }) => i.v);
       },
     });
-    const recorded = (await storage.loadJournal("wf-only-replay", "s"))[0]!;
+    const recorded = (
+      await storage.loadJournal({ workflowId: "wf-only-replay", stepName: "s" })
+    )[0]!;
     expect(recorded.payloadHash).toBeUndefined();
 
     // Replay: hashing turned on. Recorded has no hash to compare against,

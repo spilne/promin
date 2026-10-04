@@ -15,7 +15,7 @@
 
 import type { RemoteDeploymentRegistry, SecretsStorage } from "@promin/agent";
 import type {
-  IWorkflowVersionRegistry,
+  WorkflowVersionRegistry,
   StepQueue,
   WallClock,
   WorkerRegistry,
@@ -25,7 +25,7 @@ import {
   InMemoryStepQueue,
   InMemoryWorkerRegistry,
   SystemWallClock,
-  WorkflowVersionRegistry,
+  InMemoryWorkflowVersionRegistry,
 } from "@promin/workflow";
 import { createWorkerApiHandler, createWorkflowStorageHandler } from "@promin/workflow-remote";
 import { Auth, type AuthConfig } from "./auth.ts";
@@ -267,7 +267,7 @@ export interface ZoryaServerConfig extends AuthConfig {
    * in-memory `WorkflowVersionRegistry`; production deployments should
    * pass `PostgresWorkflowVersionRegistry` so lifecycle survives restart.
    */
-  versionRegistry?: IWorkflowVersionRegistry;
+  versionRegistry?: WorkflowVersionRegistry;
   /**
    * Public-facing base URL for token completion callbacks. When set, the
    * `POST /api/runs/:id/signals/:name/token` mint route returns
@@ -324,7 +324,7 @@ export class ZoryaServer {
   readonly skills?: ZoryaSkills;
   readonly fragments?: ZoryaFragments;
   readonly dags?: ZoryaDags;
-  readonly versionRegistry: IWorkflowVersionRegistry;
+  readonly versionRegistry: WorkflowVersionRegistry;
   /**
    * Worker → server WebSocket multiplexer. Always present — workers in
    * step / agent mode connect on `/ws/worker` to receive server-pushed
@@ -357,7 +357,7 @@ export class ZoryaServer {
     if (config.secrets) this.secrets = config.secrets;
     this.clock = config.clock ?? SystemWallClock;
     const clock = this.clock;
-    this.versionRegistry = config.versionRegistry ?? new WorkflowVersionRegistry({ clock });
+    this.versionRegistry = config.versionRegistry ?? new InMemoryWorkflowVersionRegistry({ clock });
 
     this.logger = config.logger ?? console;
     this.auth = new Auth(config);

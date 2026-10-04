@@ -11,7 +11,7 @@ import type {
   WorkflowRunSummary,
   JournalEntry,
 } from "@promin/workflow";
-import { isStepAttemptStorage, isActivityJournalStorage } from "@promin/workflow";
+import { hasCapability } from "@promin/workflow";
 import { json, jsonError } from "../router.ts";
 import { runToSummaryDto } from "../serialize.ts";
 import type { RunSummaryDto } from "../api-types.ts";
@@ -86,7 +86,7 @@ export interface JournalEntryDto {
 }
 
 export interface StepJournalResponse {
-  /** False when the storage backend doesn't implement ActivityJournalStorage. */
+  /** False when the storage backend doesn't implement JournalStore. */
   supported: boolean;
   entries: JournalEntryDto[];
 }
@@ -145,13 +145,13 @@ export function getRunAttempts(storage: WorkflowStorage) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
-    if (!isStepAttemptStorage(storage)) {
+    if (!hasCapability(storage, "stepAttempts")) {
       const response: AttemptsResponse = { supported: false, attempts: [] };
       return json(200, response);
     }
     const url = new URL(req.url);
     const stepName = url.searchParams.get("stepName") ?? undefined;
-    const records = await storage.loadStepAttempts(id, stepName);
+    const records = await storage.loadStepAttempts({ workflowId: id, stepName });
     const response: AttemptsResponse = {
       supported: true,
       attempts: records.map(attemptToDto),
@@ -164,7 +164,7 @@ export function getRunHistory(storage: WorkflowStorage) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
-    const rows = await storage.loadRunHistory(id);
+    const rows = await storage.loadRunHistory({ workflowId: id });
     const response: RunHistoryResponse = { runs: rows.map(runSummaryToDto) };
     return json(200, response);
   };
@@ -186,7 +186,7 @@ export function getRunChildren(storage: WorkflowStorage) {
  * actual execution had multiple `ctx.activity` / `ctx.sleep` checkpoints
  * — this endpoint surfaces them so the run-detail UI can list each one
  * with its result. Degrades gracefully when the storage backend doesn't
- * implement ActivityJournalStorage (returns supported=false).
+ * implement JournalStore (returns supported=false).
  */
 export function getRunStepJournal(storage: WorkflowStorage) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
@@ -194,11 +194,11 @@ export function getRunStepJournal(storage: WorkflowStorage) {
     const stepName = params.stepName;
     if (!id) return jsonError(400, "missing_id");
     if (!stepName) return jsonError(400, "missing_step_name");
-    if (!isActivityJournalStorage(storage)) {
+    if (!hasCapability(storage, "journal")) {
       const response: StepJournalResponse = { supported: false, entries: [] };
       return json(200, response);
     }
-    const entries = await storage.loadJournal(id, stepName);
+    const entries = await storage.loadJournal({ workflowId: id, stepName });
     const response: StepJournalResponse = {
       supported: true,
       entries: entries.map(journalEntryToDto),
@@ -230,7 +230,7 @@ export function markRunSuccess(storage: WorkflowStorage) {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
     try {
-      await storage.completeWorkflow(id, null);
+      await storage.completeWorkflow({ workflowId: id, result: null });
       return json(200, { ok: true });
     } catch (err) {
       return jsonError(
@@ -254,7 +254,7 @@ export function markRunFailed(storage: WorkflowStorage) {
       // body is optional
     }
     try {
-      await storage.failWorkflow(id, reason);
+      await storage.failWorkflow({ workflowId: id, error: reason });
       return json(200, { ok: true });
     } catch (err) {
       return jsonError(400, "mark_failed_failed", err instanceof Error ? err.message : String(err));
@@ -272,7 +272,7 @@ export function rerunRun(storage: WorkflowStorage, trigger?: (id: string) => Pro
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
     try {
-      await storage.startFreshRun(id);
+      await storage.startFreshRun({ workflowId: id });
       if (trigger) await trigger(id);
       return json(200, { ok: true });
     } catch (err) {

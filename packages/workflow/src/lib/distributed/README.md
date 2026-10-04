@@ -56,7 +56,7 @@ gpuWorker.start();
 Step retry + when         ✓ StepOptions        ✓ WorkerStepOptions
 onFailure (skip/fallback) ✓ StepOptions        ✓ WorkerStepOptions
 Compensation              ✓ StepOptions        ✗ (not on workers)
-Step attempt recording    ✓ StepAttemptStorage  ✓ StepAttemptStorage
+Step attempt recording    ✓ StepAttemptStore  ✓ StepAttemptStore
 Workflow-level retry      ✓ workflow({ retry }) ✗ (coordinator manages)
 Compensation cascade      ✓ CompensateConfig   ✗ (coordinator manages)
 DLQ                       ✓ workflow({ dlq })   ✗ (coordinator manages)

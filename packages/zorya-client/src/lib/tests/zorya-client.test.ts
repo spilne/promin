@@ -49,7 +49,7 @@ function mountTestServer(
       // so cancel/signal/events tests can act on a non-terminal workflow
       // before driving it to completion themselves.
       if (options.autoComplete !== false) {
-        await storage.completeWorkflow(workflowId, { ok: true, echoed: body.input });
+        await storage.completeWorkflow({ workflowId, result: { ok: true, echoed: body.input } });
       }
       return new Response(JSON.stringify({ workflowId }), {
         status: 200,
@@ -172,7 +172,7 @@ describe("ZoryaClient handle — signal / cancel / events over the wire", () => 
     // (RemoteWorkflowStorage has no native push) sees the diff and yields
     // workflow-completed before the iterator's break.
     setTimeout(() => {
-      void storage.completeWorkflow("wf-events-1", { done: true });
+      void storage.completeWorkflow({ workflowId: "wf-events-1", result: { done: true } });
     }, 30);
 
     const seen: string[] = [];

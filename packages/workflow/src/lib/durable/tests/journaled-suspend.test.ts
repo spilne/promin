@@ -35,7 +35,7 @@ describe("ctx.sleep — durable mid-step sleep", () => {
       }),
     ).rejects.toBeInstanceOf(WorkflowSuspendedError);
 
-    const journal = await storage.loadJournal("wf-sleep-1", "wait");
+    const journal = await storage.loadJournal({ workflowId: "wf-sleep-1", stepName: "wait" });
     expect(journal).toHaveLength(1);
     expect(journal[0]!.stepType).toBe("sleep");
     expect(journal[0]!.phase).toBe("pending");
@@ -151,7 +151,7 @@ describe("ctx.sleep — durable mid-step sleep", () => {
       }),
     ).rejects.toBeInstanceOf(WorkflowSuspendedError);
 
-    const journal = await storage.loadJournal("wf-sleep-date", "s");
+    const journal = await storage.loadJournal({ workflowId: "wf-sleep-date", stepName: "s" });
     expect(journal[0]!.wakeAt!.getTime()).toBe(wakeAt.getTime());
   });
 });
@@ -179,7 +179,7 @@ describe("ctx.signal — durable mid-step signal wait", () => {
       }),
     ).rejects.toBeInstanceOf(WorkflowSuspendedError);
 
-    const journal = await storage.loadJournal("wf-sig-1", "gate");
+    const journal = await storage.loadJournal({ workflowId: "wf-sig-1", stepName: "gate" });
     expect(journal).toHaveLength(1);
     expect(journal[0]!.stepType).toBe("signal");
     expect(journal[0]!.phase).toBe("pending");
@@ -334,7 +334,7 @@ describe("DefaultSleepScanner integration with journaled sleeps", () => {
     expect(postSleepCalls).toBe(1);
 
     // Journal entry should now be completed.
-    const journal = await storage.loadJournal("scan-1", "wait-then-do");
+    const journal = await storage.loadJournal({ workflowId: "scan-1", stepName: "wait-then-do" });
     expect(journal[0]!.stepType).toBe("sleep");
     expect(journal[0]!.phase).toBe("completed");
   });
@@ -454,7 +454,10 @@ describe("ctx.signal({ timeout }) — bounded suspend", () => {
     ).rejects.toBeInstanceOf(WorkflowSuspendedError);
 
     // Journal has a pending signal entry with wakeAt set.
-    const journalAfterSuspend = await storage.loadJournal("wf-tsig-1", "wait");
+    const journalAfterSuspend = await storage.loadJournal({
+      workflowId: "wf-tsig-1",
+      stepName: "wait",
+    });
     expect(journalAfterSuspend).toHaveLength(1);
     expect(journalAfterSuspend[0]!.stepType).toBe("signal");
     expect(journalAfterSuspend[0]!.wakeAt).toBeInstanceOf(Date);
@@ -515,7 +518,7 @@ describe("ctx.signal({ timeout }) — bounded suspend", () => {
     expect(result).toEqual({ ok: false, error: "timeout" });
 
     // Journal entry is now completed with the tagged timeout outcome.
-    const journal = await storage.loadJournal("wf-tsig-2", "wait");
+    const journal = await storage.loadJournal({ workflowId: "wf-tsig-2", stepName: "wait" });
     expect(journal[0]!.phase).toBe("completed");
     expect(journal[0]!.exit).toEqual({
       tag: "Success",

@@ -12,13 +12,8 @@
 // put it in front of this handler.
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage, ActivityJournalStorage } from "@promin/workflow";
-import {
-  isActivityJournalStorage,
-  isCompensationLedgerStorage,
-  isStepAttemptStorage,
-} from "@promin/workflow";
-import type { CompensationLedgerStorage, StepAttemptStorage } from "@promin/workflow";
+import type { WorkflowStorage } from "@promin/workflow";
+import { hasCapability, type StorageCapability, type StorageCapabilityMap } from "@promin/workflow";
 import { WIRE_CODEC, type RpcRequest, type RpcResponse, type StorageMethod } from "./wire.ts";
 
 /**
@@ -29,10 +24,11 @@ import { WIRE_CODEC, type RpcRequest, type RpcResponse, type StorageMethod } fro
 export function createWorkflowStorageHandler(
   storage: WorkflowStorage,
 ): (req: Request) => Promise<Response> {
-  // Every write RPC carries an optional `guard: { fenceToken }` field on
-  // its params object so a stale holder's stray writes get rejected
-  // server-side. The param shape is exactly `{ ...originalArgs, guard? }`
-  // — new clients send it, legacy clients omit it, both work.
+  // The RPC params of a method are its storage params object, `guard`
+  // included, so most dispatchers hand them straight through. Three keep
+  // their older wire envelope (see `RemoteWorkflowStorage`):
+  // `cancelWorkflow` ({ options: { cascade } }), `failWorkflow`
+  // ({ details: { errorTag } }) and `loadRunHistory` ({ params: page }).
   const dispatchers: Record<StorageMethod, (params: any) => Promise<unknown>> = {
     loadWorkflow: (p) => storage.loadWorkflow(p.workflowId),
     loadWorkflowStatus: (p) => storage.loadWorkflowStatus(p.workflowId),
@@ -40,124 +36,67 @@ export function createWorkflowStorageHandler(
     distinctWorkflowNames: (p) => storage.distinctWorkflowNames(p),
     distinctWorkflowTypes: (p) => storage.distinctWorkflowTypes(p),
     distinctNamespaces: () => storage.distinctNamespaces(),
-    cancelWorkflow: (p) => storage.cancelWorkflow(p.workflowId, p.options, p.guard),
-    createWorkflow: (p) => {
-      const { guard, ...params } = p;
-      return storage.createWorkflow(params, guard);
-    },
+    cancelWorkflow: ({ options, ...p }) =>
+      storage.cancelWorkflow({
+        ...p,
+        ...(options?.cascade !== undefined && { cascade: options.cascade }),
+      }),
+    createWorkflow: (p) => storage.createWorkflow(p),
     findWorkflowByIdempotencyKey: (p) => storage.findWorkflowByIdempotencyKey(p),
-    saveStepResult: (p) => {
-      const { guard, ...params } = p;
-      return storage.saveStepResult(params, guard);
-    },
-    batchSaveStepResults: (p) => storage.batchSaveStepResults(p.records, p.guard),
-    saveStepFailure: (p) => {
-      const { guard, ...params } = p;
-      return storage.saveStepFailure(params, guard);
-    },
-    saveTaskResult: (p) => {
-      const { guard, ...params } = p;
-      return storage.saveTaskResult(params, guard);
-    },
-    saveTaskFailure: (p) => {
-      const { guard, ...params } = p;
-      return storage.saveTaskFailure(params, guard);
-    },
-    completeWorkflow: (p) => storage.completeWorkflow(p.workflowId, p.result, p.guard),
-    failWorkflow: (p) => storage.failWorkflow(p.workflowId, p.error, p.guard, p.details),
-    tripwireWorkflow: async (p) => {
-      // Forwarded only if the underlying storage implements it. The client
-      // calling this op against a non-tripwire-capable storage surfaces a
-      // clear 4xx-style error rather than a silent miss.
-      if (!storage.tripwireWorkflow) {
-        throw new Error("storage does not implement tripwireWorkflow");
-      }
-      await storage.tripwireWorkflow(p.workflowId, p.reason, p.guard);
-    },
-    suspendWorkflow: (p) =>
-      storage.suspendWorkflow(p.workflowId, p.stepName, p.stepUpdate, p.guard),
-    deliverSignal: (p) => storage.deliverSignal(p.workflowId, p.signalName, p.payload),
+    saveStepResult: (p) => storage.saveStepResult(p),
+    batchSaveStepResults: (p) => storage.batchSaveStepResults(p),
+    saveStepFailure: (p) => storage.saveStepFailure(p),
+    saveTaskResult: (p) => storage.saveTaskResult(p),
+    saveTaskFailure: (p) => storage.saveTaskFailure(p),
+    completeWorkflow: (p) => storage.completeWorkflow(p),
+    failWorkflow: ({ details, ...p }) =>
+      storage.failWorkflow({
+        ...p,
+        ...(details?.errorTag !== undefined && { errorTag: details.errorTag }),
+      }),
+    tripwireWorkflow: (p) => requireCapability(storage, "tripwire").tripwireWorkflow(p),
+    suspendWorkflow: (p) => storage.suspendWorkflow(p),
+    deliverSignal: (p) => storage.deliverSignal(p),
     loadSignals: (p) => storage.loadSignals(p.workflowId),
-    setWorkflowMetadata: (p) => storage.setWorkflowMetadata(p.workflowId, p.patch, p.guard),
-    tryLock: (p) => storage.tryLock(p.workflowId, p.lockDurationMs),
-    tryLockAndLoad: (p) => storage.tryLockAndLoad(p.workflowId, p.lockDurationMs),
-    releaseLock: (p) => storage.releaseLock(p.workflowId, p.guard),
-    heartbeat: (p) => storage.heartbeat(p.workflowId, p.lockDurationMs, p.guard),
-    startFreshRun: (p) => storage.startFreshRun(p.workflowId, p.guard),
-    loadRunHistory: (p) => storage.loadRunHistory(p.workflowId, p.params),
-    resetSteps: async (p) => {
-      // Forwarded only if the underlying storage implements it — surface
-      // a clear error rather than a silent miss.
-      if (!storage.resetSteps) {
-        throw new Error("storage does not implement resetSteps");
-      }
-      await storage.resetSteps(p.workflowId, p.stepNames);
-    },
+    setWorkflowMetadata: (p) => storage.setWorkflowMetadata(p),
+    tryLock: (p) => storage.tryLock(p),
+    tryLockAndLoad: (p) => storage.tryLockAndLoad(p),
+    releaseLock: (p) => storage.releaseLock(p),
+    heartbeat: (p) => storage.heartbeat(p),
+    startFreshRun: (p) => storage.startFreshRun(p),
+    loadRunHistory: ({ params, ...p }) => storage.loadRunHistory({ ...p, ...params }),
+    resetSteps: (p) => requireCapability(storage, "resetSteps").resetSteps(p),
     purgeCompleted: (p) => storage.purgeCompleted(p),
-    // -- Scanner / recovery queries. Feature-detected: a backend without
-    // them surfaces a clear error instead of a silent miss.
-    listDueTimers: (p) => {
-      if (!storage.listDueTimers) throw new Error("storage does not implement listDueTimers");
-      return storage.listDueTimers(p);
-    },
-    listSignalWakeups: (p) => {
-      if (!storage.listSignalWakeups) {
-        throw new Error("storage does not implement listSignalWakeups");
-      }
-      return storage.listSignalWakeups(p);
-    },
-    listOrphanedRuns: (p) => {
-      if (!storage.listOrphanedRuns) throw new Error("storage does not implement listOrphanedRuns");
-      return storage.listOrphanedRuns(p);
-    },
-    // -- Journal methods. Feature-detected so backends without journal
-    // support surface a clear error instead of silently dropping calls.
-    loadJournal: (p) => requireJournal(storage).loadJournal(p.workflowId, p.stepName),
-    appendEntry: (p) => {
-      const { guard, ...params } = p;
-      return requireJournal(storage).appendEntry(params, guard);
-    },
-    appendPendingEntry: (p) => {
-      const { guard, ...params } = p;
-      return requireJournal(storage).appendPendingEntry(params, guard);
-    },
-    completePendingEntry: (p) => {
-      const { guard, ...params } = p;
-      return requireJournal(storage).completePendingEntry(params, guard);
-    },
-    discardJournalEntries: async (p) => {
-      const journal = requireJournal(storage);
-      if (!journal.discardJournalEntries) {
-        throw new Error("storage does not implement discardJournalEntries");
-      }
-      const { guard, ...params } = p;
-      await journal.discardJournalEntries(params, guard);
-    },
-    findDueSleeps: (p) => requireJournal(storage).findDueSleeps(p),
-    findPendingSignal: (p) => requireJournal(storage).findPendingSignal(p),
-    // -- StepAttempt methods. Feature-detected so backends without
-    // attempt-history support surface a clear error instead of silent
-    // failure.
-    saveStepAttempt: (p) => requireStepAttempt(storage).saveStepAttempt(p.record, p.guard),
-    loadStepAttempts: (p) => requireStepAttempt(storage).loadStepAttempts(p.workflowId, p.stepName),
-    // -- Compensation ledger. Feature-detected like the attempt history.
-    beginCompensation: (p) => {
-      const { guard, ...params } = p;
-      return requireCompensationLedger(storage).beginCompensation(params, guard);
-    },
-    saveStepCompensation: (p) => {
-      const { guard, ...params } = p;
-      return requireCompensationLedger(storage).saveStepCompensation(params, guard);
-    },
-    // -- Signal tokens. Core methods on WorkflowStorage — no feature gate.
+    // -- Scanner / recovery queries.
+    listDueTimers: (p) => requireCapability(storage, "dueTimers").listDueTimers(p),
+    listSignalWakeups: (p) => requireCapability(storage, "signalWakeups").listSignalWakeups(p),
+    listOrphanedRuns: (p) => requireCapability(storage, "orphanedRuns").listOrphanedRuns(p),
+    // -- Journal.
+    loadJournal: (p) => requireCapability(storage, "journal").loadJournal(p),
+    appendEntry: (p) => requireCapability(storage, "journal").appendEntry(p),
+    appendPendingEntry: (p) => requireCapability(storage, "journal").appendPendingEntry(p),
+    completePendingEntry: (p) => requireCapability(storage, "journal").completePendingEntry(p),
+    discardJournalEntries: (p) =>
+      requireCapability(
+        requireCapability(storage, "journal"),
+        "journalDiscard",
+      ).discardJournalEntries(p),
+    findDueSleeps: (p) => requireCapability(storage, "journal").findDueSleeps(p),
+    findPendingSignal: (p) => requireCapability(storage, "journal").findPendingSignal(p),
+    // -- Step attempts.
+    saveStepAttempt: (p) => requireCapability(storage, "stepAttempts").saveStepAttempt(p),
+    loadStepAttempts: (p) => requireCapability(storage, "stepAttempts").loadStepAttempts(p),
+    // -- Compensation ledger.
+    beginCompensation: (p) => requireCapability(storage, "compensationLedger").beginCompensation(p),
+    saveStepCompensation: (p) =>
+      requireCapability(storage, "compensationLedger").saveStepCompensation(p),
+    // -- Signal tokens.
     createSignalToken: (p) => storage.createSignalToken(p),
     findSignalTokenById: (p) => storage.findSignalTokenById(p.tokenId),
     markSignalTokenCompleted: (p) => storage.markSignalTokenCompleted(p),
     listSignalTokensForWorkflow: (p) => storage.listSignalTokensForWorkflow(p.workflowId),
-    appendStreamChunk: (p) => {
-      const { guard, ...params } = p;
-      return storage.appendStreamChunk(params, guard);
-    },
+    // -- Streams.
+    appendStreamChunk: (p) => storage.appendStreamChunk(p),
     readStreamChunks: (p) => storage.readStreamChunks(p),
   };
 
@@ -224,29 +163,33 @@ function jsonResponse(body: RpcResponse, status: number): Response {
   });
 }
 
-function requireJournal(storage: WorkflowStorage): ActivityJournalStorage {
-  if (!isActivityJournalStorage(storage)) {
-    throw new Error(
-      "storage does not implement ActivityJournalStorage — .journaled() steps are unsupported on this backend",
-    );
-  }
-  return storage;
-}
+/** Why a storage lacking each capability can't serve the call. */
+const MISSING_CAPABILITY: Record<StorageCapability, string> = {
+  journal:
+    "storage does not implement JournalStore — .journaled() steps are unsupported on this backend",
+  journalDiscard: "storage does not implement discardJournalEntries",
+  stepAttempts:
+    "storage does not implement StepAttemptStore — step attempt history is unsupported on this backend",
+  stepCheckpoint: "storage does not implement checkpointStep",
+  compensationLedger:
+    "storage does not implement CompensationLedgerStore — durable compensation is unsupported on this backend",
+  tripwire: "storage does not implement tripwireWorkflow",
+  resetSteps: "storage does not implement resetSteps",
+  runEvents: "storage does not implement subscribeToWorkflow",
+  stepStartedEvents: "storage does not implement notifyStepStarted",
+  summaries: "storage does not implement listWorkflowSummaries",
+  countWorkflows: "storage does not implement countWorkflows",
+  cancelStale: "storage does not implement cancelStaleWorkflows",
+  dueTimers: "storage does not implement listDueTimers",
+  signalWakeups: "storage does not implement listSignalWakeups",
+  orphanedRuns: "storage does not implement listOrphanedRuns",
+};
 
-function requireCompensationLedger(storage: WorkflowStorage): CompensationLedgerStorage {
-  if (!isCompensationLedgerStorage(storage)) {
-    throw new Error(
-      "storage does not implement CompensationLedgerStorage — durable compensation is unsupported on this backend",
-    );
-  }
-  return storage;
-}
-
-function requireStepAttempt(storage: WorkflowStorage): StepAttemptStorage {
-  if (!isStepAttemptStorage(storage)) {
-    throw new Error(
-      "storage does not implement StepAttemptStorage — step attempt history is unsupported on this backend",
-    );
-  }
+/** `storage` narrowed to `capability`, or a clear error when it lacks it. */
+function requireCapability<S extends object, K extends StorageCapability>(
+  storage: S,
+  capability: K,
+): S & StorageCapabilityMap[K] {
+  if (!hasCapability(storage, capability)) throw new Error(MISSING_CAPABILITY[capability]);
   return storage;
 }

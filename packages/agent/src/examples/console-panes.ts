@@ -114,7 +114,7 @@ export async function buildStepsTree(
 
       const stepNodes = await Promise.all(
         Object.entries(info.steps).map(async ([name, step]): Promise<TreeNode> => {
-          const entries = await storage.loadJournal(run.workflowId, name);
+          const entries = await storage.loadJournal({ workflowId: run.workflowId, stepName: name });
           const entryNodes: TreeNode[] = entries.map((entry): TreeNode => {
             const icon =
               entry.exit?.tag === "Success" ? "✓" : entry.exit?.tag === "Failure" ? "✗" : "○";

@@ -6,7 +6,14 @@
 // (e.g. PgWorkflowMetrics) can override via ZoryaServerConfig.metrics.
 // ---------------------------------------------------------------------------
 
-import { WORKFLOW_STATUSES, type WorkflowStatus, type WorkflowStorage } from "@promin/workflow";
+import {
+  WORKFLOW_STATUSES,
+  hasCapability,
+  type WorkflowStatus,
+  type ListWorkflowsParams,
+  type WorkflowStorage,
+  type WorkflowSummary,
+} from "@promin/workflow";
 import { json } from "../router.ts";
 import type { MetricsDto } from "../api-types.ts";
 
@@ -23,6 +30,14 @@ export class StorageMetricsProvider implements MetricsProvider {
     this.storage = storage;
   }
 
+  /** The lean list (`listWorkflowSummaries`) when the storage has it, else `listWorkflows`. */
+  private summaryLister(): (params?: ListWorkflowsParams) => Promise<WorkflowSummary[]> {
+    const storage = this.storage;
+    return hasCapability(storage, "summaries")
+      ? storage.listWorkflowSummaries.bind(storage)
+      : storage.listWorkflows.bind(storage);
+  }
+
   async getMetrics(): Promise<MetricsDto> {
     const byStatus: Record<WorkflowStatus, number> = {
       pending: 0,
@@ -34,19 +49,18 @@ export class StorageMetricsProvider implements MetricsProvider {
       tripwire: 0,
     };
 
-    if (this.storage.countWorkflows) {
+    const storage = this.storage;
+    if (hasCapability(storage, "countWorkflows")) {
       // Fast path: one COUNT(*) query per status, each hitting the status index.
       const counts = await Promise.all(
-        ALL_STATUSES.map((s) => this.storage.countWorkflows!({ status: s })),
+        ALL_STATUSES.map((s) => storage.countWorkflows({ status: s })),
       );
       for (let i = 0; i < ALL_STATUSES.length; i++) {
         byStatus[ALL_STATUSES[i]] = counts[i];
       }
     } else {
       // Fallback: lean scan without blob columns.
-      const lister = (this.storage.listWorkflowSummaries ?? this.storage.listWorkflows).bind(
-        this.storage,
-      );
+      const lister = this.summaryLister();
       let offset = 0;
       while (true) {
         const page = await lister({ limit: 500, offset });
@@ -61,9 +75,7 @@ export class StorageMetricsProvider implements MetricsProvider {
     const total = ALL_STATUSES.reduce((s, k) => s + byStatus[k], 0);
 
     // Duration percentiles: lean scan of completed rows only, no blob columns.
-    const lister = (this.storage.listWorkflowSummaries ?? this.storage.listWorkflows).bind(
-      this.storage,
-    );
+    const lister = this.summaryLister();
     const completedPage = await lister({ status: "completed", limit: 2000 });
     const durations = completedPage
       .filter((w) => w.completedAt != null)

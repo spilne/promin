@@ -5,10 +5,10 @@
 import { eq, and, or, sql, desc, asc, inArray, gte, lt, type SQL } from "drizzle-orm";
 import type {
   WorkflowStorage,
-  StepAttemptStorage,
+  StepAttemptStore,
   StepCheckpoint,
-  StepCheckpointStorage,
-  CompensationLedgerStorage,
+  StepCheckpointStore,
+  CompensationLedgerStore,
   StepCompensationOutcome,
   RunSource,
   WorkflowState,
@@ -23,16 +23,45 @@ import type {
   StepTaskState,
   SignalState,
   StepAttemptRecord,
-  ActivityJournalStorage,
+  JournalStore,
   JournalEntry,
   JournalExit,
-  JournalSlot,
   CompletePendingResult,
   FenceGuard,
   SignalTokenRecord,
   StreamChunk,
   WorkflowWakeup,
   OrphanedRun,
+  AppendEntryParams,
+  AppendPendingEntryParams,
+  AppendStreamChunkParams,
+  BatchSaveStepResultsParams,
+  BeginCompensationParams,
+  CancelWorkflowParams,
+  CheckpointStepParams,
+  CompletePendingEntryParams,
+  CompleteWorkflowParams,
+  CreateWorkflowParams,
+  DeliverSignalParams,
+  DiscardJournalEntriesParams,
+  FailWorkflowParams,
+  HeartbeatParams,
+  LoadJournalParams,
+  LoadRunHistoryParams,
+  LoadStepAttemptsParams,
+  ReleaseLockParams,
+  ResetStepsParams,
+  SaveStepAttemptParams,
+  SaveStepCompensationParams,
+  SaveStepFailureParams,
+  SaveStepResultParams,
+  SaveTaskFailureParams,
+  SaveTaskResultParams,
+  SetWorkflowMetadataParams,
+  StartFreshRunParams,
+  SuspendWorkflowParams,
+  TripwireWorkflowParams,
+  TryLockParams,
 } from "@promin/workflow";
 import {
   CANCELLED_ERROR,
@@ -148,13 +177,13 @@ function parseJsonText(text: string | null | undefined): unknown {
 export class PostgresWorkflowStorage
   implements
     WorkflowStorage,
-    StepAttemptStorage,
-    StepCheckpointStorage,
-    CompensationLedgerStorage,
-    ActivityJournalStorage
+    StepAttemptStore,
+    StepCheckpointStore,
+    CompensationLedgerStore,
+    JournalStore
 {
   /**
-   * Drizzle schemas for all workflow tables.
+   * Drizzle schemas for every table this storage reads and writes.
    * Use these to include workflow tables in your migration pipeline.
    *
    * @example
@@ -163,6 +192,7 @@ export class PostgresWorkflowStorage
    * export const {
    *   workflows, workflowSteps, workflowStepTasks,
    *   workflowSignals, workflowLocks, stepAttempts,
+   *   activityJournal, signalTokens, workflowStreams,
    * } = PostgresWorkflowStorage.schema;
    * ```
    */
@@ -174,6 +204,9 @@ export class PostgresWorkflowStorage
     workflowSignals,
     workflowLocks,
     stepAttempts,
+    activityJournal,
+    signalTokens,
+    workflowStreams,
   };
 
   private readonly config: Required<PostgresStorageConfig>;
@@ -594,15 +627,11 @@ export class PostgresWorkflowStorage
     return rows.map((r) => r.namespace!).filter((n): n is string => n != null);
   }
 
-  async cancelWorkflow(
-    workflowId: string,
-    options?: { cascade?: boolean },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async cancelWorkflow({ workflowId, cascade, guard }: CancelWorkflowParams): Promise<void> {
     await this.fenced({
       workflowId,
       guard,
-      write: (db) => this.cancelWithin({ db, workflowId, cascade: options?.cascade === true }),
+      write: (db) => this.cancelWithin({ db, workflowId, cascade: cascade === true }),
     });
   }
 
@@ -655,23 +684,12 @@ export class PostgresWorkflowStorage
       );
   }
 
-  async createWorkflow(
-    params: {
-      workflowId: string;
-      workflowName: string;
-      input: unknown;
-      workflowType?: string;
-      parentWorkflowId?: string;
-      namespace?: string;
-      metadata?: Record<string, unknown>;
-      version?: string;
-      runSource?: RunSource;
-      runSourceId?: string;
-      idempotencyKey?: string;
-      idempotencyExpiresAt?: Date;
-    },
-    guard?: FenceGuard,
-  ): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
+  async createWorkflow({
+    guard,
+    ...params
+  }: CreateWorkflowParams): Promise<
+    { created: true } | { created: false; existing: WorkflowState }
+  > {
     const ns = this.resolveNamespace(params.namespace);
     const parentToken = this.fenceTokenOf(guard);
     if (parentToken !== undefined && params.parentWorkflowId === undefined) {
@@ -775,17 +793,7 @@ export class PostgresWorkflowStorage
     return row ? { workflowId: row.workflowId } : null;
   }
 
-  async saveStepResult(
-    params: {
-      workflowId: string;
-      stepName: string;
-      result: unknown;
-      durationMs: number;
-      startedAt: Date;
-      metadata?: Record<string, unknown>;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async saveStepResult({ guard, ...params }: SaveStepResultParams): Promise<void> {
     const { workflowId, stepName, ...outcome } = params;
     await this.writeStep({
       checkpoint: {
@@ -804,10 +812,10 @@ export class PostgresWorkflowStorage
    * row's status move, the step row upsert and the attempt rows, with the
    * run's status read back from the same statement.
    */
-  async checkpointStep(
-    checkpoint: StepCheckpoint,
-    guard?: FenceGuard,
-  ): Promise<WorkflowStatusSnapshot | null> {
+  async checkpointStep({
+    guard,
+    ...checkpoint
+  }: CheckpointStepParams): Promise<WorkflowStatusSnapshot | null> {
     return this.writeStep({ checkpoint, guard });
   }
 
@@ -905,17 +913,7 @@ export class PostgresWorkflowStorage
     };
   }
 
-  async batchSaveStepResults(
-    records: ReadonlyArray<{
-      workflowId: string;
-      stepName: string;
-      result: unknown;
-      durationMs: number;
-      startedAt: Date;
-      metadata?: Record<string, unknown>;
-    }>,
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async batchSaveStepResults({ records, guard }: BatchSaveStepResultsParams): Promise<void> {
     if (records.length === 0) return;
     const token = this.fenceTokenOf(guard);
     const now = this.config.clock.now();
@@ -1006,18 +1004,7 @@ export class PostgresWorkflowStorage
     });
   }
 
-  async saveStepFailure(
-    params: {
-      workflowId: string;
-      stepName: string;
-      error: string;
-      errorTag?: string;
-      durationMs: number;
-      startedAt: Date;
-      metadata?: Record<string, unknown>;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async saveStepFailure({ guard, ...params }: SaveStepFailureParams): Promise<void> {
     const { workflowId, stepName, ...outcome } = params;
     await this.writeStep({
       checkpoint: { workflowId, stepName, outcome: { kind: "failed", ...outcome }, attempts: [] },
@@ -1025,15 +1012,7 @@ export class PostgresWorkflowStorage
     });
   }
 
-  async saveTaskResult(
-    params: {
-      workflowId: string;
-      stepName: string;
-      taskIndex: number;
-      result: unknown;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async saveTaskResult({ guard, ...params }: SaveTaskResultParams): Promise<void> {
     await this.writeTask({
       ...params,
       outcome: { statusId: StepStatusIds.id.completed, result: params.result },
@@ -1041,15 +1020,7 @@ export class PostgresWorkflowStorage
     });
   }
 
-  async saveTaskFailure(
-    params: {
-      workflowId: string;
-      stepName: string;
-      taskIndex: number;
-      error: string;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async saveTaskFailure({ guard, ...params }: SaveTaskFailureParams): Promise<void> {
     await this.writeTask({
       ...params,
       outcome: { statusId: StepStatusIds.id.failed, error: params.error },
@@ -1108,7 +1079,7 @@ export class PostgresWorkflowStorage
     });
   }
 
-  async completeWorkflow(workflowId: string, result: unknown, guard?: FenceGuard): Promise<void> {
+  async completeWorkflow({ workflowId, result, guard }: CompleteWorkflowParams): Promise<void> {
     await this.finishWorkflow({
       workflowId,
       guard,
@@ -1116,20 +1087,15 @@ export class PostgresWorkflowStorage
     });
   }
 
-  async failWorkflow(
-    workflowId: string,
-    error: string,
-    guard?: FenceGuard,
-    details?: { readonly errorTag?: string },
-  ): Promise<void> {
+  async failWorkflow({ workflowId, error, errorTag, guard }: FailWorkflowParams): Promise<void> {
     await this.finishWorkflow({
       workflowId,
       guard,
-      set: { statusId: WorkflowStatusIds.id.failed, error, errorTag: details?.errorTag ?? null },
+      set: { statusId: WorkflowStatusIds.id.failed, error, errorTag: errorTag ?? null },
     });
   }
 
-  async tripwireWorkflow(workflowId: string, reason: unknown, guard?: FenceGuard): Promise<void> {
+  async tripwireWorkflow({ workflowId, reason, guard }: TripwireWorkflowParams): Promise<void> {
     await this.finishWorkflow({
       workflowId,
       guard,
@@ -1176,12 +1142,12 @@ export class PostgresWorkflowStorage
     });
   }
 
-  async suspendWorkflow(
-    workflowId: string,
-    stepName: string,
-    stepUpdate: Record<string, unknown>,
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async suspendWorkflow({
+    workflowId,
+    stepName,
+    stepUpdate,
+    guard,
+  }: SuspendWorkflowParams): Promise<void> {
     // One fenced statement, so the step row and the workflow's `suspended`
     // status land together. Fields `stepUpdate` leaves out keep their
     // stored value on an existing row (and their default on a new one).
@@ -1237,7 +1203,7 @@ export class PostgresWorkflowStorage
     });
   }
 
-  async deliverSignal(workflowId: string, signalName: string, payload: unknown): Promise<void> {
+  async deliverSignal({ workflowId, signalName, payload }: DeliverSignalParams): Promise<void> {
     await this.db
       .insert(workflowSignals)
       .values({ workflowId, signalName, payload })
@@ -1247,11 +1213,11 @@ export class PostgresWorkflowStorage
       });
   }
 
-  async setWorkflowMetadata(
-    workflowId: string,
-    patch: Record<string, unknown>,
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async setWorkflowMetadata({
+    workflowId,
+    patch,
+    guard,
+  }: SetWorkflowMetadataParams): Promise<void> {
     // Postgres jsonb merge on the row's metadata column, in one UPDATE so
     // concurrent patches to different keys all land. `||` shallow-merges
     // top-level keys; null-valued entries in the patch are stripped via a
@@ -1299,10 +1265,10 @@ export class PostgresWorkflowStorage
     }));
   }
 
-  async tryLock(
-    workflowId: string,
-    lockDurationMs: number,
-  ): Promise<{ acquired: boolean; token?: string }> {
+  async tryLock({
+    workflowId,
+    lockDurationMs,
+  }: TryLockParams): Promise<{ acquired: boolean; token?: string }> {
     // Row locks (the default) live in wf_workflow_locks and carry the
     // bigserial fence_token. The deprecated advisory mode has no row and so
     // no token — see `PostgresStorageConfig.useAdvisoryLocks`.
@@ -1313,21 +1279,21 @@ export class PostgresWorkflowStorage
     return this.tryRowLock(workflowId, lockDurationMs);
   }
 
-  async tryLockAndLoad(
-    workflowId: string,
-    lockDurationMs: number,
-  ): Promise<{ locked: boolean; token?: string; state: WorkflowState | null }> {
+  async tryLockAndLoad({
+    workflowId,
+    lockDurationMs,
+  }: TryLockParams): Promise<{ locked: boolean; token?: string; state: WorkflowState | null }> {
     // Sequenced lock then load (not one transaction): collapses two HTTP
     // round-trips when this storage is fronted by the workflow-remote RPC.
     // The load can observe writes committed after the lock was taken —
     // good enough for the "are we joining an in-flight run?" question the
     // coordinator actually asks.
-    const { acquired, token } = await this.tryLock(workflowId, lockDurationMs);
+    const { acquired, token } = await this.tryLock({ workflowId, lockDurationMs });
     const state = await this.loadWorkflow(workflowId);
     return { locked: acquired, token, state };
   }
 
-  async releaseLock(workflowId: string, guard?: FenceGuard): Promise<void> {
+  async releaseLock({ workflowId, guard }: ReleaseLockParams): Promise<void> {
     if (this.config.useAdvisoryLocks) {
       await this.releaseAdvisoryLock(workflowId);
       return;
@@ -1355,7 +1321,7 @@ export class PostgresWorkflowStorage
       );
   }
 
-  async heartbeat(workflowId: string, lockDurationMs: number, guard?: FenceGuard): Promise<void> {
+  async heartbeat({ workflowId, lockDurationMs, guard }: HeartbeatParams): Promise<void> {
     if (this.config.useAdvisoryLocks) return;
     // Expiry is computed on the server clock, same as `tryRowLock`, so the
     // lease length doesn't drift with client/server skew.
@@ -1503,7 +1469,7 @@ export class PostgresWorkflowStorage
     });
   }
 
-  async startFreshRun(workflowId: string, guard?: FenceGuard): Promise<number> {
+  async startFreshRun({ workflowId, guard }: StartFreshRunParams): Promise<number> {
     const now = this.config.clock.now();
     const token = this.fenceTokenOf(guard);
 
@@ -1560,7 +1526,7 @@ export class PostgresWorkflowStorage
     });
   }
 
-  async resetSteps(workflowId: string, stepNames: readonly string[]): Promise<void> {
+  async resetSteps({ workflowId, stepNames }: ResetStepsParams): Promise<void> {
     if (stepNames.length === 0) return;
     const names = [...stepNames];
     await this.db.transaction(async (tx) => {
@@ -1794,10 +1760,10 @@ export class PostgresWorkflowStorage
     });
   }
 
-  async loadRunHistory(
-    workflowId: string,
-    params?: { limit?: number; offset?: number },
-  ): Promise<WorkflowRunSummary[]> {
+  async loadRunHistory({
+    workflowId,
+    ...params
+  }: LoadRunHistoryParams): Promise<WorkflowRunSummary[]> {
     const [wfRow] = await this.db
       .select()
       .from(workflows)
@@ -1997,10 +1963,10 @@ export class PostgresWorkflowStorage
   }
 
   // ---------------------------------------------------------------------------
-  // StepAttemptStorage — attempt history (opt-in via recordAttempts config)
+  // StepAttemptStore — attempt history (opt-in via recordAttempts config)
   // ---------------------------------------------------------------------------
 
-  async saveStepAttempt(record: StepAttemptRecord, guard?: FenceGuard): Promise<void> {
+  async saveStepAttempt({ record, guard }: SaveStepAttemptParams): Promise<void> {
     if (!this.config.recordAttempts) return;
     await this.fenced({
       workflowId: record.workflowId,
@@ -2027,7 +1993,10 @@ export class PostgresWorkflowStorage
     });
   }
 
-  async loadStepAttempts(workflowId: string, stepName?: string): Promise<StepAttemptRecord[]> {
+  async loadStepAttempts({
+    workflowId,
+    stepName,
+  }: LoadStepAttemptsParams): Promise<StepAttemptRecord[]> {
     const query = this.db.select().from(stepAttempts).$dynamic();
     if (stepName) {
       query.where(
@@ -2058,13 +2027,10 @@ export class PostgresWorkflowStorage
   }
 
   // ---------------------------------------------------------------------------
-  // CompensationLedgerStorage
+  // CompensationLedgerStore
   // ---------------------------------------------------------------------------
 
-  async beginCompensation(
-    params: { readonly workflowId: string; readonly error: string; readonly errorTag?: string },
-    guard?: FenceGuard,
-  ): Promise<boolean> {
+  async beginCompensation({ guard, ...params }: BeginCompensationParams): Promise<boolean> {
     const { workflowId } = params;
     return this.fenced({
       workflowId,
@@ -2095,15 +2061,7 @@ export class PostgresWorkflowStorage
     });
   }
 
-  async saveStepCompensation(
-    params: {
-      readonly workflowId: string;
-      readonly stepName: string;
-      readonly status: StepCompensationOutcome;
-      readonly error?: string;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async saveStepCompensation({ guard, ...params }: SaveStepCompensationParams): Promise<void> {
     const { workflowId } = params;
     const now = timestampParam(this.config.clock.now());
     await this.fencedStatement({
@@ -2128,10 +2086,10 @@ export class PostgresWorkflowStorage
   }
 
   // ---------------------------------------------------------------------------
-  // ActivityJournalStorage — .journaled() step support
+  // JournalStore — .journaled() step support
   // ---------------------------------------------------------------------------
 
-  async loadJournal(workflowId: string, stepName: string): Promise<JournalEntry[]> {
+  async loadJournal({ workflowId, stepName }: LoadJournalParams): Promise<JournalEntry[]> {
     const rows = await this.db
       .select()
       .from(activityJournal)
@@ -2142,18 +2100,7 @@ export class PostgresWorkflowStorage
     return rows.map(rowToJournalEntry);
   }
 
-  async appendEntry(
-    params: {
-      workflowId: string;
-      stepName: string;
-      activityIndex: number;
-      branchPath?: string;
-      activityName: string;
-      payloadHash?: string;
-      exit: NonNullable<JournalEntry["exit"]>;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async appendEntry({ guard, ...params }: AppendEntryParams): Promise<void> {
     // Idempotent append — PK conflict on
     // (workflow_id, step_name, activity_index, branch_path) is silently
     // dropped. Storage-level dedup: the engine may re-call append during a
@@ -2169,22 +2116,10 @@ export class PostgresWorkflowStorage
   }
 
   // ---------------------------------------------------------------------------
-  // ActivityJournalStorage — pending entries (ctx.sleep / ctx.signal)
+  // JournalStore — pending entries (ctx.sleep / ctx.signal)
   // ---------------------------------------------------------------------------
 
-  async appendPendingEntry(
-    params: {
-      workflowId: string;
-      stepName: string;
-      activityIndex: number;
-      branchPath?: string;
-      activityName: string;
-      payloadHash?: string;
-      stepType: JournalStepType;
-      wakeAt?: Date;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async appendPendingEntry({ guard, ...params }: AppendPendingEntryParams): Promise<void> {
     await this.insertJournalEntry({ ...params, phase: "pending", exit: null, guard });
   }
 
@@ -2221,16 +2156,10 @@ export class PostgresWorkflowStorage
     });
   }
 
-  async completePendingEntry(
-    params: {
-      workflowId: string;
-      stepName: string;
-      activityIndex: number;
-      branchPath?: string;
-      exit: JournalExit;
-    },
-    guard?: FenceGuard,
-  ): Promise<CompletePendingResult> {
+  async completePendingEntry({
+    guard,
+    ...params
+  }: CompletePendingEntryParams): Promise<CompletePendingResult> {
     const slot = and(
       eq(activityJournal.workflowId, params.workflowId),
       eq(activityJournal.stepName, params.stepName),
@@ -2262,14 +2191,7 @@ export class PostgresWorkflowStorage
     return { completed: false, exit: (stored?.exit ?? undefined) as JournalExit | undefined };
   }
 
-  async discardJournalEntries(
-    params: {
-      workflowId: string;
-      stepName: string;
-      slots: readonly JournalSlot[];
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async discardJournalEntries({ guard, ...params }: DiscardJournalEntriesParams): Promise<void> {
     await this.fenced({
       workflowId: params.workflowId,
       guard,
@@ -2462,15 +2384,10 @@ export class PostgresWorkflowStorage
   // Streams — append-only chunks per (workflow, stream).
   // ---------------------------------------------------------------------------
 
-  async appendStreamChunk(
-    params: {
-      workflowId: string;
-      streamId: string;
-      payload: unknown;
-      appendedBy: "workflow" | "external";
-    },
-    guard?: FenceGuard,
-  ): Promise<{ chunkIndex: number }> {
+  async appendStreamChunk({
+    guard,
+    ...params
+  }: AppendStreamChunkParams): Promise<{ chunkIndex: number }> {
     // `MAX + 1` alone isn't atomic under READ COMMITTED: two appenders read
     // the same MAX and collide on the PK. A transaction-scoped advisory lock
     // on (workflow, stream) serializes appenders of one stream (other

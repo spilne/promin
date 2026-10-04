@@ -340,7 +340,7 @@ describe("activity retry — journal Failure after exhausting retries", () => {
       }),
     ).rejects.toBeInstanceOf(TerminalError);
 
-    const journal = await storage.loadJournal("wf-terminal-journal", "s");
+    const journal = await storage.loadJournal({ workflowId: "wf-terminal-journal", stepName: "s" });
     expect(journal).toHaveLength(1);
     expect(journal[0]!.phase).toBe("completed");
     expect(journal[0]!.exit?.tag).toBe("Failure");

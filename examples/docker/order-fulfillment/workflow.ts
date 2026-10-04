@@ -122,7 +122,7 @@ export function buildOrderWorkflow() {
         throw new Error("placeholder");
       })
       // Suspend until the warehouse posts a "shipped" signal. Resume
-      // happens when `storage.deliverSignal(workflowId, "shipped", ...)`
+      // happens when `storage.deliverSignal({ workflowId, signalName: "shipped", payload })`
       // fires from whatever delivered the real event (webhook, Kafka
       // consumer, UI action).
       .waitForSignal<ShippedSignal>("wait-for-shipped", {

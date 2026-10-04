@@ -16,10 +16,10 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import type { ActivityJournalStorage } from "./activity-journal.ts";
+import type { JournalStore } from "./activity-journal.ts";
 import { TerminalError, WorkflowSuspendedError } from "./durable-pipeline-error.ts";
 import type { Workflow } from "./workflow-types.ts";
-import type { WorkflowStorage } from "./workflow-storage.ts";
+import type { LoadJournalParams, WorkflowStorage } from "./workflow-storage.ts";
 import { completeDueSleeps, completeSignal, runJournaledStep } from "./journaled-step.ts";
 import { FakeWallClock } from "../shared/wall-clock.ts";
 
@@ -40,8 +40,7 @@ const uniqueId = (label: string): string =>
     .slice(2, 8)}`;
 
 /** A journal-capable store; `createWorkflow` is called first when present. */
-export type JournalReplayStorage = ActivityJournalStorage &
-  Partial<Pick<WorkflowStorage, "createWorkflow">>;
+export type JournalReplayStorage = JournalStore & Partial<Pick<WorkflowStorage, "createWorkflow">>;
 
 /** Fresh workflow id; creates the workflow row on stores whose journal references it. */
 async function newWorkflow(params: {
@@ -56,7 +55,7 @@ async function newWorkflow(params: {
 const CHILD_WORKFLOW = { name: "child-wf" } as unknown as Workflow<unknown, unknown>;
 
 /**
- * Run the journal replay suite against any `ActivityJournalStorage`. The
+ * Run the journal replay suite against any `JournalStore`. The
  * factory may return a shared store; every case uses unique workflow ids.
  */
 export function journalReplayTestSuite(
@@ -85,7 +84,7 @@ export function journalReplayTestSuite(
 
   /** Sorted `index|branchPath|stepType|name` keys of the step's journal. */
   const keys = async (params: { storage: JournalReplayStorage; workflowId: string }) =>
-    (await params.storage.loadJournal(params.workflowId, "s"))
+    (await params.storage.loadJournal({ workflowId: params.workflowId, stepName: "s" }))
       .map(
         (e) => `${e.activityIndex}|${e.branchPath}|${e.stepType ?? "activity"}|${e.activityName}`,
       )
@@ -102,7 +101,7 @@ export function journalReplayTestSuite(
   }) => {
     const { storage, workflowId, count } = params;
     for (let i = 0; i < 200; i++) {
-      const journal = await storage.loadJournal(workflowId, "s");
+      const journal = await storage.loadJournal({ workflowId, stepName: "s" });
       if (journal.filter((e) => (e.phase ?? "completed") === "completed").length >= count) return;
       await new Promise((r) => setTimeout(r, 5));
     }
@@ -448,8 +447,8 @@ export function journalReplayTestSuite(
       return new Proxy(params.storage, {
         get(target, prop) {
           if (prop === "loadJournal") {
-            return async (workflowId: string, stepName: string) => {
-              const journal = await target.loadJournal(workflowId, stepName);
+            return async (load: LoadJournalParams) => {
+              const journal = await target.loadJournal(load);
               if (armed) {
                 armed = false;
                 await params.deliver();

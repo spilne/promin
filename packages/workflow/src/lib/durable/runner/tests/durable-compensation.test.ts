@@ -11,7 +11,7 @@ import { FakeWallClock } from "../../../shared/wall-clock.ts";
 import { workflow, type Workflow } from "../../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../../in-memory-storage.ts";
 import { createWorkflowRunner, RecoveryStrategy } from "../../workflow-runner.ts";
-import { WorkflowVersionRegistry } from "../../workflow-version-registry.ts";
+import { InMemoryWorkflowVersionRegistry } from "../../workflow-version-registry.ts";
 import type { WorkflowState } from "../../workflow-state.ts";
 import type { WorkflowStorage } from "../../workflow-storage.ts";
 import { compensationOrder } from "../compensation.ts";
@@ -217,7 +217,7 @@ describe("durable compensation", () => {
     expect((await inner.loadWorkflow("saga-2"))!.status).toBe("failed");
 
     // Compensation attempt rows: one per try, numbered across both drivers.
-    const attempts = await inner.loadStepAttempts("saga-2");
+    const attempts = await inner.loadStepAttempts({ workflowId: "saga-2" });
     const comp = attempts
       .filter((a) => a.type === "compensation")
       .map((a) => `${a.stepName}#${a.attempt}:${a.status}`);
@@ -249,7 +249,7 @@ describe("durable compensation", () => {
     expect((await inner.loadWorkflow("saga-3"))!.status).toBe("compensating");
     crashed = false;
 
-    const registry = new WorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
     registry.register(wf as unknown as Workflow<unknown, unknown>);
     const restarted = createWorkflowRunner({ storage: inner, clock, registry });
     const result = await restarted.recover(RecoveryStrategy.builder().resumeRecent().build());

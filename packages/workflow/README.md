@@ -96,6 +96,16 @@ The longhand `ctx.activity(...)` form stays available for cases the proxy doesn'
 - When a failure escapes the body, the attempt is over: after the compensation unwind, recorded failures and rolled-back activities are discarded, so the next attempt (a retry or a resume) runs them again. Successful activities that were not rolled back replay and never run twice.
 - A signal delivery and the signal's timeout race for the same journal entry; the first to complete it wins, and the live run and every replay take that outcome. `completeSignal` returns `false` when it lost.
 
+## Writing a storage backend
+
+`WorkflowStorage` is composed of cohesive stores — `WorkflowRunStore`, `WorkflowLockStore`, `WorkflowQueryStore`, `WorkflowScannerStore`, `SignalStore`, `SignalTokenStore`, `StreamStore` and `RunEventStore` — plus optional extensions (`JournalStore`, `StepAttemptStore`, `StepCheckpointStore`, `CompensationLedgerStore`). Every method takes one params object; a fenced write carries the lock holder's fence token in its `guard` field:
+
+```typescript
+await storage.completeWorkflow({ workflowId, result, guard: { fenceToken } });
+```
+
+Optional parts of the contract are named capabilities. `hasCapability(storage, "journal")` narrows a storage to the interface a capability adds, and `storageCapabilities(storage)` lists them all. `@promin/workflow/storage-kit` holds the helpers the bundled backends share (metadata patch semantics, `listWorkflows` ordering, `tryLockAndLoadDefault` / `batchSaveStepResultsDefault`), and `@promin/workflow/testing` the conformance suites (`storageTestSuite`, `journalReplayTestSuite`, `zombieWorkerTestSuite`).
+
 ## Documentation
 
 - **[Versioning guide](./versioning.md)** — strict / drain / `ctx.patched()` / rolling worker deploys, with runnable examples in [`examples/versioning/`](./examples/versioning)

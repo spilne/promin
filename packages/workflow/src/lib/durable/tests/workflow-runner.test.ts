@@ -8,7 +8,7 @@ import { TaggedError, succeed, fail } from "@spilne/perfect-core";
 import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { InProcessStepExecutor, createWorkflowRunner } from "../workflow-runner.ts";
-import { WorkflowVersionRegistry } from "../workflow-version-registry.ts";
+import { InMemoryWorkflowVersionRegistry } from "../workflow-version-registry.ts";
 
 class TestError extends TaggedError("TestError")<{ readonly message: string }>() {}
 
@@ -55,7 +55,7 @@ describe("WorkflowRunner", () => {
       .step("bump", ({ input }) => succeed(input.n + 100))
       .build();
 
-    const registry = new WorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
     registry.register(v1);
     registry.register(v2);
 
@@ -85,7 +85,7 @@ describe("WorkflowRunner", () => {
       version: "1",
     });
 
-    const registry = new WorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
     registry.register(v1);
     registry.register(v2);
 

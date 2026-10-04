@@ -64,7 +64,7 @@ describe("ctx.validatedSignal — typed signal wait", () => {
 
     // The journal entry uses the SignalType's name (no `validated:` prefix —
     // wire format is unchanged).
-    const journal = await storage.loadJournal("wf-vs-1", "gate");
+    const journal = await storage.loadJournal({ workflowId: "wf-vs-1", stepName: "gate" });
     expect(journal[0]!.activityName).toBe("review");
     expect(journal[0]!.stepType).toBe("signal");
 

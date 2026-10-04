@@ -13,7 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import type {
-  IWorkflowVersionRegistry,
+  WorkflowVersionRegistry,
   RecoveryStrategy,
   SignalScanner,
   SleepScanner,
@@ -50,7 +50,7 @@ export interface LocalWorkflowsConfig {
    * local mapping when nothing's been promoted (preserves the existing
    * "use the default-export" behaviour for unversioned workflows).
    */
-  versionRegistry?: import("@promin/workflow").IWorkflowVersionRegistry;
+  versionRegistry?: import("@promin/workflow").WorkflowVersionRegistry;
   /** Time source for start-up recovery. Default: `SystemWallClock`. */
   clock?: WallClock;
 }
@@ -62,7 +62,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
   private readonly recovery?: RecoveryStrategy;
   private readonly sleepScanner?: SleepScanner;
   private readonly signalScanner?: SignalScanner;
-  private readonly versionRegistry?: import("@promin/workflow").IWorkflowVersionRegistry;
+  private readonly versionRegistry?: import("@promin/workflow").WorkflowVersionRegistry;
   private readonly clock: WallClock;
 
   constructor(config: LocalWorkflowsConfig) {
@@ -151,7 +151,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
       // hit a terminal-state row. Reset so this fresh fire reports its own
       // latency instead of inheriting the prior run's timestamps.
       if (!result.created && isTerminal(result.existing.status)) {
-        await this.storage.startFreshRun(workflowId);
+        await this.storage.startFreshRun({ workflowId });
       }
     }
 
@@ -172,7 +172,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
         `rerun: no in-process definition for "${state.workflowName}" (run ${workflowId})`,
       );
     }
-    await this.storage.startFreshRun(workflowId);
+    await this.storage.startFreshRun({ workflowId });
     void this.runner.runSafe({
       workflow: def,
       workflowId,
@@ -223,18 +223,19 @@ export class LocalWorkflows extends ZoryaWorkflows {
  */
 function definitionsRegistry(
   definitions: Readonly<Record<string, Workflow<unknown, unknown>>>,
-): IWorkflowVersionRegistry {
-  const readOnly = (): never => {
+): WorkflowVersionRegistry {
+  const readOnly = async (): Promise<never> => {
     throw new Error("LocalWorkflows recovery registry is read-only");
   };
   return {
-    resolve: (name) => (Object.hasOwn(definitions, name) ? definitions[name] : undefined),
-    versions: (name) => {
+    resolve: async (name) => (Object.hasOwn(definitions, name) ? definitions[name] : undefined),
+    versions: async (name) => {
       const version = Object.hasOwn(definitions, name) ? definitions[name]!.version : undefined;
       return version !== undefined ? [version] : [];
     },
-    latest: (name) => (Object.hasOwn(definitions, name) ? definitions[name]!.version : undefined),
-    names: () => Object.keys(definitions),
+    latest: async (name) =>
+      Object.hasOwn(definitions, name) ? definitions[name]!.version : undefined,
+    names: async () => Object.keys(definitions),
     register: readOnly,
     deregister: readOnly,
   };

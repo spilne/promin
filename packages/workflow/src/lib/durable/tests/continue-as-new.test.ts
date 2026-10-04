@@ -49,7 +49,7 @@ describe("ctx.continueAsNew", () => {
     // archived in run history.
     const state = await storage.loadWorkflow("cnt-1");
     expect(state?.status).toBe("completed");
-    const runs = await storage.loadRunHistory("cnt-1");
+    const runs = await storage.loadRunHistory({ workflowId: "cnt-1" });
     expect(runs.length).toBeGreaterThanOrEqual(3);
   });
 

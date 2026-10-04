@@ -9,8 +9,7 @@ import {
   decodeRunSource,
   withoutCompensationLedger,
   type WorkflowStorage,
-  type CompensationLedgerStorage,
-  type StepCompensationOutcome,
+  type CompensationLedgerStore,
   type FenceToken,
   type FenceGuard,
   type WorkflowOrderBy,
@@ -28,28 +27,56 @@ import type {
   WorkflowRunSummary,
   SignalState,
   StepState,
+  AppendEntryParams,
+  AppendPendingEntryParams,
+  AppendStreamChunkParams,
+  BatchSaveStepResultsParams,
+  BeginCompensationParams,
+  CancelWorkflowParams,
+  CheckpointStepParams,
+  CompletePendingEntryParams,
+  CompleteWorkflowParams,
+  CreateWorkflowParams,
+  DeliverSignalParams,
+  DiscardJournalEntriesParams,
+  FailWorkflowParams,
+  HeartbeatParams,
+  LoadJournalParams,
+  LoadRunHistoryParams,
+  LoadStepAttemptsParams,
+  ReleaseLockParams,
+  ResetStepsParams,
+  SaveStepAttemptParams,
+  SaveStepCompensationParams,
+  SaveStepFailureParams,
+  SaveStepResultParams,
+  SaveTaskFailureParams,
+  SaveTaskResultParams,
+  SetWorkflowMetadataParams,
+  StartFreshRunParams,
+  SuspendWorkflowParams,
+  TryLockParams,
 } from "@promin/workflow";
 import type {
-  ActivityJournalStorage,
+  JournalStore,
   JournalEntry,
   JournalExit,
-  JournalSlot,
   CompletePendingResult,
   JournalStepType,
   JournalPhase,
-  StepAttemptStorage,
+  StepAttemptStore,
   StepAttemptRecord,
   StepAttemptType,
-  StepCheckpoint,
-  StepCheckpointStorage,
+  StepCheckpointStore,
 } from "@promin/workflow";
+import { applyMetadataPatch } from "@promin/workflow/storage-kit";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
 /**
  * Persistent workflow storage backed by SQLite.
  *
  * Implements the full `WorkflowStorage` contract plus the optional
- * `ActivityJournalStorage` extension.
+ * `JournalStore` extension.
  * Steps and tasks are stored as JSON blobs on the workflow row for
  * simplicity; run history is archived to a separate table on `startFreshRun`.
  *
@@ -71,10 +98,10 @@ import type { SqliteDatabase } from "./sqlite-database.ts";
 export class SqliteWorkflowStorage
   implements
     WorkflowStorage,
-    ActivityJournalStorage,
-    StepAttemptStorage,
-    StepCheckpointStorage,
-    CompensationLedgerStorage
+    JournalStore,
+    StepAttemptStore,
+    StepCheckpointStore,
+    CompensationLedgerStore
 {
   private readonly _t: string;
   private readonly clock: WallClock;
@@ -347,7 +374,8 @@ export class SqliteWorkflowStorage
    * writer that committed first makes this transaction fail with BUSY
    * instead of writing). Without a token the write is unfenced.
    */
-  private _checkFence(workflowId: string, guard?: FenceGuard): void {
+  private _checkFence(params: { workflowId: string; guard?: FenceGuard }): void {
+    const { workflowId, guard } = params;
     if (!guard?.fenceToken) return;
     const lock = this.db
       .query<{ token: string; expires_at: number }>(
@@ -383,7 +411,7 @@ export class SqliteWorkflowStorage
   /** Run `write` in one transaction behind `_checkFence`. */
   private _fenced<T>(params: { workflowId: string; guard?: FenceGuard; write: () => T }): T {
     return this.db.transaction((): T => {
-      this._checkFence(params.workflowId, params.guard);
+      this._checkFence({ workflowId: params.workflowId, guard: params.guard });
       return params.write();
     })();
   }
@@ -810,11 +838,7 @@ export class SqliteWorkflowStorage
     return rows.map((r) => r.namespace);
   }
 
-  async cancelWorkflow(
-    workflowId: string,
-    options?: { cascade?: boolean },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async cancelWorkflow({ workflowId, cascade, guard }: CancelWorkflowParams): Promise<void> {
     const now = this.clock.currentTimeMs();
     this._fenced({
       workflowId,
@@ -829,35 +853,24 @@ export class SqliteWorkflowStorage
           .run(CANCELLED_ERROR, CANCELLED_ERROR_TAG, now, now, workflowId),
     });
 
-    if (options?.cascade) {
+    if (cascade) {
       const children = this.db
         .query<{ workflow_id: string }>(
           `SELECT workflow_id FROM ${this._t} WHERE parent_workflow_id = ?`,
         )
         .all(workflowId);
       for (const child of children) {
-        await this.cancelWorkflow(child.workflow_id, { cascade: true });
+        await this.cancelWorkflow({ workflowId: child.workflow_id, cascade: true });
       }
     }
   }
 
-  async createWorkflow(
-    params: {
-      workflowId: string;
-      workflowName: string;
-      input: unknown;
-      workflowType?: string;
-      parentWorkflowId?: string;
-      namespace?: string;
-      metadata?: Record<string, unknown>;
-      version?: string;
-      runSource?: RunSource;
-      runSourceId?: string;
-      idempotencyKey?: string;
-      idempotencyExpiresAt?: Date;
-    },
-    guard?: FenceGuard,
-  ): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
+  async createWorkflow({
+    guard,
+    ...params
+  }: CreateWorkflowParams): Promise<
+    { created: true } | { created: false; existing: WorkflowState }
+  > {
     if (guard?.fenceToken && params.parentWorkflowId === undefined) {
       throw new Error("createWorkflow: a fenced create needs parentWorkflowId");
     }
@@ -865,7 +878,7 @@ export class SqliteWorkflowStorage
       (): { created: true } | { created: false; existing: WorkflowState } => {
         // A child create is fenced on the parent's lock.
         if (params.parentWorkflowId !== undefined) {
-          this._checkFence(params.parentWorkflowId, guard);
+          this._checkFence({ workflowId: params.parentWorkflowId, guard });
         }
         const now = this.clock.currentTimeMs();
 
@@ -968,35 +981,23 @@ export class SqliteWorkflowStorage
       .run(now, now, workflowId);
   }
 
-  async saveStepResult(
-    params: {
-      workflowId: string;
-      stepName: string;
-      result: unknown;
-      durationMs: number;
-      startedAt: Date;
-      metadata?: Record<string, unknown>;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
-    this._saveStepResult(params, guard);
+  async saveStepResult({ guard, ...params }: SaveStepResultParams): Promise<void> {
+    this._saveStepResult({ ...params, guard });
   }
 
   /** Synchronous body of `saveStepResult`, so a batch can run it in one transaction. */
-  private _saveStepResult(
-    params: {
-      workflowId: string;
-      stepName: string;
-      result: unknown;
-      durationMs: number;
-      startedAt: Date;
-      metadata?: Record<string, unknown>;
-    },
-    guard?: FenceGuard,
-  ): void {
+  private _saveStepResult(params: {
+    workflowId: string;
+    stepName: string;
+    result: unknown;
+    durationMs: number;
+    startedAt: Date;
+    metadata?: Record<string, unknown>;
+    guard?: FenceGuard;
+  }): void {
     const now = this.clock.currentTimeMs();
     this.db.transaction((): void => {
-      this._checkFence(params.workflowId, guard);
+      this._checkFence(params);
       this._markRunning(params.workflowId, now);
       const row = this.db
         .query<{ steps: string; run: number }>(
@@ -1027,56 +1028,34 @@ export class SqliteWorkflowStorage
     })();
   }
 
-  async batchSaveStepResults(
-    records: ReadonlyArray<{
-      workflowId: string;
-      stepName: string;
-      result: unknown;
-      durationMs: number;
-      startedAt: Date;
-      metadata?: Record<string, unknown>;
-    }>,
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async batchSaveStepResults({ records, guard }: BatchSaveStepResultsParams): Promise<void> {
     // One transaction: every fence is checked before the first write, and
     // the batch commits whole or not at all.
     this.db.transaction((): void => {
-      for (const id of new Set(records.map((r) => r.workflowId))) this._checkFence(id, guard);
+      for (const id of new Set(records.map((r) => r.workflowId)))
+        this._checkFence({ workflowId: id, guard });
       for (const r of records) this._saveStepResult(r);
     })();
   }
 
-  async saveStepFailure(
-    params: {
-      workflowId: string;
-      stepName: string;
-      error: string;
-      errorTag?: string;
-      durationMs: number;
-      startedAt: Date;
-      metadata?: Record<string, unknown>;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
-    this._saveStepFailure(params, guard);
+  async saveStepFailure({ guard, ...params }: SaveStepFailureParams): Promise<void> {
+    this._saveStepFailure({ ...params, guard });
   }
 
   /** Synchronous body of `saveStepFailure`, so `checkpointStep` can run it in its transaction. */
-  private _saveStepFailure(
-    params: {
-      workflowId: string;
-      stepName: string;
-      error: string;
-      errorTag?: string;
-      durationMs: number;
-      startedAt: Date;
-      metadata?: Record<string, unknown>;
-    },
-    guard?: FenceGuard,
-  ): void {
+  private _saveStepFailure(params: {
+    workflowId: string;
+    stepName: string;
+    error: string;
+    errorTag?: string;
+    durationMs: number;
+    startedAt: Date;
+    metadata?: Record<string, unknown>;
+    guard?: FenceGuard;
+  }): void {
     const now = this.clock.currentTimeMs();
     this.db.transaction((): void => {
-      this._checkFence(params.workflowId, guard);
+      this._checkFence(params);
       this._markRunning(params.workflowId, now);
       const row = this.db
         .query<{ steps: string; run: number }>(
@@ -1108,71 +1087,31 @@ export class SqliteWorkflowStorage
     })();
   }
 
-  async saveTaskResult(
-    params: {
-      workflowId: string;
-      stepName: string;
-      taskIndex: number;
-      result: unknown;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
-    const now = this.clock.currentTimeMs();
-    this.db.transaction((): void => {
-      this._checkFence(params.workflowId, guard);
-      const row = this.db
-        .query<{ steps: string; run: number }>(
-          `SELECT steps, run FROM ${this._t} WHERE workflow_id = ?`,
-        )
-        .get(params.workflowId);
-      if (!row) return;
-
-      const steps: Record<string, StepState> = JSON.parse(row.steps);
-      const existing = steps[params.stepName];
-      const tasks = existing?.tasks ? [...existing.tasks] : [];
-
-      const idx = tasks.findIndex((t) => t.taskIndex === params.taskIndex);
-      const prev = idx >= 0 ? tasks[idx] : undefined;
-      const task = {
-        taskIndex: params.taskIndex,
-        status: "completed" as const,
-        result: params.result,
-        startedAt: prev?.startedAt ?? new Date(now),
-        completedAt: new Date(now),
-        attempt: (prev?.attempt ?? 0) + 1,
-      };
-      if (idx >= 0) tasks[idx] = task;
-      else tasks.push(task);
-
-      steps[params.stepName] = {
-        ...(existing ?? {
-          stepName: params.stepName,
-          run: row.run,
-          status: "running" as const,
-          dependsOn: [],
-          stepType: "map" as const,
-          attempt: 1,
-        }),
-        tasks,
-      };
-      this.db
-        .query(`UPDATE ${this._t} SET steps = ?, updated_at = ? WHERE workflow_id = ?`)
-        .run(JSON.stringify(steps), now, params.workflowId);
-    })();
+  async saveTaskResult({ result, ...params }: SaveTaskResultParams): Promise<void> {
+    this._saveTask({ ...params, outcome: { status: "completed", result } });
   }
 
-  async saveTaskFailure(
-    params: {
-      workflowId: string;
-      stepName: string;
-      taskIndex: number;
-      error: string;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async saveTaskFailure({ error, ...params }: SaveTaskFailureParams): Promise<void> {
+    this._saveTask({ ...params, outcome: { status: "failed", error } });
+  }
+
+  /**
+   * Upsert one map task row with `outcome`, creating a `running` map step
+   * row when the step has none, in one fenced transaction.
+   */
+  private _saveTask(params: {
+    workflowId: string;
+    stepName: string;
+    taskIndex: number;
+    guard?: FenceGuard;
+    outcome:
+      | { readonly status: "completed"; readonly result: unknown }
+      | { readonly status: "failed"; readonly error: string };
+  }): void {
+    const { outcome } = params;
     const now = this.clock.currentTimeMs();
     this.db.transaction((): void => {
-      this._checkFence(params.workflowId, guard);
+      this._checkFence(params);
       const row = this.db
         .query<{ steps: string; run: number }>(
           `SELECT steps, run FROM ${this._t} WHERE workflow_id = ?`,
@@ -1188,8 +1127,8 @@ export class SqliteWorkflowStorage
       const prev = idx >= 0 ? tasks[idx] : undefined;
       const task = {
         taskIndex: params.taskIndex,
-        status: "failed" as const,
-        error: params.error,
+        status: outcome.status,
+        ...(outcome.status === "completed" ? { result: outcome.result } : { error: outcome.error }),
         startedAt: prev?.startedAt ?? new Date(now),
         completedAt: new Date(now),
         attempt: (prev?.attempt ?? 0) + 1,
@@ -1218,7 +1157,7 @@ export class SqliteWorkflowStorage
   // WorkflowStorage — workflow lifecycle
   // ---------------------------------------------------------------------------
 
-  async completeWorkflow(workflowId: string, result: unknown, guard?: FenceGuard): Promise<void> {
+  async completeWorkflow({ workflowId, result, guard }: CompleteWorkflowParams): Promise<void> {
     const now = this.clock.currentTimeMs();
     this._fenced({
       workflowId,
@@ -1234,12 +1173,7 @@ export class SqliteWorkflowStorage
     });
   }
 
-  async failWorkflow(
-    workflowId: string,
-    error: string,
-    guard?: FenceGuard,
-    details?: { readonly errorTag?: string },
-  ): Promise<void> {
+  async failWorkflow({ workflowId, error, errorTag, guard }: FailWorkflowParams): Promise<void> {
     const now = this.clock.currentTimeMs();
     this._fenced({
       workflowId,
@@ -1251,19 +1185,19 @@ export class SqliteWorkflowStorage
              SET status = 'failed', error = ?, error_tag = ?, completed_at = ?, updated_at = ?
              WHERE workflow_id = ? AND status NOT IN ('completed', 'failed', 'tripwire')`,
           )
-          .run(error, details?.errorTag ?? null, now, now, workflowId),
+          .run(error, errorTag ?? null, now, now, workflowId),
     });
   }
 
-  async suspendWorkflow(
-    workflowId: string,
-    stepName: string,
-    stepUpdate: Record<string, unknown>,
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async suspendWorkflow({
+    workflowId,
+    stepName,
+    stepUpdate,
+    guard,
+  }: SuspendWorkflowParams): Promise<void> {
     const now = this.clock.currentTimeMs();
     this.db.transaction((): void => {
-      this._checkFence(workflowId, guard);
+      this._checkFence({ workflowId, guard });
       const row = this.db
         .query<{ steps: string; run: number }>(
           `SELECT steps, run FROM ${this._t} WHERE workflow_id = ?`,
@@ -1295,7 +1229,7 @@ export class SqliteWorkflowStorage
   // WorkflowStorage — signals
   // ---------------------------------------------------------------------------
 
-  async deliverSignal(workflowId: string, signalName: string, payload: unknown): Promise<void> {
+  async deliverSignal({ workflowId, signalName, payload }: DeliverSignalParams): Promise<void> {
     // Last delivery per name wins (one row per (workflow, name)).
     this.db.transaction((): void => {
       this.db
@@ -1310,26 +1244,24 @@ export class SqliteWorkflowStorage
     })();
   }
 
-  async setWorkflowMetadata(
-    workflowId: string,
-    patch: Record<string, unknown>,
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async setWorkflowMetadata({
+    workflowId,
+    patch,
+    guard,
+  }: SetWorkflowMetadataParams): Promise<void> {
     // SQLite has json_patch but support is recent + spotty; do read-modify-
     // write inside a transaction so concurrent body re-runs don't lose
     // updates. Same shape as the in-memory + redis impls.
     this.db.transaction((): void => {
-      this._checkFence(workflowId, guard);
+      this._checkFence({ workflowId, guard });
       const row = this.db
         .query<{ metadata: string | null }>(`SELECT metadata FROM ${this._t} WHERE workflow_id = ?`)
         .get(workflowId);
       if (!row) return;
-      const current: Record<string, unknown> = row.metadata != null ? JSON.parse(row.metadata) : {};
-      const merged: Record<string, unknown> = { ...current };
-      for (const [k, v] of Object.entries(patch)) {
-        if (v === null) delete merged[k];
-        else merged[k] = v;
-      }
+      const merged = applyMetadataPatch({
+        current: row.metadata != null ? JSON.parse(row.metadata) : {},
+        patch,
+      });
       this.db
         .query(`UPDATE ${this._t} SET metadata = ?, updated_at = ? WHERE workflow_id = ?`)
         .run(JSON.stringify(merged), this.clock.currentTimeMs(), workflowId);
@@ -1454,17 +1386,12 @@ export class SqliteWorkflowStorage
   // Streams — append-only chunks per (workflow, stream).
   // ---------------------------------------------------------------------------
 
-  async appendStreamChunk(
-    params: {
-      workflowId: string;
-      streamId: string;
-      payload: unknown;
-      appendedBy: "workflow" | "external";
-    },
-    guard?: FenceGuard,
-  ): Promise<{ chunkIndex: number }> {
+  async appendStreamChunk({
+    guard,
+    ...params
+  }: AppendStreamChunkParams): Promise<{ chunkIndex: number }> {
     return this.db.transaction((): { chunkIndex: number } => {
-      this._checkFence(params.workflowId, guard);
+      this._checkFence({ workflowId: params.workflowId, guard });
       const row = this.db
         .query<{ next: number | null }>(
           `SELECT MAX(chunk_index) AS next FROM ${this._t}_streams
@@ -1527,10 +1454,10 @@ export class SqliteWorkflowStorage
   // WorkflowStorage — locking
   // ---------------------------------------------------------------------------
 
-  async tryLock(
-    workflowId: string,
-    lockDurationMs: number,
-  ): Promise<{ acquired: boolean; token?: FenceToken }> {
+  async tryLock({
+    workflowId,
+    lockDurationMs,
+  }: TryLockParams): Promise<{ acquired: boolean; token?: FenceToken }> {
     return this.db.transaction((): { acquired: boolean; token?: FenceToken } => {
       const now = this.clock.currentTimeMs();
       const existing = this.db
@@ -1557,16 +1484,16 @@ export class SqliteWorkflowStorage
     })();
   }
 
-  async tryLockAndLoad(
-    workflowId: string,
-    lockDurationMs: number,
-  ): Promise<{ locked: boolean; token?: FenceToken; state: WorkflowState | null }> {
-    const { acquired, token } = await this.tryLock(workflowId, lockDurationMs);
+  async tryLockAndLoad({
+    workflowId,
+    lockDurationMs,
+  }: TryLockParams): Promise<{ locked: boolean; token?: FenceToken; state: WorkflowState | null }> {
+    const { acquired, token } = await this.tryLock({ workflowId, lockDurationMs });
     const state = await this.loadWorkflow(workflowId);
     return { locked: acquired, token, state };
   }
 
-  async releaseLock(workflowId: string, guard?: FenceGuard): Promise<void> {
+  async releaseLock({ workflowId, guard }: ReleaseLockParams): Promise<void> {
     if (guard?.fenceToken) {
       this.db
         .query(`DELETE FROM ${this._t}_locks WHERE workflow_id = ? AND token = ?`)
@@ -1576,7 +1503,7 @@ export class SqliteWorkflowStorage
     }
   }
 
-  async heartbeat(workflowId: string, lockDurationMs: number, guard?: FenceGuard): Promise<void> {
+  async heartbeat({ workflowId, lockDurationMs, guard }: HeartbeatParams): Promise<void> {
     const now = this.clock.currentTimeMs();
     if (guard?.fenceToken) {
       // A token holder whose lock is gone, expired or re-taken learns it
@@ -1603,9 +1530,9 @@ export class SqliteWorkflowStorage
   // WorkflowStorage — run history
   // ---------------------------------------------------------------------------
 
-  async startFreshRun(workflowId: string, guard?: FenceGuard): Promise<number> {
+  async startFreshRun({ workflowId, guard }: StartFreshRunParams): Promise<number> {
     return this.db.transaction((): number => {
-      this._checkFence(workflowId, guard);
+      this._checkFence({ workflowId, guard });
       const row = this.db
         .query<WfRow>(`SELECT * FROM ${this._t} WHERE workflow_id = ?`)
         .get(workflowId);
@@ -1649,7 +1576,7 @@ export class SqliteWorkflowStorage
     })();
   }
 
-  async resetSteps(workflowId: string, stepNames: readonly string[]): Promise<void> {
+  async resetSteps({ workflowId, stepNames }: ResetStepsParams): Promise<void> {
     if (stepNames.length === 0) return;
     const names = [...stepNames];
     this.db.transaction((): void => {
@@ -1843,10 +1770,10 @@ export class SqliteWorkflowStorage
     }));
   }
 
-  async loadRunHistory(
-    workflowId: string,
-    params?: { limit?: number; offset?: number },
-  ): Promise<WorkflowRunSummary[]> {
+  async loadRunHistory({
+    workflowId,
+    ...params
+  }: LoadRunHistoryParams): Promise<WorkflowRunSummary[]> {
     const current = this.db
       .query<WfRow>(`SELECT * FROM ${this._t} WHERE workflow_id = ?`)
       .get(workflowId);
@@ -1924,10 +1851,10 @@ export class SqliteWorkflowStorage
   }
 
   // ---------------------------------------------------------------------------
-  // ActivityJournalStorage
+  // JournalStore
   // ---------------------------------------------------------------------------
 
-  async loadJournal(workflowId: string, stepName: string): Promise<JournalEntry[]> {
+  async loadJournal({ workflowId, stepName }: LoadJournalParams): Promise<JournalEntry[]> {
     const rows = this.db
       .query<JournalRow>(
         `SELECT * FROM ${this._t}_journal
@@ -1938,18 +1865,7 @@ export class SqliteWorkflowStorage
     return rows.map(rowToJournalEntry);
   }
 
-  async appendEntry(
-    params: {
-      workflowId: string;
-      stepName: string;
-      activityIndex: number;
-      branchPath?: string;
-      activityName: string;
-      payloadHash?: string;
-      exit: NonNullable<JournalEntry["exit"]>;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async appendEntry({ guard, ...params }: AppendEntryParams): Promise<void> {
     this._fenced({ workflowId: params.workflowId, guard, write: () => this._appendEntry(params) });
   }
 
@@ -2000,22 +1916,10 @@ export class SqliteWorkflowStorage
   }
 
   // ---------------------------------------------------------------------------
-  // ActivityJournalStorage — pending entries (ctx.sleep / ctx.signal)
+  // JournalStore — pending entries (ctx.sleep / ctx.signal)
   // ---------------------------------------------------------------------------
 
-  async appendPendingEntry(
-    params: {
-      workflowId: string;
-      stepName: string;
-      activityIndex: number;
-      branchPath?: string;
-      activityName: string;
-      payloadHash?: string;
-      stepType: JournalStepType;
-      wakeAt?: Date;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async appendPendingEntry({ guard, ...params }: AppendPendingEntryParams): Promise<void> {
     this._fenced({
       workflowId: params.workflowId,
       guard,
@@ -2063,16 +1967,10 @@ export class SqliteWorkflowStorage
       );
   }
 
-  async completePendingEntry(
-    params: {
-      workflowId: string;
-      stepName: string;
-      activityIndex: number;
-      branchPath?: string;
-      exit: JournalExit;
-    },
-    guard?: FenceGuard,
-  ): Promise<CompletePendingResult> {
+  async completePendingEntry({
+    guard,
+    ...params
+  }: CompletePendingEntryParams): Promise<CompletePendingResult> {
     return this._fenced({
       workflowId: params.workflowId,
       guard,
@@ -2117,20 +2015,13 @@ export class SqliteWorkflowStorage
     };
   }
 
-  async discardJournalEntries(
-    params: {
-      workflowId: string;
-      stepName: string;
-      slots: readonly JournalSlot[];
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async discardJournalEntries({ guard, ...params }: DiscardJournalEntriesParams): Promise<void> {
     const del = this.db.query(
       `DELETE FROM ${this._t}_journal
        WHERE workflow_id = ? AND step_name = ? AND activity_index = ? AND branch_path = ?`,
     );
     this.db.transaction(() => {
-      this._checkFence(params.workflowId, guard);
+      this._checkFence({ workflowId: params.workflowId, guard });
       for (const slot of params.slots) {
         del.run(params.workflowId, params.stepName, slot.activityIndex, slot.branchPath);
       }
@@ -2185,14 +2076,14 @@ export class SqliteWorkflowStorage
   }
 
   // ---------------------------------------------------------------------------
-  // StepAttemptStorage — append-only audit trail of step execution +
+  // StepAttemptStore — append-only audit trail of step execution +
   // compensation attempts. Surfaces "which worker handled this attempt?" +
   // retry analysis. Implemented as a separate table with (workflow_id,
   // step_name, attempt, type) composite PK so retries are idempotent and
   // execution / compensation rows for the same (step, attempt) can coexist.
   // ---------------------------------------------------------------------------
 
-  async saveStepAttempt(record: StepAttemptRecord, guard?: FenceGuard): Promise<void> {
+  async saveStepAttempt({ record, guard }: SaveStepAttemptParams): Promise<void> {
     this._fenced({
       workflowId: record.workflowId,
       guard,
@@ -2201,14 +2092,14 @@ export class SqliteWorkflowStorage
   }
 
   // ---------------------------------------------------------------------------
-  // StepCheckpointStorage — a settled step's row and attempt rows in one
+  // StepCheckpointStore — a settled step's row and attempt rows in one
   // transaction, behind one fence check.
   // ---------------------------------------------------------------------------
 
-  async checkpointStep(
-    checkpoint: StepCheckpoint,
-    guard?: FenceGuard,
-  ): Promise<WorkflowStatusSnapshot | null> {
+  async checkpointStep({
+    guard,
+    ...checkpoint
+  }: CheckpointStepParams): Promise<WorkflowStatusSnapshot | null> {
     const { workflowId, stepName, outcome } = checkpoint;
     return this._fenced({
       workflowId,
@@ -2272,7 +2163,10 @@ export class SqliteWorkflowStorage
       );
   }
 
-  async loadStepAttempts(workflowId: string, stepName?: string): Promise<StepAttemptRecord[]> {
+  async loadStepAttempts({
+    workflowId,
+    stepName,
+  }: LoadStepAttemptsParams): Promise<StepAttemptRecord[]> {
     interface Row {
       workflow_id: string;
       step_name: string;
@@ -2320,13 +2214,10 @@ export class SqliteWorkflowStorage
   }
 
   // ---------------------------------------------------------------------------
-  // CompensationLedgerStorage
+  // CompensationLedgerStore
   // ---------------------------------------------------------------------------
 
-  async beginCompensation(
-    params: { readonly workflowId: string; readonly error: string; readonly errorTag?: string },
-    guard?: FenceGuard,
-  ): Promise<boolean> {
+  async beginCompensation({ guard, ...params }: BeginCompensationParams): Promise<boolean> {
     const now = this.clock.currentTimeMs();
     return this._fenced({
       workflowId: params.workflowId,
@@ -2347,15 +2238,7 @@ export class SqliteWorkflowStorage
     });
   }
 
-  async saveStepCompensation(
-    params: {
-      readonly workflowId: string;
-      readonly stepName: string;
-      readonly status: StepCompensationOutcome;
-      readonly error?: string;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async saveStepCompensation({ guard, ...params }: SaveStepCompensationParams): Promise<void> {
     const now = this.clock.currentTimeMs();
     this._fenced({
       workflowId: params.workflowId,

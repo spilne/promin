@@ -97,31 +97,37 @@ redisDescribe("RedisWorkflowStorage on Redis Cluster", (redis) => {
 
     // Parent with a fenced child, steps, tasks, a suspension, signals.
     await s.createWorkflow({ workflowId: "p", workflowName: "parent", input: 1, namespace: "ns" });
-    const { token } = await s.tryLock("p", 30_000);
+    const { token } = await s.tryLock({ workflowId: "p", lockDurationMs: 30_000 });
     const guard = { fenceToken: token! };
-    await s.createWorkflow(
-      {
-        workflowId: "c",
-        workflowName: "child",
-        input: 2,
-        parentWorkflowId: "p",
-        workflowType: "t",
-      },
+    await s.createWorkflow({
+      workflowId: "c",
+      workflowName: "child",
+      input: 2,
+      parentWorkflowId: "p",
+      workflowType: "t",
       guard,
-    );
-    await s.heartbeat("p", 30_000, guard);
-    await s.saveStepResult(
-      { workflowId: "p", stepName: "a", result: 1, durationMs: 1, startedAt: new Date() },
+    });
+    await s.heartbeat({ workflowId: "p", lockDurationMs: 30_000, guard });
+    await s.saveStepResult({
+      workflowId: "p",
+      stepName: "a",
+      result: 1,
+      durationMs: 1,
+      startedAt: new Date(),
       guard,
-    );
-    await s.saveTaskResult({ workflowId: "p", stepName: "m", taskIndex: 0, result: 1 }, guard);
-    await s.saveTaskFailure({ workflowId: "p", stepName: "m", taskIndex: 1, error: "x" }, guard);
-    await s.saveStepFailure(
-      { workflowId: "p", stepName: "b", error: "x", durationMs: 1, startedAt: new Date() },
+    });
+    await s.saveTaskResult({ workflowId: "p", stepName: "m", taskIndex: 0, result: 1, guard });
+    await s.saveTaskFailure({ workflowId: "p", stepName: "m", taskIndex: 1, error: "x", guard });
+    await s.saveStepFailure({
+      workflowId: "p",
+      stepName: "b",
+      error: "x",
+      durationMs: 1,
+      startedAt: new Date(),
       guard,
-    );
-    await s.saveStepAttempt(
-      {
+    });
+    await s.saveStepAttempt({
+      record: {
         workflowId: "p",
         stepName: "b",
         attempt: 1,
@@ -132,12 +138,15 @@ redisDescribe("RedisWorkflowStorage on Redis Cluster", (redis) => {
         durationMs: 1,
       } as never,
       guard,
-    );
-    await s.setWorkflowMetadata("p", { k: 1 }, guard);
-    await s.appendStreamChunk(
-      { workflowId: "p", streamId: "out", payload: 1, appendedBy: "workflow" },
+    });
+    await s.setWorkflowMetadata({ workflowId: "p", patch: { k: 1 }, guard });
+    await s.appendStreamChunk({
+      workflowId: "p",
+      streamId: "out",
+      payload: 1,
+      appendedBy: "workflow",
       guard,
-    );
+    });
     await s.readStreamChunks({ workflowId: "p", streamId: "out" });
     await s.createSignalToken({
       tokenId: "tk",
@@ -151,64 +160,68 @@ redisDescribe("RedisWorkflowStorage on Redis Cluster", (redis) => {
     await s.markSignalTokenCompleted({ tokenId: "tk", value: 1, now: new Date() });
 
     // Journal: completed, pending sleep and signal, completion, discard.
-    await s.appendEntry(
-      {
-        workflowId: "p",
-        stepName: "j",
-        activityIndex: 0,
-        activityName: "fetch",
-        exit: { tag: "Success", value: 1 },
-      },
+    await s.appendEntry({
+      workflowId: "p",
+      stepName: "j",
+      activityIndex: 0,
+      activityName: "fetch",
+      exit: { tag: "Success", value: 1 },
       guard,
-    );
-    await s.appendPendingEntry(
-      {
-        workflowId: "p",
-        stepName: "j",
-        activityIndex: 1,
-        activityName: "nap",
-        stepType: "sleep",
-        wakeAt: new Date(Date.now() - 1_000),
-      },
+    });
+    await s.appendPendingEntry({
+      workflowId: "p",
+      stepName: "j",
+      activityIndex: 1,
+      activityName: "nap",
+      stepType: "sleep",
+      wakeAt: new Date(Date.now() - 1_000),
       guard,
-    );
-    await s.appendPendingEntry(
-      {
-        workflowId: "p",
-        stepName: "j",
-        activityIndex: 2,
-        activityName: "approve",
-        stepType: "signal",
-      },
+    });
+    await s.appendPendingEntry({
+      workflowId: "p",
+      stepName: "j",
+      activityIndex: 2,
+      activityName: "approve",
+      stepType: "signal",
       guard,
-    );
+    });
     await s.findDueSleeps({ now: new Date(), limit: 10 });
     await s.findPendingSignal({ workflowId: "p", stepName: "j", signalName: "approve" });
-    await s.completePendingEntry(
-      { workflowId: "p", stepName: "j", activityIndex: 1, exit: { tag: "Success", value: 1 } },
+    await s.completePendingEntry({
+      workflowId: "p",
+      stepName: "j",
+      activityIndex: 1,
+      exit: { tag: "Success", value: 1 },
       guard,
-    );
-    await s.discardJournalEntries(
-      { workflowId: "p", stepName: "j", slots: [{ activityIndex: 2, branchPath: "" }] },
+    });
+    await s.discardJournalEntries({
+      workflowId: "p",
+      stepName: "j",
+      slots: [{ activityIndex: 2, branchPath: "" }],
       guard,
-    );
-    await s.loadJournal("p", "j");
+    });
+    await s.loadJournal({ workflowId: "p", stepName: "j" });
 
-    await s.suspendWorkflow("p", "w", { status: "waiting_for_signal", signalName: "go" }, guard);
-    await s.deliverSignal("p", "go", 1);
+    await s.suspendWorkflow({
+      workflowId: "p",
+      stepName: "w",
+      stepUpdate: { status: "waiting_for_signal", signalName: "go" },
+      guard,
+    });
+    await s.deliverSignal({ workflowId: "p", signalName: "go", payload: 1 });
     await s.listSignalWakeups({ limit: 10 });
     await s.listDueTimers({ now: new Date(), limit: 10 });
     await s.listOrphanedRuns({ now: new Date(), updatedBefore: new Date(), limit: 10 });
-    await s.beginCompensation({ workflowId: "p", error: "boom" }, guard);
-    await s.saveStepCompensation({ workflowId: "p", stepName: "a", status: "compensated" }, guard);
-    await s.failWorkflow("p", "boom", guard);
-    await s.releaseLock("p", guard);
+    await s.beginCompensation({ workflowId: "p", error: "boom", guard });
+    await s.saveStepCompensation({ workflowId: "p", stepName: "a", status: "compensated", guard });
+    await s.failWorkflow({ workflowId: "p", error: "boom", guard });
+    await s.releaseLock({ workflowId: "p", guard });
 
     // Reads, listing, rewinds, fresh runs, purge.
-    await s.tryLockAndLoad("c", 30_000);
+    await s.tryLockAndLoad({ workflowId: "c", lockDurationMs: 30_000 });
     await s.loadWorkflowStatus("p");
-    await s.loadRunHistory("p");
-    await s.loadStepAttempts("p");
+    await s.loadRunHistory({ workflowId: "p" });
+    await s.loadStepAttempts({ workflowId: "p" });
     await s.loadSignals("p");
     await s.listSignalTokensForWorkflow("p");
     await s.listWorkflows({ name: "child", parentId: "p", status: "pending" });
@@ -218,11 +231,11 @@ redisDescribe("RedisWorkflowStorage on Redis Cluster", (redis) => {
     await s.countWorkflows({ name: "child", parentId: "p" });
     await s.countWorkflows({ version: "1" });
     await s.distinctWorkflowNames({ namespace: "ns" });
-    await s.resetSteps("p", ["b", "j"]);
-    await s.completeWorkflow("p", 1);
-    await s.startFreshRun("p");
-    await s.cancelWorkflow("p", { cascade: true });
-    await s.tripwireWorkflow("c", "x");
+    await s.resetSteps({ workflowId: "p", stepNames: ["b", "j"] });
+    await s.completeWorkflow({ workflowId: "p", result: 1 });
+    await s.startFreshRun({ workflowId: "p" });
+    await s.cancelWorkflow({ workflowId: "p", cascade: true });
+    await s.tripwireWorkflow({ workflowId: "c", reason: "x" });
     expect(await s.purgeCompleted({ olderThanMs: -60_000, limit: 10 })).toBe(2);
 
     // Every recorded call stays within one slot.

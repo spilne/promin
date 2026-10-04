@@ -67,7 +67,7 @@ describe(".waitForSignal() — timeout deadline across resumes", () => {
     clock.advance(15);
     await runner.runSafe({ workflow: build(), workflowId: "sit-1", input: 1 });
     clock.advance(10);
-    await storage.deliverSignal("sit-1", "approve", "alice");
+    await storage.deliverSignal({ workflowId: "sit-1", signalName: "approve", payload: "alice" });
     const r = await runner.runSafe({ workflow: build(), workflowId: "sit-1", input: 1 });
     expect(r.error).toBeNull();
     expect(r.data).toBe("approved by alice");
@@ -100,7 +100,7 @@ describe(".waitForSignal() — repeated signal names", () => {
         .build();
 
     await runner.runSafe({ workflow: build(), workflowId: "ss-1", input: 1 });
-    await storage.deliverSignal("ss-1", "approve", "manager");
+    await storage.deliverSignal({ workflowId: "ss-1", signalName: "approve", payload: "manager" });
     const r = await runner.runSafe({ workflow: build(), workflowId: "ss-1", input: 1 });
 
     expect(r.error).toBeNull();
@@ -120,12 +120,12 @@ describe(".waitForSignal() — repeated signal names", () => {
         .build();
 
     await runner.runSafe({ workflow: build(), workflowId: "slw-1", input: 1 });
-    await storage.deliverSignal("slw-1", "approve", "v1");
+    await storage.deliverSignal({ workflowId: "slw-1", signalName: "approve", payload: "v1" });
     const mid = await runner.runSafe({ workflow: build(), workflowId: "slw-1", input: 1 });
     expect(tagOf(mid.error)).toBe("WorkflowSuspendedError"); // parked on "gate"
 
-    await storage.deliverSignal("slw-1", "approve", "v2");
-    await storage.deliverSignal("slw-1", "continue", "go");
+    await storage.deliverSignal({ workflowId: "slw-1", signalName: "approve", payload: "v2" });
+    await storage.deliverSignal({ workflowId: "slw-1", signalName: "continue", payload: "go" });
     const r = await runner.runSafe({ workflow: build(), workflowId: "slw-1", input: 1 });
 
     expect(r.error).toBeNull();
@@ -145,11 +145,19 @@ describe(".waitForSignal() — repeated signal names", () => {
         .build();
 
     await runner.runSafe({ workflow: build(), workflowId: "sdn-1", input: 1 });
-    await storage.deliverSignal("sdn-1", "approve-1", "manager");
+    await storage.deliverSignal({
+      workflowId: "sdn-1",
+      signalName: "approve-1",
+      payload: "manager",
+    });
     const mid = await runner.runSafe({ workflow: build(), workflowId: "sdn-1", input: 1 });
     expect(tagOf(mid.error)).toBe("WorkflowSuspendedError");
 
-    await storage.deliverSignal("sdn-1", "approve-2", "director");
+    await storage.deliverSignal({
+      workflowId: "sdn-1",
+      signalName: "approve-2",
+      payload: "director",
+    });
     const r = await runner.runSafe({ workflow: build(), workflowId: "sdn-1", input: 1 });
     expect(r.data).toBe("director");
   });

@@ -14,8 +14,7 @@ import type { CompensateConfig } from "../durable-pipeline.ts";
 import { isAbandonRunExit } from "../step-policy.ts";
 import type { WorkflowState } from "../workflow-state.ts";
 import {
-  isCompensationLedgerStorage,
-  isStepAttemptStorage,
+  hasCapability,
   type FenceGuard,
   type StepCompensationOutcome,
   type WorkflowStorage,
@@ -122,12 +121,12 @@ export function compensationOrder(params: {
  * config's per-step retry policy. `compensate` receives the step's result
  * decoded through its codec, as downstream steps saw it.
  *
- * With a `CompensationLedgerStorage`, each step's rollback is recorded
+ * With a `CompensationLedgerStore`, each step's rollback is recorded
  * (fenced) as it settles, and steps the ledger already lists are skipped:
  * their earlier outcome goes into the report as it was recorded. A rollback
  * that was interrupted between a step's `compensate` and its ledger entry
  * runs that step's `compensate` again. Records an attempt row per try when
- * the storage supports `StepAttemptStorage`; `resumed` numbers them after
+ * the storage supports `StepAttemptStore`; `resumed` numbers them after
  * the step's existing compensation attempts.
  *
  * A ledger or attempt write that keeps failing rejects with
@@ -161,8 +160,8 @@ export async function compensateWorkflow(params: {
   const state = await storage.loadWorkflow(workflowId);
   if (!state) return { compensated, failed };
 
-  const ledger = isCompensationLedgerStorage(storage) ? storage : undefined;
-  const attemptStorage = isStepAttemptStorage(storage) ? storage : undefined;
+  const ledger = hasCapability(storage, "compensationLedger") ? storage : undefined;
+  const attemptStorage = hasCapability(storage, "stepAttempts") ? storage : undefined;
 
   const pending: CompensatableStep[] = [];
   for (const step of compensationOrder({ steps: params.steps, state, dagNodes: params.dagNodes })) {
@@ -201,8 +200,8 @@ export async function compensateWorkflow(params: {
       operation: "saveStepAttempt",
       stepName: record.stepName,
       write: () =>
-        attemptStorage.saveStepAttempt(
-          {
+        attemptStorage.saveStepAttempt({
+          record: {
             workflowId,
             stepName: record.stepName,
             attempt: record.attempt,
@@ -215,7 +214,7 @@ export async function compensateWorkflow(params: {
             ...(executorId !== undefined && { executorId }),
           },
           guard,
-        ),
+        }),
     });
   };
 
@@ -231,15 +230,13 @@ export async function compensateWorkflow(params: {
       operation: "saveStepCompensation",
       stepName: entry.stepName,
       write: () =>
-        ledger.saveStepCompensation(
-          {
-            workflowId,
-            stepName: entry.stepName,
-            status: entry.status,
-            ...(entry.error !== undefined && { error: errorMessage(entry.error) }),
-          },
+        ledger.saveStepCompensation({
+          workflowId,
+          stepName: entry.stepName,
+          status: entry.status,
+          ...(entry.error !== undefined && { error: errorMessage(entry.error) }),
           guard,
-        ),
+        }),
     });
   };
 
@@ -284,8 +281,8 @@ async function lastCompensationAttempt(
   workflowId: string,
   stepName: string,
 ): Promise<number> {
-  if (!isStepAttemptStorage(storage)) return 0;
-  const attempts = await storage.loadStepAttempts(workflowId, stepName);
+  if (!hasCapability(storage, "stepAttempts")) return 0;
+  const attempts = await storage.loadStepAttempts({ workflowId, stepName });
   let last = 0;
   for (const a of attempts) {
     if (a.type === "compensation" && a.attempt > last) last = a.attempt;
