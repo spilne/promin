@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // RedisWorkflowStorage — Redis-backed WorkflowStorage, StepAttemptStore,
-// CompensationLedgerStore and JournalStore.
+// StepCheckpointStore, CompensationLedgerStore and JournalStore.
 // ---------------------------------------------------------------------------
 //
 // Runs on a standalone Redis and on Redis Cluster. Every key of a workflow
@@ -19,10 +19,14 @@
 //   the journal write; removing follows the completion. A member left
 //   behind is dropped by `findDueSleeps`, which checks each due member
 //   against its journal entry.
-// - A fenced child create checks the parent's fence in one script and
-//   writes the child's row in another (different slots), so a parent that
-//   loses its lock in between can still create the child. Child ids are
-//   deterministic per parent step, so the new lock holder attaches to it.
+// - A fenced child create commits on the parent's slot. The child's row is
+//   first written provisional (unindexed, invisible to readers, with a TTL);
+//   then one fenced script on the parent's slot records the child in the
+//   parent's child intents; then the row is confirmed and indexed. A
+//   provisional row counts only once the parent's intent names it, so a
+//   parent that lost its lock before the intent never creates the child,
+//   and a reader that finds a provisional row with a matching intent
+//   confirms it (a crash after the intent loses nothing).
 //
 // Keys written before this layout need `migrateLegacyKeys()` once, on the
 // standalone instance, with workers stopped.
@@ -31,6 +35,7 @@
 import type {
   WorkflowStorage,
   StepAttemptStore,
+  StepCheckpointStore,
   CompensationLedgerStore,
   JournalStore,
   JournalEntry,
@@ -48,6 +53,7 @@ import type {
   BatchSaveStepResultsParams,
   BeginCompensationParams,
   CancelWorkflowParams,
+  CheckpointStepParams,
   CompletePendingEntryParams,
   CompleteWorkflowParams,
   CreateWorkflowParams,
@@ -102,6 +108,7 @@ import { RedisWorkflowKeys, escapeGlob } from "./redis-workflow-keys.ts";
 import {
   APPEND_ENTRY_LUA,
   APPEND_PENDING_LUA,
+  CHECKPOINT_STEP_LUA,
   COMPLETE_PENDING_LUA,
   CREATE_SIGNAL_TOKEN_LUA,
   DISCARD_ENTRIES_LUA,
@@ -150,6 +157,7 @@ export interface RedisWorkflowStorageConfig {
 
 // Fenced variants of every script a lock holder writes through.
 const FENCED_CHECK_LUA = fencedLua("return 1");
+const FENCED_CHECKPOINT_STEP_LUA = fencedLua(CHECKPOINT_STEP_LUA);
 const FENCED_TRANSITION_STATUS_LUA = fencedLua(TRANSITION_STATUS_LUA);
 const FENCED_HASH_FIELD_CAS_LUA = fencedLua(HASH_FIELD_CAS_LUA);
 const FENCED_START_FRESH_RUN_LUA = fencedLua(START_FRESH_RUN_LUA);
@@ -166,6 +174,14 @@ const CANCELLABLE_STATUSES: readonly WorkflowStatus[] = ["pending", "running", "
 const TERMINAL_STATUSES_CSV = WORKFLOW_STATUSES.filter(isTerminalWorkflowStatus).join(",");
 /** Bound on compare-and-set retries under contention. */
 const MAX_CAS_ATTEMPTS = 100;
+/** Bound on re-reads while a provisional child row is being replaced under a reader. */
+const MAX_SETTLE_ATTEMPTS = 3;
+/**
+ * Lifetime of a provisional child row: one whose parent's intent has not
+ * been confirmed yet. A row whose creator died before the parent's intent
+ * expires with it; the parent's next lock holder re-creates the child.
+ */
+const PROVISIONAL_CHILD_TTL_MS = 60 * 60 * 1_000;
 /** Ids per HMGET when reading index records. */
 const RECORD_CHUNK = 2_000;
 /** Workflows purged concurrently. */
@@ -255,7 +271,12 @@ function fenceMismatch(params: {
 }
 
 export class RedisWorkflowStorage
-  implements WorkflowStorage, StepAttemptStore, CompensationLedgerStore, JournalStore
+  implements
+    WorkflowStorage,
+    StepAttemptStore,
+    StepCheckpointStore,
+    CompensationLedgerStore,
+    JournalStore
 {
   private readonly redis: RedisStoreClient;
   private readonly keys: RedisWorkflowKeys;
@@ -423,18 +444,6 @@ export class RedisWorkflowStorage
       }
     }
 
-    // A fenced create checks the parent's fence on the parent's slot; the
-    // child's row lives on its own slot.
-    if (guard?.fenceToken && params.parentWorkflowId !== undefined) {
-      await this.evalFenced({
-        script: FENCED_CHECK_LUA,
-        workflowId: params.parentWorkflowId,
-        guard,
-        keys: [],
-        args: [],
-      });
-    }
-
     const now = this.serializeDate(this.clock.now());
     const fields: Record<string, string> = {
       id: params.workflowId,
@@ -462,50 +471,171 @@ export class RedisWorkflowStorage
       fields.idempotencyExpiresAt = this.serializeDate(params.idempotencyExpiresAt);
     }
 
-    // The row lands in one script that first checks it is still absent (a
-    // concurrent create wins cleanly). It is indexed once the idempotency
-    // claim below is settled.
+    // A fenced child create commits through the parent's child intents (see
+    // the file header): the row goes in provisional, under a nonce of this
+    // attempt, and counts once the parent's intent names that nonce.
+    const parentId = guard?.fenceToken ? params.parentWorkflowId : undefined;
+    const wfKey = this.keys.wf(params.workflowId);
+    for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
+      const nonce = parentId === undefined ? undefined : crypto.randomUUID();
+      const rowOps = (precondition: ReadonlyArray<readonly string[]>) => [
+        ...precondition,
+        ["HSET", wfKey, ...Object.entries(fields).flat(), ...(nonce ? ["provisional", nonce] : [])],
+        ...(nonce ? [["PEXPIRE", wfKey, String(PROVISIONAL_CHILD_TTL_MS)]] : []),
+        ["INDEXED", wfKey],
+      ];
+
+      // The row lands in one script that first checks it is still absent (a
+      // concurrent create wins cleanly). It is indexed once the idempotency
+      // claim below is settled.
+      let { applied, snapshot } = await this.writeOps({
+        workflowId: params.workflowId,
+        deferIndex: true,
+        ops: rowOps([["ABSENT", wfKey]]),
+      });
+      if (!applied) {
+        const existing = await this.loadWorkflow(params.workflowId);
+        if (existing) {
+          // A stale parent learns it lost the run here too, as on any other
+          // fenced call.
+          if (parentId !== undefined) {
+            await this.evalFenced({
+              script: FENCED_CHECK_LUA,
+              workflowId: parentId,
+              guard,
+              keys: [],
+              args: [],
+            });
+          }
+          // A create that crashed before indexing its row is healed by the retry.
+          await this.repairIndex(params.workflowId);
+          return { created: false, existing };
+        }
+        // A provisional row no parent intent names never counted: replace it.
+        const stale = await this.redis.hget(wfKey, "provisional");
+        if (stale === null) continue; // gone in between (purged, expired)
+        ({ applied, snapshot } = await this.writeOps({
+          workflowId: params.workflowId,
+          deferIndex: true,
+          ops: rowOps([
+            ["HEQ", wfKey, "provisional", stale],
+            ["DEL", wfKey],
+          ]),
+        }));
+        if (!applied) continue;
+      }
+
+      if (parentId !== undefined && nonce !== undefined) {
+        // The commit point: the parent's fence and its intent, in one script
+        // on the parent's slot. A rejected fence leaves the row uncommitted.
+        try {
+          await this.writeOps({
+            workflowId: parentId,
+            guard,
+            ops: [["HSET", this.keys.childIntents(parentId), params.workflowId, nonce]],
+          });
+        } catch (err) {
+          if (err instanceof FenceTokenMismatchError) {
+            await this.writeOps({
+              workflowId: params.workflowId,
+              ops: [
+                ["HEQ", wfKey, "provisional", nonce],
+                ["DEL", wfKey],
+              ],
+            });
+          }
+          throw err;
+        }
+      }
+
+      // Atomic claim of the idempotency index. SET NX with PX expires the
+      // index entry exactly at the run's idempotency_expires_at — concurrent
+      // creates that race here lose the SET NX and back out below.
+      if (params.idempotencyKey && params.idempotencyExpiresAt) {
+        const idxKey = this.keys.workflowIdempotency(
+          ns,
+          params.workflowName,
+          params.idempotencyKey,
+        );
+        const ttlMs = params.idempotencyExpiresAt.getTime() - this.clock.now().getTime();
+        if (ttlMs > 0) {
+          const won = await this.redis.set(idxKey, params.workflowId, "NX", "PX", ttlMs);
+          if (!won) {
+            // Lost the race — undo the (not yet indexed) row and resolve to the winner.
+            await this.redis.del(wfKey);
+            const winnerId = await this.redis.get(idxKey);
+            if (winnerId) {
+              const existing = await this.loadWorkflow(winnerId);
+              if (existing) return { created: false, existing };
+            }
+            return this.createWorkflow({ ...params, guard });
+          }
+        }
+      }
+
+      if (nonce !== undefined) {
+        const confirmed = await this.confirmProvisional({
+          workflowId: params.workflowId,
+          nonce,
+          deferIndex: true,
+        });
+        if (!confirmed.applied) {
+          // A reader confirmed it first, or the row expired before this
+          // confirm: then the create starts over.
+          if (await this.redis.exists(wfKey)) return { created: true };
+          continue;
+        }
+        snapshot = confirmed.snapshot;
+      }
+
+      await this.syncIndex(snapshot);
+      return { created: true };
+    }
+    throw new Error(`createWorkflow: gave up on "${params.workflowId}" after contention`);
+  }
+
+  /**
+   * Make a provisional child row a plain one: drop the marker and its TTL,
+   * provided it still carries `nonce`, and index it.
+   */
+  private async confirmProvisional(params: {
+    workflowId: string;
+    nonce: string;
+    deferIndex?: boolean;
+  }): Promise<{ applied: boolean; snapshot: IndexSnapshot | null }> {
     const wfKey = this.keys.wf(params.workflowId);
     const { applied, snapshot } = await this.writeOps({
       workflowId: params.workflowId,
-      deferIndex: true,
+      deferIndex: params.deferIndex,
       ops: [
-        ["ABSENT", wfKey],
-        ["HSET", wfKey, ...Object.entries(fields).flat()],
+        ["HEQ", wfKey, "provisional", params.nonce],
+        ["HDEL", wfKey, "provisional"],
+        ["PERSIST", wfKey],
         ["INDEXED", wfKey],
       ],
     });
-    if (!applied) {
-      const existing = await this.loadWorkflow(params.workflowId);
-      if (!existing) return this.createWorkflow({ ...params, guard }); // purged in between
-      // A create that crashed before indexing its row is healed by the retry.
-      await this.repairIndex(params.workflowId);
-      return { created: false, existing };
-    }
+    return { applied, snapshot };
+  }
 
-    // Atomic claim of the idempotency index. SET NX with PX expires the
-    // index entry exactly at the run's idempotency_expires_at — concurrent
-    // creates that race here lose the SET NX and back out below.
-    if (params.idempotencyKey && params.idempotencyExpiresAt) {
-      const idxKey = this.keys.workflowIdempotency(ns, params.workflowName, params.idempotencyKey);
-      const ttlMs = params.idempotencyExpiresAt.getTime() - this.clock.now().getTime();
-      if (ttlMs > 0) {
-        const won = await this.redis.set(idxKey, params.workflowId, "NX", "PX", ttlMs);
-        if (!won) {
-          // Lost the race — undo the (not yet indexed) row and resolve to the winner.
-          await this.redis.del(wfKey);
-          const winnerId = await this.redis.get(idxKey);
-          if (winnerId) {
-            const existing = await this.loadWorkflow(winnerId);
-            if (existing) return { created: false, existing };
-          }
-          return this.createWorkflow({ ...params, guard });
-        }
-      }
-    }
-
-    await this.syncIndex(snapshot);
-    return { created: true };
+  /**
+   * Settle a provisional row a reader found: confirm it when its parent's
+   * intent names its nonce. True when the row counts now (confirmed here
+   * or by someone else), false when no intent commits it.
+   */
+  private async settleProvisional(params: {
+    workflowId: string;
+    parentId: string;
+    nonce: string;
+  }): Promise<boolean> {
+    const intent = await this.redis.hget(
+      this.keys.childIntents(params.parentId),
+      params.workflowId,
+    );
+    if (intent !== params.nonce) return false;
+    const { applied } = await this.confirmProvisional(params);
+    if (applied) return true;
+    const [id, marker] = await this.hmget(this.keys.wf(params.workflowId), ["id", "provisional"]);
+    return Boolean(id) && !marker;
   }
 
   async findWorkflowByIdempotencyKey(params: {
@@ -545,13 +675,15 @@ export class RedisWorkflowStorage
   }
 
   async loadWorkflowStatus(workflowId: string): Promise<WorkflowStatusSnapshot | null> {
-    const [id, status, error, errorTag] = await this.hmget(this.keys.wf(workflowId), [
-      "id",
-      "status",
-      "error",
-      "errorTag",
-    ]);
+    const [id, status, error, errorTag, nonce, parentId] = await this.hmget(
+      this.keys.wf(workflowId),
+      ["id", "status", "error", "errorTag", "provisional", "parentWorkflowId"],
+    );
     if (!id || !status) return null;
+    if (nonce) {
+      const counts = await this.settleProvisional({ workflowId, parentId: parentId ?? "", nonce });
+      return counts ? this.loadWorkflowStatus(workflowId) : null;
+    }
     return {
       status: status as WorkflowStatus,
       ...(error ? { error } : {}),
@@ -561,7 +693,32 @@ export class RedisWorkflowStorage
 
   async loadWorkflow(workflowId: string): Promise<WorkflowState | null> {
     const wfKey = this.keys.wf(workflowId);
-    return this.assembleWorkflow(await this.redis.eval(LOAD_RUN_LUA, 1, wfKey, wfKey));
+    return this.settledState({
+      workflowId,
+      reply: await this.redis.eval(LOAD_RUN_LUA, 1, wfKey, wfKey),
+    });
+  }
+
+  /**
+   * The workflow a `LOAD_RUN_LUA` reply holds. A provisional child row is
+   * settled first: null unless its parent's intent commits it, else the
+   * confirmed row, re-read.
+   */
+  private async settledState(params: {
+    workflowId: string;
+    reply: unknown;
+  }): Promise<WorkflowState | null> {
+    const wfKey = this.keys.wf(params.workflowId);
+    let reply = params.reply;
+    for (let attempt = 0; attempt < MAX_SETTLE_ATTEMPTS; attempt++) {
+      const pending = provisionalMarker(reply);
+      if (!pending) return this.assembleWorkflow(reply);
+      if (!(await this.settleProvisional({ workflowId: params.workflowId, ...pending }))) {
+        return null;
+      }
+      reply = await this.redis.eval(LOAD_RUN_LUA, 1, wfKey, wfKey);
+    }
+    return null;
   }
 
   // -- Listing ---------------------------------------------------------------
@@ -857,7 +1014,18 @@ export class RedisWorkflowStorage
     });
 
     if (cascade) {
-      const children = await this.redis.smembers(this.keys.children(workflowId));
+      // The children index, plus the children committed through the
+      // parent's intents whose rows are not indexed yet: reading their
+      // status settles (confirms) them first.
+      const [indexed, intents] = await Promise.all([
+        this.redis.smembers(this.keys.children(workflowId)),
+        this.redis.hgetall(this.keys.childIntents(workflowId)),
+      ]);
+      const children = new Set(indexed);
+      for (const childId of Object.keys(intents ?? {})) {
+        if (children.has(childId)) continue;
+        if (await this.loadWorkflowStatus(childId)) children.add(childId);
+      }
       for (const childId of children) {
         await this.cancelWorkflow({ workflowId: childId, cascade: true });
       }
@@ -985,6 +1153,37 @@ export class RedisWorkflowStorage
     }
   }
 
+  /** Failed step row for `saveStepFailure` / `checkpointStep`. */
+  private failedStep(params: {
+    run: number;
+    existing: Partial<StepState>;
+    record: {
+      stepName: string;
+      error: string;
+      errorTag?: string;
+      durationMs: number;
+      startedAt: Date;
+      metadata?: Record<string, unknown>;
+    };
+    now: Date;
+  }): StepState {
+    const { run, existing, record, now } = params;
+    return {
+      stepName: record.stepName,
+      run,
+      status: "failed",
+      dependsOn: existing.dependsOn ?? [],
+      stepType: existing.stepType ?? "single",
+      error: record.error,
+      ...(record.errorTag !== undefined && { errorTag: record.errorTag }),
+      metadata: record.metadata ?? existing.metadata,
+      startedAt: record.startedAt,
+      completedAt: now,
+      durationMs: record.durationMs,
+      attempt: ((existing.attempt as number) ?? 0) + 1,
+    };
+  }
+
   async saveStepFailure({ guard, ...params }: SaveStepFailureParams): Promise<void> {
     const now = this.clock.now();
     const nowIso = this.serializeDate(now);
@@ -994,20 +1193,7 @@ export class RedisWorkflowStorage
       stepNames: [params.stepName],
       ops: ({ run, steps }) => {
         const existing: Partial<StepState> = steps[0] ? JSON.parse(steps[0]) : {};
-        const step: StepState = {
-          stepName: params.stepName,
-          run,
-          status: "failed",
-          dependsOn: existing.dependsOn ?? [],
-          stepType: existing.stepType ?? "single",
-          error: params.error,
-          ...(params.errorTag !== undefined && { errorTag: params.errorTag }),
-          metadata: params.metadata ?? existing.metadata,
-          startedAt: params.startedAt,
-          completedAt: now,
-          durationMs: params.durationMs,
-          attempt: ((existing.attempt as number) ?? 0) + 1,
-        };
+        const step = this.failedStep({ run, existing, record: params, now });
         return [
           this.markRunningOp(params.workflowId, nowIso),
           [
@@ -1020,6 +1206,76 @@ export class RedisWorkflowStorage
         ];
       },
     });
+  }
+
+  /**
+   * The step row, its attempt rows, the pending → running move and the
+   * status read-back, in one fenced script. The row is built for the
+   * existing row the script is expected to find — none on the first try,
+   * so a step's first checkpoint is one round trip; when a row is there
+   * already (a map step's, a retried step's) the script hands it back and
+   * the second try builds on it.
+   */
+  async checkpointStep({
+    guard,
+    ...checkpoint
+  }: CheckpointStepParams): Promise<WorkflowStatusSnapshot | null> {
+    const { workflowId, stepName, outcome } = checkpoint;
+    const now = this.clock.now();
+    const nowIso = this.serializeDate(now);
+    const wfKey = this.keys.wf(workflowId);
+    const attempts = checkpoint.attempts.map((record) => this.serializeAttempt(record));
+    let expected: string | null = null;
+    for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
+      const existing: Partial<StepState> = expected === null ? {} : JSON.parse(expected);
+      const record = { stepName, ...outcome };
+      const step =
+        outcome.kind === "completed"
+          ? this.completedStep({
+              run: 0,
+              existing,
+              record: { ...record, result: outcome.result },
+              now,
+            })
+          : this.failedStep({ run: 0, existing, record: { ...record, error: outcome.error }, now });
+      // The script puts the run in.
+      const rowJson = this.serializeStepState({ ...step, run: undefined as unknown as number });
+      const reply = (await this.evalFenced({
+        script: FENCED_CHECKPOINT_STEP_LUA,
+        workflowId,
+        guard,
+        keys: [wfKey, this.keys.attempts(workflowId)],
+        args: [
+          wfKey,
+          stepName,
+          expected === null ? "0" : "1",
+          expected ?? "",
+          rowJson,
+          nowIso,
+          ...attempts,
+        ],
+      })) as [number, ...unknown[]];
+      const code = Number(reply[0]);
+      if (code === -1) return null;
+      if (code === 0) {
+        expected = (reply[1] as string | null) ?? null;
+        continue;
+      }
+      const [, status, error, errorTag, snapshot] = reply as [
+        number,
+        WorkflowStatus,
+        string,
+        string,
+        IndexSnapshot | null,
+      ];
+      await this.syncIndex(snapshot);
+      return {
+        status,
+        ...(error ? { error } : {}),
+        ...(errorTag ? { errorTag } : {}),
+      };
+    }
+    throw new Error(`checkpointStep: gave up on "${workflowId}" after contention`);
   }
 
   // -- Task results ---------------------------------------------------------
@@ -1478,7 +1734,7 @@ export class RedisWorkflowStorage
       lockDurationMs.toString(),
       wfKey,
     )) as [number, string, unknown];
-    const state = this.assembleWorkflow(load);
+    const state = await this.settledState({ workflowId, reply: load });
     return acquired === 1 ? { locked: true, token, state } : { locked: false, state };
   }
 
@@ -2068,17 +2324,15 @@ export class RedisWorkflowStorage
     await this.writeOps({
       workflowId: record.workflowId,
       guard,
-      ops: [
-        [
-          "RPUSH",
-          this.keys.attempts(record.workflowId),
-          JSON.stringify({
-            ...record,
-            startedAt: this.serializeDate(record.startedAt),
-            completedAt: this.serializeDate(record.completedAt),
-          }),
-        ],
-      ],
+      ops: [["RPUSH", this.keys.attempts(record.workflowId), this.serializeAttempt(record)]],
+    });
+  }
+
+  private serializeAttempt(record: StepAttemptRecord): string {
+    return JSON.stringify({
+      ...record,
+      startedAt: this.serializeDate(record.startedAt),
+      completedAt: this.serializeDate(record.completedAt),
     });
   }
 
@@ -2476,6 +2730,18 @@ function toSummary(values: ReadonlyArray<string | null>): WorkflowSummary | null
     updatedAt: new Date(f.updatedAt ?? f.createdAt),
     ...(f.completedAt ? { completedAt: new Date(f.completedAt) } : {}),
   };
+}
+
+/**
+ * The provisional marker of a `LOAD_RUN_LUA` reply's workflow hash: the
+ * nonce and parent of a fenced child create not confirmed yet, else null.
+ */
+function provisionalMarker(reply: unknown): { parentId: string; nonce: string } | null {
+  const parts = (reply ?? []) as unknown[];
+  if (parts.length === 0) return null;
+  const raw = flatToRecord(parts[0] as string[]);
+  if (!raw.provisional) return null;
+  return { parentId: raw.parentWorkflowId ?? "", nonce: raw.provisional };
 }
 
 /** `[k1, v1, k2, v2, ...]` (a Lua HGETALL reply) as a record. */

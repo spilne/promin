@@ -74,7 +74,7 @@ redisDescribe("RedisSchedulerStorage", (redis) => {
       }
       await s.upsertSchedule({ id: "on", intervalMs: 1_000 });
       // Due-set entries left behind by an older writer, sorting before "on".
-      const dueKey = `${prefix}:ns:_:due`;
+      const dueKey = `{${prefix}}:ns:_:due`;
       for (let i = 0; i < 3; i++) await client.zadd(dueKey, -10 + i, `off-${i}`);
       await client.zadd(dueKey, -20, "deleted");
 

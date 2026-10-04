@@ -1,30 +1,40 @@
 // ---------------------------------------------------------------------------
 // RedisStepQueue — Redis-backed StepQueue for distributed step dispatch
 //
-// Key structure:
-//   {prefix}:task:{id}                             → Hash (task fields)
-//   {prefix}:pending                               → Sorted Set (all pending
+// Every key of a queue starts with `{<prefix>}`, so on Redis Cluster the
+// whole queue sits in one slot: a claim walks the shared pending set and
+// moves tasks, running sets and concurrency sets in one script, so there is
+// no per-task key worth spreading. Queues with different prefixes land in
+// different slots.
+//
+// Key structure (base = `{<prefix>}`):
+//   <base>:task:<id>                               → Hash (task fields)
+//   <base>:pending                                 → Sorted Set (all pending
 //                                                    tasks, priority-scored;
 //                                                    claim filters by needs,
 //                                                    step name and version
 //                                                    in Lua)
-//   {prefix}:running                               → Set of task IDs
-//   {prefix}:done                                  → Sorted Set of terminal
+//   <base>:running                                 → Set of task IDs
+//   <base>:done                                    → Sorted Set of terminal
 //                                                    task IDs scored by
 //                                                    completion time (ms);
 //                                                    drives purge()
-//   {prefix}:counter                               → Incr for task ID gen
-//   {prefix}:claimseq                              → Incr for claim tokens
-//   {prefix}:active:{wf}::{step}                   → taskId of the active
+//   <base>:counter                                 → Incr for task ID gen
+//   <base>:claimseq                                → Incr for claim tokens
+//   <base>:active:<wf>::<step>                     → taskId of the active
 //                                                    (pending/running) task
 //                                                    — drives idempotent
 //                                                    enqueue
-//   {prefix}:conc:{len(scope)}:{scope}:{key}       → Set of running task IDs
+//   <base>:conc:<len(scope)>:<scope>:<key>         → Set of running task IDs
 //                                                    sharing a (concurrency
 //                                                    scope, key) — SCARD is
 //                                                    the running count that
 //                                                    claim checks against
 //                                                    the task's limit
+//
+// A lease store that fences `requeueStuck` must keep its keys in the same
+// slot: construct it with `prefix: "{<prefix>}"`. Keys written before this
+// layout (`<prefix>:task:<id>` ...) need `migrateLegacyKeys()` once.
 // ---------------------------------------------------------------------------
 
 import {
@@ -46,6 +56,7 @@ import {
 } from "@promin/workflow";
 import type { RedisStoreClient } from "./redis-client.ts";
 import type { RedisLeaderLeaseStore } from "./redis-leader-lease-store.ts";
+import { hashTagOf, renameLegacyKeys, storeKeyBase } from "./redis-key-migration.ts";
 
 // -- Lua scripts -------------------------------------------------------------
 
@@ -391,16 +402,24 @@ export interface RedisStepQueueConfig {
    * Lease store whose epoch keys `requeueStuck({ lease })` fences against:
    * every requeue script checks the lease's epoch before writing, and the
    * sweep rejects with `StaleLeaseError` once it has moved on. Must live on
-   * the same Redis as the queue. Without it the `lease` param is ignored.
+   * the same Redis as the queue, with its keys in the queue's slot:
+   * construct it with `prefix: "{<queue prefix>}"` (the constructor throws
+   * otherwise). Without it the `lease` param is ignored.
    */
   leaseStore?: RedisLeaderLeaseStore;
 }
 
 const PURGE_BATCH = 500;
+/** Ids per batch of task reads in `metrics()`. */
+const METRICS_BATCH = 500;
+/** Keys of the untagged layout, after `<prefix>:`. */
+const LEGACY_KEY = /^(task:|active:|conc:|pending$|running$|done$|counter$|claimseq$)/;
 
 export class RedisStepQueue implements StepQueue {
   private readonly redis: RedisStoreClient;
   private readonly prefix: string;
+  /** `{<prefix>}`: the start of every key, and the queue's slot. */
+  private readonly base: string;
   private readonly claimScanLimit: number;
   private readonly maxDeliveries: number;
   private readonly clock: WallClock;
@@ -409,28 +428,57 @@ export class RedisStepQueue implements StepQueue {
   constructor(config: RedisStepQueueConfig) {
     this.redis = config.redis;
     this.prefix = config.prefix ?? "sq";
+    this.base = storeKeyBase(this.prefix);
     this.claimScanLimit = config.claimScanLimit ?? 1000;
     this.maxDeliveries = config.maxDeliveries ?? DEFAULT_MAX_DELIVERIES;
     this.clock = config.clock ?? SystemWallClock;
     this.leaseStore = config.leaseStore;
+    if (this.leaseStore) {
+      const epoch = this.leaseStore.keysFor("lease").epoch;
+      if (hashTagOf(epoch) !== hashTagOf(this.base)) {
+        throw new Error(
+          `RedisStepQueue: the lease store's keys (${epoch}) must share the queue's ` +
+            `hash tag ${this.base}: construct it with prefix "${this.base}"`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Move keys written by earlier versions of this queue (`<prefix>:task:<id>`,
+   * `<prefix>:pending` ...) under the queue's hash tag. Run it once per
+   * prefix against the standalone instance (it renames keys across slots),
+   * with every worker stopped. Re-running it is a no-op.
+   */
+  async migrateLegacyKeys(params?: {
+    /** SCAN COUNT hint. Default 1000. */
+    scanCount?: number;
+  }): Promise<{ keys: number }> {
+    const { renamed } = await renameLegacyKeys({
+      redis: this.redis,
+      prefix: this.prefix,
+      scanCount: params?.scanCount ?? 1_000,
+      target: (rest) => (LEGACY_KEY.test(rest) ? `${this.base}:${rest}` : null),
+    });
+    return { keys: renamed.length };
   }
 
   // -- Key helpers -----------------------------------------------------------
 
   private taskKey(id: string): string {
-    return `${this.prefix}:task:${id}`;
+    return `${this.base}:task:${id}`;
   }
 
   private get pendingKey(): string {
-    return `${this.prefix}:pending`;
+    return `${this.base}:pending`;
   }
 
   private get runningKey(): string {
-    return `${this.prefix}:running`;
+    return `${this.base}:running`;
   }
 
   private get doneKey(): string {
-    return `${this.prefix}:done`;
+    return `${this.base}:done`;
   }
 
   /**
@@ -438,7 +486,7 @@ export class RedisStepQueue implements StepQueue {
    * unique, so (workflow_id, step_name) is the key.
    */
   private activeKey(workflowId: string, stepName: string): string {
-    return `${this.prefix}:active:${workflowId}::${stepName}`;
+    return `${this.base}:active:${workflowId}::${stepName}`;
   }
 
   // -- StepQueue interface ---------------------------------------------------
@@ -452,8 +500,8 @@ export class RedisStepQueue implements StepQueue {
       3,
       this.activeKey(params.workflowId, params.stepName),
       this.pendingKey,
-      `${this.prefix}:counter`,
-      `${this.prefix}:task:`,
+      `${this.base}:counter`,
+      `${this.base}:task:`,
       params.workflowId,
       params.stepName,
       String(priority),
@@ -481,11 +529,11 @@ export class RedisStepQueue implements StepQueue {
       3,
       this.pendingKey,
       this.runningKey,
-      `${this.prefix}:claimseq`,
+      `${this.base}:claimseq`,
       params.workerId,
       this.clock.now().toISOString(),
       String(limit),
-      this.prefix,
+      this.base,
       JSON.stringify(params.capabilities ?? []),
       String(Math.max(limit, this.claimScanLimit)),
       params.stepNames !== undefined ? JSON.stringify(params.stepNames) : "",
@@ -619,7 +667,7 @@ export class RedisStepQueue implements StepQueue {
         PURGE_LUA,
         1,
         this.doneKey,
-        this.prefix,
+        this.base,
         String(params.completedBefore.getTime()),
         String(PURGE_BATCH),
       )) as [number, number];
@@ -638,9 +686,10 @@ export class RedisStepQueue implements StepQueue {
     p95ExecMs: number;
   }> {
     // Redis has no native time-range index over task hashes, so we read
-    // the task namespace and filter in-process. Acceptable for the modest
-    // backlog sizes Redis is typically used with (and `purge()` keeps it
-    // bounded); for millions of retained rows, use Postgres.
+    // every task the pending, running and done sets hold and filter
+    // in-process. Acceptable for the modest backlog sizes Redis is
+    // typically used with (and `purge()` keeps it bounded); for millions of
+    // retained rows, use Postgres.
     const sinceMs = params.since.getTime();
     const untilMs = (params.until ?? this.clock.now()).getTime();
     const inWindow = (raw: string | undefined): boolean => {
@@ -658,9 +707,18 @@ export class RedisStepQueue implements StepQueue {
     let execSum = 0;
     const execTimes: number[] = [];
 
-    const taskKeys = await this.redis.keys(`${this.prefix}:task:*`);
-    for (const key of taskKeys) {
-      const h = await this.redis.hgetall(key);
+    const [pendingIds, runningIds, doneIds] = await Promise.all([
+      this.redis.zrangebyscore(this.pendingKey, "-inf", "+inf"),
+      this.redis.smembers(this.runningKey),
+      this.redis.zrangebyscore(this.doneKey, "-inf", "+inf"),
+    ]);
+    const ids = [...new Set([...pendingIds, ...runningIds, ...doneIds])];
+    const hashes: Array<Record<string, string>> = [];
+    for (let i = 0; i < ids.length; i += METRICS_BATCH) {
+      const batch = ids.slice(i, i + METRICS_BATCH);
+      hashes.push(...(await Promise.all(batch.map((id) => this.redis.hgetall(this.taskKey(id))))));
+    }
+    for (const h of hashes) {
       if (!h) continue;
       const status = h.status;
       if (status === "pending" && inWindow(h.createdAt)) {
@@ -720,7 +778,7 @@ export class RedisStepQueue implements StepQueue {
       params.value,
       String(params.durationMs),
       now.toISOString(),
-      this.prefix,
+      this.base,
       String(now.getTime()),
     );
     return ok === 1;
@@ -754,7 +812,7 @@ export class RedisStepQueue implements StepQueue {
       this.doneKey,
       ...leaseKeys,
       params.id,
-      this.prefix,
+      this.base,
       params.claimToken,
       params.mode,
       String(this.maxDeliveries),

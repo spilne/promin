@@ -11,16 +11,22 @@ redisDescribe("RedisStepQueue conformance", (redis) => {
     {
       leaseFenced: () => {
         const client = redis.client();
-        const leases = new RedisLeaderLeaseStore({ redis: client, prefix: uniquePrefix("lease") });
-        const queue = new RedisStepQueue({
-          redis: client,
-          prefix: uniquePrefix("sq"),
-          leaseStore: leases,
-        });
+        const prefix = uniquePrefix("sq");
+        // The lease keys share the queue's slot.
+        const leases = new RedisLeaderLeaseStore({ redis: client, prefix: `{${prefix}}` });
+        const queue = new RedisStepQueue({ redis: client, prefix, leaseStore: leases });
         return { queue, leases };
       },
     },
   );
+
+  it("rejects a lease store whose keys sit in another slot", () => {
+    const client = redis.client();
+    const leases = new RedisLeaderLeaseStore({ redis: client, prefix: "lease" });
+    expect(() => new RedisStepQueue({ redis: client, prefix: "sq", leaseStore: leases })).toThrow(
+      'construct it with prefix "{sq}"',
+    );
+  });
 });
 
 redisDescribe("RedisStepQueue concurrency keys", (redis) => {

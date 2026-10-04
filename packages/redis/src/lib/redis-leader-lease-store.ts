@@ -1,8 +1,14 @@
 // ---------------------------------------------------------------------------
 // RedisLeaderLeaseStore — `LeaderLeaseStore` on two keys per lease:
 //
-//   {prefix}:lease:{<key>}:holder  — STRING, the holder's instance id, PX ttl
-//   {prefix}:lease:{<key>}:epoch   — STRING counter, no TTL (fencing token)
+//   <prefix>:lease:{<key>}:holder  — STRING, the holder's instance id, PX ttl
+//   <prefix>:lease:{<key>}:epoch   — STRING counter, no TTL (fencing token)
+//
+// The `{<key>}` hash tag keeps a lease's two keys in one cluster slot. A
+// prefix that carries a hash tag itself (`{sq}`) wins over it, since Redis
+// hashes the first tag in a key: every lease of the store then sits in the
+// prefix's slot, next to the keys of the store using that tag, which is
+// how a fenced write checks the epoch in its own script.
 //
 // Acquire, refresh and release are each one Lua script, so the check and
 // the write can't interleave with another instance (the old SET NX + GET +
@@ -12,8 +18,7 @@
 //
 // Fencing: a write is current when `GET <epoch key>` still equals the
 // lease's epoch. Check it inside the same script as the write (see
-// `RedisSchedulerStorage.commitPoll`); the hash tag keeps both keys in one
-// cluster slot.
+// `RedisSchedulerStorage.commitPoll` and `RedisStepQueue.requeueStuck`).
 // ---------------------------------------------------------------------------
 
 import type { LeaderLease, LeaderLeaseStore } from "@promin/workflow";

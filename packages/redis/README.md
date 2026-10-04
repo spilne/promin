@@ -37,6 +37,8 @@ const storage = new RedisWorkflowStorage({
 
 `resetSteps` (behind `WorkflowRunner.resume`) is supported. Listing and counting read compact index records, so `countWorkflows` and `listWorkflowSummaries` never load runs.
 
+`checkpointStep` writes a settled step's row and its attempt rows and reads back the run's status in one fenced script, so the runner spends one Redis round trip per step: a 100-step chain sends 109 commands in all, against 408 with the separate writes.
+
 ### Redis Cluster
 
 Every key of one workflow carries the hash tag `{wf:<workflowId>}`, so all of a workflow's keys share a slot. The cross-workflow indexes (status, name, parent and namespace sets, the ordering sorted sets, the sleep schedule) share the tag `{idx}`, so they all sit in one other slot. No script touches both slots:
@@ -44,19 +46,29 @@ Every key of one workflow carries the hash tag `{wf:<workflowId>}`, so all of a 
 - A workflow's write (step rows, status, journal, fence check) is one atomic script on its own slot.
 - The index update is a second script on the `{idx}` slot. It is versioned by an `iv` counter on the workflow hash, so concurrent writers converge on the latest state whatever order their updates land in. The workflow hash is authoritative. After a crash between the two scripts, the index lags until the next write to that workflow, or until a scanner, listing or purge notices the lag and repairs it.
 - The sleep schedule is updated after the journal write. `findDueSleeps` drops schedule members whose journal entry is no longer a pending sleep.
-- A fenced child create checks the parent's fence and writes the child's row in two scripts, because they are in different slots. A parent that loses its lock between the two can still create the child. Child ids are deterministic per parent step, so the next lock holder attaches to that child.
+- A fenced child create commits on the parent's slot. The child's row is first written provisional: unindexed, invisible to readers, with a one-hour TTL. Then one fenced script on the parent's slot records the child in the parent's child intents, and the row is confirmed and indexed. A provisional row counts only once the parent's intent names it, so a parent that lost its lock before writing the intent never creates the child. A reader that finds a provisional row with a matching intent confirms it, so a crash after the intent loses nothing. A cascading cancel also reaches children committed this way whose rows are not indexed yet.
 
-The step queue, scheduler and state machine stores are unchanged: they do not hash-tag their keys yet.
+The other stores are Cluster-safe too:
+
+- **Step queue**: every key starts with `{<prefix>}`, so a whole queue sits in one slot. A claim walks the shared pending set and moves tasks between sets in one script. Queues with different prefixes land in different slots. A lease store that fences `requeueStuck` must keep its keys in the queue's slot: construct it with `prefix: "{<queue prefix>}"`. The queue's constructor rejects a lease store in another slot.
+- **Scheduler**: every key, leader leases included, starts with `{<prefix>}`. A fenced poll commit checks the lease epoch and writes many schedules and due sets in one script. Namespaces are tracked in a set, so `findDueAcross` and listing every namespace no longer need `KEYS`.
+- **State machines**: each machine's keys carry the tag `{sm:<id>}`. There is no cross-machine key.
+- **Leader leases**: `RedisLeaderLeaseStore` tags each lease's keys with `{<key>}`. A prefix that carries its own hash tag wins, which is how the scheduler and step queue keep leases in their slot.
 
 ### Migrating keys from earlier versions
 
-Earlier versions stored keys without hash tags (`wf:<id>`, `wf:<id>:steps:1`, `wf:lock:<id>`, `wf:idx:status:running` …). Those keys are invisible to this version. To move them, stop every worker and run the migration once per prefix against the standalone instance, before moving to a cluster:
+Earlier versions stored keys without hash tags (`wf:<id>`, `wf:<id>:steps:1`, `wf:lock:<id>`, `wf:idx:status:running`, `sq:task:<id>`, `sched:schedule:<id>`, `sm:machine:<id>` …). Those keys are invisible to this version. To move them, stop every worker and run each store's migration once per prefix against the standalone instance, before moving to a cluster:
 
 ```typescript
 const { workflows, keys } = await storage.migrateLegacyKeys();
+await queue.migrateLegacyKeys(); // RedisStepQueue
+await schedulerStorage.migrateLegacyKeys(); // RedisSchedulerStorage
+await machines.migrateLegacyKeys(); // RedisStateMachineStorage
 ```
 
-The migration renames each workflow's keys under its tag and rebuilds the indexes from the workflow hashes. It also copies the sleep schedule and distinct-value sets, then deletes the old index keys. It scans the keyspace once, which also finds streams appended before stream ids were tracked, so purge removes them. Re-running it is a no-op. For a row that still lacks stream tracking, `purgeCompleted` falls back to a bounded `SCAN` for that workflow's stream keys.
+The step queue, scheduler and state machine migrations rename their keys under the new tags. The scheduler's lease epochs move with their keys, so fencing stays monotonic, and every namespace found is registered. A step queue's fencing lease store takes the queue's tag as its prefix; its epochs start over, which is safe because the migration runs with every worker stopped.
+
+The workflow migration renames each workflow's keys under its tag and rebuilds the indexes from the workflow hashes. It also copies the sleep schedule and distinct-value sets, then deletes the old index keys. It scans the keyspace once, which also finds streams appended before stream ids were tracked, so purge removes them. Re-running it is a no-op. For a row that still lacks stream tracking, `purgeCompleted` falls back to a bounded `SCAN` for that workflow's stream keys.
 
 ## RedisStepQueue
 

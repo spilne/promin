@@ -1,12 +1,17 @@
 import { describe, expect, it } from "bun:test";
 import { RedisWorkflowStorage } from "../redis-workflow-storage.ts";
+import { RedisStepQueue } from "../redis-step-queue.ts";
+import { RedisSchedulerStorage } from "../redis-scheduler-storage.ts";
+import { RedisStateMachineStorage } from "../redis-state-machine-storage.ts";
+import { RedisLeaderLeaseStore } from "../redis-leader-lease-store.ts";
 import * as scripts from "../redis-workflow-scripts.ts";
 import type { RedisStoreClient } from "../redis-client.ts";
 import { redisDescribe, uniquePrefix } from "./redis-test-utils.ts";
 
 // ---------------------------------------------------------------------------
-// Redis Cluster readiness of RedisWorkflowStorage: every script call and
-// every multi-key command must stay within one hash slot. The test records
+// Redis Cluster readiness of every Redis store: every script call and every
+// multi-key command must stay within one hash slot, and every script names
+// at least one key (a cluster client routes a script by its keys). The test records
 // each call a full workload makes and computes the CRC16 slot of every key
 // it passes — plus the key bases scripts derive further keys from in Lua.
 // ---------------------------------------------------------------------------
@@ -46,8 +51,11 @@ function recording(params: { client: RedisStoreClient; prefix: string }): {
   calls: RecordedCall[];
 } {
   const calls: RecordedCall[] = [];
+  // Workflow and state machine keys start `<prefix>:{`; the keys of the
+  // single-slot stores (queue, scheduler) start `{<prefix>}`.
   const isBase = (arg: unknown): arg is string =>
-    typeof arg === "string" && arg.startsWith(`${params.prefix}:{`);
+    typeof arg === "string" &&
+    (arg.startsWith(`${params.prefix}:{`) || arg.startsWith(`{${params.prefix}}`));
   const client = new Proxy(params.client, {
     get(target, prop) {
       const value = (target as unknown as Record<string | symbol, unknown>)[prop];
@@ -74,6 +82,15 @@ function recording(params: { client: RedisStoreClient; prefix: string }): {
     },
   });
   return { client, calls };
+}
+
+/** Calls spanning more than one slot, and scripts that name no key. */
+function offenders(calls: readonly RecordedCall[]): RecordedCall[] {
+  return calls.filter((call) => {
+    if (call.command === "eval" && call.keys.length === 0) return true;
+    const slots = new Set([...call.keys, ...call.derivedBases].map(keySlot));
+    return slots.size > 1;
+  });
 }
 
 describe("keySlot", () => {
@@ -137,6 +154,13 @@ redisDescribe("RedisWorkflowStorage on Redis Cluster", (redis) => {
         completedAt: new Date(),
         durationMs: 1,
       } as never,
+      guard,
+    });
+    await s.checkpointStep({
+      workflowId: "p",
+      stepName: "b",
+      outcome: { kind: "completed", result: 2, durationMs: 1, startedAt: new Date() },
+      attempts: [],
       guard,
     });
     await s.setWorkflowMetadata({ workflowId: "p", patch: { k: 1 }, guard });
@@ -238,12 +262,7 @@ redisDescribe("RedisWorkflowStorage on Redis Cluster", (redis) => {
     await s.tripwireWorkflow({ workflowId: "c", reason: "x" });
     expect(await s.purgeCompleted({ olderThanMs: -60_000, limit: 10 })).toBe(2);
 
-    // Every recorded call stays within one slot.
-    const offenders = calls.filter((call) => {
-      const slots = new Set([...call.keys, ...call.derivedBases].map(keySlot));
-      return slots.size > 1;
-    });
-    expect(offenders).toEqual([]);
+    expect(offenders(calls)).toEqual([]);
 
     // Workflow keys spread over slots; the indexes share one.
     const used = new Set(calls.flatMap((c) => c.keys));
@@ -262,5 +281,105 @@ redisDescribe("RedisWorkflowStorage on Redis Cluster", (redis) => {
       .filter(([, lua]) => !ran.has(lua) && !ran.has(scripts.fencedLua(lua)))
       .map(([name]) => name);
     expect(unused).toEqual([]);
+  });
+});
+
+redisDescribe("RedisStepQueue on Redis Cluster", (redis) => {
+  it("keeps every script call within the queue's slot", async () => {
+    const prefix = uniquePrefix("sq");
+    const { client, calls } = recording({ client: redis.client(), prefix });
+    const leases = new RedisLeaderLeaseStore({ redis: client, prefix: `{${prefix}}` });
+    const q = new RedisStepQueue({ redis: client, prefix, leaseStore: leases, maxDeliveries: 1 });
+    const task = (stepName: string) => ({
+      workflowId: "wf",
+      stepName,
+      input: {},
+      prevResults: {},
+      concurrencyScope: "send",
+      concurrencyKey: "tenant",
+      concurrencyLimit: 5,
+    });
+
+    for (const step of ["a", "b", "c", "d"]) await q.enqueue(task(step));
+    const [a, b, c] = await q.claim({ workerId: "w", limit: 4 });
+    await q.heartbeat({ taskId: a!.id, claimToken: a!.claimToken });
+    await q.complete({ taskId: a!.id, claimToken: a!.claimToken, result: 1, durationMs: 1 });
+    await q.fail({ taskId: b!.id, claimToken: b!.claimToken, error: "x", durationMs: 1 });
+    await q.release({ taskId: c!.id, claimToken: c!.claimToken! });
+    const lease = await leases.tryAcquireLeader({ key: "sweep", instanceId: "i", ttlMs: 30_000 });
+    expect(lease).not.toBeNull();
+    await q.requeueStuck({ mode: "worker", workerId: "w", lease: lease! });
+    await q.requeueStuck({ mode: "stale", olderThanMs: 0 });
+    await leases.releaseLeader({ lease: lease! });
+    await q.get(a!.id);
+    await q.metrics({ since: new Date(0) });
+    await q.purge({ completedBefore: new Date(Date.now() + 60_000) });
+
+    expect(offenders(calls)).toEqual([]);
+    const slots = new Set(calls.flatMap((c) => [...c.keys, ...c.derivedBases]).map(keySlot));
+    expect(slots).toEqual(new Set([keySlot(`{${prefix}}`)]));
+    // Enqueue, claim, heartbeat, settle, requeue, purge, lease acquire / release.
+    expect(new Set(calls.map((c) => c.script)).size).toBe(8);
+  });
+});
+
+redisDescribe("RedisSchedulerStorage on Redis Cluster", (redis) => {
+  it("keeps every script call within the scheduler's slot", async () => {
+    const prefix = uniquePrefix("sched");
+    const { client, calls } = recording({ client: redis.client(), prefix });
+    const s = new RedisSchedulerStorage({ redis: client, prefix });
+    const now = new Date();
+
+    await s.upsertSchedule({ id: "a", intervalMs: 1_000, namespace: "x" });
+    await s.upsertSchedule({ id: "a", intervalMs: 1_000, namespace: "y" });
+    await s.upsertSchedule({ id: "b", intervalMs: 1_000 });
+    await s.setNextRun("a", new Date(now.getTime() - 1_000));
+    await s.setEnabled("b", false);
+    await s.setEnabled("b", true);
+    await s.findDue({ now, limit: 10, namespace: "y" });
+    await s.findDueAcross({ now, limit: 10 });
+    await s.recordFire("a", now, 1);
+    const lease = await s.tryAcquireLeader({ key: "poll", instanceId: "i", ttlMs: 30_000 });
+    expect(lease).not.toBeNull();
+    await s.commitPoll({
+      updates: [{ id: "a", firedAt: now, tickIncrement: 1, nextRun: now, expectedTickCount: 1 }],
+      lease: lease!,
+    });
+    await s.commitPoll({ updates: [{ id: "b", nextRun: null }] });
+    await s.releaseLeader({ lease: lease! });
+    await s.listSchedules();
+    await s.countSchedules({ enabled: true });
+    await s.deleteSchedule("a");
+
+    expect(offenders(calls)).toEqual([]);
+    const slots = new Set(calls.flatMap((c) => [...c.keys, ...c.derivedBases]).map(keySlot));
+    expect(slots).toEqual(new Set([keySlot(`{${prefix}}`)]));
+    // Upsert, next run, enabled, find due, fire, commit, delete, lease acquire / release.
+    expect(new Set(calls.map((c) => c.script)).size).toBe(9);
+  });
+});
+
+redisDescribe("RedisStateMachineStorage on Redis Cluster", (redis) => {
+  it("keeps every machine's keys in its own slot", async () => {
+    const prefix = uniquePrefix("sm");
+    const { client, calls } = recording({ client: redis.client(), prefix });
+    const s = new RedisStateMachineStorage({ redis: client, prefix, activeTtlMs: 60_000 });
+
+    for (const id of ["m1", "m2"]) {
+      await s.create({ id, name: "n", initial: "a", context: {} });
+      await s.transition({ id, from: "a", to: "b", expectedRevision: 0, event: "go", context: {} });
+      const token = await s.tryLock({ id, durationMs: 30_000 });
+      await s.extendLock({ id, token: token!, durationMs: 30_000 });
+      await s.releaseLock({ id, token: token! });
+      await s.load(id);
+      await s.loadEvents(id);
+    }
+
+    expect(offenders(calls)).toEqual([]);
+    expect(keySlot(`${prefix}:{sm:m1}:machine`)).not.toBe(keySlot(`${prefix}:{sm:m2}:machine`));
+    // Transition, release, extend.
+    expect(new Set(calls.filter((c) => c.command === "eval").map((c) => c.script)).size).toBe(3);
+    // `create` clears a machine's snapshot and history in one DEL.
+    expect(calls.some((c) => c.command === "del" && c.keys.length === 2)).toBe(true);
   });
 });
