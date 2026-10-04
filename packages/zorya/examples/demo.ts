@@ -33,7 +33,7 @@ import {
   createWorkflowRunner,
   RecoveryStrategy,
   completeSignal,
-  isJournaledSuspendStorage,
+  isActivityJournalStorage,
   type Workflow,
 } from "@promin/workflow";
 import {
@@ -1034,7 +1034,7 @@ async function startApprovalAutoSignaler(): Promise<void> {
       // completed entry and continues. The sleep scanner only handles
       // sleep resumption — signal completion needs its own nudge.
       await storage.deliverSignal(r.workflowId, "approval", payload);
-      if (isJournaledSuspendStorage(storage)) {
+      if (isActivityJournalStorage(storage)) {
         await completeSignal({
           storage,
           workflowId: r.workflowId,

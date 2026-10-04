@@ -31,7 +31,6 @@ import type {
 } from "@promin/workflow";
 import type {
   ActivityJournalStorage,
-  JournaledSuspendStorage,
   JournalEntry,
   JournalExit,
   JournalSlot,
@@ -48,7 +47,7 @@ import type { SqliteDatabase } from "./sqlite-database.ts";
  * Persistent workflow storage backed by SQLite.
  *
  * Implements the full `WorkflowStorage` contract plus the optional
- * `ActivityJournalStorage` and `JournaledSuspendStorage` extensions.
+ * `ActivityJournalStorage` extension.
  * Steps and tasks are stored as JSON blobs on the workflow row for
  * simplicity; run history is archived to a separate table on `startFreshRun`.
  *
@@ -68,12 +67,7 @@ import type { SqliteDatabase } from "./sqlite-database.ts";
  * ```
  */
 export class SqliteWorkflowStorage
-  implements
-    WorkflowStorage,
-    ActivityJournalStorage,
-    JournaledSuspendStorage,
-    StepAttemptStorage,
-    CompensationLedgerStorage
+  implements WorkflowStorage, ActivityJournalStorage, StepAttemptStorage, CompensationLedgerStorage
 {
   private readonly _t: string;
   private readonly clock: WallClock;
@@ -1979,7 +1973,7 @@ export class SqliteWorkflowStorage
   }
 
   // ---------------------------------------------------------------------------
-  // JournaledSuspendStorage
+  // ActivityJournalStorage — pending entries (ctx.sleep / ctx.signal)
   // ---------------------------------------------------------------------------
 
   async appendPendingEntry(

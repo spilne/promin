@@ -1,15 +1,16 @@
 // ---------------------------------------------------------------------------
-// ActivityJournalStorage — optional WorkflowStorage extension for .journaled() steps
+// ActivityJournalStorage — the WorkflowStorage extension behind `.journaled()`
+// steps.
 //
-// Journaled steps (.journaled() builder method) record each activity
-// invocation as a journal entry, enabling intra-step replay after retry/crash.
-// Storages opt in by also implementing this interface; .journaled() throws at
-// build time if the configured storage doesn't support journaling.
-//
-// Mirrors the StepAttemptStorage pattern for consistency.
+// A journaled step records each activity, sleep, signal wait, child run and
+// compensation as a journal entry, so a retry or crash recovery replays the
+// recorded outcomes instead of re-running them. Storages opt in by
+// implementing this interface; a `.journaled()` step throws
+// `JournalStorageMissingError` at execute time when the runner's storage
+// doesn't.
 // ---------------------------------------------------------------------------
 
-import type { FenceGuard, WorkflowStorage } from "./workflow-storage.ts";
+import type { FenceGuard } from "./workflow-storage.ts";
 
 /** What kind of checkpoint an entry records. Used by replay + the sleep scanner. */
 export type JournalStepType = "activity" | "sleep" | "signal" | "compensation" | "child";
@@ -110,9 +111,11 @@ export interface JournalEntry {
 }
 
 /**
- * Optional storage extension for `.journaled()` steps. Implementations persist
- * activity journal entries keyed by (workflowId, stepName, activityIndex) and
- * return them in index order on load.
+ * Storage extension for `.journaled()` steps. Implementations persist journal
+ * entries keyed by (workflowId, stepName, activityIndex, branchPath), return
+ * them in index order on load, and support the two-phase record (a `pending`
+ * entry before the side effect, completed after) that suspend/resume and
+ * crash recovery rely on.
  *
  * The engine detects this at runtime via `isActivityJournalStorage()`.
  */
@@ -124,12 +127,11 @@ export interface ActivityJournalStorage {
   loadJournal(workflowId: string, stepName: string): Promise<JournalEntry[]>;
 
   /**
-   * Append one journal entry. Idempotent on
+   * Append one completed journal entry. Idempotent on
    * `(workflowId, stepName, activityIndex, branchPath)`: re-inserting the
-   * same quadruple is a no-op (the engine only appends after the side
-   * effect completes, so at-most-once is the target). `branchPath` defaults
-   * to `""` for backwards compatibility with callers that don't use
-   * `ctx.parallel`.
+   * same quadruple is a no-op. `branchPath` defaults to `""`. The engine
+   * records through `appendPendingEntry` / `completePendingEntry`; this
+   * single-write form serves tooling and the conformance suites.
    *
    * Fenced by `guard`: the step body's run passes its lock token (see
    * `FenceGuard`).
@@ -146,19 +148,7 @@ export interface ActivityJournalStorage {
     },
     guard?: FenceGuard,
   ): Promise<void>;
-}
 
-// ---------------------------------------------------------------------------
-// JournaledSuspendStorage — extension for ctx.sleep / ctx.signal
-//
-// Strict superset of ActivityJournalStorage. Storages opt in by implementing
-// these four methods; the engine type-guards at first use of ctx.sleep /
-// ctx.signal and throws a loud error if the configured storage doesn't
-// support durable suspend/resume.
-// ---------------------------------------------------------------------------
-
-/** Optional extension for journaled steps that use `ctx.sleep` or `ctx.signal`. */
-export interface JournaledSuspendStorage extends ActivityJournalStorage {
   /**
    * Append a `pending` entry — used by `ctx.sleep` / `ctx.signal` when a
    * journaled step suspends, by `ctx.activity` for the two-phase record
@@ -260,12 +250,14 @@ export interface JournaledSuspendStorage extends ActivityJournalStorage {
   }): Promise<JournalEntry | null>;
 }
 
-/** Runtime check for whether a storage implementation supports suspend/resume. */
-export function isJournaledSuspendStorage(
-  storage: ActivityJournalStorage,
-): storage is JournaledSuspendStorage {
-  const s = storage as Partial<JournaledSuspendStorage>;
+/** Runtime check for whether a storage implementation supports `.journaled()` steps. */
+export function isActivityJournalStorage<S extends object>(
+  storage: S,
+): storage is S & ActivityJournalStorage {
+  const s = storage as Partial<ActivityJournalStorage>;
   return (
+    typeof s.loadJournal === "function" &&
+    typeof s.appendEntry === "function" &&
     typeof s.appendPendingEntry === "function" &&
     typeof s.completePendingEntry === "function" &&
     typeof s.findDueSleeps === "function" &&
@@ -273,14 +265,8 @@ export function isJournaledSuspendStorage(
   );
 }
 
-/** Runtime check for whether a storage implementation supports activity journaling. */
-export function isActivityJournalStorage(
-  storage: WorkflowStorage,
-): storage is WorkflowStorage & ActivityJournalStorage {
-  return (
-    "loadJournal" in storage &&
-    typeof (storage as { loadJournal?: unknown }).loadJournal === "function" &&
-    "appendEntry" in storage &&
-    typeof (storage as { appendEntry?: unknown }).appendEntry === "function"
-  );
-}
+/** @deprecated Merged into `ActivityJournalStorage`; removed in the next release. */
+export type JournaledSuspendStorage = ActivityJournalStorage;
+
+/** @deprecated Use `isActivityJournalStorage`; removed in the next release. */
+export const isJournaledSuspendStorage = isActivityJournalStorage;

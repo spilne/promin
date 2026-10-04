@@ -48,7 +48,7 @@ export type StorageMethod =
   | "listDueTimers"
   | "listSignalWakeups"
   | "listOrphanedRuns"
-  // ActivityJournalStorage / JournaledSuspendStorage — forwarded only when
+  // ActivityJournalStorage — forwarded only when
   // the underlying storage implements them. Lets `.journaled()` workflows
   // (with ctx.activity / ctx.sleep / ctx.signal) run over the wire.
   | "loadJournal"

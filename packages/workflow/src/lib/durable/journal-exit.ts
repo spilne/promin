@@ -130,6 +130,13 @@ const BUILTIN_ERRORS: Readonly<Record<string, new (message: string) => Error>> =
 
 const RESERVED_ERROR_KEYS: ReadonlySet<string> = new Set(["_tag", "name", "message", "stack"]);
 
+/** `_tag` of a thrown value, when it has one. */
+export function errorTag(err: unknown): string | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  const tag = (err as { readonly _tag?: unknown })._tag;
+  return typeof tag === "string" ? tag : undefined;
+}
+
 /** Journal exit for a thrown value. */
 export function failureExit(err: unknown): JournalFailureExit {
   if (!(err instanceof Error)) {

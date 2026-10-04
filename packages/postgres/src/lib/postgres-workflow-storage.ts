@@ -21,7 +21,6 @@ import type {
   SignalState,
   StepAttemptRecord,
   ActivityJournalStorage,
-  JournaledSuspendStorage,
   JournalEntry,
   JournalExit,
   JournalSlot,
@@ -123,12 +122,7 @@ function parseJsonText(text: string | null | undefined): unknown {
 // ---------------------------------------------------------------------------
 
 export class PostgresWorkflowStorage
-  implements
-    WorkflowStorage,
-    StepAttemptStorage,
-    CompensationLedgerStorage,
-    ActivityJournalStorage,
-    JournaledSuspendStorage
+  implements WorkflowStorage, StepAttemptStorage, CompensationLedgerStorage, ActivityJournalStorage
 {
   /**
    * Drizzle schemas for all workflow tables.
@@ -1938,7 +1932,7 @@ export class PostgresWorkflowStorage
   }
 
   // ---------------------------------------------------------------------------
-  // JournaledSuspendStorage — ctx.sleep / ctx.signal
+  // ActivityJournalStorage — pending entries (ctx.sleep / ctx.signal)
   // ---------------------------------------------------------------------------
 
   async appendPendingEntry(

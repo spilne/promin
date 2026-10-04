@@ -19,21 +19,19 @@ import {
 import type { StepAttemptRecord } from "./workflow-state.ts";
 import {
   isActivityJournalStorage,
-  isJournaledSuspendStorage,
   JOURNAL_STEP_TYPES,
   type ActivityJournalStorage,
-  type JournaledSuspendStorage,
 } from "./activity-journal.ts";
 
 export interface StorageTestSuiteOptions {
   /**
-   * Opt in to the `ActivityJournalStorage` conformance section.
-   * Defaults to `false`. When `true`, the factory must return a storage that
-   * also implements `ActivityJournalStorage` (`loadJournal` / `appendEntry`).
+   * Opt in to the `ActivityJournalStorage` conformance section for
+   * `loadJournal` / `appendEntry`. Defaults to `false`. When `true`, the
+   * factory must return a storage that implements `ActivityJournalStorage`.
    */
   hasJournal?: boolean;
   /**
-   * Opt in to the `JournaledSuspendStorage` conformance section
+   * Opt in to the pending-entry conformance section
    * (`appendPendingEntry` / `completePendingEntry` / `findDueSleeps` /
    * `findPendingSignal`). Implies `hasJournal: true`.
    */
@@ -111,15 +109,8 @@ export function storageTestSuite(
     return options.createPeer ? options.createPeer(s) : s;
   }
 
-  async function getSuspendStorage(): Promise<WorkflowStorage & JournaledSuspendStorage> {
-    const s = await getJournalStorage();
-    if (!isJournaledSuspendStorage(s)) {
-      throw new Error(
-        "storageTestSuite was invoked with hasJournaledSuspend: true, but the factory " +
-          "returned a storage that does not implement JournaledSuspendStorage.",
-      );
-    }
-    return s as WorkflowStorage & JournaledSuspendStorage;
+  async function getSuspendStorage(): Promise<WorkflowStorage & ActivityJournalStorage> {
+    return getJournalStorage();
   }
 
   describe("WorkflowStorage conformance", () => {
@@ -1252,11 +1243,10 @@ export function storageTestSuite(
     // -------------------------------------------------------------------
 
     const fenceAt = new Date("2026-01-01T00:00:00.000Z");
-    const suspendOf = (s: WorkflowStorage) => s as WorkflowStorage & JournaledSuspendStorage;
+    const suspendOf = (s: WorkflowStorage) => s as WorkflowStorage & ActivityJournalStorage;
     const attemptsOf = (s: WorkflowStorage) => s as WorkflowStorage & StepAttemptStorage;
     const ledgerOf = (s: WorkflowStorage) => s as WorkflowStorage & CompensationLedgerStorage;
-    const hasSuspend = (s: WorkflowStorage): boolean =>
-      isActivityJournalStorage(s) && isJournaledSuspendStorage(s);
+    const hasSuspend = (s: WorkflowStorage): boolean => isActivityJournalStorage(s);
     const attemptFor = (workflowId: string): StepAttemptRecord => ({
       workflowId,
       stepName: "s",
@@ -3582,11 +3572,11 @@ export function storageTestSuite(
     }
 
     // -------------------------------------------------------------------
-    // JournaledSuspendStorage (opt-in)
+    // ActivityJournalStorage pending entries (opt-in)
     // -------------------------------------------------------------------
 
     if (options.hasJournaledSuspend) {
-      describe("journal — JournaledSuspendStorage", () => {
+      describe("journal — pending entries", () => {
         it("appendPendingEntry writes a pending sleep with wakeAt", async () => {
           const s = await getSuspendStorage();
           await s.createWorkflow({ workflowId: "j-sleep", workflowName: "test", input: {} });
@@ -3870,7 +3860,7 @@ export function storageTestSuite(
 
         it("concurrent completePendingEntry calls have exactly one winner", async () => {
           const s = await getSuspendStorage();
-          const peer = (await getPeer(s)) as WorkflowStorage & JournaledSuspendStorage;
+          const peer = (await getPeer(s)) as WorkflowStorage & ActivityJournalStorage;
           await s.createWorkflow({ workflowId: "j-race", workflowName: "test", input: {} });
           for (let round = 0; round < 5; round++) {
             await s.appendPendingEntry({

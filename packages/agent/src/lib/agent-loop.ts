@@ -1,14 +1,5 @@
-import {
-  workflow,
-  completeSignal,
-  isActivityJournalStorage,
-  isJournaledSuspendStorage,
-} from "@promin/workflow";
-import type {
-  WorkflowRunner,
-  JournaledSuspendStorage,
-  ActivityJournalStorage,
-} from "@promin/workflow";
+import { workflow, completeSignal, isActivityJournalStorage } from "@promin/workflow";
+import type { WorkflowRunner, ActivityJournalStorage } from "@promin/workflow";
 import { SystemWallClock } from "@promin/workflow";
 import type { RateLimiter } from "./agent-shared.ts";
 import type { WallClock, TimerHandle } from "@promin/workflow";
@@ -584,14 +575,13 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
 
   return {
     async session({ runner, sessionId }) {
-      if (!isActivityJournalStorage(runner.storage) || !isJournaledSuspendStorage(runner.storage)) {
+      if (!isActivityJournalStorage(runner.storage)) {
         throw new Error(
-          "agentLoop requires storage that implements JournaledSuspendStorage " +
+          "agentLoop requires storage that implements ActivityJournalStorage " +
             "(e.g. InMemoryWorkflowStorage or PgWorkflowStorage).",
         );
       }
-      const journalStorage = runner.storage as unknown as JournaledSuspendStorage;
-      const activityStorage = runner.storage as unknown as ActivityJournalStorage;
+      const journalStorage = runner.storage as unknown as ActivityJournalStorage;
 
       const clock = config.clock ?? SystemWallClock;
       // Multi-subscriber event bus. The legacy `config.logger` (if provided)
@@ -1138,7 +1128,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
       // Restore turn counter from the journal so that recreating the session
       // object (e.g. server restart with persistent storage) doesn't re-deliver
       // task-0. Count completed emit-N activities — each represents one done turn.
-      const pastEntries = await activityStorage.loadJournal(sessionId, "conversation");
+      const pastEntries = await journalStorage.loadJournal(sessionId, "conversation");
       const reconstructedTurn = pastEntries.reduce((max, e) => {
         const m = e.activityName.match(/^emit-(\d+)$/);
         return m && e.exit?.tag === "Success" ? Math.max(max, Number(m[1]) + 1) : max;
