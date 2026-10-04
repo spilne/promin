@@ -7,4 +7,5 @@ storageTestSuite(() => new InMemoryWorkflowStorage(), {
   hasJournaledSuspend: true,
   hasResetSteps: true,
   hasScannerQueries: true,
+  hasCompensationLedger: true,
 });

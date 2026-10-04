@@ -11,6 +11,8 @@
 import type {
   WorkflowStorage,
   StepAttemptStorage,
+  CompensationLedgerStorage,
+  StepCompensationOutcome,
   ActivityJournalStorage,
   JournaledSuspendStorage,
   JournalEntry,
@@ -44,6 +46,7 @@ import {
   isTerminalWorkflowStatus,
   encodeRunSource,
   decodeRunSource,
+  withoutCompensationLedger,
 } from "@promin/workflow";
 import type { RedisStoreClient } from "./redis-client.ts";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
@@ -429,7 +432,12 @@ function fenceMismatch(params: {
 }
 
 export class RedisWorkflowStorage
-  implements WorkflowStorage, StepAttemptStorage, ActivityJournalStorage, JournaledSuspendStorage
+  implements
+    WorkflowStorage,
+    StepAttemptStorage,
+    CompensationLedgerStorage,
+    ActivityJournalStorage,
+    JournaledSuspendStorage
 {
   private readonly redis: RedisStoreClient;
   private readonly prefix: string;
@@ -2019,7 +2027,7 @@ export class RedisWorkflowStorage
     const nowMs = params.now.getTime();
     const beforeMs = params.updatedBefore.getTime();
     return this.scanStatusIndex<OrphanedRun>({
-      statuses: ["pending", "running"],
+      statuses: ["pending", "running", "compensating"],
       limit: params.limit,
       afterWorkflowId: params.afterWorkflowId,
       pick: async (workflowId) => {
@@ -2028,7 +2036,9 @@ export class RedisWorkflowStorage
           this.redis.eval(PTTL_LUA, 1, this.lockKey(workflowId)) as Promise<number>,
         ]);
         if (!raw || !raw.id) return undefined;
-        if (raw.status !== "pending" && raw.status !== "running") return undefined;
+        if (raw.status !== "pending" && raw.status !== "running" && raw.status !== "compensating") {
+          return undefined;
+        }
         if (!this.inScannerNamespace(raw)) return undefined;
         if (this.parseDate(raw.updatedAt).getTime() >= beforeMs) return undefined;
         // PTTL: -2 = no key, -1 = no expiry (treat as held).
@@ -2358,6 +2368,64 @@ export class RedisWorkflowStorage
     });
 
     return stepName ? items.filter((a) => a.stepName === stepName) : items;
+  }
+
+  // -- CompensationLedgerStorage --------------------------------------------
+
+  async beginCompensation(
+    params: { readonly workflowId: string; readonly error: string; readonly errorTag?: string },
+    guard?: FenceGuard,
+  ): Promise<boolean> {
+    const { workflowId } = params;
+    const nowIso = this.serializeDate(this.clock.now());
+    // The move and the read-back run in one script: the reply is the status
+    // the run has after it.
+    const { last } = await this.writeOps({
+      workflowId,
+      guard,
+      ops: [
+        this.statusOp({
+          workflowId,
+          to: "compensating",
+          from: CANCELLABLE_STATUSES,
+          fields: { error: params.error, errorTag: params.errorTag ?? "", updatedAt: nowIso },
+        }),
+        ["HGET", this.wfKey(workflowId), "status"],
+      ],
+    });
+    return last === "compensating";
+  }
+
+  async saveStepCompensation(
+    params: {
+      readonly workflowId: string;
+      readonly stepName: string;
+      readonly status: StepCompensationOutcome;
+      readonly error?: string;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    const { workflowId } = params;
+    const run = await this.redis.hget(this.wfKey(workflowId), "run");
+    if (!run) return;
+    const stepsHashKey = this.stepsKey(workflowId, Number(run));
+    const existingJson = await this.redis.hget(stepsHashKey, params.stepName);
+    if (!existingJson) return;
+    const now = this.clock.now();
+    const step: StepState = {
+      ...withoutCompensationLedger(this.parseStepState(existingJson)),
+      compensationStatus: params.status,
+      ...(params.error !== undefined && { compensationError: params.error }),
+      compensatedAt: now,
+    };
+    await this.writeOps({
+      workflowId,
+      guard,
+      ops: [
+        ["HSET", stepsHashKey, params.stepName, this.serializeStepState(step)],
+        ["HSET", this.wfKey(workflowId), "updatedAt", this.serializeDate(now)],
+      ],
+    });
   }
 
   // -- ActivityJournalStorage -----------------------------------------------

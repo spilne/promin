@@ -15,6 +15,9 @@ import { findTripwireStep, storedRunError } from "./run-status.ts";
 
 export { findTripwireStep } from "./run-status.ts";
 
+/** Failed reads in a row after which a polling event stream gives up. */
+export const DEFAULT_MAX_CONSECUTIVE_POLL_ERRORS = 10;
+
 /**
  * Build a `WorkflowHandle` over a known `workflowId`. `result()` rejects with
  * `WorkflowFailedError` for a failed run (carrying the stored `errorTag`),
@@ -115,41 +118,67 @@ export function toStatusInfo(params: {
  * Event stream for storages without native push: polls `loadWorkflow`
  * every `pollIntervalMs` (default 500ms), diffs the step-state map and
  * synthesizes events. Closes on the first terminal workflow state or when
- * `signal` aborts.
+ * `signal` aborts (at once for a signal that is already aborted).
+ *
+ * A new run of the workflow (`startFreshRun`: continue-as-new, a forced
+ * re-run) resets the diff, so its steps are reported again. A failed read
+ * is retried on the next poll; after `maxConsecutiveErrors` failed reads
+ * in a row (default `DEFAULT_MAX_CONSECUTIVE_POLL_ERRORS`) the stream
+ * rejects with the last error.
  */
 export function pollWorkflowEvents(params: {
   storage: WorkflowStorage;
   clock: WallClock;
   workflowId: string;
-  options?: { signal?: AbortSignal; pollIntervalMs?: number };
+  options?: { signal?: AbortSignal; pollIntervalMs?: number; maxConsecutiveErrors?: number };
 }): AsyncIterable<WorkflowRunEvent> {
   const { storage, clock, workflowId, options } = params;
   const pollMs = options?.pollIntervalMs ?? 500;
+  const maxErrors = options?.maxConsecutiveErrors ?? DEFAULT_MAX_CONSECUTIVE_POLL_ERRORS;
 
   return createWorkflowEventStream((producer) => {
     let stopped = false;
     let prevSteps: Record<string, StepState> = {};
     let prevStatus: string | null = null;
+    let prevRun: number | undefined;
+    let consecutiveErrors = 0;
 
     const stop = (): void => {
       stopped = true;
       producer.end();
     };
+    const signal = options?.signal;
+    if (signal?.aborted) {
+      stop();
+      return;
+    }
     const onAbort = (): void => stop();
-    options?.signal?.addEventListener("abort", onAbort, { once: true });
+    signal?.addEventListener("abort", onAbort, { once: true });
 
     const tick = async (): Promise<void> => {
       while (!stopped && !producer.done) {
         let state;
         try {
           state = await storage.loadWorkflow(workflowId);
-        } catch {
-          // Transient storage error — keep polling; the workflow may still
-          // materialize. Swallowing here keeps the stream alive in face
-          // of network blips on remote storages.
+        } catch (error) {
+          // Transient storage error — keep polling, up to the error budget:
+          // a network blip on a remote storage does not end the stream, a
+          // storage that stays down does.
+          if (++consecutiveErrors >= maxErrors) {
+            stopped = true;
+            producer.fail(error);
+            return;
+          }
           await new Promise<void>((r) => clock.setTimeout(() => r(), pollMs));
           continue;
         }
+        consecutiveErrors = 0;
+        if (state && prevRun !== undefined && state.run !== prevRun) {
+          // A new run: report its steps and status afresh.
+          prevSteps = {};
+          prevStatus = null;
+        }
+        if (state) prevRun = state.run;
         if (state) {
           // Emit step transitions vs the last observed snapshot. Using
           // completedAt as the event timestamp so the ordering is stable
@@ -213,7 +242,7 @@ export function pollWorkflowEvents(params: {
 
     return () => {
       stopped = true;
-      options?.signal?.removeEventListener("abort", onAbort);
+      signal?.removeEventListener("abort", onAbort);
     };
   });
 }

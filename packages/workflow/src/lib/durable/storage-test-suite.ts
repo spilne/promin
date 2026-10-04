@@ -8,8 +8,10 @@
 
 import { describe, it, expect } from "bun:test";
 import {
+  isCompensationLedgerStorage,
   isStepAttemptStorage,
   isTripwireCapableStorage,
+  type CompensationLedgerStorage,
   type FenceGuard,
   type StepAttemptStorage,
   type WorkflowStorage,
@@ -55,6 +57,12 @@ export interface StorageTestSuiteOptions {
    * methods (back the sleep / signal scanners and coordinator recovery).
    */
   hasScannerQueries?: boolean;
+  /**
+   * Opt in to the `CompensationLedgerStorage` conformance section
+   * (`beginCompensation` / `saveStepCompensation`). Defaults to `false`.
+   * The fenced-write cases run for any storage that implements it.
+   */
+  hasCompensationLedger?: boolean;
   /**
    * Build a second storage instance over the same backend as `storage` —
    * what another process, pool client or worker would hold. Enables the
@@ -1246,6 +1254,7 @@ export function storageTestSuite(
     const fenceAt = new Date("2026-01-01T00:00:00.000Z");
     const suspendOf = (s: WorkflowStorage) => s as WorkflowStorage & JournaledSuspendStorage;
     const attemptsOf = (s: WorkflowStorage) => s as WorkflowStorage & StepAttemptStorage;
+    const ledgerOf = (s: WorkflowStorage) => s as WorkflowStorage & CompensationLedgerStorage;
     const hasSuspend = (s: WorkflowStorage): boolean =>
       isActivityJournalStorage(s) && isJournaledSuspendStorage(s);
     const attemptFor = (workflowId: string): StepAttemptRecord => ({
@@ -1366,6 +1375,29 @@ export function storageTestSuite(
           name: "saveStepAttempt",
           supported: recordsAttempts,
           write: (s, id, g) => attemptsOf(s).saveStepAttempt(attemptFor(id), g),
+        },
+        {
+          name: "beginCompensation",
+          supported: isCompensationLedgerStorage,
+          write: (s, id, g) =>
+            ledgerOf(s).beginCompensation({ workflowId: id, error: "boom", errorTag: "Boom" }, g),
+        },
+        {
+          name: "saveStepCompensation",
+          supported: isCompensationLedgerStorage,
+          seed: (s, id) =>
+            s.saveStepResult({
+              workflowId: id,
+              stepName: "s",
+              result: 1,
+              durationMs: 1,
+              startedAt: fenceAt,
+            }),
+          write: (s, id, g) =>
+            ledgerOf(s).saveStepCompensation(
+              { workflowId: id, stepName: "s", status: "compensated" },
+              g,
+            ),
         },
         {
           name: "appendEntry",
@@ -2198,6 +2230,225 @@ export function storageTestSuite(
         ).rejects.toMatchObject({ _tag: "FenceTokenMismatchError" });
       });
     });
+
+    // -------------------------------------------------------------------
+    // compensation ledger (opt-in) — durable saga rollback
+    // -------------------------------------------------------------------
+
+    if (options.hasCompensationLedger) {
+      describe("compensation ledger", () => {
+        async function getLedgerStorage(): Promise<WorkflowStorage & CompensationLedgerStorage> {
+          const s = await getStorage();
+          if (!isCompensationLedgerStorage(s)) {
+            throw new Error(
+              "storageTestSuite was invoked with hasCompensationLedger: true, but the factory " +
+                "returned a storage that does not implement CompensationLedgerStorage.",
+            );
+          }
+          return s;
+        }
+
+        /** A running run `id` with completed steps `names`. */
+        async function runWithSteps(
+          s: WorkflowStorage,
+          id: string,
+          names: readonly string[],
+        ): Promise<void> {
+          await s.createWorkflow({ workflowId: id, workflowName: "ledger", input: { id } });
+          for (const stepName of names) {
+            await s.saveStepResult({
+              workflowId: id,
+              stepName,
+              result: { stepName },
+              durationMs: 1,
+              startedAt: new Date(),
+            });
+          }
+        }
+
+        it("beginCompensation moves a running run to compensating with its failure", async () => {
+          const s = await getLedgerStorage();
+          await runWithSteps(s, "led-begin", ["a"]);
+
+          expect(
+            await s.beginCompensation({ workflowId: "led-begin", error: "boom", errorTag: "Boom" }),
+          ).toBe(true);
+          const state = await s.loadWorkflow("led-begin");
+          expect(state?.status).toBe("compensating");
+          expect(state?.error).toBe("boom");
+          expect(state?.errorTag).toBe("Boom");
+          expect(state?.completedAt).toBeUndefined();
+          expect(await s.loadWorkflowStatus("led-begin")).toMatchObject({
+            status: "compensating",
+            error: "boom",
+            errorTag: "Boom",
+          });
+        });
+
+        it("beginCompensation on a compensating run keeps it as it is", async () => {
+          const s = await getLedgerStorage();
+          await runWithSteps(s, "led-again", ["a"]);
+          await s.beginCompensation({ workflowId: "led-again", error: "first", errorTag: "First" });
+          await s.saveStepCompensation({
+            workflowId: "led-again",
+            stepName: "a",
+            status: "compensated",
+          });
+
+          expect(await s.beginCompensation({ workflowId: "led-again", error: "second" })).toBe(
+            true,
+          );
+          const state = await s.loadWorkflow("led-again");
+          expect(state?.error).toBe("first");
+          expect(state?.errorTag).toBe("First");
+          expect(state?.steps.a?.compensationStatus).toBe("compensated");
+        });
+
+        it("beginCompensation never moves an ended run", async () => {
+          const s = await getLedgerStorage();
+          await runWithSteps(s, "led-done", ["a"]);
+          await s.completeWorkflow("led-done", "ok");
+          await runWithSteps(s, "led-failed", ["a"]);
+          await s.failWorkflow("led-failed", "nope");
+          await runWithSteps(s, "led-cancelled", ["a"]);
+          await s.cancelWorkflow("led-cancelled");
+
+          for (const id of ["led-done", "led-failed", "led-cancelled"]) {
+            const before = await s.loadWorkflowStatus(id);
+            expect(await s.beginCompensation({ workflowId: id, error: "late" })).toBe(false);
+            expect(await s.loadWorkflowStatus(id)).toEqual(before);
+          }
+          expect(await s.beginCompensation({ workflowId: "led-missing", error: "x" })).toBe(false);
+        });
+
+        it("saveStepCompensation records each step's rollback on the current run", async () => {
+          const s = await getLedgerStorage();
+          await runWithSteps(s, "led-steps", ["a", "b", "c"]);
+          await s.beginCompensation({ workflowId: "led-steps", error: "boom" });
+
+          await s.saveStepCompensation({
+            workflowId: "led-steps",
+            stepName: "c",
+            status: "compensated",
+          });
+          await s.saveStepCompensation({
+            workflowId: "led-steps",
+            stepName: "b",
+            status: "compensation_failed",
+            error: "refund API down",
+          });
+          // A step without a row is left alone.
+          await s.saveStepCompensation({
+            workflowId: "led-steps",
+            stepName: "ghost",
+            status: "compensated",
+          });
+
+          const state = await s.loadWorkflow("led-steps");
+          expect(state?.steps.c?.compensationStatus).toBe("compensated");
+          expect(state?.steps.c?.compensationError).toBeUndefined();
+          expect(state?.steps.c?.compensatedAt).toBeInstanceOf(Date);
+          expect(state?.steps.b?.compensationStatus).toBe("compensation_failed");
+          expect(state?.steps.b?.compensationError).toBe("refund API down");
+          expect(state?.steps.a?.compensationStatus).toBeUndefined();
+          expect(state?.steps.ghost).toBeUndefined();
+          // The step rows themselves are untouched.
+          expect(state?.steps.c?.status).toBe("completed");
+          expect(state?.steps.c?.result).toEqual({ stepName: "c" });
+
+          // A later entry replaces the earlier one, error included.
+          await s.saveStepCompensation({
+            workflowId: "led-steps",
+            stepName: "b",
+            status: "compensated",
+          });
+          const again = await s.loadWorkflow("led-steps");
+          expect(again?.steps.b?.compensationStatus).toBe("compensated");
+          expect(again?.steps.b?.compensationError).toBeUndefined();
+        });
+
+        it("a compensating run is not cancellable and ends failed with failWorkflow", async () => {
+          const s = await getLedgerStorage();
+          await runWithSteps(s, "led-end", ["a"]);
+          await s.beginCompensation({ workflowId: "led-end", error: "boom", errorTag: "Boom" });
+
+          await s.cancelWorkflow("led-end");
+          expect((await s.loadWorkflowStatus("led-end"))?.status).toBe("compensating");
+
+          await s.failWorkflow("led-end", "boom", undefined, { errorTag: "Boom" });
+          const state = await s.loadWorkflow("led-end");
+          expect(state?.status).toBe("failed");
+          expect(state?.errorTag).toBe("Boom");
+          expect(state?.completedAt).toBeInstanceOf(Date);
+        });
+
+        it("a fresh run starts with an empty ledger", async () => {
+          const s = await getLedgerStorage();
+          await runWithSteps(s, "led-fresh", ["a"]);
+          await s.beginCompensation({ workflowId: "led-fresh", error: "boom" });
+          await s.saveStepCompensation({
+            workflowId: "led-fresh",
+            stepName: "a",
+            status: "compensated",
+          });
+          await s.failWorkflow("led-fresh", "boom");
+
+          await s.startFreshRun("led-fresh");
+          await s.saveStepResult({
+            workflowId: "led-fresh",
+            stepName: "a",
+            result: 2,
+            durationMs: 1,
+            startedAt: new Date(),
+          });
+          const state = await s.loadWorkflow("led-fresh");
+          expect(state?.status).toBe("running");
+          expect(state?.steps.a?.compensationStatus).toBeUndefined();
+        });
+
+        if (options.hasResetSteps) {
+          it("resetSteps clears the ledger of every step of the run", async () => {
+            const s = await getLedgerStorage();
+            await runWithSteps(s, "led-reset", ["a", "b"]);
+            await s.beginCompensation({ workflowId: "led-reset", error: "boom" });
+            for (const stepName of ["a", "b"]) {
+              await s.saveStepCompensation({
+                workflowId: "led-reset",
+                stepName,
+                status: "compensated",
+              });
+            }
+            await s.failWorkflow("led-reset", "boom");
+
+            await s.resetSteps!("led-reset", ["b"]);
+            const state = await s.loadWorkflow("led-reset");
+            expect(state?.status).toBe("running");
+            expect(state?.steps.b).toBeUndefined();
+            expect(state?.steps.a?.status).toBe("completed");
+            expect(state?.steps.a?.compensationStatus).toBeUndefined();
+            expect(state?.steps.a?.compensatedAt).toBeUndefined();
+          });
+        }
+
+        if (options.hasScannerQueries) {
+          it("listOrphanedRuns returns a compensating run nobody holds", async () => {
+            const s = await getLedgerStorage();
+            await runWithSteps(s, "led-orphan", ["a"]);
+            await s.beginCompensation({ workflowId: "led-orphan", error: "boom" });
+            const later = new Date(Date.now() + 5_000);
+            const rows = await s.listOrphanedRuns!({
+              now: later,
+              updatedBefore: later,
+              limit: 100,
+            });
+            expect(rows.find((r) => r.workflowId === "led-orphan")).toMatchObject({
+              workflowId: "led-orphan",
+              status: "compensating",
+            });
+          });
+        }
+      });
+    }
 
     // -------------------------------------------------------------------
     // parent / run source persistence, filters and cascade cancel

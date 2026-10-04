@@ -171,26 +171,35 @@ registry.register(
 Same workflow, some steps local, some containerized:
 
 ```typescript
-import { workflow, createWorker } from "@promin/workflow";
+import {
+  workflow,
+  createWorker,
+  createWorkflowRunner,
+  RoutingStepExecutor,
+  StepQueueExecutor,
+} from "@promin/workflow";
 
-const processVideo = workflow<{ videoId: string }>({
-  name: "process-video",
-  storage,
-  dispatch: {
-    stepQueue,
-    routing: { transcribe: "gpu", "train-model": "gpu" },
-  },
-})
+const processVideo = workflow<{ videoId: string }>({ name: "process-video" })
   .step("download", ({ input }) => downloadVideo(input.videoId)) // local
-  .step("transcribe", { dependsOn: ["download"] }, fn) // → GPU worker (container)
+  .step("transcribe", { dependsOn: ["download"] }, fn, { needs: ["gpu"] }) // → GPU worker
   .step("summarize", { dependsOn: ["transcribe"] }, fn) // local
   .build();
+
+// "transcribe" goes through the step queue; every other step runs in-process.
+const runner = createWorkflowRunner({
+  storage,
+  stepExecutor: new RoutingStepExecutor({
+    remote: new StepQueueExecutor({ stepQueue, storage }),
+    remoteSteps: ["transcribe"],
+    storage,
+  }),
+});
 
 // GPU worker runs container steps
 const gpuWorker = createWorker({
   storage,
   stepQueue,
   registry: gpuRegistry, // has containerStep("transcribe") registered
-  queues: ["gpu"],
+  capabilities: ["gpu"],
 });
 ```

@@ -62,6 +62,10 @@ export {
   type StepExecutionResult,
   type StepExecutor,
 } from "./runner/step-executor.ts";
+export {
+  RoutingStepExecutor,
+  type RoutingStepExecutorConfig,
+} from "./runner/routing-step-executor.ts";
 export type { StepAttemptFailure } from "./runner/step-body.ts";
 export {
   RecoveryStrategy,
@@ -77,7 +81,12 @@ export {
 export { runWorkflowOrchestration } from "./runner/orchestrate.ts";
 export type { DagExecutionContext } from "./runner/dag-context.ts";
 export { executeWorkflowDag } from "./runner/dag-executor.ts";
-export { compensateWorkflow, type CompensatableStep } from "./runner/compensation.ts";
+export {
+  compensateWorkflow,
+  compensationOrder,
+  type CompensatableStep,
+  type CompensationReport,
+} from "./runner/compensation.ts";
 export { publishDlqRecord } from "./runner/dlq.ts";
 export { getIdempotencyTtl } from "./runner/idempotency.ts";
 
@@ -151,6 +160,30 @@ export type WorkflowRunnerRunParams =
       readonly idempotencyKeyTTL?: number;
     };
 
+/**
+ * Params for `WorkflowRunner.start`: everything `run` takes, with the
+ * input and output typed by the workflow when it is passed directly.
+ */
+export type WorkflowRunnerStartParams<Input = unknown, Output = unknown> =
+  | (Omit<
+      Extract<WorkflowRunnerRunParams, { readonly workflow: unknown }>,
+      "workflow" | "input"
+    > & {
+      readonly workflow: Workflow<Input, Output>;
+      readonly input: Input;
+    })
+  | (Omit<Extract<WorkflowRunnerRunParams, { readonly name: string }>, "input"> & {
+      readonly input: Input;
+    });
+
+/** What `start` learns from the run it launches. */
+interface StartGate {
+  /** The run's id (after idempotency-key resolution) and its definition. */
+  onResolved: (run: { workflowId: string; workflow: Workflow<unknown, unknown> }) => void;
+  /** The run holds its lock. */
+  onLocked: () => void;
+}
+
 /** Config for `createWorkflowRunner` / `DefaultWorkflowRunner`. */
 export interface WorkflowRunnerConfig {
   /**
@@ -220,16 +253,22 @@ export interface WorkflowRunner {
     params: WorkflowRunnerRunParams,
   ): Promise<{ data: unknown; error: null } | { data: null; error: WorkflowRunSafeError }>;
   /**
-   * Fire-and-forget start that returns a `WorkflowHandle` for async inspection.
-   * Honors the workflow's `idempotency.onInFlight` policy: `"reject"` throws
-   * `WorkflowLockError` if a run is already active; `"join"` returns a handle
-   * to the running workflow without starting a second execution.
+   * Start a run and return a `WorkflowHandle` for async inspection. Takes
+   * everything `run` takes (namespace, idempotency key, `force`, a
+   * name-based definition). Resolves once the run holds its lock, so the
+   * run has started when the handle comes back.
+   *
+   * Honors the workflow's `idempotency.onInFlight` policy when the run is
+   * already in flight (pending, running, suspended or compensating, or its
+   * lock is held): `"reject"` throws `WorkflowLockError`; `"join"` returns
+   * a handle to that run without starting a second execution. The check
+   * happens under the run's lock, so of two concurrent `start` calls only
+   * one starts the run. A run that ends before taking the lock (an
+   * idempotency-cache hit, a version mismatch) is reported by the handle.
    */
-  start<Input = unknown, Output = unknown>(params: {
-    readonly workflow: Workflow<Input, Output>;
-    readonly workflowId: string;
-    readonly input: Input;
-  }): Promise<WorkflowHandle<Output>>;
+  start<Input = unknown, Output = unknown>(
+    params: WorkflowRunnerStartParams<Input, Output>,
+  ): Promise<WorkflowHandle<Output>>;
   /**
    * Build a `WorkflowHandle` for a workflow that is *already running* — does
    * not enqueue or start anything. Useful when execution lives elsewhere
@@ -280,7 +319,12 @@ export interface WorkflowRunner {
    */
   subscribe(
     workflowId: string,
-    options?: { signal?: AbortSignal; pollIntervalMs?: number },
+    options?: {
+      signal?: AbortSignal;
+      pollIntervalMs?: number;
+      /** Polling only: failed reads in a row before the stream rejects. Default: 10. */
+      maxConsecutiveErrors?: number;
+    },
   ): AsyncIterable<WorkflowRunEvent>;
   /**
    * Snapshot of a workflow's current status: active step, suspended reason,
@@ -304,13 +348,16 @@ export interface WorkflowRunner {
    *    storage supports `cancelStaleWorkflows` (e.g. `SqliteWorkflowStorage`);
    *    falls back to paginated per-row calls otherwise.
    *
-   * 2. **Resume recent runs** (`resumeRecent`): paginates all remaining
-   *    pending/running workflows (those not stale), looks up their definition
-   *    in the runner's registry, and fires each one off as a non-blocking
-   *    `runSafe` call. Requires the runner to have been configured with a
-   *    `registry`; throws otherwise.
+   * 2. **Resume recent runs** (`resumeRecent`): lists the remaining
+   *    pending / running / compensating workflows nobody is driving
+   *    (keyset-paginated `listOrphanedRuns` when the storage has it), looks
+   *    up their definition in the runner's registry, and runs each through
+   *    `runSafe`, at most `resumeRecent({ concurrent })` at a time. A
+   *    `compensating` run finishes its rollback. Requires the runner to have
+   *    been configured with a `registry`; throws otherwise.
    *
-   * @returns counts of terminated / resumed / skipped workflows.
+   * @returns counts of terminated / resumed / skipped workflows, once every
+   *   resumed run is accepted; `settled` resolves when they have finished.
    */
   recover(strategy: RecoveryStrategy): Promise<RecoveryResult>;
 }
@@ -336,7 +383,12 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     if (config.executorId !== undefined) this.executorId = config.executorId;
   }
 
-  async run(params: WorkflowRunnerRunParams): Promise<unknown> {
+  run(params: WorkflowRunnerRunParams): Promise<unknown> {
+    return this._run(params);
+  }
+
+  /** `run`, reporting to `gate` (set by `start`). */
+  private async _run(params: WorkflowRunnerRunParams, gate?: StartGate): Promise<unknown> {
     const storage = this.storage;
     const { input, force, namespace, idempotencyKey, idempotencyKeyTTL } = params;
 
@@ -380,6 +432,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
             version: params.version,
             workflowId,
           });
+    gate?.onResolved({ workflowId, workflow });
 
     return this._runWorkflow({
       workflow,
@@ -387,6 +440,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       workflowId,
       input,
       force,
+      ...(gate !== undefined && { onLocked: gate.onLocked }),
       ...(namespace !== undefined && { namespace }),
       ...(idempotencyKey && idempotencyExpiresAt ? { idempotencyKey, idempotencyExpiresAt } : {}),
     });
@@ -403,37 +457,39 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     }
   }
 
-  async start<Input = unknown, Output = unknown>(params: {
-    readonly workflow: Workflow<Input, Output>;
-    readonly workflowId: string;
-    readonly input: Input;
-  }): Promise<WorkflowHandle<Output>> {
-    const storage = this.storage;
-    const { workflow, workflowId, input } = params;
+  async start<Input = unknown, Output = unknown>(
+    params: WorkflowRunnerStartParams<Input, Output>,
+  ): Promise<WorkflowHandle<Output>> {
+    let workflowId = params.workflowId;
+    let onInFlight: "reject" | "join" =
+      "workflow" in params ? (params.workflow.idempotency?.onInFlight ?? "reject") : "reject";
+    let locked!: () => void;
+    const lockTaken = new Promise<void>((resolve) => (locked = resolve));
 
-    const existing = await storage.loadWorkflow(workflowId);
-    const isRunning =
-      existing?.status === "pending" ||
-      existing?.status === "running" ||
-      existing?.status === "suspended";
-    const onInFlight = workflow.idempotency?.onInFlight ?? "reject";
+    // The run itself goes on in the background once it holds the lock; its
+    // outcome is recorded in storage (and the DLQ / hooks), so the handle
+    // reports it.
+    const running = this._run(params as WorkflowRunnerRunParams, {
+      onResolved: (run) => {
+        workflowId = run.workflowId;
+        onInFlight = run.workflow.idempotency?.onInFlight ?? "reject";
+      },
+      onLocked: () => locked(),
+    });
+    const first = await Promise.race([
+      lockTaken.then(() => ({ error: undefined })),
+      running.then(
+        () => ({ error: undefined }),
+        (error: unknown) => ({ error }),
+      ),
+    ]);
+    void running.catch(() => undefined);
 
-    if (isRunning) {
-      if (onInFlight === "reject") {
-        throw new WorkflowLockError({
-          workflowId,
-          message: `Workflow "${workflowId}" is already running`,
-        });
-      }
-      // "join" — caller receives a handle that polls the existing run.
-    } else {
-      // Fire-and-forget. Failures are recorded in storage (and the DLQ /
-      // hooks if configured) so we intentionally swallow the rejection
-      // here to avoid unhandled-rejection warnings on the start path.
-      void this.runSafe({ workflow, workflowId, input });
-      await yieldToEventLoop();
-    }
-
+    if (first.error instanceof WorkflowLockError && onInFlight === "reject") throw first.error;
+    // Let the run go on until its first real wait (a run on a local
+    // storage reaches its first suspension within one turn), as callers
+    // that re-drive the run right after `start` expect.
+    await yieldToEventLoop();
     return this.handle<Output>(workflowId);
   }
 
@@ -510,7 +566,12 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
 
   subscribe(
     workflowId: string,
-    options?: { signal?: AbortSignal; pollIntervalMs?: number },
+    options?: {
+      signal?: AbortSignal;
+      pollIntervalMs?: number;
+      /** Polling only: failed reads in a row before the stream rejects. Default: 10. */
+      maxConsecutiveErrors?: number;
+    },
   ): AsyncIterable<WorkflowRunEvent> {
     // Fast path: storage has native push support.
     if (isSubscribableStorage(this.storage)) {
@@ -539,7 +600,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       storage: this.storage,
       registry: this.registry,
       clock: this.clock,
-      resume: (run) => void this.runSafe(run),
+      resume: (run) => this.runSafe(run),
     });
   }
 
@@ -552,6 +613,8 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     namespace?: string;
     idempotencyKey?: string;
     idempotencyExpiresAt?: Date;
+    /** Set by `start`: leave an in-flight run alone, and report taking the lock. */
+    onLocked?: () => void;
   }): Promise<unknown> {
     const ctx = orchestrationContextFor({
       workflow: params.workflow,
@@ -568,6 +631,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       input: params.input,
       force: params.force,
       namespace: params.namespace,
+      ...(params.onLocked !== undefined && { onLocked: params.onLocked, rejectInFlight: true }),
       ...(params.idempotencyKey && params.idempotencyExpiresAt
         ? {
             idempotencyKey: params.idempotencyKey,
@@ -587,11 +651,10 @@ export function createWorkflowRunner(config: WorkflowRunnerConfig): WorkflowRunn
 }
 
 /**
- * Yield one macrotask so a just-launched fire-and-forget run gets going
- * before `start()` returns its handle. An event-loop yield, not time math —
- * no delay is measured, so it does not go through the WallClock (a
+ * Yield one event-loop turn (`setImmediate`). An event-loop yield, not time
+ * math — no delay is measured, so it does not go through the WallClock (a
  * `FakeWallClock` would never fire it).
  */
 function yieldToEventLoop(): Promise<void> {
-  return new Promise((r) => setTimeout(r, 0));
+  return new Promise((r) => setImmediate(r));
 }

@@ -16,10 +16,15 @@ import type {
 export interface RecoveryResult {
   /** Workflows terminated as stale (cancelled or failed). */
   terminated: number;
-  /** Workflows resumed (fire-and-forget runs kicked off). */
+  /** Workflows resumed (accepted for a run; at most `concurrent` run at once). */
   resumed: number;
   /** Workflows that could not be resumed (missing registry, unknown definition, etc.). */
   skipped: Array<{ workflowId: string; name: string; reason: string }>;
+  /**
+   * Resolves once every resumed run has settled (whatever its outcome).
+   * `recover()` itself resolves as soon as every run is accepted.
+   */
+  settled: Promise<void>;
 }
 
 export type StaleTerminationAction =
@@ -109,16 +114,23 @@ export class RecoveryStrategyBuilder {
   }
 
   /**
-   * Resume all pending/running workflows that survived stale termination.
-   * Each is re-launched as a fire-and-forget run via the runner's registry.
-   * The runner must have been configured with a `registry`; throws otherwise.
+   * Resume all pending / running / compensating workflows that survived
+   * stale termination and that nobody is driving (no live lock). Each is
+   * re-launched via the runner's registry; a `compensating` run finishes
+   * its rollback. The runner must have been configured with a `registry`;
+   * throws otherwise.
    *
-   * `concurrent` controls how many runs are submitted per event-loop tick
-   * (default: 10) to avoid thundering-herd on large backlogs.
+   * `concurrent` bounds how many resumed runs are in flight at once
+   * (default: 10); the rest wait for a free slot.
    */
   resumeRecent(params?: { concurrent?: number }): this {
     this._resumeRecent = true;
-    if (params?.concurrent != null) this._resumeConcurrency = params.concurrent;
+    if (params?.concurrent != null) {
+      if (!(params.concurrent >= 1)) {
+        throw new Error(`resumeRecent: concurrent must be at least 1, got ${params.concurrent}`);
+      }
+      this._resumeConcurrency = Math.floor(params.concurrent);
+    }
     return this;
   }
 
@@ -139,10 +151,36 @@ export class RecoveryStrategyBuilder {
   }
 }
 
+/** Page size of the recovery listings. */
+const RECOVERY_PAGE_SIZE = 200;
+
+/** Statuses `resumeRecent` resumes. */
+const RESUMABLE_STATUSES = ["pending", "running", "compensating"] as const;
+
+/** A run `resumeRecent` hands to `resume`. */
+interface ResumeCandidate {
+  readonly workflowId: string;
+  readonly workflowName: string;
+  readonly version?: string;
+  readonly input: unknown;
+}
+
 /**
  * Apply `strategy` to `storage`: terminate stale runs, then hand every
- * remaining pending/running run whose definition the registry knows to
- * `resume` (fire-and-forget).
+ * remaining pending / running / compensating run nobody is driving, whose
+ * definition the registry knows, to `resume`.
+ *
+ * - Stale termination uses the storage's bulk `cancelStaleWorkflows` when
+ *   it has one; otherwise it pages through the oldest rows, and stops on a
+ *   page where no row it has not already tried is stale (a backend whose
+ *   terminate leaves a row listed cannot loop it forever).
+ * - Resume candidates come from `listOrphanedRuns` (keyset-paginated on
+ *   `workflowId`, so runs changing status meanwhile never shift a page),
+ *   or, without it, from a snapshot of every listing page taken before the
+ *   first run is resumed.
+ * - At most `resumeRecent({ concurrent })` resumed runs are in flight at
+ *   once. The result comes back once every run is accepted; its
+ *   `settled` resolves when they have all finished.
  */
 export async function recoverWorkflows(params: {
   strategy: RecoveryStrategy;
@@ -153,7 +191,7 @@ export async function recoverWorkflows(params: {
     workflow: Workflow<unknown, unknown>;
     workflowId: string;
     input: unknown;
-  }) => void;
+  }) => Promise<unknown> | void;
 }): Promise<RecoveryResult> {
   const { storage, registry, clock } = params;
   const opts = params.strategy._opts;
@@ -163,94 +201,191 @@ export async function recoverWorkflows(params: {
 
   // ---- Phase 1: terminate stale runs ----
   if (opts.staleThresholdMs !== undefined) {
-    const errorMsg =
-      opts.staleAction.kind === "fail" ? opts.staleAction.error : "Stale run cancelled on restart";
-
-    // Fast path: storage exposes a bulk cancelStaleWorkflows (e.g. SQLite).
-    if (typeof storage.cancelStaleWorkflows === "function") {
-      terminated = await storage.cancelStaleWorkflows({
-        olderThanMs: opts.staleThresholdMs,
-        error: errorMsg,
-        statuses: opts.staleStatuses,
-      });
-    } else {
-      // Slow path: page through, cancel stale rows one-by-one.
-      // Ordered by createdAt ASC so stale rows surface first; we break
-      // once the first non-stale row appears in a page.
-      const cutoff = clock.currentTimeMs() - opts.staleThresholdMs;
-      const PAGE = 200;
-      for (const status of opts.staleStatuses as WorkflowStatus[]) {
-        while (true) {
-          const page = await storage.listWorkflows({
-            status,
-            limit: PAGE,
-            offset: 0,
-            orderBy: "createdAt",
-            orderDir: "asc",
-          });
-          if (page.length === 0) break;
-          let anyStale = false;
-          for (const wf of page) {
-            if (wf.createdAt.getTime() >= cutoff) break;
-            anyStale = true;
-            if (opts.staleAction.kind === "cancel") {
-              await storage.cancelWorkflow(wf.workflowId);
-            } else {
-              await storage.failWorkflow(wf.workflowId, opts.staleAction.error);
-            }
-            terminated++;
-          }
-          if (!anyStale) break;
-        }
-      }
-    }
+    terminated = await terminateStaleRuns({ storage, clock, opts });
   }
 
   // ---- Phase 2: resume recent runs ----
-  if (opts.resumeRecent) {
-    if (!registry) {
-      throw new Error(
-        "WorkflowRunner.recover() with resumeRecent() requires a registry. " +
-          "Pass createWorkflowRunner({ storage, registry }) to enable name-based resume.",
-      );
-    }
-    const PAGE = 200;
-    for (const status of ["pending", "running"] as const) {
-      let offset = 0;
-      while (true) {
-        const page = await storage.listWorkflows({ status, limit: PAGE, offset });
-        if (page.length === 0) break;
-
-        // Fire in batches to avoid thundering-herd on large backlogs.
-        for (let i = 0; i < page.length; i += opts.resumeConcurrency) {
-          const batch = page.slice(i, i + opts.resumeConcurrency);
-          for (const wf of batch) {
-            const def = await registry.resolve(wf.workflowName, wf.version);
-            if (!def) {
-              skipped.push({
-                workflowId: wf.workflowId,
-                name: wf.workflowName,
-                reason:
-                  `No definition found for "${wf.workflowName}"` +
-                  (wf.version ? ` v${wf.version}` : "") +
-                  " in registry",
-              });
-              continue;
-            }
-            params.resume({ workflow: def, workflowId: wf.workflowId, input: wf.input });
-            resumed++;
-          }
-          // Yield to the event loop between batches.
-          if (i + opts.resumeConcurrency < page.length) {
-            await new Promise<void>((r) => clock.setTimeout(() => r(), 0));
-          }
-        }
-
-        if (page.length < PAGE) break;
-        offset += PAGE;
-      }
-    }
+  if (!opts.resumeRecent) return { terminated, resumed, skipped, settled: Promise.resolve() };
+  if (!registry) {
+    throw new Error(
+      "WorkflowRunner.recover() with resumeRecent() requires a registry. " +
+        "Pass createWorkflowRunner({ storage, registry }) to enable name-based resume.",
+    );
   }
 
-  return { terminated, resumed, skipped };
+  const candidates = await listResumeCandidates({ storage, clock });
+  const pool = createRunPool(Math.max(1, opts.resumeConcurrency));
+  for (const run of candidates) {
+    const def = await registry.resolve(run.workflowName, run.version);
+    if (!def) {
+      skipped.push({
+        workflowId: run.workflowId,
+        name: run.workflowName,
+        reason:
+          `No definition found for "${run.workflowName}"` +
+          (run.version ? ` v${run.version}` : "") +
+          " in registry",
+      });
+      continue;
+    }
+    resumed++;
+    pool.submit(() =>
+      params.resume({ workflow: def, workflowId: run.workflowId, input: run.input }),
+    );
+  }
+  return { terminated, resumed, skipped, settled: pool.drained() };
+}
+
+/** Phase 1 of `recoverWorkflows`: returns how many runs it terminated. */
+async function terminateStaleRuns(params: {
+  storage: WorkflowStorage;
+  clock: WallClock;
+  opts: RecoveryStrategy["_opts"];
+}): Promise<number> {
+  const { storage, clock, opts } = params;
+  const thresholdMs = opts.staleThresholdMs!;
+  const errorMsg =
+    opts.staleAction.kind === "fail" ? opts.staleAction.error : "Stale run cancelled on restart";
+
+  // Fast path: storage exposes a bulk cancelStaleWorkflows (e.g. SQLite).
+  if (typeof storage.cancelStaleWorkflows === "function") {
+    return await storage.cancelStaleWorkflows({
+      olderThanMs: thresholdMs,
+      error: errorMsg,
+      statuses: opts.staleStatuses,
+    });
+  }
+
+  // Slow path: page through the oldest rows of each status and terminate
+  // the stale ones. A terminated row leaves the listing; one that stays
+  // (a terminate the backend ignored) is counted as stuck and skipped by
+  // the offset, and a page with nothing new to terminate ends the status.
+  const cutoff = clock.currentTimeMs() - thresholdMs;
+  let terminated = 0;
+  for (const status of opts.staleStatuses as WorkflowStatus[]) {
+    const tried = new Set<string>();
+    const stuck = new Set<string>();
+    while (true) {
+      const page = await storage.listWorkflows({
+        status,
+        limit: RECOVERY_PAGE_SIZE,
+        offset: stuck.size,
+        orderBy: "createdAt",
+        orderDir: "asc",
+      });
+      let progressed = false;
+      const stuckBefore = stuck.size;
+      for (const wf of page) {
+        if (wf.createdAt.getTime() >= cutoff) break;
+        if (tried.has(wf.workflowId)) {
+          stuck.add(wf.workflowId);
+          continue;
+        }
+        tried.add(wf.workflowId);
+        progressed = true;
+        if (opts.staleAction.kind === "cancel") {
+          await storage.cancelWorkflow(wf.workflowId);
+        } else {
+          await storage.failWorkflow(wf.workflowId, opts.staleAction.error);
+        }
+        terminated++;
+      }
+      // Newly stuck rows move the offset past them; a page that neither
+      // terminated nor skipped anything new is the end.
+      if (!progressed && stuck.size === stuckBefore) break;
+      if (progressed && page.length < RECOVERY_PAGE_SIZE) break;
+    }
+  }
+  return terminated;
+}
+
+/**
+ * Every run `resumeRecent` should resume, listed in full before any is
+ * resumed: `listOrphanedRuns` (runs without a live lock, keyset-paged),
+ * else every pending / running / compensating row from `listWorkflows`.
+ */
+async function listResumeCandidates(params: {
+  storage: WorkflowStorage;
+  clock: WallClock;
+}): Promise<ResumeCandidate[]> {
+  const { storage, clock } = params;
+  const out: ResumeCandidate[] = [];
+  if (storage.listOrphanedRuns) {
+    const now = clock.now();
+    let afterWorkflowId: string | undefined;
+    while (true) {
+      const page = await storage.listOrphanedRuns({
+        now,
+        updatedBefore: now,
+        limit: RECOVERY_PAGE_SIZE,
+        ...(afterWorkflowId !== undefined && { afterWorkflowId }),
+      });
+      out.push(...page);
+      if (page.length < RECOVERY_PAGE_SIZE) return out;
+      afterWorkflowId = page[page.length - 1]!.workflowId;
+    }
+  }
+  const seen = new Set<string>();
+  for (const status of RESUMABLE_STATUSES) {
+    for (let offset = 0; ; offset += RECOVERY_PAGE_SIZE) {
+      const page = await storage.listWorkflows({
+        status,
+        limit: RECOVERY_PAGE_SIZE,
+        offset,
+        orderBy: "createdAt",
+        orderDir: "asc",
+      });
+      for (const wf of page) {
+        if (seen.has(wf.workflowId)) continue;
+        seen.add(wf.workflowId);
+        out.push(wf);
+      }
+      if (page.length < RECOVERY_PAGE_SIZE) break;
+    }
+  }
+  return out;
+}
+
+/**
+ * Runs submitted tasks with at most `concurrency` in flight; the rest wait
+ * in submission order. A task's rejection is swallowed (the run records its
+ * own outcome). `drained()` resolves once every submitted task has settled.
+ */
+function createRunPool(concurrency: number): {
+  submit: (task: () => Promise<unknown> | void) => void;
+  drained: () => Promise<void>;
+} {
+  const queue: Array<() => Promise<unknown> | void> = [];
+  let active = 0;
+  let onDrained: (() => void) | undefined;
+  let drainedPromise: Promise<void> | undefined;
+
+  const pump = (): void => {
+    while (active < concurrency && queue.length > 0) {
+      const task = queue.shift()!;
+      active++;
+      void Promise.resolve()
+        .then(task)
+        .catch(() => undefined)
+        .finally(() => {
+          active--;
+          pump();
+        });
+    }
+    if (active === 0 && queue.length === 0) onDrained?.();
+  };
+
+  return {
+    submit: (task) => {
+      queue.push(task);
+      pump();
+    },
+    drained: () => {
+      drainedPromise ??= new Promise<void>((resolve) => {
+        onDrained = resolve;
+        if (active === 0 && queue.length === 0) resolve();
+      });
+      return drainedPromise;
+    },
+  };
 }

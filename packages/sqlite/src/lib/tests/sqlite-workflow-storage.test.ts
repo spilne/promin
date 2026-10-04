@@ -25,6 +25,7 @@ storageTestSuite(
     hasJournaledSuspend: true,
     hasResetSteps: true,
     hasScannerQueries: true,
+    hasCompensationLedger: true,
     createPeer: (storage) => SqliteWorkflowStorage.make({ db: dbs.get(storage)! }),
   },
 );

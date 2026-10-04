@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // DAG executor — the wave loop. Replays completed steps from stored state,
-// then repeatedly computes the ready set, runs it as one wave (remote
-// dispatch, then the executor or inline wave), folds the wave's completed
+// then repeatedly computes the ready set, runs it as one wave (through the
+// step executor, or inline), folds the wave's completed
 // steps back in, reports its failure or control flow, and checks the
 // workflow deadline and tripwire.
 // ---------------------------------------------------------------------------
@@ -20,14 +20,13 @@ import type {
 import { runExecutorWave } from "./executor-wave.ts";
 import { fireHook } from "./hooks.ts";
 import { runInlineWave } from "./inline-wave.ts";
-import { runDispatchedSteps } from "./remote-dispatch.ts";
 import { assertRunActive } from "./run-status.ts";
 import { errorMessage } from "./step-body.ts";
 
 /**
  * Execute the workflow DAG against its current state. Computes the ready
- * set per iteration, dispatches remote steps via the step queue, runs local
- * ready steps in parallel with per-step retry + timeout + onFailure, and
+ * set per iteration, runs the ready steps (through `ctx.stepExecutor`, or
+ * inline) in parallel with per-step retry + timeout + onFailure, and
  * checkpoints every completed step via `saveStepResult`. Suspension
  * errors propagate through as `{ suspension: true }` so the caller can
  * distinguish "workflow is sleeping / waiting for signal" from real
@@ -52,7 +51,6 @@ export async function executeWorkflowDag(
   const results: Record<string, unknown> = {};
   const stepsByName = new Map<string, StepDefinition>();
   for (const step of ctx.steps) stepsByName.set(step.name, step);
-  const remoteSet = ctx.dispatch ? new Set(ctx.dispatch.remoteSteps ?? []) : undefined;
 
   // Load previously completed step results. The stored shape is always the
   // codec's encoded form (written by saveStepResult), so we decode
@@ -107,39 +105,8 @@ export async function executeWorkflowDag(
       };
     }
 
-    // Split into local and dispatched steps
-    const localReady: string[] = [];
-    const dispatchReady: string[] = [];
-
-    for (const name of ready) {
-      if (remoteSet?.has(name)) {
-        dispatchReady.push(name);
-      } else {
-        localReady.push(name);
-      }
-    }
-
-    // Dispatch remote steps — enqueue (with the step's declared needs) and
-    // poll until completed.
-    if (dispatchReady.length > 0) {
-      const dispatchFailure = await runDispatchedSteps({
-        ctx,
-        clock,
-        workflowId,
-        input,
-        names: dispatchReady,
-        stepsByName,
-        results,
-        markCompleted: tracker.markCompleted,
-      });
-      if (dispatchFailure) return dispatchFailure;
-    }
-
-    // If all ready steps were dispatched, skip local execution
-    if (localReady.length === 0) continue;
-
-    // Execute local ready steps in parallel, with per-step retry and failure handling
-    const readySteps = localReady.map((name) => stepsByName.get(name)!);
+    // Execute the ready steps in parallel, with per-step retry and failure handling
+    const readySteps = ready.map((name) => stepsByName.get(name)!);
 
     const waveParams: WaveParams = {
       ctx,

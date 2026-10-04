@@ -6,7 +6,6 @@
 
 import type { WallClock } from "../../shared/wall-clock.ts";
 import type {
-  DispatchConfig,
   RunChildWorkflow,
   StepDefinition,
   StepRuntime,
@@ -29,7 +28,6 @@ export interface DagExecutionContext {
   readonly steps: ReadonlyArray<StepDefinition>;
   readonly hooks?: WorkflowHooks;
   readonly timeoutMs?: number;
-  readonly dispatch?: DispatchConfig;
   /**
    * Workflow name + workflow-level queue config — needed to derive a
    * task's `(concurrencyScope, concurrencyKey, concurrencyLimit)` triple
@@ -53,7 +51,7 @@ export interface DagExecutionContext {
    * in-process path.
    */
   readonly stepExecutor?: StepExecutor;
-  /** Time source. Drives deadline checks, step durations, dispatch poll waits. Default: `SystemWallClock`. */
+  /** Time source. Drives deadline checks and step durations. Default: `SystemWallClock`. */
   readonly clock?: WallClock;
   /**
    * Identifier of the executor running this DAG execution. Stamped on each

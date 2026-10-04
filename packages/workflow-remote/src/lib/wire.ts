@@ -63,6 +63,10 @@ export type StorageMethod =
   // (workerId per attempt) on the central server's storage.
   | "saveStepAttempt"
   | "loadStepAttempts"
+  // CompensationLedgerStorage — forwarded only when the underlying storage
+  // implements it, so a rollback interrupted on a remote runner resumes.
+  | "beginCompensation"
+  | "saveStepCompensation"
   // Signal tokens — public-bearer authz for deliverSignal. Forwarded so
   // remote workers can surface tokens through their parent storage.
   | "createSignalToken"

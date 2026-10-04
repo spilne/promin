@@ -15,6 +15,8 @@
 import type {
   WorkflowStorage,
   StepAttemptStorage,
+  CompensationLedgerStorage,
+  StepCompensationOutcome,
   FenceGuard,
   FenceToken,
   WorkflowOrderBy,
@@ -28,6 +30,7 @@ import {
   CANCELLED_ERROR,
   CANCELLED_ERROR_TAG,
   isTerminalWorkflowStatus,
+  withoutCompensationLedger as withoutLedger,
   type WorkflowStatusSnapshot,
 } from "./workflow-state.ts";
 import { createWorkflowEventStream } from "./workflow-event-stream.ts";
@@ -125,7 +128,12 @@ interface MutableWorkflow {
 }
 
 export class InMemoryWorkflowStorage
-  implements WorkflowStorage, StepAttemptStorage, ActivityJournalStorage, JournaledSuspendStorage
+  implements
+    WorkflowStorage,
+    StepAttemptStorage,
+    CompensationLedgerStorage,
+    ActivityJournalStorage,
+    JournaledSuspendStorage
 {
   private workflows = new Map<string, MutableWorkflow>();
   /**
@@ -999,6 +1007,10 @@ export class InMemoryWorkflowStorage
       // (workflowId, stepName) so we delete the matching journal Map slot.
       this.journal.delete(this.journalKey(workflowId, name));
     }
+    // The kept steps start a fresh compensation ledger.
+    for (const [name, step] of wf.steps) {
+      if (step.compensationStatus !== undefined) wf.steps.set(name, withoutLedger(step));
+    }
 
     // Flip the workflow back into a runnable state. Terminal statuses
     // (completed / failed / tripwire) become "running" so the runner
@@ -1118,7 +1130,9 @@ export class InMemoryWorkflowStorage
       limit: params.limit,
       afterWorkflowId: params.afterWorkflowId,
       pick: (wf) => {
-        if (wf.status !== "pending" && wf.status !== "running") return undefined;
+        if (wf.status !== "pending" && wf.status !== "running" && wf.status !== "compensating") {
+          return undefined;
+        }
         if (wf.updatedAt.getTime() >= beforeMs) return undefined;
         const lock = this.locks.get(wf.workflowId);
         if (lock !== undefined && lock.expiresAt > nowMs) return undefined;
@@ -1258,6 +1272,51 @@ export class InMemoryWorkflowStorage
   async loadStepAttempts(workflowId: string, stepName?: string): Promise<StepAttemptRecord[]> {
     const all = this.attempts.get(workflowId) ?? [];
     return stepName ? all.filter((a) => a.stepName === stepName) : all;
+  }
+
+  // ---------------------------------------------------------------------------
+  // CompensationLedgerStorage
+  // ---------------------------------------------------------------------------
+
+  async beginCompensation(
+    params: { readonly workflowId: string; readonly error: string; readonly errorTag?: string },
+    guard?: FenceGuard,
+  ): Promise<boolean> {
+    this.checkFence(params.workflowId, guard);
+    const wf = this.workflows.get(params.workflowId);
+    if (!wf) return false;
+    if (wf.status === "compensating") return true;
+    if (wf.status !== "pending" && wf.status !== "running" && wf.status !== "suspended") {
+      return false;
+    }
+    wf.status = "compensating";
+    wf.error = params.error;
+    wf.errorTag = params.errorTag;
+    wf.updatedAt = this.clock.now();
+    return true;
+  }
+
+  async saveStepCompensation(
+    params: {
+      readonly workflowId: string;
+      readonly stepName: string;
+      readonly status: StepCompensationOutcome;
+      readonly error?: string;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    this.checkFence(params.workflowId, guard);
+    const wf = this.workflows.get(params.workflowId);
+    const step = wf?.steps.get(params.stepName);
+    if (!wf || !step) return;
+    const now = this.clock.now();
+    wf.steps.set(params.stepName, {
+      ...withoutLedger(step),
+      compensationStatus: params.status,
+      ...(params.error !== undefined && { compensationError: params.error }),
+      compensatedAt: now,
+    });
+    wf.updatedAt = now;
   }
 
   // ---------------------------------------------------------------------------
