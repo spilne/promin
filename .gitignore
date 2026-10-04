@@ -73,3 +73,9 @@ package-lock.json
 .beads
 
 .claude/projects
+
+# Internal-only notes; never committed.
+/docs/
+# Published documentation pages. Re-include explicitly so a per-user global
+# `docs` ignore pattern does not hide new pages or break `git add`.
+!/documentation/content/docs/

@@ -73,15 +73,25 @@
       },
       "typecheck-ui": {
         "executor": "nx:run-commands",
+        "dependsOn": [
+          "^typecheck"
+        ],
         "options": {
           "command": "bunx tsc -p tsconfig.ui.json --noEmit",
           "cwd": "{projectRoot}"
         },
+        "cache": true,
         "inputs": [
-          "{projectRoot}/src/ui/**/*",
-          "{projectRoot}/src/server/api-types.ts",
-          "{projectRoot}/tsconfig.ui.json"
-        ]
+          "production",
+          "^production",
+          "{workspaceRoot}/tsconfig.base.json",
+          "{workspaceRoot}/bun.lock",
+          {
+            "dependentTasksOutputFiles": "**/*.d.ts",
+            "transitive": true
+          }
+        ],
+        "outputs": []
       },
       "test": {},
       "lint": {},

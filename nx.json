@@ -48,6 +48,24 @@
     "typecheck": {
       "dependsOn": [
         "^typecheck"
+      ],
+      "inputs": [
+        "production",
+        "^production",
+        "{workspaceRoot}/tsconfig.base.json",
+        "{workspaceRoot}/bun.lock",
+        {
+          "dependentTasksOutputFiles": "**/*.d.ts",
+          "transitive": true
+        }
+      ],
+      "outputs": [
+        "{projectRoot}/dist/**/*.d.ts",
+        "{projectRoot}/dist/**/*.d.ts.map",
+        "{projectRoot}/dist/*.tsbuildinfo",
+        "{projectRoot}/dist-examples/**/*.d.ts",
+        "{projectRoot}/dist-examples/**/*.d.ts.map",
+        "{projectRoot}/dist-examples/*.tsbuildinfo"
       ]
     },
     "test": {
