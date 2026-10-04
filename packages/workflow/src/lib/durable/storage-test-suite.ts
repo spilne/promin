@@ -2666,6 +2666,28 @@ export function storageTestSuite(
         expect(byName).toEqual({ a: 2, b: "x" });
       });
 
+      it("reading signals does not consume them", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "sig-read", workflowName: "t", input: {} });
+        await s.deliverSignal("sig-read", "go", { n: 1 });
+        const first = await s.loadSignals("sig-read");
+        const second = await s.loadSignals("sig-read");
+        expect(first.map((x) => [x.signalName, x.payload])).toEqual([["go", { n: 1 }]]);
+        expect(second.map((x) => [x.signalName, x.payload])).toEqual([["go", { n: 1 }]]);
+      });
+
+      it("a delivery made before the wait starts is seen by the waiter", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "sig-early", workflowName: "t", input: {} });
+        await s.deliverSignal("sig-early", "go", "early");
+        await s.suspendWorkflow("sig-early", "wait", {
+          status: "waiting_for_signal",
+          stepType: "signal",
+          signalName: "go",
+        });
+        expect((await s.loadSignals("sig-early")).map((x) => x.payload)).toEqual(["early"]);
+      });
+
       it("startFreshRun drops the previous run's signals", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "sig-fresh", workflowName: "t", input: {} });
@@ -3384,6 +3406,16 @@ export function storageTestSuite(
           const s = await getStorage();
           if (!s.resetSteps) throw new Error("factory storage lacks resetSteps");
           await expect(s.resetSteps("ghost-workflow", ["s1"])).rejects.toThrow();
+        });
+
+        it("keeps the delivered signals: a re-run waiter sees the latest delivery", async () => {
+          const s = await getStorage();
+          if (!s.resetSteps) throw new Error("factory storage lacks resetSteps");
+          await seedCompleted(s, "reset-signals");
+          await s.deliverSignal("reset-signals", "go", 1);
+          await s.deliverSignal("reset-signals", "go", 2);
+          await s.resetSteps("reset-signals", ["s2"]);
+          expect((await s.loadSignals("reset-signals")).map((x) => x.payload)).toEqual([2]);
         });
       });
     }

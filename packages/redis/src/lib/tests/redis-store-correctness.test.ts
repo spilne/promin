@@ -75,12 +75,16 @@ redisDescribe("RedisWorkflowStorage store correctness", (redis) => {
       await s.createWorkflow({ workflowId: "ttl", workflowName: "w", input: 1 });
       await s.completeWorkflow("ttl", "done");
       expect(
-        await (client as unknown as { pttl(k: string): Promise<number> }).pttl(`${prefix}:ttl`),
+        await (client as unknown as { pttl(k: string): Promise<number> }).pttl(
+          `${prefix}:{wf:ttl}`,
+        ),
       ).toBeGreaterThan(0);
 
       await s.startFreshRun("ttl");
       expect(
-        await (client as unknown as { pttl(k: string): Promise<number> }).pttl(`${prefix}:ttl`),
+        await (client as unknown as { pttl(k: string): Promise<number> }).pttl(
+          `${prefix}:{wf:ttl}`,
+        ),
       ).toBe(-1);
       expect((await s.listWorkflows({ status: "pending" })).map((w) => w.workflowId)).toEqual([
         "ttl",
