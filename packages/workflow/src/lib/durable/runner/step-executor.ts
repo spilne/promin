@@ -7,7 +7,7 @@
 // ---------------------------------------------------------------------------
 
 import { SystemWallClock, type WallClock } from "../../shared/wall-clock.ts";
-import type { StepRuntime, Workflow } from "../durable-pipeline.ts";
+import type { StepDefinition, StepRuntime, Workflow } from "../durable-pipeline.ts";
 import type {
   WorkflowContinueAsNewError,
   WorkflowSuspendedError,
@@ -163,6 +163,8 @@ export class InProcessStepExecutor implements StepExecutor {
   private readonly workflow: Workflow<unknown, unknown>;
   private readonly storage: WorkflowStorage;
   private readonly clock: WallClock;
+  /** The workflow's steps by name, built on first use. */
+  private stepsByName: Map<string, StepDefinition> | undefined;
 
   constructor(
     workflow: Workflow<unknown, unknown>,
@@ -183,7 +185,8 @@ export class InProcessStepExecutor implements StepExecutor {
   }
 
   async executeStep(req: StepExecutionRequest): Promise<StepExecutionResult> {
-    const stepDef = this.workflow._definition.steps.find((s) => s.name === req.stepName);
+    this.stepsByName ??= new Map(this.workflow._definition.steps.map((s) => [s.name, s]));
+    const stepDef = this.stepsByName.get(req.stepName);
     if (!stepDef) {
       return {
         ok: false,

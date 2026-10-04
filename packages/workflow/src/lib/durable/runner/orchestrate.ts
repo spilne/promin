@@ -122,7 +122,8 @@ export async function runWorkflowOrchestration(
     return await withLock({
       storage: ctx.storage,
       workflowId,
-      options: { lockDurationMs: DEFAULT_LOCK_DURATION_MS, clock },
+      // The run's state comes with the lock: one round trip instead of two.
+      options: { lockDurationMs: DEFAULT_LOCK_DURATION_MS, clock, loadState: true },
       fn: async (lock) => {
         try {
           const result = await runChain({ ctx, params, lock, clock, loaded });
@@ -198,6 +199,8 @@ async function runChain(params: {
         lock,
         clock,
         loaded,
+        // The state read with the lock is current only for the first run.
+        ...(chain === 0 && lock.state !== undefined && { preloaded: lock.state }),
         // A continued run is an internal restart: no idempotency cache,
         // and the key stays on the archived row.
         params:
@@ -265,6 +268,8 @@ async function runOneOrchestrationCycle(cycle: {
   lock: LockContext;
   clock: WallClock;
   loaded: LoadedRun;
+  /** The run's state as read when the lock was taken, if it was. */
+  preloaded?: WorkflowState | null;
 }): Promise<unknown> {
   const { ctx, lock, clock, loaded } = cycle;
   const { workflowId, input, force, namespace } = cycle.params;
@@ -272,8 +277,9 @@ async function runOneOrchestrationCycle(cycle: {
   const idempotency = force ? undefined : ctx.idempotency;
   const guard = lock.fenceToken ? { fenceToken: lock.fenceToken } : undefined;
 
-  // 1. Load the run.
-  let state = await ctx.storage.loadWorkflow(workflowId);
+  // 1. Load the run, unless it came with the lock.
+  let state =
+    cycle.preloaded !== undefined ? cycle.preloaded : await ctx.storage.loadWorkflow(workflowId);
 
   // Double-check idempotency under the lock — prevents a race with a
   // concurrent run that completed after the pre-check.

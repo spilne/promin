@@ -8,9 +8,15 @@
 
 import { SystemWallClock } from "../../shared/wall-clock.ts";
 import { WorkflowDeadlineError, WorkflowError } from "../durable-pipeline-error.ts";
-import { computeReadySet, type DagNode } from "../workflow-dag.ts";
+import type { StepDefinition } from "../durable-pipeline.ts";
+import { createReadyTracker, type DagNode } from "../workflow-dag.ts";
 import type { WorkflowState } from "../workflow-state.ts";
-import type { DagExecutionContext, DagExecutionResult, WaveOutcome } from "./dag-context.ts";
+import type {
+  DagExecutionContext,
+  DagExecutionResult,
+  WaveOutcome,
+  WaveParams,
+} from "./dag-context.ts";
 import { runExecutorWave } from "./executor-wave.ts";
 import { fireHook } from "./hooks.ts";
 import { runInlineWave } from "./inline-wave.ts";
@@ -44,6 +50,9 @@ export async function executeWorkflowDag(
   const { workflowId, input, dagNodes, state } = params;
   const clock = ctx.clock ?? SystemWallClock;
   const results: Record<string, unknown> = {};
+  const stepsByName = new Map<string, StepDefinition>();
+  for (const step of ctx.steps) stepsByName.set(step.name, step);
+  const remoteSet = ctx.dispatch ? new Set(ctx.dispatch.remoteSteps ?? []) : undefined;
 
   // Load previously completed step results. The stored shape is always the
   // codec's encoded form (written by saveStepResult), so we decode
@@ -52,22 +61,22 @@ export async function executeWorkflowDag(
   // DAG — e.g., synthetic `<loop>.iter.<n>` rows written by `.dowhile()`,
   // or orphans from a prior version's topology. Those rows stay in
   // storage for observability but must not count as DAG progress, or the
-  // `completed.size < ctx.steps.length` gate would skip the real step.
+  // completed-count gate would skip the real step.
   if (state) {
     for (const [stepName, stepState] of Object.entries(state.steps)) {
       if (stepState.status !== "completed") continue;
-      const stepDef = ctx.steps.find((s) => s.name === stepName);
+      const stepDef = stepsByName.get(stepName);
       if (!stepDef) continue;
       results[stepName] = stepDef.codec.decode(stepState.result);
     }
   }
 
-  const completed = new Set(Object.keys(results));
-  // Every wave settles before the next ready-set computation, so no step
-  // is ever in flight when the ready set is computed.
-  const running = new Set<string>();
+  // Every wave settles before the next ready set is read, so no step is
+  // ever in flight then: the ready set is every not-yet-completed step
+  // whose dependencies have completed, in definition order.
+  const tracker = createReadyTracker({ nodes: dagNodes, completed: Object.keys(results) });
 
-  for (let wave = 0; completed.size < ctx.steps.length; wave++) {
+  for (let wave = 0; tracker.completedCount < ctx.steps.length; wave++) {
     // Between waves: stop on a lost lock or a cancel that landed during the
     // last wave. The caller checked the run before the first one.
     if (wave > 0) await assertRunActive({ storage: ctx.storage, workflowId, signal: ctx.signal });
@@ -85,7 +94,7 @@ export async function executeWorkflowDag(
       };
     }
 
-    const ready = computeReadySet({ nodes: dagNodes, completed, running });
+    const ready = tracker.ready();
 
     if (ready.length === 0) {
       return {
@@ -99,12 +108,11 @@ export async function executeWorkflowDag(
     }
 
     // Split into local and dispatched steps
-    const remoteSet = new Set(ctx.dispatch?.remoteSteps ?? []);
     const localReady: string[] = [];
     const dispatchReady: string[] = [];
 
     for (const name of ready) {
-      if (remoteSet.has(name) && ctx.dispatch) {
+      if (remoteSet?.has(name)) {
         dispatchReady.push(name);
       } else {
         localReady.push(name);
@@ -120,8 +128,9 @@ export async function executeWorkflowDag(
         workflowId,
         input,
         names: dispatchReady,
+        stepsByName,
         results,
-        completed,
+        markCompleted: tracker.markCompleted,
       });
       if (dispatchFailure) return dispatchFailure;
     }
@@ -130,25 +139,9 @@ export async function executeWorkflowDag(
     if (localReady.length === 0) continue;
 
     // Execute local ready steps in parallel, with per-step retry and failure handling
-    const readySteps = localReady.map((name) => ctx.steps.find((s) => s.name === name)!);
+    const readySteps = localReady.map((name) => stepsByName.get(name)!);
 
-    // Emit `step-started` events to any subscribers before kicking the
-    // batch off. Storages without the optional hook are silently skipped —
-    // polling-only callers don't see step-started (no reliable signal
-    // from snapshot diffs).
-    if (typeof ctx.storage.notifyStepStarted === "function") {
-      for (const stepDef of readySteps) {
-        // Swallow errors from the notify path — subscription is advisory,
-        // not load-bearing. A broken event bus must not fail a workflow.
-        try {
-          await ctx.storage.notifyStepStarted(workflowId, stepDef.name);
-        } catch {
-          // ignore
-        }
-      }
-    }
-
-    const waveParams = {
+    const waveParams: WaveParams = {
       ctx,
       workflowId,
       input,
@@ -157,6 +150,7 @@ export async function executeWorkflowDag(
       stepAttempts: params.stepAttempts,
       clock,
       stepStates: state?.steps ?? {},
+      stepStarted: notifyStepsStarted({ ctx, workflowId, readySteps }),
     };
     // Every step of the wave has settled and been checkpointed by here.
     const { outcomes }: WaveOutcome = ctx.stepExecutor
@@ -173,7 +167,7 @@ export async function executeWorkflowDag(
     for (const outcome of outcomes) {
       if (outcome.kind !== "completed") continue;
       const { name, result, metadata, durationMs } = outcome;
-      const stepDef = ctx.steps.find((s) => s.name === name);
+      const stepDef = stepsByName.get(name);
       const decoded = stepDef ? stepDef.codec.decode(result) : result;
       if (outcome.skipped !== true) {
         await fireHook({
@@ -183,7 +177,7 @@ export async function executeWorkflowDag(
         });
       }
       results[name] = decoded;
-      completed.add(name);
+      tracker.markCompleted(name);
 
       // Tripwire detection: a `.tripwire()` step signals termination by
       // writing `{ tripwireFired: true, reason }` to its metadata. The step
@@ -243,7 +237,7 @@ export async function executeWorkflowDag(
     if (
       params.deadlineMs != null &&
       clock.currentTimeMs() > params.deadlineMs &&
-      completed.size < ctx.steps.length
+      tracker.completedCount < ctx.steps.length
     ) {
       return {
         success: false,
@@ -259,4 +253,47 @@ export async function executeWorkflowDag(
 
   const lastStepName = ctx.steps[ctx.steps.length - 1]!.name;
   return { success: true, result: results[lastStepName] };
+}
+
+/**
+ * Emit `step-started` for every step of a wave, all at once, and return
+ * each step's pending notice. The wave does not wait for the notices to
+ * start its steps; it waits for a step's own notice before that step's
+ * outcome is written (inline) or before handing the step to an executor
+ * that may persist it itself, so a subscriber still sees a step's
+ * `step-started` before its `step-completed` / `step-failed`.
+ *
+ * Notification is advisory: a notice that fails is reported and resolves,
+ * and never fails the run. `undefined` when the storage has no
+ * `notifyStepStarted` (polling-only callers see no `step-started`).
+ */
+function notifyStepsStarted(params: {
+  ctx: DagExecutionContext;
+  workflowId: string;
+  readySteps: readonly StepDefinition[];
+}): ReadonlyMap<string, Promise<void>> | undefined {
+  const { ctx, workflowId } = params;
+  const storage = ctx.storage;
+  if (typeof storage.notifyStepStarted !== "function") return undefined;
+  const report = (stepName: string, error: unknown): void => {
+    console.warn(
+      `[workflow] notifyStepStarted failed for step "${stepName}" of "${workflowId}":`,
+      error,
+    );
+  };
+  const notices = new Map<string, Promise<void>>();
+  for (const { name } of params.readySteps) {
+    let notice: Promise<void>;
+    try {
+      notice = Promise.resolve(storage.notifyStepStarted(workflowId, name)).then(
+        () => undefined,
+        (error: unknown) => report(name, error),
+      );
+    } catch (error) {
+      report(name, error);
+      notice = Promise.resolve();
+    }
+    notices.set(name, notice);
+  }
+  return notices;
 }

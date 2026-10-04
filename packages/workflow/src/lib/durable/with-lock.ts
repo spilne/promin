@@ -15,6 +15,8 @@
 //      returned fence token is handed to `fn` via `ctx.fenceToken` and
 //      threaded to every subsequent mutating call, so a stale holder
 //      that wakes up after its lock expired can't corrupt fresh state.
+//      With `loadState`, `tryLockAndLoad()` takes the lock and reads the
+//      workflow's state in one call.
 //   2. setInterval — background heartbeat extends the lock every
 //      `heartbeatIntervalMs`, carrying the fence token so only the current
 //      holder can extend.
@@ -41,6 +43,7 @@
 // ---------------------------------------------------------------------------
 
 import type { FenceToken, WorkflowStorage } from "./workflow-storage.ts";
+import type { WorkflowState } from "./workflow-state.ts";
 import { WorkflowLockError, WorkflowLockLostError } from "./durable-pipeline-error.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 
@@ -72,6 +75,14 @@ export interface WithLockOptions {
    * time fires heartbeats deterministically without real waits.
    */
   clock?: WallClock;
+  /**
+   * Also load the workflow's state as the lock is taken, through
+   * `storage.tryLockAndLoad` (one round trip on backends that implement
+   * it), and hand it to the callback as `LockContext.state`. Falls back to
+   * `tryLock` then `loadWorkflow` on a storage without `tryLockAndLoad`.
+   * Default: false.
+   */
+  loadState?: boolean;
 }
 
 /** Context passed to `withLock`'s callback. */
@@ -88,6 +99,11 @@ export interface LockContext {
    * or presumed lost. Check it at safe points and stop there.
    */
   readonly signal: AbortSignal;
+  /**
+   * The workflow's state as of taking the lock (`null` when it has no
+   * record yet). Set only with `WithLockOptions.loadState`.
+   */
+  readonly state?: WorkflowState | null;
 }
 
 /**
@@ -123,7 +139,12 @@ export async function withLock<T>(params: {
   const lockDurationMs = params.options?.lockDurationMs ?? DEFAULT_LOCK_EXTENSION_MS;
   const clock = params.options?.clock ?? SystemWallClock;
 
-  const { acquired, token } = await storage.tryLock(workflowId, lockDurationMs);
+  const { acquired, token, state } = await acquireLock({
+    storage,
+    workflowId,
+    lockDurationMs,
+    loadState: params.options?.loadState === true,
+  });
   if (!acquired) {
     throw new WorkflowLockError({
       workflowId,
@@ -170,7 +191,11 @@ export async function withLock<T>(params: {
   }, heartbeatMs);
 
   try {
-    return await fn({ fenceToken: token, signal: lost.signal });
+    return await fn({
+      fenceToken: token,
+      signal: lost.signal,
+      ...(state !== undefined && { state }),
+    });
   } finally {
     released = true;
     heartbeatHandle.clear();
@@ -181,4 +206,27 @@ export async function withLock<T>(params: {
       // expires on its own `lockDurationMs` after the last heartbeat.
     }
   }
+}
+
+/**
+ * Take the lock, with the state when `loadState` is set and the storage
+ * has `tryLockAndLoad`. Otherwise `state` is left out and the callback
+ * loads it under the lock itself. Not `async`: the plain `tryLock` path
+ * hands back the storage's own promise, adding no extra ticks.
+ */
+function acquireLock(params: {
+  storage: WorkflowStorage;
+  workflowId: string;
+  lockDurationMs: number;
+  loadState: boolean;
+}): Promise<{ acquired: boolean; token?: FenceToken; state?: WorkflowState | null }> {
+  const { storage, workflowId, lockDurationMs } = params;
+  if (params.loadState && typeof storage.tryLockAndLoad === "function") {
+    return storage
+      .tryLockAndLoad(workflowId, lockDurationMs)
+      .then(({ locked, token, state }) =>
+        locked ? { acquired: true, token, state } : { acquired: false },
+      );
+  }
+  return storage.tryLock(workflowId, lockDurationMs);
 }

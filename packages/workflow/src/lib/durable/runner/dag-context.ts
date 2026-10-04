@@ -117,13 +117,24 @@ export interface WaveParams {
   readonly workflowId: string;
   readonly input: unknown;
   readonly readySteps: StepDefinition[];
-  /** Decoded results of completed steps, keyed by step name. */
+  /**
+   * Decoded results of completed steps, keyed by step name. The run's own
+   * map, shared by every step of the wave and never copied: steps read it,
+   * and only the DAG executor adds to it, between waves.
+   */
   readonly results: Record<string, unknown>;
   /** Tracks attempt numbers per step — shared across workflow retries so counters keep incrementing. */
   readonly stepAttempts: Map<string, number>;
   readonly clock: WallClock;
   /** Stored step rows as of the run's last load, keyed by step name. */
   readonly stepStates: Readonly<Record<string, StepState>>;
+  /**
+   * Each ready step's pending `step-started` notice (never rejects).
+   * A step's outcome is not written before its notice settles, so the
+   * notice reaches subscribers first. `undefined` when the storage has no
+   * `notifyStepStarted`.
+   */
+  readonly stepStarted?: ReadonlyMap<string, Promise<void>>;
 }
 
 /** Failure outcome of `executeWorkflowDag` (suspension and continue-as-new included). */
