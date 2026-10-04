@@ -3,7 +3,9 @@ import { InMemoryWorkflowAdvertisementRegistry } from "../workflow-advertisement
 import { workflowAdvertisementRegistryTestSuite } from "../workflow-advertisements-test-suite.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
 
-workflowAdvertisementRegistryTestSuite(() => new InMemoryWorkflowAdvertisementRegistry());
+workflowAdvertisementRegistryTestSuite(
+  ({ clock }) => new InMemoryWorkflowAdvertisementRegistry({ clock }),
+);
 
 describe("InMemoryWorkflowAdvertisementRegistry — advertisedAt on an injected clock", () => {
   it("stamps advertisedAt from the clock and refreshes it on re-advertise", async () => {
@@ -11,11 +13,11 @@ describe("InMemoryWorkflowAdvertisementRegistry — advertisedAt on an injected 
     const registry = new InMemoryWorkflowAdvertisementRegistry({ clock });
     const workflows = [{ name: "wf", steps: [] }];
 
-    await registry.upsert("w-1", workflows);
+    await registry.upsert({ workerId: "w-1", workflows });
     expect((await registry.list())[0]?.advertisedAt.toISOString()).toBe("2026-01-01T00:00:00.000Z");
 
     clock.advance(5_000);
-    await registry.upsert("w-1", workflows);
+    await registry.upsert({ workerId: "w-1", workflows });
     expect((await registry.list())[0]?.advertisedAt.toISOString()).toBe("2026-01-01T00:00:05.000Z");
   });
 });

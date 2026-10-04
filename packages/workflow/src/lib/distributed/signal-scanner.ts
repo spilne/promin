@@ -1,17 +1,16 @@
 // ---------------------------------------------------------------------------
-// SignalScanner — resumes suspended workflows whose `ctx.signal` wait has
-// a delivered signal in storage.
+// SignalScanner — resumes suspended workflows whose signal wait has a
+// delivered signal in storage.
 //
-// Mirror of SleepScanner, one notch over: SleepScanner wakes workflows
-// whose `wakeAt` has passed; SignalScanner wakes workflows whose
-// `waiting_for_signal` step has a matching signal row in
-// `storage.loadSignals`. Both share the same shape — periodic poll,
-// resolveWorkflow hook, onResume/onError, FakeWallClock-driven cadence in
-// tests.
+// Mirror of SleepScanner: SleepScanner wakes runs whose timer is due;
+// SignalScanner wakes runs whose `waiting_for_signal` step has a delivered
+// signal under the awaited name. Both share the same loop (`ResumeScanner`):
+// keyset-paged storage queries, bounded-concurrency resumes, optional leader
+// gating, FakeWallClock-driven cadence in tests.
 //
 // Why a scanner instead of caller responsibility
 // ----------------------------------------------
-// `WorkflowStorage.deliverSignal` only appends a signal row; for
+// `WorkflowStorage.deliverSignal` only records the signal; for
 // journaled-suspend storages the pending journal entry must also be
 // completed (`completeSignal`) and the workflow re-run before the body
 // observes the delivery. Without this scanner, every code path that
@@ -20,29 +19,25 @@
 // forget, easy to half-implement. The scanner closes the loop generically
 // so a `deliverSignal` call from anywhere just works.
 //
-// Idempotency
-// -----------
-// `completeSignal` returns `false` when the pending journal entry was
-// already completed (concurrent scanner, prior in-line resume). The
-// scanner walks every signal matching the waiting step's name until one
-// succeeds — so racing scanners / leftover already-consumed signal rows
-// don't cause double resumes or false-negatives.
+// Repeated signal names
+// ---------------------
+// Signals are a named value on the run: a second delivery under the same
+// name replaces the first (last delivery wins), and a fresh run starts with
+// none. The scanner resumes a waiting run with the value stored when it
+// scans. `completeSignal` returns false when the pending journal entry was
+// already completed (concurrent scanner, an earlier in-line resume); the
+// run is resumed anyway, and replay picks the completed entry up.
 // ---------------------------------------------------------------------------
 
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
-import {
-  PollLoop,
-  describeError,
-  isNetworkError,
-  type PollLoopErrorInfo,
-} from "../shared/poll-loop.ts";
 import { isActivityJournalStorage } from "../durable/activity-journal.ts";
 import { isJournaledSuspendStorage } from "../durable/activity-journal.ts";
 import type { Workflow } from "../durable/durable-pipeline.ts";
 import { completeSignal } from "../durable/journaled-step.ts";
 import type { WorkflowRunner } from "../durable/workflow-runner.ts";
-import type { WorkflowState } from "../durable/workflow-state.ts";
-import type { WorkflowStorage } from "../durable/workflow-storage.ts";
+import type { WorkflowStorage, WorkflowWakeup } from "../durable/workflow-storage.ts";
+import type { LeaderElection } from "./leader-election.ts";
+import { ResumeScanner } from "./resume-scanner.ts";
 
 export interface SignalScannerConfig {
   /** Workflow storage to scan. */
@@ -53,13 +48,25 @@ export interface SignalScannerConfig {
   readonly scanIntervalMs?: number;
   /**
    * Resolve a pure `Workflow` definition by name. Passed back to the runner
-   * for resumption; the scanner doesn't bind storage itself.
+   * for resumption; the scanner doesn't bind storage itself. A name it
+   * can't resolve is reported once through `onError` and its runs are
+   * skipped.
    */
   readonly resolveWorkflow: (workflowName: string) => Workflow<unknown, unknown> | undefined;
   readonly onResume?: (workflowId: string) => void;
   readonly onError?: (workflowId: string, error: unknown) => void;
   /** Time source. Default `SystemWallClock`. Tests pass `FakeWallClock`. */
   readonly clock?: WallClock;
+  /** Resumes run at once, at most. Default: 10. */
+  readonly resumeConcurrency?: number;
+  /**
+   * Only the leader scans. Pass a `LeaseLeaderElection` with key
+   * `scannerLeaderKey({ scanner: "signal", namespace })` when several
+   * instances run the scanner. Default: every instance scans.
+   */
+  readonly leaderElection?: LeaderElection;
+  /** Runs fetched per storage query. Default: 100. */
+  readonly pageSize?: number;
 }
 
 export interface SignalScanner {
@@ -69,140 +76,67 @@ export interface SignalScanner {
    * once the scanner has stopped.
    */
   start(): Promise<void>;
-  /** Stop scanning. Resolves once the in-flight scan (if any) has finished. */
+  /**
+   * Stop scanning. Resolves once the in-flight scan and the resumes it
+   * started have finished, and leadership (if any) has been released.
+   */
   stop(): Promise<void>;
 }
 
 export class DefaultSignalScanner implements SignalScanner {
-  private readonly storage: WorkflowStorage;
-  private readonly runner: WorkflowRunner;
-  private readonly scanIntervalMs: number;
-  private readonly resolveWorkflow: SignalScannerConfig["resolveWorkflow"];
-  private readonly onResume?: SignalScannerConfig["onResume"];
-  private readonly onError?: SignalScannerConfig["onError"];
-  private readonly clock: WallClock;
-  private readonly loop: PollLoop;
+  private readonly scanner: ResumeScanner<WorkflowWakeup>;
 
   constructor(config: SignalScannerConfig) {
-    this.storage = config.storage;
-    this.runner = config.runner;
-    this.scanIntervalMs = config.scanIntervalMs ?? 5_000;
-    this.resolveWorkflow = config.resolveWorkflow;
-    this.onResume = config.onResume;
-    this.onError = config.onError;
-    this.clock = config.clock ?? SystemWallClock;
-    this.loop = new PollLoop({
+    const storage = config.storage;
+    const pageSize = config.pageSize ?? 100;
+    const journalStorage = isActivityJournalStorage(storage) ? storage : undefined;
+    const journaledSuspend =
+      journalStorage && isJournaledSuspendStorage(journalStorage) ? journalStorage : undefined;
+
+    this.scanner = new ResumeScanner<WorkflowWakeup>({
       name: "signal-scanner",
-      intervalMs: this.scanIntervalMs,
-      clock: this.clock,
-      tick: () => this.scan(),
-      onError: (err, info) => this.reportScanError(err, info),
+      runner: config.runner,
+      intervalMs: config.scanIntervalMs ?? 5_000,
+      clock: config.clock ?? SystemWallClock,
+      resolveWorkflow: config.resolveWorkflow,
+      onResume: config.onResume,
+      onError: config.onError,
+      leaderElection: config.leaderElection,
+      resumeConcurrency: config.resumeConcurrency,
+      find: async ({ afterWorkflowId }) => {
+        if (storage.listSignalWakeups) {
+          const rows = await storage.listSignalWakeups({
+            limit: pageSize,
+            ...(afterWorkflowId !== undefined && { afterWorkflowId }),
+          });
+          return { rows, done: rows.length < pageSize };
+        }
+        return { rows: await signalWakeupsByListing({ storage, pageSize }), done: true };
+      },
+      prepare: async (row) => {
+        // Journaled `ctx.signal` waits read the value from their pending
+        // journal entry, so complete it before re-running the body. DAG
+        // `waitForSignal` steps read `loadSignals` directly.
+        if (journaledSuspend && row.signalName !== undefined) {
+          await completeSignal({
+            storage: journaledSuspend,
+            workflowId: row.workflowId,
+            stepName: row.stepName,
+            signalName: row.signalName,
+            value: row.signalPayload,
+          });
+        }
+        return true;
+      },
     });
   }
 
   start(): Promise<void> {
-    return this.loop.start();
+    return this.scanner.start();
   }
 
-  /** Stop scanning. Resolves once the in-flight scan (if any) has finished. */
   stop(): Promise<void> {
-    return this.loop.stop();
-  }
-
-  /**
-   * Scan-loop failure: most often storage is briefly unreachable (dev
-   * hot-reload, restart). Network blips log tersely for the first few
-   * failures, then stay quiet; anything else logs loudly every time.
-   * `onError` gets a synthetic `"(scan-loop)"` id with the real error.
-   */
-  private reportScanError(err: unknown, info: PollLoopErrorInfo): void {
-    if (isNetworkError(err)) {
-      if (info.consecutiveFailures <= 3) {
-        console.warn(`[signal-scanner] storage unreachable, retrying — ${describeError(err)}`);
-      }
-    } else {
-      console.error("[signal-scanner] scan failed:", err);
-    }
-    this.onError?.("(scan-loop)", err);
-  }
-
-  private async scan(): Promise<void> {
-    // Resolve once per scan — `completeSignal` only applies to journaled
-    // storages; non-journaled backends rely on `runner.run` re-driving
-    // the workflow so the body sees the new signal directly.
-    const journalStorage = isActivityJournalStorage(this.storage) ? this.storage : undefined;
-    const journaledSuspend =
-      journalStorage && isJournaledSuspendStorage(journalStorage) ? journalStorage : undefined;
-
-    let offset = 0;
-    const pageSize = 100;
-
-    while (!this.loop.stopRequested) {
-      const suspended = await this.storage.listWorkflows({
-        status: "suspended",
-        limit: pageSize,
-        offset,
-      });
-
-      for (const wf of suspended) {
-        if (this.loop.stopRequested) return;
-        const waiting = findWaitingForSignal(wf);
-        if (!waiting) continue;
-        const signals = await this.storage.loadSignals(wf.workflowId);
-        const matching = signals.filter((s) => s.signalName === waiting.signalName);
-        if (matching.length === 0) continue;
-
-        let consumed: boolean;
-        if (journaledSuspend) {
-          // Walk every matching delivered signal until one completes the
-          // pending journal entry. completeSignal returns false when the
-          // entry was already completed (concurrent scanner, leftover
-          // already-consumed row), so this naturally finds the live one.
-          consumed = false;
-          for (const sig of matching) {
-            const ok = await completeSignal({
-              storage: journaledSuspend,
-              workflowId: wf.workflowId,
-              stepName: waiting.stepName,
-              signalName: waiting.signalName,
-              value: sig.payload,
-            });
-            if (ok) {
-              consumed = true;
-              break;
-            }
-          }
-        } else {
-          // Non-journaled: trust runner.run to re-drive the body and let
-          // `ctx.signal` consume directly from `loadSignals`.
-          consumed = true;
-        }
-
-        if (consumed) await this.resumeWorkflow(wf.workflowId, wf.workflowName, wf.input);
-      }
-
-      if (suspended.length < pageSize) break;
-      offset += pageSize;
-    }
-  }
-
-  private async resumeWorkflow(
-    workflowId: string,
-    workflowName: string,
-    input: unknown,
-  ): Promise<void> {
-    const definition = this.resolveWorkflow(workflowName);
-    if (!definition) return;
-
-    try {
-      await this.runner.run({ workflow: definition, workflowId, input });
-      this.onResume?.(workflowId);
-    } catch (err) {
-      // Expected when the workflow suspends again on a different signal /
-      // sleep — let it stay suspended; next scan picks it up.
-      if ((err as { _tag?: string })?._tag === "WorkflowSuspendedError") return;
-      this.onError?.(workflowId, err);
-    }
+    return this.scanner.stop();
   }
 }
 
@@ -210,11 +144,45 @@ export function createSignalScanner(config: SignalScannerConfig): SignalScanner 
   return new DefaultSignalScanner(config);
 }
 
-function findWaitingForSignal(wf: WorkflowState): { stepName: string; signalName: string } | null {
-  for (const step of Object.values(wf.steps)) {
-    if (step.status === "waiting_for_signal" && step.signalName !== undefined) {
-      return { stepName: step.stepName, signalName: step.signalName };
+/**
+ * Fallback for storages without `listSignalWakeups`: list every suspended
+ * run, find its signal wait and look up its signals. Collects every page
+ * before anything is resumed, so offset paging can't skip rows.
+ */
+async function signalWakeupsByListing(params: {
+  readonly storage: WorkflowStorage;
+  readonly pageSize: number;
+}): Promise<WorkflowWakeup[]> {
+  const { storage, pageSize } = params;
+  const due: WorkflowWakeup[] = [];
+  for (let offset = 0; ; offset += pageSize) {
+    const page = await storage.listWorkflows({
+      status: "suspended",
+      limit: pageSize,
+      offset,
+      orderBy: "createdAt",
+      orderDir: "asc",
+    });
+    for (const wf of page) {
+      const waiting = Object.values(wf.steps).find(
+        (s) => s.status === "waiting_for_signal" && s.signalName !== undefined,
+      );
+      if (!waiting) continue;
+      const signals = await storage.loadSignals(wf.workflowId);
+      const signal = signals.find((s) => s.signalName === waiting.signalName);
+      if (!signal) continue;
+      due.push({
+        workflowId: wf.workflowId,
+        workflowName: wf.workflowName,
+        input: wf.input,
+        ...(wf.version !== undefined && { version: wf.version }),
+        stepName: waiting.stepName,
+        reason: "signal",
+        signalName: signal.signalName,
+        signalPayload: signal.payload,
+      });
     }
+    if (page.length < pageSize) break;
   }
-  return null;
+  return due;
 }

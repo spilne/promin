@@ -40,6 +40,7 @@ import {
 import {
   claimWorkflowStarts,
   completeWorkflowStart,
+  heartbeatWorkflowStart,
   listWorkflowStarts,
 } from "./routes/workflow-starts.ts";
 import { RunEventBus } from "./run-event-bus.ts";
@@ -793,6 +794,7 @@ export class ZoryaServer {
         const wfs = remoteDeps.workflowStarts;
         this.router
           .post("/api/worker-protocol/claim-starts", claimWorkflowStarts(wfs))
+          .post("/api/worker-protocol/heartbeat-start/:id", heartbeatWorkflowStart(wfs))
           .post("/api/worker-protocol/complete-start/:id", completeWorkflowStart(wfs))
           .get("/api/worker-protocol/starts", listWorkflowStarts(wfs));
       }

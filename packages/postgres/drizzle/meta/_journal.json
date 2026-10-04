@@ -358,6 +358,13 @@
       "when": 1743400050000,
       "tag": "0050_step_queue_v2",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1743400051000,
+      "tag": "0051_coordinator_scanners",
+      "breakpoints": true
     }
   ]
 }

@@ -106,6 +106,15 @@ export const workflows = pgTable(
     index("wf_workflows_parent_idx")
       .on(t.parentWorkflowId)
       .where(sql`${t.parentWorkflowId} IS NOT NULL`),
+    // Coordinator recovery (`listOrphanedRuns`): pending / running runs
+    // in workflow-id order.
+    index("wf_workflows_active_idx")
+      .on(t.workflowId)
+      .where(
+        sql`${t.statusId} IN (${sql.raw(
+          [WorkflowStatusIds.id.pending, WorkflowStatusIds.id.running].join(", "),
+        )})`,
+      ),
     index("wf_workflows_run_source_idx")
       .on(t.runSource, t.runSourceId)
       .where(sql`${t.runSource} IS NOT NULL`),
@@ -166,7 +175,24 @@ export const workflowSteps = pgTable(
     // steps that don't produce audit data.
     metadata: jsonb("metadata"),
   },
-  (t) => [primaryKey({ columns: [t.workflowId, t.stepName, t.run] })],
+  (t) => [
+    primaryKey({ columns: [t.workflowId, t.stepName, t.run] }),
+    // Sleep scanner (`listDueTimers`): sleeping steps by wake time.
+    index("wf_workflow_steps_wake_at_idx")
+      .on(t.wakeAt)
+      .where(sql`${t.statusId} = ${sql.raw(String(StepStatusIds.id.sleeping))}`),
+    // Sleep scanner (`listDueTimers`): signal waits by their timeout.
+    index("wf_workflow_steps_signal_timeout_idx")
+      .on(t.signalTimeoutAt)
+      .where(
+        sql`${t.statusId} = ${sql.raw(String(StepStatusIds.id.waiting_for_signal))} AND ${t.signalTimeoutAt} IS NOT NULL`,
+      ),
+    // Signal scanner (`listSignalWakeups`): waiting steps, joined to
+    // delivered signals on (workflow_id, signal_name).
+    index("wf_workflow_steps_waiting_signal_idx")
+      .on(t.workflowId, t.signalName)
+      .where(sql`${t.statusId} = ${sql.raw(String(StepStatusIds.id.waiting_for_signal))}`),
+  ],
 );
 
 export const workflowStepTasks = pgTable(
@@ -487,6 +513,14 @@ export const workflowStarts = pgTable(
     enqueuedAt: timestamp("enqueued_at", { withTimezone: true }).notNull().defaultNow(),
     claimedAt: timestamp("claimed_at", { withTimezone: true }),
     claimedBy: text("claimed_by"),
+    // Fencing token of the current claim. `heartbeat` and `complete` only
+    // act when they carry it, so a claimant whose claim went stale can't
+    // touch the start another worker now owns.
+    claimToken: text("claim_token"),
+    // Last proof of life from the claimant (set on claim, refreshed by
+    // `heartbeat`). A claim whose heartbeat is older than `reclaimAfterMs`
+    // goes back to pending.
+    heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
     // status: 'pending' (waiting for a worker) | 'claimed' (in flight).
     // Completion deletes the row to keep the queue tight.
     status: text("status").notNull().default("pending"),
@@ -498,9 +532,10 @@ export const workflowStarts = pgTable(
     index("wf_workflow_starts_pending_idx")
       .on(t.workflowName, t.enqueuedAt)
       .where(sql`${t.status} = 'pending'`),
-    // Stale-claim sweeper: find rows past the reclaim window.
-    index("wf_workflow_starts_claimed_idx")
-      .on(t.claimedAt)
+    // Stale-claim sweeper: claims whose last heartbeat is past the
+    // reclaim window.
+    index("wf_workflow_starts_heartbeat_idx")
+      .on(t.heartbeatAt)
       .where(sql`${t.status} = 'claimed'`),
   ],
 );

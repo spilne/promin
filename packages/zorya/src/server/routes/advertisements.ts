@@ -23,7 +23,7 @@ export function upsertAdvertisements(registry: WorkflowAdvertisementRegistry) {
     if (!body || !body.workerId || !Array.isArray(body.workflows)) {
       return jsonError(400, "invalid_body", "Expected { workerId, workflows }");
     }
-    await registry.upsert(body.workerId, body.workflows);
+    await registry.upsert({ workerId: body.workerId, workflows: body.workflows });
     return json(200, { ok: true });
   };
 }

@@ -20,6 +20,8 @@ import type {
   WorkflowOrderBy,
   SignalTokenRecord,
   StreamChunk,
+  WorkflowWakeup,
+  OrphanedRun,
 } from "./workflow-storage.ts";
 import { workflowMetadataMatches } from "./workflow-storage.ts";
 import { isTerminalWorkflowStatus } from "./workflow-state.ts";
@@ -946,6 +948,146 @@ export class InMemoryWorkflowStorage
       wf.completedAt = undefined;
     }
     wf.updatedAt = this.clock.now();
+  }
+
+  /**
+   * Workflows after the keyset cursor, in `workflowId` order, that pass
+   * `pick`. Scoped to the configured namespace like `listWorkflows`.
+   * Stops as soon as `limit` rows are collected.
+   */
+  private scanWorkflows<T>(params: {
+    limit: number;
+    afterWorkflowId?: string;
+    pick: (wf: MutableWorkflow) => T | undefined;
+  }): T[] {
+    const after = params.afterWorkflowId;
+    const ns = this.namespace;
+    const ids = [...this.workflows.keys()]
+      .filter((id) => after === undefined || id > after)
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const out: T[] = [];
+    for (const id of ids) {
+      if (out.length >= params.limit) break;
+      const wf = this.workflows.get(id)!;
+      if (ns && wf.namespace !== ns) continue;
+      const row = params.pick(wf);
+      if (row !== undefined) out.push(row);
+    }
+    return out;
+  }
+
+  /** Steps of a workflow sorted by name — the scanners pick the smallest due one. */
+  private sortedSteps(wf: MutableWorkflow): StepState[] {
+    return [...wf.steps.values()].sort((a, b) =>
+      a.stepName < b.stepName ? -1 : a.stepName > b.stepName ? 1 : 0,
+    );
+  }
+
+  async listDueTimers(params: {
+    now: Date;
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<WorkflowWakeup[]> {
+    const nowMs = params.now.getTime();
+    const due = (at: Date | string | undefined): boolean =>
+      at !== undefined && at !== null && new Date(at).getTime() <= nowMs;
+    return this.scanWorkflows<WorkflowWakeup>({
+      limit: params.limit,
+      afterWorkflowId: params.afterWorkflowId,
+      pick: (wf) => {
+        if (wf.status !== "suspended") return undefined;
+        for (const step of this.sortedSteps(wf)) {
+          if (step.status === "sleeping" && due(step.wakeAt)) {
+            return this.toWakeup({ wf, stepName: step.stepName, reason: "sleep" });
+          }
+          if (step.status === "waiting_for_signal" && due(step.signalTimeoutAt)) {
+            return this.toWakeup({
+              wf,
+              stepName: step.stepName,
+              reason: "signal-timeout",
+              signalName: step.signalName,
+            });
+          }
+        }
+        return undefined;
+      },
+    });
+  }
+
+  async listSignalWakeups(params: {
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<WorkflowWakeup[]> {
+    return this.scanWorkflows<WorkflowWakeup>({
+      limit: params.limit,
+      afterWorkflowId: params.afterWorkflowId,
+      pick: (wf) => {
+        if (wf.status !== "suspended") return undefined;
+        const delivered = this.signals.get(wf.workflowId);
+        if (!delivered || delivered.length === 0) return undefined;
+        for (const step of this.sortedSteps(wf)) {
+          if (step.status !== "waiting_for_signal" || step.signalName === undefined) continue;
+          const signal = delivered.find((s) => s.signalName === step.signalName);
+          if (!signal) continue;
+          return this.toWakeup({
+            wf,
+            stepName: step.stepName,
+            reason: "signal",
+            signalName: step.signalName,
+            signalPayload: signal.payload,
+          });
+        }
+        return undefined;
+      },
+    });
+  }
+
+  async listOrphanedRuns(params: {
+    now: Date;
+    updatedBefore: Date;
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<OrphanedRun[]> {
+    const nowMs = params.now.getTime();
+    const beforeMs = params.updatedBefore.getTime();
+    return this.scanWorkflows<OrphanedRun>({
+      limit: params.limit,
+      afterWorkflowId: params.afterWorkflowId,
+      pick: (wf) => {
+        if (wf.status !== "pending" && wf.status !== "running") return undefined;
+        if (wf.updatedAt.getTime() >= beforeMs) return undefined;
+        const lock = this.locks.get(wf.workflowId);
+        if (lock !== undefined && lock.expiresAt > nowMs) return undefined;
+        return {
+          workflowId: wf.workflowId,
+          workflowName: wf.workflowName,
+          ...(wf.version !== undefined ? { version: wf.version } : {}),
+          status: wf.status,
+          input: wf.input,
+          ...(wf.metadata !== undefined ? { metadata: wf.metadata } : {}),
+        };
+      },
+    });
+  }
+
+  private toWakeup(params: {
+    wf: MutableWorkflow;
+    stepName: string;
+    reason: WorkflowWakeup["reason"];
+    signalName?: string;
+    signalPayload?: unknown;
+  }): WorkflowWakeup {
+    const { wf } = params;
+    return {
+      workflowId: wf.workflowId,
+      workflowName: wf.workflowName,
+      ...(wf.version !== undefined ? { version: wf.version } : {}),
+      input: wf.input,
+      stepName: params.stepName,
+      reason: params.reason,
+      ...(params.signalName !== undefined ? { signalName: params.signalName } : {}),
+      ...(params.reason === "signal" ? { signalPayload: params.signalPayload } : {}),
+    };
   }
 
   async loadRunHistory(

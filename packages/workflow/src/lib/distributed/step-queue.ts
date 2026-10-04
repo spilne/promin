@@ -8,6 +8,8 @@
 // can settle a task.
 // ---------------------------------------------------------------------------
 
+import type { LeaderLease } from "../scheduler/leader-lease.ts";
+
 export type StepTaskStatus = "pending" | "running" | "completed" | "failed";
 
 export interface StepTask {
@@ -171,9 +173,20 @@ export interface StepQueueClaimParams {
  * - `stale` — every task whose last activity (heartbeat, else claim) is
  *   more than `olderThanMs` ago, whoever claimed it.
  */
-export type StepQueueRequeueParams =
+export type StepQueueRequeueParams = (
   | { readonly mode: "worker"; readonly workerId: string }
-  | { readonly mode: "stale"; readonly olderThanMs: number };
+  | { readonly mode: "stale"; readonly olderThanMs: number }
+) & {
+  /**
+   * Fence the sweep with the caller's leader lease. When set, the sweep
+   * changes nothing and rejects with `StaleLeaseError` unless the lease is
+   * still the current lease of its key; the check runs in the same
+   * transaction (or script) as the writes. Queues fence against the lease
+   * store they were configured with (see each implementation's config); a
+   * queue with no lease store configured ignores it.
+   */
+  readonly lease?: LeaderLease;
+};
 
 /** What one `requeueStuck` sweep did. */
 export interface StepQueueRequeueResult {

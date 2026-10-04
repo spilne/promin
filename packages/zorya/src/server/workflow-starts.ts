@@ -11,6 +11,7 @@
 export {
   type WorkflowStartQueue,
   type WorkflowStartRecord,
+  type WorkflowStartClaimRef,
   type WorkerWorkflowSpec,
   InMemoryWorkflowStartQueue,
 } from "@promin/workflow";

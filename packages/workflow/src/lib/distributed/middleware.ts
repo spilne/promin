@@ -5,6 +5,7 @@
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import type { StepTask } from "./step-queue.ts";
 import type { StepContext } from "./step-registry.ts";
+import { retryAsync } from "./retry.ts";
 
 /** The next function in the middleware chain. Call it to proceed. */
 export type NextFn = (ctx: StepContext) => Promise<unknown>;
@@ -66,25 +67,14 @@ export function retryMiddleware(params: {
   /** Time source for backoff waits. Default: `SystemWallClock`. */
   clock?: WallClock;
 }): WorkerMiddleware {
-  return async ({ ctx, next }) => {
-    const { maxRetries, baseDelayMs = 500, when, clock = SystemWallClock } = params;
-    let lastError: unknown;
-
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      try {
-        if (attempt > 0) {
-          await new Promise<void>((r) =>
-            clock.setTimeout(() => r(), baseDelayMs * Math.pow(2, attempt - 1)),
-          );
-        }
-        return await next(ctx);
-      } catch (err) {
-        lastError = err;
-        if (when && !when(err)) throw err; // not retryable
-      }
-    }
-    throw lastError;
-  };
+  const { maxRetries, baseDelayMs = 500, when, clock = SystemWallClock } = params;
+  return ({ ctx, next }) =>
+    retryAsync({
+      policy: { maxRetries, baseDelayMs, ...(when !== undefined && { when }) },
+      clock,
+      signal: ctx.signal,
+      run: () => next(ctx),
+    });
 }
 
 /**

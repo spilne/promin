@@ -94,7 +94,7 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
     expect(state?.status).toBe("suspended");
   });
 
-  it("unrecognized workflow name — scanner skips it silently without crashing", async () => {
+  it("unrecognized workflow name — scanner skips it and reports it once", async () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
 
@@ -120,8 +120,9 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
     await new Promise((r) => setTimeout(r, 200));
     await scanner.stop();
 
-    // No error, no resume — silently skipped
-    expect(errors).toHaveLength(0);
+    // Several scans, one report for the unknown name, no resume.
+    expect(errors).toEqual(["sleep-3"]);
+    expect((await storage.loadWorkflow("sleep-3"))?.status).toBe("suspended");
   });
 
   it("three workflows sleeping — scanner wakes all of them in one scan cycle", async () => {

@@ -40,6 +40,8 @@ export {
   type FenceToken,
   type WorkflowOrderBy,
   type SignalTokenRecord,
+  type WorkflowWakeup,
+  type OrphanedRun,
   type StreamChunk,
   workflowMetadataMatches,
   isStepAttemptStorage,

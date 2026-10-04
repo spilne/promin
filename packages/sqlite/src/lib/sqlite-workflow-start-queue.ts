@@ -7,9 +7,11 @@
 // the demo's concurrency level the immediate-lock pattern is sufficient
 // (the same shape SqliteSchedulerStorage uses for its leader path).
 //
-// Stale-claim recovery: rows in `status='claimed'` past `reclaimAfterMs`
+// Stale-claim recovery: rows in `status='claimed'` whose last heartbeat
+// (the claim time until the first one) is older than `reclaimAfterMs`
 // drop back to pending on the next claim() call so a crashed worker
-// doesn't strand a start indefinitely.
+// doesn't strand a start indefinitely. Every claim gets a fresh
+// `claim_token`; heartbeat and complete only act on the current token.
 //
 // Schema (auto-created on first use):
 //
@@ -23,6 +25,8 @@
 //     enqueued_at   INTEGER NOT NULL,
 //     claimed_at    INTEGER,
 //     claimed_by    TEXT,
+//     claim_token   TEXT,
+//     heartbeat_at  INTEGER,
 //     status        TEXT NOT NULL DEFAULT 'pending'
 //   );
 // ---------------------------------------------------------------------------
@@ -31,6 +35,7 @@ import {
   SystemWallClock,
   type WallClock,
   type WorkerWorkflowSpec,
+  type WorkflowStartClaimRef,
   type WorkflowStartQueue,
   type WorkflowStartRecord,
 } from "@promin/workflow";
@@ -46,6 +51,8 @@ interface Row {
   enqueued_at: number;
   claimed_at: number | null;
   claimed_by: string | null;
+  claim_token: string | null;
+  heartbeat_at: number | null;
   status: string;
 }
 
@@ -53,7 +60,7 @@ export interface SqliteWorkflowStartQueueOptions {
   db: SqliteDatabase;
   /** Override the table name (default: `promin_workflow_starts`). */
   tableName?: string;
-  /** Worker stuck mid-execution — re-claimable after this many ms. Default 60s. */
+  /** A claim with no heartbeat for this many ms is re-claimable. Default 60s. */
   reclaimAfterMs?: number;
   /** Time source for enqueue / claim timestamps and the reclaim cutoff. Default: `SystemWallClock`. */
   clock?: WallClock;
@@ -98,16 +105,32 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
         enqueued_at   INTEGER NOT NULL,
         claimed_at    INTEGER,
         claimed_by    TEXT,
+        claim_token   TEXT,
+        heartbeat_at  INTEGER,
         status        TEXT NOT NULL DEFAULT 'pending'
       )
     `);
+    // Tables created before claim fencing lack these columns. sqlite has
+    // no ADD COLUMN IF NOT EXISTS before 3.35; swallow "duplicate column"
+    // and let any other error propagate.
+    for (const stmt of [
+      `ALTER TABLE ${t} ADD COLUMN claim_token TEXT`,
+      `ALTER TABLE ${t} ADD COLUMN heartbeat_at INTEGER`,
+    ]) {
+      try {
+        this.db.run(stmt);
+      } catch (e) {
+        if (!String(e).includes("duplicate column")) throw e;
+      }
+    }
     // Most claims hit the pending partition — partial index keeps the
     // scan tight even when the queue accumulates completed history.
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_pending ON ${t} (workflow_name, enqueued_at) WHERE status = 'pending'`,
     );
+    this.db.run(`DROP INDEX IF EXISTS ${t}_claimed`);
     this.db.run(
-      `CREATE INDEX IF NOT EXISTS ${t}_claimed ON ${t} (claimed_at) WHERE status = 'claimed'`,
+      `CREATE INDEX IF NOT EXISTS ${t}_heartbeat ON ${t} (heartbeat_at) WHERE status = 'claimed'`,
     );
   }
 
@@ -155,14 +178,7 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
     this.db.run("BEGIN IMMEDIATE");
     try {
       // First, recover stale claims back to pending.
-      const cutoff = now - this._reclaimAfterMs;
-      this.db
-        .query(
-          `UPDATE ${t}
-             SET status = 'pending', claimed_at = NULL, claimed_by = NULL
-           WHERE status = 'claimed' AND claimed_at < ?`,
-        )
-        .run(cutoff);
+      this._sweepStale(now);
 
       // Then find pending starts matching any of the worker's specs.
       // We can't push the version-set match into SQL portably, so we
@@ -181,7 +197,6 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
       const specByName = new Map<string, WorkerWorkflowSpec>();
       for (const spec of params.workflowSpecs) specByName.set(spec.name, spec);
 
-      const idsToClaim: string[] = [];
       for (const row of candidates) {
         if (claimed.length >= params.limit) break;
         const spec = specByName.get(row.workflow_name);
@@ -196,19 +211,24 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
         ) {
           continue;
         }
-        idsToClaim.push(row.id);
-        claimed.push(rowToRecord({ ...row, claimed_at: now, claimed_by: params.workerId ?? null }));
+        claimed.push(
+          rowToRecord({
+            ...row,
+            claimed_at: now,
+            claimed_by: params.workerId ?? null,
+            claim_token: crypto.randomUUID(),
+            heartbeat_at: now,
+          }),
+        );
       }
 
-      if (idsToClaim.length > 0) {
-        const ph = idsToClaim.map(() => "?").join(", ");
-        this.db
-          .query(
-            `UPDATE ${t}
-               SET status = 'claimed', claimed_at = ?, claimed_by = ?
-             WHERE id IN (${ph})`,
-          )
-          .run(now, params.workerId ?? null, ...idsToClaim);
+      const stamp = this.db.query(
+        `UPDATE ${t}
+           SET status = 'claimed', claimed_at = ?, claimed_by = ?, claim_token = ?, heartbeat_at = ?
+         WHERE id = ?`,
+      );
+      for (const rec of claimed) {
+        stamp.run(now, params.workerId ?? null, rec.claimToken!, now, rec.id);
       }
       this.db.run("COMMIT");
     } catch (err) {
@@ -218,27 +238,52 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
     return claimed;
   }
 
-  async complete(id: string): Promise<void> {
-    // Match the in-memory contract: complete() is a hard delete (the
-    // record is no longer in inflight after complete). Predates a
-    // 'completed' status so list() doesn't surface long-finished rows.
-    this.db.query(`DELETE FROM ${this._t} WHERE id = ?`).run(id);
+  async heartbeat(params: WorkflowStartClaimRef): Promise<boolean> {
+    const now = this.clock.currentTimeMs();
+    this.db
+      .query(
+        `UPDATE ${this._t}
+           SET heartbeat_at = ?
+         WHERE id = ? AND status = 'claimed' AND claim_token = ?
+           AND COALESCE(heartbeat_at, claimed_at) >= ?`,
+      )
+      .run(now, params.id, params.claimToken, now - this._reclaimAfterMs);
+    return this._changes() > 0;
+  }
+
+  async complete(params: WorkflowStartClaimRef): Promise<boolean> {
+    // Hard delete, fenced by the claim token: a stale claimant can't
+    // remove the record a newer claimant is running.
+    this.db
+      .query(`DELETE FROM ${this._t} WHERE id = ? AND status = 'claimed' AND claim_token = ?`)
+      .run(params.id, params.claimToken);
+    return this._changes() > 0;
   }
 
   async list(): Promise<WorkflowStartRecord[]> {
     // Sweep stale claims first so the snapshot reflects the current
     // claimable set, matching the in-memory impl's behaviour.
-    const cutoff = this.clock.currentTimeMs() - this._reclaimAfterMs;
-    this.db
-      .query(
-        `UPDATE ${this._t}
-           SET status = 'pending', claimed_at = NULL, claimed_by = NULL
-         WHERE status = 'claimed' AND claimed_at < ?`,
-      )
-      .run(cutoff);
+    this._sweepStale(this.clock.currentTimeMs());
 
     const rows = this.db.query<Row>(`SELECT * FROM ${this._t} ORDER BY enqueued_at ASC`).all();
     return rows.map(rowToRecord);
+  }
+
+  /** Rows touched by the last write on this connection. */
+  private _changes(): number {
+    return this.db.query<{ changes: number }>(`SELECT changes() AS changes`).get()?.changes ?? 0;
+  }
+
+  /** Move claims whose last heartbeat is past the reclaim window back to pending. */
+  private _sweepStale(nowMs: number): void {
+    this.db
+      .query(
+        `UPDATE ${this._t}
+           SET status = 'pending', claimed_at = NULL, claimed_by = NULL,
+               claim_token = NULL, heartbeat_at = NULL
+         WHERE status = 'claimed' AND COALESCE(heartbeat_at, claimed_at) < ?`,
+      )
+      .run(nowMs - this._reclaimAfterMs);
   }
 }
 
@@ -256,5 +301,7 @@ function rowToRecord(r: Row): WorkflowStartRecord {
   }
   if (r.claimed_at !== null) (out as { claimedAt?: number }).claimedAt = r.claimed_at;
   if (r.claimed_by !== null) (out as { claimedBy?: string }).claimedBy = r.claimed_by;
+  if (r.claim_token !== null) (out as { claimToken?: string }).claimToken = r.claim_token;
+  if (r.heartbeat_at !== null) (out as { heartbeatAt?: number }).heartbeatAt = r.heartbeat_at;
   return out;
 }

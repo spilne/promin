@@ -19,10 +19,16 @@ const noRunner = { run: async () => undefined } as unknown as WorkflowRunner;
 function countingStorage(clock: FakeWallClock): { storage: WorkflowStorage; scans: () => number } {
   const storage = new InMemoryWorkflowStorage({ clock });
   let scans = 0;
-  const list = storage.listWorkflows.bind(storage);
-  storage.listWorkflows = (params) => {
+  // Each scan issues one scanner query (an empty store fits on one page).
+  const dueTimers = storage.listDueTimers.bind(storage);
+  storage.listDueTimers = (params) => {
     scans++;
-    return list(params);
+    return dueTimers(params);
+  };
+  const signalWakeups = storage.listSignalWakeups.bind(storage);
+  storage.listSignalWakeups = (params) => {
+    scans++;
+    return signalWakeups(params);
   };
   return { storage, scans: () => scans };
 }

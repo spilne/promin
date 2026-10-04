@@ -6,7 +6,11 @@
 
 import { beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { sql } from "drizzle-orm";
-import { workflowStartQueueTestSuite } from "@promin/workflow/testing";
+import { FakeWallClock } from "@promin/workflow";
+import {
+  workflowStartQueueTestSuite,
+  type WorkflowStartQueueSuiteFactoryParams,
+} from "@promin/workflow/testing";
 import { PgWorkflowStartQueue } from "../pg-workflow-start-queue.ts";
 import { postgresDescribe } from "../test-utils.ts";
 
@@ -18,7 +22,12 @@ postgresDescribe("PgWorkflowStartQueue conformance", (pg) => {
     await pg.db.execute(sql`TRUNCATE TABLE wf_workflow_starts`);
   });
 
-  const factory = async () => new PgWorkflowStartQueue({ db: pg.db });
+  const factory = async (params: WorkflowStartQueueSuiteFactoryParams) =>
+    new PgWorkflowStartQueue({
+      db: pg.db,
+      clock: params.clock,
+      reclaimAfterMs: params.reclaimAfterMs,
+    });
 
   workflowStartQueueTestSuite(factory);
 
@@ -158,16 +167,17 @@ postgresDescribe("PgWorkflowStartQueue conformance", (pg) => {
       });
       expect(claimed).toHaveLength(1);
       expect(claimed[0]!.workflowId).toBe("wf-1");
-      // Complete from B; A's list should reflect the deletion.
-      await b.complete(claimed[0]!.id);
-      const remaining = await a.list();
+      // Complete from A with B's token; B's list should reflect the deletion.
+      expect(await a.complete({ id: claimed[0]!.id, claimToken: claimed[0]!.claimToken! })).toBe(
+        true,
+      );
+      const remaining = await b.list();
       expect(remaining).toHaveLength(0);
     });
 
     it("stale claims drop back to pending after reclaimAfterMs and another worker can pick them up", async () => {
-      // Tight reclaim window so the test runs in milliseconds. Real
-      // deployments use 60s+; we use 50ms here.
-      const q = new PgWorkflowStartQueue({ db: pg.db, reclaimAfterMs: 50 });
+      const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+      const q = new PgWorkflowStartQueue({ db: pg.db, reclaimAfterMs: 50, clock });
       await q.ensureTable();
       await q.enqueue({ workflowId: "stuck-1", workflowName: "wf", input: {} });
 
@@ -179,8 +189,8 @@ postgresDescribe("PgWorkflowStartQueue conformance", (pg) => {
       });
       expect(firstClaim).toHaveLength(1);
 
-      // Wait past the reclaim window.
-      await new Promise((r) => setTimeout(r, 80));
+      // Move past the reclaim window.
+      clock.advance(80);
 
       // Worker B re-claims the stale row.
       const secondClaim = await q.claim({

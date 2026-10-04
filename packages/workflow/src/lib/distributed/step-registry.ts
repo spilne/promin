@@ -16,6 +16,14 @@ export interface StepContext {
   readonly workflowId: string;
   readonly stepName: string;
   readonly attempt: number;
+  /**
+   * Aborted when this worker no longer owns the task: its claim was lost
+   * (a heartbeat found the task reclaimed by another worker after this one
+   * stalled) or the worker is stopping and gave the task back. Anything the
+   * handler does after that is wasted and its result is discarded, so long
+   * handlers should pass the signal on (fetch, child processes) or check it.
+   */
+  readonly signal: AbortSignal;
 }
 
 /**
@@ -33,12 +41,6 @@ export interface WorkerStepOptions {
   retry?: RetryPolicy<TaggedError>;
   /** What to do when the step fails (after retries). Default: "fail". */
   onFailure?: StepFailureStrategy;
-  /** Compensation function — undo side effects during saga rollback. */
-  compensate?: (params: {
-    result: unknown;
-    input: unknown;
-    workflowId: string;
-  }) => Eff<unknown, Throws<unknown>> | Promise<void>;
 }
 
 export interface StepRegistration {

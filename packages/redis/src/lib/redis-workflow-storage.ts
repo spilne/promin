@@ -21,6 +21,8 @@ import type {
   WorkflowOrderBy,
   SignalTokenRecord,
   StreamChunk,
+  WorkflowWakeup,
+  OrphanedRun,
 } from "@promin/workflow";
 import type {
   WorkflowState,
@@ -81,6 +83,10 @@ redis.call('HSET', KEYS[1], 'lockedBy', ARGV[1], 'token', token)
 redis.call('PEXPIRE', KEYS[1], ARGV[2])
 return {1, tostring(token)}
 `;
+
+// PTTL of a lock key (the client surface has no PTTL command).
+// KEYS: [lockKey]
+const PTTL_LUA = `return redis.call('PTTL', KEYS[1])`;
 
 // RELEASE_LOCK: honor the fence token when provided, else fall back to
 // the instanceId check (matches InMemory/Postgres semantics during the
@@ -1693,6 +1699,194 @@ export class RedisWorkflowStorage
           `token mismatch (expected "${current ?? "(no lock)"}", got "${guard.fenceToken}")`,
       });
     }
+  }
+
+  // -- Scanner / recovery queries -------------------------------------------
+  //
+  // Candidates come from the status index sets (ids only), sorted and cut at
+  // the keyset cursor client-side; each candidate's workflow hash and
+  // current-run steps hash are then read in parallel chunks, stopping as
+  // soon as `limit` rows match. Full workflow assembly (tasks, history) is
+  // never loaded.
+
+  /**
+   * Walk the ids in the given status index sets in ascending order after
+   * `afterWorkflowId`, resolving `pick` for each in parallel chunks, and
+   * return the first `limit` non-undefined results in id order.
+   */
+  private async scanStatusIndex<T>(params: {
+    statuses: readonly WorkflowStatus[];
+    limit: number;
+    afterWorkflowId?: string;
+    pick: (workflowId: string) => Promise<T | undefined>;
+  }): Promise<T[]> {
+    const limit = Math.max(0, Math.trunc(params.limit));
+    if (limit === 0) return [];
+    const sets = await Promise.all(
+      params.statuses.map((s) => this.redis.smembers(this.statusIndexKey(s))),
+    );
+    const after = params.afterWorkflowId;
+    const ids = [...new Set(sets.flat())]
+      .filter((id) => after === undefined || id > after)
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+    const out: T[] = [];
+    const chunkSize = Math.max(limit, 32);
+    for (let i = 0; i < ids.length && out.length < limit; i += chunkSize) {
+      const picked = await Promise.all(ids.slice(i, i + chunkSize).map((id) => params.pick(id)));
+      for (const row of picked) {
+        if (row === undefined) continue;
+        out.push(row);
+        if (out.length >= limit) break;
+      }
+    }
+    return out;
+  }
+
+  /** Namespace scoping for the scanners — the same rule `listWorkflows` applies. */
+  private inScannerNamespace(raw: Record<string, string>): boolean {
+    return !this.namespace || raw.namespace === this.namespace;
+  }
+
+  /** Workflow hash + current-run steps of a still-suspended run, sorted by step name. */
+  private async loadSuspendedSteps(
+    workflowId: string,
+  ): Promise<{ raw: Record<string, string>; steps: StepState[] } | undefined> {
+    const raw = await this.redis.hgetall(this.wfKey(workflowId));
+    // The status index can briefly lag the hash; the hash is authoritative.
+    if (!raw || !raw.id || raw.status !== "suspended") return undefined;
+    if (!this.inScannerNamespace(raw)) return undefined;
+    const stepsRaw = await this.redis.hgetall(this.stepsKey(workflowId, Number(raw.run)));
+    const steps = Object.values(stepsRaw ?? {})
+      .map((json) => this.parseStepState(json))
+      .sort((a, b) => (a.stepName < b.stepName ? -1 : a.stepName > b.stepName ? 1 : 0));
+    return { raw, steps };
+  }
+
+  private toWakeup(params: {
+    raw: Record<string, string>;
+    stepName: string;
+    reason: WorkflowWakeup["reason"];
+    signalName?: string;
+    signalPayload?: unknown;
+  }): WorkflowWakeup {
+    const { raw } = params;
+    return {
+      workflowId: raw.id,
+      workflowName: raw.workflowName,
+      ...(raw.version ? { version: raw.version } : {}),
+      input: JSON.parse(raw.input),
+      stepName: params.stepName,
+      reason: params.reason,
+      ...(params.signalName !== undefined ? { signalName: params.signalName } : {}),
+      ...(params.reason === "signal" ? { signalPayload: params.signalPayload } : {}),
+    };
+  }
+
+  async listDueTimers(params: {
+    now: Date;
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<WorkflowWakeup[]> {
+    const nowMs = params.now.getTime();
+    const due = (at: Date | undefined): boolean => at !== undefined && at.getTime() <= nowMs;
+    return this.scanStatusIndex<WorkflowWakeup>({
+      statuses: ["suspended"],
+      limit: params.limit,
+      afterWorkflowId: params.afterWorkflowId,
+      pick: async (workflowId) => {
+        const loaded = await this.loadSuspendedSteps(workflowId);
+        if (!loaded) return undefined;
+        for (const step of loaded.steps) {
+          if (step.status === "sleeping" && due(step.wakeAt)) {
+            return this.toWakeup({ raw: loaded.raw, stepName: step.stepName, reason: "sleep" });
+          }
+          if (step.status === "waiting_for_signal" && due(step.signalTimeoutAt)) {
+            return this.toWakeup({
+              raw: loaded.raw,
+              stepName: step.stepName,
+              reason: "signal-timeout",
+              signalName: step.signalName,
+            });
+          }
+        }
+        return undefined;
+      },
+    });
+  }
+
+  async listSignalWakeups(params: {
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<WorkflowWakeup[]> {
+    return this.scanStatusIndex<WorkflowWakeup>({
+      statuses: ["suspended"],
+      limit: params.limit,
+      afterWorkflowId: params.afterWorkflowId,
+      pick: async (workflowId) => {
+        // Signals first: most suspended runs have none delivered, and that
+        // check is one HGETALL on a usually-missing key.
+        const signals = await this.redis.hgetall(this.signalsKey(workflowId));
+        if (!signals || Object.keys(signals).length === 0) return undefined;
+        const loaded = await this.loadSuspendedSteps(workflowId);
+        if (!loaded) return undefined;
+        for (const step of loaded.steps) {
+          if (step.status !== "waiting_for_signal" || step.signalName === undefined) continue;
+          const json = signals[step.signalName];
+          if (json === undefined) continue;
+          return this.toWakeup({
+            raw: loaded.raw,
+            stepName: step.stepName,
+            reason: "signal",
+            signalName: step.signalName,
+            signalPayload: JSON.parse(json).payload,
+          });
+        }
+        return undefined;
+      },
+    });
+  }
+
+  /**
+   * Locks are keys with a server-side TTL, so a lock that expired is
+   * already gone; a live lock counts as expired at `now` when its
+   * remaining TTL, measured from this client's clock, ends by then.
+   */
+  async listOrphanedRuns(params: {
+    now: Date;
+    updatedBefore: Date;
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<OrphanedRun[]> {
+    const nowMs = params.now.getTime();
+    const beforeMs = params.updatedBefore.getTime();
+    return this.scanStatusIndex<OrphanedRun>({
+      statuses: ["pending", "running"],
+      limit: params.limit,
+      afterWorkflowId: params.afterWorkflowId,
+      pick: async (workflowId) => {
+        const [raw, pttl] = await Promise.all([
+          this.redis.hgetall(this.wfKey(workflowId)),
+          this.redis.eval(PTTL_LUA, 1, this.lockKey(workflowId)) as Promise<number>,
+        ]);
+        if (!raw || !raw.id) return undefined;
+        if (raw.status !== "pending" && raw.status !== "running") return undefined;
+        if (!this.inScannerNamespace(raw)) return undefined;
+        if (this.parseDate(raw.updatedAt).getTime() >= beforeMs) return undefined;
+        // PTTL: -2 = no key, -1 = no expiry (treat as held).
+        const ttl = Number(pttl);
+        if (ttl === -1) return undefined;
+        if (ttl >= 0 && this.clock.currentTimeMs() + ttl > nowMs) return undefined;
+        return {
+          workflowId: raw.id,
+          workflowName: raw.workflowName,
+          ...(raw.version ? { version: raw.version } : {}),
+          status: raw.status,
+          input: JSON.parse(raw.input),
+          ...(raw.metadata ? { metadata: JSON.parse(raw.metadata) } : {}),
+        };
+      },
+    });
   }
 
   // -- Run history ----------------------------------------------------------

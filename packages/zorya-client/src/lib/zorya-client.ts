@@ -283,14 +283,42 @@ export class ZoryaClient {
     return body.starts ?? [];
   }
 
-  /** Mark a claimed workflow-start as done. */
-  async completeWorkflowStart(id: string): Promise<void> {
+  /**
+   * Keep a claimed workflow-start alive. The server re-queues a claim whose
+   * last heartbeat is older than its reclaim window. Returns false when the
+   * claim is no longer current (it went stale and was re-claimed).
+   */
+  async heartbeatWorkflowStart(params: { id: string; claimToken: string }): Promise<boolean> {
+    return this.postStartClaim({ action: "heartbeat-start", ...params });
+  }
+
+  /**
+   * Mark a claimed workflow-start as done. Returns false when the claim
+   * token is stale: the start was re-claimed by another worker and is left
+   * alone.
+   */
+  async completeWorkflowStart(params: { id: string; claimToken: string }): Promise<boolean> {
+    return this.postStartClaim({ action: "complete-start", ...params });
+  }
+
+  private async postStartClaim(params: {
+    action: "heartbeat-start" | "complete-start";
+    id: string;
+    claimToken: string;
+  }): Promise<boolean> {
     const req = new Request(
-      `${this.url}/api/worker-protocol/complete-start/${encodeURIComponent(id)}`,
-      { method: "POST", headers: this.headers },
+      `${this.url}/api/worker-protocol/${params.action}/${encodeURIComponent(params.id)}`,
+      {
+        method: "POST",
+        headers: this.headers,
+        body: JSON.stringify({ claimToken: params.claimToken }),
+      },
     );
     const res = await this.fetch(req);
-    if (!res.ok) throw new Error(`completeWorkflowStart failed: ${res.status}`);
+    const text = await res.text();
+    if (!res.ok) throw new Error(`${params.action} failed: ${res.status} ${text}`);
+    const body = JSON.parse(text) as { ok?: boolean };
+    return body.ok === true;
   }
 }
 
@@ -302,4 +330,6 @@ export interface WorkflowStartClaim {
   readonly metadata?: Record<string, unknown>;
   readonly version?: string;
   readonly enqueuedAt: number;
+  /** Fencing token of this claim — pass it to heartbeat and complete. */
+  readonly claimToken: string;
 }

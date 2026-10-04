@@ -13,20 +13,28 @@
 //   - the worker's `WorkerWorkflowSpec` versions filter is applied in
 //     JS (same shape as the SQLite impl) — it's a small set match
 //     that doesn't compose cleanly into a portable SQL predicate
-//   - stale claims (worker died mid-execution) drop back to pending
-//     after `reclaimAfterMs` so a crashed worker doesn't strand a
-//     start; sweep runs on every `claim()` and `list()`
+//   - every claim stamps a fresh `claim_token` and `heartbeat_at`;
+//     `heartbeat` and `complete` only act on the current token, so a
+//     worker whose claim went stale can't touch the re-claimed start
+//   - claims whose last heartbeat is older than `reclaimAfterMs` drop
+//     back to pending so a crashed worker doesn't strand a start; the
+//     sweep runs on every `claim()` and `list()`
 // ---------------------------------------------------------------------------
 
 import { and, asc, eq, sql } from "drizzle-orm";
-import type { WorkerWorkflowSpec, WorkflowStartQueue, WorkflowStartRecord } from "@promin/workflow";
+import type {
+  WorkerWorkflowSpec,
+  WorkflowStartClaimRef,
+  WorkflowStartQueue,
+  WorkflowStartRecord,
+} from "@promin/workflow";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { type DrizzleDb, ensureTable as ensureTableFromSchema } from "@spilne/perfect-postgres";
 import { workflowStarts } from "./schema.ts";
 
 export interface PgWorkflowStartQueueConfig {
   db: DrizzleDb;
-  /** Worker stuck mid-execution — re-claimable after this many ms. Default 60s. */
+  /** A claim with no heartbeat for this many ms is re-claimable. Default 60s. */
   reclaimAfterMs?: number;
   /**
    * Time source. Default: `SystemWallClock`. Tests pass a `FakeWallClock` for
@@ -87,23 +95,11 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
 
     const claimed: WorkflowStartRecord[] = [];
     const now = this.clock.now();
-    const cutoff = new Date(this.clock.currentTimeMs() - this.reclaimAfterMs).toISOString();
 
-    // postgres-js refuses to bind Date directly against an untyped
-    // parameter; same workaround as `PgStepQueue.requeueStuck` —
-    // ISO-string + ::timestamptz cast.
     await this.db.transaction(async (tx) => {
       // 1. Sweep stale claims back to pending. The partial index on
-      //    (claimed_at) WHERE status='claimed' makes this cheap.
-      await tx
-        .update(workflowStarts)
-        .set({ status: "pending", claimedAt: null, claimedBy: null })
-        .where(
-          and(
-            eq(workflowStarts.status, "claimed"),
-            sql`${workflowStarts.claimedAt} < ${cutoff}::timestamptz`,
-          ),
-        );
+      //    (heartbeat_at) WHERE status='claimed' makes this cheap.
+      await this.sweepStale(tx);
 
       // 2. Find candidate pending rows whose workflow_name matches one
       //    the worker advertises. Version-set match is filtered in JS
@@ -147,7 +143,6 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
       const specByName = new Map<string, WorkerWorkflowSpec>();
       for (const spec of params.workflowSpecs) specByName.set(spec.name, spec);
 
-      const idsToClaim: string[] = [];
       for (const row of candidates) {
         if (claimed.length >= params.limit) break;
         const spec = specByName.get(row.workflowName);
@@ -162,7 +157,6 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
         ) {
           continue;
         }
-        idsToClaim.push(row.id);
         const stamped: WorkflowStartRecord = {
           id: row.id,
           workflowId: row.workflowId,
@@ -170,6 +164,8 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
           input: row.input,
           enqueuedAt: row.enqueuedAt.getTime(),
           claimedAt: now.getTime(),
+          heartbeatAt: now.getTime(),
+          claimToken: crypto.randomUUID(),
           ...(row.version !== null && { version: row.version }),
           ...(row.metadata !== null &&
             row.metadata !== undefined && { metadata: row.metadata as Record<string, unknown> }),
@@ -178,42 +174,68 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
         claimed.push(stamped);
       }
 
-      if (idsToClaim.length > 0) {
-        const idsLiteral = sql.raw(textArrayLiteral(idsToClaim));
-        await tx
-          .update(workflowStarts)
-          .set({
-            status: "claimed",
-            claimedAt: now,
-            claimedBy: params.workerId ?? null,
-          })
-          .where(sql`${workflowStarts.id} = ANY(${idsLiteral})`);
+      if (claimed.length > 0) {
+        // One UPDATE stamps every row with its own token: zip the id and
+        // token arrays with unnest and join on id.
+        const idsLiteral = sql.raw(textArrayLiteral(claimed.map((r) => r.id)));
+        const tokensLiteral = sql.raw(textArrayLiteral(claimed.map((r) => r.claimToken!)));
+        const nowIso = now.toISOString();
+        await tx.execute(sql`
+          UPDATE wf_workflow_starts AS s
+             SET status = 'claimed',
+                 claimed_at = ${nowIso}::timestamptz,
+                 claimed_by = ${params.workerId ?? null},
+                 claim_token = v.token,
+                 heartbeat_at = ${nowIso}::timestamptz
+            FROM unnest(${idsLiteral}, ${tokensLiteral}) AS v(id, token)
+           WHERE s.id = v.id
+        `);
       }
     });
 
     return claimed;
   }
 
-  async complete(id: string): Promise<void> {
-    // Hard delete — matches the in-memory + Sqlite contract. Once a
-    // start is completed the queue no longer needs the row, and
-    // keeping a 'completed' status would just bloat the table.
-    await this.db.delete(workflowStarts).where(eq(workflowStarts.id, id));
+  async heartbeat(params: WorkflowStartClaimRef): Promise<boolean> {
+    // A claim already past the reclaim window is lost even if no sweep
+    // has moved it back to pending yet.
+    const nowIso = this.clock.now().toISOString();
+    const cutoff = this.cutoffIso();
+    const rows = await this.db
+      .update(workflowStarts)
+      .set({ heartbeatAt: sql`${nowIso}::timestamptz` })
+      .where(
+        and(
+          eq(workflowStarts.id, params.id),
+          eq(workflowStarts.status, "claimed"),
+          eq(workflowStarts.claimToken, params.claimToken),
+          sql`${workflowStarts.heartbeatAt} >= ${cutoff}::timestamptz`,
+        ),
+      )
+      .returning({ id: workflowStarts.id });
+    return rows.length > 0;
+  }
+
+  async complete(params: WorkflowStartClaimRef): Promise<boolean> {
+    // Hard delete, fenced by the claim token: a stale claimant can't
+    // remove the row a newer claimant is running.
+    const rows = await this.db
+      .delete(workflowStarts)
+      .where(
+        and(
+          eq(workflowStarts.id, params.id),
+          eq(workflowStarts.status, "claimed"),
+          eq(workflowStarts.claimToken, params.claimToken),
+        ),
+      )
+      .returning({ id: workflowStarts.id });
+    return rows.length > 0;
   }
 
   async list(): Promise<WorkflowStartRecord[]> {
     // Sweep stale claims first so the snapshot reflects the current
     // claimable set, matching the in-memory + Sqlite impls.
-    const cutoff = new Date(this.clock.currentTimeMs() - this.reclaimAfterMs).toISOString();
-    await this.db
-      .update(workflowStarts)
-      .set({ status: "pending", claimedAt: null, claimedBy: null })
-      .where(
-        and(
-          eq(workflowStarts.status, "claimed"),
-          sql`${workflowStarts.claimedAt} < ${cutoff}::timestamptz`,
-        ),
-      );
+    await this.sweepStale(this.db);
 
     const rows = await this.db
       .select()
@@ -236,8 +258,40 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
       }
       if (r.claimedAt !== null) (out as { claimedAt?: number }).claimedAt = r.claimedAt.getTime();
       if (r.claimedBy !== null) (out as { claimedBy?: string }).claimedBy = r.claimedBy;
+      if (r.claimToken !== null) (out as { claimToken?: string }).claimToken = r.claimToken;
+      if (r.heartbeatAt !== null) {
+        (out as { heartbeatAt?: number }).heartbeatAt = r.heartbeatAt.getTime();
+      }
       return out;
     });
+  }
+
+  /**
+   * Reclaim cutoff as an ISO string. postgres-js refuses to bind a Date
+   * against an untyped parameter, so callers cast it with `::timestamptz`
+   * (same workaround as `PgStepQueue.requeueStuck`).
+   */
+  private cutoffIso(): string {
+    return new Date(this.clock.currentTimeMs() - this.reclaimAfterMs).toISOString();
+  }
+
+  /** Move claims whose last heartbeat is past the reclaim window back to pending. */
+  private async sweepStale(db: Pick<DrizzleDb, "update">): Promise<void> {
+    await db
+      .update(workflowStarts)
+      .set({
+        status: "pending",
+        claimedAt: null,
+        claimedBy: null,
+        claimToken: null,
+        heartbeatAt: null,
+      })
+      .where(
+        and(
+          eq(workflowStarts.status, "claimed"),
+          sql`${workflowStarts.heartbeatAt} < ${this.cutoffIso()}::timestamptz`,
+        ),
+      );
   }
 }
 

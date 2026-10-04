@@ -17,6 +17,7 @@ redisDescribe("RedisWorkflowStorage conformance", (redis) => {
     {
       hasJournal: true,
       hasJournaledSuspend: true,
+      hasScannerQueries: true,
       createPeer: (storage) =>
         new RedisWorkflowStorage({ redis: redis.client(), prefix: prefixes.get(storage)! }),
     },

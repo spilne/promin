@@ -29,6 +29,19 @@ export interface WorkflowStartRecord {
   readonly claimedAt?: number;
   /** Worker that claimed the record. */
   readonly claimedBy?: string;
+  /**
+   * Fencing token of the current claim, set on every claimed record.
+   * `heartbeat` and `complete` only act when they carry it.
+   */
+  readonly claimToken?: string;
+  /** Epoch ms. Last heartbeat of the current claim (the claim time until the first one). */
+  readonly heartbeatAt?: number;
+}
+
+/** One claim of a start: the record id plus its claim token. */
+export interface WorkflowStartClaimRef {
+  readonly id: string;
+  readonly claimToken: string;
 }
 
 /** Per-name set of versions a worker can run. */
@@ -50,21 +63,37 @@ export interface WorkflowStartQueue {
    * Claim up to `limit` pending starts the worker can run. A start matches
    * a spec when the names match AND (the start has no version, the spec
    * advertises no specific versions, or the start's version is in the
-   * spec's version set).
+   * spec's version set). Each claimed record carries a fresh `claimToken`.
+   *
+   * A claim whose last heartbeat (or the claim itself, before the first
+   * heartbeat) is older than the queue's reclaim window goes back to
+   * pending and can be claimed again under a new token, so a dead worker
+   * doesn't strand a start. A worker running a start for longer than that
+   * window must `heartbeat` it.
    */
   claim(params: {
     workflowSpecs: readonly WorkerWorkflowSpec[];
     workerId?: string;
     limit: number;
   }): Promise<WorkflowStartRecord[]>;
-  /** Mark a claimed start as done. No-op if id is unknown. */
-  complete(id: string): Promise<void>;
+  /**
+   * Keep a claim alive. Returns false when the claim is no longer current
+   * (it went stale and was reclaimed, or was completed): the worker has
+   * lost the start.
+   */
+  heartbeat(params: WorkflowStartClaimRef): Promise<boolean>;
+  /**
+   * Mark a claimed start as done (removes it). Only the current claim can
+   * complete it: with a stale token or an unknown id it changes nothing
+   * and returns false.
+   */
+  complete(params: WorkflowStartClaimRef): Promise<boolean>;
   /** Snapshot — used by `GET /api/worker-protocol/starts` for debugging. */
   list(): Promise<WorkflowStartRecord[]>;
 }
 
 export interface InMemoryWorkflowStartQueueConfig {
-  /** Worker stuck mid-execution: re-claimable after this many ms. Default 60s. */
+  /** A claim with no heartbeat for this many ms is re-claimable. Default 60s. */
   reclaimAfterMs?: number;
   /** Time source for enqueue / claim stamps and the reclaim cutoff. Default: `SystemWallClock`. */
   clock?: WallClock;
@@ -126,9 +155,12 @@ export class InMemoryWorkflowStartQueue implements WorkflowStartQueue {
         continue;
       }
       this.pending.splice(i, 1);
+      const now = this.clock.currentTimeMs();
       const stamped: WorkflowStartRecord = {
         ...rec,
-        claimedAt: this.clock.currentTimeMs(),
+        claimedAt: now,
+        heartbeatAt: now,
+        claimToken: crypto.randomUUID(),
         ...(params.workerId !== undefined && { claimedBy: params.workerId }),
       };
       this.inflight.set(rec.id, stamped);
@@ -137,8 +169,19 @@ export class InMemoryWorkflowStartQueue implements WorkflowStartQueue {
     return claimed;
   }
 
-  async complete(id: string): Promise<void> {
-    this.inflight.delete(id);
+  async heartbeat(params: WorkflowStartClaimRef): Promise<boolean> {
+    this.reclaimStale();
+    const rec = this.inflight.get(params.id);
+    if (!rec || rec.claimToken !== params.claimToken) return false;
+    this.inflight.set(params.id, { ...rec, heartbeatAt: this.clock.currentTimeMs() });
+    return true;
+  }
+
+  async complete(params: WorkflowStartClaimRef): Promise<boolean> {
+    const rec = this.inflight.get(params.id);
+    if (!rec || rec.claimToken !== params.claimToken) return false;
+    this.inflight.delete(params.id);
+    return true;
   }
 
   async list(): Promise<WorkflowStartRecord[]> {
@@ -150,7 +193,7 @@ export class InMemoryWorkflowStartQueue implements WorkflowStartQueue {
   private reclaimStale(): void {
     const cutoff = this.clock.currentTimeMs() - this.reclaimAfterMs;
     for (const [id, rec] of this.inflight) {
-      if ((rec.claimedAt ?? 0) < cutoff) {
+      if ((rec.heartbeatAt ?? rec.claimedAt ?? 0) < cutoff) {
         this.inflight.delete(id);
         const requeued: WorkflowStartRecord = {
           id: rec.id,

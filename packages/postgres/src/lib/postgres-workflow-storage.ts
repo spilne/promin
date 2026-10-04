@@ -26,6 +26,8 @@ import type {
   FenceGuard,
   SignalTokenRecord,
   StreamChunk,
+  WorkflowWakeup,
+  OrphanedRun,
 } from "@promin/workflow";
 import {
   FenceTokenMismatchError,
@@ -81,6 +83,11 @@ const CANCELLABLE_STATUS_IDS = [
 /** `NOW() + <ms>` evaluated on the server clock. */
 function serverNowPlusMs(ms: number) {
   return sql`NOW() + (${Math.max(0, Math.trunc(ms))}::double precision * INTERVAL '1 millisecond')`;
+}
+
+/** Parse a jsonb column selected as `::text`; SQL NULL stays `null`. */
+function parseJsonText(text: string | null | undefined): unknown {
+  return text == null ? null : JSON.parse(text);
 }
 
 // ---------------------------------------------------------------------------
@@ -1175,6 +1182,160 @@ export class PostgresWorkflowStorage
             ]),
           ),
         );
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Scanner / recovery queries
+  // ---------------------------------------------------------------------------
+  //
+  // Each query is driven from a partial index (sleeping / waiting steps,
+  // or pending / running workflows) and keyset-paginated on workflow_id.
+  // jsonb columns come back as `::text` and are parsed here so the result
+  // doesn't depend on the driver's json type parsers.
+
+  /**
+   * `AND w.namespace = …` when the storage has a configured namespace —
+   * the same scoping `listWorkflows` applies.
+   */
+  private namespaceScope() {
+    return this.config.namespace ? sql` AND w.namespace = ${this.config.namespace}` : sql``;
+  }
+
+  async listDueTimers(params: {
+    now: Date;
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<WorkflowWakeup[]> {
+    const now = params.now.toISOString();
+    const after =
+      params.afterWorkflowId !== undefined
+        ? sql` AND s.workflow_id > ${params.afterWorkflowId}`
+        : sql``;
+    // Both branches hit their own partial index (wake_at / signal_timeout_at),
+    // then join the workflow on its current run while suspended. DISTINCT ON
+    // keeps the smallest due step name per run.
+    const rows = await execRaw(
+      this.db,
+      sql`
+      SELECT DISTINCT ON (d.workflow_id)
+        d.workflow_id, w.workflow_name, w.version, w.input::text AS input_json,
+        d.step_name, d.reason, d.signal_name
+      FROM (
+        SELECT s.workflow_id, s.run, s.step_name, 'sleep' AS reason, NULL::text AS signal_name
+        FROM wf_workflow_steps s
+        WHERE s.status_id = ${StepStatusIds.id.sleeping}
+          AND s.wake_at <= ${now}::timestamptz${after}
+        UNION ALL
+        SELECT s.workflow_id, s.run, s.step_name, 'signal-timeout' AS reason, s.signal_name
+        FROM wf_workflow_steps s
+        WHERE s.status_id = ${StepStatusIds.id.waiting_for_signal}
+          AND s.signal_timeout_at IS NOT NULL
+          AND s.signal_timeout_at <= ${now}::timestamptz${after}
+      ) d
+      JOIN wf_workflows w
+        ON w.workflow_id = d.workflow_id
+       AND w.run = d.run
+       AND w.status_id = ${WorkflowStatusIds.id.suspended}${this.namespaceScope()}
+      ORDER BY d.workflow_id, d.step_name
+      LIMIT ${Math.max(0, Math.trunc(params.limit))}
+    `,
+    );
+    return rows.map((r) => ({
+      workflowId: r.workflow_id,
+      workflowName: r.workflow_name,
+      ...(r.version != null ? { version: r.version } : {}),
+      input: parseJsonText(r.input_json),
+      stepName: r.step_name,
+      reason: r.reason as "sleep" | "signal-timeout",
+      ...(r.signal_name != null ? { signalName: r.signal_name } : {}),
+    }));
+  }
+
+  async listSignalWakeups(params: {
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<WorkflowWakeup[]> {
+    const after =
+      params.afterWorkflowId !== undefined
+        ? sql` AND s.workflow_id > ${params.afterWorkflowId}`
+        : sql``;
+    // Waiting steps (partial index on (workflow_id, signal_name)) joined to
+    // the delivered signal under the same name and to the workflow's
+    // current, suspended run.
+    const rows = await execRaw(
+      this.db,
+      sql`
+      SELECT DISTINCT ON (s.workflow_id)
+        s.workflow_id, w.workflow_name, w.version, w.input::text AS input_json,
+        s.step_name, s.signal_name, g.payload::text AS payload_json
+      FROM wf_workflow_steps s
+      JOIN wf_workflows w
+        ON w.workflow_id = s.workflow_id
+       AND w.run = s.run
+       AND w.status_id = ${WorkflowStatusIds.id.suspended}${this.namespaceScope()}
+      JOIN wf_workflow_signals g
+        ON g.workflow_id = s.workflow_id
+       AND g.signal_name = s.signal_name
+      WHERE s.status_id = ${StepStatusIds.id.waiting_for_signal}${after}
+      ORDER BY s.workflow_id, s.step_name
+      LIMIT ${Math.max(0, Math.trunc(params.limit))}
+    `,
+    );
+    return rows.map((r) => ({
+      workflowId: r.workflow_id,
+      workflowName: r.workflow_name,
+      ...(r.version != null ? { version: r.version } : {}),
+      input: parseJsonText(r.input_json),
+      stepName: r.step_name,
+      reason: "signal" as const,
+      signalName: r.signal_name,
+      signalPayload: parseJsonText(r.payload_json),
+    }));
+  }
+
+  /**
+   * Lock state comes from `wf_workflow_locks`; in the deprecated advisory
+   * lock mode there are no lock rows, so every pending / running run that
+   * matches is returned and the caller's `tryLock` turns away owned ones.
+   */
+  async listOrphanedRuns(params: {
+    now: Date;
+    updatedBefore: Date;
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<OrphanedRun[]> {
+    const after =
+      params.afterWorkflowId !== undefined
+        ? sql` AND w.workflow_id > ${params.afterWorkflowId}`
+        : sql``;
+    const rows = await execRaw(
+      this.db,
+      sql`
+      SELECT w.workflow_id, w.workflow_name, w.version, w.status_id,
+        w.input::text AS input_json, w.metadata::text AS metadata_json
+      FROM wf_workflows w
+      WHERE w.status_id IN (${WorkflowStatusIds.id.pending}, ${WorkflowStatusIds.id.running})
+        AND w.updated_at < ${params.updatedBefore.toISOString()}::timestamptz${after}${this.namespaceScope()}
+        AND NOT EXISTS (
+          SELECT 1 FROM wf_workflow_locks l
+          WHERE l.workflow_id = w.workflow_id
+            AND l.expires_at > ${params.now.toISOString()}::timestamptz
+        )
+      ORDER BY w.workflow_id
+      LIMIT ${Math.max(0, Math.trunc(params.limit))}
+    `,
+    );
+    return rows.map((r) => {
+      const metadata = parseJsonText(r.metadata_json) as Record<string, unknown> | null;
+      return {
+        workflowId: r.workflow_id,
+        workflowName: r.workflow_name,
+        ...(r.version != null ? { version: r.version } : {}),
+        status: WorkflowStatusIds.toName(Number(r.status_id)) as "pending" | "running",
+        input: parseJsonText(r.input_json),
+        ...(metadata != null ? { metadata } : {}),
+      };
     });
   }
 

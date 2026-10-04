@@ -5,15 +5,21 @@
 
 import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { workflowStartQueueTestSuite } from "@promin/workflow/testing";
+import { FakeWallClock } from "@promin/workflow";
+import {
+  workflowStartQueueTestSuite,
+  type WorkflowStartQueueSuiteFactoryParams,
+} from "@promin/workflow/testing";
 import { SqliteWorkflowStartQueue } from "../sqlite-workflow-start-queue.ts";
 
 let counter = 0;
-function freshQueue(): SqliteWorkflowStartQueue {
+function freshQueue(params: WorkflowStartQueueSuiteFactoryParams): SqliteWorkflowStartQueue {
   const db = new Database(":memory:");
   return SqliteWorkflowStartQueue.make({
     db,
     tableName: `promin_workflow_starts_${++counter}`,
+    clock: params.clock,
+    reclaimAfterMs: params.reclaimAfterMs,
   });
 }
 
@@ -41,7 +47,8 @@ describe("SqliteWorkflowStartQueue — persistence", () => {
 
   it("stale claims auto-recover after reclaimAfterMs", async () => {
     const db = new Database(":memory:");
-    const q = SqliteWorkflowStartQueue.make({ db, reclaimAfterMs: 50 });
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const q = SqliteWorkflowStartQueue.make({ db, reclaimAfterMs: 50, clock });
     await q.enqueue({ workflowId: "a", workflowName: "wf", input: {} });
     const first = await q.claim({
       workflowSpecs: [{ name: "wf", versions: [] }],
@@ -51,7 +58,7 @@ describe("SqliteWorkflowStartQueue — persistence", () => {
     expect(first.length).toBe(1);
 
     // No completion — simulate worker crash.
-    await new Promise((r) => setTimeout(r, 80));
+    clock.advance(80);
 
     // Next claim() recovers the stale row and hands it to the new worker.
     const second = await q.claim({
@@ -61,5 +68,41 @@ describe("SqliteWorkflowStartQueue — persistence", () => {
     });
     expect(second.length).toBe(1);
     expect(second[0]?.claimedBy).toBe("live-worker");
+  });
+});
+
+describe("SqliteWorkflowStartQueue — schema upgrade", () => {
+  it("adds the claim fencing columns to a table created without them", async () => {
+    const db = new Database(":memory:");
+    db.run(`
+      CREATE TABLE promin_workflow_starts (
+        id            TEXT PRIMARY KEY,
+        workflow_id   TEXT NOT NULL,
+        workflow_name TEXT NOT NULL,
+        version       TEXT,
+        input         TEXT NOT NULL,
+        metadata      TEXT,
+        enqueued_at   INTEGER NOT NULL,
+        claimed_at    INTEGER,
+        claimed_by    TEXT,
+        status        TEXT NOT NULL DEFAULT 'pending'
+      )
+    `);
+    db.run(
+      `INSERT INTO promin_workflow_starts (id, workflow_id, workflow_name, input, enqueued_at)
+       VALUES ('old-1', 'wf-old', 'wf', '{}', 1)`,
+    );
+
+    const q = SqliteWorkflowStartQueue.make({ db });
+    const [rec] = await q.claim({
+      workflowSpecs: [{ name: "wf", versions: [] }],
+      workerId: "w1",
+      limit: 1,
+    });
+    expect(rec?.id).toBe("old-1");
+    expect(typeof rec?.claimToken).toBe("string");
+    expect(await q.heartbeat({ id: "old-1", claimToken: rec!.claimToken! })).toBe(true);
+    expect(await q.complete({ id: "old-1", claimToken: rec!.claimToken! })).toBe(true);
+    expect(await q.list()).toEqual([]);
   });
 });
