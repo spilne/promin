@@ -151,7 +151,8 @@ describe("retry backoff — transition and middleware retries wait on the clock"
     await m.start({ id: "rt-1", context: { n: 0 } });
     const sent = m.send({ id: "rt-1", event: "flip" });
 
-    await waitFor(() => clock.pendingCount() === 1);
+    // The backoff timer plus the send's lock heartbeat.
+    await waitFor(() => clock.pendingCount() === 2);
     expect(attempts).toBe(1);
     clock.advance(499);
     expect(attempts).toBe(1);
@@ -187,15 +188,102 @@ describe("retry backoff — transition and middleware retries wait on the clock"
       (err: Error) => err.message,
     );
 
+    // Pending timers: the backoff plus the send's lock heartbeat.
     // 1st failure → 1s backoff on the clock.
-    await waitFor(() => clock.pendingCount() === 1);
+    await waitFor(() => clock.pendingCount() === 2);
     clock.advance(1_000);
     // 2nd failure → 2s backoff.
-    await waitFor(() => calls === 2 && clock.pendingCount() === 1);
+    await waitFor(() => calls === 2 && clock.pendingCount() === 2);
     clock.advance(2_000);
     // 3rd failure happens 3s in — past the 1.5s budget, so no further retry.
     expect(await outcome).toBe("always failing");
     expect(calls).toBe(3);
     expect(clock.pendingCount()).toBe(0);
+  });
+});
+
+describe("lock heartbeat — a send's lock is extended on the clock", () => {
+  type Slow = {
+    idle: { context: { n: number }; transitions: { work: "done" } };
+    done: { context: { n: number }; transitions: {} };
+  };
+
+  function slowMachine(params: { clock: FakeWallClock; storage: InMemoryStateMachineStorage }) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let entered = false;
+    const m = stateMachine<Slow>({ name: "slow", storage: params.storage, clock: params.clock })
+      .state("idle")
+      .state("done", { terminal: true })
+      .on("work", {
+        from: "idle",
+        to: "done",
+        action: async (ctx: { n: number }) => {
+          entered = true;
+          await gate;
+          return { n: ctx.n + 1 };
+        },
+      })
+      .initial("idle")
+      .build();
+    return { m, release: () => release(), entered: () => entered };
+  }
+
+  it("a send that outlives the 30s lease keeps its lock and saves", async () => {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryStateMachineStorage({ clock });
+    const { m, release, entered } = slowMachine({ clock, storage });
+    await m.start({ id: "hb-1", context: { n: 0 } });
+
+    const sent = m.send({ id: "hb-1", event: "work" });
+    await waitFor(entered);
+    // Two minutes in 10s beats: each beat pushes the lease 30s ahead.
+    for (let i = 0; i < 12; i++) {
+      clock.advance(10_000);
+      await Promise.resolve();
+    }
+    expect(await storage.tryLock({ id: "hb-1", durationMs: 30_000 })).toBeNull();
+
+    release();
+    await sent;
+    expect(await m.getState("hb-1")).toEqual({ current: "done", context: { n: 1 } });
+    // Released after the send, and the heartbeat stopped with it.
+    expect(clock.pendingCount()).toBe(0);
+    expect(await storage.tryLock({ id: "hb-1", durationMs: 30_000 })).not.toBeNull();
+  });
+
+  it("a send whose heartbeat finds the lock lost does not save", async () => {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryStateMachineStorage({ clock });
+    storage.extendLock = async () => false;
+    const { m, release, entered } = slowMachine({ clock, storage });
+    await m.start({ id: "hb-2", context: { n: 0 } });
+
+    const sent = m.send({ id: "hb-2", event: "work" });
+    const outcome = sent.then(
+      () => "resolved",
+      (err: Error) => err.message,
+    );
+    await waitFor(entered);
+    clock.advance(10_000);
+    await Promise.resolve();
+
+    release();
+    expect(await outcome).toBe("Machine hb-2 lock expired before the transition was saved");
+    expect(await m.getState("hb-2")).toEqual({ current: "idle", context: { n: 0 } });
+    expect(await m.getHistory("hb-2")).toEqual([]);
+  });
+
+  it("a holder whose lease lapsed can neither extend nor release the next holder's lock", async () => {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryStateMachineStorage({ clock });
+    const stale = await storage.tryLock({ id: "hb-3", durationMs: 30_000 });
+    clock.advance(30_000);
+    const current = await storage.tryLock({ id: "hb-3", durationMs: 30_000 });
+    expect(current).not.toBeNull();
+
+    expect(await storage.extendLock({ id: "hb-3", token: stale!, durationMs: 30_000 })).toBe(false);
+    await storage.releaseLock({ id: "hb-3", token: stale! });
+    expect(await storage.tryLock({ id: "hb-3", durationMs: 30_000 })).toBeNull();
   });
 });

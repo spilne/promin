@@ -13,7 +13,11 @@ import type {
   TransitionTo,
 } from "./state-machine-types.ts";
 import { transitionTo } from "./state-machine-types.ts";
-import { type StateMachineStorage, InMemoryStateMachineStorage } from "./state-machine-storage.ts";
+import {
+  type StateMachineLockToken,
+  type StateMachineStorage,
+  InMemoryStateMachineStorage,
+} from "./state-machine-storage.ts";
 import type { RetryPolicy } from "../shared/retry-policy.ts";
 import { type TimerHandle, type WallClock, SystemWallClock } from "../shared/wall-clock.ts";
 import type { SchemaParser } from "@spilne/perfect-core";
@@ -322,6 +326,19 @@ export class StateMachineBuilder<S, Events = void> {
 /** Sweep idle rate-limit windows once this many machine ids are tracked. */
 const RATE_WINDOW_SWEEP_THRESHOLD = 1024;
 
+/** Lease length of a machine lock; the heartbeat keeps extending it. */
+const LOCK_DURATION_MS = 30_000;
+/** Heartbeat period: three beats per lease, so one missed beat is harmless. */
+const LOCK_HEARTBEAT_MS = 10_000;
+
+/** A held machine lock with its running heartbeat. */
+interface HeldMachineLock {
+  readonly token: StateMachineLockToken;
+  readonly heartbeat: TimerHandle;
+  /** Set once a heartbeat finds the lock expired or taken over. */
+  lost: boolean;
+}
+
 export class StateMachineInstance<S, Events = void> {
   /** Per-machine send timestamps (clock ms) inside the last second. */
   private recentSendTimestamps = new Map<string, number[]>();
@@ -385,8 +402,8 @@ export class StateMachineInstance<S, Events = void> {
       data = result.data;
     }
 
-    const locked = await this.storage.tryLock(id, 30_000);
-    if (!locked) throw new Error(`Machine ${id} is locked`);
+    const lock = await this.acquireLock(id);
+    if (!lock) throw new Error(`Machine ${id} is locked`);
 
     // The pending timeout stays armed until the transition commits: a send
     // rejected by a guard, a missing transition or a failing action leaves
@@ -408,10 +425,10 @@ export class StateMachineInstance<S, Events = void> {
         );
       }
 
-      // Check limits
+      // Check limits. The revision counts committed transitions, so the
+      // lifetime limit costs nothing per send however long the history is.
       if (this.limits?.maxTransitions) {
-        const events = await this.storage.loadEvents(id);
-        if (events.length >= this.limits.maxTransitions) {
+        if (machine.revision >= this.limits.maxTransitions) {
           throw new Error(
             `Machine ${id} exceeded max transitions limit (${this.limits.maxTransitions})`,
           );
@@ -520,10 +537,12 @@ export class StateMachineInstance<S, Events = void> {
             await currentStateConfig.onExit(machine.context, data);
           }
 
+          assertLockHeld({ id, lock });
           await this.storage.transition({
             id,
             from: txCtx.from,
             to: txCtx.to,
+            expectedRevision: machine.revision,
             event,
             context: txCtx.context,
             eventData: txCtx.eventData,
@@ -546,8 +565,38 @@ export class StateMachineInstance<S, Events = void> {
       }
     } finally {
       this.settleTimeoutAfterSend({ id, fromState, committedTo, pendingTimeoutDueAt });
-      await this.storage.releaseLock(id);
+      await this.releaseLock({ id, lock });
     }
+  }
+
+  /**
+   * Take `id`'s lock and start its heartbeat: the lease is extended every
+   * `LOCK_HEARTBEAT_MS` on `clock` while hooks, actions and the save run,
+   * so a slow send keeps its lock instead of losing it at the first expiry.
+   * Returns `null` when another holder has the lock.
+   */
+  private async acquireLock(id: string): Promise<HeldMachineLock | null> {
+    const token = await this.storage.tryLock({ id, durationMs: LOCK_DURATION_MS });
+    if (token === null) return null;
+    const heartbeat = this.clock.setInterval(() => {
+      this.storage.extendLock({ id, token, durationMs: LOCK_DURATION_MS }).then(
+        (held) => {
+          if (!held) lock.lost = true;
+        },
+        // A failed beat is retried by the next one; a lease that expires
+        // meanwhile makes that next beat report the loss.
+        () => {},
+      );
+    }, LOCK_HEARTBEAT_MS);
+    heartbeat.unref?.();
+    const lock: HeldMachineLock = { token, heartbeat, lost: false };
+    return lock;
+  }
+
+  /** Stop the heartbeat and release the lock (a no-op once taken over). */
+  private async releaseLock(params: { id: string; lock: HeldMachineLock }): Promise<void> {
+    params.lock.heartbeat.clear();
+    await this.storage.releaseLock({ id: params.id, token: params.lock.token });
   }
 
   /**
@@ -653,8 +702,8 @@ export class StateMachineInstance<S, Events = void> {
     const cfg = this.states.get(fromState)?.timeout;
     if (!cfg) return false;
 
-    const locked = await this.storage.tryLock(id, 30_000);
-    if (!locked) return false;
+    const lock = await this.acquireLock(id);
+    if (!lock) return false;
     try {
       const machine = await this.storage.load(id);
       if (!machine) return false;
@@ -688,10 +737,12 @@ export class StateMachineInstance<S, Events = void> {
           const fromConfig = this.states.get(fromState);
           if (fromConfig?.onExit) await fromConfig.onExit(machine.context, undefined);
 
+          assertLockHeld({ id, lock });
           await this.storage.transition({
             id,
             from: fromState,
             to: cfg.target,
+            expectedRevision: machine.revision,
             event: eventName,
             context: machine.context,
           });
@@ -716,7 +767,7 @@ export class StateMachineInstance<S, Events = void> {
       }
       return true;
     } finally {
-      await this.storage.releaseLock(id);
+      await this.releaseLock({ id, lock });
     }
   }
 
@@ -762,6 +813,17 @@ export class StateMachineInstance<S, Events = void> {
     params?: { limit?: number; offset?: number },
   ): Promise<TransitionEvent[]> {
     return this.storage.loadEvents(id, params);
+  }
+}
+
+/**
+ * Refuse to save once the heartbeat has seen the lock lost: another sender
+ * may hold it now. The compare-and-set in `transition` would reject a stale
+ * save anyway; this fails earlier with a clearer error.
+ */
+function assertLockHeld(params: { id: string; lock: HeldMachineLock }): void {
+  if (params.lock.lost) {
+    throw new Error(`Machine ${params.id} lock expired before the transition was saved`);
   }
 }
 

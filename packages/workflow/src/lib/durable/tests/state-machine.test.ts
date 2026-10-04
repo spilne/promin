@@ -325,7 +325,7 @@ describe("StateMachine", () => {
 
   it("locking prevents concurrent sends", async () => {
     // Manually lock the machine
-    await storage.tryLock("locked-1", 60_000);
+    const token = await storage.tryLock({ id: "locked-1", durationMs: 60_000 });
 
     const machine = createTrafficLight(storage);
     await machine.start({ id: "locked-1", context: { count: 0 } });
@@ -335,7 +335,7 @@ describe("StateMachine", () => {
     );
 
     // Release and retry
-    await storage.releaseLock("locked-1");
+    await storage.releaseLock({ id: "locked-1", token: token! });
     await machine.send({ id: "locked-1", event: "next" });
 
     const state = await machine.getState("locked-1");

@@ -65,6 +65,12 @@ export interface MachineState {
   readonly context: unknown;
   readonly version?: string;
   readonly metadata?: Record<string, unknown>;
+  /**
+   * Number of committed transitions. Starts at 0 and goes up by one per
+   * `transition`, which compares it (with `current`) before writing. Equal
+   * to the length of the machine's event history.
+   */
+  readonly revision: number;
   readonly createdAt: Date;
   readonly updatedAt: Date;
 }

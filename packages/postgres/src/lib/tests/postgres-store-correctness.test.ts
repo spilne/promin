@@ -187,29 +187,43 @@ postgresDescribe("PostgresWorkflowStorage store correctness", { migrate }, (pg) 
       const a = new PgStateMachineStorage(pg.db);
       const b = new PgStateMachineStorage(pg.db);
 
-      expect(await a.tryLock("m1", 30_000)).toBe(true);
-      expect(await a.tryLock("m1", 30_000)).toBe(false);
-      expect(await b.tryLock("m1", 30_000)).toBe(false);
+      const token = await a.tryLock({ id: "m1", durationMs: 30_000 });
+      expect(token).not.toBeNull();
+      expect(await a.tryLock({ id: "m1", durationMs: 30_000 })).toBeNull();
+      expect(await b.tryLock({ id: "m1", durationMs: 30_000 })).toBeNull();
 
-      await b.releaseLock("m1"); // not the holder — no effect
-      expect(await b.tryLock("m1", 30_000)).toBe(false);
+      await b.releaseLock({ id: "m1", token: "not-the-holder" }); // no effect
+      expect(await b.tryLock({ id: "m1", durationMs: 30_000 })).toBeNull();
 
-      await a.releaseLock("m1");
-      expect(await b.tryLock("m1", 30_000)).toBe(true);
+      await a.releaseLock({ id: "m1", token: token! });
+      expect(await b.tryLock({ id: "m1", durationMs: 30_000 })).not.toBeNull();
     });
 
     it("an expired lease can be taken over", async () => {
       const a = new PgStateMachineStorage(pg.db);
       const b = new PgStateMachineStorage(pg.db);
-      expect(await a.tryLock("m2", 1)).toBe(true);
+      expect(await a.tryLock({ id: "m2", durationMs: 1 })).not.toBeNull();
       await new Promise((r) => setTimeout(r, 30));
-      expect(await b.tryLock("m2", 30_000)).toBe(true);
+      expect(await b.tryLock({ id: "m2", durationMs: 30_000 })).not.toBeNull();
+    });
+
+    it("extendLock moves expires_at on the server clock", async () => {
+      const a = new PgStateMachineStorage(pg.db);
+      const token = await a.tryLock({ id: "m4", durationMs: 1_000 });
+      expect(await a.extendLock({ id: "m4", token: token!, durationMs: 600_000 })).toBe(true);
+      const [row] = (await pg.sql`
+        SELECT expires_at > NOW() + INTERVAL '5 minutes' AS extended
+        FROM sm_machine_locks WHERE machine_id = 'm4'
+      `) as unknown as Array<{ extended: boolean }>;
+      expect(row?.extended).toBe(true);
     });
 
     it("concurrent tryLock calls produce one winner", async () => {
       const instances = Array.from({ length: 6 }, () => new PgStateMachineStorage(pg.db));
-      const results = await Promise.all(instances.map((i) => i.tryLock("m3", 30_000)));
-      expect(results.filter(Boolean)).toHaveLength(1);
+      const results = await Promise.all(
+        instances.map((i) => i.tryLock({ id: "m3", durationMs: 30_000 })),
+      );
+      expect(results.filter((t) => t !== null)).toHaveLength(1);
     });
   });
 });

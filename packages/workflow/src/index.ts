@@ -179,6 +179,7 @@ export {
   StateMachineVersionMismatchError,
   TIMEOUT_EVENT,
   type StateMachineStorage,
+  type StateMachineLockToken,
   InMemoryStateMachineStorage,
   type MachineSnapshot,
   type MachineState,
