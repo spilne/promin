@@ -45,13 +45,28 @@ export function createWorkflowStorageHandler(
     distinctWorkflowTypes: (p) => storage.distinctWorkflowTypes(p),
     distinctNamespaces: () => storage.distinctNamespaces(),
     cancelWorkflow: (p) => storage.cancelWorkflow(p.workflowId, p.options, p.guard),
-    createWorkflow: (p) => storage.createWorkflow(p),
+    createWorkflow: (p) => {
+      const { guard, ...params } = p;
+      return storage.createWorkflow(params, guard);
+    },
     findWorkflowByIdempotencyKey: (p) => storage.findWorkflowByIdempotencyKey(p),
-    saveStepResult: (p) => storage.saveStepResult(p, p.guard),
+    saveStepResult: (p) => {
+      const { guard, ...params } = p;
+      return storage.saveStepResult(params, guard);
+    },
     batchSaveStepResults: (p) => storage.batchSaveStepResults(p.records, p.guard),
-    saveStepFailure: (p) => storage.saveStepFailure(p, p.guard),
-    saveTaskResult: (p) => storage.saveTaskResult(p, p.guard),
-    saveTaskFailure: (p) => storage.saveTaskFailure(p, p.guard),
+    saveStepFailure: (p) => {
+      const { guard, ...params } = p;
+      return storage.saveStepFailure(params, guard);
+    },
+    saveTaskResult: (p) => {
+      const { guard, ...params } = p;
+      return storage.saveTaskResult(params, guard);
+    },
+    saveTaskFailure: (p) => {
+      const { guard, ...params } = p;
+      return storage.saveTaskFailure(params, guard);
+    },
     completeWorkflow: (p) => storage.completeWorkflow(p.workflowId, p.result, p.guard),
     failWorkflow: (p) => storage.failWorkflow(p.workflowId, p.error, p.guard, p.details),
     tripwireWorkflow: async (p) => {
@@ -67,12 +82,12 @@ export function createWorkflowStorageHandler(
       storage.suspendWorkflow(p.workflowId, p.stepName, p.stepUpdate, p.guard),
     deliverSignal: (p) => storage.deliverSignal(p.workflowId, p.signalName, p.payload),
     loadSignals: (p) => storage.loadSignals(p.workflowId),
-    setWorkflowMetadata: (p) => storage.setWorkflowMetadata(p.workflowId, p.patch),
+    setWorkflowMetadata: (p) => storage.setWorkflowMetadata(p.workflowId, p.patch, p.guard),
     tryLock: (p) => storage.tryLock(p.workflowId, p.lockDurationMs),
     tryLockAndLoad: (p) => storage.tryLockAndLoad(p.workflowId, p.lockDurationMs),
     releaseLock: (p) => storage.releaseLock(p.workflowId, p.guard),
     heartbeat: (p) => storage.heartbeat(p.workflowId, p.lockDurationMs, p.guard),
-    startFreshRun: (p) => storage.startFreshRun(p.workflowId),
+    startFreshRun: (p) => storage.startFreshRun(p.workflowId, p.guard),
     loadRunHistory: (p) => storage.loadRunHistory(p.workflowId, p.params),
     resetSteps: async (p) => {
       // Forwarded only if the underlying storage implements it — surface
@@ -102,15 +117,25 @@ export function createWorkflowStorageHandler(
     // -- Journal methods. Feature-detected so backends without journal
     // support surface a clear error instead of silently dropping calls.
     loadJournal: (p) => requireJournal(storage).loadJournal(p.workflowId, p.stepName),
-    appendEntry: (p) => requireJournal(storage).appendEntry(p),
-    appendPendingEntry: (p) => requireSuspend(storage).appendPendingEntry(p),
-    completePendingEntry: (p) => requireSuspend(storage).completePendingEntry(p),
+    appendEntry: (p) => {
+      const { guard, ...params } = p;
+      return requireJournal(storage).appendEntry(params, guard);
+    },
+    appendPendingEntry: (p) => {
+      const { guard, ...params } = p;
+      return requireSuspend(storage).appendPendingEntry(params, guard);
+    },
+    completePendingEntry: (p) => {
+      const { guard, ...params } = p;
+      return requireSuspend(storage).completePendingEntry(params, guard);
+    },
     discardJournalEntries: async (p) => {
       const suspend = requireSuspend(storage);
       if (!suspend.discardJournalEntries) {
         throw new Error("storage does not implement discardJournalEntries");
       }
-      await suspend.discardJournalEntries(p);
+      const { guard, ...params } = p;
+      await suspend.discardJournalEntries(params, guard);
     },
     findDueSleeps: (p) => requireSuspend(storage).findDueSleeps(p),
     findPendingSignal: (p) => requireSuspend(storage).findPendingSignal(p),
@@ -124,7 +149,10 @@ export function createWorkflowStorageHandler(
     findSignalTokenById: (p) => storage.findSignalTokenById(p.tokenId),
     markSignalTokenCompleted: (p) => storage.markSignalTokenCompleted(p),
     listSignalTokensForWorkflow: (p) => storage.listSignalTokensForWorkflow(p.workflowId),
-    appendStreamChunk: (p) => storage.appendStreamChunk(p),
+    appendStreamChunk: (p) => {
+      const { guard, ...params } = p;
+      return storage.appendStreamChunk(params, guard);
+    },
     readStreamChunks: (p) => storage.readStreamChunks(p),
   };
 

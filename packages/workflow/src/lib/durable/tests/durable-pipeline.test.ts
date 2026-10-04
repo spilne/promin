@@ -1738,9 +1738,14 @@ describe("InMemoryWorkflowStorage", () => {
   });
 
   it("heartbeat extends the lock", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const { token } = await storage.tryLock("l4", 1);
+    // A heartbeat on an already-expired lock is rejected, so drive time with
+    // a FakeWallClock: extend before the original expiry, then move past it.
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const { token } = await storage.tryLock("l4", 1_000);
+    clock.advance(500);
     await storage.heartbeat("l4", 60_000, token ? { fenceToken: token } : undefined);
+    clock.advance(1_000);
     expect((await storage.tryLock("l4", 60_000)).acquired).toBe(false);
   });
 

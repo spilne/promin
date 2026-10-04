@@ -721,7 +721,7 @@ function makeCtx<Input, Prev>(params: {
   initialMetadata?: Record<string, unknown>;
   /** Time source for sleep / signal deadlines and activity retry backoff. */
   clock?: WallClock;
-  /** Fence guard passed on the ctx.sleep / ctx.signal suspension writes. */
+  /** Fence guard of the run's lock, passed on every journal, suspend and metadata write. */
   guard?: FenceGuard;
 }): { ctx: JournaledContext<Input, Prev>; unwind: (bodyError: unknown) => Promise<JournalSlot[]> } {
   const {
@@ -805,6 +805,7 @@ function makeCtx<Input, Prev>(params: {
       workflowId,
       stepName,
       ...params,
+      ...(guard !== undefined && { guard }),
     });
   }
 
@@ -1002,15 +1003,18 @@ function makeCtx<Input, Prev>(params: {
       // Fresh-run path — optionally write a pending row, execute, then
       // complete (or fall back to single-phase append).
       if (twoPhase) {
-        await storage.appendPendingEntry({
-          workflowId,
-          stepName,
-          activityIndex,
-          branchPath,
-          activityName: name,
-          payloadHash: payloadHashValue,
-          stepType: "activity",
-        });
+        await storage.appendPendingEntry(
+          {
+            workflowId,
+            stepName,
+            activityIndex,
+            branchPath,
+            activityName: name,
+            payloadHash: payloadHashValue,
+            stepType: "activity",
+          },
+          guard,
+        );
       }
 
       // Exit the journaledBodyScope before running `fn()` — the scope is
@@ -1037,15 +1041,18 @@ function makeCtx<Input, Prev>(params: {
           // Another writer completed the slot first: follow the journal.
           if (!stored.won) return settle(stored.exit);
         } else {
-          await storage.appendEntry({
-            workflowId,
-            stepName,
-            activityIndex,
-            branchPath,
-            activityName: name,
-            payloadHash: payloadHashValue,
-            exit,
-          });
+          await storage.appendEntry(
+            {
+              workflowId,
+              stepName,
+              activityIndex,
+              branchPath,
+              activityName: name,
+              payloadHash: payloadHashValue,
+              exit,
+            },
+            guard,
+          );
         }
         throw err;
       }
@@ -1063,15 +1070,18 @@ function makeCtx<Input, Prev>(params: {
         });
         return settle(stored.exit);
       }
-      await storage.appendEntry({
-        workflowId,
-        stepName,
-        activityIndex,
-        branchPath,
-        activityName: name,
-        payloadHash: payloadHashValue,
-        exit: successExit,
-      });
+      await storage.appendEntry(
+        {
+          workflowId,
+          stepName,
+          activityIndex,
+          branchPath,
+          activityName: name,
+          payloadHash: payloadHashValue,
+          exit: successExit,
+        },
+        guard,
+      );
       return settle(successExit);
     })();
 
@@ -1134,15 +1144,18 @@ function makeCtx<Input, Prev>(params: {
         (duration instanceof Date ? duration : new Date(clock.currentTimeMs() + duration));
 
       if (!recorded) {
-        await suspendStorage.appendPendingEntry({
-          workflowId,
-          stepName,
-          activityIndex,
-          branchPath,
-          activityName: name,
-          stepType: "sleep",
-          wakeAt,
-        });
+        await suspendStorage.appendPendingEntry(
+          {
+            workflowId,
+            stepName,
+            activityIndex,
+            branchPath,
+            activityName: name,
+            stepType: "sleep",
+            wakeAt,
+          },
+          guard,
+        );
       }
 
       // Self-healing replay: if the scanner re-ran us and our wake time has
@@ -1270,15 +1283,18 @@ function makeCtx<Input, Prev>(params: {
           : undefined;
 
       if (!recorded) {
-        await suspendStorage.appendPendingEntry({
-          workflowId,
-          stepName,
-          activityIndex,
-          branchPath,
-          activityName: signalName,
-          stepType: "signal",
-          ...(wakeAt && { wakeAt }),
-        });
+        await suspendStorage.appendPendingEntry(
+          {
+            workflowId,
+            stepName,
+            activityIndex,
+            branchPath,
+            activityName: signalName,
+            stepType: "signal",
+            ...(wakeAt && { wakeAt }),
+          },
+          guard,
+        );
       }
 
       // Self-healing replay: if the scanner re-ran us and our timeout has
@@ -1523,14 +1539,17 @@ function makeCtx<Input, Prev>(params: {
 
       const twoPhase = isJournaledSuspendStorage(storage);
       if (twoPhase) {
-        await storage.appendPendingEntry({
-          workflowId,
-          stepName,
-          activityIndex,
-          branchPath,
-          activityName,
-          stepType: "child",
-        });
+        await storage.appendPendingEntry(
+          {
+            workflowId,
+            stepName,
+            activityIndex,
+            branchPath,
+            activityName,
+            stepType: "child",
+          },
+          guard,
+        );
       }
 
       let result: Output;
@@ -1563,14 +1582,17 @@ function makeCtx<Input, Prev>(params: {
           // Another writer completed the slot first: follow the journal.
           if (!stored.won) return settle(stored.exit);
         } else {
-          await storage.appendEntry({
-            workflowId,
-            stepName,
-            activityIndex,
-            branchPath,
-            activityName,
-            exit,
-          });
+          await storage.appendEntry(
+            {
+              workflowId,
+              stepName,
+              activityIndex,
+              branchPath,
+              activityName,
+              exit,
+            },
+            guard,
+          );
         }
         throw err;
       }
@@ -1585,14 +1607,17 @@ function makeCtx<Input, Prev>(params: {
         });
         return settle(stored.exit);
       }
-      await storage.appendEntry({
-        workflowId,
-        stepName,
-        activityIndex,
-        branchPath,
-        activityName,
-        exit: successExit,
-      });
+      await storage.appendEntry(
+        {
+          workflowId,
+          stepName,
+          activityIndex,
+          branchPath,
+          activityName,
+          exit: successExit,
+        },
+        guard,
+      );
       return settle(successExit);
     })();
 
@@ -1656,13 +1681,16 @@ function makeCtx<Input, Prev>(params: {
 
       if (twoPhase) {
         try {
-          await storage.appendPendingEntry({
-            workflowId,
-            stepName,
-            activityIndex: compIdx,
-            activityName: compName,
-            stepType: "compensation",
-          });
+          await storage.appendPendingEntry(
+            {
+              workflowId,
+              stepName,
+              activityIndex: compIdx,
+              activityName: compName,
+              stepType: "compensation",
+            },
+            guard,
+          );
         } catch {
           // Journal unreachable — nothing to do.
           continue;
@@ -1675,12 +1703,15 @@ function makeCtx<Input, Prev>(params: {
           exit = failureExit(err);
         }
         try {
-          await storage.completePendingEntry({
-            workflowId,
-            stepName,
-            activityIndex: compIdx,
-            exit,
-          });
+          await storage.completePendingEntry(
+            {
+              workflowId,
+              stepName,
+              activityIndex: compIdx,
+              exit,
+            },
+            guard,
+          );
         } catch {
           /* journal unreachable — give up on this one, continue unwind */
           continue;
@@ -1692,22 +1723,28 @@ function makeCtx<Input, Prev>(params: {
         // documented at the journal-suspend layer.
         try {
           await comp.run();
-          await storage.appendEntry({
-            workflowId,
-            stepName,
-            activityIndex: compIdx,
-            activityName: compName,
-            exit: { tag: "Success", value: null },
-          });
-        } catch (err) {
-          await storage
-            .appendEntry({
+          await storage.appendEntry(
+            {
               workflowId,
               stepName,
               activityIndex: compIdx,
               activityName: compName,
-              exit: failureExit(err),
-            })
+              exit: { tag: "Success", value: null },
+            },
+            guard,
+          );
+        } catch (err) {
+          await storage
+            .appendEntry(
+              {
+                workflowId,
+                stepName,
+                activityIndex: compIdx,
+                activityName: compName,
+                exit: failureExit(err),
+              },
+              guard,
+            )
             .catch(() => undefined);
         }
       }
@@ -1811,7 +1848,7 @@ function makeCtx<Input, Prev>(params: {
   const metadataState: Record<string, unknown> = { ...(initialMetadata ?? {}) };
   const writeMetadataPatch = (patch: Record<string, unknown>): void => {
     if (!workflowStorage) return; // tests that drive runJournaledStep without WorkflowStorage skip persistence
-    workflowStorage.setWorkflowMetadata(workflowId, patch).catch((err) => {
+    workflowStorage.setWorkflowMetadata(workflowId, patch, guard).catch((err) => {
       console.warn(
         `[ctx.metadata] failed to persist for workflow ${workflowId}:`,
         err instanceof Error ? err.message : String(err),
@@ -1953,15 +1990,19 @@ async function completeAndReport(params: {
   slot: JournalSlot;
   exit: JournalExit;
   readBack: boolean;
+  guard?: FenceGuard;
 }): Promise<{ won: boolean; exit: JournalExit }> {
-  const { storage, workflowId, stepName, slot, exit, readBack } = params;
-  const result: CompletePendingResult | undefined = await storage.completePendingEntry({
-    workflowId,
-    stepName,
-    activityIndex: slot.activityIndex,
-    branchPath: slot.branchPath,
-    exit,
-  });
+  const { storage, workflowId, stepName, slot, exit, readBack, guard } = params;
+  const result: CompletePendingResult | undefined = await storage.completePendingEntry(
+    {
+      workflowId,
+      stepName,
+      activityIndex: slot.activityIndex,
+      branchPath: slot.branchPath,
+      exit,
+    },
+    guard,
+  );
   if (result) {
     // No stored exit means the entry is gone (purged under us): nothing to
     // follow, keep the local outcome.
@@ -2080,7 +2121,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
   clock?: WallClock;
   /**
    * Fence guard of the runner's lock on this run, passed on the
-   * ctx.sleep / ctx.signal suspension writes.
+   * journal, suspend and metadata writes the step body makes.
    */
   guard?: FenceGuard;
   body: JournaledStepBody<Input, Prev, Output>;
@@ -2160,7 +2201,13 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
   } catch (bodyError) {
     if (runsCompensations(bodyError)) {
       const rolledBack = await unwind(bodyError);
-      await discardFailedAttempt({ storage, workflowId, stepName, rolledBack });
+      await discardFailedAttempt({
+        storage,
+        workflowId,
+        stepName,
+        rolledBack,
+        ...(guard !== undefined && { guard }),
+      });
     }
     throw bodyError;
   }
@@ -2178,8 +2225,9 @@ async function discardFailedAttempt(params: {
   workflowId: string;
   stepName: string;
   rolledBack: readonly JournalSlot[];
+  guard?: FenceGuard;
 }): Promise<void> {
-  const { storage, workflowId, stepName, rolledBack } = params;
+  const { storage, workflowId, stepName, rolledBack, guard } = params;
   const discard = (storage as Partial<JournaledSuspendStorage>).discardJournalEntries;
   if (typeof discard !== "function") return;
   try {
@@ -2196,7 +2244,7 @@ async function discardFailedAttempt(params: {
     }
     for (const slot of rolledBack) add(slot);
     if (slots.size === 0) return;
-    await discard.call(storage, { workflowId, stepName, slots: [...slots.values()] });
+    await discard.call(storage, { workflowId, stepName, slots: [...slots.values()] }, guard);
   } catch {
     // Journal unreachable: the body error is what the caller needs to see.
   }

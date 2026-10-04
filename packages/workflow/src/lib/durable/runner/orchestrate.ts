@@ -23,7 +23,7 @@ import { isAbandonRunExit, isControlFlowExit } from "../step-policy.ts";
 import { withLock, type LockContext } from "../with-lock.ts";
 import { topologicalSort, type DagNode } from "../workflow-dag.ts";
 import { isCancelledRun, isTerminalWorkflowStatus, type WorkflowState } from "../workflow-state.ts";
-import { isTripwireCapableStorage } from "../workflow-storage.ts";
+import { isTripwireCapableStorage, type FenceGuard } from "../workflow-storage.ts";
 import type { Workflow } from "../durable-pipeline.ts";
 import { compensateWorkflow } from "./compensation.ts";
 import type { DagExecutionContext } from "./dag-context.ts";
@@ -210,7 +210,10 @@ async function runChain(params: {
       });
     } catch (err) {
       if (errorTag(err) !== "WorkflowContinueAsNewError") throw err;
-      await ctx.storage.startFreshRun(workflowId);
+      await ctx.storage.startFreshRun(
+        workflowId,
+        lock.fenceToken ? { fenceToken: lock.fenceToken } : undefined,
+      );
       clearQueryHandlers(workflowId);
       input = (err as WorkflowContinueAsNewError).nextInput;
     }
@@ -229,26 +232,31 @@ async function runChain(params: {
  * (a re-run of the parent step) is resumed as-is. Any other create failure
  * propagates. The child then runs under its own lock through the same
  * orchestration loop, inheriting storage, clock, step executor, executor id
- * and runner-level hooks.
+ * and runner-level hooks. `parentGuard` (the parent's lock) fences the
+ * create, so a parent that lost its lock cannot start a child.
  */
 export async function runChildWorkflow(params: {
   readonly runtime: OrchestrationRuntime;
   readonly parentWorkflowId: string;
+  readonly parentGuard?: FenceGuard;
   readonly workflow: Workflow<unknown, unknown>;
   readonly workflowId: string;
   readonly input: unknown;
 }): Promise<unknown> {
   const { runtime, workflow, workflowId, input } = params;
   const def = workflow._definition;
-  const created = await runtime.storage.createWorkflow({
-    workflowId,
-    workflowName: workflow.name,
-    input,
-    workflowType: def.type,
-    parentWorkflowId: params.parentWorkflowId,
-    metadata: def.metadata,
-    version: workflow.version,
-  });
+  const created = await runtime.storage.createWorkflow(
+    {
+      workflowId,
+      workflowName: workflow.name,
+      input,
+      workflowType: def.type,
+      parentWorkflowId: params.parentWorkflowId,
+      metadata: def.metadata,
+      version: workflow.version,
+    },
+    params.parentGuard,
+  );
   // A child that failed is run again from scratch when its parent step is
   // retried; a completed, cancelled or tripwired child answers as stored.
   const existing = created.created ? undefined : created.existing;
@@ -288,7 +296,7 @@ async function runOneOrchestrationCycle(cycle: {
     if (cached) return cached.result;
     const onExpiry = idempotency.onExpiry ?? "fresh-run";
     if (onExpiry === "fresh-run" && (state.status === "completed" || state.status === "failed")) {
-      await ctx.storage.startFreshRun(workflowId);
+      await ctx.storage.startFreshRun(workflowId, guard);
       state = await ctx.storage.loadWorkflow(workflowId);
     }
   }
@@ -347,7 +355,7 @@ async function runOneOrchestrationCycle(cycle: {
       rejectEndedRun(state);
       return completedRunResult({ ctx, state });
     }
-    await ctx.storage.startFreshRun(workflowId);
+    await ctx.storage.startFreshRun(workflowId, guard);
     state = await ctx.storage.loadWorkflow(workflowId);
     loaded.state = state;
   }
@@ -389,7 +397,12 @@ async function runOneOrchestrationCycle(cycle: {
     ...(ctx.version !== undefined && { workflowVersion: ctx.version }),
     ...(ctx.patches !== undefined && { patches: ctx.patches }),
     runChild: (child) =>
-      runChildWorkflow({ runtime: runtimeOf(ctx), parentWorkflowId: workflowId, ...child }),
+      runChildWorkflow({
+        runtime: runtimeOf(ctx),
+        parentWorkflowId: workflowId,
+        ...(guard !== undefined && { parentGuard: guard }),
+        ...child,
+      }),
   };
 
   const retryPolicy = workflowRetryPolicy(ctx);

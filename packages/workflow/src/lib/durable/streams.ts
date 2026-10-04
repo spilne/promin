@@ -14,7 +14,7 @@
 // the storage layer treats payloads as JSON.
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage, StreamChunk } from "./workflow-storage.ts";
+import type { FenceGuard, WorkflowStorage, StreamChunk } from "./workflow-storage.ts";
 
 /** Direction of a stream — convention only, see file header. */
 export type StreamKind = "output" | "input";
@@ -75,20 +75,26 @@ export function defineInputStream<T>(opts: DefineStreamOptions): StreamDescripto
 /**
  * Append a chunk on behalf of a workflow body. Source-of-truth wrapper
  * over `storage.appendStreamChunk` — keeps the `appendedBy` tag stamped
- * correctly without callers having to think about it.
+ * correctly without callers having to think about it. Pass the run's
+ * `guard` (the step's `StepRuntime.guard`) so a worker that lost the run
+ * cannot append.
  */
 export async function appendStreamChunk<T>(params: {
   storage: WorkflowStorage;
   workflowId: string;
   stream: StreamDescriptor<T, "output">;
   payload: T;
+  guard?: FenceGuard;
 }): Promise<{ chunkIndex: number }> {
-  return params.storage.appendStreamChunk({
-    workflowId: params.workflowId,
-    streamId: params.stream.id,
-    payload: params.payload,
-    appendedBy: "workflow",
-  });
+  return params.storage.appendStreamChunk(
+    {
+      workflowId: params.workflowId,
+      streamId: params.stream.id,
+      payload: params.payload,
+      appendedBy: "workflow",
+    },
+    params.guard,
+  );
 }
 
 /**

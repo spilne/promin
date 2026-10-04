@@ -7,7 +7,14 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import type { WorkflowStorage } from "./workflow-storage.ts";
+import {
+  isStepAttemptStorage,
+  isTripwireCapableStorage,
+  type FenceGuard,
+  type StepAttemptStorage,
+  type WorkflowStorage,
+} from "./workflow-storage.ts";
+import type { StepAttemptRecord } from "./workflow-state.ts";
 import {
   isActivityJournalStorage,
   isJournaledSuspendStorage,
@@ -1229,6 +1236,430 @@ export function storageTestSuite(
           ),
         ).rejects.toMatchObject({ _tag: "FenceTokenMismatchError" });
         await peer.releaseLock("fence-reuse", { fenceToken: second.token });
+      });
+    });
+
+    // -------------------------------------------------------------------
+    // fencing — every fenced write, against a stale and an expired token
+    // -------------------------------------------------------------------
+
+    const fenceAt = new Date("2026-01-01T00:00:00.000Z");
+    const suspendOf = (s: WorkflowStorage) => s as WorkflowStorage & JournaledSuspendStorage;
+    const attemptsOf = (s: WorkflowStorage) => s as WorkflowStorage & StepAttemptStorage;
+    const hasSuspend = (s: WorkflowStorage): boolean =>
+      isActivityJournalStorage(s) && isJournaledSuspendStorage(s);
+    const attemptFor = (workflowId: string): StepAttemptRecord => ({
+      workflowId,
+      stepName: "s",
+      attempt: 1,
+      type: "execution",
+      status: "completed",
+      result: 1,
+      durationMs: 1,
+      startedAt: fenceAt,
+      completedAt: fenceAt,
+    });
+    /** Whether `s` records attempts: a probe write must land. */
+    async function recordsAttempts(s: WorkflowStorage): Promise<boolean> {
+      if (!isStepAttemptStorage(s)) return false;
+      await s.saveStepAttempt(attemptFor("fw-attempt-probe"));
+      return (await s.loadStepAttempts("fw-attempt-probe")).length > 0;
+    }
+    /** Everything a fenced write can touch for workflow `id`. */
+    async function fencedSnapshot(s: WorkflowStorage, id: string): Promise<unknown> {
+      return {
+        workflow: await s.loadWorkflow(id),
+        child: await s.loadWorkflow(`${id}-child`),
+        journal: isActivityJournalStorage(s) ? await s.loadJournal(id, "j") : [],
+        stream: await s.readStreamChunks({ workflowId: id, streamId: "out" }),
+        attempts: isStepAttemptStorage(s) ? await s.loadStepAttempts(id) : [],
+        runs: await s.loadRunHistory(id),
+      };
+    }
+    const rejectsStale = (write: () => Promise<unknown>) =>
+      expect(write()).rejects.toMatchObject({ _tag: "FenceTokenMismatchError" });
+
+    describe("fencing — every fenced write", () => {
+      interface FencedWriteCase {
+        /** Slug: names the test and the workflow id. */
+        readonly name: string;
+        /** Skip the case when the storage lacks the method. */
+        readonly supported?: (s: WorkflowStorage) => boolean | Promise<boolean>;
+        /** Unfenced setup the write needs (an entry to complete, ...). */
+        readonly seed?: (s: WorkflowStorage, id: string) => Promise<unknown>;
+        readonly write: (s: WorkflowStorage, id: string, guard: FenceGuard) => Promise<unknown>;
+      }
+
+      const cases: FencedWriteCase[] = [
+        {
+          name: "saveStepResult",
+          write: (s, id, g) =>
+            s.saveStepResult(
+              { workflowId: id, stepName: "s", result: 1, durationMs: 1, startedAt: fenceAt },
+              g,
+            ),
+        },
+        {
+          name: "batchSaveStepResults",
+          write: (s, id, g) =>
+            s.batchSaveStepResults(
+              [
+                { workflowId: id, stepName: "a", result: 1, durationMs: 1, startedAt: fenceAt },
+                { workflowId: id, stepName: "b", result: 2, durationMs: 1, startedAt: fenceAt },
+              ],
+              g,
+            ),
+        },
+        {
+          name: "saveStepFailure",
+          write: (s, id, g) =>
+            s.saveStepFailure(
+              { workflowId: id, stepName: "s", error: "boom", durationMs: 1, startedAt: fenceAt },
+              g,
+            ),
+        },
+        {
+          name: "saveTaskResult",
+          write: (s, id, g) =>
+            s.saveTaskResult({ workflowId: id, stepName: "m", taskIndex: 0, result: 1 }, g),
+        },
+        {
+          name: "saveTaskFailure",
+          write: (s, id, g) =>
+            s.saveTaskFailure({ workflowId: id, stepName: "m", taskIndex: 0, error: "boom" }, g),
+        },
+        { name: "completeWorkflow", write: (s, id, g) => s.completeWorkflow(id, "done", g) },
+        { name: "failWorkflow", write: (s, id, g) => s.failWorkflow(id, "boom", g) },
+        {
+          name: "tripwireWorkflow",
+          supported: isTripwireCapableStorage,
+          write: (s, id, g) => s.tripwireWorkflow!(id, "why", g),
+        },
+        { name: "cancelWorkflow", write: (s, id, g) => s.cancelWorkflow(id, undefined, g) },
+        {
+          name: "suspendWorkflow",
+          write: (s, id, g) =>
+            s.suspendWorkflow(id, "s", { status: "sleeping", wakeAt: fenceAt }, g),
+        },
+        {
+          name: "setWorkflowMetadata",
+          write: (s, id, g) => s.setWorkflowMetadata(id, { progress: 1 }, g),
+        },
+        { name: "startFreshRun", write: (s, id, g) => s.startFreshRun(id, g) },
+        {
+          name: "appendStreamChunk",
+          write: (s, id, g) =>
+            s.appendStreamChunk(
+              { workflowId: id, streamId: "out", payload: 1, appendedBy: "workflow" },
+              g,
+            ),
+        },
+        {
+          name: "createWorkflow-child",
+          write: (s, id, g) =>
+            s.createWorkflow(
+              { workflowId: `${id}-child`, workflowName: "child", input: {}, parentWorkflowId: id },
+              g,
+            ),
+        },
+        {
+          name: "saveStepAttempt",
+          supported: recordsAttempts,
+          write: (s, id, g) => attemptsOf(s).saveStepAttempt(attemptFor(id), g),
+        },
+        {
+          name: "appendEntry",
+          supported: isActivityJournalStorage,
+          write: (s, id, g) =>
+            suspendOf(s).appendEntry(
+              {
+                workflowId: id,
+                stepName: "j",
+                activityIndex: 0,
+                activityName: "a",
+                exit: { tag: "Success", value: 1 },
+              },
+              g,
+            ),
+        },
+        {
+          name: "appendPendingEntry",
+          supported: hasSuspend,
+          write: (s, id, g) =>
+            suspendOf(s).appendPendingEntry(
+              {
+                workflowId: id,
+                stepName: "j",
+                activityIndex: 0,
+                activityName: "a",
+                stepType: "activity",
+              },
+              g,
+            ),
+        },
+        {
+          name: "completePendingEntry",
+          supported: hasSuspend,
+          seed: (s, id) =>
+            suspendOf(s).appendPendingEntry({
+              workflowId: id,
+              stepName: "j",
+              activityIndex: 0,
+              activityName: "a",
+              stepType: "activity",
+            }),
+          write: (s, id, g) =>
+            suspendOf(s).completePendingEntry(
+              {
+                workflowId: id,
+                stepName: "j",
+                activityIndex: 0,
+                exit: { tag: "Success", value: 1 },
+              },
+              g,
+            ),
+        },
+        {
+          name: "discardJournalEntries",
+          supported: (s) =>
+            hasSuspend(s) && typeof suspendOf(s).discardJournalEntries === "function",
+          seed: (s, id) =>
+            suspendOf(s).appendEntry({
+              workflowId: id,
+              stepName: "j",
+              activityIndex: 0,
+              activityName: "a",
+              exit: { tag: "Failure", error: "boom" },
+            }),
+          write: (s, id, g) =>
+            suspendOf(s).discardJournalEntries!(
+              { workflowId: id, stepName: "j", slots: [{ activityIndex: 0, branchPath: "" }] },
+              g,
+            ),
+        },
+      ];
+
+      for (const scenario of ["taken-over", "expired"] as const) {
+        const how =
+          scenario === "taken-over"
+            ? "after another holder took the lock over"
+            : "after the lock expired, before any takeover";
+        for (const c of cases) {
+          it(`${c.name}: a stale token is rejected ${how} and writes nothing`, async () => {
+            const s = await getStorage();
+            const peer = await getPeer(s);
+            if (c.supported && !(await c.supported(s))) return;
+            const id = `fw-${scenario}-${c.name}`;
+            await s.createWorkflow({ workflowId: id, workflowName: "t", input: {} });
+            await c.seed?.(s, id);
+
+            const stale = await s.tryLock(id, 1);
+            expect(stale.acquired).toBe(true);
+            if (stale.token === undefined) return; // backend without fencing
+            await sleep(30);
+            const takeover = scenario === "taken-over" ? await peer.tryLock(id, 30_000) : undefined;
+            if (takeover) expect(takeover.acquired).toBe(true);
+
+            const before = await fencedSnapshot(s, id);
+            await rejectsStale(() => c.write(s, id, { fenceToken: stale.token }));
+            expect(await fencedSnapshot(s, id)).toEqual(before);
+
+            // The live holder's token passes the same fence.
+            const live = takeover ?? (await peer.tryLock(id, 30_000));
+            expect(live.acquired).toBe(true);
+            await c.write(peer, id, { fenceToken: live.token });
+            expect(await fencedSnapshot(s, id)).not.toEqual(before);
+            await peer.releaseLock(id, { fenceToken: live.token });
+          });
+        }
+      }
+
+      it("a fenced heartbeat rejects once its lock expired, before any takeover", async () => {
+        const s = await getStorage();
+        const held = await s.tryLock("fw-hb-expired", 1);
+        if (held.token === undefined) return; // backend without fencing
+        await sleep(30);
+        await rejectsStale(() => s.heartbeat("fw-hb-expired", 30_000, { fenceToken: held.token }));
+        // The expired lease was not revived: another worker can take the run.
+        const peer = await getPeer(s);
+        const next = await peer.tryLock("fw-hb-expired", 30_000);
+        expect(next.acquired).toBe(true);
+        await peer.releaseLock("fw-hb-expired", { fenceToken: next.token });
+      });
+    });
+
+    // -------------------------------------------------------------------
+    // zombie worker — a holder stalls past its lease, another takes over
+    // -------------------------------------------------------------------
+
+    describe("zombie worker", () => {
+      it("every write of a stalled holder fails after a takeover; the new holder's state stays intact", async () => {
+        const s = await getStorage();
+        const peer = await getPeer(s);
+        const id = "zombie-1";
+        const journaled = hasSuspend(s);
+        await s.createWorkflow({ workflowId: id, workflowName: "t", input: {} });
+
+        // Worker A holds a short lease and makes progress.
+        const a = await s.tryLock(id, 300);
+        if (a.token === undefined) return; // backend without fencing
+        const aGuard = { fenceToken: a.token };
+        await s.saveStepResult(
+          { workflowId: id, stepName: "one", result: "a", durationMs: 1, startedAt: fenceAt },
+          aGuard,
+        );
+        if (journaled) {
+          await suspendOf(s).appendPendingEntry(
+            {
+              workflowId: id,
+              stepName: "j",
+              activityIndex: 0,
+              activityName: "act",
+              stepType: "activity",
+            },
+            aGuard,
+          );
+        }
+
+        // A stalls past its lease without heartbeating; B takes the run over.
+        await sleep(400);
+        const b = await peer.tryLock(id, 30_000);
+        expect(b.acquired).toBe(true);
+        const bGuard = { fenceToken: b.token };
+        await peer.saveStepResult(
+          { workflowId: id, stepName: "one", result: "b", durationMs: 1, startedAt: fenceAt },
+          bGuard,
+        );
+        if (journaled) {
+          await suspendOf(peer).completePendingEntry(
+            {
+              workflowId: id,
+              stepName: "j",
+              activityIndex: 0,
+              exit: { tag: "Success", value: "b" },
+            },
+            bGuard,
+          );
+        }
+        await peer.setWorkflowMetadata(id, { owner: "b" }, bGuard);
+        const bState = await fencedSnapshot(s, id);
+
+        // A wakes up and carries on as if it still held the run: every
+        // write fails.
+        await rejectsStale(() => s.heartbeat(id, 30_000, aGuard));
+        await rejectsStale(() =>
+          s.saveStepResult(
+            { workflowId: id, stepName: "two", result: "a", durationMs: 1, startedAt: fenceAt },
+            aGuard,
+          ),
+        );
+        await rejectsStale(() =>
+          s.batchSaveStepResults(
+            [{ workflowId: id, stepName: "one", result: "a2", durationMs: 1, startedAt: fenceAt }],
+            aGuard,
+          ),
+        );
+        await rejectsStale(() =>
+          s.saveStepFailure(
+            { workflowId: id, stepName: "two", error: "a", durationMs: 1, startedAt: fenceAt },
+            aGuard,
+          ),
+        );
+        await rejectsStale(() =>
+          s.saveTaskResult({ workflowId: id, stepName: "m", taskIndex: 0, result: "a" }, aGuard),
+        );
+        await rejectsStale(() =>
+          s.saveTaskFailure({ workflowId: id, stepName: "m", taskIndex: 0, error: "a" }, aGuard),
+        );
+        await rejectsStale(() =>
+          s.suspendWorkflow(id, "two", { status: "sleeping", wakeAt: fenceAt }, aGuard),
+        );
+        await rejectsStale(() => s.setWorkflowMetadata(id, { owner: "a" }, aGuard));
+        await rejectsStale(() =>
+          s.appendStreamChunk(
+            { workflowId: id, streamId: "out", payload: "a", appendedBy: "workflow" },
+            aGuard,
+          ),
+        );
+        await rejectsStale(() =>
+          s.createWorkflow(
+            { workflowId: `${id}-child`, workflowName: "child", input: {}, parentWorkflowId: id },
+            aGuard,
+          ),
+        );
+        if (await recordsAttempts(s)) {
+          await rejectsStale(() => attemptsOf(s).saveStepAttempt(attemptFor(id), aGuard));
+        }
+        if (journaled) {
+          const j = suspendOf(s);
+          await rejectsStale(() =>
+            j.completePendingEntry(
+              {
+                workflowId: id,
+                stepName: "j",
+                activityIndex: 0,
+                exit: { tag: "Success", value: "a" },
+              },
+              aGuard,
+            ),
+          );
+          await rejectsStale(() =>
+            j.appendEntry(
+              {
+                workflowId: id,
+                stepName: "j",
+                activityIndex: 1,
+                activityName: "act",
+                exit: { tag: "Success", value: "a" },
+              },
+              aGuard,
+            ),
+          );
+          await rejectsStale(() =>
+            j.appendPendingEntry(
+              {
+                workflowId: id,
+                stepName: "j",
+                activityIndex: 2,
+                activityName: "nap",
+                stepType: "sleep",
+                wakeAt: fenceAt,
+              },
+              aGuard,
+            ),
+          );
+          if (typeof j.discardJournalEntries === "function") {
+            await rejectsStale(() =>
+              j.discardJournalEntries!(
+                { workflowId: id, stepName: "j", slots: [{ activityIndex: 0, branchPath: "" }] },
+                aGuard,
+              ),
+            );
+          }
+        }
+        await rejectsStale(() => s.startFreshRun(id, aGuard));
+        await rejectsStale(() => s.completeWorkflow(id, "a", aGuard));
+        await rejectsStale(() => s.failWorkflow(id, "a", aGuard));
+        if (isTripwireCapableStorage(s)) {
+          await rejectsStale(() => s.tripwireWorkflow(id, "a", aGuard));
+        }
+        await rejectsStale(() => s.cancelWorkflow(id, undefined, aGuard));
+        // A's release is a no-op: B keeps the lock.
+        await s.releaseLock(id, aGuard);
+
+        expect(await fencedSnapshot(s, id)).toEqual(bState);
+        expect((await s.tryLock(id, 30_000)).acquired).toBe(false);
+
+        // B is unaffected and finishes the run.
+        await peer.heartbeat(id, 30_000, bGuard);
+        await peer.completeWorkflow(id, "b", bGuard);
+        const final = (await s.loadWorkflow(id))!;
+        expect(final.status).toBe("completed");
+        expect(final.result).toBe("b");
+        expect(final.steps["one"]?.result).toBe("b");
+        expect(final.steps["two"]).toBeUndefined();
+        expect(final.metadata).toEqual({ owner: "b" });
+        await peer.releaseLock(id, bGuard);
       });
     });
 

@@ -29,11 +29,35 @@ import type {
 export type FenceToken = string;
 
 /**
- * Optional fencing field carried on every mutating write. When the backend
- * supports fencing AND the caller holds a token, the write is rejected
- * if the token doesn't match the current lock. When the backend doesn't
- * support fencing (or the caller doesn't pass a token), the write is
- * accepted — keeping legacy call sites working during migration.
+ * Fencing argument of every write a run's lock holder makes. It is the
+ * trailing `guard` parameter of each fenced method.
+ *
+ * **Fenced write.** With `fenceToken` set, the backend accepts the write
+ * only while the token is the workflow's current lock token and that lock
+ * has not expired. The check runs atomically with the write: in the same
+ * SQL transaction that holds the lock row, in the same Lua script, or in
+ * the same synchronous step. A rejected write throws
+ * `FenceTokenMismatchError` and changes nothing, so the lock cannot move
+ * between the check and the write.
+ *
+ * **Expired locks.** A lock past its expiry fences nothing, whether or not
+ * another worker has taken it over yet. Every fenced write carrying its
+ * token is rejected, `heartbeat` included, so a holder that stalled past
+ * its lease learns it lost the run at its next write. A `releaseLock` with
+ * a stale token never frees a newer holder's lock.
+ *
+ * **Unfenced write.** Without a token (or on a backend that issues none)
+ * the write is accepted as before. Operator actions, external signal
+ * delivery and the scanners write unfenced.
+ *
+ * **Fenced methods.** `saveStepResult`, `batchSaveStepResults`,
+ * `saveStepFailure`, `saveTaskResult`, `saveTaskFailure`,
+ * `completeWorkflow`, `failWorkflow`, `tripwireWorkflow`, `cancelWorkflow`,
+ * `suspendWorkflow`, `setWorkflowMetadata`, `startFreshRun`,
+ * `appendStreamChunk`, `createWorkflow` (fenced on the parent's lock),
+ * `heartbeat`, `StepAttemptStorage.saveStepAttempt`, and the journal writes
+ * `appendEntry`, `appendPendingEntry`, `completePendingEntry` and
+ * `discardJournalEntries`.
  */
 export interface FenceGuard {
   readonly fenceToken?: FenceToken;
@@ -255,37 +279,47 @@ export interface WorkflowStorage {
    * Create a new workflow record. Returns `{ created: false, existing }` on
    * conflict. `parentWorkflowId`, `runSource` and `runSourceId` are persisted
    * and round-trip through `loadWorkflow` and the list filters.
+   *
+   * `guard` fences the create on the parent's lock: a parent run creating
+   * a child passes its own token, and the row is created only while that
+   * token holds `parentWorkflowId`'s live lock. A stale token creates
+   * nothing; whether it rejects or answers `created: false` when the child
+   * already exists is backend-specific. A guard with a token requires
+   * `parentWorkflowId`.
    */
-  createWorkflow(params: {
-    workflowId: string;
-    workflowName: string;
-    input: unknown;
-    workflowType?: string;
-    parentWorkflowId?: string;
-    namespace?: string;
-    metadata?: Record<string, unknown>;
-    version?: string;
-    /**
-     * What kicked this run off — stored as a small int column so backends
-     * can filter / sort by source efficiently. See `RunSource`.
-     */
-    runSource?: import("./workflow-state.ts").RunSource;
-    /** Producer id corresponding to `runSource` (e.g. `scheduleId`). */
-    runSourceId?: string;
-    /**
-     * Per-call idempotency key + expiry. Lets the auto-mint path
-     * (`workflows.trigger()` minting workflowId via `crypto.randomUUID`)
-     * dedup without the caller knowing the workflowId ahead of time. The
-     * partial-unique index on `(namespace, workflowName, idempotencyKey)` guarantees
-     * concurrent creates with the same key resolve to the same row —
-     * `created: false; existing` returns the canonical workflowId.
-     *
-     * Once a key's `idempotencyExpiresAt` has passed it no longer claims the
-     * slot: a create with the same key succeeds and the new row owns it.
-     */
-    idempotencyKey?: string;
-    idempotencyExpiresAt?: Date;
-  }): Promise<{ created: true } | { created: false; existing: WorkflowState }>;
+  createWorkflow(
+    params: {
+      workflowId: string;
+      workflowName: string;
+      input: unknown;
+      workflowType?: string;
+      parentWorkflowId?: string;
+      namespace?: string;
+      metadata?: Record<string, unknown>;
+      version?: string;
+      /**
+       * What kicked this run off — stored as a small int column so backends
+       * can filter / sort by source efficiently. See `RunSource`.
+       */
+      runSource?: import("./workflow-state.ts").RunSource;
+      /** Producer id corresponding to `runSource` (e.g. `scheduleId`). */
+      runSourceId?: string;
+      /**
+       * Per-call idempotency key + expiry. Lets the auto-mint path
+       * (`workflows.trigger()` minting workflowId via `crypto.randomUUID`)
+       * dedup without the caller knowing the workflowId ahead of time. The
+       * partial-unique index on `(namespace, workflowName, idempotencyKey)` guarantees
+       * concurrent creates with the same key resolve to the same row —
+       * `created: false; existing` returns the canonical workflowId.
+       *
+       * Once a key's `idempotencyExpiresAt` has passed it no longer claims the
+       * slot: a create with the same key succeeds and the new row owns it.
+       */
+      idempotencyKey?: string;
+      idempotencyExpiresAt?: Date;
+    },
+    guard?: FenceGuard,
+  ): Promise<{ created: true } | { created: false; existing: WorkflowState }>;
 
   /**
    * Resolve a `(namespace, workflowName, idempotencyKey)` tuple to its workflow row,
@@ -431,7 +465,7 @@ export interface WorkflowStorage {
    */
   tripwireWorkflow?(workflowId: string, reason: unknown, guard?: FenceGuard): Promise<void>;
 
-  /** Suspend the workflow (sleeping or waiting for signal). */
+  /** Suspend the workflow (sleeping or waiting for signal). Fenced by `guard`. */
   suspendWorkflow(
     workflowId: string,
     stepName: string,
@@ -489,8 +523,13 @@ export interface WorkflowStorage {
    * Idempotent on identical patches — replay safely re-applies the same
    * writes without journaling. Cheap to call frequently (one row update).
    * Atomic per call: concurrent patches touching different keys all land.
+   * Fenced by `guard` (the body's run passes its lock token).
    */
-  setWorkflowMetadata(workflowId: string, patch: Record<string, unknown>): Promise<void>;
+  setWorkflowMetadata(
+    workflowId: string,
+    patch: Record<string, unknown>,
+    guard?: FenceGuard,
+  ): Promise<void>;
 
   // -------------------------------------------------------------------------
   // Signal tokens — public-bearer authorization for `deliverSignal`.
@@ -562,13 +601,19 @@ export interface WorkflowStorage {
    * `chunkIndex` (monotonic per `(workflowId, streamId)`). Atomic against
    * concurrent appends: every call gets a distinct index and the indices
    * of a stream stay gap-free (0, 1, 2, …).
+   *
+   * A step appending on behalf of its run passes the run's `guard`;
+   * external appends are unfenced.
    */
-  appendStreamChunk(params: {
-    readonly workflowId: string;
-    readonly streamId: string;
-    readonly payload: unknown;
-    readonly appendedBy: "workflow" | "external";
-  }): Promise<{ readonly chunkIndex: number }>;
+  appendStreamChunk(
+    params: {
+      readonly workflowId: string;
+      readonly streamId: string;
+      readonly payload: unknown;
+      readonly appendedBy: "workflow" | "external";
+    },
+    guard?: FenceGuard,
+  ): Promise<{ readonly chunkIndex: number }>;
 
   /**
    * Read chunks from a stream. Pass `since` (exclusive) to replay from
@@ -635,9 +680,9 @@ export interface WorkflowStorage {
 
   /**
    * Heartbeat to extend a lock (for long-running steps). With a fence
-   * token in `guard`, only the token holder extends: when the lock is gone
-   * or held under another token, the call rejects with
-   * `FenceTokenMismatchError`, which tells the holder it lost the run.
+   * token in `guard`, only the token holder extends a live lock: when the
+   * lock is gone, expired or held under another token, the call rejects
+   * with `FenceTokenMismatchError`, which tells the holder it lost the run.
    * Without a token, a lock not held by this instance is left alone.
    */
   heartbeat(workflowId: string, lockDurationMs: number, guard?: FenceGuard): Promise<void>;
@@ -653,9 +698,12 @@ export interface WorkflowStorage {
    * signals. Old step results remain in run history. Signal tokens and
    * streams are workflow-scoped and survive.
    *
+   * Fenced by `guard` when the lock holder restarts its own run
+   * (continue-as-new, a forced re-run); operator re-runs are unfenced.
+   *
    * Returns the new run number.
    */
-  startFreshRun(workflowId: string): Promise<number>;
+  startFreshRun(workflowId: string, guard?: FenceGuard): Promise<number>;
 
   /**
    * Reset specific step rows back to `pending`, clearing their result /
@@ -877,7 +925,7 @@ export async function batchSaveStepResultsDefault(
  * The engine detects this at runtime via `isStepAttemptStorage()`.
  */
 export interface StepAttemptStorage {
-  /** Append a step attempt record (execution or compensation). */
+  /** Append a step attempt record (execution or compensation). Fenced by `guard`. */
   saveStepAttempt(record: StepAttemptRecord, guard?: FenceGuard): Promise<void>;
 
   /** Load attempt history for a workflow, optionally filtered by step name. */
