@@ -16,6 +16,8 @@ import { createSignalScanner } from "../signal-scanner.ts";
 import { coordinatorLeaderKey } from "../leader-election.ts";
 import type { StepQueue } from "../step-queue.ts";
 import { InMemoryWorkflowStorage } from "../../durable/in-memory-storage.ts";
+import type { WorkflowStorage } from "../../durable/workflow-storage.ts";
+import { WorkflowVersionRegistry } from "../../durable/workflow-version-registry.ts";
 import { workflow } from "../../durable/durable-pipeline.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
 import {
@@ -53,6 +55,20 @@ function wrapQueue(inner: StepQueue, overrides: Partial<StepQueue>): StepQueue {
     requeueStuck: (p) => inner.requeueStuck(p),
     ...overrides,
   };
+}
+
+/** `inner` without `listOrphanedRuns`, so recovery takes the listing fallback. */
+function withoutOrphanQuery(inner: InMemoryWorkflowStorage): WorkflowStorage {
+  return new Proxy(inner, {
+    get(target, prop, receiver) {
+      if (prop === "listOrphanedRuns") return undefined;
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+    has(target, prop) {
+      return prop === "listOrphanedRuns" ? false : Reflect.has(target, prop);
+    },
+  });
 }
 
 const sleepy = workflow<{ n: number }>({ name: "sleepy" })
@@ -272,6 +288,109 @@ describe("leadership-triggered, orphan-only recovery", () => {
     await runner.stopLoop();
     await loop;
     expect(errors).toEqual([]);
+  });
+});
+
+describe("recovery without listOrphanedRuns", () => {
+  /** A one-step saga; its rollback records the run id in `undone`. */
+  function sagaFor(undone: string[]) {
+    return workflow<{ n: number }>({ name: "saga", version: "1" })
+      .step("charge", ({ input }) => succeed(input.n), {
+        compensate: async ({ workflowId }) => {
+          undone.push(workflowId);
+        },
+      })
+      .build();
+  }
+
+  /** A run a dead coordinator left `compensating` after `charge` completed. */
+  async function leaveCompensating(storage: InMemoryWorkflowStorage, workflowId: string) {
+    await storage.createWorkflow({
+      workflowId,
+      workflowName: "saga",
+      input: { n: 1 },
+      version: "1",
+    });
+    await storage.saveStepResult({
+      workflowId,
+      stepName: "charge",
+      result: 1,
+      durationMs: 1,
+      startedAt: new Date(0),
+    });
+    expect(await storage.beginCompensation({ workflowId, error: "declined" })).toBe(true);
+  }
+
+  it("adopts a compensating run and finishes its rollback", async () => {
+    const clock = FakeWallClock.create(0);
+    const inner = new InMemoryWorkflowStorage({ clock });
+    const undone: string[] = [];
+    await leaveCompensating(inner, "comp");
+    clock.advance(60_000);
+
+    const registry = new WorkflowVersionRegistry();
+    registry.register(sagaFor(undone) as never);
+    const errors: DistributedRunnerErrorEvent[] = [];
+    const runner = new DistributedWorkflowRunner({
+      storage: withoutOrphanQuery(inner),
+      stepQueue: new InMemoryStepQueue({ clock }),
+      registry,
+      orphanGraceMs: 30_000,
+      clock,
+      onError: (e) => errors.push(e),
+    });
+    const loop = runner.startLoop();
+    await waitFor(async () => (await inner.loadWorkflow("comp"))?.status === "failed");
+    await runner.stopLoop();
+    await loop;
+
+    expect(undone).toEqual(["comp"]);
+    expect((await inner.loadWorkflow("comp"))?.error).toContain("declined");
+    // At most the adopted run's own failed outcome is reported.
+    expect(errors.every((e) => e.source === "recovery" && e.workflowId === "comp")).toBe(true);
+  });
+
+  it("adopts every orphan across several listing pages, once each", async () => {
+    const clock = FakeWallClock.create(0);
+    const inner = new InMemoryWorkflowStorage({ clock });
+    const undone: string[] = [];
+    // More than one listing page of compensating runs (each adoption moves
+    // one to `failed`, which would shift an offset page) plus pending runs.
+    const compensating = Array.from({ length: 250 }, (_, i) => `c-${String(i).padStart(3, "0")}`);
+    for (const id of compensating) await leaveCompensating(inner, id);
+    for (let i = 0; i < 150; i++) {
+      await inner.createWorkflow({
+        workflowId: `p-${String(i).padStart(3, "0")}`,
+        workflowName: "saga",
+        input: { n: i },
+        version: "1",
+      });
+    }
+    clock.advance(60_000);
+
+    const registry = new WorkflowVersionRegistry();
+    registry.register(sagaFor(undone) as never);
+    const queue = new InMemoryStepQueue({ clock });
+    const runner = new DistributedWorkflowRunner({
+      storage: withoutOrphanQuery(inner),
+      stepQueue: queue,
+      registry,
+      orphanGraceMs: 30_000,
+      clock,
+      onError: () => undefined,
+    });
+    const loop = runner.startLoop();
+    await waitFor(async () => {
+      const failed = await inner.listWorkflows({ status: "failed", limit: 1_000 });
+      return failed.length === 250 && queue.getAllTasks().length === 150;
+    });
+    await runner.stopLoop();
+    await loop;
+
+    expect([...undone].sort()).toEqual(compensating);
+    // Every pending orphan dispatched its first step exactly once.
+    const dispatched = queue.getAllTasks().map((t) => t.workflowId);
+    expect(new Set(dispatched).size).toBe(150);
   });
 });
 

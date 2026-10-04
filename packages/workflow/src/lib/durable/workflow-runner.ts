@@ -70,6 +70,7 @@ export type { StepAttemptFailure } from "./runner/step-body.ts";
 export {
   RecoveryStrategy,
   RecoveryStrategyBuilder,
+  recoverWorkflows,
   type RecoveryResult,
   type StaleTerminationAction,
 } from "./runner/recovery.ts";
@@ -534,10 +535,6 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     void running.catch(() => undefined);
 
     if (first.error instanceof WorkflowLockError && onInFlight === "reject") throw first.error;
-    // Let the run go on until its first real wait (a run on a local
-    // storage reaches its first suspension within one turn), as callers
-    // that re-drive the run right after `start` expect.
-    await yieldToEventLoop();
     return this.handle<Output>(workflowId);
   }
 
@@ -696,13 +693,4 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
  */
 export function createWorkflowRunner(config: WorkflowRunnerConfig): WorkflowRunner {
   return new DefaultWorkflowRunner(config);
-}
-
-/**
- * Yield one event-loop turn (`setImmediate`). An event-loop yield, not time
- * math — no delay is measured, so it does not go through the WallClock (a
- * `FakeWallClock` would never fire it).
- */
-function yieldToEventLoop(): Promise<void> {
-  return new Promise((r) => setImmediate(r));
 }

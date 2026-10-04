@@ -221,11 +221,12 @@ describe("agentAction", () => {
     });
 
     const { runner } = makeRunner();
-    await runner.start({
+    const handle = await runner.start({
       workflow: agent,
       workflowId: "w-isreplay",
       input: { task: "go" },
     });
+    await handle.result({ timeoutMs: 5_000 });
 
     // Plumbing check: the flag arrives as `false` on the very first body
     // pass. Replay-mode behaviour (true after a body re-execution) is
@@ -249,11 +250,12 @@ describe("agentAction", () => {
     });
 
     const { runner } = makeRunner();
-    await runner.start({
+    const handle = await runner.start({
       workflow: agent,
       workflowId: "w-isreplay-procs",
       input: { task: "go" },
     });
+    await handle.result({ timeoutMs: 5_000 });
 
     expect(replayValuesSeen).toEqual([false]);
   });
@@ -272,7 +274,7 @@ describe("agentAction", () => {
     });
 
     const { runner } = makeRunner();
-    await runner.start({
+    const handle = await runner.start({
       workflow: agent,
       workflowId: "w-7",
       input: {
@@ -283,6 +285,7 @@ describe("agentAction", () => {
         ],
       },
     });
+    await handle.result({ timeoutMs: 5_000 });
 
     expect(capturedMessages).toHaveLength(3);
     expect((capturedMessages[0] as { role: string }).role).toBe("user");

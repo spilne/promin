@@ -103,6 +103,7 @@ export {
   createWorkflowRunner,
   RecoveryStrategy,
   RecoveryStrategyBuilder,
+  recoverWorkflows,
   type WorkflowRunner,
   type WorkflowRunnerConfig,
   type WorkflowRunnerRunParams,

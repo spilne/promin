@@ -100,9 +100,9 @@ export interface DistributedRunnerConfig {
    */
   stepWaitTimeoutMs?: number;
   /**
-   * How often the leader looks for orphaned runs (pending / running runs
-   * nobody holds the lock of) after the scan it does on becoming leader.
-   * Default: 60 000.
+   * How often the leader looks for orphaned runs (pending / running /
+   * compensating runs nobody holds the lock of) after the scan it does on
+   * becoming leader. Default: 60 000.
    */
   recoveryIntervalMs?: number;
   /**
@@ -160,6 +160,9 @@ const WORKER_GC_EVERY_N_TICKS = 60;
 
 /** Page size for the orphaned-run scan. */
 const RECOVERY_PAGE_SIZE = 100;
+
+/** Statuses an orphaned run can be adopted from. */
+const RECOVERABLE_STATUSES = ["pending", "running", "compensating"] as const;
 
 /** How a run driven by this instance ended up. */
 type LocalOutcome =
@@ -622,12 +625,14 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
   }
 
   /**
-   * Adopt runs nobody is driving: `pending` / `running` runs whose lock is
-   * free or expired and that haven't been touched for `orphanGraceMs`.
+   * Adopt runs nobody is driving: `pending` / `running` / `compensating`
+   * runs whose lock is free or expired and that haven't been touched for
+   * `orphanGraceMs` (adopting a `compensating` run finishes its rollback).
    * Suspended runs are never adopted: the sleep / signal scanners resume
    * them when they're due. Uses `storage.listOrphanedRuns` (keyset-paged)
-   * when the backend has it; otherwise lists pending and running runs and
-   * lets the run lock turn away the ones still owned.
+   * when the backend has it; otherwise snapshots every listing page of those
+   * statuses before adopting any run, and lets the run lock turn away the
+   * ones still owned.
    */
   private async _recoverOrphanedRuns(): Promise<void> {
     const nowMs = this.clock.currentTimeMs();
@@ -649,10 +654,13 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
       }
     }
 
-    // Collect first, adopt after: adopting moves runs out of `pending`, which
-    // would make offset paging over that status skip rows.
+    // Collect first, adopt after: adopting moves runs out of `pending` (and a
+    // finished rollback out of `compensating`), which would make offset
+    // paging over that status skip rows. A run listed under two statuses
+    // (it moved between the listings) is adopted once.
     const candidates: OrphanedRun[] = [];
-    for (const status of ["pending", "running"] as const) {
+    const seen = new Set<string>();
+    for (const status of RECOVERABLE_STATUSES) {
       for (let offset = 0; ; offset += RECOVERY_PAGE_SIZE) {
         const page = await this.storage.listWorkflows({
           status,
@@ -662,7 +670,8 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
           orderDir: "asc",
         });
         for (const state of page) {
-          if (state.updatedAt >= updatedBefore) continue;
+          if (state.updatedAt >= updatedBefore || seen.has(state.workflowId)) continue;
+          seen.add(state.workflowId);
           candidates.push({
             workflowId: state.workflowId,
             workflowName: state.workflowName,
