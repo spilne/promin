@@ -175,6 +175,8 @@ export interface WorkflowQueueConfig<Input> {
  * runs.
  */
 export interface StepQueueContext {
+  /** The workflow input the run was started with. */
+  readonly input: unknown;
   /**
    * The value the step receives as `prev`: its first dependency's result,
    * or the workflow input for a step with no dependencies.
@@ -783,7 +785,8 @@ export type StepKind =
   | "guard"
   | "tripwire"
   | "parallel"
-  | "loop";
+  | "loop"
+  | "child";
 
 export interface StepDefinition {
   readonly name: string;
@@ -2077,7 +2080,7 @@ export class WorkflowBuilder<
     const stepDef: StepDefinition = {
       name,
       dependsOn,
-      kind: "normal",
+      kind: "child",
       codec,
       ...toStepPolicy(options),
       execute: (execParams) => {

@@ -180,6 +180,22 @@ await processVideo.run({ workflowId: "v1", input: { videoId: "abc" } });
 await coordinator.submit({ workflow: processVideo, workflowId: "v1", input: { videoId: "abc" } });
 ```
 
+### Steps that run on the coordinator
+
+Only ordinary steps go to the step queue. `.sleep()`, `.waitForSignal()` and
+`.subworkflow()` steps run on the coordinator: sleep and signal steps write
+their suspension to storage, and a subworkflow step drives its child run there
+(the child's own ordinary steps go to the queue). Workers never register them.
+
+### Step wait bounds
+
+The coordinator waits for a queued step's outcome for at most
+`stepWaitTimeoutMs` (default 24 hours, `Infinity` to wait forever). After
+that the step fails with `StepWaitTimeoutError`, and a task still running
+loses its claim, so its worker skips the commit. A wait also ends, failing
+the step with `StepWaitAbandonedError`, when the run is deleted or reaches a
+terminal status.
+
 ## Example: Multi-Queue Video Processing
 
 ```typescript

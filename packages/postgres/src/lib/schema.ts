@@ -537,6 +537,12 @@ export const workflowStarts = pgTable(
     index("wf_workflow_starts_pending_idx")
       .on(t.workflowName, t.enqueuedAt)
       .where(sql`${t.status} = 'pending'`),
+    // Claims across several workflow names: pending starts oldest first, so
+    // `ORDER BY enqueued_at LIMIT n` stops after n matches instead of
+    // sorting every pending row of those names.
+    index("wf_workflow_starts_pending_enqueued_idx")
+      .on(t.enqueuedAt)
+      .where(sql`${t.status} = 'pending'`),
     // Stale-claim sweeper: claims whose last heartbeat is past the
     // reclaim window.
     index("wf_workflow_starts_heartbeat_idx")

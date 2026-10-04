@@ -83,6 +83,22 @@ export function createWorkflowStorageHandler(
       await storage.resetSteps(p.workflowId, p.stepNames);
     },
     purgeCompleted: (p) => storage.purgeCompleted(p),
+    // -- Scanner / recovery queries. Feature-detected: a backend without
+    // them surfaces a clear error instead of a silent miss.
+    listDueTimers: (p) => {
+      if (!storage.listDueTimers) throw new Error("storage does not implement listDueTimers");
+      return storage.listDueTimers(p);
+    },
+    listSignalWakeups: (p) => {
+      if (!storage.listSignalWakeups) {
+        throw new Error("storage does not implement listSignalWakeups");
+      }
+      return storage.listSignalWakeups(p);
+    },
+    listOrphanedRuns: (p) => {
+      if (!storage.listOrphanedRuns) throw new Error("storage does not implement listOrphanedRuns");
+      return storage.listOrphanedRuns(p);
+    },
     // -- Journal methods. Feature-detected so backends without journal
     // support surface a clear error instead of silently dropping calls.
     loadJournal: (p) => requireJournal(storage).loadJournal(p.workflowId, p.stepName),

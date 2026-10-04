@@ -3,13 +3,14 @@
 // dispatched step task from the workflow- and step-level queue config.
 // ---------------------------------------------------------------------------
 
-import type { StepDefinition, WorkflowQueueConfig } from "../durable-pipeline.ts";
+import type { StepDefinition, StepQueueContext, WorkflowQueueConfig } from "../durable-pipeline.ts";
 
 /**
  * Resolve a step task's concurrency triple from the workflow + step queue
- * config. Step-level wins over workflow-level. The key function is
- * evaluated against the step ctx (input + prev/deps + workflowId), and the
- * resolved string is what `claim()` counts against.
+ * config. Step-level wins over workflow-level. A step-level key function
+ * is evaluated against a `StepQueueContext` (the workflow input, `prev`,
+ * `deps`, `workflowId`, `attempt`); a workflow-level one against the
+ * workflow input. The resolved string is what `claim()` counts against.
  *
  * Returns `null` when neither level configures concurrency — the caller
  * stamps no concurrency fields on the task and `claim()` skips the count
@@ -27,14 +28,14 @@ export function resolveStepConcurrency(params: {
 }): { readonly scope: string; readonly key: string; readonly limit: number } | null {
   const stepQueue = params.stepDef.queue;
   if (stepQueue) {
-    const ctx = {
-      input: params.stepInput,
+    const ctx: StepQueueContext = {
+      input: params.workflowInput,
       prev: params.stepInput,
       deps: params.results,
       workflowId: params.workflowId,
       attempt: params.attempt,
     };
-    const key = stepQueue.concurrencyKey ? stepQueue.concurrencyKey(ctx as never) : "__all__";
+    const key = stepQueue.concurrencyKey ? stepQueue.concurrencyKey(ctx) : "__all__";
     const scope = `${params.workflowName ?? ""}::${params.stepDef.name}`;
     return { scope, key, limit: stepQueue.concurrencyLimit };
   }

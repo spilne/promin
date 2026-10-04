@@ -42,6 +42,12 @@ export type StorageMethod =
   | "loadRunHistory"
   | "resetSteps"
   | "purgeCompleted"
+  // Scanner / recovery queries — forwarded only when the underlying storage
+  // implements them, so the sleep / signal scanners and coordinator
+  // recovery query the backend's indexes instead of paging listWorkflows.
+  | "listDueTimers"
+  | "listSignalWakeups"
+  | "listOrphanedRuns"
   // ActivityJournalStorage / JournaledSuspendStorage — forwarded only when
   // the underlying storage implements them. Lets `.journaled()` workflows
   // (with ctx.activity / ctx.sleep / ctx.signal) run over the wire.

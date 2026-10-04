@@ -3,12 +3,15 @@
 // inner runner.
 //
 // The runner sends every ready step to its executor, whatever the step's
-// kind. Only ordinary steps belong on the step queue: a sleep or signal-wait
-// step enqueued as a task is named after the step, no worker registers it,
-// and it sits pending forever while the run never suspends. So this executor
-// runs `sleep` / `signal` steps in-process, through `InProcessStepExecutor`
-// with the runner's fenced runtime (they only write their suspension to
-// storage), and sends every other step to the queue.
+// kind. Only ordinary steps belong on the step queue: a sleep, signal-wait or
+// subworkflow step enqueued as a task is named after the step, no worker
+// registers it, and it sits pending forever. So this executor runs `sleep` /
+// `signal` / `child` steps in-process, through `InProcessStepExecutor` with
+// the runner's fenced runtime, and sends every other step to the queue.
+// Sleep and signal steps only write their suspension to storage; a `child`
+// step drives its child run through the runtime's `runChild`, so the child
+// inherits this runner's executor and clock and its own ordinary steps go
+// to the queue like any other.
 //
 // It also gives the queue executor a cheaper view of storage and the queue:
 // - step waits on one run share their storage reads (one `loadWorkflow` per
@@ -18,7 +21,7 @@
 //   unfenced global sweep per in-flight step.
 // ---------------------------------------------------------------------------
 
-import type { Workflow } from "../durable/durable-pipeline.ts";
+import type { StepKind, Workflow } from "../durable/durable-pipeline.ts";
 import {
   InProcessStepExecutor,
   type StepExecutionRequest,
@@ -31,7 +34,7 @@ import type { WallClock } from "../shared/wall-clock.ts";
 import type { StepQueue, StepQueueRequeueResult } from "./step-queue.ts";
 
 /** Step kinds that run on the coordinator instead of a worker. */
-const IN_PROCESS_KINDS: ReadonlySet<string> = new Set(["sleep", "signal"]);
+const IN_PROCESS_KINDS: ReadonlySet<StepKind> = new Set<StepKind>(["sleep", "signal", "child"]);
 
 /** Expired shared reads are swept once the cache holds this many runs. */
 const MAX_SHARED_READS = 256;
