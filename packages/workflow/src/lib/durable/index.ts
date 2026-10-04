@@ -127,6 +127,10 @@ export {
 // Journaled steps — generator-body DAG steps with per-activity replay
 export {
   type JournalEntry,
+  type JournalExit,
+  type JournalFailureExit,
+  type JournalSlot,
+  type CompletePendingResult,
   type JournalStepType,
   JOURNAL_STEP_TYPES,
   type JournalPhase,

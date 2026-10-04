@@ -21,6 +21,16 @@ import type { JournalEntry } from "../activity-journal.ts";
 // (replay behaviour is tested by running the step body twice — see below —
 // rather than by injecting storage errors mid-unwind, which is fragile.)
 
+/**
+ * Never discards journal entries. After a failed attempt the engine drops
+ * rolled-back activities, their compensation rows and recorded failures;
+ * this storage keeps them, which is what the journal looks like when a
+ * worker crashes between the unwind and that discard.
+ */
+class RetainingStorage extends InMemoryWorkflowStorage {
+  override async discardJournalEntries(): Promise<void> {}
+}
+
 // ---------------------------------------------------------------------------
 // Success path — compensations registered but never fire
 // ---------------------------------------------------------------------------
@@ -172,7 +182,7 @@ describe("ctx.activity.compensate — failure path", () => {
 
 describe("ctx.activity.compensate — journal entries", () => {
   it("each compensation is journaled with stepType='compensation'", async () => {
-    const storage = new InMemoryWorkflowStorage();
+    const storage = new RetainingStorage();
 
     await expect(
       runJournaledStep<unknown, unknown, unknown>({
@@ -208,8 +218,47 @@ describe("ctx.activity.compensate — journal entries", () => {
 // ---------------------------------------------------------------------------
 
 describe("ctx.activity.compensate — replay is idempotent", () => {
-  it("compensations run exactly once even when the step is re-driven", async () => {
+  it("a re-drive after the unwind re-runs rolled-back activities, keeps the rest", async () => {
     const storage = new InMemoryWorkflowStorage();
+    const ran = { a: 0, b: 0, fail: 0, compA: 0 };
+    const body = function* (ctx: any) {
+      yield* ctx.activity("a", async () => ++ran.a, {
+        compensate: () => {
+          ran.compA++;
+        },
+      });
+      yield* ctx.activity("b", async () => ++ran.b);
+      return yield* ctx.activity("fail", async () => {
+        ran.fail++;
+        if (ran.fail === 1) throw new Error("body failed");
+        return "done";
+      });
+    };
+    const run = () =>
+      runJournaledStep({
+        input: undefined,
+        prev: undefined,
+        workflowId: "wf-redrive",
+        stepName: "s",
+        storage,
+        body,
+      });
+
+    await expect(run()).rejects.toThrow("body failed");
+    expect(ran).toEqual({ a: 1, b: 1, fail: 1, compA: 1 });
+    // a was rolled back and the failure is over: both are gone. b had no
+    // compensation, so its effect stands and it stays journaled.
+    const journal = await storage.loadJournal("wf-redrive", "s");
+    expect(journal.map((e) => e.activityName)).toEqual(["b"]);
+
+    // Next attempt: a runs again (its effect was undone), b replays, the
+    // failed activity runs again and succeeds.
+    expect(await run()).toBe("done");
+    expect(ran).toEqual({ a: 2, b: 1, fail: 2, compA: 1 });
+  });
+
+  it("compensations run exactly once when the step is re-driven before the discard", async () => {
+    const storage = new RetainingStorage();
     const runCount = { a: 0, b: 0 };
 
     const body = function* (ctx: any) {
@@ -265,7 +314,7 @@ describe("ctx.activity.compensate — replay is idempotent", () => {
 
 describe("ctx.activity.compensate — compensation failure", () => {
   it("a failing compensation is journaled as Failure; next ones still run", async () => {
-    const storage = new InMemoryWorkflowStorage();
+    const storage = new RetainingStorage();
     const events: string[] = [];
 
     await expect(

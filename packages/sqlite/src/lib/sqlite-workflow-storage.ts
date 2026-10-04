@@ -25,6 +25,9 @@ import type {
   ActivityJournalStorage,
   JournaledSuspendStorage,
   JournalEntry,
+  JournalExit,
+  JournalSlot,
+  CompletePendingResult,
   JournalStepType,
   JournalPhase,
   StepAttemptStorage,
@@ -1729,24 +1732,52 @@ export class SqliteWorkflowStorage
     stepName: string;
     activityIndex: number;
     branchPath?: string;
-    exit: NonNullable<JournalEntry["exit"]>;
-  }): Promise<void> {
+    exit: JournalExit;
+  }): Promise<CompletePendingResult> {
     const branchPath = params.branchPath ?? "";
-    // Idempotent: no-op if already completed
-    this.db
-      .query(
+    // First writer wins: only a still-pending row is updated.
+    const won = this.db
+      .query<{ won: number }>(
         `UPDATE ${this._t}_journal
          SET phase = 'completed', exit = ?
          WHERE workflow_id = ? AND step_name = ? AND activity_index = ? AND branch_path = ?
-           AND phase = 'pending'`,
+           AND phase = 'pending'
+         RETURNING 1 AS won`,
       )
-      .run(
+      .get(
         JSON.stringify(params.exit),
         params.workflowId,
         params.stepName,
         params.activityIndex,
         branchPath,
       );
+    if (won) return { completed: true, exit: params.exit };
+    const row = this.db
+      .query<{ exit: string | null }>(
+        `SELECT exit FROM ${this._t}_journal
+         WHERE workflow_id = ? AND step_name = ? AND activity_index = ? AND branch_path = ?`,
+      )
+      .get(params.workflowId, params.stepName, params.activityIndex, branchPath);
+    return {
+      completed: false,
+      exit: row?.exit ? (JSON.parse(row.exit) as JournalExit) : undefined,
+    };
+  }
+
+  async discardJournalEntries(params: {
+    workflowId: string;
+    stepName: string;
+    slots: readonly JournalSlot[];
+  }): Promise<void> {
+    const del = this.db.query(
+      `DELETE FROM ${this._t}_journal
+       WHERE workflow_id = ? AND step_name = ? AND activity_index = ? AND branch_path = ?`,
+    );
+    this.db.transaction(() => {
+      for (const slot of params.slots) {
+        del.run(params.workflowId, params.stepName, slot.activityIndex, slot.branchPath);
+      }
+    })();
   }
 
   async findDueSleeps(params: { now: Date; limit: number }): Promise<

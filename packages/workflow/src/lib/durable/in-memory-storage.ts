@@ -26,8 +26,11 @@ import { isTerminalWorkflowStatus } from "./workflow-state.ts";
 import { createWorkflowEventStream } from "./workflow-event-stream.ts";
 import type {
   ActivityJournalStorage,
+  CompletePendingResult,
   JournaledSuspendStorage,
   JournalEntry,
+  JournalExit,
+  JournalSlot,
 } from "./activity-journal.ts";
 import type {
   WorkflowState,
@@ -1147,23 +1150,39 @@ export class InMemoryWorkflowStorage
     stepName: string;
     activityIndex: number;
     branchPath?: string;
-    exit: NonNullable<JournalEntry["exit"]>;
-  }): Promise<void> {
+    exit: JournalExit;
+  }): Promise<CompletePendingResult> {
     const branchPath = params.branchPath ?? "";
     const key = this.journalKey(params.workflowId, params.stepName);
     const entries = this.journal.get(key);
-    if (!entries) return;
+    if (!entries) return { completed: false, exit: undefined };
     const idx = this.findEntryIndex(entries, params.activityIndex, branchPath);
-    if (idx === -1) return;
+    if (idx === -1) return { completed: false, exit: undefined };
     const existing = entries[idx]!;
-    // Idempotent on repeated delivery — ignore if already completed.
-    if (existing.phase === "completed") return;
+    // First writer wins — report the stored exit to the loser.
+    if (existing.phase !== "pending") return { completed: false, exit: existing.exit };
     entries[idx] = {
       ...existing,
       phase: "completed",
       exit: params.exit,
     };
     this.journal.set(key, entries);
+    return { completed: true, exit: params.exit };
+  }
+
+  async discardJournalEntries(params: {
+    workflowId: string;
+    stepName: string;
+    slots: readonly JournalSlot[];
+  }): Promise<void> {
+    const key = this.journalKey(params.workflowId, params.stepName);
+    const entries = this.journal.get(key);
+    if (!entries) return;
+    const drop = new Set(params.slots.map((s) => `${s.activityIndex}:${s.branchPath}`));
+    this.journal.set(
+      key,
+      entries.filter((e) => !drop.has(`${e.activityIndex}:${e.branchPath}`)),
+    );
   }
 
   async findDueSleeps(params: { now: Date; limit: number }): Promise<

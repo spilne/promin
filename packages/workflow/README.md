@@ -90,6 +90,12 @@ const acts = ctx.proxy(
 
 The longhand `ctx.activity(...)` form stays available for cases the proxy doesn't fit — dynamic activity names, the 3-arg form for payload-hash determinism checks.
 
+## Journaled failures and signal outcomes
+
+- An activity that still fails after its own `retry` is journaled. While the step attempt is in flight (suspended on `ctx.sleep` / `ctx.signal`, or re-driven after a crash), replay rethrows an error of the same kind: `TerminalError` and the other engine errors come back as their class, other tagged errors keep their `_tag`, `name` and fields.
+- When a failure escapes the body, the attempt is over: after the compensation unwind, recorded failures and rolled-back activities are discarded, so the next attempt (a retry or a resume) runs them again. Successful activities that were not rolled back replay and never run twice.
+- A signal delivery and the signal's timeout race for the same journal entry; the first to complete it wins, and the live run and every replay take that outcome. `completeSignal` returns `false` when it lost.
+
 ## Documentation
 
 - **[Versioning guide](./versioning.md)** — strict / drain / `ctx.patched()` / rolling worker deploys, with runnable examples in [`examples/versioning/`](./examples/versioning)

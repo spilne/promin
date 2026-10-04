@@ -2,7 +2,7 @@
 // PostgresWorkflowStorage — production-grade WorkflowStorage backed by Postgres
 // ---------------------------------------------------------------------------
 
-import { eq, and, sql, desc, asc, inArray, gte, lt } from "drizzle-orm";
+import { eq, and, or, sql, desc, asc, inArray, gte, lt } from "drizzle-orm";
 import type {
   WorkflowStorage,
   StepAttemptStorage,
@@ -20,6 +20,9 @@ import type {
   ActivityJournalStorage,
   JournaledSuspendStorage,
   JournalEntry,
+  JournalExit,
+  JournalSlot,
+  CompletePendingResult,
   FenceGuard,
   SignalTokenRecord,
   StreamChunk,
@@ -1529,20 +1532,53 @@ export class PostgresWorkflowStorage
     stepName: string;
     activityIndex: number;
     branchPath?: string;
-    exit: NonNullable<JournalEntry["exit"]>;
-  }): Promise<void> {
-    // Idempotent on repeated delivery: the WHERE clause restricts to still-
-    // pending rows, so a second call on an already-completed row no-ops.
-    await this.db
+    exit: JournalExit;
+  }): Promise<CompletePendingResult> {
+    const slot = and(
+      eq(activityJournal.workflowId, params.workflowId),
+      eq(activityJournal.stepName, params.stepName),
+      eq(activityJournal.activityIndex, params.activityIndex),
+      eq(activityJournal.branchPath, params.branchPath ?? ""),
+    );
+    // First writer wins: the WHERE clause restricts to still-pending rows,
+    // and a concurrent completer's UPDATE re-checks it after the winner
+    // commits, so exactly one call completes the row.
+    const won = await this.db
       .update(activityJournal)
       .set({ phase: "completed", exit: params.exit })
+      .where(and(slot, eq(activityJournal.phase, "pending")))
+      .returning({ exit: activityJournal.exit });
+    if (won.length > 0) return { completed: true, exit: params.exit };
+    // Lost (or no such row). A completed row never changes again, so a
+    // fresh read sees the winner's exit.
+    const [row] = await this.db
+      .select({ exit: activityJournal.exit })
+      .from(activityJournal)
+      .where(slot)
+      .limit(1);
+    return { completed: false, exit: (row?.exit ?? undefined) as JournalExit | undefined };
+  }
+
+  async discardJournalEntries(params: {
+    workflowId: string;
+    stepName: string;
+    slots: readonly JournalSlot[];
+  }): Promise<void> {
+    if (params.slots.length === 0) return;
+    await this.db
+      .delete(activityJournal)
       .where(
         and(
           eq(activityJournal.workflowId, params.workflowId),
           eq(activityJournal.stepName, params.stepName),
-          eq(activityJournal.activityIndex, params.activityIndex),
-          eq(activityJournal.branchPath, params.branchPath ?? ""),
-          eq(activityJournal.phase, "pending"),
+          or(
+            ...params.slots.map((s) =>
+              and(
+                eq(activityJournal.activityIndex, s.activityIndex),
+                eq(activityJournal.branchPath, s.branchPath),
+              ),
+            ),
+          ),
         ),
       );
   }

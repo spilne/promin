@@ -514,12 +514,12 @@ describe("ctx.signal({ timeout }) — bounded suspend", () => {
     });
     expect(result).toEqual({ ok: false, error: "timeout" });
 
-    // Journal entry is now completed with the timeout envelope.
+    // Journal entry is now completed with the tagged timeout outcome.
     const journal = await storage.loadJournal("wf-tsig-2", "wait");
     expect(journal[0]!.phase).toBe("completed");
     expect(journal[0]!.exit).toEqual({
       tag: "Success",
-      value: { ok: false, error: "timeout" },
+      value: { $signal: "timeout" },
     });
   });
 
