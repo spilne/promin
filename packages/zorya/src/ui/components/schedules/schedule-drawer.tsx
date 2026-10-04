@@ -102,7 +102,7 @@ export function ScheduleDrawer({
                 {history.history.map((h) => {
                   // Prefer the dispatcher-stamped firedAt (the moment the
                   // trigger actually went out); fall back to startedAt for
-                  // legacy rows whose metadata predates the firedAt write.
+                  // rows that carry no firedAt.
                   const when = h.firedAt ?? h.startedAt;
                   return (
                     <li

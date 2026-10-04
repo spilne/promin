@@ -107,34 +107,14 @@ export class SqliteStepQueue implements StepQueue {
         error          TEXT,
         duration_ms    INTEGER,
         last_heartbeat INTEGER,
-        active_key     TEXT
+        active_key     TEXT,
+        concurrency_key   TEXT,
+        concurrency_scope TEXT,
+        concurrency_limit INTEGER,
+        claimed_by     TEXT,
+        deliveries     INTEGER NOT NULL DEFAULT 0
       )
     `);
-    // Migrate tables that predate a column. sqlite has no ADD COLUMN IF
-    // NOT EXISTS before 3.35; older dbs throw "duplicate column" — we
-    // swallow that exact failure mode and let any other error propagate.
-    for (const stmt of [
-      `ALTER TABLE ${t} ADD COLUMN metadata TEXT`,
-      `ALTER TABLE ${t} ADD COLUMN concurrency_key TEXT`,
-      `ALTER TABLE ${t} ADD COLUMN concurrency_scope TEXT`,
-      `ALTER TABLE ${t} ADD COLUMN concurrency_limit INTEGER`,
-      `ALTER TABLE ${t} ADD COLUMN claim_token TEXT`,
-      `ALTER TABLE ${t} ADD COLUMN claimed_by TEXT`,
-      `ALTER TABLE ${t} ADD COLUMN deliveries INTEGER NOT NULL DEFAULT 0`,
-    ]) {
-      try {
-        this.db.run(stmt);
-      } catch (e) {
-        if (!String(e).includes("duplicate column")) throw e;
-      }
-    }
-    // Active keys used to include the namespace; the dedupe key is now
-    // (workflowId, stepName). Rows whose rewrite would collide keep the old
-    // key until they settle.
-    this.db.run(
-      `UPDATE OR IGNORE ${t} SET active_key = workflow_id || '::' || step_name
-       WHERE active_key IS NOT NULL AND active_key <> workflow_id || '::' || step_name`,
-    );
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_concurrency_running ON ${t} (concurrency_scope, concurrency_key) WHERE status = 'running' AND concurrency_key IS NOT NULL`,
     );

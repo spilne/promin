@@ -51,7 +51,7 @@ export function makeChild(env: JournaledCtxEnv): JournaledContext<unknown, unkno
     workflow: Workflow<unknown, Output>,
     options?: { readonly input?: unknown; readonly workflowId?: string },
   ): Generator<ActivityYield, Output, Output> {
-    const slot = cursor.allocateSlot({ suspendOrChild: true });
+    const slot = cursor.allocateSlot();
     const { activityIndex, branchPath } = slot;
     // Inside a parallel branch the default id also carries the branch path
     // ("/" mapped to "~" so the id stays URL-safe); top-level ids keep the

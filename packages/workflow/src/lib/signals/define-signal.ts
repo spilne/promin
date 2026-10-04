@@ -65,9 +65,9 @@ export function defineSignal<S extends Schema<unknown>>(params: {
 // ---------------------------------------------------------------------------
 // Canonical ApprovalSignal — the shape `ctx.approval(id)` waits on.
 //
-// `approve:<id>` name prefix preserved for backward compatibility with the
-// existing convention agentLoop already uses (so SignalScanner / dashboard
-// filters / external delivery callers don't have to change). Authors who
+// The `approve:<id>` name prefix is the convention agentLoop uses too, so
+// SignalScanner / dashboard filters / external delivery callers see one
+// naming scheme for every approval. Authors who
 // want a custom approval shape can `defineSignal` their own; this one is
 // just the preset.
 //

@@ -150,9 +150,7 @@ export class RemoteWorkflowStorage
   // -------------------------------------------------------------------------
   // Thin delegates. Each method sends its params object as the RPC params,
   // `guard` included, so the server's dispatcher hands it straight to the
-  // backing storage. Three methods keep their older envelope on the wire
-  // (`cancelWorkflow`, `failWorkflow`, `loadRunHistory`), so clients and
-  // servers of either version keep talking.
+  // backing storage.
   // -------------------------------------------------------------------------
 
   loadWorkflow(workflowId: string): Promise<WorkflowState | null> {
@@ -179,9 +177,8 @@ export class RemoteWorkflowStorage
     return this.call("distinctNamespaces", {});
   }
 
-  cancelWorkflow({ workflowId, cascade, guard }: CancelWorkflowParams): Promise<void> {
-    const options = cascade === undefined ? undefined : { cascade };
-    return this.call("cancelWorkflow", { workflowId, options, guard });
+  cancelWorkflow(params: CancelWorkflowParams): Promise<void> {
+    return this.call("cancelWorkflow", params);
   }
 
   createWorkflow(params: CreateWorkflowParams): Promise<CreateWorkflowResult> {
@@ -218,9 +215,8 @@ export class RemoteWorkflowStorage
     return this.call("completeWorkflow", params);
   }
 
-  failWorkflow({ workflowId, error, errorTag, guard }: FailWorkflowParams): Promise<void> {
-    const details = errorTag === undefined ? undefined : { errorTag };
-    return this.call("failWorkflow", { workflowId, error, guard, details });
+  failWorkflow(params: FailWorkflowParams): Promise<void> {
+    return this.call("failWorkflow", params);
   }
 
   tripwireWorkflow(params: TripwireWorkflowParams): Promise<void> {
@@ -295,8 +291,8 @@ export class RemoteWorkflowStorage
     return this.call("startFreshRun", params);
   }
 
-  loadRunHistory({ workflowId, ...page }: LoadRunHistoryParams): Promise<WorkflowRunSummary[]> {
-    return this.call("loadRunHistory", { workflowId, params: page });
+  loadRunHistory(params: LoadRunHistoryParams): Promise<WorkflowRunSummary[]> {
+    return this.call("loadRunHistory", params);
   }
 
   /**

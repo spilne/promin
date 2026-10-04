@@ -95,10 +95,8 @@ describe("getScheduleHistory — agent ticks join the workflow row at scheduleTi
     expect(total).toBe(1);
     expect(history).toHaveLength(1);
     const row = history[0]!;
-    // The whole point: `status` comes from the workflow row, NOT the
-    // legacy hardcoded "completed" fallback for agent schedules. (When
-    // the row's status happens to be "completed" the legacy behaviour
-    // would coincidentally pass — that's why the next test exists.)
+    // `status` comes from the workflow row, not a fixed "completed" for
+    // agent schedules (the next test covers a failed row).
     expect(row.status).toBe("completed");
     // Schedule provenance — the chip stays "agent" because the
     // schedule's metadata says so.
@@ -107,10 +105,7 @@ describe("getScheduleHistory — agent ticks join the workflow row at scheduleTi
     expect(row.workflowName).toBe("summary-bot");
   });
 
-  it("an agent tick whose workflow row failed reports status=failed (not the legacy 'completed')", async () => {
-    // This is the test the legacy hardcoded-completed path failed: every
-    // agent tick used to be reported "completed" regardless of the
-    // underlying invocation outcome.
+  it("an agent tick whose workflow row failed reports status=failed", async () => {
     const sch = new InMemorySchedulerStorage();
     const wfs = new InMemoryWorkflowStorage();
     await sch.upsertSchedule({

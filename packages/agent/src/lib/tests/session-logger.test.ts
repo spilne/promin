@@ -442,7 +442,7 @@ describe("agentLoop — session event log", () => {
 
     const ac = new AbortController();
     ac.abort();
-    for await (const _ of session.stream("go", ac.signal)) {
+    for await (const _ of session.stream("go", { signal: ac.signal })) {
       /* drain */
     }
     session.close();

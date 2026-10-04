@@ -553,8 +553,7 @@ export class ZoryaServer {
         )
         // Fragment catalog — the agent editor's layered-prompt editor source.
         // Prefers the dedicated ZoryaFragments service (which the manager UI
-        // also writes through); falls back to a registry passed inline on
-        // ZoryaAgents for legacy hosts that haven't moved to the service yet.
+        // also writes through), else the registry passed on ZoryaAgents.
         .get(
           "/api/agents/_catalog/fragments",
           this.fragments

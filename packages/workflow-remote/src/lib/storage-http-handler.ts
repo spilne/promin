@@ -25,10 +25,7 @@ export function createWorkflowStorageHandler(
   storage: WorkflowStorage,
 ): (req: Request) => Promise<Response> {
   // The RPC params of a method are its storage params object, `guard`
-  // included, so most dispatchers hand them straight through. Three keep
-  // their older wire envelope (see `RemoteWorkflowStorage`):
-  // `cancelWorkflow` ({ options: { cascade } }), `failWorkflow`
-  // ({ details: { errorTag } }) and `loadRunHistory` ({ params: page }).
+  // included, so the dispatchers hand them straight through.
   const dispatchers: Record<StorageMethod, (params: any) => Promise<unknown>> = {
     loadWorkflow: (p) => storage.loadWorkflow(p.workflowId),
     loadWorkflowStatus: (p) => storage.loadWorkflowStatus(p.workflowId),
@@ -36,11 +33,7 @@ export function createWorkflowStorageHandler(
     distinctWorkflowNames: (p) => storage.distinctWorkflowNames(p),
     distinctWorkflowTypes: (p) => storage.distinctWorkflowTypes(p),
     distinctNamespaces: () => storage.distinctNamespaces(),
-    cancelWorkflow: ({ options, ...p }) =>
-      storage.cancelWorkflow({
-        ...p,
-        ...(options?.cascade !== undefined && { cascade: options.cascade }),
-      }),
+    cancelWorkflow: (p) => storage.cancelWorkflow(p),
     createWorkflow: (p) => storage.createWorkflow(p),
     findWorkflowByIdempotencyKey: (p) => storage.findWorkflowByIdempotencyKey(p),
     saveStepResult: (p) => storage.saveStepResult(p),
@@ -49,11 +42,7 @@ export function createWorkflowStorageHandler(
     saveTaskResult: (p) => storage.saveTaskResult(p),
     saveTaskFailure: (p) => storage.saveTaskFailure(p),
     completeWorkflow: (p) => storage.completeWorkflow(p),
-    failWorkflow: ({ details, ...p }) =>
-      storage.failWorkflow({
-        ...p,
-        ...(details?.errorTag !== undefined && { errorTag: details.errorTag }),
-      }),
+    failWorkflow: (p) => storage.failWorkflow(p),
     tripwireWorkflow: (p) => requireCapability(storage, "tripwire").tripwireWorkflow(p),
     suspendWorkflow: (p) => storage.suspendWorkflow(p),
     deliverSignal: (p) => storage.deliverSignal(p),
@@ -64,7 +53,7 @@ export function createWorkflowStorageHandler(
     releaseLock: (p) => storage.releaseLock(p),
     heartbeat: (p) => storage.heartbeat(p),
     startFreshRun: (p) => storage.startFreshRun(p),
-    loadRunHistory: ({ params, ...p }) => storage.loadRunHistory({ ...p, ...params }),
+    loadRunHistory: (p) => storage.loadRunHistory(p),
     resetSteps: (p) => requireCapability(storage, "resetSteps").resetSteps(p),
     purgeCompleted: (p) => storage.purgeCompleted(p),
     // -- Scanner / recovery queries.
@@ -76,11 +65,7 @@ export function createWorkflowStorageHandler(
     appendEntry: (p) => requireCapability(storage, "journal").appendEntry(p),
     appendPendingEntry: (p) => requireCapability(storage, "journal").appendPendingEntry(p),
     completePendingEntry: (p) => requireCapability(storage, "journal").completePendingEntry(p),
-    discardJournalEntries: (p) =>
-      requireCapability(
-        requireCapability(storage, "journal"),
-        "journalDiscard",
-      ).discardJournalEntries(p),
+    discardJournalEntries: (p) => requireCapability(storage, "journal").discardJournalEntries(p),
     findDueSleeps: (p) => requireCapability(storage, "journal").findDueSleeps(p),
     findPendingSignal: (p) => requireCapability(storage, "journal").findPendingSignal(p),
     // -- Step attempts.
@@ -167,7 +152,6 @@ function jsonResponse(body: RpcResponse, status: number): Response {
 const MISSING_CAPABILITY: Record<StorageCapability, string> = {
   journal:
     "storage does not implement JournalStore — .journaled() steps are unsupported on this backend",
-  journalDiscard: "storage does not implement discardJournalEntries",
   stepAttempts:
     "storage does not implement StepAttemptStore — step attempt history is unsupported on this backend",
   stepCheckpoint: "storage does not implement checkpointStep",

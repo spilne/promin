@@ -212,8 +212,8 @@ void worker.start();
 ```
 
 Tasks whose version isn't in `supportedVersions` are left pending for a
-compatible worker. Unversioned tasks (from pre-versioning workflows) are
-always accepted for backward compat.
+compatible worker. Unversioned tasks (from workflows without a `version`) are
+always accepted.
 
 ### Rolling deploy recipe
 

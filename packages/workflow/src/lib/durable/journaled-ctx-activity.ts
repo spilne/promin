@@ -65,7 +65,7 @@ export function makeActivity(env: JournaledCtxEnv): ActivityFn {
       options = argB as ActivityOptions<T> | undefined;
     }
     const scope = activityScope.getStore();
-    const slot = cursor.allocateSlot({ suspendOrChild: false });
+    const slot = cursor.allocateSlot();
     const { activityIndex } = slot;
     const codec = options?.codec ?? stepCodec;
     const idempotent = options?.idempotent === true;

@@ -6,10 +6,6 @@
 // Signal entries (`stepType: "signal"`) store a tagged success value:
 //   delivered → { $signal: "delivered", value }
 //   timed out → { $signal: "timeout" }
-// Journals written before the tag hold the bare delivered value, or
-// `{ ok: false, error: "timeout" }` when the timeout completed the entry.
-// Those still decode: the exact legacy timeout shape on a signal waited on
-// with a timeout reads as a timeout, anything else as a delivered value.
 //
 // Failures (`tag: "Failure"`) store the message plus the error's `_tag` (or
 // non-default `name`) and its other public fields, so replay rethrows an
@@ -58,29 +54,18 @@ export type SignalOutcome =
   | { readonly kind: "timeout" };
 
 /**
- * Decode a signal entry's stored success value. `hasTimeout` is whether the
- * waiting `ctx.signal` call has a timeout; it only matters for legacy rows,
- * where the timeout was recognised by shape.
+ * Decode a signal entry's stored success value. Throws when the value is
+ * not a tagged signal exit (the entry was not written by the engine).
  */
-export function decodeSignalExitValue(params: {
-  stored: unknown;
-  hasTimeout: boolean;
-}): SignalOutcome {
-  const { stored, hasTimeout } = params;
+export function decodeSignalExitValue(stored: unknown): SignalOutcome {
   if (isRecord(stored) && SIGNAL_EXIT_KEY in stored) {
     const tag = stored[SIGNAL_EXIT_KEY];
     if (tag === "timeout") return { kind: "timeout" };
     if (tag === "delivered") return { kind: "delivered", value: stored.value };
   }
-  if (hasTimeout && isLegacyTimeoutValue(stored)) return { kind: "timeout" };
-  return { kind: "delivered", value: stored };
-}
-
-/** The exact `{ ok: false, error: "timeout" }` value legacy timeouts stored. */
-function isLegacyTimeoutValue(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  const keys = Object.keys(value);
-  return keys.length === 2 && value.ok === false && value.error === "timeout";
+  throw new Error(
+    `signal journal entry holds an untagged value; expected { ${SIGNAL_EXIT_KEY}: "delivered" | "timeout" }`,
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

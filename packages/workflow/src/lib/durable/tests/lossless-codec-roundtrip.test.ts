@@ -235,7 +235,7 @@ describe("workflow — pipeline-level default codec", () => {
     expect(replay).toBeInstanceOf(Date);
   });
 
-  it("no pipeline codec set ⇒ default is LosslessJsonCodec (backward compat)", async () => {
+  it("no pipeline codec set ⇒ default is LosslessJsonCodec", async () => {
     const storage = new JsonRoundTripStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow({ name: "no-pipeline-codec" })

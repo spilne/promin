@@ -446,8 +446,7 @@ export class PostgresMemoryStore implements MemoryStore {
             and(eq(agentMessage.namespaceId, r.namespaceId), eq(agentMessage.threadId, r.threadId)),
           );
         const metadata = (r.metadata as Record<string, unknown> | null) ?? {};
-        const title =
-          r.title ?? (typeof metadata.title === "string" ? (metadata.title as string) : null);
+        const title = r.title ?? null;
         return {
           namespaceId: r.namespaceId,
           resourceId: r.resourceId,
@@ -924,7 +923,7 @@ function toResourceRow(r: DbResourceRow): ResourceRow {
 
 function toThreadRow(r: DbThreadRow): ThreadRow {
   const metadata = (r.metadata as Record<string, unknown>) ?? {};
-  const title = r.title ?? (typeof metadata.title === "string" ? (metadata.title as string) : null);
+  const title = r.title ?? null;
   return {
     namespaceId: r.namespaceId,
     resourceId: r.resourceId,

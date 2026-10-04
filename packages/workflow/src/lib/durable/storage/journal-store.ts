@@ -146,10 +146,9 @@ export interface JournalStore {
    * The engine calls this when a failure escapes a journaled body: recorded
    * failures (and activities whose compensation ran) are removed so the next
    * attempt of the step re-executes them instead of replaying the failure.
-   * On a storage without this method a step-level retry replays the
-   * recorded failure. Fenced.
+   * Fenced.
    */
-  discardJournalEntries?(params: DiscardJournalEntriesParams): Promise<void>;
+  discardJournalEntries(params: DiscardJournalEntriesParams): Promise<void>;
 
   /**
    * Scanner hook — return pending sleep entries whose `wakeAt <= now`, up to

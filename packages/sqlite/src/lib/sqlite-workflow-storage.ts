@@ -159,29 +159,12 @@ export class SqliteWorkflowStorage
         created_at           INTEGER NOT NULL,
         started_at           INTEGER,
         updated_at           INTEGER NOT NULL,
-        completed_at         INTEGER
+        completed_at         INTEGER,
+        idempotency_key      TEXT,
+        idempotency_expires_at INTEGER
       )
     `);
-    // Migrate any existing table that predates the runSource columns.
-    // sqlite ALTER TABLE ADD COLUMN IF NOT EXISTS landed in 3.35; older
-    // dbs throw "duplicate column" — we swallow that exact failure mode
-    // and let any other error propagate.
-    for (const stmt of [
-      `ALTER TABLE ${t} ADD COLUMN run_source INTEGER`,
-      `ALTER TABLE ${t} ADD COLUMN run_source_id TEXT`,
-      `ALTER TABLE ${t} ADD COLUMN idempotency_key TEXT`,
-      `ALTER TABLE ${t} ADD COLUMN idempotency_expires_at INTEGER`,
-      `ALTER TABLE ${t} ADD COLUMN error_tag TEXT`,
-    ]) {
-      try {
-        this.db.run(stmt);
-      } catch (e) {
-        if (!String(e).includes("duplicate column")) throw e;
-      }
-    }
     // Partial unique index on namespace-scoped idempotency keys for atomic claim-or-attach.
-    // Rebuild the pre-namespace index if it exists under the same historical name.
-    this.db.run(`DROP INDEX IF EXISTS ${t}_idempotency_key`);
     this.db.run(
       `CREATE UNIQUE INDEX IF NOT EXISTS ${t}_idempotency_key ON ${t} (COALESCE(namespace, ''), workflow_name, idempotency_key) WHERE idempotency_key IS NOT NULL`,
     );
@@ -192,14 +175,6 @@ export class SqliteWorkflowStorage
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_suspended ON ${t} (workflow_id) WHERE status = 'suspended'`,
     );
-    // `_active` covered pending / running only; recovery now lists
-    // compensating runs too.
-    const legacyActive = this.db
-      .query<{ name: string }>(
-        `SELECT name FROM sqlite_master WHERE type = 'index' AND name = ? AND tbl_name = ?`,
-      )
-      .get(`${t}_active`, t);
-    if (legacyActive) this.db.run(`DROP INDEX IF EXISTS ${t}_active`);
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_active_runs ON ${t} (workflow_id) WHERE status IN ('pending', 'running', 'compensating')`,
     );
@@ -334,23 +309,7 @@ export class SqliteWorkflowStorage
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_attempts_wfid ON ${t}_attempts (workflow_id, step_name)`,
     );
-    // Migrate older databases that had the column named `worker_id`
-    // (renamed to `executor_id` so non-worker contexts — in-process
-    // runs, scheduler-loop, scripts — can populate it too without
-    // misleading naming). SQLite RENAME COLUMN is no-op when the
-    // column doesn't exist; we swallow that exact failure.
-    try {
-      this.db.run(`ALTER TABLE ${t}_attempts RENAME COLUMN worker_id TO executor_id`);
-    } catch (e) {
-      const msg = String(e);
-      if (!msg.includes("no such column") && !msg.includes("already exists")) throw e;
-    }
-    // Seed the counter past any token minted before the counter table
-    // existed, so upgraded databases never reissue a live token.
-    this.db.run(
-      `INSERT OR IGNORE INTO ${t}_fence (id, value)
-       SELECT 1, COALESCE(MAX(CAST(token AS INTEGER)), 0) FROM ${t}_locks`,
-    );
+    this.db.run(`INSERT OR IGNORE INTO ${t}_fence (id, value) VALUES (1, 0)`);
   }
 
   /** Mint the next fence token. Call inside the lock transaction. */

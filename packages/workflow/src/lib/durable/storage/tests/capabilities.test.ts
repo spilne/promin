@@ -28,7 +28,6 @@ describe("storage capabilities", () => {
   it("a capability needs every one of its methods", () => {
     const storage = without(["findPendingSignal"]);
     expect(hasCapability(storage, "journal")).toBe(false);
-    expect(hasCapability(storage, "journalDiscard")).toBe(true);
     expect(storageCapabilities(storage).journal).toBe(false);
   });
 
@@ -46,7 +45,7 @@ describe("storage capabilities", () => {
       ["checkpointStep", "stepCheckpoint"],
       ["saveStepAttempt", "stepAttempts"],
       ["beginCompensation", "compensationLedger"],
-      ["discardJournalEntries", "journalDiscard"],
+      ["discardJournalEntries", "journal"],
     ];
     for (const [method, capability] of cases) {
       const caps = storageCapabilities(without([method]));

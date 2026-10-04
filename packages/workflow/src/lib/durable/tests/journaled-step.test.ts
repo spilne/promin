@@ -399,6 +399,7 @@ describe("journaled step", () => {
       // only gets one through `.bind(storage)`.
       const bareStorage: any = {
         tryLock: async () => ({ acquired: true }),
+        tryLockAndLoad: async () => ({ locked: true, state: await bareStorage.loadWorkflow() }),
         renewLock: async () => true,
         releaseLock: async () => {},
         heartbeat: async () => {},

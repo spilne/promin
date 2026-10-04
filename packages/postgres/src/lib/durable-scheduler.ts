@@ -3,8 +3,8 @@
 //
 // Wraps the generic DurableScheduler shell from @promin/workflow with a
 // PgSchedulerStorage adapter. All cron/rrule/catch-up/jitter/leader logic
-// lives in the workflow shell; this file is just the convenience factory
-// and the legacy `DurableScheduler` export for backward compat.
+// lives in the workflow shell; this file adds the Postgres storage adapter
+// and a convenience factory.
 // ---------------------------------------------------------------------------
 
 import { type WallClock } from "@promin/workflow";

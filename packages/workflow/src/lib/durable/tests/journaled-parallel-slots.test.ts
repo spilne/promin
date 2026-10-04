@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // ctx.parallel slot allocation — branch-path grammar, sleep/signal/child
-// inside branches, legacy-format replay and timing independence. The
+// inside branches, replay of recorded journals and timing independence. The
 // portable cases run through `journalReplayTestSuite` (also run by the
 // Postgres, Redis and SQLite packages); the cases below are specific to the
 // in-memory engine wiring.
@@ -65,7 +65,7 @@ describe("ctx.parallel slots — in-memory specifics", () => {
     ]);
   });
 
-  it("a top-level-only journal settles on the current format at the first parallel", async () => {
+  it("a parallel resumed after a recorded top-level entry takes the next slot", async () => {
     const storage = new InMemoryWorkflowStorage();
     const body = function* (ctx: any) {
       const pre = yield* ctx.activity("pre", async () => "pre");
@@ -74,7 +74,7 @@ describe("ctx.parallel slots — in-memory specifics", () => {
     };
     // A previous worker recorded only "pre" before crashing.
     await storage.appendEntry({
-      workflowId: "undecided",
+      workflowId: "resumed",
       stepName: "s",
       activityIndex: 0,
       branchPath: "",
@@ -85,13 +85,13 @@ describe("ctx.parallel slots — in-memory specifics", () => {
       await runJournaledStep({
         input: undefined,
         prev: undefined,
-        workflowId: "undecided",
+        workflowId: "resumed",
         stepName: "s",
         storage,
         body,
       }),
     ).toEqual(["pre", "a"]);
-    const journal = await storage.loadJournal({ workflowId: "undecided", stepName: "s" });
+    const journal = await storage.loadJournal({ workflowId: "resumed", stepName: "s" });
     expect(journal.find((e) => e.activityName === "a")).toMatchObject({
       activityIndex: 1,
       branchPath: "/0.0",

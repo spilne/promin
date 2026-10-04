@@ -132,10 +132,7 @@ export interface AgentTown {
   /** Send a task to the Mayor and wait for its full reply. */
   ask(task: string): Promise<string>;
   /** Stream the Mayor's reply token-by-token. */
-  stream(
-    task: string,
-    options?: AbortSignal | import("./agent-loop.ts").StreamOptions,
-  ): AsyncIterable<string>;
+  stream(task: string, options?: import("./agent-loop.ts").StreamOptions): AsyncIterable<string>;
   /**
    * Unblock the mayor if it is currently waiting in `readInbox()`.
    * Call this when the user interrupts a turn (e.g. Ctrl+C) so the session
@@ -468,10 +465,7 @@ export function createAgentTown(config: AgentTownConfig): AgentTown {
       return session.send(task);
     },
 
-    stream(
-      task: string,
-      options?: AbortSignal | import("./agent-loop.ts").StreamOptions,
-    ): AsyncIterable<string> {
+    stream(task: string, options?: import("./agent-loop.ts").StreamOptions): AsyncIterable<string> {
       return (async function* () {
         const session = await sessionPromises.get(mayorName)!;
         yield* session.stream(task, options);

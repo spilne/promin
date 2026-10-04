@@ -101,8 +101,7 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
   parameters: z.ZodType<TInput>;
   /**
    * Run the tool. The optional `ctx` carries per-call wiring like a
-   * progress writer; tools that ignore `ctx` keep working unchanged
-   * — backwards-compat with the original single-arg signature.
+   * progress writer; a tool that needs none of it takes only `input`.
    */
   execute: (input: TInput, ctx?: ToolExecuteContext) => Promise<TOutput>;
   requireApproval?: boolean;

@@ -668,7 +668,7 @@ export function stepQueueTestSuite(
         expect(secondPass[0]!.version).toBe("5");
       });
 
-      it("unversioned tasks have undefined version (backward compat)", async () => {
+      it("unversioned tasks have undefined version", async () => {
         const q = await getQueue();
         await q.enqueue({ workflowId: "u-1", stepName: "s", input: {}, prevResults: {} });
 
@@ -700,7 +700,7 @@ export function stepQueueTestSuite(
         expect(task!.metadata).toEqual(meta);
       });
 
-      it("tasks without metadata have undefined metadata (backward compat)", async () => {
+      it("tasks without metadata have undefined metadata", async () => {
         const q = await getQueue();
         await q.enqueue({ workflowId: "no-meta", stepName: "s", input: {}, prevResults: {} });
 
@@ -797,7 +797,7 @@ export function stepQueueTestSuite(
         expect(second[0]!.id).not.toBe(first[0]!.id);
       });
 
-      it("does not cap tasks without concurrency config (backward compat)", async () => {
+      it("does not cap tasks without concurrency config", async () => {
         const q = await getQueue();
         for (let i = 0; i < 5; i++) {
           await q.enqueue({

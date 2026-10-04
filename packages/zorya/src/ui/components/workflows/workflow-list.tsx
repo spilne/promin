@@ -173,7 +173,7 @@ export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: 
                   <td colSpan={6}>
                     <EmptyState
                       message="No workflows registered."
-                      hint="Pass a `workflows` map to ZoryaServer, or use scanWorkflowsFolder()."
+                      hint="Pass a `workflows` map to ZoryaServer, or use WorkflowScanner.scanFolder()."
                     />
                   </td>
                 </tr>

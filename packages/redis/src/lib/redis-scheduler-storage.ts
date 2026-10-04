@@ -18,9 +18,6 @@
 //   <base>:schedule:<id>         — HASH with config + state (namespace-tagged)
 //   <base>:lease:{<key>}:holder  — STRING with PX TTL, the lease holder
 //   <base>:lease:{<key>}:epoch   — STRING counter, the lease's fencing epoch
-//
-// Keys written before this layout (`<prefix>:schedule:<id>` ...) need
-// `migrateLegacyKeys()` once.
 // ---------------------------------------------------------------------------
 
 import { SystemWallClock, type WallClock } from "@promin/workflow";
@@ -35,7 +32,7 @@ import {
 import { scheduleMetadataContains } from "@promin/workflow/storage-kit";
 import type { RedisStoreClient } from "./redis-client.ts";
 import { RedisLeaderLeaseStore } from "./redis-leader-lease-store.ts";
-import { renameLegacyKeys, storeKeyBase } from "./redis-key-migration.ts";
+import { storeKeyBase } from "./redis-key-tags.ts";
 
 export interface RedisSchedulerStorageConfig {
   redis: RedisStoreClient;
@@ -46,8 +43,6 @@ export interface RedisSchedulerStorageConfig {
 }
 
 const GLOBAL_NS = "_";
-/** Keys of the untagged layout, after `<prefix>:`. */
-const LEGACY_KEY = /^(schedule:|ns:|lease:)/;
 
 /**
  * Insert or replace a schedule hash atomically.
@@ -282,36 +277,6 @@ export class RedisSchedulerStorage implements SchedulerStorage {
     // Lease keys under the base share its slot, so a fenced commit checks
     // the epoch in the same script as its writes.
     this.leases = new RedisLeaderLeaseStore({ redis: config.redis, prefix: this.base });
-  }
-
-  /**
-   * Move keys written by earlier versions of this storage
-   * (`<prefix>:schedule:<id>`, `<prefix>:ns:<ns>:due`, `<prefix>:lease:...`)
-   * under the scheduler's hash tag, and register every namespace found.
-   * Lease epochs move with their keys, so fencing stays monotonic. Run it
-   * once per prefix against the standalone instance (it renames keys across
-   * slots), with every scheduler stopped. Re-running it is a no-op.
-   */
-  async migrateLegacyKeys(params?: {
-    /** SCAN COUNT hint. Default 1000. */
-    scanCount?: number;
-  }): Promise<{ keys: number }> {
-    const { renamed } = await renameLegacyKeys({
-      redis: this.redis,
-      prefix: this.prefix,
-      scanCount: params?.scanCount ?? 1_000,
-      target: (rest) => (LEGACY_KEY.test(rest) ? `${this.base}:${rest}` : null),
-    });
-    const namespaces = new Set<string>();
-    const nsBase = `${this.prefix}:ns:`;
-    for (const [from] of renamed) {
-      if (!from.startsWith(nsBase)) continue;
-      const rest = from.slice(nsBase.length);
-      const at = rest.lastIndexOf(":");
-      if (at > 0) namespaces.add(rest.slice(0, at));
-    }
-    if (namespaces.size > 0) await this.redis.sadd(this.namespacesKey, ...namespaces);
-    return { keys: renamed.length };
   }
 
   // -------------------------------------------------------------------------

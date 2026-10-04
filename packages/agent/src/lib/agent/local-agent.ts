@@ -211,7 +211,7 @@ export interface LocalAgentConfig<TOutput = any> {
    * `dispatchAgentSchedule` can look the recipe up later). Decoupled
    * from `agent.name` because hosts often want a recipe-id namespace
    * ("writer-v3") that's more stable than the workflow name. Defaults
-   * to `agent.name` for backward compat.
+   * to `agent.name`.
    */
   readonly agentId?: string;
 }

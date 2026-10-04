@@ -37,15 +37,8 @@ local function snapshot(k)
 end
 `;
 
-// A journal index member is `${idx}|${branchPath}`; members written before
-// branch paths existed are the bare index, whose entry key ends in `|`.
-const ENTRY_SUFFIX_FN = `
-local function entrySuffix(m)
-  if not string.find(m, '|', 1, true) then return m .. '|' end
-  return m
-end
-`;
-
+// A journal index member is `${idx}|${branchPath}`, the suffix of the
+// entry's key after `:entry:`.
 // Load a workflow hash, its current run's step rows and the task rows of
 // every step that has them. Returns {} for a missing workflow.
 const LOAD_RUN_FN = `
@@ -89,7 +82,6 @@ end
 
 // Put a retention TTL on a finished run's keys.
 const EXPIRE_RUN_FN = `
-${ENTRY_SUFFIX_FN}
 local function expireRun(wfKey, base, run, ttl)
   redis.call('PEXPIRE', wfKey, ttl)
   local stepsKey = base .. ':steps:' .. run
@@ -105,7 +97,7 @@ local function expireRun(wfKey, base, run, ttl)
   for _, step in ipairs(redis.call('SMEMBERS', journalSteps)) do
     local jb = base .. ':journal:' .. step
     for _, m in ipairs(redis.call('ZRANGE', jb .. ':idx', 0, -1)) do
-      redis.call('PEXPIRE', jb .. ':entry:' .. entrySuffix(m), ttl)
+      redis.call('PEXPIRE', jb .. ':entry:' .. m, ttl)
     end
     redis.call('PEXPIRE', jb .. ':idx', ttl)
     redis.call('PEXPIRE', jb .. ':signal-idx', ttl)
@@ -272,18 +264,16 @@ return {1, '', stepType}
 
 // Journal: delete entries of one step and their index memberships.
 // KEYS: [idxZset, signalIdxHash, entryHash_1 .. entryHash_n]
-// ARGV: per entry: idxMember, legacyIdxMember|''
+// ARGV: per entry: idxMember
 export const DISCARD_ENTRIES_LUA = `
 for s = 1, #KEYS - 2 do
   local entry = KEYS[2 + s]
-  local a = (s - 1) * 2
   local stepType = redis.call('HGET', entry, 'stepType')
   local name = redis.call('HGET', entry, 'activityName')
   redis.call('DEL', entry)
-  redis.call('ZREM', KEYS[1], ARGV[a + 1])
-  if ARGV[a + 2] ~= '' then redis.call('ZREM', KEYS[1], ARGV[a + 2]) end
+  redis.call('ZREM', KEYS[1], ARGV[s])
   if stepType == 'signal' and name then
-    if redis.call('HGET', KEYS[2], name) == ARGV[a + 1] then redis.call('HDEL', KEYS[2], name) end
+    if redis.call('HGET', KEYS[2], name) == ARGV[s] then redis.call('HDEL', KEYS[2], name) end
   end
 end
 return 1
@@ -491,7 +481,6 @@ return {0, ARGV[1]}
 // the run moved on since the caller read it.
 export const START_FRESH_RUN_LUA = `
 ${SNAPSHOT_FN}
-${ENTRY_SUFFIX_FN}
 local run = redis.call('HGET', KEYS[1], 'run')
 if run ~= ARGV[1] then return {-1} end
 redis.call('RPUSH', KEYS[2], ARGV[2])
@@ -507,7 +496,7 @@ local sleeps = {}
 for _, step in ipairs(redis.call('SMEMBERS', KEYS[4])) do
   local jb = ARGV[5] .. step
   for _, m in ipairs(redis.call('ZRANGE', jb .. ':idx', 0, -1)) do
-    local suffix = entrySuffix(m)
+    local suffix = m
     redis.call('DEL', jb .. ':entry:' .. suffix)
     sleeps[#sleeps + 1] = step .. '::' .. suffix
   end
@@ -528,7 +517,6 @@ return {newRun, sleeps, snapshot(KEYS[1])}
 // changed since the caller read it, else {1, {"<step>::<idx>|<path>" ...}, snapshot|false}.
 export const RESET_STEPS_LUA = `
 ${SNAPSHOT_FN}
-${ENTRY_SUFFIX_FN}
 local run = redis.call('HGET', KEYS[1], 'run')
 if not run then return {-1} end
 if run ~= ARGV[3] then return {0} end
@@ -546,7 +534,7 @@ for i = 6, 5 + n do
   redis.call('DEL', base .. ':tasks:' .. run .. ':' .. name)
   local jb = ARGV[2] .. name
   for _, m in ipairs(redis.call('ZRANGE', jb .. ':idx', 0, -1)) do
-    local suffix = entrySuffix(m)
+    local suffix = m
     redis.call('DEL', jb .. ':entry:' .. suffix)
     sleeps[#sleeps + 1] = name .. '::' .. suffix
   end
@@ -582,11 +570,10 @@ return {1, sleeps, snap}
 // KEYS: [wfKey]
 // ARGV: [wfKey (base), terminalStatusesCsv]
 // Returns {0} when the workflow is gone, {-1} when it isn't terminal, else
-// {1, status, workflowName, parentWorkflowId, namespace, streamsTracked,
+// {1, status, workflowName, parentWorkflowId, namespace,
 //  {tokenId ...}, {"<step>::<idx>|<path>" ...}}.
 export const PURGE_WORKFLOW_LUA = `
-${ENTRY_SUFFIX_FN}
-local h = redis.call('HMGET', KEYS[1], 'id', 'status', 'run', 'workflowName', 'parentWorkflowId', 'namespace', 'streamsTracked')
+local h = redis.call('HMGET', KEYS[1], 'id', 'status', 'run', 'workflowName', 'parentWorkflowId', 'namespace')
 if not h[1] then return {0} end
 local terminal = false
 for s in string.gmatch(ARGV[2], '[^,]+') do
@@ -610,7 +597,7 @@ local journalSteps = b .. ':journal:steps'
 for _, step in ipairs(redis.call('SMEMBERS', journalSteps)) do
   local jb = b .. ':journal:' .. step
   for _, m in ipairs(redis.call('ZRANGE', jb .. ':idx', 0, -1)) do
-    local suffix = entrySuffix(m)
+    local suffix = m
     redis.call('DEL', jb .. ':entry:' .. suffix)
     sleeps[#sleeps + 1] = step .. '::' .. suffix
   end
@@ -619,7 +606,7 @@ end
 redis.call('DEL', KEYS[1], journalSteps, b .. ':signals', b .. ':runs', b .. ':attempts',
   b .. ':signal_tokens', b .. ':signal_token_idempotency', b .. ':stream-ids', b .. ':fence',
   b .. ':child-intents')
-return {1, h[2], h[4] or '', h[5] or '', h[6] or '', h[7] or '', tokenIds, sleeps}
+return {1, h[2], h[4] or '', h[5] or '', h[6] or '', tokenIds, sleeps}
 `;
 
 // -- Cross-workflow index ({idx} slot) -------------------------------------

@@ -76,8 +76,8 @@ describe("tool-progress writer", () => {
     await session.close();
   });
 
-  it("tools that ignore the writer keep working unchanged (backwards-compat)", async () => {
-    // Tool defined with the original single-arg signature — no ctx.
+  it("a tool that takes only its input works without a writer", async () => {
+    // Single-arg execute — no ctx.
     const noProgressTool = tool({
       name: "noProgress",
       description: "Returns immediately without progress.",

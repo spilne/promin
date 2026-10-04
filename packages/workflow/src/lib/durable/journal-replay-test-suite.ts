@@ -3,11 +3,11 @@
 //
 // Drives `runJournaledStep` against a real backend to prove the journal it
 // persists replays deterministically: nested `ctx.parallel` branch paths,
-// `ctx.sleep` / `ctx.signal` / `ctx.child` slots inside branches, journals
-// written in the legacy branch-path format, and slot stability under
+// `ctx.sleep` / `ctx.signal` / `ctx.child` slots inside branches, a
+// pre-written journal replayed unchanged, and slot stability under
 // randomized activity timing. It also checks suspend and failure outcomes:
 // a signal delivery racing its timeout, delivered payloads that look like a
-// timeout, legacy signal rows, failures discarded between step attempts,
+// timeout, tagged signal rows, failures discarded between step attempts,
 // and tagged errors replayed as the same kind.
 //
 // Usage:
@@ -254,17 +254,17 @@ export function journalReplayTestSuite(
       expect(childIds).toHaveLength(2);
     });
 
-    it("a journal written in the legacy branch-path format replays unchanged", async () => {
+    it("a pre-written journal replays unchanged", async () => {
       const storage = await factory();
-      const workflowId = await newWorkflow({ storage, label: "legacy" });
+      const workflowId = await newWorkflow({ storage, label: "prewritten" });
       const success = (value: unknown) => ({ tag: "Success" as const, value });
-      // Legacy layout of: parallel([A, function*{ B; C }]) at slot 0, then a
-      // sleep in branch 0 that took top-level slot 1, then "after" at 2.
+      // Layout of: parallel([function*{ A; sleep }, function*{ B; C }]) at
+      // slot 0, then "after" at 1.
       for (const [idx, path, name, value] of [
-        [0, "0", "A", "a"],
-        [0, "1", "B", "b"],
-        [0, "1.1", "C", "c"],
-        [2, "", "after", "z"],
+        [0, "/0.0", "A", "a"],
+        [0, "/1.0", "B", "b"],
+        [0, "/1.1", "C", "c"],
+        [1, "", "after", "z"],
       ] as const) {
         await storage.appendEntry({
           workflowId,
@@ -278,7 +278,8 @@ export function journalReplayTestSuite(
       await storage.appendPendingEntry({
         workflowId,
         stepName: "s",
-        activityIndex: 1,
+        activityIndex: 0,
+        branchPath: "/0.1",
         activityName: "sleep",
         stepType: "sleep",
         wakeAt: new Date("2026-01-01T00:00:00Z"),
@@ -286,7 +287,8 @@ export function journalReplayTestSuite(
       await storage.completePendingEntry({
         workflowId,
         stepName: "s",
-        activityIndex: 1,
+        activityIndex: 0,
+        branchPath: "/0.1",
         exit: success("2026-01-01T00:00:00.000Z"),
       });
 
@@ -322,29 +324,30 @@ export function journalReplayTestSuite(
         "E-fresh",
       ]);
       expect(calls.sort()).toEqual(["D", "E"]);
-      // New work in a legacy journal keeps the legacy grammar.
       const journal = await keys({ storage, workflowId });
-      expect(journal).toContain("3|0|activity|D");
-      expect(journal).toContain("3|1|activity|E");
+      expect(journal).toContain("2|/0.0|activity|D");
+      expect(journal).toContain("2|/1.0|activity|E");
     });
 
-    it("a legacy journal with only top-level slots (children in a parallel) replays", async () => {
+    it("recorded children inside a parallel replay without re-running", async () => {
       const storage = await factory();
-      const workflowId = await newWorkflow({ storage, label: "legacy-child" });
-      // Legacy: parallel at slot 0, its two children took top-level 1 and 2.
-      for (const idx of [1, 2]) {
+      const workflowId = await newWorkflow({ storage, label: "recorded-child" });
+      // Parallel at slot 0; its two children took branch paths /0.0 and /1.0.
+      for (const branch of [0, 1]) {
         await storage.appendPendingEntry({
           workflowId,
           stepName: "s",
-          activityIndex: idx,
+          activityIndex: 0,
+          branchPath: `/${branch}.0`,
           activityName: "child-wf",
           stepType: "child",
         });
         await storage.completePendingEntry({
           workflowId,
           stepName: "s",
-          activityIndex: idx,
-          exit: { tag: "Success", value: `legacy-${idx}` },
+          activityIndex: 0,
+          branchPath: `/${branch}.0`,
+          exit: { tag: "Success", value: `recorded-${branch}` },
         });
       }
       let childCalls = 0;
@@ -356,8 +359,8 @@ export function journalReplayTestSuite(
         return yield* ctx.parallel([ctx.child(CHILD_WORKFLOW), ctx.child(CHILD_WORKFLOW)]);
       };
       expect(await runStep({ storage, workflowId, body, runChild })).toEqual([
-        "legacy-1",
-        "legacy-2",
+        "recorded-0",
+        "recorded-1",
       ]);
       expect(childCalls).toBe(0);
     });
@@ -573,15 +576,15 @@ export function journalReplayTestSuite(
       expect(await runStep({ storage, workflowId, body, clock })).toEqual(expected);
     });
 
-    it("signal entries written before the delivered/timeout tag replay as before", async () => {
+    it("tagged signal entries replay as delivered or timed out", async () => {
       const storage = await factory();
-      const workflowId = await newWorkflow({ storage, label: "legacy-signal" });
-      const legacy: Array<[string, unknown]> = [
-        ["declined", { ok: false, reason: "declined" }],
-        ["expired", { ok: false, error: "timeout" }],
-        ["plain", "v"],
+      const workflowId = await newWorkflow({ storage, label: "tagged-signal" });
+      const recorded: Array<[string, unknown]> = [
+        ["declined", { $signal: "delivered", value: { ok: false, reason: "declined" } }],
+        ["expired", { $signal: "timeout" }],
+        ["plain", { $signal: "delivered", value: "v" }],
       ];
-      for (const [i, [signalName, value]] of legacy.entries()) {
+      for (const [i, [signalName, value]] of recorded.entries()) {
         await storage.appendPendingEntry({
           workflowId,
           stepName: "s",

@@ -44,18 +44,12 @@ export const CANCELLED_ERROR_TAG = "WorkflowCancelledError";
 /** `error` `cancelWorkflow` stores on a cancelled run. */
 export const CANCELLED_ERROR = "Cancelled";
 
-/**
- * True when a run is `failed` because it was cancelled. Rows written before
- * `errorTag` existed are recognised by their `"Cancelled"` error.
- */
+/** True when a run is `failed` because it was cancelled. */
 export function isCancelledRun(state: {
   readonly status: WorkflowStatus;
-  readonly error?: string;
   readonly errorTag?: string;
 }): boolean {
-  if (state.status !== "failed") return false;
-  if (state.errorTag !== undefined) return state.errorTag === CANCELLED_ERROR_TAG;
-  return state.error === CANCELLED_ERROR;
+  return state.status === "failed" && state.errorTag === CANCELLED_ERROR_TAG;
 }
 
 /**

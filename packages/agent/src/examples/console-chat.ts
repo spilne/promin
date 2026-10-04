@@ -448,7 +448,7 @@ function prompt() {
       const { aborted, error: streamError } = await consoleRunner.runTurn(
         (signal) => {
           term.setActiveSignal(signal);
-          return session.stream(input, signal);
+          return session.stream(input, { signal });
         },
         { label: "Agent", workspace },
       );

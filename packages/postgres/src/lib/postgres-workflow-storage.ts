@@ -849,7 +849,7 @@ export class PostgresWorkflowStorage
         ? sql``
         : sql`, attempts AS (
             INSERT INTO wf_step_attempts (workflow_id, step_name, attempt, attempt_type_id,
-              status_id, result, error, duration_ms, started_at, completed_at, worker_id)
+              status_id, result, error, duration_ms, started_at, completed_at, executor_id)
             SELECT v.* FROM (VALUES ${sql.join(
               attempts.map(
                 (a) => sql`(${a.workflowId}::text, ${a.stepName}::text, ${a.attempt}::int,
@@ -865,7 +865,7 @@ export class PostgresWorkflowStorage
             ON CONFLICT (workflow_id, step_name, run, attempt, attempt_type_id) DO UPDATE SET
               status_id = EXCLUDED.status_id, result = EXCLUDED.result, error = EXCLUDED.error,
               duration_ms = EXCLUDED.duration_ms, started_at = EXCLUDED.started_at,
-              completed_at = EXCLUDED.completed_at, worker_id = EXCLUDED.worker_id
+              completed_at = EXCLUDED.completed_at, executor_id = EXCLUDED.executor_id
           )`;
 
     const row = await this.fencedStatement({
@@ -1268,13 +1268,10 @@ export class PostgresWorkflowStorage
     workflowId,
     lockDurationMs,
   }: TryLockParams): Promise<{ acquired: boolean; token?: string }> {
-    // Row locks (the default) live in wf_workflow_locks and carry the
-    // bigserial fence_token. The deprecated advisory mode has no row and so
-    // no token — see `PostgresStorageConfig.useAdvisoryLocks`.
-    if (this.config.useAdvisoryLocks) {
-      const acquired = await this.tryAdvisoryLock(workflowId);
-      return { acquired };
-    }
+    // Row locks live in wf_workflow_locks with a server-side lease expiry
+    // and carry the bigserial fence_token, so they exclude every other
+    // caller (any pool connection, any process) and fenced writes reject a
+    // stale holder.
     return this.tryRowLock(workflowId, lockDurationMs);
   }
 
@@ -1293,10 +1290,6 @@ export class PostgresWorkflowStorage
   }
 
   async releaseLock({ workflowId, guard }: ReleaseLockParams): Promise<void> {
-    if (this.config.useAdvisoryLocks) {
-      await this.releaseAdvisoryLock(workflowId);
-      return;
-    }
     // When a token is provided, only the current holder releases — a stale
     // holder whose lock already moved on silently no-ops (matches InMemory).
     if (guard?.fenceToken) {
@@ -1321,7 +1314,6 @@ export class PostgresWorkflowStorage
   }
 
   async heartbeat({ workflowId, lockDurationMs, guard }: HeartbeatParams): Promise<void> {
-    if (this.config.useAdvisoryLocks) return;
     // Expiry is computed on the server clock, same as `tryRowLock`, so the
     // lease length doesn't drift with client/server skew.
     if (guard?.fenceToken) {
@@ -1367,8 +1359,6 @@ export class PostgresWorkflowStorage
 
   /** The token a fenced write must match, or undefined when the write is unfenced. */
   private fenceTokenOf(guard?: FenceGuard): string | undefined {
-    // Advisory-lock mode issues no tokens, so there is no row to fence on.
-    if (this.config.useAdvisoryLocks) return undefined;
     return guard?.fenceToken || undefined;
   }
 
@@ -1714,11 +1704,7 @@ export class PostgresWorkflowStorage
     }));
   }
 
-  /**
-   * Lock state comes from `wf_workflow_locks`; in the deprecated advisory
-   * lock mode there are no lock rows, so every pending / running run that
-   * matches is returned and the caller's `tryLock` turns away owned ones.
-   */
+  /** Lock state comes from `wf_workflow_locks`. */
   async listOrphanedRuns(params: {
     now: Date;
     updatedBefore: Date;
@@ -1888,19 +1874,12 @@ export class PostgresWorkflowStorage
     const ids = expired.map((r) => r.workflowId);
 
     // One transaction: a crash mid-purge never leaves a workflow row with
-    // half its dependents gone. Child tables first (FK order), then the
-    // workflow itself. Tables with an ON DELETE CASCADE FK would follow the
-    // final delete anyway; deleting them explicitly keeps rows orphaned
-    // before those FKs existed from surviving.
+    // half its dependents gone. Signals, steps, runs, journal, signal tokens
+    // and streams follow the workflow row through their ON DELETE CASCADE
+    // foreign keys; the tables without one are cleared explicitly.
     await this.db.transaction(async (tx) => {
-      await tx.delete(workflowSignals).where(inArray(workflowSignals.workflowId, ids));
       await tx.delete(workflowStepTasks).where(inArray(workflowStepTasks.workflowId, ids));
-      await tx.delete(workflowSteps).where(inArray(workflowSteps.workflowId, ids));
       await tx.delete(stepAttempts).where(inArray(stepAttempts.workflowId, ids));
-      await tx.delete(workflowRuns).where(inArray(workflowRuns.workflowId, ids));
-      await tx.delete(activityJournal).where(inArray(activityJournal.workflowId, ids));
-      await tx.delete(signalTokens).where(inArray(signalTokens.workflowId, ids));
-      await tx.delete(workflowStreams).where(inArray(workflowStreams.workflowId, ids));
       await tx
         .delete(stepQueue)
         .where(
@@ -1914,18 +1893,6 @@ export class PostgresWorkflowStorage
     });
 
     return ids.length;
-  }
-
-  private async tryAdvisoryLock(workflowId: string): Promise<boolean> {
-    const [result] = await execRaw(
-      this.db,
-      sql`SELECT pg_try_advisory_lock(${hashToInt32(workflowId)}) as acquired`,
-    );
-    return result?.acquired === true;
-  }
-
-  private async releaseAdvisoryLock(workflowId: string): Promise<void> {
-    await execRaw(this.db, sql`SELECT pg_advisory_unlock(${hashToInt32(workflowId)})`);
   }
 
   private async tryRowLock(
@@ -1982,11 +1949,7 @@ export class PostgresWorkflowStorage
           durationMs: record.durationMs,
           startedAt: record.startedAt,
           completedAt: record.completedAt,
-          // Schema column is still named `worker_id` (drizzle field
-          // `workerId`); the StepAttemptRecord interface renamed
-          // `workerId` → `executorId` so non-worker executors (in-process
-          // runner, embedded ZoryaWorkflows) read naturally too.
-          workerId: record.executorId,
+          executorId: record.executorId,
         });
       },
     });
@@ -2021,7 +1984,7 @@ export class PostgresWorkflowStorage
       durationMs: Number(r.durationMs ?? 0),
       startedAt: r.startedAt,
       completedAt: r.completedAt,
-      executorId: r.workerId ?? undefined,
+      executorId: r.executorId ?? undefined,
     }));
   }
 

@@ -50,7 +50,6 @@ exports[`entry points — exported names match the snapshot 1`] = `
     "type DefineStreamOptions",
     "type DeliverSignalParams",
     "type DiscardJournalEntriesParams",
-    "type DispatchConfig",
     "type DueSleep",
     "type EventData",
     "EventDataValidationError",

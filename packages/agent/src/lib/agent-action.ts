@@ -152,8 +152,8 @@ export interface AgentActionConfig<TOutput = any> {
    * forwarders (e.g. WS relay shipping events from a Zorya worker to the
    * dashboard) plus in-process loggers / metrics simultaneously.
    *
-   * The legacy onChunk / onToolCall / onToolResult callbacks still fire
-   * when set; the bus is additive. Pass `new SessionEventBus()` from
+   * The onChunk / onToolCall / onToolResult callbacks fire too when set;
+   * the bus is additive. Pass `new SessionEventBus()` from
    * `@promin/agent` and subscribe to it before calling
    * `runner.run({ workflow: agentAction({ bus, ... }), ... })`.
    *
@@ -316,8 +316,8 @@ export function agentAction(
 
         const response = yield* ctx.activity(`think-${step}`, async () => {
           const llmStart = Date.now();
-          // Tee tokens to both the legacy onChunk callback (back-compat)
-          // and the bus as token.delta events (transient — never journaled).
+          // Tee tokens to both the onChunk callback and the bus as
+          // token.delta events (transient — never journaled).
           const result = await runLlmCall({
             llm: config.llm,
             messages,

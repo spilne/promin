@@ -63,20 +63,8 @@ export class SqliteWorkerRegistry implements WorkerRegistry {
     const t = this._t;
     const tbl = `${t}_workers`;
 
-    // Migrate a pre-`retired` table: the old schema CHECK-constrained
-    // status to ('active','draining','dead') and has no `retired_at`
-    // column. SQLite can't ALTER a CHECK constraint, so rebuild — rename
-    // the old table aside, create the new one, copy rows, drop the old.
-    const existing = this.db
-      .query<{ sql: string }>(`SELECT sql FROM sqlite_master WHERE type='table' AND name = ?`)
-      .get(tbl);
-    const legacy = existing != null && !existing.sql.includes("retired_at");
-    if (legacy) {
-      this.db.run(`ALTER TABLE ${tbl} RENAME TO ${tbl}_legacy`);
-    }
-
-    // Status is left unconstrained (validated by the WorkerStatus type) —
-    // a CHECK can't be ALTER'd, and the four values are app-controlled.
+    // Status is left unconstrained (validated by the WorkerStatus type);
+    // the four values are app-controlled.
     this.db.run(`
       CREATE TABLE IF NOT EXISTS ${tbl} (
         worker_id         TEXT    NOT NULL PRIMARY KEY,
@@ -89,16 +77,6 @@ export class SqliteWorkerRegistry implements WorkerRegistry {
         retired_at        INTEGER
       )
     `);
-
-    if (legacy) {
-      this.db.run(
-        `INSERT INTO ${tbl}
-           (worker_id, status, capabilities, concurrency, metadata, started_at, last_heartbeat_at)
-         SELECT worker_id, status, capabilities, concurrency, metadata, started_at, last_heartbeat_at
-         FROM ${tbl}_legacy`,
-      );
-      this.db.run(`DROP TABLE ${tbl}_legacy`);
-    }
 
     this.db.run(`CREATE INDEX IF NOT EXISTS ${tbl}_status ON ${tbl} (status)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS ${tbl}_heartbeat ON ${tbl} (last_heartbeat_at)`);

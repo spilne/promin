@@ -10,6 +10,26 @@ import { createWorkflowRunner } from "../../durable/workflow-runner.ts";
 import { MapStepRegistry } from "../step-registry.ts";
 import { InMemoryStepQueue } from "../in-memory-step-queue.ts";
 import { createWorker } from "../worker.ts";
+import { StepQueueExecutor } from "../step-queue-executor.ts";
+import { RoutingStepExecutor } from "../../durable/runner/routing-step-executor.ts";
+
+/** A runner that sends `remoteSteps` to workers over `stepQueue`. */
+function routedRunner(params: {
+  storage: InMemoryWorkflowStorage;
+  stepQueue: InMemoryStepQueue;
+  remoteSteps: readonly string[];
+  pollIntervalMs: number;
+}) {
+  const { storage, stepQueue, remoteSteps, pollIntervalMs } = params;
+  return createWorkflowRunner({
+    storage,
+    stepExecutor: new RoutingStepExecutor({
+      remote: new StepQueueExecutor({ stepQueue, storage, pollIntervalMs }),
+      remoteSteps,
+      storage,
+    }),
+  });
+}
 
 describe("versioned dispatch", () => {
   it("coordinator stamps enqueued tasks with the workflow's version", async () => {
@@ -31,12 +51,16 @@ describe("versioned dispatch", () => {
     const wf = workflow<{ id: string }>({
       name: "vd-1",
       version: "2",
-      dispatch: { stepQueue, remoteSteps: ["remote-step"], pollIntervalMs: 25 },
     })
       .step("load", ({ input }) => succeed(input.id))
       .step("remote-step", { dependsOn: ["load"] }, ({ deps }) => succeed(`x-${deps.load}`))
       .build();
-    const runner = createWorkflowRunner({ storage });
+    const runner = routedRunner({
+      storage,
+      stepQueue,
+      remoteSteps: ["remote-step"],
+      pollIntervalMs: 25,
+    });
     await runner.run({ workflow: wf, workflowId: "vd-1-a", input: { id: "abc" } });
 
     // After the workflow completes, inspect the completed task's stored version.
@@ -112,8 +136,8 @@ describe("versioned dispatch", () => {
     const registry = new MapStepRegistry();
     registry.register({ stepName: "s", handler: () => succeed("ok") });
 
-    // Worker supports v1 + v2 only. Unversioned is always accepted for
-    // backward compat. v3 is rejected.
+    // Worker supports v1 + v2 only. Unversioned is always accepted;
+    // v3 is rejected.
     const supported = ["1", "2"];
     const claimed = await stepQueue.claim({
       workerId: "w-1",
@@ -150,13 +174,17 @@ describe("versioned dispatch", () => {
     });
     void worker.start();
 
-    const runner = createWorkflowRunner({ storage });
+    const runner = routedRunner({
+      storage,
+      stepQueue,
+      remoteSteps: ["step-a"],
+      pollIntervalMs: 25,
+    });
 
     // v1 in-flight workflow.
     const v1 = workflow<{ x: number }>({
       name: "order",
       version: "1",
-      dispatch: { stepQueue, remoteSteps: ["step-a"], pollIntervalMs: 25 },
     })
       .step("step-a", ({ input }) => succeed(`v1-${input.x}`))
       .build();
@@ -171,7 +199,6 @@ describe("versioned dispatch", () => {
     const v2 = workflow<{ x: number }>({
       name: "order",
       version: "2",
-      dispatch: { stepQueue, remoteSteps: ["step-a"], pollIntervalMs: 25 },
     })
       .step("step-a", ({ input }) => succeed(`v2-${input.x}`))
       .build();

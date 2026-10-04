@@ -7,8 +7,7 @@
 //   <prefix>:{sm:<id>}:events    — LIST of JSON transition events (append-only)
 //   <prefix>:{sm:<id>}:lock      — STRING lock token with PX expiry
 //
-// There is no cross-machine key. Keys written before this layout
-// (`<prefix>:machine:<id>` ...) need `migrateLegacyKeys()` once.
+// There is no cross-machine key.
 // ---------------------------------------------------------------------------
 
 import {
@@ -20,7 +19,6 @@ import {
   type WallClock,
 } from "@promin/workflow";
 import type { RedisStoreClient } from "./redis-client.ts";
-import { renameLegacyKeys } from "./redis-key-migration.ts";
 
 export interface RedisStateMachineStorageConfig {
   redis: RedisStoreClient;
@@ -39,8 +37,6 @@ export interface RedisStateMachineStorageConfig {
  * `from` at the expected revision, updating the snapshot, bumping the
  * revision, appending the event and refreshing TTLs in one step. Returns
  * `{current, revision}` on mismatch, nil when missing, and `1` on success.
- * A machine written before revisions existed has no `revision` field; its
- * history length stands in for it.
  *
  * KEYS: [machine_key, events_key]
  * ARGV: [from, to, context_json, updated_at, event_json, ttl_ms ('' = none), expected_revision]
@@ -48,7 +44,7 @@ export interface RedisStateMachineStorageConfig {
 const TRANSITION_LUA = `
 local current = redis.call('HGET', KEYS[1], 'current')
 if not current then return nil end
-local revision = tonumber(redis.call('HGET', KEYS[1], 'revision') or redis.call('LLEN', KEYS[2]))
+local revision = tonumber(redis.call('HGET', KEYS[1], 'revision'))
 if current ~= ARGV[1] or revision ~= tonumber(ARGV[7]) then return {current, revision} end
 redis.call('HSET', KEYS[1], 'current', ARGV[2], 'context', ARGV[3], 'updatedAt', ARGV[4], 'revision', revision + 1)
 redis.call('RPUSH', KEYS[2], ARGV[5])
@@ -108,34 +104,6 @@ export class RedisStateMachineStorage implements StateMachineStorage {
     return `${this.prefix}:{sm:${id}}:lock`;
   }
 
-  /**
-   * Move keys written by earlier versions of this storage
-   * (`<prefix>:machine:<id>`, `<prefix>:events:<id>`, `<prefix>:lock:<id>`)
-   * under each machine's hash tag. Run it once per prefix against the
-   * standalone instance (it renames keys across slots), with every worker
-   * stopped. Re-running it is a no-op.
-   */
-  async migrateLegacyKeys(params?: {
-    /** SCAN COUNT hint. Default 1000. */
-    scanCount?: number;
-  }): Promise<{ keys: number }> {
-    const kinds = { "machine:": "machine", "events:": "events", "lock:": "lock" } as const;
-    const { renamed } = await renameLegacyKeys({
-      redis: this.redis,
-      prefix: this.prefix,
-      scanCount: params?.scanCount ?? 1_000,
-      target: (rest) => {
-        for (const [legacy, kind] of Object.entries(kinds)) {
-          if (rest.startsWith(legacy)) {
-            return `${this.prefix}:{sm:${rest.slice(legacy.length)}}:${kind}`;
-          }
-        }
-        return null;
-      },
-    });
-    return { keys: renamed.length };
-  }
-
   async create(params: {
     id: string;
     name: string;
@@ -173,8 +141,6 @@ export class RedisStateMachineStorage implements StateMachineStorage {
   async load(id: string): Promise<MachineState | null> {
     const raw = await this.redis.hgetall(this.machineKey(id));
     if (!raw || !raw.id) return null;
-    const revision =
-      raw.revision !== undefined ? Number(raw.revision) : await this.redis.llen(this.eventsKey(id));
     return {
       id: raw.id,
       name: raw.name ?? "",
@@ -184,7 +150,7 @@ export class RedisStateMachineStorage implements StateMachineStorage {
       context: raw.context !== undefined ? JSON.parse(raw.context) : undefined,
       version: raw.version ?? undefined,
       metadata: raw.metadata ? JSON.parse(raw.metadata) : undefined,
-      revision,
+      revision: Number(raw.revision ?? 0),
       createdAt: new Date(raw.createdAt ?? 0),
       updatedAt: new Date(raw.updatedAt ?? 0),
     };

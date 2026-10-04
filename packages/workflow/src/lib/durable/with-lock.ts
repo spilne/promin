@@ -210,10 +210,10 @@ export async function withLock<T>(params: {
 }
 
 /**
- * Take the lock, with the state when `loadState` is set and the storage
- * has `tryLockAndLoad`. Otherwise `state` is left out and the callback
- * loads it under the lock itself. Not `async`: the plain `tryLock` path
- * hands back the storage's own promise, adding no extra ticks.
+ * Take the lock, with the state when `loadState` is set. Otherwise `state`
+ * is left out and the callback loads it under the lock itself. Not
+ * `async`: the plain `tryLock` path hands back the storage's own promise,
+ * adding no extra ticks.
  */
 function acquireLock(params: {
   storage: WorkflowStorage;
@@ -222,7 +222,7 @@ function acquireLock(params: {
   loadState: boolean;
 }): Promise<{ acquired: boolean; token?: FenceToken; state?: WorkflowState | null }> {
   const { storage, workflowId, lockDurationMs } = params;
-  if (params.loadState && typeof storage.tryLockAndLoad === "function") {
+  if (params.loadState) {
     return storage
       .tryLockAndLoad({ workflowId, lockDurationMs })
       .then(({ locked, token, state }) =>

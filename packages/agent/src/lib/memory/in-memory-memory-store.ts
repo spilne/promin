@@ -282,14 +282,7 @@ export class InMemoryMemoryStore implements MemoryStore {
   }
 
   async getThread(key: ThreadKey): Promise<ThreadRow | null> {
-    const row = this.threads.get(this.threadK(key));
-    if (!row) return null;
-    // Same legacy fallback as listThreads: surface `metadata.title` as
-    // the typed `title` when the column itself is null.
-    if (row.title == null && typeof row.metadata.title === "string") {
-      return { ...row, title: row.metadata.title };
-    }
-    return row;
+    return this.threads.get(this.threadK(key)) ?? null;
   }
 
   async listThreads(params: ListThreadsParams): Promise<ThreadSummary[]> {
@@ -322,11 +315,7 @@ export class InMemoryMemoryStore implements MemoryStore {
         namespaceId: t.namespaceId,
         resourceId: t.resourceId,
         threadId: t.threadId,
-        // Read-side fallback: legacy rows wrote `metadata.title` before
-        // the column existed. Surface that as `title` so the UI doesn't
-        // lose names that were set under the old contract. Newly written
-        // titles always go through the typed column.
-        title: t.title ?? (typeof t.metadata.title === "string" ? t.metadata.title : null),
+        title: t.title,
         metadata: t.metadata,
         archivedAt: t.archivedAt,
         messageCount: this.messages.get(k)?.length ?? 0,

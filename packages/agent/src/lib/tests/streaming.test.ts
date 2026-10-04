@@ -229,14 +229,14 @@ describe("session.stream() — extended thinking", () => {
     expect(assistant?.thinkingBlocks).toEqual([{ thinking: "reasoning", signature: "sig-xyz" }]);
   });
 
-  it("backward-compatible: bare AbortSignal still works alongside thinking", async () => {
+  it("options.signal works alongside thinking", async () => {
     const session = await makeSession({
-      name: "stream-thinking-signal-compat",
+      name: "stream-thinking-signal",
       llm: mockStreamingLLM([{ chunks: ["ok"], finishReason: "stop" }]),
     });
 
     const ac = new AbortController();
-    const chunks = await collectStream(session.stream("hi", ac.signal));
+    const chunks = await collectStream(session.stream("hi", { signal: ac.signal }));
     await session.close();
 
     expect(chunks).toEqual(["ok"]);

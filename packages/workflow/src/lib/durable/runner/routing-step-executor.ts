@@ -1,8 +1,7 @@
 // ---------------------------------------------------------------------------
 // Routing step executor — sends a fixed set of steps to one executor (a
 // queue of remote workers, typically) and every other step to another (the
-// in-process executor by default). Replaces the workflow-level
-// `dispatch.remoteSteps` option, which the runner now maps onto it.
+// in-process executor by default).
 // ---------------------------------------------------------------------------
 
 import { SystemWallClock, type WallClock } from "../../shared/wall-clock.ts";

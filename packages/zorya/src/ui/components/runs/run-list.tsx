@@ -60,9 +60,9 @@ export function RunList({ onOpen, queryParams, onQueryChange }: RunListProps) {
   // The chip row is the canonical filter state — once a clause submits it
   // moves out of the input and into `appliedFilters`. The input is just an
   // edit buffer for the *next* clause. We accept either the unified `?q=`
-  // form or the legacy per-field params (`?name=`, etc.) so old bookmarks
-  // keep working.
-  const initialQueryText = queryParams?.get("q") ?? buildQueryFromLegacyParams(queryParams);
+  // form or the per-field params (`?name=`, etc.) that links from the
+  // workflow and schedule pages use.
+  const initialQueryText = queryParams?.get("q") ?? buildQueryFromFieldParams(queryParams);
   const initialFilters = useMemo<ParsedSearchQuery>(
     () => promoteFreeText(parseSearchQuery(initialQueryText)),
     // initialQueryText is computed once at mount; no need to retrigger.
@@ -545,12 +545,10 @@ function parseSortParam(
 }
 
 /**
- * Backwards-compat: rebuild the smart-search text from the legacy
- * per-field URL params (`?name=`, `?type=`, `?version=`, `?metadata=`) so
- * old bookmarks land on the right filters even though the UI no longer
- * writes them. Returns "" when no legacy params are present.
+ * Build the smart-search text from per-field URL params (`?name=`,
+ * `?type=`, `?version=`, `?metadata=`). Returns "" when none are present.
  */
-function buildQueryFromLegacyParams(qp: URLSearchParams | undefined): string {
+function buildQueryFromFieldParams(qp: URLSearchParams | undefined): string {
   if (!qp) return "";
   const parts: string[] = [];
   for (const f of ["name", "type", "version", "namespace"] as const) {

@@ -7,7 +7,6 @@
 
 import type { Eff, Throws } from "@spilne/perfect-core";
 import type { Codec } from "@spilne/perfect-core/connect";
-import type { StepQueue } from "../distributed/step-queue.ts";
 import type { WorkflowRetryPolicy } from "../shared/retry-policy.ts";
 import type { Sinkable } from "../shared/streamable.ts";
 import type { TaggedError } from "../shared/tagged-error.ts";
@@ -151,7 +150,6 @@ export interface WorkflowDefinitionInternals {
   readonly retry?: WorkflowRetryPolicy;
   readonly compensateConfig?: CompensateConfig;
   readonly dlq?: Sinkable<FailedWorkflowRecord>;
-  readonly dispatch?: DispatchConfig;
   readonly timeoutMs?: number;
   readonly onVersionMismatch: "strict" | "drain";
   readonly previousVersions?: ReadonlyArray<Workflow<unknown, unknown>>;
@@ -321,29 +319,6 @@ export interface CompensateConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch config — send specific steps to remote workers
-// ---------------------------------------------------------------------------
-
-export interface DispatchConfig {
-  /** Step queue for dispatching tasks to remote workers. */
-  stepQueue: StepQueue;
-  /**
-   * Step names to dispatch remotely. Unlisted steps execute locally. Each
-   * dispatched task carries the step's declared `needs` (from its
-   * `StepOptions.needs`), so workers match by capability rather than
-   * queue name.
-   *
-   * @example
-   * ```ts
-   * remoteSteps: ["transcribe", "train-model"]
-   * ```
-   */
-  remoteSteps: readonly string[];
-  /** How often to poll for dispatched step completion (ms). Default: 500. */
-  pollIntervalMs?: number;
-}
-
-// ---------------------------------------------------------------------------
 // workflow() parameters and the builder's frozen copy of them
 // ---------------------------------------------------------------------------
 
@@ -359,8 +334,6 @@ export interface WorkflowParams<Input> {
   readonly compensate?: CompensateConfig;
   /** Dead letter queue — failed workflows are published here after all retries + compensation. */
   readonly dlq?: Sinkable<FailedWorkflowRecord>;
-  /** Dispatch specific steps to remote workers instead of executing locally. */
-  readonly dispatch?: DispatchConfig;
   /** Workflow version tag — used to detect code/state mismatch on resume. Unset by default. */
   readonly version?: string;
   /** Global deadline for the entire workflow execution (ms). Fails with WorkflowDeadlineError if exceeded. */

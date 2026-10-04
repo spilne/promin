@@ -94,7 +94,7 @@ function renderRoute(route: string, navigate: (p: string) => void) {
     return <FragmentsPage />;
   }
   if (path === "/roles") {
-    return <RolesPage onOpenAgent={(id) => navigate(`/agents/${encodeURIComponent(id)}`)} />;
+    return <RolesPage />;
   }
   if (path === "/dags") {
     return <DagsPage />;

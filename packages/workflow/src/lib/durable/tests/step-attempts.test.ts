@@ -297,6 +297,7 @@ describe("Graceful degradation — audit logging is optional", () => {
       deliverSignal: base.deliverSignal.bind(base),
       loadSignals: base.loadSignals.bind(base),
       tryLock: base.tryLock.bind(base),
+      tryLockAndLoad: base.tryLockAndLoad.bind(base),
       releaseLock: base.releaseLock.bind(base),
       heartbeat: base.heartbeat.bind(base),
       // NO saveStepAttempt or loadStepAttempts

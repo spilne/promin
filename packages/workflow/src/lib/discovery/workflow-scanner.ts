@@ -3,9 +3,8 @@
 //
 // Lives in @promin/workflow (rather than @promin/zorya) so workers, agents,
 // and any other consumer can construct one without depending on the
-// dashboard. ZoryaServer's `scanWorkflowsFolder` helper is a thin wrapper
-// around this class, and split-mode workers can share the same configured
-// instance.
+// dashboard; split-mode workers and the Zorya server can share the same
+// configured instance.
 //
 // Detection is structural: an export counts as a Workflow if it has a
 // string `name`, an object `dag`, and an object `_definition`. Any

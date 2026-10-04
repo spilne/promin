@@ -13,8 +13,6 @@ interface TabsProps<V extends string> {
   tabs: ReadonlyArray<TabDef<V>>;
   active: V;
   onChange: (id: V) => void;
-  /** "lifted" | "boxed" | "bordered" — passed through to DaisyUI. */
-  variant?: "lifted" | "boxed" | "bordered";
   /** Tailwind size modifier. */
   size?: "xs" | "sm" | "md";
   /** Extra class on the wrapper. */
@@ -25,9 +23,6 @@ export function Tabs<V extends string>({
   tabs,
   active,
   onChange,
-  // `variant` kept for API compat — lifted is the only style we ship now,
-  // since DaisyUI's tabs-lifted didn't read well against the dark theme.
-  variant: _variant = "lifted",
   size = "sm",
   class: klass = "",
 }: TabsProps<V>) {

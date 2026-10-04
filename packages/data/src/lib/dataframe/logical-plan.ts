@@ -99,7 +99,7 @@ export interface SortPlan {
   readonly _tag: "Sort";
   readonly input: LogicalPlan;
   readonly by: string | { column: string; order: "asc" | "desc" }[];
-  readonly order: "asc" | "desc"; // used when by is string (backward compat)
+  readonly order: "asc" | "desc"; // used when by is a single column name
 }
 
 export interface LimitPlan {

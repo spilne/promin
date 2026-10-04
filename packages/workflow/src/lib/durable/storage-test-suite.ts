@@ -33,12 +33,6 @@ export interface StorageTestSuiteOptions {
    */
   hasJournaledSuspend?: boolean;
   /**
-   * Run the `discardJournalEntries` cases. Defaults to `hasJournaledSuspend`;
-   * pass `false` for a suspend-capable storage that leaves the optional
-   * method out.
-   */
-  hasJournalDiscard?: boolean;
-  /**
    * Opt in to the `resetSteps` conformance section. Defaults to `false`.
    * When `true`, the factory must return a storage that implements the
    * optional `resetSteps` method (backs `WorkflowRunner.resume`).
@@ -1788,8 +1782,7 @@ export function storageTestSuite(
         },
         {
           name: "discardJournalEntries",
-          supported: (s) =>
-            hasSuspend(s) && typeof suspendOf(s).discardJournalEntries === "function",
+          supported: (s) => hasSuspend(s),
           seed: (s, id) =>
             suspendOf(s).appendEntry({
               workflowId: id,
@@ -1799,7 +1792,7 @@ export function storageTestSuite(
               exit: { tag: "Failure", error: "boom" },
             }),
           write: (s, id, g) =>
-            suspendOf(s).discardJournalEntries!({
+            suspendOf(s).discardJournalEntries({
               workflowId: id,
               stepName: "j",
               slots: [{ activityIndex: 0, branchPath: "" }],
@@ -2044,16 +2037,14 @@ export function storageTestSuite(
               guard: aGuard,
             }),
           );
-          if (typeof j.discardJournalEntries === "function") {
-            await rejectsStale(() =>
-              j.discardJournalEntries!({
-                workflowId: id,
-                stepName: "j",
-                slots: [{ activityIndex: 0, branchPath: "" }],
-                guard: aGuard,
-              }),
-            );
-          }
+          await rejectsStale(() =>
+            j.discardJournalEntries({
+              workflowId: id,
+              stepName: "j",
+              slots: [{ activityIndex: 0, branchPath: "" }],
+              guard: aGuard,
+            }),
+          );
         }
         await rejectsStale(() => s.startFreshRun({ workflowId: id, guard: aGuard }));
         await rejectsStale(() =>
@@ -4516,17 +4507,11 @@ export function storageTestSuite(
       });
     }
 
-    if (options.hasJournalDiscard ?? options.hasJournaledSuspend) {
+    if (options.hasJournaledSuspend) {
       describe("journal — discardJournalEntries", () => {
         async function getDiscardStorage() {
           const s = await getSuspendStorage();
           const discard = s.discardJournalEntries;
-          if (typeof discard !== "function") {
-            throw new Error(
-              "storageTestSuite runs the discardJournalEntries cases, but the storage does " +
-                "not implement it. Pass hasJournalDiscard: false to skip them.",
-            );
-          }
           return {
             s,
             discard: (p: Parameters<typeof discard>[0]) => discard.call(s, p),

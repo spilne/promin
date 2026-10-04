@@ -5,6 +5,26 @@ import { createWorkflowRunner } from "../../durable/workflow-runner.ts";
 import { MapStepRegistry } from "../step-registry.ts";
 import { InMemoryStepQueue } from "../in-memory-step-queue.ts";
 import { createWorker } from "../worker.ts";
+import { StepQueueExecutor } from "../step-queue-executor.ts";
+import { RoutingStepExecutor } from "../../durable/runner/routing-step-executor.ts";
+
+/** A runner that sends `remoteSteps` to workers over `stepQueue`. */
+function routedRunner(params: {
+  storage: InMemoryWorkflowStorage;
+  stepQueue: InMemoryStepQueue;
+  remoteSteps: readonly string[];
+  pollIntervalMs: number;
+}) {
+  const { storage, stepQueue, remoteSteps, pollIntervalMs } = params;
+  return createWorkflowRunner({
+    storage,
+    stepExecutor: new RoutingStepExecutor({
+      remote: new StepQueueExecutor({ stepQueue, storage, pollIntervalMs }),
+      remoteSteps,
+      storage,
+    }),
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Hybrid dispatch — engine runs locally, dispatches specific steps to workers
@@ -35,15 +55,8 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
     });
     void gpuWorker.start();
 
-    // Run workflow with dispatch — "transcribe" goes to GPU worker, rest runs locally
-    const wf = workflow<{ videoId: string }>({
-      name: "hybrid",
-      dispatch: {
-        stepQueue,
-        remoteSteps: ["transcribe"],
-        pollIntervalMs: 100,
-      },
-    })
+    // "transcribe" goes to the GPU worker, the rest runs locally
+    const wf = workflow<{ videoId: string }>({ name: "hybrid" })
       .step("download", ({ input }) => {
         log.push("download:local");
         return succeed(`video-${input.videoId}`);
@@ -59,7 +72,12 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
         return succeed(`formatted: ${deps.transcribe}`);
       })
       .build();
-    const runner = createWorkflowRunner({ storage });
+    const runner = routedRunner({
+      storage,
+      stepQueue,
+      remoteSteps: ["transcribe"],
+      pollIntervalMs: 100,
+    });
     await runner.run({ workflow: wf, workflowId: "hybrid-1", input: { videoId: "abc" } });
 
     await gpuWorker.stop();
@@ -76,13 +94,7 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
     let attempts = 0;
 
     // No worker needed for this test — only local steps
-    const wf = workflow<number>({
-      name: "local-retry",
-      dispatch: {
-        stepQueue,
-        remoteSteps: [], // nothing dispatched
-      },
-    })
+    const wf = workflow<number>({ name: "local-retry" })
       .step(
         "flaky",
         ({ input }) => {
@@ -95,14 +107,15 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
         },
       )
       .build();
-    const runner = createWorkflowRunner({ storage });
+    // Nothing dispatched.
+    const runner = routedRunner({ storage, stepQueue, remoteSteps: [], pollIntervalMs: 100 });
     const result = await runner.run({ workflow: wf, workflowId: "local-1", input: 5 });
 
     expect(result).toBe(10);
     expect(attempts).toBe(3);
   });
 
-  it("no dispatch config — everything runs locally as a normal workflow", async () => {
+  it("no step executor — everything runs locally as a normal workflow", async () => {
     const storage = new InMemoryWorkflowStorage();
 
     const wf = workflow<number>({ name: "no-dispatch" })
@@ -137,20 +150,18 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
     });
     void worker.start();
 
-    const wf = workflow<string>({
-      name: "dispatch-fail",
-      dispatch: {
-        stepQueue,
-        remoteSteps: ["bad-step"],
-        pollIntervalMs: 100,
-      },
-    })
+    const wf = workflow<string>({ name: "dispatch-fail" })
       .step("local-ok", () => succeed("ok"))
       .step("bad-step", { dependsOn: ["local-ok"] }, () => succeed("should not run locally"), {
         needs: ["remote"],
       })
       .build();
-    const runner = createWorkflowRunner({ storage });
+    const runner = routedRunner({
+      storage,
+      stepQueue,
+      remoteSteps: ["bad-step"],
+      pollIntervalMs: 100,
+    });
     const { error } = await runner.runSafe({
       workflow: wf,
       workflowId: "fail-1",

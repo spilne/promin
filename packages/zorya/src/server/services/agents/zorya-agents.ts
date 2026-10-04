@@ -20,12 +20,8 @@ import type {
   RoleRegistry,
   ToolHistoryStore,
 } from "@promin/agent";
-import { dispatchAgentSchedule } from "@promin/agent";
+import { dispatchAgentSchedule, startAgentScanLoop } from "@promin/agent";
 import type { DurableScheduleConfig, ScheduleTick } from "@promin/workflow/scheduler";
-import {
-  startAgentsScanLoop,
-  type AgentScanFolderResult as _ScanResult,
-} from "../../agent-registry.ts";
 import type { AgentScheduleDispatcher } from "../scheduler/index.ts";
 
 export interface ZoryaAgentsScanConfig {
@@ -174,7 +170,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   async start(): Promise<void> {
     if (this.scanHandle || !this.scanConfig) return;
     const userOnTick = this.scanConfig.onTick;
-    this.scanHandle = startAgentsScanLoop({
+    this.scanHandle = startAgentScanLoop({
       registry: this.registry,
       root: this.scanConfig.root,
       ...(this.scanConfig.intervalMs !== undefined && {

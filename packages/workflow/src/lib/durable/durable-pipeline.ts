@@ -15,7 +15,6 @@
 
 export type {
   CompensateConfig,
-  DispatchConfig,
   IdempotencyConfig,
   Workflow,
   WorkflowConfig,

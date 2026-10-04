@@ -163,8 +163,7 @@ export interface ThreadSummary {
   readonly resourceId: string | null;
   /**
    * Display title (typed first-class field). Optional; UIs fall back to
-   * `id` when null. Read-side fallback in storage backends surfaces
-   * legacy `metadata.title` values here for backward compatibility.
+   * `id` when null.
    */
   readonly title: string | null;
   readonly metadata: Readonly<Record<string, unknown>>;

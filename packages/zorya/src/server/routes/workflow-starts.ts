@@ -16,17 +16,11 @@ export function claimWorkflowStarts(queue: WorkflowStartQueue) {
   return async (req: Request): Promise<Response> => {
     const body = await readJson<{
       workflowSpecs?: WorkerWorkflowSpec[];
-      // Legacy shape kept so older workers still work — interpreted as
-      // "any version" for each name.
-      workflowNames?: string[];
       workerId?: string;
       limit?: number;
     }>(req);
     const limit = Math.min(Math.max(body?.limit ?? 10, 1), 100);
-    let specs: WorkerWorkflowSpec[] = body?.workflowSpecs ?? [];
-    if (specs.length === 0 && body?.workflowNames?.length) {
-      specs = body.workflowNames.map((name) => ({ name, versions: [] }));
-    }
+    const specs: WorkerWorkflowSpec[] = body?.workflowSpecs ?? [];
     if (specs.length === 0) return json(200, { starts: [] });
     const starts = await queue.claim({ workflowSpecs: specs, workerId: body?.workerId, limit });
     return json(200, { starts });

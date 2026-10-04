@@ -18,12 +18,6 @@ import type {
 } from "./activity-journal.ts";
 import { failureExit } from "./journal-exit.ts";
 import { JournalNonDeterminismError } from "./journal-errors.ts";
-import {
-  JOURNAL_FORMAT_LEGACY,
-  detectJournalFormat,
-  resolveUndecidedJournalFormat,
-  type JournalFormatVersion,
-} from "./journal-format.ts";
 import { activityScope, nextPathInScope } from "./journaled-body-scope.ts";
 import type { FenceGuard } from "./workflow-storage.ts";
 
@@ -54,12 +48,6 @@ export class JournalCursor {
    * re-derives identical indices on replay.
    */
   private nextIndex = 0;
-  /**
-   * Branch-path grammar of this journal. `undefined` until the first
-   * top-level `ctx.parallel` when the journal holds only top-level entries
-   * (see `journal-format.ts`).
-   */
-  private format: JournalFormatVersion | undefined;
 
   constructor(params: {
     readonly workflowId: string;
@@ -74,7 +62,6 @@ export class JournalCursor {
     this.guard = params.guard;
     this.journal = params.journal;
     this.entries = new Map(params.journal.map((e) => [slotKey(e), e]));
-    this.format = detectJournalFormat(params.journal);
   }
 
   /** Whether the body is re-running on top of recorded entries. */
@@ -85,14 +72,10 @@ export class JournalCursor {
   /**
    * Allocate the slot of one yield. Inside a parallel branch the branch
    * scope supplies it; at top level the step's counter does.
-   *
-   * `ctx.sleep` / `ctx.signal` / `ctx.child` pass `suspendOrChild: true`:
-   * a format 1 journal recorded those on the top-level counter even inside
-   * a branch, so replaying one keeps that allocation.
    */
-  allocateSlot(params: { readonly suspendOrChild: boolean }): JournalSlot {
+  allocateSlot(): JournalSlot {
     const scope = activityScope.getStore();
-    if (scope && !(params.suspendOrChild && scope.format === JOURNAL_FORMAT_LEGACY)) {
+    if (scope) {
       return { activityIndex: scope.parallelActivityIndex, branchPath: nextPathInScope(scope) };
     }
     return { activityIndex: this.nextIndex++, branchPath: "" };
@@ -101,18 +84,6 @@ export class JournalCursor {
   /** Reserve the next top-level slot index (a compensation's row). */
   reserveTopLevelIndex(): number {
     return this.nextIndex++;
-  }
-
-  /**
-   * Branch-path grammar for the `ctx.parallel` occupying `parallelIndex`. A
-   * journal with only top-level entries settles its format at the first
-   * top-level parallel; nested parallels inherit it from their scope.
-   */
-  formatForParallel(parallelIndex: number): JournalFormatVersion {
-    return (this.format ??= resolveUndecidedJournalFormat({
-      journal: this.journal,
-      parallelIndex,
-    }));
   }
 
   /** The entry recorded in `slot`, if any. */
@@ -186,18 +157,13 @@ export class JournalCursor {
    * beating the timeout, or a second worker), that writer's exit is
    * returned and `won` is false: the caller must continue with it so the
    * live run and replay agree.
-   *
-   * A storage that reports nothing (written before `CompletePendingResult`)
-   * is assumed to have taken this exit, unless `readBack` asks to read the
-   * row back; only worth the read where a race is expected.
    */
   async complete(params: {
     readonly slot: JournalSlot;
     readonly exit: JournalExit;
-    readonly readBack: boolean;
   }): Promise<{ won: boolean; exit: JournalExit }> {
-    const { slot, exit, readBack } = params;
-    const result: CompletePendingResult | undefined = await this.storage.completePendingEntry({
+    const { slot, exit } = params;
+    const result: CompletePendingResult = await this.storage.completePendingEntry({
       workflowId: this.workflowId,
       stepName: this.stepName,
       activityIndex: slot.activityIndex,
@@ -205,20 +171,10 @@ export class JournalCursor {
       exit,
       guard: this.guard,
     });
-    if (result) {
-      // No stored exit means the entry is gone (purged under us): nothing to
-      // follow, keep the local outcome.
-      if (result.completed || result.exit === undefined) return { won: true, exit };
-      return { won: false, exit: result.exit };
-    }
-    if (!readBack) return { won: true, exit };
-    const stored = (
-      await this.storage.loadJournal({ workflowId: this.workflowId, stepName: this.stepName })
-    ).find((e) => e.activityIndex === slot.activityIndex && e.branchPath === slot.branchPath);
-    if (stored?.exit && (stored.phase ?? "completed") === "completed") {
-      return { won: false, exit: stored.exit };
-    }
-    return { won: true, exit };
+    // No stored exit means the entry is gone (purged under us): nothing to
+    // follow, keep the local outcome.
+    if (result.completed || result.exit === undefined) return { won: true, exit };
+    return { won: false, exit: result.exit };
   }
 
   /**
@@ -247,14 +203,13 @@ export class JournalCursor {
       value = await run();
     } catch (err) {
       await passThrough?.(err);
-      const stored = await this.complete({ slot, exit: failureExit(err), readBack: false });
+      const stored = await this.complete({ slot, exit: failureExit(err) });
       // Another writer completed the slot first: follow the journal.
       return stored.won ? { kind: "failed", error: err } : { kind: "stored", exit: stored.exit };
     }
     const stored = await this.complete({
       slot,
       exit: { tag: "Success", value: encode(value) },
-      readBack: false,
     });
     return { kind: "stored", exit: stored.exit };
   }

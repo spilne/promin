@@ -1,11 +1,9 @@
 // ---------------------------------------------------------------------------
 // Suspend and failure outcomes of journaled steps.
 //
-//   * Signal exits are tagged delivered / timeout; legacy untagged rows
-//     still decode.
+//   * Signal exits are tagged delivered / timeout.
 //   * The live run follows the exit the journal holds when another writer
-//     completed the entry first, including on storages whose
-//     `completePendingEntry` predates the reported result.
+//     completed the entry first.
 //   * A failure escaping the body ends the step attempt: recorded failures
 //     are discarded so step-level `retry` on `.journaled` re-runs the
 import type { LoadJournalParams } from "../workflow-storage.ts";
@@ -21,11 +19,7 @@ import { createWorkflowRunner } from "../workflow-runner.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { completeSignal, runJournaledStep } from "../journaled-step.ts";
 import { TerminalError, WorkflowSuspendedError } from "../durable-pipeline-error.ts";
-import type {
-  CompletePendingResult,
-  JournalExit,
-  JournalFailureExit,
-} from "../activity-journal.ts";
+import type { JournalExit, JournalFailureExit } from "../activity-journal.ts";
 import {
   decodeSignalExitValue,
   deliveredSignalExitValue,
@@ -68,32 +62,16 @@ class CardDeclined extends TaggedError("CardDeclined")<{
 describe("signal exit encoding", () => {
   it("tagged values decode regardless of the payload's shape", () => {
     const payload = { ok: false, error: "timeout" };
-    expect(
-      decodeSignalExitValue({ stored: deliveredSignalExitValue(payload), hasTimeout: true }),
-    ).toEqual({ kind: "delivered", value: payload });
-    expect(decodeSignalExitValue({ stored: timedOutSignalExitValue(), hasTimeout: true })).toEqual({
-      kind: "timeout",
+    expect(decodeSignalExitValue(deliveredSignalExitValue(payload))).toEqual({
+      kind: "delivered",
+      value: payload,
     });
+    expect(decodeSignalExitValue(timedOutSignalExitValue())).toEqual({ kind: "timeout" });
   });
 
-  it("legacy rows: only the exact timeout shape on a timed wait is a timeout", () => {
-    const legacyTimeout = { ok: false, error: "timeout" };
-    expect(decodeSignalExitValue({ stored: legacyTimeout, hasTimeout: true })).toEqual({
-      kind: "timeout",
-    });
-    expect(decodeSignalExitValue({ stored: legacyTimeout, hasTimeout: false })).toEqual({
-      kind: "delivered",
-      value: legacyTimeout,
-    });
-    const declined = { ok: false, reason: "declined" };
-    expect(decodeSignalExitValue({ stored: declined, hasTimeout: true })).toEqual({
-      kind: "delivered",
-      value: declined,
-    });
-    expect(decodeSignalExitValue({ stored: "v", hasTimeout: true })).toEqual({
-      kind: "delivered",
-      value: "v",
-    });
+  it("an untagged value is rejected", () => {
+    expect(() => decodeSignalExitValue({ ok: false, error: "timeout" })).toThrow(/untagged/);
+    expect(() => decodeSignalExitValue("v")).toThrow(/untagged/);
   });
 });
 
@@ -132,32 +110,19 @@ describe("failure exit encoding", () => {
     expect(back.drop).toBeUndefined();
   });
 
-  it("thrown non-errors and legacy rows rehydrate as a plain Error", () => {
+  it("thrown non-errors and untagged failures rehydrate as a plain Error", () => {
     expect(rehydrateFailure(failureExit("boom")).message).toBe("boom");
-    const legacy: JournalFailureExit = { tag: "Failure", error: "old" };
-    const back = rehydrateFailure(legacy);
+    const untagged: JournalFailureExit = { tag: "Failure", error: "old" };
+    const back = rehydrateFailure(untagged);
     expect(back.constructor).toBe(Error);
     expect(back.message).toBe("old");
   });
 });
 
 describe("live run follows the stored outcome", () => {
-  /** A storage whose `completePendingEntry` predates the reported result. */
-  class LegacyResultStorage extends InMemoryWorkflowStorage {
-    override async completePendingEntry(
-      params: Parameters<InMemoryWorkflowStorage["completePendingEntry"]>[0],
-    ): Promise<CompletePendingResult> {
-      await super.completePendingEntry(params);
-      return undefined as unknown as CompletePendingResult;
-    }
-  }
-
-  for (const [label, make] of [
-    ["current storage", () => new InMemoryWorkflowStorage()],
-    ["storage without a reported result", () => new LegacyResultStorage()],
-  ] as const) {
-    it(`a delivery landing after the journal load beats the timeout (${label})`, async () => {
-      const storage = make();
+  {
+    it("a delivery landing after the journal load beats the timeout", async () => {
+      const storage = new InMemoryWorkflowStorage();
       const clock = FakeWallClock.create(0);
       const body = function* (ctx: any) {
         return yield* ctx.signal("go", { timeout: 1_000 });

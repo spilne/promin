@@ -55,17 +55,6 @@ export {
 export type { RunTrigger } from "./server/routes/runs.ts";
 export type { ScheduleDto, SchedulesResponse } from "./server/routes/schedules.ts";
 export {
-  scanWorkflowsFolder,
-  type ScanOptions,
-  type ScanResult,
-} from "./server/workflow-registry.ts";
-export {
-  scanAgentsFolder,
-  startAgentsScanLoop,
-  type AgentScanOptions,
-  type AgentScanFolderResult,
-} from "./server/agent-registry.ts";
-export {
   InMemoryWorkflowAdvertisementRegistry,
   type WorkflowAdvertisementRegistry,
   type AdvertisedWorkflow,

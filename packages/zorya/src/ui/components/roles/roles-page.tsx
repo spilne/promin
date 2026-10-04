@@ -26,15 +26,7 @@ function blankRole(): RegisteredRole {
   };
 }
 
-interface RolesPageProps {
-  /**
-   * Opens an agent detail. No longer used by this page (roles are their own
-   * registry now), kept so the app.tsx call site stays compatible.
-   */
-  onOpenAgent?: (id: string) => void;
-}
-
-export function RolesPage(_props: RolesPageProps) {
+export function RolesPage() {
   const { data, loading, error, refresh } = useFetch(() => api.listRoles(), [], 30_000);
   const [query, setQuery] = useState("");
   // The role currently open in the edit/create drawer, with its mode.

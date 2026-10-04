@@ -182,54 +182,6 @@ redisDescribe("RedisStateMachineStorage", (ctx) => {
     expect((await storage.load("m1"))?.revision).toBe(0);
   });
 
-  it("a machine written without a revision field takes its history length as revision", async () => {
-    const { storage, redis, prefix } = make();
-    await storage.create({ id: "m1", name: "n", initial: "a", context: {} });
-    await storage.transition({
-      id: "m1",
-      from: "a",
-      to: "a",
-      expectedRevision: 0,
-      event: "t",
-      context: {},
-    });
-    await storage.transition({
-      id: "m1",
-      from: "a",
-      to: "a",
-      expectedRevision: 1,
-      event: "t",
-      context: {},
-    });
-    // Snapshot shape from before revisions were stored.
-    await redis.eval(
-      "return redis.call('HDEL', KEYS[1], 'revision')",
-      1,
-      `${prefix}:{sm:m1}:machine`,
-    );
-
-    expect((await storage.load("m1"))?.revision).toBe(2);
-    await expect(
-      storage.transition({
-        id: "m1",
-        from: "a",
-        to: "a",
-        expectedRevision: 0,
-        event: "t",
-        context: {},
-      }),
-    ).rejects.toThrow("at revision 2");
-    await storage.transition({
-      id: "m1",
-      from: "a",
-      to: "a",
-      expectedRevision: 2,
-      event: "t",
-      context: {},
-    });
-    expect((await storage.load("m1"))?.revision).toBe(3);
-  });
-
   it("applies the active TTL while running and the terminal TTL once terminal", async () => {
     const { storage, redis, prefix } = make({ activeTtlMs: 60_000, terminalTtlMs: 5_000 });
     storage.registerTerminalStates(["done"]);

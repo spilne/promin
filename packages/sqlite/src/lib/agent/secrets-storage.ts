@@ -20,8 +20,8 @@ export interface SqliteSecretsStorageConfig {
   readonly db: SqliteDatabase;
   /**
    * Host-supplied passphrase. Stretched via scrypt to a 32-byte AES
-   * key on construction. Same salt as FileSecretStore for migration
-   * compatibility.
+   * key on construction. Same salt as FileSecretStore, so the two stores
+   * derive the same key from one passphrase.
    */
   readonly passphrase: string;
   /** Override the table name (default: `promin_secrets`). */

@@ -11,8 +11,8 @@
 // Design choices:
 //
 // 1. Backend is a discriminated union so the registry stays open to ACP
-//    spawners, Mastra, HTTP-proxied agents, etc., without breaking
-//    existing rows. First version ships only `LocalAgentBackend`.
+//    spawners, Mastra, HTTP-proxied agents, etc. Only `LocalAgentBackend`
+//    ships today.
 //
 // 2. `version` is part of the primary key, defaulting to `"v1"`. Lets
 //    operators run experiments side-by-side and rollback by re-pointing.

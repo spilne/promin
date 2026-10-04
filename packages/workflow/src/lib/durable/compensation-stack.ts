@@ -15,7 +15,6 @@ import { errorTag, failureExit } from "./journal-exit.ts";
 import type { JournalCursor } from "./journal-cursor.ts";
 import { journaledBodyScope } from "./journaled-body-scope.ts";
 import type { FenceGuard } from "./workflow-storage.ts";
-import { hasCapability } from "./storage/capabilities.ts";
 
 interface Compensation {
   /** Slot index reserved at registration time. */
@@ -108,7 +107,7 @@ export class CompensationStack {
         exit = failureExit(err);
       }
       try {
-        await this.cursor.complete({ slot, exit, readBack: false });
+        await this.cursor.complete({ slot, exit });
       } catch {
         // Journal unreachable — give up on this one, continue the unwind.
         continue;
@@ -170,7 +169,6 @@ export async function discardFailedAttempt(params: {
   guard?: FenceGuard;
 }): Promise<void> {
   const { storage, workflowId, stepName, rolledBack, guard } = params;
-  if (!hasCapability(storage, "journalDiscard")) return;
   try {
     const journal = await storage.loadJournal({ workflowId, stepName });
     const slots = new Map<string, JournalSlot>();

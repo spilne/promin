@@ -9,7 +9,7 @@
 //   - Late subscribers (attached after run() starts) see only events
 //     from that point onward.
 //   - Token deltas from the LLM stream land on the bus as token.delta
-//     events, transient, alongside the legacy onChunk callback.
+//     events, transient, alongside the onChunk callback.
 //   - A throwing subscriber is silently removed without breaking the loop.
 // ---------------------------------------------------------------------------
 

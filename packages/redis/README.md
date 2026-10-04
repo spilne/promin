@@ -51,24 +51,9 @@ Every key of one workflow carries the hash tag `{wf:<workflowId>}`, so all of a 
 The other stores are Cluster-safe too:
 
 - **Step queue**: every key starts with `{<prefix>}`, so a whole queue sits in one slot. A claim walks the shared pending set and moves tasks between sets in one script. Queues with different prefixes land in different slots. A lease store that fences `requeueStuck` must keep its keys in the queue's slot: construct it with `prefix: "{<queue prefix>}"`. The queue's constructor rejects a lease store in another slot.
-- **Scheduler**: every key, leader leases included, starts with `{<prefix>}`. A fenced poll commit checks the lease epoch and writes many schedules and due sets in one script. Namespaces are tracked in a set, so `findDueAcross` and listing every namespace no longer need `KEYS`.
+- **Scheduler**: every key, leader leases included, starts with `{<prefix>}`. A fenced poll commit checks the lease epoch and writes many schedules and due sets in one script. Namespaces are tracked in a set, so `findDueAcross` and listing every namespace need no `KEYS`.
 - **State machines**: each machine's keys carry the tag `{sm:<id>}`. There is no cross-machine key.
 - **Leader leases**: `RedisLeaderLeaseStore` tags each lease's keys with `{<key>}`. A prefix that carries its own hash tag wins, which is how the scheduler and step queue keep leases in their slot.
-
-### Migrating keys from earlier versions
-
-Earlier versions stored keys without hash tags (`wf:<id>`, `wf:<id>:steps:1`, `wf:lock:<id>`, `wf:idx:status:running`, `sq:task:<id>`, `sched:schedule:<id>`, `sm:machine:<id>` …). Those keys are invisible to this version. To move them, stop every worker and run each store's migration once per prefix against the standalone instance, before moving to a cluster:
-
-```typescript
-const { workflows, keys } = await storage.migrateLegacyKeys();
-await queue.migrateLegacyKeys(); // RedisStepQueue
-await schedulerStorage.migrateLegacyKeys(); // RedisSchedulerStorage
-await machines.migrateLegacyKeys(); // RedisStateMachineStorage
-```
-
-The step queue, scheduler and state machine migrations rename their keys under the new tags. The scheduler's lease epochs move with their keys, so fencing stays monotonic, and every namespace found is registered. A step queue's fencing lease store takes the queue's tag as its prefix; its epochs start over, which is safe because the migration runs with every worker stopped.
-
-The workflow migration renames each workflow's keys under its tag and rebuilds the indexes from the workflow hashes. It also copies the sleep schedule and distinct-value sets, then deletes the old index keys. It scans the keyspace once, which also finds streams appended before stream ids were tracked, so purge removes them. Re-running it is a no-op. For a row that still lacks stream tracking, `purgeCompleted` falls back to a bounded `SCAN` for that workflow's stream keys.
 
 ## RedisStepQueue
 

@@ -380,7 +380,7 @@ describe("journaled activity — storage without the two-phase record", () => {
       runJournaledStep<unknown, unknown, number>({
         input: undefined,
         prev: undefined,
-        workflowId: "wf-legacy",
+        workflowId: "wf-single-phase",
         stepName: "step",
         storage: storage as unknown as JournalStore,
         body: function* (ctx) {
@@ -393,6 +393,8 @@ describe("journaled activity — storage without the two-phase record", () => {
     ).rejects.toBeInstanceOf(JournalStorageMissingError);
 
     expect(ran).toBe(0);
-    expect(await storage.loadJournal({ workflowId: "wf-legacy", stepName: "step" })).toEqual([]);
+    expect(await storage.loadJournal({ workflowId: "wf-single-phase", stepName: "step" })).toEqual(
+      [],
+    );
   });
 });

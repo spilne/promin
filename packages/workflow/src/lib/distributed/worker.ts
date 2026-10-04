@@ -70,8 +70,8 @@ export interface WorkerConfig {
    * Workflow versions this worker is willing to process. When set, only
    * tasks whose `version` is in this list are claimed (the filter runs
    * inside the queue's claim, so other versions are never taken).
-   * Unversioned tasks (`version === undefined`) are always accepted for
-   * backward compat with pre-versioning workflows.
+   * Unversioned tasks (`version === undefined`, from workflows without a
+   * `version`) are always accepted.
    *
    * Typical use during a rolling deploy: a worker running both v1 and v2
    * handlers sets `supportedVersions: ["1", "2"]`; after v1 drains, the

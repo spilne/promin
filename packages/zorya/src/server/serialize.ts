@@ -70,7 +70,6 @@ export function runToDto(w: WorkflowState): RunDto {
     });
     if (hasFailedDep) s.effectiveStatus = "upstream_failed";
   }
-  const { runSource, runSourceId } = deriveRunSource(w);
   return {
     workflowId: w.workflowId,
     workflowName: w.workflowName,
@@ -85,8 +84,8 @@ export function runToDto(w: WorkflowState): RunDto {
     metadata: w.metadata,
     steps,
     parentWorkflowId: w.parentWorkflowId,
-    runSource,
-    runSourceId,
+    runSource: w.runSource,
+    runSourceId: w.runSourceId,
     createdAt: w.createdAt.toISOString(),
     startedAt: iso(w.startedAt),
     updatedAt: w.updatedAt.toISOString(),
@@ -104,7 +103,6 @@ export function runToSummaryDto(w: WorkflowSummary): RunSummaryDto {
   // for not-yet-started or single-run scenarios.
   const anchor = w.startedAt ?? w.createdAt;
   const totalMs = w.completedAt ? w.completedAt.getTime() - anchor.getTime() : undefined;
-  const { runSource, runSourceId } = deriveRunSource(w);
   return {
     workflowId: w.workflowId,
     workflowName: w.workflowName,
@@ -113,32 +111,12 @@ export function runToSummaryDto(w: WorkflowSummary): RunSummaryDto {
     status: w.status,
     version: w.version,
     run: w.run,
-    runSource,
-    runSourceId,
+    runSource: w.runSource,
+    runSourceId: w.runSourceId,
     createdAt: w.createdAt.toISOString(),
     startedAt: iso(w.startedAt),
     completedAt: iso(w.completedAt),
     updatedAt: w.updatedAt.toISOString(),
     totalMs,
   };
-}
-
-/**
- * Resolve `runSource` / `runSourceId` for the wire DTO. Prefers the typed
- * columns (`w.runSource`, `w.runSourceId`); when they're absent — e.g. on
- * legacy rows from before the column existed — falls back to inferring
- * from `metadata.scheduleId`, which the scheduler dispatcher has been
- * stamping for longer. Keeps the dashboard's source badge usable on a
- * mixed-vintage history without a write-side migration.
- */
-function deriveRunSource(w: WorkflowSummary): {
-  runSource?: WorkflowSummary["runSource"];
-  runSourceId?: string;
-} {
-  if (w.runSource) return { runSource: w.runSource, runSourceId: w.runSourceId };
-  const meta = w.metadata as Record<string, unknown> | undefined;
-  const scheduleId =
-    typeof meta?.["scheduleId"] === "string" ? (meta["scheduleId"] as string) : undefined;
-  if (scheduleId) return { runSource: "schedule", runSourceId: scheduleId };
-  return {};
 }

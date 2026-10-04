@@ -223,9 +223,8 @@ export function AgentEditDrawer({
     const skillRefs = Array.from(selectedSkills)
       .sort()
       .map((id) => ({ id }));
-    // Emit the layered shape when the operator picked layers; fall back
-    // to the plain-string form (or null) otherwise. Keeps backward-compat
-    // for recipes that don't use fragments.
+    // Emit the layered shape when the operator picked layers, else the
+    // plain-string form (or null) for recipes that don't use fragments.
     const trimmedBase = systemPrompt.trim();
     const promptValue =
       selectedLayers.length > 0

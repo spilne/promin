@@ -153,9 +153,9 @@ describe("WorkflowRunner", () => {
       }
     }
 
-    it("legacy path: a fast parallel step persists before its slow sibling finishes", async () => {
+    it("in-process path: a fast parallel step persists before its slow sibling finishes", async () => {
       const storage = new RecordingStorage();
-      const wf = workflow<void>({ name: "eager-legacy" })
+      const wf = workflow<void>({ name: "eager-in-process" })
         // Two parallel roots (no dependsOn) → same wave.
         .stepAsync("fast", async () => {
           // ~immediate
@@ -172,7 +172,7 @@ describe("WorkflowRunner", () => {
         .build();
 
       const runner = createWorkflowRunner({ storage });
-      await runner.run({ workflow: wf, workflowId: "eager-legacy-1", input: undefined });
+      await runner.run({ workflow: wf, workflowId: "eager-in-process-1", input: undefined });
 
       const fastSave = storage.saves.find((s) => s.stepName === "fast");
       const slowSave = storage.saves.find((s) => s.stepName === "slow");

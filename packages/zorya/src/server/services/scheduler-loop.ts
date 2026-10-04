@@ -59,9 +59,8 @@ export interface SchedulerLoopConfig {
   trigger?: RunTrigger;
   /**
    * Optional dispatch hook. Inspect the tick / schedule and either
-   * handle it (return `{ handled: true }` or `void` for backward
-   * compat) or pass — return `{ handled: false }` and the loop runs
-   * its default `trigger`-based dispatch using `metadata.workflowName`.
+   * handle it (return `{ handled: true }`, or nothing) or pass — return
+   * `{ handled: false }` and the loop runs its default `trigger`-based dispatch using `metadata.workflowName`.
    *
    * Use this to layer additional dispatch kinds (agent-targeted ticks
    * via `dispatchAgentSchedule`, webhook ticks, etc.) without losing

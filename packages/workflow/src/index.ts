@@ -27,7 +27,6 @@ export type {
   WorkflowStatusInfo,
   WorkflowHooks,
   CompensateConfig,
-  DispatchConfig,
 } from "./lib/durable/workflow-types.ts";
 export { type WorkflowDAG, dagToMermaid, dagToDot } from "./lib/durable/workflow-dag-viz.ts";
 export type {

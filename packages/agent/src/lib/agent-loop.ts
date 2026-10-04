@@ -357,12 +357,12 @@ export interface AgentSession {
    * Send a task and receive the answer as a stream of token deltas.
    * Falls back to a single-chunk stream when the LLM adapter has no chatStream.
    *
-   * Pass an AbortSignal (or `options.signal`) to cancel mid-flight.
+   * Pass `options.signal` to cancel mid-flight.
    * Pass `options.onThinking` to receive extended-thinking deltas in real time.
    * The signal is propagated to the underlying fetch — the workflow completes
    * the turn with an empty response so conversation history stays consistent.
    */
-  stream(task: string, options?: AbortSignal | StreamOptions): AsyncIterable<string>;
+  stream(task: string, options?: StreamOptions): AsyncIterable<string>;
   /**
    * Approve a pending tool call that has `requireApproval: true`.
    * Returns `true` if the signal was delivered and the workflow was resumed,
@@ -585,9 +585,9 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
       const journalStorage: JournalStore = storage;
 
       const clock = config.clock ?? SystemWallClock;
-      // Multi-subscriber event bus. The legacy `config.logger` (if provided)
-      // is wired in as one subscriber so existing `session.eventLog()` callers
-      // keep working unchanged. New subscribers attach via `session.subscribe`
+      // Multi-subscriber event bus. `config.logger` (if provided) is wired
+      // in as one subscriber, which backs `session.eventLog()`. Other
+      // subscribers attach via `session.subscribe`
       // — used by cross-process forwarders (the WS relay in promin-o8dj /
       // promin-yxxk) and any other live observer.
       const eventBus = new SessionEventBus();
@@ -1258,14 +1258,13 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
           }
         },
 
-        async *stream(task: string, options?: AbortSignal | StreamOptions): AsyncIterable<string> {
+        async *stream(task: string, options?: StreamOptions): AsyncIterable<string> {
           if (state.closed) throw new Error("Session is closed");
           if (state.inTurn) throw new Error("Session is busy — only one turn at a time");
           const turn = state.turn++;
           state.inTurn = true;
 
-          const opts: StreamOptions =
-            options instanceof AbortSignal ? { signal: options } : (options ?? {});
+          const opts: StreamOptions = options ?? {};
 
           // Combine caller's abort signal with the session-level close signal.
           const combinedSignal = opts.signal

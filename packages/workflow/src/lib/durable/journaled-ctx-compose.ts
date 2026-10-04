@@ -26,10 +26,8 @@ export function makeParallel(env: JournaledCtxEnv): Ctx["parallel"] {
   ): Generator<ActivityYield, T[], unknown> {
     // The parallel takes its own slot like any yield: from the enclosing
     // branch when nested, else from the step-level counter.
-    const { activityIndex: parallelActivityIndex, branchPath: parallelPath } = cursor.allocateSlot({
-      suspendOrChild: false,
-    });
-    const format = cursor.formatForParallel(parallelActivityIndex);
+    const { activityIndex: parallelActivityIndex, branchPath: parallelPath } =
+      cursor.allocateSlot();
 
     // Drive each branch sub-generator in its own ActivityScope so its
     // yields consume slots from a branch-local counter with a branch-
@@ -38,9 +36,8 @@ export function makeParallel(env: JournaledCtxEnv): Ctx["parallel"] {
       branches.map((branchGen, i) => {
         const branchScope: ActivityScope = {
           parallelActivityIndex,
-          pathPrefix: branchPrefix({ format, parallelPath, branch: i }),
+          pathPrefix: branchPrefix({ parallelPath, branch: i }),
           localCounter: { next: 0 },
-          format,
         };
         return activityScope.run(branchScope, () => driveSubGenerator(branchGen));
       }),

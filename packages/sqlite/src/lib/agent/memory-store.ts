@@ -112,25 +112,12 @@ export class SqliteMemoryStore implements MemoryStore {
         working_memory      TEXT,
         inherit_from_parent INTEGER NOT NULL DEFAULT 1,
         metadata            TEXT,
+        archived_at         INTEGER,
         created_at          INTEGER NOT NULL,
         updated_at          INTEGER NOT NULL,
         PRIMARY KEY (namespace_id, thread_id)
       )
     `);
-    // Migrate existing tables for columns added after initial release.
-    // sqlite's ALTER TABLE ADD COLUMN IF NOT EXISTS arrived in 3.35; older
-    // dbs throw "duplicate column" — we swallow that and let any other
-    // error propagate.
-    for (const migration of [
-      `ALTER TABLE ${p}_thread ADD COLUMN title TEXT`,
-      `ALTER TABLE ${p}_thread ADD COLUMN archived_at INTEGER`,
-    ]) {
-      try {
-        this.db.run(migration);
-      } catch (e) {
-        if (!String(e).includes("duplicate column")) throw e;
-      }
-    }
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${p}_thread_resource ON ${p}_thread (namespace_id, resource_id)`,
     );
@@ -542,8 +529,7 @@ export class SqliteMemoryStore implements MemoryStore {
         )
         .get(r.namespace_id, r.thread_id);
       const metadata = r.metadata ? (JSON.parse(r.metadata) as Record<string, unknown>) : {};
-      const title =
-        r.title ?? (typeof metadata.title === "string" ? (metadata.title as string) : null);
+      const title = r.title ?? null;
       return {
         namespaceId: r.namespace_id,
         resourceId: r.resource_id,
@@ -1018,10 +1004,7 @@ function toResourceRow(r: DbResourceRow): ResourceRow {
 
 function toThreadRow(r: DbThreadRow): ThreadRow {
   const metadata = r.metadata ? (JSON.parse(r.metadata) as Record<string, unknown>) : {};
-  // Read-side fallback for legacy rows that wrote `metadata.title` before
-  // the dedicated column existed. Newly written titles always go through
-  // the typed column.
-  const title = r.title ?? (typeof metadata.title === "string" ? (metadata.title as string) : null);
+  const title = r.title ?? null;
   return {
     namespaceId: r.namespace_id,
     resourceId: r.resource_id,

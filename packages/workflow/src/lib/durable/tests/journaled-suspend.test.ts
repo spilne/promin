@@ -527,7 +527,7 @@ describe("ctx.signal({ timeout }) — bounded suspend", () => {
   });
 
   it("delivery wins the race against an unexpired timeout — value, not envelope, when no opts", async () => {
-    // No-timeout overload preserves the legacy bare-T return shape.
+    // The no-timeout overload returns the bare T.
     type Decision = { approved: boolean };
     const body = function* (ctx: JournaledContext<unknown, unknown>) {
       const result = yield* ctx.signal<Decision>("approve");
@@ -561,7 +561,7 @@ describe("ctx.signal({ timeout }) — bounded suspend", () => {
       storage,
       body,
     });
-    // Bare T — backwards-compatible shape.
+    // Bare T.
     expect(result).toEqual({ approved: false });
   });
 });

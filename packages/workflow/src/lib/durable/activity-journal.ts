@@ -19,8 +19,8 @@ export const JOURNAL_STEP_TYPES: readonly JournalStepType[] = [
 export type JournalPhase = "pending" | "completed";
 
 /**
- * A recorded failure. `error` is the message. Entries written before tagged
- * persistence hold only `error` and replay as a plain `Error`.
+ * A recorded failure. `error` is the message; a plain `Error` records
+ * nothing else and replays as a plain `Error`.
  */
 export interface JournalFailureExit {
   readonly tag: "Failure";
@@ -72,18 +72,16 @@ export interface JournalEntry {
   readonly activityIndex: number;
   /**
    * Branch path inside a `ctx.parallel` tree. Empty string `""` means "at
-   * top-level in the body" — that's the value every pre-parallel workflow
-   * journal already has, so old data works unchanged. Yields inside parallel
-   * branches get paths like `"/0.0"`, `"/1.2"`, `"/1.1/0.0"` (nested); journals
-   * written before that grammar hold `"0"`, `"1.1"`-style paths and still
-   * replay — see `journal-format.ts`. Opaque text to storage backends. The
+   * top-level in the body". Yields inside parallel branches get paths like
+   * `"/0.0"`, `"/1.2"`, `"/1.1/0.0"` (nested) — see `journal-format.ts`.
+   * Opaque text to storage backends. The
    * (workflow, step, activity_index, branch_path) quadruple is unique.
    */
   readonly branchPath: string;
   readonly activityName: string;
-  /** Default `"activity"` preserves backward compat for entries without stepType. */
+  /** Kind of yield that wrote the entry. Absent means `"activity"`. */
   readonly stepType?: JournalStepType;
-  /** Default `"completed"` preserves backward compat for entries without phase. */
+  /** Absent means `"completed"` (an entry written in one step by `appendEntry`). */
   readonly phase?: JournalPhase;
   /**
    * Canonicalized-+-hashed fingerprint of the activity's input — only set when

@@ -74,7 +74,7 @@ function pauseFirstCommit(storage: SchedulerStorage) {
 /**
  * Run the full SchedulerStorage conformance suite against any implementation.
  * Verifies CRUD, due-tracking, leader election, multi-namespace dispatch,
- * fire-state monotonicity, and back-compat for the global namespace.
+ * fire-state monotonicity, and the default (global) namespace.
  *
  * The factory is called before each test group, so each describe block sees
  * a fresh storage. Backends with shared mutable state (testcontainers, real

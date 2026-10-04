@@ -955,7 +955,6 @@ export class WorkflowBuilder<
       retry: config.retry,
       compensateConfig: config.compensate,
       dlq: config.dlq,
-      dispatch: config.dispatch,
       timeoutMs: config.timeoutMs,
       onVersionMismatch: config.onVersionMismatch,
       previousVersions: config.previousVersions,

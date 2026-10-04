@@ -21,7 +21,7 @@ All stores accept a `DrizzleDb` (from `@spilne/perfect-postgres`), so any Postgr
 
 ## Workflow Storage
 
-Production-grade `WorkflowStorage` backed by Postgres. Integer lookup tables for status fields, `pg_advisory_lock` for distributed locking, configurable table prefix for multi-tenant DBs.
+Production-grade `WorkflowStorage` backed by Postgres. Integer lookup tables for status fields, row locks with fence tokens for distributed locking, configurable table prefix for multi-tenant DBs.
 
 ```typescript
 import { createPostgresDb } from "@spilne/perfect-postgres";
@@ -49,7 +49,6 @@ const result = await workflow<{ userId: string }>({ name: "onboard" })
 PostgresWorkflowStorage.create({
   db, // DrizzleDb instance (required)
   instanceId: "node-1", // Lock ownership ID (default: random UUID)
-  useAdvisoryLocks: false, // row locks + fence tokens (default); `true` is deprecated (unsafe through a pool)
   defaultLockDurationMs: 30_000,
   autoSeedLookups: true, // Auto-seed status enum tables (default: true)
 });

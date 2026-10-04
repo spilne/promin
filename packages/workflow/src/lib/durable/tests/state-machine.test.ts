@@ -1598,7 +1598,7 @@ describe("StateMachine", () => {
       expect(state!.current).toBe("green");
     });
 
-    it("allows send when machine has no version (backward compat)", async () => {
+    it("allows send when machine has no version", async () => {
       const noVersion = stateMachine<TrafficLight>({ name: "traffic-light", storage })
         .state("red")
         .state("green")
@@ -1630,7 +1630,7 @@ describe("StateMachine", () => {
       expect(state!.current).toBe("green");
     });
 
-    it("allows send when code has no version (backward compat)", async () => {
+    it("allows send when code has no version", async () => {
       const v1 = stateMachine<TrafficLight>({ name: "traffic-light", storage, version: "1" })
         .state("red")
         .state("green")

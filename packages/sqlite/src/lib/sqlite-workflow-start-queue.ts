@@ -109,25 +109,11 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
         status        TEXT NOT NULL DEFAULT 'pending'
       )
     `);
-    // Tables created before claim fencing lack these columns. sqlite has
-    // no ADD COLUMN IF NOT EXISTS before 3.35; swallow "duplicate column"
-    // and let any other error propagate.
-    for (const stmt of [
-      `ALTER TABLE ${t} ADD COLUMN claim_token TEXT`,
-      `ALTER TABLE ${t} ADD COLUMN heartbeat_at INTEGER`,
-    ]) {
-      try {
-        this.db.run(stmt);
-      } catch (e) {
-        if (!String(e).includes("duplicate column")) throw e;
-      }
-    }
     // Most claims hit the pending partition — partial index keeps the
     // scan tight even when the queue accumulates completed history.
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_pending ON ${t} (workflow_name, enqueued_at) WHERE status = 'pending'`,
     );
-    this.db.run(`DROP INDEX IF EXISTS ${t}_claimed`);
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_heartbeat ON ${t} (heartbeat_at) WHERE status = 'claimed'`,
     );

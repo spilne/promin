@@ -17,7 +17,7 @@
 // ---------------------------------------------------------------------------
 
 import { AsyncContext } from "../shared/async-context.ts";
-import { pathInBranch, type JournalFormatVersion } from "./journal-format.ts";
+import { pathInBranch } from "./journal-format.ts";
 
 interface JournaledBodyContext {
   readonly stepName: string;
@@ -55,8 +55,6 @@ export interface ActivityScope {
   readonly pathPrefix: string;
   /** Mutable, scope-local yield counter. `{ next: 0 }` at branch entry. */
   readonly localCounter: { next: number };
-  /** Branch-path grammar of the journal this scope reads and writes. */
-  readonly format: JournalFormatVersion;
 }
 
 export const activityScope = new AsyncContext<ActivityScope>();
@@ -67,5 +65,5 @@ export const activityScope = new AsyncContext<ActivityScope>();
  */
 export function nextPathInScope(scope: ActivityScope): string {
   const seq = scope.localCounter.next++;
-  return pathInBranch({ format: scope.format, prefix: scope.pathPrefix, seq });
+  return pathInBranch({ prefix: scope.pathPrefix, seq });
 }

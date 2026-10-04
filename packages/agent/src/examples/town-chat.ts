@@ -303,13 +303,16 @@ function prompt(): void {
     if (await dispatchCommand(COMMANDS, input)) return prompt();
 
     // ---- normal turn ----
-    const { aborted, error } = await consoleRunner.runTurn((signal) => town.stream(input, signal), {
-      initialSpinner: "director thinking...",
-      label: "Director",
-      maxRetries: 4,
-      retryOn: (e) => e.message.includes("busy"),
-      retrySpinner: (n) => `settling… (${n})`,
-    });
+    const { aborted, error } = await consoleRunner.runTurn(
+      (signal) => town.stream(input, { signal }),
+      {
+        initialSpinner: "director thinking...",
+        label: "Director",
+        maxRetries: 4,
+        retryOn: (e) => e.message.includes("busy"),
+        retrySpinner: (n) => `settling… (${n})`,
+      },
+    );
 
     if (!aborted) {
       if (error) {

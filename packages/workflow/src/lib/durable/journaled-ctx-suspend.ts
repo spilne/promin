@@ -30,7 +30,7 @@ export function makeSleep(env: JournaledCtxEnv): JournaledContext<unknown, unkno
   const { workflowId, stepName, cursor, workflowStorage, guard, clock } = env;
 
   return function* sleep(duration: number | Date): Generator<ActivityYield, Date, Date> {
-    const slot = cursor.allocateSlot({ suspendOrChild: true });
+    const slot = cursor.allocateSlot();
     const name = "sleep";
 
     const promise = (async (): Promise<Date> => {
@@ -68,7 +68,6 @@ export function makeSleep(env: JournaledCtxEnv): JournaledContext<unknown, unkno
         const stored = await cursor.complete({
           slot,
           exit: { tag: "Success", value: wakeAt.toISOString() },
-          readBack: false,
         });
         return wokeAt(stored.exit);
       }
@@ -121,7 +120,7 @@ export function makeSignalMethods(env: JournaledCtxEnv): SignalMethods {
       readonly jsonSchema?: unknown;
     },
   ): Generator<ActivityYield, T | TimedSignalOutcome<T>, unknown> {
-    const slot = cursor.allocateSlot({ suspendOrChild: true });
+    const slot = cursor.allocateSlot();
     const { activityIndex } = slot;
     const hasTimeout = options?.timeout !== undefined;
 
@@ -129,12 +128,11 @@ export function makeSignalMethods(env: JournaledCtxEnv): SignalMethods {
       const recorded = cursor.expectRecorded({ slot, kind: "signal", name: signalName });
 
       // Result of a completed entry. The stored value is tagged delivered /
-      // timeout (see `journal-exit.ts`); untagged legacy rows decode by
-      // their old shape. With a timeout configured a delivery is wrapped in
+      // timeout (see `journal-exit.ts`). With a timeout configured a delivery is wrapped in
       // the `{ ok: true, value }` envelope so `result.ok` works uniformly.
       const outcomeOf = (exit: JournalExit): T | TimedSignalOutcome<T> => {
         if (exit.tag === "Failure") throw rehydrateFailure(exit);
-        const outcome = decodeSignalExitValue({ stored: exit.value, hasTimeout });
+        const outcome = decodeSignalExitValue(exit.value);
         if (outcome.kind === "timeout") {
           if (!hasTimeout) {
             // The run that recorded this waited with a timeout; this code
@@ -191,7 +189,6 @@ export function makeSignalMethods(env: JournaledCtxEnv): SignalMethods {
         const stored = await cursor.complete({
           slot,
           exit: { tag: "Success", value: timedOutSignalExitValue() },
-          readBack: true,
         });
         return outcomeOf(stored.exit);
       }

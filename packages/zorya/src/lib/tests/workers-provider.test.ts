@@ -34,7 +34,7 @@ describe("RegistryBackedWorkersProvider", () => {
     await reg.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
 
     // offlineAfterMs=0 → any heartbeat age reads as stale.
-    const [dto] = await new RegistryBackedWorkersProvider(reg, 0).listWorkers();
+    const [dto] = await new RegistryBackedWorkersProvider(reg, { offlineAfterMs: 0 }).listWorkers();
     expect(dto?.status).toBe("offline");
     expect(dto?.retiredAt).toBeUndefined();
   });

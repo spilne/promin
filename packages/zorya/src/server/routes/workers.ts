@@ -53,12 +53,10 @@ export class RegistryBackedWorkersProvider implements WorkersProvider {
 
   constructor(
     private readonly registry: WorkerRegistry,
-    /** Options, or (legacy) the offline-after age in ms. */
-    options: RegistryBackedWorkersProviderOptions | number = {},
+    options: RegistryBackedWorkersProviderOptions = {},
   ) {
-    const opts = typeof options === "number" ? { offlineAfterMs: options } : options;
-    this.offlineAfterMs = opts.offlineAfterMs ?? 30_000;
-    this.clock = opts.clock ?? SystemWallClock;
+    this.offlineAfterMs = options.offlineAfterMs ?? 30_000;
+    this.clock = options.clock ?? SystemWallClock;
   }
 
   async listWorkers(): Promise<WorkerDto[]> {

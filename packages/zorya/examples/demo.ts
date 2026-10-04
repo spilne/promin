@@ -97,16 +97,13 @@ import {
   type ModelCatalogItem,
   type RegisteredAgent,
   type SkillRegistry,
+  AgentScanner,
 } from "@promin/agent";
+import { WorkflowScanner } from "@promin/workflow/discovery";
 import { echoLLM } from "@promin/agent/testing";
 import { z } from "zod";
 import { Database } from "bun:sqlite";
-import {
-  ZoryaServer,
-  RegistryBackedWorkersProvider,
-  scanAgentsFolder,
-  scanWorkflowsFolder,
-} from "../src/index.ts";
+import { ZoryaServer, RegistryBackedWorkersProvider } from "../src/index.ts";
 // KB content lives at ./kb/org-knowledge-base.ts; the searchKnowledge +
 // getDocument tools that wrap it are exposed under ./tools/ for the
 // folder-scan registry.
@@ -207,7 +204,7 @@ const secretsStorage = SqliteSecretsStorage.make({ db, passphrase: secretsPassph
 // the JSON-serializable recipe shape on disk.
 
 const agentScanRoot = path.join(import.meta.dir, "agents");
-const rawAgentScan = await scanAgentsFolder(agentScanRoot, {
+const rawAgentScan = await AgentScanner.scanFolder(agentScanRoot, {
   onAgent: (agent, src) =>
     console.log(`[zorya] discovered agent ${agent.id} (${path.relative(agentScanRoot, src)})`),
 });
@@ -773,7 +770,8 @@ process.on("SIGTERM", () => clearInterval(heartbeatHandle));
 // that directory whose exports include a Workflow is registered under its
 // `workflow.name`. Add a new file and restart — no edits here needed.
 const scanRoot = path.join(import.meta.dir, "workflows");
-const scanResult = await scanWorkflowsFolder(scanRoot, {
+const scanResult = await WorkflowScanner.scanFolder({
+  root: scanRoot,
   onWorkflow: ({ name, sourcePath }) =>
     console.log(`[zorya] discovered workflow ${name} (${path.relative(scanRoot, sourcePath)})`),
 });

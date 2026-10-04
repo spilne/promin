@@ -33,8 +33,7 @@
 //                                                    the task's limit
 //
 // A lease store that fences `requeueStuck` must keep its keys in the same
-// slot: construct it with `prefix: "{<prefix>}"`. Keys written before this
-// layout (`<prefix>:task:<id>` ...) need `migrateLegacyKeys()` once.
+// slot: construct it with `prefix: "{<prefix>}"`.
 // ---------------------------------------------------------------------------
 
 import { SystemWallClock, type WallClock } from "@promin/workflow";
@@ -53,7 +52,7 @@ import { StaleLeaseError, type LeaderLease } from "@promin/workflow/scheduler";
 import { deadLetterError, percentileCont } from "@promin/workflow/storage-kit";
 import type { RedisStoreClient } from "./redis-client.ts";
 import type { RedisLeaderLeaseStore } from "./redis-leader-lease-store.ts";
-import { hashTagOf, renameLegacyKeys, storeKeyBase } from "./redis-key-migration.ts";
+import { hashTagOf, storeKeyBase } from "./redis-key-tags.ts";
 
 // -- Lua scripts -------------------------------------------------------------
 
@@ -409,8 +408,6 @@ export interface RedisStepQueueConfig {
 const PURGE_BATCH = 500;
 /** Ids per batch of task reads in `metrics()`. */
 const METRICS_BATCH = 500;
-/** Keys of the untagged layout, after `<prefix>:`. */
-const LEGACY_KEY = /^(task:|active:|conc:|pending$|running$|done$|counter$|claimseq$)/;
 
 export class RedisStepQueue implements StepQueue {
   private readonly redis: RedisStoreClient;
@@ -439,25 +436,6 @@ export class RedisStepQueue implements StepQueue {
         );
       }
     }
-  }
-
-  /**
-   * Move keys written by earlier versions of this queue (`<prefix>:task:<id>`,
-   * `<prefix>:pending` ...) under the queue's hash tag. Run it once per
-   * prefix against the standalone instance (it renames keys across slots),
-   * with every worker stopped. Re-running it is a no-op.
-   */
-  async migrateLegacyKeys(params?: {
-    /** SCAN COUNT hint. Default 1000. */
-    scanCount?: number;
-  }): Promise<{ keys: number }> {
-    const { renamed } = await renameLegacyKeys({
-      redis: this.redis,
-      prefix: this.prefix,
-      scanCount: params?.scanCount ?? 1_000,
-      target: (rest) => (LEGACY_KEY.test(rest) ? `${this.base}:${rest}` : null),
-    });
-    return { keys: renamed.length };
   }
 
   // -- Key helpers -----------------------------------------------------------

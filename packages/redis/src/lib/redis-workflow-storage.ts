@@ -27,9 +27,6 @@
 //   parent that lost its lock before the intent never creates the child,
 //   and a reader that finds a provisional row with a matching intent
 //   confirms it (a crash after the intent loses nothing).
-//
-// Keys written before this layout need `migrateLegacyKeys()` once, on the
-// standalone instance, with workers stopped.
 // ---------------------------------------------------------------------------
 
 import type {
@@ -106,7 +103,7 @@ import {
 import { applyMetadataPatch, sortWorkflowRows } from "@promin/workflow/storage-kit";
 import type { RedisStoreClient } from "./redis-client.ts";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
-import { RedisWorkflowKeys, escapeGlob } from "./redis-workflow-keys.ts";
+import { RedisWorkflowKeys } from "./redis-workflow-keys.ts";
 import {
   APPEND_ENTRY_LUA,
   APPEND_PENDING_LUA,
@@ -137,7 +134,6 @@ import {
   WRITE_OPS_LUA,
   fencedLua,
 } from "./redis-workflow-scripts.ts";
-import { migrateLegacyWorkflowKeys } from "./redis-workflow-migration.ts";
 
 export interface RedisWorkflowStorageConfig {
   redis: RedisStoreClient;
@@ -188,8 +184,6 @@ const PROVISIONAL_CHILD_TTL_MS = 60 * 60 * 1_000;
 const RECORD_CHUNK = 2_000;
 /** Workflows purged concurrently. */
 const PURGE_CONCURRENCY = 16;
-/** SCAN calls (COUNT 1000 each) the purge spends looking for one workflow's untracked streams. */
-const UNTRACKED_STREAM_SCAN_CALLS = 1_000;
 /** "No limit" for the index page script; small enough to print as an integer in Lua. */
 const UNBOUNDED = 2_147_483_647;
 
@@ -296,29 +290,6 @@ export class RedisWorkflowStorage
     this.completedTtlMs = config.retention?.completedTtlMs;
     this.maxRunsPerWorkflow = config.retention?.maxRunsPerWorkflow ?? 5;
     this.clock = config.clock ?? SystemWallClock;
-  }
-
-  /**
-   * Move keys written by earlier versions of this storage (untagged,
-   * standalone-only layout) to the hash-tagged layout, and rebuild the
-   * cross-workflow indexes from the moved workflow hashes. Streams appended
-   * before stream ids were tracked are found by the same keyspace SCAN and
-   * registered, so `purgeCompleted` removes them.
-   *
-   * Run it once per prefix, against the standalone instance (it renames
-   * keys across slots), with every worker stopped. Re-running it is safe:
-   * keys already in the new layout are left alone.
-   */
-  async migrateLegacyKeys(params?: {
-    /** SCAN COUNT hint. Default 1000. */
-    scanCount?: number;
-  }): Promise<{ workflows: number; keys: number }> {
-    return migrateLegacyWorkflowKeys({
-      redis: this.redis,
-      keys: this.keys,
-      scanCount: params?.scanCount ?? 1_000,
-      reindex: (workflowId) => this.repairIndex(workflowId),
-    });
   }
 
   // -- Serialization helpers ------------------------------------------------
@@ -456,8 +427,6 @@ export class RedisWorkflowStorage
       createdAt: now,
       updatedAt: now,
       iv: "1",
-      // Every stream of this row is registered in its stream-ids set.
-      streamsTracked: "1",
     };
     if (params.workflowType) fields.workflowType = params.workflowType;
     if (params.parentWorkflowId) fields.parentWorkflowId = params.parentWorkflowId;
@@ -2265,9 +2234,8 @@ export class RedisWorkflowStorage
       await this.repairIndex(workflowId);
       return false;
     }
-    const [, status, name, parentId, ns, streamsTracked, tokenIds, sleeps] = reply as [
+    const [, status, name, parentId, ns, tokenIds, sleeps] = reply as [
       number,
-      string,
       string,
       string,
       string,
@@ -2276,7 +2244,6 @@ export class RedisWorkflowStorage
       string[],
     ];
     await Promise.all([
-      streamsTracked === "1" ? undefined : this.deleteUntrackedStreams(workflowId),
       // Each lookup key is its own slot: one DEL per key.
       ...tokenIds.map((tokenId) => this.redis.del(this.keys.signalTokenLookup(tokenId))),
       this.unscheduleSleeps({ workflowId, members: sleeps }),
@@ -2289,23 +2256,6 @@ export class RedisWorkflowStorage
       }),
     ]);
     return true;
-  }
-
-  /**
-   * Streams appended before their ids were tracked in the stream-ids set
-   * are found by a SCAN for the workflow's stream keys, bounded at
-   * `UNTRACKED_STREAM_SCAN_CALLS` calls. Runs only for rows that predate
-   * the tracking (no `streamsTracked` marker).
-   */
-  private async deleteUntrackedStreams(workflowId: string): Promise<void> {
-    const match = `${escapeGlob(this.keys.wf(workflowId))}:streams:*`;
-    let cursor = "0";
-    for (let calls = 0; calls < UNTRACKED_STREAM_SCAN_CALLS; calls++) {
-      const [next, found] = await this.redis.scan(cursor, "MATCH", match, "COUNT", 1_000);
-      await Promise.all(found.map((key) => this.redis.del(key)));
-      cursor = next;
-      if (cursor === "0") return;
-    }
   }
 
   /** Take journal sleeps (`<step>::<idx>|<path>` from a script) off the sleep schedule. */
@@ -2574,11 +2524,7 @@ export class RedisWorkflowStorage
           ),
         ),
       ],
-      args: params.slots.flatMap((slot) => [
-        `${slot.activityIndex}|${slot.branchPath}`,
-        // Index members written before branch paths existed are the bare index.
-        slot.branchPath === "" ? String(slot.activityIndex) : "",
-      ]),
+      args: params.slots.map((slot) => `${slot.activityIndex}|${slot.branchPath}`),
     });
     if (params.slots.length > 0) {
       await this.redis.zrem(
@@ -2785,14 +2731,9 @@ function parseSleepsMember(member: string): {
   return { workflowId, stepName, activityIndex, branchPath };
 }
 
-/**
- * Parse a composite journal member `${idx}|${branchPath}`. Rows written
- * before branch paths existed have just `${idx}` with no pipe — tolerated
- * so old workflows keep loading cleanly.
- */
+/** Parse a composite journal member `${idx}|${branchPath}`. */
 function parseJournalMember(member: string): { activityIndex: number; branchPath: string } {
   const pipe = member.indexOf("|");
-  if (pipe === -1) return { activityIndex: Number(member), branchPath: "" };
   return {
     activityIndex: Number(member.slice(0, pipe)),
     branchPath: member.slice(pipe + 1),

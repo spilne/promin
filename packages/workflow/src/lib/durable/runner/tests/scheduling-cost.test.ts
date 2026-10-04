@@ -129,17 +129,6 @@ describe("scheduling cost", () => {
     // One per wave after the first, plus the check after the completion.
     expect(counts.loadWorkflowStatus).toBe(10);
   });
-
-  it("falls back to tryLock + loadWorkflow on a storage without tryLockAndLoad", async () => {
-    const { storage, counts } = countingStorage({ hide: ["tryLockAndLoad"] });
-    const runner = createWorkflowRunner({ storage });
-
-    const result = await runner.run({ workflow: chain(3), workflowId: "fallback", input: 0 });
-
-    expect(result).toBe(3);
-    expect(counts.tryLock).toBe(1);
-    expect(counts.loadWorkflow).toBe(2);
-  });
 });
 
 // ---------------------------------------------------------------------------

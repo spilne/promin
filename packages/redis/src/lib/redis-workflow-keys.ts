@@ -214,8 +214,3 @@ export class RedisWorkflowKeys {
     return `${this.prefix}:signal_token:${tokenId}`;
   }
 }
-
-/** Escape glob metacharacters so `s` matches literally in `SCAN MATCH`. */
-export function escapeGlob(s: string): string {
-  return s.replace(/[*?[\]\\]/g, (c) => `\\${c}`);
-}

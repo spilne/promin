@@ -37,16 +37,14 @@ export async function completeSignal(params: {
   });
   if (!hit) return false;
 
-  const result: CompletePendingResult | undefined = await params.storage.completePendingEntry({
+  const result: CompletePendingResult = await params.storage.completePendingEntry({
     workflowId: params.workflowId,
     stepName: params.stepName,
     activityIndex: hit.activityIndex,
     branchPath: hit.branchPath,
     exit: { tag: "Success", value: deliveredSignalExitValue(params.value) },
   });
-  // A storage written before `CompletePendingResult` reports nothing; keep
-  // its old answer.
-  return result?.completed ?? true;
+  return result.completed;
 }
 
 /**

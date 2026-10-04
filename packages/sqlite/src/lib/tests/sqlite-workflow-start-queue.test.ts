@@ -70,39 +70,3 @@ describe("SqliteWorkflowStartQueue — persistence", () => {
     expect(second[0]?.claimedBy).toBe("live-worker");
   });
 });
-
-describe("SqliteWorkflowStartQueue — schema upgrade", () => {
-  it("adds the claim fencing columns to a table created without them", async () => {
-    const db = new Database(":memory:");
-    db.run(`
-      CREATE TABLE promin_workflow_starts (
-        id            TEXT PRIMARY KEY,
-        workflow_id   TEXT NOT NULL,
-        workflow_name TEXT NOT NULL,
-        version       TEXT,
-        input         TEXT NOT NULL,
-        metadata      TEXT,
-        enqueued_at   INTEGER NOT NULL,
-        claimed_at    INTEGER,
-        claimed_by    TEXT,
-        status        TEXT NOT NULL DEFAULT 'pending'
-      )
-    `);
-    db.run(
-      `INSERT INTO promin_workflow_starts (id, workflow_id, workflow_name, input, enqueued_at)
-       VALUES ('old-1', 'wf-old', 'wf', '{}', 1)`,
-    );
-
-    const q = SqliteWorkflowStartQueue.make({ db });
-    const [rec] = await q.claim({
-      workflowSpecs: [{ name: "wf", versions: [] }],
-      workerId: "w1",
-      limit: 1,
-    });
-    expect(rec?.id).toBe("old-1");
-    expect(typeof rec?.claimToken).toBe("string");
-    expect(await q.heartbeat({ id: "old-1", claimToken: rec!.claimToken! })).toBe(true);
-    expect(await q.complete({ id: "old-1", claimToken: rec!.claimToken! })).toBe(true);
-    expect(await q.list()).toEqual([]);
-  });
-});

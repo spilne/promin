@@ -155,10 +155,9 @@ export class PgStateMachineStorage implements StateMachineStorage {
   }
 
   /**
-   * Lease row in `sm_machine_locks`, expiry on the server clock. Unlike a
-   * session advisory lock it excludes callers on every pool connection and
-   * process, honours `durationMs`, and is released by row delete rather
-   * than by whichever connection the pool happens to hand out. Each
+   * Lease row in `sm_machine_locks`, expiry on the server clock. It
+   * excludes callers on every pool connection and process, honours
+   * `durationMs`, and is released by row delete. Each
    * acquisition writes a fresh token to `locked_by`; release and extend
    * match on it.
    */

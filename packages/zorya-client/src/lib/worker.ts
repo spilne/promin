@@ -121,9 +121,8 @@ export interface ZoryaWorkerConfig {
    *   - workflow query handlers (promin-i0wi)
    *   - server-pushed step dispatch (future)
    *
-   * Defaults to `false` for back-compat — workers that don't need any of
-   * those features stay HTTP-only. Set to `true` once the server has been
-   * upgraded with the matching `/ws/worker` endpoint (Zorya 0.5+).
+   * Defaults to `false`: workers that don't need any of those features
+   * stay HTTP-only.
    */
   controlSocket?:
     | boolean

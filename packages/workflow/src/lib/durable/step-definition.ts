@@ -157,8 +157,8 @@ export interface StepOptions<T, Input = unknown, Prev = unknown> {
   readonly needs?: readonly string[];
   /**
    * Dispatch priority for distributed execution. Higher numbers claim
-   * ahead of lower. Honoured by both `coordinator.submit`'s enqueueReady
-   * and `wf.run`'s DispatchConfig-backed path. Ignored by pure in-process
+   * ahead of lower. Honoured by `coordinator.submit`'s enqueueReady and
+   * by `StepQueueExecutor`. Ignored by pure in-process
    * `.run()` (no queue involved there). Range 0–10, default 5.
    */
   readonly priority?: number;

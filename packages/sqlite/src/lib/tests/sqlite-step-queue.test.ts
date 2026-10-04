@@ -56,34 +56,6 @@ describe("SqliteStepQueue", () => {
     expect(requeued).toBe(0);
   });
 
-  it("upgrades a table created before claimed_by / deliveries and namespace-free active keys", async () => {
-    const db = new Database(":memory:");
-    db.run(`
-      CREATE TABLE promin_step_tasks (
-        id TEXT NOT NULL PRIMARY KEY, workflow_id TEXT NOT NULL, step_name TEXT NOT NULL,
-        needs TEXT NOT NULL DEFAULT '[]', priority INTEGER NOT NULL DEFAULT 5,
-        input TEXT NOT NULL, prev_results TEXT NOT NULL DEFAULT '{}',
-        attempt INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'pending',
-        version TEXT, namespace TEXT, created_at INTEGER NOT NULL, claimed_at INTEGER,
-        completed_at INTEGER, result TEXT, error TEXT, duration_ms INTEGER,
-        last_heartbeat INTEGER, active_key TEXT
-      )
-    `);
-    db.run(
-      `INSERT INTO promin_step_tasks (id, workflow_id, step_name, input, created_at, active_key)
-       VALUES ('old-1', 'wf', 's', '{}', 1, 'ns::wf::s')`,
-    );
-
-    const q = SqliteStepQueue.make({ db });
-    // The pre-existing active task still dedupes under the new key.
-    expect(await q.enqueue({ workflowId: "wf", stepName: "s", input: {}, prevResults: {} })).toBe(
-      "old-1",
-    );
-    const [task] = await q.claim({ workerId: "w-9", limit: 1 });
-    expect(task?.deliveries).toBe(1);
-    expect((await q.get("old-1"))?.claimedBy).toBe("w-9");
-  });
-
   it("metrics returns zero counts for empty queue", async () => {
     const q = makeQueue();
     const m = await q.metrics({ since: new Date(Date.now() - 60_000) });

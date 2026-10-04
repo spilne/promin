@@ -19,8 +19,6 @@ import type { StepAttemptStore, StepCheckpointStore } from "./step-attempt-store
 export interface StorageCapabilityMap {
   /** `.journaled()` steps (`JournalStore`). */
   journal: JournalStore;
-  /** `discardJournalEntries`: a step retry re-executes recorded failures. */
-  journalDiscard: Required<Pick<JournalStore, "discardJournalEntries">>;
   /** Step attempt history (`StepAttemptStore`). */
   stepAttempts: StepAttemptStore;
   /** One-call step checkpoint (`StepCheckpointStore`). */
@@ -62,10 +60,10 @@ const CAPABILITY_METHODS: { readonly [K in StorageCapability]: readonly string[]
     "appendEntry",
     "appendPendingEntry",
     "completePendingEntry",
+    "discardJournalEntries",
     "findDueSleeps",
     "findPendingSignal",
   ],
-  journalDiscard: ["discardJournalEntries"],
   stepAttempts: ["saveStepAttempt", "loadStepAttempts"],
   stepCheckpoint: ["checkpointStep"],
   compensationLedger: ["beginCompensation", "saveStepCompensation"],

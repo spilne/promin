@@ -40,11 +40,10 @@ export async function resolveRunDefinition(params: {
   //   2. `latest(name)` (the registry's existing fallback inside
   //      `resolve(name, undefined)`) — last-registered version.
   //
-  // The first call lets `promote/rollback` actually shift dispatch
-  // without breaking pre-promote workflows: when nothing's been
-  // promoted, `findActive` returns null and we drop through to the
-  // legacy path. When the caller passes an explicit version, neither
-  // hook fires — the explicit version always wins.
+  // The first call lets `promote/rollback` shift dispatch: when nothing's
+  // been promoted, `findActive` returns null and we drop through to
+  // `latest`. When the caller passes an explicit version, neither hook
+  // fires — the explicit version always wins.
   let resolvedVersion = params.version;
   if (!resolvedVersion && typeof registry.findActive === "function") {
     const active = await registry.findActive(params.name);
