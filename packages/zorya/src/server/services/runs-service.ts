@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Workflow, WorkflowState, WorkflowStorage } from "@promin/workflow";
+import { wakeParentOfEndedRun } from "@promin/workflow";
 import { runToDto, runToSummaryDto } from "../serialize.ts";
 import type { RunDto, RunListQuery, RunListResponse, StepDto } from "../api-types.ts";
 import type { WorkflowAdvertisementRegistry } from "../workflow-advertisements.ts";
@@ -68,6 +69,9 @@ export class RunsService {
   /** Cancel a running or suspended workflow. */
   async cancel(id: string): Promise<void> {
     await this.deps.storage.cancelWorkflow(id);
+    // A cancelled child wakes a parent parked on it.
+    const state = await this.deps.storage.loadWorkflow(id);
+    if (state) await wakeParentOfEndedRun({ storage: this.deps.storage, state });
   }
 
   /**

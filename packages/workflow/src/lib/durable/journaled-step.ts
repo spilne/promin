@@ -58,6 +58,7 @@ import {
   timedOutSignalExitValue,
 } from "./journal-exit.ts";
 import type { Workflow } from "./durable-pipeline.ts";
+import { suspendOnChild } from "./child-wake.ts";
 import {
   AmbiguousActivityOutcome,
   LoopLimitExceededError,
@@ -399,7 +400,9 @@ export interface JournaledContext<Input, Prev> {
    * as a separate workflow record in storage (own workflowId, own journal, own
    * compensation scope). The parent step waits for the child to complete and
    * receives its result. On replay the result is read from the journal — the
-   * child is not re-executed.
+   * child is not re-executed. A child that suspends parks the parent step
+   * until the child's own wake time or until the child run ends, whichever
+   * comes first; the scanners then resume the parent.
    *
    * The child `workflowId` defaults to
    * `"${parentWorkflowId}.${stepName}.${activityIndex}"` so replay always
@@ -1423,44 +1426,33 @@ function makeCtx<Input, Prev>(params: {
   // -------------------------------------------------------------------------
 
   /**
-   * The child workflow suspended. Suspend this step too, waking when the
-   * child does: the child's earliest sleep wake time or signal deadline.
-   * The sleep scanner then re-drives the parent, whose `ctx.child` resumes
-   * the child. A child waiting on a signal without a deadline gives the
-   * parent no wake time; the parent stays suspended until it is resumed.
+   * The child workflow suspended. Suspend this step too, as a wait that
+   * ends with the child (see `suspendOnChild`): the sleep scanner re-drives
+   * the parent at the child's earliest wake time, and the child's runner
+   * wakes it when the child run ends. Either way the parent's `ctx.child`
+   * then resumes the child or reads its outcome.
    */
   async function suspendForChild(params: {
     childWorkflowId: string;
     childError: unknown;
   }): Promise<WorkflowSuspendedError> {
     const { childWorkflowId, childError } = params;
-    const reason = (childError as { reason?: unknown }).reason === "sleep" ? "sleep" : "signal";
-    let wakeAt: Date | undefined;
     if (workflowStorage) {
-      const child = await workflowStorage.loadWorkflow(childWorkflowId);
-      for (const step of Object.values(child?.steps ?? {})) {
-        const at =
-          step.status === "sleeping"
-            ? step.wakeAt
-            : step.status === "waiting_for_signal"
-              ? step.signalTimeoutAt
-              : undefined;
-        if (at && (!wakeAt || at.getTime() < wakeAt.getTime())) wakeAt = at;
-      }
-      await workflowStorage.suspendWorkflow(
+      return suspendOnChild({
+        storage: workflowStorage,
         workflowId,
         stepName,
-        { status: "sleeping", ...(wakeAt && { wakeAt }) },
+        childWorkflowId,
+        childError,
         guard,
-      );
+      });
     }
+    const reason = (childError as { reason?: unknown }).reason === "sleep" ? "sleep" : "signal";
     return new WorkflowSuspendedError({
       workflowId,
       stepName,
       reason,
-      message:
-        `waiting for child workflow "${childWorkflowId}"` +
-        (wakeAt ? ` (wakes at ${wakeAt.toISOString()})` : ""),
+      message: `waiting for child workflow "${childWorkflowId}"`,
     });
   }
 

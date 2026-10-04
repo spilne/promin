@@ -11,6 +11,8 @@ import { InMemoryStepQueue } from "../in-memory-step-queue.ts";
 import { MapStepRegistry } from "../step-registry.ts";
 import { createWorker } from "../worker.ts";
 import { buildStubWorkflow } from "../stub-workflow.ts";
+import { createSignalScanner } from "../signal-scanner.ts";
+import { createSleepScanner } from "../sleep-scanner.ts";
 import { InMemoryWorkflowStorage } from "../../durable/in-memory-storage.ts";
 import { workflow } from "../../durable/durable-pipeline.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
@@ -106,5 +108,78 @@ describe("subworkflow steps under the distributed runner", () => {
     expect(String(cause.defect)).toContain(
       "runs a child workflow, which only the real definition knows",
     );
+  });
+
+  it("a child that waits on a signal without a deadline wakes its parked parent when it completes", async () => {
+    const clock = FakeWallClock.create(0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const queue = new InMemoryStepQueue({ clock });
+    const runner = new DistributedWorkflowRunner({
+      storage,
+      stepQueue: queue,
+      stepPollIntervalMs: 10,
+      clock,
+    });
+    const gated = workflow<{ id: number }>({ name: "gated-child" })
+      .waitForSignal<number>("wait", { signalName: "go" })
+      .step("scale", ({ prev }) => succeed((prev as number) * 10))
+      .build();
+    const gatedParent = workflow<{ n: number }>({ name: "gated-parent" })
+      .step("load", ({ input }) => succeed(input.n))
+      .subworkflow("enrich", gated, {
+        input: (prev) => ({ id: prev }),
+        workflowId: (prev) => `gated-${prev}`,
+      })
+      .step("after", ({ prev }) => succeed((prev as number) + 1))
+      .build();
+    const registry = new MapStepRegistry();
+    registry.register("load", (ctx) => succeed((ctx.input as { n: number }).n));
+    registry.register("scale", (ctx) => succeed((ctx.deps["wait"] as number) * 10));
+    registry.register("after", (ctx) => succeed((ctx.deps["enrich"] as number) + 1));
+    const worker = createWorker({ storage, stepQueue: queue, registry, pollIntervalMs: 10, clock });
+    void worker.start();
+
+    await runner.submit({ workflow: gatedParent, workflowId: "gp", input: { n: 3 } });
+    await waitFor(async () => {
+      if (clock.pendingCount() > 0) clock.advance(10);
+      return (await storage.loadWorkflow("gp"))?.status === "suspended";
+    });
+    const parked = await storage.loadWorkflow("gp");
+    expect(parked?.steps["enrich"]?.status).toBe("waiting_for_signal");
+    expect(parked?.steps["enrich"]?.signalTimeoutAt).toBeUndefined();
+
+    const definitions = new Map<string, unknown>([
+      [gated.name, gated],
+      [gatedParent.name, gatedParent],
+    ]);
+    const resolveWorkflow = (name: string) => definitions.get(name) as never;
+    const sleepScanner = createSleepScanner({
+      storage,
+      runner,
+      scanIntervalMs: 1_000,
+      resolveWorkflow,
+      clock,
+    });
+    const signalScanner = createSignalScanner({
+      storage,
+      runner,
+      scanIntervalMs: 1_000,
+      resolveWorkflow,
+      clock,
+    });
+    void sleepScanner.start();
+    void signalScanner.start();
+
+    await storage.deliverSignal("gated-3", "go", 7);
+    await waitFor(async () => {
+      if (clock.pendingCount() > 0) clock.advance(10);
+      return (await storage.loadWorkflow("gp"))?.status === "completed";
+    });
+    expect((await storage.loadWorkflow("gated-3"))?.status).toBe("completed");
+    expect((await storage.loadWorkflow("gp"))?.result).toBe(71);
+
+    await sleepScanner.stop();
+    await signalScanner.stop();
+    await worker.stop();
   });
 });

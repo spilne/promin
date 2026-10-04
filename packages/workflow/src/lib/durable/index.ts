@@ -171,6 +171,11 @@ export {
   type ActivityOptions,
 } from "./journaled-step.ts";
 export {
+  CHILD_ENDED_SIGNAL_PREFIX,
+  childEndedSignalName,
+  wakeParentOfEndedRun,
+} from "./child-wake.ts";
+export {
   invokeQueryHandler,
   hasQueryHandlers,
   listQueryHandlers,

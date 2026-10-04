@@ -7,6 +7,7 @@
 
 import type { WallClock } from "../../shared/wall-clock.ts";
 import type { WorkflowHandle, WorkflowStatusInfo } from "../durable-pipeline.ts";
+import { wakeParentOfEndedRun } from "../child-wake.ts";
 import { createWorkflowEventStream } from "../workflow-event-stream.ts";
 import type { StepState, WorkflowRunEvent, WorkflowState } from "../workflow-state.ts";
 import type { WorkflowStorage } from "../workflow-storage.ts";
@@ -36,7 +37,12 @@ export function createWorkflowHandle<Output>(params: {
     workflowId,
     status: (p) => params.getStatus(p) as Promise<WorkflowStatusInfo<Output> | null>,
     signal: (signalName, payload) => storage.deliverSignal(workflowId, signalName, payload),
-    cancel: () => storage.cancelWorkflow(workflowId),
+    cancel: async () => {
+      await storage.cancelWorkflow(workflowId);
+      // A cancelled child wakes a parent parked on it.
+      const state = await storage.loadWorkflow(workflowId);
+      if (state) await wakeParentOfEndedRun({ storage, state });
+    },
     events: (opts) => params.subscribe(opts),
     result: async (p) => {
       const intervalMs = p?.intervalMs ?? 1_000;
