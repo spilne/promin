@@ -1,19 +1,13 @@
 // ---------------------------------------------------------------------------
 // DAG executor — the wave loop. Replays completed steps from stored state,
 // then repeatedly computes the ready set, runs it as one wave (remote
-// dispatch, then the executor or inline wave), records a failure or folds
-// the wave's results back in, and checks the workflow deadline and tripwire.
+// dispatch, then the executor or inline wave), folds the wave's completed
+// steps back in, reports its failure or control flow, and checks the
+// workflow deadline and tripwire.
 // ---------------------------------------------------------------------------
 
-import type { TaggedError } from "../../shared/tagged-error.ts";
 import { SystemWallClock } from "../../shared/wall-clock.ts";
-import {
-  StepError,
-  WorkflowDeadlineError,
-  WorkflowError,
-  type StepTimeoutError,
-  type WorkflowTimeoutError,
-} from "../durable-pipeline-error.ts";
+import { WorkflowDeadlineError, WorkflowError } from "../durable-pipeline-error.ts";
 import { computeReadySet, type DagNode } from "../workflow-dag.ts";
 import type { WorkflowState } from "../workflow-state.ts";
 import type { DagExecutionContext, DagExecutionResult, WaveOutcome } from "./dag-context.ts";
@@ -21,7 +15,7 @@ import { runExecutorWave } from "./executor-wave.ts";
 import { fireHook } from "./hooks.ts";
 import { runInlineWave } from "./inline-wave.ts";
 import { runDispatchedSteps } from "./remote-dispatch.ts";
-import { persistStepFailure, persistStepResult } from "./step-checkpoint.ts";
+import { errorMessage } from "./step-body.ts";
 
 /**
  * Execute the workflow DAG against its current state. Computes the ready
@@ -149,11 +143,6 @@ export async function executeWorkflowDag(
       }
     }
 
-    // Per-parallel-batch audit metadata map. `.match()` writes its chosen
-    // case here via metadataRef; the failure path reads it back by step
-    // name to persist metadata even when a match branch throws.
-    const stepMetadata = new Map<string, Record<string, unknown>>();
-
     const waveParams = {
       ctx,
       workflowId,
@@ -164,104 +153,39 @@ export async function executeWorkflowDag(
       clock,
       stepStates: state?.steps ?? {},
     };
-    const { batchResults, batchError }: WaveOutcome = ctx.stepExecutor
+    // Every step of the wave has settled and been checkpointed by here.
+    const { outcomes }: WaveOutcome = ctx.stepExecutor
       ? await runExecutorWave(waveParams)
-      : await runInlineWave({ ...waveParams, stepMetadata });
+      : await runInlineWave(waveParams);
 
-    if (batchError) {
-      const tag = (batchError as TaggedError)._tag;
-
-      // Suspension errors propagate without failing the workflow
-      if (tag === "WorkflowSuspendedError") {
-        return { success: false, error: batchError, suspension: true };
-      }
-
-      // Continue-as-new requests also unwind cleanly — no compensation,
-      // no failure recording. The orchestration wrapper catches the
-      // thrown error and chains a fresh run.
-      if (tag === "WorkflowContinueAsNewError") {
-        return { success: false, error: batchError, suspension: false, continueAsNew: true };
-      }
-
-      // Record step failure
-      const stepName =
-        tag === "StepError"
-          ? (batchError as StepError).stepName
-          : tag === "WorkflowTimeoutError"
-            ? (batchError as WorkflowTimeoutError).stepName
-            : tag === "StepTimeoutError"
-              ? (batchError as StepTimeoutError).stepName
-              : (ready[0] ?? "unknown");
-      const errorMsg =
-        batchError instanceof globalThis.Error ? batchError.message : String(batchError);
-      await persistStepFailure({
-        ctx,
-        clock,
-        workflowId,
-        stepName,
-        errorMsg,
-        metadata: stepMetadata.get(stepName),
-        attempt: params.stepAttempts.get(stepName) ?? 1,
-      });
-      await fireHook({
-        hooks: ctx.hooks,
-        name: "onStepFailure",
-        event: {
-          workflowId,
-          stepName,
-          error: errorMsg,
-          durationMs: 0,
-        },
-      });
-
-      return { success: false, error: batchError, suspension: false };
-    }
-
-    // Fold each step's result back in. `result` here is the codec-encoded
-    // form; storage keeps that shape. Downstream steps and the
-    // onStepComplete hook see the round-tripped decoded form so fresh-run
-    // and replay paths are identical. Both waves save completed steps
-    // themselves; only skipped steps still need saving here.
+    // Fold completed steps back in. `result` is the codec-encoded form
+    // storage keeps; downstream steps and the onStepComplete hook see the
+    // round-tripped decoded form so fresh-run and replay paths are
+    // identical. Siblings of a failed step count too: their rows are
+    // `completed`, so compensation reverses them and a workflow retry does
+    // not run them again.
     let tripwireFire: { stepName: string; reason: unknown } | null = null;
-    for (const stepResult of batchResults!) {
-      const { name, result, metadata, durationMs, startedAt } = stepResult;
-      const wasSkipped = stepResult.skipped === true;
+    for (const outcome of outcomes) {
+      if (outcome.kind !== "completed") continue;
+      const { name, result, metadata, durationMs } = outcome;
       const stepDef = ctx.steps.find((s) => s.name === name);
       const decoded = stepDef ? stepDef.codec.decode(result) : result;
-      if (stepResult.storageAlreadyCheckpointed !== true) {
-        await persistStepResult({
-          ctx,
-          clock,
-          workflowId,
-          name,
-          result,
-          metadata,
-          durationMs,
-          startedAt,
-          attempt: params.stepAttempts.get(name) ?? 1,
-        });
-      }
-      if (!wasSkipped) {
+      if (outcome.skipped !== true) {
         await fireHook({
           hooks: ctx.hooks,
           name: "onStepComplete",
-          event: {
-            workflowId,
-            stepName: name,
-            result: decoded,
-            durationMs,
-          },
+          event: { workflowId, stepName: name, result: decoded, durationMs },
         });
       }
       results[name] = decoded;
       completed.add(name);
 
       // Tripwire detection: a `.tripwire()` step signals termination by
-      // writing `{ tripwireFired: true, reason }` to its metadata. Captured
-      // here after save so the step row shows `status: completed` with the
-      // reason as its result — ops can still query the step history.
-      // Breaks out of DAG execution after the batch settles.
+      // writing `{ tripwireFired: true, reason }` to its metadata. The step
+      // row shows `status: completed` with the reason as its result, so
+      // ops can still query the step history. Ends the run after the wave.
       if (
+        tripwireFire === null &&
         stepDef?.kind === "tripwire" &&
         metadata &&
         (metadata as { tripwireFired?: boolean }).tripwireFired === true
@@ -272,6 +196,39 @@ export async function executeWorkflowDag(
         };
       }
     }
+
+    // A failure outranks control flow: each failed step has its own
+    // failure row, and the run fails with the first one in ready order.
+    let firstFailure: unknown = undefined;
+    let failed = false;
+    for (const outcome of outcomes) {
+      if (outcome.kind !== "failed") continue;
+      await fireHook({
+        hooks: ctx.hooks,
+        name: "onStepFailure",
+        event: {
+          workflowId,
+          stepName: outcome.name,
+          error: errorMessage(outcome.error),
+          durationMs: outcome.durationMs,
+        },
+      });
+      if (!failed) firstFailure = outcome.error;
+      failed = true;
+    }
+    if (failed) return { success: false, error: firstFailure, suspension: false };
+
+    // Continue-as-new unwinds cleanly — no compensation, no failure
+    // recording. The orchestration wrapper catches the error and chains a
+    // fresh run.
+    const continued = outcomes.find((o) => o.kind === "continue-as-new");
+    if (continued) {
+      return { success: false, error: continued.error, suspension: false, continueAsNew: true };
+    }
+
+    // Suspension propagates without failing the workflow.
+    const suspended = outcomes.find((o) => o.kind === "suspended");
+    if (suspended) return { success: false, error: suspended.error, suspension: true };
 
     if (tripwireFire) {
       return { success: false, tripwire: true, ...tripwireFire };

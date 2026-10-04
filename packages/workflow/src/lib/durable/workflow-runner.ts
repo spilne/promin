@@ -62,6 +62,7 @@ export {
   type StepExecutionResult,
   type StepExecutor,
 } from "./runner/step-executor.ts";
+export type { StepAttemptFailure } from "./runner/step-body.ts";
 export {
   RecoveryStrategy,
   RecoveryStrategyBuilder,

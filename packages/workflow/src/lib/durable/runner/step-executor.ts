@@ -6,14 +6,16 @@
 // is request/response.
 // ---------------------------------------------------------------------------
 
-import type { TaggedError } from "../../shared/tagged-error.ts";
-import { runEffSafe } from "../../shared/eff.ts";
 import { SystemWallClock, type WallClock } from "../../shared/wall-clock.ts";
 import type { StepRuntime, Workflow } from "../durable-pipeline.ts";
+import type {
+  WorkflowContinueAsNewError,
+  WorkflowSuspendedError,
+} from "../durable-pipeline-error.ts";
 import type { WorkflowStorage } from "../workflow-storage.ts";
 import type { OrchestrationRuntime } from "./orchestration-context.ts";
 import { runChildWorkflow } from "./orchestrate.ts";
-import { applyStepPolicies } from "./step-policies.ts";
+import { errorMessage, runStepBody, type StepAttemptFailure } from "./step-body.ts";
 
 export interface StepExecutionRequest {
   readonly workflowId: string;
@@ -45,17 +47,77 @@ export interface StepExecutionRequest {
    * `InProcessStepExecutor` falls back to its own config without it.
    */
   readonly runtime?: StepRuntime;
+  /**
+   * Aborted when another step of the same wave fails. Advisory: the runner
+   * still waits for this step's result and records whatever it reports,
+   * so an executor that stops early reports the step as failed. The bundled
+   * executors run the step to completion (an in-process body has no
+   * cancellation point, and a queued task cannot be recalled).
+   */
+  readonly signal?: AbortSignal;
 }
 
+/**
+ * Fields an executor reports for a step that settled (completed or
+ * failed). All optional: a minimal executor reports none of them.
+ */
+interface StepExecutionReport {
+  readonly metadata?: Record<string, unknown>;
+  /**
+   * The executor already persisted this step (its row and its attempt
+   * rows), so the runner writes nothing for it.
+   */
+  readonly storageAlreadyCheckpointed?: boolean;
+  /** Attempt number of the last invocation. Default: the request's `attempt`. */
+  readonly attempt?: number;
+  /** Attempts that failed before the last one (or including it, when `onFailure` absorbed it), oldest first. */
+  readonly failedAttempts?: readonly StepAttemptFailure[];
+}
+
+/**
+ * How a step settled, as reported by a `StepExecutor`. `kind` tells a
+ * failure apart from control flow: `"suspended"` (the step is sleeping or
+ * waiting for a signal) and `"continue-as-new"` unwind the run without
+ * failing it. A failure without `kind` is a failure.
+ */
 export type StepExecutionResult =
-  | {
+  | (StepExecutionReport & {
       readonly ok: true;
+      readonly kind?: "completed";
+      /** Codec-encoded result. */
       readonly result: unknown;
-      readonly metadata?: Record<string, unknown>;
-      /** When true, the executor already persisted this step — runner skips saveStepResult. */
-      readonly storageAlreadyCheckpointed?: boolean;
+    })
+  | (StepExecutionReport & {
+      readonly ok: false;
+      readonly kind?: "failed";
+      /** Error message. */
+      readonly error: string;
+      /** `_tag` of the original error, when it had one. */
+      readonly errorTag?: string;
+      /**
+       * The original error, from executors that run in-process. Never
+       * serialized; when set, the run fails with it exactly as the inline
+       * path would.
+       */
+      readonly cause?: unknown;
+    })
+  | {
+      readonly ok: false;
+      readonly kind: "suspended";
+      readonly reason: "sleep" | "signal";
+      readonly message?: string;
+      /** The original `WorkflowSuspendedError`, from in-process executors. */
+      readonly cause?: unknown;
     }
-  | { readonly ok: false; readonly error: string };
+  | {
+      readonly ok: false;
+      readonly kind: "continue-as-new";
+      /** Input of the next run. */
+      readonly nextInput: unknown;
+      readonly message?: string;
+      /** The original `WorkflowContinueAsNewError`, from in-process executors. */
+      readonly cause?: unknown;
+    };
 
 export interface StepExecutor {
   /**
@@ -66,8 +128,10 @@ export interface StepExecutor {
    * ready-set, workflow-level retry, compensation, etc.
    *
    * Errors should be surfaced as `{ ok: false, error }` rather than thrown,
-   * so the runner's state machine can branch uniformly across in-process
-   * and remote executors.
+   * and suspension / continue-as-new as `{ ok: false, kind }`, so the
+   * runner's state machine can branch uniformly across in-process and
+   * remote executors. A thrown error is treated as the step's failure
+   * (a thrown suspension or continue-as-new keeps its meaning).
    */
   executeStep(req: StepExecutionRequest): Promise<StepExecutionResult>;
   /**
@@ -91,8 +155,9 @@ export interface StepExecutor {
  * clock, the bound definition's version and patches, and a child runner on
  * this executor's storage and clock; storage writes are then unfenced.
  *
- * Re-throws `WorkflowSuspendedError` directly rather than wrapping it in
- * `{ ok: false }` so the caller can distinguish suspension from failure.
+ * Never throws for a step's own outcome: suspension and continue-as-new are
+ * reported by `kind`, and failures (defects included) carry the original
+ * error as `cause` plus its `errorTag`.
  */
 export class InProcessStepExecutor implements StepExecutor {
   private readonly workflow: Workflow<unknown, unknown>;
@@ -122,48 +187,74 @@ export class InProcessStepExecutor implements StepExecutor {
     if (!stepDef) {
       return {
         ok: false,
+        kind: "failed",
         error: `Step "${req.stepName}" not found in workflow "${this.workflow.name}"`,
       };
     }
 
-    const attemptRef = { current: req.attempt };
-    const metadataRef: { current?: Record<string, unknown> } = { current: undefined };
-
     const runtime = this.runtimeFor(req);
     const clock = runtime.clock ?? this.clock;
-    const raw = applyStepPolicies({
+    const body = await runStepBody({
       stepDef,
       workflowId: req.workflowId,
       clock,
-      invoke: () => {
-        const currentAttempt = attemptRef.current;
-        attemptRef.current = currentAttempt + 1;
-        return stepDef.execute({
+      firstAttempt: req.attempt,
+      execute: ({ attempt, metadataRef }) =>
+        stepDef.execute({
           ...runtime,
           clock,
           input: req.input,
           results: req.prevResults,
           workflowId: req.workflowId,
           storage: this.storage,
-          attemptRef: { current: currentAttempt },
+          attemptRef: { current: attempt },
           metadataRef,
-        });
-      },
+        }),
     });
 
-    // Defects (a rejected `.stepAsync()` body, a synchronous throw) reject
-    // here rather than landing in `{ ok: false }`.
-    const { data, error } = await runEffSafe(raw.map((result) => stepDef.codec.encode(result)));
-
-    if (error) {
-      if ((error as TaggedError)._tag === "WorkflowSuspendedError") {
-        throw error;
+    switch (body.kind) {
+      case "completed":
+        return {
+          ok: true,
+          result: body.result,
+          metadata: body.metadata,
+          attempt: body.attempt,
+          failedAttempts: body.failedAttempts,
+        };
+      case "failed": {
+        const errorTag = (body.error as { _tag?: unknown } | null | undefined)?._tag;
+        return {
+          ok: false,
+          kind: "failed",
+          error: errorMessage(body.error),
+          ...(typeof errorTag === "string" && { errorTag }),
+          cause: body.error,
+          metadata: body.metadata,
+          attempt: body.attempt,
+          failedAttempts: body.failedAttempts,
+        };
       }
-      const errorMsg = error instanceof globalThis.Error ? error.message : String(error);
-      return { ok: false, error: errorMsg };
+      case "suspended": {
+        const suspended = body.error as WorkflowSuspendedError;
+        return {
+          ok: false,
+          kind: "suspended",
+          reason: suspended.reason,
+          message: suspended.message,
+          cause: body.error,
+        };
+      }
+      case "continue-as-new": {
+        const next = body.error as WorkflowContinueAsNewError;
+        return {
+          ok: false,
+          kind: "continue-as-new",
+          nextInput: next.nextInput,
+          message: next.message,
+          cause: body.error,
+        };
+      }
     }
-
-    return { ok: true, result: data!, metadata: metadataRef.current };
   }
 
   /** The request's runtime, or this executor's own when the runner sent none. */

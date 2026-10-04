@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // DAG execution types — the context the DAG executor and its waves run
-// against, the per-step wave result, and the executor's result union, plus
+// against, the settled wave, and the executor's result union, plus
 // the per-step runtime both waves hand to step bodies.
 // ---------------------------------------------------------------------------
 
@@ -15,6 +15,7 @@ import type {
 } from "../durable-pipeline.ts";
 import type { StepState } from "../workflow-state.ts";
 import type { FenceGuard, WorkflowStorage } from "../workflow-storage.ts";
+import type { StepOutcome } from "./step-checkpoint.ts";
 import type { StepExecutor } from "./step-executor.ts";
 
 /**
@@ -95,21 +96,13 @@ export function stepRuntimeFor(params: {
   };
 }
 
-/** Result of one locally run step within a wave. `result` is codec-encoded. */
-export type LocalStepResult = {
-  name: string;
-  result: unknown;
-  metadata?: Record<string, unknown>;
-  storageAlreadyCheckpointed?: boolean;
-  durationMs: number;
-  startedAt: Date;
-  skipped?: true;
-};
-
-/** Settled wave: either every step's result, or the first failure. */
+/**
+ * A settled wave: one checkpointed outcome per ready step, in ready order.
+ * Every step settles before the wave returns; a failing step never cuts
+ * its siblings short.
+ */
 export interface WaveOutcome {
-  readonly batchResults: LocalStepResult[] | null;
-  readonly batchError: unknown;
+  readonly outcomes: StepOutcome[];
 }
 
 /** Inputs shared by both wave implementations. */

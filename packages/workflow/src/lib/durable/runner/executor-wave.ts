@@ -5,141 +5,209 @@
 // executor runs the body.
 // ---------------------------------------------------------------------------
 
-import { StepError } from "../durable-pipeline-error.ts";
-import { isStepAttemptStorage } from "../workflow-storage.ts";
 import {
-  stepRuntimeFor,
-  type LocalStepResult,
-  type WaveOutcome,
-  type WaveParams,
-} from "./dag-context.ts";
+  StepError,
+  WorkflowContinueAsNewError,
+  WorkflowSuspendedError,
+} from "../durable-pipeline-error.ts";
+import { stepRuntimeFor, type WaveOutcome, type WaveParams } from "./dag-context.ts";
+import { errorMessage } from "./step-body.ts";
+import { checkpointStepOutcome, type StepOutcome } from "./step-checkpoint.ts";
 import { resolveStepConcurrency } from "./step-concurrency.ts";
-import type { StepExecutionRequest } from "./step-executor.ts";
+import type { StepExecutionRequest, StepExecutionResult } from "./step-executor.ts";
+import { settleWave, skippedOutcome } from "./wave.ts";
 
 /**
- * Run `readySteps` through `ctx.stepExecutor`. Each step saves its result
- * (and attempt row) the moment its body resolves, unless the executor
- * reports it already checkpointed the step. Skipped steps are returned
- * unsaved and persisted by the DAG executor after the wave.
+ * Run `readySteps` through `ctx.stepExecutor` and wait for every one of
+ * them. Each step is checkpointed as soon as its executor reports, unless
+ * the executor says it already persisted the step. The wave's
+ * `AbortSignal` is aborted when the first step fails.
  */
 export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> {
   const { ctx, workflowId, input, readySteps, results, clock, stepStates } = params;
-  let batchResults: LocalStepResult[] | null = null;
-  let batchError: unknown = null;
+  const abort = new AbortController();
 
-  try {
-    batchResults = await Promise.all(
-      readySteps.map(async (stepDef): Promise<LocalStepResult> => {
-        if (stepDef.skipWhen) {
-          const prevStepName = stepDef.dependsOn[0];
-          const prev = prevStepName != null ? results[prevStepName] : input;
-          if (stepDef.skipWhen(prev)) {
-            const skipResult = stepDef.skipValue ? stepDef.skipValue(prev) : prev;
-            return {
-              name: stepDef.name,
-              result: stepDef.codec.encode(skipResult),
-              durationMs: 0,
-              startedAt: clock.now(),
-              skipped: true,
-            };
-          }
-        }
+  return settleWave({
+    readySteps,
+    runStep: async (stepDef) => {
+      const skipped = skippedOutcome({
+        stepDef,
+        input,
+        results,
+        clock,
+        attempt: params.stepAttempts.get(stepDef.name) ?? 1,
+      });
+      if (skipped) return checkpointStepOutcome({ ctx, clock, workflowId, outcome: skipped });
 
-        const startedAt = clock.now();
-        const startTime = startedAt.getTime();
-        const currentAttempt = (params.stepAttempts.get(stepDef.name) ?? 0) + 1;
-        params.stepAttempts.set(stepDef.name, currentAttempt);
+      const startedAt = clock.now();
+      const currentAttempt = (params.stepAttempts.get(stepDef.name) ?? 0) + 1;
+      params.stepAttempts.set(stepDef.name, currentAttempt);
 
-        // Resolve per-task concurrency cap. Step-level wins over the
-        // workflow-level default. The key fn is evaluated against the
-        // step's input ctx; the resolved string + scope + limit are
-        // stamped on the dispatched task so workers don't re-evaluate.
-        const concurrency = resolveStepConcurrency({
-          workflowName: ctx.workflowName,
-          workflowQueue: ctx.workflowQueue,
-          stepDef,
-          workflowInput: input,
-          stepInput: (() => {
-            const prevStepName = stepDef.dependsOn[0];
-            return prevStepName != null ? results[prevStepName] : input;
-          })(),
-          workflowId,
-          attempt: currentAttempt,
-          results,
-        });
+      // Resolve per-task concurrency cap. Step-level wins over the
+      // workflow-level default. The key fn is evaluated against the
+      // step's input ctx; the resolved string + scope + limit are
+      // stamped on the dispatched task so workers don't re-evaluate.
+      const prevStepName = stepDef.dependsOn[0];
+      const concurrency = resolveStepConcurrency({
+        workflowName: ctx.workflowName,
+        workflowQueue: ctx.workflowQueue,
+        stepDef,
+        workflowInput: input,
+        stepInput: prevStepName != null ? results[prevStepName] : input,
+        workflowId,
+        attempt: currentAttempt,
+        results,
+      });
 
-        const req: StepExecutionRequest = {
-          workflowId,
-          stepName: stepDef.name,
-          input,
-          prevResults: { ...results },
-          attempt: currentAttempt,
-          needs: stepDef.needs,
-          priority: stepDef.priority,
-          ...(ctx.workflowVersion !== undefined && { version: ctx.workflowVersion }),
-          runtime: stepRuntimeFor({ ctx, clock, stepStates, stepName: stepDef.name }),
-          ...(concurrency
-            ? {
-                concurrencyKey: concurrency.key,
-                concurrencyScope: concurrency.scope,
-                concurrencyLimit: concurrency.limit,
-              }
-            : {}),
-        };
-        const res = await ctx.stepExecutor!.executeStep(req);
-        if (!res.ok) {
-          throw new StepError({ workflowId, stepName: stepDef.name, message: res.error });
-        }
-        const durationMs = clock.currentTimeMs() - startTime;
+      const req: StepExecutionRequest = {
+        workflowId,
+        stepName: stepDef.name,
+        input,
+        prevResults: { ...results },
+        attempt: currentAttempt,
+        needs: stepDef.needs,
+        priority: stepDef.priority,
+        signal: abort.signal,
+        ...(ctx.workflowVersion !== undefined && { version: ctx.workflowVersion }),
+        runtime: stepRuntimeFor({ ctx, clock, stepStates, stepName: stepDef.name }),
+        ...(concurrency
+          ? {
+              concurrencyKey: concurrency.key,
+              concurrencyScope: concurrency.scope,
+              concurrencyLimit: concurrency.limit,
+            }
+          : {}),
+      };
 
-        // Save here unless the executor already wrote the step row
-        // (Postgres step-queue / coordinator path sets
-        // `storageAlreadyCheckpointed`). Either way the returned result
-        // is flagged as checkpointed so the DAG executor does not save it
-        // again.
-        if (!res.storageAlreadyCheckpointed) {
-          await ctx.storage.saveStepResult(
-            {
-              workflowId,
-              stepName: stepDef.name,
-              result: res.result,
-              metadata: res.metadata,
-              durationMs,
-              startedAt,
-            },
-            ctx.guard,
-          );
-          if (isStepAttemptStorage(ctx.storage)) {
-            await ctx.storage.saveStepAttempt(
-              {
-                workflowId,
-                stepName: stepDef.name,
-                attempt: currentAttempt,
-                type: "execution",
-                status: "completed",
-                result: res.result,
-                durationMs,
-                startedAt,
-                completedAt: clock.now(),
-                ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
-              },
-              ctx.guard,
-            );
-          }
-        }
-        return {
-          name: stepDef.name,
-          result: res.result,
-          metadata: res.metadata,
-          storageAlreadyCheckpointed: true,
-          durationMs,
-          startedAt,
-        };
-      }),
-    );
-  } catch (err) {
-    batchError = err;
+      let res: StepExecutionResult;
+      try {
+        res = await ctx.stepExecutor!.executeStep(req);
+      } catch (thrown) {
+        res = resultOfThrown(thrown);
+      }
+
+      const reported = res.ok || res.kind === undefined || res.kind === "failed" ? res : undefined;
+      if (reported?.attempt !== undefined) {
+        params.stepAttempts.set(stepDef.name, reported.attempt);
+      }
+      const outcome = outcomeOfResult({
+        workflowId,
+        name: stepDef.name,
+        res,
+        startedAt,
+        durationMs: clock.currentTimeMs() - startedAt.getTime(),
+        attempt: reported?.attempt ?? currentAttempt,
+      });
+      if (outcome.kind === "failed") abort.abort(outcome.error);
+
+      return checkpointStepOutcome({
+        ctx,
+        clock,
+        workflowId,
+        outcome,
+        failedAttempts: reported?.failedAttempts ?? [],
+        checkpointed: reported?.storageAlreadyCheckpointed === true,
+      });
+    },
+  });
+}
+
+/**
+ * An executor that throws instead of reporting: a suspension or
+ * continue-as-new keeps its meaning, anything else is the step's failure.
+ */
+function resultOfThrown(thrown: unknown): StepExecutionResult {
+  const tag = (thrown as { _tag?: unknown } | null | undefined)?._tag;
+  if (tag === "WorkflowSuspendedError") {
+    const suspended = thrown as WorkflowSuspendedError;
+    return {
+      ok: false,
+      kind: "suspended",
+      reason: suspended.reason,
+      message: suspended.message,
+      cause: thrown,
+    };
   }
+  if (tag === "WorkflowContinueAsNewError") {
+    const next = thrown as WorkflowContinueAsNewError;
+    return {
+      ok: false,
+      kind: "continue-as-new",
+      nextInput: next.nextInput,
+      message: next.message,
+      cause: thrown,
+    };
+  }
+  return { ok: false, kind: "failed", error: errorMessage(thrown), cause: thrown };
+}
 
-  return { batchResults, batchError };
+/**
+ * The step's outcome from its executor's report. In-process executors hand
+ * back the original error as `cause`, so the run sees the same error the
+ * inline path would; a remote report becomes a `StepError` carrying the
+ * reported `errorTag`.
+ */
+function outcomeOfResult(params: {
+  workflowId: string;
+  name: string;
+  res: StepExecutionResult;
+  startedAt: Date;
+  durationMs: number;
+  attempt: number;
+}): StepOutcome {
+  const { workflowId, name, res, startedAt, durationMs, attempt } = params;
+  if (res.ok) {
+    return {
+      kind: "completed",
+      name,
+      result: res.result,
+      metadata: res.metadata,
+      startedAt,
+      durationMs,
+      attempt,
+    };
+  }
+  if (res.kind === "suspended") {
+    return {
+      kind: "suspended",
+      name,
+      error:
+        res.cause ??
+        new WorkflowSuspendedError({
+          workflowId,
+          stepName: name,
+          reason: res.reason,
+          message: res.message ?? `Workflow "${workflowId}" suspended at step "${name}"`,
+        }),
+    };
+  }
+  if (res.kind === "continue-as-new") {
+    return {
+      kind: "continue-as-new",
+      name,
+      error:
+        res.cause ??
+        new WorkflowContinueAsNewError({
+          workflowId,
+          nextInput: res.nextInput,
+          message: res.message ?? `Workflow "${workflowId}" requested continue-as-new`,
+        }),
+    };
+  }
+  return {
+    kind: "failed",
+    name,
+    error:
+      res.cause ??
+      new StepError({
+        workflowId,
+        stepName: name,
+        message: res.error,
+        ...(res.errorTag !== undefined && { errorTag: res.errorTag }),
+      }),
+    metadata: res.metadata,
+    startedAt,
+    durationMs,
+    attempt,
+  };
 }

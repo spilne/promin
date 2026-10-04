@@ -186,7 +186,7 @@ describe("StepQueueExecutor", () => {
       await new Promise<void>((r) => setImmediate(r));
     }
 
-    expect(result).toEqual({ ok: false, error: deadLetterError(1) });
+    expect(result).toEqual({ ok: false, kind: "failed", error: deadLetterError(1) });
   });
 });
 

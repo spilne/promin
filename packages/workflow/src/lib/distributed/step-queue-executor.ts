@@ -13,7 +13,12 @@ import type { StepQueue } from "./step-queue.ts";
  * until a worker checkpoints the result. The worker writes both the queue
  * task and workflow storage, so the runner can skip its own `saveStepResult`
  * call — indicated by `storageAlreadyCheckpointed: true` on the returned
- * success value.
+ * value, for a completed step and for a failed one. A task dead-lettered
+ * without a storage write is reported as a failure the runner records.
+ *
+ * The request's `signal` is not observed: a claimed task cannot be
+ * recalled, so the executor always waits for its outcome rather than let a
+ * later attempt run beside it.
  */
 export class StepQueueExecutor implements StepExecutor {
   private readonly stepQueue: StepQueue;
@@ -90,7 +95,13 @@ export class StepQueueExecutor implements StepExecutor {
           return "stop";
         }
         if (stepState?.status === "failed") {
-          outcome = { ok: false, error: stepState.error ?? "step failed" };
+          // The worker wrote the failure row and its attempt row.
+          outcome = {
+            ok: false,
+            kind: "failed",
+            error: stepState.error ?? "step failed",
+            storageAlreadyCheckpointed: true,
+          };
           return "stop";
         }
         // A task that failed in the queue without a storage write was
@@ -99,7 +110,7 @@ export class StepQueueExecutor implements StepExecutor {
         if (sweep) {
           const task = await this.stepQueue.get(taskId);
           if (task?.status === "failed") {
-            outcome = { ok: false, error: task.error ?? "step task failed" };
+            outcome = { ok: false, kind: "failed", error: task.error ?? "step task failed" };
             return "stop";
           }
         }
