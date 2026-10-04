@@ -13,4 +13,4 @@ export {
   type AdvertisedWorkflow,
   type AdvertisementEntry,
   InMemoryWorkflowAdvertisementRegistry,
-} from "@promin/workflow";
+} from "@promin/workflow/distributed";

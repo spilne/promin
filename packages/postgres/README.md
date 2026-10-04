@@ -108,9 +108,13 @@ await scheduler
   .run();
 
 // Management
-const next5 = await scheduler.nextFireTimes("daily-etl", 5);
+const next5 = await scheduler.nextFireTimes({ scheduleId: "daily-etl", count: 5 });
 await scheduler.triggerNow("daily-etl");
-await scheduler.backfill("daily-etl", { from: new Date("2026-03-01"), to: new Date("2026-03-20") });
+await scheduler.backfill({
+  scheduleId: "daily-etl",
+  from: new Date("2026-03-01"),
+  to: new Date("2026-03-20"),
+});
 await scheduler.pause("daily-etl");
 await scheduler.resume("daily-etl");
 ```

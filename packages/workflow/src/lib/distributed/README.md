@@ -72,7 +72,8 @@ Horizontal scaling        ✗                     ✓ add more workers
 The same `WorkflowDefinition` works in both modes. No code changes — only deployment changes:
 
 ```typescript
-import { workflow, createCoordinator } from "@promin/workflow";
+import { workflow } from "@promin/workflow";
+import { createDistributedWorkflowRunner } from "@promin/workflow/distributed";
 
 // Define once
 const processVideo = workflow<{ videoId: string }>({ name: "process-video", storage })
@@ -147,9 +148,9 @@ await coordinator.submit({ workflow: processVideo, workflowId: "v1", input: { vi
 The coordinator routes steps to queues. Workers only poll their assigned queues.
 
 ```typescript
-import { createCoordinator } from "@promin/workflow";
+import { createDistributedWorkflowRunner } from "@promin/workflow/distributed";
 
-const coordinator = createCoordinator({
+const coordinator = createDistributedWorkflowRunner({
   storage,
   stepQueue,
   routing: {
@@ -199,7 +200,11 @@ terminal status.
 ## Example: Multi-Queue Video Processing
 
 ```typescript
-import { createCoordinator, createWorker, MapStepRegistry } from "@promin/workflow";
+import {
+  createDistributedWorkflowRunner,
+  createWorker,
+  MapStepRegistry,
+} from "@promin/workflow/distributed";
 import { PgStepQueue, PostgresWorkflowStorage, migrate } from "@promin/postgres";
 
 // --- Shared setup (all processes) ---
@@ -210,7 +215,7 @@ await stepQueue.ensureTable();
 
 // --- Coordinator process ---
 
-const coordinator = createCoordinator({
+const coordinator = createDistributedWorkflowRunner({
   storage,
   stepQueue,
   routing: {
@@ -233,7 +238,10 @@ coordinator.start(); // runs forever, enqueuing ready steps
 // --- Default worker process ---
 
 const defaultRegistry = new MapStepRegistry();
-defaultRegistry.register("download", (ctx) => downloadVideo((ctx.input as any).videoId));
+defaultRegistry.register({
+  stepName: "download",
+  handler: (ctx) => downloadVideo((ctx.input as any).videoId),
+});
 
 const defaultWorker = createWorker({
   storage,
@@ -248,7 +256,10 @@ defaultWorker.start();
 // --- GPU worker process (different machine, has GPU) ---
 
 const gpuRegistry = new MapStepRegistry();
-gpuRegistry.register("transcribe", (ctx) => whisperTranscribe(ctx.prev as Buffer));
+gpuRegistry.register({
+  stepName: "transcribe",
+  handler: (ctx) => whisperTranscribe(ctx.prev as Buffer),
+});
 
 const gpuWorker = createWorker({
   storage,
@@ -263,7 +274,7 @@ gpuWorker.start();
 // --- AI worker process ---
 
 const aiRegistry = new MapStepRegistry();
-aiRegistry.register("summarize", (ctx) => llmSummarize(ctx.prev as string));
+aiRegistry.register({ stepName: "summarize", handler: (ctx) => llmSummarize(ctx.prev as string) });
 
 const aiWorker = createWorker({
   storage,
@@ -332,12 +343,14 @@ This gives:
 Steps registered on workers support the same resilience features as the in-process workflow engine:
 
 ```typescript
-import { MapStepRegistry } from "@promin/workflow";
+import { MapStepRegistry } from "@promin/workflow/distributed";
 
 const registry = new MapStepRegistry();
 
 // Retry with backoff + predicate
-registry.register("fetch-data", (ctx) => httpClient.get(ctx.prev), {
+registry.register({
+  stepName: "fetch-data",
+  handler: (ctx) => httpClient.get(ctx.prev),
   retry: {
     maxRetries: 3,
     baseDelayMs: 500,
@@ -346,19 +359,26 @@ registry.register("fetch-data", (ctx) => httpClient.get(ctx.prev), {
 });
 
 // Skip on failure — continue workflow with undefined
-registry.register("optional-enrichment", (ctx) => enrichData(ctx.prev), {
+registry.register({
+  stepName: "optional-enrichment",
+  handler: (ctx) => enrichData(ctx.prev),
   onFailure: "skip",
 });
 
 // Fallback value on failure
-registry.register("load-config", (ctx) => loadFromRemote(), {
+registry.register({
+  stepName: "load-config",
+  handler: () => loadFromRemote(),
   onFailure: { fallback: () => ({ defaults: true }) },
 });
 
 // Lease loss — `ctx.signal` aborts when the worker no longer owns the task
 // (it stalled and the task was reclaimed, or `stop({ timeoutMs })` gave it
 // back). Pass it on so the work stops; its result would be discarded anyway.
-registry.register("fetch-report", (ctx) => fetch(reportUrl(ctx.prev), { signal: ctx.signal }));
+registry.register({
+  stepName: "fetch-report",
+  handler: (ctx) => fetch(reportUrl(ctx.prev), { signal: ctx.signal }),
+});
 ```
 
 ### Hooks
@@ -366,7 +386,7 @@ registry.register("fetch-report", (ctx) => fetch(reportUrl(ctx.prev), { signal: 
 Simple lifecycle callbacks at fixed execution points:
 
 ```typescript
-import { createWorker } from "@promin/workflow";
+import { createWorker } from "@promin/workflow/distributed";
 
 const worker = createWorker({
   storage,
@@ -397,17 +417,17 @@ import {
   retryMiddleware,
   loggingMiddleware,
   metricsMiddleware,
-} from "@promin/workflow";
+} from "@promin/workflow/distributed";
 
 const worker = createWorker({
   storage,
   stepQueue,
   registry,
   middleware: [
-    timeoutMiddleware(30_000), // kill steps taking > 30s
+    timeoutMiddleware({ ms: 30_000 }), // kill steps taking > 30s
     retryMiddleware({ maxRetries: 2 }), // retry on any failure
-    loggingMiddleware(console.log), // structured step logs
-    metricsMiddleware((m) => prometheus.observe(m)), // duration + status
+    loggingMiddleware({ log: console.log }), // structured step logs
+    metricsMiddleware({ record: (m) => prometheus.observe(m) }), // duration + status
   ],
 });
 ```
@@ -463,10 +483,12 @@ import {
   createWorker,
   timeoutMiddleware,
   loggingMiddleware,
-} from "@promin/workflow";
+} from "@promin/workflow/distributed";
 
 const registry = new MapStepRegistry();
-registry.register("charge", chargeFn, {
+registry.register({
+  stepName: "charge",
+  handler: chargeFn,
   retry: { maxRetries: 3 }, // per-step: retry this specific step
   onFailure: { fallback: () => ({ charged: false }) },
 });
@@ -476,7 +498,7 @@ const worker = createWorker({
   stepQueue,
   registry,
   middleware: [
-    timeoutMiddleware(60_000), // global: all steps time out at 60s
+    timeoutMiddleware({ ms: 60_000 }), // global: all steps time out at 60s
     loggingMiddleware(), // global: log all steps
   ],
   hooks: {
@@ -490,14 +512,14 @@ const worker = createWorker({
 
 ### StepRegistry vs ActivityRegistry
 
-|               | StepRegistry                    | ActivityRegistry                    |
-| ------------- | ------------------------------- | ----------------------------------- |
-| Purpose       | Worker step execution           | Visual editor compilation           |
-| Used by       | WorkflowWorker                  | compileWorkflow()                   |
-| Context       | StepContext (input, prev, deps) | ActivityContext (input, prev, deps) |
-| Returns       | Eff or Promise                  | Eff                                 |
-| Registration  | By step name + options          | By activity ref + config            |
-| Retry/Failure | WorkerStepOptions               | N/A (handled by engine)             |
+|               | StepRegistry                          | ActivityRegistry                    |
+| ------------- | ------------------------------------- | ----------------------------------- |
+| Purpose       | Worker step execution                 | Visual editor compilation           |
+| Used by       | WorkflowWorker                        | compileWorkflow()                   |
+| Context       | WorkerStepContext (input, prev, deps) | ActivityContext (input, prev, deps) |
+| Returns       | Eff or Promise                        | Eff                                 |
+| Registration  | By step name + options                | By activity ref + config            |
+| Retry/Failure | WorkerStepOptions                     | N/A (handled by engine)             |
 
 ### Graceful Shutdown
 

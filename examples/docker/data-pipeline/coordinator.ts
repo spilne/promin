@@ -14,7 +14,8 @@
 // rather than re-running the workflow from scratch.
 // ---------------------------------------------------------------------------
 
-import { createCoordinator, InMemoryWorkflowVersionRegistry } from "@promin/workflow";
+import { InMemoryWorkflowVersionRegistry } from "@promin/workflow";
+import { createDistributedWorkflowRunner } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { buildDataPipelineWorkflow, type DatasetInput } from "./workflow.ts";
 
@@ -25,7 +26,7 @@ const { storage, stepQueue, close } = await buildStack();
 const registry = new InMemoryWorkflowVersionRegistry();
 registry.register(buildDataPipelineWorkflow());
 
-const coordinator = createCoordinator({
+const coordinator = createDistributedWorkflowRunner({
   storage,
   stepQueue,
   registry,
@@ -61,7 +62,7 @@ const submitDemo = async (): Promise<void> => {
 
   // Immediately try the same workflowId again — simulates a double-trigger
   // (e.g. S3 event + manual retry). The second attempt should be a no-op.
-  const existing = await coordinator.status(workflowId);
+  const existing = await storage.loadWorkflow(workflowId);
   if (existing && existing.status !== "completed" && existing.status !== "failed") {
     console.log(`[coordinator] ${workflowId} already in flight — duplicate skipped`);
   }

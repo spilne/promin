@@ -11,7 +11,7 @@ import { succeed } from "@spilne/perfect-core";
 import { workflow } from "./workflow-builder.ts";
 import type { Workflow } from "./workflow-types.ts";
 import {
-  createWorkflowVersionRegistry,
+  InMemoryWorkflowVersionRegistry,
   type WorkflowVersionRegistry,
 } from "./workflow-version-registry.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
@@ -49,18 +49,18 @@ export function versionRegistryTestSuite(
         await reg.register(def({ name: "orders", version: "1" }));
         await reg.register(def({ name: "billing", version: "1" }));
 
-        const billing = await reg.resolve("billing", "1");
+        const billing = await reg.resolve({ name: "billing", version: "1" });
         expect(billing?.name).toBe("billing");
         expect(billing?.version).toBe("1");
-        const orders = await reg.resolve("orders", "1");
+        const orders = await reg.resolve({ name: "orders", version: "1" });
         expect(orders?.name).toBe("orders");
       });
 
       it("returns undefined for an unknown name or version", async () => {
         const reg = await factory();
         await reg.register(def({ name: "orders", version: "1" }));
-        expect(await reg.resolve("ghost")).toBeUndefined();
-        expect(await reg.resolve("orders", "99")).toBeUndefined();
+        expect(await reg.resolve({ name: "ghost" })).toBeUndefined();
+        expect(await reg.resolve({ name: "orders", version: "99" })).toBeUndefined();
         expect(await reg.latest("ghost")).toBeUndefined();
         expect(await reg.versions("ghost")).toEqual([]);
       });
@@ -70,7 +70,7 @@ export function versionRegistryTestSuite(
         await reg.register(def({ name: "orders", version: "1" }));
         await reg.register(def({ name: "orders", version: "2" }));
         expect(await reg.latest("orders")).toBe("2");
-        expect((await reg.resolve("orders"))?.version).toBe("2");
+        expect((await reg.resolve({ name: "orders" }))?.version).toBe("2");
       });
 
       it("latest stays correct past 100 registered versions", async () => {
@@ -79,7 +79,7 @@ export function versionRegistryTestSuite(
           await reg.register(def({ name: "many", version: String(i) }));
         }
         expect(await reg.latest("many")).toBe("105");
-        expect((await reg.resolve("many"))?.version).toBe("105");
+        expect((await reg.resolve({ name: "many" }))?.version).toBe("105");
         expect(await reg.versions("many")).toHaveLength(105);
       });
 
@@ -121,10 +121,10 @@ export function versionRegistryTestSuite(
         await reg.register(def({ name: "orders", version: "1" }));
         await reg.register(def({ name: "billing", version: "1" }));
 
-        await reg.deregister("orders", "1");
+        await reg.deregister({ name: "orders", version: "1" });
 
-        expect(await reg.resolve("orders", "1")).toBeUndefined();
-        expect((await reg.resolve("billing", "1"))?.name).toBe("billing");
+        expect(await reg.resolve({ name: "orders", version: "1" })).toBeUndefined();
+        expect((await reg.resolve({ name: "billing", version: "1" }))?.name).toBe("billing");
         expect(await reg.versions("billing")).toEqual(["1"]);
       });
 
@@ -132,15 +132,15 @@ export function versionRegistryTestSuite(
         const reg = await factory();
         await reg.register(def({ name: "orders", version: "1" }));
         await reg.register(def({ name: "orders", version: "2" }));
-        await reg.deregister("orders", "2");
+        await reg.deregister({ name: "orders", version: "2" });
         expect(await reg.latest("orders")).toBe("1");
-        expect((await reg.resolve("orders"))?.version).toBe("1");
+        expect((await reg.resolve({ name: "orders" }))?.version).toBe("1");
       });
 
       it("is a no-op for an unknown version", async () => {
         const reg = await factory();
         await reg.register(def({ name: "orders", version: "1" }));
-        await reg.deregister("orders", "42");
+        await reg.deregister({ name: "orders", version: "42" });
         expect(await reg.versions("orders")).toEqual(["1"]);
       });
     });
@@ -150,9 +150,9 @@ export function versionRegistryTestSuite(
         it("new registrations start inactive and nothing is active", async () => {
           const reg = await factory();
           await reg.register(def({ name: "orders", version: "1" }));
-          expect((await reg.getStatus!("orders", "1"))?.status).toBe("inactive");
+          expect((await reg.getStatus!({ name: "orders", version: "1" }))?.status).toBe("inactive");
           expect(await reg.findActive!("orders")).toBeNull();
-          expect(await reg.getStatus!("orders", "9")).toBeNull();
+          expect(await reg.getStatus!({ name: "orders", version: "9" })).toBeNull();
         });
 
         it("promote makes one version active and demotes the prior one", async () => {
@@ -160,40 +160,40 @@ export function versionRegistryTestSuite(
           await reg.register(def({ name: "orders", version: "1" }));
           await reg.register(def({ name: "orders", version: "2" }));
 
-          await reg.promote!("orders", "1");
+          await reg.promote!({ name: "orders", version: "1" });
           expect((await reg.findActive!("orders"))?.version).toBe("1");
 
-          const rec = await reg.promote!("orders", "2");
+          const rec = await reg.promote!({ name: "orders", version: "2" });
           expect(rec.status).toBe("active");
           expect(rec.activeAt).toBeInstanceOf(Date);
           expect((await reg.findActive!("orders"))?.version).toBe("2");
-          expect((await reg.getStatus!("orders", "1"))?.status).toBe("inactive");
+          expect((await reg.getStatus!({ name: "orders", version: "1" }))?.status).toBe("inactive");
         });
 
         it("promote is scoped to the workflow name", async () => {
           const reg = await factory();
           await reg.register(def({ name: "orders", version: "1" }));
           await reg.register(def({ name: "billing", version: "1" }));
-          await reg.promote!("orders", "1");
-          await reg.promote!("billing", "1");
+          await reg.promote!({ name: "orders", version: "1" });
+          await reg.promote!({ name: "billing", version: "1" });
           expect((await reg.findActive!("orders"))?.name).toBe("orders");
-          expect((await reg.getStatus!("orders", "1"))?.status).toBe("active");
-          expect((await reg.getStatus!("billing", "1"))?.status).toBe("active");
+          expect((await reg.getStatus!({ name: "orders", version: "1" }))?.status).toBe("active");
+          expect((await reg.getStatus!({ name: "billing", version: "1" }))?.status).toBe("active");
         });
 
         it("re-registering keeps the lifecycle status", async () => {
           const reg = await factory();
           await reg.register(def({ name: "orders", version: "1" }));
-          await reg.promote!("orders", "1");
+          await reg.promote!({ name: "orders", version: "1" });
           await reg.register(def({ name: "orders", version: "1" }));
-          expect((await reg.getStatus!("orders", "1"))?.status).toBe("active");
+          expect((await reg.getStatus!({ name: "orders", version: "1" }))?.status).toBe("active");
         });
 
         it("rollback archives the active version and activates the target", async () => {
           const reg = await factory();
           await reg.register(def({ name: "orders", version: "1" }));
           await reg.register(def({ name: "orders", version: "2" }));
-          await reg.promote!("orders", "2");
+          await reg.promote!({ name: "orders", version: "2" });
 
           const { previous, active } = await reg.rollback!({ name: "orders", toVersion: "1" });
           expect(previous.version).toBe("2");
@@ -207,7 +207,9 @@ export function versionRegistryTestSuite(
         it("promote and rollback reject unknown versions", async () => {
           const reg = await factory();
           await reg.register(def({ name: "orders", version: "1" }));
-          await expect(Promise.resolve().then(() => reg.promote!("orders", "9"))).rejects.toThrow();
+          await expect(
+            Promise.resolve().then(() => reg.promote!({ name: "orders", version: "9" })),
+          ).rejects.toThrow();
           await expect(
             Promise.resolve().then(() => reg.rollback!({ name: "orders", toVersion: "9" })),
           ).rejects.toThrow();
@@ -288,7 +290,7 @@ export function versionDrainTestSuite(
     it("counts runs per version by status; terminal runs are not in flight", async () => {
       const storage = await factory();
       const name = freshName("counts");
-      const registry = createWorkflowVersionRegistry();
+      const registry = new InMemoryWorkflowVersionRegistry();
       registry.register(def({ name, version: "1" }));
       registry.register(def({ name, version: "2" }));
 
@@ -317,7 +319,7 @@ export function versionDrainTestSuite(
       if (!storage.tripwireWorkflow) return;
       const name = freshName("tripwire");
       const drained: string[] = [];
-      const registry = createWorkflowVersionRegistry({
+      const registry = new InMemoryWorkflowVersionRegistry({
         autoDeregister: true,
         onDrained: (_n, version) => void drained.push(version),
       });
@@ -337,7 +339,7 @@ export function versionDrainTestSuite(
       const storage = await factory();
       const name = freshName("inflight");
       const drained: string[] = [];
-      const registry = createWorkflowVersionRegistry({
+      const registry = new InMemoryWorkflowVersionRegistry({
         autoDeregister: true,
         onDrained: (_n, version) => void drained.push(version),
       });
@@ -353,11 +355,11 @@ export function versionDrainTestSuite(
     it("autoDeregister never removes the promoted active version", async () => {
       const storage = await factory();
       const name = freshName("active");
-      const registry = createWorkflowVersionRegistry({ autoDeregister: true });
+      const registry = new InMemoryWorkflowVersionRegistry({ autoDeregister: true });
       registry.register(def({ name, version: "1" }));
       registry.register(def({ name, version: "2" }));
       registry.register(def({ name, version: "3" }));
-      await registry.promote(name, "3");
+      await registry.promote({ name, version: "3" });
       // Roll back: 1 becomes active while 3 stays the latest registered.
       await registry.rollback({ name, toVersion: "1" });
 
@@ -371,7 +373,7 @@ export function versionDrainTestSuite(
       const storage = await factory();
       const name = freshName("renotify");
       const drained: string[] = [];
-      const registry = createWorkflowVersionRegistry({
+      const registry = new InMemoryWorkflowVersionRegistry({
         onDrained: (_n, version) => void drained.push(version),
       });
       registry.register(def({ name, version: "1" }));

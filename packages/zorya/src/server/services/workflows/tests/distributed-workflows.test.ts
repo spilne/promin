@@ -3,7 +3,8 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { InMemoryWorkflowStorage, InMemoryStepQueue } from "@promin/workflow";
+import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { InMemoryStepQueue } from "@promin/workflow/distributed";
 import { InMemoryWorkflowAdvertisementRegistry } from "../../../workflow-advertisements.ts";
 import { DistributedWorkflows, UnknownWorkflowError } from "../index.ts";
 

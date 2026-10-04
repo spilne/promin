@@ -1,5 +1,5 @@
-import { workflow, completeSignal, isActivityJournalStorage } from "@promin/workflow";
-import type { WorkflowRunner, ActivityJournalStorage } from "@promin/workflow";
+import { workflow, completeSignal, hasCapability } from "@promin/workflow";
+import type { JournalStore, WorkflowRunner } from "@promin/workflow";
 import { SystemWallClock } from "@promin/workflow";
 import type { RateLimiter } from "./agent-shared.ts";
 import type { WallClock, TimerHandle } from "@promin/workflow";
@@ -575,13 +575,14 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
 
   return {
     async session({ runner, sessionId }) {
-      if (!isActivityJournalStorage(runner.storage)) {
+      const storage = runner.storage;
+      if (!hasCapability(storage, "journal")) {
         throw new Error(
-          "agentLoop requires storage that implements ActivityJournalStorage " +
+          "agentLoop requires storage with the journal capability " +
             "(e.g. InMemoryWorkflowStorage or PgWorkflowStorage).",
         );
       }
-      const journalStorage = runner.storage as unknown as ActivityJournalStorage;
+      const journalStorage: JournalStore = storage;
 
       const clock = config.clock ?? SystemWallClock;
       // Multi-subscriber event bus. The legacy `config.logger` (if provided)
@@ -1355,7 +1356,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
         async status(): Promise<AgentStatus> {
           if (state.closed || !state.inTurn) return "idle";
           if (state.inDelivery) return "thinking";
-          const info = await runner.getStatus(sessionId, {});
+          const info = await runner.getStatus({ workflowId: sessionId });
           if (!info || info.state === "completed" || info.state === "failed") return "idle";
           if (info.state === "suspended") return "waiting_approval";
           return "thinking";

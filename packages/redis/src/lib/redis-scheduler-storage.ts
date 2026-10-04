@@ -23,17 +23,16 @@
 // `migrateLegacyKeys()` once.
 // ---------------------------------------------------------------------------
 
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
   StaleLeaseError,
-  scheduleMetadataContains,
-  SystemWallClock,
   type CommitPollResult,
   type DurableScheduleConfig,
   type LeaderLease,
   type ScheduleCommit,
   type SchedulerStorage,
-  type WallClock,
-} from "@promin/workflow";
+} from "@promin/workflow/scheduler";
+import { scheduleMetadataContains } from "@promin/workflow/storage-kit";
 import type { RedisStoreClient } from "./redis-client.ts";
 import { RedisLeaderLeaseStore } from "./redis-leader-lease-store.ts";
 import { renameLegacyKeys, storeKeyBase } from "./redis-key-migration.ts";

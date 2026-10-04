@@ -95,7 +95,7 @@ export function promoteWorkflowVersion(deps: WorkflowVersionsRoutesDeps) {
     if (!name) return jsonError(400, "missing_name");
     if (!version) return jsonError(400, "missing_version");
     try {
-      const record = await lifecycle.promote(name, version);
+      const record = await lifecycle.promote({ name, version });
       return json(200, { version: toDto(record) });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

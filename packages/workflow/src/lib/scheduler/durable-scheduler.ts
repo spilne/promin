@@ -6,7 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { Cron } from "croner";
-import { RRule } from "rrule";
+import { RRule } from "./rrule.ts";
 import { Stream, succeed, suspend, tryPromise, type Eff } from "@spilne/perfect-core";
 import { SystemWallClock } from "../shared/wall-clock.ts";
 import { wallClockSleep } from "./wall-clock-sleep.ts";
@@ -216,10 +216,11 @@ export class DurableScheduler implements Scheduler {
    *
    * Throws if the schedule doesn't exist. Re-validates the merged result.
    */
-  async update(
-    scheduleId: string,
-    patch: Partial<Omit<DurableScheduleConfig, "id">>,
-  ): Promise<void> {
+  async update(params: {
+    scheduleId: string;
+    patch: Partial<Omit<DurableScheduleConfig, "id">>;
+  }): Promise<void> {
+    const { scheduleId, patch } = params;
     const current = await this.storage.loadSchedule(scheduleId);
     if (!current) {
       throw new Error(`Cannot update schedule "${scheduleId}" — does not exist`);
@@ -231,12 +232,15 @@ export class DurableScheduler implements Scheduler {
     // Any change to trigger/timezone/startAt/endAt can alter when the next fire
     // should be. Recompute and push into due-tracking so the next poll sees it.
     if (merged.enabled !== false) {
-      await this.storage.setNextRun(scheduleId, computeNextRun(merged, this.clock));
+      await this.storage.setNextRun(
+        scheduleId,
+        computeNextRun({ config: merged, clock: this.clock }),
+      );
     }
   }
 
-  async unregister(scheduleId: string, _options?: { reason?: string }): Promise<void> {
-    await this.storage.deleteSchedule(scheduleId);
+  async unregister(params: { scheduleId: string; reason?: string }): Promise<void> {
+    await this.storage.deleteSchedule(params.scheduleId);
   }
 
   /** Pause a schedule. It leaves due-tracking until resumed. */
@@ -281,7 +285,8 @@ export class DurableScheduler implements Scheduler {
    * occurrences; interval schedules continue the cadence from the last fire
    * (or start now / at `startAt` when they have never fired).
    */
-  async nextFireTimes(scheduleId: string, count: number): Promise<Date[]> {
+  async nextFireTimes(params: { scheduleId: string; count: number }): Promise<Date[]> {
+    const { scheduleId, count } = params;
     const config = await this.storage.loadSchedule(scheduleId);
     if (!config) return [];
     const state =
@@ -312,7 +317,8 @@ export class DurableScheduler implements Scheduler {
    * Emit ticks for the occurrences in `[from, to)` and record them as fired.
    * Like `triggerNow`, the tick numbers are taken atomically.
    */
-  async backfill(scheduleId: string, params: { from: Date; to: Date }): Promise<ScheduleTick[]> {
+  async backfill(params: { scheduleId: string; from: Date; to: Date }): Promise<ScheduleTick[]> {
+    const { scheduleId } = params;
     const ticks = await this.fireManually({
       scheduleId,
       occurrences: (config) =>
@@ -656,10 +662,15 @@ export function planDueTicks(params: {
     }
     try {
       const state = params.states.get(id) ?? { lastFired: null, tickCount: 0 };
-      const due = computeDueTicks(config, state.lastFired, state.tickCount, params.clock);
+      const due = computeDueTicks({
+        config,
+        lastFired: state.lastFired,
+        tickCount: state.tickCount,
+        clock: params.clock,
+      });
       const nextRun = jitterNextRun({
         config,
-        nextRun: computeNextRun(config, params.clock),
+        nextRun: computeNextRun({ config, clock: params.clock }),
         random,
       });
       const last = due[due.length - 1];
@@ -736,12 +747,14 @@ function jitterNextRun(params: {
  * missed occurrences after `lastFired` up to "now" are due, of which the
  * newest `max(1, maxCatchUp)` fire, oldest first.
  */
-export function computeDueTicks(
-  config: DurableScheduleConfig,
-  lastFired: Date | null,
-  tickCount: number,
-  clock: WallClock = SystemWallClock,
-): ScheduleTick[] {
+export function computeDueTicks(params: {
+  config: DurableScheduleConfig;
+  lastFired: Date | null;
+  tickCount: number;
+  /** Time source for "now" and each tick's `firedAt`. Default: `SystemWallClock`. */
+  clock?: WallClock;
+}): ScheduleTick[] {
+  const { config, lastFired, tickCount, clock = SystemWallClock } = params;
   const now = clock.now();
   if (config.startAt && now < config.startAt) return [];
   if (config.endAt && now > config.endAt) return [];
@@ -752,13 +765,13 @@ export function computeDueTicks(
   }
 
   const limit = Math.max(1, config.maxCatchUp ?? 0);
-  const params = { config, now, lastFired, limit };
+  const missed = { config, now, lastFired, limit };
   const occurrences = config.cron
-    ? missedCronOccurrences(params)
+    ? missedCronOccurrences(missed)
     : config.rrule
-      ? missedRruleOccurrences(params)
+      ? missedRruleOccurrences(missed)
       : config.intervalMs !== undefined
-        ? missedIntervalOccurrences(params)
+        ? missedIntervalOccurrences(missed)
         : [];
   return occurrences.map((scheduledAt, i) =>
     makeTick({ config, scheduledAt, tickNumber: tickCount + i, clock }),
@@ -835,10 +848,12 @@ function makeTick(params: {
  * Compute the next time a schedule will fire — used to update the due index.
  * "Now" comes from `clock` (default: `SystemWallClock`).
  */
-export function computeNextRun(
-  config: DurableScheduleConfig,
-  clock: WallClock = SystemWallClock,
-): Date | null {
+export function computeNextRun(params: {
+  config: DurableScheduleConfig;
+  /** Time source for "now". Default: `SystemWallClock`. */
+  clock?: WallClock;
+}): Date | null {
+  const { config, clock = SystemWallClock } = params;
   const now = clock.now();
   if (config.endAt && now >= config.endAt) return null;
 
@@ -942,12 +957,4 @@ function backfillCron(cron: string, timezone: string, from: Date, to: Date): Dat
     cursor = new Date(next.getTime() + 1);
   }
   return dates;
-}
-
-// ---------------------------------------------------------------------------
-// Factory
-// ---------------------------------------------------------------------------
-
-export function createDurableScheduler(config: DurableSchedulerConfig): DurableScheduler {
-  return new DurableScheduler(config);
 }

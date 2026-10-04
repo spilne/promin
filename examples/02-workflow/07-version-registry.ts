@@ -11,13 +11,13 @@
 
 import {
   workflow,
-  createWorkflowVersionRegistry,
+  InMemoryWorkflowVersionRegistry,
   createWorkflowRunner,
   InMemoryWorkflowStorage,
 } from "@promin/workflow";
 
 const storage = new InMemoryWorkflowStorage();
-const registry = createWorkflowVersionRegistry();
+const registry = new InMemoryWorkflowVersionRegistry();
 const runner = createWorkflowRunner({ storage, registry });
 
 // ---------------------------------------------------------------------------

@@ -214,7 +214,7 @@ export async function recoverWorkflows(params: {
   const candidates = await listResumeCandidates({ storage, clock });
   const pool = createRunPool(Math.max(1, opts.resumeConcurrency));
   for (const run of candidates) {
-    const def = await registry.resolve(run.workflowName, run.version);
+    const def = await registry.resolve({ name: run.workflowName, version: run.version });
     if (!def) {
       skipped.push({
         workflowId: run.workflowId,

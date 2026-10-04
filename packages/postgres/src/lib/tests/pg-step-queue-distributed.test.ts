@@ -1,12 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, setDefaultTimeout } from "bun:test";
+import { workflow, InMemoryWorkflowStorage } from "@promin/workflow";
 import {
-  workflow,
-  InMemoryWorkflowStorage,
-  DefaultCoordinator,
-  DefaultWorker,
   MapStepRegistry,
   InMemoryWorkerRegistry,
-} from "@promin/workflow";
+  createDistributedWorkflowRunner,
+  createWorker,
+} from "@promin/workflow/distributed";
 import { PostgresTestContainer } from "../test-utils.ts";
 import { PgStepQueue } from "../pg-step-queue.ts";
 
@@ -238,32 +237,51 @@ describe("Distributed DAG workflow — video processing pipeline", () => {
       .stepAsync("notify", async (ctx) => ({ notified: true, summary: ctx.prev.summary }))
       .build();
 
-    const coordinator = new DefaultCoordinator({ storage, stepQueue: queue, pollIntervalMs: 100 });
+    const coordinator = createDistributedWorkflowRunner({
+      storage,
+      stepQueue: queue,
+      pollIntervalMs: 100,
+    });
 
     const registry = new MapStepRegistry();
     const executionOrder: string[] = [];
-    registry.register("upload", async (ctx) => {
-      executionOrder.push("upload");
-      return { url: (ctx.input as any).videoUrl, size: 1024 };
+    registry.register({
+      stepName: "upload",
+      handler: async (ctx) => {
+        executionOrder.push("upload");
+        return { url: (ctx.input as any).videoUrl, size: 1024 };
+      },
     });
-    registry.register("transcribe", async (ctx) => {
-      executionOrder.push("transcribe");
-      return { text: `Transcript of ${(ctx.prev as any).url}` };
+    registry.register({
+      stepName: "transcribe",
+      handler: async (ctx) => {
+        executionOrder.push("transcribe");
+        return { text: `Transcript of ${(ctx.prev as any).url}` };
+      },
     });
-    registry.register("thumbnail", async (ctx) => {
-      executionOrder.push("thumbnail");
-      return { thumbUrl: `${(ctx.prev as any).url}/thumb.jpg` };
+    registry.register({
+      stepName: "thumbnail",
+      handler: async (ctx) => {
+        executionOrder.push("thumbnail");
+        return { thumbUrl: `${(ctx.prev as any).url}/thumb.jpg` };
+      },
     });
-    registry.register("summarize", async (ctx) => {
-      executionOrder.push("summarize");
-      return { summary: "Summary text", thumb: (ctx.deps as any).thumbnail.thumbUrl };
+    registry.register({
+      stepName: "summarize",
+      handler: async (ctx) => {
+        executionOrder.push("summarize");
+        return { summary: "Summary text", thumb: (ctx.deps as any).thumbnail.thumbUrl };
+      },
     });
-    registry.register("notify", async (ctx) => {
-      executionOrder.push("notify");
-      return { notified: true, summary: (ctx.prev as any).summary };
+    registry.register({
+      stepName: "notify",
+      handler: async (ctx) => {
+        executionOrder.push("notify");
+        return { notified: true, summary: (ctx.prev as any).summary };
+      },
     });
 
-    const worker = new DefaultWorker({
+    const worker = createWorker({
       storage,
       stepQueue: queue,
       registry,
@@ -310,7 +328,11 @@ describe("Distributed workers — competing task execution", () => {
       .stepAsync("fulfill", async (ctx) => ({ fulfilled: true, orderId: ctx.input.orderId }))
       .build();
 
-    const coordinator = new DefaultCoordinator({ storage, stepQueue: queue, pollIntervalMs: 50 });
+    const coordinator = createDistributedWorkflowRunner({
+      storage,
+      stepQueue: queue,
+      pollIntervalMs: 50,
+    });
 
     for (let i = 0; i < 50; i++) {
       await coordinator.submit({
@@ -330,14 +352,17 @@ describe("Distributed workers — competing task execution", () => {
 
     const workers = [1, 2, 3].map((id) => {
       const registry = new MapStepRegistry();
-      registry.register("fulfill", async (stepCtx) => {
-        processed.push({ worker: `worker-${id}`, workflowId: stepCtx.workflowId });
-        workersSeen.add(`worker-${id}`);
-        if (workersSeen.size >= 2) openGate();
-        await gate;
-        return { fulfilled: true };
+      registry.register({
+        stepName: "fulfill",
+        handler: async (stepCtx) => {
+          processed.push({ worker: `worker-${id}`, workflowId: stepCtx.workflowId });
+          workersSeen.add(`worker-${id}`);
+          if (workersSeen.size >= 2) openGate();
+          await gate;
+          return { fulfilled: true };
+        },
       });
-      return new DefaultWorker({
+      return createWorker({
         storage,
         stepQueue: new PgStepQueue({ db: pg.db, workerId: `worker-${id}` }),
         registry,
@@ -496,17 +521,24 @@ describe("Queue routing — GPU vs CPU workers", () => {
       .stepAsync("postprocess", async (ctx) => ({ result: ctx.prev }), { needs: ["cpu"] })
       .build();
 
-    const coordinator = new DefaultCoordinator({ storage, stepQueue: queue, pollIntervalMs: 50 });
+    const coordinator = createDistributedWorkflowRunner({
+      storage,
+      stepQueue: queue,
+      pollIntervalMs: 50,
+    });
 
     const gpuProcessed: string[] = [];
     const cpuProcessed: string[] = [];
 
     const gpuRegistry = new MapStepRegistry();
-    gpuRegistry.register("inference", async () => {
-      gpuProcessed.push("inference");
-      return { prediction: "cat", confidence: 0.95 };
+    gpuRegistry.register({
+      stepName: "inference",
+      handler: async () => {
+        gpuProcessed.push("inference");
+        return { prediction: "cat", confidence: 0.95 };
+      },
     });
-    const gpuWorker = new DefaultWorker({
+    const gpuWorker = createWorker({
       storage,
       stepQueue: new PgStepQueue({ db: pg.db }),
       registry: gpuRegistry,
@@ -517,15 +549,21 @@ describe("Queue routing — GPU vs CPU workers", () => {
     });
 
     const cpuRegistry = new MapStepRegistry();
-    cpuRegistry.register("preprocess", async (stepCtx) => {
-      cpuProcessed.push("preprocess");
-      return { processed: (stepCtx.input as any).imageUrl };
+    cpuRegistry.register({
+      stepName: "preprocess",
+      handler: async (stepCtx) => {
+        cpuProcessed.push("preprocess");
+        return { processed: (stepCtx.input as any).imageUrl };
+      },
     });
-    cpuRegistry.register("postprocess", async (ctx) => {
-      cpuProcessed.push("postprocess");
-      return { result: ctx.prev };
+    cpuRegistry.register({
+      stepName: "postprocess",
+      handler: async (ctx) => {
+        cpuProcessed.push("postprocess");
+        return { result: ctx.prev };
+      },
     });
-    const cpuWorker = new DefaultWorker({
+    const cpuWorker = createWorker({
       storage,
       stepQueue: new PgStepQueue({ db: pg.db }),
       registry: cpuRegistry,

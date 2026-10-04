@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { Cron } from "croner";
-import { RRule } from "rrule";
+import { RRule } from "./rrule.ts";
 import type { DurableScheduleConfig, ScheduleConfig } from "./types.ts";
 
 /**

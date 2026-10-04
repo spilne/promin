@@ -7,7 +7,7 @@
 // ---------------------------------------------------------------------------
 
 import { Cron } from "croner";
-import { RRule } from "rrule";
+import { RRule } from "./rrule.ts";
 import { Stream, succeed, suspend, sync, type Eff } from "@spilne/perfect-core";
 import { JsonCodec } from "@spilne/perfect-core/connect";
 import { SystemWallClock } from "../shared/wall-clock.ts";
@@ -49,9 +49,10 @@ export interface InMemorySchedulerConfig {
  *
  * @example
  * ```ts
- * import { createScheduler, trigger } from "@promin/workflow";
+ * import { trigger } from "@promin/workflow";
+ * import { InMemoryScheduler } from "@promin/workflow/scheduler";
  *
- * const scheduler = createScheduler();
+ * const scheduler = new InMemoryScheduler();
  *
  * // Cron — every weekday at 9am EST
  * await scheduler.register({
@@ -86,7 +87,7 @@ export interface InMemorySchedulerConfig {
  * await scheduler.resume("health-check");
  *
  * // Unregister ends the stream
- * await scheduler.unregister("health-check");
+ * await scheduler.unregister({ scheduleId: "health-check" });
  * ```
  */
 export class InMemoryScheduler implements Scheduler {
@@ -114,7 +115,8 @@ export class InMemoryScheduler implements Scheduler {
   }
 
   /** Remove a schedule. Its stream will end. */
-  async unregister(scheduleId: string, _options?: { reason?: string }): Promise<void> {
+  async unregister(params: { scheduleId: string; reason?: string }): Promise<void> {
+    const { scheduleId } = params;
     this.schedules.delete(scheduleId);
   }
 
@@ -318,27 +320,4 @@ function getNextRruleTime(rruleStr: string, after: Date): Date {
     throw new Error(`RRULE "${rruleStr}" has no next occurrence after ${after.toISOString()}`);
   }
   return next;
-}
-
-// ---------------------------------------------------------------------------
-// Factory
-// ---------------------------------------------------------------------------
-
-/**
- * Create an in-memory scheduler. Non-blocking, no persistence.
- *
- * @example
- * ```ts
- * const scheduler = createScheduler();
- * await scheduler.register({ id: "daily", cron: "0 2 * * *", timezone: "America/New_York" });
- * await scheduler.register({ id: "heartbeat", intervalMs: 30_000 });
- *
- * await scheduler.stream("daily")
- *   .through(trigger({ workflow: etlWorkflow, ... }))
- *   .drain()
- *   .run();
- * ```
- */
-export function createScheduler(config?: InMemorySchedulerConfig): InMemoryScheduler {
-  return new InMemoryScheduler(config);
 }

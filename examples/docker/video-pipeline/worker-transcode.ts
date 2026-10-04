@@ -8,14 +8,14 @@
 // Scale by `docker compose up --scale worker-transcode=N`.
 // ---------------------------------------------------------------------------
 
-import { MapStepRegistry, createWorker } from "@promin/workflow";
+import { MapStepRegistry, createWorker } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { transcodeHandler } from "./workflow.ts";
 
 const { storage, stepQueue, close } = await buildStack();
 
 const registry = new MapStepRegistry();
-registry.register("transcode", transcodeHandler);
+registry.register({ stepName: "transcode", handler: transcodeHandler });
 
 const worker = createWorker({
   storage,

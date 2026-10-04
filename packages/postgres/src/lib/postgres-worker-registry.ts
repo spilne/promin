@@ -10,7 +10,7 @@
 // ---------------------------------------------------------------------------
 
 import { eq, sql } from "drizzle-orm";
-import type { WorkerRegistry, WorkerInfo, WorkerStatus } from "@promin/workflow";
+import type { WorkerRegistry, WorkerInfo, WorkerStatus } from "@promin/workflow/distributed";
 import { workerRegistry } from "./schema.ts";
 import type { PostgresStorageConfig } from "./config.ts";
 import { resolveConfig } from "./config.ts";

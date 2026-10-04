@@ -1,11 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import type { Eff } from "@spilne/perfect-core";
-import {
-  MapStepRegistry,
-  InMemoryWorkflowStorage,
-  InMemoryStepQueue,
-  createWorker,
-} from "@promin/workflow";
+import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { MapStepRegistry, InMemoryStepQueue, createWorker } from "@promin/workflow/distributed";
 import { LocalProcessRuntime } from "../local-process-runtime.ts";
 import { containerStep } from "../container-step.ts";
 
@@ -178,6 +174,7 @@ describe("Container step integration — run containerized commands as workflow 
         workflowId: "wf-cs-1",
         stepName: "test",
         attempt: 1,
+        signal: new AbortController().signal,
       }) as Eff<unknown, never>
     ).run();
 
@@ -203,7 +200,7 @@ describe("Container step integration — run containerized commands as workflow 
       runtime,
     });
 
-    registry.register("container-step", handler, options);
+    registry.register({ stepName: "container-step", handler, ...options });
 
     await storage.createWorkflow({ workflowId: "cs-1", workflowName: "test", input: {} });
     await queue.enqueue({

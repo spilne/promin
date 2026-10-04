@@ -44,7 +44,7 @@ function setup(rootWorkflow: Workflow<unknown, unknown>) {
   const storage = new InMemoryWorkflowStorage({ clock });
   const seen: StepExecutionRequest[] = [];
   const stepExecutor = new RecordingExecutor(
-    new InProcessStepExecutor(rootWorkflow, { storage, clock }),
+    new InProcessStepExecutor({ workflow: rootWorkflow, storage, clock }),
     seen,
   );
   const runner = createWorkflowRunner({ storage, clock, stepExecutor, executorId: "exec-1" });
@@ -255,7 +255,8 @@ describe("step timeouts — run on the injected WallClock", () => {
         { timeoutMs: 5_000 },
       )
       .build();
-    const executor = new InProcessStepExecutor(wf as Workflow<unknown, unknown>, {
+    const executor = new InProcessStepExecutor({
+      workflow: wf as Workflow<unknown, unknown>,
       storage,
       clock,
     });
@@ -285,7 +286,10 @@ describe("InProcessStepExecutor without a runner-supplied runtime", () => {
         return yield* ctx.activity("one", async () => 1);
       })
       .build();
-    const executor = new InProcessStepExecutor(wf as Workflow<unknown, unknown>, { storage });
+    const executor = new InProcessStepExecutor({
+      workflow: wf as Workflow<unknown, unknown>,
+      storage,
+    });
 
     const res = await executor.executeStep({
       workflowId: "be-1",

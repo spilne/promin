@@ -77,10 +77,7 @@ export class RoutingStepExecutor implements StepExecutor {
       local:
         local?.forWorkflow?.(workflow) ??
         local ??
-        new InProcessStepExecutor(workflow, {
-          storage: storage!,
-          clock: clock ?? SystemWallClock,
-        }),
+        new InProcessStepExecutor({ workflow, storage: storage!, clock: clock ?? SystemWallClock }),
     });
   }
 

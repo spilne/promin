@@ -14,17 +14,15 @@
 // ---------------------------------------------------------------------------
 
 import {
-  createSleepScanner,
   createWorkflowRunner,
   hasQueryHandlers,
   InProcessStepExecutor,
   invokeQueryHandler,
   listQueryHandlers,
-  type SleepScanner,
-  type StepTask,
   type Workflow,
   type WorkflowRunner,
 } from "@promin/workflow";
+import { createSleepScanner, type SleepScanner, type StepTask } from "@promin/workflow/distributed";
 import type { ZoryaClient } from "./zorya-client.ts";
 import { WorkerControlSocket } from "./worker-control-socket.ts";
 
@@ -262,7 +260,7 @@ export class ZoryaWorker {
         if (!hasQueryHandlers(workflowId)) {
           return { hosted: false };
         }
-        const result = await invokeQueryHandler(workflowId, name, queryArgs);
+        const result = await invokeQueryHandler({ workflowId, name, args: queryArgs });
         return { hosted: true, result };
       });
       this.control.onCommand("query-list", (args) => {
@@ -533,7 +531,7 @@ export class ZoryaWorker {
     const startedAt = new Date();
     const startMs = Date.now();
     try {
-      const executor = new InProcessStepExecutor(def, { storage: this.client.storage });
+      const executor = new InProcessStepExecutor({ workflow: def, storage: this.client.storage });
       const stepDef = def._definition.steps.find((s) => s.name === task.stepName)!;
       const result = await executor.executeStep({
         workflowId: task.workflowId,

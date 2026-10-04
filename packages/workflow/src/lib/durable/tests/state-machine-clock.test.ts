@@ -271,7 +271,7 @@ describe("lock heartbeat — a send's lock is extended on the clock", () => {
     release();
     expect(await outcome).toBe("Machine hb-2 lock expired before the transition was saved");
     expect(await m.getState("hb-2")).toEqual({ current: "idle", context: { n: 0 } });
-    expect(await m.getHistory("hb-2")).toEqual([]);
+    expect(await m.getHistory({ id: "hb-2" })).toEqual([]);
   });
 
   it("a holder whose lease lapsed can neither extend nor release the next holder's lock", async () => {

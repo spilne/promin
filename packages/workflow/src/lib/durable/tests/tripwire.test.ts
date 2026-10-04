@@ -207,7 +207,7 @@ describe("tripwire", () => {
         .run({ workflow: wf, workflowId: "wf-status-1", input: { denied: true } })
         .catch(() => undefined);
 
-      const status = await runner.getStatus("wf-status-1");
+      const status = await runner.getStatus({ workflowId: "wf-status-1" });
       expect(status?.state).toBe("tripwire");
       expect(status?.tripwire).toEqual({ err: "nope" });
     });

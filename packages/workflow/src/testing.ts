@@ -35,3 +35,4 @@ export {
   stateMachineStorageTestSuite,
   type StateMachineStorageTestSuiteOptions,
 } from "./lib/durable/state-machine-storage-test-suite.ts";
+export { clearQueryHandlers } from "./lib/durable/query-registry.ts";

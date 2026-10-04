@@ -22,13 +22,12 @@
 //   );
 // ---------------------------------------------------------------------------
 
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
-  SystemWallClock,
   type AdvertisedWorkflow,
   type AdvertisementEntry,
-  type WallClock,
   type WorkflowAdvertisementRegistry,
-} from "@promin/workflow";
+} from "@promin/workflow/distributed";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
 interface Row {

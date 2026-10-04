@@ -5,16 +5,16 @@
 // inbound rate, keeping the expensive GPU workers focused on transcode.
 // ---------------------------------------------------------------------------
 
-import { MapStepRegistry, createWorker } from "@promin/workflow";
+import { MapStepRegistry, createWorker } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { decodeHandler, metadataHandler, notifyHandler } from "./workflow.ts";
 
 const { storage, stepQueue, close } = await buildStack();
 
 const registry = new MapStepRegistry();
-registry.register("decode", decodeHandler);
-registry.register("metadata", metadataHandler);
-registry.register("notify", notifyHandler);
+registry.register({ stepName: "decode", handler: decodeHandler });
+registry.register({ stepName: "metadata", handler: metadataHandler });
+registry.register({ stepName: "notify", handler: notifyHandler });
 
 const worker = createWorker({
   storage,

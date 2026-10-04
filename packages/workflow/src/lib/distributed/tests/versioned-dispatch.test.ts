@@ -5,7 +5,7 @@
 
 import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
-import { workflow, InMemoryWorkflowStorage } from "../../durable/index.ts";
+import { workflow, InMemoryWorkflowStorage } from "../../../index.ts";
 import { createWorkflowRunner } from "../../durable/workflow-runner.ts";
 import { MapStepRegistry } from "../step-registry.ts";
 import { InMemoryStepQueue } from "../in-memory-step-queue.ts";
@@ -17,7 +17,7 @@ describe("versioned dispatch", () => {
     const stepQueue = new InMemoryStepQueue();
 
     const registry = new MapStepRegistry();
-    registry.register("remote-step", (ctx) => succeed(`done-${ctx.prev}`));
+    registry.register({ stepName: "remote-step", handler: (ctx) => succeed(`done-${ctx.prev}`) });
 
     const worker = createWorker({
       storage,
@@ -65,7 +65,7 @@ describe("versioned dispatch", () => {
 
     // Worker supports only "known-step".
     const registry = new MapStepRegistry();
-    registry.register("known-step", () => succeed("ok"));
+    registry.register({ stepName: "known-step", handler: () => succeed("ok") });
 
     // Claim directly — avoid spinning the worker loop.
     const claimed = await stepQueue.claim({
@@ -110,7 +110,7 @@ describe("versioned dispatch", () => {
     });
 
     const registry = new MapStepRegistry();
-    registry.register("s", () => succeed("ok"));
+    registry.register({ stepName: "s", handler: () => succeed("ok") });
 
     // Worker supports v1 + v2 only. Unversioned is always accepted for
     // backward compat. v3 is rejected.
@@ -134,7 +134,10 @@ describe("versioned dispatch", () => {
     const stepQueue = new InMemoryStepQueue();
 
     const v2Registry = new MapStepRegistry();
-    v2Registry.register("step-a", (ctx) => succeed(`A-${(ctx.input as any).x}`));
+    v2Registry.register({
+      stepName: "step-a",
+      handler: (ctx) => succeed(`A-${(ctx.input as any).x}`),
+    });
 
     // Worker declares it supports both versions during the rolling deploy.
     const worker = createWorker({
@@ -200,7 +203,7 @@ describe("versioned dispatch", () => {
     });
 
     const v2OnlyRegistry = new MapStepRegistry();
-    v2OnlyRegistry.register("step-a", () => succeed("v2-result"));
+    v2OnlyRegistry.register({ stepName: "step-a", handler: () => succeed("v2-result") });
 
     // Worker only supports v2 — declares drain complete on its side.
     const worker = createWorker({

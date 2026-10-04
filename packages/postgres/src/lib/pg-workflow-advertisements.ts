@@ -25,7 +25,7 @@ import type {
   AdvertisedWorkflow,
   AdvertisementEntry,
   WorkflowAdvertisementRegistry,
-} from "@promin/workflow";
+} from "@promin/workflow/distributed";
 import { type DrizzleDb, ensureTable as ensureTableFromSchema } from "@spilne/perfect-postgres";
 import { workflowAdvertisements } from "./schema.ts";
 

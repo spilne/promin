@@ -8,10 +8,9 @@
 // ---------------------------------------------------------------------------
 
 import { eq, and, sql, type SQL } from "drizzle-orm";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
   DEFAULT_MAX_DELIVERIES,
-  deadLetterError,
-  SystemWallClock,
   type StepQueue,
   type StepQueueClaimParams,
   type StepQueueEnqueueParams,
@@ -19,8 +18,8 @@ import {
   type StepQueueRequeueResult,
   type StepTask,
   type StepTaskRecord,
-  type WallClock,
-} from "@promin/workflow";
+} from "@promin/workflow/distributed";
+import { deadLetterError } from "@promin/workflow/storage-kit";
 import { type DrizzleDb, ensureTable as ensureTableFromSchema } from "@spilne/perfect-postgres";
 import { execRaw } from "./exec-raw.ts";
 import { assertPgLeaseCurrent } from "./pg-leader-lease-store.ts";

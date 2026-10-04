@@ -236,7 +236,8 @@ describe("DurableScheduler manual fires", () => {
     await scheduler.triggerNow("h");
 
     const hour = 3_600_000;
-    const ticks = await scheduler.backfill("h", {
+    const ticks = await scheduler.backfill({
+      scheduleId: "h",
       from: new Date(T0 - 3 * hour),
       to: new Date(T0),
     });
@@ -262,7 +263,9 @@ describe("DurableScheduler nextFireTimes", () => {
     await scheduler.register({ id: "i", intervalMs: 10_000 });
     await storage.recordFire("i", new Date(T0 - 4_000));
 
-    expect(offsets(await scheduler.nextFireTimes("i", 3))).toEqual([6_000, 16_000, 26_000]);
+    expect(offsets(await scheduler.nextFireTimes({ scheduleId: "i", count: 3 }))).toEqual([
+      6_000, 16_000, 26_000,
+    ]);
   });
 
   it("a never-fired interval schedule starts now, or at startAt", async () => {
@@ -270,8 +273,12 @@ describe("DurableScheduler nextFireTimes", () => {
     await scheduler.register({ id: "now", intervalMs: 5_000 });
     await scheduler.register({ id: "later", intervalMs: 5_000, startAt: new Date(T0 + 60_000) });
 
-    expect(offsets(await scheduler.nextFireTimes("now", 2))).toEqual([0, 5_000]);
-    expect(offsets(await scheduler.nextFireTimes("later", 2))).toEqual([60_000, 65_000]);
+    expect(offsets(await scheduler.nextFireTimes({ scheduleId: "now", count: 2 }))).toEqual([
+      0, 5_000,
+    ]);
+    expect(offsets(await scheduler.nextFireTimes({ scheduleId: "later", count: 2 }))).toEqual([
+      60_000, 65_000,
+    ]);
   });
 
   it("cron and rrule previews start at startAt and stop before endAt", async () => {
@@ -285,13 +292,19 @@ describe("DurableScheduler nextFireTimes", () => {
       ...window,
     });
 
-    expect(offsets(await scheduler.nextFireTimes("c", 10), hour)).toEqual([5, 6]);
-    expect(offsets(await scheduler.nextFireTimes("r", 10), hour)).toEqual([5, 6]);
+    expect(offsets(await scheduler.nextFireTimes({ scheduleId: "c", count: 10 }), hour)).toEqual([
+      5, 6,
+    ]);
+    expect(offsets(await scheduler.nextFireTimes({ scheduleId: "r", count: 10 }), hour)).toEqual([
+      5, 6,
+    ]);
   });
 
   it("interval previews stop before endAt", async () => {
     const { scheduler } = setup();
     await scheduler.register({ id: "done", intervalMs: 1_000, endAt: new Date(T0 + 2_500) });
-    expect(offsets(await scheduler.nextFireTimes("done", 5))).toEqual([0, 1_000, 2_000]);
+    expect(offsets(await scheduler.nextFireTimes({ scheduleId: "done", count: 5 }))).toEqual([
+      0, 1_000, 2_000,
+    ]);
   });
 });

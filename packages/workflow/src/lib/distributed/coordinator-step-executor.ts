@@ -74,7 +74,8 @@ export class CoordinatorStepExecutor implements StepExecutor {
     const workflow = this.workflow;
     const stepDef = workflow?._definition.steps.find((s) => s.name === req.stepName);
     if (workflow && stepDef && IN_PROCESS_KINDS.has(stepDef.kind)) {
-      this.inProcess ??= new InProcessStepExecutor(workflow, {
+      this.inProcess ??= new InProcessStepExecutor({
+        workflow,
         storage: this.storage,
         clock: this.clock,
       });

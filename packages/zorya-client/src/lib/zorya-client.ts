@@ -5,14 +5,8 @@
 // definitions to the server on connect.
 // ---------------------------------------------------------------------------
 
-import type {
-  Workflow,
-  WorkflowStorage,
-  StepQueue,
-  WorkerRegistry,
-  WorkflowHandle,
-  WorkflowRunner,
-} from "@promin/workflow";
+import type { Workflow, WorkflowStorage, WorkflowHandle, WorkflowRunner } from "@promin/workflow";
+import type { StepQueue, WorkerRegistry } from "@promin/workflow/distributed";
 import { createWorkflowRunner } from "@promin/workflow";
 import {
   RemoteStepQueue,
@@ -213,25 +207,6 @@ export class ZoryaClient {
     return this.runner.handle<unknown>(workflowId);
   }
 
-  /**
-   * @deprecated Prefer {@link start} (typed) or {@link startByName} (untyped)
-   * — both return a `WorkflowHandle` with `result()`, `signal()`, `cancel()`,
-   * and `events()` methods. This method is kept for back-compat with callers
-   * that only need the workflowId for fire-and-forget triggers.
-   */
-  async triggerWorkflow(
-    name: string,
-    body: {
-      input?: unknown;
-      workflowId?: string;
-      namespace?: string;
-      version?: string;
-      metadata?: Record<string, unknown>;
-    } = {},
-  ): Promise<{ workflowId: string }> {
-    return this._postTrigger(name, body);
-  }
-
   private async _postTrigger(
     name: string,
     body: {
@@ -249,7 +224,7 @@ export class ZoryaClient {
     });
     const res = await this.fetch(req);
     const text = await res.text();
-    if (!res.ok) throw new Error(`triggerWorkflow failed: ${res.status} ${text}`);
+    if (!res.ok) throw new Error(`workflow trigger failed: ${res.status} ${text}`);
     return JSON.parse(text) as { workflowId: string };
   }
 

@@ -15,12 +15,8 @@
 
 import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
-import {
-  InMemoryStepQueue,
-  InMemoryWorkerRegistry,
-  InMemoryWorkflowStorage,
-  workflow,
-} from "@promin/workflow";
+import { InMemoryWorkflowStorage, workflow } from "@promin/workflow";
+import { InMemoryStepQueue, InMemoryWorkerRegistry } from "@promin/workflow/distributed";
 import { ZoryaClient, ZoryaWorker } from "@promin/zorya-client";
 import { ZoryaServer } from "../../server/server.ts";
 import { DistributedWorkflows } from "../../index.ts";
@@ -87,7 +83,7 @@ describe("Coordinator-driven step dispatch (promin-2c29)", () => {
 
     // Trigger via the public HTTP endpoint to exercise the
     // CoordinatedTriggerService path.
-    const triggered = await client.triggerWorkflow("fan-out", {
+    const triggered = await client.startByName("fan-out", {
       input: { id: 7 },
       workflowId: "fan-out-1",
     });
@@ -154,7 +150,7 @@ describe("Coordinator-driven step dispatch (promin-2c29)", () => {
     await w1.start();
     await w2.start();
 
-    await client.triggerWorkflow("split", { input: 0, workflowId: "split-1" });
+    await client.startByName("split", { input: 0, workflowId: "split-1" });
 
     const ok = await pollUntil(
       async () => (await storage.loadWorkflow("split-1"))?.status === "completed",

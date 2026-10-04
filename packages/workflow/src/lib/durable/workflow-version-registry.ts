@@ -50,7 +50,10 @@ export interface WorkflowVersionRegistry {
   /** Register a workflow definition (persists for remote backends). */
   register(definition: Workflow<unknown, unknown>): Promise<void>;
   /** Resolve by name + optional version (latest when absent). `undefined` when not found. */
-  resolve(name: string, version?: string): Promise<Workflow<unknown, unknown> | undefined>;
+  resolve(params: {
+    name: string;
+    version?: string;
+  }): Promise<Workflow<unknown, unknown> | undefined>;
   /** All registered version strings for a workflow name. */
   versions(name: string): Promise<readonly string[]>;
   /** Latest registered version string, or undefined. */
@@ -58,7 +61,7 @@ export interface WorkflowVersionRegistry {
   /** All registered workflow names. */
   names(): Promise<readonly string[]>;
   /** Remove a specific (name, version) from the registry. */
-  deregister(name: string, version: string): Promise<void>;
+  deregister(params: { name: string; version: string }): Promise<void>;
 
   /**
    * Lifecycle methods — explicit promote/rollback/inspect. Not all
@@ -69,13 +72,13 @@ export interface WorkflowVersionRegistry {
   /** Resolve "the active version of workflow X". Null when no version has been promoted. */
   findActive?(name: string): Promise<VersionRecord | null>;
   /** Inspect status + timestamps for one (name, version). */
-  getStatus?(name: string, version: string): Promise<VersionRecord | null>;
+  getStatus?(params: { name: string; version: string }): Promise<VersionRecord | null>;
   /**
    * Promote a version to `active`. Atomically demotes the prior active
    * (if any) for the same name to `inactive` (NOT `archived` — we don't
    * presume the demoted version is rolling-back; see `rollback` for that).
    */
-  promote?(name: string, version: string): Promise<VersionRecord>;
+  promote?(params: { name: string; version: string }): Promise<VersionRecord>;
   /**
    * Roll back the current active to `archived` and promote a target to
    * `active`. The archive distinguishes "demoted by promote" (still in
@@ -89,10 +92,6 @@ export interface WorkflowVersionRegistry {
   /** List all version records for one workflow, ordered by registration desc. */
   listRecords?(name: string): Promise<ReadonlyArray<VersionRecord>>;
 }
-
-/** @deprecated Use `WorkflowVersionRegistry`. */
-export type IWorkflowVersionRegistry = WorkflowVersionRegistry;
-
 /**
  * Registry mapping (workflowName, version) to pure `Workflow` definitions.
  *
@@ -102,9 +101,9 @@ export type IWorkflowVersionRegistry = WorkflowVersionRegistry;
  *
  * @example
  * ```ts
- * const registry = createWorkflowVersionRegistry();
- * registry.register(orderV1);
- * registry.register(orderV2);
+ * const registry = new InMemoryWorkflowVersionRegistry();
+ * await registry.register(orderV1);
+ * await registry.register(orderV2);
  *
  * const runner = createWorkflowRunner({ storage, registry });
  * await runner.run({ name: "order", workflowId: "order-new", input });
@@ -208,7 +207,7 @@ export class InMemoryWorkflowVersionRegistry implements WorkflowVersionRegistry 
    */
   static for(name: string, config?: WorkflowVersionRegistryConfig): ScopedWorkflowVersionRegistry {
     const underlying = new InMemoryWorkflowVersionRegistry(config);
-    return new ScopedWorkflowVersionRegistry(underlying, name);
+    return new ScopedWorkflowVersionRegistry({ registry: underlying, name });
   }
 
   /**
@@ -253,7 +252,11 @@ export class InMemoryWorkflowVersionRegistry implements WorkflowVersionRegistry 
   }
 
   /** Resolve a definition by name + version. Returns undefined if not found. */
-  async resolve(name: string, version?: string): Promise<Workflow<unknown, unknown> | undefined> {
+  async resolve(params: {
+    name: string;
+    version?: string;
+  }): Promise<Workflow<unknown, unknown> | undefined> {
+    const { name, version } = params;
     const versions = this.definitions.get(name);
     if (!versions) return undefined;
     if (version) return versions.get(version)?.definition;
@@ -301,7 +304,8 @@ export class InMemoryWorkflowVersionRegistry implements WorkflowVersionRegistry 
   }
 
   /** Inspect status + timestamps for one (name, version). Null when not registered. */
-  async getStatus(name: string, version: string): Promise<VersionRecord | null> {
+  async getStatus(params: { name: string; version: string }): Promise<VersionRecord | null> {
+    const { name, version } = params;
     const entry = this.definitions.get(name)?.get(version);
     return entry ? this.toRecord(name, version, entry) : null;
   }
@@ -313,7 +317,8 @@ export class InMemoryWorkflowVersionRegistry implements WorkflowVersionRegistry 
    *
    * Idempotent: promoting an already-active version is a no-op.
    */
-  async promote(name: string, version: string): Promise<VersionRecord> {
+  async promote(params: { name: string; version: string }): Promise<VersionRecord> {
+    const { name, version } = params;
     const versions = this.definitions.get(name);
     if (!versions) {
       throw new Error(`promote: workflow "${name}" has no registered versions`);
@@ -472,7 +477,8 @@ export class InMemoryWorkflowVersionRegistry implements WorkflowVersionRegistry 
    * Manually deregister a specific (name, version). Removes it from the
    * registry so it can't be resolved. Doesn't touch stored workflows.
    */
-  async deregister(name: string, version: string): Promise<void> {
+  async deregister(params: { name: string; version: string }): Promise<void> {
+    const { name, version } = params;
     this.deregisterNow(name, version);
   }
 
@@ -497,10 +503,13 @@ export class InMemoryWorkflowVersionRegistry implements WorkflowVersionRegistry 
  * a fluent API when you only manage one workflow's versions.
  */
 export class ScopedWorkflowVersionRegistry {
-  constructor(
-    private readonly registry: InMemoryWorkflowVersionRegistry,
-    private readonly name: string,
-  ) {}
+  private readonly registry: InMemoryWorkflowVersionRegistry;
+  private readonly name: string;
+
+  constructor(params: { registry: InMemoryWorkflowVersionRegistry; name: string }) {
+    this.registry = params.registry;
+    this.name = params.name;
+  }
 
   /**
    * Register a versioned definition. Returns `this` for chaining.
@@ -526,7 +535,7 @@ export class ScopedWorkflowVersionRegistry {
 
   /** Resolve a definition by version (or latest if omitted). */
   resolve(version?: string): Promise<Workflow<unknown, unknown> | undefined> {
-    return this.registry.resolve(this.name, version);
+    return this.registry.resolve({ name: this.name, version });
   }
 
   /** Latest registered version string, or undefined. */
@@ -546,7 +555,7 @@ export class ScopedWorkflowVersionRegistry {
 
   /** Deregister a specific version. */
   deregister(version: string): Promise<void> {
-    return this.registry.deregister(this.name, version);
+    return this.registry.deregister({ name: this.name, version });
   }
 
   /** Access the underlying unscoped registry (escape hatch). */
@@ -554,21 +563,3 @@ export class ScopedWorkflowVersionRegistry {
     return this.registry;
   }
 }
-
-/**
- * Convenience factory. Prefer this over `new InMemoryWorkflowVersionRegistry(...)`
- * in new code — mirrors how every other promin building block is built.
- */
-export function createWorkflowVersionRegistry(
-  config?: WorkflowVersionRegistryConfig,
-): InMemoryWorkflowVersionRegistry {
-  return new InMemoryWorkflowVersionRegistry(config);
-}
-
-/**
- * @deprecated The in-memory registry class is `InMemoryWorkflowVersionRegistry`;
- * `WorkflowVersionRegistry` names the registry interface. This value alias
- * keeps `new WorkflowVersionRegistry()` and `WorkflowVersionRegistry.for()`
- * working for one release.
- */
-export const WorkflowVersionRegistry = InMemoryWorkflowVersionRegistry;

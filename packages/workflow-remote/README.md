@@ -64,7 +64,7 @@ The runner detects this (`hasCapability(storage, "runEvents")` → `false`) and 
 
 ```ts
 // Works — runner.subscribe falls back to polling against any non-subscribable storage.
-for await (const ev of runner.subscribe(workflowId, { pollIntervalMs: 100 })) {
+for await (const ev of runner.subscribe({ workflowId, pollIntervalMs: 100 })) {
   if (ev.type === "workflow-completed") break;
 }
 ```

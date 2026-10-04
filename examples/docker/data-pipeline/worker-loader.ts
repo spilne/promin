@@ -3,14 +3,14 @@
 // Handles: reduce-results
 // ---------------------------------------------------------------------------
 
-import { MapStepRegistry, createWorker } from "@promin/workflow";
+import { MapStepRegistry, createWorker } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { reduceResultsHandler } from "./workflow.ts";
 
 const { storage, stepQueue, close } = await buildStack();
 
 const registry = new MapStepRegistry();
-registry.register("reduce-results", reduceResultsHandler);
+registry.register({ stepName: "reduce-results", handler: reduceResultsHandler });
 
 const worker = createWorker({
   storage,

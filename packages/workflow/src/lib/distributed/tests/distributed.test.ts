@@ -3,10 +3,10 @@ import {
   workflow,
   InMemoryWorkflowStorage,
   InMemoryWorkflowVersionRegistry,
-} from "../../durable/index.ts";
+} from "../../../index.ts";
 import { MapStepRegistry } from "../step-registry.ts";
 import { InMemoryStepQueue } from "../in-memory-step-queue.ts";
-import { createCoordinator } from "../coordinator.ts";
+import { createDistributedWorkflowRunner } from "../coordinator.ts";
 import { createWorker } from "../worker.ts";
 
 // ---------------------------------------------------------------------------
@@ -16,7 +16,7 @@ import { createWorker } from "../worker.ts";
 describe("Step registry — register reusable step handlers by name", () => {
   it("register a 'double' handler and look it up by name at runtime", async () => {
     const registry = new MapStepRegistry();
-    registry.register("double", (ctx) => succeed((ctx.prev as number) * 2));
+    registry.register({ stepName: "double", handler: (ctx) => succeed((ctx.prev as number) * 2) });
 
     expect(registry.has("double")).toBe(true);
     expect(registry.has("missing")).toBe(false);
@@ -186,7 +186,7 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
     const registry = new MapStepRegistry();
     const completed: string[] = [];
 
-    registry.register("double", (ctx) => succeed((ctx.input as any).n * 2));
+    registry.register({ stepName: "double", handler: (ctx) => succeed((ctx.input as any).n * 2) });
 
     // Create workflow and enqueue a task
     await storage.createWorkflow({ workflowId: "wf-1", workflowName: "test", input: { n: 5 } });
@@ -229,8 +229,11 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
     const registry = new MapStepRegistry();
     const failures: string[] = [];
 
-    registry.register("fail-step", () => {
-      throw new Error("step exploded");
+    registry.register({
+      stepName: "fail-step",
+      handler: () => {
+        throw new Error("step exploded");
+      },
     });
 
     await storage.createWorkflow({ workflowId: "wf-2", workflowName: "test", input: {} });
@@ -308,9 +311,12 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
 
-    registry.register("async-step", async (ctx) => {
-      await new Promise((r) => setTimeout(r, 10));
-      return (ctx.prev as number) + 100;
+    registry.register({
+      stepName: "async-step",
+      handler: async (ctx) => {
+        await new Promise((r) => setTimeout(r, 10));
+        return (ctx.prev as number) + 100;
+      },
     });
 
     await storage.createWorkflow({ workflowId: "wf-4", workflowName: "test", input: { n: 5 } });
@@ -343,7 +349,7 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
     const registry = new MapStepRegistry();
     const completed: string[] = [];
 
-    registry.register("gpu-step", (ctx) => succeed("gpu-result"));
+    registry.register({ stepName: "gpu-step", handler: (ctx) => succeed("gpu-result") });
 
     await storage.createWorkflow({ workflowId: "wf-5", workflowName: "test", input: {} });
     await queue.enqueue({
@@ -394,10 +400,13 @@ describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow
 
     // Register step implementations on the worker
     const registry = new MapStepRegistry();
-    registry.register("double", (ctx) => succeed((ctx.input as any).n * 2));
-    registry.register("add-ten", (ctx) => succeed((ctx.prev as number) + 10));
+    registry.register({ stepName: "double", handler: (ctx) => succeed((ctx.input as any).n * 2) });
+    registry.register({
+      stepName: "add-ten",
+      handler: (ctx) => succeed((ctx.prev as number) + 10),
+    });
 
-    const coordinator = createCoordinator({
+    const coordinator = createDistributedWorkflowRunner({
       storage,
       stepQueue: queue,
     });
@@ -444,12 +453,18 @@ describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow
       .build();
 
     const defaultRegistry = new MapStepRegistry();
-    defaultRegistry.register("preprocess", (ctx) => succeed((ctx.input as any).text));
+    defaultRegistry.register({
+      stepName: "preprocess",
+      handler: (ctx) => succeed((ctx.input as any).text),
+    });
 
     const gpuRegistry = new MapStepRegistry();
-    gpuRegistry.register("transcribe", (ctx) => succeed(`transcribed: ${ctx.prev}`));
+    gpuRegistry.register({
+      stepName: "transcribe",
+      handler: (ctx) => succeed(`transcribed: ${ctx.prev}`),
+    });
 
-    const coordinator = createCoordinator({
+    const coordinator = createDistributedWorkflowRunner({
       storage,
       stepQueue: queue,
     });
@@ -504,9 +519,12 @@ describe("Coordinator registry-keyed submit — submit by name, not by object", 
     registry.register(wf as any);
 
     const stepRegistry = new MapStepRegistry();
-    stepRegistry.register("double", (ctx) => succeed((ctx.input as any).n * 2));
+    stepRegistry.register({
+      stepName: "double",
+      handler: (ctx) => succeed((ctx.input as any).n * 2),
+    });
 
-    const coordinator = createCoordinator({ storage, stepQueue: queue, registry });
+    const coordinator = createDistributedWorkflowRunner({ storage, stepQueue: queue, registry });
     const worker = createWorker({
       storage,
       stepQueue: queue,
@@ -540,7 +558,7 @@ describe("Coordinator registry-keyed submit — submit by name, not by object", 
     const registry = new InMemoryWorkflowVersionRegistry();
     registry.register(wf as any);
 
-    const coordinator = createCoordinator({ storage, stepQueue: queue, registry });
+    const coordinator = createDistributedWorkflowRunner({ storage, stepQueue: queue, registry });
 
     await expect(coordinator.submit({ name: "typo", workflowId: "x", input: 1 })).rejects.toThrow(
       /No workflow "typo"/,
@@ -551,7 +569,7 @@ describe("Coordinator registry-keyed submit — submit by name, not by object", 
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryStepQueue();
 
-    const coordinator = createCoordinator({ storage, stepQueue: queue });
+    const coordinator = createDistributedWorkflowRunner({ storage, stepQueue: queue });
 
     await expect(
       coordinator.submit({ name: "anything", workflowId: "x", input: 0 }),
@@ -574,9 +592,12 @@ describe("Coordinator registry-keyed submit — submit by name, not by object", 
       .build();
 
     const stepRegistry = new MapStepRegistry();
-    stepRegistry.register("only", (ctx) => succeed((ctx.input as number) + 1));
+    stepRegistry.register({
+      stepName: "only",
+      handler: (ctx) => succeed((ctx.input as number) + 1),
+    });
 
-    const coordinator = createCoordinator({ storage, stepQueue: queue, registry });
+    const coordinator = createDistributedWorkflowRunner({ storage, stepQueue: queue, registry });
     const worker = createWorker({
       storage,
       stepQueue: queue,
@@ -610,7 +631,7 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
     const registry = new MapStepRegistry();
     const log: string[] = [];
 
-    registry.register("step-a", (ctx) => succeed("result"));
+    registry.register({ stepName: "step-a", handler: (ctx) => succeed("result") });
 
     await storage.createWorkflow({ workflowId: "mw-1", workflowName: "test", input: {} });
     await queue.enqueue({
@@ -649,9 +670,12 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
     const registry = new MapStepRegistry();
     const log: string[] = [];
 
-    registry.register("step-a", () => {
-      log.push("handler");
-      return succeed("ok");
+    registry.register({
+      stepName: "step-a",
+      handler: () => {
+        log.push("handler");
+        return succeed("ok");
+      },
     });
 
     await storage.createWorkflow({ workflowId: "mw-2", workflowName: "test", input: {} });
@@ -697,9 +721,12 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
     const registry = new MapStepRegistry();
     const failures: string[] = [];
 
-    registry.register("slow-step", async () => {
-      await new Promise((r) => setTimeout(r, 5000));
-      return "should-not-reach";
+    registry.register({
+      stepName: "slow-step",
+      handler: async () => {
+        await new Promise((r) => setTimeout(r, 5000));
+        return "should-not-reach";
+      },
     });
 
     await storage.createWorkflow({ workflowId: "mw-3", workflowName: "test", input: {} });
@@ -719,7 +746,7 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
       registry,
       capabilities: [],
       pollIntervalMs: 50,
-      middleware: [timeoutMiddleware(100)],
+      middleware: [timeoutMiddleware({ ms: 100 })],
       hooks: {
         onError: (_task, err, _ms) => {
           failures.push(err instanceof Error ? err.message : String(err));
@@ -740,7 +767,7 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
     const registry = new MapStepRegistry();
     const log: string[] = [];
 
-    registry.register("step-a", () => succeed("ok"));
+    registry.register({ stepName: "step-a", handler: () => succeed("ok") });
 
     await storage.createWorkflow({ workflowId: "mw-4", workflowName: "test", input: {} });
     await queue.enqueue({
@@ -799,15 +826,15 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
     const registry = new MapStepRegistry();
     let attempts = 0;
 
-    registry.register(
-      "flaky",
-      (ctx) => {
+    registry.register({
+      stepName: "flaky",
+      handler: (ctx) => {
         attempts++;
         if (attempts < 3) throw new Error("transient");
         return succeed("ok");
       },
-      { retry: { maxRetries: 5, baseDelayMs: 10 } },
-    );
+      retry: { maxRetries: 5, baseDelayMs: 10 },
+    });
 
     await storage.createWorkflow({ workflowId: "retry-1", workflowName: "test", input: {} });
     await queue.enqueue({
@@ -841,20 +868,18 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
     const registry = new MapStepRegistry();
     let attempts = 0;
 
-    registry.register(
-      "selective",
-      () => {
+    registry.register({
+      stepName: "selective",
+      handler: () => {
         attempts++;
         throw new TestError({ message: "permanent" });
       },
-      {
-        retry: {
-          maxRetries: 5,
-          baseDelayMs: 10,
-          when: (err: any) => err._tag !== "TestError",
-        },
+      retry: {
+        maxRetries: 5,
+        baseDelayMs: 10,
+        when: (err: any) => err._tag !== "TestError",
       },
-    );
+    });
 
     await storage.createWorkflow({ workflowId: "when-1", workflowName: "test", input: {} });
     await queue.enqueue({
@@ -885,13 +910,13 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
 
-    registry.register(
-      "optional",
-      () => {
+    registry.register({
+      stepName: "optional",
+      handler: () => {
         throw new Error("fail");
       },
-      { onFailure: "skip" },
-    );
+      onFailure: "skip",
+    });
 
     await storage.createWorkflow({ workflowId: "skip-1", workflowName: "test", input: {} });
     await queue.enqueue({
@@ -924,13 +949,13 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
 
-    registry.register(
-      "risky",
-      () => {
+    registry.register({
+      stepName: "risky",
+      handler: () => {
         throw new Error("fail");
       },
-      { onFailure: { fallback: () => "default-value" } },
-    );
+      onFailure: { fallback: () => "default-value" },
+    });
 
     await storage.createWorkflow({ workflowId: "fallback-1", workflowName: "test", input: {} });
     await queue.enqueue({
@@ -962,7 +987,7 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
 
-    registry.register("tracked", () => succeed("done"));
+    registry.register({ stepName: "tracked", handler: () => succeed("done") });
 
     await storage.createWorkflow({ workflowId: "attempt-1", workflowName: "test", input: {} });
     await queue.enqueue({
@@ -995,8 +1020,8 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
 
-    registry.register("ok", () => succeed("done"));
-    registry.register("boom", () => fail(new Error("nope") as any));
+    registry.register({ stepName: "ok", handler: () => succeed("done") });
+    registry.register({ stepName: "boom", handler: () => fail(new Error("nope") as any) });
 
     await storage.createWorkflow({ workflowId: "worker-trace", workflowName: "t", input: {} });
     await queue.enqueue({
@@ -1048,12 +1073,19 @@ describe("Coordinator recovery — resume workflows after process restart", () =
       .build();
 
     // First coordinator — submits workflow and processes step-1
-    const coord1 = createCoordinator({ storage, stepQueue: queue, pollIntervalMs: 50 });
+    const coord1 = createDistributedWorkflowRunner({
+      storage,
+      stepQueue: queue,
+      pollIntervalMs: 50,
+    });
     await coord1.submit({ workflow: wf, workflowId: "recover-1", input: { n: 5 } });
 
     const registry = new MapStepRegistry();
-    registry.register("step-1", (ctx) => succeed((ctx.input as any).n * 2));
-    registry.register("step-2", (ctx) => succeed((ctx.prev as number) + 100));
+    registry.register({ stepName: "step-1", handler: (ctx) => succeed((ctx.input as any).n * 2) });
+    registry.register({
+      stepName: "step-2",
+      handler: (ctx) => succeed((ctx.prev as number) + 100),
+    });
 
     const worker = createWorker({
       storage,
@@ -1073,7 +1105,11 @@ describe("Coordinator recovery — resume workflows after process restart", () =
     expect(stateAfterStep1?.steps["step-1"]?.status).toBe("completed");
 
     // Simulate coordinator restart — new coordinator with no in-memory state
-    const coord2 = createCoordinator({ storage, stepQueue: queue, pollIntervalMs: 50 });
+    const coord2 = createDistributedWorkflowRunner({
+      storage,
+      stepQueue: queue,
+      pollIntervalMs: 50,
+    });
 
     // coord2 never saw submit() — but should recover from storage
     void coord2.startLoop();
@@ -1096,11 +1132,15 @@ describe("Coordinator recovery — resume workflows after process restart", () =
       .build();
 
     // Submit and complete
-    const coord1 = createCoordinator({ storage, stepQueue: queue, pollIntervalMs: 50 });
+    const coord1 = createDistributedWorkflowRunner({
+      storage,
+      stepQueue: queue,
+      pollIntervalMs: 50,
+    });
     await coord1.submit({ workflow: wf, workflowId: "done-1", input: 5 });
 
     const registry = new MapStepRegistry();
-    registry.register("only", (ctx) => succeed((ctx.input as any) * 2));
+    registry.register({ stepName: "only", handler: (ctx) => succeed((ctx.input as any) * 2) });
 
     const worker = createWorker({
       storage,
@@ -1120,7 +1160,11 @@ describe("Coordinator recovery — resume workflows after process restart", () =
     expect(state?.status).toBe("completed");
 
     // New coordinator should not pick it up
-    const coord2 = createCoordinator({ storage, stepQueue: queue, pollIntervalMs: 50 });
+    const coord2 = createDistributedWorkflowRunner({
+      storage,
+      stepQueue: queue,
+      pollIntervalMs: 50,
+    });
     void coord2.startLoop();
     await new Promise((r) => setTimeout(r, 200));
     await coord2.stopLoop();

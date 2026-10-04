@@ -14,7 +14,7 @@ transform shards, reduces their results, and publishes a report.
   `idempotency: { ttl: 5 * 60_000, onInFlight: "join" }`. A second
   submission with the same `workflowId` within the TTL is a no-op — the
   existing run continues and any waiter joins it. The coordinator
-  demonstrates this by checking `coordinator.status()` immediately after
+  demonstrates this by loading the run from storage immediately after
   submit and logging "already in flight — duplicate skipped".
 - **Independent scaling** — bump `worker-transform` to 3 replicas and
   all three shards can execute on separate containers simultaneously.

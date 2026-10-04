@@ -1,10 +1,9 @@
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
-  SystemWallClock,
-  type WallClock,
   type WorkerRegistry,
   type WorkerInfo,
   type WorkerStatus,
-} from "@promin/workflow";
+} from "@promin/workflow/distributed";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
 /**

@@ -791,11 +791,13 @@ export class StateMachineInstance<S, Events = void> {
     });
   }
 
-  async getHistory(
-    id: string,
-    params?: { limit?: number; offset?: number },
-  ): Promise<TransitionEvent[]> {
-    return this.storage.loadEvents(id, params);
+  async getHistory(params: {
+    id: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<TransitionEvent[]> {
+    const { id, ...page } = params;
+    return this.storage.loadEvents(id, page);
   }
 }
 
@@ -870,7 +872,7 @@ export class MachineHandle<S, Events = void> {
   }
 
   getHistory(params?: { limit?: number; offset?: number }): Promise<TransitionEvent[]> {
-    return this.instance.getHistory(this.id, params);
+    return this.instance.getHistory({ ...params, id: this.id });
   }
 }
 

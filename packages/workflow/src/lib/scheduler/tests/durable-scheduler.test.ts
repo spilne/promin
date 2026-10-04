@@ -184,7 +184,7 @@ describe("DurableScheduler scalability features", () => {
         metadata: { team: "analytics" },
       });
 
-      await scheduler.update("daily-report", { cron: "0 10 * * *" });
+      await scheduler.update({ scheduleId: "daily-report", patch: { cron: "0 10 * * *" } });
 
       const list = await scheduler.list();
       const updated = list.find((s) => s.id === "daily-report")!;
@@ -202,7 +202,7 @@ describe("DurableScheduler scalability features", () => {
       await scheduler.register({ id: "iv-1", intervalMs: 60_000 });
 
       // Updating interval should push the next run further out.
-      await scheduler.update("iv-1", { intervalMs: 300_000 });
+      await scheduler.update({ scheduleId: "iv-1", patch: { intervalMs: 300_000 } });
 
       // Due-tracking should now reflect the new interval; findDue within the
       // next few ms should not return it because nextRun moved forward.
@@ -213,9 +213,9 @@ describe("DurableScheduler scalability features", () => {
     it("throws on update of non-existent schedule", async () => {
       const storage = new InMemorySchedulerStorage();
       const scheduler = new DurableScheduler({ storage, pollIntervalMs: 25 });
-      await expect(scheduler.update("missing", { cron: "* * * * *" })).rejects.toThrow(
-        /does not exist/,
-      );
+      await expect(
+        scheduler.update({ scheduleId: "missing", patch: { cron: "* * * * *" } }),
+      ).rejects.toThrow(/does not exist/);
     });
 
     it("rejects invalid merged config (e.g. cron + intervalMs both set)", async () => {
@@ -224,9 +224,9 @@ describe("DurableScheduler scalability features", () => {
 
       await scheduler.register({ id: "conflict", cron: "0 9 * * *" });
       // Patch adds intervalMs — merged config has both cron AND intervalMs, invalid.
-      await expect(scheduler.update("conflict", { intervalMs: 60_000 })).rejects.toThrow(
-        /must have exactly one/,
-      );
+      await expect(
+        scheduler.update({ scheduleId: "conflict", patch: { intervalMs: 60_000 } }),
+      ).rejects.toThrow(/must have exactly one/);
     });
 
     it("can pause via update enabled: false", async () => {
@@ -234,7 +234,7 @@ describe("DurableScheduler scalability features", () => {
       const scheduler = new DurableScheduler({ storage, pollIntervalMs: 25 });
       await scheduler.register({ id: "pr-u", intervalMs: 60_000 });
 
-      await scheduler.update("pr-u", { enabled: false });
+      await scheduler.update({ scheduleId: "pr-u", patch: { enabled: false } });
       const updated = (await scheduler.list()).find((s) => s.id === "pr-u")!;
       expect(updated.enabled).toBe(false);
     });
@@ -686,7 +686,7 @@ describe("computeDueTicks catch-up", () => {
       { id: "i", intervalMs: 3_600_000, maxCatchUp: 2 },
     ];
     for (const config of configs) {
-      const ticks = computeDueTicks(config, lastFired, 7, clock);
+      const ticks = computeDueTicks({ config, lastFired, tickCount: 7, clock });
       expect(hhmm(ticks)).toEqual(["09:00", "10:00"]);
       expect(ticks.map((t) => t.tickNumber)).toEqual([7, 8]);
     }
@@ -699,18 +699,26 @@ describe("computeDueTicks catch-up", () => {
       { id: "i", intervalMs: 3_600_000 },
     ];
     for (const config of configs) {
-      expect(hhmm(computeDueTicks(config, lastFired, 0, clock))).toEqual(["10:00"]);
+      expect(hhmm(computeDueTicks({ config, lastFired, tickCount: 0, clock }))).toEqual(["10:00"]);
     }
   });
 
   it("fires fewer when fewer were missed, and nothing before the next occurrence", () => {
     const at = (iso: string) => FakeWallClock.create(Date.parse(iso));
     const cron = { id: "c", cron: "0 * * * *", maxCatchUp: 5 };
-    expect(hhmm(computeDueTicks(cron, lastFired, 0, at("2026-01-01T02:30:00Z")))).toEqual([
-      "01:00",
-      "02:00",
-    ]);
-    expect(computeDueTicks(cron, lastFired, 0, at("2026-01-01T00:59:59Z"))).toEqual([]);
+    expect(
+      hhmm(
+        computeDueTicks({
+          config: cron,
+          lastFired,
+          tickCount: 0,
+          clock: at("2026-01-01T02:30:00Z"),
+        }),
+      ),
+    ).toEqual(["01:00", "02:00"]);
+    expect(
+      computeDueTicks({ config: cron, lastFired, tickCount: 0, clock: at("2026-01-01T00:59:59Z") }),
+    ).toEqual([]);
   });
 });
 
@@ -838,7 +846,7 @@ describe("DurableScheduler due-time math follows the injected WallClock", () => 
 
     // Updated at T0 + 1s → nextRun = T0 + 1s + 3s.
     clock.advance(1_000);
-    await scheduler.update("nr", { intervalMs: 3_000 });
+    await scheduler.update({ scheduleId: "nr", patch: { intervalMs: 3_000 } });
     expect(await storage.findDue({ now: new Date(T0 + 3_999), limit: 10 })).toEqual([]);
     expect(await storage.findDue({ now: new Date(T0 + 4_000), limit: 10 })).toEqual(["nr"]);
   });
@@ -847,13 +855,20 @@ describe("DurableScheduler due-time math follows the injected WallClock", () => 
     const config = { id: "pure", intervalMs: 1_000 };
     const lastFired = new Date(T0);
 
-    expect(computeDueTicks(config, lastFired, 1, FakeWallClock.create(T0 + 999))).toEqual([]);
-    const due = computeDueTicks(config, lastFired, 1, FakeWallClock.create(T0 + 1_500));
+    expect(
+      computeDueTicks({ config, lastFired, tickCount: 1, clock: FakeWallClock.create(T0 + 999) }),
+    ).toEqual([]);
+    const due = computeDueTicks({
+      config,
+      lastFired,
+      tickCount: 1,
+      clock: FakeWallClock.create(T0 + 1_500),
+    });
     expect(due.map((t) => [t.scheduledAt.getTime(), t.firedAt.getTime()])).toEqual([
       [T0 + 1_000, T0 + 1_500],
     ]);
 
-    expect(computeNextRun(config, FakeWallClock.create(T0))!.getTime()).toBe(T0 + 1_000);
+    expect(computeNextRun({ config, clock: FakeWallClock.create(T0) })!.getTime()).toBe(T0 + 1_000);
   });
 
   it("InMemorySchedulerStorage seeds nextRun and leader-lock expiry from its clock", async () => {

@@ -15,7 +15,11 @@
 // ---------------------------------------------------------------------------
 
 import { sql } from "drizzle-orm";
-import { StaleLeaseError, type LeaderLease, type LeaderLeaseStore } from "@promin/workflow";
+import {
+  StaleLeaseError,
+  type LeaderLease,
+  type LeaderLeaseStore,
+} from "@promin/workflow/scheduler";
 import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { execRaw } from "./exec-raw.ts";
 

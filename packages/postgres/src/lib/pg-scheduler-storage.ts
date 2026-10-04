@@ -15,7 +15,7 @@ import type {
   LeaderLease,
   ScheduleCommit,
   SchedulerStorage,
-} from "@promin/workflow";
+} from "@promin/workflow/scheduler";
 import { durableSchedules, durableScheduleTicks, leaderLeases } from "./scheduler-schema.ts";
 import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { SystemWallClock, type WallClock } from "@promin/workflow";

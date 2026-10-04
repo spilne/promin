@@ -104,7 +104,7 @@ export type ActivityFactory = (
  * ```ts
  * // Custom registry that loads activities from a plugin directory
  * class PluginRegistry implements ActivityRegistry {
- *   resolve(ref: string, config?: Record<string, unknown>) {
+ *   resolve({ ref, config }: { ref: string; config?: Record<string, unknown> }) {
  *     const plugin = loadPlugin(ref);
  *     return plugin.createActivity(config);
  *   }
@@ -115,10 +115,10 @@ export type ActivityFactory = (
  */
 export interface ActivityRegistry {
   /** Resolve an activity reference to a step function. Throws if not found. */
-  resolve(
-    ref: string,
-    config?: Record<string, unknown>,
-  ): (ctx: ActivityContext) => Eff<unknown, Throws<TaggedError>>;
+  resolve(params: {
+    ref: string;
+    config?: Record<string, unknown>;
+  }): (ctx: ActivityContext) => Eff<unknown, Throws<TaggedError>>;
 
   /** Check if an activity reference exists in the registry. */
   has(ref: string): boolean;
@@ -180,10 +180,11 @@ export class MapActivityRegistry implements ActivityRegistry {
     this.activities = new Map(Object.entries(activities));
   }
 
-  resolve(
-    ref: string,
-    config?: Record<string, unknown>,
-  ): (ctx: ActivityContext) => Eff<unknown, Throws<TaggedError>> {
+  resolve(params: {
+    ref: string;
+    config?: Record<string, unknown>;
+  }): (ctx: ActivityContext) => Eff<unknown, Throws<TaggedError>> {
+    const { ref, config } = params;
     const factory = this.activities.get(ref);
     if (!factory) {
       throw new Error(
@@ -206,15 +207,17 @@ export class MapActivityRegistry implements ActivityRegistry {
    *
    * @example
    * ```ts
-   * registry.register("slack.send", (config) => (ctx) =>
-   *   tryPromise(
-   *     () => slack.postMessage({ channel: config?.channel as string, text: String(ctx.prev) }),
-   *     toSlackError,
-   *   ),
-   * );
+   * registry.register({
+   *   ref: "slack.send",
+   *   factory: (config) => (ctx) =>
+   *     tryPromise(
+   *       () => slack.postMessage({ channel: config?.channel as string, text: String(ctx.prev) }),
+   *       toSlackError,
+   *     ),
+   * });
    * ```
    */
-  register(ref: string, factory: ActivityFactory): void {
-    this.activities.set(ref, factory);
+  register(params: { ref: string; factory: ActivityFactory }): void {
+    this.activities.set(params.ref, params.factory);
   }
 }

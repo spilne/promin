@@ -89,7 +89,7 @@ describe("DefaultWorker — claim loop resilience", () => {
     const storage = new InMemoryWorkflowStorage({ clock });
     await storage.createWorkflow({ workflowId: "wf", workflowName: "x", input: {} });
     const registry = new MapStepRegistry();
-    registry.register("s", async () => 42);
+    registry.register({ stepName: "s", handler: async () => 42 });
     const errors: WorkerErrorEvent[] = [];
     const worker = new DefaultWorker({
       storage,
@@ -140,7 +140,7 @@ describe("DefaultWorker — claim loop resilience", () => {
     const storage = new InMemoryWorkflowStorage({ clock });
     await storage.createWorkflow({ workflowId: "wf", workflowName: "x", input: {} });
     const registry = new MapStepRegistry();
-    registry.register("s", async () => "done");
+    registry.register({ stepName: "s", handler: async () => "done" });
     const worker = new DefaultWorker({ storage, stepQueue: queue, registry, clock });
 
     void worker.start();
@@ -166,19 +166,17 @@ describe("DefaultWorker — no unhandled rejections", () => {
     const storage = new InMemoryWorkflowStorage({ clock });
     await storage.createWorkflow({ workflowId: "wf", workflowName: "x", input: {} });
     const registry = new MapStepRegistry();
-    registry.register(
-      "s",
-      async () => {
+    registry.register({
+      stepName: "s",
+      handler: async () => {
         throw new Error("boom");
       },
-      {
-        onFailure: {
-          fallback: () => {
-            throw new Error("fallback threw");
-          },
+      onFailure: {
+        fallback: () => {
+          throw new Error("fallback threw");
         },
       },
-    );
+    });
     const worker = new DefaultWorker({ storage, stepQueue: queue, registry, clock });
 
     void worker.start();
@@ -233,9 +231,12 @@ describe("DefaultWorker — no unhandled rejections", () => {
     const storage = new InMemoryWorkflowStorage({ clock });
     await storage.createWorkflow({ workflowId: "wf", workflowName: "x", input: {} });
     const registry = new MapStepRegistry();
-    registry.register("ok", async () => 1);
-    registry.register("bad", async () => {
-      throw new Error("step failed");
+    registry.register({ stepName: "ok", handler: async () => 1 });
+    registry.register({
+      stepName: "bad",
+      handler: async () => {
+        throw new Error("step failed");
+      },
     });
     const errors: WorkerErrorEvent[] = [];
     const worker = new DefaultWorker({
@@ -277,9 +278,12 @@ describe("DefaultWorker — storage first, then queue", () => {
     const storage = flakyStepResultStorage(base, 1);
     const registry = new MapStepRegistry();
     let runs = 0;
-    registry.register("s", async () => {
-      runs++;
-      return 42;
+    registry.register({
+      stepName: "s",
+      handler: async () => {
+        runs++;
+        return 42;
+      },
     });
     const errors: WorkerErrorEvent[] = [];
     const worker = new DefaultWorker({
@@ -337,10 +341,13 @@ describe("DefaultWorker — storage first, then queue", () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     let started = false;
-    registry.register("s", async () => {
-      started = true;
-      await gate;
-      return "stale";
+    registry.register({
+      stepName: "s",
+      handler: async () => {
+        started = true;
+        await gate;
+        return "stale";
+      },
     });
     const worker = new DefaultWorker({
       storage,
@@ -375,8 +382,12 @@ describe("DefaultWorker — storage first, then queue", () => {
     const boom = async () => {
       throw new Error("boom");
     };
-    registry.register("skipped", boom, { onFailure: "skip" });
-    registry.register("fellback", boom, { onFailure: { fallback: () => "plan b" } });
+    registry.register({ stepName: "skipped", handler: boom, onFailure: "skip" });
+    registry.register({
+      stepName: "fellback",
+      handler: boom,
+      onFailure: { fallback: () => "plan b" },
+    });
     const worker = new DefaultWorker({
       storage,
       stepQueue: queue,
@@ -409,7 +420,7 @@ describe("DefaultWorker — throughput", () => {
       await queue.enqueue({ workflowId: `wf-${i}`, stepName: "s", input: {}, prevResults: {} });
     }
     const registry = new MapStepRegistry();
-    registry.register("s", async () => 1);
+    registry.register({ stepName: "s", handler: async () => 1 });
     let claims = 0;
     const counting = wrapQueue(queue, {
       claim: (p) => {

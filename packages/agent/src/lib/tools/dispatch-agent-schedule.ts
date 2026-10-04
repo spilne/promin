@@ -31,8 +31,8 @@
 // (frame-task.ts), not in every dispatch caller.
 // ---------------------------------------------------------------------------
 
-import type { ScheduleTick, DurableScheduleConfig } from "@promin/workflow";
-import { scheduleTickRunId } from "@promin/workflow";
+import type { ScheduleTick, DurableScheduleConfig } from "@promin/workflow/scheduler";
+import { scheduleTickRunId } from "@promin/workflow/scheduler";
 import type { Agent } from "../agent/types.ts";
 import type { AgentRegistry, RegisteredAgent } from "../registry/types.ts";
 
@@ -151,7 +151,7 @@ export async function dispatchAgentSchedule(
   // the agent's run row directly, no special-case needed; (2) a leader
   // race that fires the same tick twice lands on the same workflow row
   // (createWorkflow is idempotent) instead of double-billing the model.
-  const runId = scheduleTickRunId(tick.scheduleId, tick.tickNumber);
+  const runId = scheduleTickRunId({ scheduleId: tick.scheduleId, tickNumber: tick.tickNumber });
 
   try {
     let text: string;

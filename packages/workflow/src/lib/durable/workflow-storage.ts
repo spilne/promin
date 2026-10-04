@@ -31,9 +31,6 @@ import type { WorkflowRunStore } from "./storage/run-store.ts";
 import type { WorkflowScannerStore } from "./storage/scanner-store.ts";
 import type { SignalStore, SignalTokenStore } from "./storage/signal-store.ts";
 import type { StreamStore } from "./storage/stream-store.ts";
-import type { CompensationLedgerStore } from "./storage/compensation-ledger-store.ts";
-import type { StepAttemptStore, StepCheckpointStore } from "./storage/step-attempt-store.ts";
-import { hasCapability, type StorageCapabilityMap } from "./storage/capabilities.ts";
 
 export type { FenceToken, FenceGuard, FencedWrite } from "./storage/fencing.ts";
 export type {
@@ -151,51 +148,3 @@ export interface WorkflowStorage
     SignalTokenStore,
     StreamStore,
     RunEventStore {}
-
-// ---------------------------------------------------------------------------
-// Deprecated names, kept for one release.
-// ---------------------------------------------------------------------------
-
-/** @deprecated Use `StepAttemptStore`. */
-export type StepAttemptStorage = StepAttemptStore;
-/** @deprecated Use `StepCheckpointStore`. */
-export type StepCheckpointStorage = StepCheckpointStore;
-/** @deprecated Use `CompensationLedgerStore`. */
-export type CompensationLedgerStorage = CompensationLedgerStore;
-/** @deprecated Use `WorkflowStorage & StorageCapabilityMap["tripwire"]`. */
-export type TripwireCapableStorage = WorkflowStorage & StorageCapabilityMap["tripwire"];
-/** @deprecated Use `WorkflowStorage & StorageCapabilityMap["runEvents"]`. */
-export type SubscribableStorage = WorkflowStorage & StorageCapabilityMap["runEvents"];
-
-/** @deprecated Use `hasCapability(storage, "stepAttempts")`. */
-export function isStepAttemptStorage(
-  storage: WorkflowStorage,
-): storage is WorkflowStorage & StepAttemptStore {
-  return hasCapability(storage, "stepAttempts");
-}
-
-/** @deprecated Use `hasCapability(storage, "stepCheckpoint")`. */
-export function isStepCheckpointStorage(
-  storage: WorkflowStorage,
-): storage is WorkflowStorage & StepCheckpointStore {
-  return hasCapability(storage, "stepCheckpoint");
-}
-
-/** @deprecated Use `hasCapability(storage, "compensationLedger")`. */
-export function isCompensationLedgerStorage(
-  storage: WorkflowStorage,
-): storage is WorkflowStorage & CompensationLedgerStore {
-  return hasCapability(storage, "compensationLedger");
-}
-
-/** @deprecated Use `hasCapability(storage, "tripwire")`. */
-export function isTripwireCapableStorage(
-  storage: WorkflowStorage,
-): storage is TripwireCapableStorage {
-  return hasCapability(storage, "tripwire");
-}
-
-/** @deprecated Use `hasCapability(storage, "runEvents")`. */
-export function isSubscribableStorage(storage: WorkflowStorage): storage is SubscribableStorage {
-  return hasCapability(storage, "runEvents");
-}

@@ -9,12 +9,11 @@ import { describe, it, expect } from "bun:test";
 import {
   FakeWallClock,
   InMemoryWorkflowStorage,
-  createSignalScanner,
-  createSleepScanner,
   type Workflow,
   type WorkflowRunner,
   type WorkflowStorage,
 } from "@promin/workflow";
+import { createSignalScanner, createSleepScanner } from "@promin/workflow/distributed";
 import { RemoteWorkflowStorage } from "../remote-workflow-storage.ts";
 import { createWorkflowStorageHandler } from "../storage-http-handler.ts";
 

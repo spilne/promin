@@ -6,7 +6,7 @@
 //   docker compose up --scale worker-transform=3
 // ---------------------------------------------------------------------------
 
-import { MapStepRegistry, createWorker } from "@promin/workflow";
+import { MapStepRegistry, createWorker } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import {
   transformShardAHandler,
@@ -17,9 +17,9 @@ import {
 const { storage, stepQueue, close } = await buildStack();
 
 const registry = new MapStepRegistry();
-registry.register("transform-shard-a", transformShardAHandler);
-registry.register("transform-shard-b", transformShardBHandler);
-registry.register("transform-shard-c", transformShardCHandler);
+registry.register({ stepName: "transform-shard-a", handler: transformShardAHandler });
+registry.register({ stepName: "transform-shard-b", handler: transformShardBHandler });
+registry.register({ stepName: "transform-shard-c", handler: transformShardCHandler });
 
 const worker = createWorker({
   storage,

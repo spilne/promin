@@ -5,7 +5,8 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { FakeWallClock, InMemoryWorkerRegistry } from "@promin/workflow";
+import { FakeWallClock } from "@promin/workflow";
+import { InMemoryWorkerRegistry } from "@promin/workflow/distributed";
 import { RegistryBackedWorkersProvider } from "../../server/routes/workers.ts";
 
 describe("RegistryBackedWorkersProvider", () => {

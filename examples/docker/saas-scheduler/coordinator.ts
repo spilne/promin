@@ -12,7 +12,8 @@
 // The execute step duration difference (~500ms vs ~1.5s) shows the SLA gap.
 // ---------------------------------------------------------------------------
 
-import { createCoordinator, InMemoryWorkflowVersionRegistry } from "@promin/workflow";
+import { InMemoryWorkflowVersionRegistry } from "@promin/workflow";
+import { createDistributedWorkflowRunner } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { buildPremiumJobWorkflow, buildStandardJobWorkflow, type TenantJob } from "./workflow.ts";
 
@@ -24,7 +25,7 @@ const registry = new InMemoryWorkflowVersionRegistry();
 registry.register(buildPremiumJobWorkflow());
 registry.register(buildStandardJobWorkflow());
 
-const coordinator = createCoordinator({
+const coordinator = createDistributedWorkflowRunner({
   storage,
   stepQueue,
   registry,

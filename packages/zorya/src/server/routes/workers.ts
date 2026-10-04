@@ -7,7 +7,8 @@
 // .workerProtocol.workerRegistry (see RegistryBackedWorkersProvider).
 // ---------------------------------------------------------------------------
 
-import type { WallClock, WorkerInfo, WorkerRegistry } from "@promin/workflow";
+import type { WallClock } from "@promin/workflow";
+import type { WorkerInfo, WorkerRegistry } from "@promin/workflow/distributed";
 import { SystemWallClock } from "@promin/workflow";
 import { json } from "../router.ts";
 import type { WorkerDto, WorkersResponse } from "../api-types.ts";

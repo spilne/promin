@@ -14,4 +14,4 @@ export {
   type WorkflowStartClaimRef,
   type WorkerWorkflowSpec,
   InMemoryWorkflowStartQueue,
-} from "@promin/workflow";
+} from "@promin/workflow/distributed";

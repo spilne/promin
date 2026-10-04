@@ -4,14 +4,14 @@
 // retry-with-backoff path; the workflow-level retry config kicks in.
 // ---------------------------------------------------------------------------
 
-import { MapStepRegistry, createWorker } from "@promin/workflow";
+import { MapStepRegistry, createWorker } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { chargePaymentHandler } from "./workflow.ts";
 
 const { storage, stepQueue, close } = await buildStack();
 
 const registry = new MapStepRegistry();
-registry.register("charge-payment", chargePaymentHandler);
+registry.register({ stepName: "charge-payment", handler: chargePaymentHandler });
 
 const worker = createWorker({
   storage,

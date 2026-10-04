@@ -277,7 +277,7 @@ describe("StateMachine", () => {
     await machine.send({ id: "tl-1", event: "next" });
     await machine.send({ id: "tl-1", event: "next" });
 
-    const history = await machine.getHistory("tl-1");
+    const history = await machine.getHistory({ id: "tl-1" });
     expect(history).toHaveLength(3);
     expect(history[0]!.from).toBe("red");
     expect(history[0]!.to).toBe("green");
@@ -454,7 +454,7 @@ describe("StateMachine", () => {
     const state2 = await clockStorage.load("clock-1");
     expect(state2!.updatedAt).toEqual(new Date("2026-01-01T00:00:05Z"));
 
-    const events = await machine.getHistory("clock-1");
+    const events = await machine.getHistory({ id: "clock-1" });
     expect(events[0]!.createdAt).toEqual(new Date("2026-01-01T00:00:05Z"));
   });
 
@@ -790,7 +790,7 @@ describe("StateMachine", () => {
     await machine.start({ id: "mw-4", context: { count: 0 } });
     await machine.send({ id: "mw-4", event: "next" });
 
-    const events = await machine.getHistory("mw-4");
+    const events = await machine.getHistory({ id: "mw-4" });
     expect((events[0]!.metadata as any).injected).toBe(true);
   });
 
@@ -1025,7 +1025,7 @@ describe("StateMachine", () => {
         data: { approvedBy: "alice", amount: 500 },
       });
 
-      const history = await machine.getHistory("c-3");
+      const history = await machine.getHistory({ id: "c-3" });
       expect(history).toHaveLength(1);
       expect(history[0]!.eventData).toEqual({ approvedBy: "alice", amount: 500 });
     });
@@ -1410,7 +1410,7 @@ describe("StateMachine", () => {
       expect(await m.checkTimeouts("t-1")).toBe(true);
       expect((await m.getState("t-1"))!.current).toBe("timedOut");
 
-      const history = await m.getHistory("t-1");
+      const history = await m.getHistory({ id: "t-1" });
       expect(history).toHaveLength(1);
       expect(history[0]!.event).toBe(TIMEOUT_EVENT);
       expect(history[0]!.from).toBe("pending");
@@ -1439,7 +1439,7 @@ describe("StateMachine", () => {
       clock.advance(150);
       expect(await m.checkTimeouts("t-label")).toBe(true);
 
-      const history = await m.getHistory("t-label");
+      const history = await m.getHistory({ id: "t-label" });
       expect(history).toHaveLength(1);
       expect(history[0]!.event).toBe("expire");
       expect(history[0]!.event).not.toBe(TIMEOUT_EVENT);

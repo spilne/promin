@@ -84,9 +84,9 @@ describe("workflow versions routes — registry lifecycle surface", () => {
     await promote(new Request("http://x", { method: "POST" }), { name: "compute", version: "v1" });
     await promote(new Request("http://x", { method: "POST" }), { name: "compute", version: "v2" });
 
-    const v1 = await registry.getStatus("compute", "v1");
+    const v1 = await registry.getStatus({ name: "compute", version: "v1" });
     expect(v1?.status).toBe("inactive");
-    const v2 = await registry.getStatus("compute", "v2");
+    const v2 = await registry.getStatus({ name: "compute", version: "v2" });
     expect(v2?.status).toBe("active");
   });
 
@@ -99,10 +99,10 @@ describe("workflow versions routes — registry lifecycle surface", () => {
     const res = await rollback(jsonReq({ toVersion: "v1" }), { name: "compute" });
     expect(res.status).toBe(200);
 
-    const v2After = await registry.getStatus("compute", "v2");
+    const v2After = await registry.getStatus({ name: "compute", version: "v2" });
     expect(v2After?.status).toBe("archived");
     expect(v2After?.archivedAt).not.toBeNull();
-    const v1After = await registry.getStatus("compute", "v1");
+    const v1After = await registry.getStatus({ name: "compute", version: "v1" });
     expect(v1After?.status).toBe("active");
   });
 

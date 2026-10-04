@@ -348,12 +348,12 @@ describe("compileWorkflow", () => {
 
 describe("MapActivityRegistry", () => {
   it("resolves registered activities", () => {
-    const fn = registry.resolve("transform.uppercase");
+    const fn = registry.resolve({ ref: "transform.uppercase" });
     expect(typeof fn).toBe("function");
   });
 
   it("throws on unknown ref", () => {
-    expect(() => registry.resolve("nope")).toThrow(/not found/);
+    expect(() => registry.resolve({ ref: "nope" })).toThrow(/not found/);
   });
 
   it("has() checks existence", () => {
@@ -370,7 +370,7 @@ describe("MapActivityRegistry", () => {
   it("register() adds new activities", () => {
     const r = new MapActivityRegistry({});
     expect(r.has("test")).toBe(false);
-    r.register("test", () => () => succeed("ok"));
+    r.register({ ref: "test", factory: () => () => succeed("ok") });
     expect(r.has("test")).toBe(true);
   });
 });

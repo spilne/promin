@@ -13,7 +13,8 @@
 // a v2 experiment is dispatched.
 // ---------------------------------------------------------------------------
 
-import { createCoordinator, InMemoryWorkflowVersionRegistry } from "@promin/workflow";
+import { InMemoryWorkflowVersionRegistry } from "@promin/workflow";
+import { createDistributedWorkflowRunner } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { buildModelWorkflow, type ModelInput } from "./workflow.ts";
 
@@ -25,7 +26,7 @@ const registry = new InMemoryWorkflowVersionRegistry();
 registry.register(buildModelWorkflow("1"));
 registry.register(buildModelWorkflow("2"));
 
-const coordinator = createCoordinator({
+const coordinator = createDistributedWorkflowRunner({
   storage,
   stepQueue,
   registry,

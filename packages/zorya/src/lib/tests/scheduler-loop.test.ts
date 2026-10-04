@@ -15,16 +15,17 @@ import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
 import {
   FakeWallClock,
-  InMemorySchedulerStorage,
-  InMemoryStepQueue,
-  InMemoryWorkerRegistry,
   InMemoryWorkflowStorage,
   workflow,
   createWorkflowRunner,
+} from "@promin/workflow";
+import { InMemoryStepQueue, InMemoryWorkerRegistry } from "@promin/workflow/distributed";
+import {
+  InMemorySchedulerStorage,
   isStaleLeaseError,
   schedulePartition,
-} from "@promin/workflow";
-import type { ScheduleTick, SchedulerErrorEvent } from "@promin/workflow";
+} from "@promin/workflow/scheduler";
+import type { ScheduleTick, SchedulerErrorEvent } from "@promin/workflow/scheduler";
 import { ZoryaClient, ZoryaWorker } from "@promin/zorya-client";
 import { ZoryaServer } from "../../server/server.ts";
 import { SchedulerLoop } from "../../server/services/scheduler-loop.ts";

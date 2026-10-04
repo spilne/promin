@@ -7,15 +7,15 @@
 // and the legacy `DurableScheduler` export for backward compat.
 // ---------------------------------------------------------------------------
 
+import { type WallClock } from "@promin/workflow";
 import {
   DurableScheduler as GenericDurableScheduler,
   type DurableSchedulerConfig as GenericConfig,
-  type WallClock,
-} from "@promin/workflow";
+} from "@promin/workflow/scheduler";
 import { PgSchedulerStorage } from "./pg-scheduler-storage.ts";
 import type { DrizzleDb } from "@spilne/perfect-postgres";
 
-export type { DurableScheduleConfig } from "@promin/workflow";
+export type { DurableScheduleConfig } from "@promin/workflow/scheduler";
 
 export interface DurableSchedulerConfig {
   db: DrizzleDb;
@@ -72,7 +72,7 @@ export class DurableScheduler extends GenericDurableScheduler {
   }
 }
 
-/** Convenience factory mirroring `createScheduler()` from @promin/workflow. */
+/** Convenience factory for a Postgres-backed `DurableScheduler`. */
 export function createDurableScheduler(config: DurableSchedulerConfig): DurableScheduler {
   return new DurableScheduler(config);
 }

@@ -1,4 +1,4 @@
-import type { DurableScheduleConfig } from "@promin/workflow";
+import type { DurableScheduleConfig } from "@promin/workflow/scheduler";
 
 export const videoTranscodesEvery45s: DurableScheduleConfig = {
   id: "video-transcodes-every-45s",

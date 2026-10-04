@@ -29,13 +29,13 @@ if (!(console.log as unknown as { __ts?: boolean }).__ts) {
 // ---------------------------------------------------------------------------
 
 import {
-  InMemoryWorkerRegistry,
   createWorkflowRunner,
   RecoveryStrategy,
   completeSignal,
   hasCapability,
   type Workflow,
 } from "@promin/workflow";
+import { InMemoryWorkerRegistry } from "@promin/workflow/distributed";
 import {
   LocalWorkflows,
   QueuedWorkflows,
@@ -774,8 +774,8 @@ process.on("SIGTERM", () => clearInterval(heartbeatHandle));
 // `workflow.name`. Add a new file and restart — no edits here needed.
 const scanRoot = path.join(import.meta.dir, "workflows");
 const scanResult = await scanWorkflowsFolder(scanRoot, {
-  onWorkflow: (name, _wf, src) =>
-    console.log(`[zorya] discovered workflow ${name} (${path.relative(scanRoot, src)})`),
+  onWorkflow: ({ name, sourcePath }) =>
+    console.log(`[zorya] discovered workflow ${name} (${path.relative(scanRoot, sourcePath)})`),
 });
 for (const w of scanResult.warnings) console.warn(`[zorya] ${w}`);
 const workflowsByName: Record<string, Workflow<unknown, unknown>> = scanResult.workflows;

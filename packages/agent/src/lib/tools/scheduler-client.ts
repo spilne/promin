@@ -14,7 +14,7 @@
 // The tool consumes the interface; consumers pick which impl to wire.
 // ---------------------------------------------------------------------------
 
-import type { DurableScheduleConfig, SchedulerStorage } from "@promin/workflow";
+import type { DurableScheduleConfig, SchedulerStorage } from "@promin/workflow/scheduler";
 
 /** Minimal scope label every client carries — used to gate ownership. */
 export interface SchedulerClientScope {

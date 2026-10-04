@@ -5,7 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { createScheduler } from "../in-memory-scheduler.ts";
+import { InMemoryScheduler } from "../in-memory-scheduler.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
 import type { ScheduleTick } from "../types.ts";
 
@@ -44,7 +44,7 @@ function track(run: Promise<ScheduleTick[]>): {
 describe("InMemoryScheduler — fire times follow the injected WallClock", () => {
   it("interval: waits exactly intervalMs on the clock between ticks", async () => {
     const clock = FakeWallClock.create(T0);
-    const scheduler = createScheduler({ clock });
+    const scheduler = new InMemoryScheduler({ clock });
     await scheduler.register({ id: "iv", intervalMs: 1_000 });
 
     const run = track(scheduler.stream("iv").take(2).toArray().run());
@@ -69,7 +69,7 @@ describe("InMemoryScheduler — fire times follow the injected WallClock", () =>
   it("cron: fires at the next cron boundary computed from the clock's now", async () => {
     // 30s into the minute — next "every minute" boundary is 30s away.
     const clock = FakeWallClock.create(T0 + 30_000);
-    const scheduler = createScheduler({ clock });
+    const scheduler = new InMemoryScheduler({ clock });
     await scheduler.register({ id: "cron", cron: "* * * * *" });
 
     const run = track(scheduler.stream("cron").take(2).toArray().run());
@@ -95,7 +95,7 @@ describe("InMemoryScheduler — fire times follow the injected WallClock", () =>
   it("jitter: delays the emission past the nominal fire time", async () => {
     const clock = FakeWallClock.create(T0);
     // random() = 0.5 → a 100ms delay out of the 200ms jitter window.
-    const scheduler = createScheduler({ clock, random: () => 0.5 });
+    const scheduler = new InMemoryScheduler({ clock, random: () => 0.5 });
     await scheduler.register({ id: "jit", intervalMs: 1_000, jitterMs: 200 });
 
     const run = track(scheduler.stream("jit").take(1).toArray().run());
@@ -113,7 +113,7 @@ describe("InMemoryScheduler — fire times follow the injected WallClock", () =>
 
   it("paused: rechecks on the clock and resumes from the clock's now", async () => {
     const clock = FakeWallClock.create(T0);
-    const scheduler = createScheduler({ clock });
+    const scheduler = new InMemoryScheduler({ clock });
     await scheduler.register({ id: "p", intervalMs: 500, enabled: false });
 
     const run = track(scheduler.stream("p").take(1).toArray().run());
@@ -139,7 +139,7 @@ describe("InMemoryScheduler — fire times follow the injected WallClock", () =>
 
   it("startAt: waits on the clock until startAt, then one interval", async () => {
     const clock = FakeWallClock.create(T0);
-    const scheduler = createScheduler({ clock });
+    const scheduler = new InMemoryScheduler({ clock });
     await scheduler.register({ id: "s", intervalMs: 1_000, startAt: new Date(T0 + 5_000) });
 
     const run = track(scheduler.stream("s").take(1).toArray().run());
@@ -156,7 +156,7 @@ describe("InMemoryScheduler — fire times follow the injected WallClock", () =>
 
   it("endAt: ends the stream once the next fire time reaches endAt on the clock", async () => {
     const clock = FakeWallClock.create(T0);
-    const scheduler = createScheduler({ clock });
+    const scheduler = new InMemoryScheduler({ clock });
     await scheduler.register({ id: "e", intervalMs: 1_000, endAt: new Date(T0 + 2_500) });
 
     const run = scheduler.stream("e").toArray().run();
@@ -174,7 +174,7 @@ describe("InMemoryScheduler — fire times follow the injected WallClock", () =>
 describe("InMemoryScheduler — stopping a consumer clears its clock timers", () => {
   it("interrupting a single-schedule stream mid-wait leaves nothing pending", async () => {
     const clock = FakeWallClock.create(T0);
-    const scheduler = createScheduler({ clock });
+    const scheduler = new InMemoryScheduler({ clock });
     await scheduler.register({ id: "never", intervalMs: 60_000 });
 
     // The fake clock never advances, so the stream is parked on its timer
@@ -187,7 +187,7 @@ describe("InMemoryScheduler — stopping a consumer clears its clock timers", ()
 
   it("interrupting a paused schedule's recheck wait leaves nothing pending", async () => {
     const clock = FakeWallClock.create(T0);
-    const scheduler = createScheduler({ clock });
+    const scheduler = new InMemoryScheduler({ clock });
     await scheduler.register({ id: "paused", intervalMs: 1_000, enabled: false });
 
     const ticks = await scheduler.stream("paused").interruptAfter(30).toArray().run();
@@ -198,7 +198,7 @@ describe("InMemoryScheduler — stopping a consumer clears its clock timers", ()
 
   it("breaking out of a merged subscribe() clears every schedule's timer", async () => {
     const clock = FakeWallClock.create(T0);
-    const scheduler = createScheduler({ clock });
+    const scheduler = new InMemoryScheduler({ clock });
     await scheduler.register({ id: "fast", intervalMs: 1_000 });
     await scheduler.register({ id: "slow", intervalMs: 60_000 });
 
@@ -222,7 +222,7 @@ describe("InMemoryScheduler — stopping a consumer clears its clock timers", ()
 describe("InMemoryScheduler — changes made while a stream waits", () => {
   it("pause() during the wait suppresses the pending tick", async () => {
     const clock = FakeWallClock.create(T0);
-    const scheduler = createScheduler({ clock });
+    const scheduler = new InMemoryScheduler({ clock });
     await scheduler.register({ id: "y", intervalMs: 1_000 });
 
     const ticks: ScheduleTick[] = [];
@@ -244,12 +244,12 @@ describe("InMemoryScheduler — changes made while a stream waits", () => {
 
   it("unregister() during the wait ends the stream without emitting", async () => {
     const clock = FakeWallClock.create(T0);
-    const scheduler = createScheduler({ clock });
+    const scheduler = new InMemoryScheduler({ clock });
     await scheduler.register({ id: "gone", intervalMs: 1_000 });
 
     const run = scheduler.stream("gone").toArray().run();
     await untilWaiting({ clock });
-    await scheduler.unregister("gone");
+    await scheduler.unregister({ scheduleId: "gone" });
     clock.advance(1_000);
 
     expect(await run).toEqual([]);
@@ -258,7 +258,7 @@ describe("InMemoryScheduler — changes made while a stream waits", () => {
 
   it("re-registering during the wait restarts the wait with the new config", async () => {
     const clock = FakeWallClock.create(T0);
-    const scheduler = createScheduler({ clock });
+    const scheduler = new InMemoryScheduler({ clock });
     await scheduler.register({ id: "r", intervalMs: 1_000, metadata: { v: 1 } });
 
     const run = track(scheduler.stream("r").take(1).toArray().run());
@@ -278,7 +278,7 @@ describe("InMemoryScheduler — changes made while a stream waits", () => {
 
   it("re-registering while subscribed doesn't start a second stream for the schedule", async () => {
     const clock = FakeWallClock.create(T0);
-    const scheduler = createScheduler({ clock });
+    const scheduler = new InMemoryScheduler({ clock });
     await scheduler.register({ id: "x", intervalMs: 1_000 });
 
     const ticks: ScheduleTick[] = [];

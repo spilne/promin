@@ -4,15 +4,15 @@
 // routes to a specialized worker via `needs`.
 // ---------------------------------------------------------------------------
 
-import { MapStepRegistry, createWorker } from "@promin/workflow";
+import { MapStepRegistry, createWorker } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { notifyWarehouseHandler, markDeliveredHandler } from "./workflow.ts";
 
 const { storage, stepQueue, close } = await buildStack();
 
 const registry = new MapStepRegistry();
-registry.register("notify-warehouse", notifyWarehouseHandler);
-registry.register("mark-delivered", markDeliveredHandler);
+registry.register({ stepName: "notify-warehouse", handler: notifyWarehouseHandler });
+registry.register({ stepName: "mark-delivered", handler: markDeliveredHandler });
 
 const worker = createWorker({
   storage,

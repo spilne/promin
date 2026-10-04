@@ -527,7 +527,7 @@ export function stateMachineStorageTestSuite(
 
         expect((await m.getState(id))?.current).toBe("b");
         expect(enters).toBe(2);
-        expect((await m.getHistory(id)).map((e) => e.event)).toEqual(["go"]);
+        expect((await m.getHistory({ id })).map((e) => e.event)).toEqual(["go"]);
         // The lock was released after the send.
         const token = await storage.tryLock({ id, durationMs: 30_000 });
         expect(token).not.toBeNull();

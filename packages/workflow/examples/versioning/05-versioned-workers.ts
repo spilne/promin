@@ -19,13 +19,15 @@ import { succeed } from "@spilne/perfect-core";
 import {
   workflow,
   InMemoryWorkflowStorage,
+  createWorkflowRunner,
+  RoutingStepExecutor,
+} from "@promin/workflow";
+import {
   InMemoryStepQueue,
   MapStepRegistry,
   createWorker,
-  createWorkflowRunner,
-  RoutingStepExecutor,
   StepQueueExecutor,
-} from "@promin/workflow";
+} from "@promin/workflow/distributed";
 
 async function main(): Promise<void> {
   const storage = new InMemoryWorkflowStorage();
@@ -45,7 +47,10 @@ async function main(): Promise<void> {
   // the same for v1 and v2 — real deployments might have version-specific
   // handlers, or use ctx.patched inside journaled steps.
   const registry = new MapStepRegistry();
-  registry.register("process", ({ input }) => succeed(`handled-${(input as { id: string }).id}`));
+  registry.register({
+    stepName: "process",
+    handler: ({ input }) => succeed(`handled-${(input as { id: string }).id}`),
+  });
 
   // Rolling-deploy window: this worker declares it handles v1 and v2.
   // After v1 drains (countByVersion shows 0 in-flight), update this to ["2"]

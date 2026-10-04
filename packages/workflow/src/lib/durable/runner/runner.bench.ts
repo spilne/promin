@@ -110,7 +110,10 @@ for (const n of [100, 1_000, 2_000, 4_000]) {
   const wf = chain(1_000);
   await time("executor chain 1000", () => {
     const storage = new InMemoryWorkflowStorage();
-    const stepExecutor = new InProcessStepExecutor(wf as Workflow<unknown, unknown>, { storage });
+    const stepExecutor = new InProcessStepExecutor({
+      workflow: wf as Workflow<unknown, unknown>,
+      storage,
+    });
     return createWorkflowRunner({ storage, stepExecutor }).run({
       workflow: wf,
       workflowId: nextId(),

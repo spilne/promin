@@ -318,7 +318,7 @@ describe("query handler registry", () => {
     registerQueryHandler("q-own", "status", () => "busy");
 
     stale.close();
-    expect(await invokeQueryHandler("q-own", "status")).toBe("busy");
+    expect(await invokeQueryHandler({ workflowId: "q-own", name: "status" })).toBe("busy");
 
     live.close();
     expect(hasQueryHandlers("q-own")).toBe(false);
@@ -332,7 +332,7 @@ describe("query handler registry", () => {
     scope.close({ suspended: true });
 
     clock.advance(999);
-    expect(await invokeQueryHandler("q-ttl", "status")).toBe("waiting");
+    expect(await invokeQueryHandler({ workflowId: "q-ttl", name: "status" })).toBe("waiting");
     clock.advance(1);
     expect(hasQueryHandlers("q-ttl")).toBe(false);
     configureQueryRegistry({ suspendedTtlMs: 60 * 60 * 1000 });
@@ -348,7 +348,7 @@ describe("query handler registry", () => {
     first.close({ suspended: true });
     const resumed = openQueryScope("q-resume");
     clock.advance(5_000);
-    expect(await invokeQueryHandler("q-resume", "status")).toBe("v1");
+    expect(await invokeQueryHandler({ workflowId: "q-resume", name: "status" })).toBe("v1");
     resumed.reset();
     expect(hasQueryHandlers("q-resume")).toBe(false);
     resumed.close();

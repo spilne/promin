@@ -14,19 +14,10 @@
 // ---------------------------------------------------------------------------
 
 import type { RemoteDeploymentRegistry, SecretsStorage } from "@promin/agent";
-import type {
-  WorkflowVersionRegistry,
-  StepQueue,
-  WallClock,
-  WorkerRegistry,
-  WorkflowStorage,
-} from "@promin/workflow";
-import {
-  InMemoryStepQueue,
-  InMemoryWorkerRegistry,
-  SystemWallClock,
-  InMemoryWorkflowVersionRegistry,
-} from "@promin/workflow";
+import type { WorkflowVersionRegistry, WallClock, WorkflowStorage } from "@promin/workflow";
+import type { StepQueue, WorkerRegistry } from "@promin/workflow/distributed";
+import { SystemWallClock, InMemoryWorkflowVersionRegistry } from "@promin/workflow";
+import { InMemoryStepQueue, InMemoryWorkerRegistry } from "@promin/workflow/distributed";
 import { createWorkerApiHandler, createWorkflowStorageHandler } from "@promin/workflow-remote";
 import { Auth, type AuthConfig } from "./auth.ts";
 import { Router, jsonError } from "./router.ts";

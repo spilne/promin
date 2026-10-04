@@ -1,6 +1,6 @@
 import { succeed, fail } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
-import { workflow, InMemoryWorkflowStorage } from "../../durable/index.ts";
+import { workflow, InMemoryWorkflowStorage } from "../../../index.ts";
 import { createWorkflowRunner } from "../../durable/workflow-runner.ts";
 import { MapStepRegistry } from "../step-registry.ts";
 import { InMemoryStepQueue } from "../in-memory-step-queue.ts";
@@ -18,9 +18,12 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
 
     // GPU worker — only handles "transcribe"
     const gpuRegistry = new MapStepRegistry();
-    gpuRegistry.register("transcribe", (ctx) => {
-      log.push("transcribe:remote");
-      return succeed(`transcribed: ${ctx.prev}`);
+    gpuRegistry.register({
+      stepName: "transcribe",
+      handler: (ctx) => {
+        log.push("transcribe:remote");
+        return succeed(`transcribed: ${ctx.prev}`);
+      },
     });
 
     const gpuWorker = createWorker({
@@ -118,8 +121,11 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
 
     // Worker that fails
     const registry = new MapStepRegistry();
-    registry.register("bad-step", () => {
-      throw new Error("remote failure");
+    registry.register({
+      stepName: "bad-step",
+      handler: () => {
+        throw new Error("remote failure");
+      },
     });
 
     const worker = createWorker({

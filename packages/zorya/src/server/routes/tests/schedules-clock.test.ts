@@ -4,7 +4,8 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import { FakeWallClock, InMemorySchedulerStorage } from "@promin/workflow";
+import { FakeWallClock } from "@promin/workflow";
+import { InMemorySchedulerStorage } from "@promin/workflow/scheduler";
 import {
   createSchedule,
   getSchedule,

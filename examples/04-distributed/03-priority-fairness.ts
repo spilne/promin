@@ -8,7 +8,7 @@
  *   claimer.
  */
 
-import { InMemoryStepQueue } from "@promin/workflow";
+import { InMemoryStepQueue } from "@promin/workflow/distributed";
 
 const queue = new InMemoryStepQueue();
 

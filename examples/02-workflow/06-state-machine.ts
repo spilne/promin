@@ -168,5 +168,5 @@ console.log("After resubmit:", await orderMachine.getState("order-2"));
 // { current: "draft", context: { items: ["Thingamajig"], customerId: "cust-99" } }
 
 // Event history (audit trail)
-const history = await orderMachine.getHistory("order-1");
+const history = await orderMachine.getHistory({ id: "order-1" });
 console.log(`Order-1 had ${history.length} transitions`);

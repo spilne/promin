@@ -168,7 +168,7 @@ export function compileWorkflow<Input = unknown>(params: {
 
 /** Compile a SingleStepSchema into a .step() call on the builder. */
 function compileSingleStep(builder: any, step: SingleStepSchema, registry: ActivityRegistry): any {
-  const activityFn = registry.resolve(step.activityRef, step.config);
+  const activityFn = registry.resolve({ ref: step.activityRef, config: step.config });
   const options = compileStepOptions(step.options);
 
   if (step.dependsOn.length === 0) {
@@ -187,7 +187,7 @@ function compileSingleStep(builder: any, step: SingleStepSchema, registry: Activ
 
 /** Compile a MapStepSchema into a .mapOver() call on the builder. */
 function compileMapStep(builder: any, step: MapStepSchema, registry: ActivityRegistry): any {
-  const activityFn = registry.resolve(step.activityRef, step.config);
+  const activityFn = registry.resolve({ ref: step.activityRef, config: step.config });
   const options = compileStepOptions(step.options);
 
   return builder.mapOver(

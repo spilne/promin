@@ -37,7 +37,10 @@ const handle = await runner.start({
 });
 
 // Later, when manager approves (e.g. from a webhook):
-await handle.signal("manager-decision", { approved: true, approvedBy: "bob" });
+await handle.signal({
+  signalName: "manager-decision",
+  payload: { approved: true, approvedBy: "bob" },
+});
 
 // Workflow resumes and completes
 const result = await handle.result();

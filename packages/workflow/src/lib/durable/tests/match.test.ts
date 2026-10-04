@@ -90,7 +90,7 @@ describe(".match() — no match is a typed failure", () => {
     const wf = workflow<string>({ name: "match-executor" })
       .match("m", { on: (s) => s, cases: { a: () => succeed(1) } })
       .build();
-    const executor = new InProcessStepExecutor(wf, { storage });
+    const executor = new InProcessStepExecutor({ workflow: wf, storage });
 
     const result = await executor.executeStep({
       workflowId: "me-1",

@@ -47,7 +47,7 @@ describe("DefaultWorker — routing inside the claim", () => {
     const storage = new InMemoryWorkflowStorage({ clock });
     await storage.createWorkflow({ workflowId: "b", workflowName: "x", input: {} });
     const registry = new MapStepRegistry();
-    registry.register("mine", async () => "ran");
+    registry.register({ stepName: "mine", handler: async () => "ran" });
     const worker = new DefaultWorker({
       storage,
       stepQueue: queue,
@@ -87,7 +87,7 @@ describe("DefaultWorker — routing inside the claim", () => {
     const storage = new InMemoryWorkflowStorage({ clock });
     await storage.createWorkflow({ workflowId: "b", workflowName: "x", input: {} });
     const registry = new MapStepRegistry();
-    registry.register("s", async () => "ran");
+    registry.register({ stepName: "s", handler: async () => "ran" });
     const worker = new DefaultWorker({
       storage,
       stepQueue: queue,
@@ -114,8 +114,11 @@ describe("DefaultWorker — routing inside the claim", () => {
     });
     const registry = new MapStepRegistry();
     let ran = false;
-    registry.register("s", async () => {
-      ran = true;
+    registry.register({
+      stepName: "s",
+      handler: async () => {
+        ran = true;
+      },
     });
     let filtered = 0;
     const worker = new DefaultWorker({

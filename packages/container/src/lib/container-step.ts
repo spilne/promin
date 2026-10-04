@@ -6,7 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { tryPromise } from "@spilne/perfect-core";
-import type { StepHandler, WorkerStepOptions } from "@promin/workflow";
+import type { StepHandler, WorkerStepOptions } from "@promin/workflow/distributed";
 import type { ContainerRuntime, ContainerSpec } from "./container-runtime.ts";
 
 export interface ContainerStepConfig {

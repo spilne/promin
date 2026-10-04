@@ -38,6 +38,30 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
+    "./distributed": {
+      "types": "./dist/distributed.d.ts",
+      "@promin/source": "./src/distributed.ts",
+      "import": "./dist/distributed.js",
+      "default": "./dist/distributed.js"
+    },
+    "./scheduler": {
+      "types": "./dist/scheduler.d.ts",
+      "@promin/source": "./src/scheduler.ts",
+      "import": "./dist/scheduler.js",
+      "default": "./dist/scheduler.js"
+    },
+    "./discovery": {
+      "types": "./dist/discovery.d.ts",
+      "@promin/source": "./src/discovery.ts",
+      "import": "./dist/discovery.js",
+      "default": "./dist/discovery.js"
+    },
+    "./sql-models": {
+      "types": "./dist/sql-models.d.ts",
+      "@promin/source": "./src/sql-models.ts",
+      "import": "./dist/sql-models.js",
+      "default": "./dist/sql-models.js"
+    },
     "./testing": {
       "types": "./dist/testing.d.ts",
       "@promin/source": "./src/testing.ts",

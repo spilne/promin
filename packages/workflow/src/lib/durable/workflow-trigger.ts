@@ -65,9 +65,44 @@ export namespace WorkflowResult {
 // ---------------------------------------------------------------------------
 
 /**
+ * What `trigger` does with an item whose workflow id already has a run:
+ * - `"run"` (default) hands it to the runner anyway, which resumes or
+ *   returns the existing run under that id.
+ * - `"skip"` emits `WorkflowResult.Skipped` without touching the run,
+ *   whatever its status.
+ */
+export type TriggerDuplicatePolicy = "skip" | "run";
+
+/** Parameters of `trigger`. */
+export interface TriggerParams<T, Input, Output> {
+  readonly workflow: Workflow<Input, Output>;
+  /** Runner used to execute each workflow instance. */
+  readonly runner: WorkflowRunner;
+  /**
+   * Storage for the duplicate lookup, typically the runner's storage.
+   * Required with `onDuplicate: "skip"`.
+   */
+  readonly storage?: WorkflowStorage;
+  readonly toInput: (item: T) => Input;
+  readonly toWorkflowId: (item: T) => string;
+  /** Items run concurrently; results keep input order. Default: 1. */
+  readonly concurrency?: number;
+  /** Default: `"run"`. */
+  readonly onDuplicate?: TriggerDuplicatePolicy;
+  /** Time source for each result's `durationMs`. Default: `SystemWallClock`. */
+  readonly clock?: WallClock;
+}
+
+/**
  * Bridge a stream to workflow execution.
  * Each stream item triggers a workflow instance.
  * Returns a perfect `Pipe` for use with `Stream.through()`.
+ *
+ * A workflow failure, and any error from the duplicate lookup or the
+ * runner, comes out as `WorkflowResult.Failed`; the stream keeps going.
+ * The duplicate lookup is a read before the run, so two items with the same
+ * id in flight at once can both pass it; the runner's run lock still keeps
+ * them from executing the run twice.
  *
  * @example
  * ```ts
@@ -86,72 +121,56 @@ export namespace WorkflowResult {
  *   .run();
  * ```
  */
-export function trigger<T, Input, Output>(params: {
-  workflow: Workflow<Input, Output>;
-  /** Runner used to execute each workflow instance. */
-  runner: WorkflowRunner;
-  /** Storage for dedup lookup. Typically the runner's storage. */
-  storage: WorkflowStorage;
-  toInput: (item: T) => Input;
-  toWorkflowId: (item: T) => string;
-  concurrency?: number;
-  onDuplicate?: "skip" | "queue" | "fail";
-  /** Time source for each result's `durationMs`. Default: `SystemWallClock`. */
-  clock?: WallClock;
-}): Pipe<T, WorkflowResult<Output>> {
-  const {
-    workflow,
-    runner,
-    storage,
-    toInput,
-    toWorkflowId,
-    concurrency = 1,
-    onDuplicate = "fail",
-  } = params;
+export function trigger<T, Input, Output>(
+  params: TriggerParams<T, Input, Output>,
+): Pipe<T, WorkflowResult<Output>> {
+  const { workflow, runner, storage, toInput, toWorkflowId, concurrency = 1 } = params;
+  const onDuplicate = params.onDuplicate ?? "run";
   const clock = params.clock ?? SystemWallClock;
+  if (onDuplicate === "skip" && storage === undefined) {
+    throw new Error('trigger: onDuplicate "skip" needs `storage` for the duplicate lookup');
+  }
 
-  // A rejected run is a defect, not a typed stream failure: workflow failures
-  // already surface as `WorkflowResult.Failed` via `runSafe`.
-  const runOne = (item: T): Eff<WorkflowResult<Output>> =>
-    tryPromise(
-      async (): Promise<WorkflowResult<Output>> => {
-        const workflowId = toWorkflowId(item);
-        const input = toInput(item);
-        const startTime = clock.currentTimeMs();
+  const runOne = async (item: T): Promise<WorkflowResult<Output>> => {
+    const startTime = clock.currentTimeMs();
+    let workflowId: string | undefined;
+    try {
+      workflowId = toWorkflowId(item);
+      const input = toInput(item);
 
-        // Dedup check: see if workflow already exists
-        if (onDuplicate === "skip") {
-          const existing = await storage.loadWorkflow(workflowId);
-          if (existing) {
-            if (
-              existing.status === "completed" ||
-              existing.status === "pending" ||
-              existing.status === "running"
-            ) {
-              return WorkflowResult.skipped({ workflowId, reason: "duplicate" });
-            }
-          }
-        }
+      if (onDuplicate === "skip" && (await storage!.loadWorkflow(workflowId)) !== null) {
+        return WorkflowResult.skipped({ workflowId, reason: "duplicate" });
+      }
 
-        const { data, error } = await runner.runSafe({ workflow, workflowId, input });
-
-        if (error) {
-          return WorkflowResult.failed({
-            workflowId,
-            error,
-            durationMs: clock.currentTimeMs() - startTime,
-          });
-        }
-
-        return WorkflowResult.completed({
+      const { data, error } = await runner.runSafe({ workflow, workflowId, input });
+      if (error) {
+        return WorkflowResult.failed({
           workflowId,
-          result: data as Output,
+          error,
           durationMs: clock.currentTimeMs() - startTime,
         });
-      },
+      }
+      return WorkflowResult.completed({
+        workflowId,
+        result: data as Output,
+        durationMs: clock.currentTimeMs() - startTime,
+      });
+    } catch (error) {
+      return WorkflowResult.failed({
+        workflowId: workflowId ?? "",
+        error,
+        durationMs: clock.currentTimeMs() - startTime,
+      });
+    }
+  };
+
+  // `runOne` never rejects, so the stream only ends when its source does.
+  const runOneEff = (item: T): Eff<WorkflowResult<Output>> =>
+    tryPromise(
+      () => runOne(item),
       (e) => e,
     ).orDie();
 
   // Ordered: results come out in input order, up to `concurrency` in flight.
-  return (stream) => stream.parEvalMap(concurrency, runOne);
+  return (stream) => stream.parEvalMap(concurrency, runOneEff);
 }

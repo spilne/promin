@@ -11,7 +11,8 @@ Write SQL logic, declare dependencies. The compiler builds a DAG, runs models in
 ### Basic pipeline: staging → fact table
 
 ```typescript
-import { compileSqlProject } from "@promin/workflow";
+import { createWorkflowRunner } from "@promin/workflow";
+import { compileSqlProject, type SqlProjectResult } from "@promin/workflow/sql-models";
 
 const project = {
   name: "analytics",
@@ -20,13 +21,13 @@ const project = {
       name: "stg_orders",
       sql: "SELECT id, user_id, amount FROM raw.orders",
       dependsOn: [],
-      materialization: "view",
+      materialization: "view" as const,
     },
     {
       name: "stg_users",
       sql: "SELECT id, name, tier FROM raw.users",
       dependsOn: [],
-      materialization: "view",
+      materialization: "view" as const,
     },
     {
       name: "fct_revenue",
@@ -36,16 +37,22 @@ const project = {
         GROUP BY u.tier
       `,
       dependsOn: ["stg_orders", "stg_users"],
-      materialization: "table",
+      materialization: "table" as const,
     },
   ],
 };
 
-const wf = compileSqlProject({ project, storage, executeSql: (sql) => db.query(sql) });
-await wf.run({ workflowId: "analytics-daily", input: {} });
+const wf = compileSqlProject({ project, executeSql: (sql) => db.query(sql) });
+const runner = createWorkflowRunner({ storage });
+const result: SqlProjectResult = await runner.run({
+  workflow: wf,
+  workflowId: "analytics-daily",
+  input: {},
+});
+console.log(`${result.modelsRun} models, ${result.testsPassed}/${result.testsRun} tests passed`);
 ```
 
-Execution order: `stg_orders` and `stg_users` run in parallel, then `fct_revenue`.
+Execution order: `stg_orders` and `stg_users` run in parallel, then `fct_revenue`. A last step (`sql-project:result`) sums the run up into a `SqlProjectResult`.
 
 ### Data quality tests
 
@@ -61,44 +68,40 @@ Execution order: `stg_orders` and `stg_users` run in parallel, then `fct_revenue
     { type: "row_count", min: 1 },
     { type: "between", column: "total", min: 0, max: 1_000_000 },
     { type: "custom", check: "SELECT COUNT(*) = 0 FROM fct_revenue WHERE total < 0" },
+    { type: "row_count", max: 10, severity: "warn" },
   ],
 }
 ```
 
-Tests run after the model is materialized. Failures are reported in the result.
+Tests run after the model is materialized. A `custom` test passes when the first column of its query's first row is truthy.
 
-### Parameterized runs
-
-```typescript
-const wf = compileSqlProject({ project, storage, executeSql });
-
-// Input is available as {{ date }} in SQL
-await wf.run({ workflowId: "analytics-2026-04-06", input: { date: "2026-04-06" } });
-```
+A failed test fails the model's step with `SqlModelError` — the same as a failed materialization — so its dependants don't run on bad data, the step's retry policy applies (`modelStepOptions`) and the run ends failed. A test with `severity: "warn"` is recorded in the result's `warnings` instead.
 
 ### Crash recovery
 
 ```typescript
 // If this crashes after stg_orders but before fct_revenue...
-await wf.run({ workflowId: "run-1", input: {} });
+await runner.run({ workflow: wf, workflowId: "run-1", input: {} });
 
 // ...re-running with the same workflowId skips completed models
-await wf.run({ workflowId: "run-1", input: {} });
+await runner.run({ workflow: wf, workflowId: "run-1", input: {} });
 // Only fct_revenue runs — stg_orders and stg_users are checkpointed
 ```
 
 ## Materializations
 
-| Type          | Behavior                                       |
-| ------------- | ---------------------------------------------- |
-| `table`       | DROP + CREATE TABLE AS SELECT (clean rebuild)  |
-| `view`        | CREATE OR REPLACE VIEW (no data duplication)   |
-| `incremental` | INSERT INTO ... SELECT (append new rows)       |
-| `ephemeral`   | Not materialized — inlined by dependent models |
+| Type          | Behavior                                                                  |
+| ------------- | ------------------------------------------------------------------------- |
+| `table`       | DROP + CREATE TABLE AS SELECT (clean rebuild)                             |
+| `view`        | DROP + CREATE VIEW (no data duplication)                                  |
+| `incremental` | CREATE TABLE once, then INSERT the selected rows whose `uniqueKey` is new |
+
+An `incremental` model needs a `uniqueKey` column. Its SELECT is wrapped as a subquery, so it may have its own `WHERE`, `GROUP BY` or `ORDER BY`.
+
+`compileSqlProject` throws when the project is invalid: a dependency cycle or unknown dependency, a model, column or key name that isn't a plain SQL identifier, an incremental model without `uniqueKey`, or a test missing its `column` / `check`.
 
 ## Use Cases
 
 - **Analytics pipelines** — staging → fact → mart layers with dependency ordering
-- **Daily/hourly rebuilds** — parameterized by date, crash-recoverable
+- **Daily/hourly rebuilds** — crash-recoverable, one workflow id per run
 - **Data quality gates** — fail the pipeline if a model produces bad data
-- **Migration scripts** — ordered DDL execution with rollback on failure

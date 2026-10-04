@@ -10,7 +10,7 @@ import {
   type DurableScheduleConfig,
   type RegisteredAgent,
 } from "@promin/agent";
-import type { ScheduleTick } from "@promin/workflow";
+import type { ScheduleTick } from "@promin/workflow/scheduler";
 import { ZoryaAgents } from "../index.ts";
 
 function makeAgent(): Agent & { calls: string[] } {

@@ -5,7 +5,7 @@
 // concurrency=4 — shared pool serving all tenants for non-premium steps.
 // ---------------------------------------------------------------------------
 
-import { MapStepRegistry, createWorker } from "@promin/workflow";
+import { MapStepRegistry, createWorker } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import {
   validateJobHandler,
@@ -17,10 +17,10 @@ import {
 const { storage, stepQueue, close } = await buildStack();
 
 const registry = new MapStepRegistry();
-registry.register("validate-job", validateJobHandler);
-registry.register("execute-standard-job", executeStandardJobHandler);
-registry.register("store-result", storeResultHandler);
-registry.register("notify-webhook", notifyWebhookHandler);
+registry.register({ stepName: "validate-job", handler: validateJobHandler });
+registry.register({ stepName: "execute-standard-job", handler: executeStandardJobHandler });
+registry.register({ stepName: "store-result", handler: storeResultHandler });
+registry.register({ stepName: "notify-webhook", handler: notifyWebhookHandler });
 
 const worker = createWorker({
   storage,

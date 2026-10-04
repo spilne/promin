@@ -3,7 +3,7 @@ import { describe, it, expect } from "bun:test";
 // constraint imported from `shared/tagged-error.ts` below.
 import { TaggedError as PerfectTaggedError, succeed, fail } from "@spilne/perfect-core";
 import type { TaggedError } from "../../shared/tagged-error.ts";
-import { workflow, InMemoryWorkflowStorage } from "../../durable/index.ts";
+import { workflow, InMemoryWorkflowStorage } from "../../../index.ts";
 import { createWorkflowRunner } from "../../durable/workflow-runner.ts";
 import { createSleepScanner } from "../sleep-scanner.ts";
 

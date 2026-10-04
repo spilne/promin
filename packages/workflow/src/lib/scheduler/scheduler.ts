@@ -29,7 +29,7 @@ export interface Scheduler extends Streamable<ScheduleTick> {
   register(config: ScheduleConfig): Promise<void>;
 
   /** Remove a schedule. Optional reason for audit/logging. */
-  unregister(scheduleId: string, options?: { reason?: string }): Promise<void>;
+  unregister(params: { scheduleId: string; reason?: string }): Promise<void>;
 
   /** Pause a schedule (stops firing, keeps config). */
   pause(scheduleId: string): Promise<void>;

@@ -27,7 +27,7 @@ import type {
   WorkflowStartClaimRef,
   WorkflowStartQueue,
   WorkflowStartRecord,
-} from "@promin/workflow";
+} from "@promin/workflow/distributed";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { type DrizzleDb, ensureTable as ensureTableFromSchema } from "@spilne/perfect-postgres";
 import { workflowStarts } from "./schema.ts";

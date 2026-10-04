@@ -5,7 +5,7 @@
 // chains.
 //
 // Owns:
-//   - DefaultWorkflowRunner (or any WorkflowRunner) for execution
+//   - a WorkflowRunner (createWorkflowRunner or any other) for execution
 //   - In-process sleep scanner so suspended runs resume after their
 //     wakeAt passes (without this, ctx.sleep is a no-op-on-restart)
 //   - Optional one-shot recovery on start (cancel/fail stale, resume
@@ -15,19 +15,18 @@
 import type {
   WorkflowVersionRegistry,
   RecoveryStrategy,
-  SignalScanner,
-  SleepScanner,
   WallClock,
   Workflow,
   WorkflowRunner,
   WorkflowStorage,
 } from "@promin/workflow";
 import {
-  DefaultSignalScanner,
-  DefaultSleepScanner,
-  SystemWallClock,
-  recoverWorkflows,
-} from "@promin/workflow";
+  createSignalScanner,
+  createSleepScanner,
+  type SignalScanner,
+  type SleepScanner,
+} from "@promin/workflow/distributed";
+import { SystemWallClock, recoverWorkflows } from "@promin/workflow";
 import { ZoryaWorkflows, type TriggerOptions, type TriggerResult } from "./zorya-workflows.ts";
 
 export interface LocalWorkflowsConfig {
@@ -78,7 +77,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
 
     const scanIntervalMs = config.sleepScanIntervalMs ?? 2_000;
     if (scanIntervalMs > 0) {
-      this.sleepScanner = new DefaultSleepScanner({
+      this.sleepScanner = createSleepScanner({
         storage: this.storage,
         runner: this.runner,
         scanIntervalMs,
@@ -93,7 +92,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
     // explicitly completed the journal entry and re-ran it.
     const signalIntervalMs = config.signalScanIntervalMs ?? 2_000;
     if (signalIntervalMs > 0) {
-      this.signalScanner = new DefaultSignalScanner({
+      this.signalScanner = createSignalScanner({
         storage: this.storage,
         runner: this.runner,
         scanIntervalMs: signalIntervalMs,
@@ -111,7 +110,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
     if (this.versionRegistry?.findActive) {
       const active = await this.versionRegistry.findActive(name);
       if (active) {
-        const resolved = await this.versionRegistry.resolve(name, active.version);
+        const resolved = await this.versionRegistry.resolve({ name, version: active.version });
         if (resolved) return resolved;
       }
     }
@@ -228,7 +227,7 @@ function definitionsRegistry(
     throw new Error("LocalWorkflows recovery registry is read-only");
   };
   return {
-    resolve: async (name) => (Object.hasOwn(definitions, name) ? definitions[name] : undefined),
+    resolve: async ({ name }) => (Object.hasOwn(definitions, name) ? definitions[name] : undefined),
     versions: async (name) => {
       const version = Object.hasOwn(definitions, name) ? definitions[name]!.version : undefined;
       return version !== undefined ? [version] : [];

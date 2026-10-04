@@ -6,7 +6,7 @@
 
 import { it, expect } from "bun:test";
 import { sql } from "drizzle-orm";
-import { schedulePartition, schedulerLeaderKey } from "@promin/workflow";
+import { schedulePartition, schedulerLeaderKey } from "@promin/workflow/scheduler";
 import { postgresDescribe } from "../test-utils.ts";
 import { migrate } from "../migrate.ts";
 import { createDurableScheduler } from "../durable-scheduler.ts";

@@ -78,7 +78,7 @@ describe("Workflow query handlers — ctx.setQueryHandler + POST /api/runs/:id/q
           args?: unknown;
         };
         if (!hasQueryHandlers(workflowId)) return { hosted: false };
-        const result = await invokeQueryHandler(workflowId, name, queryArgs);
+        const result = await invokeQueryHandler({ workflowId, name, args: queryArgs });
         return { hosted: true, result };
       });
       ws.start();

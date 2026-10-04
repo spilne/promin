@@ -26,7 +26,7 @@ import { TaggedError, succeed, fail } from "@spilne/perfect-core";
 import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
-import { createWorkflowVersionRegistry } from "../workflow-version-registry.ts";
+import { InMemoryWorkflowVersionRegistry } from "../workflow-version-registry.ts";
 
 class BoomError extends TaggedError("BoomError")<{
   readonly stepName: string;
@@ -94,7 +94,7 @@ describe("versioning drain — compensation uses the stored version's code", () 
     const storage = new InMemoryWorkflowStorage();
     const v1Log: string[] = [];
     const v2Log: string[] = [];
-    const registry = createWorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
 
     const v1 = workflow<{ n: number }>({ name: "pay", version: "1" })
       .step("charge", ({ input }) => succeed(input.n * 10), {

@@ -41,6 +41,28 @@ export class StepWaitAbandonedError extends TaggedError("StepWaitAbandonedError"
   readonly message: string;
 }>() {}
 
+/** Configuration for `StepQueueExecutor`. */
+export interface StepQueueExecutorConfig {
+  stepQueue: StepQueue;
+  storage: WorkflowStorage;
+  /** How often to poll storage for step completion. Default: 500ms. */
+  pollIntervalMs?: number;
+  /** Re-enqueue tasks stuck in 'running' longer than this. Default: 30000ms. */
+  staleTimeoutMs?: number;
+  /**
+   * How long to wait for a step's outcome after enqueuing it before
+   * failing the step with `StepWaitTimeoutError`. `Infinity` waits
+   * forever. Default: `DEFAULT_STEP_WAIT_TIMEOUT_MS` (24 hours).
+   */
+  stepWaitTimeoutMs?: number;
+  clock?: WallClock;
+  /**
+   * Called when a storage / queue read fails while waiting for a step.
+   * The wait retries with backoff. Default: `console.error`.
+   */
+  onError?: (error: unknown, info: PollLoopErrorInfo) => void;
+}
+
 /**
  * Executes a step by enqueuing it on the step queue and polling storage
  * until a worker checkpoints the result. The worker writes both the queue
@@ -70,26 +92,7 @@ export class StepQueueExecutor implements StepExecutor {
   private readonly clock: WallClock;
   private readonly onError?: (error: unknown, info: PollLoopErrorInfo) => void;
 
-  constructor(config: {
-    stepQueue: StepQueue;
-    storage: WorkflowStorage;
-    /** How often to poll storage for step completion. Default: 500ms. */
-    pollIntervalMs?: number;
-    /** Re-enqueue tasks stuck in 'running' longer than this. Default: 30000ms. */
-    staleTimeoutMs?: number;
-    /**
-     * How long to wait for a step's outcome after enqueuing it before
-     * failing the step with `StepWaitTimeoutError`. `Infinity` waits
-     * forever. Default: `DEFAULT_STEP_WAIT_TIMEOUT_MS` (24 hours).
-     */
-    stepWaitTimeoutMs?: number;
-    clock?: WallClock;
-    /**
-     * Called when a storage / queue read fails while waiting for a step.
-     * The wait retries with backoff. Default: `console.error`.
-     */
-    onError?: (error: unknown, info: PollLoopErrorInfo) => void;
-  }) {
+  constructor(config: StepQueueExecutorConfig) {
     this.stepQueue = config.stepQueue;
     this.storage = config.storage;
     this.pollIntervalMs = config.pollIntervalMs ?? 500;

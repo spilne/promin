@@ -1,4 +1,4 @@
-import type { DurableScheduleConfig } from "@promin/workflow";
+import type { DurableScheduleConfig } from "@promin/workflow/scheduler";
 
 export const approvalsEvery75s: DurableScheduleConfig = {
   id: "approvals-every-75s",

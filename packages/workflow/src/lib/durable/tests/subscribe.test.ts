@@ -30,7 +30,7 @@ describe("subscribe — run-scoped event stream", () => {
       .step("b", ({ prev }) => succeed(prev * 2))
       .build();
 
-    const eventsP = collect(runner.subscribe("sub-started-1"));
+    const eventsP = collect(runner.subscribe({ workflowId: "sub-started-1" }));
     await runner.run({ workflow: wf, workflowId: "sub-started-1", input: 5 });
     const events = await eventsP;
 
@@ -54,7 +54,7 @@ describe("subscribe — run-scoped event stream", () => {
       .step("b", ({ prev }) => succeed(prev * 2))
       .build();
 
-    const eventsP = collect(runner.subscribe("sub-ok-1"));
+    const eventsP = collect(runner.subscribe({ workflowId: "sub-ok-1" }));
 
     await runner.run({ workflow: wf, workflowId: "sub-ok-1", input: 5 });
     const events = await eventsP;
@@ -89,7 +89,7 @@ describe("subscribe — run-scoped event stream", () => {
       .step("boom", () => fail(new StepBoom({ message: "bang" })))
       .build();
 
-    const eventsP = collect(runner.subscribe("sub-fail-1"));
+    const eventsP = collect(runner.subscribe({ workflowId: "sub-fail-1" }));
     await runner.runSafe({ workflow: wf, workflowId: "sub-fail-1", input: 0 });
     const events = await eventsP;
 
@@ -108,7 +108,7 @@ describe("subscribe — run-scoped event stream", () => {
       input: {},
     });
 
-    const eventsP = collect(runner.subscribe("sub-cancel-1"));
+    const eventsP = collect(runner.subscribe({ workflowId: "sub-cancel-1" }));
     await runner.handle("sub-cancel-1").cancel();
     const events = await eventsP;
 
@@ -127,7 +127,7 @@ describe("subscribe — run-scoped event stream", () => {
       })
       .build();
 
-    const eventsP = collect(runner.subscribe("sub-trip-1"));
+    const eventsP = collect(runner.subscribe({ workflowId: "sub-trip-1" }));
     await runner.runSafe({ workflow: wf, workflowId: "sub-trip-1", input: 7 });
     const events = await eventsP;
 
@@ -149,7 +149,7 @@ describe("subscribe — run-scoped event stream", () => {
       .step("x", ({ input }) => succeed(input))
       .build();
 
-    const it = runner.subscribe("sub-close-1")[Symbol.asyncIterator]();
+    const it = runner.subscribe({ workflowId: "sub-close-1" })[Symbol.asyncIterator]();
     const p1 = it.next();
     const p2 = it.next();
     const p3 = it.next();
@@ -179,8 +179,8 @@ describe("subscribe — run-scoped event stream", () => {
       .step("b", ({ prev }) => succeed(prev + 1))
       .build();
 
-    const a = collect(runner.subscribe("sub-multi-1"));
-    const b = collect(runner.subscribe("sub-multi-1"));
+    const a = collect(runner.subscribe({ workflowId: "sub-multi-1" }));
+    const b = collect(runner.subscribe({ workflowId: "sub-multi-1" }));
 
     await runner.run({ workflow: wf, workflowId: "sub-multi-1", input: 10 });
 
@@ -196,7 +196,9 @@ describe("subscribe — run-scoped event stream", () => {
     const runner = createWorkflowRunner({ storage });
 
     const ctl = new AbortController();
-    const it = runner.subscribe("sub-abort-1", { signal: ctl.signal })[Symbol.asyncIterator]();
+    const it = runner
+      .subscribe({ workflowId: "sub-abort-1", signal: ctl.signal })
+      [Symbol.asyncIterator]();
 
     const p = it.next();
     ctl.abort();
@@ -222,7 +224,7 @@ describe("subscribe — run-scoped event stream", () => {
     // Attach AFTER the run has started. We can't deterministically land in the
     // middle, so we simply assert the subscriber receives the terminal event
     // even when it may have missed some earlier events.
-    const eventsP = collect(runner.subscribe("sub-late-1"));
+    const eventsP = collect(runner.subscribe({ workflowId: "sub-late-1" }));
 
     await runP;
     const events = await eventsP;
@@ -242,7 +244,7 @@ describe("subscribe — run-scoped event stream", () => {
 
     // Fast poll so the test finishes quickly but still goes through the
     // polling code path.
-    const eventsP = collect(runner.subscribe("sub-poll-1", { pollIntervalMs: 20 }));
+    const eventsP = collect(runner.subscribe({ workflowId: "sub-poll-1", pollIntervalMs: 20 }));
     await runner.run({ workflow: wf, workflowId: "sub-poll-1", input: 5 });
     const events = await eventsP;
 
@@ -263,7 +265,9 @@ describe("subscribe — run-scoped event stream", () => {
       .step("boom", () => fail(new StepBoom({ message: "x" })))
       .build();
 
-    const eventsP = collect(runner.subscribe("sub-poll-fail-1", { pollIntervalMs: 20 }));
+    const eventsP = collect(
+      runner.subscribe({ workflowId: "sub-poll-fail-1", pollIntervalMs: 20 }),
+    );
     await runner.runSafe({ workflow: wf, workflowId: "sub-poll-fail-1", input: 0 });
     const events = await eventsP;
 

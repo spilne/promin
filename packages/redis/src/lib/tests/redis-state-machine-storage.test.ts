@@ -337,6 +337,6 @@ redisDescribe("RedisStateMachineStorage", (ctx) => {
     await light.send({ id: "l1", event: "stop" });
 
     expect(await light.getState("l1")).toEqual({ current: "off", context: { count: 2 } });
-    expect((await light.getHistory("l1")).map((e) => e.event)).toEqual(["next", "stop"]);
+    expect((await light.getHistory({ id: "l1" })).map((e) => e.event)).toEqual(["next", "stop"]);
   });
 });

@@ -1,9 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
   DEFAULT_MAX_DELIVERIES,
-  deadLetterError,
-  percentileCont,
-  SystemWallClock,
   type StepQueue,
   type StepQueueClaimParams,
   type StepQueueEnqueueParams,
@@ -11,8 +9,8 @@ import {
   type StepQueueRequeueResult,
   type StepTask,
   type StepTaskRecord,
-  type WallClock,
-} from "@promin/workflow";
+} from "@promin/workflow/distributed";
+import { deadLetterError, percentileCont } from "@promin/workflow/storage-kit";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
 /**

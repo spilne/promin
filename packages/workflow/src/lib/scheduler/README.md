@@ -57,9 +57,9 @@ interface ScheduleTick {
 Non-blocking, in-process scheduler. No persistence, no multi-instance coordination. Good for development, single-process services, and tests.
 
 ```typescript
-import { createScheduler } from "@promin/workflow";
+import { InMemoryScheduler } from "@promin/workflow/scheduler";
 
-const scheduler = createScheduler();
+const scheduler = new InMemoryScheduler();
 
 // Cron — every weekday at 9am EST
 await scheduler.register({
@@ -110,7 +110,7 @@ for await (const tick of scheduler.subscribe().toAsyncIterable()) {
 ```typescript
 await scheduler.pause("health-check"); // Stops emitting, keeps config
 await scheduler.resume("health-check"); // Resumes emitting
-await scheduler.unregister("health-check"); // Removes entirely, stream ends
+await scheduler.unregister({ scheduleId: "health-check" }); // Removes entirely, stream ends
 await scheduler.list(); // All registered ScheduleConfigs
 ```
 
@@ -128,7 +128,7 @@ A schedule paused, replaced or removed while a stream waits for its next fire ti
 
 ### Delivery guarantee: at least once
 
-Each poll computes the due ticks, emits them, and commits the fire state only after the consumer has pulled past them; then it waits `pollIntervalMs` and polls again. A tick is acknowledged when the consumer pulls the next one. If the consumer stops early (`take(n)`, interruption, crash), schedules whose ticks were all acknowledged are committed and the rest stay due: the next poll emits them again with the **same `tickNumber`**. Derive run ids with `scheduleTickRunId(tick.scheduleId, tick.tickNumber)` (or another id derived only from the tick, like `toWorkflowId` below) so a redelivered tick is a no-op. Zorya's scheduler loop gives the same guarantee: it dispatches a poll's ticks, then commits.
+Each poll computes the due ticks, emits them, and commits the fire state only after the consumer has pulled past them; then it waits `pollIntervalMs` and polls again. A tick is acknowledged when the consumer pulls the next one. If the consumer stops early (`take(n)`, interruption, crash), schedules whose ticks were all acknowledged are committed and the rest stay due: the next poll emits them again with the **same `tickNumber`**. Derive run ids with `scheduleTickRunId({ scheduleId: tick.scheduleId, tickNumber: tick.tickNumber })` (or another id derived only from the tick, like `toWorkflowId` below) so a redelivered tick is a no-op. Zorya's scheduler loop gives the same guarantee: it dispatches a poll's ticks, then commits.
 
 Storage errors never end the stream. A failed poll is reported through `onError` and retried with exponential backoff (on the injected clock, capped by `maxErrorBackoffMs`); a failed commit is reported and its ticks are redelivered; a stored schedule that can't be evaluated (say, an invalid cron written straight to storage) is reported, disabled and skipped while the others keep firing. Paused schedules leave due-tracking (`nextRun = null`), so they never crowd active ones out of a poll batch.
 
@@ -177,9 +177,10 @@ await scheduler
   .run();
 
 // Management
-const next5 = await scheduler.nextFireTimes("daily-etl", 5);
+const next5 = await scheduler.nextFireTimes({ scheduleId: "daily-etl", count: 5 });
 await scheduler.triggerNow("daily-etl");
-await scheduler.backfill("daily-etl", {
+await scheduler.backfill({
+  scheduleId: "daily-etl",
   from: new Date("2026-03-01"),
   to: new Date("2026-03-20"),
 });

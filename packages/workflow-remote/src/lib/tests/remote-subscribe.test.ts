@@ -45,7 +45,7 @@ describe("RemoteWorkflowStorage — polling subscribe fallback", () => {
     // step rows materialize.
     const events: WorkflowRunEvent[] = [];
     const collect = (async () => {
-      for await (const ev of runner.subscribe("remote-sub-1", { pollIntervalMs: 20 })) {
+      for await (const ev of runner.subscribe({ workflowId: "remote-sub-1", pollIntervalMs: 20 })) {
         events.push(ev);
         if (ev.type === "workflow-completed" || ev.type === "workflow-failed") break;
       }
@@ -84,7 +84,10 @@ describe("RemoteWorkflowStorage — polling subscribe fallback", () => {
 
     const events: WorkflowRunEvent[] = [];
     const collect = (async () => {
-      for await (const ev of runner.subscribe("remote-sub-fail-1", { pollIntervalMs: 20 })) {
+      for await (const ev of runner.subscribe({
+        workflowId: "remote-sub-fail-1",
+        pollIntervalMs: 20,
+      })) {
         events.push(ev);
         if (ev.type === "workflow-failed" || ev.type === "workflow-completed") break;
       }

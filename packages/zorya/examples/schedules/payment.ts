@@ -1,4 +1,4 @@
-import type { DurableScheduleConfig } from "@promin/workflow";
+import type { DurableScheduleConfig } from "@promin/workflow/scheduler";
 
 // Demonstrates that a single module can export multiple schedules — the
 // scanner picks them all up (array exports get flattened too, so either

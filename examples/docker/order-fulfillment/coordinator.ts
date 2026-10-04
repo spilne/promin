@@ -7,7 +7,8 @@
 // the default worker picks up notify-warehouse + mark-delivered.
 // ---------------------------------------------------------------------------
 
-import { createCoordinator, InMemoryWorkflowVersionRegistry } from "@promin/workflow";
+import { InMemoryWorkflowVersionRegistry } from "@promin/workflow";
+import { createDistributedWorkflowRunner } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { buildOrderWorkflow, type OrderInput, type ShippedSignal } from "./workflow.ts";
 
@@ -19,7 +20,7 @@ const { storage, stepQueue, close } = await buildStack();
 const registry = new InMemoryWorkflowVersionRegistry();
 registry.register(buildOrderWorkflow());
 
-const coordinator = createCoordinator({
+const coordinator = createDistributedWorkflowRunner({
   storage,
   stepQueue,
   registry,

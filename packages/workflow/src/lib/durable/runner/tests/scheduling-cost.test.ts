@@ -199,7 +199,7 @@ describe("step-started notices", () => {
 
     const eventsP = (async () => {
       const events: WorkflowRunEvent[] = [];
-      for await (const ev of runner.subscribe("gated-1")) events.push(ev);
+      for await (const ev of runner.subscribe({ workflowId: "gated-1" })) events.push(ev);
       return events;
     })();
     const done = runner.run({ workflow: wf, workflowId: "gated-1", input: 10 });

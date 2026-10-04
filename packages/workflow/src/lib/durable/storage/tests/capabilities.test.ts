@@ -1,14 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { InMemoryWorkflowStorage } from "../../in-memory-storage.ts";
-import { isActivityJournalStorage } from "../../activity-journal.ts";
-import {
-  isCompensationLedgerStorage,
-  isStepAttemptStorage,
-  isStepCheckpointStorage,
-  isSubscribableStorage,
-  isTripwireCapableStorage,
-  type WorkflowStorage,
-} from "../../workflow-storage.ts";
+import type { WorkflowStorage } from "../../workflow-storage.ts";
 import { hasCapability, STORAGE_CAPABILITIES, storageCapabilities } from "../capabilities.ts";
 
 /** An in-memory storage with the named methods removed. */
@@ -64,29 +56,5 @@ describe("storage capabilities", () => {
         expect({ method, other, has: caps[other] }).toEqual({ method, other, has: true });
       }
     }
-  });
-
-  it("the deprecated guards agree with hasCapability", () => {
-    const full = new InMemoryWorkflowStorage();
-    const bare = without([
-      "loadJournal",
-      "saveStepAttempt",
-      "checkpointStep",
-      "beginCompensation",
-      "tripwireWorkflow",
-      "subscribeToWorkflow",
-    ]);
-    for (const storage of [full, bare]) {
-      expect(isActivityJournalStorage(storage)).toBe(hasCapability(storage, "journal"));
-      expect(isStepAttemptStorage(storage)).toBe(hasCapability(storage, "stepAttempts"));
-      expect(isStepCheckpointStorage(storage)).toBe(hasCapability(storage, "stepCheckpoint"));
-      expect(isCompensationLedgerStorage(storage)).toBe(
-        hasCapability(storage, "compensationLedger"),
-      );
-      expect(isTripwireCapableStorage(storage)).toBe(hasCapability(storage, "tripwire"));
-      expect(isSubscribableStorage(storage)).toBe(hasCapability(storage, "runEvents"));
-    }
-    expect(isActivityJournalStorage(bare)).toBe(false);
-    expect(isActivityJournalStorage(full)).toBe(true);
   });
 });

@@ -3,14 +3,14 @@
 // Handles: ingest-dataset
 // ---------------------------------------------------------------------------
 
-import { MapStepRegistry, createWorker } from "@promin/workflow";
+import { MapStepRegistry, createWorker } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { ingestDatasetHandler } from "./workflow.ts";
 
 const { storage, stepQueue, close } = await buildStack();
 
 const registry = new MapStepRegistry();
-registry.register("ingest-dataset", ingestDatasetHandler);
+registry.register({ stepName: "ingest-dataset", handler: ingestDatasetHandler });
 
 const worker = createWorker({
   storage,

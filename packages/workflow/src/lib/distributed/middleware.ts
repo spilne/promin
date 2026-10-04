@@ -4,11 +4,11 @@
 
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import type { StepTask } from "./step-queue.ts";
-import type { StepContext } from "./step-registry.ts";
+import type { WorkerStepContext } from "./step-registry.ts";
 import { retryAsync } from "../shared/retry-policy.ts";
 
 /** The next function in the middleware chain. Call it to proceed. */
-export type NextFn = (ctx: StepContext) => Promise<unknown>;
+export type NextFn = (ctx: WorkerStepContext) => Promise<unknown>;
 
 /**
  * Worker middleware wraps step execution. Each middleware receives the
@@ -19,7 +19,7 @@ export type NextFn = (ctx: StepContext) => Promise<unknown>;
  */
 export type WorkerMiddleware = (params: {
   task: StepTask;
-  ctx: StepContext;
+  ctx: WorkerStepContext;
   next: NextFn;
 }) => Promise<unknown>;
 
@@ -35,13 +35,15 @@ export type WorkerMiddleware = (params: {
  *
  * @example
  * ```ts
- * createWorker({ middleware: [timeoutMiddleware(30_000)] })
+ * createWorker({ middleware: [timeoutMiddleware({ ms: 30_000 })] })
  * ```
  */
-export function timeoutMiddleware(
-  ms: number,
-  clock: WallClock = SystemWallClock,
-): WorkerMiddleware {
+export function timeoutMiddleware(params: {
+  ms: number;
+  /** Time source for the deadline. Default: `SystemWallClock`. */
+  clock?: WallClock;
+}): WorkerMiddleware {
+  const { ms, clock = SystemWallClock } = params;
   return async ({ ctx, next }) => {
     return Promise.race([
       next(ctx),
@@ -82,13 +84,18 @@ export function retryMiddleware(params: {
  *
  * @example
  * ```ts
- * createWorker({ middleware: [loggingMiddleware(console.log)] })
+ * createWorker({ middleware: [loggingMiddleware({ log: console.log })] })
  * ```
  */
 export function loggingMiddleware(
-  log: (message: string, meta?: Record<string, unknown>) => void = console.log,
-  clock: WallClock = SystemWallClock,
+  params: {
+    /** Log sink. Default: `console.log`. */
+    log?: (message: string, meta?: Record<string, unknown>) => void;
+    /** Time source for durations. Default: `SystemWallClock`. */
+    clock?: WallClock;
+  } = {},
 ): WorkerMiddleware {
+  const { log = console.log, clock = SystemWallClock } = params;
   return async ({ task, ctx, next }) => {
     const start = clock.currentTimeMs();
     log("step:start", {
@@ -122,20 +129,22 @@ export function loggingMiddleware(
  * @example
  * ```ts
  * createWorker({
- *   middleware: [metricsMiddleware((m) => prometheus.observe(m))]
+ *   middleware: [metricsMiddleware({ record: (m) => prometheus.observe(m) })]
  * })
  * ```
  */
-export function metricsMiddleware(
+export function metricsMiddleware(params: {
   record: (metric: {
     workflowId: string;
     stepName: string;
     needs: readonly string[];
     status: "completed" | "failed";
     durationMs: number;
-  }) => void,
-  clock: WallClock = SystemWallClock,
-): WorkerMiddleware {
+  }) => void;
+  /** Time source for durations. Default: `SystemWallClock`. */
+  clock?: WallClock;
+}): WorkerMiddleware {
+  const { record, clock = SystemWallClock } = params;
   return async ({ task, ctx, next }) => {
     const start = clock.currentTimeMs();
     try {

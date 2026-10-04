@@ -34,11 +34,12 @@ type StubOutcome = { readonly value: unknown } | { readonly error: TaggedError }
  * distributed runner sends them to workers); `sleep` and `signal` steps get
  * resume-only bodies and `child` steps fail (see the file header).
  */
-export function buildStubWorkflow(
-  dag: WorkflowDAG,
-  name: string,
-  version?: string,
-): Workflow<unknown, unknown> {
+export function buildStubWorkflow(params: {
+  readonly dag: WorkflowDAG;
+  readonly name: string;
+  readonly version?: string;
+}): Workflow<unknown, unknown> {
+  const { dag, name, version } = params;
   const steps: StepDefinition[] = dag.steps.map((node) => ({
     name: node.name,
     dependsOn: [...node.dependsOn],

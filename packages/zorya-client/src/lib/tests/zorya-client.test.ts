@@ -7,8 +7,7 @@
 //     the same storage so the handle's status / result / cancel calls land
 //     on a real workflow row without spinning up a worker.
 // Lets us exercise the full `start → handle.result()` round-trip without
-// running an actual workflow engine, and pins the back-compat shape of
-// `triggerWorkflow`.
+// running an actual workflow engine.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
@@ -116,20 +115,6 @@ describe("ZoryaClient.startByName — untyped dispatch", () => {
   });
 });
 
-describe("ZoryaClient.triggerWorkflow — back-compat", () => {
-  it("still returns { workflowId } for legacy callers", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const fetch = mountTestServer(storage);
-    const client = new ZoryaClient({ url: "http://test.local", fetch });
-
-    const out = await client.triggerWorkflow("legacy", {
-      input: { x: 1 },
-      workflowId: "wf-legacy-1",
-    });
-    expect(out).toEqual({ workflowId: "wf-legacy-1" });
-  });
-});
-
 // Round-trip the rest of the WorkflowHandle surface through the wire. The
 // `autoComplete: false` mount keeps the workflow row pending so cancel /
 // signal / events have a non-terminal workflow to act on.
@@ -140,7 +125,7 @@ describe("ZoryaClient handle — signal / cancel / events over the wire", () => 
     const client = new ZoryaClient({ url: "http://test.local", fetch });
 
     const handle = await client.startByName("approve", { workflowId: "wf-sig-1" });
-    await handle.signal("approval", { approved: true });
+    await handle.signal({ signalName: "approval", payload: { approved: true } });
 
     const signals = await storage.loadSignals("wf-sig-1");
     expect(signals).toHaveLength(1);

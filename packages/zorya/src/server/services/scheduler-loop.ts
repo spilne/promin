@@ -35,17 +35,17 @@ import type {
   ScheduleTick,
   DurableScheduleConfig,
   SchedulerErrorEvent,
-} from "@promin/workflow";
+} from "@promin/workflow/scheduler";
 import type { WallClock } from "@promin/workflow";
+import { SystemWallClock } from "@promin/workflow";
 import {
-  SystemWallClock,
   commitPlannedSchedules,
   computeNextRun,
   planDueTicks,
   schedulePartition,
   scheduleTickRunId,
   schedulerLeaderKey,
-} from "@promin/workflow";
+} from "@promin/workflow/scheduler";
 import type { RunTrigger } from "../routes/runs.ts";
 
 export interface SchedulerLoopConfig {
@@ -265,7 +265,7 @@ export class SchedulerLoop {
             firedAt: now,
             tickIncrement: 1,
             expectedTickCount: state.tickCount,
-            nextRun: computeNextRun(config, this.clock),
+            nextRun: computeNextRun({ config, clock: this.clock }),
             ticks: [tick],
           },
         ],
@@ -468,7 +468,10 @@ export class SchedulerLoop {
     // race) from creating two workflow rows. createWorkflow is idempotent
     // on workflowId so the second submission is a safe no-op. Same id
     // shape used by `dispatchAgentSchedule` for agent-targeted ticks.
-    const workflowId = scheduleTickRunId(tick.scheduleId, tick.tickNumber);
+    const workflowId = scheduleTickRunId({
+      scheduleId: tick.scheduleId,
+      tickNumber: tick.tickNumber,
+    });
     await this.trigger(workflowName, meta.input, {
       workflowId,
       namespace: meta.namespace ?? schedule.namespace,

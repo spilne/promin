@@ -7,7 +7,8 @@
 // method. No routing, no middleware, no auth (put auth in front of it).
 // ---------------------------------------------------------------------------
 
-import type { StepQueue, WorkerRegistry, WorkflowStorage } from "@promin/workflow";
+import type { WorkflowStorage } from "@promin/workflow";
+import type { StepQueue, WorkerRegistry } from "@promin/workflow/distributed";
 import {
   WORKER_WIRE_CODEC,
   type WorkerMethod,

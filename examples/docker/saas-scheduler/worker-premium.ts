@@ -6,14 +6,14 @@
 // Standard tenant work never competes here.
 // ---------------------------------------------------------------------------
 
-import { MapStepRegistry, createWorker } from "@promin/workflow";
+import { MapStepRegistry, createWorker } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { executePremiumJobHandler } from "./workflow.ts";
 
 const { storage, stepQueue, close } = await buildStack();
 
 const registry = new MapStepRegistry();
-registry.register("execute-premium-job", executePremiumJobHandler);
+registry.register({ stepName: "execute-premium-job", handler: executePremiumJobHandler });
 
 const worker = createWorker({
   storage,

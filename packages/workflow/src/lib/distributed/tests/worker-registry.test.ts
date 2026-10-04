@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { InMemoryWorkflowStorage } from "../../durable/index.ts";
+import { InMemoryWorkflowStorage } from "../../../index.ts";
 import { InMemoryWorkerRegistry } from "../worker-registry.ts";
 import { InMemoryStepQueue } from "../in-memory-step-queue.ts";
 import { MapStepRegistry } from "../step-registry.ts";
@@ -99,9 +99,12 @@ describe("Worker + registry integration — automatic lifecycle management", () 
     const stepRegistry = new MapStepRegistry();
     const workerRegistry = new InMemoryWorkerRegistry();
 
-    stepRegistry.register("slow", async () => {
-      await new Promise((r) => setTimeout(r, 300));
-      return "done";
+    stepRegistry.register({
+      stepName: "slow",
+      handler: async () => {
+        await new Promise((r) => setTimeout(r, 300));
+        return "done";
+      },
     });
 
     await storage.createWorkflow({ workflowId: "drain-1", workflowName: "test", input: {} });

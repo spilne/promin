@@ -374,3 +374,83 @@ describe("trigger — durationMs on an injected clock", () => {
     if (failed && WorkflowResult.isFailed(failed)) expect(failed.durationMs).toBe(750);
   });
 });
+
+describe("trigger — duplicates and errors", () => {
+  const failing = workflow<{ n: number }>({ name: "dup-failing" })
+    .step("boom", () => fail(new ProcessError({ message: "boom" })))
+    .build();
+
+  it('onDuplicate "skip" skips a run in any status, including failed', async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    await runner.runSafe({ workflow: failing, workflowId: "dup-failed", input: { n: 1 } });
+    expect((await storage.loadWorkflow("dup-failed"))?.status).toBe("failed");
+
+    const results = await Stream.fromIterable([1])
+      .through(
+        trigger({
+          workflow: failing,
+          runner,
+          storage,
+          toInput: (n) => ({ n }),
+          toWorkflowId: () => "dup-failed",
+          onDuplicate: "skip",
+        }),
+      )
+      .toArray()
+      .run();
+
+    expect(results.map((r) => r._tag)).toEqual(["skipped"]);
+  });
+
+  it('onDuplicate "skip" needs storage', () => {
+    const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+    expect(() =>
+      trigger({
+        workflow: failing,
+        runner,
+        toInput: (n: number) => ({ n }),
+        toWorkflowId: (n) => `w-${n}`,
+        onDuplicate: "skip",
+      }),
+    ).toThrow(/needs `storage`/);
+  });
+
+  it("a failing duplicate lookup is a failed result and the stream keeps going", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const ok = workflow<{ n: number }>({ name: "dup-ok" })
+      .step("double", ({ input }) => succeed(input.n * 2))
+      .build();
+    const flaky = new Proxy(storage, {
+      get(target, prop, receiver) {
+        if (prop === "loadWorkflow") {
+          return async (id: string) => {
+            if (id === "w-1") throw new Error("storage down");
+            return target.loadWorkflow(id);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    const results = await Stream.fromIterable([1, 2])
+      .through(
+        trigger({
+          workflow: ok,
+          runner,
+          storage: flaky,
+          toInput: (n) => ({ n }),
+          toWorkflowId: (n) => `w-${n}`,
+          onDuplicate: "skip",
+        }),
+      )
+      .toArray()
+      .run();
+
+    expect(results.map((r) => r._tag)).toEqual(["failed", "completed"]);
+    const first = results[0]!;
+    if (WorkflowResult.isFailed(first)) expect(String(first.error)).toContain("storage down");
+  });
+});

@@ -3,14 +3,14 @@
 // Handles generate-label (carrier label API integration in real life).
 // ---------------------------------------------------------------------------
 
-import { MapStepRegistry, createWorker } from "@promin/workflow";
+import { MapStepRegistry, createWorker } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { generateLabelHandler } from "./workflow.ts";
 
 const { storage, stepQueue, close } = await buildStack();
 
 const registry = new MapStepRegistry();
-registry.register("generate-label", generateLabelHandler);
+registry.register({ stepName: "generate-label", handler: generateLabelHandler });
 
 const worker = createWorker({
   storage,

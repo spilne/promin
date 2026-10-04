@@ -56,7 +56,7 @@ describe("worker lease loss", () => {
     const { clock, storage, queue, taskId } = await setup();
     const slow = blockingHandler();
     const registry = new MapStepRegistry();
-    registry.register("slow", slow.handler);
+    registry.register({ stepName: "slow", handler: slow.handler });
     const lost: string[] = [];
     const worker = new DefaultWorker({
       workerId: "a",
@@ -94,7 +94,7 @@ describe("worker lease loss", () => {
     const { clock, storage, queue, taskId } = await setup();
     const slow = blockingHandler();
     const registry = new MapStepRegistry();
-    registry.register("slow", slow.handler);
+    registry.register({ stepName: "slow", handler: slow.handler });
     const phases: string[] = [];
     const heartbeat = queue.heartbeat.bind(queue);
     let failHeartbeats = true;
@@ -131,7 +131,7 @@ describe("worker stop({ timeoutMs })", () => {
     const { clock, storage, queue, taskId } = await setup();
     const slow = blockingHandler();
     const registry = new MapStepRegistry();
-    registry.register("slow", slow.handler);
+    registry.register({ stepName: "slow", handler: slow.handler });
     const workers = new InMemoryWorkerRegistry({ clock });
     const worker = new DefaultWorker({
       workerId: "a",
@@ -176,7 +176,7 @@ describe("worker stop({ timeoutMs })", () => {
     const { clock, storage, queue, taskId } = await setup();
     const slow = blockingHandler();
     const registry = new MapStepRegistry();
-    registry.register("slow", slow.handler);
+    registry.register({ stepName: "slow", handler: slow.handler });
     const worker = new DefaultWorker({ storage, stepQueue: queue, registry, clock });
     void worker.start();
     await waitFor(() => slow.seen.signal !== undefined);

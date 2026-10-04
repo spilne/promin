@@ -4,7 +4,7 @@
 // `createWorkerApiHandler` configured with a real WorkerRegistry.
 // ---------------------------------------------------------------------------
 
-import type { WorkerInfo, WorkerRegistry, WorkerStatus } from "@promin/workflow";
+import type { WorkerInfo, WorkerRegistry, WorkerStatus } from "@promin/workflow/distributed";
 import type { FetchLike } from "./remote-workflow-storage.ts";
 import { WORKER_WIRE_CODEC, type WorkerMethod, type WorkerRpcResponse } from "./worker-wire.ts";
 

@@ -11,7 +11,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import { InMemorySchedulerStorage } from "@promin/workflow";
+import { InMemorySchedulerStorage } from "@promin/workflow/scheduler";
 import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
 import {
   createDurableSchedulerTool,

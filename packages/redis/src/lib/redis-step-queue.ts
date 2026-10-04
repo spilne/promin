@@ -37,13 +37,9 @@
 // layout (`<prefix>:task:<id>` ...) need `migrateLegacyKeys()` once.
 // ---------------------------------------------------------------------------
 
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
   DEFAULT_MAX_DELIVERIES,
-  deadLetterError,
-  percentileCont,
-  StaleLeaseError,
-  SystemWallClock,
-  type LeaderLease,
   type StepQueue,
   type StepQueueClaimParams,
   type StepQueueEnqueueParams,
@@ -52,8 +48,9 @@ import {
   type StepTask,
   type StepTaskRecord,
   type StepTaskStatus,
-  type WallClock,
-} from "@promin/workflow";
+} from "@promin/workflow/distributed";
+import { StaleLeaseError, type LeaderLease } from "@promin/workflow/scheduler";
+import { deadLetterError, percentileCont } from "@promin/workflow/storage-kit";
 import type { RedisStoreClient } from "./redis-client.ts";
 import type { RedisLeaderLeaseStore } from "./redis-leader-lease-store.ts";
 import { hashTagOf, renameLegacyKeys, storeKeyBase } from "./redis-key-migration.ts";

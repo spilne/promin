@@ -5,14 +5,14 @@
 // concurrency=1 simulates a single GPU — only one training job at a time.
 // ---------------------------------------------------------------------------
 
-import { MapStepRegistry, createWorker } from "@promin/workflow";
+import { MapStepRegistry, createWorker } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { trainModelHandler } from "./workflow.ts";
 
 const { storage, stepQueue, close } = await buildStack();
 
 const registry = new MapStepRegistry();
-registry.register("train-model", trainModelHandler);
+registry.register({ stepName: "train-model", handler: trainModelHandler });
 
 const worker = createWorker({
   storage,

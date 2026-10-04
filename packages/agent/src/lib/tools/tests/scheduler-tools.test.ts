@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import { InMemoryScheduler, type ScheduleTick } from "@promin/workflow";
+import { InMemoryScheduler, type ScheduleTick } from "@promin/workflow/scheduler";
 import { createSchedulerTools } from "../scheduler-tools.ts";
 
 describe("createSchedulerTools", () => {
@@ -28,7 +28,7 @@ describe("createSchedulerTools", () => {
     expect(reply).toBe('Scheduled "ping": every 20ms');
 
     await firstTick;
-    await scheduler.unregister("ping");
+    await scheduler.unregister({ scheduleId: "ping" });
 
     expect(fired[0]!.task).toBe("say hi");
     expect(fired[0]!.tick.scheduleId).toBe("ping");
@@ -41,7 +41,7 @@ describe("createSchedulerTools", () => {
 
     await scheduler.register({ id: "raw", intervalMs: 10, metadata: { other: 1 } });
     await new Promise((resolve) => setTimeout(resolve, 60));
-    await scheduler.unregister("raw");
+    await scheduler.unregister({ scheduleId: "raw" });
 
     expect(tasks).toEqual([]);
   });

@@ -14,7 +14,7 @@
 // ---------------------------------------------------------------------------
 
 import type { WorkflowStorage, OrphanedRun } from "../durable/workflow-storage.ts";
-import type { WorkflowState, WorkflowRunEvent } from "../durable/workflow-state.ts";
+import type { WorkflowRunEvent } from "../durable/workflow-state.ts";
 import type {
   Workflow,
   WorkflowDAG,
@@ -29,6 +29,8 @@ import {
   type WorkflowRunSafeError,
   type RecoveryResult,
   type RecoveryStrategy,
+  type WorkflowSubscribeParams,
+  type WorkflowGetStatusParams,
 } from "../durable/workflow-runner.ts";
 import { WorkflowLockError } from "../durable/durable-pipeline-error.ts";
 import type { StepQueue } from "./step-queue.ts";
@@ -145,9 +147,6 @@ export interface DistributedRunnerErrorEvent {
   /** The run involved, when there is one. */
   readonly workflowId?: string;
 }
-
-/** @deprecated Use DistributedRunnerConfig */
-export type CoordinatorConfig = DistributedRunnerConfig;
 
 /**
  * Run worker `gc()` every Nth dead-worker sweep rather than every tick —
@@ -326,27 +325,12 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
     return this.innerRunner.resume<Input, Output>(params);
   }
 
-  subscribe(
-    workflowId: string,
-    options?: { signal?: AbortSignal; pollIntervalMs?: number },
-  ): AsyncIterable<WorkflowRunEvent> {
-    return this.innerRunner.subscribe(workflowId, options);
+  subscribe(params: WorkflowSubscribeParams): AsyncIterable<WorkflowRunEvent> {
+    return this.innerRunner.subscribe(params);
   }
 
-  getStatus(
-    workflowId: string,
-    params?: { readonly includeStepResults?: boolean },
-  ): Promise<WorkflowStatusInfo<unknown> | null> {
-    return this.innerRunner.getStatus(workflowId, params);
-  }
-
-  /**
-   * Load the workflow's current persistent state. Pairs with the
-   * deprecated `WorkflowCoordinator.status` contract — new callers should
-   * prefer `getStatus()` (richer info) or `storage.loadWorkflow()`.
-   */
-  status(workflowId: string): Promise<WorkflowState | null> {
-    return this.storage.loadWorkflow(workflowId);
+  getStatus(params: WorkflowGetStatusParams): Promise<WorkflowStatusInfo<unknown> | null> {
+    return this.innerRunner.getStatus(params);
   }
 
   recover(strategy: RecoveryStrategy): Promise<RecoveryResult> {
@@ -588,7 +572,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
           `Pass a WorkflowVersionRegistry or use the { workflow } shape.`,
       );
     }
-    const def = await registry.resolve(name, version);
+    const def = await registry.resolve({ name, version });
     if (!def) {
       const allNames = await registry.names();
       throw new Error(
@@ -731,12 +715,12 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
   /** The registered definition for a run, else a stub from its stored DAG. */
   private async _definitionFor(run: OrphanedRun): Promise<Workflow<unknown, unknown> | undefined> {
     if (this.registry) {
-      const def = await this.registry.resolve(run.workflowName, run.version);
+      const def = await this.registry.resolve({ name: run.workflowName, version: run.version });
       if (def) return def;
     }
     const dag = run.metadata?._dag as WorkflowDAG | undefined;
     if (!dag) return undefined;
-    return buildStubWorkflow(dag, run.workflowName ?? dag.name, run.version);
+    return buildStubWorkflow({ dag, name: run.workflowName ?? dag.name, version: run.version });
   }
 }
 
@@ -755,38 +739,5 @@ function defaultOnError(event: DistributedRunnerErrorEvent): void {
 export function createDistributedWorkflowRunner(
   config: DistributedRunnerConfig,
 ): DistributedWorkflowRunner {
-  return new DistributedWorkflowRunner(config);
-}
-
-// ---------------------------------------------------------------------------
-// Backward-compat aliases
-// ---------------------------------------------------------------------------
-
-/** @deprecated Use DistributedWorkflowRunner */
-export interface WorkflowCoordinator {
-  submit<Input>(params: {
-    workflow: Workflow<Input, unknown>;
-    workflowId: string;
-    input: Input;
-  }): Promise<void>;
-  submit<Input>(params: {
-    name: string;
-    workflowId: string;
-    input: Input;
-    version?: string;
-  }): Promise<void>;
-  status(workflowId: string): Promise<WorkflowState | null>;
-  waitForResult<Output>(workflowId: string): Promise<Output>;
-  /** @deprecated Use startLoop() */
-  startLoop(): Promise<void>;
-  /** @deprecated Use stopLoop() */
-  stopLoop(): Promise<void>;
-}
-
-/** @deprecated Use DistributedWorkflowRunner */
-export const DefaultCoordinator = DistributedWorkflowRunner;
-
-/** @deprecated Use createDistributedWorkflowRunner */
-export function createCoordinator(config: CoordinatorConfig): DistributedWorkflowRunner {
   return new DistributedWorkflowRunner(config);
 }

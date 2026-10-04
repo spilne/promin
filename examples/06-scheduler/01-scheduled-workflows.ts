@@ -3,9 +3,9 @@
  * The scheduler streams ticks — connect to workflows via trigger.
  */
 
-import { createScheduler } from "@promin/workflow";
+import { InMemoryScheduler } from "@promin/workflow/scheduler";
 
-const scheduler = createScheduler();
+const scheduler = new InMemoryScheduler();
 
 // Every weekday at 9am
 await scheduler.register({

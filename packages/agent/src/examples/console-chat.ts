@@ -133,7 +133,7 @@ const COMMANDS: ReplCommand[] = [
     desc: "immediately cancel a schedule",
     handle: async (input) => {
       const id = input.slice("/cancel-schedule ".length).trim();
-      await scheduler.unregister(id);
+      await scheduler.unregister({ scheduleId: id });
       activeTicks.delete(id);
       console.log(`\n\x1b[2mCancelled schedule "${id}"\x1b[0m\n`);
     },

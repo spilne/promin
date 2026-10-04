@@ -112,7 +112,7 @@ describe("WorkflowRunner", () => {
       .step("double", ({ input }) => succeed((input as { n: number }).n * 2))
       .build();
 
-    const executor = new InProcessStepExecutor(wf, { storage });
+    const executor = new InProcessStepExecutor({ workflow: wf, storage });
     const res = await executor.executeStep({
       workflowId: "exec-1",
       stepName: "double",
@@ -199,7 +199,7 @@ describe("WorkflowRunner", () => {
         )
         .build();
 
-      const executor = new InProcessStepExecutor(wf, { storage });
+      const executor = new InProcessStepExecutor({ workflow: wf, storage });
       const runner = createWorkflowRunner({ storage, stepExecutor: executor });
       await runner.run({ workflow: wf, workflowId: "eager-executor-1", input: undefined });
 

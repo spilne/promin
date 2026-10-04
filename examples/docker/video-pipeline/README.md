@@ -97,7 +97,7 @@ call `ffmpeg -hwaccel ...` inside `transcodeHandler`.
 ## A note on the "one coordinator" pattern
 
 An earlier version of this demo shipped a separate `submit.ts` container
-that called `.submit()` via its own throwaway `createCoordinator`. End-to-
+that called `.submit()` via its own throwaway `createDistributedWorkflowRunner`. End-to-
 end testing surfaced a race: that throwaway coord enqueued the first
 step AND the long-running coord, on its next tick, discovered the new
 workflow and ran `enqueueReady` against its own (empty) in-memory

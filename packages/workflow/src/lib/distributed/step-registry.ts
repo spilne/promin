@@ -9,7 +9,8 @@ import type { Eff, Throws } from "@spilne/perfect-core";
 import type { TaggedError } from "../shared/tagged-error.ts";
 import type { RetryPolicy } from "../shared/retry-policy.ts";
 
-export interface StepContext {
+/** What a worker step handler receives. */
+export interface WorkerStepContext {
   readonly input: unknown;
   readonly prev: unknown;
   readonly deps: Record<string, unknown>;
@@ -31,16 +32,17 @@ export interface StepContext {
  * sees) or a Promise.
  */
 export type StepHandler = (
-  ctx: StepContext,
+  ctx: WorkerStepContext,
 ) => Eff<unknown, Throws<TaggedError>> | Promise<unknown>;
 
-export type StepFailureStrategy = "fail" | "skip" | { fallback: (error: unknown) => unknown };
+/** What a worker does when a step still fails after its retries. */
+export type WorkerStepFailureStrategy = "fail" | "skip" | { fallback: (error: unknown) => unknown };
 
 export interface WorkerStepOptions {
   /** Retry policy for this step. */
   retry?: RetryPolicy<TaggedError>;
   /** What to do when the step fails (after retries). Default: "fail". */
-  onFailure?: StepFailureStrategy;
+  onFailure?: WorkerStepFailureStrategy;
 }
 
 export interface StepRegistration {
@@ -48,8 +50,14 @@ export interface StepRegistration {
   options?: WorkerStepOptions;
 }
 
+/** What `StepRegistry.register` takes: the step name, its handler and its options. */
+export interface RegisterStepParams extends WorkerStepOptions {
+  readonly stepName: string;
+  readonly handler: StepHandler;
+}
+
 export interface StepRegistry {
-  register(stepName: string, handler: StepHandler, options?: WorkerStepOptions): void;
+  register(params: RegisterStepParams): void;
   resolve(stepName: string): StepRegistration | undefined;
   has(stepName: string): boolean;
   list(): string[];
@@ -58,7 +66,8 @@ export interface StepRegistry {
 export class MapStepRegistry implements StepRegistry {
   private readonly steps = new Map<string, StepRegistration>();
 
-  register(stepName: string, handler: StepHandler, options?: WorkerStepOptions): void {
+  register(params: RegisterStepParams): void {
+    const { stepName, handler, ...options } = params;
     this.steps.set(stepName, { handler, options });
   }
 

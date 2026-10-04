@@ -3,7 +3,8 @@
  * The compiler turns this into a durable workflow: crash-safe, parallel where possible.
  */
 
-import { compileSqlProject, InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
+import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
+import { compileSqlProject, type SqlProjectResult } from "@promin/workflow/sql-models";
 
 const storage = new InMemoryWorkflowStorage();
 const runner = createWorkflowRunner({ storage });
@@ -44,14 +45,18 @@ const wf = compileSqlProject({
   project,
   executeSql: async (sql) => {
     console.log(`Executing: ${sql.slice(0, 60)}...`);
+    // Stand-in database: data tests count no NULLs and three rows.
+    if (sql.includes("IS NULL")) return [{ cnt: 0 }];
+    if (sql.includes("COUNT(*)")) return [{ cnt: 3 }];
     return [];
   },
 });
 
-// stg_orders and stg_users run in parallel, then fct_revenue
-const result = (await runner.run({
+// stg_orders and stg_users run in parallel, then fct_revenue. A failed
+// materialization or data test fails the run.
+const result: SqlProjectResult = await runner.run({
   workflow: wf,
   workflowId: "daily-2026-04-06",
   input: {},
-})) as { modelsRun: number; testsPassed: number };
+});
 console.log(`${result.modelsRun} models, ${result.testsPassed} tests passed`);

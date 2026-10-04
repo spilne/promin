@@ -33,7 +33,7 @@ async function handleStartKyc(
   const workflowId = `kyc-${userId}`;
 
   // Idempotent — returns existing status if already started
-  const existing = await runner.getStatus(workflowId);
+  const existing = await runner.getStatus({ workflowId });
   if (existing) return { status: 200, body: existing };
 
   await runner.start({
@@ -46,7 +46,7 @@ async function handleStartKyc(
 
 // GET /kyc/:userId/status — poll for result
 async function handleGetStatus(userId: string): Promise<{ status: number; body?: unknown }> {
-  const status = await runner.getStatus(`kyc-${userId}`);
+  const status = await runner.getStatus({ workflowId: `kyc-${userId}` });
   if (!status) return { status: 404 };
   return { status: 200, body: status };
 }

@@ -14,7 +14,7 @@ import type {
   StepQueueRequeueResult,
   StepTask,
   StepTaskRecord,
-} from "@promin/workflow";
+} from "@promin/workflow/distributed";
 import type { FetchLike } from "./remote-workflow-storage.ts";
 import { WORKER_WIRE_CODEC, type WorkerMethod, type WorkerRpcResponse } from "./worker-wire.ts";
 

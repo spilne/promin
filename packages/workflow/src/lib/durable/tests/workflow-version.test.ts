@@ -1,6 +1,6 @@
 import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
-import { workflow, WorkflowVersionMismatchError } from "../index.ts";
+import { workflow, WorkflowVersionMismatchError } from "../../../index.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 

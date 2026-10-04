@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import type { Workflow, WorkflowStorage, TriggerOptions as _TO } from "@promin/workflow";
+import type { Workflow, WorkflowStorage } from "@promin/workflow";
 import { ZoryaWorkflows, UnknownWorkflowError } from "../index.ts";
 import type { TriggerOptions, TriggerResult } from "../zorya-workflows.ts";
 

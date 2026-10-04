@@ -6,18 +6,18 @@
 // callers can swap Postgres ↔ Redis with a one-line constructor change.
 // ---------------------------------------------------------------------------
 
+import { type WallClock } from "@promin/workflow";
 import {
   DurableScheduler as GenericDurableScheduler,
   type DurableSchedulerConfig as GenericConfig,
-  type WallClock,
-} from "@promin/workflow";
+} from "@promin/workflow/scheduler";
 import {
   RedisSchedulerStorage,
   type RedisSchedulerStorageConfig,
 } from "./redis-scheduler-storage.ts";
 import type { RedisStoreClient } from "./redis-client.ts";
 
-export type { DurableScheduleConfig } from "@promin/workflow";
+export type { DurableScheduleConfig } from "@promin/workflow/scheduler";
 
 export interface RedisDurableSchedulerConfig {
   redis: RedisStoreClient;

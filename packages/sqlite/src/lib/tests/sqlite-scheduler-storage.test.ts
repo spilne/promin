@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { FakeWallClock, isStaleLeaseError, schedulerLeaderKey } from "@promin/workflow";
+import { FakeWallClock } from "@promin/workflow";
+import { isStaleLeaseError, schedulerLeaderKey } from "@promin/workflow/scheduler";
 import { schedulerStorageTestSuite } from "@promin/workflow/testing";
 import { SqliteSchedulerStorage } from "../sqlite-scheduler-storage.ts";
 

@@ -563,15 +563,15 @@ describe("query handler ownership", () => {
 
     const live = runner.runSafe({ workflow: wf, workflowId: "q-1", input: 1 });
     await started.promise;
-    expect(await invokeQueryHandler("q-1", "status")).toBe("busy");
+    expect(await invokeQueryHandler({ workflowId: "q-1", name: "status" })).toBe("busy");
 
     const dup = await runner.runSafe({ workflow: wf, workflowId: "q-1", input: 1 });
     expect(tagOf(dup.error)).toBe("WorkflowLockError");
-    expect(await invokeQueryHandler("q-1", "status")).toBe("busy");
+    expect(await invokeQueryHandler({ workflowId: "q-1", name: "status" })).toBe("busy");
 
     gate.resolve();
     expect((await live).error).toBeNull();
-    await expect(invokeQueryHandler("q-1", "status")).rejects.toThrow();
+    await expect(invokeQueryHandler({ workflowId: "q-1", name: "status" })).rejects.toThrow();
   });
 });
 

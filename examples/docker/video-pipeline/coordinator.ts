@@ -20,7 +20,8 @@
 // need to import `buildVideoWorkflow`.
 // ---------------------------------------------------------------------------
 
-import { createCoordinator, InMemoryWorkflowVersionRegistry } from "@promin/workflow";
+import { InMemoryWorkflowVersionRegistry } from "@promin/workflow";
+import { createDistributedWorkflowRunner } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { buildVideoWorkflow, type VideoInput } from "./workflow.ts";
 
@@ -36,7 +37,7 @@ registry.register(buildVideoWorkflow());
 // Routing lives on the step itself via `needs` (see workflow.ts).
 // Workers declare capabilities that match. The coordinator just
 // orchestrates the DAG — no routing table.
-const coordinator = createCoordinator({
+const coordinator = createDistributedWorkflowRunner({
   storage,
   stepQueue,
   registry,

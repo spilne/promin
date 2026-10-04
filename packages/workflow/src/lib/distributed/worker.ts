@@ -11,7 +11,7 @@ import { SystemWallClock, type WallClock, type TimerHandle } from "../shared/wal
 import { PollLoop, type PollTickResult } from "../shared/poll-loop.ts";
 import type { WorkflowStorage } from "../durable/workflow-storage.ts";
 import { hasCapability } from "../durable/workflow-storage.ts";
-import type { StepRegistry, StepContext, StepRegistration } from "./step-registry.ts";
+import type { StepRegistry, WorkerStepContext, StepRegistration } from "./step-registry.ts";
 import type { StepQueue, StepTask } from "./step-queue.ts";
 import type { WorkerMiddleware } from "./middleware.ts";
 import type { WorkerRegistry } from "./worker-registry.ts";
@@ -447,7 +447,7 @@ export class DefaultWorker implements WorkflowWorker {
       return { kind: "failed", error, cause: new Error(error), durationMs: elapsed() };
     }
 
-    const ctx: StepContext = {
+    const ctx: WorkerStepContext = {
       input: task.input,
       prev: this.computePrev(task),
       deps: task.prevResults,
@@ -576,11 +576,11 @@ export class DefaultWorker implements WorkflowWorker {
   private buildChain(
     task: StepTask,
     registration: StepRegistration,
-  ): (ctx: StepContext) => Promise<unknown> {
+  ): (ctx: WorkerStepContext) => Promise<unknown> {
     const { handler, options } = registration;
 
     // Base: resolve handler result + apply step-level retry
-    let base = async (ctx: StepContext): Promise<unknown> => {
+    let base = async (ctx: WorkerStepContext): Promise<unknown> => {
       return runHookValue(handler(ctx));
     };
 
@@ -588,7 +588,7 @@ export class DefaultWorker implements WorkflowWorker {
     if (options?.retry) {
       const policy = options.retry as RetryPolicy<unknown>;
       const innerBase = base;
-      base = (ctx: StepContext): Promise<unknown> =>
+      base = (ctx: WorkerStepContext): Promise<unknown> =>
         retryAsync({
           policy,
           clock: this.clock,
@@ -598,7 +598,7 @@ export class DefaultWorker implements WorkflowWorker {
     }
 
     // Wrap with global middleware (right to left)
-    return this.middleware.reduceRight<(ctx: StepContext) => Promise<unknown>>(
+    return this.middleware.reduceRight<(ctx: WorkerStepContext) => Promise<unknown>>(
       (next, mw) => (ctx) => mw({ task, ctx, next }),
       base,
     );

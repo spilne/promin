@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { TaggedError, succeed, fail } from "@spilne/perfect-core";
-import { workflow, WorkflowSuspendedError, InMemoryWorkflowStorage } from "../index.ts";
+import { workflow, WorkflowSuspendedError, InMemoryWorkflowStorage } from "../../../index.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 
 class TestError extends TaggedError("TestError")<{

@@ -142,11 +142,12 @@ export function registerQueryHandler(
  * `WorkflowNotRunningError` or `NoHandlerForQueryError` based on
  * whether the workflow is hosted on this worker at all.
  */
-export async function invokeQueryHandler(
-  workflowId: string,
-  name: string,
-  args?: unknown,
-): Promise<unknown> {
+export async function invokeQueryHandler(params: {
+  workflowId: string;
+  name: string;
+  args?: unknown;
+}): Promise<unknown> {
+  const { workflowId, name, args } = params;
   const entry = liveEntry(workflowId);
   if (!entry) {
     throw new Error(

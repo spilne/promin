@@ -184,7 +184,7 @@ export interface WorkflowHandle<Output, E extends TaggedError = never> {
   status(params?: { includeStepResults?: boolean }): Promise<WorkflowStatusInfo<Output> | null>;
 
   /** Send a signal to the workflow (e.g. from a webhook). */
-  signal(signalName: string, payload: unknown): Promise<void>;
+  signal(params: { signalName: string; payload: unknown }): Promise<void>;
 
   /**
    * Wait for the workflow to complete. Resumes suspended workflows on each
@@ -206,7 +206,7 @@ export interface WorkflowHandle<Output, E extends TaggedError = never> {
    * Subscribe to live step / lifecycle events for this workflow. Closes on
    * the first terminal event (`workflow-completed`, `workflow-failed`,
    * `workflow-tripwire`) or when `options.signal` fires. Delegates to
-   * `runner.subscribe(workflowId, options)` — uses the storage's native
+   * `runner.subscribe({ workflowId, ...options })` — uses the storage's native
    * push path when available, falls back to polling otherwise.
    */
   events(options?: {

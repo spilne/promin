@@ -22,14 +22,15 @@ describe("applyDiscoveredSchedules — kickstart on an injected clock", () => {
     const clock = FakeWallClock.create("2026-03-01T12:00:00Z");
     const storage = new RecordingSchedulerStorage({ clock });
 
-    const result = await applyDiscoveredSchedules(
+    const result = await applyDiscoveredSchedules({
       storage,
-      [
+      schedules: [
         { id: "nightly", cron: "0 0 * * *" },
         { id: "paused", intervalMs: 60_000, enabled: false },
       ],
-      { kickstart: true, clock },
-    );
+      kickstart: true,
+      clock,
+    });
 
     expect(result.added).toEqual(["nightly", "paused"]);
     // Disabled schedules aren't kickstarted.

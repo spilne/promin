@@ -50,7 +50,7 @@ export async function resolveRunDefinition(params: {
     const active = await registry.findActive(params.name);
     if (active) resolvedVersion = active.version;
   }
-  const latestDef = await registry.resolve(params.name, resolvedVersion);
+  const latestDef = await registry.resolve({ name: params.name, version: resolvedVersion });
   if (!latestDef) {
     const allNames = await registry.names();
     throw new Error(
@@ -61,7 +61,7 @@ export async function resolveRunDefinition(params: {
 
   const existing = await storage.loadWorkflow(workflowId);
   if (existing && existing.version && existing.version !== latestDef.version) {
-    const storedDef = await registry.resolve(params.name, existing.version);
+    const storedDef = await registry.resolve({ name: params.name, version: existing.version });
     if (!storedDef) {
       const allVersions = await registry.versions(params.name);
       throw new Error(

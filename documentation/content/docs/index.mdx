@@ -38,8 +38,8 @@ const orderFlow = workflow({ name: "process-order", storage })
 Coordinator + workers via Postgres queues. Route steps to specialized hardware (GPU, AI). Same workflow definition works in-process and distributed.
 
 ```typescript
-const coordinator = createCoordinator({ storage, stepQueue, routing: { transcribe: "gpu" } });
-await coordinator.submit({ workflow: processVideo, workflowId: "v1", input });
+const runner = createDistributedWorkflowRunner({ storage, stepQueue });
+await runner.submit({ workflow: processVideo, workflowId: "v1", input });
 ```
 
 ### [DataFrame](/docs/data/dataframe) — Lazy analytics

@@ -1,11 +1,11 @@
 import { z } from "zod";
 import { tool } from "../tool.ts";
-import type { Scheduler, ScheduleTick } from "@promin/workflow";
+import type { Scheduler, ScheduleTick } from "@promin/workflow/scheduler";
 
 export interface SchedulerToolsConfig {
   /**
    * The scheduler instance — typically `new InMemoryScheduler()` for single-process use,
-   * or `createDurableScheduler({ storage })` for persistent multi-process deployments.
+   * or `new DurableScheduler({ storage })` for persistent multi-process deployments.
    */
   scheduler: Scheduler;
   /**
@@ -119,7 +119,7 @@ export function createSchedulerTools(config: SchedulerToolsConfig) {
         id: z.string().describe("The schedule ID to cancel"),
       }),
       execute: async ({ id }) => {
-        await config.scheduler.unregister(id);
+        await config.scheduler.unregister({ scheduleId: id });
         return `Cancelled schedule "${id}".`;
       },
     }),

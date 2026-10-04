@@ -252,6 +252,24 @@ export interface WorkflowRunnerConfig {
   readonly executorId?: string;
 }
 
+/** What `WorkflowRunner.subscribe` takes. */
+export interface WorkflowSubscribeParams {
+  readonly workflowId: string;
+  /** Closes the event stream when aborted. */
+  readonly signal?: AbortSignal;
+  /** Polling only: how often to reload the run. Default: 500. */
+  readonly pollIntervalMs?: number;
+  /** Polling only: failed reads in a row before the stream rejects. Default: 10. */
+  readonly maxConsecutiveErrors?: number;
+}
+
+/** What `WorkflowRunner.getStatus` takes. */
+export interface WorkflowGetStatusParams {
+  readonly workflowId: string;
+  /** Include each step's result in the snapshot. Default: false. */
+  readonly includeStepResults?: boolean;
+}
+
 /**
  * Runs a workflow end-to-end. Holds orchestration (DAG ready-set, lock,
  * heartbeat, retry, compensation, idempotency) and delegates step execution
@@ -353,24 +371,13 @@ export interface WorkflowRunner {
    * 500ms) and synthesizing events from the step-state diff. User code
    * doesn't need to branch on the backend.
    */
-  subscribe(
-    workflowId: string,
-    options?: {
-      signal?: AbortSignal;
-      pollIntervalMs?: number;
-      /** Polling only: failed reads in a row before the stream rejects. Default: 10. */
-      maxConsecutiveErrors?: number;
-    },
-  ): AsyncIterable<WorkflowRunEvent>;
+  subscribe(params: WorkflowSubscribeParams): AsyncIterable<WorkflowRunEvent>;
   /**
    * Snapshot of a workflow's current status: active step, suspended reason,
    * per-step summary, timestamps. Returns `null` when the workflow doesn't
    * exist in storage. Intended for status endpoints / dashboards.
    */
-  getStatus(
-    workflowId: string,
-    params?: { readonly includeStepResults?: boolean },
-  ): Promise<WorkflowStatusInfo<unknown> | null>;
+  getStatus(params: WorkflowGetStatusParams): Promise<WorkflowStatusInfo<unknown> | null>;
 
   /**
    * Apply a `RecoveryStrategy` to the runner's storage — typically called once
@@ -601,20 +608,13 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       workflowId,
       storage: this.storage,
       clock: this.clock,
-      getStatus: (p) => this.getStatus(workflowId, p),
-      subscribe: (opts) => this.subscribe(workflowId, opts),
+      getStatus: (p) => this.getStatus({ ...p, workflowId }),
+      subscribe: (opts) => this.subscribe({ ...opts, workflowId }),
     });
   }
 
-  subscribe(
-    workflowId: string,
-    options?: {
-      signal?: AbortSignal;
-      pollIntervalMs?: number;
-      /** Polling only: failed reads in a row before the stream rejects. Default: 10. */
-      maxConsecutiveErrors?: number;
-    },
-  ): AsyncIterable<WorkflowRunEvent> {
+  subscribe(params: WorkflowSubscribeParams): AsyncIterable<WorkflowRunEvent> {
+    const { workflowId, ...options } = params;
     // Fast path: storage has native push support.
     if (hasCapability(this.storage, "runEvents")) {
       return this.storage.subscribeToWorkflow({ workflowId, ...options });
@@ -627,13 +627,10 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     return pollWorkflowEvents({ storage: this.storage, clock: this.clock, workflowId, options });
   }
 
-  async getStatus(
-    workflowId: string,
-    params?: { readonly includeStepResults?: boolean },
-  ): Promise<WorkflowStatusInfo<unknown> | null> {
-    const state = await this.storage.loadWorkflow(workflowId);
+  async getStatus(params: WorkflowGetStatusParams): Promise<WorkflowStatusInfo<unknown> | null> {
+    const state = await this.storage.loadWorkflow(params.workflowId);
     if (!state) return null;
-    return toStatusInfo({ state, includeStepResults: params?.includeStepResults ?? false });
+    return toStatusInfo({ state, includeStepResults: params.includeStepResults ?? false });
   }
 
   recover(strategy: RecoveryStrategy): Promise<RecoveryResult> {

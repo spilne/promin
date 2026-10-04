@@ -21,7 +21,7 @@ import type {
   ToolHistoryStore,
 } from "@promin/agent";
 import { dispatchAgentSchedule } from "@promin/agent";
-import type { DurableScheduleConfig, ScheduleTick } from "@promin/workflow";
+import type { DurableScheduleConfig, ScheduleTick } from "@promin/workflow/scheduler";
 import {
   startAgentsScanLoop,
   type AgentScanFolderResult as _ScanResult,

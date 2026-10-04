@@ -12,7 +12,7 @@ import {
   WorkflowScanner,
   type WorkflowScannerOptions,
   type WorkflowScanResult,
-} from "@promin/workflow";
+} from "@promin/workflow/discovery";
 
 export type ScanOptions = WorkflowScannerOptions;
 export type ScanResult = WorkflowScanResult;
@@ -21,5 +21,5 @@ export async function scanWorkflowsFolder(
   root: string,
   options: ScanOptions = {},
 ): Promise<ScanResult> {
-  return await WorkflowScanner.scanFolder(root, options);
+  return await WorkflowScanner.scanFolder({ root, ...options });
 }

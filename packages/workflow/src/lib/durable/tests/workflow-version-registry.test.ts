@@ -1,16 +1,13 @@
 import { describe, it, expect } from "bun:test";
 import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
-import {
-  createWorkflowVersionRegistry,
-  InMemoryWorkflowVersionRegistry,
-} from "../workflow-version-registry.ts";
+import { InMemoryWorkflowVersionRegistry } from "../workflow-version-registry.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
 
 describe("WorkflowVersionRegistry", () => {
   it("registers and resolves versioned workflows", async () => {
-    const registry = createWorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
 
     const v1 = workflow({ name: "order", version: "1" })
       .stepAsync("validate", async () => "v1-result")
@@ -24,13 +21,13 @@ describe("WorkflowVersionRegistry", () => {
 
     expect(await registry.versions("order")).toEqual(["1", "2"]);
     expect(await registry.latest("order")).toBe("2");
-    expect(await registry.resolve("order", "1")).toBe(v1);
-    expect(await registry.resolve("order", "2")).toBe(v2);
-    expect(await registry.resolve("order")).toBe(v2); // latest
+    expect(await registry.resolve({ name: "order", version: "1" })).toBe(v1);
+    expect(await registry.resolve({ name: "order", version: "2" })).toBe(v2);
+    expect(await registry.resolve({ name: "order" })).toBe(v2); // latest
   });
 
   it("rejects registering without version", async () => {
-    const registry = createWorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
 
     const noVersion = workflow({ name: "order" })
       .stepAsync("step", async () => "done")
@@ -41,7 +38,7 @@ describe("WorkflowVersionRegistry", () => {
 
   it("run() creates new workflow with latest version", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const registry = createWorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
 
     const v1 = workflow({ name: "order", version: "1" })
       .stepAsync("step", async () => "v1")
@@ -67,7 +64,7 @@ describe("WorkflowVersionRegistry", () => {
 
   it("run() resumes existing workflow with stored version", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const registry = createWorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
 
     // Register v1 and v2
     let v1Calls = 0;
@@ -105,7 +102,7 @@ describe("WorkflowVersionRegistry", () => {
 
   it("run() throws if stored version not in registry", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const registry = createWorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
 
     // Create workflow with v1
     const v1 = workflow({ name: "order", version: "1" })
@@ -128,7 +125,7 @@ describe("WorkflowVersionRegistry", () => {
   });
 
   it("names() lists registered workflows", async () => {
-    const registry = createWorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
 
     registry.register(
       workflow({ name: "order", version: "1" })
@@ -146,7 +143,7 @@ describe("WorkflowVersionRegistry", () => {
 
   it("countByVersion reports in-flight workflows per version", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const registry = createWorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
 
     const v1 = workflow({ name: "order", version: "1" })
       .stepAsync("step", async () => "v1")
@@ -177,7 +174,7 @@ describe("WorkflowVersionRegistry", () => {
 
   it("multiple workflow types in same registry", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const registry = createWorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
 
     const order = workflow({ name: "order", version: "1" })
       .stepAsync("s", async () => "order-result")
@@ -200,7 +197,7 @@ describe("WorkflowVersionRegistry", () => {
 
   it("re-registering same version overwrites definition", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const registry = createWorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
 
     const v1a = workflow({ name: "order", version: "1" })
       .stepAsync("s", async () => "first")
@@ -219,16 +216,16 @@ describe("WorkflowVersionRegistry", () => {
   });
 
   it("resolve returns undefined for non-existent workflow name", async () => {
-    const registry = createWorkflowVersionRegistry();
-    expect(await registry.resolve("nonexistent")).toBeUndefined();
-    expect(await registry.resolve("nonexistent", "1")).toBeUndefined();
+    const registry = new InMemoryWorkflowVersionRegistry();
+    expect(await registry.resolve({ name: "nonexistent" })).toBeUndefined();
+    expect(await registry.resolve({ name: "nonexistent", version: "1" })).toBeUndefined();
     expect(await registry.latest("nonexistent")).toBeUndefined();
     expect(await registry.versions("nonexistent")).toEqual([]);
   });
 
   it("run throws for non-existent workflow name", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const registry = createWorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
     const runner = createWorkflowRunner({ storage, registry });
     await expect(runner.run({ workflowId: "x", name: "nonexistent", input: {} })).rejects.toThrow(
       "No workflow",
@@ -236,7 +233,7 @@ describe("WorkflowVersionRegistry", () => {
   });
 
   it("latest is always the last registered version", async () => {
-    const registry = createWorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
 
     registry.register(
       workflow({ name: "order", version: "3" })
@@ -260,7 +257,7 @@ describe("WorkflowVersionRegistry", () => {
 
   it("different versions can have different step structures", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const registry = createWorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
 
     // v1: 2 steps
     const v1 = workflow({ name: "order", version: "1" })
@@ -294,7 +291,7 @@ describe("WorkflowVersionRegistry", () => {
 
   it("concurrent workflows on different versions", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const registry = createWorkflowVersionRegistry();
+    const registry = new InMemoryWorkflowVersionRegistry();
 
     let v1Count = 0;
     let v2Count = 0;
@@ -387,7 +384,7 @@ describe("WorkflowVersionRegistry", () => {
     it("fires onDrained when a version's in-flight count hits zero", async () => {
       const storage = new InMemoryWorkflowStorage();
       const drained: Array<[string, string]> = [];
-      const registry = createWorkflowVersionRegistry({
+      const registry = new InMemoryWorkflowVersionRegistry({
         onDrained: (name, version) => {
           drained.push([name, version]);
         },
@@ -416,7 +413,7 @@ describe("WorkflowVersionRegistry", () => {
 
     it("autoDeregister removes drained versions (except the latest)", async () => {
       const storage = new InMemoryWorkflowStorage();
-      const registry = createWorkflowVersionRegistry({ autoDeregister: true });
+      const registry = new InMemoryWorkflowVersionRegistry({ autoDeregister: true });
 
       const v1 = workflow({ name: "order", version: "1" })
         .stepAsync("x", async () => "v1")
@@ -442,7 +439,7 @@ describe("WorkflowVersionRegistry", () => {
     it("doesn't double-fire onDrained for the same version", async () => {
       const storage = new InMemoryWorkflowStorage();
       let count = 0;
-      const registry = createWorkflowVersionRegistry({
+      const registry = new InMemoryWorkflowVersionRegistry({
         onDrained: () => {
           count++;
         },
@@ -464,7 +461,7 @@ describe("WorkflowVersionRegistry", () => {
   describe("runner routing — promote / findActive drives dispatch", () => {
     it("by default (no promote) routes to latest registered — pre-promote behaviour preserved", async () => {
       const storage = new InMemoryWorkflowStorage();
-      const registry = createWorkflowVersionRegistry();
+      const registry = new InMemoryWorkflowVersionRegistry();
 
       let v1Calls = 0;
       let v2Calls = 0;
@@ -492,7 +489,7 @@ describe("WorkflowVersionRegistry", () => {
 
     it("when v1 is promoted, runner routes to v1 even though v2 is latest-registered", async () => {
       const storage = new InMemoryWorkflowStorage();
-      const registry = createWorkflowVersionRegistry();
+      const registry = new InMemoryWorkflowVersionRegistry();
 
       let v1Calls = 0;
       let v2Calls = 0;
@@ -510,7 +507,7 @@ describe("WorkflowVersionRegistry", () => {
         .build();
       registry.register(v1);
       registry.register(v2);
-      await registry.promote("compute", "1"); // override "latest = v2"
+      await registry.promote({ name: "compute", version: "1" }); // override "latest = v2"
 
       const runner = createWorkflowRunner({ storage, registry });
       await runner.run({ name: "compute", workflowId: "r2", input: { n: 5 } });
@@ -521,7 +518,7 @@ describe("WorkflowVersionRegistry", () => {
 
     it("explicit version on .run() always wins over the active pointer", async () => {
       const storage = new InMemoryWorkflowStorage();
-      const registry = createWorkflowVersionRegistry();
+      const registry = new InMemoryWorkflowVersionRegistry();
 
       let v1Calls = 0;
       let v2Calls = 0;
@@ -539,7 +536,7 @@ describe("WorkflowVersionRegistry", () => {
         .build();
       registry.register(v1);
       registry.register(v2);
-      await registry.promote("compute", "1");
+      await registry.promote({ name: "compute", version: "1" });
 
       const runner = createWorkflowRunner({ storage, registry });
       await runner.run({ name: "compute", version: "2", workflowId: "r3", input: { n: 5 } });
@@ -550,7 +547,7 @@ describe("WorkflowVersionRegistry", () => {
 
     it("rollback shifts the routing target", async () => {
       const storage = new InMemoryWorkflowStorage();
-      const registry = createWorkflowVersionRegistry();
+      const registry = new InMemoryWorkflowVersionRegistry();
 
       let v1Calls = 0;
       let v2Calls = 0;
@@ -569,7 +566,7 @@ describe("WorkflowVersionRegistry", () => {
       registry.register(v1);
       registry.register(v2);
 
-      await registry.promote("compute", "2");
+      await registry.promote({ name: "compute", version: "2" });
       const runner = createWorkflowRunner({ storage, registry });
       await runner.run({ name: "compute", workflowId: "r4a", input: { n: 5 } });
       expect(v2Calls).toBe(1);
@@ -602,7 +599,7 @@ describe("WorkflowVersionRegistry — lifecycle stamps on an injected clock", ()
     expect(records[1]!.registeredAt.toISOString()).toBe("2026-01-01T00:00:00.000Z");
 
     clock.advance(1_000);
-    const promoted = await registry.promote("stamped", "2");
+    const promoted = await registry.promote({ name: "stamped", version: "2" });
     expect(promoted.activeAt?.toISOString()).toBe("2026-01-01T00:00:02.000Z");
 
     clock.advance(1_000);

@@ -6,13 +6,14 @@
 // their InMemorySchedulerStorage / PgSchedulerStorage / etc.
 // ---------------------------------------------------------------------------
 
-import type { DurableScheduleConfig, SchedulerStorage, WorkflowStorage } from "@promin/workflow";
+import type { WorkflowStorage } from "@promin/workflow";
+import type { DurableScheduleConfig, SchedulerStorage } from "@promin/workflow/scheduler";
 import {
   computeNextRun,
   isTickLogStorage,
   scheduleTickRunId,
   validateScheduleConfig,
-} from "@promin/workflow";
+} from "@promin/workflow/scheduler";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 
@@ -153,7 +154,10 @@ function nextRunIso(params: {
   const { config, clock } = params;
   if (!(config.enabled ?? true)) return undefined;
   try {
-    const next = computeNextRun(config, frozenClockAt({ when: clock.now(), base: clock }));
+    const next = computeNextRun({
+      config,
+      clock: frozenClockAt({ when: clock.now(), base: clock }),
+    });
     return next ? next.toISOString() : undefined;
   } catch {
     return undefined;
@@ -421,14 +425,16 @@ export function getScheduleHistory(
       // Enrich each tick with status / duration from the matching workflow
       // row, joined on the deterministic `scheduleTickRunId` id. One bulk
       // query per page, not N+1.
-      const workflowIds = ticks.map((t) => scheduleTickRunId(id, t.tickNumber));
+      const workflowIds = ticks.map((t) =>
+        scheduleTickRunId({ scheduleId: id, tickNumber: t.tickNumber }),
+      );
       const wfStates = await Promise.all(
         workflowIds.map((wfId) => workflowStorage.loadWorkflow(wfId)),
       );
       const wfById = new Map(wfStates.filter((s) => s != null).map((s) => [s!.workflowId, s!]));
 
       const history: ScheduleTickHistoryDto[] = ticks.map((t) => {
-        const wfId = scheduleTickRunId(id, t.tickNumber);
+        const wfId = scheduleTickRunId({ scheduleId: id, tickNumber: t.tickNumber });
         const wf = wfById.get(wfId);
         const firedMs = t.firedAt.getTime();
         // Both lag and duration are measured against this fire's
@@ -547,7 +553,7 @@ export function getScheduleUpcoming(deps: ScheduleRoutesDeps) {
     let cursor = clock.now();
     let exhausted = false;
     for (let i = 0; i < count; i++) {
-      const next = computeNextRun(config, frozenClockAt({ when: cursor, base: clock }));
+      const next = computeNextRun({ config, clock: frozenClockAt({ when: cursor, base: clock }) });
       if (!next) {
         exhausted = true;
         break;

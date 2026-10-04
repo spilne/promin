@@ -21,7 +21,7 @@
 // `RedisSchedulerStorage.commitPoll` and `RedisStepQueue.requeueStuck`).
 // ---------------------------------------------------------------------------
 
-import type { LeaderLease, LeaderLeaseStore } from "@promin/workflow";
+import type { LeaderLease, LeaderLeaseStore } from "@promin/workflow/scheduler";
 import type { RedisStoreClient } from "./redis-client.ts";
 
 /**

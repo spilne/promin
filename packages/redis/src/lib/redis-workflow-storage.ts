@@ -91,16 +91,18 @@ import type {
   RunSource,
 } from "@promin/workflow";
 import {
-  CANCELLED_ERROR,
-  CANCELLED_ERROR_TAG,
   FenceTokenMismatchError,
-  workflowMetadataMatches,
   WORKFLOW_STATUSES,
   isTerminalWorkflowStatus,
+} from "@promin/workflow";
+import {
+  CANCELLED_ERROR,
+  CANCELLED_ERROR_TAG,
+  workflowMetadataMatches,
   encodeRunSource,
   decodeRunSource,
   withoutCompensationLedger,
-} from "@promin/workflow";
+} from "@promin/workflow/storage-kit";
 import { applyMetadataPatch, sortWorkflowRows } from "@promin/workflow/storage-kit";
 import type { RedisStoreClient } from "./redis-client.ts";
 import { SystemWallClock, type WallClock } from "@promin/workflow";

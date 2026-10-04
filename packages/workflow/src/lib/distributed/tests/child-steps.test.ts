@@ -60,9 +60,18 @@ describe("subworkflow steps under the distributed runner", () => {
     });
     // Hosts the parent's and the child's ordinary steps — not "enrich".
     const registry = new MapStepRegistry();
-    registry.register("load", (ctx) => succeed((ctx.input as { n: number }).n));
-    registry.register("lookup", (ctx) => succeed((ctx.input as { id: number }).id * 100));
-    registry.register("after", (ctx) => succeed((ctx.deps["enrich"] as number) + 1));
+    registry.register({
+      stepName: "load",
+      handler: (ctx) => succeed((ctx.input as { n: number }).n),
+    });
+    registry.register({
+      stepName: "lookup",
+      handler: (ctx) => succeed((ctx.input as { id: number }).id * 100),
+    });
+    registry.register({
+      stepName: "after",
+      handler: (ctx) => succeed((ctx.deps["enrich"] as number) + 1),
+    });
     const worker = createWorker({ storage, stepQueue: queue, registry, pollIntervalMs: 10, clock });
     void worker.start();
 
@@ -89,7 +98,7 @@ describe("subworkflow steps under the distributed runner", () => {
   });
 
   it("a stub workflow's child step fails with an error naming the missing definition", async () => {
-    const stub = buildStubWorkflow(parent.dag, parent.name);
+    const stub = buildStubWorkflow({ dag: parent.dag, name: parent.name });
     const step = stub._definition.steps.find((s) => s.name === "enrich")!;
     expect(step.kind).toBe("child");
     const storage = new InMemoryWorkflowStorage();
@@ -133,9 +142,18 @@ describe("subworkflow steps under the distributed runner", () => {
       .step("after", ({ prev }) => succeed((prev as number) + 1))
       .build();
     const registry = new MapStepRegistry();
-    registry.register("load", (ctx) => succeed((ctx.input as { n: number }).n));
-    registry.register("scale", (ctx) => succeed((ctx.deps["wait"] as number) * 10));
-    registry.register("after", (ctx) => succeed((ctx.deps["enrich"] as number) + 1));
+    registry.register({
+      stepName: "load",
+      handler: (ctx) => succeed((ctx.input as { n: number }).n),
+    });
+    registry.register({
+      stepName: "scale",
+      handler: (ctx) => succeed((ctx.deps["wait"] as number) * 10),
+    });
+    registry.register({
+      stepName: "after",
+      handler: (ctx) => succeed((ctx.deps["enrich"] as number) + 1),
+    });
     const worker = createWorker({ storage, stepQueue: queue, registry, pollIntervalMs: 10, clock });
     void worker.start();
 

@@ -8,11 +8,8 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import {
-  InMemorySchedulerStorage,
-  InMemoryWorkflowStorage,
-  createWorkflowRunner,
-} from "@promin/workflow";
+import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
+import { InMemorySchedulerStorage } from "@promin/workflow/scheduler";
 import { LocalAgent } from "../../agent/local-agent.ts";
 import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
 import { createDurableSchedulerTools } from "../durable-scheduler-tool.ts";

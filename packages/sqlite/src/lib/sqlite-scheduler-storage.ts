@@ -1,3 +1,4 @@
+import type { WallClock } from "@promin/workflow";
 import type {
   CommitPollResult,
   DurableScheduleConfig,
@@ -5,9 +6,9 @@ import type {
   ScheduleCommit,
   SchedulerStorage,
   ScheduleTick,
-  WallClock,
-} from "@promin/workflow";
-import { flattenLeafPaths, SystemWallClock } from "@promin/workflow";
+} from "@promin/workflow/scheduler";
+import { SystemWallClock } from "@promin/workflow";
+import { flattenLeafPaths } from "@promin/workflow/storage-kit";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 import { SqliteLeaderLeaseStore } from "./sqlite-leader-lease-store.ts";
 

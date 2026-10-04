@@ -3,12 +3,12 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
+import { InMemoryWorkflowStorage } from "@promin/workflow";
 import {
   InMemorySchedulerStorage,
-  InMemoryWorkflowStorage,
   type DurableScheduleConfig,
   type ScheduleTick,
-} from "@promin/workflow";
+} from "@promin/workflow/scheduler";
 import { QueuedWorkflows } from "../../workflows/index.ts";
 import { ZoryaScheduler, type AgentScheduleDispatcher } from "../index.ts";
 

@@ -11,20 +11,13 @@
 //     here on connect; we resolve names → DAGs through this registry
 // ---------------------------------------------------------------------------
 
-import type {
-  LeaderElection,
-  RecoveryStrategy,
-  StepQueue,
-  Workflow,
-  WorkerRegistry,
-  WorkflowDAG,
-  WorkflowStorage,
-} from "@promin/workflow";
+import type { RecoveryStrategy, Workflow, WorkflowDAG, WorkflowStorage } from "@promin/workflow";
+import type { LeaderElection, StepQueue, WorkerRegistry } from "@promin/workflow/distributed";
 import {
   buildStubWorkflow,
   DistributedWorkflowRunner,
   createDistributedWorkflowRunner,
-} from "@promin/workflow";
+} from "@promin/workflow/distributed";
 import {
   InMemoryWorkflowAdvertisementRegistry,
   type AdvertisedWorkflow,
@@ -126,7 +119,7 @@ export class DistributedWorkflows extends ZoryaWorkflows {
         })),
       };
       if (resolvedVersion === undefined) resolvedVersion = advertised.version;
-      workflow = buildStubWorkflow(dag, advertised.name, resolvedVersion);
+      workflow = buildStubWorkflow({ dag, name: advertised.name, version: resolvedVersion });
     }
 
     // Pre-create the storage row so typed fields land (namespace, metadata,

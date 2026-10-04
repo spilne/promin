@@ -87,6 +87,6 @@ export interface ScheduleTick {
  * Both the scheduler loop's workflow-trigger path and
  * `dispatchAgentSchedule`'s agent path use this — single source of truth.
  */
-export function scheduleTickRunId(scheduleId: string, tickNumber: number): string {
-  return `${scheduleId}.${tickNumber}`;
+export function scheduleTickRunId(params: { scheduleId: string; tickNumber: number }): string {
+  return `${params.scheduleId}.${params.tickNumber}`;
 }

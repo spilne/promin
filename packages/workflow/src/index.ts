@@ -1,31 +1,58 @@
-// Durable execution
+// ---------------------------------------------------------------------------
+// @promin/workflow — build and run durable workflows.
+//
+// The root entry covers authoring (workflow, flow, steps, signals, streams,
+// state machines), running (createWorkflowRunner, recovery, triggers), the
+// storage contract, errors and the in-memory implementations. It loads in
+// any JavaScript runtime: nothing reachable from here imports a Node
+// built-in or `bun:test`.
+//
+// Everything else lives behind a subpath:
+//   @promin/workflow/distributed  workers, step queue, distributed runner
+//   @promin/workflow/scheduler    cron / rrule / interval schedulers
+//   @promin/workflow/discovery    filesystem scanners (Node-compatible runtime)
+//   @promin/workflow/sql-models   dbt-style SQL model DAGs
+//   @promin/workflow/storage-kit  helpers for storage backend authors
+//   @promin/workflow/testing      conformance suites (bun:test)
+//   @promin/workflow/dev          non-determinism instrumentation
+// ---------------------------------------------------------------------------
+
+// Authoring
+export { workflow, flow, type WorkflowBuilder } from "./lib/durable/workflow-builder.ts";
+export type {
+  Workflow,
+  WorkflowErrorOf,
+  IdempotencyConfig,
+  WorkflowHandle,
+  WorkflowStatusInfo,
+  WorkflowHooks,
+  CompensateConfig,
+  DispatchConfig,
+} from "./lib/durable/workflow-types.ts";
+export { type WorkflowDAG, dagToMermaid, dagToDot } from "./lib/durable/workflow-dag-viz.ts";
+export type {
+  StepContext,
+  DagStepContext,
+  MapStepContext,
+  StepOptions,
+  StepFailureStrategy,
+  MapOverOptions,
+  MapElementOptions,
+  ParallelStepsOptions,
+  JournaledStepOptions,
+  SubworkflowOptions,
+  TripwireOptions,
+  StepQueueOption,
+  StepQueueContext,
+  StepRuntime,
+  WorkflowMetadataRef,
+  RunChildWorkflow,
+} from "./lib/durable/step-definition.ts";
+export type { LoopOptions } from "./lib/durable/steps/loop-step.ts";
+export { MatchError, type MatchParams } from "./lib/durable/steps/match-step.ts";
+
+// Storage contract
 export {
-  workflow,
-  flow,
-  WorkflowBuilder,
-  type Workflow,
-  type WorkflowErrorOf,
-  type IdempotencyConfig,
-  type WorkflowHandle,
-  type WorkflowStatusInfo,
-  type WorkflowHooks,
-  type WorkflowDAG,
-  dagToMermaid,
-  dagToDot,
-  type StepContext,
-  type DagStepContext,
-  type MapStepContext,
-  type StepOptions,
-  type StepFailureStrategy,
-  type MapOverOptions,
-  type MapElementOptions,
-  type ParallelStepsOptions,
-  type JournaledStepOptions,
-  type SubworkflowOptions,
-  type TripwireOptions,
-  type LoopOptions,
-  type StepQueueOption,
-  type StepQueueContext,
   type WorkflowStorage,
   type WorkflowRunStore,
   type WorkflowLockStore,
@@ -39,6 +66,8 @@ export {
   type StepCheckpointStore,
   type CompensationLedgerStore,
   type JournalStore,
+  type FenceGuard,
+  type FenceToken,
   type FencedWrite,
   type CreateWorkflowParams,
   type CreateWorkflowResult,
@@ -62,25 +91,32 @@ export {
   type TryLockAndLoadResult,
   type ReleaseLockParams,
   type HeartbeatParams,
+  type WorkflowOrderBy,
   type WorkflowListFilter,
   type ListWorkflowsParams,
   type LoadRunHistoryParams,
   type PurgeCompletedParams,
   type CancelStaleWorkflowsParams,
+  type WorkflowWakeup,
+  type OrphanedRun,
   type ListDueTimersParams,
   type ListSignalWakeupsParams,
   type ListOrphanedRunsParams,
   type DeliverSignalParams,
+  type SignalTokenRecord,
   type CreateSignalTokenParams,
   type MarkSignalTokenCompletedParams,
   type MarkSignalTokenCompletedResult,
+  type StreamChunk,
   type AppendStreamChunkParams,
   type ReadStreamChunksParams,
   type NotifyStepStartedParams,
   type SubscribeToWorkflowParams,
   type SaveStepAttemptParams,
   type LoadStepAttemptsParams,
+  type StepCheckpoint,
   type CheckpointStepParams,
+  type StepCompensationOutcome,
   type BeginCompensationParams,
   type SaveStepCompensationParams,
   type LoadJournalParams,
@@ -97,13 +133,33 @@ export {
   hasCapability,
   storageCapabilities,
   STORAGE_CAPABILITIES,
-  type FenceGuard,
-  type FenceToken,
-  type WorkflowOrderBy,
-  type SignalTokenRecord,
-  type WorkflowWakeup,
-  type OrphanedRun,
-  type StreamChunk,
+} from "./lib/durable/workflow-storage.ts";
+export {
+  type WorkflowState,
+  type WorkflowSummary,
+  type WorkflowRunSummary,
+  type StepState,
+  type StepTaskState,
+  type SignalState,
+  type WorkflowStatus,
+  type WorkflowStatusSnapshot,
+  type RunSource,
+  type StepStatus,
+  type StepType,
+  type CompensationStatus,
+  type StepAttemptRecord,
+  type StepAttemptType,
+  type FailedWorkflowRecord,
+  type WorkflowRunEvent,
+  WORKFLOW_STATUSES,
+  TERMINAL_WORKFLOW_STATUSES,
+  isTerminalWorkflowStatus,
+  isCancelledRun,
+} from "./lib/durable/workflow-state.ts";
+export { InMemoryWorkflowStorage } from "./lib/durable/in-memory-storage.ts";
+
+// Streams
+export {
   type StreamDescriptor,
   type StreamKind,
   type DefineStreamOptions,
@@ -112,38 +168,21 @@ export {
   appendStreamChunk,
   appendExternalStreamChunk,
   peekStreamChunk,
-  workflowMetadataMatches,
-  type WorkflowState,
-  type WorkflowSummary,
-  type WorkflowRunSummary,
-  type StepState,
-  type StepTaskState,
-  type SignalState,
-  type WorkflowStatus,
-  type StepStatus,
-  type StepType,
-  type RunSource,
-  RUN_SOURCE_CODES,
-  WORKFLOW_STATUSES,
-  TERMINAL_WORKFLOW_STATUSES,
-  isTerminalWorkflowStatus,
-  CANCELLED_ERROR,
-  CANCELLED_ERROR_TAG,
-  isCancelledRun,
-  withoutCompensationLedger,
-  type WorkflowStatusSnapshot,
-  encodeRunSource,
-  decodeRunSource,
-  InMemoryWorkflowStorage,
-  WorkflowVersionRegistry,
+} from "./lib/durable/streams.ts";
+
+// Versioning
+export {
+  type WorkflowVersionRegistry,
   InMemoryWorkflowVersionRegistry,
   ScopedWorkflowVersionRegistry,
-  createWorkflowVersionRegistry,
   type WorkflowVersionRegistryConfig,
-  type IWorkflowVersionRegistry,
   type VersionRecord,
   type VersionRunCounts,
   type VersionStatus,
+} from "./lib/durable/workflow-version-registry.ts";
+
+// Errors
+export {
   WorkflowError,
   StepError,
   WorkflowFailedError,
@@ -163,12 +202,10 @@ export {
   WorkflowTripwireError,
   TripwireStorageMissingError,
   LoopLimitExceededError,
-  MatchError,
-  type MatchParams,
-  topologicalSort,
-  computeReadySet,
-  type DagNode,
-  DefaultWorkflowRunner,
+} from "./lib/durable/durable-pipeline-error.ts";
+
+// Running
+export {
   InProcessStepExecutor,
   RoutingStepExecutor,
   createWorkflowRunner,
@@ -183,102 +220,108 @@ export {
   type WorkflowRunError,
   type WorkflowRunSafeResult,
   type WorkflowRunParamsFor,
+  type WorkflowSubscribeParams,
+  type WorkflowGetStatusParams,
   type StepExecutor,
   type StepExecutionRequest,
   type StepExecutionResult,
   type StepAttemptFailure,
-  type StepRuntime,
-  type WorkflowMetadataRef,
-  type RunChildWorkflow,
   type RecoveryResult,
   type StaleTerminationAction,
+} from "./lib/durable/workflow-runner.ts";
+export {
   trigger,
   WorkflowResult,
+  type TriggerParams,
+  type TriggerDuplicatePolicy,
+} from "./lib/durable/workflow-trigger.ts";
+export {
   webhookTrigger,
   type WebhookTriggerConfig,
   type WebhookRequest,
   type WebhookHandler,
   type WebhookHmacConfig,
+} from "./lib/durable/webhook-trigger.ts";
+
+// Journaled steps
+export {
   type JournalEntry,
   type JournalExit,
   type JournalFailureExit,
   type JournalSlot,
   type CompletePendingResult,
   type JournalStepType,
-  JOURNAL_STEP_TYPES,
   type JournalPhase,
-  type ActivityJournalStorage,
-  type JournaledSuspendStorage,
-  isActivityJournalStorage,
-  isJournaledSuspendStorage,
+} from "./lib/durable/activity-journal.ts";
+export {
   runJournaledStep,
   completeSignal,
   completeDueSleeps,
-  CHILD_ENDED_SIGNAL_PREFIX,
-  childEndedSignalName,
-  wakeParentOfEndedRun,
-  invokeQueryHandler,
-  hasQueryHandlers,
-  listQueryHandlers,
-  clearQueryHandlers,
-  configureQueryRegistry,
-  DEFAULT_SUSPENDED_QUERY_TTL_MS,
   JournalNonDeterminismError,
   JournalStorageMissingError,
   type JournaledContext,
   type JournaledStepBody,
   type ActivityYield,
   type ActivityOptions,
-  type CompensateConfig,
-  type DispatchConfig,
-  type CompensationStatus,
-  type StepAttemptRecord,
-  type StepAttemptType,
-  type StepAttemptStorage,
-  isStepAttemptStorage,
-  type StepCheckpoint,
-  type StepCheckpointStorage,
-  isStepCheckpointStorage,
-  type CompensationLedgerStorage,
-  type StepCompensationOutcome,
-  isCompensationLedgerStorage,
-  type TripwireCapableStorage,
-  isTripwireCapableStorage,
-  type SubscribableStorage,
-  isSubscribableStorage,
-  type WorkflowRunEvent,
-  type FailedWorkflowRecord,
+} from "./lib/durable/journaled-step.ts";
+export { wakeParentOfEndedRun } from "./lib/durable/child-wake.ts";
+export {
+  invokeQueryHandler,
+  hasQueryHandlers,
+  listQueryHandlers,
+  configureQueryRegistry,
+  DEFAULT_SUSPENDED_QUERY_TTL_MS,
+} from "./lib/durable/query-registry.ts";
+
+// Serializable workflow schema (visual editors) and its compiler
+export {
   type WorkflowSchema,
   type StepSchema,
   type SingleStepSchema,
   type MapStepSchema,
   type StepSchemaOptions,
   type MapStepSchemaOptions,
-  type JsonSchema,
   type NodeUiMeta,
+  type JsonSchema,
+} from "./lib/durable/workflow-schema.ts";
+export {
   WorkflowSchemaZ,
   validateWorkflowSchema,
   validateWorkflowSchemaSafe,
+} from "./lib/durable/workflow-schema-validator.ts";
+export {
   type ActivityRegistry,
   type ActivityFactory,
   type ActivityContext,
   MapActivityRegistry,
-  compileWorkflow,
-  WorkflowCompilationError,
+} from "./lib/durable/activity-registry.ts";
+export { compileWorkflow, WorkflowCompilationError } from "./lib/durable/workflow-compiler.ts";
+
+// State machines
+export {
   stateMachine,
   machine,
   pureStateMachine,
-  StateMachineBuilder,
-  StateMachineInstance,
-  QuickMachineBuilder,
-  MachineHandle,
+  type StateMachineBuilder,
+  type StateMachineInstance,
+  type QuickMachineBuilder,
+  type MachineHandle,
   type PureStateMachineBuilder,
   EventDataValidationError,
   StateMachineVersionMismatchError,
   TIMEOUT_EVENT,
+  type MachineLimits,
+  type MachineMiddleware,
+  type TransitionContext,
+  composeMachineMiddleware,
+  retryMiddleware as machineRetryMiddleware,
+} from "./lib/durable/state-machine.ts";
+export {
   type StateMachineStorage,
   type StateMachineLockToken,
   InMemoryStateMachineStorage,
+} from "./lib/durable/state-machine-storage.ts";
+export {
   type MachineSnapshot,
   type MachineState,
   type TransitionEvent,
@@ -287,169 +330,19 @@ export {
   type EventsOf,
   type TerminalStates,
   type TransitionTo,
-  transitionTo,
-  type MachineLimits,
-  type MachineMiddleware,
-  type TransitionContext,
   type EventsMap,
   type EventData,
   type EventName,
   type SendParams,
   type StrictSchemas,
-  composeMachineMiddleware,
-  retryMiddleware as machineRetryMiddleware,
-} from "./lib/durable/index.ts";
-
-// Scheduler
-export {
-  type ScheduleConfig,
-  type DurableScheduleConfig,
-  type ScheduleTick,
-  type Scheduler,
-  type SchedulerStorage,
-  type ScheduleCommit,
-  type CommitPollResult,
-  isTickLogStorage,
-  InMemoryScheduler,
-  type InMemorySchedulerConfig,
-  createScheduler,
-  DurableScheduler,
-  type DurableSchedulerConfig,
-  type SchedulerErrorEvent,
-  type SchedulerErrorPhase,
-  type PlannedSchedule,
-  createDurableScheduler,
-  InMemorySchedulerStorage,
-  computeDueTicks,
-  computeNextRun,
-  planDueTicks,
-  commitPlannedSchedules,
-  schedulePartition,
-  type LeaderLease,
-  type LeaderLeaseStore,
-  type InMemoryLeaderLeasesConfig,
-  InMemoryLeaderLeases,
-  LeaseLeaderElection,
-  StaleLeaseError,
-  isStaleLeaseError,
-  schedulerLeaderKey,
-  validateScheduleConfig,
-  scheduleMetadataContains,
-  flattenLeafPaths,
-  scheduleTickRunId,
-} from "./lib/scheduler/index.ts";
-
-// Distributed workflow execution
-export {
-  type StepRegistry,
-  type StepHandler,
-  type StepRegistration,
-  type WorkerStepOptions,
-  MapStepRegistry,
-  type StepQueue,
-  type StepTask,
-  type StepTaskStatus,
-  type StepTaskRecord,
-  type StepQueueEnqueueParams,
-  type StepQueueClaimParams,
-  type StepQueueRequeueParams,
-  type StepQueueRequeueResult,
-  DEFAULT_MAX_DELIVERIES,
-  deadLetterError,
-  percentileCont,
-  InMemoryStepQueue,
-  type InMemoryStepQueueConfig,
-  DistributedWorkflowRunner,
-  createDistributedWorkflowRunner,
-  type DistributedRunnerConfig,
-  type DistributedRunnerErrorEvent,
-  type WorkflowCoordinator,
-  type CoordinatorConfig,
-  DefaultCoordinator,
-  createCoordinator,
-  buildStubWorkflow,
-  type WorkflowWorker,
-  type WorkerConfig,
-  type WorkerInfo,
-  type WorkerStatus,
-  type WorkerRegistry,
-  InMemoryWorkerRegistry,
-  type InMemoryWorkerRegistryConfig,
-  type LeaderElection,
-  SingleLeader,
-  coordinatorLeaderKey,
-  scannerLeaderKey,
-  type SleepScanner,
-  type SleepScannerConfig,
-  DefaultSleepScanner,
-  createSleepScanner,
-  type SignalScanner,
-  type SignalScannerConfig,
-  DefaultSignalScanner,
-  createSignalScanner,
-  DefaultWorker,
-  createWorker,
-  TaskLeaseLostError,
-  WorkerStoppingError,
-  type WorkerHooks,
-  type WorkerErrorEvent,
-  type WorkerMiddleware,
-  type NextFn,
-  timeoutMiddleware,
-  retryMiddleware,
-  loggingMiddleware,
-  metricsMiddleware,
-  StepQueueExecutor,
-  StepWaitTimeoutError,
-  StepWaitAbandonedError,
-  DEFAULT_STEP_WAIT_TIMEOUT_MS,
-  type WorkflowAdvertisementRegistry,
-  type AdvertisedWorkflow,
-  type AdvertisementEntry,
-  InMemoryWorkflowAdvertisementRegistry,
-  type InMemoryWorkflowAdvertisementRegistryConfig,
-  type WorkflowStartQueue,
-  type WorkflowStartRecord,
-  type WorkerWorkflowSpec,
-  type WorkflowStartClaimRef,
-  InMemoryWorkflowStartQueue,
-  type InMemoryWorkflowStartQueueConfig,
-} from "./lib/distributed/index.ts";
-
-// SQL Models (dbt-style)
-export {
-  type SqlModel,
-  type SqlProject,
-  type SqlProjectResult,
-  type Materialization,
-  type ExpectationDef as SqlExpectationDef,
-  compileSqlProject,
-  type SqlCompilerConfig,
-} from "./lib/sql-models/index.ts";
-
-// Filesystem-based discovery — share a single configured scanner across
-// the dashboard server and any worker / agent process that also imports
-// workflow definitions from disk.
-export {
-  WorkflowScanner,
-  ScheduleScanner,
-  applyDiscoveredSchedules,
-  type WorkflowScannerOptions,
-  type WorkflowScanResult,
-  type ScheduleScannerOptions,
-  type ScheduleScanResult,
-  type ApplyDiscoveredSchedulesOptions,
-  type ApplyDiscoveredSchedulesResult,
-} from "./lib/discovery/index.ts";
+  transitionTo,
+} from "./lib/durable/state-machine-types.ts";
 
 // Zero-dep JSON-Schema-native schema builder + validator. Used by
 // `defineSignal` to type signal payloads and snapshot validation rules
-// onto suspended steps.
-//
-// The builder's `JsonSchema` is exported as `SignalPayloadSchema` to
-// avoid colliding with the existing workflow-IR `JsonSchema` interface
-// (a permissive open-shape type for activity I/O annotations, not the
-// tagged union the schema builder produces).
+// onto suspended steps. The builder's `JsonSchema` is exported as
+// `SignalPayloadSchema` so it doesn't collide with the workflow-schema
+// `JsonSchema` above.
 export {
   s,
   type Schema,
@@ -459,11 +352,7 @@ export {
 } from "./lib/schema/builder.ts";
 export { validate, type ValidationError, type ValidationResult } from "./lib/schema/validator.ts";
 
-// First-class signal types — `defineSignal` returns an addressable
-// artifact (name + schema) callers import wherever they suspend on /
-// deliver to / inspect the signal. Mirrors how `tool({...})` works for
-// tools. `approvalSignal` is the canonical preset over `ctx.signal` with
-// the canonical approval shape and the `approve:` name prefix.
+// First-class signal types
 export {
   defineSignal,
   approvalSignal,
@@ -474,8 +363,8 @@ export {
   type ApprovalDecision,
 } from "./lib/signals/define-signal.ts";
 
-// Injectable wall-clock time source + timer scheduler for Promise-based
-// code (stores, scanners, workers). `FakeWallClock` drives it in tests.
+// Injectable wall-clock time source + timer scheduler. `FakeWallClock`
+// drives it in tests.
 export {
   type WallClock,
   type TimerHandle,
@@ -484,14 +373,12 @@ export {
 } from "./lib/shared/wall-clock.ts";
 
 // Plain-data contracts shared by the engine and its storage/transport
-// packages: persisted retry shape, typed-error constraint, step cache,
-// and dead-letter / schedule source contracts.
+// packages: persisted retry shape, typed-error constraint, step cache and
+// stream source/sink contracts.
 export {
   type RetryPolicy,
   type WorkflowRetryPolicy,
   RETRY_POLICY_DEFAULTS,
-  retryAsync,
-  retryDelayMs,
 } from "./lib/shared/retry-policy.ts";
 export { type TaggedError } from "./lib/shared/tagged-error.ts";
 export { type CacheStore, MemoryCache, type MemoryCacheConfig } from "./lib/shared/cache-store.ts";

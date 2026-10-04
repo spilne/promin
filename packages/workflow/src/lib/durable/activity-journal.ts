@@ -3,9 +3,6 @@
 // storage side is `JournalStore` (`./storage/journal-store.ts`).
 // ---------------------------------------------------------------------------
 
-import { hasCapability } from "./storage/capabilities.ts";
-import type { JournalStore } from "./storage/journal-store.ts";
-
 /** What kind of checkpoint an entry records. Used by replay + the sleep scanner. */
 export type JournalStepType = "activity" | "sleep" | "signal" | "compensation" | "child";
 
@@ -105,19 +102,3 @@ export interface JournalEntry {
 }
 
 export type { JournalStore } from "./storage/journal-store.ts";
-
-/** @deprecated Use `JournalStore`. */
-export type ActivityJournalStorage = JournalStore;
-
-/** @deprecated Merged into `JournalStore`. */
-export type JournaledSuspendStorage = JournalStore;
-
-/** @deprecated Use `hasCapability(storage, "journal")`. */
-export function isActivityJournalStorage<S extends object>(
-  storage: S,
-): storage is S & JournalStore {
-  return hasCapability(storage, "journal");
-}
-
-/** @deprecated Use `hasCapability(storage, "journal")`. */
-export const isJournaledSuspendStorage = isActivityJournalStorage;

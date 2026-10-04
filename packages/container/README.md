@@ -14,7 +14,7 @@ Three runtimes, same interface:
 
 ```typescript
 import { containerStep, LocalProcessRuntime } from "@promin/container";
-import { MapStepRegistry, createWorker } from "@promin/workflow";
+import { MapStepRegistry, createWorker } from "@promin/workflow/distributed";
 
 const runtime = new LocalProcessRuntime();
 
@@ -171,13 +171,8 @@ registry.register(
 Same workflow, some steps local, some containerized:
 
 ```typescript
-import {
-  workflow,
-  createWorker,
-  createWorkflowRunner,
-  RoutingStepExecutor,
-  StepQueueExecutor,
-} from "@promin/workflow";
+import { workflow, createWorkflowRunner, RoutingStepExecutor } from "@promin/workflow";
+import { createWorker, StepQueueExecutor } from "@promin/workflow/distributed";
 
 const processVideo = workflow<{ videoId: string }>({ name: "process-video" })
   .step("download", ({ input }) => downloadVideo(input.videoId)) // local

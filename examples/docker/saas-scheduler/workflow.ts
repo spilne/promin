@@ -34,7 +34,8 @@
 // ---------------------------------------------------------------------------
 
 import { tryPromise } from "@spilne/perfect-core";
-import { workflow, type StepHandler } from "@promin/workflow";
+import { workflow } from "@promin/workflow";
+import { type StepHandler } from "@promin/workflow/distributed";
 
 export interface TenantJob {
   readonly tenantId: string;

@@ -1,12 +1,23 @@
+// ---------------------------------------------------------------------------
+// @promin/workflow/distributed — run workflow steps on remote workers.
+//
+// The distributed runner drives a workflow and hands its steps to a
+// `StepQueue`; workers claim them, run the handlers they registered and
+// commit the outcome. Also here: the worker registry, leader election,
+// sleep / signal scanners, worker middleware, the step-queue executor for
+// mixed local + remote runs, workflow advertisements and the start queue.
+// ---------------------------------------------------------------------------
+
 export {
   type StepRegistry,
   type StepHandler,
-  type StepContext,
+  type WorkerStepContext,
   type StepRegistration,
+  type RegisterStepParams,
   type WorkerStepOptions,
-  type StepFailureStrategy,
+  type WorkerStepFailureStrategy,
   MapStepRegistry,
-} from "./step-registry.ts";
+} from "./lib/distributed/step-registry.ts";
 export {
   type StepQueue,
   type StepTask,
@@ -17,60 +28,51 @@ export {
   type StepQueueRequeueParams,
   type StepQueueRequeueResult,
   DEFAULT_MAX_DELIVERIES,
-  deadLetterError,
-  percentileCont,
-} from "./step-queue.ts";
-export { InMemoryStepQueue, type InMemoryStepQueueConfig } from "./in-memory-step-queue.ts";
+} from "./lib/distributed/step-queue.ts";
 export {
-  DistributedWorkflowRunner,
+  InMemoryStepQueue,
+  type InMemoryStepQueueConfig,
+} from "./lib/distributed/in-memory-step-queue.ts";
+export {
+  type DistributedWorkflowRunner,
   createDistributedWorkflowRunner,
   type DistributedRunnerConfig,
   type DistributedRunnerErrorEvent,
-  /** @deprecated Use DistributedWorkflowRunner */
-  type WorkflowCoordinator,
-  /** @deprecated Use DistributedRunnerConfig */
-  type CoordinatorConfig,
-  /** @deprecated Use DistributedWorkflowRunner */
-  DefaultCoordinator,
-  /** @deprecated Use createDistributedWorkflowRunner */
-  createCoordinator,
   buildStubWorkflow,
-} from "./coordinator.ts";
+} from "./lib/distributed/coordinator.ts";
 export {
   type WorkflowWorker,
   type WorkerConfig,
   type WorkerHooks,
   type WorkerErrorEvent,
-  DefaultWorker,
+  type WorkerErrorPhase,
   createWorker,
   TaskLeaseLostError,
   WorkerStoppingError,
-} from "./worker.ts";
+} from "./lib/distributed/worker.ts";
 export {
   type WorkerInfo,
   type WorkerStatus,
   type WorkerRegistry,
   InMemoryWorkerRegistry,
   type InMemoryWorkerRegistryConfig,
-} from "./worker-registry.ts";
+} from "./lib/distributed/worker-registry.ts";
 export {
   type LeaderElection,
   SingleLeader,
   coordinatorLeaderKey,
   scannerLeaderKey,
-} from "./leader-election.ts";
+} from "./lib/distributed/leader-election.ts";
 export {
   type SleepScanner,
   type SleepScannerConfig,
-  DefaultSleepScanner,
   createSleepScanner,
-} from "./sleep-scanner.ts";
+} from "./lib/distributed/sleep-scanner.ts";
 export {
   type SignalScanner,
   type SignalScannerConfig,
-  DefaultSignalScanner,
   createSignalScanner,
-} from "./signal-scanner.ts";
+} from "./lib/distributed/signal-scanner.ts";
 export {
   type WorkerMiddleware,
   type NextFn,
@@ -78,20 +80,21 @@ export {
   retryMiddleware,
   loggingMiddleware,
   metricsMiddleware,
-} from "./middleware.ts";
+} from "./lib/distributed/middleware.ts";
 export {
   StepQueueExecutor,
+  type StepQueueExecutorConfig,
   StepWaitTimeoutError,
   StepWaitAbandonedError,
   DEFAULT_STEP_WAIT_TIMEOUT_MS,
-} from "./step-queue-executor.ts";
+} from "./lib/distributed/step-queue-executor.ts";
 export {
   type WorkflowAdvertisementRegistry,
   type AdvertisedWorkflow,
   type AdvertisementEntry,
   InMemoryWorkflowAdvertisementRegistry,
   type InMemoryWorkflowAdvertisementRegistryConfig,
-} from "./workflow-advertisements.ts";
+} from "./lib/distributed/workflow-advertisements.ts";
 export {
   type WorkflowStartQueue,
   type WorkflowStartRecord,
@@ -99,4 +102,4 @@ export {
   type WorkflowStartClaimRef,
   InMemoryWorkflowStartQueue,
   type InMemoryWorkflowStartQueueConfig,
-} from "./workflow-start-queue.ts";
+} from "./lib/distributed/workflow-start-queue.ts";

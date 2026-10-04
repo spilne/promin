@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { InMemoryWorkflowStorage } from "../../durable/index.ts";
+import { InMemoryWorkflowStorage } from "../../../index.ts";
 import { createWorkflowRunner } from "../../durable/workflow-runner.ts";
 import { compileSqlProject } from "../sql-compiler.ts";
 import type { SqlProject } from "../sql-model.ts";
@@ -148,8 +148,9 @@ describe("SQL model orchestration — build analytics tables from raw data", () 
     const state = await storage.loadWorkflow("sql-2");
     expect(state?.status).toBe("completed");
 
-    // All 4 models should have run
-    expect(Object.keys(state?.steps ?? {}).length).toBe(4);
+    // All 4 models ran, plus the step that sums the run up
+    expect(Object.keys(state?.steps ?? {}).length).toBe(5);
+    expect(state?.steps["sql-project:result"]?.status).toBe("completed");
   });
 
   it("validates order table has no nulls or duplicates after build — quality gate", async () => {

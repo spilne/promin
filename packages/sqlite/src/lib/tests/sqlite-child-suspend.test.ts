@@ -5,14 +5,9 @@
 
 import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import {
-  FakeWallClock,
-  childEndedSignalName,
-  createSignalScanner,
-  createSleepScanner,
-  createWorkflowRunner,
-  workflow,
-} from "@promin/workflow";
+import { FakeWallClock, createWorkflowRunner, workflow } from "@promin/workflow";
+import { createSignalScanner, createSleepScanner } from "@promin/workflow/distributed";
+import { childEndedSignalName } from "@promin/workflow/storage-kit";
 import { SqliteWorkflowStorage } from "../sqlite-workflow-storage.ts";
 
 /** Yield to the event loop until `predicate` holds (bounded). */

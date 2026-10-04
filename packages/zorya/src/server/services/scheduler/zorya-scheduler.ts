@@ -10,12 +10,12 @@
 // need to special-case agent schedules in the server config.
 // ---------------------------------------------------------------------------
 
+import type { WallClock } from "@promin/workflow";
 import type {
   DurableScheduleConfig,
   ScheduleTick,
   SchedulerStorage,
-  WallClock,
-} from "@promin/workflow";
+} from "@promin/workflow/scheduler";
 import { isAgentSchedule } from "@promin/agent";
 import { SchedulerLoop } from "../scheduler-loop.ts";
 import type { ZoryaWorkflows } from "../workflows/index.ts";

@@ -63,14 +63,13 @@ import type {
   TripwireWorkflowParams,
   TryLockParams,
 } from "@promin/workflow";
+import { FenceTokenMismatchError, type JournalStepType } from "@promin/workflow";
 import {
   CANCELLED_ERROR,
   CANCELLED_ERROR_TAG,
-  FenceTokenMismatchError,
   encodeRunSource,
   decodeRunSource,
-  type JournalStepType,
-} from "@promin/workflow";
+} from "@promin/workflow/storage-kit";
 import {
   workflows,
   workflowRuns,

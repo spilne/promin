@@ -206,7 +206,7 @@ describe("one attempt row per step attempt", () => {
     const wf = flaky({ n: 0 });
     const runner = createWorkflowRunner({
       storage,
-      stepExecutor: new InProcessStepExecutor(wf, { storage }),
+      stepExecutor: new InProcessStepExecutor({ workflow: wf, storage }),
     });
 
     await runner.run({ workflow: wf, workflowId: "att-2", input: 1 });
@@ -319,7 +319,7 @@ describe("executor path", () => {
       .build();
     const runner = createWorkflowRunner({
       storage,
-      stepExecutor: new InProcessStepExecutor(wf, { storage }),
+      stepExecutor: new InProcessStepExecutor({ workflow: wf, storage }),
     });
 
     const result = await runner.run({ workflow: wf, workflowId: "can-1", input: { count: 0 } });
@@ -336,7 +336,7 @@ describe("executor path", () => {
       })
       .stepAsync("crash", () => Promise.reject(new Error("crashed")))
       .build();
-    const executor = new InProcessStepExecutor(wf, { storage });
+    const executor = new InProcessStepExecutor({ workflow: wf, storage });
     await storage.createWorkflow({ workflowId: "d-1", workflowName: wf.name, input: { count: 0 } });
 
     const can = await executor.executeStep({
@@ -378,7 +378,7 @@ describe("executor path", () => {
       .build();
     const runner = createWorkflowRunner({
       storage,
-      stepExecutor: new InProcessStepExecutor(wf, { storage }),
+      stepExecutor: new InProcessStepExecutor({ workflow: wf, storage }),
     });
 
     const { error } = await runner.runSafe({ workflow: wf, workflowId: "t-1", input: 1 });

@@ -166,22 +166,20 @@ export class InProcessStepExecutor implements StepExecutor {
   /** The workflow's steps by name, built on first use. */
   private stepsByName: Map<string, StepDefinition> | undefined;
 
-  constructor(
-    workflow: Workflow<unknown, unknown>,
-    config: {
-      storage: WorkflowStorage;
-      /** Time source for step retry backoff. Default: `SystemWallClock`. */
-      clock?: WallClock;
-    },
-  ) {
-    this.workflow = workflow;
+  constructor(config: {
+    workflow: Workflow<unknown, unknown>;
+    storage: WorkflowStorage;
+    /** Time source for step retry backoff. Default: `SystemWallClock`. */
+    clock?: WallClock;
+  }) {
+    this.workflow = config.workflow;
     this.storage = config.storage;
     this.clock = config.clock ?? SystemWallClock;
   }
 
   forWorkflow(workflow: Workflow<unknown, unknown>): StepExecutor {
     if (workflow === this.workflow) return this;
-    return new InProcessStepExecutor(workflow, { storage: this.storage, clock: this.clock });
+    return new InProcessStepExecutor({ workflow, storage: this.storage, clock: this.clock });
   }
 
   async executeStep(req: StepExecutionRequest): Promise<StepExecutionResult> {

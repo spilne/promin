@@ -52,7 +52,7 @@ describe("step queue key context", () => {
         },
       })
       .build();
-    const inner = new InProcessStepExecutor(wf, { storage });
+    const inner = new InProcessStepExecutor({ workflow: wf, storage });
     const requests: StepExecutionRequest[] = [];
     const executor: StepExecutor = {
       executeStep: (req) => (requests.push(req), inner.executeStep(req)),

@@ -70,7 +70,7 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
       const scheduler = createDurableScheduler({ db: pg.db });
       await scheduler.register({ id: "preview", cron: "0 * * * *" }); // every hour
 
-      const times = await scheduler.nextFireTimes("preview", 3);
+      const times = await scheduler.nextFireTimes({ scheduleId: "preview", count: 3 });
       expect(times).toHaveLength(3);
       expect(times[0]!).toBeInstanceOf(Date);
       expect(times[1]!.getTime()).toBeGreaterThan(times[0]!.getTime());
@@ -116,7 +116,7 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
 
       const from = new Date("2026-03-01T00:00:00Z");
       const to = new Date("2026-03-05T00:00:00Z");
-      const ticks = await scheduler.backfill("backfill", { from, to });
+      const ticks = await scheduler.backfill({ scheduleId: "backfill", from, to });
 
       // Should have 4 ticks: Mar 1, 2, 3, 4 at midnight
       expect(ticks.length).toBeGreaterThanOrEqual(3);

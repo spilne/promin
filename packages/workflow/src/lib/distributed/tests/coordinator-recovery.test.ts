@@ -89,8 +89,11 @@ function workerFor(params: {
   clock: FakeWallClock;
 }) {
   const registry = new MapStepRegistry();
-  registry.register("before", (ctx) => succeed((ctx.input as { n: number }).n));
-  registry.register("after", (ctx) => succeed(ctx.deps["wait"]));
+  registry.register({
+    stepName: "before",
+    handler: (ctx) => succeed((ctx.input as { n: number }).n),
+  });
+  registry.register({ stepName: "after", handler: (ctx) => succeed(ctx.deps["wait"]) });
   return createWorker({
     storage: params.storage,
     stepQueue: params.queue,
@@ -112,8 +115,14 @@ describe("sleep and signal steps under the distributed runner", () => {
       clock,
     });
     const registry = new MapStepRegistry();
-    registry.register("before", (ctx) => succeed((ctx.input as { n: number }).n));
-    registry.register("after", (ctx) => succeed((ctx.deps["nap"] as number) + 1));
+    registry.register({
+      stepName: "before",
+      handler: (ctx) => succeed((ctx.input as { n: number }).n),
+    });
+    registry.register({
+      stepName: "after",
+      handler: (ctx) => succeed((ctx.deps["nap"] as number) + 1),
+    });
     const worker = createWorker({ storage, stepQueue: queue, registry, pollIntervalMs: 10, clock });
     void worker.start();
 
@@ -550,7 +559,7 @@ describe("step waits", () => {
       clock,
     });
     const registry = new MapStepRegistry();
-    registry.register("root", (ctx) => succeed(ctx.input));
+    registry.register({ stepName: "root", handler: (ctx) => succeed(ctx.input) });
     const worker = createWorker({ storage, stepQueue: queue, registry, pollIntervalMs: 10, clock });
     void worker.start();
 

@@ -31,14 +31,13 @@
 //   );
 // ---------------------------------------------------------------------------
 
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
-  SystemWallClock,
-  type WallClock,
   type WorkerWorkflowSpec,
   type WorkflowStartClaimRef,
   type WorkflowStartQueue,
   type WorkflowStartRecord,
-} from "@promin/workflow";
+} from "@promin/workflow/distributed";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
 interface Row {

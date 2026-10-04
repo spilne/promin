@@ -7,7 +7,7 @@
 //
 // Usage:
 //   import { schedulerTestSuite } from "@promin/workflow/testing";
-//   schedulerTestSuite("InMemoryScheduler", () => ({ scheduler: createScheduler() }));
+//   schedulerTestSuite("InMemoryScheduler", () => ({ scheduler: new InMemoryScheduler() }));
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
@@ -35,7 +35,7 @@ export function schedulerTestSuite(
 
     const reg = (config: ScheduleConfig) => harness.scheduler.register(config);
     const unreg = (id: string, options?: { reason?: string }) =>
-      harness.scheduler.unregister(id, options);
+      harness.scheduler.unregister({ scheduleId: id, ...options });
     const pause = (id: string) => harness.scheduler.pause(id);
     const resume = (id: string) => harness.scheduler.resume(id);
     const list = () => harness.scheduler.list();

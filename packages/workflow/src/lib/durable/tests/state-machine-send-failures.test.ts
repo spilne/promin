@@ -156,7 +156,7 @@ describe("retrying middleware after the transition was saved", () => {
     expect((await m.getState("y"))!.current).toBe("b");
     expect(exits).toBe(1);
     expect(enters).toBe(2);
-    expect((await m.getHistory("y")).map((e) => e.event)).toEqual(["go"]);
+    expect((await m.getHistory({ id: "y" })).map((e) => e.event)).toEqual(["go"]);
   });
 
   it("a fired timeout under retrying middleware re-runs only onEnter", async () => {
@@ -183,7 +183,7 @@ describe("retrying middleware after the transition was saved", () => {
     await waitFor(() => enters === 2);
 
     expect((await m.getState("t"))!.current).toBe("late");
-    expect((await m.getHistory("t")).map((e) => e.to)).toEqual(["late"]);
+    expect((await m.getHistory({ id: "t" })).map((e) => e.to)).toEqual(["late"]);
   });
 });
 

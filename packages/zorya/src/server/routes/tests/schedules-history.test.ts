@@ -12,11 +12,8 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import {
-  InMemorySchedulerStorage,
-  InMemoryWorkflowStorage,
-  scheduleTickRunId,
-} from "@promin/workflow";
+import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { InMemorySchedulerStorage, scheduleTickRunId } from "@promin/workflow/scheduler";
 import { getScheduleHistory } from "../schedules.ts";
 
 interface HistoryRow {
@@ -85,7 +82,7 @@ describe("getScheduleHistory — agent ticks join the workflow row at scheduleTi
 
     // Simulate `dispatchAgentSchedule` having created and completed the
     // workflow row at the deterministic id.
-    const wfId = scheduleTickRunId("daily-summary", 0);
+    const wfId = scheduleTickRunId({ scheduleId: "daily-summary", tickNumber: 0 });
     await wfs.createWorkflow({
       workflowId: wfId,
       workflowName: "summary-bot",
@@ -124,7 +121,7 @@ describe("getScheduleHistory — agent ticks join the workflow row at scheduleTi
     });
     const firedAt = new Date("2026-05-02T09:05:00Z");
     await logTick(sch, "flaky-bot", 0, firedAt);
-    const wfId = scheduleTickRunId("flaky-bot", 0);
+    const wfId = scheduleTickRunId({ scheduleId: "flaky-bot", tickNumber: 0 });
     await wfs.createWorkflow({ workflowId: wfId, workflowName: "flaky", input: {} });
     await wfs.failWorkflow({ workflowId: wfId, error: "boom" });
 
@@ -165,7 +162,7 @@ describe("getScheduleHistory — agent ticks join the workflow row at scheduleTi
     });
     const firedAt = new Date("2026-05-02T03:00:00Z");
     await logTick(sch, "nightly", 0, firedAt);
-    const wfId = scheduleTickRunId("nightly", 0);
+    const wfId = scheduleTickRunId({ scheduleId: "nightly", tickNumber: 0 });
     await wfs.createWorkflow({ workflowId: wfId, workflowName: "send-email", input: {} });
     await wfs.completeWorkflow({ workflowId: wfId, result: "sent" });
 

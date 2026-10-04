@@ -11,10 +11,13 @@
 // string `name`, an object `dag`, and an object `_definition`. Any
 // authoring style — `defineWorkflow(...)`, factory functions, builder
 // pattern — works as long as the resulting object matches that shape.
+//
+// Definitions are told apart by `name@version`, so several versions of one
+// workflow exported side by side are all kept.
 // ---------------------------------------------------------------------------
 
-import { loadNodeFs } from "./node-fs.ts";
 import type { Workflow } from "../durable/workflow-types.ts";
+import { scanModules } from "./scan-modules.ts";
 
 export interface WorkflowScannerOptions {
   /** File extensions to consider. Default: .ts, .tsx, .js, .mjs. */
@@ -23,112 +26,77 @@ export interface WorkflowScannerOptions {
   maxDepth?: number;
   /** Predicate to filter candidate files before import. */
   filter?: (absPath: string) => boolean;
-  /** Called for each discovered workflow. */
-  onWorkflow?: (name: string, workflow: Workflow<unknown, unknown>, sourcePath: string) => void;
+  /** Called for each discovered workflow definition. */
+  onWorkflow?: (params: {
+    readonly name: string;
+    readonly workflow: Workflow<unknown, unknown>;
+    readonly sourcePath: string;
+  }) => void;
 }
 
 export interface WorkflowScanResult {
+  /**
+   * One definition per workflow name — the last one discovered when a name
+   * is exported in several versions. `definitions` has all of them.
+   */
   workflows: Record<string, Workflow<unknown, unknown>>;
-  /** Per-name source path — useful for debugging and dup diagnostics. */
+  /** Every distinct definition, one per `name@version` (or `name` when unversioned). */
+  definitions: Workflow<unknown, unknown>[];
+  /** Source path per `name@version` (or `name`) key. */
   sources: Record<string, string>;
   warnings: string[];
 }
 
-const DEFAULT_EXTENSIONS = [".ts", ".tsx", ".js", ".mjs"];
+/** The key a scan tells definitions apart by: `name@version`, or `name`. */
+export function workflowDefinitionKey(workflow: { name: string; version?: string }): string {
+  return workflow.version === undefined ? workflow.name : `${workflow.name}@${workflow.version}`;
+}
 
 export class WorkflowScanner {
-  private readonly extensions: ReadonlyArray<string>;
-  private readonly maxDepth: number;
-  private readonly filter: (absPath: string) => boolean;
-  private readonly onWorkflow?: WorkflowScannerOptions["onWorkflow"];
+  private readonly options: WorkflowScannerOptions;
 
   constructor(options: WorkflowScannerOptions = {}) {
-    this.extensions = options.extensions ?? DEFAULT_EXTENSIONS;
-    this.maxDepth = options.maxDepth ?? 10;
-    this.filter = options.filter ?? (() => true);
-    this.onWorkflow = options.onWorkflow;
+    this.options = options;
   }
 
   /** One-shot helper for callers that don't want to hold an instance. */
   static async scanFolder(
-    root: string,
-    options: WorkflowScannerOptions = {},
+    params: { readonly root: string } & WorkflowScannerOptions,
   ): Promise<WorkflowScanResult> {
+    const { root, ...options } = params;
     return await new WorkflowScanner(options).scan(root);
   }
 
   async scan(root: string): Promise<WorkflowScanResult> {
+    const byKey = new Map<string, Workflow<unknown, unknown>>();
     const workflows: Record<string, Workflow<unknown, unknown>> = {};
     const sources: Record<string, string> = {};
     const warnings: string[] = [];
-    await this.walk(root, 0, workflows, sources, warnings);
-    return { workflows, sources, warnings };
-  }
 
-  private async walk(
-    dir: string,
-    depth: number,
-    workflows: Record<string, Workflow<unknown, unknown>>,
-    sources: Record<string, string>,
-    warnings: string[],
-  ): Promise<void> {
-    if (depth > this.maxDepth) return;
-    const { readdir, join } = await loadNodeFs();
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch (err) {
-      warnings.push(`failed to read ${dir}: ${asMessage(err)}`);
-      return;
-    }
+    await scanModules({
+      root,
+      extensions: this.options.extensions,
+      maxDepth: this.options.maxDepth,
+      filter: this.options.filter,
+      warnings,
+      visit: ({ exports, path }) => {
+        for (const value of Object.values(exports)) {
+          if (!isWorkflow(value)) continue;
+          const key = workflowDefinitionKey(value);
+          const existing = byKey.get(key);
+          if (existing === value) continue;
+          if (existing) {
+            warnings.push(`duplicate workflow "${key}": ${sources[key]} vs ${path} — last wins`);
+          }
+          byKey.set(key, value);
+          workflows[value.name] = value;
+          sources[key] = path;
+          this.options.onWorkflow?.({ name: value.name, workflow: value, sourcePath: path });
+        }
+      },
+    });
 
-    for (const entry of entries) {
-      const name = entry.name;
-      const full = join(dir, name);
-
-      if (entry.isDirectory()) {
-        if (name === "node_modules" || name.startsWith(".")) continue;
-        await this.walk(full, depth + 1, workflows, sources, warnings);
-        continue;
-      }
-      if (!entry.isFile()) continue;
-      if (!this.extensions.some((ext) => name.endsWith(ext))) continue;
-      if (!this.filter(full)) continue;
-      if (name.includes(".test.") || name.includes(".bench.") || name.endsWith(".d.ts")) {
-        continue;
-      }
-
-      await this.importModule(full, workflows, sources, warnings);
-    }
-  }
-
-  private async importModule(
-    absPath: string,
-    workflows: Record<string, Workflow<unknown, unknown>>,
-    sources: Record<string, string>,
-    warnings: string[],
-  ): Promise<void> {
-    const { pathToFileURL } = await loadNodeFs();
-    let mod: Record<string, unknown>;
-    try {
-      mod = (await import(pathToFileURL(absPath).href)) as Record<string, unknown>;
-    } catch (err) {
-      warnings.push(`failed to import ${absPath}: ${asMessage(err)}`);
-      return;
-    }
-
-    for (const [, value] of Object.entries(mod)) {
-      if (!isWorkflow(value)) continue;
-      const name = value.name;
-      if (workflows[name]) {
-        warnings.push(
-          `duplicate workflow name "${name}": ${sources[name]} vs ${absPath} — last wins`,
-        );
-      }
-      workflows[name] = value;
-      sources[name] = absPath;
-      this.onWorkflow?.(name, value, absPath);
-    }
+    return { workflows, definitions: [...byKey.values()], sources, warnings };
   }
 }
 
@@ -142,8 +110,4 @@ function isWorkflow(v: unknown): v is Workflow<unknown, unknown> {
     typeof o._definition === "object" &&
     o._definition !== null
   );
-}
-
-function asMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

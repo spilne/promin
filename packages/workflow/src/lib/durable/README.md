@@ -573,8 +573,8 @@ if (counts.get("1")!.running === 0) {
 await registry.names(); // ["order", "payment"]
 await registry.versions("order"); // ["1", "2"]
 await registry.latest("order"); // "2"
-await registry.resolve("order", "1"); // Workflow for v1
-await registry.resolve("order"); // Workflow for latest
+await registry.resolve({ name: "order", version: "1" }); // Workflow for v1
+await registry.resolve({ name: "order" }); // Workflow for latest
 ```
 
 ### RRULE Support

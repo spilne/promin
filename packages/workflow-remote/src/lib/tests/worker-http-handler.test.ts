@@ -6,7 +6,8 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, beforeEach } from "bun:test";
-import { InMemoryStepQueue, InMemoryWorkflowStorage } from "@promin/workflow";
+import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { InMemoryStepQueue } from "@promin/workflow/distributed";
 import { createWorkerApiHandler } from "../worker-http-handler.ts";
 import { WORKER_WIRE_CODEC } from "../worker-wire.ts";
 

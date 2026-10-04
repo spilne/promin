@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // CoordinatedTriggerService — server-side trigger that hands off to the
-// embedded WorkflowCoordinator instead of enqueueing to a workflow-start
+// embedded DistributedWorkflowRunner instead of enqueueing to a workflow-start
 // queue.
 //
 // Used when ZoryaServer is configured with `coordination: { enabled: true }`.
@@ -16,8 +16,9 @@
 // a DAG the coordinator can't enqueue anything.
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage, DistributedWorkflowRunner, WorkflowDAG } from "@promin/workflow";
-import { buildStubWorkflow } from "@promin/workflow";
+import type { WorkflowStorage, WorkflowDAG } from "@promin/workflow";
+import type { DistributedWorkflowRunner } from "@promin/workflow/distributed";
+import { buildStubWorkflow } from "@promin/workflow/distributed";
 import type { RunTrigger } from "../routes/runs.ts";
 import type {
   AdvertisedWorkflow,
@@ -60,7 +61,7 @@ export class CoordinatedTriggerService {
         priority: s.priority,
       })),
     };
-    const stub = buildStubWorkflow(dag, advertised.name, version);
+    const stub = buildStubWorkflow({ dag, name: advertised.name, version });
 
     // The coordinator's `submit` pre-creates the workflow row itself; we
     // don't `storage.createWorkflow` here. Metadata threading goes through

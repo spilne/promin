@@ -2,7 +2,7 @@
 // Example 03 — Drain policy via WorkflowVersionRegistry (3+ versions)
 //
 // `previousVersions` works for 2-3 versions but gets unwieldy when you have
-// many coexisting versions. `createWorkflowVersionRegistry()` is a catalog
+// many coexisting versions. `new InMemoryWorkflowVersionRegistry()` is a catalog
 // of (name, version) definitions that the runner consults on resume —
 // automatic version resolution, optional auto-deregister when a version
 // drains.
@@ -14,7 +14,7 @@ import { succeed } from "@spilne/perfect-core";
 import {
   workflow,
   InMemoryWorkflowStorage,
-  createWorkflowVersionRegistry,
+  InMemoryWorkflowVersionRegistry,
   createWorkflowRunner,
 } from "@promin/workflow";
 
@@ -38,7 +38,7 @@ async function main(): Promise<void> {
   // and delegates version resolution to the registry on resume.
   // `onDrained` fires when a version's in-flight count hits zero.
   // `autoDeregister: true` removes drained versions (except the latest).
-  const registry = createWorkflowVersionRegistry({
+  const registry = new InMemoryWorkflowVersionRegistry({
     autoDeregister: true,
     onDrained: (_name, version) => {
       console.log(`version "${version}" has drained`);

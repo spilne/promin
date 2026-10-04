@@ -66,7 +66,11 @@ export class PostgresWorkflowVersionRegistry implements WorkflowVersionRegistry 
       });
   }
 
-  async resolve(name: string, version?: string): Promise<Workflow<unknown, unknown> | undefined> {
+  async resolve(params: {
+    name: string;
+    version?: string;
+  }): Promise<Workflow<unknown, unknown> | undefined> {
+    const { name, version } = params;
     if (version) {
       const rows = await this.db
         .select()
@@ -116,7 +120,8 @@ export class PostgresWorkflowVersionRegistry implements WorkflowVersionRegistry 
     return rows.map((r) => r.name);
   }
 
-  async deregister(name: string, version: string): Promise<void> {
+  async deregister(params: { name: string; version: string }): Promise<void> {
+    const { name, version } = params;
     await this.db
       .delete(workflowRegistry)
       .where(and(eq(workflowRegistry.name, name), eq(workflowRegistry.version, version)));
@@ -135,7 +140,8 @@ export class PostgresWorkflowVersionRegistry implements WorkflowVersionRegistry 
     return row ? rowToVersionRecord(row) : null;
   }
 
-  async getStatus(name: string, version: string): Promise<VersionRecord | null> {
+  async getStatus(params: { name: string; version: string }): Promise<VersionRecord | null> {
+    const { name, version } = params;
     const [row] = await this.db
       .select()
       .from(workflowRegistry)
@@ -144,7 +150,8 @@ export class PostgresWorkflowVersionRegistry implements WorkflowVersionRegistry 
     return row ? rowToVersionRecord(row) : null;
   }
 
-  async promote(name: string, version: string): Promise<VersionRecord> {
+  async promote(params: { name: string; version: string }): Promise<VersionRecord> {
+    const { name, version } = params;
     return this.db.transaction(async (tx) => {
       const [target] = await tx
         .select()

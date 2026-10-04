@@ -1,7 +1,8 @@
 import type { AgentSession } from "../lib/agent-loop.ts";
 import type { MemoryIndex } from "../lib/memory-index.ts";
 import type { TreeNode } from "../lib/terminal/terminal.ts";
-import type { InMemoryWorkflowStorage, InMemoryScheduler, WorkflowRunner } from "@promin/workflow";
+import type { InMemoryWorkflowStorage, WorkflowRunner } from "@promin/workflow";
+import type { InMemoryScheduler } from "@promin/workflow/scheduler";
 
 import type { CommandDef } from "../lib/terminal/chat-terminal.ts";
 export type { CommandDef };
@@ -77,9 +78,9 @@ export function buildHistory(session: AgentSession): string[] {
 
 interface LifecycleMachine {
   getState(id: string): Promise<{ current: string; context: unknown } | null>;
-  getHistory(
-    id: string,
-  ): Promise<Array<{ from: string; event: string; to: string; createdAt: Date }>>;
+  getHistory(params: {
+    id: string;
+  }): Promise<Array<{ from: string; event: string; to: string; createdAt: Date }>>;
 }
 
 export async function buildAgentState(
@@ -87,7 +88,7 @@ export async function buildAgentState(
   sessionId: string,
 ): Promise<string[]> {
   const st = await machine.getState(sessionId);
-  const transitions = await machine.getHistory(sessionId);
+  const transitions = await machine.getHistory({ id: sessionId });
   if (!st) return ["(no state yet)"];
   const lines: string[] = [
     `state: \x1b[1m${st.current}\x1b[0m   context: ${JSON.stringify(st.context)}`,
@@ -109,7 +110,10 @@ export async function buildStepsTree(
   const runs = await storage.listWorkflows({ name: workflowName });
   return Promise.all(
     runs.map(async (run): Promise<TreeNode> => {
-      const info = await runner.getStatus(run.workflowId, { includeStepResults: false });
+      const info = await runner.getStatus({
+        workflowId: run.workflowId,
+        includeStepResults: false,
+      });
       if (!info) return { label: `? ${run.workflowId}`, children: [], expanded: false };
 
       const stepNodes = await Promise.all(

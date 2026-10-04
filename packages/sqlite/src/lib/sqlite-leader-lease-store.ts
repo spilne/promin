@@ -10,13 +10,12 @@
 // inside the `db.transaction(...)` that does the fenced writes.
 // ---------------------------------------------------------------------------
 
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
   StaleLeaseError,
-  SystemWallClock,
   type LeaderLease,
   type LeaderLeaseStore,
-  type WallClock,
-} from "@promin/workflow";
+} from "@promin/workflow/scheduler";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
 export class SqliteLeaderLeaseStore implements LeaderLeaseStore {

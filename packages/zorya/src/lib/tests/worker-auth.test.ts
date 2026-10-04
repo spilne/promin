@@ -1,9 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import {
-  InMemoryStepQueue,
-  InMemoryWorkerRegistry,
-  InMemoryWorkflowStorage,
-} from "@promin/workflow";
+import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { InMemoryStepQueue, InMemoryWorkerRegistry } from "@promin/workflow/distributed";
 import { ZoryaServer } from "../../server/server.ts";
 import { DistributedWorkflows } from "../../index.ts";
 

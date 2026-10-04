@@ -3,8 +3,8 @@
 // ---------------------------------------------------------------------------
 
 import { schedulerTestSuite } from "../scheduler-test-suite.ts";
-import { createScheduler } from "../in-memory-scheduler.ts";
+import { InMemoryScheduler } from "../in-memory-scheduler.ts";
 
 schedulerTestSuite("InMemoryScheduler", () => ({
-  scheduler: createScheduler(),
+  scheduler: new InMemoryScheduler(),
 }));

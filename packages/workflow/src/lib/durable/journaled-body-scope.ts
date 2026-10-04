@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// journaledBodyScope — AsyncLocalStorage used to detect whether code is
+// journaledBodyScope — async context used to detect whether code is
 // currently executing inside a `.journaled()` step body.
 //
 // The runner wraps each synchronous tick of the generator in
@@ -16,14 +16,14 @@
 // tooling can import the scope without dragging the whole runner in.
 // ---------------------------------------------------------------------------
 
-import { AsyncLocalStorage } from "node:async_hooks";
+import { AsyncContext } from "../shared/async-context.ts";
 import { pathInBranch, type JournalFormatVersion } from "./journal-format.ts";
 
 interface JournaledBodyContext {
   readonly stepName: string;
 }
 
-export const journaledBodyScope = new AsyncLocalStorage<JournaledBodyContext>();
+export const journaledBodyScope = new AsyncContext<JournaledBodyContext>();
 
 /** True while the current async context is inside a journaled step body. */
 export function isInJournaledBody(): boolean {
@@ -59,7 +59,7 @@ export interface ActivityScope {
   readonly format: JournalFormatVersion;
 }
 
-export const activityScope = new AsyncLocalStorage<ActivityScope>();
+export const activityScope = new AsyncContext<ActivityScope>();
 
 /**
  * Consume the next (branchPath) slot in the current scope. Mutates the

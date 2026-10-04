@@ -31,7 +31,7 @@ postgresDescribe("PostgresWorkflowVersionRegistry", { migrate }, (pg) => {
   describe("register + resolve", () => {
     it("round-trips a workflow by (name, version)", async () => {
       await registry.register(wfV1);
-      const fetched = await registry.resolve("my-wf", "1");
+      const fetched = await registry.resolve({ name: "my-wf", version: "1" });
       expect(fetched).not.toBeUndefined();
       expect(fetched!.name).toBe("my-wf");
       expect(fetched!.version).toBe("1");
@@ -41,19 +41,19 @@ postgresDescribe("PostgresWorkflowVersionRegistry", { migrate }, (pg) => {
     it("resolve without version returns the latest registered", async () => {
       await registry.register(wfV1);
       await registry.register(wfV2);
-      const latest = await registry.resolve("my-wf");
+      const latest = await registry.resolve({ name: "my-wf" });
       expect(latest!.version).toBe("2");
       expect(latest!.dag.steps).toHaveLength(2);
     });
 
     it("returns undefined for unknown workflow", async () => {
-      const result = await registry.resolve("no-such-wf");
+      const result = await registry.resolve({ name: "no-such-wf" });
       expect(result).toBeUndefined();
     });
 
     it("returns undefined for unknown version", async () => {
       await registry.register(wfV1);
-      const result = await registry.resolve("my-wf", "99");
+      const result = await registry.resolve({ name: "my-wf", version: "99" });
       expect(result).toBeUndefined();
     });
 
@@ -99,16 +99,16 @@ postgresDescribe("PostgresWorkflowVersionRegistry", { migrate }, (pg) => {
     it("removes the (name, version) entry", async () => {
       await registry.register(wfV1);
       await registry.register(wfV2);
-      await registry.deregister("my-wf", "1");
-      expect(await registry.resolve("my-wf", "1")).toBeUndefined();
-      expect(await registry.resolve("my-wf", "2")).toBeDefined();
+      await registry.deregister({ name: "my-wf", version: "1" });
+      expect(await registry.resolve({ name: "my-wf", version: "1" })).toBeUndefined();
+      expect(await registry.resolve({ name: "my-wf", version: "2" })).toBeDefined();
     });
   });
 
   describe("stub workflow", () => {
     it("reconstructed stub has correct DAG structure", async () => {
       await registry.register(wfV2);
-      const stub = await registry.resolve("my-wf", "2");
+      const stub = await registry.resolve({ name: "my-wf", version: "2" });
       expect(stub!.dag.steps).toHaveLength(2);
       expect(stub!.dag.steps[1]!.dependsOn).toContain("double");
     });

@@ -5,7 +5,9 @@
 //
 // Detection: an export counts as a schedule if it has a string `id` and at
 // least one trigger field (`cron`, `rrule`, or `intervalMs`). Modules can
-// export either a single config or an array — both flatten.
+// export either a single config or an array — both flatten. A candidate
+// that fails `validateScheduleConfig` (two triggers, a bad cron, …) is
+// left out with a warning.
 //
 // `applyDiscoveredSchedules` reconciles a discovered set into a
 // `SchedulerStorage`. It's exported alongside the scanner because the two
@@ -13,16 +15,20 @@
 // always wants to push them into storage afterward.
 // ---------------------------------------------------------------------------
 
-import { loadNodeFs } from "./node-fs.ts";
 import type { DurableScheduleConfig } from "../scheduler/types.ts";
 import type { SchedulerStorage } from "../scheduler/scheduler-storage.ts";
+import { validateScheduleConfig } from "../scheduler/schedule-config.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
+import { asMessage, scanModules } from "./scan-modules.ts";
 
 export interface ScheduleScannerOptions {
   extensions?: ReadonlyArray<string>;
   maxDepth?: number;
   filter?: (absPath: string) => boolean;
-  onSchedule?: (schedule: DurableScheduleConfig, sourcePath: string) => void;
+  onSchedule?: (params: {
+    readonly schedule: DurableScheduleConfig;
+    readonly sourcePath: string;
+  }) => void;
 }
 
 export interface ScheduleScanResult {
@@ -31,25 +37,17 @@ export interface ScheduleScanResult {
   warnings: string[];
 }
 
-const DEFAULT_EXTENSIONS = [".ts", ".tsx", ".js", ".mjs"];
-
 export class ScheduleScanner {
-  private readonly extensions: ReadonlyArray<string>;
-  private readonly maxDepth: number;
-  private readonly filter: (absPath: string) => boolean;
-  private readonly onSchedule?: ScheduleScannerOptions["onSchedule"];
+  private readonly options: ScheduleScannerOptions;
 
   constructor(options: ScheduleScannerOptions = {}) {
-    this.extensions = options.extensions ?? DEFAULT_EXTENSIONS;
-    this.maxDepth = options.maxDepth ?? 10;
-    this.filter = options.filter ?? (() => true);
-    this.onSchedule = options.onSchedule;
+    this.options = options;
   }
 
   static async scanFolder(
-    root: string,
-    options: ScheduleScannerOptions = {},
+    params: { readonly root: string } & ScheduleScannerOptions,
   ): Promise<ScheduleScanResult> {
+    const { root, ...options } = params;
     return await new ScheduleScanner(options).scan(root);
   }
 
@@ -57,80 +55,42 @@ export class ScheduleScanner {
     const schedules: DurableScheduleConfig[] = [];
     const sources: Record<string, string> = {};
     const warnings: string[] = [];
-    await this.walk(root, 0, schedules, sources, warnings);
-    return { schedules, sources, warnings };
-  }
 
-  private async walk(
-    dir: string,
-    depth: number,
-    schedules: DurableScheduleConfig[],
-    sources: Record<string, string>,
-    warnings: string[],
-  ): Promise<void> {
-    if (depth > this.maxDepth) return;
-    const { readdir, join } = await loadNodeFs();
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch (err) {
-      warnings.push(`failed to read ${dir}: ${asMessage(err)}`);
-      return;
-    }
-
-    for (const entry of entries) {
-      const name = entry.name;
-      const full = join(dir, name);
-
-      if (entry.isDirectory()) {
-        if (name === "node_modules" || name.startsWith(".")) continue;
-        await this.walk(full, depth + 1, schedules, sources, warnings);
-        continue;
-      }
-      if (!entry.isFile()) continue;
-      if (!this.extensions.some((ext) => name.endsWith(ext))) continue;
-      if (!this.filter(full)) continue;
-      if (name.includes(".test.") || name.includes(".bench.") || name.endsWith(".d.ts")) {
-        continue;
-      }
-
-      await this.importModule(full, schedules, sources, warnings);
-    }
-  }
-
-  private async importModule(
-    absPath: string,
-    schedules: DurableScheduleConfig[],
-    sources: Record<string, string>,
-    warnings: string[],
-  ): Promise<void> {
-    const { pathToFileURL } = await loadNodeFs();
-    let mod: Record<string, unknown>;
-    try {
-      mod = (await import(pathToFileURL(absPath).href)) as Record<string, unknown>;
-    } catch (err) {
-      warnings.push(`failed to import ${absPath}: ${asMessage(err)}`);
-      return;
-    }
-
-    for (const [, value] of Object.entries(mod)) {
-      const candidates = Array.isArray(value) ? value : [value];
-      for (const candidate of candidates) {
-        if (!isScheduleConfig(candidate)) continue;
-        const existing = sources[candidate.id];
-        if (existing) {
-          warnings.push(
-            `duplicate schedule id "${candidate.id}": ${existing} vs ${absPath} — last wins`,
-          );
-          const i = schedules.findIndex((s) => s.id === candidate.id);
-          if (i >= 0) schedules[i] = candidate;
-        } else {
-          schedules.push(candidate);
+    await scanModules({
+      root,
+      extensions: this.options.extensions,
+      maxDepth: this.options.maxDepth,
+      filter: this.options.filter,
+      warnings,
+      visit: ({ exports, path }) => {
+        for (const value of Object.values(exports)) {
+          const candidates = Array.isArray(value) ? value : [value];
+          for (const candidate of candidates) {
+            if (!isScheduleConfig(candidate)) continue;
+            try {
+              validateScheduleConfig(candidate);
+            } catch (err) {
+              warnings.push(`invalid schedule "${candidate.id}" in ${path}: ${asMessage(err)}`);
+              continue;
+            }
+            const existing = sources[candidate.id];
+            if (existing) {
+              warnings.push(
+                `duplicate schedule id "${candidate.id}": ${existing} vs ${path} — last wins`,
+              );
+              const i = schedules.findIndex((s) => s.id === candidate.id);
+              if (i >= 0) schedules[i] = candidate;
+            } else {
+              schedules.push(candidate);
+            }
+            sources[candidate.id] = path;
+            this.options.onSchedule?.({ schedule: candidate, sourcePath: path });
+          }
         }
-        sources[candidate.id] = absPath;
-        this.onSchedule?.(candidate, absPath);
-      }
-    }
+      },
+    });
+
+    return { schedules, sources, warnings };
   }
 }
 
@@ -147,27 +107,37 @@ function isScheduleConfig(v: unknown): v is DurableScheduleConfig {
 // Reconcile discovered schedules into a SchedulerStorage.
 // ---------------------------------------------------------------------------
 
-export interface ApplyDiscoveredSchedulesOptions {
+/** Page size for listing the stored schedules of the scope. */
+const LIST_PAGE_SIZE = 500;
+
+export interface ApplyDiscoveredSchedulesParams {
+  readonly storage: SchedulerStorage;
+  readonly schedules: readonly DurableScheduleConfig[];
   /**
-   * Delete storage entries whose id isn't in the discovered set. Default:
-   * false (upsert-only, leaves operator-created entries alone). Set true
-   * to make the filesystem authoritative.
+   * The namespace this call manages. Discovered schedules from another
+   * namespace are skipped (listed in `skipped`), and `sync` only deletes
+   * stored schedules of this namespace. Default: the global scope —
+   * schedules without a namespace.
    */
-  sync?: boolean;
+  readonly namespace?: string;
+  /**
+   * Delete stored schedules of the namespace whose id isn't in the
+   * discovered set. Default: false (upsert-only, leaves operator-created
+   * entries alone). Set true to make the filesystem authoritative.
+   */
+  readonly sync?: boolean;
   /**
    * Set `nextRun = now` on every newly-added schedule so the scheduler
    * picks it up on the next poll. Useful for in-memory storage and
    * first-time installs. Default: false.
    */
-  kickstart?: boolean;
-  /** Restrict the operation to a single namespace. */
-  namespace?: string;
+  readonly kickstart?: boolean;
   /**
    * Time source for the `kickstart` nextRun stamp. Pass the scheduler's
    * clock so the seeded time lines up with its due checks. Default:
    * `SystemWallClock`.
    */
-  clock?: WallClock;
+  readonly clock?: WallClock;
 }
 
 export interface ApplyDiscoveredSchedulesResult {
@@ -176,50 +146,90 @@ export interface ApplyDiscoveredSchedulesResult {
   added: string[];
   /** Only populated when `sync: true`. */
   deleted: string[];
+  /** Discovered schedules left alone because they belong to another namespace. */
+  skipped: string[];
 }
 
+/**
+ * Upsert discovered schedules into `storage`, scoped to one namespace.
+ * Every schedule is validated first (`validateScheduleConfig`); an invalid
+ * one rejects the call before anything is written.
+ */
 export async function applyDiscoveredSchedules(
-  storage: SchedulerStorage,
-  schedules: readonly DurableScheduleConfig[],
-  options: ApplyDiscoveredSchedulesOptions = {},
+  params: ApplyDiscoveredSchedulesParams,
 ): Promise<ApplyDiscoveredSchedulesResult> {
+  const { storage, schedules, namespace, sync = false, kickstart = false } = params;
+  const clock = params.clock ?? SystemWallClock;
+
+  const problems: string[] = [];
+  for (const config of schedules) {
+    try {
+      validateScheduleConfig(config);
+    } catch (err) {
+      problems.push(asMessage(err));
+    }
+  }
+  if (problems.length > 0) {
+    throw new Error(`applyDiscoveredSchedules: invalid schedules:\n  ${problems.join("\n  ")}`);
+  }
+
+  const inScope = (config: Pick<DurableScheduleConfig, "namespace">): boolean =>
+    (config.namespace ?? undefined) === namespace;
+
+  const existing = await listScope({ storage, namespace, inScope });
+  const existingIds = new Set(existing.map((s) => s.id));
+
   const upserted: string[] = [];
   const added: string[] = [];
   const deleted: string[] = [];
+  const skipped: string[] = [];
+  const now = clock.now();
 
-  const existing =
-    options.sync || options.kickstart
-      ? await storage.listSchedules({ namespace: options.namespace, limit: 10_000 })
-      : [];
-  const existingIds = new Set(existing.map((s) => s.id));
-
-  const now = (options.clock ?? SystemWallClock).now();
   for (const config of schedules) {
-    if (options.namespace !== undefined && config.namespace !== options.namespace) continue;
-    const wasExisting = existingIds.has(config.id);
+    if (!inScope(config)) {
+      skipped.push(config.id);
+      continue;
+    }
     await storage.upsertSchedule(config);
     upserted.push(config.id);
-    if (!wasExisting) {
+    if (!existingIds.has(config.id)) {
       added.push(config.id);
-      if (options.kickstart && config.enabled !== false) {
+      if (kickstart && config.enabled !== false) {
         await storage.setNextRun(config.id, now);
       }
     }
   }
 
-  if (options.sync) {
-    const discoveredIds = new Set(schedules.map((s) => s.id));
+  if (sync) {
+    const discoveredIds = new Set(upserted);
     for (const stored of existing) {
-      if (!discoveredIds.has(stored.id)) {
-        await storage.deleteSchedule(stored.id);
-        deleted.push(stored.id);
-      }
+      if (discoveredIds.has(stored.id)) continue;
+      await storage.deleteSchedule(stored.id);
+      deleted.push(stored.id);
     }
   }
 
-  return { upserted, added, deleted };
+  return { upserted, added, deleted, skipped };
 }
 
-function asMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+/**
+ * Every stored schedule of the scope, page by page. Backends treat an
+ * absent `namespace` filter as "all namespaces", so the global scope is
+ * narrowed here.
+ */
+async function listScope(params: {
+  readonly storage: SchedulerStorage;
+  readonly namespace: string | undefined;
+  readonly inScope: (config: DurableScheduleConfig) => boolean;
+}): Promise<DurableScheduleConfig[]> {
+  const out: DurableScheduleConfig[] = [];
+  for (let offset = 0; ; offset += LIST_PAGE_SIZE) {
+    const page = await params.storage.listSchedules({
+      namespace: params.namespace,
+      limit: LIST_PAGE_SIZE,
+      offset,
+    });
+    for (const config of page) if (params.inScope(config)) out.push(config);
+    if (page.length < LIST_PAGE_SIZE) return out;
+  }
 }
