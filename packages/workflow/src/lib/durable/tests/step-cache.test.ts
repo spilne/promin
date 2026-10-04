@@ -15,7 +15,7 @@
 import { describe, it, expect } from "bun:test";
 import { succeed } from "@spilne/perfect-core";
 import { MemoryCache, type CacheStore } from "../../shared/cache-store.ts";
-import { workflow } from "../durable-pipeline.ts";
+import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 

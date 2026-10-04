@@ -1,7 +1,8 @@
 import { describe, it, expect } from "bun:test";
 import { TaggedError, succeed, fail, tryPromise, all, runSafe } from "@spilne/perfect-core";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
-import { workflow, flow, type StepEff } from "../durable-pipeline.ts";
+import type { StepEff } from "../step-definition.ts";
+import { workflow, flow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 import {

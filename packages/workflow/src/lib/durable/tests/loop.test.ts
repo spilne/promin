@@ -1,9 +1,8 @@
 import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
-import { workflow } from "../durable-pipeline.ts";
+import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
-import { LoopLimitExceededError } from "../durable-pipeline-error.ts";
 
 describe("dowhile / dountil", () => {
   describe("dowhile", () => {
@@ -15,7 +14,7 @@ describe("dowhile / dountil", () => {
         .step("load", ({ input }) => succeed(input.start))
         .dowhile(
           "inc",
-          (ctx, iter) => (ctx.prev as number) + iter + 1,
+          (ctx, iter) => succeed((ctx.prev as number) + iter + 1),
           (n) => n < 6,
         )
         .build();
@@ -45,7 +44,7 @@ describe("dowhile / dountil", () => {
           "body",
           () => {
             runs++;
-            return "only-once";
+            return succeed("only-once");
           },
           () => false,
         )
@@ -64,9 +63,9 @@ describe("dowhile / dountil", () => {
       const wf = workflow<number>({ name: "w-one" })
         .dowhile(
           "body",
-          (ctx, iter) => {
+          (_ctx, iter) => {
             runs++;
-            return iter;
+            return succeed(iter);
           },
           (result) => result < 0,
         )
@@ -85,7 +84,7 @@ describe("dowhile / dountil", () => {
       const wf = workflow<{ target: number }>({ name: "u-target" })
         .dountil(
           "climb",
-          (ctx, iter) => iter + 1,
+          (_ctx, iter) => succeed(iter + 1),
           (n, _iter) => n >= ctx_target,
         )
         .build();
@@ -110,7 +109,7 @@ describe("dowhile / dountil", () => {
       const wf = workflow<number>({ name: "u-invert" })
         .dountil(
           "body",
-          (_ctx, iter) => iter,
+          (_ctx, iter) => succeed(iter),
           (result) => result >= 2,
         )
         .build();
@@ -135,7 +134,7 @@ describe("dowhile / dountil", () => {
       const wf = workflow<number>({ name: "w-runaway" })
         .dowhile(
           "loopy",
-          () => 1,
+          () => succeed(1),
           () => true, // never converges
           { maxIterations: 3 },
         )
@@ -165,7 +164,7 @@ describe("dowhile / dountil", () => {
       const wf = workflow<number>({ name: "w-default-cap" })
         .dountil(
           "stops",
-          (_ctx, iter) => iter,
+          (_ctx, iter) => succeed(iter),
           (result) => result >= 200, // never reaches — 100 is the cap
         )
         .build();
@@ -186,7 +185,7 @@ describe("dowhile / dountil", () => {
         workflow<number>({ name: "w-bad" })
           .dowhile(
             "x",
-            () => 1,
+            () => succeed(1),
             () => false,
             { maxIterations: 0 },
           )
@@ -203,7 +202,7 @@ describe("dowhile / dountil", () => {
       const wf = workflow<number>({ name: "w-chain" })
         .dowhile(
           "count",
-          (_ctx, iter) => iter,
+          (_ctx, iter) => succeed(iter),
           (result) => result < 3,
         )
         .step("format", ({ prev }) => succeed(`iterations-done:${prev}`))
@@ -227,7 +226,7 @@ describe("dowhile / dountil", () => {
           "inc",
           // ctx.prev is the step-level prev (fixed across iterations).
           // Iterations differ via the `iter` index — we accumulate with it.
-          (ctx, iter) => (ctx.prev as number) + iter + 1,
+          (ctx, iter) => succeed((ctx.prev as number) + iter + 1),
           (result) => result < 10,
         )
         .build();
@@ -250,7 +249,7 @@ describe("dowhile / dountil", () => {
       const wf = workflow<number>({ name: "w-iter-rows" })
         .dowhile(
           "loop",
-          (_ctx, iter) => iter,
+          (_ctx, iter) => succeed(iter),
           (result) => result < 2,
         )
         .build();
@@ -301,7 +300,7 @@ describe("dowhile / dountil", () => {
           "loop",
           (_ctx, iter) => {
             bodyRuns++;
-            return iter;
+            return succeed(iter);
           },
           (result) => result < 3,
         )
@@ -322,7 +321,7 @@ describe("dowhile / dountil", () => {
       const wf = workflow<number>({ name: "w-iter-meta" })
         .dowhile(
           "loop",
-          (_ctx, iter) => iter,
+          (_ctx, iter) => succeed(iter),
           (result) => result < 1,
         )
         .build();

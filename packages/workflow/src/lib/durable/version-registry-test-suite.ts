@@ -8,7 +8,8 @@
 
 import { describe, it, expect } from "bun:test";
 import { succeed } from "@spilne/perfect-core";
-import { workflow, type Workflow } from "./durable-pipeline.ts";
+import { workflow } from "./workflow-builder.ts";
+import type { Workflow } from "./workflow-types.ts";
 import {
   createWorkflowVersionRegistry,
   type IWorkflowVersionRegistry,

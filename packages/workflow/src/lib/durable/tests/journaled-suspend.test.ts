@@ -5,7 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, beforeEach } from "bun:test";
-import { workflow } from "../durable-pipeline.ts";
+import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 import { runJournaledStep, completeSignal, completeDueSleeps } from "../journaled-step.ts";

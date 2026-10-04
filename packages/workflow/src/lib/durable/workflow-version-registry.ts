@@ -2,7 +2,7 @@
 // WorkflowVersionRegistry — maps (workflowName, version) to Workflow
 // ---------------------------------------------------------------------------
 
-import type { Workflow } from "./durable-pipeline.ts";
+import type { Workflow } from "./workflow-types.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
 import { WORKFLOW_STATUSES, type WorkflowStatus } from "./workflow-state.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";

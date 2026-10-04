@@ -8,8 +8,8 @@
 // The compiler is pure — no side effects. Execution is separate.
 // ---------------------------------------------------------------------------
 
-import { workflow } from "./durable-pipeline.ts";
-import type { Workflow } from "./durable-pipeline.ts";
+import { workflow } from "./workflow-builder.ts";
+import type { Workflow } from "./workflow-types.ts";
 import type {
   WorkflowSchema,
   StepSchema,

@@ -12,7 +12,8 @@
 
 import { succeed } from "@spilne/perfect-core";
 import { MemoryCache } from "../shared/cache-store.ts";
-import { workflow, type StepQueueOption } from "./durable-pipeline.ts";
+import type { StepQueueOption } from "./step-definition.ts";
+import { workflow } from "./workflow-builder.ts";
 
 const store = new MemoryCache<string, unknown>({ ttlMs: 1_000 });
 const cache = { key: () => "k", ttlMs: 1_000, store };
@@ -168,15 +169,23 @@ base.subworkflow("s", child, childConfig, { timeoutMs: 1 });
 
 export const _loopOk = base.dowhile(
   "l",
-  () => 1,
+  () => succeed(1),
   () => false,
   { retry, timeoutMs: 1, onFailure: { fallback: () => 0 }, maxIterations: 3 },
 );
 
 base.dountil(
   "l",
-  () => 1,
+  () => succeed(1),
   () => true,
+  // @ts-expect-error — iteration rows are the loop's memo; no step cache
+  { cache },
+);
+
+base.dowhileAsync(
+  "l",
+  async () => 1,
+  () => false,
   // @ts-expect-error — iteration rows are the loop's memo; no step cache
   { cache },
 );

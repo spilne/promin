@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { succeed } from "@spilne/perfect-core";
-import { workflow } from "../durable-pipeline.ts";
+import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
@@ -77,7 +77,7 @@ describe(".dowhile() — iteration rows are timed on the runner clock", () => {
         (_ctx, iter) => {
           // Each iteration "takes" 250ms of fake time.
           clock.advance(250);
-          return iter + 1;
+          return succeed(iter + 1);
         },
         (n) => n < 2,
       )

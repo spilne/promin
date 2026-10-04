@@ -18,7 +18,7 @@
 import { describe, it, expect } from "bun:test";
 import type { JournaledSuspendStorage } from "./activity-journal.ts";
 import { TerminalError, WorkflowSuspendedError } from "./durable-pipeline-error.ts";
-import type { Workflow } from "./durable-pipeline.ts";
+import type { Workflow } from "./workflow-types.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
 import { completeDueSleeps, completeSignal, runJournaledStep } from "./journaled-step.ts";
 import { FakeWallClock } from "../shared/wall-clock.ts";

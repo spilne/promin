@@ -10,7 +10,7 @@ import { describe, it, expect } from "bun:test";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { journalReplayTestSuite } from "../journal-replay-test-suite.ts";
 import { runJournaledStep } from "../journaled-step.ts";
-import type { Workflow } from "../durable-pipeline.ts";
+import type { Workflow } from "../workflow-types.ts";
 
 journalReplayTestSuite(() => new InMemoryWorkflowStorage(), { timingRuns: 50 });
 
