@@ -72,6 +72,12 @@ export interface DagExecutionContext {
   readonly patches?: readonly string[];
   /** Runs a child workflow of this run on its runtime (`ExecuteParams.runChild`). */
   readonly runChild?: RunChildWorkflow;
+  /**
+   * Aborted once the run's lock is lost (`LockContext.signal`). The DAG
+   * executor stops at the next wave boundary, and executor waves pass it on
+   * to their steps' `StepExecutionRequest.signal`.
+   */
+  readonly signal?: AbortSignal;
 }
 
 /**

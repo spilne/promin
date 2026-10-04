@@ -24,7 +24,12 @@ import type {
   OrphanedRun,
 } from "./workflow-storage.ts";
 import { workflowMetadataMatches } from "./workflow-storage.ts";
-import { isTerminalWorkflowStatus } from "./workflow-state.ts";
+import {
+  CANCELLED_ERROR,
+  CANCELLED_ERROR_TAG,
+  isTerminalWorkflowStatus,
+  type WorkflowStatusSnapshot,
+} from "./workflow-state.ts";
 import { createWorkflowEventStream } from "./workflow-event-stream.ts";
 import type {
   ActivityJournalStorage,
@@ -105,6 +110,7 @@ interface MutableWorkflow {
   input: unknown;
   result?: unknown;
   error?: string;
+  errorTag?: string;
   tripwire?: unknown;
   runSource?: RunSource;
   runSourceId?: string;
@@ -204,6 +210,7 @@ export class InMemoryWorkflowStorage
       input: wf.input,
       result: wf.result,
       error: wf.error,
+      errorTag: wf.errorTag,
       tripwire: wf.tripwire,
       runSource: wf.runSource,
       runSourceId: wf.runSourceId,
@@ -219,6 +226,16 @@ export class InMemoryWorkflowStorage
   async loadWorkflow(workflowId: string): Promise<WorkflowState | null> {
     const wf = this.workflows.get(workflowId);
     return wf ? this.toState(wf) : null;
+  }
+
+  async loadWorkflowStatus(workflowId: string): Promise<WorkflowStatusSnapshot | null> {
+    const wf = this.workflows.get(workflowId);
+    if (!wf) return null;
+    return {
+      status: wf.status,
+      ...(wf.error !== undefined && { error: wf.error }),
+      ...(wf.errorTag !== undefined && { errorTag: wf.errorTag }),
+    };
   }
 
   async listWorkflows(params?: {
@@ -337,10 +354,11 @@ export class InMemoryWorkflowStorage
 
     const now = this.clock.now();
     wf.status = "failed";
-    wf.error = "Cancelled";
+    wf.error = CANCELLED_ERROR;
+    wf.errorTag = CANCELLED_ERROR_TAG;
     wf.completedAt = now;
     wf.updatedAt = now;
-    this.emitEvent(workflowId, { type: "workflow-failed", error: "Cancelled", at: now }, true);
+    this.emitEvent(workflowId, { type: "workflow-failed", error: CANCELLED_ERROR, at: now }, true);
 
     if (options?.cascade) {
       for (const [childId, child] of this.workflows) {
@@ -509,6 +527,7 @@ export class InMemoryWorkflowStorage
       workflowId: string;
       stepName: string;
       error: string;
+      errorTag?: string;
       durationMs: number;
       startedAt: Date;
       metadata?: Record<string, unknown>;
@@ -529,6 +548,7 @@ export class InMemoryWorkflowStorage
       dependsOn: existing?.dependsOn ?? [],
       stepType: existing?.stepType ?? "single",
       error: params.error,
+      ...(params.errorTag !== undefined && { errorTag: params.errorTag }),
       metadata: params.metadata ?? existing?.metadata,
       startedAt: params.startedAt,
       completedAt: now,
@@ -649,13 +669,19 @@ export class InMemoryWorkflowStorage
     this.emitEvent(workflowId, { type: "workflow-completed", result, at: now }, true);
   }
 
-  async failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void> {
+  async failWorkflow(
+    workflowId: string,
+    error: string,
+    guard?: FenceGuard,
+    details?: { readonly errorTag?: string },
+  ): Promise<void> {
     this.checkFence(workflowId, guard);
     const wf = this.workflows.get(workflowId);
     if (!wf || isTerminalWorkflowStatus(wf.status)) return;
     const now = this.clock.now();
     wf.status = "failed";
     wf.error = error;
+    wf.errorTag = details?.errorTag;
     wf.completedAt = now;
     wf.updatedAt = now;
     this.emitEvent(workflowId, { type: "workflow-failed", error, at: now }, true);
@@ -832,15 +858,13 @@ export class InMemoryWorkflowStorage
   }
 
   async heartbeat(workflowId: string, lockDurationMs: number, guard?: FenceGuard): Promise<void> {
+    // A token holder whose lock is gone or re-taken learns it lost the
+    // run (`checkFence` rejects); without a token, a lock this instance
+    // doesn't hold is left alone.
+    this.checkFence(workflowId, guard);
     const lock = this.locks.get(workflowId);
     if (!lock) return;
-    // Same reasoning as releaseLock — silent no-op when a stale holder
-    // tries to extend. The real holder keeps ticking.
-    if (guard?.fenceToken) {
-      if (lock.token !== guard.fenceToken) return;
-    } else if (lock.lockedBy !== this.instanceId) {
-      return;
-    }
+    if (!guard?.fenceToken && lock.lockedBy !== this.instanceId) return;
     this.locks.set(workflowId, {
       expiresAt: this.clock.currentTimeMs() + lockDurationMs,
       lockedBy: lock.lockedBy,
@@ -904,6 +928,7 @@ export class InMemoryWorkflowStorage
     wf.status = "pending";
     wf.result = undefined;
     wf.error = undefined;
+    wf.errorTag = undefined;
     wf.tripwire = undefined;
     wf.startedAt = undefined;
     wf.completedAt = undefined;
@@ -944,6 +969,7 @@ export class InMemoryWorkflowStorage
       wf.status = "running";
       wf.result = undefined;
       wf.error = undefined;
+      wf.errorTag = undefined;
       wf.tripwire = undefined;
       wf.completedAt = undefined;
     }

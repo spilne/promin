@@ -26,6 +26,7 @@ import type {
 } from "@promin/workflow";
 import type {
   WorkflowState,
+  WorkflowStatusSnapshot,
   WorkflowStatus,
   WorkflowRunSummary,
   StepState,
@@ -35,6 +36,8 @@ import type {
   RunSource,
 } from "@promin/workflow";
 import {
+  CANCELLED_ERROR,
+  CANCELLED_ERROR_TAG,
   FenceTokenMismatchError,
   workflowMetadataMatches,
   WORKFLOW_STATUSES,
@@ -288,7 +291,7 @@ redis.call('RPUSH', KEYS[2], ARGV[3])
 redis.call('LTRIM', KEYS[2], -tonumber(ARGV[4]), -1)
 local newRun = tonumber(run) + 1
 redis.call('HSET', KEYS[1], 'run', tostring(newRun), 'status', 'pending', 'updatedAt', ARGV[5])
-redis.call('HDEL', KEYS[1], 'result', 'error', 'tripwire', 'startedAt', 'completedAt')
+redis.call('HDEL', KEYS[1], 'result', 'error', 'errorTag', 'tripwire', 'startedAt', 'completedAt')
 redis.call('PERSIST', KEYS[1])
 redis.call('PERSIST', KEYS[2])
 if old and old ~= 'pending' then
@@ -575,6 +578,7 @@ export class RedisWorkflowStorage
       input: JSON.parse(raw.input),
       result: raw.result ? JSON.parse(raw.result) : undefined,
       error: raw.error || undefined,
+      errorTag: raw.errorTag || undefined,
       tripwire: raw.tripwire ? JSON.parse(raw.tripwire) : undefined,
       runSource: raw.runSource ? decodeRunSource(Number(raw.runSource)) : undefined,
       runSourceId: raw.runSourceId || undefined,
@@ -780,6 +784,20 @@ export class RedisWorkflowStorage
     return members.sort();
   }
 
+  async loadWorkflowStatus(workflowId: string): Promise<WorkflowStatusSnapshot | null> {
+    const [id, status, error, errorTag] = ((await this.redis.eval(
+      `return redis.call('HMGET', KEYS[1], 'id', 'status', 'error', 'errorTag')`,
+      1,
+      this.wfKey(workflowId),
+    )) ?? []) as Array<string | null | false>;
+    if (!id || !status) return null;
+    return {
+      status: status as WorkflowStatus,
+      ...(error ? { error } : {}),
+      ...(errorTag ? { errorTag } : {}),
+    };
+  }
+
   async loadWorkflow(workflowId: string): Promise<WorkflowState | null> {
     const raw = await this.redis.hgetall(this.wfKey(workflowId));
     if (!raw || !raw.id) return null;
@@ -914,7 +932,7 @@ export class RedisWorkflowStorage
       workflowId,
       to: "failed",
       from: CANCELLABLE_STATUSES,
-      fields: { error: "Cancelled" },
+      fields: { error: CANCELLED_ERROR, errorTag: CANCELLED_ERROR_TAG },
     });
 
     if (options?.cascade) {
@@ -1107,6 +1125,7 @@ export class RedisWorkflowStorage
       workflowId: string;
       stepName: string;
       error: string;
+      errorTag?: string;
       durationMs: number;
       startedAt: Date;
       metadata?: Record<string, unknown>;
@@ -1135,6 +1154,7 @@ export class RedisWorkflowStorage
       dependsOn: existing.dependsOn ?? [],
       stepType: existing.stepType ?? "single",
       error: params.error,
+      ...(params.errorTag !== undefined && { errorTag: params.errorTag }),
       metadata: params.metadata ?? existing.metadata,
       startedAt: params.startedAt,
       completedAt: now,
@@ -1296,9 +1316,18 @@ export class RedisWorkflowStorage
     });
   }
 
-  async failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void> {
+  async failWorkflow(
+    workflowId: string,
+    error: string,
+    guard?: FenceGuard,
+    details?: { readonly errorTag?: string },
+  ): Promise<void> {
     await this.checkFence(workflowId, guard);
-    await this.finishWorkflow({ workflowId, to: "failed", fields: { error } });
+    await this.finishWorkflow({
+      workflowId,
+      to: "failed",
+      fields: { error, ...(details?.errorTag !== undefined && { errorTag: details.errorTag }) },
+    });
   }
 
   async tripwireWorkflow(workflowId: string, reason: unknown, guard?: FenceGuard): Promise<void> {
@@ -1671,7 +1700,7 @@ export class RedisWorkflowStorage
   }
 
   async heartbeat(workflowId: string, lockDurationMs: number, guard?: FenceGuard): Promise<void> {
-    await this.redis.eval(
+    const extended = await this.redis.eval(
       HEARTBEAT_LUA,
       1,
       this.lockKey(workflowId),
@@ -1679,6 +1708,8 @@ export class RedisWorkflowStorage
       lockDurationMs.toString(),
       guard?.fenceToken ?? "",
     );
+    // A token holder whose lock is gone or re-taken learns it lost the run.
+    if (guard?.fenceToken && Number(extended) !== 1) await this.checkFence(workflowId, guard);
   }
 
   /**

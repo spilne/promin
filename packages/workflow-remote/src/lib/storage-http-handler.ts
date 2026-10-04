@@ -39,6 +39,7 @@ export function createWorkflowStorageHandler(
   // — new clients send it, legacy clients omit it, both work.
   const dispatchers: Record<StorageMethod, (params: any) => Promise<unknown>> = {
     loadWorkflow: (p) => storage.loadWorkflow(p.workflowId),
+    loadWorkflowStatus: (p) => storage.loadWorkflowStatus(p.workflowId),
     listWorkflows: (p) => storage.listWorkflows(p),
     distinctWorkflowNames: (p) => storage.distinctWorkflowNames(p),
     distinctWorkflowTypes: (p) => storage.distinctWorkflowTypes(p),
@@ -52,7 +53,7 @@ export function createWorkflowStorageHandler(
     saveTaskResult: (p) => storage.saveTaskResult(p, p.guard),
     saveTaskFailure: (p) => storage.saveTaskFailure(p, p.guard),
     completeWorkflow: (p) => storage.completeWorkflow(p.workflowId, p.result, p.guard),
-    failWorkflow: (p) => storage.failWorkflow(p.workflowId, p.error, p.guard),
+    failWorkflow: (p) => storage.failWorkflow(p.workflowId, p.error, p.guard, p.details),
     tripwireWorkflow: async (p) => {
       // Forwarded only if the underlying storage implements it. The client
       // calling this op against a non-tripwire-capable storage surfaces a

@@ -65,8 +65,11 @@ export function toStepPolicy<T>(options: Partial<StepOptions<T>> | undefined): S
  *  - `WorkflowTripwireError`: an intentional early end.
  *  - `JournalNonDeterminismError`: code drifted from the journal.
  *  - `AmbiguousActivityOutcome`: halt for an operator.
- *  - `WorkflowLockError` / `FenceTokenMismatchError`: this worker lost the
- *    run; the new owner re-drives it from storage.
+ *  - `WorkflowLockError` / `FenceTokenMismatchError` /
+ *    `WorkflowLockLostError`: this worker lost the run; the new owner
+ *    re-drives it from storage.
+ *  - `CheckpointError`: a durable write failed past its retries; recovery
+ *    re-drives the run.
  */
 const CONTROL_FLOW_EXITS: ReadonlySet<string> = new Set([
   "WorkflowSuspendedError",
@@ -76,7 +79,28 @@ const CONTROL_FLOW_EXITS: ReadonlySet<string> = new Set([
   "AmbiguousActivityOutcome",
   "WorkflowLockError",
   "FenceTokenMismatchError",
+  "WorkflowLockLostError",
+  "CheckpointError",
 ]);
+
+/**
+ * Exits after which the run is abandoned as it stands rather than failed:
+ * this worker no longer owns it, or could not save its progress. No
+ * workflow retry, compensation or terminal write follows; the row stays
+ * as it is for the lock's next holder or for recovery.
+ */
+const ABANDON_RUN_EXITS: ReadonlySet<string> = new Set([
+  "FenceTokenMismatchError",
+  "WorkflowLockLostError",
+  "CheckpointError",
+]);
+
+/** Whether `error` abandons the run instead of failing it (see `ABANDON_RUN_EXITS`). */
+export function isAbandonRunExit(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const tag = (error as { readonly _tag?: unknown })._tag;
+  return typeof tag === "string" && ABANDON_RUN_EXITS.has(tag);
+}
 
 /** Whether `error` is an engine control-flow exit rather than a step failure. */
 export function isControlFlowExit(error: unknown): boolean {

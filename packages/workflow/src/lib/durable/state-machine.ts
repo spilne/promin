@@ -18,7 +18,7 @@ import {
   type StateMachineStorage,
   InMemoryStateMachineStorage,
 } from "./state-machine-storage.ts";
-import type { RetryPolicy } from "../shared/retry-policy.ts";
+import { retryAsync, type RetryPolicy } from "../shared/retry-policy.ts";
 import { type TimerHandle, type WallClock, SystemWallClock } from "../shared/wall-clock.ts";
 import type { SchemaParser } from "@spilne/perfect-core";
 
@@ -106,33 +106,16 @@ export function retryMiddleware(
   };
 }
 
-async function executeWithRetryReturn<T>(params: {
+function executeWithRetryReturn<T>(params: {
   fn: () => T | Promise<T>;
   policy: RetryPolicy<unknown>;
   clock: WallClock;
 }): Promise<T> {
-  const { fn, policy, clock } = params;
-  const maxRetries = policy.maxRetries ?? 3;
-  const baseDelay = policy.baseDelayMs ?? 250;
-  const maxDelay = policy.maxDelayMs ?? Infinity;
-  const jitter = policy.jitter ?? false;
-  const timeBudget = policy.timeBudgetMs ?? Infinity;
-  const start = clock.currentTimeMs();
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      if (attempt >= maxRetries) throw err;
-      if (policy.when && !policy.when(err)) throw err;
-      if (clock.currentTimeMs() - start >= timeBudget) throw err;
-
-      let delay = Math.min(baseDelay * 2 ** attempt, maxDelay);
-      if (jitter) delay *= 0.75 + Math.random() * 0.5;
-      await new Promise<void>((r) => clock.setTimeout(() => r(), delay));
-    }
-  }
-  throw new Error("unreachable");
+  return retryAsync({
+    policy: params.policy,
+    clock: params.clock,
+    run: async () => params.fn(),
+  });
 }
 
 /** Safety limits to prevent infinite loops and runaway machines. */

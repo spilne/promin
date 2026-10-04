@@ -5,7 +5,13 @@
 
 import { describe, it, expect } from "bun:test";
 import { TaggedError, die, fail, runExit, succeed, suspend } from "@spilne/perfect-core";
-import { RETRY_POLICY_DEFAULTS, retryDelayMs, retryWithPolicy } from "../retry-policy.ts";
+import {
+  RETRY_POLICY_DEFAULTS,
+  nextRetryDelayMs,
+  retryAsync,
+  retryDelayMs,
+  retryWithPolicy,
+} from "../retry-policy.ts";
 import { FakeWallClock } from "../wall-clock.ts";
 
 class Flaky extends TaggedError("Flaky")<{ readonly message: string }>() {}
@@ -135,5 +141,91 @@ describe("retryWithPolicy", () => {
     const exit = await done;
     expect(exit._tag).toBe("Failure");
     expect(attempts).toBe(3);
+  });
+});
+
+describe("nextRetryDelayMs — the decision both loops share", () => {
+  it("gives up when retries, the time budget or `when` say so", () => {
+    const base = { error: "e", firstFailureMs: 0, nowMs: 0 };
+    expect(nextRetryDelayMs({ ...base, policy: {}, retry: 2 })).toBe(1000);
+    expect(nextRetryDelayMs({ ...base, policy: {}, retry: 3 })).toBeUndefined();
+    expect(
+      nextRetryDelayMs({ ...base, policy: { timeBudgetMs: 100 }, retry: 0, nowMs: 100 }),
+    ).toBeUndefined();
+    expect(nextRetryDelayMs({ ...base, policy: { when: () => false }, retry: 0 })).toBeUndefined();
+  });
+
+  it("treats maxDelayMs: 0 as no cap", () => {
+    expect(retryDelayMs({ policy: { maxDelayMs: 0 }, retry: 2 })).toBe(1000);
+  });
+});
+
+describe("retryAsync", () => {
+  it("retries rejections with the same defaults and backoff as retryWithPolicy", async () => {
+    const clock = FakeWallClock.create(0);
+    const at: number[] = [];
+    const done = retryAsync({
+      policy: {},
+      clock,
+      run: async () => {
+        at.push(clock.currentTimeMs());
+        throw new Error(`fail ${at.length}`);
+      },
+    }).catch((e: unknown) => e);
+    for (const delay of [250, 500, 1000]) {
+      await settle();
+      expect(clock.pendingCount()).toBe(1);
+      clock.advance(delay);
+    }
+    expect(((await done) as Error).message).toBe("fail 4");
+    expect(at).toEqual([0, 250, 750, 1750]);
+  });
+
+  it("hands `run` the retry number and stops on success", async () => {
+    const clock = FakeWallClock.create(0);
+    const seen: number[] = [];
+    const done = retryAsync({
+      policy: { baseDelayMs: 10 },
+      clock,
+      run: async (retry) => {
+        seen.push(retry);
+        if (retry < 1) throw new Error("once");
+        return "ok";
+      },
+    });
+    await settle();
+    clock.advance(10);
+    expect(await done).toBe("ok");
+    expect(seen).toEqual([0, 1]);
+  });
+
+  it("does not retry what `when` rejects, and stops at once when the signal aborts", async () => {
+    let calls = 0;
+    await expect(
+      retryAsync({
+        policy: { when: () => false },
+        run: async () => {
+          calls++;
+          throw new Error("fatal");
+        },
+      }),
+    ).rejects.toThrow("fatal");
+    expect(calls).toBe(1);
+
+    const clock = FakeWallClock.create(0);
+    const abort = new AbortController();
+    const done = retryAsync({
+      policy: {},
+      clock,
+      signal: abort.signal,
+      run: async () => {
+        throw new Error("down");
+      },
+    }).catch((e: unknown) => e);
+    await settle();
+    expect(clock.pendingCount()).toBe(1);
+    abort.abort(new Error("stopped"));
+    expect(((await done) as Error).message).toBe("stopped");
+    expect(clock.pendingCount()).toBe(0);
   });
 });

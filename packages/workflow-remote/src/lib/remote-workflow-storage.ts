@@ -13,6 +13,7 @@ import type {
   WorkflowStorage,
   WorkflowState,
   WorkflowStatus,
+  WorkflowStatusSnapshot,
   WorkflowOrderBy,
   WorkflowRunSummary,
   SignalState,
@@ -114,6 +115,10 @@ export class RemoteWorkflowStorage
     return this.call("loadWorkflow", { workflowId });
   }
 
+  loadWorkflowStatus(workflowId: string): Promise<WorkflowStatusSnapshot | null> {
+    return this.call("loadWorkflowStatus", { workflowId });
+  }
+
   listWorkflows(params?: {
     status?: WorkflowStatus;
     name?: string;
@@ -207,6 +212,7 @@ export class RemoteWorkflowStorage
       workflowId: string;
       stepName: string;
       error: string;
+      errorTag?: string;
       durationMs: number;
       startedAt: Date;
       metadata?: Record<string, unknown>;
@@ -244,8 +250,13 @@ export class RemoteWorkflowStorage
     return this.call("completeWorkflow", { workflowId, result, guard });
   }
 
-  failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void> {
-    return this.call("failWorkflow", { workflowId, error, guard });
+  failWorkflow(
+    workflowId: string,
+    error: string,
+    guard?: FenceGuard,
+    details?: { readonly errorTag?: string },
+  ): Promise<void> {
+    return this.call("failWorkflow", { workflowId, error, guard, details });
   }
 
   tripwireWorkflow(workflowId: string, reason: unknown, guard?: FenceGuard): Promise<void> {

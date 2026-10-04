@@ -271,8 +271,12 @@ describe("failure replay and step attempts", () => {
     let calls = 0;
     let before = 0;
     // Workflow-level retry re-runs the failed journaled step on the same
-    // journal, like a step-level retry does.
-    const wf = workflow({ name: "retry-journaled", retry: { maxRetries: 5, baseDelayMs: 1 } })
+    // journal, like a step-level retry does. The activity throws a plain
+    // Error (a defect), which the workflow retries only with `retryDefects`.
+    const wf = workflow({
+      name: "retry-journaled",
+      retry: { maxRetries: 5, baseDelayMs: 1, retryDefects: true },
+    })
       .journaled("j", function* (ctx: any) {
         yield* ctx.activity("before", async () => ++before);
         return yield* ctx.activity("flaky", async () => {

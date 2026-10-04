@@ -37,7 +37,7 @@ import {
 } from "./journaled-step.ts";
 import type { TaggedError } from "../shared/tagged-error.ts";
 import { isEff, isThenable, promiseOrDie, promiseOrEff } from "../shared/eff.ts";
-import type { RetryPolicy } from "../shared/retry-policy.ts";
+import type { RetryPolicy, WorkflowRetryPolicy } from "../shared/retry-policy.ts";
 import type { CacheStore } from "../shared/cache-store.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
@@ -272,7 +272,7 @@ export interface WorkflowDefinitionInternals {
   readonly steps: ReadonlyArray<StepDefinition>;
   readonly type?: string;
   readonly metadata?: Record<string, unknown>;
-  readonly retry?: RetryPolicy<TaggedError>;
+  readonly retry?: WorkflowRetryPolicy;
   readonly compensateConfig?: CompensateConfig;
   readonly dlq?: Sinkable<FailedWorkflowRecord>;
   readonly dispatch?: DispatchConfig;
@@ -333,6 +333,12 @@ export interface WorkflowStatusInfo<Output> {
   readonly result?: Output;
   readonly error?: string;
   /**
+   * `_tag` of the error that failed the run, as stored with it
+   * (`"WorkflowCancelledError"` for a cancelled run). Present only when
+   * `state === "failed"` and the error carried a tag.
+   */
+  readonly errorTag?: string;
+  /**
    * Structured tripwire reason — present only when `state === "tripwire"`.
    * Opaque payload returned by the firing `.tripwire()` step's `reason(prev)`.
    */
@@ -386,6 +392,17 @@ export interface WorkflowHooks {
     reason: unknown;
     durationMs: number;
   }) => void | Promise<void>;
+  /**
+   * Called when one of the hooks above throws or rejects. Hooks are
+   * observers: their errors never change the run's outcome, and the run
+   * goes on after the report. Default: `console.error`. An error thrown
+   * here is dropped.
+   */
+  onHookError?: (params: {
+    workflowId: string;
+    hook: Exclude<keyof WorkflowHooks, "onHookError">;
+    error: unknown;
+  }) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -578,7 +595,10 @@ export interface CompensateConfig {
    * - `"immediate"` — compensate on first workflow failure (skip workflow retries).
    */
   trigger?: "after-retries" | "immediate";
-  /** Retry policy for each compensation function. Default: no retry. */
+  /**
+   * Retry policy for each compensation function. Default: no retry; with
+   * `maxRetries` set, `baseDelayMs` defaults to 250ms (`RETRY_POLICY_DEFAULTS`).
+   */
   retry?: { maxRetries?: number; baseDelayMs?: number };
   /**
    * Callback after all step compensations complete.
@@ -890,7 +910,7 @@ export class WorkflowBuilder<
     private readonly _hooks?: WorkflowHooks,
     private readonly _type?: string,
     private readonly _metadata?: Record<string, unknown>,
-    private readonly _retry?: RetryPolicy<TaggedError>,
+    private readonly _retry?: WorkflowRetryPolicy,
     private readonly _compensateConfig?: CompensateConfig,
     private readonly _dlq?: Sinkable<FailedWorkflowRecord>,
     private readonly _dispatch?: DispatchConfig,
@@ -2673,7 +2693,7 @@ export function workflow<Input>(params: {
   type?: string;
   metadata?: Record<string, unknown>;
   /** Workflow-level retry policy. Re-runs from the failed step (completed steps are checkpointed). */
-  retry?: RetryPolicy<TaggedError>;
+  retry?: WorkflowRetryPolicy;
   /** Compensation configuration — controls when and how saga rollback runs. */
   compensate?: CompensateConfig;
   /** Dead letter queue — failed workflows are published here after all retries + compensation. */
@@ -2770,7 +2790,7 @@ export function workflow<Input>(params: {
     params.hooks,
     params.type,
     params.metadata,
-    params.retry as RetryPolicy<TaggedError> | undefined,
+    params.retry,
     params.compensate,
     params.dlq,
     params.dispatch,

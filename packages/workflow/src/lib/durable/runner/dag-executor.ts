@@ -15,6 +15,7 @@ import { runExecutorWave } from "./executor-wave.ts";
 import { fireHook } from "./hooks.ts";
 import { runInlineWave } from "./inline-wave.ts";
 import { runDispatchedSteps } from "./remote-dispatch.ts";
+import { assertRunActive } from "./run-status.ts";
 import { errorMessage } from "./step-body.ts";
 
 /**
@@ -66,7 +67,11 @@ export async function executeWorkflowDag(
   // is ever in flight when the ready set is computed.
   const running = new Set<string>();
 
-  while (completed.size < ctx.steps.length) {
+  for (let wave = 0; completed.size < ctx.steps.length; wave++) {
+    // Between waves: stop on a lost lock or a cancel that landed during the
+    // last wave. The caller checked the run before the first one.
+    if (wave > 0) await assertRunActive({ storage: ctx.storage, workflowId, signal: ctx.signal });
+
     // Check workflow-level deadline before each batch
     if (params.deadlineMs != null && clock.currentTimeMs() > params.deadlineMs) {
       return {

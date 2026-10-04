@@ -57,6 +57,18 @@ export function errorMessage(error: unknown): string {
 }
 
 /**
+ * The `_tag` to store with a failure: a `StepError`'s reported `errorTag`
+ * (the tag of the error the executor could not ship), otherwise the
+ * error's own `_tag`. `undefined` for an untagged error (a defect).
+ */
+export function errorTagOf(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const { _tag, errorTag } = error as { readonly _tag?: unknown; readonly errorTag?: unknown };
+  if (_tag === "StepError" && typeof errorTag === "string") return errorTag;
+  return typeof _tag === "string" ? _tag : undefined;
+}
+
+/**
  * Run `stepDef`'s body under its timeout, retry and `onFailure` policies.
  * Attempts are numbered from `firstAttempt`, one per invocation. Every
  * attempt that fails with a typed error (other than suspension or

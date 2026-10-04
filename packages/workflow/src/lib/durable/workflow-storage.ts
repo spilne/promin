@@ -8,6 +8,7 @@ import type {
   WorkflowStatus,
   WorkflowRunSummary,
   WorkflowRunEvent,
+  WorkflowStatusSnapshot,
   SignalState,
   StepAttemptRecord,
 } from "./workflow-state.ts";
@@ -127,6 +128,14 @@ export interface WorkflowStorage {
   loadWorkflow(workflowId: string): Promise<WorkflowState | null>;
 
   /**
+   * Load only the run's status, error and error tag — no step rows. The
+   * runner calls it between waves to notice a cancel, so backends should
+   * answer it from the workflow row alone. Returns null if the workflow
+   * doesn't exist.
+   */
+  loadWorkflowStatus(workflowId: string): Promise<WorkflowStatusSnapshot | null>;
+
+  /**
    * List workflows, optionally filtered by status, name, type, or namespace.
    *
    * `orderBy` defaults to `startedAt`, `orderDir` defaults to `desc` —
@@ -228,7 +237,11 @@ export interface WorkflowStorage {
 
   /**
    * Cancel a pending, running or suspended workflow: status becomes
-   * `failed` with error `"Cancelled"`. A terminal run is left untouched.
+   * `failed` with error `"Cancelled"` and `errorTag`
+   * `"WorkflowCancelledError"` (`CANCELLED_ERROR` / `CANCELLED_ERROR_TAG`).
+   * A terminal run is left untouched, and so is every later terminal write
+   * of the run that was executing (they are conditional), so the cancel
+   * wins over a completion that lands after it.
    * With `cascade`, every descendant created with `parentWorkflowId`
    * pointing at this run (transitively) is cancelled the same way.
    */
@@ -341,12 +354,14 @@ export interface WorkflowStorage {
     guard?: FenceGuard,
   ): Promise<void>;
 
-  /** Mark a step as failed. */
+  /** Mark a step as failed. `errorTag` is stored on the step row as given. */
   saveStepFailure(
     params: {
       workflowId: string;
       stepName: string;
       error: string;
+      /** `_tag` of the error that failed the step, if it had one. */
+      errorTag?: string;
       durationMs: number;
       startedAt: Date;
       /**
@@ -389,8 +404,17 @@ export interface WorkflowStorage {
    */
   completeWorkflow(workflowId: string, result: unknown, guard?: FenceGuard): Promise<void>;
 
-  /** Mark the entire workflow as failed. No-op on a terminal run (see `completeWorkflow`). */
-  failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void>;
+  /**
+   * Mark the entire workflow as failed, storing `error` and, when given,
+   * `details.errorTag` (the failing error's `_tag`) on the run. No-op on a
+   * terminal run (see `completeWorkflow`).
+   */
+  failWorkflow(
+    workflowId: string,
+    error: string,
+    guard?: FenceGuard,
+    details?: { readonly errorTag?: string },
+  ): Promise<void>;
 
   /**
    * Mark the entire workflow as ended by a tripwire — an intentional early
@@ -610,9 +634,11 @@ export interface WorkflowStorage {
   releaseLock(workflowId: string, guard?: FenceGuard): Promise<void>;
 
   /**
-   * Heartbeat to extend a lock (for long-running steps). When fencing is
-   * in play, only the token holder can extend — stale holders silently
-   * no-op and their lock expires on schedule.
+   * Heartbeat to extend a lock (for long-running steps). With a fence
+   * token in `guard`, only the token holder extends: when the lock is gone
+   * or held under another token, the call rejects with
+   * `FenceTokenMismatchError`, which tells the holder it lost the run.
+   * Without a token, a lock not held by this instance is left alone.
    */
   heartbeat(workflowId: string, lockDurationMs: number, guard?: FenceGuard): Promise<void>;
 

@@ -6,6 +6,7 @@
 
 import type { Eff, Throws } from "@spilne/perfect-core";
 import { runHookResult } from "../../shared/eff.ts";
+import { retryAsync, type RetryPolicy } from "../../shared/retry-policy.ts";
 import { SystemWallClock, type WallClock } from "../../shared/wall-clock.ts";
 import type { CompensateConfig } from "../durable-pipeline.ts";
 import {
@@ -72,62 +73,66 @@ export async function compensateWorkflow(params: {
     }
   }
 
+  // Compensation retries run on the shared retry loop: no retry unless
+  // `compensate.retry` sets `maxRetries`, `RetryPolicy` defaults otherwise.
   const retryConfig = compensateConfig?.retry;
-  const maxCompRetries = retryConfig?.maxRetries ?? 0;
-  const compRetryDelayMs = retryConfig?.baseDelayMs ?? 500;
+  const policy: RetryPolicy<unknown> = {
+    maxRetries: retryConfig?.maxRetries ?? 0,
+    ...(retryConfig?.baseDelayMs !== undefined && { baseDelayMs: retryConfig.baseDelayMs }),
+  };
 
   const attemptStorage = isStepAttemptStorage(storage) ? storage : undefined;
+  const saveAttempt = async (record: {
+    stepName: string;
+    attempt: number;
+    startedAt: Date;
+    error?: unknown;
+  }): Promise<void> => {
+    if (!attemptStorage) return;
+    const failedRecord = "error" in record;
+    await attemptStorage.saveStepAttempt(
+      {
+        workflowId,
+        stepName: record.stepName,
+        attempt: record.attempt,
+        type: "compensation",
+        status: failedRecord ? "failed" : "completed",
+        ...(failedRecord && {
+          error: record.error instanceof Error ? record.error.message : String(record.error),
+        }),
+        durationMs: clock.currentTimeMs() - record.startedAt.getTime(),
+        startedAt: record.startedAt,
+        completedAt: clock.now(),
+        ...(executorId !== undefined && { executorId }),
+      },
+      guard,
+    );
+  };
 
   for (const { stepDef, result } of stepsToCompensate) {
-    for (let attempt = 0; attempt <= maxCompRetries; attempt++) {
-      const compStartedAt = clock.now();
-      try {
-        if (attempt > 0) {
-          await new Promise((r) =>
-            clock.setTimeout(() => r(undefined), compRetryDelayMs * Math.pow(2, attempt - 1)),
-          );
-        }
-        await runHookResult(stepDef.compensate!({ result, input, workflowId }));
-        compensated.push(stepDef.name);
-        if (attemptStorage) {
-          await attemptStorage.saveStepAttempt(
-            {
-              workflowId,
+    try {
+      await retryAsync({
+        policy,
+        clock,
+        run: async (retry) => {
+          const startedAt = clock.now();
+          try {
+            await runHookResult(stepDef.compensate!({ result, input, workflowId }));
+          } catch (err) {
+            await saveAttempt({
               stepName: stepDef.name,
-              attempt: attempt + 1,
-              type: "compensation",
-              status: "completed",
-              durationMs: clock.currentTimeMs() - compStartedAt.getTime(),
-              startedAt: compStartedAt,
-              completedAt: clock.now(),
-              ...(executorId !== undefined && { executorId }),
-            },
-            guard,
-          );
-        }
-        break;
-      } catch (err) {
-        if (attemptStorage) {
-          await attemptStorage.saveStepAttempt(
-            {
-              workflowId,
-              stepName: stepDef.name,
-              attempt: attempt + 1,
-              type: "compensation",
-              status: "failed",
-              error: err instanceof Error ? err.message : String(err),
-              durationMs: clock.currentTimeMs() - compStartedAt.getTime(),
-              startedAt: compStartedAt,
-              completedAt: clock.now(),
-              ...(executorId !== undefined && { executorId }),
-            },
-            guard,
-          );
-        }
-        if (attempt === maxCompRetries) {
-          failed.push({ stepName: stepDef.name, error: err });
-        }
-      }
+              attempt: retry + 1,
+              startedAt,
+              error: err,
+            });
+            throw err;
+          }
+          await saveAttempt({ stepName: stepDef.name, attempt: retry + 1, startedAt });
+        },
+      });
+      compensated.push(stepDef.name);
+    } catch (err) {
+      failed.push({ stepName: stepDef.name, error: err });
     }
   }
 

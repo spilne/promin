@@ -15,26 +15,33 @@
 //      returned fence token is handed to `fn` via `ctx.fenceToken` and
 //      threaded to every subsequent mutating call, so a stale holder
 //      that wakes up after its lock expired can't corrupt fresh state.
-//   2. setInterval — background heartbeat extends the lock every 10s,
-//      carrying the fence token so only the current holder can extend.
+//   2. setInterval — background heartbeat extends the lock every
+//      `heartbeatIntervalMs`, carrying the fence token so only the current
+//      holder can extend.
 //   3. fn(ctx) — execute the workflow steps, passing `ctx.fenceToken`
-//      down into every storage mutation.
+//      down into every storage mutation and watching `ctx.signal`.
 //   4. finally — clear heartbeat timer, release the lock (fenced).
 //
-// The heartbeat runs independently of the main execution. If a heartbeat
-// call fails (e.g. storage is temporarily unavailable), it is silently
-// swallowed — the lock will expire naturally at its last-extended time,
-// which is the correct behavior (it means we can't prove liveness).
+// Losing the lock:
 //
-// Edge cases:
-//   - Heartbeat failure: swallowed, lock expires naturally
-//   - fn() throws: lock is released in finally block
-//   - Suspended workflow: throw propagates up, lock released
-//   - Advisory locks (Postgres): heartbeat is a no-op (see storage impl)
+//   - A heartbeat rejected with `FenceTokenMismatchError` means another
+//     holder has the lock: `ctx.signal` aborts at once.
+//   - Other heartbeat failures (storage briefly unavailable) are tolerated
+//     until no heartbeat has succeeded for a whole `lockDurationMs`; by
+//     then the lock has expired and may be taken, so `ctx.signal` aborts.
+//
+//   The abort reason is a `WorkflowLockLostError`. `fn` decides where to
+//   stop (the runner checks between waves); `withLock` never interrupts it.
+//
+// Releasing: a `releaseLock` failure never replaces `fn`'s outcome — its
+// result or its error (including `WorkflowSuspendedError`) is what the
+// caller sees. The lock then expires on its own.
+//
+// Advisory locks (Postgres): the heartbeat is a no-op (see storage impl).
 // ---------------------------------------------------------------------------
 
 import type { FenceToken, WorkflowStorage } from "./workflow-storage.ts";
-import { WorkflowLockError } from "./durable-pipeline-error.ts";
+import { WorkflowLockError, WorkflowLockLostError } from "./durable-pipeline-error.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 
 /**
@@ -76,6 +83,11 @@ export interface LockContext {
    * `undefined` when the backend doesn't issue tokens.
    */
   readonly fenceToken?: FenceToken;
+  /**
+   * Aborted, with a `WorkflowLockLostError` reason, once the lock is known
+   * or presumed lost. Check it at safe points and stop there.
+   */
+  readonly signal: AbortSignal;
 }
 
 /**
@@ -92,10 +104,10 @@ export interface LockContext {
  * const result = await withLock({
  *   storage,
  *   workflowId: "order-123",
- *   fn: async ({ fenceToken }) => {
+ *   fn: async ({ fenceToken, signal }) => {
  *     // storage mutations carry { fenceToken } so a stale holder that
  *     // wakes up after the lock expired is rejected by the backend.
- *     return await executeSteps(fenceToken);
+ *     return await executeSteps({ fenceToken, signal });
  *   },
  * });
  * ```
@@ -120,17 +132,53 @@ export async function withLock<T>(params: {
   }
 
   const guard = token ? { fenceToken: token } : undefined;
+  const lost = new AbortController();
+  let lastExtendedMs = clock.currentTimeMs();
+  let released = false;
 
   const heartbeatHandle = clock.setInterval(() => {
-    storage.heartbeat(workflowId, lockDurationMs, guard).catch(() => {
-      // Heartbeat failure is swallowed — lock expires naturally.
-    });
+    storage.heartbeat(workflowId, lockDurationMs, guard).then(
+      () => {
+        lastExtendedMs = clock.currentTimeMs();
+      },
+      (error: unknown) => {
+        if (released || lost.signal.aborted) return;
+        const tag = (error as { _tag?: unknown } | null | undefined)?._tag;
+        if (tag === "FenceTokenMismatchError") {
+          lost.abort(
+            new WorkflowLockLostError({
+              workflowId,
+              message: `Lost the lock on workflow "${workflowId}": it is held under another fence token`,
+              cause: error,
+            }),
+          );
+          return;
+        }
+        if (clock.currentTimeMs() - lastExtendedMs >= lockDurationMs) {
+          lost.abort(
+            new WorkflowLockLostError({
+              workflowId,
+              message:
+                `Lost the lock on workflow "${workflowId}": no heartbeat succeeded ` +
+                `for ${lockDurationMs}ms`,
+              cause: error,
+            }),
+          );
+        }
+      },
+    );
   }, heartbeatMs);
 
   try {
-    return await fn({ fenceToken: token });
+    return await fn({ fenceToken: token, signal: lost.signal });
   } finally {
+    released = true;
     heartbeatHandle.clear();
-    await storage.releaseLock(workflowId, guard);
+    try {
+      await storage.releaseLock(workflowId, guard);
+    } catch {
+      // Never let a failed release replace fn's result or error; the lock
+      // expires on its own `lockDurationMs` after the last heartbeat.
+    }
   }
 }

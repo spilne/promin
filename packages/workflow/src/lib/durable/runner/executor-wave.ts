@@ -21,95 +21,105 @@ import { settleWave, skippedOutcome } from "./wave.ts";
  * Run `readySteps` through `ctx.stepExecutor` and wait for every one of
  * them. Each step is checkpointed as soon as its executor reports, unless
  * the executor says it already persisted the step. The wave's
- * `AbortSignal` is aborted when the first step fails.
+ * `AbortSignal` is aborted when the first step fails, or when the run's
+ * lock is lost (`ctx.signal`).
  */
 export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> {
   const { ctx, workflowId, input, readySteps, results, clock, stepStates } = params;
   const abort = new AbortController();
+  const lockSignal = ctx.signal;
+  const onLockLost = (): void => abort.abort(lockSignal?.reason);
+  if (lockSignal?.aborted) onLockLost();
+  else lockSignal?.addEventListener("abort", onLockLost, { once: true });
 
-  return settleWave({
-    readySteps,
-    runStep: async (stepDef) => {
-      const skipped = skippedOutcome({
-        stepDef,
-        input,
-        results,
-        clock,
-        attempt: params.stepAttempts.get(stepDef.name) ?? 1,
-      });
-      if (skipped) return checkpointStepOutcome({ ctx, clock, workflowId, outcome: skipped });
+  try {
+    return await settleWave({
+      readySteps,
+      runStep: async (stepDef) => {
+        const skipped = skippedOutcome({
+          stepDef,
+          input,
+          results,
+          clock,
+          attempt: params.stepAttempts.get(stepDef.name) ?? 1,
+        });
+        if (skipped) return checkpointStepOutcome({ ctx, clock, workflowId, outcome: skipped });
 
-      const startedAt = clock.now();
-      const currentAttempt = (params.stepAttempts.get(stepDef.name) ?? 0) + 1;
-      params.stepAttempts.set(stepDef.name, currentAttempt);
+        const startedAt = clock.now();
+        const currentAttempt = (params.stepAttempts.get(stepDef.name) ?? 0) + 1;
+        params.stepAttempts.set(stepDef.name, currentAttempt);
 
-      // Resolve per-task concurrency cap. Step-level wins over the
-      // workflow-level default. The key fn is evaluated against the
-      // step's input ctx; the resolved string + scope + limit are
-      // stamped on the dispatched task so workers don't re-evaluate.
-      const prevStepName = stepDef.dependsOn[0];
-      const concurrency = resolveStepConcurrency({
-        workflowName: ctx.workflowName,
-        workflowQueue: ctx.workflowQueue,
-        stepDef,
-        workflowInput: input,
-        stepInput: prevStepName != null ? results[prevStepName] : input,
-        workflowId,
-        attempt: currentAttempt,
-        results,
-      });
+        // Resolve per-task concurrency cap. Step-level wins over the
+        // workflow-level default. The key fn is evaluated against the
+        // step's input ctx; the resolved string + scope + limit are
+        // stamped on the dispatched task so workers don't re-evaluate.
+        const prevStepName = stepDef.dependsOn[0];
+        const concurrency = resolveStepConcurrency({
+          workflowName: ctx.workflowName,
+          workflowQueue: ctx.workflowQueue,
+          stepDef,
+          workflowInput: input,
+          stepInput: prevStepName != null ? results[prevStepName] : input,
+          workflowId,
+          attempt: currentAttempt,
+          results,
+        });
 
-      const req: StepExecutionRequest = {
-        workflowId,
-        stepName: stepDef.name,
-        input,
-        prevResults: { ...results },
-        attempt: currentAttempt,
-        needs: stepDef.needs,
-        priority: stepDef.priority,
-        signal: abort.signal,
-        ...(ctx.workflowVersion !== undefined && { version: ctx.workflowVersion }),
-        runtime: stepRuntimeFor({ ctx, clock, stepStates, stepName: stepDef.name }),
-        ...(concurrency
-          ? {
-              concurrencyKey: concurrency.key,
-              concurrencyScope: concurrency.scope,
-              concurrencyLimit: concurrency.limit,
-            }
-          : {}),
-      };
+        const req: StepExecutionRequest = {
+          workflowId,
+          stepName: stepDef.name,
+          input,
+          prevResults: { ...results },
+          attempt: currentAttempt,
+          needs: stepDef.needs,
+          priority: stepDef.priority,
+          signal: abort.signal,
+          ...(ctx.workflowVersion !== undefined && { version: ctx.workflowVersion }),
+          runtime: stepRuntimeFor({ ctx, clock, stepStates, stepName: stepDef.name }),
+          ...(concurrency
+            ? {
+                concurrencyKey: concurrency.key,
+                concurrencyScope: concurrency.scope,
+                concurrencyLimit: concurrency.limit,
+              }
+            : {}),
+        };
 
-      let res: StepExecutionResult;
-      try {
-        res = await ctx.stepExecutor!.executeStep(req);
-      } catch (thrown) {
-        res = resultOfThrown(thrown);
-      }
+        let res: StepExecutionResult;
+        try {
+          res = await ctx.stepExecutor!.executeStep(req);
+        } catch (thrown) {
+          res = resultOfThrown(thrown);
+        }
 
-      const reported = res.ok || res.kind === undefined || res.kind === "failed" ? res : undefined;
-      if (reported?.attempt !== undefined) {
-        params.stepAttempts.set(stepDef.name, reported.attempt);
-      }
-      const outcome = outcomeOfResult({
-        workflowId,
-        name: stepDef.name,
-        res,
-        startedAt,
-        durationMs: clock.currentTimeMs() - startedAt.getTime(),
-        attempt: reported?.attempt ?? currentAttempt,
-      });
-      if (outcome.kind === "failed") abort.abort(outcome.error);
+        const reported =
+          res.ok || res.kind === undefined || res.kind === "failed" ? res : undefined;
+        if (reported?.attempt !== undefined) {
+          params.stepAttempts.set(stepDef.name, reported.attempt);
+        }
+        const outcome = outcomeOfResult({
+          workflowId,
+          name: stepDef.name,
+          res,
+          startedAt,
+          durationMs: clock.currentTimeMs() - startedAt.getTime(),
+          attempt: reported?.attempt ?? currentAttempt,
+        });
+        if (outcome.kind === "failed") abort.abort(outcome.error);
 
-      return checkpointStepOutcome({
-        ctx,
-        clock,
-        workflowId,
-        outcome,
-        failedAttempts: reported?.failedAttempts ?? [],
-        checkpointed: reported?.storageAlreadyCheckpointed === true,
-      });
-    },
-  });
+        return checkpointStepOutcome({
+          ctx,
+          clock,
+          workflowId,
+          outcome,
+          failedAttempts: reported?.failedAttempts ?? [],
+          checkpointed: reported?.storageAlreadyCheckpointed === true,
+        });
+      },
+    });
+  } finally {
+    lockSignal?.removeEventListener("abort", onLockLost);
+  }
 }
 
 /**

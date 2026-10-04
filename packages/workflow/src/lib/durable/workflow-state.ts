@@ -38,6 +38,37 @@ export function isTerminalWorkflowStatus(status: WorkflowStatus): boolean {
   return status === "completed" || status === "failed" || status === "tripwire";
 }
 
+/** `errorTag` `cancelWorkflow` stores on a cancelled run. */
+export const CANCELLED_ERROR_TAG = "WorkflowCancelledError";
+
+/** `error` `cancelWorkflow` stores on a cancelled run. */
+export const CANCELLED_ERROR = "Cancelled";
+
+/**
+ * True when a run is `failed` because it was cancelled. Rows written before
+ * `errorTag` existed are recognised by their `"Cancelled"` error.
+ */
+export function isCancelledRun(state: {
+  readonly status: WorkflowStatus;
+  readonly error?: string;
+  readonly errorTag?: string;
+}): boolean {
+  if (state.status !== "failed") return false;
+  if (state.errorTag !== undefined) return state.errorTag === CANCELLED_ERROR_TAG;
+  return state.error === CANCELLED_ERROR;
+}
+
+/**
+ * The status fields of a run, as returned by `WorkflowStorage.loadWorkflowStatus`:
+ * what the runner re-reads between waves to notice a cancel without loading
+ * every step row.
+ */
+export interface WorkflowStatusSnapshot {
+  readonly status: WorkflowStatus;
+  readonly error?: string;
+  readonly errorTag?: string;
+}
+
 export type CompensationStatus = "none" | "compensating" | "compensated" | "partial";
 
 export type StepStatus =
@@ -105,6 +136,12 @@ export interface WorkflowState<Input = unknown, Result = unknown> {
   readonly input: Input;
   readonly result?: Result;
   readonly error?: string;
+  /**
+   * `_tag` of the error that failed the run (`failWorkflow`'s `errorTag`),
+   * `"WorkflowCancelledError"` for a cancelled run. Absent when the run is
+   * not `failed` or the error carried no tag.
+   */
+  readonly errorTag?: string;
   /**
    * Structured reason attached when the workflow ended via a `.tripwire()`
    * step. Present only when `status === "tripwire"`. Opaque payload — the
@@ -177,6 +214,12 @@ export interface StepState {
   readonly stepType: StepType;
   readonly result?: unknown;
   readonly error?: string;
+  /**
+   * `_tag` of the error that failed the step (`saveStepFailure`'s
+   * `errorTag`). For a `StepError` reported by an executor, the original
+   * error's tag. Absent when the step is not `failed` or the error had no tag.
+   */
+  readonly errorTag?: string;
   readonly startedAt?: Date;
   readonly completedAt?: Date;
   readonly durationMs?: number;

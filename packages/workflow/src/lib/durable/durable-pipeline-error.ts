@@ -22,12 +22,56 @@ export class StepError extends TaggedError("StepError")<{
 /**
  * A stored run ended `failed`. Raised by `WorkflowHandle.result()`, which
  * reads the outcome back from storage: `stepName` is the step whose row is
- * `failed`, when there is one, and `message` the stored error.
+ * `failed`, when there is one, `message` the stored error, and `errorTag`
+ * the `_tag` of the error that failed the run, as stored with it (for a
+ * `StepError` from an executor, the tag the executor reported).
  */
 export class WorkflowFailedError extends TaggedError("WorkflowFailedError")<{
   readonly workflowId: string;
   readonly stepName?: string;
   readonly message: string;
+  readonly errorTag?: string;
+}>() {}
+
+/**
+ * The run was cancelled (`handle.cancel()` / `storage.cancelWorkflow`).
+ * Raised by the run that was executing when the cancel landed (at the next
+ * wave boundary), by a later attempt to run the cancelled workflow again,
+ * and by `WorkflowHandle.result()`.
+ */
+export class WorkflowCancelledError extends TaggedError("WorkflowCancelledError")<{
+  readonly workflowId: string;
+  readonly message: string;
+}>() {}
+
+/**
+ * A durable write the run depends on (a step checkpoint, a terminal status
+ * write) still failed after its retries. The step body's outcome is not
+ * lost but not saved either, so the run stops without compensation and
+ * without `failWorkflow`: the row stays `running`, and recovery re-drives
+ * it once its lock expires. A step whose result was not saved runs again
+ * then (at-least-once).
+ */
+export class CheckpointError extends TaggedError("CheckpointError")<{
+  readonly workflowId: string;
+  /** The storage call that failed (`saveStepResult`, `completeWorkflow`, ...). */
+  readonly operation: string;
+  readonly stepName?: string;
+  readonly message: string;
+  readonly cause: unknown;
+}>() {}
+
+/**
+ * The run's workflow lock was lost while it was executing: a heartbeat found
+ * the lock held under another fence token, or no heartbeat succeeded for a
+ * whole lock duration. The run stops at the next wave boundary without
+ * compensation or terminal writes; the new holder re-drives it from
+ * storage.
+ */
+export class WorkflowLockLostError extends TaggedError("WorkflowLockLostError")<{
+  readonly workflowId: string;
+  readonly message: string;
+  readonly cause?: unknown;
 }>() {}
 
 /** A storage backend error. */
