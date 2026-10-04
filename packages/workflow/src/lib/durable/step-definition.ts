@@ -11,10 +11,10 @@
 // the same pattern Effect, Zod and RxJS use for heterogeneous collections.
 // ---------------------------------------------------------------------------
 
-import { die, type Eff, type Throws } from "@spilne/perfect-core";
+import { die, succeed, type Eff, type Throws } from "@spilne/perfect-core";
 import type { Codec } from "@spilne/perfect-core/connect";
 import type { CacheStore } from "../shared/cache-store.ts";
-import { isEff, isThenable, promiseOrEff } from "../shared/eff.ts";
+import { isEff, isThenable, promiseOrDie, promiseOrEff } from "../shared/eff.ts";
 import type { RetryPolicy } from "../shared/retry-policy.ts";
 import type { TaggedError } from "../shared/tagged-error.ts";
 import type { WallClock } from "../shared/wall-clock.ts";
@@ -112,8 +112,13 @@ export type StepFailureStrategy<T> = "fail" | "skip" | { readonly fallback: (err
  * from a synchronous callback (`.branch()` `condition`, `.match()` `on` /
  * `when`, a step function that throws before returning its `Eff`) is a
  * defect: it fails the step without retry or `onFailure`.
+ *
+ * `Input` is the workflow input and `Prev` the value the step receives as
+ * `prev` (its first dependency's result, or the workflow input for a step
+ * with no dependencies); the builder fills both in, so `compensate`,
+ * `skipWhen`, `skipValue` and `cache.key` see typed values.
  */
-export interface StepOptions<T> {
+export interface StepOptions<T, Input = unknown, Prev = unknown> {
   readonly codec?: Codec<T>;
   /**
    * Per-attempt timeout. An attempt that does not settle in time is
@@ -132,13 +137,13 @@ export interface StepOptions<T> {
    */
   readonly compensate?: (params: {
     result: T;
-    input: unknown;
+    input: Input;
     workflowId: string;
   }) => Eff<unknown, Throws<unknown>> | Promise<void>;
   /** Skip this step when the predicate returns true. Skipped steps are recorded as 'skipped' and do not trigger compensation. */
-  readonly skipWhen?: (prev: unknown) => boolean;
+  readonly skipWhen?: (prev: Prev) => boolean;
   /** Value to pass to the next step when this step is skipped. Defaults to prev. */
-  readonly skipValue?: (prev: unknown) => T;
+  readonly skipValue?: (prev: Prev) => T;
   /**
    * Capabilities this step requires from a worker. Only takes effect under
    * distributed execution (coordinator + workers); in-process `.run()`
@@ -170,7 +175,7 @@ export interface StepOptions<T> {
    * branch) without their entries colliding. Values are stored encoded with
    * the step's codec.
    */
-  readonly cache?: StepCacheOption;
+  readonly cache?: StepCacheOption<Input, Prev>;
   /**
    * Per-step concurrency cap. Step-level wins over workflow-level — set
    * this when one step is rate-limited by an external API while the rest
@@ -198,10 +203,17 @@ export interface MapElementOptions<T> {
  * to the whole map step, whose result is the `T[]` array: `codec` encodes
  * that array (default: `element.codec` lifted to arrays, else the workflow
  * codec), `onFailure.fallback` and `skipValue` return an array, `compensate`
- * receives it. A step-level `retry` or `timeoutMs` re-runs every element;
- * use `element` to retry or time out elements individually.
+ * receives it, and `skipWhen` / `skipValue` / `cache.key` see the source
+ * array as `prev`. Elements with a saved result are not run again: a
+ * step-level `retry`, a workflow retry or a resume after a crash runs only
+ * the elements that have not completed. Use `element` to retry or time out
+ * one element in place.
  */
-export interface MapOverOptions<T> extends StepOptions<T[]> {
+export interface MapOverOptions<T, Input = unknown, Prev = unknown> extends StepOptions<
+  T[],
+  Input,
+  Prev
+> {
   readonly element?: MapElementOptions<T>;
 }
 
@@ -213,11 +225,15 @@ export interface MapOverOptions<T> extends StepOptions<T[]> {
  * Failure handling, compensation and skipping are per branch only, because
  * each branch is its own step with its own result type.
  */
-export interface ParallelStepsOptions<Outputs extends Record<string, unknown>> extends Pick<
-  StepOptions<Outputs>,
+export interface ParallelStepsOptions<
+  Outputs extends Record<string, unknown>,
+  Input = unknown,
+  Prev = unknown,
+> extends Pick<
+  StepOptions<Outputs, Input, Prev>,
   "codec" | "timeoutMs" | "retry" | "needs" | "priority" | "queue" | "cache"
 > {
-  readonly branches?: { readonly [K in keyof Outputs]?: StepOptions<Outputs[K]> };
+  readonly branches?: { readonly [K in keyof Outputs]?: StepOptions<Outputs[K], Input, Prev> };
 }
 
 /**
@@ -229,7 +245,10 @@ export interface ParallelStepsOptions<Outputs extends Record<string, unknown>> e
  * would leave it running against the journal; time out activities or the
  * workflow instead).
  */
-export type JournaledStepOptions<T> = Omit<StepOptions<T>, "cache" | "timeoutMs">;
+export type JournaledStepOptions<T, Input = unknown, Prev = unknown> = Omit<
+  StepOptions<T, Input, Prev>,
+  "cache" | "timeoutMs"
+>;
 
 /**
  * Options of `.subworkflow()`. A child that fails surfaces as a typed
@@ -238,7 +257,10 @@ export type JournaledStepOptions<T> = Omit<StepOptions<T>, "cache" | "timeoutMs"
  * row is the memo) and no `timeoutMs` (the child would keep running and
  * holding its lock; set the child workflow's own `timeoutMs` instead).
  */
-export type SubworkflowOptions<T> = Omit<StepOptions<T>, "cache" | "timeoutMs">;
+export type SubworkflowOptions<T, Input = unknown, Prev = unknown> = Omit<
+  StepOptions<T, Input, Prev>,
+  "cache" | "timeoutMs"
+>;
 
 /**
  * Options of `.tripwire()`. Only the codec: the step is a synchronous
@@ -247,9 +269,13 @@ export type SubworkflowOptions<T> = Omit<StepOptions<T>, "cache" | "timeoutMs">;
  */
 export type TripwireOptions<T> = Pick<StepOptions<T>, "codec">;
 
-export interface StepCacheOption {
-  /** Compute the cache key from step context (input + prev + workflowId). */
-  readonly key: (ctx: StepContext<unknown, unknown>) => string;
+export interface StepCacheOption<Input = unknown, Prev = unknown> {
+  /**
+   * Compute the cache key from the step context: the workflow input, `prev`
+   * (the first dependency's result, also for a step with `dependsOn`) and
+   * the workflow id.
+   */
+  readonly key: (ctx: StepContext<Input, Prev>) => string;
   /** TTL in milliseconds. Entries expire after this window. */
   readonly ttlMs: number;
   /**
@@ -283,7 +309,9 @@ export type StepKind =
   | "tripwire"
   | "parallel"
   | "loop"
-  | "child";
+  | "child"
+  /** The pure step `.map()` adds after the head. */
+  | "transform";
 
 export interface StepDefinition {
   readonly name: string;
@@ -362,7 +390,7 @@ export interface StepRuntime {
   /**
    * This step's stored row as of the runner's last load of the run (`null`
    * when the step has no row yet). `undefined` means the caller did not
-   * supply it; step kinds that need it (sleep, waitForSignal) then load it.
+   * supply it; step kinds that need it (sleep, waitForSignal, mapOver) then load it.
    */
   readonly stepState?: StepState | null;
   /**
@@ -419,6 +447,26 @@ export function asStepEff(params: {
       `Step "${stepName}" must return an Eff (got ${result === null ? "null" : typeof result}); ` +
         `use ${params.asyncVariant ?? ".stepAsync()"} for Promise-returning functions`,
     ),
+  );
+}
+
+/**
+ * This step's stored row: the runner-supplied `stepState` when present
+ * (`null` = no row), else a fresh load (steps driven without a runner).
+ * `reload` forces the fresh load, for a step that needs writes made after
+ * the runner's last load of the run (an earlier attempt's task rows).
+ */
+export function currentStepState(params: {
+  readonly exec: ExecuteParams;
+  readonly stepName: string;
+  readonly reload?: boolean;
+}): Eff<StepState | undefined> {
+  const { exec, stepName } = params;
+  if (exec.stepState !== undefined && params.reload !== true) {
+    return succeed(exec.stepState ?? undefined);
+  }
+  return promiseOrDie(() => exec.storage.loadWorkflow(exec.workflowId)).map(
+    (state) => state?.steps[stepName],
   );
 }
 

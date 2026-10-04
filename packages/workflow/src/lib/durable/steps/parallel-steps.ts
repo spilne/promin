@@ -19,11 +19,11 @@ import {
 import { toStepPolicy } from "../step-policy.ts";
 
 /** Extract the success type from a parallel branch function. */
-export type BranchOutput<B> = B extends (ctx: any) => Eff<infer T, any> ? T : never;
+export type BranchOutput<B> = B extends (ctx: never) => Eff<infer T, infer _S> ? T : never;
 
 /** Union of all branch error types — flows into the builder's typed Error channel. */
 export type BranchError<Branches extends Record<string, unknown>> = {
-  [K in keyof Branches]: Branches[K] extends (ctx: any) => Eff<any, infer S>
+  [K in keyof Branches]: Branches[K] extends (ctx: never) => Eff<infer _A, infer S>
     ? ErrorsOf<S> extends infer E
       ? E extends TaggedError
         ? E

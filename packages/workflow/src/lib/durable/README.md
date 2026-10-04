@@ -98,7 +98,22 @@ const result = await workflow<{ userId: string }>({
 ```
 
 `element` options (codec, timeoutMs, retry) apply to each element on its own;
-the other options apply to the map step and its array result.
+the other options apply to the map step and its array result. Each completed
+element is saved as a task row, so when the map step runs again (a step or
+workflow retry, a resume after a crash) only the elements without a saved
+result run.
+
+### map — Pure transform of `prev`
+
+```typescript
+.step("load", ({ input }) => succeed({ id: input.id, total: 42 }))
+.map((order) => order.total) // the next step's prev is 42
+```
+
+`.map(fn)` adds a step `"<head>.map"` that applies `fn` to the head's result
+and checkpoints the mapped value with the workflow codec. The head step is
+unchanged: its row, codec, `compensate` and `dependsOn: ["load"]` see the
+unmapped value, and its `skipValue` / `onFailure` fallback are mapped too.
 
 ### branch — Conditional paths
 

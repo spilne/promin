@@ -10,6 +10,11 @@ export interface WorkflowDAG {
   readonly steps: readonly {
     readonly name: string;
     readonly dependsOn: readonly string[];
+    /**
+     * The step's `StepKind` when built by this package. Typed `string`
+     * because a DAG is persisted and read back (stub workflows, the
+     * dashboard), possibly from another version that has other kinds.
+     */
     readonly kind: string;
     /**
      * Capabilities this step requires from a worker. Empty / omitted = any

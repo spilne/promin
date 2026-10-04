@@ -4,28 +4,12 @@
 // has been delivered (or its stored deadline has passed).
 // ---------------------------------------------------------------------------
 
-import { eff, fail, succeed, type Eff } from "@spilne/perfect-core";
+import { eff, fail } from "@spilne/perfect-core";
 import type { Codec } from "@spilne/perfect-core/connect";
 import { promiseOrDie } from "../../shared/eff.ts";
 import { SystemWallClock } from "../../shared/wall-clock.ts";
 import { WorkflowSuspendedError, WorkflowTimeoutError } from "../durable-pipeline-error.ts";
-import { readPrev, type ExecuteParams, type StepDefinition } from "../step-definition.ts";
-import type { StepState } from "../workflow-state.ts";
-
-/**
- * This step's stored row: the runner-supplied `stepState` when present
- * (`null` = no row), else a fresh load (steps driven without a runner).
- */
-function currentStepState(params: {
-  readonly exec: ExecuteParams;
-  readonly stepName: string;
-}): Eff<StepState | undefined> {
-  const { exec, stepName } = params;
-  if (exec.stepState !== undefined) return succeed(exec.stepState ?? undefined);
-  return promiseOrDie(() => exec.storage.loadWorkflow(exec.workflowId)).map(
-    (state) => state?.steps[stepName],
-  );
-}
+import { currentStepState, readPrev, type StepDefinition } from "../step-definition.ts";
 
 export function createSleepStep(params: {
   readonly name: string;

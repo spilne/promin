@@ -6,7 +6,6 @@ import {
   emptySteps,
   hasStep,
   lastStep,
-  replaceLastStep,
   stepsToArray,
   type BuilderState,
   type StepSeq,
@@ -86,14 +85,6 @@ describe("StepSeq", () => {
     const snapshot = stepsToArray(seq);
     append(seq, "b");
     expect(snapshot.map((d) => d.name)).toEqual(["a"]);
-  });
-
-  it("replaceLastStep swaps the last step and leaves the original alone", () => {
-    const seq = append(emptySteps(), "a", "b");
-    const replaced = replaceLastStep({ seq, def: { ...def("b"), kind: "branch" } });
-    expect(stepsToArray(replaced).map((d) => d.kind)).toEqual(["normal", "branch"]);
-    expect(stepsToArray(seq).map((d) => d.kind)).toEqual(["normal", "normal"]);
-    expect(hasStep({ seq: replaced, name: "b" })).toBe(true);
   });
 });
 

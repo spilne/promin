@@ -19,6 +19,7 @@ export type {
   IdempotencyConfig,
   Workflow,
   WorkflowConfig,
+  WorkflowErrorOf,
   WorkflowDefinitionInternals,
   WorkflowHandle,
   WorkflowHooks,
