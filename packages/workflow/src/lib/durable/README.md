@@ -92,9 +92,13 @@ const result = await workflow<{ userId: string }>({
 ```typescript
 .step("get-urls", ({ input }) => succeed(input.urls))
 .mapOver("fetch-all", { array: "get-urls", concurrency: 5 }, (url, ctx) =>
-  succeed(`Response from ${url}`)
+  succeed(`Response from ${url}`),
+  { element: { retry: { maxRetries: 3 }, timeoutMs: 5_000 } }, // per element
 )
 ```
+
+`element` options (codec, timeoutMs, retry) apply to each element on its own;
+the other options apply to the map step and its array result.
 
 ### branch — Conditional paths
 
@@ -172,10 +176,21 @@ await eventStream
   onFailure: "skip",                              // skip, continue with undefined
   // OR
   onFailure: { fallback: (error) => defaults },   // use fallback value
-  // OR
-  onFailure: { handler: (error) => "retry" | "skip" | "fail" },  // dynamic decision
 })
 ```
+
+Retry and `onFailure` handle typed failures only. A throw from a synchronous
+callback (`.branch()` `condition`, `.match()` `on`/`when`, `.subworkflow()`
+`input`/`workflowId`) is a defect and fails the step without them; return a
+failed `Eff` for a recoverable error. Suspension (sleep, signal waits) is never
+retried or skipped.
+
+Every step kind applies the options its options type accepts. `.step()`,
+`.branch()` and `.match()` accept all of them; `.mapOver()` adds per-element
+`element` options; `.parallelSteps()` takes block-wide defaults plus per-branch
+`branches` options; `.journaled()` and `.subworkflow()` have no `cache` or
+`timeoutMs`; loops have no `cache`; `.tripwire()` takes only `codec`. An option a
+kind cannot honour is a compile error.
 
 ### Workflow-level Retry
 

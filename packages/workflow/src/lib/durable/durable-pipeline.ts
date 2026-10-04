@@ -23,6 +23,7 @@ import {
   fail,
   forEachPar,
   succeed,
+  suspend,
   tryPromise,
   type Eff,
   type ErrorsOf,
@@ -40,8 +41,8 @@ import type { RetryPolicy } from "../shared/retry-policy.ts";
 import type { CacheStore } from "../shared/cache-store.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
-import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
-import type { Show } from "@spilne/perfect-core";
+import { LosslessJsonCodec, codecArray } from "@spilne/perfect-core/connect";
+import { isControlFlowExit, toStepPolicy, withStepRetry, withStepTimeout } from "./step-policy.ts";
 import type { Sinkable } from "../shared/streamable.ts";
 import type { FailedWorkflowRecord, StepState } from "./workflow-state.ts";
 import { type FenceGuard, type WorkflowStorage, isStepAttemptStorage } from "./workflow-storage.ts";
@@ -79,27 +80,23 @@ export interface MapStepContext<Input> {
   readonly input: Input;
   readonly workflowId: string;
   readonly taskIndex: number;
+  /** The step attempt plus this element's `element.retry` retries so far. */
   readonly attempt: number;
 }
 
-/** Options for `.dowhile()` / `.dountil()` loops. */
-export interface LoopOptions<T> {
+/**
+ * Options for `.dowhile()` / `.dountil()` loops. The step-level fields
+ * apply to the loop step as a whole (not per iteration): a `retry` restarts
+ * the loop, which replays completed iterations from their rows and resumes
+ * at the first missing one. No `cache` (iteration rows are the loop's memo).
+ */
+export interface LoopOptions<T> extends Omit<StepOptions<T>, "cache"> {
   /**
    * Safety cap on the number of iterations. When the loop runs this many
    * times without the exit condition being satisfied, the loop step fails
    * with `LoopLimitExceededError`. Default: 100.
    */
   readonly maxIterations?: number;
-  /** Override the codec used for the loop's iteration results. */
-  readonly codec?: Codec<T>;
-  /** Per-step timeout applied to the outer loop (not per-iteration). */
-  readonly timeoutMs?: number;
-  /** Retry policy applied to the outer loop step (not per-iteration). */
-  readonly retry?: RetryPolicy<TaggedError>;
-  /** Capabilities required by the loop step (forwarded when dispatched). */
-  readonly needs?: readonly string[];
-  /** Dispatch priority for the loop step. */
-  readonly priority?: number;
 }
 
 /**
@@ -173,17 +170,32 @@ export interface WorkflowQueueConfig<Input> {
 }
 
 /**
+ * What a step-level `queue.concurrencyKey` receives. It is evaluated when
+ * the runner hands the step to a step executor (dispatch), before the body
+ * runs.
+ */
+export interface StepQueueContext {
+  /**
+   * The value the step receives as `prev`: its first dependency's result,
+   * or the workflow input for a step with no dependencies.
+   */
+  readonly prev: unknown;
+  /** Results of every step completed so far in this run, by step name. */
+  readonly deps: Readonly<Record<string, unknown>>;
+  readonly workflowId: string;
+  readonly attempt: number;
+}
+
+/**
  * Per-step concurrency cap — same shape as workflow-level but scoped to
  * just one step's tasks. Step-level wins over workflow-level for that
  * specific step. Useful when one step is rate-limited by an external API
  * (e.g. `concurrencyLimit: 3` on a "send-email" step that hits a vendor
  * with a 3-rps cap, while the rest of the workflow has no cap).
  */
-export interface StepQueueOption<T> {
+export interface StepQueueOption {
   readonly concurrencyLimit: number;
-  readonly concurrencyKey?: (
-    ctx: StepContext<T, unknown> | DagStepContext<T, Record<string, unknown>>,
-  ) => string;
+  readonly concurrencyKey?: (ctx: StepQueueContext) => string;
 }
 
 // ---------------------------------------------------------------------------
@@ -380,15 +392,34 @@ export interface WorkflowHooks {
 // Step options
 // ---------------------------------------------------------------------------
 
-export type StepFailureStrategy<T> =
-  | "fail"
-  | "skip"
-  | { fallback: (error: unknown) => T }
-  | { handler: (error: unknown) => "retry" | "skip" | "fail" };
+/**
+ * What a step does once it has failed with a typed error and its retries
+ * are spent: `"fail"` (default) fails the step, `"skip"` completes it with
+ * `undefined`, `fallback` completes it with the returned value. Defects and
+ * engine control flow (suspension, continue-as-new) are never handled.
+ */
+export type StepFailureStrategy<T> = "fail" | "skip" | { readonly fallback: (error: unknown) => T };
 
+/**
+ * Options of `.step()` / `.stepAsync()`, `.branch()` and `.match()`, which
+ * honour every field. Other step kinds take a narrowed variant that leaves
+ * out what they cannot honour (`MapOverOptions`, `ParallelStepsOptions`,
+ * `JournaledStepOptions`, `SubworkflowOptions`, `LoopOptions`,
+ * `TripwireOptions`), so an unsupported option is a compile error rather
+ * than silently ignored.
+ *
+ * Retry and `onFailure` act on typed failures (an `Eff` failure). A throw
+ * from a synchronous callback (`.branch()` `condition`, `.match()` `on` /
+ * `when`, a step function that throws before returning its `Eff`) is a
+ * defect: it fails the step without retry or `onFailure`.
+ */
 export interface StepOptions<T> {
   readonly codec?: Codec<T>;
-  readonly show?: Show<T>;
+  /**
+   * Per-attempt timeout. An attempt that does not settle in time is
+   * interrupted and fails with `StepTimeoutError` (a typed failure, so
+   * `retry` and `onFailure` apply to it).
+   */
   readonly timeoutMs?: number;
   /** Retry the step on typed failures. Default delays: 250ms base, doubling, 3 retries. */
   readonly retry?: RetryPolicy<TaggedError>;
@@ -445,8 +476,76 @@ export interface StepOptions<T> {
    * this when one step is rate-limited by an external API while the rest
    * of the workflow has no cap. See `WorkflowQueueConfig` for the shape.
    */
-  readonly queue?: StepQueueOption<T>;
+  readonly queue?: StepQueueOption;
 }
+
+/**
+ * Per-element options of `.mapOver()`. Each element runs under its own
+ * timeout and retry, so one flaky element is retried alone instead of
+ * failing (and, with a step-level `retry`, re-running) the whole map.
+ */
+export interface MapElementOptions<T> {
+  /** Codec for each element's task row. Default: the workflow codec. */
+  readonly codec?: Codec<T>;
+  /** Per-element attempt timeout (a `StepTimeoutError` whose message names `step[index]`). */
+  readonly timeoutMs?: number;
+  /** Retry one element on typed failures. */
+  readonly retry?: RetryPolicy<TaggedError>;
+}
+
+/**
+ * Options of `.mapOver()` / `.mapOverAsync()`. The step-level fields apply
+ * to the whole map step, whose result is the `T[]` array: `codec` encodes
+ * that array (default: `element.codec` lifted to arrays, else the workflow
+ * codec), `onFailure.fallback` and `skipValue` return an array, `compensate`
+ * receives it. A step-level `retry` or `timeoutMs` re-runs every element;
+ * use `element` to retry or time out elements individually.
+ */
+export interface MapOverOptions<T> extends StepOptions<T[]> {
+  readonly element?: MapElementOptions<T>;
+}
+
+/**
+ * Options of `.parallelSteps()`. `codec` encodes the joined record (default:
+ * the branch codecs combined per key). `timeoutMs`, `retry`, `needs`,
+ * `priority`, `queue` and `cache` are defaults for every branch; `branches`
+ * sets any `StepOptions` field per branch, overriding those defaults.
+ * Failure handling, compensation and skipping are per branch only, because
+ * each branch is its own step with its own result type.
+ */
+export interface ParallelStepsOptions<Outputs extends Record<string, unknown>> extends Pick<
+  StepOptions<Outputs>,
+  "codec" | "timeoutMs" | "retry" | "needs" | "priority" | "queue" | "cache"
+> {
+  readonly branches?: { readonly [K in keyof Outputs]?: StepOptions<Outputs[K]> };
+}
+
+/**
+ * Options of `.journaled()`. A `retry` re-runs the body; activities already
+ * in the journal return their recorded result without re-executing (also
+ * after the step's own compensations ran), so prefer activity-level retry
+ * for work that must be redone. No `cache` (the journal is the body's
+ * memo) and no `timeoutMs` (the body cannot be interrupted, so a timeout
+ * would leave it running against the journal; time out activities or the
+ * workflow instead).
+ */
+export type JournaledStepOptions<T> = Omit<StepOptions<T>, "cache" | "timeoutMs">;
+
+/**
+ * Options of `.subworkflow()`. A child that fails surfaces as a typed
+ * `StepError`, so `retry` re-drives the same child run (it resumes from its
+ * failed step) and `onFailure` / `compensate` apply. No `cache` (the child
+ * row is the memo) and no `timeoutMs` (the child would keep running and
+ * holding its lock; set the child workflow's own `timeoutMs` instead).
+ */
+export type SubworkflowOptions<T> = Omit<StepOptions<T>, "cache" | "timeoutMs">;
+
+/**
+ * Options of `.tripwire()`. Only the codec: the step is a synchronous
+ * predicate over `prev`, so there is nothing to retry, time out, dispatch,
+ * cache or compensate.
+ */
+export type TripwireOptions<T> = Pick<StepOptions<T>, "codec">;
 
 export interface StepCacheOption {
   /** Compute the cache key from step context (input + prev + workflowId). */
@@ -694,7 +793,7 @@ export interface StepDefinition {
    * When set, takes precedence over the workflow's queue config for this
    * specific step.
    */
-  readonly queue?: StepQueueOption<unknown>;
+  readonly queue?: StepQueueOption;
   /**
    * Static metadata for visualization/documentation. Currently set by `.match()`
    * to expose its case labels so the DAG can render decision branches; future
@@ -772,10 +871,6 @@ export interface ExecuteParams extends StepRuntime {
    */
   readonly metadataRef: { current?: Record<string, unknown> };
 }
-
-// ---------------------------------------------------------------------------
-// Lock duration
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // WorkflowBuilder
@@ -997,6 +1092,16 @@ export class WorkflowBuilder<
   // mapOver — fan-out over array with per-element retry
   // ---------------------------------------------------------------------------
 
+  /**
+   * Run `fn` for every element of the array produced by step `config.array`
+   * (up to `config.concurrency` at a time) and complete with the results in
+   * order. Each element's result is written as a task row. The step-level
+   * options apply to the map step as a whole; `options.element` sets an
+   * element's own codec, timeout and retry (see `MapOverOptions`).
+   *
+   * `ctx.attempt` is the step attempt plus the element-level retries so far,
+   * so it starts at the step attempt and grows with each element retry.
+   */
   mapOver<
     Name extends string,
     ArrayStep extends keyof Steps & string,
@@ -1009,18 +1114,24 @@ export class WorkflowBuilder<
       element: Steps[ArrayStep] extends readonly (infer U)[] ? U : never,
       ctx: MapStepContext<Input>,
     ) => StepEff<Output, E2>,
-    options?: StepOptions<Output>,
+    options?: MapOverOptions<Output>,
   ): WorkflowBuilder<Input, Steps & Record<Name, Output[]>, Output[], Error | E2> {
     this._validateName(name);
 
-    const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
+    const elementOptions = options?.element;
+    const elementCodec = (elementOptions?.codec ?? this._codec()) as Codec<unknown>;
+    const codec = (options?.codec ??
+      (elementOptions?.codec ? codecArray(elementOptions.codec) : this._codec())) as Codec<unknown>;
     const concurrency = config.concurrency ?? Infinity;
+    const cacheNamespace = this._name;
+    const dependsOn = [config.array];
 
     const stepDef: StepDefinition = {
       name,
-      dependsOn: [config.array],
+      dependsOn,
       kind: "map",
       codec,
+      ...toStepPolicy(options),
       execute: (params) => {
         const sourceArray = params.results[config.array] as unknown[];
         if (!Array.isArray(sourceArray)) {
@@ -1032,32 +1143,67 @@ export class WorkflowBuilder<
             }),
           );
         }
+        const clock = params.clock ?? SystemWallClock;
+        const stepAttempt = params.attemptRef.current;
 
-        return forEachPar(
-          sourceArray,
-          (element, taskIndex) => {
+        const runElement = (element: unknown, taskIndex: number): StepEff<unknown, TaggedError> => {
+          // Element retries re-enter this thunk; each entry is one attempt.
+          let elementRetries = -1;
+          let attemptEff: StepEff<unknown, TaggedError> = suspend(() => {
+            elementRetries++;
             const ctx: MapStepContext<unknown> = {
               input: params.input,
               workflowId: params.workflowId,
               taskIndex,
-              attempt: 1,
+              attempt: stepAttempt + elementRetries,
             };
-            return asStepEff((fn as any)(element, ctx), name).flatMap((result) =>
-              promiseOrDie(() =>
-                params.storage.saveTaskResult(
-                  {
-                    workflowId: params.workflowId,
-                    stepName: name,
-                    taskIndex,
-                    result: codec.encode(result),
-                  },
-                  params.guard,
-                ),
-              ).as(result),
-            );
+            return asStepEff((fn as (el: unknown, c: unknown) => unknown)(element, ctx), name);
+          });
+          if (elementOptions?.timeoutMs != null) {
+            attemptEff = withStepTimeout({
+              eff: attemptEff,
+              clock,
+              ms: elementOptions.timeoutMs,
+              workflowId: params.workflowId,
+              stepName: name,
+              subject: `${name}[${taskIndex}]`,
+            });
+          }
+          if (elementOptions?.retry) {
+            attemptEff = withStepRetry({ eff: attemptEff, policy: elementOptions.retry, clock });
+          }
+          return attemptEff.flatMap((result) =>
+            promiseOrDie(() =>
+              params.storage.saveTaskResult(
+                {
+                  workflowId: params.workflowId,
+                  stepName: name,
+                  taskIndex,
+                  result: elementCodec.encode(result),
+                },
+                params.guard,
+              ),
+            ).as(result),
+          );
+        };
+
+        const runAll = () =>
+          forEachPar(sourceArray, runElement, {
+            concurrency: Number.isFinite(concurrency) ? concurrency : "unbounded",
+          }) as StepEff<unknown, TaggedError>;
+        return withOptionalStepCache({
+          cache: options?.cache,
+          ctx: {
+            input: params.input,
+            prev: sourceArray,
+            workflowId: params.workflowId,
+            attempt: stepAttempt,
           },
-          { concurrency: Number.isFinite(concurrency) ? concurrency : "unbounded" },
-        );
+          runBody: runAll,
+          stepName: name,
+          namespace: cacheNamespace,
+          codec,
+        });
       },
     };
 
@@ -1075,7 +1221,7 @@ export class WorkflowBuilder<
       element: Steps[ArrayStep] extends readonly (infer U)[] ? U : never,
       ctx: MapStepContext<Input>,
     ) => Promise<Output>,
-    options?: StepOptions<Output>,
+    options?: MapOverOptions<Output>,
   ): WorkflowBuilder<Input, Steps & Record<Name, Output[]>, Output[], Error> {
     const wrappedFn = (element: any, ctx: MapStepContext<Input>) =>
       promiseOrDie(() => fn(element, ctx));
@@ -1158,7 +1304,7 @@ export class WorkflowBuilder<
       when: (prev: Current) => boolean;
       reason: (prev: Current) => unknown;
     },
-    options?: StepOptions<Current>,
+    options?: TripwireOptions<Current>,
   ): WorkflowBuilder<Input, Steps & Record<Name, Current>, Current, Error> {
     this._validateName(name);
 
@@ -1280,17 +1426,14 @@ export class WorkflowBuilder<
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
     const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
-    const iterCodec = (options?.codec ?? this._codec()) as Codec<unknown>;
+    const iterCodec = codec;
 
     const stepDef: StepDefinition = {
       name,
       dependsOn,
       kind: "loop",
       codec,
-      timeoutMs: options?.timeoutMs,
-      retry: options?.retry as RetryPolicy<TaggedError> | undefined,
-      needs: options?.needs,
-      priority: options?.priority,
+      ...toStepPolicy(options),
       execute: (execParams) => {
         const prevStepName = dependsOn[0];
         const prev = prevStepName != null ? execParams.results[prevStepName] : execParams.input;
@@ -1464,6 +1607,18 @@ export class WorkflowBuilder<
    * within a ready-set batch and the block fails on the first branch
    * failure (remaining branches' results are not preserved; compensation
    * cascades via the usual saga path).
+   *
+   * Options: block-level `timeoutMs` / `retry` / `needs` / `priority` /
+   * `queue` / `cache` apply to every branch; `branches` gives one branch
+   * its own `StepOptions` (codec, retry, `onFailure`, `compensate`, ...),
+   * typed by that branch's output. `codec` encodes the joined record.
+   *
+   * ```typescript
+   * .parallelSteps("enrich", { user, perms }, {
+   *   retry: { maxRetries: 2 },
+   *   branches: { perms: { onFailure: { fallback: () => [] } } },
+   * })
+   * ```
    */
   parallelSteps<
     Name extends string,
@@ -1474,7 +1629,7 @@ export class WorkflowBuilder<
   >(
     name: Name,
     branches: Branches,
-    options?: StepOptions<{ [K in keyof Branches]: BranchOutput<Branches[K]> }>,
+    options?: ParallelStepsOptions<{ [K in keyof Branches]: BranchOutput<Branches[K]> }>,
   ): WorkflowBuilder<
     Input,
     Steps & Record<Name, { [K in keyof Branches]: BranchOutput<Branches[K]> }>,
@@ -1489,11 +1644,29 @@ export class WorkflowBuilder<
         message: `.parallelSteps("${name}", ...) requires at least one branch`,
       });
     }
+    const perBranch = (options?.branches ?? {}) as Record<string, StepOptions<unknown> | undefined>;
+    for (const key of Object.keys(perBranch)) {
+      if (!Object.hasOwn(branches, key)) {
+        throw new WorkflowError({
+          workflowId: "",
+          message: `.parallelSteps("${name}", ...): options.branches has no branch "${key}"`,
+        });
+      }
+    }
 
     const parentStep = this._lastStepName;
     const parentDepends = parentStep ? [parentStep] : [];
-    const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
     const workflowName = this._name;
+    // Block-level fields are defaults for every branch; a branch's own
+    // options override them field by field.
+    const blockDefaults: StepOptions<unknown> = {
+      ...(options?.timeoutMs !== undefined && { timeoutMs: options.timeoutMs }),
+      ...(options?.retry !== undefined && { retry: options.retry }),
+      ...(options?.needs !== undefined && { needs: options.needs }),
+      ...(options?.priority !== undefined && { priority: options.priority }),
+      ...(options?.queue !== undefined && { queue: options.queue }),
+      ...(options?.cache !== undefined && { cache: options.cache }),
+    };
 
     // One StepDefinition per branch. Scoped names (block.branch) keep the
     // label record free for TypeScript while the physical queue rows stay
@@ -1502,6 +1675,7 @@ export class WorkflowBuilder<
     takenNames.add(name);
     const branchSteps: StepDefinition[] = [];
     const scopedNames: string[] = [];
+    const branchCodecs: Record<string, Codec<unknown>> = {};
 
     for (const key of branchKeys) {
       const scopedName = `${name}.${key}`;
@@ -1517,17 +1691,16 @@ export class WorkflowBuilder<
       const branchFn = branches[key] as (
         ctx: StepContext<Input, Current>,
       ) => StepEff<unknown, TaggedError>;
+      const branchOptions: StepOptions<unknown> = { ...blockDefaults, ...perBranch[key] };
+      const codec = (branchOptions.codec ?? this._codec()) as Codec<unknown>;
+      branchCodecs[key] = codec;
 
       branchSteps.push({
         name: scopedName,
         dependsOn: parentDepends,
         kind: "normal",
         codec,
-        timeoutMs: options?.timeoutMs,
-        retry: options?.retry as RetryPolicy<TaggedError> | undefined,
-        onFailure: options?.onFailure as StepFailureStrategy<unknown> | undefined,
-        needs: options?.needs,
-        priority: options?.priority,
+        ...toStepPolicy(branchOptions),
         execute: (execParams) => {
           const prevName = parentDepends[0];
           const prev = prevName != null ? execParams.results[prevName] : execParams.input;
@@ -1537,15 +1710,12 @@ export class WorkflowBuilder<
             workflowId: execParams.workflowId,
             attempt: execParams.attemptRef.current,
           };
-          const cacheOption = options?.cache;
-          if (!cacheOption)
-            return asStepEff(branchFn(ctx as StepContext<Input, Current>), scopedName);
-          return wrapWithStepCache({
-            cache: cacheOption,
-            ctx: ctx as StepContext<unknown, unknown>,
+          return withOptionalStepCache({
+            cache: branchOptions.cache,
+            ctx,
             runBody: () => asStepEff(branchFn(ctx as StepContext<Input, Current>), scopedName),
             stepName: scopedName,
-            namespace: cacheOption.namespace ?? workflowName,
+            namespace: workflowName,
             codec,
           });
         },
@@ -1555,13 +1725,16 @@ export class WorkflowBuilder<
     // Synthetic join. Kind "parallel" marks it for visualization; its
     // body is a zero-effort assembler that reads the branch results and
     // shapes them into { [label]: result } using the original (unscoped)
-    // keys. Inherits the default codec so downstream consumers see the
-    // normal round-tripped shape.
+    // keys. Its codec is `options.codec`; else, when a branch sets its own
+    // codec, the branch codecs per key; else the workflow codec.
+    const anyBranchCodec = branchKeys.some((key) => perBranch[key]?.codec !== undefined);
+    const joinCodec = (options?.codec ??
+      (anyBranchCodec ? recordCodec(branchCodecs) : this._codec())) as Codec<unknown>;
     const joinStepDef: StepDefinition = {
       name,
       dependsOn: scopedNames,
       kind: "parallel",
-      codec,
+      codec: joinCodec,
       execute: (execParams) => {
         const out: Record<string, unknown> = {};
         for (let i = 0; i < branchKeys.length; i++) {
@@ -1578,6 +1751,13 @@ export class WorkflowBuilder<
   // branch — conditional paths
   // ---------------------------------------------------------------------------
 
+  /**
+   * Two-way conditional: run `ifTrue` or `ifFalse` depending on
+   * `condition(prev)`. One DAG node; every `StepOptions` field applies to it
+   * (a `retry` re-evaluates `condition`). A throw from `condition` is a
+   * defect and is not retried; return a failed `Eff` from the branch for a
+   * typed failure.
+   */
   branch<Name extends string, Output, E2 extends TaggedError = never>(
     name: Name,
     params: {
@@ -1591,12 +1771,14 @@ export class WorkflowBuilder<
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
     const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
+    const cacheNamespace = this._name;
 
     const stepDef: StepDefinition = {
       name,
       dependsOn,
       kind: "branch",
       codec,
+      ...toStepPolicy(options),
       execute: (execParams) => {
         const prevStepName = dependsOn[0];
         const prev = prevStepName != null ? execParams.results[prevStepName] : execParams.input;
@@ -1604,10 +1786,20 @@ export class WorkflowBuilder<
           input: execParams.input,
           prev,
           workflowId: execParams.workflowId,
-          attempt: 1,
+          attempt: execParams.attemptRef.current,
         };
-        const branch = params.condition(prev as Current) ? params.ifTrue : params.ifFalse;
-        return asStepEff(branch(ctx as any), name);
+        return withOptionalStepCache({
+          cache: options?.cache,
+          ctx,
+          // `condition` runs on every attempt (and only on a cache miss).
+          runBody: () => {
+            const branch = params.condition(prev as Current) ? params.ifTrue : params.ifFalse;
+            return asStepEff(branch(ctx as any), name);
+          },
+          stepName: name,
+          namespace: cacheNamespace,
+          codec,
+        });
       },
     };
 
@@ -1626,7 +1818,9 @@ export class WorkflowBuilder<
    *
    * Requires the configured `WorkflowStorage` to also implement
    * `ActivityJournalStorage` (InMemoryWorkflowStorage and
-   * PostgresWorkflowStorage do). `.build()` throws otherwise.
+   * PostgresWorkflowStorage do); otherwise the step fails with
+   * `JournalStorageMissingError` when it runs. Options: see
+   * `JournaledStepOptions` (no `cache`, no `timeoutMs`).
    *
    * ```typescript
    * workflow({ name: "signup", storage })
@@ -1647,7 +1841,7 @@ export class WorkflowBuilder<
   journaled<Name extends string, Output>(
     name: Name,
     body: JournaledStepBody<Input, Current, Output>,
-    options?: StepOptions<Output>,
+    options?: JournaledStepOptions<Output>,
   ): WorkflowBuilder<
     Input,
     Steps & Record<Name, Output>,
@@ -1676,6 +1870,7 @@ export class WorkflowBuilder<
       dependsOn,
       kind: "journaled",
       codec,
+      ...toStepPolicy(options),
       execute: (execParams) => {
         const prevStepName = dependsOn[0];
         const prev = prevStepName != null ? execParams.results[prevStepName] : execParams.input;
@@ -1761,6 +1956,10 @@ export class WorkflowBuilder<
    * Output type is inferred as the union of all case outputs (or the
    * common type when they all match). Match contributes one node to the DAG;
    * deterministic from `prev` so replay re-runs the same case.
+   *
+   * Every `StepOptions` field applies. `MatchError` is a typed failure, so
+   * `retry` (which re-runs the selection) and `onFailure` handle it. A throw
+   * from `on` or a `when` predicate is a defect and is not retried.
    */
   match<Name extends string, Output, E2 extends TaggedError = never>(
     name: Name,
@@ -1771,12 +1970,14 @@ export class WorkflowBuilder<
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
     const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
+    const cacheNamespace = this._name;
 
     const stepDef: StepDefinition = {
       name,
       dependsOn,
       kind: "match",
       codec,
+      ...toStepPolicy(options),
       execute: (execParams) => {
         const prevStepName = dependsOn[0];
         const prev = prevStepName != null ? execParams.results[prevStepName] : execParams.input;
@@ -1784,20 +1985,31 @@ export class WorkflowBuilder<
           input: execParams.input,
           prev,
           workflowId: execParams.workflowId,
-          attempt: 1,
+          attempt: execParams.attemptRef.current,
         };
 
-        const picked = pickMatchBranch({ match: params, prev: prev as Current, stepName: name });
-        // No case and no default: a typed failure, so step retry / onFailure
-        // policies and `runSafe` callers see it like any other step error.
-        if (picked instanceof MatchError) return fail(picked);
-        // Record the chosen case BEFORE running it — even if the branch
-        // throws, the metadata is still there to debug "which case fired".
-        execParams.metadataRef.current = {
-          matchCase: picked.label,
-          matchMode: picked.mode,
+        const runBody = (): StepEff<unknown, TaggedError> => {
+          const picked = pickMatchBranch({ match: params, prev: prev as Current, stepName: name });
+          // No case and no default: a typed failure, so step retry /
+          // onFailure policies and `runSafe` callers see it like any other
+          // step error.
+          if (picked instanceof MatchError) return fail(picked);
+          // Record the chosen case BEFORE running it — even if the branch
+          // throws, the metadata is still there to debug "which case fired".
+          execParams.metadataRef.current = {
+            matchCase: picked.label,
+            matchMode: picked.mode,
+          };
+          return asStepEff(picked.fn(ctx as any), name);
         };
-        return asStepEff(picked.fn(ctx as any), name);
+        return withOptionalStepCache({
+          cache: options?.cache,
+          ctx,
+          runBody,
+          stepName: name,
+          namespace: cacheNamespace,
+          codec,
+        });
       },
       viz: matchVizMeta(params),
     };
@@ -1816,6 +2028,11 @@ export class WorkflowBuilder<
    * row with that `workflowId` is resumed as-is (its original parent and
    * version are kept).
    *
+   * A failed child fails this step with a typed `StepError`, so `retry`
+   * re-drives the same child run and `onFailure` / `compensate` apply (see
+   * `SubworkflowOptions`). A throw from `config.input` / `config.workflowId`
+   * is a defect and is not retried.
+   *
    * @example
    * ```ts
    * .subworkflow("enrich", enrichUser, {
@@ -1831,7 +2048,7 @@ export class WorkflowBuilder<
       input: (prev: Current) => ChildInput;
       workflowId: (prev: Current) => string;
     },
-    options?: StepOptions<ChildOutput>,
+    options?: SubworkflowOptions<ChildOutput>,
   ): WorkflowBuilder<Input, Steps & Record<Name, ChildOutput>, ChildOutput, Error | StepError> {
     this._validateName(name);
 
@@ -1842,6 +2059,7 @@ export class WorkflowBuilder<
       dependsOn,
       kind: "normal",
       codec,
+      ...toStepPolicy(options),
       execute: (execParams) => {
         const prevStepName = dependsOn[0];
         const prev = (
@@ -1865,12 +2083,29 @@ export class WorkflowBuilder<
         // against the version the child was started with. Creation is
         // create-if-absent: an existing child row (with its original
         // version) is resumed.
-        return promiseOrDie(() =>
-          runChild({
-            workflow: child as Workflow<unknown, unknown>,
-            workflowId: childWorkflowId,
-            input: childInput,
-          }),
+        //
+        // A child that fails is a typed `StepError` on this step, so step
+        // retry (which re-drives the same child run) and `onFailure` apply.
+        // Engine control flow from the child (its suspension, a lost lock)
+        // propagates unchanged.
+        return tryPromise(
+          () =>
+            runChild({
+              workflow: child as Workflow<unknown, unknown>,
+              workflowId: childWorkflowId,
+              input: childInput,
+            }),
+          (err): TaggedError =>
+            isControlFlowExit(err)
+              ? (err as TaggedError)
+              : new StepError({
+                  workflowId: execParams.workflowId,
+                  stepName: name,
+                  message: `subworkflow "${name}" (child "${childWorkflowId}") failed: ${
+                    err instanceof globalThis.Error ? err.message : String(err)
+                  }`,
+                  cause: err,
+                }),
         );
       },
     };
@@ -2266,15 +2501,7 @@ export class WorkflowBuilder<
       dependsOn: params.dependsOn,
       kind: params.kind,
       codec,
-      timeoutMs: params.options?.timeoutMs,
-      retry: params.options?.retry as RetryPolicy<TaggedError> | undefined,
-      onFailure: params.options?.onFailure as StepFailureStrategy<unknown> | undefined,
-      compensate: params.options?.compensate as StepDefinition["compensate"],
-      skipWhen: params.options?.skipWhen as StepDefinition["skipWhen"],
-      skipValue: params.options?.skipValue as StepDefinition["skipValue"],
-      needs: params.options?.needs,
-      priority: params.options?.priority,
-      queue: params.options?.queue as StepQueueOption<unknown> | undefined,
+      ...toStepPolicy(params.options),
       execute: (execParams) => {
         let ctx: StepContext<unknown, unknown> | DagStepContext<unknown, Record<string, unknown>>;
         if (params.isLinear) {
@@ -2297,14 +2524,12 @@ export class WorkflowBuilder<
           };
         }
 
-        const cacheOption = params.options?.cache;
-        if (!cacheOption) return asStepEff(params.fn(ctx), params.name);
-        return wrapWithStepCache({
-          cache: cacheOption,
+        return withOptionalStepCache({
+          cache: params.options?.cache,
           ctx: ctx as StepContext<unknown, unknown>,
           runBody: () => asStepEff(params.fn(ctx), params.name),
           stepName: params.name,
-          namespace: cacheOption.namespace ?? workflowName,
+          namespace: workflowName,
           codec,
         });
       },
@@ -2349,6 +2574,43 @@ export function stepCacheKey(params: {
   readonly key: string;
 }): string {
   return `${params.namespace}:${params.stepName}:${params.key}`;
+}
+
+/**
+ * Run `runBody` through the step cache when the step has a `cache` option,
+ * else run it directly. `namespace` is the default (the workflow name); the
+ * cache option's own `namespace` wins.
+ */
+function withOptionalStepCache(params: {
+  readonly cache: StepCacheOption | undefined;
+  readonly ctx: StepContext<unknown, unknown>;
+  readonly runBody: () => StepEff<unknown, TaggedError>;
+  readonly stepName: string;
+  readonly namespace: string;
+  readonly codec: Codec<unknown>;
+}): StepEff<unknown, TaggedError> {
+  const { cache } = params;
+  if (!cache) return params.runBody();
+  return wrapWithStepCache({ ...params, cache, namespace: cache.namespace ?? params.namespace });
+}
+
+/**
+ * Combine per-key codecs into a codec for the record of their values (the
+ * `parallelSteps` join). Keys without a codec are encoded as-is.
+ */
+function recordCodec(codecs: Readonly<Record<string, Codec<unknown>>>): Codec<unknown> {
+  const mapRecord = (value: unknown, pick: (codec: Codec<unknown>, v: unknown) => unknown) => {
+    const out: Record<string, unknown> = {};
+    for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+      const codec = Object.hasOwn(codecs, key) ? codecs[key] : undefined;
+      out[key] = codec ? pick(codec, v) : v;
+    }
+    return out;
+  };
+  return {
+    encode: (value) => mapRecord(value, (codec, v) => codec.encode(v)),
+    decode: (raw) => mapRecord(raw, (codec, v) => codec.decode(v)),
+  };
 }
 
 function wrapWithStepCache(params: {
